@@ -464,6 +464,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.grk.crc` | Greek block checksums, using the Greek file's own geometry |
 | `.tix` | the bar file's time index, version 1 (§8.1, D-2329) |
 | `.prv` | where the month's bars came from, one record per landing, version 1 (§8.3, D-3334) |
+| `.srt` | the bar file's sort index: rows ordered by each sortable column, in runs, version 1 (§8.4, D-3349) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
 
 ```
@@ -783,6 +784,119 @@ or the endpoint. A month written before D-3334 has no `.prv` until its next
 landing, and its earlier bars stay unrecorded.
 
 ---
+
+### 8.4 `.srt` — sort index, version 1 (D-3349)
+
+**Why it exists.** `/bars/window.json` ordered by a price, the volume or the
+open interest read every kept row: 43,942,544 bars for one-second NIFTY over
+97 months, seconds and gigabytes a request, then a refusal past 24 million rows
+(DB-N14). The store is indexed by time and nothing could answer "the fifty
+largest closes" without reading them all. This sibling is that index, one per
+month, written by `store::sort_index` and `store::file`'s writer step, and read
+by `api`'s window.
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2019-03.srt
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2019-03.srt
+```
+
+**Runs over a prefix of the month.** After a 64-byte header come one or more
+runs. A run orders a contiguous range of committed rows `[start, end)`; the
+first starts at row 0 and each later one where the one before ended, so the
+runs cover a prefix of the month (its *coverage*). A writer appends one run
+after every commit — exactly the rows it committed — and, at open, one over
+any rows an earlier writer committed and no run covers. A month whose index is
+absent, damaged, not these bars', or would reach 32 runs with the next
+append is written WHOLE as one run into `<yyyy-mm>.new.srt`, synced, and
+renamed over the name; a file is never edited in place, and the only bytes an
+append may overwrite are those past the last valid run, which no reader used.
+`cli srt-build` writes named months whole the same way, beside the generation
+every reader opens (D-3350). A failed run never refuses the commit before it:
+it is a `store.srt` warning, and a reader reads the uncovered rows itself.
+
+**Only the last appended run can be torn, and every walk checks it.** An
+appended run is written, then synced once; the writer begins the next run only
+after that sync returned, and cuts a run whose write or sync failed. So a crash
+can tear only the last run — and can leave its header on disk over entries that
+are not. Each run header therefore carries the CRC-32C of its body and its
+*kind*: a walk checks the body of the last run when it is an appended one, and
+a run that fails is torn (never read; the next writer appends over it). A whole
+image is synced before its rename, so its body is not read on a walk; a block
+that later rots is refused when it is read, and the reader sets that month
+aside and reads it (`api`, D-3349).
+
+**Bound to the bars, checked on every read.** Each run records the stamps of
+its first and last rows; a reader compares them with the bar file's (the
+header's own first and last stamps answer the two ends) and refuses runs that
+disagree. Every row a reader serves is read from the `.bin` and checked
+against the entry that named it.
+
+Magic `BRUTEXS1`, version `1`, six columns, fence stride `256`, at most 64
+runs. Every integer is little-endian.
+
+**Header, 64 bytes at offset 0:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXS1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | columns `6` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 4 | symbol id, as the bar header |
+| 20 | 4 | fence stride `256` |
+| 24 | 8 | second 0 of the month: 00:00 IST on its first day, UTC micros |
+| 32 | 28 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+**Run header, 512 bytes:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXSR` |
+| 8 | 8 | first row |
+| 16 | 8 | one past the last row |
+| 24 | 8 | stamp of the first row |
+| 32 | 8 | stamp of the last row |
+| 40 | 8 | the run's length in bytes, this header included |
+| 48 | 6 × 48 | per column (open, high, low, close, volume, open interest): entry width (1; 8 or 12), 7 zero, null count (8), smallest value (8), largest value (8), section offset from the run's start (8), blocks (8) |
+| 336 | 6 × 16 | extremes, each value then the stamp of the EARLIEST bar holding it: close max, close min, high max, low min, widest `high − low`, heaviest volume |
+| 432 | 4 | CRC-32C over every byte after the run header, keyed by the first row (its eight bytes lead the checksummed run) |
+| 436 | 1 | kind: `0` appended after a commit, `1` a whole image written by rename; any other value is not a run |
+| 437 | 71 | reserved, zero; a set byte is not a run |
+| 508 | 4 | CRC-32C over bytes `0..508` |
+
+**Column section**, at its offset from the run's start: the fence table (the
+first entry of every 256-entry block), each block's CRC-32C (4 bytes each,
+over the block's entries, keyed by the run's first row, the column and the
+block number), the CRC-32C of those two tables (keyed by the run's first row
+and the column), then the entries. An entry is the value and the second of the
+month its bar opens at: narrow (8 bytes: the value less the column's smallest,
+`u32`, then the second, `u32`) when the column's span fits four bytes, wide
+(12 bytes: the value, `i64`, then the second) otherwise. Entries are ordered by
+`(value, second)`; open interest's null (`i64::MIN`) entries come first, in
+time order, and carry no value. A bar's stamp must be a whole second of its
+month; a run over one that is not is not written, and readers read that month.
+
+**Size.** About 48 bytes a bar (four more per wide column): the 97 months of
+one-second NIFTY hold 2.0 GB of `.srt` beside 2.3 GB of `.bin`.
+
+**A disk that will not take a run.** The bars are committed before any run is
+written, so a run never refuses them. An appended run whose write or sync
+fails is cut off again — the file ends where the last synced run ended — and
+a whole image whose write or sync fails stays in `<yyyy-mm>.new.srt` and is
+never renamed into place; the next writer step cuts that staging file and
+writes the image again. Either way the writer says so once (`store.srt`,
+WARN) and a reader reads the rows no run orders, named on the wire.
+
+**What it does not prove.** The checksums are integrity, not authentication.
+The header binds a file to its rung, symbol id and month, and each run's end
+stamps bind it to the rows it orders; no digest of the bars is kept. A `.srt`
+built from another series of the same symbol, rung and month whose runs have
+the same row counts and end stamps — two contracts of one underlying, copied
+across directories by hand — therefore binds. It still serves no value the
+bars do not hold: every row a reader serves is read from the `.bin` and
+checked against the entry that named it, and each place of a page that
+disagrees is a named fault carrying the command that rebuilds the index.
 
 ## 9. What this format does not solve
 

@@ -208,7 +208,8 @@ pub(super) struct Stamp {
 }
 
 impl Stamp {
-    fn of(meta: &std::fs::Metadata) -> Self {
+    /// The stamp of a file's metadata.
+    pub(super) fn of(meta: &std::fs::Metadata) -> Self {
         Self {
             len: meta.len(),
             modified_secs: meta.mtime(),
@@ -600,6 +601,7 @@ impl SeriesPlan {
         key: SeriesKey,
         months: &[YearMonth],
         filter: Filter,
+        cancel: &super::Cancel,
     ) -> Result<Self, String> {
         let (Some(&first), Some(&last)) = (months.first(), months.last()) else {
             return Err("a window names at least one month".to_owned());
@@ -661,7 +663,7 @@ impl SeriesPlan {
                 count: usize::try_from(last_day.saturating_sub(first_day).saturating_add(1))
                     .unwrap_or(0),
             };
-            plan.cut_days(root, filter, (from, to))?;
+            plan.cut_days(root, filter, (from, to), cancel)?;
         } else {
             plan.cut_months(root, filter)?;
         }
@@ -747,11 +749,20 @@ impl SeriesPlan {
 
     /// Runs under a time-of-day bound: one per IST day whose window holds a
     /// row, two lookups per calendar day, cached per month file and window.
-    fn cut_days(&mut self, root: &Path, filter: Filter, tod: (u32, u32)) -> Result<(), String> {
+    fn cut_days(
+        &mut self,
+        root: &Path,
+        filter: Filter,
+        tod: (u32, u32),
+        cancel: &super::Cancel,
+    ) -> Result<(), String> {
         let Buckets::Days { first, .. } = self.buckets else {
             return Ok(());
         };
         for slot in 0..self.slots.len() {
+            // TWO LOOKUPS A DAY, so the client is asked after every month
+            // (DB-N15): an abandoned request stops here, not at its end.
+            cancel.check()?;
             let Some(at) = self.slots.get(slot) else {
                 continue;
             };
@@ -1070,7 +1081,7 @@ impl SeriesPlan {
     }
 
     /// The first row of `slot` at or after `ts`.
-    fn locate(&mut self, root: &Path, slot: usize, ts: i64) -> Result<u64, String> {
+    pub(super) fn locate(&mut self, root: &Path, slot: usize, ts: i64) -> Result<u64, String> {
         let file = self.file(root, slot)?;
         file.first_at_or_after(ts)
             .map_err(|why| format!("{}: cannot locate {ts}: {why}", file.path().display()))

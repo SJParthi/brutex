@@ -75,6 +75,8 @@ mod gdfl_import_command;
 /// `cli gdfl-rekey`: stored GDFL option keys the decoder files elsewhere or
 /// refuses, moved as new files or retired by name (D-3331, D-3316; WP-12c).
 mod gdfl_rekey;
+/// `cli srt-build`: the `.srt` sort index for named months of a series (D-3349).
+mod srt_build;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuild;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
@@ -510,6 +512,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    names a refused key `retired`, and installs
                                    the census's next FNO epoch without either.
                                    Old files never change (D-3331, D-3316).
+       cli srt-build VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT|/*] RUNG FROM TO [--dry-run]
+                                   write the .srt sort index of every named
+                                   month (FROM, TO are YYYY-MM) as one run, in
+                                   a new file renamed over the old; bars,
+                                   checksums and .tix never change, a month not
+                                   held is not created, a month another process
+                                   holds is refused. `*` walks every contract
+                                   under the symbol. --dry-run writes nothing
+                                   (D-3349).
        cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
                                    build the .tix time index of every named
                                    month of one spot series (FROM, TO are
@@ -2652,6 +2663,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
             tix_rebuild::command(arguments, out)
         }
+        ["srt-build", arguments @ ..] if !arguments.is_empty() => {
+            srt_build::command(arguments, out)
+        }
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)
         }
@@ -2726,7 +2740,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 43] = [
+const COMMANDS: [&str; 44] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2762,6 +2776,7 @@ const COMMANDS: [&str; 43] = [
     "research-plan",
     "results",
     "screen",
+    "srt-build",
     "sweep",
     "sweep-all",
     "sweep-audited-stored",

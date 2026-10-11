@@ -260,15 +260,19 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
             "the_page_orders_only_itself_wherever_the_offset_lands",
         ],
     );
-    let window = item(BARS, "pub fn window(");
-    // D-3326 (WP-31): a non-time sort streams every kept row once through
-    // `scan`, holding at most `offset + limit` of them, and still orders only
-    // the page. The O(n) READ stands; the O(n) memory is gone, and WP-99
-    // rewrites the bullet's memory clause with WP-31's measurements.
+    let window = item(BARS, "pub fn window_cancellable(");
+    // D-3326 (WP-31): a non-time sort streamed every kept row once through
+    // `scan`, holding at most `offset + limit` of them, and still ordered only
+    // the page. D-3349 (WP-39): a VALUE sort is served from the months' sort
+    // indexes (`sort::page`), reading only rows no index run orders, under the
+    // same caps; `scan` remains the time-of-day sort's, which still reads
+    // every kept row. WP-99 rewrites the bullet with WP-39's measurements.
     let scan = item(BARS, "fn scan(");
     assert!(
-        window.contains("scan(") && scan.contains("for row in run.start..run.end {"),
-        "every kept bar is read: {window}\n{scan}"
+        window.contains("sort::page(")
+            && window.contains("scan(")
+            && scan.contains("for row in run.start..run.end {"),
+        "a value sort is indexed and a time-of-day sort still reads: {window}\n{scan}"
     );
     assert!(
         scan.contains("page_of(kept, offset, limit, order)"),

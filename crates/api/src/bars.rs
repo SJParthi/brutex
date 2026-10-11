@@ -44,8 +44,79 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 mod change;
 #[path = "bars_series.rs"]
 mod series;
+#[path = "bars_sort.rs"]
+mod sort;
 use series::SeriesPlan;
 pub use series::{Filter, MAX_SERIES, SeriesKey};
+pub use sort::SortReport;
+
+/// A request's cancellation flag: set when the client that asked went away,
+/// read by the blocking work between months and every few thousand rows, so
+/// an abandoned request stops instead of running to its end (DB-N15).
+///
+/// [`Cancel::never`] for a caller with no client — a bench, a test, the CLI.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+impl Cancel {
+    /// A flag nothing ever sets.
+    #[must_use]
+    pub const fn never() -> Self {
+        Self(None)
+    }
+
+    /// A flag, and the guard that sets it when dropped unless it was
+    /// disarmed first — dropped with the request's future when the client
+    /// goes away, disarmed when the answer is ready.
+    #[must_use]
+    pub fn pair() -> (Self, CancelOnDrop) {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            Self(Some(std::sync::Arc::clone(&flag))),
+            CancelOnDrop(Some(flag)),
+        )
+    }
+
+    /// Whether the client went away.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// `Err("cancelled: …")` once the client went away.
+    ///
+    /// # Errors
+    ///
+    /// The cancellation, by name.
+    pub fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            Err("cancelled: the client that asked went away, and the work stopped".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Sets its [`Cancel`] flag when dropped, unless [`Self::disarm`]ed.
+#[derive(Debug)]
+pub struct CancelOnDrop(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+impl CancelOnDrop {
+    /// The answer is ready: dropping the guard now cancels nothing.
+    pub fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0.take() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
 
 /// Whether an F&O series on `symbol` is written on an index (D-3325 rule 3,
 /// DB-G66), by the sourced alias table's answer (`brutex_core::alias::
@@ -470,6 +541,81 @@ pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>)
     (rows, faults)
 }
 
+/// [`page`], reading in chunks and stopping with a `cancelled` refusal once
+/// `cancel` is set — `/bars.json` reads a whole one-second month, up to 2.7
+/// million rows, and an abandoned request must not run to its end (DB-N15).
+///
+/// One `records unreadable` line for the whole read, as [`page`] writes.
+///
+/// # Errors
+///
+/// `cancelled`, by name.
+pub fn page_cancellable(
+    file: &BarFile,
+    skip: usize,
+    take: usize,
+    cancel: &Cancel,
+) -> Result<(Vec<Bar>, Vec<String>), String> {
+    /// Rows between two looks at the flag.
+    const CHUNK: usize = 65_536;
+    let mut rows = Vec::with_capacity(take.min(1 << 20));
+    let mut faults = Vec::new();
+    let mut at = skip;
+    let end = skip.saturating_add(take);
+    while at < end {
+        cancel.check()?;
+        let size = CHUNK.min(end - at);
+        let (read, mut lost) = slots(file, at, size);
+        let got = read.len();
+        rows.extend(read.into_iter().flatten());
+        faults.append(&mut lost);
+        if got < size {
+            break;
+        }
+        at += size;
+    }
+    note_unreadable_records(
+        &file.path().display().to_string(),
+        &faults,
+        rows.len(),
+        skip,
+    );
+    Ok((rows, faults))
+}
+
+/// `api.bars`, INFO, once per window request whose range holds months a
+/// series does not hold inside its own life — the holes: how many, the first
+/// and the last (DB-N17). Never a line per month: a 240-month window over a
+/// sparse store wrote one warning per absent month on every request, and
+/// about 1,240 such requests would roll the whole 64 MiB log over. Months
+/// before a series' first held month or after its last are expected
+/// absences and write nothing. Absent months are counted from the rung
+/// directory's listing and never opened.
+fn note_holes(plans: &[SeriesPlan]) {
+    let holes: usize = plans.iter().map(|plan| plan.holes.len()).sum();
+    let first = plans
+        .iter()
+        .filter_map(|plan| plan.holes.first())
+        .min()
+        .map(ToString::to_string);
+    let last = plans
+        .iter()
+        .filter_map(|plan| plan.holes.last())
+        .max()
+        .map(ToString::to_string);
+    let (Some(first), Some(last), Some(plan)) = (first, last, plans.first()) else {
+        return;
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("api.bars", "window range holds months not stored")
+            .with("months", telemetry::Value::Uint(holes as u64))
+            .with("first", telemetry::Value::Str(&first))
+            .with("last", telemetry::Value::Str(&last))
+            .with("key", telemetry::Value::Str(&plan.key.text()))
+            .with("series", telemetry::Value::Uint(plans.len() as u64)),
+    );
+}
+
 /// [`page`], with every POSITION kept: `None` where the record would not read.
 ///
 /// The window needs the gap and not only its name. A row after an unreadable
@@ -593,13 +739,15 @@ pub const MAX_WINDOW_LIMIT: usize = 1_000;
 /// over `n_valid` says which file holds row N and `page` reads it by index.
 /// Nothing scans, and page 12,470 costs what page 1 costs.
 ///
-/// Every other variant asks a question no index answers. "The fifty largest
-/// closes" cannot be known without reading the closes, and `CLAUDE.md` §4 bans
-/// a query planner precisely because there is no second path to choose. So
-/// those variants scan, once, here — in Rust over local files — instead of
-/// moving four million rows to a browser to be sorted there. The scan keeps
-/// only the `offset + limit` best rows (D-3326), so its memory is the page's
-/// depth, not the window's size.
+/// Every other variant asks a question the time index does not answer. "The
+/// fifty largest closes" could not be known without reading the closes, so
+/// those variants scanned, once, here (D-3326) — every kept row of the range,
+/// 43.9 million for one-second NIFTY, refused past [`MAX_SCAN_BARS`]
+/// (DB-N14). Since D-3349 the six value columns are served from each month's
+/// `.srt` sort index (`store::sort_index`), which orders the month's rows by
+/// each column when they are written; only rows no index run orders are read,
+/// keeping the `offset + limit` best, capped and named on the wire.
+/// [`Self::TimeOfDay`] has no index and still reads its kept rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     /// The store's own order.
@@ -645,7 +793,8 @@ impl SortKey {
         }
     }
 
-    /// Whether answering this order requires reading every row.
+    /// Whether this order is not time order: a value or time-of-day sort.
+    /// A value sort reads only the rows no `.srt` run orders (D-3349).
     #[must_use]
     pub const fn scans(self) -> bool {
         !matches!(self, Self::Ts)
@@ -674,8 +823,10 @@ impl SortKey {
     }
 }
 
-/// The most rows a non-time sort may stream before it is refused
-/// `scan_budget_exceeded` (D-3326).
+/// The most rows a non-time sort may READ before it is refused
+/// `scan_budget_exceeded` (D-3326): every kept row of a time-of-day sort, and
+/// of a value sort the rows no `.srt` run orders (D-3349), named with the
+/// command that indexes them.
 ///
 /// Measured on the shadow store (WP-31, 2026-10-09, release build, sequential
 /// GETs): a close sort over twelve months of one-second NIFTY (5,418,076
@@ -1141,6 +1292,8 @@ pub struct Window {
     pub scan_rows: u64,
     /// Days covered per held month, when asked for.
     pub coverage: Vec<MonthCoverage>,
+    /// What a value sort served from sort indexes and what it read (D-3349).
+    pub sort_index: Option<SortReport>,
     /// The asked series the current decoder files under another key, each
     /// with that key (D-3331; WP-12c).
     pub superseded: Vec<SupersededBy>,
@@ -1283,18 +1436,50 @@ static MONTH_EXTREMES: series::Memo<(std::path::PathBuf, series::Stamp), Extreme
 ///   page is then merged from each series' own position: `O(k + limit)`
 ///   record reads and `O(k · limit)` comparisons. Ties in time are ordered by
 ///   the series' place in the request, so the order is total and stable.
-/// * **Ordered by anything else** — streams every kept row once, keeping only
+/// * **Ordered by a value column** — from the months' `.srt` sort indexes
+///   (D-3349): the value of row `offset` by a bisection over each run's fence
+///   table, its instant by a bisection over time, then `limit` rows merged
+///   from one cursor per run (`sort::page`). A run a day bound cuts is
+///   served from its own entries stamped inside the bound. Rows no run
+///   orders — a month without its index, rows appended after it, every row
+///   under a time-of-day bound — are read and named, refused past
+///   [`MAX_SCAN_BARS`]; up to a million of them are ordered whole, and past
+///   that a page within [`MAX_SORT_DEPTH`] of the front is served, or of the
+///   end when no row is indexed. Open interest over series that have none
+///   (an index, a share) is time order and is a seek.
+/// * **Ordered by time of day** — streams every kept row once, keeping only
 ///   the `offset + limit` best (`O(bars)` time, `O(offset + limit)` memory),
 ///   refused past [`MAX_SCAN_BARS`] and [`MAX_SORT_DEPTH`] by name.
 /// * **`at`** — the global index of an instant: one rank per series.
-/// * **Extremes** — whole months from a per-month memo keyed by the file's
-///   stamp, the rest folded by a scan under the same budget.
+/// * **Extremes** — each index run's own summary (D-3349), whole months
+///   no run covers from a per-month memo keyed by the file's stamp, the rest
+///   folded by a scan under the same budget.
 ///
 /// # Errors
 ///
 /// The range being inverted or too long, too many or no series, an invalid
 /// address, an unavailable store root, or a scan past its budget.
 pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Window, String> {
+    window_cancellable(store_root, query, &Cancel::never())
+}
+
+/// [`window`], stopping with a `cancelled` refusal once `cancel` is set —
+/// looked at between the plan and the read, and every few thousand rows of
+/// any read beyond the page (DB-N15).
+///
+/// # Errors
+///
+/// What [`window`] refuses, and `cancelled`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the plan, the three ways a page is answered and the extremes, in \
+              the order the doc above states them; each branch is one call"
+)]
+pub fn window_cancellable(
+    store_root: &std::path::Path,
+    query: &WindowQuery,
+    cancel: &Cancel,
+) -> Result<Window, String> {
     let Some(months) = months_of(query.from, query.to) else {
         return Err(format!(
             "{}-{:02} to {}-{:02} is not a month range this build will read: it \
@@ -1329,6 +1514,7 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             key,
             &lineage,
         ));
+        cancel.check()?;
         plans.push(SeriesPlan::build(
             store_root,
             query.vendor,
@@ -1336,9 +1522,11 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             key.clone(),
             &months,
             query.filter,
+            cancel,
         )?);
     }
     tally(&mut out, &mut plans);
+    note_holes(&plans);
     if let Some(at) = query.at {
         let index = at_index(store_root, &mut plans, at, query.desc, out.total)?;
         out.at_index = Some(index);
@@ -1349,8 +1537,66 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             usize::try_from(last).map_or(0, |last| last - last % limit.max(1))
         })
     });
+    cancel.check()?;
     let mut record_faults = Vec::new();
-    if query.sort.scans() {
+    if query.sort == SortKey::OpenInterest && rules.iter().all(change::Rules::not_a_derivative) {
+        // NO ROW HAS AN OPEN INTEREST: an index's or a share's is not
+        // applicable (D-3322) and sorts as a null, and nulls are ordered by
+        // time, then series, in BOTH directions. That is the ascending
+        // time order, so the page is a seek — `limit` reads, not a merge of
+        // null slices (D-3349).
+        let ascending = WindowQuery {
+            desc: false,
+            ..query.clone()
+        };
+        out.bars = seek(
+            store_root,
+            &mut plans,
+            &rules,
+            &ascending,
+            (out.offset, limit),
+            &mut record_faults,
+        )?;
+        if query.want_extremes {
+            match sort::extremes_of(
+                store_root,
+                &mut plans,
+                &rules,
+                query,
+                &mut record_faults,
+                cancel,
+            ) {
+                Ok((extremes, rows)) => {
+                    out.extremes = Some(extremes);
+                    out.scan_rows = rows;
+                }
+                Err(why) if why.starts_with("cancelled") => return Err(why),
+                Err(why) => out.extremes_why = Some(why),
+            }
+        }
+        out.sort_index = Some(SortReport {
+            column: "oi",
+            by_time: true,
+            ..SortReport::default()
+        });
+    } else if sort::column_of(query.sort).is_some() {
+        // A VALUE SORT IS SERVED FROM THE SORT INDEXES (D-3349): only the
+        // rows no index run orders are read, capped and named.
+        let sorted = sort::page(
+            store_root,
+            &mut plans,
+            &rules,
+            query,
+            (out.offset, limit),
+            &mut record_faults,
+            cancel,
+        )?;
+        out.scan_rows = sorted.scanned;
+        out.bars = sorted.page;
+        out.extremes = sorted.extremes;
+        out.extremes_why = sorted.extremes_why;
+        out.sort_index = Some(sorted.report);
+    } else if query.sort.scans() {
         scan_admitted(out.total, query.sort, out.offset, limit)?;
         let scanned = scan(
             store_root,
@@ -1359,7 +1605,8 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             query,
             (out.offset, limit),
             &mut record_faults,
-        );
+            cancel,
+        )?;
         out.scan_rows = scanned.rows;
         out.bars = scanned.page;
         if query.want_extremes {
@@ -1375,11 +1622,19 @@ pub fn window(store_root: &std::path::Path, query: &WindowQuery) -> Result<Windo
             &mut record_faults,
         )?;
         if query.want_extremes {
-            match extremes_of(store_root, &mut plans, &rules, &mut record_faults) {
+            match sort::extremes_of(
+                store_root,
+                &mut plans,
+                &rules,
+                query,
+                &mut record_faults,
+                cancel,
+            ) {
                 Ok((extremes, rows)) => {
                     out.extremes = Some(extremes);
                     out.scan_rows = rows;
                 }
+                Err(why) if why.starts_with("cancelled") => return Err(why),
                 Err(why) => out.extremes_why = Some(why),
             }
         }
@@ -1789,7 +2044,8 @@ fn scan(
     query: &WindowQuery,
     (offset, limit): (usize, usize),
     faults: &mut Vec<String>,
-) -> Scanned {
+    cancel: &Cancel,
+) -> Result<Scanned, String> {
     let order = candidate_order(query.desc);
     let depth = offset.saturating_add(limit).max(1);
     let mut kept: Vec<Candidate> = Vec::with_capacity(depth.saturating_mul(2).min(1 << 16));
@@ -1811,6 +2067,9 @@ fn scan(
                 continue;
             };
             rows = rows.saturating_add(run.end - run.start);
+            // THE CLIENT IS ASKED AFTER EVERY RUN — a month, or under a
+            // time-of-day bound a day's window (DB-N15).
+            cancel.check()?;
             for row in run.start..run.end {
                 let bar = match plan.read(root, run.slot, row) {
                     Ok(bar) => bar,
@@ -1864,90 +2123,11 @@ fn scan(
             Err(why) => faults.push(why),
         }
     }
-    Scanned {
+    Ok(Scanned {
         page,
         extremes,
         rows,
-    }
-}
-
-/// The extremes of every kept row of every series, for a time-ordered page.
-///
-/// A run that is a whole month file is answered from [`MONTH_EXTREMES`] when
-/// the file has not changed since it was folded; every other run is read. The
-/// rows that would have to be read are counted first, and past
-/// [`MAX_EXTREMES_SCAN_BARS`] the extremes are refused by name rather than the
-/// page.
-///
-/// # Errors
-///
-/// The `scan_budget_exceeded` sentence.
-fn extremes_of(
-    root: &std::path::Path,
-    plans: &mut [SeriesPlan],
-    rules: &[change::Rules],
-    faults: &mut Vec<String>,
-) -> Result<(Extremes, u64), String> {
-    let mut extremes = Extremes::default();
-    let mut owed = 0_u64;
-    let mut cached: Vec<Vec<Option<Extremes>>> = Vec::with_capacity(plans.len());
-    for plan in plans.iter() {
-        let mut runs = Vec::with_capacity(plan.runs.len());
-        for run in &plan.runs {
-            let whole = plan
-                .slots
-                .get(run.slot)
-                .filter(|slot| run.start == 0 && run.end == slot.held.n_valid);
-            let held = whole.and_then(|slot| MONTH_EXTREMES.get(&(slot.path.clone(), slot.stamp)));
-            if held.is_none() {
-                owed = owed.saturating_add(run.end - run.start);
-            }
-            runs.push(held);
-        }
-        cached.push(runs);
-    }
-    if owed > MAX_EXTREMES_SCAN_BARS {
-        return Err(format!(
-            "scan_budget_exceeded: the extremes need {owed} records read that no earlier \
-             request folded, past the {MAX_EXTREMES_SCAN_BARS} one request may fold; the page \
-             is served without them"
-        ));
-    }
-    for (series, plan) in plans.iter_mut().enumerate() {
-        let volume = rules
-            .get(series)
-            .is_none_or(|series_rules| !series_rules.index_no_volume());
-        for run_at in 0..plan.runs.len() {
-            let Some(run) = plan.runs.get(run_at).copied() else {
-                continue;
-            };
-            if let Some(Some(held)) = cached.get(series).and_then(|runs| runs.get(run_at)) {
-                extremes.merge(held, Some(series));
-                continue;
-            }
-            let mut month = Extremes::default();
-            let mut whole_read = true;
-            for row in run.start..run.end {
-                match plan.read(root, run.slot, row) {
-                    Ok(bar) => month.fold(&bar, 0, volume),
-                    Err(why) => {
-                        whole_read = false;
-                        faults.push(why);
-                    }
-                }
-            }
-            if whole_read
-                && let Some(slot) = plan
-                    .slots
-                    .get(run.slot)
-                    .filter(|slot| run.start == 0 && run.end == slot.held.n_valid)
-            {
-                MONTH_EXTREMES.put((slot.path.clone(), slot.stamp), month);
-            }
-            extremes.merge(&month, Some(series));
-        }
-    }
-    Ok((extremes, owed))
+    })
 }
 
 /// Days covered per held month of every series (`coverage=1`), DB-G35.
@@ -3233,24 +3413,18 @@ mod window_tests {
             .expect("slots ends")
             .0;
         assert!(!slots.contains("note_unreadable_records"));
-        // `page`, and `window` once after its paths: two call sites, plus the
-        // definition (D-3326).
-        assert_eq!(code.matches("note_unreadable_records(").count(), 3);
+        // `page`, `page_cancellable` (D-3349) and `window` once after its
+        // paths: three call sites, plus the definition (D-3326).
+        assert_eq!(code.matches("note_unreadable_records(").count(), 4);
         let window = code
-            .split_once("pub fn window(")
+            .split_once("pub fn window_cancellable(")
             .expect("window exists")
             .1
             .split_once("\n}\n")
             .expect("window ends")
             .0;
         assert_eq!(window.matches("note_unreadable_records(").count(), 1);
-        for path in [
-            "fn seek(",
-            "fn merged(",
-            "fn scan(",
-            "fn extremes_of(",
-            "fn behind_of(",
-        ] {
+        for path in ["fn seek(", "fn merged(", "fn scan(", "fn behind_of("] {
             let body = code
                 .split_once(path)
                 .expect("the path exists")
@@ -3265,7 +3439,14 @@ mod window_tests {
         }
         let series = include_str!("bars_series.rs");
         let change = include_str!("bars_change.rs");
-        for (name, text) in [("bars_series.rs", series), ("bars_change.rs", change)] {
+        // THE SORT INDEX'S READER EMITS NOTHING EITHER (D-3349): what it
+        // could not serve is on the wire, named, once per request.
+        let sorted = include_str!("bars_sort.rs");
+        for (name, text) in [
+            ("bars_series.rs", series),
+            ("bars_change.rs", change),
+            ("bars_sort.rs", sorted),
+        ] {
             assert!(
                 !text.contains(concat!("telemetry", "::emit")),
                 "{name} emits nothing"
@@ -3445,6 +3626,12 @@ mod window_tests {
     /// first row after a damaged block was measured against the last row BEFORE
     /// it — a real-looking number against a bar that is not its predecessor
     /// (W1-api1-10, D-0730).
+    ///
+    /// Two paths, one rule. WITH a sort index (D-3349) the order was written
+    /// when the bars were, so a damaged record keeps its place: the page that
+    /// covers it names it in `faults` and the next page does not shift — the
+    /// rule the time-ordered page keeps (D-0730). WITHOUT one, the rows are
+    /// read and only those that read are ordered, as before.
     #[test]
     fn a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it() {
         let root = scratch("scan-damaged");
@@ -3453,10 +3640,18 @@ mod window_tests {
         // Records 73..146 are one checksum block; 0..73 and 146..200 read.
         damage_record(&root, jan, 100);
 
+        // INDEXED: rows 73 and 74 hold their places, unreadable and named.
         let got =
             legacy(&root, jan, jan, SortKey::Close, false, 73, 2, false).expect("a legal window");
+        assert!(got.bars.is_empty(), "{:?}", got.bars);
+        assert_eq!(got.faults.len(), 2, "{:?}", got.faults);
+        assert!(got.faults.iter().all(|fault| fault.contains("record 7")));
+        let indexed = got.sort_index.expect("a value page reports its index");
+        assert_eq!((indexed.indexed_rows, indexed.scanned_rows), (200, 0));
+        let got =
+            legacy(&root, jan, jan, SortKey::Close, false, 146, 2, false).expect("a legal window");
         let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
-        assert_eq!(closes, [1_146, 1_147], "the 74th smallest readable close");
+        assert_eq!(closes, [1_146, 1_147], "the 147th smallest close");
         assert_eq!(
             got.bars[0].chg, None,
             "its predecessor, record 145, did not read"
@@ -3466,7 +3661,44 @@ mod window_tests {
             got.bars[1].chg.is_some(),
             "record 146 read, so 147 is measured"
         );
+
+        // READ: no index, so the rows that read are the order.
+        let srt = open_classified(
+            &root,
+            PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: SEGMENT,
+                symbol: SYMBOL,
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month: jan,
+                file: FileKind::Bars,
+            },
+        )
+        .map_err(|why| why.message)
+        .expect("the month opens")
+        .path()
+        .with_extension("srt");
+        std::fs::remove_file(&srt).expect("the index is removed");
+        let got =
+            legacy(&root, jan, jan, SortKey::Close, false, 73, 2, false).expect("a legal window");
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(closes, [1_146, 1_147], "the 74th smallest readable close");
+        assert_eq!(got.bars[0].chg_why, "previous_unreadable");
+        assert!(got.bars[1].chg.is_some());
         assert_eq!(got.faults.len(), 73, "every unreadable record is named");
+        let read = got.sort_index.expect("a value page reports what it read");
+        assert_eq!((read.indexed_rows, read.scanned_rows), (0, 200));
+        assert!(
+            read.scanned_why[0].contains("no .srt sort index"),
+            "{:?}",
+            read.scanned_why
+        );
+        assert_eq!(
+            read.build,
+            ["cli srt-build dhan NSE/TESTSEG/WINDOWTEST 1min 2026-01 2026-01"]
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

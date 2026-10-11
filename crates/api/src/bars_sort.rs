@@ -1,0 +1,2474 @@
+//! A value-ordered window page served from the months' `.srt` sort indexes,
+//! not by reading every bar. D-3349, WP-39; DB-N14.
+//!
+//! # What this replaces
+//!
+//! A window ordered by a price, the volume or the open interest streamed every
+//! kept row (D-3326): 43,942,544 bars for one-second NIFTY over 97 months, 4.3
+//! to 7.4 s and 8 to 12 GB a request on the measurement that found it (DB-N14),
+//! and since D-3326 a refusal past [`super::MAX_SCAN_BARS`] rows. The operator
+//! could not sort the series by close at all.
+//!
+//! # The shape of the answer
+//!
+//! Each held month's `.srt` holds runs, and each run orders its rows by
+//! `(value, time)` per column (`store::sort_index`). Every run fully inside the
+//! request's kept rows is one SORTED ARRAY here. A global page at offset `k`
+//! over those arrays is:
+//!
+//! 1. the VALUE of the `k`-th row, by a bisection over the value domain whose
+//!    every step counts, per array, the rows at or below a value — from the
+//!    array's fence table in memory, and a read of one block only for the
+//!    arrays the fences cannot decide;
+//! 2. its INSTANT, among the rows that hold that value, by a bisection over
+//!    time across those rows' slices of each array (ties in value are ordered
+//!    by time, then by the series' place in the request, in both directions —
+//!    the order every sort of the grid has kept since D-3326);
+//! 3. the page, merged forward from that row: one cursor per array, `limit`
+//!    rows out, each read from its bar file and checked against the entry
+//!    that named it.
+//!
+//! # A day bound
+//!
+//! A day bound cuts only the edge months of a range. A run it cuts is served
+//! from its OWN entries: those stamped inside the bound are exactly the kept
+//! rows it orders, already in order, so they are read once from the run's
+//! column (eight or twelve bytes a row, checked block by block), held for the
+//! request — and between requests within a budget — and searched in memory.
+//! No bar is read to order them, and no depth is refused (`Piece::Cut`).
+//!
+//! # What is not in an index, and what it costs
+//!
+//! Rows no run covers — a month with no `.srt` yet, rows a writer appended
+//! after the last run, a month whose index failed when it was read, every row
+//! under a time-of-day bound — are READ, once. Their count is capped at
+//! [`super::MAX_SCAN_BARS`]; up to [`MAX_READ_HELD`] of them are ordered
+//! whole, so any page of them is served; past that a page within
+//! [`super::MAX_SORT_DEPTH`] of the front is served, or of the end when no row
+//! is indexed, and a deeper one is refused `sort_too_deep` by name. The answer
+//! names them — how many rows, in which months, why, and the `cli srt-build`
+//! command that indexes them (`sort_index` on the wire). Nothing is read
+//! silently.
+//!
+//! A month whose index fails while it is read — a block that fails its
+//! checksum — is set aside until its index changes, and the page is asked
+//! again with its rows read and named: never served from the damaged index,
+//! never a refusal of the whole range on its account.
+//!
+//! # Cost, stated
+//!
+//! With every month indexed: `O(m)` header and stamp reads for `m` runs, the
+//! fence tables (memoised by the file's stamp), `O(m · log V)` in-memory fence
+//! searches for a value domain of `V`, a handful of block reads per run near
+//! the answer, then `limit` row reads and their predecessors. No bar outside
+//! the page is read. Measured on the shadow store (WP-39, release build,
+//! sequential GETs, n = 200 a shape): one-second NIFTY over 97 months
+//! (43,942,544 bars), every column, both directions, first, middle and last
+//! page, `extremes=1`: p50 2.1-3.3 ms, p99 under 5 ms on a quiet machine, the
+//! first request after a start up to about 100 ms. `docs/06-limits.md` is
+//! WP-99's to carry.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use store::format::{Bar, OI_NULL};
+use store::path::YearMonth;
+use store::sort_index::{Column, ColumnInfo, Entry, FENCE, Fences, Shape, SortIndex, Walked};
+
+use super::series::{self, Position, SeriesPlan, Stamp};
+use super::{
+    Behind, Cancel, Extreme, Extremes, MAX_SCAN_BARS, MAX_SORT_DEPTH, SortKey, WindowBar,
+    WindowQuery, behind_of, change, window_bar,
+};
+
+/// The column a value sort orders on, or `None` for time and time of day.
+#[must_use]
+pub(super) const fn column_of(sort: SortKey) -> Option<Column> {
+    match sort {
+        SortKey::Open => Some(Column::Open),
+        SortKey::High => Some(Column::High),
+        SortKey::Low => Some(Column::Low),
+        SortKey::Close => Some(Column::Close),
+        SortKey::Volume => Some(Column::Volume),
+        SortKey::OpenInterest => Some(Column::OpenInterest),
+        SortKey::Ts | SortKey::TimeOfDay => None,
+    }
+}
+
+/// The most reasons the answer names one by one; the counts are always whole.
+const MAX_NAMED: usize = 12;
+
+/// Rows read between two looks at the cancellation flag.
+const CANCEL_STRIDE: u64 = 4_096;
+
+/// The most rows no index orders that one request orders WHOLE, so any page
+/// of them is served however deep (D-3349): forty bytes a row, 40 MB at the
+/// bound. Past it a page is served within [`MAX_SORT_DEPTH`] of the front, or
+/// of the end when no row is indexed, and refused `sort_too_deep` by name
+/// deeper. A five-minute time-of-day window over the 97 months of one-second
+/// NIFTY keeps 590,181 rows: every page of it is served.
+pub(super) const MAX_READ_HELD: u64 = 1_000_000;
+
+#[cfg(test)]
+thread_local! {
+    /// [`MAX_READ_HELD`], lowered by a test on its own thread so the paths
+    /// past it are driven without writing a million bars.
+    pub(super) static READ_HELD: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_READ_HELD) };
+}
+
+/// [`MAX_READ_HELD`], or a test's own bound.
+fn read_held() -> u64 {
+    #[cfg(test)]
+    {
+        READ_HELD.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        MAX_READ_HELD
+    }
+}
+
+/// Bytes of fence tables the process keeps between requests. Emptied whole
+/// when full, as every memo here is: a forgotten table costs one read.
+const FENCE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Bytes of day-cut entries (see [`Piece::Cut`]) the process keeps between
+/// requests: about six one-second months of one column. A forgotten list
+/// costs one read of its run's column.
+const CUT_BUDGET: usize = 48 * 1024 * 1024;
+
+/// What one request's value sort used and read, for the wire.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortReport {
+    /// The column ordered on.
+    pub column: &'static str,
+    /// Kept rows served by a sort index.
+    pub indexed_rows: u64,
+    /// Index runs those rows lie in.
+    pub indexed_runs: usize,
+    /// Of those, runs a day bound cuts, served from their own entries
+    /// stamped inside the bound (D-3349); their rows are among
+    /// `indexed_rows`.
+    pub cut_runs: usize,
+    /// Kept rows read because no run orders them.
+    pub scanned_rows: u64,
+    /// Held months with any such row.
+    pub scanned_months: usize,
+    /// Up to [`MAX_NAMED`] of those months, each with its rows and why.
+    pub scanned_why: Vec<String>,
+    /// The command that indexes the months a reader had to read, when one
+    /// would help.
+    pub build: Vec<String>,
+    /// Every kept row is null in this column — open interest of an index or
+    /// a share (D-3322) — so the page is the rows in time order, served by
+    /// seeking, with nothing read beyond it.
+    pub by_time: bool,
+}
+
+/// What a value sort answers.
+pub(super) struct Sorted {
+    /// The page.
+    pub(super) page: Vec<WindowBar>,
+    /// The extremes, when asked for.
+    pub(super) extremes: Option<Extremes>,
+    /// Why the extremes were asked for and are not served.
+    pub(super) extremes_why: Option<String>,
+    /// Kept rows read beyond the page.
+    pub(super) scanned: u64,
+    /// What it used.
+    pub(super) report: SortReport,
+}
+
+/// Why rows are read rather than served by an index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unindexed {
+    /// A time-of-day bound keeps windows of days; no run is per window.
+    TimeOfDay,
+    /// The month's `.srt` is absent or refused, for this reason.
+    NoIndex(String),
+    /// The index orders rows `0..coverage`; these were appended after it.
+    PastIndex(u64),
+    /// A day bound cuts through a run whose entries would not serve the
+    /// stretch it keeps, for this reason (see [`Piece::Cut`]).
+    CutUnserved(String),
+}
+
+impl Unindexed {
+    fn sentence(&self) -> String {
+        match self {
+            Self::TimeOfDay => "a time-of-day bound keeps windows no index run is cut to".into(),
+            Self::NoIndex(why) => why.clone(),
+            Self::PastIndex(coverage) => {
+                format!("appended after its sort index, which orders rows 0..{coverage}")
+            }
+            Self::CutUnserved(why) => {
+                format!("a day bound cuts a sort index run whose entries would not serve it: {why}")
+            }
+        }
+    }
+
+    /// Whether `cli srt-build` would index these rows: every reason but a
+    /// time-of-day bound, which no index run is cut to. A cut run that would
+    /// not serve failed a checksum or disagrees with its bars, and a rebuild
+    /// writes it again.
+    const fn buildable(&self) -> bool {
+        !matches!(self, Self::TimeOfDay)
+    }
+}
+
+/// A memoised walk of one month's `.srt`, bound to its bar file.
+struct View {
+    path: PathBuf,
+    shape: Shape,
+    walked: Walked,
+}
+
+/// Every month's walk, by the `.srt`'s stamp and the bar file's.
+static VIEWS: series::Memo<(PathBuf, Stamp, Stamp), Arc<Result<View, String>>> =
+    series::Memo::new();
+
+/// One run's fence table for one column, by the `.srt`'s path and stamp.
+type FenceKey = (PathBuf, Stamp, usize, Column);
+
+/// A month's walk as one request holds it, and the `.srt`'s stamp.
+type Held = (Arc<Result<View, String>>, Stamp);
+
+/// Every month's walk one request loaded, by series and slot.
+type Views = HashMap<(usize, usize), Held>;
+
+/// A process-wide memo held within a byte budget, emptied whole when a value
+/// would pass it.
+struct Weighed<K, V> {
+    map: OnceLock<Mutex<(usize, HashMap<K, V>)>>,
+    budget: usize,
+}
+
+impl<K: Eq + std::hash::Hash, V: Clone> Weighed<K, V> {
+    const fn new(budget: usize) -> Self {
+        Self {
+            map: OnceLock::new(),
+            budget,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, (usize, HashMap<K, V>)> {
+        self.map
+            .get_or_init(|| Mutex::new((0, HashMap::with_capacity(1_024))))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        self.lock().1.get(key).cloned()
+    }
+
+    /// Holds `value`, which weighs `weight` bytes; one heavier than the whole
+    /// budget is not held.
+    fn put(&self, key: K, value: V, weight: usize) {
+        if weight > self.budget {
+            return;
+        }
+        let mut held = self.lock();
+        if held.0.saturating_add(weight) > self.budget {
+            held.1.clear();
+            held.0 = 0;
+        }
+        held.0 = held.0.saturating_add(weight);
+        held.1.insert(key, value);
+    }
+}
+
+/// Fence tables kept between requests, within [`FENCE_BUDGET`].
+static FENCE_TABLES: Weighed<FenceKey, Arc<Fences>> = Weighed::new(FENCE_BUDGET);
+
+/// A day-cut run's entries for one column: the `.srt`'s path and stamp, the
+/// run, the column, and the bound `[lo, hi)`.
+type CutKey = (PathBuf, Stamp, usize, Column, i64, i64);
+
+/// The entries a day bound keeps of one run's column, and how many of them
+/// are nulls.
+type CutEntries = Arc<(Arc<[Entry]>, u64)>;
+
+/// Day-cut entries kept between requests, within [`CUT_BUDGET`].
+static CUT_ENTRIES: Weighed<CutKey, CutEntries> = Weighed::new(CUT_BUDGET);
+
+/// Every month's `.srt` whose index failed while a page read it — a block or
+/// fence table that fails its checksum — by its path and stamp, with why. It
+/// is not used again until it changes (a rebuild): its rows are read, named
+/// with the command that rebuilds it.
+static BROKEN: series::Memo<(PathBuf, Stamp), Arc<str>> = series::Memo::new();
+
+/// The most months one request sets aside because their index failed while
+/// it was read, before it is refused instead.
+const MAX_BROKEN: usize = 8;
+
+/// The extremes of rows `[start, end)` of a month file that is not a whole
+/// month — a stretch a day bound cuts — by the file's path and stamp.
+static CUT_EXTREMES: series::Memo<(PathBuf, Stamp, u64, u64), Extremes> = series::Memo::new();
+
+/// The `.srt` of `slot` in `plan`, walked and bound to its bar file, from the
+/// memo when neither file changed.
+fn view(
+    root: &Path,
+    plan: &mut SeriesPlan,
+    slot: usize,
+    timeframe_secs: u32,
+) -> Result<Held, String> {
+    let Some(at) = plan.slots.get(slot) else {
+        return Err(format!("slot {slot} is not a month of this window"));
+    };
+    let (bars_path, bars_stamp, held, month) = (at.path.clone(), at.stamp, at.held, at.month);
+    let path = bars_path.with_extension("srt");
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            return Err(store::sort_index::Why::Absent.to_string());
+        }
+        Err(why) => return Err(format!("{}: {why}", path.display())),
+    };
+    let stamp = Stamp::of(&meta);
+    if let Some(why) = BROKEN.get(&(path.clone(), stamp)) {
+        return Err(format!(
+            "its .srt sort index failed when it was read and is not used until it is rebuilt \
+             ({why})"
+        ));
+    }
+    let key = (path.clone(), stamp, bars_stamp);
+    if let Some(found) = VIEWS.get(&key) {
+        return Ok((found, stamp));
+    }
+    let symbol_id = symbol_id(&plan.key.symbol);
+    let shape = Shape::of(month, timeframe_secs, symbol_id);
+    let opened = SortIndex::open(&path, &shape).map_err(|why| why.to_string());
+    let bound = opened.and_then(|index| {
+        let walked = index.walked().clone();
+        store::sort_index::bind(
+            &walked.runs,
+            held.n_valid,
+            held.first_ts,
+            held.last_ts,
+            |row| plan.read(root, slot, row).map(|bar| bar.ts_micros),
+        )
+        .map_err(|why| why.to_string())?;
+        Ok(View {
+            path: path.clone(),
+            shape,
+            walked,
+        })
+    });
+    let found = Arc::new(bound);
+    VIEWS.put(key, Arc::clone(&found));
+    Ok((found, stamp))
+}
+
+/// The header symbol id a bar file of `symbol` carries, folded as
+/// `pull::ingest` folds it.
+fn symbol_id(symbol: &str) -> u32 {
+    let [a, b, c, d, ..] = brutex_core::universe::fnv1a(symbol).to_le_bytes();
+    u32::from_le_bytes([a, b, c, d])
+}
+
+/// One stretch of a kept run: ordered by one index run, cut from one, or
+/// read.
+#[derive(Debug, Clone)]
+enum Piece {
+    /// Rows `[start, end)` of the slot, ordered by `.srt` run `run`.
+    Indexed {
+        slot: usize,
+        run: usize,
+        start: u64,
+        end: u64,
+    },
+    /// Rows `[start, end)` of the slot: the part of `.srt` run `run` a day
+    /// bound keeps, which are its entries stamped inside `[lo, hi)`. A day
+    /// bound cuts only the edge months of a range, so a request holds at
+    /// most two of these per series. The entries are read from the run's
+    /// column whole, filtered, and are already in order (D-3349): no bar is
+    /// read to order them, and no depth is refused.
+    Cut {
+        slot: usize,
+        run: usize,
+        start: u64,
+        end: u64,
+        lo: i64,
+        hi: i64,
+        /// The kept entries and their nulls, once read for the request's
+        /// column.
+        entries: Option<CutEntries>,
+    },
+    /// Rows `[start, end)` of the slot, read.
+    Read {
+        slot: usize,
+        start: u64,
+        end: u64,
+        why: Unindexed,
+    },
+}
+
+/// A kept run of a series, cut into pieces.
+struct Cut {
+    series: usize,
+    /// Index into the plan's runs.
+    run: usize,
+    pieces: Vec<Piece>,
+}
+
+/// Cuts every kept run of every series into indexed and read pieces.
+fn cut(root: &Path, plans: &mut [SeriesPlan], query: &WindowQuery, views: &mut Views) -> Vec<Cut> {
+    let timeframe_secs = query.timeframe.secs();
+    let mut out = Vec::new();
+    for (series, plan) in plans.iter_mut().enumerate() {
+        for run_at in 0..plan.runs.len() {
+            let Some(run) = plan.runs.get(run_at).copied() else {
+                continue;
+            };
+            let mut pieces = Vec::new();
+            if query.filter.tod.is_some() {
+                pieces.push(Piece::Read {
+                    slot: run.slot,
+                    start: run.start,
+                    end: run.end,
+                    why: Unindexed::TimeOfDay,
+                });
+                out.push(Cut {
+                    series,
+                    run: run_at,
+                    pieces,
+                });
+                continue;
+            }
+            let loaded = if let Some(held) = views.get(&(series, run.slot)).cloned() {
+                Ok(held)
+            } else {
+                let found = view(root, plan, run.slot, timeframe_secs);
+                if let Ok(held) = &found {
+                    views.insert((series, run.slot), held.clone());
+                }
+                found
+            };
+            let walked = match &loaded {
+                Ok((found, _)) => match found.as_ref() {
+                    Ok(view) => Ok(&view.walked),
+                    Err(why) => Err(why.clone()),
+                },
+                Err(why) => Err(why.clone()),
+            };
+            match walked {
+                Err(why) => pieces.push(Piece::Read {
+                    slot: run.slot,
+                    start: run.start,
+                    end: run.end,
+                    why: Unindexed::NoIndex(why),
+                }),
+                Ok(walked) => {
+                    let mut at = run.start;
+                    for (index, srt) in walked.runs.iter().enumerate() {
+                        if srt.end <= run.start || srt.start >= run.end {
+                            continue;
+                        }
+                        // THE RUNS CHAIN FROM ROW 0 with no gap (the walk
+                        // refuses one), so the first run met holds `at` and
+                        // each later one starts where the last piece ended.
+                        if srt.start >= run.start && srt.end <= run.end {
+                            pieces.push(Piece::Indexed {
+                                slot: run.slot,
+                                run: index,
+                                start: srt.start,
+                                end: srt.end,
+                            });
+                            at = srt.end;
+                        } else {
+                            // A DAY BOUND CUTS THIS RUN: its entries stamped
+                            // inside the bound are exactly the kept rows it
+                            // orders, because the kept run is every row of the
+                            // month inside `[lo, hi)`.
+                            let from = srt.start.max(at);
+                            let until = srt.end.min(run.end);
+                            if until > from {
+                                pieces.push(Piece::Cut {
+                                    slot: run.slot,
+                                    run: index,
+                                    start: from,
+                                    end: until,
+                                    lo: run.lo,
+                                    hi: run.hi,
+                                    entries: None,
+                                });
+                                at = until;
+                            }
+                        }
+                    }
+                    if at < run.end {
+                        pieces.push(Piece::Read {
+                            slot: run.slot,
+                            start: at,
+                            end: run.end,
+                            why: Unindexed::PastIndex(walked.coverage()),
+                        });
+                    }
+                }
+            }
+            out.push(Cut {
+                series,
+                run: run_at,
+                pieces,
+            });
+        }
+    }
+    out
+}
+
+/// The order every value page is in: nulls last in both directions, then
+/// the value (`vkey` is `!v` descending, which reverses `i64` order exactly),
+/// then the instant, then the series' place in the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Key {
+    null: bool,
+    vkey: i64,
+    ts: i64,
+    series: u32,
+}
+
+/// The order key of value `v`.
+const fn vkey(v: i64, desc: bool) -> i64 {
+    if desc { !v } else { v }
+}
+
+/// A row read from outside every index run, kept while it is among the
+/// `offset + limit` best.
+#[derive(Debug, Clone, Copy)]
+struct Kept {
+    key: Key,
+    run: usize,
+    row: u64,
+}
+
+/// One index run as a sorted array of this request.
+struct RunArray {
+    series: u32,
+    slot: usize,
+    run: usize,
+    rows: u64,
+    nulls: u64,
+    info: ColumnInfo,
+    origin: i64,
+    path: PathBuf,
+    stamp: Stamp,
+    view: Arc<Result<View, String>>,
+    file: Option<SortIndex>,
+    fences: Option<Arc<Fences>>,
+    blocks: HashMap<u64, Arc<[Entry]>>,
+    column: Column,
+    /// A day-cut run's kept entries, in order, held whole: `entry` reads
+    /// them and no fence or block is read (see [`Piece::Cut`]).
+    held: Option<Arc<[Entry]>>,
+    /// The series and month, and the command that rebuilds the month's
+    /// index, for a refusal to name.
+    named: (Arc<str>, Arc<str>),
+    /// Why reading this run's index failed, once it has: the page is then
+    /// asked again with the month read instead (see [`page`]).
+    failure: Option<String>,
+}
+
+impl RunArray {
+    /// Records that reading this run's index failed for `why`, and says so,
+    /// naming the month and the command that rebuilds it.
+    fn fail(&mut self, why: impl std::fmt::Display) -> String {
+        let said = format!("{}: {why}; rebuild it with: {}", self.named.0, self.named.1);
+        self.failure = Some(said.clone());
+        said
+    }
+
+    fn view(&self) -> Result<&View, String> {
+        self.view.as_ref().as_ref().map_err(Clone::clone)
+    }
+
+    fn file(&mut self) -> Result<&SortIndex, String> {
+        if self.file.is_none() {
+            let view = self.view()?;
+            let opened = SortIndex::open_walked(&view.path, &view.shape, view.walked.clone());
+            let opened = opened.map_err(|why| self.fail(why))?;
+            self.file = Some(opened);
+        }
+        self.file
+            .as_ref()
+            .ok_or_else(|| "the sort index did not open".to_owned())
+    }
+
+    fn fences(&mut self) -> Result<Arc<Fences>, String> {
+        if let Some(held) = &self.fences {
+            return Ok(Arc::clone(held));
+        }
+        let key = (self.path.clone(), self.stamp, self.run, self.column);
+        let fences = if let Some(found) = FENCE_TABLES.get(&key) {
+            found
+        } else {
+            let (run, column) = (self.run, self.column);
+            let read = self.file()?.fences(run, column);
+            let read = Arc::new(read.map_err(|why| self.fail(why))?);
+            FENCE_TABLES.put(key, Arc::clone(&read), read.weight());
+            read
+        };
+        self.fences = Some(Arc::clone(&fences));
+        Ok(fences)
+    }
+
+    fn entry(&mut self, at: u64) -> Result<Entry, String> {
+        if let Some(held) = &self.held {
+            return usize::try_from(at)
+                .ok()
+                .and_then(|at| held.get(at).copied())
+                .ok_or_else(|| format!("entry {at} is past the cut run's {}", held.len()));
+        }
+        let block = at / FENCE;
+        let held = if let Some(held) = self.blocks.get(&block) {
+            Arc::clone(held)
+        } else {
+            let fences = self.fences()?;
+            let (run, column) = (self.run, self.column);
+            let read = self.file()?.block(run, column, block, &fences);
+            let read: Arc<[Entry]> = read.map_err(|why| self.fail(why))?.into();
+            self.blocks.insert(block, Arc::clone(&read));
+            read
+        };
+        usize::try_from(at % FENCE)
+            .ok()
+            .and_then(|i| held.get(i).copied())
+            .ok_or_else(|| format!("entry {at} is not in its block"))
+    }
+
+    /// Where the first entry of `[lo, hi)` for which `pred` holds lies,
+    /// bounded by the fence table alone: `[lower, upper]`.
+    fn bounds(
+        &mut self,
+        lo: u64,
+        hi: u64,
+        pred: &dyn Fn(Entry) -> bool,
+    ) -> Result<(u64, u64), String> {
+        if lo >= hi {
+            return Ok((hi, hi));
+        }
+        if self.held.is_some() {
+            // IN MEMORY: the search below is over the entries themselves.
+            return Ok((lo, hi));
+        }
+        let fences = self.fences()?;
+        let (jlo, jhi) = (lo.div_ceil(FENCE), hi.div_ceil(FENCE));
+        let (mut a, mut b) = (jlo, jhi);
+        while a < b {
+            let mid = a + (b - a) / 2;
+            let fence = usize::try_from(mid)
+                .ok()
+                .and_then(|i| fences.entries.get(i).copied())
+                .ok_or_else(|| format!("fence {mid} is missing"))?;
+            if pred(fence) {
+                b = mid;
+            } else {
+                a = mid + 1;
+            }
+        }
+        let upper = if a < jhi { a * FENCE } else { hi };
+        let lower = if a > jlo { (a - 1) * FENCE + 1 } else { lo };
+        Ok((lower.min(upper), upper))
+    }
+
+    /// The first entry of `[lo, hi)` for which `pred` holds, or `hi`: the
+    /// fence table, then one block at most.
+    fn partition(&mut self, lo: u64, hi: u64, pred: &dyn Fn(Entry) -> bool) -> Result<u64, String> {
+        let (mut a, mut b) = self.bounds(lo, hi, pred)?;
+        while a < b {
+            let mid = a + (b - a) / 2;
+            if pred(self.entry(mid)?) {
+                b = mid;
+            } else {
+                a = mid + 1;
+            }
+        }
+        Ok(a)
+    }
+
+    fn ts(&self, entry: Entry) -> i64 {
+        entry.ts(self.origin)
+    }
+
+    /// Non-null entries whose value is at or below `x` (`le`) or below it.
+    fn count_v(&mut self, x: i64, le: bool, exact: bool) -> Result<(u64, u64), String> {
+        let pred = move |entry: Entry| if le { entry.v > x } else { entry.v >= x };
+        let (lo, hi) = (self.nulls, self.rows);
+        if exact {
+            let at = self.partition(lo, hi, &pred)?;
+            Ok((at - lo, at - lo))
+        } else {
+            let (a, b) = self.bounds(lo, hi, &pred)?;
+            Ok((a - lo, b - lo))
+        }
+    }
+
+    /// Non-null entries whose ORDER KEY is at or below `x`: bounds, or exact.
+    fn count_vkey_le(&mut self, x: i64, desc: bool, exact: bool) -> Result<(u64, u64), String> {
+        if desc {
+            // !v <= x  <=>  v >= !x
+            let (a, b) = self.count_v(!x, false, exact)?;
+            let valued = self.rows - self.nulls;
+            Ok((valued - b, valued - a))
+        } else {
+            self.count_v(x, true, exact)
+        }
+    }
+
+    /// The non-null rows holding value `v`: `[first, end)`.
+    fn group(&mut self, v: i64) -> Result<(u64, u64), String> {
+        let (lo, hi) = (self.nulls, self.rows);
+        let first = self.partition(lo, hi, &|entry: Entry| entry.v >= v)?;
+        let end = self.partition(first, hi, &|entry: Entry| entry.v > v)?;
+        Ok((first, end))
+    }
+
+    /// The first entry of `[lo, hi)` — sorted by time there — at or after
+    /// `(ts, series)` in the page's order.
+    fn at_or_after(&mut self, lo: u64, hi: u64, ts: i64, series: u32) -> Result<u64, String> {
+        let (origin, own) = (self.origin, self.series);
+        self.partition(lo, hi, &move |entry: Entry| {
+            let at = entry.ts(origin);
+            at > ts || (at == ts && own >= series)
+        })
+    }
+}
+
+/// The kept rows of a series whose open interest is not applicable, under
+/// an open-interest sort: every one is a null, ordered by time.
+#[derive(Debug, Clone, Copy)]
+struct TimeArray {
+    series: u32,
+    run: usize,
+    slot: usize,
+    start: u64,
+    end: u64,
+}
+
+/// One slice of rows that share a value (or are all null), sorted by time,
+/// that the `j`-th row of the group is chosen from.
+#[derive(Debug, Clone, Copy)]
+enum Slice {
+    Run { array: usize, lo: u64, hi: u64 },
+    Time { array: usize, lo: u64, hi: u64 },
+    Kept { lo: usize, hi: usize },
+}
+
+/// Everything one request selects its page from.
+struct Arrays {
+    runs: Vec<RunArray>,
+    times: Vec<TimeArray>,
+    kept: Vec<Kept>,
+    desc: bool,
+}
+
+impl Arrays {
+    /// Non-null rows across every array, the read ones counted whole.
+    fn valued(&self, kept_valued: u64) -> u64 {
+        self.runs
+            .iter()
+            .map(|run| run.rows - run.nulls)
+            .sum::<u64>()
+            .saturating_add(kept_valued)
+    }
+
+    /// The order-key domain of the non-null rows.
+    fn domain(&self) -> Option<(i64, i64)> {
+        let mut lo: Option<i64> = None;
+        let mut hi: Option<i64> = None;
+        let mut take = |a: i64, b: i64| {
+            lo = Some(lo.map_or(a, |held| held.min(a)));
+            hi = Some(hi.map_or(b, |held| held.max(b)));
+        };
+        for run in &self.runs {
+            if run.rows > run.nulls {
+                let (a, b) = (
+                    vkey(run.info.base, self.desc),
+                    vkey(run.info.max, self.desc),
+                );
+                take(a.min(b), a.max(b));
+            }
+        }
+        for kept in self.kept.iter().filter(|kept| !kept.key.null) {
+            take(kept.key.vkey, kept.key.vkey);
+        }
+        lo.zip(hi)
+    }
+
+    /// Read rows kept with an order key at or below `x`, non-null.
+    fn kept_le(&self, x: i64) -> u64 {
+        let (mut lo, mut hi) = (0_usize, self.kept.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let le = self
+                .kept
+                .get(mid)
+                .is_some_and(|kept| !kept.key.null && kept.key.vkey <= x);
+            if le {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo as u64
+    }
+
+    /// Whether more than `k` non-null rows hold an order key at or below `x`.
+    fn more_than(&mut self, x: i64, k: u64) -> Result<bool, String> {
+        let kept = self.kept_le(x);
+        let mut bounds = Vec::with_capacity(self.runs.len());
+        let (mut lb, mut ub) = (kept, kept);
+        for run in &mut self.runs {
+            if run.rows == run.nulls {
+                bounds.push((0, 0));
+                continue;
+            }
+            let (a, b) = run.count_vkey_le(x, self.desc, false)?;
+            lb += a;
+            ub += b;
+            bounds.push((a, b));
+        }
+        if lb > k {
+            return Ok(true);
+        }
+        if ub <= k {
+            return Ok(false);
+        }
+        let mut exact = kept;
+        for (run, (a, b)) in self.runs.iter_mut().zip(bounds) {
+            exact += if a == b {
+                a
+            } else {
+                run.count_vkey_le(x, self.desc, true)?.0
+            };
+        }
+        Ok(exact > k)
+    }
+
+    /// Exact count of non-null rows with an order key at or below `x`.
+    fn count_le(&mut self, x: i64) -> Result<u64, String> {
+        let mut total = self.kept_le(x);
+        for run in &mut self.runs {
+            if run.rows > run.nulls {
+                total += run.count_vkey_le(x, self.desc, true)?.0;
+            }
+        }
+        Ok(total)
+    }
+
+    /// The first and last instant of a slice, and how many of its rows lie at
+    /// or before `t`.
+    fn slice_count(
+        &mut self,
+        root: &Path,
+        plans: &mut [SeriesPlan],
+        slice: Slice,
+        t: i64,
+    ) -> Result<u64, String> {
+        match slice {
+            Slice::Run { array, lo, hi } => {
+                let run = self.runs.get_mut(array).ok_or("no such sorted array")?;
+                let origin = run.origin;
+                let at = run.partition(lo, hi, &move |entry: Entry| entry.ts(origin) > t)?;
+                Ok(at - lo)
+            }
+            Slice::Time { array, lo, hi } => {
+                let time = *self.times.get(array).ok_or("no such time array")?;
+                let plan = plans
+                    .get_mut(time.series as usize)
+                    .ok_or("no such series")?;
+                let row = plan.locate(root, time.slot, t.saturating_add(1))?;
+                Ok(row.clamp(lo, hi) - lo)
+            }
+            Slice::Kept { lo, hi } => {
+                let (mut a, mut b) = (lo, hi);
+                while a < b {
+                    let mid = a + (b - a) / 2;
+                    if self.kept.get(mid).is_some_and(|kept| kept.key.ts <= t) {
+                        a = mid + 1;
+                    } else {
+                        b = mid;
+                    }
+                }
+                Ok((a - lo) as u64)
+            }
+        }
+    }
+
+    /// The instant and series of a slice's row `at` (its own position).
+    fn slice_at(
+        &mut self,
+        root: &Path,
+        plans: &mut [SeriesPlan],
+        slice: Slice,
+        at: u64,
+    ) -> Result<(i64, u32), String> {
+        match slice {
+            Slice::Run { array, lo, .. } => {
+                let run = self.runs.get_mut(array).ok_or("no such sorted array")?;
+                let entry = run.entry(lo + at)?;
+                Ok((run.ts(entry), run.series))
+            }
+            Slice::Time { array, lo, .. } => {
+                let time = *self.times.get(array).ok_or("no such time array")?;
+                let plan = plans
+                    .get_mut(time.series as usize)
+                    .ok_or("no such series")?;
+                let bar = plan.read(root, time.slot, lo + at)?;
+                Ok((bar.ts_micros, time.series))
+            }
+            Slice::Kept { lo, .. } => {
+                let kept = usize::try_from(at)
+                    .ok()
+                    .and_then(|at| self.kept.get(lo + at))
+                    .ok_or("no such kept row")?;
+                Ok((kept.key.ts, kept.key.series))
+            }
+        }
+    }
+
+    /// The `j`-th row, by `(instant, series)`, of the union of `slices`, or
+    /// `None` when they hold `j` rows or fewer.
+    fn select_in(
+        &mut self,
+        root: &Path,
+        plans: &mut [SeriesPlan],
+        slices: &[(Slice, u64)],
+        j: u64,
+    ) -> Result<Option<(i64, u32)>, String> {
+        if slices.iter().map(|&(_, len)| len).sum::<u64>() <= j {
+            return Ok(None);
+        }
+        let mut ends = Vec::with_capacity(slices.len());
+        let (mut tlo, mut thi) = (i64::MAX, i64::MIN);
+        for &(slice, len) in slices {
+            if len == 0 {
+                ends.push(None);
+                continue;
+            }
+            let first = self.slice_at(root, plans, slice, 0)?.0;
+            let last = self.slice_at(root, plans, slice, len - 1)?.0;
+            tlo = tlo.min(first);
+            thi = thi.max(last);
+            ends.push(Some((first, last)));
+        }
+        if tlo > thi {
+            return Ok(None);
+        }
+        let count = |this: &mut Self, plans: &mut [SeriesPlan], t: i64| -> Result<u64, String> {
+            let mut total = 0;
+            for (&(slice, len), end) in slices.iter().zip(&ends) {
+                let Some((first, last)) = *end else {
+                    continue;
+                };
+                total += if t < first {
+                    0
+                } else if t >= last {
+                    len
+                } else {
+                    this.slice_count(root, plans, slice, t)?
+                };
+            }
+            Ok(total)
+        };
+        // The smallest instant with more than `j` rows at or before it.
+        let (mut lo, mut hi) = (tlo, thi);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if count(self, plans, mid)? > j {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        let before = count(self, plans, lo.saturating_sub(1))?;
+        // THE ROWS AT THAT INSTANT, BY SERIES: at most one per series — a
+        // run's slice holds one series, the read rows' slice several — so a
+        // short list.
+        let mut at: Vec<u32> = Vec::new();
+        for (&(slice, _), end) in slices.iter().zip(&ends) {
+            let Some((first, last)) = *end else {
+                continue;
+            };
+            if lo < first || lo > last {
+                continue;
+            }
+            let upto = self.slice_count(root, plans, slice, lo)?;
+            let below = self.slice_count(root, plans, slice, lo.saturating_sub(1))?;
+            for row in below..upto {
+                let (_, series) = self.slice_at(root, plans, slice, row)?;
+                at.push(series);
+            }
+        }
+        at.sort_unstable();
+        let offset = usize::try_from(j.saturating_sub(before)).unwrap_or(usize::MAX);
+        let series = at
+            .get(offset)
+            .copied()
+            .ok_or_else(|| format!("no row {offset} at instant {lo}"))?;
+        Ok(Some((lo, series)))
+    }
+}
+
+/// Where a chosen row lives, to read it.
+#[derive(Debug, Clone, Copy)]
+enum Found {
+    /// A run's entry: its series' slot, its instant and the value it names.
+    Run {
+        series: u32,
+        slot: usize,
+        ts: i64,
+        value: Option<i64>,
+    },
+    /// A time array's row, already read.
+    Time {
+        series: u32,
+        run: usize,
+        row: u64,
+        bar: Bar,
+    },
+    /// A read row.
+    Kept { series: u32, run: usize, row: u64 },
+}
+
+/// A cursor over one array, in the page's order from a starting key.
+enum Cursor {
+    /// A run's non-null entries, ascending: `[p, end)`.
+    Up { array: usize, p: u64 },
+    /// A run's non-null entries, descending by value and ascending by time
+    /// within a value: the group `[g0, g1)` from `p`.
+    Down {
+        array: usize,
+        g0: u64,
+        g1: u64,
+        p: u64,
+    },
+    /// A run's null entries, by time: `[p, nulls)`.
+    Nulls { array: usize, p: u64 },
+    /// A time array's rows: `[row, end)`.
+    Time { array: usize, row: u64 },
+    /// The read rows: from `i`.
+    Kept { i: usize },
+}
+
+impl Arrays {
+    /// The cursor's current row, or `None` when it is spent.
+    fn head(
+        &mut self,
+        root: &Path,
+        plans: &mut [SeriesPlan],
+        cursor: &Cursor,
+    ) -> Result<Option<(Key, Found)>, String> {
+        let desc = self.desc;
+        match *cursor {
+            Cursor::Up { array, p } | Cursor::Down { array, p, .. } => {
+                let run = self.runs.get_mut(array).ok_or("no such sorted array")?;
+                let end = match *cursor {
+                    Cursor::Down { g1, .. } => g1,
+                    _ => run.rows,
+                };
+                if p >= end {
+                    return Ok(None);
+                }
+                let entry = run.entry(p)?;
+                let ts = run.ts(entry);
+                Ok(Some((
+                    Key {
+                        null: false,
+                        vkey: vkey(entry.v, desc),
+                        ts,
+                        series: run.series,
+                    },
+                    Found::Run {
+                        series: run.series,
+                        slot: run.slot,
+                        ts,
+                        value: Some(entry.v),
+                    },
+                )))
+            }
+            Cursor::Nulls { array, p } => {
+                let run = self.runs.get_mut(array).ok_or("no such sorted array")?;
+                if p >= run.nulls {
+                    return Ok(None);
+                }
+                let entry = run.entry(p)?;
+                let ts = run.ts(entry);
+                Ok(Some((
+                    Key {
+                        null: true,
+                        vkey: 0,
+                        ts,
+                        series: run.series,
+                    },
+                    Found::Run {
+                        series: run.series,
+                        slot: run.slot,
+                        ts,
+                        value: None,
+                    },
+                )))
+            }
+            Cursor::Time { array, row } => {
+                let time = *self.times.get(array).ok_or("no such time array")?;
+                if row >= time.end {
+                    return Ok(None);
+                }
+                let plan = plans
+                    .get_mut(time.series as usize)
+                    .ok_or("no such series")?;
+                let bar = plan.read(root, time.slot, row)?;
+                Ok(Some((
+                    Key {
+                        null: true,
+                        vkey: 0,
+                        ts: bar.ts_micros,
+                        series: time.series,
+                    },
+                    Found::Time {
+                        series: time.series,
+                        run: time.run,
+                        row,
+                        bar,
+                    },
+                )))
+            }
+            Cursor::Kept { i } => Ok(self.kept.get(i).map(|kept| {
+                (
+                    kept.key,
+                    Found::Kept {
+                        series: kept.key.series,
+                        run: kept.run,
+                        row: kept.row,
+                    },
+                )
+            })),
+        }
+    }
+
+    /// Steps the cursor past its current row.
+    fn advance(&mut self, cursor: &mut Cursor) -> Result<(), String> {
+        match cursor {
+            Cursor::Up { p, .. } | Cursor::Nulls { p, .. } => *p += 1,
+            Cursor::Time { row, .. } => *row += 1,
+            Cursor::Kept { i } => *i += 1,
+            Cursor::Down { array, g0, g1, p } => {
+                *p += 1;
+                if *p >= *g1 {
+                    let run = self.runs.get_mut(*array).ok_or("no such sorted array")?;
+                    if *g0 <= run.nulls {
+                        *p = *g1;
+                        return Ok(());
+                    }
+                    // THE NEXT SMALLER VALUE'S GROUP, read forward by time.
+                    let v = run.entry(*g0 - 1)?.v;
+                    let start = run.partition(run.nulls, *g0, &move |entry: Entry| entry.v >= v)?;
+                    *g1 = *g0;
+                    *g0 = start;
+                    *p = start;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Arrays {
+    /// The rows holding order key `vk` (value `v`), as time-sorted slices:
+    /// one per run that holds any, and the read rows that do.
+    fn value_slices(&mut self, vk: i64, v: i64) -> Result<Vec<(Slice, u64)>, String> {
+        let mut slices = Vec::new();
+        for array in 0..self.runs.len() {
+            let Some(run) = self.runs.get_mut(array) else {
+                continue;
+            };
+            if run.rows == run.nulls {
+                continue;
+            }
+            let (lo, hi) = run.group(v)?;
+            if hi > lo {
+                slices.push((Slice::Run { array, lo, hi }, hi - lo));
+            }
+        }
+        let (mut a, mut b) = (0_usize, self.kept.len());
+        while a < b {
+            let mid = a + (b - a) / 2;
+            if self
+                .kept
+                .get(mid)
+                .is_some_and(|kept| !kept.key.null && kept.key.vkey < vk)
+            {
+                a = mid + 1;
+            } else {
+                b = mid;
+            }
+        }
+        let first = a;
+        let mut end = first;
+        while self
+            .kept
+            .get(end)
+            .is_some_and(|kept| !kept.key.null && kept.key.vkey == vk)
+        {
+            end += 1;
+        }
+        if end > first {
+            slices.push((Slice::Kept { lo: first, hi: end }, (end - first) as u64));
+        }
+        Ok(slices)
+    }
+
+    /// Every null row, as time-sorted slices.
+    fn null_slices(&self) -> Vec<(Slice, u64)> {
+        let mut slices = Vec::new();
+        for array in 0..self.runs.len() {
+            if let Some(run) = self.runs.get(array)
+                && run.nulls > 0
+            {
+                slices.push((
+                    Slice::Run {
+                        array,
+                        lo: 0,
+                        hi: run.nulls,
+                    },
+                    run.nulls,
+                ));
+            }
+        }
+        for (array, time) in self.times.iter().enumerate() {
+            if time.end > time.start {
+                slices.push((
+                    Slice::Time {
+                        array,
+                        lo: time.start,
+                        hi: time.end,
+                    },
+                    time.end - time.start,
+                ));
+            }
+        }
+        let first = self.kept.iter().take_while(|kept| !kept.key.null).count();
+        if self.kept.len() > first {
+            slices.push((
+                Slice::Kept {
+                    lo: first,
+                    hi: self.kept.len(),
+                },
+                (self.kept.len() - first) as u64,
+            ));
+        }
+        slices
+    }
+}
+
+/// The page's rows: `limit` from global position `k`, as `Found`s.
+fn select(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    arrays: &mut Arrays,
+    kept_valued: u64,
+    (k, limit): (u64, usize),
+) -> Result<Vec<Found>, String> {
+    let Some(start) = start_key(root, plans, arrays, kept_valued, k)? else {
+        return Ok(Vec::new());
+    };
+    let mut cursors = cursors_at(root, plans, arrays, start)?;
+    merge(root, plans, arrays, &mut cursors, limit)
+}
+
+/// The key of the row at global position `k`: the value by a bisection over
+/// the value domain, then the instant among the rows that hold it. `None`
+/// past every row the arrays hold.
+fn start_key(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    arrays: &mut Arrays,
+    kept_valued: u64,
+    k: u64,
+) -> Result<Option<Key>, String> {
+    let desc = arrays.desc;
+    let valued = arrays.valued(kept_valued);
+    let start = if k < valued {
+        let Some((lo, hi)) = arrays.domain() else {
+            return Err("no valued row to order".to_owned());
+        };
+        let (mut a, mut b) = (lo, hi);
+        while a < b {
+            let mid = i64::try_from((i128::from(a) + i128::from(b)).div_euclid(2))
+                .map_err(|_| "the value bisection left i64".to_owned())?;
+            if arrays.more_than(mid, k)? {
+                b = mid;
+            } else {
+                a = mid + 1;
+            }
+        }
+        let vk = a;
+        let before = if vk == i64::MIN {
+            0
+        } else {
+            arrays.count_le(vk - 1)?
+        };
+        let v = if desc { !vk } else { vk };
+        let slices = arrays.value_slices(vk, v)?;
+        let Some((ts, series)) = arrays.select_in(root, plans, &slices, k - before)? else {
+            return Err(format!(
+                "the value bisection found {vk} for row {k} and no row holds it"
+            ));
+        };
+        Key {
+            null: false,
+            vkey: vk,
+            ts,
+            series,
+        }
+    } else {
+        let slices = arrays.null_slices();
+        // PAST EVERY ROW THE ARRAYS HOLD: rows that did not read are not in
+        // a read stretch's order, so the page past them is empty.
+        let Some((ts, series)) = arrays.select_in(root, plans, &slices, k - valued)? else {
+            return Ok(None);
+        };
+        Key {
+            null: true,
+            vkey: 0,
+            ts,
+            series,
+        }
+    };
+    Ok(Some(start))
+}
+
+/// One cursor per array, at its first row at or after `start` in the page's
+/// order.
+fn cursors_at(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    arrays: &mut Arrays,
+    start: Key,
+) -> Result<Vec<Cursor>, String> {
+    let desc = arrays.desc;
+    let mut cursors = Vec::with_capacity(arrays.runs.len() * 2 + arrays.times.len() + 1);
+    for array in 0..arrays.runs.len() {
+        let Some(run) = arrays.runs.get_mut(array) else {
+            continue;
+        };
+        let own = run.series;
+        if !start.null && run.rows > run.nulls {
+            let v = if desc { !start.vkey } else { start.vkey };
+            let (ts, series) = (start.ts, start.series);
+            if desc {
+                let (g0, g1) = run.group(v)?;
+                let p = run.at_or_after(g0, g1, ts, series)?;
+                // NOTHING LEFT AT THIS VALUE IN THIS ARRAY: step from the
+                // group's last place, which moves the cursor to the next
+                // smaller value's group (or spends it).
+                let mut cursor = Cursor::Down {
+                    array,
+                    g0,
+                    g1,
+                    p: if p >= g1 { g1.saturating_sub(1) } else { p },
+                };
+                if p >= g1 {
+                    arrays.advance(&mut cursor)?;
+                }
+                cursors.push(cursor);
+            } else {
+                let origin = run.origin;
+                let p = run.partition(run.nulls, run.rows, &move |entry: Entry| {
+                    let at = entry.ts(origin);
+                    entry.v > v || (entry.v == v && (at > ts || (at == ts && own >= series)))
+                })?;
+                cursors.push(Cursor::Up { array, p });
+            }
+        }
+        if let Some(run) = arrays.runs.get_mut(array)
+            && run.nulls > 0
+        {
+            let p = if start.null {
+                run.at_or_after(0, run.nulls, start.ts, start.series)?
+            } else {
+                0
+            };
+            cursors.push(Cursor::Nulls { array, p });
+        }
+    }
+    for (array, time) in arrays.times.clone().iter().enumerate() {
+        let row = if start.null {
+            let probe = if time.series >= start.series {
+                start.ts
+            } else {
+                start.ts.saturating_add(1)
+            };
+            let plan = plans
+                .get_mut(time.series as usize)
+                .ok_or("no such series")?;
+            plan.locate(root, time.slot, probe)?
+                .clamp(time.start, time.end)
+        } else {
+            time.start
+        };
+        cursors.push(Cursor::Time { array, row });
+    }
+    let mut a = 0_usize;
+    let mut b = arrays.kept.len();
+    while a < b {
+        let mid = a + (b - a) / 2;
+        if arrays.kept.get(mid).is_some_and(|kept| kept.key < start) {
+            a = mid + 1;
+        } else {
+            b = mid;
+        }
+    }
+    cursors.push(Cursor::Kept { i: a });
+    Ok(cursors)
+}
+
+/// The merge of every cursor: the smallest head, `limit` times.
+fn merge(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    arrays: &mut Arrays,
+    cursors: &mut [Cursor],
+    limit: usize,
+) -> Result<Vec<Found>, String> {
+    let mut heads: Vec<Option<(Key, Found)>> = Vec::with_capacity(cursors.len());
+    for cursor in cursors.iter() {
+        heads.push(arrays.head(root, plans, cursor)?);
+    }
+    let mut out = Vec::with_capacity(limit);
+    while out.len() < limit {
+        let mut best: Option<(usize, Key)> = None;
+        for (at, head) in heads.iter().enumerate() {
+            if let Some((key, _)) = head
+                && best.is_none_or(|(_, held)| *key < held)
+            {
+                best = Some((at, *key));
+            }
+        }
+        let Some((at, _)) = best else {
+            break;
+        };
+        if let Some(Some((_, found))) = heads.get(at) {
+            out.push(*found);
+        }
+        if let Some(cursor) = cursors.get_mut(at) {
+            arrays.advance(cursor)?;
+            let next = arrays.head(root, plans, cursor)?;
+            if let Some(slot) = heads.get_mut(at) {
+                *slot = next;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Cuts `kept` to its `keep` best by `order`, in place and without
+/// allocating, and returns the worst of those kept — the bar a later row must
+/// beat to be kept. Leaves `kept` as it is when it holds no more.
+fn keep_best(
+    kept: &mut Vec<Kept>,
+    keep: usize,
+    order: impl Fn(&Kept, &Kept) -> std::cmp::Ordering,
+) -> Option<Kept> {
+    if keep > 0 && kept.len() > keep {
+        kept.select_nth_unstable_by(keep - 1, &order);
+        kept.truncate(keep);
+        return kept.last().copied();
+    }
+    None
+}
+
+/// One series' kept-run index for a slot, under no time-of-day bound: a
+/// month is one kept run.
+fn run_of_slot(plan: &SeriesPlan, slot: usize) -> Option<usize> {
+    let (mut lo, mut hi) = (0_usize, plan.runs.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match plan.runs.get(mid).map(|run| run.slot.cmp(&slot)) {
+            Some(std::cmp::Ordering::Less) => lo = mid + 1,
+            Some(std::cmp::Ordering::Equal) => return Some(mid),
+            _ => hi = mid,
+        }
+    }
+    None
+}
+
+/// The extremes of a run, renamed to `series`, volume only where it trades.
+fn run_extremes(x: &store::sort_index::RunExtremes, series: usize, volume: bool) -> Extremes {
+    let at = |held: store::sort_index::Extreme| {
+        Some(Extreme {
+            v: held.v,
+            t: held.ts,
+            series,
+        })
+    };
+    Extremes {
+        range: x.range_max.v,
+        volume: if volume { x.volume_max.v } else { 0 },
+        close_max: at(x.close_max),
+        close_min: at(x.close_min),
+        high_max: at(x.high_max),
+        low_min: at(x.low_min),
+        range_max: at(x.range_max),
+        volume_max: if volume { at(x.volume_max) } else { None },
+    }
+}
+
+/// The entries a day bound keeps of `.srt` run `run` for `column` — every
+/// entry stamped inside `[lo, hi)` — from the memo, or read from the run's
+/// column whole and filtered (D-3349). `rows` is how many kept rows the bars
+/// hold there; an index that disagrees is refused by name, never served.
+///
+/// # Errors
+///
+/// The month's index did not walk, a block or fence table failed its
+/// checksum, or the count disagrees with the bars.
+fn cut_entries(
+    held: &Held,
+    run: usize,
+    column: Column,
+    (lo, hi): (i64, i64),
+    rows: u64,
+) -> Result<CutEntries, String> {
+    let (found, stamp) = held;
+    let view = found.as_ref().as_ref().map_err(Clone::clone)?;
+    let key = (view.path.clone(), *stamp, run, column, lo, hi);
+    if let Some(found) = CUT_ENTRIES.get(&key) {
+        return Ok(found);
+    }
+    let index = SortIndex::open_walked(&view.path, &view.shape, view.walked.clone())
+        .map_err(|why| why.to_string())?;
+    let fence_key = (view.path.clone(), *stamp, run, column);
+    let fences = if let Some(found) = FENCE_TABLES.get(&fence_key) {
+        found
+    } else {
+        let read = Arc::new(index.fences(run, column).map_err(|why| why.to_string())?);
+        FENCE_TABLES.put(fence_key, Arc::clone(&read), read.weight());
+        read
+    };
+    let origin = view.shape.origin_micros;
+    let (entries, nulls) = index
+        .entries_where(run, column, &fences, |entry| {
+            let at = entry.ts(origin);
+            at >= lo && at < hi
+        })
+        .map_err(|why| why.to_string())?;
+    if entries.len() as u64 != rows {
+        return Err(format!(
+            "its run holds {} entries inside the day bound and the bars hold {rows} rows there",
+            entries.len()
+        ));
+    }
+    let weight = entries.len().saturating_mul(std::mem::size_of::<Entry>());
+    let value: CutEntries = Arc::new((entries.into(), nulls));
+    CUT_ENTRIES.put(key, Arc::clone(&value), weight);
+    Ok(value)
+}
+
+/// Whether the extremes of rows `[start, end)` of `slot` are already held.
+fn cut_extremes_held(plan: &SeriesPlan, slot: usize, start: u64, end: u64) -> bool {
+    plan.slots.get(slot).is_some_and(|at| {
+        CUT_EXTREMES
+            .get(&(at.path.clone(), at.stamp, start, end))
+            .is_some()
+    })
+}
+
+/// The extremes of rows `[start, end)` of `slot` — a stretch a day bound cuts,
+/// whose run summary covers more than it keeps — from the memo, or read and
+/// then held when every row read. Returns them, renamed to `series`, and the
+/// rows read (none from the memo).
+///
+/// # Errors
+///
+/// `cancelled`, by name.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the stretch (plan, slot, rows), what to fold (series, volume) and \
+              the request's faults, flag and stride: each is one of the read's \
+              own inputs"
+)]
+fn cut_extremes(
+    root: &Path,
+    plan: &mut SeriesPlan,
+    slot: usize,
+    (start, end): (u64, u64),
+    (series, volume): (usize, bool),
+    faults: &mut Vec<String>,
+    cancel: &Cancel,
+    since: &mut u64,
+) -> Result<(Extremes, u64), String> {
+    let key = plan
+        .slots
+        .get(slot)
+        .map(|at| (at.path.clone(), at.stamp, start, end));
+    if let Some(held) = key.as_ref().and_then(|key| CUT_EXTREMES.get(key)) {
+        let mut out = Extremes::default();
+        out.merge(&held, Some(series));
+        return Ok((out, 0));
+    }
+    let mut month = Extremes::default();
+    let mut all_read = true;
+    for row in start..end {
+        *since += 1;
+        if *since >= CANCEL_STRIDE {
+            *since = 0;
+            cancel.check()?;
+        }
+        match plan.read(root, slot, row) {
+            Ok(bar) => month.fold(&bar, 0, volume),
+            Err(why) => {
+                all_read = false;
+                faults.push(why);
+            }
+        }
+    }
+    if all_read && let Some(key) = key {
+        CUT_EXTREMES.put(key, month);
+    }
+    let mut out = Extremes::default();
+    out.merge(&month, Some(series));
+    Ok((out, end - start))
+}
+
+/// The build command for months that had no usable index.
+fn build_command(
+    query: &WindowQuery,
+    key: &super::SeriesKey,
+    from: YearMonth,
+    to: YearMonth,
+) -> String {
+    let contract = key
+        .contract
+        .map_or_else(String::new, |contract| format!("/{contract}"));
+    format!(
+        "cli srt-build {} {}/{}/{}{contract} {} {from} {to}",
+        query.vendor.as_str(),
+        key.exchange,
+        key.segment,
+        key.symbol,
+        query.timeframe.as_str(),
+    )
+}
+
+/// One value-ordered page. See the module header.
+///
+/// # Errors
+///
+/// `scan_budget_exceeded` or `sort_too_deep` for rows no index orders past
+/// the caps, each naming the months and the command that indexes them;
+/// `cancelled` when the client went away; more than [`MAX_BROKEN`] months
+/// whose index failed while it was read.
+///
+/// # A month whose index fails while it is read
+///
+/// A block or fence table that fails its checksum stops the attempt; the
+/// month is set aside ([`BROKEN`], until its index changes) and the page is
+/// asked again with that month's rows read — counted, named, and given the
+/// command that rebuilds it, like a month with no index. Never served from
+/// the damaged index, and never refused for the whole range on its account.
+pub(super) fn page(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    rules: &[change::Rules],
+    query: &WindowQuery,
+    (offset, limit): (usize, usize),
+    faults: &mut Vec<String>,
+    cancel: &Cancel,
+) -> Result<Sorted, String> {
+    let mut set_aside = Vec::new();
+    for _ in 0..=MAX_BROKEN {
+        let mut tried = Vec::new();
+        match page_once(
+            root,
+            plans,
+            rules,
+            query,
+            (offset, limit),
+            &mut tried,
+            cancel,
+        ) {
+            Ok(sorted) => {
+                faults.append(&mut tried);
+                return Ok(sorted);
+            }
+            Err(Attempt::Refused(why)) => return Err(why),
+            Err(Attempt::Broken { path, stamp, why }) => {
+                BROKEN.put((path, stamp), Arc::from(why.as_str()));
+                set_aside.push(why);
+            }
+        }
+    }
+    Err(format!(
+        "more than {MAX_BROKEN} months' sort indexes failed while this page read them; each is \
+         set aside until it is rebuilt: {}",
+        set_aside.join("; ")
+    ))
+}
+
+/// Why one attempt at a value page did not answer.
+enum Attempt {
+    /// Refused, in these words: the request's answer.
+    Refused(String),
+    /// The month whose index is at `path` (as it was at `stamp`) failed while
+    /// it was read, for `why`.
+    Broken {
+        path: PathBuf,
+        stamp: Stamp,
+        why: String,
+    },
+}
+
+impl From<String> for Attempt {
+    fn from(why: String) -> Self {
+        Self::Refused(why)
+    }
+}
+
+/// One attempt at [`page`]. See there.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one request's plan, budget, read and selection, in the order the \
+              module header states them; split, each part would carry the \
+              same eight arguments"
+)]
+fn page_once(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    rules: &[change::Rules],
+    query: &WindowQuery,
+    (offset, limit): (usize, usize),
+    faults: &mut Vec<String>,
+    cancel: &Cancel,
+) -> Result<Sorted, Attempt> {
+    let Some(column) = column_of(query.sort) else {
+        return Err(Attempt::Refused(
+            "a value page needs a value column".to_owned(),
+        ));
+    };
+    let desc = query.desc;
+    let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
+    let mut cuts = cut(root, plans, query, &mut views);
+    cancel.check()?;
+    let null_series = |series: usize| {
+        column == Column::OpenInterest
+            && rules
+                .get(series)
+                .is_none_or(change::Rules::not_a_derivative)
+    };
+    // THE RUNS A DAY BOUND CUTS, from their own entries (D-3349). One that
+    // would not serve is read instead, and the answer says why.
+    for cut in &mut cuts {
+        if null_series(cut.series) {
+            continue;
+        }
+        for piece in &mut cut.pieces {
+            let Piece::Cut {
+                slot,
+                run,
+                start,
+                end,
+                lo,
+                hi,
+                ..
+            } = *piece
+            else {
+                continue;
+            };
+            cancel.check()?;
+            let loaded = views
+                .get(&(cut.series, slot))
+                .ok_or_else(|| "the month's sort index was not walked".to_owned())
+                .and_then(|held| cut_entries(held, run, column, (lo, hi), end - start));
+            match loaded {
+                Ok(found) => {
+                    if let Piece::Cut { entries, .. } = piece {
+                        *entries = Some(found);
+                    }
+                }
+                Err(why) => {
+                    *piece = Piece::Read {
+                        slot,
+                        start,
+                        end,
+                        why: Unindexed::CutUnserved(why),
+                    };
+                }
+            }
+        }
+    }
+    // THE BUDGET, BEFORE ANY ROW IS READ.
+    let mut report = SortReport {
+        column: column.as_str(),
+        ..SortReport::default()
+    };
+    let mut read_rows = 0_u64;
+    let mut sort_read = 0_u64;
+    let mut named: Vec<(usize, YearMonth, u64, String, bool)> = Vec::new();
+    for cut in &cuts {
+        for piece in &cut.pieces {
+            match piece {
+                Piece::Indexed { start, end, .. } => {
+                    report.indexed_rows += end - start;
+                    report.indexed_runs += 1;
+                }
+                Piece::Cut { start, end, .. } => {
+                    report.indexed_rows += end - start;
+                    report.indexed_runs += 1;
+                    report.cut_runs += 1;
+                }
+                Piece::Read {
+                    slot,
+                    start,
+                    end,
+                    why,
+                } => {
+                    read_rows += end - start;
+                    if !null_series(cut.series) {
+                        sort_read += end - start;
+                    }
+                    let month = plans
+                        .get(cut.series)
+                        .and_then(|plan| plan.month_of_slot(*slot));
+                    if let Some(month) = month {
+                        match named
+                            .iter_mut()
+                            .find(|held| held.0 == cut.series && held.1 == month)
+                        {
+                            Some(held) => held.2 += end - start,
+                            None => named.push((
+                                cut.series,
+                                month,
+                                end - start,
+                                why.sentence(),
+                                why.buildable(),
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    report.scanned_rows = read_rows;
+    report.scanned_months = named.len();
+    for (series, month, rows, why, _) in named.iter().take(MAX_NAMED) {
+        let key = plans
+            .get(*series)
+            .map_or_else(String::new, |plan| plan.key.text());
+        report
+            .scanned_why
+            .push(format!("{key} {month}: {rows} rows read: {why}"));
+    }
+    for (series, plan) in plans.iter().enumerate() {
+        let months: Vec<YearMonth> = named
+            .iter()
+            .filter(|held| held.0 == series && held.4)
+            .map(|held| held.1)
+            .collect();
+        if let (Some(&from), Some(&to)) = (months.iter().min(), months.iter().max())
+            && report.build.len() < 4
+        {
+            report.build.push(build_command(query, &plan.key, from, to));
+        }
+    }
+    let command = || {
+        if report.build.is_empty() {
+            String::new()
+        } else {
+            format!("; index them with: {}", report.build.join(" ; "))
+        }
+    };
+    if read_rows > MAX_SCAN_BARS {
+        return Err(Attempt::Refused(format!(
+            "scan_budget_exceeded: ordering by {} serves {} kept rows from sort indexes and \
+             would read the other {read_rows}, past the {MAX_SCAN_BARS} one request may read \
+             ({}){}",
+            column.as_str(),
+            report.indexed_rows,
+            report.scanned_why.join("; "),
+            command()
+        )));
+    }
+    let depth = offset.saturating_add(limit);
+    let total: u64 = plans.iter().map(SeriesPlan::total).sum();
+    // A PAGE NEAR THE END OF AN ORDER NO INDEX SERVES (D-3349). When every
+    // kept row is read — a time-of-day bound, or no month indexed — the page
+    // at `offset` is the `total - offset`-th from the end, so a page within
+    // `MAX_SORT_DEPTH` of either end keeps that many rows, not `offset +
+    // limit`. Mixed with index runs, a read row's place among the read ones
+    // does not fix its place in the page, so only the front is served.
+    let pure = report.indexed_rows == 0 && cuts.iter().all(|cut| !null_series(cut.series));
+    let tail = u64::try_from(offset).map_or(0, |k| total.saturating_sub(k));
+    let held_whole = sort_read <= read_held();
+    let from_end = !held_whole
+        && pure
+        && depth > MAX_SORT_DEPTH
+        && usize::try_from(tail).is_ok_and(|tail| tail <= MAX_SORT_DEPTH);
+    if !held_whole && depth > MAX_SORT_DEPTH && !from_end {
+        return Err(Attempt::Refused(format!(
+            "sort_too_deep: {sort_read} kept rows no sort index orders are read for this page, \
+             more than the {MAX_READ_HELD} one request orders whole, and it keeps offset + limit \
+             = {depth} of them, past the {MAX_SORT_DEPTH} this route holds from either end ({}){}",
+            report.scanned_why.join("; "),
+            command()
+        )));
+    }
+    // THE READ ROWS: kept while among the `offset + limit` best, or, for a
+    // page near the end, the `total - offset` last.
+    let keep = if from_end {
+        usize::try_from(tail).unwrap_or(MAX_SORT_DEPTH)
+    } else {
+        depth
+    }
+    .max(1);
+    let order = |a: &Kept, b: &Kept| {
+        if from_end {
+            b.key.cmp(&a.key)
+        } else {
+            a.key.cmp(&b.key)
+        }
+    };
+    // ONE ALLOCATION, NEVER GROWN: room for twice what is kept, or for every
+    // row read when that is fewer; past it the worst half is cut in place.
+    let capacity = keep
+        .saturating_mul(2)
+        .min(usize::try_from(sort_read).unwrap_or(usize::MAX))
+        .max(1);
+    let mut kept: Vec<Kept> = Vec::with_capacity(capacity);
+    let mut worst: Option<Kept> = None;
+    let mut joined = 0_u64;
+    let mut kept_valued = 0_u64;
+    let mut scanned_extremes = Extremes::default();
+    let mut since = 0_u64;
+    for cut in &cuts {
+        let Some(series_rules) = rules.get(cut.series) else {
+            continue;
+        };
+        let volume = !series_rules.index_no_volume();
+        let joins = !null_series(cut.series);
+        let Ok(series) = u32::try_from(cut.series) else {
+            continue;
+        };
+        for piece in &cut.pieces {
+            let Piece::Read {
+                slot, start, end, ..
+            } = *piece
+            else {
+                continue;
+            };
+            let Some(plan) = plans.get_mut(cut.series) else {
+                continue;
+            };
+            for row in start..end {
+                since += 1;
+                if since >= CANCEL_STRIDE {
+                    since = 0;
+                    cancel.check()?;
+                }
+                let bar = match plan.read(root, slot, row) {
+                    Ok(bar) => bar,
+                    Err(why) => {
+                        faults.push(why);
+                        continue;
+                    }
+                };
+                if query.want_extremes {
+                    scanned_extremes.fold(&bar, cut.series, volume);
+                }
+                if !joins {
+                    continue;
+                }
+                let v = column.of(&bar);
+                let null = column.nullable() && v == OI_NULL;
+                if !null {
+                    kept_valued += 1;
+                }
+                joined += 1;
+                let candidate = Kept {
+                    key: Key {
+                        null,
+                        vkey: if null { 0 } else { vkey(v, desc) },
+                        ts: bar.ts_micros,
+                        series,
+                    },
+                    run: cut.run,
+                    row,
+                };
+                if worst
+                    .as_ref()
+                    .is_some_and(|worst| order(&candidate, worst).is_ge())
+                {
+                    continue;
+                }
+                if kept.len() == capacity {
+                    worst = keep_best(&mut kept, keep, order);
+                }
+                kept.push(candidate);
+            }
+        }
+    }
+    keep_best(&mut kept, keep, order);
+    // IN PLACE: the keys are unique (an instant holds one row per series), so
+    // an unstable sort is the order.
+    kept.sort_unstable_by(order);
+    if from_end {
+        kept.reverse();
+    }
+    cancel.check()?;
+    // THE ARRAYS.
+    let mut arrays = Arrays {
+        runs: Vec::new(),
+        times: Vec::new(),
+        kept,
+        desc,
+    };
+    let mut extremes = query.want_extremes.then_some(scanned_extremes);
+    for cut in &cuts {
+        let Ok(series) = u32::try_from(cut.series) else {
+            continue;
+        };
+        let volume = rules
+            .get(cut.series)
+            .is_none_or(|series_rules| !series_rules.index_no_volume());
+        if null_series(cut.series)
+            && let Some(run) = plans
+                .get(cut.series)
+                .and_then(|plan| plan.runs.get(cut.run))
+        {
+            arrays.times.push(TimeArray {
+                series,
+                run: cut.run,
+                slot: run.slot,
+                start: run.start,
+                end: run.end,
+            });
+        }
+        for piece in &cut.pieces {
+            let (slot, run, held) = match piece {
+                Piece::Indexed { slot, run, .. } => (*slot, *run, None),
+                Piece::Cut {
+                    slot, run, entries, ..
+                } => (*slot, *run, Some(entries)),
+                Piece::Read { .. } => continue,
+            };
+            let Some((found, stamp)) = views.get(&(cut.series, slot)).cloned() else {
+                continue;
+            };
+            let Ok(view) = found.as_ref() else {
+                continue;
+            };
+            let Some(info) = view.walked.runs.get(run).copied() else {
+                continue;
+            };
+            // A WHOLE RUN'S EXTREMES ARE ITS SUMMARY; a cut run's are folded
+            // below, since its summary covers rows the bound leaves out.
+            if held.is_none()
+                && let Some(kept) = extremes.as_mut()
+            {
+                kept.merge(&run_extremes(&info.extremes, cut.series, volume), None);
+            }
+            if null_series(cut.series) {
+                continue;
+            }
+            let array = match held {
+                None => {
+                    let column_info = *info.column(column);
+                    (info.rows(), column_info.nulls, column_info, None)
+                }
+                Some(Some(cut_held)) => {
+                    let (entries, nulls) = (&cut_held.0, cut_held.1);
+                    let valued = entries.get(usize::try_from(nulls).unwrap_or(usize::MAX)..);
+                    let (base, max) = valued
+                        .and_then(|valued| valued.first().zip(valued.last()))
+                        .map_or((0, 0), |(lo, hi)| (lo.v, hi.v));
+                    let column_info = ColumnInfo {
+                        nulls,
+                        base,
+                        max,
+                        ..ColumnInfo::default()
+                    };
+                    (
+                        entries.len() as u64,
+                        nulls,
+                        column_info,
+                        Some(Arc::clone(entries)),
+                    )
+                }
+                // NOT LOADED: only a null series' cut runs are left so, and
+                // they never reach here.
+                Some(None) => continue,
+            };
+            let (rows, nulls, column_info, held) = array;
+            let named = plans.get(cut.series).map_or_else(
+                || (Arc::from(""), Arc::from("")),
+                |plan| {
+                    let month = plan.month_of_slot(slot);
+                    let at = month.map_or_else(String::new, |month| month.to_string());
+                    let command = month.map_or_else(String::new, |month| {
+                        build_command(query, &plan.key, month, month)
+                    });
+                    (
+                        Arc::from(format!("{} {at}", plan.key.text())),
+                        Arc::from(command),
+                    )
+                },
+            );
+            arrays.runs.push(RunArray {
+                series,
+                slot,
+                run,
+                rows,
+                nulls,
+                info: column_info,
+                origin: view.shape.origin_micros,
+                path: view.path.clone(),
+                stamp,
+                view: Arc::clone(&found),
+                file: None,
+                fences: None,
+                blocks: HashMap::with_capacity(4),
+                column,
+                held,
+                named,
+                failure: None,
+            });
+        }
+    }
+    // THE EXTREMES OF THE CUT RUNS: from the memo, or their kept rows read,
+    // under the extremes' own budget; past it the page is served without
+    // them, named.
+    let mut extremes_why = None;
+    let mut extremes_read = 0_u64;
+    if extremes.is_some() {
+        let mut owed = 0_u64;
+        for cut in &cuts {
+            for piece in &cut.pieces {
+                if let Piece::Cut {
+                    slot, start, end, ..
+                } = *piece
+                    && plans
+                        .get(cut.series)
+                        .is_some_and(|plan| !cut_extremes_held(plan, slot, start, end))
+                {
+                    owed = owed.saturating_add(end - start);
+                }
+            }
+        }
+        if owed > super::MAX_EXTREMES_SCAN_BARS {
+            extremes = None;
+            extremes_why = Some(format!(
+                "scan_budget_exceeded: the extremes need {owed} records read that no sort index \
+                 summarises and no earlier request folded, past the {} one request may fold; the \
+                 page is served without them",
+                super::MAX_EXTREMES_SCAN_BARS
+            ));
+        } else {
+            let mut since = 0_u64;
+            for cut in &cuts {
+                let volume = rules
+                    .get(cut.series)
+                    .is_none_or(|series_rules| !series_rules.index_no_volume());
+                for piece in &cut.pieces {
+                    let Piece::Cut {
+                        slot, start, end, ..
+                    } = *piece
+                    else {
+                        continue;
+                    };
+                    let Some(plan) = plans.get_mut(cut.series) else {
+                        continue;
+                    };
+                    let (folded, read) = cut_extremes(
+                        root,
+                        plan,
+                        slot,
+                        (start, end),
+                        (cut.series, volume),
+                        faults,
+                        cancel,
+                        &mut since,
+                    )?;
+                    extremes_read += read;
+                    if let Some(kept) = extremes.as_mut() {
+                        kept.merge(&folded, None);
+                    }
+                }
+            }
+        }
+    }
+    let k = u64::try_from(offset).unwrap_or(u64::MAX);
+    let chosen = if k >= total {
+        Vec::new()
+    } else if from_end {
+        // THE KEPT ROWS ARE THE ORDER'S LAST: every joined row not kept
+        // comes before them.
+        let before = usize::try_from(joined)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(arrays.kept.len());
+        arrays
+            .kept
+            .iter()
+            .skip(offset.saturating_sub(before))
+            .take(limit)
+            .map(|kept| Found::Kept {
+                series: kept.key.series,
+                run: kept.run,
+                row: kept.row,
+            })
+            .collect()
+    } else {
+        match select(root, plans, &mut arrays, kept_valued, (k, limit)) {
+            Ok(chosen) => chosen,
+            Err(why) => {
+                // A MONTH'S INDEX FAILED WHILE IT WAS READ: that month is set
+                // aside and the page asked again (see `page`).
+                return Err(arrays
+                    .runs
+                    .iter()
+                    .find_map(|run| {
+                        run.failure.as_ref().map(|failed| Attempt::Broken {
+                            path: run.path.clone(),
+                            stamp: run.stamp,
+                            why: failed.clone(),
+                        })
+                    })
+                    .unwrap_or(Attempt::Refused(why)));
+            }
+        }
+    };
+    cancel.check()?;
+    // THE PAGE, READ AND CHECKED AGAINST WHAT NAMED IT.
+    let mut page = Vec::with_capacity(chosen.len());
+    for found in chosen {
+        let (series, run, row, bar) = match found {
+            Found::Kept { series, run, row } => {
+                let Some(plan) = plans.get_mut(series as usize) else {
+                    continue;
+                };
+                let Some(slot) = plan.runs.get(run).map(|at| at.slot) else {
+                    continue;
+                };
+                match plan.read(root, slot, row) {
+                    Ok(bar) => (series, run, row, bar),
+                    Err(why) => {
+                        faults.push(why);
+                        continue;
+                    }
+                }
+            }
+            Found::Time {
+                series,
+                run,
+                row,
+                bar,
+            } => (series, run, row, bar),
+            Found::Run {
+                series,
+                slot,
+                ts,
+                value,
+            } => {
+                let Some(plan) = plans.get_mut(series as usize) else {
+                    continue;
+                };
+                let Some(run) = run_of_slot(plan, slot) else {
+                    faults.push(format!("{}: slot {slot} has no kept run", plan.key.text()));
+                    continue;
+                };
+                let row = match plan.locate(root, slot, ts) {
+                    Ok(row) => row,
+                    Err(why) => {
+                        faults.push(why);
+                        continue;
+                    }
+                };
+                let bar = match plan.read(root, slot, row) {
+                    Ok(bar) => bar,
+                    Err(why) => {
+                        faults.push(why);
+                        continue;
+                    }
+                };
+                let held = column.of(&bar);
+                let agrees = bar.ts_micros == ts
+                    && match value {
+                        Some(v) => held == v,
+                        None => held == OI_NULL,
+                    };
+                if !agrees {
+                    // NEVER SERVED: a sort entry that does not name the bar
+                    // it points at is a stale index, and the row it would
+                    // have put on the page is named instead.
+                    faults.push(format!(
+                        "{} {}: the sort index names a {} of {value:?} at {ts} and the bar \
+                         there is stamped {} with {held}; rebuild it with {}",
+                        plan.key.text(),
+                        plan.month_of_slot(slot)
+                            .map_or_else(String::new, |month| month.to_string()),
+                        column.as_str(),
+                        bar.ts_micros,
+                        plan.month_of_slot(slot).map_or_else(String::new, |month| {
+                            build_command(query, &plan.key, month, month)
+                        })
+                    ));
+                    continue;
+                }
+                (series, run, row, bar)
+            }
+        };
+        let series = series as usize;
+        let (Some(plan), Some(series_rules)) = (plans.get_mut(series), rules.get(series)) else {
+            continue;
+        };
+        let at = Position { count: 0, run, row };
+        let behind: Behind = behind_of(root, plan, at, None, query.lookback);
+        page.push(window_bar(series_rules, behind, bar, series));
+    }
+    Ok(Sorted {
+        page,
+        extremes,
+        extremes_why,
+        scanned: read_rows + extremes_read,
+        report,
+    })
+}
+
+/// The extremes of every kept row, for a time-ordered page: the summaries of
+/// the index runs that cover whole stretches, and the rows no whole run
+/// covers — a stretch a day bound cuts, or rows no run orders — read, or
+/// answered by the month memo or the cut-stretch memo, under
+/// [`super::MAX_EXTREMES_SCAN_BARS`]. Returns the extremes and the rows read.
+///
+/// # Errors
+///
+/// The `scan_budget_exceeded` sentence, or `cancelled`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cut, the budget over what must be read, then the reads, in \
+              the order the doc above states them; each step is the input of \
+              the next"
+)]
+pub(super) fn extremes_of(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    rules: &[change::Rules],
+    query: &WindowQuery,
+    faults: &mut Vec<String>,
+    cancel: &Cancel,
+) -> Result<(Extremes, u64), String> {
+    let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
+    let cuts = cut(root, plans, query, &mut views);
+    let mut extremes = Extremes::default();
+    let mut owed = 0_u64;
+    let mut read: Vec<(usize, usize, u64, u64)> = Vec::new();
+    for cut in &cuts {
+        let volume = rules
+            .get(cut.series)
+            .is_none_or(|series_rules| !series_rules.index_no_volume());
+        for piece in &cut.pieces {
+            let (slot, start, end) = match *piece {
+                Piece::Indexed { slot, run, .. } => {
+                    let summary = views
+                        .get(&(cut.series, slot))
+                        .and_then(|(found, _)| found.as_ref().as_ref().ok())
+                        .and_then(|view| view.walked.runs.get(run))
+                        .map(|info| info.extremes);
+                    if let Some(summary) = summary {
+                        extremes.merge(&run_extremes(&summary, cut.series, volume), None);
+                    }
+                    continue;
+                }
+                // A CUT RUN'S SUMMARY COVERS ROWS THE BOUND LEAVES OUT: its
+                // kept rows are folded, or answered by the memo, like a
+                // stretch no run orders.
+                Piece::Cut {
+                    slot, start, end, ..
+                }
+                | Piece::Read {
+                    slot, start, end, ..
+                } => (slot, start, end),
+            };
+            let Some(plan) = plans.get(cut.series) else {
+                continue;
+            };
+            let whole = plan
+                .slots
+                .get(slot)
+                .filter(|at| start == 0 && end == at.held.n_valid);
+            let memo = whole.and_then(|at| super::MONTH_EXTREMES.get(&(at.path.clone(), at.stamp)));
+            if let Some(held) = memo {
+                extremes.merge(&held, Some(cut.series));
+            } else if whole.is_none() && cut_extremes_held(plan, slot, start, end) {
+                read.push((cut.series, slot, start, end));
+            } else {
+                owed = owed.saturating_add(end - start);
+                read.push((cut.series, slot, start, end));
+            }
+        }
+    }
+    if owed > super::MAX_EXTREMES_SCAN_BARS {
+        return Err(format!(
+            "scan_budget_exceeded: the extremes need {owed} records read that no sort index \
+             summarises and no earlier request folded, past the {} one request may fold; the \
+             page is served without them",
+            super::MAX_EXTREMES_SCAN_BARS
+        ));
+    }
+    let mut since = 0_u64;
+    let mut rows = 0_u64;
+    for (series, slot, start, end) in read {
+        let volume = rules
+            .get(series)
+            .is_none_or(|series_rules| !series_rules.index_no_volume());
+        let Some(plan) = plans.get_mut(series) else {
+            continue;
+        };
+        let whole = plan
+            .slots
+            .get(slot)
+            .is_some_and(|at| start == 0 && end == at.held.n_valid);
+        if !whole {
+            let (folded, read) = cut_extremes(
+                root,
+                plan,
+                slot,
+                (start, end),
+                (series, volume),
+                faults,
+                cancel,
+                &mut since,
+            )?;
+            rows += read;
+            extremes.merge(&folded, None);
+            continue;
+        }
+        let mut month = Extremes::default();
+        let mut all_read = true;
+        for row in start..end {
+            since += 1;
+            if since >= CANCEL_STRIDE {
+                since = 0;
+                cancel.check()?;
+            }
+            match plan.read(root, slot, row) {
+                Ok(bar) => month.fold(&bar, 0, volume),
+                Err(why) => {
+                    all_read = false;
+                    faults.push(why);
+                }
+            }
+        }
+        rows += end - start;
+        if all_read && let Some(at) = plan.slots.get(slot) {
+            super::MONTH_EXTREMES.put((at.path.clone(), at.stamp), month);
+        }
+        extremes.merge(&month, Some(series));
+    }
+    Ok((extremes, rows))
+}
+
+#[cfg(test)]
+#[path = "bars_sort_tests.rs"]
+mod tests;
