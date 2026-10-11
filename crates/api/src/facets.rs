@@ -13,6 +13,7 @@
 //! selection's rows.
 //!
 //! ```text
+//! GET /census/facets.json?feed=gdfl                                      the feed's segments (the root)
 //! GET /census/facets.json?feed=gdfl&segment=FNO                          underlyings
 //! GET /census/facets.json?feed=gdfl&segment=FNO&underlying=NIFTY         + months, expiries
 //! GET /census/facets.json?feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28
@@ -64,6 +65,32 @@ use crate::{census, ingest, render};
 
 /// Rows per rung, finest rung first ([`Timeframe`]'s order is its length).
 type Rows = BTreeMap<Timeframe, u64>;
+
+/// Every exchange, in the order a census sorts a series by (the type's own
+/// `Ord`). The answer states it (`order`), so no reader keeps a copy of this
+/// list: WP-56b, the WP-56 second agent's follow-up 6.
+/// `facets::the_order_stated_is_the_types_own_and_names_every_variant` holds
+/// it to the type.
+pub(crate) const EXCHANGES: [Exchange; 2] = [Exchange::Nse, Exchange::Bse];
+
+/// Every segment, in the order a census sorts a series by. See [`EXCHANGES`].
+pub(crate) const SEGMENTS: [Segment; 3] = [Segment::Index, Segment::Cash, Segment::Fno];
+
+/// `{"exchanges":[..],"segments":[..]}`: the order the census lists a series
+/// in, as every answer states it.
+fn order_json() -> String {
+    let words = |list: &[&str]| {
+        list.iter()
+            .map(|word| render::json_string(word))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        r#"{{"exchanges":[{}],"segments":[{}]}}"#,
+        words(&EXCHANGES.map(Exchange::as_str)),
+        words(&SEGMENTS.map(Segment::as_str))
+    )
+}
 
 /// What one node of the index sums: rows per rung, the first and last stamp,
 /// and the close of the newest entry under it.
@@ -174,6 +201,10 @@ pub(crate) struct Index {
     /// The generation of the part that holds this segment, as of `reflects`.
     generation: u64,
     underlyings: BTreeMap<(Exchange, Symbol), Underlying>,
+    /// Every key of the segment summed: the root answer's row for it, kept
+    /// by the same `apply` as the nodes, so the root reads one node per
+    /// segment and never walks the underlyings (WP-56b).
+    total: Agg,
 }
 
 impl Index {
@@ -226,6 +257,7 @@ impl Index {
     /// One key moved from `old` to `new`.
     fn apply(&mut self, old: Option<&Held>, new: &Held) {
         let key = new.entry.key;
+        self.total.apply(old, new);
         let under = self
             .underlyings
             .entry((key.exchange, key.symbol))
@@ -467,10 +499,93 @@ fn json_headers() -> axum::http::HeaderMap {
 }
 
 /// The whole answer, off the async workers.
+/// The feed of a ROOT request: `feed=` and nothing that narrows it. `None`
+/// for every other query, which [`asked`] reads (and refuses by name).
+fn root_feed(query: &str) -> Option<Vendor> {
+    let feed = param(query, "feed");
+    // An empty feed word is not a feed (`parse_vendor` reads it as its
+    // default): it goes to `asked`, which refuses it by name.
+    (!feed.is_empty()
+        && ["segment", "underlying", "exchange", "expiry", "since"]
+            .iter()
+            .all(|name| param(query, name).is_empty()))
+    .then(|| ingest::parse_vendor(&feed))
+    .flatten()
+}
+
+/// **THE ROOT OF THE SELECTION TREE** (WP-56b; DB-060, DB-G70):
+/// `GET /census/facets.json?feed=<feed>` answers the segments the feed holds
+/// a key in, in the census's order, each with its part's generation, its
+/// underlyings counted, its rows per rung and its span, and the order the
+/// census lists exchanges and segments in.
+///
+/// A page reads this ONE answer to draw the feed's first rung and to know
+/// which segment requests exist, instead of the whole census (33 MB on GDFL
+/// on 11 Oct 2026) or a list of segments written into the client. Cost: one
+/// node read per segment ([`Index::total`]), whatever the census holds. A
+/// segment the feed holds no key in is not listed.
+fn root_answer(
+    site: &Site,
+    feed: Vendor,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let (_stamps, now) = vendor_census(site, feed);
+    let census = now.census();
+    let behind = super::store_route::behind(site, feed);
+    let headers = super::store_route::census_headers_with(census, Some(&behind));
+    let state = census.map_or("absent", |census| census.state_word(behind.days));
+    if super::store_route::census_is_unreadable(census) {
+        let why = census.map_or_else(String::new, census::VendorCensus::note);
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            headers,
+            error_json("census_unreadable", &why),
+        );
+    }
+    let degraded = census.and_then(census::VendorCensus::degraded);
+    let slot = now.slot();
+    let mut out = format!(
+        r#"{{"schema":1,"feed":{},"segment":null,"state":{},"degraded":{},"order":{},"segments":["#,
+        render::json_string(feed.as_str()),
+        render::json_string(state),
+        degraded
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        order_json(),
+    );
+    let mut listed = 0_usize;
+    for segment in SEGMENTS {
+        let row = index(site, feed, segment, slot, |index| {
+            (!index.underlyings.is_empty()).then(|| {
+                let mut row = format!(
+                    r#"{{"segment":{},"generation":{},"underlyings":{},"#,
+                    render::json_string(segment.as_str()),
+                    index.generation,
+                    index.underlyings.len(),
+                );
+                agg_json(&mut row, &index.total, false);
+                row.push('}');
+                row
+            })
+        });
+        if let Some(row) = row {
+            if listed > 0 {
+                out.push(',');
+            }
+            out.push_str(&row);
+            listed += 1;
+        }
+    }
+    out.push_str("]}");
+    (axum::http::StatusCode::OK, headers, out)
+}
+
 pub(super) fn answer(
     site: &Site,
     query: &str,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    if let Some(feed) = root_feed(query) {
+        return root_answer(site, feed);
+    }
     let asked = match asked(query) {
         Ok(asked) => asked,
         Err((code, body)) => return (code, json_headers(), body),
@@ -585,7 +700,7 @@ fn render_answer(
     // keys on, never a walk of the underlyings.
     let chosen: Vec<(&(Exchange, Symbol), &Underlying)> = match asked.underlying {
         None => Vec::new(),
-        Some(symbol) => [Exchange::Nse, Exchange::Bse]
+        Some(symbol) => EXCHANGES
             .into_iter()
             .filter(|exchange| asked.exchange.is_none_or(|wanted| wanted == *exchange))
             .filter_map(|exchange| index.underlyings.get_key_value(&(exchange, symbol)))
@@ -615,7 +730,7 @@ fn render_answer(
         |id: &(Exchange, Symbol)| changed.as_ref().is_none_or(|c| c.underlyings.contains(id));
 
     let mut out = format!(
-        r#"{{"schema":1,"feed":{},"segment":{},"underlying":{},"expiry":{},"generation":{},"since":{},"state":{},"degraded":{},"underlyings":["#,
+        r#"{{"schema":1,"feed":{},"segment":{},"underlying":{},"expiry":{},"generation":{},"since":{},"state":{},"degraded":{},"order":{},"underlyings":["#,
         render::json_string(asked.feed.as_str()),
         render::json_string(asked.segment.as_str()),
         asked.underlying.map_or_else(
@@ -632,6 +747,7 @@ fn render_answer(
             .map_or_else(|| "null".to_owned(), |since| since.to_string()),
         render::json_string(state),
         degraded.map_or_else(|| "null".to_owned(), render::json_string),
+        order_json(),
     );
     // THE UNDERLYINGS: all of them with no underlying asked, or the one.
     let listed: Vec<(&(Exchange, Symbol), &Underlying)> = if asked.underlying.is_none() {

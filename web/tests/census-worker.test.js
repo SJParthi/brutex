@@ -141,3 +141,56 @@ test('yieldTask ends the task: a timer that fell due while the work ran runs bef
   // timer, which is the starvation DB-G84 measured as a two-second stall.
   assert.deepEqual(order, ['work', 'timer', 'resumed']);
 });
+
+// WP-56b (the WP-56 second agent's follow-up 1): a worker that takes the
+// message and never answers left the page on "Reading /store.json" for good.
+test('a worker that never answers is given up on at the ceiling, named, and no timer is left behind an answer', async () => {
+  /** @type {{work: () => void, ms: number, cleared: boolean}[]} */
+  const timers = [];
+  const clock = {
+    setTimer: (/** @type {() => void} */ work, /** @type {number} */ ms) => { const t = { work, ms, cleared: false }; timers.push(t); return t; },
+    clearTimer: (/** @type {any} */ t) => { t.cleared = true; }
+  };
+  const mute = { sent: /** @type {any[]} */ ([]), terminated: false, postMessage(/** @type {any} */ m) { this.sent.push(m); }, terminate() { this.terminated = true; } };
+  const client = createCensusWorker(() => /** @type {any} */ (mute), { ...immediate, ...clock, ceilingMs: 4_000 });
+  const first = client.decode(bytesOf(census()), 'example');
+  const second = client.decode(bytesOf(census()), 'example');
+  assert.equal(mute.sent.length, 2);
+  assert.deepEqual(timers.map((t) => t.ms), [4_000, 4_000], 'one ceiling per read, of the length asked');
+  let settled = false;
+  first.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((done) => setImmediate(done));
+  assert.equal(settled, false, 'nothing gives up before the ceiling');
+  timers[0].work();
+  await assert.rejects(first, /the census worker did not answer within 4 s/);
+  await assert.rejects(second, /did not answer within 4 s/, 'every read waiting on that worker is refused with it');
+  assert.equal(client.broken, 'the census worker did not answer within 4 s');
+  assert.equal(mute.terminated, true);
+  assert.equal(timers.every((t) => t.cleared), true, 'no ceiling outlives its read');
+  await assert.rejects(client.decode(bytesOf(census()), 'example'), /did not answer/, 'and the worker is not tried again');
+
+  // An answer in time clears its ceiling; a ceiling that fires late breaks nothing.
+  const timers2 = /** @type {typeof timers} */ ([]);
+  const answering = createCensusWorker(() => /** @type {any} */ (new FakeWorker()), {
+    ...immediate, clearTimer: clock.clearTimer,
+    setTimer: (work, ms) => { const t = { work, ms, cleared: false }; timers2.push(t); return t; }
+  });
+  assert.equal((await answering.decode(bytesOf(census()), 'example')).length, 3);
+  assert.equal(timers2.length, 1);
+  assert.equal(timers2[0].cleared, true);
+  timers2[0].work();
+  assert.equal(answering.broken, null, 'a ceiling of a read already answered is not a failure');
+
+  // A cancelled read clears its ceiling too.
+  const timers3 = /** @type {typeof timers} */ ([]);
+  const quiet = createCensusWorker(() => /** @type {any} */ ({ postMessage() {}, terminate() {} }), {
+    ...immediate, clearTimer: clock.clearTimer,
+    setTimer: (work, ms) => { const t = { work, ms, cleared: false }; timers3.push(t); return t; }
+  });
+  const controller = new AbortController();
+  const read = quiet.decode(bytesOf(census()), 'example', controller.signal);
+  controller.abort(new Error('superseded'));
+  await assert.rejects(read, /superseded/);
+  assert.equal(timers3[0].cleared, true);
+  assert.equal(quiet.broken, null);
+});

@@ -373,7 +373,11 @@ export function createCensusLoader(request = ask, ceilingMs = STORE_CENSUS_MS, o
       noteCensusMeasure(held.body, measure);
       if (measure.order !== null) return { why: `the census held is not in the order a delta is merged by (${measure.order})` };
       const { since, epoch } = base;
-      const result = await send(`${url}&since=${encodeURIComponent(since)}${epoch ? `&epoch=${encodeURIComponent(epoch)}` : ''}`, {});
+      // NEVER FROM A BROWSER CACHE (WP-56b): a delta is the answer to "what
+      // changed after the generation I hold", asked once, and the server
+      // sends no Cache-Control with it. `no-store` like the HEAD and the
+      // facets requests, so that does not rest on what a browser chooses.
+      const result = await send(`${url}&since=${encodeURIComponent(since)}${epoch ? `&epoch=${encodeURIComponent(epoch)}` : ''}`, { cache: 'no-store' });
       if (result.headers.get('x-brutex-census-since') === null) {
         // AN API OLDER THAN DELTAS reads no `since`: a 200 from it is the whole
         // census, and is read as one, where the worker can parse it.
@@ -417,14 +421,14 @@ export function createCensusLoader(request = ask, ceilingMs = STORE_CENSUS_MS, o
       /** @type {Awaited<ReturnType<typeof mergeCensus>>} */
       let merged;
       try {
-        merged = await mergeCensus(held.body, rows, inSlices, signal);
+        merged = await mergeCensus(held.body, rows, inSlices, signal, measure.ranks ?? null);
       } catch (why) {
         signal.throwIfAborted();
         return { why: `the delta since ${since} could not be merged (${String(/** @type {any} */ (why)?.message ?? why)})` };
       }
       const off = adds(merged.rows.length, measure.bars + merged.bars);
       if (off) return { why: off };
-      noteCensusMeasure(merged.rows, { order: null, bars: now.rows });
+      noteCensusMeasure(merged.rows, { order: null, bars: now.rows, ranks: measure.ranks ?? null });
       // THE MERGED ROWS HAVE NO VALIDATOR: an `etag` names a whole body's
       // bytes, and none was sent. The next refresh is a delta again.
       const headers = new Headers(result.headers);
@@ -523,6 +527,8 @@ export const FACETS_MS = 15_000;
 
 /** The URL for a query, with `since` when a delta is asked. @param {FacetQuery} query @param {number | null} [since] */
 export function facetsUrl(query, since = null) {
+  // NO SEGMENT IS THE ROOT (WP-56b): the feed's segments, and nothing else.
+  if (query.segment === undefined || query.segment === null) return `/census/facets.json?feed=${encodeURIComponent(query.feed)}`;
   const parts = [`feed=${encodeURIComponent(query.feed)}`, `segment=${encodeURIComponent(query.segment)}`];
   if (query.underlying) parts.push(`underlying=${encodeURIComponent(query.underlying)}`);
   if (query.exchange) parts.push(`exchange=${encodeURIComponent(query.exchange)}`);
@@ -539,6 +545,31 @@ export const facetKey = (query) => JSON.stringify([query.feed, query.segment, qu
  * Whether a body is a facets answer for this query; the sentence if not.
  * @param {any} body @param {FacetQuery} query @returns {string | null}
  */
+/**
+ * Why a body is not the ROOT answer for `feed` (`/census/facets.json?feed=`:
+ * the segments the feed holds, in the census's order, and that order), or
+ * null.
+ * @param {any} body @param {string} feed
+ */
+export function rootFault(body, feed) {
+  if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 facets answer';
+  if (body.feed !== feed || body.segment !== null) return `it answers ${body.feed}/${body.segment}, not the root of ${feed}`;
+  if (!Array.isArray(body.segments)) return 'it lists no segments (an API older than the root answer)';
+  const order = facetsOrder(body);
+  if (order.why) return order.why;
+  let at = -1;
+  for (const row of body.segments) {
+    const next = order.segments.indexOf(row?.segment);
+    if (next < 0) return `its segment ${JSON.stringify(row?.segment ?? null)} is not in the order it states`;
+    if (next <= at) return `its segments are not in the order it states (${row.segment})`;
+    at = next;
+    if (!Number.isSafeInteger(row.generation) || row.generation < 0) return `the generation of ${row.segment} is not a whole number`;
+    if (!Number.isSafeInteger(row.underlyings) || row.underlyings < 1) return `${row.segment} is listed and counts no underlying`;
+    if (!row.rows || typeof row.rows !== 'object') return `${row.segment} names no rows`;
+  }
+  return null;
+}
+
 export function facetsFault(body, query) {
   if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 facets answer';
   if (body.feed !== query.feed || body.segment !== query.segment) return `it answers ${body.feed}/${body.segment}, not ${query.feed}/${query.segment}`;
@@ -553,13 +584,40 @@ export function facetsFault(body, query) {
 }
 
 /** The order the server writes `(Exchange, Symbol)` in: its enum order. */
-const EXCHANGE_RANK = new Map([['NSE', 0], ['BSE', 1]]);
 /** @param {string} a @param {string} b */
 const textOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 /** @param {any} a @param {any} b */
-const underlyingOrder = (a, b) =>
-  ((EXCHANGE_RANK.get(a.exchange) ?? 9) - (EXCHANGE_RANK.get(b.exchange) ?? 9)) ||
-  textOrder(a.exchange, b.exchange) || textOrder(a.symbol, b.symbol);
+/**
+ * The order of two underlyings, BY THE ORDER THE SERVER STATED (`order`, in
+ * every facets answer since WP-56b): exchanges in its list's order, then the
+ * symbol. This module keeps no exchange list of its own, so a new exchange
+ * needs no change here. An exchange the answer does not name (an API older
+ * than `order`, or a list that omits it) is placed after the named ones by
+ * its text, and `mergeFacets` says so in `orderWhy`.
+ * @param {string[]} exchanges
+ */
+const underlyingOrderOf = (exchanges) => {
+  const rank = new Map(exchanges.map((word, at) => [word, at]));
+  const of = (/** @type {string} */ word) => rank.get(word) ?? exchanges.length;
+  return (/** @type {any} */ a, /** @type {any} */ b) =>
+    (of(a.exchange) - of(b.exchange)) || textOrder(a.exchange, b.exchange) || textOrder(a.symbol, b.symbol);
+};
+
+/**
+ * The exchanges and segments in the census's order, as a facets answer
+ * states them, or the reason it states none this page can use.
+ * @param {any} body
+ * @returns {{exchanges: string[], segments: string[], why: string | null}}
+ */
+export function facetsOrder(body) {
+  const words = (/** @type {any} */ list) => Array.isArray(list) && list.every((word) => typeof word === 'string' && word !== '') &&
+    new Set(list).size === list.length;
+  const order = body?.order;
+  if (order && words(order.exchanges) && words(order.segments)) return { exchanges: order.exchanges, segments: order.segments, why: null };
+  return { exchanges: [], segments: [], why: order === undefined
+    ? 'this API states no order for exchanges and segments (it is older than the order statement)'
+    : 'the order this API states is not two lists of distinct names' };
+}
 
 /**
  * Replace the base's rows by the delta's, by key, keep the server's order.
@@ -589,8 +647,17 @@ function mergeList(base, delta, keyOf, order, combine = (_, now) => now) {
  * @param {any} delta a valid delta answer for the same query
  */
 export function mergeFacets(base, delta) {
+  const order = facetsOrder(delta.order === undefined ? base : delta);
+  const underlyingOrder = underlyingOrderOf(order.exchanges);
+  const unnamed = [...new Set([...base.underlyings, ...delta.underlyings].map((row) => row.exchange))]
+    .filter((word) => !order.exchanges.includes(word));
+  const orderWhy = order.why ?? (unnamed.length ? `the order this API states does not name ${unnamed.join(', ')}` : null);
   return {
     ...base,
+    ...(delta.order ?? base.order ? { order: delta.order ?? base.order } : {}),
+    // SAID ONLY WHEN THERE IS SOMETHING TO SAY: underlyings on an exchange
+    // the answer's order does not name were placed after the named ones.
+    ...(orderWhy ? { orderWhy } : {}),
     generation: delta.generation,
     state: delta.state,
     degraded: delta.degraded,
@@ -641,7 +708,12 @@ export function createFacetsLoader(request = ask, { keep = 8, ms = FACETS_MS, no
       return fail(response.status, reason || `/census/facets.json answered HTTP ${response.status} and named no reason`, response.headers);
     }
     const body = await response.json();
-    const fault = facetsFault(body, query);
+    const isRoot = query.segment === undefined || query.segment === null;
+    const fault = isRoot ? rootFault(body, query.feed) : facetsFault(body, query);
+    if (!fault && isRoot) {
+      return { ok: true, status: response.status, key, query, body, headers: response.headers,
+        lag: censusLag(response.headers), reason: null, readAt: now(), delta: null, reloaded: false };
+    }
     if (fault) return fail(response.status, `/census/facets.json: ${fault}`, response.headers);
     if (since !== null && body.since !== since) return fail(response.status, `/census/facets.json answered a delta since ${body.since}, not since ${since}`, response.headers);
     // ONE SPELLING OF THE GENERATION (DB-B56): where the server names the
@@ -728,7 +800,138 @@ export function createFacetsLoader(request = ask, { keep = 8, ms = FACETS_MS, no
   /** The kept answer for a query, if any. @param {FacetQuery} query */
   const peek = (query) => kept.get(facetKey(query)) ?? null;
 
-  return { load, refresh, changesSince, peek };
+  /**
+   * THE ROOT OF A FEED (WP-56b): its segments in the census's order, each
+   * with its part's generation, underlyings counted, rows per rung and span.
+   * One request of a few hundred bytes, whatever the census holds; never
+   * kept, because it is the answer to "what does the feed hold NOW".
+   * @param {string} feed
+   */
+  const root = (feed) => shared(`root|${feed}`, () => read({ feed }, `root|${feed}`, null));
+
+  return { load, refresh, changesSince, peek, root };
+}
+
+/* ======================================================================
+   THE REFRESH LOG (WP-56b; the WP-56 second agent's follow-up 11)
+   ----------------------------------------------------------------------
+   How a read of the census ended (a first read, a delta merged, unchanged,
+   a whole read and why, a failure and why) was said in the banner only, and
+   the next read replaced the sentence: nobody could look up later why this
+   page read 33 MB at 14:02. Every read now leaves one entry in a log kept
+   in the browser's storage (the newest `REFRESH_LOG_KEEP`, across reloads
+   and tabs of this origin), which /db lists and filters.
+
+   IT IS THE PAGE'S LOG, NOT THE SERVER'S. The API has no route a page can
+   write an event to, and its access log keeps the route and the selection
+   of a sampled request, not why a client fell back. Until it has one, this
+   is where the reason is kept; a storage that refuses the write is said
+   (`fault`) and the log then holds this tab's reads only.
+   ====================================================================== */
+export const REFRESH_LOG_KEY = 'brutex.census.refreshes.v1';
+export const REFRESH_LOG_KEEP = 200;
+
+/**
+ * @typedef {{at: number, feed: string, kind: 'first' | 'delta' | 'unchanged' | 'whole' | 'failed', why: string | null,
+ *   since: string | null, rows: number, added: number, replaced: number, generation: number | null, held: number | null,
+ *   worker: string | null}} RefreshEntry
+ */
+
+/**
+ * One read of the census as a log entry.
+ * @param {{feed: string, at: number, how?: CensusHow | null, lag?: CensusLag | null, held?: number | null,
+ *   worker?: string | null, error?: string | null, first?: boolean}} read
+ * @returns {RefreshEntry}
+ */
+export function refreshEntry({ feed, at, how: read = null, lag = null, held = null, worker = null, error = null, first = false }) {
+  const kind = error !== null ? 'failed' : first && (read === null || read.kind === 'whole') && !read?.why ? 'first' : read?.kind ?? 'whole';
+  return { at, feed, kind, why: error ?? read?.why ?? null, since: read?.since ?? null, rows: read?.rows ?? 0,
+    added: read?.added ?? 0, replaced: read?.replaced ?? 0, generation: lag?.generation ?? null, held, worker };
+}
+
+/** One entry as the sentence the log lists and a filter searches. @param {RefreshEntry} entry */
+export function refreshText(entry) {
+  const what = entry.kind === 'first' ? 'read the whole census (the first read of this feed on this page)'
+    : entry.kind === 'delta' ? `read only the ${group(entry.rows)} row(s) changed since ${entry.since ?? 'the generation held'} (${group(entry.added)} new, ${group(entry.replaced)} changed in place)`
+      : entry.kind === 'unchanged' ? (entry.why
+        ? `asked for the whole census (${entry.why}) and the server answered that the census held is current; no body was read`
+        : `found nothing changed since ${entry.since ?? 'the generation held'}`)
+        : entry.kind === 'failed' ? `failed: ${entry.why ?? 'no reason named'}`
+          : `read the whole census again${entry.why ? `: ${entry.why}` : ''}`;
+  const now = entry.kind === 'failed' ? '' : `; generation ${entry.generation === null ? 'not named' : group(entry.generation)}` +
+    `${entry.held === null ? '' : `, ${group(entry.held)} row(s) held`}`;
+  return `${clockOf(entry.at)} · ${entry.feed} · ${what}${now}${entry.worker ? ` (${entry.worker})` : ''}.`;
+}
+
+/**
+ * The entries whose sentence holds every word of `text` (case-insensitive),
+ * newest first. An empty filter is every entry.
+ * @param {RefreshEntry[]} entries @param {string} text
+ */
+export function searchRefreshes(entries, text) {
+  const words = String(text ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const said = `${refreshText(entries[i])} ${entries[i].kind}`.toLowerCase();
+    if (words.every((word) => said.includes(word))) out.push(entries[i]);
+  }
+  return out;
+}
+
+/**
+ * The log: `note` appends one entry and saves the newest `keep`; `list` is
+ * oldest first. `fault` is why the last save or the first read of the
+ * storage failed, or null.
+ * @param {{getItem: (key: string) => string | null, setItem: (key: string, value: string) => void} | null} storage
+ * @param {{keep?: number, key?: string}} [options]
+ */
+export function createRefreshLog(storage, { keep = REFRESH_LOG_KEEP, key = REFRESH_LOG_KEY } = {}) {
+  /** @type {RefreshEntry[]} */
+  let entries = [];
+  /** @type {string | null} */
+  let fault = storage ? null : 'this browser offers no storage, so the log holds only what this tab read';
+  /** Reads what other tabs and earlier loads saved; a log that cannot be read is said, never guessed. */
+  function load() {
+    if (!storage) return;
+    try {
+      const text = storage.getItem(key);
+      if (text === null) return;
+      const saved = JSON.parse(text);
+      if (!Array.isArray(saved) || saved.some((entry) => !entry || typeof entry.at !== 'number' || typeof entry.feed !== 'string' || typeof entry.kind !== 'string')) {
+        fault = 'the refresh log saved in this browser is not a list of entries, so it was not read; it is replaced by the next read';
+        return;
+      }
+      entries = saved.slice(-keep);
+    } catch (why) {
+      fault = `the refresh log saved in this browser could not be read (${String(/** @type {any} */ (why)?.message ?? why)})`;
+    }
+  }
+  load();
+  return {
+    /** @param {RefreshEntry} entry */
+    note(entry) {
+      // ANOTHER TAB MAY HAVE WRITTEN SINCE: its entries are taken first, so
+      // two tabs do not overwrite each other's log.
+      const mine = entries;
+      const before = fault;
+      fault = storage ? null : before;
+      entries = [];
+      load();
+      const seen = new Set(entries.map((e) => `${e.at}|${e.feed}|${e.kind}`));
+      for (const e of mine) if (!seen.has(`${e.at}|${e.feed}|${e.kind}`)) entries.push(e);
+      entries.push(entry);
+      entries.sort((a, b) => a.at - b.at);
+      if (entries.length > keep) entries = entries.slice(-keep);
+      if (!storage) return;
+      try {
+        storage.setItem(key, JSON.stringify(entries));
+      } catch (why) {
+        fault = `the refresh log could not be saved (${String(/** @type {any} */ (why)?.message ?? why)}), so it holds only what this tab read`;
+      }
+    },
+    list: () => entries,
+    get fault() { return fault; }
+  };
 }
 
 /* ======================================================================
@@ -777,7 +980,13 @@ export function censusLines({ feed, at, lag, worker, head, how: read = null }) {
     (generation === null ? ' at a generation this API does not name' : ` generation ${group(generation)}`) +
     (lag?.parts ? ` (${partsText(lag.parts)})` : '') +
     `: every list, total and offset on this page is that snapshot.${checked}` });
-  if (read?.why) {
+  if (read?.why && read.kind === 'unchanged') {
+    // NO BODY WAS READ (WP-56b): the delta could not be asked or was not
+    // believed, the whole census was asked for, and the server answered
+    // that the copy this page holds is current. Saying "read the whole
+    // census again" beside "unchanged" said two things, one of them false.
+    out.push({ key: 'whole', tone: 'info', text: `This refresh could not ask for only what changed (${read.why}), so it asked for the whole census; the server answered that the census this page holds is current, and no body was read.` });
+  } else if (read?.why) {
     out.push({ key: 'whole', tone: 'warn', text: `This refresh read the whole census again, not only what changed: ${read.why}.` });
   }
   if (!lag || lag.state === null) {
@@ -815,7 +1024,7 @@ export function censusLines({ feed, at, lag, worker, head, how: read = null }) {
  * @param {number | null} readAt
  * @param {string | null} underlying
  * @param {Array<{ok: boolean, status: number, query: FacetQuery, body: any, reason: string | null}> | null} answers
- * @returns {Array<{key: string, text: string}>}
+ * @returns {Array<{key: string, text: string, through?: number}>}
  */
 export function movedLines(moved, head, readAt, underlying, answers) {
   const out = [{ key: 'moved', text: `The store moved after this page read it: generation ${group(moved.from)} → ${group(moved.to)}` +
@@ -840,7 +1049,13 @@ export function movedLines(moved, head, readAt, underlying, answers) {
     const last = body.underlyings[0]?.last_ts;
     if (months === 0 && expiries === 0 && body.underlyings.length === 0) continue;
     changed.push(segment);
-    out.push({ key: `delta-${segment}`, text: `${underlying} ${segment}: ${group(months)} month(s)` +
+    // THE PER-SERIES MARKER (DB-022, WP-56b): the store moved for THIS
+    // series after the page read it, and the day its bars now reach is the
+    // day an import or a pull has got to. `through` carries that stamp for
+    // a reader that marks the series itself.
+    const progress = Number.isFinite(last) ? `import or pull in progress through ${dayLabel(last / 1000)}: ` : '';
+    out.push({ key: `delta-${segment}`, ...(Number.isFinite(last) ? { through: last } : {}),
+      text: `${underlying} ${segment}: ${progress}${group(months)} month(s)` +
       `${expiries ? ` and ${group(expiries)} expiry(ies)` : ''} changed since this snapshot` +
       `${Number.isFinite(last) ? `; its newest bar is now ${clockOf(last / 1000)}` : ''}.` });
   }

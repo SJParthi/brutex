@@ -69,7 +69,7 @@ import { foldWindow, foldKey } from '$lib/fold.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
-import { createCensusLoader, censusFailure, censusLag, createFacetsLoader, readOnPage, STORE_CENSUS_MS } from '$lib/store-census.js';
+import { createCensusLoader, censusFailure, censusLag, createFacetsLoader, createRefreshLog, refreshEntry, readOnPage, STORE_CENSUS_MS } from '$lib/store-census.js';
 import { decodeCensus } from '$lib/store-census-wire.js';
 import { createCensusWorker, inSlices } from '$lib/census-worker.js';
 import { ask } from '$lib/ask.js';
@@ -354,6 +354,10 @@ export const store = $state({
   worker: null,
   head: null,
   how: null,
+  // THE REFRESH LOG (WP-56b): how every read of the census ended, oldest
+  // first, and why the log could not be saved if it could not.
+  refreshes: /** @type {import('./store-census.js').RefreshEntry[]} */ ([]),
+  refreshFault: /** @type {string | null} */ (null),
   ...empty(),
   get rows() { return rawRows; },
   set rows(value) { rawRows = value; }
@@ -412,6 +416,23 @@ const census = createCensusLoader(ask, STORE_CENSUS_MS, ({ nextAttempt, delayMs 
  * per selection, then `?since=` deltas.
  */
 export const facets = createFacetsLoader(ask);
+
+/* THE REFRESH LOG (WP-56b): every read of the census leaves one entry, kept
+   in the browser's storage, listed and filtered on /db. See
+   `$lib/store-census.js`. A browser that refuses storage is named there. */
+const refreshLog = createRefreshLog((() => {
+  try { return typeof localStorage === 'undefined' ? null : localStorage; } catch { return null; }
+})());
+/** Feeds this page has read at least once: a later read of one is a refresh. */
+const readOnce = new Set();
+/** @param {Parameters<typeof refreshEntry>[0]} read */
+function noteRefresh(read) {
+  refreshLog.note(refreshEntry(read));
+  store.refreshes = [...refreshLog.list()];
+  store.refreshFault = refreshLog.fault;
+}
+store.refreshes = [...refreshLog.list()];
+store.refreshFault = refreshLog.fault;
 
 /**
  * Shared selected-feed response, including its HTTP status and headers. The
@@ -615,6 +636,8 @@ function read(feed, generation) {
       store.busy = null;
       store.reads += 1;
       store.lastOk = { at: store.at, feed };
+      noteRefresh({ feed, at: store.at, how: store.how, lag: store.lag, held: body.length, worker: decodedHow, first: !readOnce.has(feed) });
+      readOnce.add(feed);
     })
     .catch((why) => {
       if (asked !== key || flightToken !== token) return;
@@ -632,6 +655,7 @@ function read(feed, generation) {
       // The key is released so a Refresh press can retry the same
       // (feed, generation) without needing a bump nobody asked for.
       asked = null;
+      noteRefresh({ feed, at: Date.now(), error: store.error });
     });
 
   // The token, not the promise, decides whether this read is still the current

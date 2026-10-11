@@ -29,13 +29,13 @@
    *
    * Owner after WP-00: WP-56 (census client: facets, worker, refresh, lag banner).
    */
-  import { store, syncStore, surveyStores, survey, refreshStore, watchCensus, facets } from '$lib/store.svelte.js';
+  import { store, syncStore, surveyStores, survey, refreshStore, watchCensus, checkCensusHead, facets } from '$lib/store.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { denominators } from '$lib/completeness.js';
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
   import { instrumentMemo, databasePreparation } from '$lib/database-preparation.js';
   import { yieldTask, inSlices } from '$lib/census-worker.js';
-  import { censusMoved, sinceFor, censusLines, movedLines } from '$lib/store-census.js';
+  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
   import { SKELETON } from '$lib/db/bars-plan.js';
@@ -255,16 +255,29 @@
         selectionDelta = null;
         return;
       }
-      const segments = m.segments.length > 0 ? m.segments : ['INDEX', 'CASH', 'FNO'];
-      const key = `${feed}|${underlying}|${m.to}|${segments.join(',')}`;
+      // WHICH SEGMENTS TO ASK. A partitioned census names the parts that
+      // moved. A single file names none, and the segments it holds are the
+      // SERVER'S to state (the root answer, `/census/facets.json?feed=`):
+      // this page keeps no list of segments, so a new one needs no change
+      // here (WP-56b).
+      const key = `${feed}|${underlying}|${m.to}|${m.segments.join(',')}`;
       if (selectionDelta?.key === key) return;
       let live = true;
-      Promise.all(segments.map((segment) => {
+      const asked = m.segments.length > 0
+        ? Promise.resolve({ segments: m.segments, why: null })
+        : facets.root(feed).then(
+          (root) => (root.ok
+            ? { segments: root.body.segments.map((/** @type {any} */ row) => row.segment), why: null }
+            : { segments: [], why: root.reason ?? 'the feed\'s segments could not be read' }),
+          (why) => ({ segments: [], why: String(why?.message ?? why) }));
+      asked.then(({ segments, why }) => (why !== null
+        ? [{ ok: false, status: 0, query: { feed, segment: 'every segment', underlying }, reason: `which segments ${feed} holds could not be read (${why})`, body: null }]
+        : Promise.all(segments.map((/** @type {string} */ segment) => {
         const since = sinceFor(lag, segment);
         return since === null
           ? Promise.resolve({ ok: false, status: 0, query: { feed, segment, underlying }, reason: 'this census names no generation for the segment, so no delta can be asked', body: null })
           : facets.changesSince({ feed, segment, underlying }, since).catch((why) => ({ ok: false, status: 0, query: { feed, segment, underlying }, reason: String(why?.message ?? why), body: null }));
-      })).then((answers) => {
+      })))).then((answers) => {
         if (live) selectionDelta = { key, answers };
       });
       return () => { live = false; };
@@ -284,6 +297,29 @@
     /** Distinct underlyings held — the unit every universe row counts (DB-N07). */
     const heldNamesNow = $derived(prepared.input === rows ? prepared.body?.heldNames ?? null : null);
 
+    /* A LIVE FILE TOTAL IS NOT HELD AGAINST A SNAPSHOT (DB-022, WP-56b).
+       The grid compares the files' totals with the census rows only while
+       the watch says the census has NOT moved since this page read it
+       (`db.censusMoved === false`). The watch asks every five seconds, so a
+       difference may be a commit it has not seen yet: the moment one is
+       drawn, the census is asked again, once per difference. If it moved,
+       the "store moved" line replaces the warning and says what moved. */
+    let disagreeChecked = '';
+    $effect(() => {
+      const first = db.barDisagree?.[0];
+      const feed = store.feed;
+      if (!first || !feed || moved !== false) return;
+      const key = `${feed}|${first.key}|${first.file}|${first.census}`;
+      if (disagreeChecked === key) return;
+      disagreeChecked = key;
+      void checkCensusHead(feed);
+    });
+
+    /* THE REFRESH LOG, FILTERED (WP-56b): how every read of the census
+       ended, newest first, from the browser's storage. */
+    let refreshFilter = $state('');
+    const refreshesShown = $derived(searchRefreshes(store.refreshes, refreshFilter));
+
     Object.defineProperties(db, {
       rows: { get: () => rows },
       prepared: { get: () => prepared, set: (v) => (prepared = v) },
@@ -299,7 +335,9 @@
       censusMoved: { get: () => moved },
       censusBanner: { get: () => banner },
       censusMovedSaid: { get: () => movedSaid },
-      refreshCensus: { get: () => () => refreshStore() }
+      refreshCensus: { get: () => () => refreshStore() },
+      refreshFilter: { get: () => refreshFilter, set: (v) => (refreshFilter = v) },
+      refreshesShown: { get: () => refreshesShown }
     });
   }
 
@@ -322,9 +360,29 @@
     {/each}
     {#if db.censusMovedSaid.length}
       <div class="cline moved" role="status">
-        {#each db.censusMovedSaid as line (line.key)}<span>{line.text}</span>{/each}
-        <button class="btn" onclick={() => db.refreshCensus()}>Refresh</button>
+        <!-- ONE SPACE BETWEEN SENTENCES, IN THE TEXT ITSELF (WP-56b): the
+             spans were adjacent, so a reader (and a screen reader, and a
+             copy) got "…IST.Nothing changed". -->
+        {#each db.censusMovedSaid as line, i (line.key)}{i > 0 ? ' ' : ''}<span>{line.text}</span>{/each}
+        {' '}<button class="btn" onclick={() => db.refreshCensus()}>Refresh</button>
       </div>
+    {/if}
+    <!-- THE REFRESH LOG (WP-56b): closed until asked for; every read of the
+         census this browser made, newest first, with a filter over its
+         sentences. A log that could not be saved says so. -->
+    {#if store.refreshes.length || store.refreshFault}
+      <details class="clog">
+        <summary>Census reads logged in this browser: {store.refreshes.length}</summary>
+        {#if store.refreshFault}<p class="cline warn" role="alert">{store.refreshFault[0].toUpperCase()}{store.refreshFault.slice(1)}.</p>{/if}
+        <label class="clog-find">Filter <input type="search" bind:value={db.refreshFilter} placeholder="whole, delta, failed, a feed, a reason…" /></label>
+        <p class="cline info" role="status">{db.refreshesShown.length} of {store.refreshes.length} shown, newest first.</p>
+        <ol class="clog-list">
+          {#each db.refreshesShown.slice(0, 50) as entry (`${entry.at}|${entry.feed}|${entry.kind}`)}
+            <li class={entry.kind === 'failed' || (entry.kind === 'whole' && entry.why) ? 'warn' : ''}>{refreshText(entry)}</li>
+          {/each}
+        </ol>
+        {#if db.refreshesShown.length > 50}<p class="cline info">The newest 50 are listed; narrow the filter to see older ones.</p>{/if}
+      </details>
     {/if}
   </section>
 {/if}
@@ -464,6 +522,33 @@
   }
   .cline.moved .btn {
     margin-left: auto;
+  }
+  /* The refresh log: closed by default, one line per read. */
+  .clog {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .clog summary {
+    cursor: pointer;
+  }
+  .clog-find {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin: var(--s2) 0;
+  }
+  .clog-find input {
+    flex: 1;
+    min-width: 0;
+  }
+  .clog-list {
+    margin: 0;
+    padding-left: var(--s5);
+    max-height: 30vh;
+    overflow-y: auto;
+  }
+  .clog-list li.warn {
+    color: var(--ink);
   }
   /* Also in the shell, +page.svelte, where its reasons are written. */
   .board {

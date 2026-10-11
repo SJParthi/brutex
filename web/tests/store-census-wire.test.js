@@ -79,7 +79,7 @@ test('the columns refuse exactly what decodeCensus refuses',async()=>{
    WP-56 (D-3327 item 3; DB-022, DB-060): THE CENSUS'S ORDER, AND A DELTA
    MERGED INTO IT. Every census below is invented for the fixture.
    ====================================================================== */
-import { censusOrder, seriesOrder, rungOrder, columnsOrderFault, measureCensus, mergeCensus,
+import { censusOrder, seriesOrder, rungOrder, columnsOrderFault, columnsOrder, measureCensus, mergeCensus,
   noteCensusMeasure, censusMeasureOf } from '../src/lib/store-census-wire.js';
 
 /** Runs the slices at once: the tests are about what is built, not when. */
@@ -118,9 +118,53 @@ const SERVER_ORDER = [
   '2019-03 NSE-FNO-NIFTY-2019-04-25-FUT 1s'
 ];
 
+/* THE ORDER THE SERVER'S LIST TEACHES (WP-56b): this page keeps no list of
+   exchanges or segments; `measureCensus` and `columnsOrder` learn it from
+   the census. FNO stands before CASH here because no two neighbours of the
+   list ever settle the two (a contract is ordered by its own text first),
+   so they keep the order they were first seen in. */
+const RANKS = { exchanges: ['NSE', 'BSE'], segments: ['INDEX', 'FNO', 'CASH'], contracts: ['FNO'] };
+/** The order and the bars a measure names, without the ranks. @param {any[]} rows */
+const measured = async (rows) => { const m = await measureCensus(rows, atOnce); return { order: m.order, bars: m.bars }; };
+
+test('the order of exchanges and segments is learned from the census, and a census in no single order is said so (WP-56b)', async () => {
+  const rows = SERVER_ORDER.map((text) => line(text));
+  assert.deepEqual((await measureCensus(rows, atOnce)).ranks, RANKS);
+  assert.deepEqual(columnsOrder(/** @type {any} */ (decodeCensusColumns(wireOf(SERVER_ORDER), 'example'))), { fault: null, ranks: RANKS });
+  // AN EXCHANGE AND A SEGMENT NO LIST IN THIS REPOSITORY NAMES: learned, in
+  // the order the census lists them, and a refreshed row of theirs is placed.
+  const future = ['2031-01 NSE-INDEX-NIFTY 1min', '2031-01 NSE-BOND-GSEC2031 1min', '2031-01 MCX-INDEX-COMDEX 1min',
+    '2031-01 MCX-BOND-SGB 1min', '2031-01 MCX-FNO-GOLD-2031-02-05-FUT 1min', '2031-01 NSE-FNO-NIFTY-2031-02-27-FUT 1min'];
+  const learned = await measureCensus(future.map((text) => line(text)), atOnce);
+  assert.equal(learned.order, null);
+  assert.deepEqual(learned.ranks, { exchanges: ['NSE', 'MCX'], segments: ['INDEX', 'BOND', 'FNO'], contracts: ['FNO'] });
+  const held = future.filter((_, i) => i !== 3).map((text) => line(text));
+  const merged = await mergeCensus(held, [line(future[3], 4)], atOnce, undefined, /** @type {any} */ (learned.ranks));
+  assert.deepEqual(names(merged.rows), future, 'the new row lands where the whole census lists it');
+  // Extremes: nothing held, one row, one exchange and one segment.
+  assert.deepEqual((await measureCensus([], atOnce)).ranks, { exchanges: [], segments: [], contracts: [] });
+  assert.deepEqual((await measureCensus([line(SERVER_ORDER[0])], atOnce)).ranks, { exchanges: ['NSE'], segments: ['INDEX'], contracts: [] });
+  // NO SINGLE ORDER: NSE before BSE in one month and after it in another.
+  const twoWays = ['2019-04 NSE-INDEX-NIFTY 1min', '2019-04 BSE-INDEX-SENSEX 1min', '2019-03 BSE-INDEX-SENSEX 1min', '2019-03 NSE-INDEX-NIFTY 1min'];
+  // The row that contradicts the rows before it is the one named.
+  const said = 'row 4 (2019-03 NSE-INDEX-NIFTY 1min) does not follow row 3 (2019-03 BSE-INDEX-SENSEX 1min) in the order this page places a refreshed row by';
+  assert.equal((await measureCensus(twoWays.map((text) => line(text)), atOnce)).order, said);
+  assert.equal(columnsOrder(/** @type {any} */ (decodeCensusColumns(wireOf(twoWays), 'example'))).fault, said);
+  // THREE SEGMENTS IN A RING (A before B, B before C, C before A): no pair
+  // contradicts another outright, and no order honours all three.
+  const ring = ['2019-05 NSE-AA-X 1min', '2019-05 NSE-BB-X 1min', '2019-04 NSE-BB-X 1min', '2019-04 NSE-CC-X 1min', '2019-03 NSE-CC-X 1min', '2019-03 NSE-AA-X 1min'];
+  assert.equal((await measureCensus(ring.map((text) => line(text)), atOnce)).order, 'the census lists the segments AA and BB in no single order');
+  assert.equal(columnsOrder(/** @type {any} */ (decodeCensusColumns(wireOf(ring), 'example'))).fault, 'the census lists the segments AA and BB in no single order');
+  // A ROW ON AN EXCHANGE THE CENSUS HELD HAS NONE OF cannot be placed: that
+  // refresh reads the census whole, and the whole census teaches it.
+  await assert.rejects(mergeCensus(rows, [line('2019-03 MCX-INDEX-COMDEX 1min')], atOnce, undefined, RANKS), /"MCX-INDEX-COMDEX" is not a name this page can place/);
+  // A census nobody measured has no order to merge by, and says so.
+  await assert.rejects(mergeCensus([...rows], [line(SERVER_ORDER[0], 3)], atOnce), /the order of the census held was never learned/);
+});
+
 test('the census order is the server\'s: any shuffle of its list sorts back to it', () => {
   const rows = SERVER_ORDER.map((text) => line(text));
-  const before = censusOrder();
+  const before = censusOrder(RANKS);
   for (let i = 1; i < rows.length; i++) assert.ok(before(rows[i - 1], rows[i]) < 0, `${SERVER_ORDER[i - 1]} is before ${SERVER_ORDER[i]}`);
   // A fixed permutation (reversed, then every third row moved to the front).
   const shuffled = [...rows].reverse();
@@ -130,17 +174,17 @@ test('the census order is the server\'s: any shuffle of its list sorts back to i
 });
 
 test('a name or a rung the order does not know is refused, never guessed a place', () => {
-  assert.deepEqual(seriesOrder('NSE-FNO-NIFTY-2019-04-25-1150000-CE'), { contract: '2019-04-25-1150000-CE', exchange: 0, segment: 2, symbol: 'NIFTY' });
-  assert.deepEqual(seriesOrder('NSE-CASH-BAJAJ-AUTO'), { contract: null, exchange: 0, segment: 1, symbol: 'BAJAJ-AUTO' });
-  assert.deepEqual(seriesOrder('NSE-FNO-BAJAJ-AUTO-2019-04-25-FUT'), { contract: '2019-04-25-FUT', exchange: 0, segment: 2, symbol: 'BAJAJ-AUTO' });
+  assert.deepEqual(seriesOrder('NSE-FNO-NIFTY-2019-04-25-1150000-CE', RANKS), { contract: '2019-04-25-1150000-CE', exchange: 0, segment: 1, symbol: 'NIFTY' });
+  assert.deepEqual(seriesOrder('NSE-CASH-BAJAJ-AUTO', RANKS), { contract: null, exchange: 0, segment: 2, symbol: 'BAJAJ-AUTO' });
+  assert.deepEqual(seriesOrder('NSE-FNO-BAJAJ-AUTO-2019-04-25-FUT', RANKS), { contract: '2019-04-25-FUT', exchange: 0, segment: 1, symbol: 'BAJAJ-AUTO' });
   for (const unknown of ['MCX-FNO-GOLD-2019-04-25-FUT', 'NSE-BONDS-GSEC', 'NSE-FNO-NIFTY', 'NSE-FNO-NIFTY-III', 'nifty', '']) {
-    assert.equal(seriesOrder(unknown), null, unknown);
+    assert.equal(seriesOrder(unknown, RANKS), null, unknown);
   }
   assert.equal(rungOrder('1s'), 1);
   assert.equal(rungOrder('15min'), 900);
   assert.equal(rungOrder('1day'), 86400);
   for (const unknown of ['', '1h', '0min', 'min', '1 min', '01s']) assert.ok(Number.isNaN(rungOrder(unknown)), unknown);
-  const before = censusOrder();
+  const before = censusOrder(RANKS);
   assert.throws(() => before(line('2019-03 NSE-FNO-NIFTY 1s'), line('2019-03 NSE-INDEX-NIFTY 1s')), /not a name this page can place/);
   assert.throws(() => before(line('2019-03 NSE-INDEX-NIFTY 1h'), line('2019-03 NSE-INDEX-NIFTY 1s')), /not a rung this page can place/);
 });
@@ -162,22 +206,24 @@ test('a whole census is checked against the order as columns and as rows, and th
   assert.ok(cols);
   assert.equal(columnsOrderFault(cols), null);
   const rows = SERVER_ORDER.map((text) => line(text, 2));
-  assert.deepEqual(await measureCensus(rows, atOnce), { order: null, bars: 2 * SERVER_ORDER.length });
-  assert.deepEqual(await measureCensus([], atOnce), { order: null, bars: 0 }, 'an empty census is in order and holds nothing');
-  assert.deepEqual(await measureCensus([line(SERVER_ORDER[0], 7)], atOnce), { order: null, bars: 7 });
+  assert.deepEqual(await measured(rows), { order: null, bars: 2 * SERVER_ORDER.length });
+  assert.deepEqual(await measured([]), { order: null, bars: 0 }, 'an empty census is in order and holds nothing');
+  assert.deepEqual(await measured([line(SERVER_ORDER[0], 7)]), { order: null, bars: 7 });
 
   // OUT OF ORDER: two rows swapped. DUPLICATE: a key twice is not "after" itself.
   const swapped = [...SERVER_ORDER];
   [swapped[5], swapped[6]] = [swapped[6], swapped[5]];
   const said = 'row 7 (2019-03 NSE-INDEX-NIFTY 1day) does not follow row 6 (2019-03 NSE-CASH-BAJAJ-AUTO 1s) in the order this page places a refreshed row by';
   assert.equal(columnsOrderFault(/** @type {any} */ (decodeCensusColumns(wireOf(swapped), 'example'))), said);
-  assert.deepEqual(await measureCensus(swapped.map((text) => line(text)), atOnce), { order: said, bars: swapped.length },
+  assert.deepEqual(await measured(swapped.map((text) => line(text))), { order: said, bars: swapped.length },
     'the rows and the columns name the same row, and the bars are still counted');
   const twice = [SERVER_ORDER[0], SERVER_ORDER[0]];
   assert.match(String(columnsOrderFault(/** @type {any} */ (decodeCensusColumns(wireOf(twice), 'example')))), /^row 2 .* does not follow row 1/);
   assert.match(String((await measureCensus(twice.map((text) => line(text)), atOnce)).order), /^row 2 .* does not follow row 1/);
   // A NAME OR A RUNG NOBODY CAN ORDER is said by name, in both forms.
-  const odd = ['2019-03 NSE-FNO-NIFTY-III 1s', '2019-03 NSE-INDEX-NIFTY 1s'];
+  // (A segment is known to name contracts by a name of it that ends in one:
+  // this page keeps no list saying FNO does.)
+  const odd = ['2019-03 NSE-INDEX-NIFTY 1s', '2019-03 NSE-FNO-NIFTY-2019-04-25-FUT 1s', '2019-03 NSE-FNO-NIFTY-III 1s'];
   assert.equal(columnsOrderFault(/** @type {any} */ (decodeCensusColumns(wireOf(odd), 'example'))), '"NSE-FNO-NIFTY-III" is not a name this page can place in the census\'s order');
   assert.equal((await measureCensus(odd.map((text) => line(text)), atOnce)).order, '"NSE-FNO-NIFTY-III" is not a name this page can place in the census\'s order');
   assert.equal(columnsOrderFault(/** @type {any} */ (decodeCensusColumns(wireOf(['2019-03 NSE-INDEX-NIFTY 1h']), 'example'))), '"1h" is not a rung this page can place in the census\'s order');
@@ -198,7 +244,7 @@ test('a delta merged into the census held is the whole census at the new generat
   const delta = SERVER_ORDER.map((text, i) => (absent.has(i) ? line(text, 5) : changed.has(i) ? line(text, 9) : null)).filter(Boolean);
   const whole = SERVER_ORDER.map((text, i) => line(text, absent.has(i) ? 5 : changed.has(i) ? 9 : 2));
 
-  const merged = await mergeCensus(held, /** @type {any[]} */ (delta), atOnce);
+  const merged = await mergeCensus(held, /** @type {any[]} */ (delta), atOnce, undefined, RANKS);
   assert.deepEqual(merged.rows, whole, 'position for position');
   assert.equal(merged.added, 5);
   assert.equal(merged.replaced, 2);
@@ -213,35 +259,35 @@ test('a delta merged into the census held is the whole census at the new generat
 test('merge extremes: nothing changed, nothing held, one row, every row, and a delta that is not in order', async () => {
   const all = SERVER_ORDER.map((text) => line(text, 2));
   // EMPTY DELTA: the same rows in a new array.
-  const same = await mergeCensus(all, [], atOnce);
+  const same = await mergeCensus(all, [], atOnce, undefined, RANKS);
   assert.deepEqual(same, { rows: all, added: 0, replaced: 0, bars: 0 });
   // NOTHING HELD: the delta is the census.
-  const first = await mergeCensus([], all, atOnce);
+  const first = await mergeCensus([], all, atOnce, undefined, RANKS);
   assert.deepEqual(first.rows, all);
   assert.equal(first.added, all.length);
   assert.equal(first.bars, 2 * all.length);
   // ONE ROW HELD, ONE ROW ADDED BEFORE IT AND ONE AFTER.
-  const around = await mergeCensus([all[5]], [all[0], all[14]], atOnce);
+  const around = await mergeCensus([all[5]], [all[0], all[14]], atOnce, undefined, RANKS);
   assert.deepEqual(names(around.rows), [SERVER_ORDER[0], SERVER_ORDER[5], SERVER_ORDER[14]]);
   // EVERY ROW REPLACED: nothing added, and every row is the delta's.
   const again = SERVER_ORDER.map((text) => line(text, 3));
-  const replaced = await mergeCensus(all, again, atOnce);
+  const replaced = await mergeCensus(all, again, atOnce, undefined, RANKS);
   assert.equal(replaced.added, 0);
   assert.equal(replaced.replaced, all.length);
   assert.equal(replaced.bars, all.length);
   assert.ok(replaced.rows.every((row, i) => row === again[i]));
   // A MONTH OLDER THAN ANY HELD goes last; one between two held months goes between.
   const months = await mergeCensus([line('2019-04 NSE-INDEX-NIFTY 1min'), line('2019-02 NSE-INDEX-NIFTY 1min')],
-    [line('2019-03 NSE-INDEX-NIFTY 1min'), line('2019-01 NSE-INDEX-NIFTY 1min')], atOnce);
+    [line('2019-03 NSE-INDEX-NIFTY 1min'), line('2019-01 NSE-INDEX-NIFTY 1min')], atOnce, undefined, RANKS);
   assert.deepEqual(names(months.rows), ['2019-04 NSE-INDEX-NIFTY 1min', '2019-03 NSE-INDEX-NIFTY 1min', '2019-02 NSE-INDEX-NIFTY 1min', '2019-01 NSE-INDEX-NIFTY 1min']);
   // A DELTA OUT OF ORDER, OR NAMING A KEY TWICE, is refused: it is not what the server sends.
-  await assert.rejects(mergeCensus(all, [all[3], all[1]], atOnce), /the delta's row 2 .* does not follow its row 1/);
-  await assert.rejects(mergeCensus(all, [all[3], line(SERVER_ORDER[3], 8)], atOnce), /the delta's row 2 .* does not follow its row 1/);
-  await assert.rejects(mergeCensus(all, [line('2019-03 NSE-FNO-NIFTY-III 1s')], atOnce), /not a name this page can place/);
+  await assert.rejects(mergeCensus(all, [all[3], all[1]], atOnce, undefined, RANKS), /the delta's row 2 .* does not follow its row 1/);
+  await assert.rejects(mergeCensus(all, [all[3], line(SERVER_ORDER[3], 8)], atOnce, undefined, RANKS), /the delta's row 2 .* does not follow its row 1/);
+  await assert.rejects(mergeCensus(all, [line('2019-03 NSE-FNO-NIFTY-III 1s')], atOnce, undefined, RANKS), /not a name this page can place/);
   // CANCELLED: a newer read replaced this one.
   const controller = new AbortController();
   controller.abort(new Error('a newer read replaced this one'));
-  await assert.rejects(mergeCensus(all, [line(SERVER_ORDER[0], 4)], atOnce, controller.signal), /newer read/);
+  await assert.rejects(mergeCensus(all, [line(SERVER_ORDER[0], 4)], atOnce, controller.signal, RANKS), /newer read/);
 });
 
 test('a large merge places thousands of rows exactly: every third row new, every seventh changed', async () => {
@@ -253,12 +299,12 @@ test('a large merge places thousands of rows exactly: every third row new, every
     for (let k = 1; k <= 60; k++) order.push(`${month} NSE-FNO-SAMPLE-2020-12-31-${String(100000 + k * 5000)}-${k % 2 ? 'CE' : 'PE'} 1s`);
   }
   // The contract text sorts as text, so put the fixture in the order itself.
-  const before = censusOrder();
+  const before = censusOrder(RANKS);
   const sorted = order.map((text) => line(text, 2)).sort(before);
   const held = sorted.filter((_, i) => i % 3 !== 0);
   const delta = sorted.map((row, i) => (i % 3 === 0 ? { ...row, rows: 5 } : i % 7 === 0 ? { ...row, rows: 9 } : null)).filter(Boolean);
   const whole = sorted.map((row, i) => (i % 3 === 0 ? { ...row, rows: 5 } : i % 7 === 0 ? { ...row, rows: 9 } : row));
-  const merged = await mergeCensus(held, /** @type {any[]} */ (delta), atOnce);
+  const merged = await mergeCensus(held, /** @type {any[]} */ (delta), atOnce, undefined, RANKS);
   assert.equal(merged.rows.length, 1200);
   assert.deepEqual(merged.rows, whole);
   assert.equal(merged.added, 400);

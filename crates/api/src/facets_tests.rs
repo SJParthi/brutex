@@ -599,3 +599,183 @@ fn the_weekday_of_a_day_is_counted_from_a_thursday() {
         );
     }
 }
+
+/// **THE ORDER AN ANSWER STATES IS THE TYPES' OWN, AND NAMES EVERY VARIANT**
+/// (WP-56b). A page orders a series by this statement and keeps no list of
+/// its own, so a variant added to either type and not to the list would be a
+/// series no page can place. The two `match`es do not compile with a variant
+/// unnamed; the sort check holds the list to `Ord`, the census's order.
+#[test]
+fn the_order_stated_is_the_types_own_and_names_every_variant() {
+    let exchange = |exchange: Exchange| match exchange {
+        Exchange::Nse => 0_usize,
+        Exchange::Bse => 1,
+    };
+    let segment = |segment: Segment| match segment {
+        Segment::Index => 0_usize,
+        Segment::Cash => 1,
+        Segment::Fno => 2,
+    };
+    assert_eq!(EXCHANGES.map(exchange), [0, 1]);
+    assert_eq!(SEGMENTS.map(segment), [0, 1, 2]);
+    assert!(EXCHANGES.is_sorted() && SEGMENTS.is_sorted());
+    assert_eq!(
+        json(&order_json()),
+        serde_json::json!({"exchanges": ["NSE", "BSE"], "segments": ["INDEX", "CASH", "FNO"]})
+    );
+    // Every selection's answer carries it.
+    let slot = slot_of(&chain());
+    let answer = json(
+        &render_answer(
+            &built(Segment::Fno, &slot),
+            &asked_for("feed=gdfl&segment=FNO"),
+            "held",
+            None,
+        )
+        .expect("answers"),
+    );
+    assert_eq!(answer["order"], json(&order_json()));
+}
+
+/// **THE SEGMENT'S TOTAL IS THE SUM OF ITS UNDERLYINGS, BUILT OR MOVED**
+/// (WP-56b): the root answer reads this one node per segment.
+#[test]
+fn a_segments_total_equals_the_sum_of_its_underlyings() {
+    let mut rows = chain();
+    rows.push(held(
+        spot(
+            Segment::Index,
+            "BANKNIFTY",
+            Timeframe::MINUTE_1,
+            month(2019, 3),
+        ),
+        7,
+        0,
+        360,
+        2_700_001,
+    ));
+    for segment in SEGMENTS {
+        let index = built(segment, &slot_of(&rows));
+        let mut summed = Rows::new();
+        for (_, under) in index.underlyings() {
+            for (rung, n) in &under.agg.rows {
+                *summed.entry(*rung).or_insert(0) += n;
+            }
+        }
+        assert_eq!(index.total.rows, summed, "{segment:?}");
+        assert_eq!(
+            index.total.first,
+            index.underlyings().filter_map(|(_, u)| u.agg.first).min(),
+            "{segment:?}"
+        );
+        assert_eq!(
+            index.total.last,
+            index.underlyings().filter_map(|(_, u)| u.agg.last).max(),
+            "{segment:?}"
+        );
+    }
+    // Moved forward by one more month of one key, the total moves by it.
+    let mut disk = OnDisk::new("facets-total", &rows);
+    let first = disk.read(None);
+    let mut index = built(Segment::Index, &first);
+    let before = index.total.rows.clone();
+    disk.append(&[held(
+        spot(
+            Segment::Index,
+            "BANKNIFTY",
+            Timeframe::MINUTE_1,
+            month(2019, 4),
+        ),
+        5,
+        3_000_000,
+        3_000_300,
+        2_700_002,
+    )]);
+    let second = disk.read(Some(first.census()));
+    advance(&mut index, Segment::Index, &second);
+    assert_eq!(
+        index.total.rows[&Timeframe::MINUTE_1],
+        before[&Timeframe::MINUTE_1] + 5
+    );
+    assert_eq!(index.total.rows, built(Segment::Index, &second).total.rows);
+}
+
+/// **THE ROOT: `feed=` ALONE ANSWERS THE SEGMENTS HELD, IN THE CENSUS'S
+/// ORDER, AND THE ORDER ITSELF** (WP-56b; DB-060, DB-G70). The first rung of
+/// the selection tree, from one node per segment: no whole census, and no
+/// segment list in the client.
+#[test]
+fn the_root_answers_the_segments_a_feed_holds_and_the_order() {
+    let dir = agreeing("facets-root");
+    let built_site = site("facets-root", &dir);
+    let mut manifest = Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+    for row in chain() {
+        let _append = manifest.record_held(row).expect("records");
+    }
+    std::fs::write(
+        manifest_path(&built_site.store_root, Vendor::Gdfl),
+        manifest.image(),
+    )
+    .expect("written");
+    let (code, headers, body) = answer(&built_site, "feed=gdfl");
+    assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(headers["x-brutex-census-state"], "held");
+    let value = json(&body);
+    assert_eq!(value["segment"], serde_json::Value::Null);
+    assert_eq!(value["order"], json(&order_json()));
+    // The fixture holds INDEX and FNO keys and no CASH key: CASH is not
+    // listed, and the two held are in the order stated.
+    let listed: Vec<&str> = value["segments"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|row| row["segment"].as_str().expect("a word"))
+        .collect();
+    assert_eq!(listed, ["INDEX", "FNO"]);
+    let index_row = &value["segments"][0];
+    assert_eq!(index_row["underlyings"], 1);
+    assert_eq!(index_row["rows"]["1min"], 60);
+    assert_eq!(index_row["rows"]["1day"], 3);
+    assert_eq!(index_row["generation"], 7);
+    assert!(index_row["first_ts"].as_i64() <= index_row["last_ts"].as_i64());
+    // Each row equals what the segment's own answer sums to.
+    let (_, _, fno_body) = answer(&built_site, "feed=gdfl&segment=FNO");
+    let fno_rows: u64 = json(&fno_body)["underlyings"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|under| under["rows"]["1s"].as_u64().unwrap_or(0))
+        .sum();
+    assert!(fno_rows > 0);
+    assert_eq!(value["segments"][1]["rows"]["1s"], fno_rows);
+    assert!(body.len() < 1_000, "{}", body.len());
+
+    // A feed with no census: no segment, its state named; never a 400.
+    let (code, headers, body) = answer(&built_site, "feed=zerodha");
+    assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(headers["x-brutex-census-state"], "absent");
+    assert_eq!(json(&body)["segments"], serde_json::json!([]));
+    assert_eq!(json(&body)["state"], "absent");
+
+    // Anything that narrows needs its segment, as before; an unknown feed is
+    // still refused by name.
+    for query in [
+        "feed=gdfl&underlying=NIFTY",
+        "feed=gdfl&since=1",
+        "feed=nope",
+        "",
+    ] {
+        let (code, _, body) = answer(&built_site, query);
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
+
+    // A census that will not load is a 503 naming it, never an empty root.
+    std::fs::write(
+        manifest_path(&built_site.store_root, Vendor::Zerodha),
+        b"not a manifest",
+    )
+    .expect("written");
+    let (code, _, body) = answer(&built_site, "feed=zerodha");
+    assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("census_unreadable"), "{body}");
+}
