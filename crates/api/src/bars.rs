@@ -3727,9 +3727,25 @@ mod window_tests {
         assert_eq!(closes, [1_146, 1_147], "the 74th smallest readable close");
         assert_eq!(got.bars[0].chg_why, "previous_unreadable");
         assert!(got.bars[1].chg.is_some());
-        assert_eq!(got.faults.len(), 73, "every unreadable record is named");
+        // ONE FAULT FOR THE MONTH, WITH THE COUNT (WP-39 repair 1). This
+        // asserted 73 faults, one string a record that would not read: the
+        // same shape answered 59 MB of faults for a one-second month another
+        // process held. The 73 records are still all accounted for — the
+        // first by name, the rest by number — and the report says they were
+        // NOT read.
+        assert_eq!(got.faults.len(), 1, "{:?}", got.faults);
+        assert!(
+            got.faults[0].contains(" record 73: ")
+                && got.faults[0].contains("73 kept rows of 2026-01 in this window would not read"),
+            "every unreadable record is counted, the first named: {:?}",
+            got.faults
+        );
         let read = got.sort_index.expect("a value page reports what it read");
-        assert_eq!((read.indexed_rows, read.scanned_rows), (0, 200));
+        assert_eq!(
+            (read.indexed_rows, read.scanned_rows, read.unread_rows),
+            (0, 127, 73)
+        );
+        assert_eq!(read.unread_months, 1);
         assert!(
             read.scanned_why[0].contains("no .srt sort index"),
             "{:?}",

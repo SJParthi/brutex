@@ -271,7 +271,10 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
     assert!(
         window.contains("sort::page(")
             && window.contains("scan(")
-            && scan.contains("for row in run.start..run.end {"),
+            // EVERY KEPT ROW, through the one stretch reader, which names a
+            // month that will not read once (WP-39 repair 1).
+            && scan.contains("plan.read_stretch(")
+            && scan.contains("(run.start, run.end),"),
         "a value sort is indexed and a time-of-day sort still reads: {window}\n{scan}"
     );
     assert!(
