@@ -47,6 +47,8 @@
 
 #[path = "ratio/census.rs"]
 mod census;
+#[path = "ratio/logs_dirs.rs"]
+mod logs_dirs;
 #[path = "ratio/sources.rs"]
 mod sources;
 #[path = "ratio/spot.rs"]
@@ -571,6 +573,7 @@ fn main() {
     ok &= window::seeks_are_flat();
     ok &= spot::probes_are_flat();
     ok &= sources::pages_are_flat();
+    ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
     if ok {
         println!("all ratios within the ceiling");
     } else {

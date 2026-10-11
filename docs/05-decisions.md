@@ -66512,3 +66512,123 @@ any document under `docs/`.
 
 **Proof.** `grep` for a vendor row's shape under `docs/` returns nothing; the
 charter rows each name their date, path and count.
+
+### D-4813 — `/imports.json` returns a page of runs and finds a run's lines by an index, never by decoding every line — 2026-10-11
+
+**Implemented by** IA-11r (R6's O(1) half; design §7.2). **Findings** F79.
+Search by run, reason, day, month and instrument is WP-33c's (merged at
+f350c156): `run` and `code` are indexed dimensions, `month=` is a key and a
+conjunction probes its most selective key first. This entry is the sentence
+that merge left open.
+
+**What was wrong.** `imports::runs_json` decoded every `run` line of the
+journal on every request (three callers), and the answer then kept 20: O(runs)
+per page.
+
+**What changed.** `import_journal::Parsed` keeps, beside `runs` (file order),
+a map from run id to the positions of that id's lines, filled as each `run`
+line is parsed (one probe, one push). `/imports.json` returns the newest
+`RUNS_PAGE` = 20 `run` lines with `runs_total`, and `runs_next`, the cursor of
+the next older page; `runs_before=<id>` is the page older than run `id`'s
+oldest line, and `runs_before=<id>.<n>` the page older than its `n`-th line,
+which is what `runs_next` names when a page ends inside an id that has
+several lines (two processes that start in one second share an id). `run=<id>`
+decodes that id's lines through the index and no other. A cursor that names no
+line shows no run and says so in `runs_cursor_refused`; a word that is not a
+cursor is a 400. No binary search and no sort.
+
+**What it does not change.** `/dayflags.json`'s day band resolves a refusal's
+run by time over the whole list, so the crate-internal caller
+(`imports::RunsAsked::Every`) still decodes every run: O(runs), the cost it had,
+named in `docs/06-limits.md` L-IA-13's section. The design's "the third caller
+takes the same page" would have dropped runs the day band needs.
+
+**Proof.** `api::server::imports::tests::the_runs_page_reads_only_its_runs`
+(IA-LG-03: a journal of 100,002 `run` lines, decodes counted); bench C-LG-02.
+
+### D-4838 — No posting tree is deleted on the emit path: a roll renames the retired generation aside and one reaper thread deletes it — 2026-10-11
+
+**Implemented by** IA-11r (R3; design §7.2). **Findings** F26, F78, F47 (gate
+21's list for these sites).
+
+**What was wrong.** `Audit::roll` ran `remove_dir_all` on the index generation
+of the audit file it dropped, under the sink's lock, so every emitter in the
+process waited for a delete whose cost is the generation's posting files.
+
+**What changed.** The roll renames `<dir>/audit.idx/<serial>` to
+`<dir>/audit.idx.gone/<serial>`: one rename inside the sink's own directory,
+after the next audit file is open. One thread per sink, `telemetry-reaper`
+(the only thread the crate starts outside its tests), started by the stream's
+open, takes each renamed path from a channel and deletes it outside every lock
+of the sink. At each start the stream lists `audit.idx.gone/` once and hands
+over what an earlier process left, and retires the one generation a process
+killed between a roll's serial write and its rename could have stranded. A
+reader finds a renamed generation absent, as it found a deleted one. A name
+already taken in `audit.idx.gone/` is not written over: the generation is
+renamed to a second, stamped name. A rename that fails both ways is the roll's
+failure (`rotation_failures`, named in `last_error`), and the stream goes on
+in the file it just opened.
+
+**What is reported.** `AuditHealth::gone_waiting` (renamed aside and not yet
+deleted), `reaped`, `reap_failures` with `reap_error`, and `reaper_behind()`
+once more than `AUDIT_KEEP_FILES` = 16 wait; each makes the health loud. A
+delete that fails is counted and the entry stays for the next start: one
+attempt per process, never a loop. A reaper thread that cannot start is named,
+and the generations then wait, counted.
+
+**Proof.** `telemetry::sink::tests::an_audit_roll_never_waits_for_a_delete`
+(IA-LG-01), `a_delete_cut_short_is_finished_at_the_next_start`,
+`a_failed_delete_is_counted_named_and_left_for_the_next_start`,
+`without_a_reaper_the_retired_generations_wait_counted`,
+`a_name_already_taken_aside_is_kept_and_the_generation_renamed_beside_it`,
+`a_rename_aside_that_cannot_happen_fails_the_roll_by_name`; benches C-AU-01 and
+C-AU-02; `docs/06-limits.md` L-IA-36; gate 21's declared list in the same
+change.
+
+### D-4862 — Every reader of a run's events reads the directory the run logged to, and names a directory it could not read — 2026-10-11
+
+**Implemented by** IA-11r (R5 widened; design §7.1, §7.2): the readers. The
+directory switch itself (each run process logging to the directory of the one
+lock that makes it alone there) is IA-1's and lands after this; until then
+every run still logs to `logs/cli`. **Findings** F78.
+
+**The closed set.** Under `<store>/logs`: `cli`, `gdfl/indices`, `gdfl/stocks`,
+`gdfl/options` (the kind lock), `gdfl/store` (the store lock: the census verbs
+and every v3 run), `verify/zerodha` and `verify/merge`; with the server's own
+directory, 8 (`api::logs::RUN_DIRS`). A run of a GDFL kind can write `cli`,
+`gdfl/<kind>` and `gdfl/store` (`IMPORT_DIRS`).
+
+**What was wrong.** `/logs` read the server's directory and `logs/cli`. The
+importer-evidence readers (`logs::import_refusals`,
+`logs::audited_import_refusals`) read `logs/cli` alone, and through them so did
+`/imports.json` (each row's logged refusals, the logged-only days, each kind's
+pace, `run=`'s attempt), `/dayflags.json`'s day band and `/store`'s behind. A
+run logging anywhere else would have read `"none"` on all of them.
+
+**What changed.** `/logs` and `/logs.json` read the 8 directories, keyed and
+unkeyed, and answer `dirs`: each directory by name with `read`, `absent` or
+`unreadable` and its error. `import_refusals` keeps one tail per directory
+(five) and answers a merged view chosen by kind; the same reads are the same
+`Arc`, so `imports::summary` and `store_route::behind` keep their answers
+against the tuple of per-directory reads by one pointer. A row's `logged_from`
+names its source directory (`logs/gdfl/indices ring`, `… audit stream`); it
+says `"none"` only when every directory a run of the row's kind can write was
+read and holds nothing, and otherwise names each directory that was absent or
+unreadable. A kind's pace names the directories its events were read from.
+`run=<id>` also answers the run's lifecycle events (target
+`gdfl.import.lifecycle`), read keyed through the `run` posting of the five
+directories. `/imports.json`'s `evidence` block lists each directory with its
+state, files, bytes, malformed lines and errors, in place of `cli_ring_files`
+and `cli_ring_bytes`.
+
+**The bound.** A keyed `/logs.json` request opens at most 8 × 3 = 24 posting
+streams under one budget of `MAX_KEYED_READS` = 2,000 line reads
+(`docs/06-limits.md` L-IA-13); the ring tails are L-IA-37.
+
+**Proof.** IA-LG-02's four tests, each failing when its reader reads
+`logs/cli` alone (checked by reverting the readers):
+`api::logs::tests::logs_reads_every_run_directory`,
+`api::server::imports::tests::imports_json_reads_importer_evidence_where_the_run_logged`,
+`…::dayflags_day_band_reads_importer_evidence_where_the_run_logged`,
+`…::store_behind_reads_importer_evidence_where_the_run_logged`; and
+`api::logs::tests::the_run_directories_name_every_import_kind`. Bench C-LG-01.

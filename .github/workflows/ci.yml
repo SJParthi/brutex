@@ -2114,31 +2114,46 @@ jobs:
           #                        an audit posting file; the next audit file
           #                        after a roll; the generation's `dims`
           #                        coverage file (WP-33c)
-          #   create_dir_all   x4  the sink's directory; `audit.idx/` before
+          #   create_dir_all   x5  the sink's directory; `audit.idx/` before
           #                        the serial; a posting's dimension directory;
-          #                        a generation directory for `dims` (WP-33c)
+          #                        a generation directory for `dims` (WP-33c);
+          #                        `audit.idx.gone/`, the sibling a roll
+          #                        renames a retired generation into (IA-11r,
+          #                        D-4838)
           #   fs::metadata     x2  stat by PATH for the resume point, and a
           #                        posting file's length in a probe
           #   fs::read         x1  the audit serial (eight bytes)
           #   read_to_string   x2  a generation's `dims`, read by a probe and by
           #                        the writer before it adds a line (WP-33c)
-          #   remove_dir_all   x1  the index generation of the audit file a roll
-          #                        deletes, so the index never outlives it
+          #   fs::read_dir     x1  `audit.idx.gone/`, listed once per sink
+          #                        start so a delete an earlier process left
+          #                        unfinished is handed to this one's reaper
+          #                        (IA-11r, D-4838)
+          #   remove_dir_all   x1  a retired index generation, deleted by the
+          #                        sink's reaper thread from `audit.idx.gone/`.
+          #                        MOVED OFF THE EMIT PATH by IA-11r (D-4838):
+          #                        until then a roll ran it under the sink's
+          #                        lock (F26). Still one site, still a path
+          #                        inside the sink's own directory
           #   remove_file      x1  dropping the oldest rolled file
-          #   fs::rename       x2  rolling within its own directory; the staged
-          #                        audit serial put in place
+          #   fs::rename       x3  rolling within its own directory; the staged
+          #                        audit serial put in place; a retired index
+          #                        generation moved from `audit.idx/<serial>`
+          #                        to `audit.idx.gone/<serial>`, both inside
+          #                        the sink's directory (IA-11r, D-4838)
           #   fs::write        x1  the staged audit serial
           #   File::open       x1  the ring's own files, read once to seed a new
           #                        audit stream
           declared='sink.rs:std::fs::File::open:1
           sink.rs:std::fs::OpenOptions::new:6
-          sink.rs:std::fs::create_dir_all:4
+          sink.rs:std::fs::create_dir_all:5
           sink.rs:std::fs::metadata:2
           sink.rs:std::fs::read:1
+          sink.rs:std::fs::read_dir:1
           sink.rs:std::fs::read_to_string:2
           sink.rs:std::fs::remove_dir_all:1
           sink.rs:std::fs::remove_file:1
-          sink.rs:std::fs::rename:2
+          sink.rs:std::fs::rename:3
           sink.rs:std::fs::write:1
           tail.rs:std::fs::File::open:2'
 
@@ -3566,10 +3581,10 @@ jobs:
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
           pull   crates/pull/benches/ratio.rs   14 C-11 C-12 C-13 C-26 C-GI-01 C-GI-02 C-GI-03 C-RF-01
           store  crates/store/benches/ratio.rs  13 C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02 C-TIX-01 C-TIX-02
-          api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
+          api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27 C-LG-01 C-LG-02
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
-          telemetry crates/telemetry/benches/ratio.rs 8  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
+          telemetry crates/telemetry/benches/ratio.rs 10 C-T-01 C-T-01b C-T-02 C-T-03 C-T-04 C-AU-01 C-AU-02
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     12 C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
           indicators crates/indicators/benches/ratio.rs 6  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07

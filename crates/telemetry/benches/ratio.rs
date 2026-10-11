@@ -531,6 +531,163 @@ fn the_tail_is_flat_in_the_size_of_the_file() -> bool {
     ok
 }
 
+/// How many posting files the index generation a roll retires holds, and how
+/// many rolls are timed at each: building one generation of 100,000 files
+/// takes seconds, so the largest size is timed fewer times, and says so.
+const DOOMED: [(usize, u32); 3] = [(10, 40), (1_000, 40), (100_000, 3)];
+
+/// How long one delete may take before the bench gives up on it. A delete
+/// is O(posting files) and this is its ceiling for 100,000 of them on a
+/// loaded machine, not a claim about the emit, which has returned by then.
+const REAPER_PATIENCE_SECS: u64 = 3_600;
+
+/// From this many posting files on, each roll is printed as it is timed, so
+/// a run cut short still shows what it measured.
+const PRINT_EACH_FROM: usize = 100_000;
+
+/// The audit serial of a stream fifteen rolls old: its next roll is the
+/// first to retire an index generation (generation 0).
+const FIRST_RETIRING_SERIAL: u64 = 15;
+
+/// One timed roll: the emit that triggered it, and how long the reaper then
+/// took to delete the retired generation, both in nanoseconds.
+struct Rolled {
+    emit_ns: u128,
+    reap_ns: u128,
+}
+
+/// Makes `dir`'s stream full and its doomed generation `files` posting files
+/// large, opens a sink on it, and times the one audited emit that rolls it
+/// and the reaper's delete after it.
+fn one_roll(dir: &Path, doomed: u64, files: usize) -> Rolled {
+    use std::io::{Seek as _, Write as _};
+    // THE GENERATION THE ROLL WILL RETIRE: one posting file per value of one
+    // dimension, as an index of `files` distinct contracts is.
+    let dimension = telemetry::audit_generation_path(dir, doomed).join("contract");
+    if std::fs::create_dir_all(&dimension).is_err() {
+        refuse("the doomed generation would not create");
+    }
+    for n in 0..files {
+        if std::fs::write(dimension.join(format!("ZZ{n:07}.idx")), [0u8; 0]).is_err() {
+            refuse("a posting file would not create");
+        }
+    }
+    // A CURRENT FILE AT ITS ROLL SIZE, sparse, ending in a newline: the next
+    // audited line rolls it. No 64 MiB is written.
+    let full = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(telemetry::audit_current_path(dir))
+        .and_then(|mut file| {
+            file.set_len(telemetry::AUDIT_MAX_FILE_BYTES)?;
+            let _at = file.seek(std::io::SeekFrom::End(-1))?;
+            file.write_all(b"\n")
+        });
+    if full.is_err() {
+        refuse("the full audit file would not create");
+    }
+    let Ok(sink) = Sink::open(&Config::new(dir.to_path_buf())) else {
+        refuse("the audit bench sink would not open");
+    };
+    let before = sink.audit_health().map_or(0, |health| health.rotations);
+    let event = Event::error("bench.audit", "refused").with("instrument", "ZZBENCH");
+    let start = Instant::now();
+    let written = black_box(sink.emit(&event)).is_written();
+    let emit_ns = start.elapsed().as_nanos();
+    let Some(health) = sink.audit_health() else {
+        refuse("the bench sink keeps no audit stream");
+    };
+    if !written || health.rotations != before + 1 || health.rotation_failures != 0 {
+        refuse(&format!("the timed emit did not roll cleanly: {health:?}"));
+    }
+    // THE ROLL RENAMED AND RETURNED; the reaper deletes off the emit path.
+    // Timed from the emit's return to the generation being gone.
+    loop {
+        let Some(health) = sink.audit_health() else {
+            refuse("the bench sink lost its audit stream");
+        };
+        if health.reap_failures != 0 {
+            refuse(&format!("the reaper failed: {health:?}"));
+        }
+        if health.gone_waiting == 0 {
+            break;
+        }
+        if start.elapsed().as_secs() > REAPER_PATIENCE_SECS {
+            refuse(&format!(
+                "the reaper did not finish in {REAPER_PATIENCE_SECS} s: {health:?}"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    let reap_ns = start.elapsed().as_nanos().saturating_sub(emit_ns);
+    if telemetry::audit_generation_path(dir, doomed).exists() {
+        refuse("the retired generation is still where a reader looks");
+    }
+    Rolled { emit_ns, reap_ns }
+}
+
+/// C-AU-01 — the audited emit that triggers a roll costs the same whether
+/// the index generation it retires holds 10, 1,000 or 100,000 posting files:
+/// the roll renames the generation aside and never deletes it (D-4838;
+/// `telemetry::sink::tests::an_audit_roll_never_waits_for_a_delete`).
+///
+/// C-AU-02 — the reaper's delete of that generation, which DOES track its
+/// posting files and runs on the reaper's thread: printed at each size,
+/// never gated, because it is not on the emit path (`docs/06-limits.md`
+/// L-IA-36).
+fn an_audit_roll_never_waits_for_a_delete() -> bool {
+    let mut medians = Vec::with_capacity(DOOMED.len());
+    for (files, rolls) in DOOMED {
+        let dir = Scratch(scratch(&format!("audit-roll-{files}")));
+        let made = std::fs::create_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).and_then(|()| {
+            std::fs::write(
+                telemetry::audit_serial_path(&dir),
+                FIRST_RETIRING_SERIAL.to_le_bytes(),
+            )
+        });
+        if made.is_err() {
+            refuse("the audit bench stream would not create");
+        }
+        let mut emits = Vec::with_capacity(rolls as usize);
+        let mut reaps = Vec::with_capacity(rolls as usize);
+        for roll in 0..rolls {
+            // Roll `n` of a stream that began at serial 15 retires
+            // generation `n`.
+            let rolled = one_roll(&dir, u64::from(roll), files);
+            if files >= PRINT_EACH_FROM {
+                println!(
+                    "  C-AU-01 roll emit, {files} posting files, roll {roll}: {} ns; C-AU-02 \
+                     reaper delete {} ns",
+                    rolled.emit_ns, rolled.reap_ns
+                );
+            }
+            emits.push(rolled.emit_ns);
+            reaps.push(rolled.reap_ns);
+        }
+        emits.sort_unstable();
+        reaps.sort_unstable();
+        let emit = Dist { ns: emits };
+        let reap = Dist { ns: reaps };
+        emit.report(&format!("C-AU-01 roll emit, {files} posting files"));
+        reap.report(&format!("C-AU-02 reaper delete, {files} posting files"));
+        medians.push(emit.at(500) * 1_000);
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (medians.first(), medians.get(1), medians.get(2))
+    else {
+        refuse("three sizes measured");
+    };
+    ratio(
+        "C-AU-01 roll emit p50: 10 -> 1,000 posting files",
+        base,
+        mid,
+    ) & ratio(
+        "C-AU-01 roll emit p50: 10 -> 100,000 posting files",
+        base,
+        big,
+    )
+}
+
 fn main() {
     println!("gate 8 — crates/telemetry, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -539,6 +696,7 @@ fn main() {
     ok &= a_filtered_event_touches_nothing_and_stays_flat();
     ok &= the_tail_is_flat_in_the_size_of_the_file();
     ok &= the_tail_is_flat_in_the_size_of_the_file_too();
+    ok &= an_audit_roll_never_waits_for_a_delete();
     println!();
     the_worst_case_is_named_rather_than_averaged_away();
     println!();

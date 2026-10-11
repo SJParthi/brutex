@@ -352,20 +352,17 @@ pub async fn logs_json(
     // would see forever while a sweep wrote thousands of records to the `cli`
     // half. The server's own sink being absent says nothing about whether
     // `cli` events exist -- and 2,090 of them existed when this was measured.
-    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
-    let (first, second) = match (log_dir(), cli_dir) {
-        (Some(served), cli) => (Some(served), cli),
-        (None, Some(cli)) => (Some(cli), None),
-        (None, None) => (None, None),
-    };
-    let Some(dir) = first else {
+    // EVERY RUN DIRECTORY, NOT `logs/cli` ALONE (D-4862 round 6; IA-11r R5):
+    // a GDFL run of a kind logs to its own directory, and a page that read two
+    // of the eight would show none of its events.
+    let halves = halves_of(log_dir(), crate::server::store_dir().ok().as_deref());
+    if halves.is_empty() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json,
-            r#"{"error":"logging is not installed in this process and no store log directory could be resolved, so there is no log to read"}"#
-                .to_owned(),
+            NO_LOG_JSON.to_owned(),
         );
-    };
+    }
     let asked = asked(uri.query().unwrap_or(""));
     let health = sink_health();
     // OFF THE ASYNC WORKERS, AND ADMITTED. `json_over` walks up to two
@@ -379,9 +376,9 @@ pub async fn logs_json(
     // that names no key reads the ring alone, exactly as it always did.
     match crate::detail::run_log_read(move || {
         if asked.keys.is_empty() {
-            json_over(&dir, second.as_deref(), &asked, health.as_ref())
+            json_across(&halves, &asked, health.as_ref())
         } else {
-            keyed_json(&dir, second.as_deref(), &asked, health.as_ref())
+            keyed_json_across(&halves, &asked, health.as_ref())
         }
     })
     .await
@@ -404,14 +401,14 @@ pub async fn logs_json(
 /// REAL file, rather than needing the process-global one installed. The
 /// handler is then the one thing left untested here — resolving the directory
 /// — and that is a single `?` on `telemetry::global()`.
+#[cfg(test)]
 fn json_over(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let tail = both_halves(dir, cli_dir, &asked.query);
-    json_of(&tail, asked, health, (dir, cli_dir))
+    json_across(&two_halves(dir, cli_dir), asked, health)
 }
 
 /// Where `crates/cli` ACTUALLY writes, resolved from the STORE root.
@@ -483,6 +480,218 @@ pub fn quoted(raw: &str) -> String {
 /// this is that walk.
 const CLI_SUBDIR: &str = "cli";
 
+/// The closed set of directories a run process logs to, under `<store>/logs`
+/// (D-4862): each belongs to the one lock that makes its writer alone there.
+/// `cli` (every cli verb, and every run until the directory switch), the
+/// three GDFL kinds' own (the kind lock), `gdfl/store` (the store lock: the
+/// census verbs and every v3 run), `verify/zerodha` and `verify/merge`.
+/// With the server's own directory these are the 8 `/logs` reads; a ninth
+/// writer needs a row here, a lock, and `docs/06-limits.md` L-IA-13's bound
+/// recomputed. The three kinds are `pull::gdfl_import::ImportKind::ALL`'s
+/// names, which `the_run_directories_name_every_import_kind` holds it to.
+pub(crate) const RUN_DIRS: [&str; 7] = [
+    CLI_SUBDIR,
+    "gdfl/indices",
+    "gdfl/stocks",
+    "gdfl/options",
+    "gdfl/store",
+    "verify/zerodha",
+    "verify/merge",
+];
+
+/// Of [`RUN_DIRS`], the five a GDFL run can write, so the five the importer's
+/// evidence is read from: for one kind `cli`, `gdfl/<kind>` and `gdfl/store`.
+pub(crate) const IMPORT_DIRS: [&str; 5] = [
+    CLI_SUBDIR,
+    "gdfl/indices",
+    "gdfl/stocks",
+    "gdfl/options",
+    "gdfl/store",
+];
+
+/// What a GDFL run's own directory starts with, under `logs/`.
+const GDFL_PREFIX: &str = "gdfl/";
+
+/// The directory, under [`GDFL_PREFIX`], of the store lock's runs.
+const STORE_RUNS: &str = "store";
+
+/// Whether a directory a reader was asked to read could answer. A reader
+/// names every directory that is not [`Self::Read`], and says "none" only
+/// when all of them were read: an absent directory and an empty one are
+/// different facts, and so are an unreadable one and both (D-4862, the rule
+/// [`cli_half`]'s doc states for one directory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DirState {
+    /// It is there and was read.
+    Read,
+    /// It does not exist: no run that logs there has ever started.
+    Absent,
+    /// It is there and could not be read, in the failure's own words.
+    Unreadable(String),
+}
+
+impl DirState {
+    /// The state's word on the wire.
+    pub(crate) const fn word(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Absent => "absent",
+            Self::Unreadable(_) => "unreadable",
+        }
+    }
+
+    /// The state of `path`: one `metadata` call.
+    fn of(path: &std::path::Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => Self::Read,
+            Ok(_) => Self::Unreadable("it is there and is not a directory".to_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(e) => Self::Unreadable(e.to_string()),
+        }
+    }
+}
+
+/// One directory a `/logs` request reads: its name on the wire (`served` for
+/// the server's own, else one of [`RUN_DIRS`]) and where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Half {
+    /// The name rows and postings carry.
+    pub(crate) name: &'static str,
+    /// The directory.
+    pub(crate) path: std::path::PathBuf,
+}
+
+/// Every directory a `/logs` request reads: the server's own, when its sink
+/// resolved one, then each of [`RUN_DIRS`] under the store, when a store root
+/// resolved: 8 at most (D-4862). The two roots are resolved apart, for the
+/// reason [`cli_half`] gives.
+pub(crate) fn halves_of(
+    served: Option<std::path::PathBuf>,
+    store: Option<&std::path::Path>,
+) -> Vec<Half> {
+    served
+        .map(|path| Half {
+            name: "served",
+            path,
+        })
+        .into_iter()
+        .chain(RUN_DIRS.iter().filter_map(|name| {
+            store.map(|root| Half {
+                name,
+                path: root.join("logs").join(name),
+            })
+        }))
+        .collect()
+}
+
+/// The first directory and the `cli` one, as [`json_of`] and [`page_of`]
+/// name them: the pair every answer has always carried.
+fn named_pair(halves: &[Half]) -> Option<(&std::path::Path, Option<&std::path::Path>)> {
+    let first = halves.first()?;
+    let cli = halves
+        .iter()
+        .skip(1)
+        .find(|half| half.name == CLI_SUBDIR)
+        .map(|half| half.path.as_path());
+    Some((first.path.as_path(), cli))
+}
+
+/// `"dirs":[...]`: every directory the request read, by name, with its state
+/// (`read`, `absent`, `unreadable` and why). One `metadata` call each.
+fn dirs_json(halves: &[Half]) -> String {
+    let mut out = String::from("\"dirs\":[");
+    for (n, half) in halves.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let state = DirState::of(&half.path);
+        let _ = write!(
+            out,
+            r#"{{"half":{},"dir":{},"state":"{}","error":{}}}"#,
+            render::json_string(half.name),
+            render::json_string(&half.path.display().to_string()),
+            state.word(),
+            match &state {
+                DirState::Unreadable(why) => render::json_string(why),
+                DirState::Read | DirState::Absent => "null".to_owned(),
+            },
+        );
+    }
+    out.push(']');
+    out
+}
+
+/// `body`, a JSON object, with [`dirs_json`] as its last member.
+fn with_dirs(body: &str, halves: &[Half]) -> String {
+    let mut out = body.strip_suffix('}').unwrap_or(body).to_owned();
+    out.push(',');
+    out.push_str(&dirs_json(halves));
+    out.push('}');
+    out
+}
+
+/// The page's line naming every directory read and the state of each, so a
+/// run directory that does not exist yet reads `absent` and never as a
+/// directory that held nothing.
+fn dirs_note(halves: &[Half]) -> String {
+    let mut out = String::from("<p class=\"lead\">Directories read:");
+    for half in halves {
+        let state = DirState::of(&half.path);
+        let _ = write!(
+            out,
+            " <code>{}</code> {}{};",
+            render::escape(half.name),
+            state.word(),
+            match &state {
+                DirState::Unreadable(why) => format!(" ({})", render::escape(why)),
+                DirState::Read | DirState::Absent => String::new(),
+            },
+        );
+    }
+    out.push_str("</p>");
+    out
+}
+
+/// Every half of the log, merged newest-first: [`merged`] folded over each
+/// directory's own walk, so the limit, the caps and `missing` combine exactly
+/// as they did for two. At most 8 walks of at most [`SCAN_BYTES`] each.
+fn all_halves(halves: &[Half], query: &telemetry::Query) -> telemetry::Tail {
+    let mut walks = halves
+        .iter()
+        .map(|half| telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query));
+    let Some(first) = walks.next() else {
+        return telemetry::Tail::default();
+    };
+    walks.fold(first, |so_far, next| merged(so_far, next, query.limit))
+}
+
+/// [`json_over`] across every directory in `halves`.
+fn json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return NO_LOG_JSON.to_owned();
+    };
+    let tail = all_halves(halves, &asked.query);
+    with_dirs(&json_of(&tail, asked, health, pair), halves)
+}
+
+/// What a request answers when no directory resolved at all.
+const NO_LOG_JSON: &str = r#"{"error":"logging is not installed in this process and no store log directory could be resolved, so there is no log to read"}"#;
+
+/// The server's directory and, when given, the `cli` one, as halves: the
+/// two-directory form the tests of this module state their fixtures in.
+#[cfg(test)]
+fn two_halves(dir: &std::path::Path, cli_dir: Option<&std::path::Path>) -> Vec<Half> {
+    std::iter::once(Half {
+        name: "served",
+        path: dir.to_path_buf(),
+    })
+    .chain(cli_dir.map(|cli| Half {
+        name: CLI_SUBDIR,
+        path: cli.to_path_buf(),
+    }))
+    .collect()
+}
+
 /// Both halves of the log, merged newest-first.
 ///
 /// # The half of the audit trail the dashboard could not see
@@ -520,6 +729,7 @@ const CLI_SUBDIR: &str = "cli";
 /// from a half means the question is unanswerable there — under a filter, or
 /// with no directory — and a half that cannot answer contributes nothing rather
 /// than a zero, because zero would read as "none lost".
+#[cfg(test)]
 fn both_halves(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
@@ -755,32 +965,14 @@ pub async fn logs_page(
     // it. Bound to a local rather than written inline so the `Option<PathBuf>`
     // it borrows from plainly outlives the call -- and named `cli_dir` rather
     // than `cli`, which is a crate this one depends on.
-    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
-    // THE SERVER'S OWN SINK BEING ABSENT IS NOT "NOTHING TO READ".
-    //
-    // This bailed on `log_dir()` alone, BEFORE `cli_dir` was ever consulted --
-    // so a server started without telemetry installed rendered "No log" while
-    // the operator's sweep was writing thousands of records to the `cli` half
-    // beside it. MEASURED, 2026-09-03: `<store>/logs/cli/events.ndjson` held
-    // **2,090 records** from a running sweep and this page showed none of them,
-    // under a sentence saying there was nothing to read.
-    //
-    // That is the same defect `page_over`'s own doc records for 2026-09-01, in
-    // a different place: the page that exists to show `cli` events could not
-    // show them, and said so in words that read as "none were written". §4
-    // bans a fallback that hides a failure; this is its mirror, a refusal that
-    // hides an answer.
-    //
-    // The `cli` half becomes the FIRST half when there is no server half. The
-    // footer names the directory it actually read, so the page still says
-    // exactly where its records came from -- it is one directory rather than
-    // two, and reporting that honestly is the whole difference.
-    let (first, second) = match (log_dir(), cli_dir) {
-        (Some(served), cli) => (Some(served), cli),
-        (None, Some(cli)) => (Some(cli), None),
-        (None, None) => (None, None),
-    };
-    let Some(dir) = first else {
+    // EVERY RUN DIRECTORY, resolved from the store exactly as `logs_json`
+    // does it, and the server's own when its sink resolved one. A server
+    // started without telemetry still reads the store's directories: its own
+    // sink being absent is not "nothing to read" (MEASURED, 2026-09-03:
+    // `<store>/logs/cli/events.ndjson` held 2,090 records from a running
+    // sweep while this page said there was nothing to read).
+    let halves = halves_of(log_dir(), crate::server::store_dir().ok().as_deref());
+    if halves.is_empty() {
         return (
             axum::http::StatusCode::OK,
             axum::response::Html(page_shell(
@@ -790,16 +982,13 @@ pub async fn logs_page(
                  nothing to read. The server names the reason on stdout at startup.</p>",
             )),
         );
-    };
+    }
     let health = sink_health();
     let inside = std::sync::Arc::clone(&asked);
     // OFF THE ASYNC WORKERS, AND ADMITTED, for the reason `logs_json` gives:
     // the page runs the same two-half walk. A full pool is a 429 page that
     // says so in words, with the form still on it. log-3, P1-04-02, D-2327.
-    match crate::detail::run_log_read(move || {
-        page_over(&dir, second.as_deref(), &inside, health.as_ref())
-    })
-    .await
+    match crate::detail::run_log_read(move || page_across(&halves, &inside, health.as_ref())).await
     {
         Ok(page) => (axum::http::StatusCode::OK, axum::response::Html(page)),
         Err(why) => {
@@ -844,18 +1033,35 @@ pub async fn logs_page(
 /// this walked the ring with the keys dropped. It now answers through
 /// [`keyed_walk`], the same rows `/logs.json` gives for the same query, with
 /// a link to the next page when there is one.
+#[cfg(test)]
 fn page_over(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
+    page_across(&two_halves(dir, cli_dir), asked, health)
+}
+
+/// [`page_over`] across every directory in `halves`, each named with its
+/// state under the lead.
+fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return page_shell(
+            asked,
+            "<p class=\"halt\"><b>No log</b>No log directory resolved, so there is nothing to \
+             read.</p>",
+        );
+    };
     if asked.keys.is_empty() {
-        let tail = both_halves(dir, cli_dir, &asked.query);
-        return page_of(&tail, asked, health, (dir, cli_dir));
+        let tail = all_halves(halves, &asked.query);
+        let mut page = page_of(&tail, asked, health, pair);
+        page.push_str(&dirs_note(halves));
+        return page;
     }
-    let (tail, _keyed, next) = keyed_walk(dir, cli_dir, asked);
-    let mut page = page_of(&tail, asked, health, (dir, cli_dir));
+    let (tail, _keyed, next) = keyed_walk(halves, asked);
+    let mut page = page_of(&tail, asked, health, pair);
+    page.push_str(&dirs_note(halves));
     match next {
         Some(cursor) => {
             let _ = write!(
@@ -2748,16 +2954,30 @@ fn ring_scan(
 /// only when `ring=1` asked for it on a first page, the newest [`SCAN_BYTES`]
 /// of each ring for lines no stream holds (WP-33c, DB-A44). Each record
 /// carries its half, its source and how it bears on the keys.
+#[cfg(test)]
 fn keyed_json(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let (tail, keyed, _next) = keyed_walk(dir, cli_dir, asked);
-    let body = json_of(&tail, asked, health, (dir, cli_dir));
+    keyed_json_across(&two_halves(dir, cli_dir), asked, health)
+}
+
+/// [`keyed_json`] across every directory in `halves`: at most 8 directories
+/// times at most 3 probes, 24 posting streams, under the one line budget
+/// ([`MAX_KEYED_READS`]) the request has whatever the streams hold
+/// (`docs/06-limits.md` L-IA-13).
+fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return NO_LOG_JSON.to_owned();
+    };
+    let (tail, keyed, _next) = keyed_walk(halves, asked);
+    let body = json_of(&tail, asked, health, pair);
     let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
     out.push_str(&keyed);
+    out.push(',');
+    out.push_str(&dirs_json(halves));
     let _ = write!(
         out,
         r#","audit_stream":{}}}"#,
@@ -2772,13 +2992,10 @@ fn keyed_json(
 
 /// A keyed answer's records as a [`telemetry::Tail`] and its `keyed` object,
 /// shared by `/logs.json` and the `/logs` page.
-fn keyed_walk(
-    dir: &std::path::Path,
-    cli_dir: Option<&std::path::Path>,
-    asked: &Asked,
-) -> (telemetry::Tail, String, Option<String>) {
-    let halves: Vec<(&'static str, &std::path::Path)> = std::iter::once(("served", dir))
-        .chain(cli_dir.map(|cli| ("cli", cli)))
+fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option<String>) {
+    let halves: Vec<(&'static str, &std::path::Path)> = named
+        .iter()
+        .map(|half| (half.name, half.path.as_path()))
         .collect();
     let indexed = index_rows(&halves, asked);
     let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = indexed
@@ -2918,7 +3135,7 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         return "null".to_owned();
     };
     format!(
-        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
         render::json_string(&h.path.display().to_string()),
         h.serial,
         h.current_bytes,
@@ -2930,6 +3147,16 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
         h.index_failures,
         h.unindexed,
         h.seeded,
+        // THE REAPER'S SIDE (D-4838): index generations a roll renamed aside
+        // and the reaper has not deleted yet, what it deleted, what it could
+        // not, and whether more wait than the stream keeps files.
+        h.gone_waiting,
+        h.reaped,
+        h.reap_failures,
+        h.reaper_behind(),
+        h.reap_error
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
         h.is_loud(),
         h.last_error
             .as_deref()
@@ -2955,7 +3182,7 @@ fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
 /// the file (`about`) and the reason (`why`), and since D-3317 its `stage` and
 /// `code`. That event is the record; this reads it rather than re-deciding.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ImportRefusals {
+pub(crate) struct DirRefusals {
     /// The refusals, keyed `(day, kind)`: a day sorts as its text does, so a
     /// range of days is a range of the map.
     by_day: std::collections::BTreeMap<(String, String), Vec<telemetry::Record>>,
@@ -3012,7 +3239,7 @@ pub(crate) struct Attempt {
     pub(crate) lines: u64,
 }
 
-impl ImportRefusals {
+impl DirRefusals {
     /// The refusals logged for one kind and day, oldest first.
     pub(crate) fn of(&self, kind: &str, day: &str) -> &[telemetry::Record] {
         self.by_day
@@ -3030,33 +3257,22 @@ impl ImportRefusals {
             .map(|((day, kind), _)| (kind.as_str(), day.as_str()))
     }
 
-    /// The import's pace for one kind, measured from the gaps between its
-    /// newest `day imported` events: `(gaps, p50 ms, p90 ms)`, or `None` with
-    /// fewer than two events. A gap that spans a pause between runs is one of
-    /// them, which is why the median is the figure to read.
+    /// The import's pace for one kind, from this directory's events alone:
+    /// see [`pace_of`].
+    #[cfg(test)]
     pub(crate) fn pace(&self, kind: &str) -> Option<(usize, i64, i64)> {
         let stamps = self.imported.get(kind)?;
-        let mut gaps: Vec<i64> = stamps
-            .iter()
-            .zip(stamps.iter().skip(1))
-            .map(|(earlier, later)| later.saturating_sub(*earlier).max(0))
-            .collect();
-        if gaps.is_empty() {
-            return None;
+        let (front, back) = stamps.as_slices();
+        if back.is_empty() {
+            pace_of(front)
+        } else {
+            let whole: Vec<i64> = stamps.iter().copied().collect();
+            pace_of(&whole)
         }
-        gaps.sort_unstable();
-        let at = |per_cent: usize| {
-            let rank = gaps
-                .len()
-                .saturating_mul(per_cent)
-                .div_ceil(100)
-                .saturating_sub(1);
-            gaps.get(rank).copied().unwrap_or(0)
-        };
-        Some((gaps.len(), at(50), at(90)))
     }
 
     /// The stamp of a kind's newest `day imported` event.
+    #[cfg(test)]
     pub(crate) fn newest_import(&self, kind: &str) -> Option<i64> {
         self.imported.get(kind)?.back().copied()
     }
@@ -3184,6 +3400,32 @@ impl ImportRefusals {
 /// over: 31 events, 30 gaps.
 pub(crate) const RATE_WINDOW: usize = 31;
 
+/// The import's pace, measured from the gaps between `day imported` stamps
+/// (milliseconds, oldest first): `(gaps, p50 ms, p90 ms)`, or `None` with
+/// fewer than two. A gap that spans a pause between runs is one of them,
+/// which is why the median is the figure to read. At most [`RATE_WINDOW`]
+/// stamps, so the one sort here is of at most 30 gaps.
+fn pace_of(stamps: &[i64]) -> Option<(usize, i64, i64)> {
+    let mut gaps: Vec<i64> = stamps
+        .iter()
+        .zip(stamps.iter().skip(1))
+        .map(|(earlier, later)| later.saturating_sub(*earlier).max(0))
+        .collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_unstable();
+    let at = |per_cent: usize| {
+        let rank = gaps
+            .len()
+            .saturating_mul(per_cent)
+            .div_ceil(100)
+            .saturating_sub(1);
+        gaps.get(rank).copied().unwrap_or(0)
+    };
+    Some((gaps.len(), at(50), at(90)))
+}
+
 /// What [`import_refusals`] keeps between calls for one directory.
 #[derive(Debug)]
 struct RefusalTail {
@@ -3192,7 +3434,7 @@ struct RefusalTail {
     /// The current file's identity and the bytes parsed through its last
     /// newline.
     current: (Option<(u64, u64)>, u64),
-    built: std::sync::Arc<ImportRefusals>,
+    built: std::sync::Arc<DirRefusals>,
 }
 
 /// Every `cli` directory read so far.
@@ -3204,21 +3446,372 @@ fn refusal_tails()
     TAILS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// The GDFL importer's refusals the `cli` ring under `store_root` holds.
+/// One directory of the importer's evidence, as one read found it.
+#[derive(Debug, Clone)]
+pub(crate) struct DirEvidence {
+    /// The directory's name under `logs/`: one of [`IMPORT_DIRS`].
+    pub(crate) half: &'static str,
+    /// Where it is.
+    pub(crate) path: std::path::PathBuf,
+    /// Whether it could answer.
+    pub(crate) state: DirState,
+    /// What its ring holds.
+    held: std::sync::Arc<DirRefusals>,
+}
+
+impl DirEvidence {
+    /// Whether a run of `kind` can write here: `logs/cli` (every run before
+    /// the directory switch, and every cli verb that is not a run),
+    /// `logs/gdfl/store` (a v3 run, the census verbs) and the kind's own
+    /// `logs/gdfl/<kind>` (D-4862).
+    fn serves(&self, kind: &str) -> bool {
+        match self.half.strip_prefix(GDFL_PREFIX) {
+            None | Some(STORE_RUNS) => true,
+            Some(own) => own == kind,
+        }
+    }
+
+    /// The directory as `/imports.json` names it: `logs/<half>`.
+    pub(crate) fn name(&self) -> String {
+        format!("logs/{}", self.half)
+    }
+
+    /// Ring files read.
+    pub(crate) fn files(&self) -> u64 {
+        self.held.files
+    }
+
+    /// Ring bytes read, in all.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.held.bytes
+    }
+
+    /// Importer lines that would not decode.
+    pub(crate) fn malformed(&self) -> u64 {
+        self.held.malformed
+    }
+
+    /// Ring files that could not be read, in their own words.
+    pub(crate) fn errors(&self) -> &[String] {
+        &self.held.errors
+    }
+}
+
+/// The importer's evidence over every directory a GDFL run can log to
+/// ([`IMPORT_DIRS`]), each read through its own tail and merged at the
+/// question (D-4862 round 6; IA-11r R5).
+///
+/// # Why merged, and why by kind
+///
+/// Until the directory switch every run logs to `logs/cli`. After it a run of
+/// a kind logs to `logs/gdfl/<kind>` and a v3 run to `logs/gdfl/store`, and a
+/// reader that still looked in `logs/cli` alone would answer `"none"` for
+/// every new run: the reader looking in the wrong place that [`cli_half`]'s
+/// own doc bans (F78). So a question about a kind reads the three directories
+/// a run of that kind can write, and names each one that could not answer
+/// ([`Self::unread`]): `"none"` is said only when all three were read.
+///
+/// # Identity
+///
+/// [`import_refusals`] returns the SAME `Arc` while no directory's read
+/// moved, so a caller keeps an answer against it by pointer, exactly as it
+/// did against the one `logs/cli` read (`imports::summary`,
+/// `store_route::behind`): the pointer stands for the tuple of the
+/// per-directory reads.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ImportRefusals {
+    /// One per directory of [`IMPORT_DIRS`], in that order.
+    dirs: Vec<DirEvidence>,
+}
+
+/// What a kind's evidence for one day is, and where it was read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Logged<'e> {
+    /// The refusals, oldest first.
+    pub(crate) records: std::borrow::Cow<'e, [telemetry::Record]>,
+    /// The directories (`logs/<half>`) that held any of them.
+    pub(crate) from: Vec<String>,
+}
+
+/// A kind's pace and the directories its newest events were read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pace {
+    /// Gaps measured.
+    pub(crate) gaps: usize,
+    /// The median gap, ms.
+    pub(crate) p50: i64,
+    /// The 90th-percentile gap, ms.
+    pub(crate) p90: i64,
+    /// The newest `day imported` stamp, ms.
+    pub(crate) newest: Option<i64>,
+    /// The directories (`logs/<half>`) whose events are among those measured.
+    pub(crate) from: Vec<String>,
+}
+
+impl ImportRefusals {
+    /// Every directory read, in [`IMPORT_DIRS`] order.
+    pub(crate) fn dirs(&self) -> &[DirEvidence] {
+        &self.dirs
+    }
+
+    /// The directories a run of `kind` can write, in read order: at most 3.
+    fn serving<'s>(&'s self, kind: &'s str) -> impl Iterator<Item = &'s DirEvidence> + 's {
+        self.dirs.iter().filter(move |dir| dir.serves(kind))
+    }
+
+    /// The directories a run of `kind` can write that could NOT answer, each
+    /// as `logs/<half> absent` or `logs/<half> unreadable: <why>`. Empty means
+    /// every one of them was read, the only case in which a reader may say
+    /// `"none"` (D-4862).
+    pub(crate) fn unread(&self, kind: &str) -> Vec<String> {
+        self.serving(kind)
+            .filter_map(|dir| match &dir.state {
+                DirState::Read => None,
+                DirState::Absent => Some(format!("{} absent", dir.name())),
+                DirState::Unreadable(why) => Some(format!("{} unreadable: {why}", dir.name())),
+            })
+            .collect()
+    }
+
+    /// The refusals logged for one kind and day, oldest first, from every
+    /// directory a run of that kind can write. At most three map probes; the
+    /// records are borrowed when one directory holds them all.
+    pub(crate) fn of(&self, kind: &str, day: &str) -> std::borrow::Cow<'_, [telemetry::Record]> {
+        self.logged(kind, day).records
+    }
+
+    /// [`Self::of`], with the directories the refusals were read from.
+    pub(crate) fn logged(&self, kind: &str, day: &str) -> Logged<'_> {
+        let held: Vec<(&DirEvidence, &[telemetry::Record])> = self
+            .dirs
+            .iter()
+            .filter(|dir| dir.serves(kind))
+            .map(|dir| (dir, dir.held.of(kind, day)))
+            .filter(|(_, records)| !records.is_empty())
+            .collect();
+        let from = held.iter().map(|(dir, _)| dir.name()).collect();
+        let records = match held.as_slice() {
+            [] => std::borrow::Cow::Borrowed(&[][..]),
+            [(_, only)] => std::borrow::Cow::Borrowed(*only),
+            several => {
+                let lists: Vec<&[telemetry::Record]> =
+                    several.iter().map(|(_, records)| *records).collect();
+                std::borrow::Cow::Owned(merged_oldest_first(&lists, |record| record.at_unix_millis))
+            }
+        };
+        Logged { records, from }
+    }
+
+    /// Every `(kind, day)` with a logged refusal in `from..=to`, both
+    /// `YYYY-MM-DD`, oldest first, each once whichever directories hold it.
+    /// O(log n + days in the range) per directory, merged without a sort:
+    /// each directory's range is already in `(day, kind)` order.
+    pub(crate) fn days(&self, from: &str, to: &str) -> Vec<(&str, &str)> {
+        let mut ranges: Vec<_> = self
+            .dirs
+            .iter()
+            .map(|dir| {
+                dir.held
+                    .days(from, to)
+                    .filter(move |(kind, _)| dir.serves(kind))
+                    .peekable()
+            })
+            .collect();
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        loop {
+            // THE SMALLEST HEAD, by (day, kind), over at most five ranges.
+            let next = ranges
+                .iter_mut()
+                .filter_map(|range| range.peek().copied())
+                .min_by_key(|(kind, day)| (*day, *kind));
+            let Some(next) = next else {
+                break;
+            };
+            for range in &mut ranges {
+                if range.peek() == Some(&next) {
+                    let _taken = range.next();
+                }
+            }
+            out.push(next);
+        }
+        out
+    }
+
+    /// The import's pace for one kind over its newest [`RATE_WINDOW`] `day
+    /// imported` events wherever they were logged, and the directories those
+    /// events were read from. `None` with fewer than two events.
+    pub(crate) fn pace(&self, kind: &str) -> Option<Pace> {
+        let held: Vec<(&DirEvidence, Vec<i64>)> = self
+            .serving(kind)
+            .filter_map(|dir| {
+                let stamps = dir.held.imported.get(kind)?;
+                Some((dir, stamps.iter().copied().collect::<Vec<i64>>()))
+            })
+            .collect();
+        let lists: Vec<&[i64]> = held.iter().map(|(_, stamps)| stamps.as_slice()).collect();
+        let all = merged_oldest_first(&lists, |stamp| *stamp);
+        let window = all.get(all.len().saturating_sub(RATE_WINDOW)..)?;
+        let (gaps, p50, p90) = pace_of(window)?;
+        let oldest = window.first().copied()?;
+        let from = held
+            .iter()
+            .filter(|(_, stamps)| stamps.last().is_some_and(|newest| *newest >= oldest))
+            .map(|(dir, _)| dir.name())
+            .collect();
+        Some(Pace {
+            gaps,
+            p50,
+            p90,
+            newest: window.last().copied(),
+            from,
+        })
+    }
+
+    /// The `cli` attempts a kind's day was logged under, oldest directory
+    /// first, each once.
+    pub(crate) fn attempts_of(&self, kind: &str, day: &str) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        for dir in self.serving(kind) {
+            for id in dir.held.attempts_of(kind, day) {
+                if !out.contains(id) {
+                    out.push(*id);
+                }
+            }
+        }
+        out
+    }
+
+    /// One `cli` attempt, by its id, and the directory (`logs/<half>`) whose
+    /// ring holds it.
+    pub(crate) fn attempt(&self, id: u64) -> Option<(String, &Attempt)> {
+        self.dirs
+            .iter()
+            .find_map(|dir| dir.held.attempt(id).map(|attempt| (dir.name(), attempt)))
+    }
+
+    /// The `cli` attempt that opened importer run `run`, when a ring names
+    /// one. O(attempts) per directory.
+    pub(crate) fn attempt_of_importer_run(&self, run: u64) -> Option<u64> {
+        self.dirs
+            .iter()
+            .find_map(|dir| dir.held.attempt_of_importer_run(run))
+    }
+
+    /// Whether `other` is the same reads: the same directories in the same
+    /// states holding the same tails, by pointer.
+    fn same_reads(&self, other: &[DirEvidence]) -> bool {
+        self.dirs.len() == other.len()
+            && self.dirs.iter().zip(other).all(|(mine, theirs)| {
+                mine.half == theirs.half
+                    && mine.state == theirs.state
+                    && std::sync::Arc::ptr_eq(&mine.held, &theirs.held)
+            })
+    }
+}
+
+/// Several lists, each already oldest first, as one list oldest first: at
+/// each step the list whose head is oldest gives it up, and an earlier list
+/// wins a tie, so the order is the same on every call. O(items × lists), with
+/// at most five lists here, and no sort.
+fn merged_oldest_first<T: Clone>(lists: &[&[T]], at: impl Fn(&T) -> i64) -> Vec<T> {
+    let mut heads = vec![0usize; lists.len()];
+    let mut out = Vec::with_capacity(lists.iter().map(|list| list.len()).sum());
+    loop {
+        let next = lists
+            .iter()
+            .zip(heads.iter())
+            .enumerate()
+            .filter_map(|(n, (list, head))| list.get(*head).map(|item| (at(item), n)))
+            .min();
+        let Some((_, n)) = next else {
+            return out;
+        };
+        if let (Some(list), Some(head)) = (lists.get(n), heads.get_mut(n)) {
+            if let Some(item) = list.get(*head) {
+                out.push(item.clone());
+            }
+            *head = head.saturating_add(1);
+        }
+    }
+}
+
+/// Each store's merged evidence as last answered, so the same reads are the
+/// same `Arc` again.
+fn evidence_kept() -> &'static std::sync::Mutex<
+    std::collections::HashMap<std::path::PathBuf, std::sync::Arc<ImportRefusals>>,
+> {
+    static KEPT: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<std::path::PathBuf, std::sync::Arc<ImportRefusals>>,
+        >,
+    > = std::sync::OnceLock::new();
+    KEPT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::with_capacity(2)))
+}
+
+/// The GDFL importer's evidence under `store_root`: every directory a GDFL
+/// run can log to ([`IMPORT_DIRS`]: `logs/cli`, `logs/gdfl/<kind>` and
+/// `logs/gdfl/store`), each named `read`, `absent` or `unreadable`
+/// (D-4862 round 6; IA-11r R5; IA-LG-02).
 ///
 /// # Cost
 ///
-/// The first call reads the whole `cli` ring once (at most its 64 MiB
-/// ceiling; 1,158,202 bytes on the operator's store, 9 Oct 2026). After that,
-/// while only the current file grows, a call reads only the bytes appended
-/// since; a roll, or a file replaced, reads the ring again. A line is decoded
-/// only when it names the importer's target.
+/// Per directory one `metadata` call and [`refusals_in`]'s tail: its whole
+/// ring once per api process, then only the bytes appended since. Five
+/// directories, so at most five rings of at most 64 MiB each read once
+/// (`docs/06-limits.md` L-IA-37), and a call that finds nothing new is five
+/// `metadata` calls, five tail checks and one pointer comparison each. The
+/// merge happens at the question, never here.
 pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
-    refusals_in(&cli_half(store_root))
+    let read: Vec<DirEvidence> = IMPORT_DIRS
+        .iter()
+        .map(|half| {
+            let path = store_root.join("logs").join(half);
+            let held = refusals_in(&path);
+            let state = match std::fs::metadata(&path) {
+                Ok(meta) if !meta.is_dir() => {
+                    DirState::Unreadable("it is there and is not a directory".to_owned())
+                }
+                // A RING FILE THAT COULD NOT BE READ leaves the directory
+                // unread in part: it cannot vouch for "none".
+                Ok(_) => held
+                    .errors
+                    .first()
+                    .map_or(DirState::Read, |why| DirState::Unreadable(why.clone())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => DirState::Absent,
+                Err(e) => DirState::Unreadable(e.to_string()),
+            };
+            DirEvidence {
+                half,
+                path,
+                state,
+                held,
+            }
+        })
+        .collect();
+    let mut kept = evidence_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(earlier) = kept.get(store_root)
+        && earlier.same_reads(&read)
+    {
+        return std::sync::Arc::clone(earlier);
+    }
+    let merged = std::sync::Arc::new(ImportRefusals { dirs: read });
+    let _replaced = kept.insert(store_root.to_path_buf(), std::sync::Arc::clone(&merged));
+    merged
 }
 
-/// [`import_refusals`] over a directory a caller names.
-fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
+/// One directory's importer evidence, read through its tail.
+///
+/// # Cost
+///
+/// The first call reads the directory's whole ring once (at most its 64 MiB
+/// ceiling; `logs/cli` held 1,158,202 bytes on the operator's store, 9 Oct
+/// 2026). After that, while only the current file grows, a call reads only
+/// the bytes appended since; a roll, or a file replaced, reads the ring
+/// again. A line is decoded only when it names the importer's target.
+/// `docs/06-limits.md` L-IA-37.
+fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
     use std::io::{Read as _, Seek as _};
     use std::os::unix::fs::MetadataExt as _;
     let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
@@ -3247,7 +3840,7 @@ fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
         });
     let fresh = tail.rolled != rolled || tail.current.0 != identity || len < tail.current.1;
     if fresh {
-        let mut built = ImportRefusals::default();
+        let mut built = DirRefusals::default();
         for path in rolled_paths.iter().rev() {
             match std::fs::read(path) {
                 Ok(bytes) => {
@@ -3304,38 +3897,172 @@ fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
     std::sync::Arc::clone(&tail.built)
 }
 
-/// The GDFL importer's refusals of one kind and day that the `cli` half's
-/// audit stream holds: one probe of its `day` posting. For a day the ring has
-/// rolled away; O(pointers of that day).
+/// `/logs.json`'s body over directories a caller names: the server's own
+/// (when it has one) and every run directory under `store_root`. The handler
+/// is this with the process's own two roots, off the async workers.
+///
+/// Public so `crates/api/benches/ratio/logs_dirs.rs` (C-LG-01) times what
+/// the route runs, the way `json_over` exists so a test can.
+#[must_use]
+pub fn logs_json_over(
+    served: Option<&std::path::Path>,
+    store_root: &std::path::Path,
+    query: &str,
+) -> String {
+    let halves = halves_of(served.map(std::path::Path::to_path_buf), Some(store_root));
+    let asked = asked(query);
+    if asked.keys.is_empty() {
+        json_across(&halves, &asked, None)
+    } else {
+        keyed_json_across(&halves, &asked, None)
+    }
+}
+
+/// How many refusals the importer's evidence holds for one kind and day
+/// under `store_root`: `(in the rings, in the audit streams)`. One read of
+/// each tail and one keyed probe of each of the kind's directories.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs` (C-LG-01), which times
+/// both readers behind `/imports.json`, `/dayflags.json` and `/store`.
+#[must_use]
+pub fn import_evidence_over(store_root: &std::path::Path, kind: &str, day: &str) -> (usize, usize) {
+    let ring = import_refusals(store_root).of(kind, day).len();
+    let audited = audited_import_refusals(store_root, kind, day).records.len();
+    (ring, audited)
+}
+
+/// `/imports.json`'s body over a store a caller names.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs` (C-LG-02): the route's
+/// module is private to the crate, and this one is where the importer's
+/// evidence is read.
+///
+/// # Errors
+///
+/// A query the route refuses, or a journal that cannot be read, in the
+/// route's own words.
+pub fn imports_json_over(store_root: &std::path::Path, query: &str) -> Result<String, String> {
+    let asked = crate::server::imports::asked(query)?;
+    crate::server::imports::answer(store_root, &asked).map(|body| body.to_string())
+}
+
+/// What a keyed read of the importer's audit streams found, and what it
+/// could not read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Audited {
+    /// The lines, oldest first.
+    pub(crate) records: Vec<telemetry::Record>,
+    /// The directories (`logs/<half>`) that held any of them.
+    pub(crate) from: Vec<String>,
+    /// A stream that is there and could not be read, or lines of it that
+    /// could not, in the failure's own words. Never dropped: a reader that
+    /// found nothing and has words here did not read everything.
+    pub(crate) unread: Vec<String>,
+    /// Whether a posting held more pointers than one read takes
+    /// ([`MAX_KEYED_READS`]), so older lines exist that this did not read.
+    pub(crate) capped: bool,
+}
+
+/// One probe of `dimension = value` in the audit stream of every directory in
+/// `halves`, each line kept when `keep` says so: at most [`MAX_KEYED_READS`]
+/// pointers per directory, one positional read each. A directory with no
+/// audit stream holds nothing audited and is passed over; one that is there
+/// and cannot be read is named in `unread`.
+fn audited_in(
+    store_root: &std::path::Path,
+    halves: &[&'static str],
+    dimension: &str,
+    value: &str,
+    keep: impl Fn(&telemetry::Record) -> bool,
+) -> Audited {
+    let mut out = Audited::default();
+    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len());
+    for half in halves {
+        let dir = store_root.join("logs").join(half);
+        let serial = match telemetry::audit_state(&dir) {
+            Ok(Some(serial)) => serial,
+            Ok(None) => continue,
+            Err(why) => {
+                out.unread.push(format!("logs/{half} audit stream: {why}"));
+                continue;
+            }
+        };
+        let postings = match telemetry::audit_postings(&dir, dimension, value, MAX_KEYED_READS) {
+            Ok(postings) => postings,
+            Err(why) => {
+                out.unread.push(format!("logs/{half} audit stream: {why}"));
+                continue;
+            }
+        };
+        out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
+        let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
+        for pointer in &postings.pointers {
+            match telemetry::audit_read(&dir, serial, pointer) {
+                telemetry::AuditLine::Found(record) if keep(&record) => found.push(record),
+                telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
+                telemetry::AuditLine::Unreadable(why) => {
+                    out.unread.push(format!("logs/{half} audit stream: {why}"));
+                }
+            }
+        }
+        if !found.is_empty() {
+            // NEWEST FIRST AS READ; oldest first as answered.
+            found.reverse();
+            out.from.push(format!("logs/{half}"));
+            lists.push(found);
+        }
+    }
+    let lists: Vec<&[telemetry::Record]> = lists.iter().map(Vec::as_slice).collect();
+    out.records = merged_oldest_first(&lists, |record| record.at_unix_millis);
+    out
+}
+
+/// The directories a run of `kind` can write, of [`IMPORT_DIRS`].
+fn import_dirs_of(kind: &str) -> Vec<&'static str> {
+    IMPORT_DIRS
+        .iter()
+        .copied()
+        .filter(|half| match half.strip_prefix(GDFL_PREFIX) {
+            None | Some(STORE_RUNS) => true,
+            Some(own) => own == kind,
+        })
+        .collect()
+}
+
+/// The GDFL importer's refusals of one kind and day that the audit streams
+/// hold: one probe of the `day` posting of each directory a run of that kind
+/// can write (at most 3), for a day a ring has rolled away. O(pointers of
+/// that day), at most [`MAX_KEYED_READS`] per directory (D-4862 round 6).
 pub(crate) fn audited_import_refusals(
     store_root: &std::path::Path,
     kind: &str,
     day: &str,
-) -> Vec<telemetry::Record> {
-    let dir = cli_half(store_root);
-    let Ok(serial) = telemetry::audit_serial(&dir) else {
-        return Vec::new();
-    };
-    let Ok(postings) = telemetry::audit_postings(&dir, "day", day, MAX_KEYED_READS) else {
-        return Vec::new();
-    };
-    let mut out: Vec<telemetry::Record> = postings
-        .pointers
-        .iter()
-        .filter_map(
-            |pointer| match telemetry::audit_read(&dir, serial, pointer) {
-                telemetry::AuditLine::Found(record) => Some(record),
-                _ => None,
-            },
-        )
-        .filter(|record| {
-            record.target == pull::gdfl_import::TARGET
-                && record.level == telemetry::Level::Error
-                && text_of(record, "kind") == Some(kind)
-        })
-        .collect();
-    out.reverse();
-    out
+) -> Audited {
+    audited_in(store_root, &import_dirs_of(kind), "day", day, |record| {
+        record.target == pull::gdfl_import::TARGET
+            && record.level == telemetry::Level::Error
+            && text_of(record, "kind") == Some(kind)
+    })
+}
+
+/// The target a GDFL run's lifecycle events carry, from `run claimed` to
+/// `finished` (the design's §7.1; D-4862). Every event of it at `info` or
+/// above is audited (`telemetry::is_audited`: a target ending `lifecycle`).
+pub(crate) const RUN_LIFECYCLE_TARGET: &str = "gdfl.import.lifecycle";
+
+/// One run's lifecycle events, oldest first: the `run` posting of every
+/// directory a GDFL run can log to (at most 5 probes, at most
+/// [`MAX_KEYED_READS`] pointers each), keyed, never a ring walk. A run from
+/// before those events existed has none, and its `cli` attempt answers
+/// instead (`imports::run_json`).
+pub(crate) fn run_lifecycle(store_root: &std::path::Path, run: u64) -> Audited {
+    audited_in(
+        store_root,
+        &IMPORT_DIRS,
+        "run",
+        &run.to_string(),
+        |record| record.target == RUN_LIFECYCLE_TARGET,
+    )
 }
 
 #[cfg(test)]
@@ -5408,7 +6135,7 @@ mod tests {
     /// at most [`RATE_WINDOW`] events per kind, and none with fewer than two.
     #[test]
     fn the_import_pace_is_the_median_gap_between_its_newest_days() {
-        let mut refusals = ImportRefusals::default();
+        let mut refusals = DirRefusals::default();
         let day = |ms: i64| {
             format!(
                 "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"info\",\
@@ -5480,5 +6207,260 @@ mod tests {
         assert_eq!(third.of("options", "2019-11-18").len(), 1);
         assert_eq!(third.files, 2);
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // IA-11r, R5 (D-4862 round 6): EVERY RUN DIRECTORY IS READ, AND ONE THAT
+    // CANNOT ANSWER IS NAMED
+    // -----------------------------------------------------------------------
+
+    /// A sink on `dir`, made with its parents.
+    fn run_sink(dir: &std::path::Path) -> telemetry::Sink {
+        std::fs::create_dir_all(dir).expect("a run directory");
+        telemetry::Sink::open(&telemetry::Config::new(dir).with_min_level(telemetry::Level::Trace))
+            .expect("opens")
+    }
+
+    /// **THE CLOSED SET NAMES EVERY IMPORT KIND**: the three kind directories
+    /// are `ImportKind::ALL`'s names in its order, so a fourth kind fails here
+    /// until its directory is a row; every importer directory is a run
+    /// directory; and with the server's own there are 8 (D-4862).
+    #[test]
+    fn the_run_directories_name_every_import_kind() {
+        let kinds: Vec<String> = pull::gdfl_import::ImportKind::ALL
+            .iter()
+            .map(|kind| format!("{GDFL_PREFIX}{}", kind.as_str()))
+            .collect();
+        let own: Vec<&str> = IMPORT_DIRS
+            .iter()
+            .copied()
+            .filter(|dir| {
+                dir.strip_prefix(GDFL_PREFIX)
+                    .is_some_and(|rest| rest != STORE_RUNS)
+            })
+            .collect();
+        assert_eq!(own, kinds);
+        assert!(IMPORT_DIRS.iter().all(|dir| RUN_DIRS.contains(dir)));
+        assert_eq!(RUN_DIRS.len() + 1, 8, "the server's own and these");
+        for kind in pull::gdfl_import::ImportKind::ALL {
+            assert_eq!(
+                import_dirs_of(kind.as_str()),
+                [
+                    CLI_SUBDIR.to_owned(),
+                    format!("{GDFL_PREFIX}{}", kind.as_str()),
+                    format!("{GDFL_PREFIX}{STORE_RUNS}"),
+                ],
+                "a kind's evidence is read from three directories"
+            );
+        }
+        let root = std::path::Path::new("/zz-no-such-store");
+        assert_eq!(halves_of(Some(root.join("logs")), Some(root)).len(), 8);
+        assert_eq!(halves_of(None, Some(root)).len(), 7, "no server sink");
+        assert!(halves_of(None, None).is_empty());
+    }
+
+    /// A store whose server logged to `logs/`, an older run to `logs/cli`
+    /// and an indices run (`run claimed`, then a refusal) to
+    /// `logs/gdfl/indices`, each through a real sink; `logs/verify` is a
+    /// FILE, so `logs/verify/zerodha` is neither there nor absent. Returns
+    /// the store's root and the indices run's id.
+    fn every_run_directory_store() -> (std::path::PathBuf, u64) {
+        let root = crate::scratch::path("logs-every-run-directory");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let served_dir = root.join("logs");
+        let run = 1_791_700_000_u64;
+        {
+            let served = run_sink(&served_dir);
+            let cli = run_sink(&served_dir.join("cli"));
+            let indices = run_sink(&served_dir.join("gdfl").join("indices"));
+            assert!(
+                served
+                    .emit(&telemetry::Event::info("api.serve", "the server said this"))
+                    .is_written()
+            );
+            assert!(
+                cli.emit(
+                    &telemetry::Event::error("gdfl.import", "refused")
+                        .with("kind", "options")
+                        .with("day", "2019-11-14")
+                        .with("run", 4_025_u64)
+                )
+                .is_written()
+            );
+            assert!(
+                indices
+                    .emit(
+                        &telemetry::Event::info(RUN_LIFECYCLE_TARGET, "run claimed")
+                            .with("run", run)
+                            .with("kind", "indices")
+                    )
+                    .is_written()
+            );
+            assert!(
+                indices
+                    .emit(
+                        &telemetry::Event::error("gdfl.import", "refused")
+                            .with("run", run)
+                            .with("kind", "indices")
+                            .with("day", "2022-03-07")
+                            .with("code", "malformed_row")
+                    )
+                    .is_written()
+            );
+        }
+        // A DIRECTORY THAT CANNOT BE READ: `logs/verify` is a file, so
+        // `logs/verify/zerodha` is neither there nor absent.
+        std::fs::write(served_dir.join("verify"), b"not a directory").expect("a file");
+        (root, run)
+    }
+
+    /// **`/logs` READS EVERY RUN DIRECTORY** (IA-LG-02, IA-GR-24's reader
+    /// half): an indices run that logged to `logs/gdfl/indices` is on the
+    /// unkeyed page and found by `run=` through that directory's own index; a
+    /// directory no run has created reads `absent` and one that cannot be
+    /// read `unreadable` with its error, by name, never as a directory that
+    /// held nothing. The two-directory reader this replaces finds none of the
+    /// run's lines, which is the defect (F78).
+    #[test]
+    fn logs_reads_every_run_directory() {
+        let (root, run) = every_run_directory_store();
+        let served_dir = root.join("logs");
+        let halves = halves_of(Some(served_dir.clone()), Some(&root));
+        assert_eq!(halves.len(), 8);
+        let state_of = |body: &serde_json::Value, half: &str| -> (String, serde_json::Value) {
+            let dir = body["dirs"]
+                .as_array()
+                .expect("dirs")
+                .iter()
+                .find(|dir| dir["half"] == half)
+                .unwrap_or_else(|| panic!("{half} is not named: {body:#}"));
+            (
+                dir["state"].as_str().expect("a state").to_owned(),
+                dir["error"].clone(),
+            )
+        };
+
+        // UNKEYED: every directory's lines, and every directory named.
+        let unkeyed: serde_json::Value =
+            serde_json::from_str(&json_across(&halves, &asked(""), None)).expect("JSON");
+        let messages: Vec<&str> = unkeyed["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| record["message"].as_str().expect("a message"))
+            .collect();
+        assert_eq!(messages.len(), 4, "{unkeyed:#}");
+        assert!(messages.contains(&"run claimed"), "{messages:?}");
+        assert!(messages.contains(&"the server said this"), "{messages:?}");
+        assert_eq!(unkeyed["dirs"].as_array().expect("dirs").len(), 8);
+        assert_eq!(state_of(&unkeyed, "served").0, "read");
+        assert_eq!(state_of(&unkeyed, "cli").0, "read");
+        assert_eq!(state_of(&unkeyed, "gdfl/indices").0, "read");
+        for never_created in ["gdfl/stocks", "gdfl/options", "gdfl/store"] {
+            assert_eq!(
+                state_of(&unkeyed, never_created),
+                ("absent".to_owned(), serde_json::Value::Null),
+                "{never_created}"
+            );
+        }
+        let (state, error) = state_of(&unkeyed, "verify/zerodha");
+        assert_eq!(state, "unreadable");
+        assert!(error.is_string(), "its error is said: {error}");
+
+        // KEYED BY THE RUN: both of its audited lines, from its own directory.
+        let by_run = asked(&format!("run={run}&durable=1"));
+        assert!(!by_run.keys.is_empty(), "run= with durable=1 is a key");
+        let keyed: serde_json::Value =
+            serde_json::from_str(&keyed_json_across(&halves, &by_run, None)).expect("JSON");
+        let rows = keyed["keyed"]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2, "{keyed:#}");
+        assert!(
+            rows.iter()
+                .all(|row| row["half"] == "gdfl/indices" && row["source"] == "audit"),
+            "{rows:?}"
+        );
+        assert_eq!(state_of(&keyed, "gdfl/stocks").0, "absent");
+        assert_eq!(keyed["keyed"]["index"]["capped"], false);
+
+        // THE READER THIS REPLACES read the server's directory and `logs/cli`,
+        // and finds nothing of the run.
+        let two: serde_json::Value = serde_json::from_str(&keyed_json(
+            &served_dir,
+            Some(&served_dir.join("cli")),
+            &by_run,
+            None,
+        ))
+        .expect("JSON");
+        assert_eq!(two["keyed"]["matched"], 0, "{two:#}");
+
+        // THE PAGE names each directory with its state too.
+        let page = page_across(&halves, &asked(""), None);
+        assert!(page.contains("<code>gdfl/stocks</code> absent"), "{page}");
+        assert!(page.contains("<code>gdfl/indices</code> read"), "{page}");
+        assert!(
+            page.contains("<code>verify/zerodha</code> unreadable"),
+            "{page}"
+        );
+        let keyed_page = page_across(&halves, &by_run, None);
+        assert!(keyed_page.contains("run claimed"), "{keyed_page}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE AUDIT STREAM'S HEALTH NAMES THE REAPER** (D-4838): what waits
+    /// for deletion, what was deleted, what could not be, and `reaper_behind`
+    /// with `loud` once more than the stream keeps files wait.
+    #[test]
+    fn the_audit_health_names_the_reaper() {
+        let quiet = telemetry::AuditHealth {
+            gone_waiting: 1,
+            reaped: 7,
+            ..telemetry::AuditHealth::default()
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&audit_json_of(Some(&quiet))).expect("JSON");
+        assert_eq!(body["gone_waiting"], 1);
+        assert_eq!(body["reaped"], 7);
+        assert_eq!(body["reap_failures"], 0);
+        assert_eq!(body["reaper_behind"], false);
+        assert_eq!(body["reap_error"], serde_json::Value::Null);
+        assert_eq!(body["loud"], false);
+        let behind = telemetry::AuditHealth {
+            gone_waiting: u64::from(telemetry::AUDIT_KEEP_FILES) + 1,
+            reap_failures: 1,
+            reap_error: Some("ZZ: cannot delete".to_owned()),
+            ..telemetry::AuditHealth::default()
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&audit_json_of(Some(&behind))).expect("JSON");
+        assert_eq!(body["reaper_behind"], true);
+        assert_eq!(body["reap_failures"], 1);
+        assert_eq!(body["reap_error"], "ZZ: cannot delete");
+        assert_eq!(body["loud"], true);
+        assert_eq!(audit_json_of(None), "null");
+    }
+
+    /// **SEVERAL LISTS MERGE OLDEST FIRST, AN EARLIER LIST WINNING A TIE**:
+    /// empty lists, one list, equal stamps and interleaved ones.
+    #[test]
+    fn lists_merge_oldest_first_without_a_sort() {
+        let at = |item: &(i64, &str)| item.0;
+        let none: [&[(i64, &str)]; 0] = [];
+        assert!(merged_oldest_first(&none, at).is_empty());
+        assert!(merged_oldest_first(&[&[][..], &[][..]], at).is_empty());
+        let one = [(1, "a"), (2, "b")];
+        assert_eq!(merged_oldest_first(&[&one[..]], at), one);
+        let left = [(1, "l1"), (5, "l5"), (5, "l5b")];
+        let right = [(0, "r0"), (5, "r5"), (9, "r9")];
+        assert_eq!(
+            merged_oldest_first(&[&left[..], &[][..], &right[..]], at),
+            [
+                (0, "r0"),
+                (1, "l1"),
+                (5, "l5"),
+                (5, "l5b"),
+                (5, "r5"),
+                (9, "r9")
+            ]
+        );
     }
 }
