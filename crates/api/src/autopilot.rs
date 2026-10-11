@@ -2118,6 +2118,17 @@ pub struct Control {
     /// moved since — a run that began after the pause captures the new value
     /// and is unaffected.
     epoch: AtomicU64,
+    /// The HAND runs' stop generation, apart from the autopilot's (DB-B28,
+    /// DB-B29).
+    ///
+    /// A hand run (`POST /pull/run`'s legs and a single `POST /pull/spot`)
+    /// captured [`Self::epoch`] too, so the autopilot's Pause aborted a hand
+    /// leg mid-universe and its conductor re-ran it from the first instrument;
+    /// and the run's own Stop moved nothing a leg checked, so it bit only
+    /// between legs, hours away (one 1min leg ran 9,300 s). A hand run now
+    /// captures this generation and checks it per instrument: Stop moves it
+    /// ([`Self::stop_hand`]) and Pause does not.
+    hand: AtomicU64,
     /// The in-process pull seats — **one per feed**, not one per process.
     ///
     /// `pull::ingest`'s census lock **refuses rather than queues**, and it is
@@ -2288,6 +2299,7 @@ impl Control {
         Self {
             paused: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            hand: AtomicU64::new(0),
             seats: AtomicU8::new(0),
             status: std::sync::Mutex::new(Status::default()),
         }
@@ -2361,6 +2373,55 @@ impl Control {
     #[must_use]
     pub fn stopped(&self, at: u64) -> bool {
         self.epoch.load(Ordering::Relaxed) != at
+    }
+
+    /// The stop generation a run driven by `driver` captures when it starts:
+    /// a hand run's own ([`Self::stop_hand`] moves it), or the autopilot's for
+    /// the autopilot and a recovery, which Pause moves (DB-B28, DB-B29).
+    #[must_use]
+    pub fn epoch_for(&self, driver: Driver) -> u64 {
+        match driver {
+            Driver::Hand => self.hand.load(Ordering::Relaxed),
+            Driver::Autopilot | Driver::Recovery => self.epoch(),
+        }
+    }
+
+    /// Whether a run driven by `driver` that captured `at` has been asked to
+    /// stop. One relaxed load and one comparison, inside the instrument loop.
+    #[must_use]
+    pub fn stopped_for(&self, driver: Driver, at: u64) -> bool {
+        match driver {
+            Driver::Hand => self.hand.load(Ordering::Relaxed) != at,
+            Driver::Autopilot | Driver::Recovery => self.stopped(at),
+        }
+    }
+
+    /// Ask every HAND run in flight to stop at its next instrument: the
+    /// operator's Stop on `/ingest` (`POST /pull/run/stop`). Moves nothing the
+    /// autopilot checks, so a paused or running backfill is untouched; a hand
+    /// run that starts after this captures the new value and is unaffected.
+    pub fn stop_hand(&self) -> u64 {
+        let epoch = self.hand.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.pull", "hand runs asked to stop")
+                .with("hand_epoch", telemetry::Value::Uint(epoch)),
+        );
+        epoch
+    }
+
+    /// Whether the cell published right now is a HAND run's: the one fact
+    /// `POST /pull/run/stop` needs to say whether a single per-row pull is in
+    /// flight (DB-B30). `false` on a poisoned status lock, which a Stop then
+    /// reports as nothing found rather than guessing.
+    #[must_use]
+    pub fn hand_in_flight(&self) -> bool {
+        self.inspect(|status| {
+            status
+                .now
+                .as_ref()
+                .is_some_and(|now| now.driver == Driver::Hand)
+        })
+        .unwrap_or(false)
     }
 
     /// Take the one pull seat, or `None` when something else holds it.

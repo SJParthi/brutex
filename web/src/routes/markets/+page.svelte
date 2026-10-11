@@ -108,6 +108,10 @@
    */
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { pooled, IN_FLIGHT } from '$lib/pooled.js';
+  // THE BOUNDED BAR PAGE (WP-61; DB-041, DB-080): a month file too big to read
+  // whole is read as its newest bars, a thousand at a time.
+  import { readWindowPage } from '$lib/database-pages.js';
+  import { foldBars, tailCut, tailPlan, TAIL_PAGE } from '$lib/markets-tail.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { onDestroy } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
@@ -920,6 +924,27 @@
   );
 
   /**
+   * A MONTH FILE TOO BIG TO READ WHOLE IS CHARTED FROM ITS NEWEST BARS, AND
+   * THE PAGE SAYS SO (WP-61; DB-041, DB-080).
+   *
+   * `/bars.json` answers one whole month file. That is about 8,600 bars for a
+   * one-minute series and it was the only read this page had; a one-second
+   * month is 380,000 to 500,000 bars and 52.8 MB of JSON (measured 11 Oct 2026:
+   * NIFTY 1s 2026-09, 382,496 bars, 52,784,449 bytes), so a feed filed at one
+   * second could be listed here and never charted. The rule is the SIZE the
+   * census states, not the feed or the rung: when any month asked for holds
+   * more than `tailPlan`'s bound, the chart reads the newest bars of the asked
+   * months through `/bars/window.json` (1,000 rows a page, a seek and not a
+   * scan: 7 ms and 213 KB measured for the same series) and names how many of
+   * how many it drew. `$lib/markets-tail.js` holds the rule and its test.
+   */
+  const tail = $derived(
+    tailPlan(monthsAtBase.filter((m) => wantMonths.includes(m.month)).map((m) => ({ month: m.month, rows: m.rows })))
+  );
+  /** What the bounded read drew, in the server's own counts; `null` for a whole read. */
+  let tailRead = $state(/** @type {{ drawn: number, total: number, from: string, to: string } | null} */ (null));
+
+  /**
    * @param {string} month `YYYY-MM`
    * @param {string} rung the timeframe the month is pinned AT — a pin is the
    *        pair, never a bare month.
@@ -1040,13 +1065,50 @@
     return { bars, faults: Array.isArray(body) ? null : (body?.faults ?? null) };
   }
 
+  /**
+   * The newest bars of `plan`'s months, bounded: `plan.pages` requests of
+   * `TAIL_PAGE` rows, newest first, stopped early when the series is shorter.
+   *
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   * @param {{ from: string, to: string, pages: number }} plan
+   * @param {string} feed
+   * @param {string} rung
+   * @param {AbortSignal} signal
+   * @returns {Promise<{ bars: Bar[], faults: string | null, total: number }>}
+   */
+  async function readTail(row, plan, feed, rung, signal) {
+    const { exchange, segment, symbol } = row;
+    if (typeof exchange !== 'string' || typeof segment !== 'string' || typeof symbol !== 'string')
+      throw new Error('this row does not name an exchange, a segment and a symbol, so there is no series to ask for.');
+    /** @type {Bar[]} */
+    const bars = [];
+    /** @type {string[]} */
+    const faults = [];
+    let total = 0;
+    for (let page = 0; page < plan.pages; page += 1) {
+      const q = new URLSearchParams({
+        feed, exchange, segment, symbol, timeframe: rung,
+        from: plan.from, to: plan.to, sort: 'ts', dir: 'desc',
+        offset: String(page * TAIL_PAGE), limit: String(TAIL_PAGE)
+      });
+      const body = await readWindowPage(q.toString(), TAIL_PAGE, signal);
+      total = body.total;
+      if (body.faults) faults.push(String(body.faults));
+      bars.push(...body.bars);
+      if (body.bars.length < TAIL_PAGE) break;
+    }
+    return { bars, faults: faults.join('; ') || null, total };
+  }
+
   $effect(() => {
     const row = picked;
     const feed = feeds.active;
     const rung = base;
     const months = wantMonths;
+    const plan = tail;
     void barsRetry; // READ, NOT USED — it is what makes "Retry the read" a read
     chartRequests.cancel();
+    tailRead = null;
 
     if (!row || !feed || !rung || months.length === 0) {
       barsLoading = false;
@@ -1059,9 +1121,19 @@
     barsError = null;
     void chartRequests.run(async (ticket) => {
       try {
-        const parts = await pooled(months, IN_FLIGHT,
-          (m) => readMonth(row, m, feed, rung, ticket.signal), ticket.signal);
-        if (!ticket.current()) return;
+        /** @type {{ bars: Bar[], faults: string | null }[]} */
+        let parts;
+        if (plan.bounded) {
+          const got = await readTail(row, plan, feed, rung, ticket.signal);
+          if (!ticket.current()) return;
+          parts = [got];
+          tailRead = { drawn: got.bars.length, total: got.total, from: plan.from, to: plan.to };
+        } else {
+          parts = await pooled(months, IN_FLIGHT,
+            (m) => readMonth(row, m, feed, rung, ticket.signal), ticket.signal);
+          if (!ticket.current()) return;
+          tailRead = null;
+        }
         rawBars = parts.flatMap((p) => p.bars).sort((a, b) => cmp(a.t, b.t));
         barsFaults = parts.map((p) => p.faults).filter(Boolean).join('; ') || null;
         barsError = null;
@@ -1081,31 +1153,22 @@
      Done on the paisa integers: min, max and last are exact on integers and
      lossy on floats. Buckets are aligned to IST, so an hourly candle breaks
      on the hour an Indian trader sees rather than 30 minutes off it. */
-  /**
-   * @param {Bar[]} raw
-   * @param {number | null} seconds
-   * @returns {Bar[]}
-   */
-  function aggregate(raw, seconds) {
-    if (seconds === null) return [];
-    /** @type {Bar[]} */
-    const out = [];
-    /** @type {Bar | null} */
-    let cur = null;
-    for (const b of raw) {
-      const start = Math.floor((b.t + IST_OFFSET) / seconds) * seconds - IST_OFFSET;
-      if (!cur || cur.t !== start) {
-        cur = { t: start, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v };
-        out.push(cur);
-      } else {
-        if (b.h > cur.h) cur.h = b.h;
-        if (b.l < cur.l) cur.l = b.l;
-        cur.c = b.c;
-        cur.v += b.v;
-      }
-    }
-    return out;
-  }
+  /* The fold is `$lib/markets-tail.js` `foldBars`, where a test drives it.
+
+     A BOUNDED READ IS CUT ON A BUCKET EDGE OF THE DRAWN RUNG (WP-61 repair).
+     The newest 5,000 bars end at whatever second the 5,000th fell on, so the
+     oldest bucket of a coarser rung was a fragment, and it was folded and
+     drawn as a whole candle: GDFL NIFTY 1s at 5m drew 14:05 IST of 24 Sep 2026
+     from 200 of its 300 seconds, open 23065.20 against the stored 23058.40.
+     `tailCut` drops the bars of that bucket when older bars exist that were
+     not read and the bucket's first second is not among those read; the strip
+     says how many were left out and of which candle. The cut is per drawn
+     rung, so changing the rung re-cuts the same read. */
+  const tailDrawn = $derived(
+    tailRead && !asStored
+      ? tailCut(rawBars, tfSeconds, IST_OFFSET, tailRead.drawn < tailRead.total)
+      : { bars: rawBars, cut: null }
+  );
 
   /* ======================================================================
      THE CHART'S HALF OF THE ONE LIST.
@@ -1138,7 +1201,7 @@
    * the reason that was computed from it. One read, carried.
    *
    * @typedef {{
-   *   kind: 'nolist'|'gone'|'idle'|'error'|'wait'|'unreadable'|'nodata'|'norung'|'pinmiss',
+   *   kind: 'nolist'|'gone'|'idle'|'error'|'wait'|'unreadable'|'nodata'|'norung'|'pinmiss'|'tailshort',
    *   tsub: string,
    *   why: string | null,
    *   raw?: boolean,
@@ -1209,6 +1272,20 @@
         why: `Reading ${group(wantMonths.length)} month file${wantMonths.length === 1 ? '' : 's'} at ${base}…`
       };
     if (barsError) return { kind: 'error', raw: true, tsub: 'that read failed', chartOnly: true, why: barsError };
+    // THE BOUNDED READ HOLDS NO WHOLE CANDLE OF THIS RUNG. Every bar read lies
+    // in one bucket whose earlier bars were not read: a fragment, which is not
+    // drawn as a candle. Said, with the rung that does fit.
+    if (tailDrawn.cut && tailDrawn.bars.length === 0)
+      return {
+        kind: 'tailshort',
+        tsub: `no whole ${tf} candle in the bars read`,
+        chartOnly: true,
+        why:
+          `The ${group(tailDrawn.cut.dropped)} newest ${base} bars read (${stampLabel(tailDrawn.cut.first * 1000)} – ${stampLabel(tailDrawn.cut.last * 1000)} IST) ` +
+          `all belong to the ${tf} candle that opens ${stampLabel(tailDrawn.cut.bucket * 1000)} IST, and that candle's earlier bars were not read ` +
+          `(${group(tailRead?.drawn ?? 0)} of ${group(tailRead?.total ?? 0)} read). A part of a candle is not drawn as the candle. ` +
+          `Pick a shorter timeframe here, or read the whole series on /db.`
+      };
     return null;
   });
 
@@ -1234,7 +1311,7 @@
       ? []
       : asStored
         ? rawBars.map((b) => ({ t: b.t, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v }))
-        : aggregate(rawBars, tfSeconds)
+        : foldBars(tailDrawn.bars, tfSeconds, IST_OFFSET)
   );
   const hasVolume = $derived(drawn.some((b) => b.v > 0));
   const byTime = $derived(new Map(drawn.map((b) => [b.t, b])));
@@ -2222,7 +2299,18 @@
           <span class="arrow">—</span>
           <span class="whyshort">{chartReason.why}</span>
         {:else}
-          <span class="seg"><u>read</u><b>{group(wantRecords)} × {base} bars</b></span>
+          {#if tail.bounded}
+            <span
+              class="seg warn"
+              data-markets-tail={tailRead ? 'read' : 'reading'}
+              title={`${tail.why} The whole series is on /db, paged.`}
+              ><u>read · newest only</u><b
+                >{tailRead ? group(tailRead.drawn) : '…'} of {group(tailRead?.total ?? wantRecords)} × {base} bars</b
+              ></span
+            >
+          {:else}
+            <span class="seg"><u>read</u><b>{group(wantRecords)} × {base} bars</b></span>
+          {/if}
           <span class="arrow">from</span>
           <span class="seg">
             <u>files</u>
@@ -2234,6 +2322,16 @@
             >
           </span>
           <span class="arrow">→</span>
+          {#if tailDrawn.cut}
+            {@const cut = tailDrawn.cut}
+            <span
+              class="seg warn"
+              data-markets-tail-cut={cut.dropped}
+              title={`The read is the newest ${group(tailRead?.drawn ?? 0)} of ${group(tailRead?.total ?? 0)} ${base} bars, and its oldest bar is ${stampLabel(cut.first * 1000)} IST: after the ${tf} candle that opens ${stampLabel(cut.bucket * 1000)} IST had begun. That candle's earlier bars were not read, so the ${group(cut.dropped)} bars of it that were (to ${stampLabel(cut.last * 1000)} IST) are left out: folding them would draw a candle with the wrong open, high and low. The first candle drawn opens ${stampLabel(cut.until * 1000)} IST or later.`}
+              ><u>cut · part of one {tf} candle</u><b>{group(cut.dropped)} × {base} bars not drawn</b></span
+            >
+            <span class="arrow">→</span>
+          {/if}
           <span class="seg vic"><u>drawn</u><b>{group(drawn.length)} × {tf} {asStored ? 'as stored' : 'derived'}</b></span>
           <span class="arrow">·</span>
           <span

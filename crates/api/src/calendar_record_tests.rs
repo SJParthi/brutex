@@ -450,3 +450,118 @@ fn a_whole_zerodha_span_is_tens_of_kilobytes() {
         at(2026, 9, 30) - at(2015, 1, 1) + 1
     );
 }
+
+/// **DB-B42: WIDENED TO THE RECORD, A DAY PAST THE HELD SPAN IS THE RECORD'S,
+/// NEVER A GUESSED WEEKDAY.** A GDFL-like answer held 2022-03-02..2022-03-31 is
+/// widened to 2018-01-01..2026-10-04: 2026-10-02 (Gandhi Jayanti) reads
+/// closed, 2026-09-30 an auction session, every added day is held `-`, the
+/// held count and the held span are unchanged, and the added sessions are
+/// counted and listed as unread, in day order.
+#[test]
+fn a_held_answer_widened_to_the_record_reads_the_records_codes_beyond_it() {
+    let month = store::path::YearMonth::new(2022, 3).expect("a month");
+    let mut counts = [0_u32; 31];
+    for (offset, count) in counts.iter_mut().enumerate() {
+        let day = at(2022, 3, 1) + i64::try_from(offset).expect("small");
+        if record_code(day).is_some_and(is_session) && day != at(2022, 3, 1) {
+            *count = 22_000;
+        }
+    }
+    let read = Reading::from_months(
+        "NIFTY",
+        &[(
+            month,
+            Some(crate::calendar_of::tests::month_days_of(counts)),
+        )],
+    );
+    let asked = Asked {
+        feed: "gdfl",
+        rung: Timeframe::SECOND_1,
+        rung_asked: false,
+        target: Target::Exchange,
+        generation: Some(7),
+    };
+    let held_body = answer(
+        &asked,
+        std::slice::from_ref(&read),
+        std::slice::from_ref(&read),
+        &[],
+    );
+    let held = parse(&held_body);
+    let widened = parse(&widen_to_record(&held_body, None).expect("an ok answer widens"));
+    assert_eq!(widened["span"], "record");
+    assert_eq!(widened["fromDate"], "2018-01-01");
+    assert_eq!(widened["toDate"], "2026-10-04");
+    assert_eq!(widened["heldSpan"]["from"], held["fromDate"]);
+    assert_eq!(widened["heldSpan"]["to"], held["toDate"]);
+    assert_eq!(
+        widened["sessions"], held["sessions"],
+        "what is held is unchanged"
+    );
+    let days = widened["days"].as_str().expect("days");
+    let held_digits = widened["held"].as_str().expect("held");
+    let from = widened["from"].as_i64().expect("from");
+    assert_eq!(days.len(), held_digits.len());
+    assert_eq!(
+        i64::try_from(days.len()).expect("small"),
+        pull::calendar::SOURCED_LAST_DAY - pull::calendar::SOURCED_FIRST_DAY + 1
+    );
+    let code_on = |day: i64| {
+        let index = usize::try_from(day - from).expect("inside");
+        (&days[index..=index], &held_digits[index..=index])
+    };
+    assert_eq!(
+        code_on(at(2026, 10, 2)),
+        (".", "-"),
+        "Gandhi Jayanti is closed by the record"
+    );
+    assert_eq!(code_on(at(2026, 9, 30)), ("X", "-"));
+    assert_eq!(code_on(at(2018, 1, 1)), ("R", "-"));
+    assert_eq!(
+        code_on(at(2022, 3, 7)).1,
+        "1",
+        "the held digits are the store's"
+    );
+    let added = widened["calendarSessions"].as_u64().expect("count")
+        - held["calendarSessions"].as_u64().expect("count");
+    let listed = widened["sessionsUnread"]["count"].as_u64().expect("count")
+        - held["sessionsUnread"]["count"].as_u64().expect("count");
+    assert_eq!(added, listed, "every added session is unread, never held");
+    assert!(added > 2000, "eight years of sessions were added: {added}");
+    assert_eq!(widened["sessionsUnread"]["days"][0]["date"], "2018-01-01");
+    assert_eq!(widened["sessionsUnread"]["truncated"], true);
+    // THE RECORD'S SPECIAL DAYS ACROSS THE WHOLE SPAN, not the held month's.
+    assert!(
+        widened["special"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .any(|day| day["date"] == "2018-11-07"),
+        "{}",
+        widened["special"]
+    );
+    // A WITHHELD ANSWER IS NOT WIDENED.
+    let none = withheld("gdfl", None, Target::Exchange, None, "nothing held");
+    assert_eq!(widen_to_record(&none, None), None);
+    // AND IT SAYS IT WAS NOT (WP-61 repair): `span: held`, the reason, and
+    // every field it had, unchanged. It used to carry no `span` at all.
+    let before = parse(&none);
+    assert_eq!(before.get("span"), None);
+    let said = parse(&not_widened(&none).expect("a JSON object is marked"));
+    assert_eq!(said["span"], "held");
+    let sentence = said["spanNote"].as_str().expect("a sentence");
+    assert!(sentence.contains("NOT widened"), "{sentence}");
+    assert!(
+        sentence.contains(before["status"].as_str().expect("a status")),
+        "{sentence}"
+    );
+    for (key, field) in before.as_object().expect("an object") {
+        assert_eq!(&said[key], field, "{key} is untouched");
+    }
+    // A FINISHED ANSWER KEEPS THE WIDENED SPAN'S OWN WORD, never this one.
+    assert_eq!(widened["span"], "record");
+    // Not an object: answered as it is, never invented into one.
+    assert_eq!(not_widened("[1,2]"), None);
+    assert_eq!(not_widened("not json"), None);
+    assert_eq!(not_widened(""), None);
+}

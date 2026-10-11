@@ -273,6 +273,87 @@ pub struct Progress {
     /// makes is now addressed to its own number and lands nowhere once the slot
     /// holds another. Not rendered: the page has no use for it. D-2760.
     pub generation: u64,
+    /// When the run was claimed, in Unix milliseconds by the server's clock,
+    /// or `None` for the never-ran document.
+    ///
+    /// # Why (DB-B32)
+    ///
+    /// A tab reloaded mid-run, or a second tab, restarted the elapsed clock at
+    /// its own load and measured the run against its own feed and selection,
+    /// because this document carried no start time and no account of what was
+    /// asked: a Zerodha run watched with GDFL active read "Reading Global
+    /// Datafeeds", with GDFL's census as its denominator. The start and the
+    /// legs below are the run's own, so a resumed page adopts them read-only.
+    pub started_at_ms: Option<u64>,
+    /// What each leg asked for, in the order the run was sent (DB-B32).
+    pub asked: Vec<AskedLeg>,
+}
+
+/// One leg as it was asked: its feed, rung, label and the window and
+/// instruments its form names. Read from the leg's own form body with the same
+/// [`crate::server::param`] the route that runs it uses, never re-derived.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AskedLeg {
+    /// The route it is sent to.
+    pub route: String,
+    /// The feed's wire key.
+    pub vendor: String,
+    /// The rung (`1day`, `1min`, `futures`, `options`).
+    pub dir: String,
+    /// The page's label for it.
+    pub label: String,
+    /// The form's `target` (the universe it names), or empty.
+    pub target: String,
+    /// The form's first day, as sent.
+    pub from: String,
+    /// The form's last day, as sent.
+    pub to: String,
+    /// How many `member=` fields the form carries; zero means every member of
+    /// the target, which is how the page sends "all ticked".
+    pub members: usize,
+}
+
+impl AskedLeg {
+    /// The leg as its own form names it.
+    #[must_use]
+    pub fn of(leg: &Leg) -> Self {
+        let field = |name: &str| crate::server::param(&leg.body, name);
+        Self {
+            route: leg.route.path().to_owned(),
+            vendor: leg.vendor.clone(),
+            dir: leg.dir.clone(),
+            label: leg.label.clone(),
+            target: field("target"),
+            from: field("from"),
+            to: field("to"),
+            members: crate::server::params(&leg.body, "member").len(),
+        }
+    }
+
+    /// The leg as one JSON object, appended to `out`.
+    fn json(&self, out: &mut String) {
+        for (nth, (name, value)) in [
+            ("route", &self.route),
+            ("vendor", &self.vendor),
+            ("dir", &self.dir),
+            ("label", &self.label),
+            ("target", &self.target),
+            ("from", &self.from),
+            ("to", &self.to),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out.push(if nth == 0 { '{' } else { ',' });
+            out.push('"');
+            out.push_str(name);
+            out.push_str("\":");
+            out.push_str(&quote_for_json(value));
+        }
+        out.push_str(",\"members\":");
+        out.push_str(&self.members.to_string());
+        out.push('}');
+    }
 }
 
 /// The last generation handed out. Starts at zero, which no claim receives.
@@ -292,6 +373,20 @@ impl Progress {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 .wrapping_add(1),
             ..Self::default()
+        }
+    }
+
+    /// A claimed document stamped with when it was claimed and what its legs
+    /// ask for (DB-B32): the constructor `POST /pull/run` uses.
+    #[must_use]
+    pub fn claimed_for(legs: &[Leg], now: std::time::SystemTime) -> Self {
+        Self {
+            started_at_ms: now
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|since| u64::try_from(since.as_millis()).ok()),
+            asked: legs.iter().map(AskedLeg::of).collect(),
+            ..Self::claimed()
         }
     }
 
@@ -335,6 +430,22 @@ impl Progress {
             Some(word) => out.push_str(&quote_for_json(word)),
             None => out.push_str("null"),
         }
+        // THE RUN'S OWN START AND ASK (DB-B32): a page that picks this run up
+        // after a reload states these, never its own clock and selection.
+        out.push_str(",\"startedAtMs\":");
+        out.push_str(
+            &self
+                .started_at_ms
+                .map_or_else(|| "null".to_owned(), |ms| ms.to_string()),
+        );
+        out.push_str(",\"asked\":[");
+        for (nth, leg) in self.asked.iter().enumerate() {
+            if nth > 0 {
+                out.push(',');
+            }
+            leg.json(&mut out);
+        }
+        out.push(']');
         out.push_str(",\"feeds\":[");
         for (nth, feed) in self.feeds.iter().enumerate() {
             if nth > 0 {
@@ -888,9 +999,47 @@ fn note_leg_failure(
     run: u64,
     nth: usize,
     leg: &Leg,
-    status: axum::http::StatusCode,
+    (status, html): (axum::http::StatusCode, &str),
     outcome: LegOutcome,
 ) {
+    // THE RECEIPT'S OWN REFUSAL, WHEN IT STATES ONE (DB-B37). A seat-busy 409
+    // returns before any journal write, so "the reason is in the audit
+    // journal" sent the operator to a record that was never written. The
+    // receipt's `Refused because` line is the reason, and it is carried.
+    //
+    // WHETHER A RECORD EXISTS IS THE RECEIPT'S OWN `Recorded` LINE, never an
+    // inference from the refusal: two spot receipts carry `Refused because`
+    // AND a journal record (`server::recorded_fact` appends it: a blocked run,
+    // and a mapping that reached nothing), and for those this said "no journal
+    // record was written" about a record that exists. Only a receipt with no
+    // `Recorded` fact (the seat 409, the unknown-feed 400: both return before
+    // any append) is a door refusal.
+    if let Some(said) = receipt_refusal(html) {
+        let journal = match receipt_fact(html, "Recorded") {
+            Some(recorded) => format!("the receipt's Recorded line: {recorded}"),
+            None => "no journal record was written for a request refused at the door".to_owned(),
+        };
+        let kind = if outcome == LegOutcome::Retry {
+            "this leg remains owed and is eligible for another pass"
+        } else {
+            "this feed is halted for the rest of this run"
+        };
+        with_progress(site, run, |progress| {
+            if let Some(feed) = progress.feeds.get_mut(nth) {
+                if feed.last_error.is_none()
+                    || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
+                {
+                    feed.last_error = Some(format!(
+                        "{} answered HTTP {}: {said} ({kind}; {journal})",
+                        leg.label,
+                        status.as_u16()
+                    ));
+                }
+                feed.credential_dead |= outcome == LegOutcome::Credential;
+            }
+        });
+        return;
+    }
     let reason = match outcome {
         LegOutcome::Credential => {
             "CREDENTIAL or authorization failure. This feed is halted \
@@ -921,6 +1070,29 @@ fn note_leg_failure(
             feed.credential_dead |= outcome == LegOutcome::Credential;
         }
     });
+}
+
+/// The `Refused because` line of a receipt page, unescaped, or `None` when
+/// the receipt states none: the reason a request refused at the door (a held
+/// seat, an unreadable feed) gives, which no journal record repeats. DB-B37.
+fn receipt_refusal(html: &str) -> Option<String> {
+    receipt_fact(html, "Refused because")
+}
+
+/// One fact of a receipt page by its label, unescaped, or `None` when the
+/// receipt carries no such row (or an empty one). The first row wins, as the
+/// first verdict badge does in [`leg_outcome`].
+fn receipt_fact(html: &str, label: &str) -> Option<String> {
+    let (_, rest) = html.split_once(&format!("<th>{label}</th><td>"))?;
+    let (cell, _) = rest.split_once("</td>")?;
+    let text = cell
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// Run one feed's legs sequentially. Only a response that actually returned
@@ -972,7 +1144,7 @@ where
             clean.store(true, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
-        note_leg_failure(&site, run, nth, leg, status, outcome);
+        note_leg_failure(&site, run, nth, leg, (status, &html), outcome);
         if leg.route == Route::Spot {
             failed_spot_rank = Some(ladder_rank(&leg.dir));
         }
@@ -1560,6 +1732,56 @@ mod tests {
         }
     }
 
+    /// DB-B32: the document names the run's own start and what each leg
+    /// asked, read from the leg's own form, so a reloaded or second tab adopts
+    /// them instead of its own clock, feed and selection.
+    #[test]
+    fn the_document_carries_the_runs_own_start_and_each_legs_ask() {
+        let form = [
+            field(
+                "/pull/spot",
+                "zerodha",
+                "1min",
+                "Spot · 1 minute",
+                "target=n50&from=2018-01-01&to=2026-09-30&member=NIFTY&member=BANKNIFTY",
+            ),
+            field(
+                "/pull/spot",
+                "zerodha",
+                "1day",
+                "Spot · 1 day",
+                "target=n50&from=2018-01-01&to=2026-09-30",
+            ),
+        ]
+        .join("&");
+        let legs = legs_from(&form).expect("two legs");
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_791_600_000_123);
+        let progress = Progress::claimed_for(&legs, at);
+        assert!(progress.running(), "a claimed document is a running one");
+        assert_eq!(progress.started_at_ms, Some(1_791_600_000_123));
+        assert_eq!(progress.asked.len(), 2);
+        assert_eq!(progress.asked[0].members, 2);
+        assert_eq!(
+            progress.asked[1].members, 0,
+            "no member field is every member"
+        );
+        let doc: serde_json::Value = serde_json::from_str(&progress.json()).expect("json");
+        assert_eq!(doc["startedAtMs"], 1_791_600_000_123_u64);
+        assert_eq!(doc["asked"][0]["vendor"], "zerodha");
+        assert_eq!(doc["asked"][0]["dir"], "1min");
+        assert_eq!(doc["asked"][0]["route"], "/pull/spot");
+        assert_eq!(doc["asked"][0]["target"], "n50");
+        assert_eq!(doc["asked"][0]["from"], "2018-01-01");
+        assert_eq!(doc["asked"][0]["to"], "2026-09-30");
+        assert_eq!(doc["asked"][0]["label"], "Spot · 1 minute");
+        assert_eq!(doc["asked"][1]["dir"], "1day");
+        // THE NEVER-RAN DOCUMENT STATES NO START AND NO ASK.
+        let idle: serde_json::Value =
+            serde_json::from_str(&Progress::default().json()).expect("json");
+        assert!(idle["startedAtMs"].is_null());
+        assert_eq!(idle["asked"], serde_json::json!([]));
+    }
+
     /// Several legs, and the order they were sent in is the order they arrive.
     #[test]
     fn every_leg_in_the_form_is_read_and_none_is_dropped() {
@@ -1882,6 +2104,8 @@ mod tests {
             finished: None,
             started: true,
             generation: 0,
+            started_at_ms: Some(1_791_000_000_000),
+            asked: Vec::new(),
             feeds: vec![FeedReport {
                 vendor: "dhan".to_owned(),
                 legs: 4,
@@ -2538,6 +2762,154 @@ mod tests {
             leg_outcome(status, &format!("{html}<p>access token expired</p>")),
             LegOutcome::Credential,
             "a failed HTTP 200 can still carry a credential failure"
+        );
+    }
+
+    /// DB-B37: a leg refused at the door carries the receipt's own reason,
+    /// never "the reason is in the audit journal", which the refusal never
+    /// wrote; a receipt with no `Refused because` line keeps the old wording.
+    #[test]
+    fn a_door_refusal_carries_the_receipts_own_reason() {
+        let page = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "NOT STARTED",
+            reason: "x",
+            good: false,
+            facts: &[(
+                "Refused because",
+                "another pull already holds Zerodha's seat & <says> \"why\"".to_owned(),
+            )],
+            footnote: "Nothing here was written to the store.",
+        });
+        assert_eq!(
+            receipt_refusal(&page).as_deref(),
+            Some("another pull already holds Zerodha's seat & <says> \"why\"")
+        );
+        assert_eq!(receipt_refusal("<p>no facts</p>"), None);
+        let held = site("door-refusal");
+        claim(&held);
+        let run = current(&held);
+        with_progress(&held, run, |progress| {
+            progress.feeds = vec![FeedReport::default(), FeedReport::default()];
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "zerodha".to_owned(),
+            dir: "1min".to_owned(),
+            label: "Spot · 1 minute".to_owned(),
+            body: String::new(),
+        };
+        note_leg_failure(
+            &held,
+            run,
+            0,
+            &leg,
+            (axum::http::StatusCode::CONFLICT, &page),
+            LegOutcome::Retry,
+        );
+        note_leg_failure(
+            &held,
+            run,
+            1,
+            &leg,
+            (axum::http::StatusCode::BAD_GATEWAY, "<p>no facts</p>"),
+            LegOutcome::Retry,
+        );
+        let seen = observed(&held);
+        let said = seen.feeds[0].last_error.clone().expect("a reason");
+        assert!(
+            said.contains("answered HTTP 409: another pull already holds Zerodha's seat"),
+            "{said}"
+        );
+        assert!(
+            !said.contains("The reason is in the audit journal"),
+            "{said}"
+        );
+        let old = seen.feeds[1].last_error.clone().expect("a reason");
+        assert!(old.contains("The reason is in the audit journal"), "{old}");
+        // THE DOOR REFUSAL, AND ONLY IT, SAYS NO RECORD WAS WRITTEN.
+        assert!(said.contains("no journal record was written"), "{said}");
+    }
+
+    /// DB-B37, repair: a receipt that carries `Refused because` AND its own
+    /// `Recorded` line (a blocked run, a mapping that reached nothing: both
+    /// append a record before answering) is never said to have written none.
+    /// The receipt's `Recorded` line is carried as it stands, whichever way
+    /// the append went.
+    #[test]
+    fn a_journalled_refusal_is_never_said_to_have_no_record() {
+        let receipt_with = |recorded: &str| {
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict: "NOT STARTED",
+                reason: "x",
+                good: false,
+                facts: &[
+                    (
+                        "Refused because",
+                        "Instrument mapping is not ready".to_owned(),
+                    ),
+                    ("Recorded", recorded.to_owned()),
+                ],
+                footnote: "Nothing here was written to the store.",
+            })
+        };
+        let landed = receipt_with("yes — appended to /x/pull.journal");
+        let lost = receipt_with("NO — this run is NOT in the journal. the disk is full");
+        assert_eq!(
+            receipt_fact(&landed, "Recorded").as_deref(),
+            Some("yes — appended to /x/pull.journal")
+        );
+        assert_eq!(receipt_fact(&landed, "Stored"), None);
+        assert_eq!(receipt_fact("<th>Recorded</th><td>", "Recorded"), None);
+        assert_eq!(
+            receipt_fact("<th>Recorded</th><td>  </td>", "Recorded"),
+            None
+        );
+        let held = site("journalled-refusal");
+        claim(&held);
+        let run = current(&held);
+        with_progress(&held, run, |progress| {
+            progress.feeds = vec![FeedReport::default(), FeedReport::default()];
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "zerodha".to_owned(),
+            dir: "1min".to_owned(),
+            label: "Spot · 1 minute".to_owned(),
+            body: String::new(),
+        };
+        for (nth, page) in [&landed, &lost].into_iter().enumerate() {
+            note_leg_failure(
+                &held,
+                run,
+                nth,
+                &leg,
+                (axum::http::StatusCode::BAD_REQUEST, page),
+                LegOutcome::Retry,
+            );
+        }
+        let seen = observed(&held);
+        let said = seen.feeds[0].last_error.clone().expect("a reason");
+        assert!(
+            said.contains("answered HTTP 400: Instrument mapping is not ready"),
+            "{said}"
+        );
+        assert!(
+            said.contains("the receipt's Recorded line: yes — appended to /x/pull.journal"),
+            "{said}"
+        );
+        assert!(!said.contains("no journal record was written"), "{said}");
+        let failed = seen.feeds[1].last_error.clone().expect("a reason");
+        assert!(
+            failed.contains(
+                "the receipt's Recorded line: NO — this run is NOT in the journal. the disk is full"
+            ),
+            "{failed}"
+        );
+        assert!(
+            !failed.contains("no journal record was written"),
+            "{failed}"
         );
     }
 
@@ -3526,6 +3898,8 @@ mod tests {
             finished: None,
             started: true,
             generation: 0,
+            started_at_ms: None,
+            asked: Vec::new(),
             feeds: vec![
                 FeedReport {
                     vendor: "dhan".to_owned(),
