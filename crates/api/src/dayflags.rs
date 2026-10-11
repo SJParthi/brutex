@@ -2284,6 +2284,46 @@ fn read_pull_journal(root: &Path, symbol: &str) -> Result<PullRead, PullUnread> 
     })
 }
 
+/// `symbol`'s Zerodha pull refusals as JSON, oldest record first, and how they
+/// were found: the reader `/ingest/refusals.json` shares with this route, so a
+/// month cell on /ingest and a day on /db name the same records (WP-61,
+/// DB-G23). One read of the symbol's index file, O(its refusals).
+///
+/// # Errors
+///
+/// The journal is there and cannot be read, or the served process is still
+/// walking it at start, in the sentence this route's notes give.
+pub(crate) fn zerodha_refusals_of(
+    root: &Path,
+    symbol: &str,
+) -> Result<(Vec<Value>, Value), String> {
+    let read = read_pull_journal(root, symbol).map_err(|unread| unread.note())?;
+    let refusals = read
+        .parsed
+        .by_symbol
+        .get(symbol)
+        .map(|found| found.iter().map(PullRefusal::json).collect())
+        .unwrap_or_default();
+    let via = match read.via {
+        Via::Absent => json!({ "kind": "absent" }),
+        Via::Index { covered, runs } => {
+            json!({ "kind": "index", "covered": covered, "runs": runs })
+        }
+        Via::Walk { ref why } => json!({ "kind": "walk", "why": why }),
+    };
+    Ok((
+        refusals,
+        json!({
+            "path": read.path.display().to_string(),
+            "present": read.present,
+            "records": read.records,
+            "read_now": read.read_now,
+            "read_micros": read.read_micros,
+            "via": via,
+        }),
+    ))
+}
+
 /// `symbol`'s Zerodha refusals through the index: the records its `refusals`
 /// file names, each filed under the run before it, then the records past the
 /// cover, decoded in order from the vendor of the last run the index holds.

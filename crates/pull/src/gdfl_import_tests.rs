@@ -1620,13 +1620,37 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
 /// A store refusal of a file is this import's (`stage=file`), and a source
 /// that hands on a damaged block is the copy's (`stage=vendor`, a code that
 /// never closes): neither closes the day.
+///
+/// The store refusal was a day older than what its month holds, which is
+/// back-filled as a new generation since WP-12d (DB-N26); a file that would
+/// change a held bar is refused by the store and by the repair alike.
 #[test]
 fn a_file_or_copy_refusal_journals_its_stage_and_leaves_the_day_incomplete() {
     let root = scratch("import-stages");
     world(&root, &[d1(), d2()]);
     let store = root.join("S");
-    import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
-    let late = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    let restated = root.join("restated");
+    world_of(
+        &restated,
+        &[(
+            d1(),
+            Tree::Indices,
+            vec![(
+                entry_of(Tree::Indices, d1(), "NIFTY 50.NSE_IDX"),
+                index_file("NIFTY 50.NSE_IDX", d1(), 22_001),
+            )],
+        )],
+    );
+    let late = import_only(
+        &restated,
+        Src::Store,
+        ImportKind::Indices,
+        d1(),
+        d1(),
+        &store,
+        &["NIFTY".to_owned()],
+    );
     assert_eq!(late.closed_incomplete, vec![d1()]);
     let line = line_of(&store, "indices", "2024-04-01");
     assert!(
@@ -2218,17 +2242,32 @@ fn closed_unmeasured_special_and_missing_days_are_each_named() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A day older than what its month holds is back-filled as a NEW GENERATION
+/// of the month (D-3350; DB-N26, WP-12d), never inserted in place. It was
+/// refused by the store and stayed `incomplete` for ever: the append-only
+/// month cannot take a day before its first. `gdfl_backfill_tests` proves
+/// the shape the real store has, a day between held ones.
 #[test]
-fn a_day_older_than_what_the_month_holds_is_refused_by_the_store() {
+fn a_day_older_than_what_the_month_holds_lands_as_a_new_generation() {
     let root = scratch("import-order");
     world(&root, &[d1(), d2()]);
     let store = root.join("S");
     import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
+    let held = bars(&store, "INDEX", "NIFTY", None);
+    let originals = tree(&store.join("bars"));
     let late = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
-    assert!(!late.failures.is_empty(), "never inserted behind the tail");
-    assert_eq!(late.seconds_committed, 0);
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    assert_eq!(late.months_repaired, late.files);
+    assert!(late.seconds_committed > 0);
+    let now = bars(&store, "INDEX", "NIFTY", None);
+    assert_eq!(&now[now.len() - held.len()..], held.as_slice(), "held kept");
+    assert!(
+        now[0].ts_micros < held[0].ts_micros,
+        "the earlier day first"
+    );
+    assert_eq!(tree(&store.join("bars")), originals, "never in place");
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
-    assert!(text.contains("incomplete indices 2024-04-01"), "{text}");
+    assert!(text.contains("\ndone indices 2024-04-01 *"), "{text}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -4288,3 +4327,8 @@ fn a_day_with_no_file_read_writes_no_ledger_line() {
     assert!(flags_lines(&store).is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ── DB-N26, WP-12d: a day inside what its month holds ──────────────────────
+
+#[path = "gdfl_backfill_tests.rs"]
+mod backfill;

@@ -242,7 +242,7 @@ fn repair_refusals_name_the_reason_path_and_publication_visibility() {
         ),
         (
             RepairError::RowLimit,
-            "repair exceeds the 100000-row ceiling",
+            "repair exceeds the 2678400-row ceiling",
         ),
         (
             RepairError::StaleSource,

@@ -240,6 +240,49 @@ pub(super) async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> CalendarAnswer {
+    // THE SPAN ASKED (DB-B42): `held` (the default) is the span the feed's
+    // bars reach; `record` widens a held answer to the calendar of record's
+    // whole span, so /ingest draws 2026-10-02 closed beyond GDFL's last held
+    // day instead of guessing a weekday. Any other word is refused.
+    let query = uri.query().unwrap_or("");
+    let span = param(query, "span");
+    if !matches!(span.as_str(), "" | "held" | "record") {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            serde_json::json!({
+                "error": format!(
+                    "span={span:?} is not a span this route answers: held (the default, the \
+                     days the feed's bars reach) or record (the calendar of record's whole span)"
+                )
+            })
+            .to_string(),
+        );
+    }
+    let rung = rung_param(query).ok().flatten();
+    let answer = calendar_json_held(site, uri).await;
+    if span == "record"
+        && answer.0 == axum::http::StatusCode::OK
+        && let Some(widened) = crate::calendar_of::record::widen_to_record(&answer.2, rung)
+    {
+        return (answer.0, answer.1, widened);
+    }
+    // ASKED FOR THE RECORD AND NOT WIDENED (withheld, building, refused): the
+    // answer says so in `span` and `spanNote` instead of looking widened.
+    if span == "record"
+        && let Some(marked) = crate::calendar_of::record::not_widened(&answer.2)
+    {
+        return (answer.0, answer.1, marked);
+    }
+    answer
+}
+
+/// [`calendar_json`] over the span the feed holds: the answer every caller
+/// got before `span` existed.
+async fn calendar_json_held(site: Loaded, uri: axum::http::Uri) -> CalendarAnswer {
     use crate::calendar_of::build::Joined;
     // THE QUESTION FIRST: a malformed one is refused before anything is read.
     let asked = match Asked::of(&uri) {
