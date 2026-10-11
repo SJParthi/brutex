@@ -1128,3 +1128,290 @@ fn the_denominators_of_a_moved_index_equal_a_fresh_builds() {
     // The INDEX keys of the same census are another segment's: not counted here.
     assert!(!index.denoms.contains_key(&(march, Timeframe::MINUTE_1)));
 }
+
+/// One NIFTY call of `expiry` at strike number `n`, held in `at` with one
+/// bar (an invented price).
+fn call_in(expiry: &str, n: usize, at: YearMonth) -> Held {
+    held(
+        fno(
+            &format!("{expiry}-{}-CE", 1_000_000 + n * 5_000),
+            Timeframe::SECOND_1,
+            at,
+        ),
+        1,
+        0,
+        1,
+        901,
+    )
+}
+
+/// `count` months ending at 2020-06, oldest first.
+fn months_to_june_2020(count: usize) -> Vec<YearMonth> {
+    let mut out = Vec::with_capacity(count);
+    let (mut year, mut at) = (2020_u16, 6_u8);
+    for _ in 0..count {
+        out.push(month(year, at));
+        if at == 1 {
+            year -= 1;
+            at = 12;
+        } else {
+            at -= 1;
+        }
+    }
+    out.reverse();
+    out
+}
+
+#[test]
+fn a_chain_of_more_contract_months_than_the_cap_answers_when_it_holds_fewer_rows() {
+    // THE SECOND CHECK'S BLOCKING CASE (verify-WP-56b-r1, NIFTY 2020-06-25:
+    // 233 contracts over a 22-month chain, 1,040 rows held, refused as 'more
+    // than 4096 census rows'). Here: 300 strikes over a 22-month chain is
+    // 6,600 contract-months, past the cap; each strike trades in two
+    // neighbouring months, so the chain HOLDS 600 rows, and one more strike
+    // trades in the first and the last month only (2 rows, 22 months apart).
+    let chain_months = months_to_june_2020(22);
+    let mut rows: Vec<Held> = Vec::new();
+    for n in 0..300 {
+        let at = n % 21;
+        rows.push(call_in("2020-06-25", n, chain_months[at]));
+        rows.push(call_in("2020-06-25", n, chain_months[at + 1]));
+    }
+    rows.push(call_in("2020-06-25", 300, chain_months[0]));
+    rows.push(call_in("2020-06-25", 300, chain_months[21]));
+    // A second expiry, so the no-expiry answer walks more than one chain.
+    rows.push(call_in("2020-05-28", 0, chain_months[20]));
+    // The candidates the old cap counted are past it.
+    const { assert!(301 * 22 > ROWS_CAP) };
+
+    let slot = slot_of(&rows);
+    let index = built(Segment::Fno, &slot);
+    let nifty = (Exchange::Nse, Symbol::new("NIFTY").expect("a symbol"));
+    let under = &index.underlyings[&nifty];
+    assert_eq!(under.agg.keys, 603, "the node counts the rows it holds");
+    let june = Day::new(2020, 6, 25).expect("a day");
+    assert_eq!(under.expiries[&june].agg.keys, 602);
+    assert_eq!(
+        under.expiries[&june].agg.span,
+        Some((chain_months[0], chain_months[21]))
+    );
+
+    let at_expiry =
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2020-06-25&rows=census-tuples-v1";
+    let (_, keys, sums) = rows_keys(&index, &asked_for(at_expiry)).expect("held rows answer");
+    // 600 keys probed for the 300 two-month strikes (none missed) and the
+    // 22 months between the sparse strike's first and last.
+    assert_eq!(keys.len(), 600 + 22);
+    assert_eq!(sums[&Timeframe::SECOND_1], 602);
+    let part = part_of(&slot, Segment::Fno).expect("a part");
+    let found = keys.iter().filter(|key| part.held(key).is_some()).count();
+    assert_eq!(found, 602, "every row the chain holds is among the keys");
+
+    let every = "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1";
+    let (_, keys, sums) = rows_keys(&index, &asked_for(every)).expect("the underlying answers");
+    assert_eq!(keys.len(), 600 + 22 + 1);
+    assert_eq!(sums[&Timeframe::SECOND_1], 603);
+
+    // END TO END, through the route: the rows, every one, and the count.
+    let built_site = site_holding("facets-rows-sparse", &rows);
+    let (code, _, body) = answer(&built_site, at_expiry);
+    assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+    let value = json(&body);
+    assert_eq!(value["held"]["months"], 602);
+    assert_eq!(value["held"]["rows"], 602);
+    assert_eq!(expanded(&value["census"]).len(), 602);
+}
+
+#[test]
+fn a_refusal_past_the_cap_states_the_rows_held_exactly_and_costs_one_probe() {
+    // The count in the refusal is the node's own, not where counting
+    // stopped: 37 past the cap reads 37 past the cap.
+    let march = month(2019, 3);
+    let rows: Vec<Held> = (0..ROWS_CAP + 37)
+        .map(|n| call_in("2019-03-28", n, march))
+        .collect();
+    let index = built(Segment::Fno, &slot_of(&rows));
+    for query in [
+        "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28&rows=census-tuples-v1",
+        "feed=gdfl&segment=FNO&underlying=NIFTY&rows=census-tuples-v1",
+    ] {
+        let (code, body) = rows_keys(&index, &asked_for(query)).expect_err("past the cap");
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        let value = json(&body);
+        assert_eq!(value["error"], "rows_too_many");
+        assert_eq!(value["reached"], ROWS_CAP + 37);
+        assert_eq!(value["counted"], "census rows");
+        let why = value["why"].as_str().expect("why");
+        assert!(
+            why.contains(&format!("holds {} census rows", ROWS_CAP + 37)),
+            "{why}"
+        );
+        assert_eq!(
+            why.contains("narrow it with expiry="),
+            !query.contains("expiry=")
+        );
+    }
+
+    // INDEX and CASH are capped by the same count. Make the node say it
+    // holds one row past the cap, the way `apply` counts them.
+    let mut index = built(Segment::Index, &slot_of(&chain()));
+    let query = "feed=gdfl&segment=INDEX&underlying=NIFTY&rows=census-tuples-v1";
+    assert!(rows_keys(&index, &asked_for(query)).is_ok());
+    let nifty = (Exchange::Nse, Symbol::new("NIFTY").expect("a symbol"));
+    index.underlyings.get_mut(&nifty).expect("held").agg.keys =
+        u64::try_from(ROWS_CAP).expect("small") + 1;
+    let (_, body) = rows_keys(&index, &asked_for(query)).expect_err("past the cap");
+    assert_eq!(json(&body)["reached"], ROWS_CAP + 1);
+
+    assert!(!past_cap(0));
+    assert!(!past_cap(u64::try_from(ROWS_CAP).expect("small")));
+    assert!(past_cap(u64::try_from(ROWS_CAP).expect("small") + 1));
+    assert!(past_cap(u64::MAX));
+}
+
+#[test]
+fn the_probe_budget_is_its_own_and_its_refusal_says_what_was_counted() {
+    // Contracts held in the first and the last month of a 32-month chain:
+    // 2 rows and 32 probes each, beside 32 one-month contracts (1 probe
+    // each) that give the chain its months. 511 sparse ones are exactly
+    // PROBE_CAP probes and answer; one more is refused, and the refusal says
+    // the chain holds 1,056 rows (within the cap) and that the probes were
+    // what ran out.
+    let chain_months = months_to_june_2020(32);
+    assert_eq!(512 * 32, PROBE_CAP);
+    let sparse = |count: usize| -> Vec<Held> {
+        (0..count)
+            .flat_map(|n| {
+                [
+                    call_in("2020-06-25", n, chain_months[0]),
+                    call_in("2020-06-25", n, chain_months[31]),
+                ]
+            })
+            // Every month of the chain is named by some contract, so the
+            // sparse ones' spans cover 32 chain months.
+            .chain((0..32).map(|at| call_in("2020-06-25", 9_000 + at, chain_months[at])))
+            .collect()
+    };
+    let query = "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2020-06-25&rows=census-tuples-v1";
+
+    let index = built(Segment::Fno, &slot_of(&sparse(511)));
+    let (_, keys, sums) = rows_keys(&index, &asked_for(query)).expect("inside the budget");
+    assert_eq!(keys.len(), 511 * 32 + 32);
+    assert_eq!(keys.len(), PROBE_CAP);
+    assert_eq!(sums[&Timeframe::SECOND_1], 511 * 2 + 32);
+
+    let index = built(Segment::Fno, &slot_of(&sparse(512)));
+    let (code, body) = rows_keys(&index, &asked_for(query)).expect_err("past the budget");
+    assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+    let value = json(&body);
+    assert_eq!(value["error"], "rows_too_many");
+    assert_eq!(value["counted"], "probes");
+    assert_eq!(value["reached"], 512 * 2 + 32);
+    assert_eq!(value["probe_cap"], PROBE_CAP);
+    let why = value["why"].as_str().expect("why");
+    assert!(why.contains("holds 1056 census rows"), "{why}");
+    assert!(
+        why.contains(&format!("more than {PROBE_CAP} probes")),
+        "{why}"
+    );
+}
+
+#[test]
+fn the_row_count_and_month_span_of_a_moved_index_equal_a_fresh_builds() {
+    // KEYS LAND LATE AND OUT OF ORDER: an older month after a newer one, a
+    // key that grows (counted once), a duplicate append of the same key.
+    let months = months_to_june_2020(4);
+    let first = vec![
+        call_in("2020-06-25", 0, months[2]),
+        call_in("2020-06-25", 1, months[3]),
+    ];
+    let mut disk = OnDisk::new("keys-span-moved", &first);
+    let before = disk.read(None);
+    let mut index = built(Segment::Fno, &before);
+    let grown = held(
+        fno("2020-06-25-1000000-CE", Timeframe::SECOND_1, months[2]),
+        9,
+        0,
+        50,
+        905,
+    );
+    disk.append(&[
+        call_in("2020-06-25", 0, months[0]),
+        grown,
+        call_in("2020-06-25", 2, months[1]),
+    ]);
+    let after = disk.read(Some(before.census()));
+    advance(&mut index, Segment::Fno, &after);
+    let fresh = built(Segment::Fno, &after);
+    let nifty = (Exchange::Nse, Symbol::new("NIFTY").expect("a symbol"));
+    let june = Day::new(2020, 6, 25).expect("a day");
+    let (moved, built_fresh) = (
+        &index.underlyings[&nifty].expiries[&june],
+        &fresh.underlyings[&nifty].expiries[&june],
+    );
+    assert_eq!(moved.agg, built_fresh.agg);
+    assert_eq!(moved.agg.keys, 4, "the grown key is counted once");
+    assert_eq!(moved.agg.span, Some((months[0], months[3])));
+    assert_eq!(moved.contracts, built_fresh.contracts);
+    assert_eq!(index.underlyings[&nifty].agg, fresh.underlyings[&nifty].agg);
+    assert_eq!(index.total, fresh.total);
+}
+
+#[test]
+fn no_word_of_a_query_is_repeated_whole_in_a_refusal() {
+    // GARBAGE PARAMETERS, 5,000 characters each: the refusal names the
+    // parameter and repeats a capped piece of what was sent.
+    let long = "x".repeat(5_000);
+    for query in [
+        format!("feed={long}&segment=INDEX"),
+        format!("feed=gdfl&segment={long}"),
+        format!("feed=gdfl&segment=INDEX&underlying={long}"),
+        format!("feed=gdfl&segment=INDEX&underlying={long}&rows=census-tuples-v1"),
+        format!("feed=gdfl&segment=INDEX&underlying=NIFTY&exchange={long}"),
+        format!("feed=gdfl&segment=FNO&underlying=NIFTY&expiry={long}"),
+        format!("feed=gdfl&segment=INDEX&since={long}"),
+        format!("feed=gdfl&segment=INDEX&underlying=NIFTY&rows={long}"),
+    ] {
+        let (code, body) = asked(&query).expect_err("refused");
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.len() < 1_200, "{} B for {}", body.len(), &query[..40]);
+        assert!(body.contains("(+"), "says how much was left out: {body}");
+    }
+    assert_eq!(capped("abc", 3), "abc");
+    assert_eq!(capped("abcd", 3), "abc...(+1 more)");
+    assert_eq!(capped("", 0), "");
+}
+
+#[test]
+fn a_rows_answer_reads_the_same_keys_at_ten_times_the_census() {
+    // THE COST OF ONE INSTRUMENT'S ROWS IS THE INSTRUMENT'S, NOT THE STORE'S
+    // (RA-005): the keys probed for NIFTY's chain are the same, one for one,
+    // whether the census holds 40 other underlyings or 400, each with its
+    // own chain at the same expiry.
+    let march = month(2019, 3);
+    let census_of = |others: usize| -> Vec<Held> {
+        let mut rows: Vec<Held> = (0..25).map(|n| call_in("2019-03-28", n, march)).collect();
+        for other in 0..others {
+            let symbol = Symbol::new(&format!("OTHER{other}")).expect("a symbol");
+            for n in 0..8 {
+                let mut key = fno(
+                    &format!("2019-03-28-{}-PE", 2_000_000 + n * 5_000),
+                    Timeframe::SECOND_1,
+                    march,
+                );
+                key.symbol = symbol;
+                rows.push(held(key, 1, 0, 1, 903));
+            }
+        }
+        rows
+    };
+    let query = "feed=gdfl&segment=FNO&underlying=NIFTY&expiry=2019-03-28&rows=census-tuples-v1";
+    let small = built(Segment::Fno, &slot_of(&census_of(40)));
+    let large = built(Segment::Fno, &slot_of(&census_of(400)));
+    assert_eq!(large.total.keys, 25 + 400 * 8);
+    let (_, few, sums_small) = rows_keys(&small, &asked_for(query)).expect("answers");
+    let (_, many, sums_large) = rows_keys(&large, &asked_for(query)).expect("answers");
+    assert_eq!(few.len(), 25);
+    assert_eq!(few, many, "the same probes, whatever else the census holds");
+    assert_eq!(sums_small, sums_large);
+}

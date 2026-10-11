@@ -742,7 +742,8 @@ function read(feed, generation, first = null, keep = false) {
         store.lag = answer.lag;
         store.worker = null;
         store.how = { kind: 'scoped', since: null, rows: answer.rows.length, added: 0, replaced: 0,
-          why: `${answer.scope.underlying}: ${scopeText(answer.scope)}` };
+          why: `${answer.scope.underlying}: ${scopeText(answer.scope)}${answer.retried
+            ? `; ${answer.retried} request(s) asked twice (the server's census readers were saturated)` : ''}` };
         store.state = 'ready';
         store.error = null;
         store.busy = null;

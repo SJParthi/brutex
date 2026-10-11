@@ -121,7 +121,13 @@
 
 <svelte:head><title>Database · brutex</title></svelte:head>
 
-<svelte:window onkeydown={db.onWindowKey} onpointerdown={db.onWindowDown} />
+<!-- A PAGE THE BROWSER RESTORED FROM ITS BACK-FORWARD CACHE IS NOT A FRESH
+     READ (WP-56b; RA-295): its census, totals and 'as of' are from when it
+     was left, under controls that look live. `persisted` is the browser's
+     own word for that restore, and one Refresh re-reads the census the page
+     stands on (its scope or the whole) through the shared clock. -->
+<svelte:window onkeydown={db.onWindowKey} onpointerdown={db.onWindowDown}
+  onpageshow={(event) => { if (event.persisted) void refreshStore(); }} />
 
 <!-- A CONTROL OUTSIDE THE BAR ROWS NEEDS EVERY ROW (WP-56b): the first paint
      is drawn from the census rows of the instrument on screen, and the lists
@@ -186,7 +192,11 @@
         </div>
       {/if}
     </div>
-  {:else if db.loading && (db.rows.length === 0 || db.preparing)}
+  {:else if (db.loading && (db.rows.length === 0 || db.preparing)) || db.scopeMissing}
+    <!-- `db.scopeMissing` (WP-56b): one instrument's rows are on screen and
+         the selection is not among them. Only the whole census can say the
+         store holds none of it, so the page reads on here until it lands;
+         the grid's 'No instrument-month matches' is never drawn from a scope. -->
     {@render censusLoading(db)}
   {:else if db.rows.length === 0}
     <div class="blank fade-in">

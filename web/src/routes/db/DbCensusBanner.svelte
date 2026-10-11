@@ -39,7 +39,7 @@
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
   import { instrumentMemo, databasePreparation } from '$lib/database-preparation.js';
   import { yieldTask, inSlices } from '$lib/census-worker.js';
-  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes } from '$lib/store-census.js';
+  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes, scopeNeed, scopeWanted } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
   import { SKELETON } from '$lib/db/bars-plan.js';
@@ -155,6 +155,11 @@
        opens on it asks for the whole census from the start. */
     /** @type {import('$lib/store-census.js').ScopeWanted | null | undefined} */
     let first;
+    /* THE FEED `first` WAS WORKED OUT FOR. A feed chosen later is asked for
+       the instrument on screen then, never for the page's opening one (the
+       second check's follow-up): `scopeWanted` decides, and is tested. */
+    /** @type {string | null | undefined} */
+    let firstFeed;
     const firstScope = () => {
       const { sel } = decodeDb(page.url.search);
       if (sel.view && sel.view !== DB_DEFAULTS.view) return null;
@@ -162,8 +167,18 @@
       return { underlying: sel.sym ?? link?.sym ?? DEFAULT_INSTRUMENT, expiry: sel.exp ?? link?.expiry ?? null };
     };
     $effect(() => {
-      if (first === undefined) first = untrack(firstScope);
-      syncStore(feeds.active, first);
+      const f = feeds.active;
+      if (first === undefined) {
+        first = untrack(firstScope);
+        firstFeed = f;
+      } else if (f && firstFeed && f !== firstFeed) {
+        first = untrack(() => scopeWanted({ view: db.view, defaultView: DB_DEFAULTS.view,
+          filter: db.filter, expiry: db.expiry, fallback: DEFAULT_INSTRUMENT }));
+        firstFeed = f;
+      } else if (f && !firstFeed) {
+        firstFeed = f;
+      }
+      syncStore(f, first);
     });
 
     /* WHAT NEEDS EVERY ROW ASKS FOR EVERY ROW (WP-56b), and says why in the
@@ -171,16 +186,24 @@
        a selection the rows read do not hold (a segment or an expiry that was
        not listed). Waited 60 ms and re-armed on every change, so a rung the
        seeds are still filling is not mistaken for an empty selection. */
+    /* `shownScope`, NOT `store.scope`: the scope of the rows ON SCREEN. While
+       the whole census is prepared behind one instrument's rows (`behind`)
+       the store already holds the whole census and the page still draws the
+       instrument's rows, and a grid drawn from them said 'No
+       instrument-month matches' for the 0.3 s the preparation took (seen in
+       headless Chrome on the real store, fix-WP-56b-r2-cdp.mjs M). */
+    const need = $derived(scopeNeed({ scope: shownScope, view: db.view, defaultView: DB_DEFAULTS.view,
+      filter: db.filter, kind: db.kind, reconciling: db.reconciling, matched: db.matched.length }));
+    /* THE SELECTION ON SCREEN IS NOT IN THE ROWS READ (WP-56b, the second
+       check's blocking 2): one instrument's rows cannot say the store holds
+       none of it, so the page shows its reading state (`+page.svelte`) from
+       this moment until the whole census has landed, and the grid's 'No
+       instrument-month matches this query' is never drawn from a scope. */
+    const scopeMissing = $derived(shownScope !== null && need?.missing === true);
     $effect(() => {
       const scope = store.scope;
       if (!scope || store.feed !== feeds.active || store.state !== 'ready' || preparing || deco.length === 0) return;
-      const why = db.view !== DB_DEFAULTS.view
-        ? 'the Coverage grid lists every instrument'
-        : db.filter !== '' && db.filter !== scope.underlying
-          ? `${db.filter} was chosen and only ${scope.underlying} had been read`
-          : db.filter !== '' && db.kind !== '' && !db.reconciling && db.matched.length === 0
-            ? `the rows read for ${scope.underlying} hold nothing for the selection on screen`
-            : null;
+      const why = need?.why ?? null;
       if (why === null) return;
       const timer = setTimeout(() => void wholeStore(why), 60);
       return () => clearTimeout(timer);
@@ -415,6 +438,7 @@
       preparing: { get: () => preparing },
       error: { get: () => error },
       loading: { get: () => loading },
+      scopeMissing: { get: () => scopeMissing },
       fetchedAt: { get: () => fetchedAt },
       nonce: { get: () => nonce },
       loadedFeed: { get: () => loadedFeed, set: (v) => (loadedFeed = v) },
@@ -487,6 +511,12 @@
 
 
 {#snippet censusLoading(/** @type {any} */ db)}
+  {#if db.scopeMissing}
+    <!-- WHY THE PAGE IS READING AGAIN (WP-56b): said, not left as a bare
+         skeleton. One instrument's rows cannot say the store holds none of
+         the selection; the whole census can, and is being read. -->
+    <p class="inline-note" role="status" data-scope-missing>Reading the whole census of {db.feedName}: the rows read for one instrument do not list the selection on screen, and only the whole census can say whether the store holds it.</p>
+  {/if}
   {#if db.preparing}
     <p class="inline-note" role="status">Preparing the database view for {fmt(db.rows.length)} stored month rows… Totals appear after the complete snapshot is ready.</p>
   {/if}

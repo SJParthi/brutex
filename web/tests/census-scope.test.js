@@ -206,3 +206,172 @@ test('the refresh log names a scoped read, and a first whole read that a failed 
   assert.deepEqual(searchRefreshes([scoped, fallen], 'scoped alpha').map((entry) => entry.kind), ['scoped']);
   assert.deepEqual(searchRefreshes([scoped, fallen], '503').map((entry) => entry.kind), ['first']);
 });
+
+/* ----------------------------------------------------------------------
+   THE SECOND CHECK'S BLOCKING 2 AND ITS FOLLOW-UPS (verify-WP-56b-r1)
+   ---------------------------------------------------------------------- */
+import { readFileSync } from 'node:fs';
+import { scopeNeed, scopeWanted, SCOPE_MS, FACETS_MS, SCOPE_RETRY_MAX_MS } from '../src/lib/store-census.js';
+
+const SCOPE = { underlying: 'ALPHA', expiry: null, months: 3, read: [{ segment: 'INDEX', expiry: null, months: 3, rows: 118, generation: 7 }], unread: [] };
+const ON_SCREEN = { scope: SCOPE, view: 'bars', defaultView: 'bars', filter: 'ALPHA', kind: 'spot', reconciling: false, matched: 3 };
+
+test('a scope that does not hold the selection on screen is a reading state, never an empty selection', () => {
+  // The selection is in the rows read: the scope answers the page.
+  assert.equal(scopeNeed(ON_SCREEN), null);
+  // NO SCOPE (the whole census, or nothing read yet): nothing is missing
+  // from a scope, whatever the selection matches. An empty selection over
+  // the whole census is the store's own answer.
+  assert.equal(scopeNeed({ ...ON_SCREEN, scope: null, matched: 0 }), null);
+  // THE BLOCKING CASE: one instrument's rows, and the selection on screen
+  // matches none of them (an option whose chain was not listed). It is
+  // MISSING, with the reason the whole census is then read for.
+  assert.deepEqual(scopeNeed({ ...ON_SCREEN, kind: 'options', matched: 0 }),
+    { why: 'the rows read for ALPHA hold nothing for the selection on screen', missing: true });
+  // Another instrument than the one read: missing too, before any row of it
+  // could match.
+  assert.deepEqual(scopeNeed({ ...ON_SCREEN, filter: 'BETA', matched: 0 }),
+    { why: 'BETA was chosen and only ALPHA had been read', missing: true });
+  // WHILE THE SELECTION IS STILL BEING RECONCILED, or before a kind is
+  // seeded, an empty match is not yet a verdict either way.
+  assert.equal(scopeNeed({ ...ON_SCREEN, matched: 0, reconciling: true }), null);
+  assert.equal(scopeNeed({ ...ON_SCREEN, matched: 0, kind: '' }), null);
+  assert.equal(scopeNeed({ ...ON_SCREEN, matched: 0, filter: '' }), null);
+  // The Coverage grid needs every row and holds its own rows meanwhile.
+  assert.deepEqual(scopeNeed({ ...ON_SCREEN, view: 'census' }), { why: 'the Coverage grid lists every instrument', missing: false });
+});
+
+test('the page draws its reading state, not the grid, while the selection is missing from the scope', () => {
+  // SOURCE SHAPE: the three places that must agree. The banner derives
+  // `scopeMissing` from `scopeNeed` (not from a copy of its rules) and keeps
+  // it while the whole read is in flight (no 'ready' gate); the page's
+  // loading branch reads it; and the grid, drawn only in the branch after,
+  // is the one place 'No instrument-month matches' is written.
+  const banner = readFileSync(new URL('../src/routes/db/DbCensusBanner.svelte', import.meta.url), 'utf8');
+  const page = readFileSync(new URL('../src/routes/db/+page.svelte', import.meta.url), 'utf8');
+  const grid = readFileSync(new URL('../src/routes/db/DbBarsGrid.svelte', import.meta.url), 'utf8');
+  // THE SCOPE OF THE ROWS ON SCREEN (`shownScope`), which outlives
+  // `store.scope` while the whole census is prepared behind them.
+  assert.match(banner, /const need = \$derived\(scopeNeed\(\{ scope: shownScope,/);
+  assert.match(banner, /const scopeMissing = \$derived\(shownScope !== null && need\?\.missing === true\);/);
+  assert.match(banner, /const shownScope = \$derived\(behind \? prepared\.scope : store\.feed === feeds\.active \? store\.scope : null\);/);
+  assert.match(banner, /scopeMissing: \{ get: \(\) => scopeMissing \}/);
+  assert.match(banner, /const why = need\?\.why \?\? null;/, 'the whole read is asked for by the same verdict');
+  const loading = page.indexOf('{:else if (db.loading && (db.rows.length === 0 || db.preparing)) || db.scopeMissing}');
+  const drawn = page.indexOf('<DbBarsGrid {db} />');
+  assert.ok(loading > 0, 'the loading branch reads db.scopeMissing');
+  assert.ok(drawn > loading, 'the grid is drawn in a later branch of the same chain');
+  assert.equal(page.slice(loading, drawn).includes('\n  {:else}\n'), true, 'the grid is in the chain\'s last branch');
+  assert.equal(grid.split('No instrument-month matches this query').length, 2, 'said in one place');
+  for (const source of [banner, page]) assert.equal(source.includes('<h3>No instrument-month matches'), false);
+});
+
+test('a chain refused at the expiry on screen yields no scope at all: the whole census is read in the same flight', async () => {
+  // The link names ALPHA 2019-03-28; FNO is refused whole AND at that
+  // expiry. A scope of the INDEX rows alone would be drawn without the
+  // selection it was read for.
+  const { request, asked } = server({
+    [ROOT]: [200, root()],
+    [Q('INDEX')]: [200, rowsBody('INDEX', 7, INDEX_ROWS)],
+    [Q('CASH')]: [200, rowsBody('CASH', 5, [])],
+    [Q('FNO')]: [400, TOO_MANY],
+    [Q('FNO', '2019-03-28')]: [400, { ...TOO_MANY, why: 'ALPHA in FNO holds 5000 census rows at this expiry, more than the 4096 one rows answer carries: read the census whole from /store.json', reached: 5000, counted: 'census rows' }]
+  });
+  const answer = await readScope(request, 'example', { underlying: 'ALPHA', expiry: '2019-03-28' });
+  assert.equal(answer.ok, false);
+  if (answer.ok) return;
+  assert.match(answer.reason, /^ALPHA in FNO at 2019-03-28: ALPHA in FNO holds 5000 census rows at this expiry/);
+  assert.equal(asked.includes(Q('FNO', '2019-03-28')), true);
+  // WITH NO EXPIRY ON SCREEN the same refusal leaves a scope of what was
+  // read, with FNO named as unread (the first test above).
+});
+
+test('a feed chosen later is read for the instrument on screen, not the page\'s opening one', () => {
+  const page = { view: 'bars', defaultView: 'bars', filter: 'BETA', expiry: '2019-03-28', fallback: 'ALPHA' };
+  assert.deepEqual(scopeWanted(page), { underlying: 'BETA', expiry: '2019-03-28' });
+  assert.deepEqual(scopeWanted({ ...page, expiry: '' }), { underlying: 'BETA', expiry: null });
+  assert.deepEqual(scopeWanted({ ...page, expiry: undefined }), { underlying: 'BETA', expiry: null });
+  // No instrument chosen: the page's opening one.
+  assert.deepEqual(scopeWanted({ ...page, filter: '', expiry: null }), { underlying: 'ALPHA', expiry: null });
+  // The Coverage grid needs every row.
+  assert.equal(scopeWanted({ ...page, view: 'census' }), null);
+  const banner = readFileSync(new URL('../src/routes/db/DbCensusBanner.svelte', import.meta.url), 'utf8');
+  assert.match(banner, /else if \(f && firstFeed && f !== firstFeed\) \{\s+first = untrack\(\(\) => scopeWanted\(/);
+});
+
+test('a scope request that never answers is given up after its own short ceiling', async () => {
+  assert.equal(SCOPE_MS, 3_000);
+  assert.ok(SCOPE_MS < FACETS_MS);
+  /** @type {number[]} */
+  const ceilings = [];
+  /** @type {any} */
+  const request = async (/** @type {string} */ url, /** @type {any} */ options) => {
+    ceilings.push(options.ms);
+    // What `ask` does at its ceiling: an answer that is not ok, in words.
+    return new Response(JSON.stringify({ error: 'timeout', why: `${url} did not answer within ${options.ms} ms` }), { status: 504, headers: HEADERS });
+  };
+  const answer = await readScope(request, 'example', { underlying: 'ALPHA' });
+  assert.deepEqual(ceilings, [SCOPE_MS]);
+  assert.equal(answer.ok, false);
+  if (!answer.ok) assert.match(answer.reason, /did not answer within 3000 ms/);
+});
+
+test('a page restored from the back-forward cache re-reads its census; a fresh load does not read twice', () => {
+  const page = readFileSync(new URL('../src/routes/db/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /onpageshow=\{\(event\) => \{ if \(event\.persisted\) void refreshStore\(\); \}\}/);
+  // The reading state under a missing selection says why it is reading.
+  const banner = readFileSync(new URL('../src/routes/db/DbCensusBanner.svelte', import.meta.url), 'utf8');
+  assert.match(banner, /\{#if db\.scopeMissing\}[\s\S]{0,400}<p class="inline-note" role="status" data-scope-missing>Reading the whole census of/);
+});
+
+test('a saturated server is asked once more after the wait it names; a second 429 gives the scope up, said', async () => {
+  // THE FIRST ANSWER OF EVERY URL IS 429 with retry-after 1; the second is
+  // the census's. The scope is read, and says how many requests it asked twice.
+  /** @type {Record<string, [number, any]>} */
+  const answers = { [ROOT]: [200, root()], [Q('INDEX')]: [200, rowsBody('INDEX', 7, INDEX_ROWS)], [Q('CASH')]: [200, rowsBody('CASH', 5, [])], [Q('FNO')]: [400, TOO_MANY] };
+  /** @type {Map<string, number>} */
+  const asked = new Map();
+  /** @type {number[]} */
+  const waits = [];
+  const saturated = (/** @type {number} */ refusals) => /** @type {any} */ (async (/** @type {string} */ url) => {
+    const n = (asked.get(url) ?? 0) + 1;
+    asked.set(url, n);
+    if (n <= refusals) return new Response(JSON.stringify({ error: 'census_read_unavailable', why: 'Saturated' }), { status: 429, headers: { ...HEADERS, 'retry-after': '1' } });
+    return new Response(JSON.stringify(answers[url][1]), { status: answers[url][0], headers: HEADERS });
+  });
+  const pause = async (/** @type {number} */ ms) => { waits.push(ms); };
+  const answer = await readScope(saturated(1), 'example', { underlying: 'ALPHA' }, { pause });
+  assert.equal(answer.ok, true, JSON.stringify(answer));
+  if (!answer.ok) return;
+  assert.equal(answer.retried, 4);
+  assert.deepEqual(waits, [1000, 1000, 1000, 1000], 'the wait the server named');
+  assert.deepEqual([...asked.values()], [2, 2, 2, 2], 'each asked exactly twice, never a third time');
+  assert.equal(answer.scope.months, 3);
+
+  // TWICE SATURATED: no third request, no scope, and the reason is the server's.
+  asked.clear();
+  waits.length = 0;
+  const refused = await readScope(saturated(2), 'example', { underlying: 'ALPHA' }, { pause });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /answered HTTP 429: Saturated/);
+  assert.deepEqual([...asked.values()], [2]);
+
+  // A retry-after the server did not name, or a silly one, waits the cap and no longer.
+  asked.clear();
+  waits.length = 0;
+  /** @type {any} */
+  const unnamed = async (/** @type {string} */ url) => {
+    const n = (asked.get(url) ?? 0) + 1;
+    asked.set(url, n);
+    if (n === 1 && url === ROOT) return new Response('{}', { status: 429, headers: { ...HEADERS, 'retry-after': '86400' } });
+    return new Response(JSON.stringify(answers[url][1]), { status: answers[url][0], headers: HEADERS });
+  };
+  const late = await readScope(unnamed, 'example', { underlying: 'ALPHA' }, { pause });
+  assert.equal(late.ok, true);
+  assert.deepEqual(waits, [SCOPE_RETRY_MAX_MS]);
+  assert.equal(SCOPE_RETRY_MAX_MS, 1_500);
+  // An ordinary scope asked nothing twice.
+  const calm = await readScope(server({ [ROOT]: [200, root()], [Q('INDEX')]: [200, rowsBody('INDEX', 7, INDEX_ROWS)], [Q('CASH')]: [200, rowsBody('CASH', 5, [])], [Q('FNO')]: [400, TOO_MANY] }).request,
+    'example', { underlying: 'ALPHA' });
+  assert.equal(calm.ok && calm.retried, 0);
+});

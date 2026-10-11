@@ -520,6 +520,16 @@ export function censusFailure(answer) {
    never patched partially.
    ====================================================================== */
 export const FACETS_MS = 15_000;
+/* THE CEILING OF ONE REQUEST OF THE FIRST PAINT'S SCOPE (`readScope`), its
+   own and shorter (WP-56b, the second check's follow-up): these answers are
+   a few kilobytes read off an index (p99 under 25 ms measured over n=200 on
+   the real store), and a scope that does not answer falls back to the whole
+   census, so every second waited here is a second before the first paint.
+   Three seconds is more than a hundred times the measured p99; past it the
+   scope is given up, the whole census is read, and the banner says why. */
+export const SCOPE_MS = 3_000;
+/** The longest one request of a scope waits before it is asked again after a 429. */
+export const SCOPE_RETRY_MAX_MS = 1_500;
 
 /**
  * @typedef {{feed: string, segment: string, underlying?: string | null,
@@ -844,7 +854,7 @@ export function createFacetsLoader(request = ask, { keep = 8, ms = FACETS_MS, no
  * @typedef {{segment: string, why: string}} ScopeUnread
  * @typedef {{underlying: string, expiry: string | null, read: ScopeRead[], unread: ScopeUnread[], months: number}} CensusScope
  * @typedef {{fullest: Map<string, number>, support: Map<string, number>}} Observed
- * @typedef {{ok: true, rows: any[], observed: Observed, lag: CensusLag, readAt: number, scope: CensusScope}
+ * @typedef {{ok: true, rows: any[], observed: Observed, lag: CensusLag, readAt: number, scope: CensusScope, retried: number}
  *   | {ok: false, reason: string}} ScopeAnswer
  */
 
@@ -880,7 +890,26 @@ export function rowsFault(body, query) {
  * @param {{ms?: number, now?: () => number, signal?: AbortSignal}} [options]
  * @returns {Promise<ScopeAnswer>}
  */
-export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = Date.now, signal = new AbortController().signal } = {}) {
+export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Date.now, signal = new AbortController().signal,
+  pause = (/** @type {number} */ waitMs) => new Promise((done) => setTimeout(done, waitMs)) } = {}) {
+  /* A SATURATED SERVER IS ASKED ONCE MORE, NOT ANSWERED WITH THE WHOLE
+     CENSUS (WP-56b). The API admits a bounded number of census reads at a
+     time and answers the rest 429 with `retry-after` (seen on the real
+     store: 12 of 20 requests at once). Falling back to the 33 MB census on
+     the first 429 would put the largest read there is on a server that has
+     just said it is full. Each request of the scope is asked again once,
+     after the wait the server named (capped at `SCOPE_RETRY_MAX_MS`); a
+     second 429 gives the scope up and says so. */
+  let retried = 0;
+  /** @param {string} url */
+  const get = async (url) => {
+    const first = await request(url, { cache: 'no-store', ms });
+    if (first.status !== 429 || signal.aborted) return first;
+    const named = Number(first.headers.get('retry-after'));
+    await pause(Math.min(SCOPE_RETRY_MAX_MS, Number.isFinite(named) && named > 0 ? named * 1000 : SCOPE_RETRY_MAX_MS));
+    retried += 1;
+    return request(url, { cache: 'no-store', ms });
+  };
   /** @param {string} reason @returns {ScopeAnswer} */
   const fail = (reason) => ({ ok: false, reason });
   const underlying = wanted.underlying;
@@ -894,7 +923,7 @@ export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = D
       why: typeof refusal?.why === 'string' && refusal.why !== '' ? refusal.why
         : typeof refusal?.error === 'string' ? refusal.error : `HTTP ${response.status} and no reason named` };
   };
-  const rootResponse = await request(facetsUrl({ feed, segment: /** @type {any} */ (null) }), { cache: 'no-store', ms });
+  const rootResponse = await get(facetsUrl({ feed, segment: /** @type {any} */ (null) }));
   if (!rootResponse.ok) {
     return fail(`/census/facets.json?feed=${feed} answered HTTP ${rootResponse.status}: ${(await refusalOf(rootResponse)).why}`);
   }
@@ -911,7 +940,7 @@ export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = D
   const rowsOf = async (segment, at) => {
     /** @type {FacetQuery} */
     const query = { feed, segment, underlying, ...(at ? { expiry: at } : {}) };
-    const response = await request(rowsUrl(query), { cache: 'no-store', ms });
+    const response = await get(rowsUrl(query));
     if (!response.ok) return { ok: false, ...(await refusalOf(response)), query, body: null, headers: response.headers };
     const body = await response.json();
     const fault = rowsFault(body, query);
@@ -936,6 +965,12 @@ export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = D
   const support = new Map();
   for (const { row, answer } of answers) {
     if (!answer.ok && answer.code === 'rows_too_many') {
+      // THE CHAIN AT THE EXPIRY ON SCREEN COULD NOT BE LISTED: the scope
+      // would be drawn without the selection it was read for, and a grid
+      // drawn from it would say the store holds no such instrument-month
+      // (the second check's blocking 2). No scope then: the whole census is
+      // read in the same flight and the page stays on its reading state.
+      if (expiry && answer.query.expiry) return fail(`${underlying} in ${row.segment} at ${expiry}: ${answer.why}`);
       unread.push({ segment: row.segment, why: answer.why });
       continue;
     }
@@ -983,8 +1018,56 @@ export async function readScope(request, feed, wanted, { ms = FACETS_MS, now = D
   // segments in the order the root listed them (each answer is already in
   // the census's order, and the sort is stable).
   rows.sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
-  return { ok: true, rows, observed: { fullest, support }, lag, readAt: now(),
+  return { ok: true, rows, observed: { fullest, support }, lag, readAt: now(), retried,
     scope: { underlying, expiry, read, unread, months: rows.length } };
+}
+
+/**
+ * WHAT THE SCOPE ON SCREEN CANNOT ANSWER (WP-56b), decided in one place so a
+ * test holds it: `null` when one instrument's rows answer the page as it
+ * stands, else `why` the whole census is needed and whether the selection
+ * on screen is `missing` from the rows read.
+ *
+ * `missing` IS NOT 'THE STORE HOLDS NONE'. One instrument's rows cannot say
+ * that an instrument-month they do not list is absent from the store: only
+ * the whole census can. So while a scope is on screen and the selection is
+ * missing from it, the page shows its reading state and the whole census is
+ * read; the grid's 'No instrument-month matches this query' is drawn from
+ * the whole census only. (The second check found it drawn from a scope for
+ * 1.3 s over an option the store holds 277,359 bars of.)
+ *
+ * @param {{scope: CensusScope | null, view: string, defaultView: string, filter: string, kind: string,
+ *   reconciling: boolean, matched: number}} page `matched` is how many rows
+ *   of the scope the selection on screen matches.
+ * @returns {{why: string, missing: boolean} | null}
+ */
+export function scopeNeed({ scope, view, defaultView, filter, kind, reconciling, matched }) {
+  if (!scope) return null;
+  if (view !== defaultView) return { why: 'the Coverage grid lists every instrument', missing: false };
+  if (filter !== '' && filter !== scope.underlying) {
+    return { why: `${filter} was chosen and only ${scope.underlying} had been read`, missing: true };
+  }
+  if (filter !== '' && kind !== '' && !reconciling && matched === 0) {
+    return { why: `the rows read for ${scope.underlying} hold nothing for the selection on screen`, missing: true };
+  }
+  return null;
+}
+
+/**
+ * THE INSTRUMENT A FEED CHOSEN LATER IS READ FOR (WP-56b): the instrument
+ * ON SCREEN, so a feed picked after the page opened is asked for what the
+ * reader is looking at and not for the page's opening instrument (the
+ * second check's follow-up: 'first' was read once, so the new feed's scope
+ * missed the selection and its whole census was read). `null` when the page
+ * needs every row (the Coverage grid): the whole census from the start.
+ *
+ * @param {{view: string, defaultView: string, filter: string, expiry: string | null | undefined, fallback: string}} page
+ *   `fallback` is the page's opening instrument, for a page with none chosen.
+ * @returns {ScopeWanted | null}
+ */
+export function scopeWanted({ view, defaultView, filter, expiry, fallback }) {
+  if (view !== defaultView) return null;
+  return { underlying: filter !== '' ? filter : fallback, expiry: expiry || null };
 }
 
 /**

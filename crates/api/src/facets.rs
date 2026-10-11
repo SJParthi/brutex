@@ -105,6 +105,14 @@ pub(crate) struct Agg {
     /// The latest last stamp seen with a close, and that close in paisa (or
     /// `None` where the census recorded none for it).
     close: Option<(i64, Option<i64>)>,
+    /// How many census keys this node sums: one per key, counted when the
+    /// key is first seen. Exact along one read (a key is never removed from
+    /// a census read forward; anything else rebuilds the index, `advance`).
+    /// What a rows answer is capped by, read in one probe (WP-56b).
+    keys: u64,
+    /// The earliest and the latest month any key under this node names: the
+    /// months a rows answer probes for this node, and no other (WP-56b).
+    span: Option<(YearMonth, YearMonth)>,
 }
 
 impl Agg {
@@ -118,6 +126,13 @@ impl Agg {
     /// does not move after its first entry.
     fn apply(&mut self, old: Option<&Held>, new: &Held) {
         let entry = &new.entry;
+        if old.is_none() {
+            self.keys = self.keys.saturating_add(1);
+        }
+        let month = entry.key.month;
+        self.span = Some(self.span.map_or((month, month), |(from, to)| {
+            (from.min(month), to.max(month))
+        }));
         let rows = self.rows.entry(entry.key.timeframe).or_insert(0);
         *rows = rows
             .saturating_sub(old.map_or(0, |was| was.entry.rows))
@@ -407,12 +422,17 @@ struct Asked {
 
 /// Reads the query, or names the parameter it cannot read.
 fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
+    // NOTHING A CALLER SENT IS REPEATED WHOLE (WP-56b, the class of the
+    // `since` echo): every word of the query is read through `word`, which
+    // keeps the value for parsing and a capped copy for the sentence, and
+    // the sentence itself is capped, whatever a parser's own error repeats.
     let bad = |why: String| {
         (
             axum::http::StatusCode::BAD_REQUEST,
-            error_json("bad_request", &why),
+            error_json("bad_request", &capped(&why, WHY_CHARS)),
         )
     };
+    let echo = super::store_route::since_echo;
     let feed_word = param(query, "feed");
     let Some(feed) = (!feed_word.is_empty())
         .then(|| ingest::parse_vendor(&feed_word))
@@ -420,30 +440,43 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
     else {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
-            no_such_feed_json(&feed_word),
+            no_such_feed_json(&echo(&feed_word)),
         ));
     };
     let segment_word = param(query, "segment");
     let segment = Segment::parse(&segment_word).map_err(|why| {
         bad(format!(
-            "segment {segment_word:?}: {why}; one of INDEX, CASH, FNO is required"
+            "segment {:?}: {}; one of {} is required",
+            echo(&segment_word),
+            capped(&why.to_string(), super::store_route::SINCE_ECHO_CHARS),
+            SEGMENTS.map(Segment::as_str).join(", ")
         ))
     })?;
     let underlying = match param(query, "underlying").as_str() {
         "" => None,
-        word => Some(Symbol::new(word).map_err(|why| bad(format!("underlying {word:?}: {why}")))?),
+        word => Some(Symbol::new(word).map_err(|why| {
+            bad(format!(
+                "underlying {:?}: {}",
+                echo(word),
+                capped(&why.to_string(), super::store_route::SINCE_ECHO_CHARS)
+            ))
+        })?),
     };
     let exchange = match param(query, "exchange").as_str() {
         "" => None,
-        word => {
-            Some(Exchange::parse(word).map_err(|why| bad(format!("exchange {word:?}: {why}")))?)
-        }
+        word => Some(Exchange::parse(word).map_err(|why| {
+            bad(format!(
+                "exchange {:?}: {}",
+                echo(word),
+                capped(&why.to_string(), super::store_route::SINCE_ECHO_CHARS)
+            ))
+        })?),
     };
     let expiry = match param(query, "expiry").as_str() {
         "" => None,
         word => {
             let (expiry, _) = contract_of(&format!("{word}-FUT"))
-                .ok_or_else(|| bad(format!("expiry {word:?} is not a YYYY-MM-DD day")))?;
+                .ok_or_else(|| bad(format!("expiry {:?} is not a YYYY-MM-DD day", echo(word))))?;
             if underlying.is_none() || segment != Segment::Fno {
                 return Err(bad("expiry needs segment=FNO and an underlying".to_owned()));
             }
@@ -454,7 +487,7 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
         "" => None,
         word => Some(
             word.parse::<u64>()
-                .map_err(|_| bad(format!("since {word:?} is not a generation")))?,
+                .map_err(|_| bad(format!("since {:?} is not a generation", echo(word))))?,
         ),
     };
     let rows = match param(query, "rows").as_str() {
@@ -491,6 +524,21 @@ fn asked(query: &str) -> Result<Asked, (axum::http::StatusCode, String)> {
         since,
         rows,
     })
+}
+
+/// The most characters of one refusal sentence: what a caller sent is
+/// repeated capped ([`super::store_route::since_echo`]) and so is whatever a
+/// parser's own error says about it.
+const WHY_CHARS: usize = 640;
+
+/// `text`, or its first `most` characters and how many were left out.
+fn capped(text: &str, most: usize) -> String {
+    let total = text.chars().count();
+    if total <= most {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(most).collect();
+    format!("{kept}...(+{} more)", total - most)
 }
 
 /// `{"error": <code>, "why": <sentence>}`.
@@ -684,23 +732,49 @@ pub(super) fn answer(
     }
 }
 
-/// The most census rows one rows answer carries, and the most keys it
-/// probes to find them. Past it the answer is a refusal that names the count
-/// reached, never a body sized by the store (D-3327; WP-56b).
+/// The most census rows one rows answer carries. Past it the answer is a
+/// refusal that names the count of rows the selection HOLDS (read off the
+/// index's node in one probe), never a body sized by the store (D-3327;
+/// WP-56b).
 pub(crate) const ROWS_CAP: usize = 4_096;
+
+/// The most keys one rows answer probes in the census to find its rows: a
+/// budget of its own, four probes for each row the cap allows. A selection
+/// that holds no more than [`ROWS_CAP`] rows is refused under this budget
+/// only when its contracts are so sparse over their own months that naming
+/// them would take more probes than this, and the refusal says so.
+pub(crate) const PROBE_CAP: usize = ROWS_CAP * 4;
 
 /// A refusal of a rows answer: the status and the body.
 type RowsRefusal = (axum::http::StatusCode, String);
+
+/// What a `rows_too_many` refusal counted when it refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Counted {
+    /// The census rows the selection holds, exactly: the node's own count.
+    Rows(u64),
+    /// The selection holds `held` rows, within the cap, and naming them
+    /// would take more than [`PROBE_CAP`] probes of the census.
+    Probes { held: u64 },
+}
 
 /// The keys the census may hold for the selection `asked` names, read off
 /// the index's own nodes (no walk of the census), and the rows per rung
 /// those nodes say they sum to. `None` for the exchange when the feed holds
 /// no such underlying in the segment.
 ///
-/// INDEX and CASH: one key per (month, rung) of the underlying. FNO: one
-/// candidate per (contract, month of its expiry, rung of the contract); a
-/// candidate the census does not hold is dropped by the probe that follows.
-/// Counting stops at [`ROWS_CAP`], so a refusal costs no more than an answer.
+/// THE CAP COUNTS CENSUS ROWS, NOT CANDIDATES: every node counts the keys it
+/// sums (`Agg::keys`), so whether the selection holds more than [`ROWS_CAP`]
+/// rows is one probe, and the refusal states that count. (Until the second
+/// check of WP-56b the cap counted contracts x months of the chain x rungs,
+/// and refused NIFTY 2020-06-25, which holds 1,040 rows, as 'more than
+/// 4,096'.)
+///
+/// INDEX and CASH: one key per (month, rung) of the underlying, each held.
+/// FNO: per contract, one candidate per (month of the expiry inside the
+/// contract's own first..last month, rung of the contract); a candidate the
+/// census does not hold is dropped by the probe that follows, and the
+/// candidates are bounded by [`PROBE_CAP`].
 fn rows_keys(
     index: &Index,
     asked: &Asked,
@@ -746,37 +820,65 @@ fn rows_keys(
         let (keys, sums) = chain_keys(under, asked, symbol, &key)?;
         return Ok((Some(*exchange), keys, sums));
     }
+    if past_cap(under.agg.keys) {
+        return Err(rows_too_many(asked, symbol, Counted::Rows(under.agg.keys)));
+    }
     let mut keys: Vec<EntryKey> = Vec::new();
     for (month, agg) in &under.months {
         for timeframe in agg.rows.keys() {
-            if keys.len() >= ROWS_CAP {
-                return Err(rows_too_many(asked, symbol));
-            }
             keys.push(key(None, *month, *timeframe));
         }
     }
     Ok((Some(*exchange), keys, under.agg.rows.clone()))
 }
 
-/// The refusal of a selection that names more than [`ROWS_CAP`] keys: the
-/// cap, the count reached when counting stopped, and what to ask instead.
-fn rows_too_many(asked: &Asked, symbol: Symbol) -> RowsRefusal {
-    let reached = ROWS_CAP.saturating_add(1);
+/// Whether a node that sums `held` keys holds more than [`ROWS_CAP`] rows.
+fn past_cap(held: u64) -> bool {
+    usize::try_from(held).map_or(true, |held| held > ROWS_CAP)
+}
+
+/// The refusal of a selection the cap or the probe budget refuses: what was
+/// counted and the count, the cap, and what to ask instead.
+fn rows_too_many(asked: &Asked, symbol: Symbol, counted: Counted) -> RowsRefusal {
+    let at = if asked.expiry.is_some() {
+        " at this expiry"
+    } else {
+        ""
+    };
+    let next = if asked.expiry.is_some() {
+        "read the census whole from /store.json"
+    } else {
+        "narrow it with expiry=, or read the census whole from /store.json"
+    };
+    let (reached, word, why) = match counted {
+        Counted::Rows(held) => (
+            held,
+            "census rows",
+            format!(
+                "{} in {} holds {held} census rows{at}, more than the {ROWS_CAP} one rows \
+                 answer carries: {next}",
+                symbol.as_str(),
+                asked.segment.as_str(),
+            ),
+        ),
+        Counted::Probes { held } => (
+            held,
+            "probes",
+            format!(
+                "{} in {} holds {held} census rows{at}, within the {ROWS_CAP} one rows answer \
+                 carries, but its contracts are spread so thinly over their months that \
+                 naming them takes more than {PROBE_CAP} probes of the census: {next}",
+                symbol.as_str(),
+                asked.segment.as_str(),
+            ),
+        ),
+    };
     (
         axum::http::StatusCode::BAD_REQUEST,
         format!(
-            r#"{{"error":"rows_too_many","why":{},"cap":{ROWS_CAP},"reached":{reached}}}"#,
-            render::json_string(&format!(
-                "{} in {} names more than {ROWS_CAP} census rows{}: narrow it with \
-                 expiry=, or read the census whole from /store.json",
-                symbol.as_str(),
-                asked.segment.as_str(),
-                if asked.expiry.is_some() {
-                    " at this expiry"
-                } else {
-                    ""
-                }
-            ))
+            r#"{{"error":"rows_too_many","why":{},"cap":{ROWS_CAP},"reached":{reached},"counted":{},"probe_cap":{PROBE_CAP}}}"#,
+            render::json_string(&why),
+            render::json_string(word),
         ),
     )
 }
@@ -790,7 +892,6 @@ fn chain_keys(
     symbol: Symbol,
     key: &dyn Fn(Option<brutex_core::instrument::Contract>, YearMonth, Timeframe) -> EntryKey,
 ) -> Result<(Vec<EntryKey>, Rows), RowsRefusal> {
-    let mut keys: Vec<EntryKey> = Vec::new();
     // A KEY THIS INDEX CANNOT NAME IS NOT LEFT OUT IN SILENCE: its contract
     // text is not the store's spelling, so no candidate would find it.
     if under.unread_contracts > 0 {
@@ -808,10 +909,28 @@ fn chain_keys(
             ),
         ));
     }
-    let chains: Vec<(&Day, &Expiry)> = match asked.expiry {
-        Some(day) => under.expiries.get_key_value(&day).into_iter().collect(),
-        None => under.expiries.iter().collect(),
+    // THE CAP FIRST, IN ONE PROBE, BEFORE ANYTHING IS COLLECTED: the rows the
+    // selection holds are the node's own count. Past it nothing below runs,
+    // so the walk that follows is over at most ROWS_CAP contracts (each
+    // holds a key) in at most ROWS_CAP expiries.
+    let one = asked
+        .expiry
+        .and_then(|day| under.expiries.get_key_value(&day));
+    let held = match asked.expiry {
+        Some(_) => one.map_or(0, |(_, chain)| chain.agg.keys),
+        None => under.agg.keys,
     };
+    if past_cap(held) {
+        return Err(rows_too_many(asked, symbol, Counted::Rows(held)));
+    }
+    let mut only = one.into_iter();
+    let mut every = under.expiries.iter();
+    let chains: &mut dyn Iterator<Item = (&Day, &Expiry)> = if asked.expiry.is_some() {
+        &mut only
+    } else {
+        &mut every
+    };
+    let mut keys: Vec<EntryKey> = Vec::new();
     let mut sums = Rows::new();
     for (expiry, chain) in chains {
         for (timeframe, rows) in &chain.agg.rows {
@@ -837,12 +956,19 @@ fn chain_keys(
                     ),
                 ));
             };
-            for month in chain.months.keys() {
+            // THE CONTRACT'S OWN MONTHS, not the chain's: a contract listed
+            // for three of the chain's twenty-two months is probed in those
+            // three (and in any month between its first and last it did not
+            // trade in, which the probe drops).
+            let Some((from, to)) = agg.span else {
+                continue;
+            };
+            for month in chain.months.range(from..=to).map(|(month, _)| *month) {
                 for timeframe in agg.rows.keys() {
-                    if keys.len() >= ROWS_CAP {
-                        return Err(rows_too_many(asked, symbol));
+                    if keys.len() >= PROBE_CAP {
+                        return Err(rows_too_many(asked, symbol, Counted::Probes { held }));
                     }
-                    keys.push(key(Some(contract), *month, *timeframe));
+                    keys.push(key(Some(contract), month, *timeframe));
                 }
             }
         }
@@ -862,10 +988,11 @@ fn chain_keys(
 /// about as much of rows for GDFL NIFTY spot) instead of the whole census
 /// (33,349,105 B on 11 Oct 2026).
 ///
-/// COST: the keys are read off the index's nodes ([`rows_keys`]), each is
-/// one probe of the census, and the answer is refused past [`ROWS_CAP`]
-/// keys: bounded by the cap, whatever the store holds. The denominators are
-/// one probe per (segment, month, rung) named.
+/// COST: the cap is decided in one probe of the index (the node's own count
+/// of the rows it holds); the keys are then read off the index's nodes
+/// ([`rows_keys`]), each one probe of the census, at most [`PROBE_CAP`] of
+/// them: bounded by the two caps, whatever the store holds. The denominators
+/// are one probe per (segment, month, rung) named.
 ///
 /// IT EQUALS THE CENSUS OR IT IS REFUSED: the rows found must sum, per rung,
 /// to what the index's node says the selection holds; a difference (a key
