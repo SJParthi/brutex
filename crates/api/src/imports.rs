@@ -79,13 +79,46 @@ pub(crate) struct Asked {
     /// Text a logged refusal's `why` holds, when named (DB-A47): the search
     /// for a reason no code names, on rows written before codes existed.
     pub(crate) why: Option<String>,
+    /// Which `run` lines the answer carries (D-4813 round 6; IA-11r R6).
+    pub(crate) runs: RunsAsked,
 }
+
+/// Which `run` lines an answer carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunsAsked {
+    /// The newest [`RUNS_PAGE`], or with a cursor the [`RUNS_PAGE`] older than
+    /// it: what `/imports.json` returns. The cursor is `runs_before=<id>`
+    /// (older than run `id`'s oldest line) or `<id>.<n>` (older than its
+    /// `n`-th line, from 0, for an id with several lines), and the answer's
+    /// `runs_next` is the next one. O(page).
+    Page(Option<(u64, usize)>),
+    /// Every run, for a caller inside this crate that resolves a run by time
+    /// and so needs the whole list: `/dayflags.json`'s day band
+    /// (`dayflags::journal_rows`). O(runs), the cost it had before the page
+    /// existed; never what the route returns.
+    Every,
+}
+
+/// How many `run` lines one answer decodes and returns: the newest, or the
+/// ones before a `runs_before=` cursor (D-4813 round 6; IA-LG-03).
+pub(crate) const RUNS_PAGE: usize = 20;
 
 /// Every parameter `/imports.json` reads. Any other is refused by name
 /// (WP-33c, DB-A45): a filter this route does not apply must never come back
 /// as an answer that looks filtered.
-pub(crate) const PARAMS: [&str; 11] = [
-    "feed", "from", "to", "kind", "outcome", "order", "page", "run", "stage", "reason", "why",
+pub(crate) const PARAMS: [&str; 12] = [
+    "feed",
+    "from",
+    "to",
+    "kind",
+    "outcome",
+    "order",
+    "page",
+    "run",
+    "stage",
+    "reason",
+    "why",
+    "runs_before",
 ];
 
 /// The longest `reason` or `why` a request may name.
@@ -184,7 +217,35 @@ pub(crate) fn asked(query: &str) -> Result<Asked, String> {
         stage,
         reason,
         why,
+        runs: RunsAsked::Page(runs_cursor(&param(query, "runs_before"))?),
     })
+}
+
+/// A `runs_before=` word: `<id>` or `<id>.<n>`, each a whole number written
+/// the one way, the id above 0. Empty is no cursor; anything else is refused
+/// by name, never read as "the newest page".
+fn runs_cursor(word: &str) -> Result<Option<(u64, usize)>, String> {
+    if word.is_empty() {
+        return Ok(None);
+    }
+    let refused = || {
+        format!(
+            "runs_before={word:?} is not a run cursor: a run id (a whole number above 0), or \
+             <id>.<n> as an answer's runs_next gives it"
+        )
+    };
+    let (id_word, nth_word) = word.split_once('.').unwrap_or((word, "0"));
+    let id = id_word
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0 && id.to_string() == id_word)
+        .ok_or_else(refused)?;
+    let nth = nth_word
+        .parse::<usize>()
+        .ok()
+        .filter(|nth| nth.to_string() == nth_word)
+        .ok_or_else(refused)?;
+    Ok(Some((id, nth)))
 }
 
 /// The run, stage, reason and logged words a query narrows the rows by
@@ -308,6 +369,7 @@ impl Asked {
             stage: None,
             reason: None,
             why: None,
+            runs: RunsAsked::Every,
         }
     }
 }
@@ -410,13 +472,13 @@ pub(crate) fn summary_of(
     .map(|row| row_json(root, row, evidence));
     let unsettled = walked.rows.iter().any(|row| {
         !row.outcome.is_done()
-            && stage_of(row, evidence.of(row.kind.as_str(), &row.day.to_string())).is_none()
+            && stage_of(row, &evidence.of(row.kind.as_str(), &row.day.to_string())).is_none()
     });
     let mut notes = notes_of(snapshot, &[]);
     if unsettled {
         notes.push(UNSETTLED.to_owned());
     }
-    let runs = runs_json(parsed);
+    let runs = runs_page(parsed, RunsAsked::Page(None));
     json!({
         "route": "/imports.json?feed=gdfl",
         "journal": journal_json(snapshot),
@@ -435,8 +497,9 @@ pub(crate) fn summary_of(
         },
         "census_refused_then_done": walked.census_then_done.len(),
         "kinds": kinds_json(parsed, evidence),
-        "runs": runs.iter().take(20).cloned().collect::<Vec<_>>(),
-        "runs_total": runs.len(),
+        "runs": runs.runs,
+        "runs_total": runs.total,
+        "runs_next": runs.next,
         "newest_not_done": newest,
         "notes": notes,
     })
@@ -489,28 +552,59 @@ pub(crate) fn stage_of(row: &DayRow, logged: &[telemetry::Record]) -> Option<(St
         .then(|| (calendar.to_owned(), StageFrom::Log))
 }
 
-/// The refusals the importer logged for a row: the `cli` ring's, or, when the
-/// ring holds none and the line names a failure, the `cli` audit stream's.
+/// The refusals the importer logged for a row, and where they were read:
+/// the ring of each directory a run of the row's kind can write (`logs/cli`,
+/// `logs/gdfl/<kind>`, `logs/gdfl/store`), or, when no ring holds any and the
+/// line names a failure, those directories' audit streams (D-4862 round 6;
+/// IA-11r R5).
+///
+/// # "none" means none
+///
+/// The source reads `"none"` only when every one of those directories was
+/// read and holds nothing for the row. A directory that does not exist yet
+/// (no run of that kind has logged there) or cannot be read is named in the
+/// source instead, so "I looked and found nothing" and "I could not look"
+/// never share a word (F78; `logs::cli_half`'s rule).
 fn logged_for(
     root: &std::path::Path,
     row: &DayRow,
     evidence: &ImportRefusals,
-) -> (Vec<telemetry::Record>, &'static str) {
+) -> (Vec<telemetry::Record>, String) {
     let kind = row.kind.as_str();
     let day = row.day.to_string();
-    let ring = evidence.of(kind, &day);
-    if !ring.is_empty() {
-        return (ring.to_vec(), "cli ring");
+    let sources = |from: &[String], what: &str| -> String {
+        from.iter()
+            .map(|dir| format!("{dir} {what}"))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    let ring = evidence.logged(kind, &day);
+    if !ring.records.is_empty() {
+        let source = sources(&ring.from, "ring");
+        return (ring.records.into_owned(), source);
     }
+    let mut unread = evidence.unread(kind);
     let failed = !row.outcome.is_done() || row.stats.failures.is_some_and(|n| n > 0);
     if failed && row.outcome != DayOutcome::Open {
         let audited = crate::logs::audited_import_refusals(root, kind, &day);
-        if !audited.is_empty() {
-            return (audited, "cli audit stream");
+        if !audited.records.is_empty() {
+            let source = sources(&audited.from, "audit stream");
+            return (audited.records, source);
         }
+        unread.extend(audited.unread);
     }
-    (Vec::new(), "none")
+    if unread.is_empty() {
+        return (Vec::new(), NONE_LOGGED.to_owned());
+    }
+    (
+        Vec::new(),
+        format!("nothing in the directories read; {}", unread.join("; ")),
+    )
 }
+
+/// What a row's `logged_from` says when every directory a run of its kind
+/// can write was read and none holds a refusal for it.
+pub(crate) const NONE_LOGGED: &str = "none";
 
 /// One count as JSON: a number, or `null` when the line has none.
 fn count(value: Option<u64>) -> Value {
@@ -660,6 +754,7 @@ fn wanted(
         && asked.run.is_none_or(|run| {
             let (kind, day) = kind_day();
             let attempts = evidence.attempts_of(kind, &day);
+            let attempts = attempts.as_slice();
             row.stats.run == Some(run)
                 || attempts.contains(&run)
                 || run_attempt.is_some_and(|attempt| attempts.contains(&attempt))
@@ -751,6 +846,7 @@ fn walk<'p>(
             *slot = slot.saturating_add(1);
         }
         let logged = evidence.of(row.kind.as_str(), &row.day.to_string());
+        let logged: &[telemetry::Record] = &logged;
         let census =
             stage_of(&row, logged).is_some_and(|(stage, _)| stage == Stage::Census.as_str());
         let name = format!("{} {}", row.kind.as_str(), row.day);
@@ -828,14 +924,21 @@ fn kinds_json(parsed: &Parsed, evidence: &ImportRefusals) -> Vec<Value> {
         .iter()
         .zip(parsed.last.iter())
         .map(|(kind, last)| {
-            let measured = evidence.pace(kind.as_str()).map(|(gaps, p50, p90)| {
+            let measured = evidence.pace(kind.as_str()).map(|pace| {
                 json!({
-                    "gaps": gaps,
-                    "p50_ms_per_day": p50,
-                    "p90_ms_per_day": p90,
-                    "days_per_hour_at_p50": if p50 > 0 { 3_600_000 / p50 } else { 0 },
-                    "newest_at_ms": evidence.newest_import(kind.as_str()),
-                    "from": "the importer's `day imported` events in the cli log",
+                    "gaps": pace.gaps,
+                    "p50_ms_per_day": pace.p50,
+                    "p90_ms_per_day": pace.p90,
+                    "days_per_hour_at_p50": if pace.p50 > 0 { 3_600_000 / pace.p50 } else { 0 },
+                    "newest_at_ms": pace.newest,
+                    // THE DIRECTORY READ IS NAMED: a pace measured from
+                    // `logs/cli` alone would be a frozen one, shown as
+                    // measured, the day a kind's runs log elsewhere (F78).
+                    "from": format!(
+                        "the importer's `day imported` events in {}",
+                        pace.from.join(", ")
+                    ),
+                    "from_dirs": pace.from,
                 })
             });
             json!({
@@ -849,24 +952,45 @@ fn kinds_json(parsed: &Parsed, evidence: &ImportRefusals) -> Vec<Value> {
         .collect()
 }
 
-/// What the journal and the `cli` ring say about one run id (DB-A41): the
-/// journal's `run` lines of that id, the `cli` attempt of that id (or the one
-/// that opened that importer run), with its start, its finish or that none was
-/// logged, and the importer runs it opened.
-fn run_json(parsed: &Parsed, evidence: &ImportRefusals, run: u64) -> Value {
-    let lines: Vec<Value> = runs_json(parsed)
-        .into_iter()
-        .filter(|line| line.get("id").and_then(Value::as_u64) == Some(run))
-        .collect();
+/// What the journal and the logs say about one run id (DB-A41; D-4862 and
+/// D-4813 round 6): the journal's `run` lines of that id, found through the
+/// id index and no other line decoded; the `cli` attempt of that id (or the
+/// one that opened that importer run), with the directory whose ring holds
+/// it, its start, its finish or that none was logged; and the run's own
+/// lifecycle events from `run claimed` to `finished`, read keyed through the
+/// `run` posting of every directory a GDFL run can log to, never a ring walk.
+fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, run: u64) -> Value {
+    let lines: Vec<Value> = parsed.runs_of(run).rev().map(run_line_json).collect();
     let attempt_id = evidence
         .attempt(run)
         .map(|_| run)
         .or_else(|| evidence.attempt_of_importer_run(run));
-    let attempt = attempt_id.and_then(|id| evidence.attempt(id).map(|attempt| (id, attempt)));
+    let attempt = attempt_id.and_then(|id| evidence.attempt(id).map(|found| (id, found)));
+    let lifecycle = crate::logs::run_lifecycle(root, run);
+    let shown = lifecycle.records.len().min(MAX_LIFECYCLE_SHOWN);
+    let events: Vec<Value> = lifecycle
+        .records
+        .iter()
+        .skip(lifecycle.records.len().saturating_sub(shown))
+        .map(|record| {
+            let fields: serde_json::Map<String, Value> = record
+                .fields
+                .iter()
+                .map(|(name, value)| (name.clone(), field_json(value)))
+                .collect();
+            json!({
+                "seq": record.seq,
+                "at_ms": record.at_unix_millis,
+                "level": record.level.label(),
+                "message": record.message,
+                "fields": fields,
+            })
+        })
+        .collect();
     json!({
         "id": run,
         "journal_lines": lines,
-        "attempt": attempt.map(|(id, attempt)| json!({
+        "attempt": attempt.map(|(id, (dir, attempt))| json!({
             "id": id,
             "command": attempt.command,
             "started_ms": attempt.started_ms,
@@ -879,28 +1003,144 @@ fn run_json(parsed: &Parsed, evidence: &ImportRefusals, run: u64) -> Value {
             },
             "importer_runs": attempt.importer_runs,
             "importer_lines": attempt.lines,
-            "from": "the cli ring: every line between this attempt's command started and its \
-                     command finished is its own, because one cli process at a time writes \
-                     logs/cli",
+            "dir": dir,
+            "from": format!(
+                "the {dir} ring: every line between this attempt's command started and its \
+                 command finished is its own, because one process at a time writes {dir}"
+            ),
         })),
+        "lifecycle": {
+            "events": events,
+            "events_total": lifecycle.records.len(),
+            "from": lifecycle.from,
+            "unread": lifecycle.unread,
+            "capped": lifecycle.capped,
+            "read": format!(
+                "the `run` posting of the audit stream of each of {}: keyed, at most {} \
+                 pointers a directory, the newest {MAX_LIFECYCLE_SHOWN} events shown",
+                crate::logs::import_dirs()
+                    .map(|dir| format!("logs/{dir}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                crate::logs::MAX_KEYED_READS,
+            ),
+        },
     })
 }
 
-/// Every `run` line, newest first, its fields decoded.
-fn runs_json(parsed: &Parsed) -> Vec<Value> {
-    parsed
+/// `/dayflags.json`'s body for `query` over the store at `root`: the day
+/// band's read, which calls [`answer`] with [`RunsAsked::Every`]. Here, and
+/// not in `dayflags`, only because this module is the one of the two that a
+/// caller outside `server` can reach; `logs::dayflags_json_over` is that
+/// caller, for the bench that measures `docs/06-limits.md` L-IA-39.
+pub(crate) fn day_band_json(root: &std::path::Path, query: &str) -> Result<String, String> {
+    let asked = super::dayflags::asked(query)?;
+    Ok(super::dayflags::answer(root, &asked).to_string())
+}
+
+/// How many of a run's lifecycle events `run=` shows: the newest.
+/// `events_total` says how many were read.
+const MAX_LIFECYCLE_SHOWN: usize = 64;
+
+/// One log field as JSON: a number as a number, anything else as its text.
+fn field_json(value: &telemetry::OwnedValue) -> Value {
+    value.as_u64().map_or_else(
+        || {
+            value
+                .as_str()
+                .map_or_else(|| Value::from(format!("{value:?}")), Value::from)
+        },
+        Value::from,
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `run` lines decoded on this thread: what IA-LG-03 counts.
+    static RUN_LINES_DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One `run` line, its fields decoded.
+fn run_line_json(run: &crate::server::import_journal::RunLine) -> Value {
+    #[cfg(test)]
+    RUN_LINES_DECODED.with(|count| count.set(count.get().saturating_add(1)));
+    let fields: serde_json::Map<String, Value> = run
+        .fields
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::from(value.clone())))
+        .collect();
+    json!({ "id": run.id, "line": run.line, "fields": fields })
+}
+
+/// One page of `run` lines, newest first.
+struct RunsPage {
+    /// The lines of the page, decoded: at most [`RUNS_PAGE`] unless every run
+    /// was asked for.
+    runs: Vec<Value>,
+    /// Every `run` line the journal holds, counted.
+    total: usize,
+    /// The cursor of the next older page, when there is one.
+    next: Option<String>,
+    /// Why a cursor could not be honoured, when it could not.
+    refused: Option<String>,
+}
+
+/// The `run` lines an answer carries, newest first: only the lines of the
+/// page are decoded, whatever the journal holds (D-4813 round 6; IA-11r R6;
+/// IA-LG-03). `parsed.runs` is in file order, so the newest page is its end
+/// and a cursor is a position the id index gives in one probe.
+fn runs_page(parsed: &Parsed, asked: RunsAsked) -> RunsPage {
+    let total = parsed.runs.len();
+    let (end, take, refused) = match asked {
+        RunsAsked::Every => (total, total, None),
+        RunsAsked::Page(None) => (total, RUNS_PAGE, None),
+        RunsAsked::Page(Some((id, nth))) => match parsed.runs_before(id, nth) {
+            Some(end) => (end, RUNS_PAGE, None),
+            // A CURSOR THAT NAMES NOTHING SHOWS NOTHING AND SAYS SO: the
+            // newest page in its place would be read as the page asked for.
+            None => (
+                0,
+                RUNS_PAGE,
+                Some(format!(
+                    "runs_before={} names no `run` line this journal holds, so no older page is \
+                     shown; ask without runs_before for the newest runs",
+                    // AS IT WAS ASKED: a bare id is not echoed as `<id>.0`.
+                    if nth == 0 {
+                        id.to_string()
+                    } else {
+                        format!("{id}.{nth}")
+                    }
+                )),
+            ),
+        },
+    };
+    let runs: Vec<Value> = parsed
         .runs
+        .get(..end)
+        .unwrap_or_default()
         .iter()
         .rev()
-        .map(|run| {
-            let fields: serde_json::Map<String, Value> = run
-                .fields
-                .iter()
-                .map(|(name, value)| (name.clone(), Value::from(value.clone())))
-                .collect();
-            json!({ "id": run.id, "line": run.line, "fields": fields })
+        .take(take)
+        .map(run_line_json)
+        .collect();
+    // THE NEXT PAGE STARTS BELOW THE OLDEST LINE SHOWN, named by its id and,
+    // when that id has older lines too, by which of its lines it is.
+    let oldest_shown = end.saturating_sub(runs.len());
+    let next = (oldest_shown > 0 && !runs.is_empty())
+        .then(|| {
+            let id = parsed.runs.get(oldest_shown)?.id;
+            match parsed.nth_of(oldest_shown)? {
+                0 => Some(id.to_string()),
+                nth => Some(format!("{id}.{nth}")),
+            }
         })
-        .collect()
+        .flatten();
+    RunsPage {
+        runs,
+        total,
+        next,
+        refused,
+    }
 }
 
 /// The journal file's own state.
@@ -996,6 +1236,26 @@ pub(crate) fn body(
         .map(|row| row_json(root, row, evidence))
         .collect();
     let notes = notes_of(snapshot, &rows);
+    let runs = runs_page(parsed, asked.runs);
+    let dirs: Vec<Value> = evidence
+        .dirs()
+        .iter()
+        .map(|dir| {
+            json!({
+                "dir": dir.name(),
+                "path": dir.path.display().to_string(),
+                "state": dir.state.word(),
+                "error": match &dir.state {
+                    crate::logs::DirState::Unreadable(why) => Value::from(why.clone()),
+                    crate::logs::DirState::Read | crate::logs::DirState::Absent => Value::Null,
+                },
+                "ring_files": dir.files(),
+                "ring_bytes": dir.bytes(),
+                "malformed": dir.malformed(),
+                "errors": dir.errors(),
+            })
+        })
+        .collect();
     json!({
         "feed": brutex_core::vendor::Vendor::Gdfl.as_str(),
         "journal": journal_json(snapshot),
@@ -1010,7 +1270,7 @@ pub(crate) fn body(
             "reason": asked.reason,
             "why": asked.why,
         },
-        "run": asked.run.map(|run| run_json(parsed, evidence, run)),
+        "run": asked.run.map(|run| run_json(root, parsed, evidence, run)),
         "page": page,
         "pages": pages,
         "page_rows": PAGE_ROWS,
@@ -1026,13 +1286,25 @@ pub(crate) fn body(
             "days": walked.census_then_done,
         },
         "kinds": kinds_json(parsed, evidence),
-        "runs": runs_json(parsed),
+        "runs": runs.runs,
+        "runs_total": runs.total,
+        "runs_page": RUNS_PAGE,
+        "runs_next": runs.next,
+        "runs_cursor_refused": runs.refused,
         "rows": rows,
+        // EVERY DIRECTORY THE IMPORTER'S EVIDENCE WAS READ FROM, each `read`,
+        // `absent` or `unreadable`, with what its ring held (D-4862 round 6).
         "evidence": {
-            "cli_ring_files": evidence.files,
-            "cli_ring_bytes": evidence.bytes,
-            "malformed": evidence.malformed,
-            "errors": evidence.errors,
+            "dirs": dirs,
+            "malformed": evidence.dirs().iter().map(crate::logs::DirEvidence::malformed).sum::<u64>(),
+            "errors": evidence
+                .dirs()
+                .iter()
+                .flat_map(|dir| dir.errors().iter().cloned())
+                .collect::<Vec<_>>(),
+            "none_means": "a row's logged_from is \"none\" only when every directory a run of \
+                           its kind can write was read and holds nothing for it; a directory \
+                           absent or unreadable is named in its place",
         },
         "notes": notes,
     })
@@ -1147,7 +1419,7 @@ begin options 2020-09-16 *
         assert_eq!(rows[0]["late"], 2);
         assert_eq!(rows[0]["max_back_s"], 3);
         assert_eq!(rows[0]["logged"][0]["about"], "census");
-        assert_eq!(rows[0]["logged_from"], "cli ring");
+        assert_eq!(rows[0]["logged_from"], "logs/cli ring");
         assert_eq!(rows[1]["day"], "2019-12-27");
         assert_eq!(rows[1]["outcome"], "done");
         assert_eq!(rows[1]["stage"], Value::Null);
@@ -1533,5 +1805,456 @@ begin options 2020-09-16 *
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(body.contains("zerodha"), "{body}");
+    }
+
+    // -----------------------------------------------------------------------
+    // IA-11r, R5 (D-4862 round 6): THE IMPORTER'S EVIDENCE IS READ WHERE THE
+    // RUN LOGGED IT. One fixture store, one named test per reader (IA-LG-02).
+    // -----------------------------------------------------------------------
+
+    /// The indices run of the fixture.
+    const INDICES_RUN: u64 = 1_791_700_000;
+
+    /// A journal for [`run_store`]: an indices run whose day 2022-03-07 closed
+    /// `incomplete` on a line with no stage, a stocks day and an indices day
+    /// done, and an older options day the census refused. Invented.
+    const RUN_JOURNAL: &str = "\
+run 1791700000 source=zip started=1791700000
+begin options 2019-11-14 *
+incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 late_unresolved=0 max_back_s=0
+begin stocks 2022-03-04 *
+done stocks 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0
+begin indices 2022-03-04 *
+done indices 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0
+begin indices 2022-03-07 *
+incomplete indices 2022-03-07 * files=2 seconds=20 failures=1 late=0 late_unresolved=0 max_back_s=0
+";
+
+    /// One store where an INDICES run logged to `logs/gdfl/indices` through a
+    /// real sink (its `run claimed`, three `day imported` events, a refusal on
+    /// 2022-03-07 and one on 2022-03-08, a day it crashed before closing) and
+    /// an OLDER options run logged to `logs/cli` (a census refusal on
+    /// 2019-11-14). `logs/gdfl/store` exists and is empty; `logs/gdfl/stocks`
+    /// and `logs/gdfl/options` were never created.
+    fn run_store(name: &str) -> std::path::PathBuf {
+        let root =
+            crate::server::import_journal::tests::journal(&format!("imports-{name}"), RUN_JOURNAL);
+        let logs = root.join("logs");
+        std::fs::create_dir_all(logs.join("cli")).expect("mkdir");
+        std::fs::write(
+            logs.join("cli").join("events.ndjson"),
+            "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078968,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"options\",\"day\":\"2019-11-14\",\"about\":\"census\",\
+             \"why\":\"n_valid is 9; this build holds at most 8\"}}\n",
+        )
+        .expect("the cli log");
+        std::fs::create_dir_all(logs.join("gdfl").join("store")).expect("mkdir");
+        let own = logs.join("gdfl").join("indices");
+        std::fs::create_dir_all(&own).expect("mkdir");
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&own).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("the run's own sink");
+        let said = |event: telemetry::Event<'_>| {
+            assert!(sink.emit(&event).is_written(), "the fixture logs");
+        };
+        said(
+            telemetry::Event::info(crate::logs::RUN_LIFECYCLE_TARGET, "run claimed")
+                .with("run", INDICES_RUN)
+                .with("kind", "indices")
+                .with("mode", "import"),
+        );
+        for day in ["2022-03-02", "2022-03-03", "2022-03-04"] {
+            said(
+                telemetry::Event::info("gdfl.import", "day imported")
+                    .with("run", INDICES_RUN)
+                    .with("kind", "indices")
+                    .with("day", day),
+            );
+        }
+        for day in ["2022-03-07", "2022-03-08"] {
+            said(
+                telemetry::Event::error("gdfl.import", "refused")
+                    .with("run", INDICES_RUN)
+                    .with("kind", "indices")
+                    .with("day", day)
+                    .with("about", "ZZ FIXTURE 50.NSE_IDX.csv")
+                    .with("stage", "vendor")
+                    .with("code", "malformed_row")
+                    .with("why", "line 9: the LTP is not a two-place decimal"),
+            );
+        }
+        drop(sink);
+        root
+    }
+
+    /// The row of `kind` and `day` in an answer.
+    fn row_of<'a>(got: &'a Value, kind: &str, day: &str) -> &'a Value {
+        got["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["kind"] == kind && row["day"] == day)
+            .unwrap_or_else(|| panic!("{kind} {day} in {got:#}"))
+    }
+
+    /// **`/imports.json` READS THE IMPORTER'S EVIDENCE WHERE THE RUN LOGGED
+    /// IT** (IA-LG-02; F78): the indices run's refusal is on its day's row
+    /// with its directory named as the source, never `"none"`; the day it
+    /// crashed before closing is a logged-only row; the indices pace is
+    /// measured from that directory and says so; `run=` answers the run's
+    /// lifecycle from its own audit stream; the older options run is still
+    /// read from `logs/cli`; a row whose kind's own directory was never
+    /// created names it `absent` and does not say `"none"`, while a row all
+    /// of whose directories were read does. Every assertion on the indices
+    /// run fails when the reader reads `logs/cli` alone.
+    #[test]
+    fn imports_json_reads_importer_evidence_where_the_run_logged() {
+        let root = run_store("where-the-run-logged");
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&order=asc&from=2019-11-01&to=2022-03-31"),
+        )
+        .expect("reads");
+
+        // (1) THE REFUSAL, FROM THE RUN'S OWN RING, source named.
+        let refused = row_of(&got, "indices", "2022-03-07");
+        assert_eq!(
+            refused["logged_from"], "logs/gdfl/indices ring",
+            "{refused:#}"
+        );
+        assert_eq!(refused["logged"].as_array().unwrap().len(), 1);
+        assert_eq!(refused["logged"][0]["about"], "ZZ FIXTURE 50.NSE_IDX.csv");
+        assert_eq!(refused["logged"][0]["code"], "malformed_row");
+        assert_eq!(refused["stage"], "vendor", "settled from the log");
+        assert_eq!(refused["stage_from"], "log");
+
+        // (2) THE DAY IT CRASHED BEFORE CLOSING is a row, from the log alone.
+        let crashed = row_of(&got, "indices", "2022-03-08");
+        assert_eq!(crashed["outcome_from"], "log", "{crashed:#}");
+        assert_eq!(crashed["logged_from"], "logs/gdfl/indices ring");
+
+        // (3) THE OLDER RUN is still read from `logs/cli`.
+        let older = row_of(&got, "options", "2019-11-14");
+        assert_eq!(older["logged_from"], "logs/cli ring", "{older:#}");
+        assert_eq!(older["stage"], "census");
+
+        // (4) "NONE" ONLY WHEN EVERY DIRECTORY OF THE KIND WAS READ. Indices:
+        // `logs/cli`, `logs/gdfl/indices` and `logs/gdfl/store` all exist.
+        let done = row_of(&got, "indices", "2022-03-04");
+        assert_eq!(done["logged_from"], NONE_LOGGED, "{done:#}");
+        // Stocks: `logs/gdfl/stocks` was never created, and is named.
+        let stocks = row_of(&got, "stocks", "2022-03-04");
+        let source = stocks["logged_from"].as_str().expect("a source");
+        assert_ne!(source, NONE_LOGGED, "{stocks:#}");
+        assert!(source.contains("logs/gdfl/stocks absent"), "{source}");
+        assert!(
+            !source.contains("logs/gdfl/indices"),
+            "not its directory: {source}"
+        );
+
+        // (5) THE PACE, from the directory the run logged to, which it names.
+        let kinds = got["kinds"].as_array().expect("kinds");
+        let pace_of = |kind: &str| -> &Value {
+            &kinds.iter().find(|k| k["kind"] == kind).expect("the kind")["pace"]
+        };
+        let pace = pace_of("indices");
+        assert_eq!(pace["gaps"], 2, "{pace:#}");
+        assert_eq!(pace["from_dirs"], json!(["logs/gdfl/indices"]));
+        assert!(
+            pace["from"].as_str().unwrap().contains("logs/gdfl/indices"),
+            "{pace:#}"
+        );
+        assert_eq!(pace_of("options"), &Value::Null, "one event is no pace");
+
+        // (6) EVERY DIRECTORY READ IS NAMED, with its state.
+        let dirs = got["evidence"]["dirs"].as_array().expect("dirs");
+        let states: Vec<(&str, &str)> = dirs
+            .iter()
+            .map(|dir| (dir["dir"].as_str().unwrap(), dir["state"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("logs/cli", "read"),
+                ("logs/gdfl/indices", "read"),
+                ("logs/gdfl/stocks", "absent"),
+                ("logs/gdfl/options", "absent"),
+                ("logs/gdfl/store", "read"),
+            ]
+        );
+        assert!(dirs[1]["ring_bytes"].as_u64().unwrap() > 0, "{dirs:#?}");
+        assert_eq!(dirs[2]["ring_files"], 0);
+
+        // (7) `run=`: the run's lifecycle, keyed, from its own audit stream.
+        let by_run = answer(&root, &ask(&format!("feed=gdfl&run={INDICES_RUN}"))).expect("reads");
+        let lifecycle = &by_run["run"]["lifecycle"];
+        assert_eq!(
+            lifecycle["from"],
+            json!(["logs/gdfl/indices"]),
+            "{by_run:#}"
+        );
+        assert_eq!(lifecycle["events_total"], 1);
+        assert_eq!(lifecycle["events"][0]["message"], "run claimed");
+        assert_eq!(lifecycle["events"][0]["fields"]["kind"], "indices");
+        assert_eq!(lifecycle["unread"], json!([]));
+        assert_eq!(lifecycle["capped"], false);
+        assert_eq!(by_run["run"]["journal_lines"].as_array().unwrap().len(), 1);
+        // A run nobody logged has no lifecycle, and says where it looked.
+        let nobody = answer(&root, &ask("feed=gdfl&run=99")).expect("reads");
+        assert_eq!(nobody["run"]["lifecycle"]["events_total"], 0);
+        assert_eq!(nobody["run"]["attempt"], Value::Null);
+
+        // (8) A RING ROLLED AWAY: the audit stream of the run's own directory
+        // answers, and is named as the source.
+        std::fs::remove_file(root.join("logs/gdfl/indices/events.ndjson")).expect("the ring");
+        let later = answer(&root, &ask("feed=gdfl&from=2022-03-07&to=2022-03-07")).expect("reads");
+        let audited = row_of(&later, "indices", "2022-03-07");
+        assert_eq!(
+            audited["logged_from"], "logs/gdfl/indices audit stream",
+            "{audited:#}"
+        );
+        assert_eq!(audited["logged"][0]["about"], "ZZ FIXTURE 50.NSE_IDX.csv");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE `/db` DAY BAND READS THE IMPORTER'S EVIDENCE WHERE THE RUN
+    /// LOGGED IT** (IA-LG-02): `/dayflags.json` takes its import rows through
+    /// [`answer`], so the refusal an indices run logged to
+    /// `logs/gdfl/indices` is on its day, and the day it crashed before
+    /// closing reads from the log. Fails when the reader reads `logs/cli`
+    /// alone: both days would carry no refusal.
+    #[test]
+    fn dayflags_day_band_reads_importer_evidence_where_the_run_logged() {
+        let root = run_store("day-band");
+        let asked = crate::server::dayflags::asked(
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2022-03&to=2022-03",
+        )
+        .expect("a day band request");
+        let got = crate::server::dayflags::answer(&root, &asked);
+        let on = |day: &str| -> &Value {
+            got["days"]
+                .as_array()
+                .expect("days")
+                .iter()
+                .find(|record| record["day"] == day)
+                .unwrap_or_else(|| panic!("{day} in {got:#}"))
+        };
+        let refused = on("2022-03-07");
+        assert_eq!(refused["import"]["outcome"], "incomplete", "{refused:#}");
+        let refusals = &refused["import"]["refusals"];
+        assert_eq!(
+            refusals["this_count"].as_u64().unwrap_or(0)
+                + refusals["other_count"].as_u64().unwrap_or(0),
+            1,
+            "the run's refusal is on its day: {refused:#}"
+        );
+        let crashed = on("2022-03-08");
+        assert_eq!(crashed["import"]["from"], "log", "{crashed:#}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`/store`'S BEHIND READS THE IMPORTER'S EVIDENCE WHERE THE RUN LOGGED
+    /// IT** (IA-LG-02): a day closed `incomplete` on a line with no stage is
+    /// behind when the importer's own `refused` event names the census, and
+    /// that event is in the run's directory. Here an options run logged its
+    /// census refusal to `logs/gdfl/options` and nothing to `logs/cli`: the
+    /// day counts. Reading `logs/cli` alone counts 0. A second read with
+    /// nothing changed is the kept answer, and a new line in the run's
+    /// directory moves it.
+    #[test]
+    fn store_behind_reads_importer_evidence_where_the_run_logged() {
+        let root = crate::server::import_journal::tests::journal(
+            "imports-store-behind",
+            "begin options 2019-11-14 *\n\
+             incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 \
+             late_unresolved=0 max_back_s=0\n\
+             begin options 2019-11-15 *\n\
+             incomplete options 2019-11-15 * definition=2 files=5 seconds=50 failures=1 late=0 \
+             late_unresolved=0 max_back_s=0\n",
+        );
+        let own = root.join("logs").join("gdfl").join("options");
+        std::fs::create_dir_all(&own).expect("mkdir");
+        std::fs::create_dir_all(root.join("logs").join("cli")).expect("mkdir");
+        let census = |seq: u32, day: &str| {
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{},\
+                 \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                 \"fields\":{{\"kind\":\"options\",\"day\":\"{day}\",\"about\":\"census\",\
+                 \"why\":\"n_valid is 9; this build holds at most 8\"}}}}\n",
+                1_791_171_078_967_u64 + u64::from(seq)
+            )
+        };
+        std::fs::write(own.join("events.ndjson"), census(1, "2019-11-14")).expect("the run's log");
+        let dir = agreeing("imports-store-behind");
+        let mut built = site("imports-store-behind", &dir);
+        built.store_root = root.clone();
+        let feed = brutex_core::vendor::Vendor::Gdfl;
+        let behind = crate::server::census_behind(&built, feed);
+        assert_eq!(behind.days, 1, "{behind:?}");
+        assert_eq!(
+            behind.from,
+            crate::server::import_journal::parse_day("2019-11-14")
+        );
+        assert_eq!(crate::server::census_behind(&built, feed).days, 1, "kept");
+        // THE SAME EVIDENCE AGAIN IS THE SAME `Arc`: the cache key stands for
+        // the tuple of the per-directory reads.
+        let first = crate::logs::import_refusals(&root);
+        let again = crate::logs::import_refusals(&root);
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        // A NEW LINE IN THE RUN'S OWN DIRECTORY moves the answer.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(own.join("events.ndjson"))
+                .expect("the run's log");
+            file.write_all(census(2, "2019-11-15").as_bytes())
+                .expect("append");
+        }
+        let moved = crate::logs::import_refusals(&root);
+        assert!(!std::sync::Arc::ptr_eq(&first, &moved), "a directory moved");
+        assert_eq!(crate::server::census_behind(&built, feed).days, 2);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // IA-11r, R6 (D-4813 round 6): THE RUNS PAGE DECODES ONLY ITS RUNS
+    // -----------------------------------------------------------------------
+
+    /// `run` lines decoded on this thread since the last call.
+    fn decoded() -> usize {
+        RUN_LINES_DECODED.with(|count| count.replace(0))
+    }
+
+    /// **THE RUNS PAGE READS ONLY ITS RUNS** (IA-LG-03; F79): over a journal
+    /// of 100,000 `run` lines the newest page decodes 20 lines, each older
+    /// page 20 more with no line skipped or shown twice across an id that has
+    /// three lines, and `run=` decodes exactly the id's own lines. A cursor
+    /// that names nothing shows nothing and says so; one that is not a cursor
+    /// is refused; the route's answer carries the page and the count. A
+    /// caller inside the crate that asks for every run still gets every run.
+    #[test]
+    fn the_runs_page_reads_only_its_runs() {
+        use std::fmt::Write as _;
+        const RUNS: u64 = 100_000;
+        // Ids 1..=100,000 in file order, and id 77,777 twice more among the
+        // newest lines, so one id's lines straddle a page end.
+        let mut text = String::with_capacity(4 << 20);
+        for id in 1..=RUNS {
+            let _ = writeln!(text, "run {id} source=zip started={id}");
+            if id == RUNS - 19 || id == RUNS - 10 {
+                text.push_str("run 77777 source=zip started=77777 resumed=1\n");
+            }
+        }
+        let root = crate::server::import_journal::tests::journal("imports-runs-page", &text);
+        let snapshot = crate::server::import_journal::snapshot(&root).expect("reads");
+        let parsed: &Parsed = &snapshot.parsed;
+        let total = usize::try_from(RUNS).unwrap() + 2;
+        assert_eq!(parsed.runs.len(), total);
+
+        let _reset = decoded();
+        let ids = |page: &RunsPage| -> Vec<u64> {
+            page.runs
+                .iter()
+                .map(|run| run["id"].as_u64().unwrap())
+                .collect()
+        };
+        // THE NEWEST PAGE: 20 lines decoded, of 100,002.
+        let newest = runs_page(parsed, RunsAsked::Page(None));
+        assert_eq!(decoded(), RUNS_PAGE, "only the page is decoded");
+        assert_eq!(newest.total, total);
+        assert_eq!(newest.runs.len(), RUNS_PAGE);
+        assert_eq!(newest.refused, None);
+        // In file order the tail is: ..., 99,981, 77,777, 99,982 ... 99,990,
+        // 77,777, 99,991 ... 100,000. Newest first, 20 lines end at 99,982.
+        let mut expected: Vec<u64> = (RUNS - 9..=RUNS).rev().collect();
+        expected.push(77_777);
+        expected.extend((RUNS - 18..=RUNS - 10).rev());
+        assert_eq!(ids(&newest), expected);
+        assert_eq!(newest.next.as_deref(), Some("99982"));
+
+        // THE NEXT PAGE starts at the line below, which is 77,777's SECOND
+        // line: shown once, then 99,981 down.
+        let cursor = runs_cursor(newest.next.as_deref().unwrap()).expect("a cursor");
+        let second = runs_page(parsed, RunsAsked::Page(cursor));
+        assert_eq!(decoded(), RUNS_PAGE);
+        let mut expected: Vec<u64> = vec![77_777];
+        expected.extend((RUNS - 37..=RUNS - 19).rev());
+        assert_eq!(ids(&second), expected);
+
+        // A PAGE THAT ENDS INSIDE AN ID WITH SEVERAL LINES names the line:
+        // one page that ends at 77,777's second line (its `.1`).
+        let ends_inside = runs_page(parsed, RunsAsked::Page(Some((RUNS, 0))));
+        assert_eq!(
+            ids(&ends_inside).last(),
+            Some(&77_777),
+            "{:?}",
+            ids(&ends_inside)
+        );
+        assert_eq!(ends_inside.next.as_deref(), Some("77777.1"));
+        let _counted = decoded();
+        let after = runs_page(
+            parsed,
+            RunsAsked::Page(runs_cursor("77777.1").expect("a cursor")),
+        );
+        assert_eq!(ids(&after).first(), Some(&(RUNS - 19)), "nothing skipped");
+        assert!(!ids(&after).contains(&77_777), "and none shown twice");
+        // `runs_before=77777` alone is older than its OLDEST line.
+        let oldest = runs_page(parsed, RunsAsked::Page(Some((77_777, 0))));
+        assert_eq!(ids(&oldest).first(), Some(&77_776));
+        let _counted = decoded();
+
+        // THE OLDEST PAGE has no next.
+        let last = runs_page(parsed, RunsAsked::Page(Some((5, 0))));
+        assert_eq!(ids(&last), [4, 3, 2, 1]);
+        assert_eq!(last.next, None);
+        let _counted = decoded();
+
+        // A CURSOR THAT NAMES NOTHING shows nothing, and says so.
+        let nothing = runs_page(parsed, RunsAsked::Page(Some((999_999_999, 0))));
+        assert!(nothing.runs.is_empty());
+        assert!(
+            nothing.refused.as_deref().unwrap().contains("999999999"),
+            "{:?}",
+            nothing.refused
+        );
+        assert_eq!(decoded(), 0, "and decodes nothing");
+        for garbage in ["abc", "0", "5.x", "-1", "5.", "05", " 5"] {
+            assert!(runs_cursor(garbage).is_err(), "{garbage:?}");
+        }
+        assert_eq!(runs_cursor(""), Ok(None));
+        assert!(asked("feed=gdfl&runs_before=abc").is_err());
+
+        // `run=`: the id's own lines, through the id index, and no other.
+        let evidence = crate::logs::import_refusals(&root);
+        let one = run_json(&root, parsed, &evidence, 77_777);
+        assert_eq!(decoded(), 3, "the id's three lines");
+        assert_eq!(one["journal_lines"].as_array().unwrap().len(), 3);
+        let none = run_json(&root, parsed, &evidence, 999_999_999);
+        assert_eq!(decoded(), 0);
+        assert_eq!(none["journal_lines"], json!([]));
+
+        // THE ROUTE'S ANSWER carries one page; the summary too.
+        let route = answer(&root, &ask("feed=gdfl")).expect("reads");
+        assert_eq!(decoded(), RUNS_PAGE);
+        assert_eq!(route["runs"].as_array().unwrap().len(), RUNS_PAGE);
+        assert_eq!(route["runs_total"], total);
+        assert_eq!(route["runs_next"], "99982");
+        let paged = answer(&root, &ask("feed=gdfl&runs_before=99982")).expect("reads");
+        assert_eq!(paged["runs"][0]["id"], 77_777);
+        assert_eq!(paged["runs_cursor_refused"], Value::Null);
+        let _counted = decoded();
+        let brief = summary_of(&root, &snapshot, &evidence);
+        assert_eq!(decoded(), RUNS_PAGE);
+        assert_eq!(brief["runs_total"], total);
+
+        // A CALLER THAT RESOLVES A RUN BY TIME (the day band) asks for every
+        // run and gets every run.
+        let every = runs_page(parsed, RunsAsked::Every);
+        assert_eq!(every.runs.len(), total);
+        assert_eq!(every.next, None);
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
