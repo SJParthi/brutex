@@ -105,7 +105,12 @@
           ? db.universeCount.get(u.key)
             ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held`
             : 'not counted'
-          : `${fmt(db.deco.length)} instrument-month(s) held`,
+          : /* NAMES, THE UNIT EVERY OTHER TIER COUNTS (WP-56; DB-N07): it read
+               "2,50,025 held" — instrument-months — beside "184 of 200 held"
+               instruments. The month count stays, under its own name. */
+            db.heldNames === null
+            ? `${fmt(db.deco.length)} instrument-month(s); names not yet counted`
+            : `${fmt(db.heldNames)} held · ${fmt(db.deco.length)} instrument-month(s)`,
         why: u.key ? undefined : 'The only setting that reaches stored data whose instrument this feed\u2019s master no longer lists.'
       }))}
       selected={new Set([db.universe])}

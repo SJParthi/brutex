@@ -466,17 +466,24 @@ fn a_delta_answers_only_what_changed_and_an_old_generation_is_refused() {
     .expect_err("refused");
     assert_eq!(code, axum::http::StatusCode::GONE);
     assert!(body.contains("since_too_old"), "{body}");
-    let (code, _) = render_answer(
-        &index,
-        &asked_for(&format!(
-            "feed=gdfl&segment=FNO&since={}",
-            index.generation + 1
-        )),
-        "held",
-        None,
-    )
-    .expect_err("a generation never published is refused too");
-    assert_eq!(code, axum::http::StatusCode::GONE);
+    // A GENERATION NEVER PUBLISHED IS NOT "TOO OLD" (WP-56; DB-B56): a
+    // client that sent the vendor-wide sum, or a value past this part's
+    // newest, is told so and given the generation to use, never sent to
+    // reload in a loop believing it fell behind.
+    for future in [index.generation + 1, 99_999_999_999] {
+        let (code, body) = render_answer(
+            &index,
+            &asked_for(&format!("feed=gdfl&segment=FNO&since={future}")),
+            "held",
+            None,
+        )
+        .expect_err("a generation never published is refused");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        let refusal = json(&body);
+        assert_eq!(refusal["error"], "since_in_future", "{body}");
+        assert_eq!(refusal["since"], future);
+        assert_eq!(refusal["generation"], index.generation);
+    }
 }
 
 #[test]
@@ -501,6 +508,13 @@ fn the_route_answers_from_the_site_and_refuses_an_unreadable_census() {
     let value = json(&body);
     assert_eq!(value["strikes"].as_array().expect("a list").len(), 2);
     assert_eq!(value["generation"], 7);
+    // ONE SPELLING OF THE GENERATION A `since` TAKES, in the header as in the
+    // body (WP-56; DB-B56).
+    assert_eq!(headers["x-brutex-census-part-generation"], "7");
+    assert_eq!(
+        headers["x-brutex-census-part-generations"], "",
+        "a single file"
+    );
     assert!(body.len() < 50_000);
 
     // An empty feed is answered with empty lists, its state named.

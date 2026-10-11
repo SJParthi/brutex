@@ -2,11 +2,21 @@
   /**
    * /db — THE CENSUS CLIENT, ITS LOADING SKELETON AND ITS BANNER
    *
-   * The page's reading of `/store.json` (`censusState`) and what the page draws
+   * The page's reading of `/store.json` (`censusState`), what the page draws
    * while that reading is in flight (`censusLoading`, the skeleton the shell
-   * renders in its loading branch). The banner that will name a capped, degraded
-   * or behind census renders nothing yet; it is mounted at the top of the pane,
-   * above every state.
+   * renders in its loading branch), and THE BANNER (WP-56, D-3327), mounted at
+   * the top of the pane above every state. The banner says:
+   *
+   *   - when the census on screen was read, and at which generation — the
+   *     page is a snapshot, and said nowhere that it was (DB-022);
+   *   - that the store moved after that read, from a header-only HEAD of the
+   *     census every few seconds, and what moved for the instrument on screen
+   *     (`/census/facets.json?since=`, O(changes)), with Refresh (DB-022);
+   *   - a census that is `capped` or `behind` its import, in the server's own
+   *     sentence, with its capacity, its headroom and the import days it
+   *     refused (DB-G03, DB-G11, DB-G60, DB-G78);
+   *   - a census this page decoded or prepared on its own thread because no
+   *     worker could, and why (DB-G84).
    *
    * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
    * page split). The only edits to a moved line are the ones the move needs: a
@@ -19,11 +29,13 @@
    *
    * Owner after WP-00: WP-56 (census client: facets, worker, refresh, lag banner).
    */
-  import { store, syncStore, surveyStores, survey } from '$lib/store.svelte.js';
+  import { store, syncStore, surveyStores, survey, refreshStore, watchCensus, facets } from '$lib/store.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { denominators } from '$lib/completeness.js';
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
   import { instrumentMemo, databasePreparation } from '$lib/database-preparation.js';
+  import { yieldTask, inSlices } from '$lib/census-worker.js';
+  import { censusMoved, sinceFor, censusLines, movedLines } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
   import { SKELETON } from '$lib/db/bars-plan.js';
@@ -59,7 +71,7 @@
        fields off a row and derives its own denominators, so it takes the array
        and not the census's normalised view of it. */
     const rows = $derived(store.feed === feeds.active ? store.rows : []);
-    /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>}|null,why:string|null}} */
+    /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>,heldNames:number}|null,why:string|null}} */
     let prepared = $state.raw({ input: null, body: null, why: null });
     const preparing = $derived(rows.length > 0 && (prepared.input !== rows || (!prepared.body && !prepared.why)));
     const error = $derived(store.error ?? (prepared.input === rows ? prepared.why : null));
@@ -178,24 +190,99 @@
 
     const deco = $derived(prepared.input === rows ? prepared.body?.rows ?? [] : []);
 
+    /* THE PREPARATION — DECORATED ROWS AND DENOMINATORS, NO PREFIX INDEX.
+       ----------------------------------------------------------------------
+       In slices of 1,024 rows (about 2 ms of decoration each), each followed
+       by a real task (`yieldTask`). The old default, `scheduler.yield`,
+       resumes AHEAD of timers and input, so a "yielding" preparation still
+       froze the page for over two seconds (DB-G84). The census worker parses
+       and decodes; decorating there and sending the rows back cost more than
+       decorating here in slices (`$lib/census-worker.js` has the figures).
+
+       NO PREFIX TOKENS (DB-B52): every row used to be filed under four
+       prefixes of four tokens — 4,586,125 references, the largest bucket
+       holding every row, about 8 times the preparation's time and 42 MB of
+       heap — for a search box WP-51 replaced and nothing reads. The empty
+       map stays the shape `DbSearch.svelte`'s unpublished `index` reads.
+
+       THE NAMES HELD (DB-N07) are counted in the same slices, so the
+       Everything universe row counts underlyings like every other row. */
     $effect(() => {
       const input = rows;
       const controller = new AbortController();
       prepared = { input, body: null, why: null };
       if (input.length > 0) {
         const describe = instrumentMemo(instrumentDescription);
-        // Preparation starts after a yield and stays outside reactive dependency
-        // tracking. Publish only one complete immutable snapshot for this input.
         void databasePreparation.read(input, (row, observed) => decorateRow(row, observed, describe(row.instrument)), {
-          signal: controller.signal, tokens: row => [row.instrument, row.sym, row.underlying, row.month]
-        }).then(body => {
+          signal: controller.signal, yieldControl: yieldTask, chunkSize: 1024
+        }).then(async (body) => {
+          const names = new Set();
+          await inSlices(body.rows.length, (start, end) => {
+            for (let i = start; i < end; i++) names.add(body.rows[i].underlying);
+          }, controller.signal);
+          return { ...body, heldNames: names.size };
+        }).then((body) => {
+          // Preparation stays outside reactive dependency tracking. Publish
+          // only one complete immutable snapshot for this input.
           if (!controller.signal.aborted) prepared = { input, body, why: null };
-        }).catch(why => {
+        }).catch((why) => {
           if (!controller.signal.aborted) prepared = { input, body: null, why: `Database view preparation failed: ${String(why)}` };
         });
       }
       return () => controller.abort();
     });
+
+    /* ======================================================================
+       THE SNAPSHOT AND WHAT MOVED SINCE (DB-022)
+       ====================================================================== */
+    /* THE GENERATION WATCH: a HEAD of the census every few seconds while the
+       tab is visible, released when the page goes or the feed changes. */
+    $effect(() => watchCensus(feeds.active));
+
+    const moved = $derived(store.feed === feeds.active ? censusMoved({ feed: store.feed, lag: store.lag }, store.head) : null);
+
+    /* WHAT MOVED FOR THE INSTRUMENT ON SCREEN, at O(changes): the facets of
+       its underlying in each segment whose part moved, asked `since` the part
+       generation this page READ. Asked once per new generation the HEAD
+       reports, never per tick. */
+    let selectionDelta = $state.raw(/** @type {{key: string, answers: any[]} | null} */ (null));
+    $effect(() => {
+      const m = moved;
+      const underlying = db.picked;
+      const feed = store.feed;
+      const lag = store.lag;
+      if (!m || !underlying || !feed || !lag) {
+        selectionDelta = null;
+        return;
+      }
+      const segments = m.segments.length > 0 ? m.segments : ['INDEX', 'CASH', 'FNO'];
+      const key = `${feed}|${underlying}|${m.to}|${segments.join(',')}`;
+      if (selectionDelta?.key === key) return;
+      let live = true;
+      Promise.all(segments.map((segment) => {
+        const since = sinceFor(lag, segment);
+        return since === null
+          ? Promise.resolve({ ok: false, status: 0, query: { feed, segment, underlying }, reason: 'this census names no generation for the segment, so no delta can be asked', body: null })
+          : facets.changesSince({ feed, segment, underlying }, since).catch((why) => ({ ok: false, status: 0, query: { feed, segment, underlying }, reason: String(why?.message ?? why), body: null }));
+      })).then((answers) => {
+        if (live) selectionDelta = { key, answers };
+      });
+      return () => { live = false; };
+    });
+
+    /** The banner's lines, from the census headers and the watch. */
+    const banner = $derived.by(() => {
+      const feed = store.feed;
+      return feed !== null && feed === feeds.active && store.state === 'ready'
+        ? censusLines({ feed, at: store.at, lag: store.lag, worker: store.worker, head: store.head, how: store.how })
+        : [];
+    });
+    const movedSaid = $derived(store.feed === feeds.active && moved
+      ? movedLines(moved, store.head, store.at, db.picked ?? null, selectionDelta?.answers ?? null)
+      : []);
+
+    /** Distinct underlyings held — the unit every universe row counts (DB-N07). */
+    const heldNamesNow = $derived(prepared.input === rows ? prepared.body?.heldNames ?? null : null);
 
     Object.defineProperties(db, {
       rows: { get: () => rows },
@@ -207,7 +294,12 @@
       nonce: { get: () => nonce },
       loadedFeed: { get: () => loadedFeed, set: (v) => (loadedFeed = v) },
       elsewhere: { get: () => elsewhere },
-      deco: { get: () => deco }
+      deco: { get: () => deco },
+      heldNames: { get: () => heldNamesNow },
+      censusMoved: { get: () => moved },
+      censusBanner: { get: () => banner },
+      censusMovedSaid: { get: () => movedSaid },
+      refreshCensus: { get: () => () => refreshStore() }
     });
   }
 
@@ -218,6 +310,24 @@
   /** @type {{ db: any }} */
   let { db } = $props();
 </script>
+
+<!-- THE BANNER. Every line is a fact the census headers or the watch
+     stated, in the server's own words where it has them; a line with
+     nothing to say is not drawn. `role="status"` for the quiet lines, an
+     alert for a census that cannot be called complete. -->
+{#if db.censusBanner.length || db.censusMovedSaid.length}
+  <section class="cbanner" aria-label="Census">
+    {#each db.censusBanner as line (line.key)}
+      <p class="cline {line.tone}" role={line.tone === 'warn' ? 'alert' : 'status'}>{line.text}</p>
+    {/each}
+    {#if db.censusMovedSaid.length}
+      <div class="cline moved" role="status">
+        {#each db.censusMovedSaid as line (line.key)}<span>{line.text}</span>{/each}
+        <button class="btn" onclick={() => db.refreshCensus()}>Refresh</button>
+      </div>
+    {/if}
+  </section>
+{/if}
 
 
 {#snippet censusLoading(/** @type {any} */ db)}
@@ -316,6 +426,45 @@
 {/snippet}
 
 <style>
+  /* ---- THE BANNER ------------------------------------------------------
+     Above every state, one line per fact. Quiet lines (`info`) are the
+     snapshot stamp and where the census was decoded; `warn` is a census that
+     cannot be called complete; `moved` carries the Refresh it offers. */
+  .cbanner {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    padding: var(--s2) var(--s5);
+  }
+  .cline {
+    margin: 0;
+    font-size: var(--fs-xs);
+    line-height: var(--lh-base);
+    color: var(--faint);
+    word-break: break-word;
+  }
+  .cline.warn {
+    color: var(--ink);
+    background: var(--warn-soft);
+    border: 1px solid var(--warn);
+    border-radius: var(--r2);
+    padding: var(--s2) var(--s4);
+  }
+  .cline.moved {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2) var(--s4);
+    color: var(--ink);
+    background: var(--info-soft);
+    border: 1px solid var(--info);
+    border-radius: var(--r2);
+    padding: var(--s2) var(--s4);
+  }
+  .cline.moved .btn {
+    margin-left: auto;
+  }
   /* Also in the shell, +page.svelte, where its reasons are written. */
   .board {
     flex: 1;

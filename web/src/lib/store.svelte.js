@@ -69,9 +69,12 @@ import { foldWindow, foldKey } from '$lib/fold.js';
 // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
-import { createCensusLoader, censusFailure, STORE_CENSUS_MS } from '$lib/store-census.js';
+import { createCensusLoader, censusFailure, censusLag, createFacetsLoader, readOnPage, STORE_CENSUS_MS } from '$lib/store-census.js';
+import { decodeCensus } from '$lib/store-census-wire.js';
+import { createCensusWorker, inSlices } from '$lib/census-worker.js';
 import { ask } from '$lib/ask.js';
 import { readFeedHeader } from '$lib/feed-summary.js';
+import { offeredFeeds } from '$lib/feed-row.js';
 import { pooled } from '$lib/pooled.js';
 
 /* ======================================================================
@@ -293,6 +296,21 @@ const empty = () => ({
  *   generation  bumped by `refreshStore`; the read key, and the shared clock
  *   reads       how many reads have SUCCEEDED — the memo key for window folds
  *   lastOk      { at, feed } of the last successful read. Never "current".
+ *   lag         every census header of the CURRENT value's read (`censusLag`):
+ *               its state word, the census's own generation and its parts',
+ *               capacity, headroom, the import days it refused — `null`
+ *               unless ready (WP-56, D-3327; DB-G03, DB-G11, DB-G60, DB-G78)
+ *   worker      `null` when the census worker decoded the current value; the
+ *               reason in words when this page decoded it on its own thread
+ *               (WP-56; DB-G84) — never a silent fallback
+ *   head        the newest HEAD of the census (`watchCensus`), or `null`:
+ *               the generation the store has NOW, against `lag`'s, which is
+ *               the generation the page READ (DB-022)
+ *   how         how the CURRENT value's rows came to be current (`CensusHow`):
+ *               read whole, merged from a delta of the rows changed since the
+ *               generation held, or unchanged; and, when a refresh had to
+ *               read the census whole, why, in words — `null` unless ready
+ *               (WP-56, D-3327 item 3; DB-022, DB-060)
  *
  * @typedef {StoreCensus & {
  *   state: 'none' | 'reading' | 'ready' | 'error',
@@ -302,7 +320,11 @@ const empty = () => ({
  *   busy: string | null,
  *   generation: number,
  *   reads: number,
- *   lastOk: { at: number | null, feed: string | null }
+ *   lastOk: { at: number | null, feed: string | null },
+ *   lag: import('$lib/store-census.js').CensusLag | null,
+ *   worker: string | null,
+ *   head: import('$lib/store-census.js').HeadCheck | null,
+ *   how: import('$lib/store-census.js').CensusHow | null
  * }} StoreReading
  */
 
@@ -328,14 +350,68 @@ export const store = $state({
   generation: 0,
   reads: 0,
   lastOk: { at: null, feed: null },
+  lag: null,
+  worker: null,
+  head: null,
+  how: null,
   ...empty(),
   get rows() { return rawRows; },
   set rows(value) { rawRows = value; }
 });
 
+/* ======================================================================
+   THE CENSUS WORKER (WP-56, D-3327; DB-G84)
+   ----------------------------------------------------------------------
+   The census body is parsed and decoded in a Web Worker
+   (`$lib/census-worker.js`), and the page builds its row objects from the
+   columns the worker sends back in slices of at most 8 ms, then folds them
+   in slices (`foldCensus`). Before, the page parsed 33 MB, built 385,442
+   rows and folded them on its own thread: one continuous stall of over two
+   seconds on GDFL with /db's preparation (DB-G84).
+
+   A browser with no Worker, or a worker that fails, decodes on the page as
+   before, and `store.worker` names that it did and why. `pageDecodes` is the
+   reason of the read in flight, published with its rows.
+   ====================================================================== */
+const censusWorker = typeof Worker === 'function'
+  ? createCensusWorker(() => new Worker(new URL('./census-worker.js', import.meta.url), { type: 'module' }))
+  : null;
+
+/** Why the read in flight was decoded on the page, or null. @type {string | null} */
+let pageDecodes = null;
+
+/** @type {import('$lib/store-census.js').CensusBodyReader} */
+async function readCensusBody(response, feed, signal) {
+  if (!censusWorker || censusWorker.broken) {
+    pageDecodes = censusWorker
+      ? `the census worker failed (${censusWorker.broken}), so this page decoded the census on its own thread`
+      : 'this browser runs no Web Worker, so this page decoded the census on its own thread';
+    return readOnPage(response, feed, signal);
+  }
+  const bytes = await response.arrayBuffer();
+  try {
+    const rows = await censusWorker.decode(bytes, feed, signal);
+    pageDecodes = null;
+    return rows;
+  } catch (why) {
+    // A REFUSED CENSUS IS THE CENSUS'S FAULT, NOT THE WORKER'S: the worker
+    // refuses a malformed body with the same sentence the page would, and
+    // that refusal stands. Only a worker that died is stepped around.
+    if (signal.aborted || !censusWorker.broken) throw why;
+    pageDecodes = `the census worker failed (${censusWorker.broken}), so this page decoded the census on its own thread`;
+    return decodeCensus(JSON.parse(new TextDecoder().decode(bytes)), feed, signal);
+  }
+}
+
 const census = createCensusLoader(ask, STORE_CENSUS_MS, ({ nextAttempt, delayMs }) => {
   store.busy = `The database reader is busy. Retrying in ${delayMs / 1000} s (attempt ${nextAttempt} of 3).`;
-});
+}, readCensusBody);
+
+/**
+ * `/census/facets.json`, shared by every page (D-3327 item 3): a cold load
+ * per selection, then `?since=` deltas.
+ */
+export const facets = createFacetsLoader(ask);
 
 /**
  * Shared selected-feed response, including its HTTP status and headers. The
@@ -361,6 +437,11 @@ let flight = null;
    and carries no fields, which is the whole of what a token is for. */
 /** @type {object | null} */
 let flightToken = null;
+/* CANCELS THE SLICED FOLD OF A READ A NEWER ONE HAS REPLACED: its slices
+   would otherwise keep spending the page's time on an answer nobody will
+   publish. */
+/** @type {AbortController | null} */
+let flightAbort = null;
 /* The feed the last `syncStore` asked about, so the poll and Refresh know what
    to re-read without importing the feed selection and making an import cycle. */
 /** @type {string | null} */
@@ -376,74 +457,99 @@ let valueFeed = null;
 
 function clearValue() {
   Object.assign(store, empty());
+  store.lag = null;
+  store.worker = null;
+  store.how = null;
 }
 
 /**
- * Fold one answer into every shape any page asks for. ONE PASS.
+ * Fold ONE ROW into every shape any page asks for.
  *
  * The readable cells are shared BY REFERENCE between `readable`, `byInstrument`
  * and `byMonth.list` — three views of one object, never three copies of it.
  *
- * THE PARAMETER IS THE ENDPOINT'S PROMISE, `StoreRow[]`, and the `rowFault`
+ * THE PARAMETER IS THE ENDPOINT'S PROMISE, `StoreRow`, and the `rowFault`
  * gate on the next line is what turns that promise into a fact one row at a
  * time. Nothing here reads a field of a row the gate has not already passed,
  * which is why the promise is safe to declare and why the two shapes below —
  * `StoreCell` for a row that parsed, `BadRow` for one that did not — are
  * separate types rather than one optional-everything type shared by both.
  *
- * @param {StoreRow[]} rows the census array exactly as `/store.json` sent it.
- * @returns {StoreCensus}
+ * @param {StoreCensus} out
+ * @param {StoreRow} row
  */
-function fold(rows) {
+function foldRow(out, row) {
+  const why = rowFault(row);
+  if (why !== null) {
+    const it = { instrument: row?.instrument, month: row?.month, timeframe: row?.timeframe, why };
+    out.bad.push(it);
+    if (typeof it.instrument === 'string' && it.instrument !== '') {
+      let list = out.badByInstrument.get(it.instrument);
+      if (!list) out.badByInstrument.set(it.instrument, (list = []));
+      list.push(it);
+    }
+    return;
+  }
+  const cell = {
+    instrument: row.instrument,
+    month: row.month,
+    timeframe: row.timeframe,
+    rows: row.rows,
+    // THE WINDOW THE MONTH ACTUALLY COVERS, in MICROSECONDS, on the wire
+    // since the census gained it. Deriving it from the month name would be a
+    // guess: a month holding one bar covers one day, and which day is a fact
+    // only the entry has.
+    first: Number.isFinite(row.first_ts) ? row.first_ts : null,
+    last: Number.isFinite(row.last_ts) ? row.last_ts : null
+  };
+  out.readable.push(cell);
+  out.cells += 1;
+  out.bars += cell.rows;
+
+  let byIns = out.byInstrument.get(cell.instrument);
+  if (!byIns) out.byInstrument.set(cell.instrument, (byIns = []));
+  byIns.push(cell);
+
+  out.byCell.set(cellKey(cell.instrument, cell.timeframe, cell.month), cell.rows);
+
+  let byMo = out.byMonth.get(cell.month);
+  if (!byMo) out.byMonth.set(cell.month, (byMo = { cells: 0, bars: 0, list: [] }));
+  byMo.cells += 1;
+  byMo.bars += cell.rows;
+  byMo.list.push(cell);
+}
+
+/** ASCENDING BY (month, rung). @param {StoreCell} a @param {StoreCell} b */
+const ladder = (a, b) => cmp(a.month, b.month) || cmp(rungSeconds(a.timeframe) ?? 0, rungSeconds(b.timeframe) ?? 0);
+
+/**
+ * Fold one answer into every shape any page asks for: ONE PASS, IN SLICES.
+ *
+ * The pass was one synchronous loop over every row, 83 to 137 ms for 246,147
+ * rows in the audit's in-page benchmark (DB-G84) and more at today's 385,442:
+ * a stall on its own. It is the same pass now, cut into slices of at most
+ * 8 ms of work with a real task between them (`inSlices`), so timers, input
+ * and rendering run while it folds. Nothing is published until the whole
+ * fold is done: the caller assigns it in one step, so no page ever reads a
+ * half-folded census.
+ *
+ * @param {StoreRow[]} rows the census array exactly as `/store.json` sent it.
+ * @param {AbortSignal} [signal] cancels a fold a newer read has replaced.
+ * @returns {Promise<StoreCensus>}
+ */
+export async function foldCensus(rows, signal) {
   const out = empty();
   out.rows = rows;
-  for (const row of rows) {
-    const why = rowFault(row);
-    if (why !== null) {
-      const it = { instrument: row?.instrument, month: row?.month, timeframe: row?.timeframe, why };
-      out.bad.push(it);
-      if (typeof it.instrument === 'string' && it.instrument !== '') {
-        let list = out.badByInstrument.get(it.instrument);
-        if (!list) out.badByInstrument.set(it.instrument, (list = []));
-        list.push(it);
-      }
-      continue;
-    }
-    const cell = {
-      instrument: row.instrument,
-      month: row.month,
-      timeframe: row.timeframe,
-      rows: row.rows,
-      // THE WINDOW THE MONTH ACTUALLY COVERS, in MICROSECONDS, on the wire
-      // since the census gained it. Deriving it from the month name would be a
-      // guess: a month holding one bar covers one day, and which day is a fact
-      // only the entry has.
-      first: Number.isFinite(row.first_ts) ? row.first_ts : null,
-      last: Number.isFinite(row.last_ts) ? row.last_ts : null
-    };
-    out.readable.push(cell);
-    out.cells += 1;
-    out.bars += cell.rows;
-
-    let byIns = out.byInstrument.get(cell.instrument);
-    if (!byIns) out.byInstrument.set(cell.instrument, (byIns = []));
-    byIns.push(cell);
-
-    out.byCell.set(cellKey(cell.instrument, cell.timeframe, cell.month), cell.rows);
-
-    let byMo = out.byMonth.get(cell.month);
-    if (!byMo) out.byMonth.set(cell.month, (byMo = { cells: 0, bars: 0, list: [] }));
-    byMo.cells += 1;
-    byMo.bars += cell.rows;
-    byMo.list.push(cell);
-  }
+  await inSlices(rows.length, (start, end) => {
+    for (let i = start; i < end; i++) foldRow(out, rows[i]);
+  }, signal);
   // ASCENDING BY (month, rung), so "the latest month" is the last element
   // everywhere and a month held at two rungs keeps them adjacent. Sorted ONCE
   // here rather than once per page, per render.
-  for (const list of out.byInstrument.values())
-    list.sort(
-      (a, b) => cmp(a.month, b.month) || cmp(rungSeconds(a.timeframe) ?? 0, rungSeconds(b.timeframe) ?? 0)
-    );
+  const lists = [...out.byInstrument.values()];
+  await inSlices(lists.length, (start, end) => {
+    for (let i = start; i < end; i++) lists[i].sort(ladder);
+  }, signal);
   return out;
 }
 
@@ -482,15 +588,28 @@ function read(feed, generation) {
 
   const token = {};
   flightToken = token;
+  flightAbort?.abort();
+  const abort = new AbortController();
+  flightAbort = abort;
   const mine = census.load(feed, generation)
-    .then((r) => (r.ok ? r.body : Promise.reject(new Error(censusFailure(r)))))
-    .then((body) => {
+    .then(async (r) => {
+      if (!r.ok) return Promise.reject(new Error(censusFailure(r)));
+      const body = r.body;
       if (asked !== key || flightToken !== token) return;
       if (!Array.isArray(body)) throw new Error('the body of /store.json is not a JSON array');
-      if (valueFeed !== feed || rawRows !== body) Object.assign(store, fold(body));
+      // THE WORKER'S VERDICT IS THE ONE THIS READ WAS DECODED UNDER. Only a
+      // whole read decodes a census: an unchanged answer and a merged delta
+      // keep the rows decoded earlier, under the verdict already published.
+      const decodedHow = r.how && r.how.kind !== 'whole' ? store.worker : pageDecodes;
+      const folded = valueFeed !== feed || rawRows !== body ? await foldCensus(body, abort.signal) : null;
+      if (asked !== key || flightToken !== token) return;
+      if (folded) Object.assign(store, folded);
       valueFeed = feed;
       store.feed = feed;
-      store.at = Date.now();
+      store.at = r.readAt ?? Date.now();
+      store.lag = r.lag ?? censusLag(r.headers);
+      store.worker = decodedHow;
+      store.how = r.how ?? null;
       store.state = 'ready';
       store.error = null;
       store.busy = null;
@@ -572,6 +691,8 @@ export function syncStore(feed) {
     clearValue();
     asked = null;
     flightToken = null;
+    flightAbort?.abort();
+    flightAbort = null;
     flight = null;
     valueFeed = null;
     store.feed = null;
@@ -690,6 +811,77 @@ async function tick() {
     await refreshStore();
   }
   ticking = false;
+}
+
+/* ======================================================================
+   THE GENERATION WATCH — "the store moved since this page read it" (DB-022)
+   ----------------------------------------------------------------------
+   /db read the census once per feed and never looked again, so during an
+   import or a pull every list on it was the opening snapshot with nothing
+   saying so. This asks `HEAD /store.json` — headers only, the census's own
+   generation — every `HEAD_POLL_MS` while the tab is visible, and keeps the
+   answer in `store.head`. It never re-reads the census itself: a page
+   compares `store.head` with `store.lag` (`censusMoved`) and OFFERS the
+   refresh, because re-downloading 33 MB every few seconds during an import
+   is the cost DB-060 names, and a list that changes under the operator's
+   cursor is worse than one that says it is a snapshot.
+   ====================================================================== */
+/** How often the watch asks, in milliseconds. */
+export const HEAD_POLL_MS = 5_000;
+
+/**
+ * One HEAD of `feed`'s census into `store.head`. A failed HEAD is kept as
+ * one, with its reason; it never clears the census the page holds, which is
+ * still the snapshot it says it is.
+ * @param {string} feed
+ * @param {typeof ask} [request]
+ */
+export async function checkCensusHead(feed, request = ask) {
+  try {
+    const response = await request(`/store.json?feed=${encodeURIComponent(feed)}`, {
+      method: 'HEAD', cache: 'no-store', ms: 15_000
+    });
+    if (!response.ok) throw new Error(`HEAD /store.json?feed=${feed} answered HTTP ${response.status}`);
+    store.head = { feed, at: Date.now(), lag: censusLag(response.headers), error: null };
+  } catch (why) {
+    store.head = { feed, at: Date.now(), lag: null, error: String(/** @type {any} */ (why)?.message ?? why) };
+  }
+}
+
+/**
+ * WATCH ONE FEED'S GENERATION. Call from an `$effect` and return the release:
+ *
+ *   $effect(() => watchCensus(feeds.active));
+ *
+ * A feed change re-runs the effect, which releases the old watch and starts
+ * one for the new feed. Skipped while the tab is hidden, and asked once at
+ * once when it becomes visible again.
+ *
+ * @param {string | null | undefined} feed
+ * @param {number} [everyMs]
+ * @returns {() => void} the release; calling it twice is safe
+ */
+export function watchCensus(feed, everyMs = HEAD_POLL_MS) {
+  if (!feed) return () => {};
+  let live = true;
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer;
+  const tick = async () => {
+    if (!live) return;
+    if (visible()) await checkCensusHead(feed);
+    if (live) timer = setTimeout(tick, everyMs);
+  };
+  timer = setTimeout(tick, everyMs);
+  const onVisible = () => {
+    if (live && visible()) void checkCensusHead(feed);
+  };
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    if (!live) return;
+    live = false;
+    clearTimeout(timer);
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
+  };
 }
 
 /* ======================================================================
@@ -843,7 +1035,10 @@ let surveyFlight = null;
  * @returns {Promise<SurveyReading>}
  */
 export function surveyStores(list) {
-  const feedsIn = [...(list ?? [])];
+  // ONLY THE FEEDS `/feeds.json` OFFERS (D-3338): the operator uses Zerodha
+  // and GDFL, and the empty Dhan, Groww and TrueData stores were HEADed on
+  // every /db load all the same (DB-G84: five HEADs per load).
+  const feedsIn = offeredFeeds([...(list ?? [])]);
   const wires = feedsIn.map((f) => f.wire).join(',');
   const generation = store.generation;
   const key = `${wires}#${generation}`;

@@ -493,9 +493,20 @@ pub(super) fn answer(
     // were committed, and a reader of the lists alone must be able to say so.
     let degraded = census.and_then(census::VendorCensus::degraded);
     let slot = now.slot();
-    let body = index(site, asked.feed, asked.segment, slot, |index| {
-        render_answer(index, &asked, state, degraded.as_deref())
+    let (body, generation) = index(site, asked.feed, asked.segment, slot, |index| {
+        (
+            render_answer(index, &asked, state, degraded.as_deref()),
+            index.generation,
+        )
     });
+    // THE GENERATION A `since` IS SPELLED IN, in a header as well as the
+    // body, so a client never keys a delta on the vendor-wide sum (WP-56;
+    // DB-B56): this part's own, the body's `generation`.
+    let mut headers = headers;
+    headers.insert(
+        axum::http::HeaderName::from_static(super::store_route::CENSUS_PART_GENERATION_HEADER),
+        axum::http::HeaderValue::from(generation),
+    );
     match body {
         Ok(body) => (axum::http::StatusCode::OK, headers, body),
         Err((code, body)) => (code, headers, body),
@@ -533,6 +544,25 @@ fn render_answer(
                     ),
                 ));
             };
+            // A GENERATION THIS PART HAS NOT REACHED is not "too old": it is a
+            // value this part never published (the vendor-wide sum, another
+            // part's, a typo). Refused as a conflict naming the generation to
+            // use, so a client does not reload in a loop believing it fell
+            // behind (WP-56; DB-B56).
+            if since > index.generation {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        r#"{{"error":"since_in_future","why":{},"since":{since},"generation":{}}}"#,
+                        render::json_string(
+                            "that generation is past this part's newest; a delta is asked \
+                             since the body's generation (x-brutex-census-part-generation), \
+                             never since the vendor-wide x-brutex-census-generation"
+                        ),
+                        index.generation
+                    ),
+                ));
+            }
             let Some(changes) = part.changed_since(since) else {
                 return Err((
                     axum::http::StatusCode::GONE,

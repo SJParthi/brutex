@@ -212,6 +212,61 @@ pub(super) fn compact(
     entries: &[(census::Series, store::path::YearMonth)],
     feed: Vendor,
 ) -> Result<String, String> {
+    serde_json::to_string(&rows_of(censuses, entries, feed))
+        .map_err(|why| format!("census encoding failed: {why}"))
+}
+
+/// What the census holds NOW, beside a delta's rows: the two counters a
+/// reader checks its merged census against before it believes the merge.
+#[derive(Serialize)]
+struct HeldNow {
+    /// Distinct keys held: the rows a whole body carries.
+    months: u64,
+    /// Bars held, summed over them.
+    rows: u64,
+}
+
+/// A whole body's fields, and the three a delta adds.
+#[derive(Serialize)]
+struct Delta<'a> {
+    #[serde(flatten)]
+    body: Compact,
+    /// The `since` this answers, exactly as it was asked: how a reader tells
+    /// a delta from the whole body an API older than this one answers.
+    since: &'a str,
+    held: HeldNow,
+}
+
+/// `/store.json?...&since=`: the SAME wire as [`compact`], holding only
+/// `entries` (the rows changed after `since`), with `since` echoed and the
+/// census's present counters beside them (WP-56; D-3327 item 3; DB-060).
+///
+/// One wire and one decoder for a whole read and a refresh, so the two
+/// cannot spell a row differently. The counters are what makes a merge
+/// checkable: a reader that merged these rows into the census it held must
+/// hold exactly `months` rows summing to `rows`, or it reads the census
+/// whole. O(`entries`): two probes per row, as [`compact`] costs.
+pub(super) fn compact_delta(
+    censuses: &[census::VendorCensus],
+    entries: &[(census::Series, store::path::YearMonth)],
+    feed: Vendor,
+    since: &str,
+    (months, rows): (u64, u64),
+) -> Result<String, String> {
+    serde_json::to_string(&Delta {
+        body: rows_of(censuses, entries, feed),
+        since,
+        held: HeldNow { months, rows },
+    })
+    .map_err(|why| format!("census encoding failed: {why}"))
+}
+
+/// The tuples of `entries`, in the order given, with their dictionaries.
+fn rows_of(
+    censuses: &[census::VendorCensus],
+    entries: &[(census::Series, store::path::YearMonth)],
+    feed: Vendor,
+) -> Compact {
     let mut instruments = Dictionary::default();
     let mut months = Dictionary::default();
     let mut timeframes = Dictionary::default();
@@ -251,7 +306,7 @@ pub(super) fn compact(
             ));
         }
     }
-    serde_json::to_string(&Compact {
+    Compact {
         schema: 1,
         encoding: ENCODING,
         feed: feed.as_str(),
@@ -260,8 +315,7 @@ pub(super) fn compact(
         timeframes: timeframes.values,
         reasons: reasons.values,
         rows,
-    })
-    .map_err(|why| format!("census encoding failed: {why}"))
+    }
 }
 
 #[cfg(test)]

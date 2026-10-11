@@ -65,9 +65,10 @@ test('a placeholder renders nothing until its owner fills it', () => {
     assert.equal(ast.module ?? null, null, `${name} carries a module script`);
     assert.match(source, /let \{ db \} = \$props\(\);/, `${name} does not take the shared state`);
   }
-  // The census banner's markup is a placeholder too; it already owns the
-  // census state and the loading snippet the shell renders, and nothing else.
-  assert.deepEqual(drawn(dbSource('../src/routes/db/DbCensusBanner.svelte')).map((/** @type {any} */ node) => node.type), ['SnippetBlock']);
+  // The census banner was a placeholder too (state and the loading snippet
+  // only). WP-56 filled it: its markup is the banner, drawn only when it has
+  // a line to say, and the loading snippet the shell renders.
+  assert.deepEqual(drawn(dbSource('../src/routes/db/DbCensusBanner.svelte')).map((/** @type {any} */ node) => node.type), ['IfBlock', 'SnippetBlock']);
 });
 
 test('every file of the page is in the fixture, so a source test reads the whole page', () => {

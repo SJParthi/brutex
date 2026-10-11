@@ -38,7 +38,35 @@ pub const CENSUS_DEGRADED_HEADER: &str = "x-brutex-census-degraded";
 
 /// The census's commit counter ([`census::VendorCensus::generation`]), or
 /// empty when no census loaded. D-3327 item 2.
+///
+/// For a partitioned census it is the SUM of the parts' generations: a value
+/// that rises whenever any part moves and never goes back, so a page can
+/// tell "the store moved" with one comparison. It counts nothing (each part
+/// carries the legacy file's generation as its base, so the sum counts that
+/// base once per part; DB-B67), and it is never a `since` for
+/// `/census/facets.json`, which answers in ONE part's generation
+/// ([`CENSUS_PART_GENERATIONS_HEADER`], [`CENSUS_PART_GENERATION_HEADER`]).
 pub(crate) const CENSUS_GENERATION_HEADER: &str = "x-brutex-census-generation";
+
+/// Each partition's own generation, `INDEX=2097116,CASH=2114847,FNO=2841866`,
+/// or empty for a single file (whose one generation is
+/// [`CENSUS_GENERATION_HEADER`]). The same spelling as
+/// [`CENSUS_EPOCH_HEADER`], on `/store.json`, its `HEAD` and
+/// `/census/facets.json`, so one census is spelled one way on every route
+/// (WP-56; DB-B56, DB-B67; D-3327 item 3).
+pub(crate) const CENSUS_PART_GENERATIONS_HEADER: &str = "x-brutex-census-part-generations";
+
+/// On `/census/facets.json` only: the generation of the part that answered,
+/// which is the body's `generation` and the only value its `?since=` takes
+/// (WP-56; DB-B56). A client that keyed its delta on
+/// [`CENSUS_GENERATION_HEADER`] (the vendor-wide sum) was refused every time.
+pub(crate) const CENSUS_PART_GENERATION_HEADER: &str = "x-brutex-census-part-generation";
+
+/// On an answer to `/store.json?...&since=` only, a delta or its refusal: the
+/// `since` it answers. Absent on a whole body, which is how a reader tells a
+/// delta from the whole census an older API sends for the same request
+/// before it reads either (WP-56; D-3327 item 3).
+pub(crate) const CENSUS_SINCE_HEADER: &str = "x-brutex-census-since";
 
 /// The entries the tightest part may hold, from its own header. D-3327.
 pub(crate) const CENSUS_CAPACITY_HEADER: &str = "x-brutex-census-capacity";
@@ -155,6 +183,10 @@ pub(super) fn census_headers_with(
             number(room.map(|room| room.headroom)),
         ),
         (CENSUS_EPOCH_HEADER, census.map_or_else(String::new, epochs)),
+        (
+            CENSUS_PART_GENERATIONS_HEADER,
+            census.map_or_else(String::new, part_generations),
+        ),
         (CENSUS_REASON_HEADER, reason(room.as_ref(), behind)),
     ] {
         headers.insert(
@@ -198,6 +230,30 @@ fn epochs(census: &census::VendorCensus) -> String {
             part.segment().map_or("", |segment| segment.as_str()),
             part.epoch()
                 .map_or_else(|| "none".to_owned(), |epoch| format!("{epoch:06}"))
+        );
+    }
+    out
+}
+
+/// Each partition's own generation, as [`CENSUS_PART_GENERATIONS_HEADER`]
+/// spells it: one field read per part.
+fn part_generations(census: &census::VendorCensus) -> String {
+    let census::Census::Held { ref manifest } = census.state else {
+        return String::new();
+    };
+    if !manifest.is_partitioned() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (n, part) in manifest.parts().iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{}={}",
+            part.segment().map_or("", |segment| segment.as_str()),
+            part.header().generation
         );
     }
     out
@@ -673,6 +729,22 @@ pub(super) fn store_response(
     if method == axum::http::Method::HEAD {
         return (code, headers, axum::body::Bytes::new());
     }
+    // A REFRESH ASKS ONLY FOR WHAT CHANGED (WP-56; D-3327 item 3; DB-060):
+    // `since=` names the generation the reader holds, and the answer is the
+    // rows appended after it on this same wire. An unreadable census keeps
+    // its 503 below; a delta is never cut from one.
+    let since = param(query, "since");
+    if !since.is_empty() && code == axum::http::StatusCode::OK {
+        let (code, body) = delta_response(census, feed, format, &since, &param(query, "epoch"));
+        // SAID IN A HEADER TOO, so a reader knows before it reads the body
+        // whether this is a delta or the whole census an API older than this
+        // one answers the same request with.
+        headers.insert(
+            axum::http::HeaderName::from_static(CENSUS_SINCE_HEADER),
+            note_header(&since),
+        );
+        return (code, headers, body.into());
+    }
     let row = census.map(std::slice::from_ref).unwrap_or_default();
     let slot = now.slot();
     let encoded = match site.census_wire.get(slot, feed, format, || {
@@ -718,6 +790,336 @@ pub(super) fn store_response(
     }
 
     (code, headers, encoded.body)
+}
+
+/* ======================================================================
+THE DELTA: `/store.json?...&since=<generation>` (WP-56; D-3327 item 3;
+DB-022, DB-060, DB-G59, DB-G70)
+----------------------------------------------------------------------
+A page that holds the census refreshed it by downloading it again: 33 MB
+and an O(keys log keys) sort and encode on this side for each commit an
+import made, every five seconds while `/ingest` watched one. A refresh
+now names the generation it holds and is answered with the rows appended
+after it, on the SAME wire (`store_wire::compact_delta`), so one decoder
+reads a whole census and a delta.
+
+WHAT A GENERATION NAMES. A manifest is an append-only log, so (file,
+generation) names a prefix of it. For a single file the file is the
+vendor's one manifest. For a partitioned census it is each segment's
+current epoch file (D-3316), so `since` carries one generation per part
+in the spelling of `x-brutex-census-part-generations`, and `epoch` the
+epochs the reader read them from, in the spelling of
+`x-brutex-census-epoch`. A different epoch is a different log: refused,
+and the reader loads the census whole.
+
+WHAT IS REFUSED, AND NEVER GUESSED: a `since` this census's shape does
+not take (409 `since_shape`), an epoch that moved (409 `epoch_changed`),
+a generation past a part's newest (409 `since_in_future`), and one the
+census no longer holds the appends after (410 `since_too_old`: it was
+read whole since). A reader that is refused reads the census whole.
+
+WHICH ROWS. Every key appended after the generation, and for each the
+same series' NEXT month when held: a row carries its previous month's
+change (`prev_chg_bps`), so a month whose closes moved changes the row
+after it too. In the order the whole body lists them.
+
+COST. `Part::changed_since` is a binary search per tail level; the answer
+is two probes per row. Nothing here walks the census or sorts it.
+====================================================================== */
+
+/// What a `since=` named: one generation, or one per partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Since {
+    /// A single-file census's one generation.
+    One(u64),
+    /// `INDEX=<g>,CASH=<g>,FNO=<g>`: each partition's own.
+    Parts(Vec<(brutex_core::instrument::Segment, u64)>),
+}
+
+/// Reads a `since`, or `None` for anything that is neither spelling. A
+/// generation is digits only (`u64::from_str` would take a sign).
+fn parse_since(text: &str) -> Option<Since> {
+    let generation = |word: &str| -> Option<u64> {
+        (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| word.parse().ok())
+            .flatten()
+    };
+    if let Some(one) = generation(text) {
+        return Some(Since::One(one));
+    }
+    let mut parts: Vec<(brutex_core::instrument::Segment, u64)> = Vec::new();
+    for pair in text.split(',') {
+        let (segment, word) = pair.split_once('=')?;
+        let segment = brutex_core::instrument::Segment::parse(segment).ok()?;
+        if parts.iter().any(|(held, _)| *held == segment) {
+            return None;
+        }
+        parts.push((segment, generation(word)?));
+    }
+    Some(Since::Parts(parts))
+}
+
+/// `{"error": <code>, "why": <sentence>, ...extra}`: a delta's refusal.
+fn delta_refusal(code: &str, why: &str, extra: &[(&str, String)]) -> String {
+    let mut out = format!(
+        r#"{{"error":{},"why":{}"#,
+        render::json_string(code),
+        render::json_string(why)
+    );
+    for (name, value) in extra {
+        let _ = write!(out, ",{}:{value}", render::json_string(name));
+    }
+    out.push('}');
+    out
+}
+
+/// The month after `month`, or `None` past the last the store addresses.
+///
+/// Which WIRE ROW a changed month also changes (the next month's row carries
+/// this month's change as `prev_chg_bps`); no bar of a later month is read to
+/// compute anything about an earlier one.
+fn month_after(month: store::path::YearMonth) -> Option<store::path::YearMonth> {
+    let (year, ordinal) = if month.month() < 12 {
+        (month.year(), month.month() + 1)
+    } else {
+        (month.year().checked_add(1)?, 1)
+    };
+    store::path::YearMonth::new(year, ordinal).ok()
+}
+
+/// A delta's refusal: its status and its body.
+type Refused = (axum::http::StatusCode, String);
+
+/// EACH PART AND THE GENERATION ASKED OF IT, or the shape is refused: a
+/// census migrated to partitions (or back) since the reader read it is not
+/// the log the reader's generation names.
+fn asked_parts<'a>(
+    manifest: &'a census::Manifests,
+    since: &Since,
+) -> Result<Vec<(&'a census::Part, u64)>, Refused> {
+    let conflict = axum::http::StatusCode::CONFLICT;
+    let parts = manifest.parts();
+    Ok(match since {
+        Since::One(generation) if !manifest.is_partitioned() => {
+            parts.iter().map(|part| (part, *generation)).collect()
+        }
+        Since::Parts(named)
+            if manifest.is_partitioned()
+                && named.len() == parts.len()
+                && parts.iter().all(|part| {
+                    named
+                        .iter()
+                        .any(|(segment, _)| Some(*segment) == part.segment())
+                }) =>
+        {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    named
+                        .iter()
+                        .find(|(segment, _)| Some(*segment) == part.segment())
+                        .map(|(_, generation)| (part, *generation))
+                })
+                .collect()
+        }
+        Since::One(_) | Since::Parts(_) => {
+            return Err((
+                conflict,
+                delta_refusal(
+                    "since_shape",
+                    if manifest.is_partitioned() {
+                        "this census is partitioned: a since names every part's generation, \
+                         as x-brutex-census-part-generations spells them; read the census whole"
+                    } else {
+                        "this census is a single file: a since is its one generation, \
+                         x-brutex-census-generation; read the census whole"
+                    },
+                    &[],
+                ),
+            ));
+        }
+    })
+}
+
+/// The rows a delta since `since` carries, in the whole body's order, or the
+/// refusal.
+fn delta_entries(
+    manifest: &census::Manifests,
+    since: &Since,
+) -> Result<Vec<(census::Series, store::path::YearMonth)>, Refused> {
+    let conflict = axum::http::StatusCode::CONFLICT;
+    let asked = asked_parts(manifest, since)?;
+    let mut seen: std::collections::HashSet<pull::manifest::EntryKey> =
+        std::collections::HashSet::new();
+    for (part, generation) in asked {
+        let name = part.segment().map_or("", |segment| segment.as_str());
+        let newest = part.header().generation;
+        let extra = |floor: Option<u64>| {
+            let mut extra = vec![
+                ("part", render::json_string(name)),
+                ("since", generation.to_string()),
+                ("generation", newest.to_string()),
+            ];
+            if let Some(floor) = floor {
+                extra.push(("floor", floor.to_string()));
+            }
+            extra
+        };
+        if generation > newest {
+            return Err((
+                conflict,
+                delta_refusal(
+                    "since_in_future",
+                    "that generation is past this part's newest, so it is not one this \
+                     census published; read the census whole",
+                    &extra(None),
+                ),
+            ));
+        }
+        let Some(changes) = part.changed_since(generation) else {
+            return Err((
+                axum::http::StatusCode::GONE,
+                delta_refusal(
+                    "since_too_old",
+                    "the census no longer holds the appends after that generation (it was \
+                     read whole since); read the census whole",
+                    &extra(Some(part.since_floor())),
+                ),
+            ));
+        };
+        for (_, key) in changes.iter() {
+            if !seen.insert(*key) {
+                continue;
+            }
+            // THE NEXT MONTH'S ROW MOVES WITH THIS ONE: it carries this
+            // month's change as its `prev_chg_bps`.
+            if let Some(next) = month_after(key.month) {
+                let next = pull::manifest::EntryKey {
+                    month: next,
+                    ..*key
+                };
+                if manifest.held(&next).is_some() {
+                    let _ = seen.insert(next);
+                }
+            }
+        }
+    }
+    let mut out: Vec<(census::Series, store::path::YearMonth)> = seen
+        .iter()
+        .map(|key| (census::Series::of(key), key.month))
+        .collect();
+    // THE WHOLE BODY'S ORDER (`census::held_entries`): newest month first,
+    // then the series' own. A reader places a new row among the rows it holds
+    // by this order, so the delta is sent in it.
+    out.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(out)
+}
+
+/// The delta of `census` since `since` (read from `epoch`): the status and
+/// the body `/store.json?feed=<its vendor>&encoding=census-tuples-v1&since=`
+/// answers with. What the route calls, and what gate 8 times
+/// (`benches/ratio/census.rs`, `deltas_are_flat`).
+#[must_use]
+pub fn census_delta(census: &census::VendorCensus, since: &str, epoch: &str) -> (u16, String) {
+    let (code, body) = delta_response(
+        Some(census),
+        census.vendor,
+        store_wire::Format::Compact,
+        since,
+        epoch,
+    );
+    (code.as_u16(), body)
+}
+
+/// The delta's answer: its status and body. See the block above.
+fn delta_response(
+    census: Option<&census::VendorCensus>,
+    feed: Vendor,
+    format: store_wire::Format,
+    since: &str,
+    epoch: &str,
+) -> (axum::http::StatusCode, String) {
+    let bad = axum::http::StatusCode::BAD_REQUEST;
+    if format != store_wire::Format::Compact {
+        return (
+            bad,
+            delta_refusal(
+                "bad_request",
+                "since needs encoding=census-tuples-v1: a delta is the tuples wire",
+                &[],
+            ),
+        );
+    }
+    let Some(asked) = parse_since(since) else {
+        return (
+            bad,
+            delta_refusal(
+                "bad_request",
+                "since is one generation, or SEGMENT=generation for every part, comma \
+                 separated, as x-brutex-census-part-generations spells them",
+                &[("since", render::json_string(since))],
+            ),
+        );
+    };
+    let held = census.and_then(|census| match census.state {
+        census::Census::Held { ref manifest } => Some((census, manifest)),
+        census::Census::Absent | census::Census::Unreadable { .. } => None,
+    });
+    let Some((census, manifest)) = held else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            delta_refusal(
+                "since_shape",
+                "this feed holds no census now, so no generation is held; read it whole",
+                &[],
+            ),
+        );
+    };
+    // THE EPOCHS THE READER READ ITS GENERATIONS FROM. A partitioned since
+    // must name them: a generation alone does not name a file (D-3316).
+    let now = epochs(census);
+    if manifest.is_partitioned() && epoch.is_empty() {
+        return (
+            bad,
+            delta_refusal(
+                "bad_request",
+                "a since over a partitioned census needs epoch=, the x-brutex-census-epoch \
+                 the generations were read with",
+                &[],
+            ),
+        );
+    }
+    if epoch != now {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            delta_refusal(
+                "epoch_changed",
+                "the census is in another epoch than the one that since was read from (a \
+                 compaction or a recount wrote a new one); read the census whole",
+                &[
+                    ("epoch", render::json_string(epoch)),
+                    ("now", render::json_string(&now)),
+                ],
+            ),
+        );
+    }
+    let entries = match delta_entries(manifest, &asked) {
+        Ok(entries) => entries,
+        Err(refused) => return refused,
+    };
+    match store_wire::compact_delta(
+        std::slice::from_ref(census),
+        &entries,
+        feed,
+        since,
+        (manifest.keys(), manifest.total_rows()),
+    ) {
+        Ok(body) => (axum::http::StatusCode::OK, body),
+        Err(why) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"error":why}).to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1103,6 +1505,11 @@ refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused fail
                 (pull::manifest::MAX_ENTRIES - 2).to_string()
             );
             assert_eq!(header(&headers, CENSUS_EPOCH_HEADER), "", "a single file");
+            assert_eq!(
+                header(&headers, CENSUS_PART_GENERATIONS_HEADER),
+                "",
+                "a single file's one generation is the vendor-wide one"
+            );
             let why = header(&headers, CENSUS_REASON_HEADER);
             assert!(
                 why.starts_with("behind: ") && why.contains("2019-11-15"),
@@ -1202,6 +1609,27 @@ refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused fail
             header(&headers, CENSUS_EPOCH_HEADER),
             "INDEX=none,CASH=none,FNO=000001"
         );
+        // EACH PART'S OWN GENERATION, spelled as the epochs are, and the
+        // vendor-wide generation their sum (WP-56; DB-B56, DB-B67): the value
+        // a facets `since` takes is one of these, never the sum.
+        let parts = header(&headers, CENSUS_PART_GENERATIONS_HEADER);
+        assert!(
+            parts.starts_with("INDEX=")
+                && parts.contains(",CASH=")
+                && parts.ends_with(&format!(",FNO={}", fno.header().generation)),
+            "{parts}"
+        );
+        let sum: u64 = parts
+            .split(',')
+            .map(|part| {
+                part.split_once('=')
+                    .expect("SEGMENT=generation")
+                    .1
+                    .parse::<u64>()
+                    .expect("a generation")
+            })
+            .sum();
+        assert_eq!(header(&headers, CENSUS_GENERATION_HEADER), sum.to_string());
         assert_eq!(
             header(&headers, CENSUS_BEHIND_DAYS_HEADER),
             "0",
@@ -1209,6 +1637,621 @@ refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused fail
         );
         let why = header(&headers, CENSUS_REASON_HEADER);
         assert!(why.starts_with("capped: ") && why.contains("FNO"), "{why}");
+    }
+
+    /* ------------------------------------------------------------------
+    THE DELTA (WP-56; D-3327 item 3; DB-022, DB-060). Every price and
+    count below is invented for the fixture.
+    ------------------------------------------------------------------ */
+
+    /// A GDFL census on disk in one shape, appended to in place the way the
+    /// writer appends (each entry at its offset, then the header slot), and
+    /// read as the per-vendor cache reads it.
+    struct Disk {
+        root: std::path::PathBuf,
+        files: Vec<(std::path::PathBuf, pull::manifest::Manifest)>,
+    }
+
+    impl Disk {
+        fn root_of(name: &str) -> std::path::PathBuf {
+            let root = crate::scratch::path(&format!("store-delta-{name}"));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("manifest")).expect("mkdir");
+            root
+        }
+
+        /// One `manifest/gdfl.man`.
+        fn single(name: &str, rows: &[pull::manifest::Held]) -> Self {
+            let root = Self::root_of(name);
+            let mut manifest =
+                pull::manifest::Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+            for row in rows {
+                let _append = manifest.record_held(*row).expect("records");
+            }
+            let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
+            std::fs::write(&path, manifest.image()).expect("written");
+            Self {
+                root,
+                files: vec![(path, manifest)],
+            }
+        }
+
+        /// One epoch-1 partition per segment named, each holding its rows.
+        fn partitioned(name: &str, parts: &[(Segment, &[pull::manifest::Held])]) -> Self {
+            let root = Self::root_of(name);
+            let mut files = Vec::new();
+            for (segment, rows) in parts {
+                let mut manifest =
+                    pull::manifest::Manifest::partition_genesis(Vendor::Gdfl, *segment, 4_096)
+                        .expect("a partition");
+                for row in *rows {
+                    let _append = manifest.record_held(*row).expect("records");
+                }
+                std::fs::create_dir_all(pull::manifest::segment_dir(&root, Vendor::Gdfl, *segment))
+                    .expect("mkdir");
+                let path = pull::manifest::epoch_path(&root, Vendor::Gdfl, *segment, 1);
+                std::fs::write(&path, manifest.image()).expect("an epoch on disk");
+                files.push((path, manifest));
+            }
+            Self { root, files }
+        }
+
+        /// Appends `rows` to the file that holds their segment.
+        fn append(&mut self, rows: &[pull::manifest::Held]) {
+            use std::os::unix::fs::FileExt as _;
+            for row in rows {
+                let (path, manifest) = self
+                    .files
+                    .iter_mut()
+                    .find(|(_, manifest)| {
+                        manifest
+                            .segment()
+                            .is_none_or(|segment| segment == row.entry.key.segment)
+                    })
+                    .expect("a file for the segment");
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .expect("open");
+                let append = manifest.record_held(*row).expect("records");
+                file.write_all_at(&append.bytes, append.offset)
+                    .expect("entry");
+                file.write_all_at(&append.commit.bytes, append.commit.offset)
+                    .expect("slot");
+            }
+        }
+
+        fn read(&self, previous: Option<&census::VendorCensus>) -> census::VendorCensus {
+            census::read_vendor_after(&self.root, Vendor::Gdfl, previous)
+        }
+    }
+
+    impl Drop for Disk {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// One held row of `series` in `at`: `rows` bars, closing `first` to
+    /// `last` paisa.
+    fn held_at(
+        series: census::Series,
+        at: store::path::YearMonth,
+        rows: u64,
+        (first, last): (i64, i64),
+    ) -> pull::manifest::Held {
+        let (from, _) = at.ist_bounds_micros();
+        pull::manifest::Held::new(
+            pull::manifest::Entry {
+                key: series.at(at),
+                rows,
+                first_ts_micros: from,
+                last_ts_micros: from + i64::try_from(rows).expect("small"),
+            },
+            priced(first, last),
+        )
+    }
+
+    fn contract(symbol: &str, contract: &str) -> census::Series {
+        census::Series {
+            contract: Some(brutex_core::instrument::Contract::parse(contract).expect("a contract")),
+            ..series_at(Segment::Fno, symbol, Timeframe::SECOND_1)
+        }
+    }
+
+    /// The whole body of `census`, as `/store.json` encodes it.
+    fn whole(census: &census::VendorCensus) -> serde_json::Value {
+        let one = std::slice::from_ref(census);
+        serde_json::from_str(
+            &store_wire::compact(one, &census::held_entries(one), Vendor::Gdfl).expect("encodes"),
+        )
+        .expect("json")
+    }
+
+    /// One wire row: its key, `(instrument, month, rung)`, and the tuple's
+    /// other seven fields.
+    type WireRow = ((String, String, String), Vec<serde_json::Value>);
+
+    /// A wire body's rows by key, in wire order.
+    fn wire_rows(body: &serde_json::Value) -> Vec<WireRow> {
+        let word = |list: &str, index: &serde_json::Value| {
+            body[list][usize::try_from(index.as_u64().expect("an index")).expect("small")]
+                .as_str()
+                .expect("a word")
+                .to_owned()
+        };
+        body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| {
+                let row = row.as_array().expect("a tuple");
+                let reason = |index: &serde_json::Value| {
+                    if index.is_null() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(word("reasons", index))
+                    }
+                };
+                (
+                    (
+                        word("instruments", &row[0]),
+                        word("months", &row[1]),
+                        word("timeframes", &row[2]),
+                    ),
+                    vec![
+                        row[3].clone(),
+                        row[4].clone(),
+                        row[5].clone(),
+                        row[6].clone(),
+                        reason(&row[7]),
+                        row[8].clone(),
+                        reason(&row[9]),
+                    ],
+                )
+            })
+            .collect()
+    }
+
+    fn delta_of(census: &census::VendorCensus, since: &str, epoch: &str) -> serde_json::Value {
+        let (code, body) = delta_response(
+            Some(census),
+            Vendor::Gdfl,
+            store_wire::Format::Compact,
+            since,
+            epoch,
+        );
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        serde_json::from_str(&body).expect("json")
+    }
+
+    fn refused(
+        census: Option<&census::VendorCensus>,
+        format: store_wire::Format,
+        since: &str,
+        epoch: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let (code, body) = delta_response(census, Vendor::Gdfl, format, since, epoch);
+        (code, serde_json::from_str(&body).expect("json"))
+    }
+
+    /// **THE ORDER A WHOLE BODY LISTS ITS ROWS IN, PINNED BY EXAMPLE** (WP-56).
+    ///
+    /// Newest month first; inside a month, the series' own order: a spot
+    /// series before every contract, then by exchange, segment, symbol and
+    /// rung; contracts by their own text, then exchange, segment, symbol,
+    /// rung. A reader that merges a delta places a new row among the rows it
+    /// holds by this order (`web/src/lib/store-census-wire.js`,
+    /// `censusOrder`), and `web/tests/store-census-wire.test.js` holds the
+    /// SAME list: the two sides are pinned to one example.
+    #[test]
+    fn the_whole_body_lists_newest_month_first_then_the_series_own_order() {
+        let march = month(2019, 3);
+        let april = month(2019, 4);
+        let bse = census::Series {
+            exchange: brutex_core::instrument::Exchange::Bse,
+            ..series_at(Segment::Index, "SENSEX", Timeframe::DAY_1)
+        };
+        let rows = [
+            held_at(contract("NIFTY", "2019-04-25-1150000-PE"), march, 1, (5, 6)),
+            held_at(contract("NIFTY", "2019-04-25-1150000-CE"), march, 1, (5, 6)),
+            held_at(contract("NIFTY", "2019-04-25-FUT"), march, 1, (5, 6)),
+            held_at(contract("NIFTY", "2019-04-25-950000-CE"), march, 1, (5, 6)),
+            held_at(
+                contract("BANKNIFTY", "2019-04-25-1150000-CE"),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                contract("BANKNIFTY", "2019-03-28-2900000-CE"),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Cash, "RELIANCE", Timeframe::SECOND_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Cash, "BAJAJ-AUTO", Timeframe::SECOND_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Index, "NIFTY", Timeframe::DAY_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Index, "NIFTY", Timeframe::SECOND_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(
+                series_at(Segment::Index, "BANKNIFTY", Timeframe::MINUTE_1),
+                march,
+                1,
+                (5, 6),
+            ),
+            held_at(bse, march, 1, (5, 6)),
+            held_at(
+                series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1),
+                april,
+                1,
+                (5, 6),
+            ),
+            held_at(contract("NIFTY", "2019-04-25-1150000-CE"), april, 1, (5, 6)),
+        ];
+        let disk = Disk::single("order", &rows);
+        let listed: Vec<String> = wire_rows(&whole(&disk.read(None)))
+            .into_iter()
+            .map(|((instrument, month, rung), _)| format!("{month} {instrument} {rung}"))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                "2019-04 NSE-INDEX-NIFTY 1min",
+                "2019-04 NSE-FNO-NIFTY-2019-04-25-1150000-CE 1s",
+                "2019-03 NSE-INDEX-BANKNIFTY 1min",
+                "2019-03 NSE-INDEX-NIFTY 1s",
+                "2019-03 NSE-INDEX-NIFTY 1min",
+                "2019-03 NSE-INDEX-NIFTY 1day",
+                "2019-03 NSE-CASH-BAJAJ-AUTO 1s",
+                "2019-03 NSE-CASH-RELIANCE 1s",
+                "2019-03 BSE-INDEX-SENSEX 1day",
+                "2019-03 NSE-FNO-BANKNIFTY-2019-03-28-2900000-CE 1s",
+                "2019-03 NSE-FNO-BANKNIFTY-2019-04-25-1150000-CE 1s",
+                "2019-03 NSE-FNO-NIFTY-2019-04-25-1150000-CE 1s",
+                "2019-03 NSE-FNO-NIFTY-2019-04-25-1150000-PE 1s",
+                "2019-03 NSE-FNO-NIFTY-2019-04-25-950000-CE 1s",
+                "2019-03 NSE-FNO-NIFTY-2019-04-25-FUT 1s",
+            ]
+        );
+    }
+
+    /// **A DELTA IS THE ROWS APPENDED SINCE, AND MERGING IT INTO THE CENSUS
+    /// THE READER HELD GIVES THE WHOLE BODY AT THE NEW GENERATION** (WP-56;
+    /// D-3327 item 3; DB-022, DB-060).
+    ///
+    /// Four appends after the read: more bars in a month already held (its
+    /// change moves, AND the next month's `prev_chg_bps`, so that row is in
+    /// the delta though nothing was appended to it), a new month of a held
+    /// series, a new contract in a held month and a new series. The contract
+    /// nothing touched is not in the delta. Merged by key into the body read
+    /// before, the rows are exactly the whole body read after; the delta's
+    /// rows keep the whole body's order; and the counters beside them are the
+    /// census's own. Before WP-56 `since` was not read: the answer was the
+    /// whole body every time.
+    #[test]
+    fn a_delta_carries_what_was_appended_and_merges_to_the_whole_body() {
+        let nifty = series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1);
+        let ce = contract("NIFTY", "2019-03-28-1150000-CE");
+        let (feb, march, april) = (month(2019, 2), month(2019, 3), month(2019, 4));
+        let mut disk = Disk::single(
+            "merge",
+            &[
+                held_at(nifty, feb, 10, (10_000, 11_000)),
+                held_at(nifty, march, 20, (11_000, 12_100)),
+                held_at(ce, march, 30, (700, 770)),
+            ],
+        );
+        let before = disk.read(None);
+        let generation = before.generation().expect("held");
+        let read_before = whole(&before);
+
+        disk.append(&[
+            held_at(nifty, feb, 12, (10_000, 10_500)),
+            held_at(nifty, april, 5, (12_100, 12_705)),
+            held_at(
+                contract("NIFTY", "2019-03-28-1160000-PE"),
+                march,
+                7,
+                (300, 330),
+            ),
+            held_at(
+                series_at(Segment::Index, "BANKNIFTY", Timeframe::DAY_1),
+                march,
+                3,
+                (2_900_000, 2_929_000),
+            ),
+        ]);
+        let after = disk.read(Some(&before));
+        let read_after = whole(&after);
+
+        let delta = delta_of(&after, &generation.to_string(), "");
+        assert_eq!(delta["since"], generation.to_string());
+        assert_eq!(delta["schema"], 1);
+        assert_eq!(delta["encoding"], store_wire::ENCODING);
+        assert_eq!(delta["feed"], "gdfl");
+        let sent = wire_rows(&delta);
+        let keys: Vec<String> = sent
+            .iter()
+            .map(|((instrument, month, rung), _)| format!("{month} {instrument} {rung}"))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "2019-04 NSE-INDEX-NIFTY 1min",
+                "2019-03 NSE-INDEX-BANKNIFTY 1day",
+                "2019-03 NSE-INDEX-NIFTY 1min",
+                "2019-03 NSE-FNO-NIFTY-2019-03-28-1160000-PE 1s",
+                "2019-02 NSE-INDEX-NIFTY 1min",
+            ],
+            "what was appended, the row after a changed month, and nothing else"
+        );
+
+        // MERGED BY KEY, IT IS THE WHOLE BODY.
+        let mut merged: std::collections::BTreeMap<_, _> =
+            wire_rows(&read_before).into_iter().collect();
+        for (key, row) in sent {
+            let _ = merged.insert(key, row);
+        }
+        let now = wire_rows(&read_after);
+        assert_eq!(merged, now.iter().cloned().collect());
+        // March's own change did not move; the change of the month before it
+        // did, from +10.00% to +5.00%.
+        let march_row = &merged[&(
+            "NSE-INDEX-NIFTY".to_owned(),
+            "2019-03".to_owned(),
+            "1min".to_owned(),
+        )];
+        assert_eq!(march_row[3], 1_000);
+        assert_eq!(march_row[5], 500, "its previous month's new change");
+
+        // THE DELTA'S ROWS KEEP THE WHOLE BODY'S ORDER.
+        let order: Vec<&(String, String, String)> = now.iter().map(|(key, _)| key).collect();
+        let mut at = 0;
+        for key in &keys {
+            let found = order[at..]
+                .iter()
+                .position(|(instrument, month, rung)| {
+                    format!("{month} {instrument} {rung}") == *key
+                })
+                .unwrap_or_else(|| panic!("{key} is out of the whole body's order"));
+            at += found + 1;
+        }
+
+        // THE COUNTERS A READER CHECKS ITS MERGE AGAINST.
+        assert_eq!(delta["held"]["months"], now.len());
+        let bars: u64 = now
+            .iter()
+            .map(|(_, row)| row[0].as_u64().expect("rows"))
+            .sum();
+        assert_eq!(delta["held"]["rows"], bars);
+
+        // ALREADY CURRENT: no row, the same counters.
+        let newest = after.generation().expect("held");
+        let current = delta_of(&after, &newest.to_string(), "");
+        assert_eq!(current["rows"], serde_json::json!([]));
+        assert_eq!(current["held"]["months"], now.len());
+    }
+
+    /// **A DELTA THAT CANNOT BE CUT IS REFUSED BY NAME, NEVER ANSWERED IN
+    /// PART** (WP-56; DB-B56's rule, on this route too).
+    #[test]
+    fn a_delta_that_cannot_be_cut_is_refused_by_name() {
+        let nifty = series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1);
+        let mut disk = Disk::single("refused", &[held_at(nifty, month(2019, 2), 10, (5, 6))]);
+        let before = disk.read(None);
+        let generation = before.generation().expect("held");
+        disk.append(&[held_at(nifty, month(2019, 3), 10, (6, 7))]);
+        let after = disk.read(Some(&before));
+        let compact = store_wire::Format::Compact;
+
+        // BEFORE THE LAST WHOLE READ: the appends after it are not held.
+        let (code, body) = refused(Some(&after), compact, &(generation - 1).to_string(), "");
+        assert_eq!(code, axum::http::StatusCode::GONE, "{body}");
+        assert_eq!(body["error"], "since_too_old");
+        assert_eq!(body["floor"], generation);
+        // PAST THE NEWEST: never published, so not "too old".
+        for future in [generation + 2, 99_999_999_999] {
+            let (code, body) = refused(Some(&after), compact, &future.to_string(), "");
+            assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"], "since_in_future");
+            assert_eq!(body["generation"], generation + 1);
+        }
+        // A SHAPE THIS CENSUS DOES NOT TAKE.
+        let (code, body) = refused(Some(&after), compact, "INDEX=1,CASH=0,FNO=0", "");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape");
+        // AN EPOCH NAMED FOR A SINGLE FILE, WHICH HAS NONE.
+        let (code, body) = refused(Some(&after), compact, &generation.to_string(), "FNO=000001");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "epoch_changed");
+        // NOT A GENERATION, AND NOT THE TUPLES WIRE.
+        for bad in [
+            "soon",
+            "-1",
+            "+1",
+            "1.5",
+            "INDEX=",
+            "INDEX=1,INDEX=2",
+            "NOPE=1",
+            "1,2",
+        ] {
+            let (code, body) = refused(Some(&after), compact, bad, "");
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{bad}: {body}");
+            assert_eq!(body["error"], "bad_request", "{bad}");
+        }
+        let (code, body) = refused(
+            Some(&after),
+            store_wire::Format::Expanded,
+            &generation.to_string(),
+            "",
+        );
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        // NO CENSUS NOW.
+        let (code, body) = refused(None, compact, &generation.to_string(), "");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape");
+    }
+
+    /// **OVER A PARTITIONED CENSUS A DELTA NAMES EVERY PART'S GENERATION AND
+    /// THE EPOCHS THEY WERE READ FROM** (WP-56; D-3316, DB-B56, DB-B67).
+    ///
+    /// The vendor-wide generation is the parts' sum and names no log; each
+    /// part's own does, in its own epoch. So `since` is the
+    /// `x-brutex-census-part-generations` the reader read, `epoch` its
+    /// `x-brutex-census-epoch`, and a different epoch, a missing part or the
+    /// sum is refused.
+    #[test]
+    fn a_partitioned_delta_names_every_part_and_its_epoch() {
+        let nifty = series_at(Segment::Index, "NIFTY", Timeframe::SECOND_1);
+        let ce = contract("NIFTY", "2019-03-28-1150000-CE");
+        let march = month(2019, 3);
+        let mut disk = Disk::partitioned(
+            "parts",
+            &[
+                (Segment::Index, &[held_at(nifty, march, 10, (5, 6))]),
+                (Segment::Fno, &[held_at(ce, march, 20, (7, 8))]),
+            ],
+        );
+        let before = disk.read(None);
+        let headers = census_headers_with(Some(&before), None);
+        let since = header(&headers, CENSUS_PART_GENERATIONS_HEADER).to_owned();
+        let epoch = header(&headers, CENSUS_EPOCH_HEADER).to_owned();
+        assert_eq!(epoch, "INDEX=000001,CASH=none,FNO=000001");
+        let sum = header(&headers, CENSUS_GENERATION_HEADER).to_owned();
+
+        disk.append(&[held_at(
+            contract("NIFTY", "2019-03-28-1160000-CE"),
+            march,
+            4,
+            (9, 10),
+        )]);
+        let after = disk.read(Some(&before));
+        let delta = delta_of(&after, &since, &epoch);
+        let sent = wire_rows(&delta);
+        assert_eq!(sent.len(), 1, "{delta}");
+        assert_eq!(sent[0].0.0, "NSE-FNO-NIFTY-2019-03-28-1160000-CE");
+        assert_eq!(delta["held"]["months"], 3);
+        assert_eq!(delta["since"], since);
+
+        let compact = store_wire::Format::Compact;
+        // THE SUM IS NOT A SINCE (DB-B56, DB-B67).
+        let (code, body) = refused(Some(&after), compact, &sum, &epoch);
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape");
+        // A PART LEFT OUT.
+        let (code, body) = refused(Some(&after), compact, "INDEX=1,FNO=1", &epoch);
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_shape");
+        // NO EPOCH NAMED, AND ANOTHER EPOCH.
+        let (code, body) = refused(Some(&after), compact, &since, "");
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        let (code, body) = refused(
+            Some(&after),
+            compact,
+            &since,
+            "INDEX=000001,CASH=none,FNO=000002",
+        );
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "epoch_changed");
+        assert_eq!(body["now"], epoch);
+        // ONE PART PAST ITS NEWEST: refused naming the part.
+        let future = since.replace("INDEX=", "INDEX=9");
+        let (code, body) = refused(Some(&after), compact, &future, &epoch);
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_in_future");
+        assert_eq!(body["part"], "INDEX");
+    }
+
+    /// **THE ROUTE READS `since`: A CURRENT READER IS ANSWERED NO ROWS, WITH
+    /// EVERY CENSUS HEADER, AND A HEAD IS STILL A HEAD** (WP-56).
+    #[test]
+    fn the_route_answers_a_since_with_the_census_headers() {
+        let dir = crate::server::tests::agreeing("store-since");
+        let site = crate::server::tests::site("store-since", &dir);
+        let mut manifest =
+            pull::manifest::Manifest::open(Vendor::Gdfl, &[], &[]).expect("a genesis census");
+        let nifty = series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1);
+        let _append = manifest
+            .record_held(held_at(nifty, month(2019, 3), 10, (5, 6)))
+            .expect("records");
+        std::fs::write(
+            pull::manifest::manifest_path(&site.store_root, Vendor::Gdfl),
+            manifest.image(),
+        )
+        .expect("written");
+        let get = |query: &str| {
+            let uri: axum::http::Uri = format!("/store.json?{query}").parse().expect("a uri");
+            let (code, headers, body) = store_response(
+                &site,
+                &axum::http::HeaderMap::new(),
+                &uri,
+                &axum::http::Method::GET,
+            );
+            (
+                code,
+                headers,
+                serde_json::from_slice::<serde_json::Value>(&body).expect("json"),
+            )
+        };
+        let (code, headers, body) = get("feed=gdfl&encoding=census-tuples-v1&since=1");
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["rows"], serde_json::json!([]));
+        assert_eq!(body["since"], "1");
+        assert_eq!(body["held"]["months"], 1);
+        assert_eq!(body["held"]["rows"], 10);
+        assert_eq!(header(&headers, CENSUS_GENERATION_HEADER), "1");
+        assert_eq!(header(&headers, CENSUS_STATE_HEADER), "held");
+        assert!(
+            headers.get(axum::http::header::ETAG).is_none(),
+            "a delta is not the body"
+        );
+        assert_eq!(header(&headers, CENSUS_SINCE_HEADER), "1");
+        let (_, whole_headers) = ask(
+            &site,
+            &axum::http::Method::GET,
+            "feed=gdfl&encoding=census-tuples-v1",
+        );
+        assert!(
+            whole_headers.get(CENSUS_SINCE_HEADER).is_none(),
+            "a whole body carries no since: that is how a reader tells the two apart"
+        );
+
+        let (code, _, body) = get("feed=gdfl&encoding=census-tuples-v1&since=2");
+        assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "since_in_future");
+        let (code, _, body) = get("feed=gdfl&since=1");
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+
+        // A HEAD NEVER CUTS A DELTA: it is the header read it always was.
+        let (code, headers) = ask(&site, &axum::http::Method::HEAD, "feed=gdfl&since=1");
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(header(&headers, CENSUS_GENERATION_HEADER), "1");
     }
 
     #[test]
