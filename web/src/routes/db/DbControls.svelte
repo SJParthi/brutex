@@ -101,7 +101,11 @@
       rows={UNIVERSES.map((u) => ({
         key: u.key,
         name: u.label,
-        detail: u.key
+        detail: db.censusScope
+          /* ONE INSTRUMENT WAS READ, NOT THE STORE (WP-56b): a count of names
+             held from its rows alone would be a statement about the store. */
+          ? `only ${db.censusScope.underlying} read so far; counted when the whole census is read`
+          : u.key
           ? db.universeCount.get(u.key)
             ? `${fmt(db.universeCount.get(u.key).held)} of ${fmt(db.universeCount.get(u.key).members)} held`
             : 'not counted'
@@ -306,7 +310,7 @@
       single
       filter
       label="segments"
-      title={`${db.filter || 'This selection'} holds ${fmt(db.instrumentMatched.length)} instrument-month(s) in ${db.feedName}'s store, under ${fmt(db.kinds.length)} of the store's segments (${db.kinds.map((/** @type {any} */ k) => `${k[0]} ${fmt(k[1])}`).join(', ') || 'none'}). Spot is every series with no expiry; a contract is expired, settled after the archive ended, or unexpired, by its expiry against today's IST day (${db.today}).`}
+      title={`${db.filter || 'This selection'} holds ${fmt(db.instrumentMatched.length)} instrument-month(s) in ${db.feedName}'s store, under ${fmt(db.kinds.length)} of the store's segments (${db.kinds.map((/** @type {any} */ k) => `${k[0]} ${fmt(k[1])}`).join(', ') || 'none'}). Spot is every series with no expiry; a contract is expired, settled after the archive ended, or unexpired, by its expiry against today's IST day (${db.today}).${db.censusScopeNote}`}
       summary={db.kind
         ? (SEG_VIEW.find((s) => s.key === db.kind)?.name ?? db.kind)
         : `${fmt(SEG_VIEW.length)} offered`}
@@ -356,7 +360,7 @@
       disabled={Boolean(db.tfRefusal)}
       title={db.tfRefusal
         ? `No rung stored — ${db.tfRefusal}`
-        : `${db.timeframe ? `${fmt(db.timeframed.length)} of ${fmt(db.universed.length)} instrument-month(s) at ${db.timeframe}. ${tfNote(db.timeframe)}` : `${fmt(db.tfAll.length)} rung(s) held, ${fmt(db.segmented.length)} instrument-month(s) across them`} Only rungs this store actually holds are listed — the list is counted off the rows, never off a fixed ladder.`}
+        : `${db.timeframe ? `${fmt(db.timeframed.length)} of ${fmt(db.universed.length)} instrument-month(s) at ${db.timeframe}. ${tfNote(db.timeframe)}` : `${fmt(db.tfAll.length)} rung(s) held, ${fmt(db.segmented.length)} instrument-month(s) across them`} Only rungs this store actually holds are listed — the list is counted off the rows, never off a fixed ladder.${db.censusScopeNote}`}
       summary={db.tfRefusal ? 'No rung stored' : db.timeframe || 'Pick a rung'}
       rows={[
         /* NO "ALL RUNGS" ROW. A table mixing rungs is a table whose columns
@@ -600,11 +604,11 @@
         {#if db.oow}
           Showing months <b>outside your window</b> ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}): {fmt(db.oowHere)} of this selection's, {fmt(db.oowMonths)}
-          instrument-month(s) across the feed.
+          instrument-month(s) across {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = false)}>Hide them</button>
         {:else}
           {fmt(db.oowHere)} of this selection's months ({fmt(db.oowHidden)} instrument-month(s) across
-          the feed) lie outside your window ({db.activeFeed?.window?.from} to
+          {db.censusScope ? `${db.censusScope.underlying}, the only instrument read so far` : 'the feed'}) lie outside your window ({db.activeFeed?.window?.from} to
           {db.activeFeed?.window?.to}); they are held and hidden.
           <button class="btn ghost sm" type="button" onclick={() => (db.oow = true)}>Show them, labelled</button>
         {/if}
@@ -890,7 +894,8 @@
           No contract — {db.expiryRefusal}
         {:else if db.expiry}
           {fmt(db.expiryCount.get(db.expiry) ?? 0)} row(s) on this contract{#if db.expiryHeld > 0}
-            · {fmt(db.expiryHeld)} on another expiry are not shown{/if}
+            · {fmt(db.expiryHeld)} on another expiry are not shown{/if}{#if db.censusScope?.read.some((/** @type {any} */ part) => part.expiry !== null)}
+            · the other expiries are not read yet{/if}
         {:else if db.expiryHeld > 0}
           {fmt(db.expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
           belongs to one contract, so nothing here blends two

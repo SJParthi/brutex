@@ -326,6 +326,31 @@ fn a_torn_or_damaged_alert_is_named_never_lost() {
         page.older_unacknowledged, 1,
         "the count includes the damaged one"
     );
+    // Acknowledging the damaged record is refused under its own name: the
+    // queue still takes puts, so the refusal must not send the operator to a
+    // replacement that would answer `alerts_not_damaged`.
+    let refused = ack_at(inside.root(), 2, "cli", Scope::Window, NOW).unwrap_err();
+    assert_eq!(
+        refused,
+        AlertError::RecordDamaged {
+            ordinal: 2,
+            offset: offset_of(2)
+        }
+    );
+    assert_eq!(refused.code(), "alert_record_damaged");
+    assert!(
+        !refused.to_string().contains("replace-damaged"),
+        "{refused}"
+    );
+    assert_eq!(
+        replace_damaged_at(inside.root(), NOW),
+        Err(AlertError::NotDamaged)
+    );
+    assert!(
+        AlertError::Damaged { offset: 0 }
+            .to_string()
+            .contains("cli alerts --replace-damaged")
+    );
 
     // THE PUT READS THE WINDOW AND NOTHING OLDER. 3,000 records of which every
     // one older than the newest 1,024 fails its CRC: a put that scanned the
@@ -344,6 +369,14 @@ fn a_torn_or_damaged_alert_is_named_never_lost() {
     );
     assert_eq!(page.alerts.len(), 1_024);
     assert_eq!(page.older_unacknowledged, 3_001 - 1_024);
+    // The cli's acknowledgement of a damaged record older than the window.
+    assert_eq!(
+        ack_at(long.root(), 5, "cli", Scope::Whole, NOW),
+        Err(AlertError::RecordDamaged {
+            ordinal: 5,
+            offset: offset_of(5)
+        })
+    );
 }
 
 // IA-AL-03.
@@ -455,6 +488,17 @@ fn an_older_unacknowledged_alert_never_leaves_view() {
     );
     assert_eq!(page.older_unacknowledged, 1, "exactly the one pushed out");
     assert!(page.first > 1, "ordinal 1 is outside the one read");
+
+    // Three open alerts INSIDE the window: they are listed, and the older
+    // count is "open after" LESS the alerts listed, so it is still exactly 1
+    // (a reader that showed "open after" itself would say 4).
+    for key in ["hole:a", "hole:b", "hole:c"] {
+        put_at(scratch.root(), &alert(6, key, "y"), NOW).unwrap();
+    }
+    let page = window(scratch.root()).unwrap();
+    assert_eq!(page.alerts.len(), 3);
+    assert_eq!(page.alerts[0].record.open_after, 4);
+    assert_eq!(page.older_unacknowledged, 1, "open after 4, less 3 listed");
 
     let listed = older(scratch.root()).unwrap();
     assert_eq!(listed.len(), 1);
@@ -791,6 +835,14 @@ fn an_alert_text_is_cut_at_a_character_boundary() {
     assert_eq!(fit_text(&ascii[..75]), (ascii[..75].to_owned(), false));
     assert_eq!(fit_text(&ascii[..76]), (ascii[..75].to_owned(), true));
     assert_eq!(fit_text(""), (String::new(), false));
+    // A line or paragraph separator, a bidirectional override or isolate and
+    // the zero-width characters would break or reorder the alert's one line
+    // on a page: each becomes a space, as a control character does.
+    assert_eq!(
+        fit_text("a\nb\u{2028}c\u{2029}d\u{202E}e\u{2066}f\u{200B}g\u{FEFF}h\u{061C}i\u{00AD}j"),
+        ("a b c d e f g h i j".to_owned(), false)
+    );
+    assert_eq!(fit_text("é€😀 ok"), ("é€😀 ok".to_owned(), false));
 
     // Through the queue: the flag is on the record and the field decodes.
     let scratch = Scratch::new("cut");
@@ -1088,12 +1140,10 @@ fn a_full_disk_spends_the_reserve_and_the_alert_is_in_the_queue() {
     );
 }
 
-// IA-AL-14 (RA-264).
-#[test]
-fn an_older_page_is_one_read_at_any_depth() {
-    let scratch = Scratch::new("paging");
-    // 2,500 records: alerts, with every 7th alert acknowledged 1,300 records
-    // later (so most acknowledgements sit in a newer page than their alert).
+/// 2,500 records: alerts, with every 7th alert acknowledged 1,300 records
+/// later (so most acknowledgements sit in a newer page than their alert).
+/// Returns the ordinals left open.
+fn mixed_queue(scratch: &Scratch) -> std::collections::BTreeSet<u32> {
     let mut records: Vec<Record> = Vec::with_capacity(2_500);
     let mut open = 0_u32;
     let mut open_set = std::collections::BTreeSet::new();
@@ -1110,7 +1160,111 @@ fn an_older_page_is_one_read_at_any_depth() {
             records.push(raw_alert(&format!("k{i}"), open));
         }
     }
-    raw_queue(&scratch, &records);
+    raw_queue(scratch, &records);
+    open_set
+}
+
+// IA-AL-18: the page before an ordinal, as the cli shows it.
+#[test]
+fn a_settled_page_never_lists_an_alert_a_later_record_acknowledges() {
+    let scratch = Scratch::new("settled");
+    let open_set = mixed_queue(&scratch);
+    let mut differed = 0_u32;
+    for before in [
+        2_u32,
+        8,
+        453,
+        454,
+        1_000,
+        1_024,
+        1_025,
+        1_300,
+        1_477,
+        1_478,
+        2_000,
+        2_500,
+        2_501,
+        9_999,
+        u32::MAX,
+    ] {
+        let settled = page_settled(scratch.root(), before).unwrap();
+        let last = (before - 1).min(2_500);
+        let first = last.saturating_sub(1_023).max(1);
+        assert_eq!(settled.first, first, "before {before}");
+        let want: Vec<u32> = open_set.range(first..=last).rev().copied().collect();
+        let got: Vec<u32> = settled.alerts.iter().map(|a| a.ordinal).collect();
+        assert_eq!(
+            got, want,
+            "the open alerts of {first}..={last}, newest first"
+        );
+        assert_eq!(
+            settled.older_unacknowledged as usize,
+            open_set.range(..first).count(),
+            "the open alerts older than #{first} (before {before})"
+        );
+        assert_eq!((settled.later_damaged, settled.records), (0, 2_500));
+        // What it carried on: the acknowledged ordinals below the page.
+        assert!(settled.acked_older.iter().all(|k| *k < first));
+        // The one read alone has not seen the later acknowledgements.
+        let raw = page_of(&scratch, Some(before));
+        assert!(raw.alerts.len() >= settled.alerts.len());
+        differed += u32::from(raw.alerts.len() > settled.alerts.len());
+    }
+    assert!(
+        differed >= 5,
+        "the case is real: the one read lists acknowledged alerts ({differed} pages)"
+    );
+    // It agrees with `older` and with the newest page, page for page.
+    let mut walked: Vec<u32> = Vec::new();
+    let mut before = window(scratch.root()).unwrap().first;
+    while before > 1 {
+        let part = page_settled(scratch.root(), before).unwrap();
+        walked.extend(part.alerts.iter().map(|a| a.ordinal));
+        before = part.first;
+    }
+    let listed: Vec<u32> = older(scratch.root())
+        .unwrap()
+        .iter()
+        .map(|a| a.ordinal)
+        .collect();
+    assert_eq!(walked, listed);
+
+    // Nothing before the first record, and nothing at all without a queue.
+    for before in [0, 1] {
+        let none = page_settled(scratch.root(), before).unwrap();
+        assert!(none.exists && none.alerts.is_empty() && none.first == 0);
+    }
+    let empty = Scratch::new("settled-none");
+    assert_eq!(page_settled(empty.root(), 5), Ok(Page::default()));
+
+    // An acknowledgement damaged in place can no longer be applied: the page
+    // says how many later records fail, and the alert is listed again rather
+    // than hidden on the word of a record nobody can read.
+    let ack_of_7 = 1_307;
+    let before_damage = page_settled(scratch.root(), 100).unwrap();
+    assert!(before_damage.alerts.iter().all(|a| a.ordinal != 7));
+    spoil(&scratch, ack_of_7);
+    let after_damage = page_settled(scratch.root(), 100).unwrap();
+    assert_eq!(after_damage.later_damaged, 1);
+    assert!(after_damage.alerts.iter().any(|a| a.ordinal == 7));
+    assert_eq!(
+        after_damage.alerts.len(),
+        before_damage.alerts.len() + 1,
+        "only the one whose acknowledgement is unreadable"
+    );
+
+    // A single record, and a page whose every later record is a put.
+    let one = Scratch::new("settled-one");
+    raw_queue(&one, &open_alerts(1));
+    let page = page_settled(one.root(), 2).unwrap();
+    assert_eq!((page.alerts.len(), page.older_unacknowledged), (1, 0));
+}
+
+// IA-AL-14 (RA-264).
+#[test]
+fn an_older_page_is_one_read_at_any_depth() {
+    let scratch = Scratch::new("paging");
+    let open_set = mixed_queue(&scratch);
 
     // Walk backwards a page at a time, carrying the acknowledged ordinals.
     let mut carried = std::collections::BTreeSet::new();
@@ -1329,6 +1483,16 @@ fn a_replacement_holds_the_lock_through_its_first_alert() {
                     seen.exists,
                     "a reader was told there is no queue mid-replacement"
                 );
+                // The damaged queue, or the new one WITH its first record:
+                // never a queue that does not yet say what it replaced.
+                let replaced = seen
+                    .alerts
+                    .last()
+                    .is_some_and(|a| a.ordinal == 1 && a.record.kind == KIND_QUEUE_REPLACED);
+                assert!(
+                    seen.damaged == [3, 2] || replaced,
+                    "neither queue: {seen:?}"
+                );
                 n += 1;
             }
         });
@@ -1362,4 +1526,257 @@ fn a_replacement_holds_the_lock_through_its_first_alert() {
     assert_eq!(window(scratch.root()).unwrap().alerts.len(), 1);
     fs::set_permissions(&names.lock, fs::Permissions::from_mode(0o644)).unwrap();
     fs::set_permissions(&names.queue, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The names in `audit/` that keep a damaged queue.
+fn kept_names(scratch: &Scratch) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(scratch.names().dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("alerts.damaged-"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Seven open alerts with the last two spoiled: a queue every put refuses.
+fn damaged_queue(tag: &str) -> (Scratch, Vec<u8>) {
+    let scratch = Scratch::new(tag);
+    raw_queue(&scratch, &open_alerts(7));
+    spoil(&scratch, 6);
+    spoil(&scratch, 7);
+    let bytes = fs::read(scratch.names().queue).unwrap();
+    (scratch, bytes)
+}
+
+// IA-AL-19: the replacement is all or nothing, at every step it can stop.
+#[test]
+fn a_replacement_stopped_at_any_step_leaves_the_damaged_queue_or_the_new_one() {
+    let kept_name = format!("alerts.damaged-{NOW}");
+    let says = format!("kept {kept_name}; open alerts it held: 5");
+    for step in 1..=5_u8 {
+        let (scratch, damaged) = damaged_queue("stopped");
+        let names = scratch.names();
+        REPLACEMENT_STOPS_AFTER.with(|s| s.set(step));
+        let stopped = replace_damaged_at(scratch.root(), NOW);
+        REPLACEMENT_STOPS_AFTER.with(|s| s.set(0));
+        assert!(
+            matches!(
+                &stopped,
+                Err(AlertError::Io {
+                    kind: std::io::ErrorKind::Interrupted,
+                    ..
+                })
+            ),
+            "step {step}: {stopped:?}"
+        );
+
+        // What a reader sees right after the stop: one whole queue or the
+        // other, and the damaged bytes are already kept under their name.
+        let seen = window(scratch.root()).unwrap();
+        assert!(seen.exists, "step {step}: no queue");
+        assert_eq!(kept_names(&scratch), vec![kept_name.clone()], "step {step}");
+        assert_eq!(fs::read(names.dir.join(&kept_name)).unwrap(), damaged);
+        let finished = step >= 4;
+        if finished {
+            assert_eq!((seen.records, seen.alerts.len()), (1, 1), "step {step}");
+            assert_eq!(seen.alerts[0].record.kind, KIND_QUEUE_REPLACED);
+            assert_eq!(seen.alerts[0].record.text, says);
+            assert_eq!(seen.alerts[0].record.open_after, 1);
+        } else {
+            assert_eq!(fs::read(&names.queue).unwrap(), damaged, "step {step}");
+            assert_eq!(seen.damaged, vec![7, 6]);
+            assert!(put_at(scratch.root(), &alert(6, "k", "t"), NOW).is_err());
+        }
+
+        // The next replacement, in a later second: it finishes an unfinished
+        // one under the SAME kept name (one damaged file is kept once), and
+        // has nothing to do after a finished one.
+        let next = replace_damaged_at(scratch.root(), NOW + 9);
+        if finished {
+            assert_eq!(next, Err(AlertError::NotDamaged), "step {step}");
+        } else {
+            assert_eq!(
+                next,
+                Ok(Replaced {
+                    kept: names.dir.join(&kept_name),
+                    open: Some(5),
+                    ordinal: 1
+                }),
+                "step {step}"
+            );
+        }
+        assert_eq!(kept_names(&scratch), vec![kept_name.clone()], "step {step}");
+        assert_eq!(fs::read(names.dir.join(&kept_name)).unwrap(), damaged);
+        let page = window(scratch.root()).unwrap();
+        assert_eq!((page.records, page.alerts.len()), (1, 1), "step {step}");
+        assert_eq!(page.alerts[0].record.text, says);
+        // The new queue takes puts, numbered after its first record, and the
+        // reserve is in place whichever step the stop took.
+        assert_eq!(
+            written(put_at(scratch.root(), &alert(6, "k", "t"), NOW).unwrap()),
+            2
+        );
+        assert_eq!(
+            fs::metadata(&names.reserve).unwrap().len(),
+            RESERVE_RECORDS * RECORD_LEN
+        );
+    }
+
+    // Without the seam: the host refuses the new queue's temporary name (a
+    // directory sits there). The damaged queue must still be the queue; a
+    // replacement that retired it first would leave a reader with none.
+    let (scratch, damaged) = damaged_queue("refused");
+    let names = scratch.names();
+    let tmp = names.dir.join(format!("alerts.{}.tmp", std::process::id()));
+    fs::create_dir(&tmp).unwrap();
+    let refused = replace_damaged_at(scratch.root(), NOW);
+    assert!(
+        matches!(
+            &refused,
+            Err(AlertError::Io {
+                op: "write the new queue",
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    let seen = window(scratch.root()).unwrap();
+    assert!(
+        seen.exists,
+        "the damaged queue left its name with nothing in its place"
+    );
+    assert_eq!(seen.damaged, vec![7, 6]);
+    assert_eq!(fs::read(&names.queue).unwrap(), damaged);
+    fs::remove_dir(&tmp).unwrap();
+    let done = replace_damaged_at(scratch.root(), NOW + 1).unwrap();
+    assert_eq!(done.kept, names.dir.join(&kept_name));
+    assert_eq!(kept_names(&scratch), vec![kept_name.clone()]);
+    assert_eq!(window(scratch.root()).unwrap().alerts[0].record.text, says);
+
+    // A second link that is NOT a kept name (someone linked the queue
+    // elsewhere) is not mistaken for one.
+    let (scratch, _damaged) = damaged_queue("linked");
+    let names = scratch.names();
+    fs::hard_link(&names.queue, names.dir.join("alerts.copy")).unwrap();
+    let done = replace_damaged_at(scratch.root(), NOW).unwrap();
+    assert_eq!(done.kept, names.dir.join(&kept_name));
+
+    // A failed header does not hide the records behind it: the open count is
+    // read from them, and is unknown only when none passes its CRC.
+    let scratch = Scratch::new("header");
+    raw_queue(&scratch, &open_alerts(5));
+    let queue = OpenOptions::new()
+        .write(true)
+        .open(scratch.names().queue)
+        .unwrap();
+    queue.write_all_at(&[0xEE], 20).unwrap();
+    assert_eq!(
+        window(scratch.root()),
+        Err(AlertError::Damaged { offset: 0 })
+    );
+    let done = replace_damaged_at(scratch.root(), NOW).unwrap();
+    assert_eq!(done.open, Some(5));
+    assert!(
+        window(scratch.root()).unwrap().alerts[0]
+            .record
+            .text
+            .ends_with("open alerts it held: 5")
+    );
+}
+
+// IA-AL-20: a key of any length is put once, and an event carries a bounded
+// part of it.
+#[test]
+fn a_long_key_is_hashed_whole_and_cut_in_its_events() {
+    let scratch = Scratch::new("longkey");
+    let long = "k".repeat(100_000);
+    let other = format!("{}j", &long[..99_999]);
+    assert_eq!(
+        written(put_at(scratch.root(), &alert(6, &long, "t"), NOW).unwrap()),
+        1
+    );
+    assert_eq!(
+        put_at(scratch.root(), &alert(6, &long, "t"), NOW),
+        Ok(Put::Duplicate { ordinal: 1 })
+    );
+    assert_eq!(
+        written(put_at(scratch.root(), &alert(6, &other, "t"), NOW).unwrap()),
+        2,
+        "the last byte of a long key still tells two alerts apart"
+    );
+    assert_eq!(event_key(&long).len(), EVENT_KEY_MAX);
+    assert_eq!(event_key("short"), "short");
+    assert_eq!(event_key(""), "");
+    // Never part of a character: 100 three-byte characters cut at 159 bytes.
+    let wide = "€".repeat(100);
+    assert_eq!(event_key(&wide).len(), 159);
+    assert!(wide.starts_with(event_key(&wide)));
+    assert!(matches!(key_bytes(&long), telemetry::Value::Uint(100_000)));
+}
+
+/// p50, p99 and max of a set of timings, in microseconds.
+fn spread(mut micros: Vec<u128>) -> (u128, u128, u128) {
+    micros.sort_unstable();
+    let at = |q: usize| micros[(micros.len() * q / 100).min(micros.len() - 1)];
+    (at(50), at(99), micros[micros.len() - 1])
+}
+
+// docs/06 L-IA-34, measured: the operator's two steps this module bounds by
+// the records after a page, and by nothing. Ignored because it times a drive;
+// it still asserts what each step returned.
+#[test]
+#[ignore = "timing: prints p50, p99 and max; run by hand with --ignored --nocapture"]
+fn the_operators_older_steps_timed() {
+    let scratch = Scratch::new("timed");
+    let records = 102_400_u32;
+    raw_queue(&scratch, &open_alerts(records));
+    for (label, before, later) in [
+        ("1,024 records after the page", records - 1_023, 1_024_u32),
+        ("51,201 records after the page", 51_200, 51_201),
+        ("101,376 records after the page", 1_025, 101_376),
+    ] {
+        let mut micros = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let start = std::time::Instant::now();
+            let page = page_settled(scratch.root(), before).unwrap();
+            micros.push(start.elapsed().as_micros());
+            assert_eq!(page.alerts.len(), 1_024);
+            assert_eq!(page.older_unacknowledged, before - 1 - 1_024);
+            assert_eq!(u64::from(later), page.records - u64::from(before) + 1);
+        }
+        let (p50, p99, max) = spread(micros);
+        println!("page_settled, {label}: p50 {p50} us, p99 {p99} us, max {max} us (n = 200)");
+    }
+    let mut one_read = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = std::time::Instant::now();
+        let page = page_of(&scratch, Some(51_200));
+        one_read.push(start.elapsed().as_micros());
+        assert_eq!(page.alerts.len(), 1_024);
+    }
+    let (p50, p99, max) = spread(one_read);
+    println!(
+        "page (one read) at the same depth: p50 {p50} us, p99 {p99} us, max {max} us (n = 200)"
+    );
+
+    // The replacement, on a small and on a long damaged queue.
+    for size in [7_u32, 102_400] {
+        let n: u64 = if size == 7 { 100 } else { 30 };
+        let mut micros = Vec::with_capacity(100);
+        for i in 0..n {
+            let scratch = Scratch::new("timed-replace");
+            raw_queue(&scratch, &open_alerts(size));
+            spoil(&scratch, u64::from(size) - 1);
+            spoil(&scratch, u64::from(size));
+            let start = std::time::Instant::now();
+            let done = replace_damaged_at(scratch.root(), NOW + i).unwrap();
+            micros.push(start.elapsed().as_micros());
+            assert_eq!((done.open, done.ordinal), (Some(size - 2), 1));
+        }
+        let (p50, p99, max) = spread(micros);
+        println!(
+            "replace_damaged, {size} records: p50 {p50} us, p99 {p99} us, max {max} us (n = {n})"
+        );
+    }
 }

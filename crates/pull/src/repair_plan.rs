@@ -148,11 +148,26 @@ pub fn plan(root: &Path, parts: PathParts<'_>, window: Window) -> Vec<Month> {
 
 /// The earliest month the series' rung directory holds a bar file for: one
 /// listing, `None` when the directory is not there or names no month.
-fn first_held_month(root: &Path, parts: PathParts<'_>) -> Option<YearMonth> {
-    let dir = StorePath::new(parts).ok()?.to_path_buf(root);
-    let dir = dir.parent()?;
-    std::fs::read_dir(dir)
-        .ok()?
+pub(crate) fn first_held_month(root: &Path, parts: PathParts<'_>) -> Option<YearMonth> {
+    held_months(root, parts).first().copied()
+}
+
+/// Every month the series' rung directory holds a bar file for, ascending:
+/// one listing, empty when the directory is not there or names no month.
+/// `parts.month` only completes the path; every held month is answered.
+#[must_use]
+pub fn held_months(root: &Path, parts: PathParts<'_>) -> Vec<YearMonth> {
+    let Some(dir) = StorePath::new(parts)
+        .ok()
+        .map(|path| path.to_path_buf(root))
+        .and_then(|file| file.parent().map(Path::to_path_buf))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut months: Vec<YearMonth> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name();
@@ -165,7 +180,10 @@ fn first_held_month(root: &Path, parts: PathParts<'_>) -> Option<YearMonth> {
             };
             YearMonth::new(digits(year, 4)?, u8::try_from(digits(month, 2)?).ok()?).ok()
         })
-        .min()
+        .collect();
+    months.sort_unstable();
+    months.dedup();
+    months
 }
 
 fn one(

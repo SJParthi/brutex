@@ -243,6 +243,89 @@ fn older_alerts_are_counted_on_the_listing_and_listed_by_older_and_before() {
     assert!(out.contains("7 older unacknowledged"), "{out}");
     let (_, out) = run(&store, &["--older"]);
     assert!(!out.contains("runs_ledger_damaged"), "{out}");
+    // The page that holds #1 agrees: its acknowledgement is record #1032,
+    // far after that page, and the alert is no longer listed there.
+    let (code, out) = run(&store, &["--before", "9"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("7 unacknowledged in the 1024 records before #9"),
+        "{out}"
+    );
+    assert!(!out.contains("runs_ledger_damaged"), "{out}");
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+#[test]
+fn every_form_of_the_listing_agrees_about_an_acknowledged_alert() {
+    // IA-AL-18, the cli's half: 1,090 open alerts, then acknowledgements of
+    // #1..#10 (records #1091..#1100), which sit outside the pages they name.
+    let store = scratch("agree");
+    for i in 1..=1_090_u32 {
+        put(&store, 9, &format!("mismatch:{i}"), "x");
+    }
+    for k in 1..=10_u32 {
+        alerts::ack_at(&store, k, "cli", Scope::Whole, NOW).unwrap();
+    }
+    let (code, out) = run(&store, &[]);
+    assert_eq!(code, OK);
+    assert!(
+        out.contains("1014 unacknowledged in the newest 1024 records; 66 older unacknowledged"),
+        "{out}"
+    );
+    assert!(
+        out.contains("the page before: cli alerts --before 77"),
+        "{out}"
+    );
+    let (_, out) = run(&store, &["--older"]);
+    assert!(out.contains("ALERTS OLDER -- 66 unacknowledged"), "{out}");
+
+    // The page the listing points at: the same 66, and none of #1..#10.
+    let (code, out) = run(&store, &["--before", "77"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains(
+            "66 unacknowledged in the 1024 records before #77; 0 unacknowledged older than \
+             this page"
+        ),
+        "{out}"
+    );
+    for k in 1..=10 {
+        assert!(!out.contains(&format!("  #{k}  ")), "#{k} is listed: {out}");
+    }
+    assert!(out.contains("  #11  mismatch") && out.contains("  #76  mismatch"));
+    assert!(!out.contains("the page before"), "{out}");
+
+    // A page that starts after them: its older count leaves them out too.
+    let (_, out) = run(&store, &["--before", "1091"]);
+    assert!(
+        out.contains(
+            "1024 unacknowledged in the 1024 records before #1091; 56 unacknowledged older \
+             than this page"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("the page before: cli alerts --before 67"),
+        "{out}"
+    );
+    // And the acknowledgement itself says what the listing now shows.
+    let (code, out) = run(&store, &["--ack", "5"]);
+    assert_eq!(code, FAILED);
+    assert!(out.contains("already_acknowledged: 5"), "{out}");
+
+    // An acknowledgement nobody can read any more is not applied in silence:
+    // the page says so, lists the alert again and does not exit clean.
+    spoil(&store, 1_095);
+    let (code, out) = run(&store, &["--before", "77"]);
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.contains("1 records after this page fail their CRC"),
+        "{out}"
+    );
+    assert!(
+        out.contains("67 unacknowledged in the 1024 records before #77") && out.contains("  #5  "),
+        "{out}"
+    );
     std::fs::remove_dir_all(&store).unwrap();
 }
 

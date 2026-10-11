@@ -511,9 +511,14 @@ impl LineageIndex {
                 // WP-12c) are read, and change no rung: the census's epoch
                 // installed with them no longer lists either key, so neither
                 // is a stored strike here.
+                // An `event` and a `stopped` record (D-3355) are read too:
+                // a stopped key is retired with no successor, so it moves
+                // no rung, and the event is its underlying's, not a key's.
                 pull::expiry_alias::AliasRecord::parse(line).is_some()
                     || pull::gdfl_lineage::SupersededRecord::parse(line).is_some()
                     || pull::gdfl_lineage::RetiredRecord::parse(line).is_some()
+                    || pull::gdfl_lineage::EventRecord::parse(line).is_some()
+                    || pull::gdfl_lineage::StoppedRecord::parse(line).is_some()
             };
             if read {
                 index.records = index.records.saturating_add(1);

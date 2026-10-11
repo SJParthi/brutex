@@ -4,14 +4,17 @@
 //! With no flag it prints what every page shows: the unacknowledged alerts
 //! among the newest 1,024 records of `<store>/audit/alerts`, newest first,
 //! the exact count of older unacknowledged ones, and any record that fails its
-//! CRC, in one read (`pull::alerts::window`). `--before <n>` prints the page
-//! before ordinal `n`, also one read.
+//! CRC, in one read (`pull::alerts::window`).
 //!
 //! The other flags are the operator's steps a route never takes
-//! (`docs/06-limits.md` L-IA-34): `--older` reads the whole queue backwards,
-//! `--ack <n>` acknowledges an alert inside or outside the window,
-//! `--replace-damaged` keeps a damaged queue and starts a new one, and
-//! `--file <path>` lists a kept file.
+//! (`docs/06-limits.md` L-IA-34): `--before <n>` prints the page before
+//! ordinal `n` as it stands now, which is one read of that page and then the
+//! records after it for their acknowledgements (`pull::alerts::page_settled`),
+//! so no alert a newer record acknowledges is listed and its counts agree with
+//! `--older`; `--older` reads the whole queue backwards, `--ack <n>`
+//! acknowledges an alert inside or outside the window, `--replace-damaged`
+//! keeps a damaged queue and puts a new one in its place, and `--file <path>`
+//! lists a kept file.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -130,14 +133,23 @@ fn render_page(out: &mut String, store: &Path, before: Option<u32>, page: &Page)
         let _ = writeln!(out, "ALERTS -- {}: no queue yet, no alert", queue.display());
         return OK;
     }
-    let which = before.map_or_else(
-        || format!("the newest {} records", alerts::WINDOW),
-        |n| format!("the {} records before #{n}", alerts::WINDOW),
+    let (which, older) = before.map_or_else(
+        || {
+            (
+                format!("the newest {} records", alerts::WINDOW),
+                "older unacknowledged (cli alerts --older)",
+            )
+        },
+        |n| {
+            (
+                format!("the {} records before #{n}", alerts::WINDOW),
+                "unacknowledged older than this page",
+            )
+        },
     );
     let _ = writeln!(
         out,
-        "ALERTS -- {}: {} unacknowledged in {which}; {} older unacknowledged \
-         (cli alerts --older); {} records",
+        "ALERTS -- {}: {} unacknowledged in {which}; {} {older}; {} records",
         queue.display(),
         page.alerts.len(),
         page.older_unacknowledged,
@@ -163,10 +175,22 @@ fn render_page(out: &mut String, store: &Path, before: Option<u32>, page: &Page)
             page.torn
         );
     }
+    if page.later_damaged > 0 {
+        let _ = writeln!(
+            out,
+            "  {} records after this page fail their CRC: an acknowledgement among them could \
+             not be applied; cli alerts names them",
+            page.later_damaged
+        );
+    }
     if page.first > 1 {
         let _ = writeln!(out, "  the page before: cli alerts --before {}", page.first);
     }
-    if page.damaged.is_empty() { OK } else { FAILED }
+    if page.damaged.is_empty() && page.later_damaged == 0 {
+        OK
+    } else {
+        FAILED
+    }
 }
 
 /// `--file`: every record of a kept file.
@@ -226,9 +250,15 @@ pub(crate) fn command_with(
         }
     };
     let done = match step {
-        Step::List(before) => {
-            alerts::page(&store, before).map(|page| render_page(out, &store, before, &page))
-        }
+        // The newest page is whole in one read. An older one is listed as it
+        // stands now: the records after it are read for their
+        // acknowledgements, so every form of this verb agrees (L-IA-34).
+        Step::List(before) => before
+            .map_or_else(
+                || alerts::window(&store),
+                |n| alerts::page_settled(&store, n),
+            )
+            .map(|page| render_page(out, &store, before, &page)),
         Step::Older => alerts::older(&store).map(|older| {
             let _ = writeln!(
                 out,

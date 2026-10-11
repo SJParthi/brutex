@@ -16272,6 +16272,29 @@ by IA-11a with the code they bound (`pull::alerts`, `cli alerts`).
     saved anywhere by this crate (the api's in-memory list is IA-10a's).
   - *A damaged record inside the window inflates the older count by one* for
     as long as it stays in the window; the readers say so beside `damaged`.
+  - *An acknowledgement damaged in place can lower the count twice, for ever.*
+    The writer finds "already acknowledged" by reading the acknowledgements
+    after the alert. One that fails its CRC cannot be read, so its alert is
+    listed as open again, and acknowledging it again appends a second
+    acknowledgement and lowers "open after" a second time. From then on
+    `older_unacknowledged` is one too low for every such pair (6 shown where
+    7 are open), which is the opposite error to the one above, and nothing in
+    the file can correct it: the damaged record's content is gone. NOT
+    DETECTED by the writer; the reader names the damaged record
+    (`damaged{ordinal}` in its own page, `later_damaged` on a settled older
+    page), which is the only sign.
+  - *A key has no length bound.* Its BLAKE3 is taken before the lock, so the
+    cost of a long key is its caller's alone; the audited events carry at
+    most 160 bytes of it and its length (IA-AL-20).
+  - *A killed replacement can leave `alerts.<pid>.tmp`* (at most 192 bytes)
+    and, when it was killed between its rename and the lines after it, no
+    "alert queue replaced" event: the new queue's first record is the durable
+    statement. Nothing reads or removes a temporary file another process id
+    left.
+  - *A reader needs `alerts.lock`.* The writer makes it before the queue, so a
+    queue without it means someone removed it; a reader then makes it again,
+    and in a directory it cannot write it refuses `alerts_io` rather than
+    read unlocked.
   - *The lock is taken blocking, with no time limit.* A holder is bounded by
     its own one read, one write and one `sync_data`; a holder that hangs (a
     drive that stalls inside `sync_data`) makes every later put, and every
@@ -16298,11 +16321,82 @@ by IA-11a with the code they bound (`pull::alerts`, `cli alerts`).
   one, needs the records after it, because an acknowledgement is a later
   record and the file is append-only: no index says "already acknowledged"
   without reading on. `alerts::older` (`cli alerts --older`) is O(records in
-  the queue); `alerts::ack` with `Scope::Whole` (`cli alerts --ack <k>`) for k
+  the queue); `alerts::page_settled` (`cli alerts --before <n>`) is one read
+  of that page plus O(records after it), so that it never lists an alert a
+  later record acknowledges and its counts agree with `--older` (IA-AL-18);
+  `alerts::ack` with `Scope::Whole` (`cli alerts --ack <k>`) for k
   outside the newest 1,024 is one read of k's own record at its known offset
   plus O(records after k); `alerts::of_file` (`cli alerts --file`) is
-  O(records in that file). All three are the operator's command only, never
-  on a page or a route: a route acknowledges with `Scope::Window` and is
-  refused `ack_outside_window` for an older alert. NOT MEASURED: none of the
-  three has a bench; their cost is the window read above times the number of
-  windows (about 0.1 ms per 1,024 records on the run above, an extrapolation).
+  O(records in that file). `alerts::replace_damaged` (`cli alerts
+  --replace-damaged`) is O(1) (one window read, two small writes, one link,
+  one rename, two directory syncs), except after a replacement that was
+  stopped before its rename: then it reads the names in `audit/` once to find
+  the kept name the earlier one gave. All of these are the operator's command
+  only, never on a page or a route: a route acknowledges with `Scope::Window`
+  and is refused `ack_outside_window` for an older alert, and a route that
+  offers `before` must carry `Page::acked_older` from the newer pages it has
+  served or say that its older page is as of that page's last record
+  (IA-10a's). `alerts::page(root, before)` alone stays one read.
+- **L-IA-34, measured.** `cargo test -p pull --lib
+  alerts::tests::the_operators_older_steps_timed -- --ignored --nocapture`
+  (an ignored test that prints; not a bench row), 12 Oct 2026, `TMPDIR` on the
+  WD_BLACK volume, the machine shared with other builds.
+  The build is the workspace's `dev` profile, which is optimised. Queue of
+  102,400 open alerts.
+  - The settled page (`page_settled`), by the records after the page: 1,024
+    after it, p50 210 µs, p99 282 µs, max 2.08 ms; 51,201 after it, p50
+    5.91 ms, p99 13.68 ms, max 14.05 ms; 101,376 after it (the oldest page),
+    p50 11.58 ms, p99 12.50 ms, max 16.59 ms (n = 200 each). About 0.11 ms
+    per 1,024 records read: linear in the records after the page, as stated,
+    and bounded by the file.
+  - The one read at the same depth (`page`, `before = 51200`): p50 105 µs,
+    p99 120 µs, max 142 µs (n = 200).
+  - The replacement (`replace_damaged`): a 7-record damaged queue, p50
+    7.99 ms, p99 and max 78.61 ms (n = 100, so p99 is the one slowest run);
+    a 102,400-record one, p50 10.16 ms, p99 and max 12.87 ms (n = 30). The
+    same at both lengths: two file syncs and two directory syncs on that
+    drive, and one read of the newest 1,024 records.
+  `older`, `ack` with `Scope::Whole` and `of_file` have no timing of their
+  own: their cost is the window read times the number of windows, as the
+  settled page's is.
+
+## Options lineage: what is per underlying-day, per ledger line or not detected — D-3354 to D-3358, 12 October 2026
+
+None of this is on a read path: it is the options import's, once per day.
+
+- **`pull::gdfl_lineage::detect` is O(contracts of the underlying-day), not
+  O(1).** One pass over the pre-ex keys and one over the day's, two hash
+  probes per contract; O(contracts x log contracts) on a lot-step ex-date.
+  Measured on the real archive, one call per stock underlying-day
+  2019-02-01 to 2020-09-15 (n = 63,213, release, `Instant` around each call):
+  p50 6.6 us, p99 23.5 us, max 303.6 us. A pre-ex OI value shared by more
+  than `OI_BUCKET_CAP` = 8 keys of one ladder is not walked.
+- **`LineageRun::load` is O(lines of the two ledgers), once per run**, and
+  holds the retired keys of every ex-date whose last expiry has not passed
+  (D-3355). Bounded by the ledger, which grows by one line per renamed or
+  stopped contract.
+- **The split probe is one directory open per applied row of
+  `core::alias::SYMBOL_CHANGES`** (18 today), once per options run (D-3354).
+  A directory that is there is walked to its first contract the ledger has
+  not withdrawn: one entry while it blocks, the directory's whole length
+  (about 1,600 names at most in the store today) once it is superseded.
+- **A detection sees only the pre-ex state the run holds.** A run that starts
+  mid-history folds three sessions before its first day; a key that last
+  traded earlier is neither paired nor stopped by that run (measured by the
+  second agent: OIL 2020-02-20 gives 19 pairs from a two-day run and 23 with
+  full state). A fuller run adds what is missing (D-3355 item 4); nothing is
+  invented.
+- **A pre-ex key whose shifted partner first trades AFTER the ex-date is
+  recorded `stopped`, never linked** (measured by the second agent: OIL
+  2020-02-20, 29 of 52; VEDL 2022-07-26, 50 of 157).
+- **NOT DETECTED:** a re-listing that reuses its pre-ex texts without a
+  sourced row (HINDUNILVR 2025-12-05); an adjustment by a ratio whose
+  inferred lot reads unchanged.
+- **NOT MEASURED:** the detector on index underlyings and on any day after
+  2020-09-15 beyond the named cases (VEDL 2022 and 2024, HEROMOTOCO 2023).
+  Its thresholds are chosen from the 2019 to 2020 stock sweep.
+- **`costs::lot::lot_size_of` has a contract rule for two revisions only**
+  (Nov 2024, Oct 2025). Near the four others it refuses (D-3357); outside
+  every window it answers the trade-day row, not proved per contract.
+- **`TATAGLOBAL/TATACONSUM` and `KPIT/BSOFT` options stay two keys** until
+  NSE's symbol-change file has a row for each (D-3354 item 3).

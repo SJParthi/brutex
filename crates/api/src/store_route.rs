@@ -68,6 +68,24 @@ pub(crate) const CENSUS_PART_GENERATION_HEADER: &str = "x-brutex-census-part-gen
 /// before it reads either (WP-56; D-3327 item 3).
 pub(crate) const CENSUS_SINCE_HEADER: &str = "x-brutex-census-since";
 
+/// The most characters of a `since` any answer repeats, and the longest
+/// `since` a delta is cut for (WP-56b; the WP-56 second agent's follow-up 9:
+/// a 5,000-digit `since` came back whole in the header and in the 400 body).
+/// A real one is `SEGMENT=generation` per part: 26 characters each at most.
+pub(crate) const SINCE_ECHO_CHARS: usize = 160;
+
+/// `since` as an answer repeats it: whole when it is at most
+/// [`SINCE_ECHO_CHARS`] characters, else that many and how many were left
+/// out. Never the request's own length.
+pub(crate) fn since_echo(since: &str) -> String {
+    let total = since.chars().count();
+    if total <= SINCE_ECHO_CHARS {
+        return since.to_owned();
+    }
+    let kept: String = since.chars().take(SINCE_ECHO_CHARS).collect();
+    format!("{kept}...(+{} more)", total - SINCE_ECHO_CHARS)
+}
+
 /// The entries the tightest part may hold, from its own header. D-3327.
 pub(crate) const CENSUS_CAPACITY_HEADER: &str = "x-brutex-census-capacity";
 
@@ -744,7 +762,7 @@ pub(super) fn store_response(
         // one answers the same request with.
         headers.insert(
             axum::http::HeaderName::from_static(CENSUS_SINCE_HEADER),
-            note_header(&since),
+            note_header(&since_echo(&since)),
         );
         return (code, headers, body.into());
     }
@@ -1053,6 +1071,24 @@ fn delta_response(
             ),
         );
     }
+    // A SINCE LONGER THAN ANY REAL ONE IS REFUSED BEFORE IT IS READ, so no
+    // answer (a refusal, or a delta that repeats the since it answers) is
+    // sized by what the request sent. Leading zeros parse, so without this a
+    // 5,000-digit spelling of generation 1 would be repeated whole.
+    let length = since.chars().count();
+    if length > SINCE_ECHO_CHARS {
+        return (
+            bad,
+            delta_refusal(
+                "bad_request",
+                &format!(
+                    "since is {length} characters and a since is at most {SINCE_ECHO_CHARS}: \
+                     one generation, or SEGMENT=generation for every part, comma separated"
+                ),
+                &[("since", render::json_string(&since_echo(since)))],
+            ),
+        );
+    }
     let Some(asked) = parse_since(since) else {
         return (
             bad,
@@ -1060,7 +1096,7 @@ fn delta_response(
                 "bad_request",
                 "since is one generation, or SEGMENT=generation for every part, comma \
                  separated, as x-brutex-census-part-generations spells them",
-                &[("since", render::json_string(since))],
+                &[("since", render::json_string(&since_echo(since)))],
             ),
         );
     };
@@ -2222,6 +2258,26 @@ refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused fail
                 serde_json::from_slice::<serde_json::Value>(&body).expect("json"),
             )
         };
+        // A SINCE NO REAL READER SENDS IS REFUSED AND NOT REPEATED WHOLE
+        // (WP-56b): 5,000 digits that parse as generation 1, and 5,000
+        // characters that parse as nothing.
+        for long in ["0".repeat(4_999) + "1", "x".repeat(5_000)] {
+            let (code, headers, body) =
+                get(&format!("feed=gdfl&encoding=census-tuples-v1&since={long}"));
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "bad_request");
+            let said = body["since"].as_str().expect("the since, cut");
+            assert!(said.ends_with("...(+4840 more)"), "{said}");
+            assert_eq!(said.chars().count(), SINCE_ECHO_CHARS + 15);
+            assert_eq!(header(&headers, CENSUS_SINCE_HEADER), said);
+            assert!(body.to_string().len() < 600, "{}", body.to_string().len());
+        }
+        // The longest real since is repeated whole.
+        assert_eq!(since_echo("INDEX=1,CASH=2,FNO=3"), "INDEX=1,CASH=2,FNO=3");
+        assert_eq!(
+            since_echo(&"9".repeat(SINCE_ECHO_CHARS)).len(),
+            SINCE_ECHO_CHARS
+        );
         let (code, headers, body) = get("feed=gdfl&encoding=census-tuples-v1&since=1");
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
         assert_eq!(body["rows"], serde_json::json!([]));

@@ -51,7 +51,7 @@
  * page decodes on its own thread and SAYS SO (`store.worker`), never
  * silently.
  */
-import { decodeCensusColumns, rowsOfColumns, columnBuffers, columnsOrderFault, noteCensusMeasure } from './store-census-wire.js';
+import { decodeCensusColumns, rowsOfColumns, columnBuffers, columnsOrder, noteCensusMeasure } from './store-census-wire.js';
 
 /* ======================================================================
    STRINGS, AS ONE TEXT AND ITS ENDS
@@ -122,13 +122,14 @@ export function answerMessage(data) {
     const cols = decodeCensusColumns(body, data.feed);
     if (!cols) return { reply: { op: 'decoded', id, legacy: body }, transfer: [] };
     // MEASURED HERE, OFF THE PAGE'S THREAD: whether the rows are in the
-    // order a refresh's delta is merged by (`columnsOrderFault`), and the
+    // order a refresh's delta is merged by (`columnsOrder`, which learns the
+    // order of exchanges and segments from the rows themselves), and the
     // bars they sum to, which a merge is checked against.
-    const order = columnsOrderFault(cols);
+    const { fault: order, ranks } = columnsOrder(cols);
     let bars = 0;
     for (let i = 0; i < cols.n; i++) bars += cols.rows[i];
     const sent = { ...cols, instruments: packStrings(cols.instruments) };
-    return { reply: { op: 'decoded', id, cols: sent, order, bars },
+    return { reply: { op: 'decoded', id, cols: sent, order, ranks, bars },
       transfer: [...columnBuffers(cols), /** @type {ArrayBuffer} */ (sent.instruments.ends.buffer)] };
   } catch (why) {
     return { reply: { op: 'error', id, message: String(/** @type {any} */ (why)?.message ?? why) }, transfer: [] };
@@ -204,6 +205,14 @@ export async function inSlices(n, work, signal, { yieldControl = yieldTask, budg
 }
 
 /**
+ * How long the page waits for one answer of the census worker before it
+ * decodes the census itself. The worker parses and decodes the 33 MB GDFL
+ * census in about 0.1 s (Node, n=5, WP-56); ten seconds is a hundred times
+ * that, and a third of the request's own ceiling (`STORE_CENSUS_MS`).
+ */
+export const WORKER_CEILING_MS = 10_000;
+
+/**
  * The page's handle on the census worker.
  *
  * `decode(bytes, feed, signal)` resolves to the census rows, the same objects
@@ -211,10 +220,21 @@ export async function inSlices(n, work, signal, { yieldControl = yieldTask, budg
  * `broken` is the reason the worker cannot be used, once it has failed; the
  * caller then decodes on the page and says so.
  *
+ * A CEILING ON THE ANSWER (WP-56b; the WP-56 second agent's follow-up 1). A
+ * worker that takes the message and then neither answers nor errors used to
+ * leave the page on "Reading /store.json" for good: nothing rejected the
+ * read. Each call now waits at most `ceilingMs`; past it the worker is
+ * marked broken with that reason, every waiting read is rejected, and the
+ * caller decodes on the page and says so, exactly as for a worker that died.
+ *
  * @param {() => Worker} spawn
- * @param {{yieldControl?: () => Promise<unknown>, budgetMs?: number, step?: number}} [options]
+ * @param {{yieldControl?: () => Promise<unknown>, budgetMs?: number, step?: number, ceilingMs?: number,
+ *   setTimer?: (work: () => void, ms: number) => any, clearTimer?: (timer: any) => void}} [options]
  */
 export function createCensusWorker(spawn, options = {}) {
+  const ceilingMs = options.ceilingMs ?? WORKER_CEILING_MS;
+  const setTimer = options.setTimer ?? ((work, ms) => setTimeout(work, ms));
+  const clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer));
   /** @type {Worker | null} */
   let worker = null;
   /** @type {string | null} */
@@ -267,13 +287,21 @@ export function createCensusWorker(spawn, options = {}) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
       const onAbort = () => {
+        const waiting = pending.get(message.id);
         pending.delete(message.id);
-        reject(signal?.reason);
+        if (waiting) waiting.reject(signal?.reason);
+        else reject(signal?.reason);
       };
       signal?.addEventListener('abort', onAbort, { once: true });
+      // THE CEILING: an answer, an error or an abort clears it; nothing else
+      // can leave a read waiting.
+      const timer = setTimer(() => {
+        if (pending.has(message.id)) fail(`the census worker did not answer within ${ceilingMs / 1000} s`);
+      }, ceilingMs);
+      const settle = () => { clearTimer(timer); signal?.removeEventListener('abort', onAbort); };
       pending.set(message.id, {
-        resolve: (value) => { signal?.removeEventListener('abort', onAbort); resolve(value); },
-        reject: (why) => { signal?.removeEventListener('abort', onAbort); reject(why); }
+        resolve: (value) => { settle(); resolve(value); },
+        reject: (why) => { settle(); reject(why); }
       });
       // COPIED, NOT MOVED: one memcpy (a few milliseconds for 33 MB), and the
       // caller keeps the bytes to decode itself if the worker dies mid-read.
@@ -294,7 +322,7 @@ export function createCensusWorker(spawn, options = {}) {
     /** @type {any[]} */
     const rows = new Array(cols.n);
     await inSlices(cols.n, (start, end) => rowsOfColumns(cols, start, end, rows), signal, options);
-    noteCensusMeasure(rows, { order: reply.order ?? null, bars: reply.bars });
+    noteCensusMeasure(rows, { order: reply.order ?? null, bars: reply.bars, ranks: reply.ranks ?? null });
     return rows;
   }
 

@@ -3309,7 +3309,7 @@ number it cannot name as `kind_<n>` and a record type it cannot name as
 | Name | What it is |
 |---|---|
 | `alerts.lock` | The lock file. Writers hold it exclusive, readers shared, for one operation. It holds no data |
-| `alerts.<pid>.tmp` | Genesis only: the header is written here, synced, hard-linked to `alerts` (the link fails if a queue exists) and removed |
+| `alerts.<pid>.tmp` | A new queue before it has its name. Genesis: the header is written here, synced, hard-linked to `alerts` (the link fails if a queue exists) and removed. A replacement: the header and the first record are written here, synced, and the name is renamed over `alerts`. One left by a killed process is never read; the same process id removes it before writing its own |
 | `alerts.reserve` | 65,536 written zero bytes (512 records' worth). A put that meets a full disk deletes it and tries once more, so `disk_full`'s own alert has room; the next put that finds room writes it again |
 | `alerts.damaged-<unix_s>` (`.2`, `.3`, … for a second replacement in one second) | A damaged queue kept by `cli alerts --replace-damaged`. Never edited, never deleted, never written over |
 
@@ -3335,8 +3335,25 @@ number it cannot name as `kind_<n>` and a record type it cannot name as
   and list the alerts in it that no acknowledgement in it names, newest first;
   a record that fails its CRC is listed as damaged. The count of older
   unacknowledged alerts is the newest good record's "open after" less the
-  alerts listed.
-- *A damaged queue is replaced, never repaired.* The file is kept under
-  `alerts.damaged-<unix_s>` by a hard link (which fails rather than write over
-  an earlier kept file), a new queue is born, and its first record is a
-  `queue_replaced` alert naming the kept file and the open count it held.
+  alerts listed. For the newest page that is exact. A page before the newest
+  is exact only once the records after it are read too, because an
+  acknowledgement is always a later record: `alerts::page_settled` (`cli
+  alerts --before <n>`) reads them, drops every alert one of them names and
+  takes one off the older count for each that names an alert older than the
+  page (D-4895, `docs/06-limits.md` L-IA-34).
+- *A damaged queue is replaced, never repaired, and the replacement is all or
+  nothing.* Under the lock held exclusive, each step durable before the next:
+  (1) the file is given its kept name `alerts.damaged-<unix_s>` by a hard link
+  (which fails rather than write over an earlier kept file) and the directory
+  is synced; (2) the new queue, header **and** first record, is written whole
+  to `alerts.<pid>.tmp` and synced; (3) that name is renamed over `alerts`,
+  which the host does atomically, and the directory is synced; (4) the
+  reserve is made. The first record is a `queue_replaced` alert naming the
+  kept file and the open count it held (its newest good record's "open
+  after"; `unknown` only when no record of its window passes its CRC, so a
+  failed header alone does not make it unknown). At every moment, and after a
+  kill at any step, `alerts` is the damaged queue or the new queue already
+  holding that record: there is never no queue, nor a queue that does not say
+  what it replaced. A replacement stopped before step 3 leaves the damaged
+  queue with two names; the next one finds the kept name by device and inode
+  and uses it, so one damaged file is kept once (D-4883).

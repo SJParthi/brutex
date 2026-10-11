@@ -787,3 +787,17 @@ fn a_rung_is_named_the_way_the_page_reads_it() {
         assert_eq!(expiry_param(bad), None, "{bad}");
     }
 }
+
+/// An `event` and a `stopped` record of the lineage ledger (D-3355) are read
+/// by the chain's index and move no rung: before they were known here each
+/// would have counted as unread and turned the chain's lineage state to
+/// `partial`. Any other unknown line still does.
+#[test]
+fn the_event_and_stopped_records_are_read_and_move_no_rung() {
+    let text = "event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted shift=0 lot_old=75 lot_new=75 paired=0 stopped=1 v=1\n\
+                stopped NSE-FNO-NIFTY-2020-06-25-1000000-CE ex=2020-06-16 v=1\n";
+    let index = LineageIndex::of(text);
+    assert_eq!((index.records, index.unread), (2, 0));
+    let torn = LineageIndex::of(&format!("{text}stopped NSE-FNO-NIFTY ex=2020-06-16 v=1\n"));
+    assert_eq!((torn.records, torn.unread), (2, 1));
+}

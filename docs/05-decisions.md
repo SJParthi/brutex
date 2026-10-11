@@ -66774,7 +66774,30 @@ at the queue's or the lock's name is refused `alerts_not_a_file`, and a name
 planted at a temporary name is removed before `create_new` (RA-287, RA-317).
 (6) `audit/alerts.reserve`, see D-4895.
 
-**Proof.** `docs/04-invariants.md` IA-AL-01 to IA-AL-17, C-AL-01, C-AL-02.
+**The replacement is all or nothing (12 October 2026, after the second
+agent's check of this package).** The design's text, and this package's
+first build, retired the damaged queue from its name first and made the new
+queue afterwards: a process killed in between (22 of 150 kills in the
+check's run) left `audit/alerts` absent or holding a header and no record,
+so a reader said "no queue yet, no alert" and exited 0 while the kept file's
+open alerts were named by nothing. The order is now: (1) hard-link the
+damaged queue to its kept name and sync the directory; (2) write the new
+queue, header and `queue_replaced` record together, under
+`alerts.<pid>.tmp` and sync it; (3) rename that name over `audit/alerts` and
+sync the directory; (4) make the reserve. A rename over an existing name is
+atomic on the host, so the name is the damaged queue until step 3 and the
+new queue with its first record from step 3 on. A replacement stopped before
+step 3 leaves the damaged queue with a second link; the next one sees
+`nlink > 1`, finds the `alerts.damaged-*` name with the same device and
+inode by reading `audit/`'s names once, and uses it, so a damaged file never
+gets two kept names. That look runs only in that case. The open count
+reported for a queue whose header fails is read from its records, which sit
+where the file's length puts them; it is `unknown` only when none passes its
+CRC. An acknowledgement of a record that fails its CRC is refused
+`alert_record_damaged`, not `alerts_damaged`, whose text sends the operator
+to a replacement that such a queue refuses (`alerts_not_damaged`).
+
+**Proof.** `docs/04-invariants.md` IA-AL-01 to IA-AL-20, C-AL-01, C-AL-02.
 Limits: `docs/06-limits.md` L-IA-30, L-IA-34.
 
 ### D-4871 — One owner per piece: an ingest-automation package edits a shared file only after the fix-round package that owns it has merged — 2026-10-11
@@ -66921,4 +66944,253 @@ APFS frees the blocks a 128-byte append then needs is not measured here
 on that drive: the in-memory list of alerts that could not be saved is the
 api's (IA-10a, audit row RA-161).
 
-**Proof.** `docs/04-invariants.md` IA-AL-09 to IA-AL-13.
+- **(12 October 2026, after the second agent's check.) Every form of `cli
+  alerts` agrees.** `alerts::page(root, before)` stays one read and lists a
+  page as of its own last record; that is the contract a caller paging
+  backwards with `acked_older` needs. `cli alerts --before <n>` printed that
+  page as it was, so it called alerts "unacknowledged" that a newer record
+  acknowledges, while `--older` and `--ack` said otherwise. The cli now asks
+  `alerts::page_settled(root, before)`: the same one read, then the records
+  after the page a window at a time for their acknowledgements. An alert one
+  of them names leaves the list, and each that names an alert older than the
+  page takes one off the page's older count; `older()` applies the same rule
+  through the same function, so there is one rule and not two. O(records
+  after the page), the operator's command only (`docs/06-limits.md` L-IA-34).
+  A later record that fails its CRC is counted (`later_damaged`), printed,
+  and makes the listing exit non-zero: an acknowledgement nobody can read is
+  not applied on trust and not dropped in silence.
+- **A key of any length; hidden characters in a text.** The key's hash is
+  taken before the lock, and an event carries at most 160 bytes of the key
+  beside its length. `fit_text` turns into a space, besides control
+  characters, the Unicode line and paragraph separators (U+2028, U+2029),
+  the bidirectional marks, embeddings, overrides and isolates (U+061C,
+  U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and the zero-width and
+  invisible format characters (U+00AD, U+180E, U+200B to U+200D, U+2060 to
+  U+2065, U+206A to U+206F, U+FEFF, U+FFF9 to U+FFFB), so an alert is one
+  line, left to right, on every page that prints it. The cost is stated: a
+  zero-width joiner inside an emoji sequence, or a zero-width non-joiner in
+  a script that needs it, becomes a space too; alert texts are this
+  program's own English.
+
+**Proof.** `docs/04-invariants.md` IA-AL-09 to IA-AL-13, IA-AL-18, IA-AL-20.
+
+### D-3354 — An option is filed under the newest symbol its name reaches; an import never opens a second key for a contract the store holds — 2026-10-12
+
+**Implemented by** WP-12e. **Findings** DB-B05, DB-B11, DB-B62. D-3349 to
+D-3353 are cited in code by WP-39, WP-13c and WP-16, so this package's entries
+start here.
+
+**What was wrong.** The options decoder took the underlying from each day's
+file name. A contract alive across `NIITTECH -> COFORGE` (2020-08-20) was two
+store contracts, one ending the day before the change and one starting on it:
+904 contracts over 14 renames in the vendor's names, 197 in the store.
+
+**What is decided.**
+
+1. `pull::gdfl_lineage::filed_underlying(stem, trade day)` is the option side
+   of D-3333: `core::alias::LINEAGE.filed_under`, the NEWEST symbol the stem's
+   dated changes reach. `gdfl_nfo::decode_ticker` files every option under it,
+   so the contract is one key on both sides of every change in the table. The
+   vendor's spelling stays the alias (`LINEAGE.backward`, `/aliases.json`).
+2. A name for a symbol the exchange was not using that day (an old symbol on
+   or after its change, a new one before it) is refused as
+   `NfoRefusal::UnderlyingStale`, cause `underlying_stale`. Never guessed: a
+   reused symbol would name another company. Measured: 0 of the archive's
+   1,218,362 names.
+3. A rename with no row in `core::alias::SYMBOL_CHANGES` keeps both keys. No
+   successor is guessed (`TATAGLOBAL -> TATACONSUM`, `KPIT -> BSOFT`).
+4. **The import refuses to split a contract it already holds.** A store filled
+   before this entry holds renamed underlyings under their OLD symbols. At the
+   start of an options run, one directory open per applied row of
+   `SYMBOL_CHANGES` whose newest symbol the filter wants: while
+   `<store>/bars/gdfl/NSE/FNO/<old symbol>` holds a contract the lineage
+   ledger has neither superseded nor retired (the re-key's records, D-3331),
+   the run is refused before it reads or journals anything
+   (`ImportRefusal::UnderlyingSplit`, code `underlying_split`, an `error`
+   event `run refused`), naming every such directory and the key it is filed
+   under. A run whose filter cannot touch them is not refused. What lifts the
+   refusal is the ledger, never a deletion: once every contract under an old
+   symbol is recorded superseded or retired, its directory is history and
+   blocks nothing. A ledger that cannot be read whole refuses the run. The
+   remedy is a store write (WP-80), and it needs the re-key to learn an
+   underlying move first (WP-12c): today the re-key judges the expiry only.
+5. **An options filter names the filed key.** A filter naming an old symbol
+   matched no file and journaled the day `done` with `files=0`; it is refused
+   (`ImportRefusal::FilterRenamed`, code `filter_renamed`) with the key to ask
+   for. An old-name file that does not decode is claimed by the new-name
+   filter (`claims_undecodable` asks `LINEAGE.current` of the shaped stem). A
+   capital-market filter is not refused: `cli`'s stored scope hands both names
+   of a renamed share, and that day's journal key is those names as given.
+
+**What it does not change.** No stored bar. The cash side (D-3333). A contract
+key has no generation component.
+
+**Proof.** `pull::gdfl_lineage::tests::an_option_file_is_filed_under_the_newest_symbol_its_name_reaches`;
+`pull::gdfl_import::wp12e_tests::a_store_holding_an_old_symbols_options_refuses_the_run_that_would_split_it`
+and `…::a_filter_naming_an_old_symbol_is_refused_and_the_new_one_reads_its_files`
+(both fail with the refusals removed); the real-archive name test
+`the_real_names_are_one_key_per_contract_across_renames_and_redatings`
+(ignored; needs the vendor archive).
+
+### D-3355 — An ex-date that keeps the lot is an event; every event and every key it retires is a ledger record, and the retired keys are read back from the ledger — 2026-10-12
+
+**Implemented by** WP-12e. **Findings** DB-B02, DB-B03 (the re-listing half),
+DB-B13. **Builds on** D-3331, D-3343. **Sources** `NSE/FAOP/53079` and
+`NSE/FAOP/73857` for the two SHAPES only (charter, "NSE F&O circulars read for
+the options lineage"); no cause is recorded for any measured event.
+
+**What was wrong.** `gdfl_lineage::detect` returned nothing when the
+underlying's inferred lot was unchanged, so a strike adjustment that keeps the
+lot, and a scheme that expires every contract and lists the same expiries
+again, left every series ending weeks before its expiry and restarting
+unlinked. When the first repair detected a re-listing it wrote nothing for it:
+a re-listing pairs no contract, and only pairs were ledger lines. The keys an
+event retired lived in the run's memory, so a run restarted more than the
+warm-up after an ex-date no longer marked a reused text `stitched`.
+
+**What is decided.**
+
+1. `EventKind` is what moved, measured: `lot_step` (D-3331), `strike_offset`
+   with its shift (old strike less new, paisa), `relisted`. The cause is never
+   written.
+2. With the lot unchanged, the OPEN INTEREST names the partner: each key of
+   the day votes for the shift to the one pre-ex key of its expiry and side
+   whose close OI it opens on. The thresholds are CHOSEN, from the audit's
+   measured events, and are constants of `pull::gdfl_lineage`:
+   `MIN_OI_PAIRS` 5 votes when pre-ex texts trade on; `MIN_OI_FRESH` 3 when
+   none does (a name break); the winning shift needs more than 4 times the
+   same-text carries; `MIN_EVENT_KEYS` 8 keys on each side make a name break;
+   `OI_BUCKET_CAP` 8 pre-ex keys of one ladder may share an OI value before it
+   is not walked. A name break with no proved shift is a re-listing and pairs
+   nothing. A re-listing that REUSES its texts shows neither fact and is
+   declared only from a sourced row.
+3. **Two new records in `<store>/imports/gdfl.lineage`** (D-3317's line rules,
+   `v=1`, appended, never rewritten):
+   `event NSE-FNO-<underlying> ex=<day> kind=<lot_step|strike_offset|relisted> shift=<paisa> lot_old=<n> lot_new=<n> paired=<n> stopped=<n> v=1`
+   and `stopped NSE-FNO-<underlying>-<contract> ex=<day> v=1`, one per pre-ex
+   key the event retired with no partner. An offset pair stays a D-3331
+   `lineage` record with `factor=1/1`. Each new `event` line is also an `info`
+   event `lineage event recorded`, emitted after the lines are durable.
+4. **The last `event` record of an (underlying, ex-date) is the one in
+   force.** A run that holds more of the pre-ex state than an earlier one adds
+   the pairs and stops it alone saw and one more `event` record with the
+   larger counts; a run that holds less writes nothing; a re-listing verdict
+   never overrules recorded pairs; a key with both a `lineage` and a `stopped`
+   record of one ex-date is paired.
+5. **The retired keys are the ledger's.** `LineageRun::load` rebuilds, for
+   every ex-date whose last retired expiry has not passed, the keys it retired
+   from the `event`, `lineage`, `stopped` and `stitched` records (a ledger
+   written before this entry has only the second and fourth), and which of
+   them had their lot restarted from `gdfl.lots`. An event read back for a
+   later day has retired nothing yet.
+6. `/dayflags.json` shows a key's `stopped` record and its underlying's
+   `events`; `/chain.json` and `/bars/window.json` read both kinds (neither is
+   an unread ledger line).
+
+**What it does not change.** No stored bar, no series split (D-3331 item 3).
+What a detection can still miss is the PRE-EX state a run lacks: the warm-up
+is three sessions, and a key that last traded earlier is neither paired nor
+stopped by that run (`docs/06-limits.md`).
+
+**Proof.** `pull::gdfl_lineage::tests::an_offset_that_keeps_the_lot_links_every_contract_to_its_shifted_key`,
+`…::a_name_break_with_no_carried_oi_is_a_relisting_that_pairs_nothing`,
+`…::an_ordinary_day_with_an_unchanged_lot_declares_nothing`,
+`…::an_event_record_reads_back_exactly_and_refuses_any_other_text`, `…::a_stopped_record_reads_back_exactly_and_refuses_any_other_text`;
+`pull::gdfl_import::wp12e_tests::an_offset_met_by_the_import_is_recorded_with_its_kind_shift_and_counts`,
+`…::a_relisting_is_recorded_and_its_retired_keys_survive_a_restart`,
+`…::a_fuller_run_adds_its_pairs_and_a_second_event_record_with_larger_counts`,
+`…::a_ledger_without_event_records_still_rebuilds_the_retired_keys` (all four
+fail with the writes or the rebuild removed);
+`api::dayflags::tests::an_event_and_its_stopped_keys_are_read_and_shown`,
+`api::chain::tests::the_event_and_stopped_records_are_read_and_move_no_rung`,
+`api::bars::…::the_event_and_stopped_records_parse_and_label_no_bar`.
+
+### D-3356 — A contract a scheme expired early settles on the day the circular states, and keeps its stated key — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B03. **Source** `NSE/FAOP/73857`
+(charter, "NSE F&O circulars read for the options lineage").
+
+**What is decided.** `pull::expiry_alias::EARLY_SETTLEMENTS` holds one row per
+circular that STATES the early expiry day: VEDL, ex-date 2026-04-30, the
+contracts stated 26-May, 30-Jun and 28-Jul-2026 expired on 2026-04-29.
+`settle()` answers a trade day before the ex-date with
+`Settlement::ExpiredEarly` and `Settled::last_day()` the cum-date. The
+contract's IDENTITY stays the stated expiry: three stated expiries expired on
+one day, so keying by that day would collide them. From the ex-date the same
+text is the re-listed generation and settles as stated. A scheme whose
+circular does not state the day (`NSE/FAOP/71627`, HINDUNILVR) is not a row.
+
+**What it does not change, and what is NOT DONE.** No reader uses
+`Settled::last_day` yet (greeks tenor, `/db` label): DTE across an early
+expiry is still measured to the stated day. The contract key has no
+generation component, so the two generations share one key and are told apart
+by the ledger's `event`, `stopped` and `stitched` records (D-3355).
+
+**Proof.** `pull::expiry_alias::tests::a_contract_a_scheme_expired_early_names_the_day_it_really_expired`.
+
+### D-3357 — A contract's lot follows the circular while two lots are in force, and is refused near a revision whose circular was not read — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B04. **Sources** `NSE/FAOP/64625`,
+`NSE/FAOP/70616` (charter, same section).
+
+**What was wrong.** `costs::lot::lot_size_on` answers one lot per trade day. A
+revision does not land on a trade day: contracts that already existed keep
+the existing lot, by rules each circular states. The audit measured 3x and 2x
+errors from Nov 2024 to Jan 2025 and 15% in Oct to Dec 2025.
+
+**What is decided.**
+
+1. `lot_size_of(slot, expiry, trade day)` answers the CONTRACT's lot. Inside a
+   sourced rule's window (`CONTRACT_RULES`, one row per circular and
+   underlying, each naming the trade-day table row it explains) the circular's
+   rule answers: contracts expiring on or before the last existing-lot expiry
+   keep the old lot, the named last monthly keeps it, existing quarterly and
+   half-yearly contracts switch after a named end of day, everything else
+   carries the revised lot. Basis `ContractRule(citation)`.
+2. **Near a revision with no rule the answer is a refusal.** The revisions of
+   July 2021, June 2023, April 2024 and July 2025 have no circular read. For a
+   trade day within `UNREAD_REVISION_DAYS` = 92 calendar days of such a row,
+   either side, `lot_size_of` returns `CostError::Unverified`, naming the
+   window and the remedy (one `ContractRule` row and a charter row). 92 is
+   CHOSEN, not an exchange fact: wider than both read circulars' windows (71
+   and 62 days) and than the audit's three contracts measured off the table
+   (4 to 15 days before the row). A new table row with no rule is refused the
+   same way, by construction.
+3. An expiry before the trade day is `CostError::ExpiryBeforeTrade`: a
+   contract has no lot after it expires.
+4. Elsewhere the trade-day row is answered with basis `TradeDayRow`, which
+   says it is not proved per contract by a circular of its own.
+
+**What it does not change.** `lot_size_on`, and every caller that sizes by
+trade day. The only caller that passes an expiry is `costs::trip` (`in_lots`
+of a `Contract::expiring`); nothing outside `crates/costs` does yet, so no
+stored result moves. DB-B04 is therefore PARTIAL.
+
+**Proof.** `costs::lot::tests::a_contracts_lot_follows_the_circulars_rule_while_two_lots_are_in_force`,
+`…::a_revision_whose_circular_was_not_read_refuses_the_contract_lot` (the
+audit's three measured contracts, the window's edges, and the count of unread
+rows), `…::an_expiry_before_the_trade_day_is_refused_by_name`,
+`…::outside_a_transition_the_contract_lot_is_the_trade_day_row_and_says_so`.
+
+### D-3358 — Ten re-dated expiry texts gain alias rows: five sourced, five inferred and labelled so — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B01. **Source** `NSE/FAOP/68747`
+for the five NIFTY rows (charter, same section).
+
+**What is decided.** `pull::expiry_alias::ALIASES` gains ten rows, each dated
+to the rename day of its underlying's regime change rather than to the text's
+own last trade: NIFTY `24JUN27 -> 29JUN27`, `29JUN28 -> 27JUN28`,
+`28DEC28 -> 26DEC28`, `28JUN29 -> 26JUN29`, `27DEC29 -> 24DEC29` (the
+circular's annexure); FINNIFTY `03NOV21 -> 02NOV21`, `11NOV21 -> 09NOV21`,
+`18NOV21 -> 16NOV21`, `30DEC21 -> 28DEC21` and MIDCPNIFTY `27SEP23 ->
+25SEP23`, INFERRED from the underlying's measured weekday move with the cause
+UNVERIFIED (FINNIFTY `18NOV21` rests on the weekday move alone: one name, and
+no strike of it traded under `16NOV21`).
+
+**What is NOT DONE.** The five inferred rows carry the kind `vendor_redated`
+like the measured rows: a row's standing (measured, sourced, inferred) is in
+its source comment, not in the `alias` record or in any answer.
+
+**Proof.** `pull::expiry_alias::tests::a_text_that_stopped_before_its_rename_day_is_the_contract_its_successor_names`;
+the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
+(ignored; needs the vendor archive).

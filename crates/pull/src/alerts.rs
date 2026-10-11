@@ -13,21 +13,27 @@
 //!   whatever the file's length. Bench C-AL-01.
 //! * [`window`] and [`page`]: one read of at most [`WINDOW`] records under the
 //!   lock held shared. Bench C-AL-02.
-//! * [`older`], [`of_file`] and an [`ack`] with [`Scope::Whole`] of an alert
-//!   older than the window read the records after it: O(records), on the
-//!   operator's command only, never on a route (`docs/06-limits.md` L-IA-34).
+//! * [`older`], [`page_settled`], [`of_file`] and an [`ack`] with
+//!   [`Scope::Whole`] of an alert older than the window read the records after
+//!   it: O(records), on the operator's command only, never on a route
+//!   (`docs/06-limits.md` L-IA-34).
 //!
 //! # What it never does
 //!
 //! It never writes over a record whose CRC passes, never truncates, never
 //! repairs: a queue whose tail holds two bad records is refused by name and
-//! replaced by the operator ([`replace_damaged`]), the damaged file kept.
+//! replaced by the operator ([`replace_damaged`]), the damaged file kept. The
+//! replacement is all or nothing: at every moment, and after a kill at any
+//! step, `audit/alerts` is the damaged queue or the new one already holding
+//! its `queue_replaced` record.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::fs::FileExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use store::crc::crc32c;
@@ -129,9 +135,19 @@ pub enum AlertError {
     },
     /// `alert_key_empty`: an alert with no de-duplication key.
     KeyEmpty,
-    /// `alerts_damaged`: the header, or two records at the tail, fail.
+    /// `alerts_damaged`: the header, or two records at the tail, fail. Every
+    /// put refuses such a queue; the operator replaces it.
     Damaged {
         /// The byte offset of the first thing that failed.
+        offset: u64,
+    },
+    /// `alert_record_damaged`: the record an acknowledgement names fails its
+    /// CRC. The queue itself still takes puts, so there is nothing to
+    /// replace; the record stays listed as damaged.
+    RecordDamaged {
+        /// The ordinal asked for.
+        ordinal: u32,
+        /// Its byte offset.
         offset: u64,
     },
     /// `alerts_version_unknown`: a later build's queue.
@@ -184,6 +200,7 @@ impl AlertError {
             Self::KindUnknown { .. } => "alert_kind_unknown",
             Self::KeyEmpty => "alert_key_empty",
             Self::Damaged { .. } => "alerts_damaged",
+            Self::RecordDamaged { .. } => "alert_record_damaged",
             Self::VersionUnknown { .. } => "alerts_version_unknown",
             Self::NotAFile { .. } => "alerts_not_a_file",
             Self::NoSuchAlert { .. } => "no_such_alert",
@@ -216,6 +233,11 @@ impl fmt::Display for AlertError {
             Self::Damaged { offset } => write!(
                 f,
                 "{code}{{offset: {offset}}}: run `cli alerts --replace-damaged`"
+            ),
+            Self::RecordDamaged { ordinal, offset } => write!(
+                f,
+                "{code}{{ordinal: {ordinal}, offset: {offset}}}: the record fails its CRC and \
+                 cannot be acknowledged; it stays listed as damaged"
             ),
             Self::VersionUnknown { found } => {
                 write!(f, "{code}: version {found}, this build reads {VERSION}")
@@ -412,14 +434,33 @@ pub fn key_hash(key: &str) -> [u8; 16] {
         .unwrap_or([0; 16])
 }
 
-/// A text as a record holds it: control characters become spaces, then it is
-/// cut at the largest character boundary at or below [`TEXT_MAX`] bytes.
-/// Returns the text and whether it was cut.
+/// Whether a character would break or reorder the one line a page gives an
+/// alert: a control character, the Unicode line and paragraph separators, the
+/// bidirectional marks, embeddings, overrides and isolates, and the
+/// zero-width and other invisible format characters.
+fn unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+        )
+}
+
+/// A text as a record holds it: every [`unprintable`] character becomes a
+/// space, then it is cut at the largest character boundary at or below
+/// [`TEXT_MAX`] bytes. Returns the text and whether it was cut.
 #[must_use]
 pub fn fit_text(text: &str) -> (String, bool) {
     let clean: String = text
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if unprintable(c) { ' ' } else { c })
         .collect();
     if clean.len() <= TEXT_MAX {
         return (clean, false);
@@ -608,19 +649,31 @@ fn create_fresh(path: &Path) -> io::Result<File> {
     }
 }
 
-/// Genesis: the header is written to a temporary name, synced and linked into
-/// place; the link fails if a queue exists, so a queue is born whole or not at
-/// all. Called under the exclusive lock.
-fn genesis(names: &Names, now: u64) -> Result<(), AlertError> {
+/// A whole new queue under the temporary name `audit/alerts.<pid>.tmp`: the
+/// header and, for a replacement, its first record, in one write, synced.
+/// Nothing a reader opens is touched. Called under the exclusive lock.
+fn write_new(names: &Names, now: u64, first: Option<&Record>) -> Result<PathBuf, AlertError> {
     let tmp = names.dir.join(format!("alerts.{}.tmp", std::process::id()));
+    let mut bytes = header(now);
+    if let Some(record) = first {
+        bytes.extend_from_slice(&record.encode());
+    }
     let written = create_fresh(&tmp).and_then(|mut file| {
-        file.write_all(&header(now))?;
+        file.write_all(&bytes)?;
         file.sync_all()
     });
     if let Err(why) = written {
         let _already_gone = fs::remove_file(&tmp);
         return Err(AlertError::io("write the new queue", &why));
     }
+    Ok(tmp)
+}
+
+/// Genesis: the header is written to a temporary name, synced and linked into
+/// place; the link fails if a queue exists, so a queue is born whole or not at
+/// all. Called under the exclusive lock.
+fn genesis(names: &Names, now: u64) -> Result<(), AlertError> {
+    let tmp = write_new(names, now, None)?;
     let linked = fs::hard_link(&tmp, &names.queue);
     let _tmp_removed = fs::remove_file(&tmp);
     linked.map_err(|why| AlertError::io("link the new queue", &why))?;
@@ -741,8 +794,8 @@ impl Writer {
         Self::under(names, lock, now, create)
     }
 
-    /// The writer over a lock the caller already holds exclusive: the
-    /// replacement keeps one hold from the rename to its first alert.
+    /// The writer over a lock held exclusive: genesis when there is no queue
+    /// and one may be made, then the window and the tail rule.
     fn under(names: Names, lock: Flock<File>, now: u64, create: bool) -> Result<Self, AlertError> {
         let mut created = false;
         if !regular(&names.queue)? {
@@ -881,13 +934,20 @@ fn put_inner(root: &Path, alert: &NewAlert<'_>, now: u64) -> Result<Put, AlertEr
     if alert.key.is_empty() {
         return Err(AlertError::KeyEmpty);
     }
+    // Hashed before the lock is taken: the one step whose cost grows with the
+    // caller's key is not paid while every other writer and reader waits.
+    let key = key_hash(alert.key);
     let writer = Writer::open(root, now, true)?;
-    put_with(&writer, alert, now)
+    put_with(&writer, alert, key, now)
 }
 
 /// The put proper, over a writer that holds the lock.
-fn put_with(writer: &Writer, alert: &NewAlert<'_>, now: u64) -> Result<Put, AlertError> {
-    let key = key_hash(alert.key);
+fn put_with(
+    writer: &Writer,
+    alert: &NewAlert<'_>,
+    key: [u8; 16],
+    now: u64,
+) -> Result<Put, AlertError> {
     // Newest first: an acknowledgement is always newer than its alert, so it
     // is met before the alert it names (D-4895: an acknowledged key is put
     // again; only an open alert makes a duplicate).
@@ -977,7 +1037,9 @@ pub fn ack(root: &Path, ordinal: u32, by: &str, scope: Scope) -> Result<Acked, A
 ///
 /// `no_such_alert` for 0, an ordinal past the end, or a record that is not an
 /// alert; `already_acknowledged`; `ack_outside_window` under [`Scope::Window`]
-/// for an alert older than the window; `alerts_damaged`; the host's refusal.
+/// for an alert older than the window; `alert_record_damaged` when the record
+/// named fails its CRC; `alerts_damaged` for a queue the put refuses too; the
+/// host's refusal.
 pub fn ack_at(
     root: &Path,
     ordinal: u32,
@@ -1002,7 +1064,8 @@ pub fn ack_at(
     }
     let alert = if let Some(at) = writer.span.index(k) {
         let Some(Slot::Good(record)) = writer.span.slots.get(at) else {
-            return Err(AlertError::Damaged {
+            return Err(AlertError::RecordDamaged {
+                ordinal,
                 offset: offset_of(k),
             });
         };
@@ -1066,7 +1129,8 @@ fn older_alert(writer: &Writer, ordinal: u32) -> Result<Record, AlertError> {
         if let Some(at) = part.index(k) {
             return match part.slots.get(at) {
                 Some(Slot::Good(record)) => Ok(record.clone()),
-                _ => Err(AlertError::Damaged {
+                _ => Err(AlertError::RecordDamaged {
+                    ordinal,
                     offset: offset_of(k),
                 }),
             };
@@ -1103,7 +1167,9 @@ pub struct Page {
     /// Whether a queue exists. No queue is no alert, not a failure.
     pub exists: bool,
     /// The alerts of this page that no acknowledgement in it names, newest
-    /// first.
+    /// first. For the newest page that is every acknowledgement there is; for
+    /// an older page [`page`] has not read the records after it, and
+    /// [`page_settled`] has.
     pub alerts: Vec<Alert>,
     /// Ordinals of records in this page that fail their CRC: named, never
     /// skipped.
@@ -1116,8 +1182,14 @@ pub struct Page {
     pub acked_older: Vec<u32>,
     /// Unacknowledged alerts older than this page, as of its newest good
     /// record: that record's "open after" less the alerts listed. Exact for
-    /// the newest page; with a damaged record in the page it includes it.
+    /// the newest page and for a page from [`page_settled`], which takes off
+    /// the older alerts a later record acknowledges; with a damaged record in
+    /// the page it includes it.
     pub older_unacknowledged: u32,
+    /// Records AFTER this page that fail their CRC, counted by
+    /// [`page_settled`]: an acknowledgement among them could not be applied.
+    /// Always 0 from [`page`], which reads no later record.
+    pub later_damaged: u32,
     /// The first ordinal of this page; pass it as `before` for the page
     /// before. 0 when the page is empty.
     pub first: u32,
@@ -1136,44 +1208,131 @@ pub fn window(root: &Path) -> Result<Page, AlertError> {
     page(root, None)
 }
 
+/// One read under `audit/alerts.lock` held shared, so a reader never meets a
+/// put's half-written record: the whole records `pick` chooses (first ordinal,
+/// count) from the number in the file. `None` when there is no queue.
+fn read_span(
+    root: &Path,
+    pick: impl FnOnce(u64) -> (u64, u64),
+) -> Result<Option<(Span, Shape)>, AlertError> {
+    let names = Names::under(root);
+    root_is_dir(&names)?;
+    // The lock first, the queue second: a replacement holds the lock while it
+    // moves the new queue onto the name, so a reader opens the damaged queue
+    // or the new one whole, never a name in between.
+    let lock_file = match open_lock(&names, false) {
+        Ok(file) => file,
+        Err(AlertError::Io {
+            kind: io::ErrorKind::NotFound,
+            ..
+        }) => return Ok(None),
+        Err(other) => return Err(other),
+    };
+    let lock = Flock::lock_shared(lock_file, names.lock.clone())
+        .map_err(|why| AlertError::io("lock shared", &why))?;
+    if !regular(&names.queue)? {
+        return Ok(None);
+    }
+    let file = File::open(&names.queue).map_err(|why| AlertError::io("open the queue", &why))?;
+    let shape = shape(&file)?;
+    let (first, count) = pick(shape.records);
+    let span = span_from(&file, first, count)?;
+    drop(lock);
+    Ok(Some((span, shape)))
+}
+
 /// One read of the at most [`WINDOW`] records before ordinal `before` (the
 /// newest when `None`), under `audit/alerts.lock` held shared, so a reader
 /// never meets a put's half-written record. O(1) at any `before`.
+///
+/// A page before the newest lists its alerts as of its own last record: an
+/// acknowledgement in a later record is not applied. A caller paging
+/// backwards carries [`Page::acked_older`] from the newer pages;
+/// [`page_settled`] is the reader that does it for one page.
 ///
 /// # Errors
 ///
 /// `alerts_unavailable` for a root that is no directory; `alerts_damaged`
 /// for a short or failed header; `alerts_version_unknown`; the host's refusal.
 pub fn page(root: &Path, before: Option<u32>) -> Result<Page, AlertError> {
-    let names = Names::under(root);
-    root_is_dir(&names)?;
-    // The lock first, the queue second: a replacement holds the lock from the
-    // moment the damaged queue leaves its name until the new one has its first
-    // alert, so a reader never reports "no queue" in between.
-    let lock_file = match open_lock(&names, false) {
-        Ok(file) => file,
-        Err(AlertError::Io {
-            kind: io::ErrorKind::NotFound,
-            ..
-        }) => return Ok(Page::default()),
-        Err(other) => return Err(other),
-    };
-    let lock = Flock::lock_shared(lock_file, names.lock.clone())
-        .map_err(|why| AlertError::io("lock shared", &why))?;
-    if !regular(&names.queue)? {
-        return Ok(Page::default());
+    let read = read_span(root, |records| {
+        let end = before.map_or(records, |b| u64::from(b).saturating_sub(1).min(records));
+        let count = end.min(WINDOW);
+        (end - count + 1, count)
+    })?;
+    Ok(read.map_or_else(Page::default, |(span, shape)| {
+        let mut page = listed(&span);
+        page.exists = true;
+        page.records = shape.records;
+        page.torn = shape.torn;
+        page
+    }))
+}
+
+/// Applies the acknowledgements of newer records to a page read by [`page`]:
+/// an alert one of them names leaves the list, and each one that names an
+/// alert older than the page lowers the page's older count by one (the
+/// writer acknowledges an alert at most once). What is left in `carried` are
+/// the ordinals below the page, for the page before it.
+fn settle(page: &mut Page, carried: &mut BTreeSet<u32>) {
+    page.alerts
+        .retain(|alert| !carried.contains(&alert.ordinal));
+    let _named_this_page_or_newer = carried.split_off(&page.first);
+    let older = u32::try_from(carried.len()).unwrap_or(u32::MAX);
+    page.older_unacknowledged = page.older_unacknowledged.saturating_sub(older);
+}
+
+/// The page before ordinal `before` as it stands NOW: [`page`]'s one read,
+/// then every record after that page, a window at a time, for the
+/// acknowledgements that name its alerts or older ones. Its list and its
+/// older count therefore agree with [`window`] and [`older`]: no alert a
+/// record acknowledges is shown as unacknowledged. O(records after the page);
+/// the cli's (`docs/06-limits.md` L-IA-34), never a route's.
+///
+/// # Errors
+///
+/// As [`page`]; and the host's `Interrupted` when the queue was replaced
+/// between two of its reads (ask again).
+pub fn page_settled(root: &Path, before: u32) -> Result<Page, AlertError> {
+    let mut page = page(root, Some(before))?;
+    if page.first == 0 {
+        return Ok(page);
     }
-    let file = File::open(&names.queue).map_err(|why| AlertError::io("open the queue", &why))?;
-    let shape = shape(&file)?;
-    let end = before.map_or(shape.records, |b| {
-        u64::from(b).saturating_sub(1).min(shape.records)
-    });
-    let span = span(&file, end)?;
-    drop(lock);
-    let mut page = listed(&span);
-    page.exists = true;
-    page.records = shape.records;
-    page.torn = shape.torn;
+    // Records are only ever appended, so the page and the records after it up
+    // to the count the first read saw are one consistent view.
+    let top = page.records;
+    let last = u64::from(before).saturating_sub(1).min(top);
+    let mut carried = BTreeSet::new();
+    let mut from = last + 1;
+    while from <= top {
+        let count = (top - from + 1).min(WINDOW);
+        let read = read_span(root, |records| {
+            (from, count.min(records.saturating_sub(from - 1)))
+        })?;
+        let Some((span, _shape)) =
+            read.filter(|(span, _)| u64::try_from(span.slots.len()).ok() == Some(count))
+        else {
+            return Err(AlertError::Io {
+                op: "read the records after the page",
+                kind: io::ErrorKind::Interrupted,
+                text: "the queue was replaced meanwhile; ask again".to_owned(),
+            });
+        };
+        // Every record of this span is newer than the page, so an
+        // acknowledgement of anything at or below `last` is "older" to it.
+        let part = listed(&span);
+        carried.extend(
+            part.acked_older
+                .iter()
+                .copied()
+                .filter(|k| u64::from(*k) <= last),
+        );
+        let bad = u32::try_from(part.damaged.len()).unwrap_or(u32::MAX);
+        page.later_damaged = page.later_damaged.saturating_add(bad);
+        from += count;
+    }
+    settle(&mut page, &mut carried);
+    page.acked_older.extend(carried);
     Ok(page)
 }
 
@@ -1232,18 +1391,13 @@ fn listed(span: &Span) -> Page {
 /// As [`page`].
 pub fn older(root: &Path) -> Result<Vec<Alert>, AlertError> {
     let newest = page(root, None)?;
-    let mut carried: std::collections::HashSet<u32> =
-        std::collections::HashSet::with_capacity(newest.acked_older.len().max(16));
-    carried.extend(newest.acked_older.iter().copied());
+    let mut carried: BTreeSet<u32> = newest.acked_older.iter().copied().collect();
     let mut found = Vec::with_capacity(usize::try_from(newest.older_unacknowledged).unwrap_or(0));
     let mut before = newest.first;
     while before > 1 {
-        let part = page(root, Some(before))?;
-        for alert in part.alerts {
-            if !carried.remove(&alert.ordinal) {
-                found.push(alert);
-            }
-        }
+        let mut part = page(root, Some(before))?;
+        settle(&mut part, &mut carried);
+        found.append(&mut part.alerts);
         carried.extend(part.acked_older.iter().copied());
         if part.first == 0 || part.first >= before {
             break;
@@ -1326,7 +1480,8 @@ pub struct Replaced {
     /// The damaged file, kept for ever under this name.
     pub kept: PathBuf,
     /// The unacknowledged alerts it held by its newest good record, or `None`
-    /// when no record of its window passes its CRC.
+    /// when no record of its window passes its CRC (a failed header alone
+    /// does not make it unknown).
     pub open: Option<u32>,
     /// The ordinal of the `queue_replaced` alert in the new queue.
     pub ordinal: u32,
@@ -1341,11 +1496,93 @@ pub fn replace_damaged(root: &Path) -> Result<Replaced, AlertError> {
     replace_damaged_at(root, unix_now())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the step of a replacement after which this thread's next
+    /// one stops, as a kill there would (0: never). The steps are those
+    /// [`replace_damaged_at`] numbers.
+    pub(crate) static REPLACEMENT_STOPS_AFTER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether the test seam stops the replacement after `step`.
+#[cfg(test)]
+fn seam_stops_after(step: u8) -> bool {
+    REPLACEMENT_STOPS_AFTER.with(std::cell::Cell::get) == step
+}
+
+/// Outside tests there is no seam: only a kill stops a replacement.
+#[cfg(not(test))]
+const fn seam_stops_after(_step: u8) -> bool {
+    false
+}
+
+/// The name a damaged queue is kept under: a hard link, which never writes
+/// over an earlier kept file (a second replacement in the same second takes
+/// `.2`, `.3`, ...). A replacement that was stopped after this step left the
+/// queue with a second name; the next one finds it by device and inode and
+/// keeps that name, so one damaged file is kept once. The look is taken only
+/// when the queue has a second link, and reads `audit/`'s names once.
+fn keep(names: &Names, now: u64) -> Result<PathBuf, AlertError> {
+    let queue = fs::symlink_metadata(&names.queue)
+        .map_err(|why| AlertError::io("stat the damaged queue", &why))?;
+    if queue.nlink() > 1 {
+        let listing =
+            fs::read_dir(&names.dir).map_err(|why| AlertError::io("list audit/", &why))?;
+        let mut already: Option<PathBuf> = None;
+        for entry in listing {
+            let entry = entry.map_err(|why| AlertError::io("list audit/", &why))?;
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("alerts.damaged-")
+            {
+                continue;
+            }
+            let path = entry.path();
+            let same = fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.dev() == queue.dev() && meta.ino() == queue.ino());
+            if same && already.as_ref().is_none_or(|kept| path < *kept) {
+                already = Some(path);
+            }
+        }
+        if let Some(kept) = already {
+            return Ok(kept);
+        }
+    }
+    let mut kept = names.dir.join(format!("alerts.damaged-{now}"));
+    let mut attempt = 1_u32;
+    loop {
+        match fs::hard_link(&names.queue, &kept) {
+            Ok(()) => return Ok(kept),
+            Err(why) if why.kind() == io::ErrorKind::AlreadyExists && attempt < 64 => {
+                attempt += 1;
+                kept = names.dir.join(format!("alerts.damaged-{now}.{attempt}"));
+            }
+            Err(why) => return Err(AlertError::io("keep the damaged queue", &why)),
+        }
+    }
+}
+
 /// Under the exclusive lock: keeps a queue the put refuses as
-/// `audit/alerts.damaged-<unix_s>` (by a hard link, which never writes over
-/// an earlier kept file; a second replacement in the same second takes
-/// `.2`, `.3`, ...), starts a new queue by genesis and puts one
-/// `queue_replaced` alert naming the kept file and its open count.
+/// `audit/alerts.damaged-<unix_s>` and puts a new queue in its place whose
+/// first record is one `queue_replaced` alert naming the kept file and its
+/// open count.
+///
+/// All or nothing, for a reader and across a kill. The steps, each durable
+/// before the next:
+///
+/// 1. the damaged queue gets its kept name (a hard link; the directory is
+///    synced), so it can never be lost;
+/// 2. the new queue, header AND first record, is written whole under the
+///    temporary name and synced;
+/// 3. the temporary name is renamed over `audit/alerts`, which the host does
+///    atomically, and the directory is synced;
+/// 4. the reserve is made and the two events are emitted.
+///
+/// Stopped before step 3, `audit/alerts` is still the damaged queue and the
+/// next replacement finishes the work under the same kept name; stopped
+/// after it, the new queue already says what it replaced. No moment has no
+/// queue, or a queue without that record.
 ///
 /// # Errors
 ///
@@ -1360,77 +1597,111 @@ pub fn replace_damaged_at(root: &Path, now: u64) -> Result<Replaced, AlertError>
     let lock_file = open_lock(&names, true)?;
     let lock =
         Flock::lock(lock_file, names.lock.clone()).map_err(|why| AlertError::io("lock", &why))?;
-    let open = damaged_open_count(&names)?;
-    let mut kept = names.dir.join(format!("alerts.damaged-{now}"));
-    let mut attempt = 1_u32;
-    loop {
-        match fs::hard_link(&names.queue, &kept) {
-            Ok(()) => break,
-            Err(why) if why.kind() == io::ErrorKind::AlreadyExists && attempt < 64 => {
-                attempt += 1;
-                kept = names.dir.join(format!("alerts.damaged-{now}.{attempt}"));
-            }
-            Err(why) => return Err(AlertError::io("keep the damaged queue", &why)),
+    let stop = |step: u8| {
+        if seam_stops_after(step) {
+            Err(AlertError::Io {
+                op: "replace the queue",
+                kind: io::ErrorKind::Interrupted,
+                text: format!("stopped after step {step} by the test seam"),
+            })
+        } else {
+            Ok(())
         }
-    }
-    fs::remove_file(&names.queue).map_err(|why| AlertError::io("retire the queue", &why))?;
+    };
+    let open = damaged_open_count(&names)?;
+
+    // Step 1: the kept name, durable before anything else changes.
+    let kept = keep(&names, now)?;
+    stop(1)?;
     sync_dir(&names.dir)?;
+    stop(2)?;
+
+    // Step 2: the new queue, whole, under the temporary name.
     let name = kept
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let held = open.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
-    note_replaced(&name, &held);
-    let text = format!("kept {name}; open alerts it held: {held}");
-    let key = format!("queue_replaced:{now}:{attempt}");
+    let said = format!("kept {name}; open alerts it held: {held}");
+    let key = format!("queue_replaced:{name}");
     let alert = NewAlert {
         kind: KIND_QUEUE_REPLACED,
         key: &key,
         day: 0,
         run: 0,
-        text: &text,
+        text: &said,
     };
-    // Still under the same hold of the lock: the new queue is born and its
-    // FIRST record is this alert; no other put can come between.
-    let first = Writer::under(names, lock, now, true).and_then(|w| put_with(&w, &alert, now));
-    match first {
-        Ok(Put::Written { ordinal, .. }) => {
-            note_put(ordinal, &alert);
-            Ok(Replaced {
-                kept,
-                open,
-                ordinal,
-            })
-        }
-        Ok(Put::Duplicate { ordinal }) => Ok(Replaced {
-            kept,
-            open,
-            ordinal,
-        }),
+    let (text, text_cut) = fit_text(alert.text);
+    let first = Record {
+        kind_of_record: TYPE_ALERT,
+        kind: alert.kind,
+        flags: if text_cut { FLAG_TEXT_CUT } else { 0 },
+        day: alert.day,
+        run: alert.run,
+        put_at: now,
+        key: key_hash(alert.key),
+        acked: 0,
+        open_after: 1,
+        text,
+    };
+    let tmp = match write_new(&names, now, Some(&first)) {
+        Ok(tmp) => tmp,
         Err(why) => {
             note_not_saved(&alert, &why);
-            Err(why)
+            return Err(why);
         }
+    };
+    stop(3)?;
+
+    // Step 3: one atomic rename. Before it the name is the damaged queue,
+    // after it the new one with its first record; never anything else.
+    if let Err(why) = fs::rename(&tmp, &names.queue) {
+        let why = AlertError::io("put the new queue in place", &why);
+        note_not_saved(&alert, &why);
+        return Err(why);
     }
+    stop(4)?;
+    sync_dir(&names.dir)?;
+    stop(5)?;
+
+    // Step 4: the reserve and the events, with the lock still held.
+    let _reserve = hold_reserve(&names);
+    note_created(&names.queue);
+    note_replaced(&name, &held);
+    note_put(1, &alert);
+    drop(lock);
+    Ok(Replaced {
+        kept,
+        open,
+        ordinal: 1,
+    })
 }
 
 /// The open count of a queue that must be damaged: `Err(NotDamaged)` when the
-/// put would accept it.
+/// put would accept it. `None` only when no record of its window passes its
+/// CRC: a failed header does not hide the records behind it, which are where
+/// the file's length puts them.
 fn damaged_open_count(names: &Names) -> Result<Option<u32>, AlertError> {
     let file = File::open(&names.queue).map_err(|why| AlertError::io("open the queue", &why))?;
-    let shape = match shape(&file) {
-        Ok(shape) => shape,
-        Err(AlertError::Damaged { .. }) => return Ok(None),
+    let (header_ok, records) = match shape(&file) {
+        Ok(shape) => (true, shape.records),
+        Err(AlertError::Damaged { .. }) => {
+            let len = file
+                .metadata()
+                .map_err(|why| AlertError::io("stat the queue", &why))?
+                .len();
+            (false, len.saturating_sub(HEADER_LEN) / RECORD_LEN)
+        }
         Err(other) => return Err(other),
     };
-    let span = span(&file, shape.records)?;
+    let span = span(&file, records)?;
     let live = span.slots.len();
     let last_two_bad = matches!(span.slots.last(), Some(Slot::Bad))
         && matches!(
             live.checked_sub(2).and_then(|at| span.slots.get(at)),
             Some(Slot::Bad)
         );
-    if !last_two_bad {
+    if header_ok && !last_two_bad {
         return Err(AlertError::NotDamaged);
     }
     Ok(span.newest_good(live).map(|r| r.open_after))
@@ -1449,6 +1720,25 @@ pub const EVENTS: [(telemetry::Level, &str, &str); 7] = [
     (telemetry::Level::Error, TARGET, "alert not saved"),
 ];
 
+/// The most of a key an event copies. A key is its caller's and has no length
+/// bound (the record holds its hash); an audited line is bounded, so it
+/// carries this much of the key and the key's whole length.
+pub const EVENT_KEY_MAX: usize = 160;
+
+/// A key as an event carries it: cut at the largest character boundary at or
+/// below [`EVENT_KEY_MAX`] bytes.
+fn event_key(key: &str) -> &str {
+    let mut end = key.len().min(EVENT_KEY_MAX);
+    while end > 0 && !key.is_char_boundary(end) {
+        end -= 1;
+    }
+    key.get(..end).unwrap_or("")
+}
+
+fn key_bytes(key: &str) -> telemetry::Value<'static> {
+    telemetry::Value::Uint(u64::try_from(key.len()).unwrap_or(u64::MAX))
+}
+
 fn note_put(ordinal: u32, alert: &NewAlert<'_>) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info(TARGET, "alert put")
@@ -1456,7 +1746,8 @@ fn note_put(ordinal: u32, alert: &NewAlert<'_>) {
             .with("kind", telemetry::Value::Str(&kind_label(alert.kind)))
             .with("run", telemetry::Value::Uint(alert.run))
             .with("day", telemetry::Value::Uint(u64::from(alert.day)))
-            .with("key", telemetry::Value::Str(alert.key)),
+            .with("key", telemetry::Value::Str(event_key(alert.key)))
+            .with("key_bytes", key_bytes(alert.key)),
     );
 }
 
@@ -1466,7 +1757,8 @@ fn note_not_saved(alert: &NewAlert<'_>, why: &AlertError) {
         &telemetry::Event::error(TARGET, "alert not saved")
             .with("kind", telemetry::Value::Str(&kind_label(alert.kind)))
             .with("run", telemetry::Value::Uint(alert.run))
-            .with("key", telemetry::Value::Str(alert.key))
+            .with("key", telemetry::Value::Str(event_key(alert.key)))
+            .with("key_bytes", key_bytes(alert.key))
             .with("code", telemetry::Value::Str(why.code()))
             .with("why", telemetry::Value::Str(&said)),
     );
