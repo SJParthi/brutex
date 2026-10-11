@@ -77,6 +77,10 @@ const MICROS: i64 = 1_000_000;
 /// Seconds in a day.
 const SECONDS_PER_DAY: i64 = 86_400;
 
+/// Instants answered between two looks at a request's cancellation flag
+/// (DB-N15, D-3349).
+pub const CANCEL_EVERY: usize = 64;
+
 /// The store segment an option underlying's own price series lives under.
 ///
 /// An index underlying has no cash equity and its spot is the index; every
@@ -473,6 +477,20 @@ impl SpotAsk {
     /// The store path the question names is not a valid address — a
     /// malformed question, refused before any file is touched.
     pub fn answer(&self, store_root: &std::path::Path) -> Result<(Vec<Spot>, Vec<String>), String> {
+        self.answer_with(store_root, &crate::bars::Cancel::never())
+    }
+
+    /// [`Self::answer`], looking at `cancel` every [`CANCEL_EVERY`] instants
+    /// and stopping by name once the client went away (DB-N15, D-3349).
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::answer`] refuses, and `cancelled`.
+    pub fn answer_with(
+        &self,
+        store_root: &std::path::Path,
+        cancel: &crate::bars::Cancel,
+    ) -> Result<(Vec<Spot>, Vec<String>), String> {
         let opened = crate::bars::open_classified(
             store_root,
             PathParts {
@@ -512,10 +530,12 @@ impl SpotAsk {
             }
         };
         let mut faults = Vec::new();
-        let spots = self
-            .times
-            .iter()
-            .map(|&ts| {
+        let mut spots = Vec::with_capacity(self.times.len());
+        for (at, &ts) in self.times.iter().enumerate() {
+            if at % CANCEL_EVERY == 0 {
+                cancel.check()?;
+            }
+            spots.push(
                 spot_at(&file, self.month, ts, self.asof).unwrap_or_else(|why| {
                     faults.push(format!(
                         "{} t={}: {why}",
@@ -523,9 +543,9 @@ impl SpotAsk {
                         ts.div_euclid(MICROS)
                     ));
                     Spot::Unreadable
-                })
-            })
-            .collect();
+                }),
+            );
+        }
         Ok((spots, faults))
     }
 
@@ -623,11 +643,21 @@ pub fn not_admitted(what: &str, why: &crate::detail::RunError) -> Answered {
 /// The handler's body, off the async workers.
 #[must_use]
 pub fn respond(store_root: &std::path::Path, query: &str) -> Answered {
+    respond_with(store_root, query, &crate::bars::Cancel::never())
+}
+
+/// [`respond`], stopping once `cancel` is set (DB-N15, D-3349).
+#[must_use]
+pub fn respond_with(
+    store_root: &std::path::Path,
+    query: &str,
+    cancel: &crate::bars::Cancel,
+) -> Answered {
     let asked = match SpotAsk::parse(query) {
         Ok(asked) => asked,
         Err(why) => return bad_request(&why),
     };
-    let (spots, faults) = match asked.answer(store_root) {
+    let (spots, faults) = match asked.answer_with(store_root, cancel) {
         Ok(answered) => answered,
         Err(why) => return bad_request(&why),
     };
@@ -652,8 +682,13 @@ pub async fn spot_json(
     let query = uri.query().unwrap_or("").to_owned();
     let root = site.store_root.clone();
     // OFF THE ASYNC WORKERS (DB-066, DB-G80): opening a month file, its
-    // lock and up to 400 lookups are blocking file reads.
-    match crate::detail::run_store_read(move || respond(&root, &query)).await {
+    // lock and up to 400 lookups are blocking file reads. STOPPED WHEN THE
+    // CLIENT GOES (DB-N15, D-3349): the lookups look at the flag every
+    // `CANCEL_EVERY` instants.
+    let answered =
+        super::bars_route::cancellable(false, move |cancel| respond_with(&root, &query, cancel))
+            .await;
+    match answered {
         Ok(answered) => answered,
         Err(why) => not_admitted("a spot read", &why),
     }

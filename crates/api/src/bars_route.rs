@@ -259,9 +259,14 @@ pub(super) async fn bars_json(
     // read and render; on a Tokio worker it stalled every other route that
     // shared it. The blocking pool admits it, and a full pool answers 429 by
     // name rather than queueing behind it.
-    let answer =
-        crate::detail::run_store_read(move || month_answer(&site, &asked, from_micros, to_micros))
-            .await;
+    // STOPPED WHEN THE CLIENT GOES (DB-N15): the read looks at the flag
+    // between chunks of rows.
+    let answer = cancellable(false, move |cancel| {
+        let answered = month_answer(&site, &asked, from_micros, to_micros, cancel);
+        note_cancelled("/bars.json", &answered);
+        answered
+    })
+    .await;
     match answer {
         Ok(Ok((status, body))) => (status, json(), body),
         // A KEY THE DECODER REFUSES IS GONE, as on the window (D-3331, WP-12c).
@@ -289,6 +294,7 @@ fn month_answer(
     asked: &Addressed,
     from_micros: Option<i64>,
     to_micros: Option<i64>,
+    cancel: &bars::Cancel,
 ) -> Result<(axum::http::StatusCode, String), String> {
     let file = asked.open(site, asked.month)?;
     // THE WINDOW IS ADDRESSED, NOT FILTERED, and it used to be filtered.
@@ -356,7 +362,8 @@ fn month_answer(
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok())
         .map_or(held, |index| index.clamp(begins, held));
-    let (rows, mut faults) = bars::page(&file, begins, ends.saturating_sub(begins));
+    let (rows, mut faults) =
+        bars::page_cancellable(&file, begins, ends.saturating_sub(begins), cancel)?;
 
     let segment = brutex_core::instrument::Segment::parse(&asked.segment).ok();
     let (out, withheld) = bars_array_of(&rows, from_micros, to_micros, segment);
@@ -377,7 +384,13 @@ fn month_answer(
             axum::http::StatusCode::PARTIAL_CONTENT,
             format!(
                 r#"{{"bars":{out},"faulted_records":{records},"faults":{}}}"#,
-                render::json_string(&crate::fault_log::joined(&faults.sentences(), "; "))
+                faults_json(
+                    &faults
+                        .sentences()
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                )
             ),
         ));
     }
@@ -736,6 +749,34 @@ where
     .map_err(|why| crate::detail::RunError::Join(why.to_string()))
 }
 
+/// Runs `work` off the async workers — in the scan pool when `heavy`, else
+/// the store-read pool, each admitted under its cap and refused by name when
+/// full — with a cancellation flag this future owns (DB-N15).
+///
+/// When the client goes away the server drops the request's future, and with
+/// it the guard, which sets the flag; `work` looks at it between months and
+/// every few thousand rows and stops by name. An answer that arrives disarms
+/// the guard first, so a finished request cancels nothing.
+///
+/// # Errors
+///
+/// The pool's refusal, or a join failure.
+pub(super) async fn cancellable<T, F>(heavy: bool, work: F) -> Result<T, crate::detail::RunError>
+where
+    T: Send + 'static,
+    F: FnOnce(&bars::Cancel) -> T + Send + 'static,
+{
+    let (cancel, guard) = bars::Cancel::pair();
+    let job = move || work(&cancel);
+    let answered = if heavy {
+        run_scan(job).await
+    } else {
+        crate::detail::run_store_read(job).await
+    };
+    guard.disarm();
+    answered
+}
+
 pub(super) async fn bars_window_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -773,16 +814,15 @@ pub(super) async fn bars_window_json(
     let heavy = scanned || asked.filter.tod.is_some() || asked.coverage;
     let root = site.store_root.clone();
     let query = asked.query();
-    let work = move || {
-        let window = bars::window(&root, &query)?;
-        Ok::<_, String>(render_window(&window, scanned))
+    // STOPPED WHEN THE CLIENT GOES (DB-N15): the window looks at the flag
+    // between its plan and its read, and every few thousand rows of a read.
+    let work = move |cancel: &bars::Cancel| {
+        let window = bars::window_cancellable(&root, &query, cancel);
+        note_cancelled("/bars/window.json", &window);
+        Ok::<_, String>(render_window(&window?, scanned))
     };
     // OFF THE ASYNC WORKERS, AND A SCAN APART FROM A SEEK (DB-066).
-    let answered = if heavy {
-        run_scan(work).await
-    } else {
-        crate::detail::run_store_read(work).await
-    };
+    let answered = cancellable(heavy, work).await;
     let (body, withheld, faulted) = match answered {
         Ok(Ok(rendered)) => rendered,
         // A SERIES THE DECODER REFUSES IS GONE, not malformed: 410, with the
@@ -821,6 +861,93 @@ pub(super) async fn bars_window_json(
         axum::http::StatusCode::PARTIAL_CONTENT
     };
     (status, json(), body)
+}
+
+/// `api.bars`, INFO, once per request whose client went away mid-read: the
+/// route, and that the work stopped. Silent for every answered request.
+fn note_cancelled<T>(route: &str, answered: &Result<T, String>) {
+    if let Err(why) = answered
+        && why.starts_with("cancelled")
+    {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::info("api.bars", "request abandoned; work stopped")
+                .with("route", telemetry::Value::Str(route)),
+        );
+    }
+}
+
+/// Faults one answer names in full; past it the rest are counted.
+///
+/// **The body is bounded whatever went wrong.** The readers name a month
+/// once however many of its rows would not read, and this is the second
+/// bound, for a window of many series: `MAX_FAULTS_NAMED` reasons of at most
+/// `MAX_FAULT_BYTES` each, then one count.
+const MAX_FAULTS_NAMED: usize = 64;
+
+/// Bytes of one fault an answer carries; a longer one is cut and says so.
+const MAX_FAULT_BYTES: usize = 512;
+
+/// The `faults` field: `null` for none, else the reasons joined, capped at
+/// [`MAX_FAULTS_NAMED`] with the count of the rest.
+fn faults_json(faults: &[&str]) -> String {
+    if faults.is_empty() {
+        return "null".to_owned();
+    }
+    let mut named: Vec<String> = faults
+        .iter()
+        .take(MAX_FAULTS_NAMED)
+        .map(|fault| {
+            if fault.len() <= MAX_FAULT_BYTES {
+                (*fault).to_owned()
+            } else {
+                let mut cut = MAX_FAULT_BYTES;
+                while !fault.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!(
+                    "{} [cut: {} more bytes]",
+                    fault.get(..cut).unwrap_or_default(),
+                    fault.len() - cut
+                )
+            }
+        })
+        .collect();
+    if faults.len() > MAX_FAULTS_NAMED {
+        named.push(format!(
+            "and {} more fault(s) not listed here",
+            faults.len() - MAX_FAULTS_NAMED
+        ));
+    }
+    render::json_string(&named.join("; "))
+}
+
+/// What a value sort served from sort indexes and what it read, as JSON, or
+/// `null` for a time-ordered page (D-3349).
+fn sort_index_json(report: Option<&bars::SortReport>) -> String {
+    report.map_or_else(
+        || "null".to_owned(),
+        |report| {
+            let list = |items: &[String]| {
+                let joined: Vec<String> = items.iter().map(|item| render::json_string(item)).collect();
+                format!("[{}]", joined.join(","))
+            };
+            format!(
+                r#"{{"column":{},"by_time":{},"indexed_rows":{},"indexed_runs":{},"cut_runs":{},"scanned_rows":{},"scanned_months":{},"scanned_why":{},"unread_rows":{},"unread_months":{},"unread_why":{},"build":{}}}"#,
+                render::json_string(report.column),
+                report.by_time,
+                report.indexed_rows,
+                report.indexed_runs,
+                report.cut_runs,
+                report.scanned_rows,
+                report.scanned_months,
+                list(&report.scanned_why),
+                report.unread_rows,
+                report.unread_months,
+                list(&report.unread_why),
+                list(&report.build),
+            )
+        },
+    )
 }
 
 /// One extreme as JSON: `{"v", "t", "key"}`, `t` in UTC seconds like a bar's.
@@ -1040,13 +1167,14 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
         }))
     };
     let body = format!(
-        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faulted_records":{},"faults":{},"bars":{rows}}}"#,
+        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"sort_index":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faulted_records":{},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.offset,
         window.months_read,
         window.months_missing,
         window.months_outside_life,
         window.scan_rows,
+        sort_index_json(window.sort_index.as_ref()),
         window
             .at_index
             .map_or_else(|| "null".to_owned(), |index| index.to_string()),
@@ -1055,14 +1183,7 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
         window.faulted_records,
-        if faults.is_empty() {
-            "null".to_owned()
-        } else {
-            // CAPPED HERE TOO (DB-B75): month refusals and withheld bars are
-            // sentences of their own, and a 240-month window of damaged
-            // months must still answer a constant-size fault text.
-            render::json_string(&crate::fault_log::joined(&faults, "; "))
-        }
+        faults_json(&faults)
     );
     (body, withheld.len(), !window.faults.is_empty())
 }
@@ -1078,6 +1199,36 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
 )]
 mod tests {
     use super::*;
+
+    /// **THE `faults` FIELD IS BOUNDED WHATEVER WENT WRONG.** None is `null`;
+    /// a few are joined as they are; 100,000 are the first
+    /// `MAX_FAULTS_NAMED` and a count of the rest; one of a megabyte is cut
+    /// and says how much was cut. The field was `faults.join("; ")` of
+    /// everything — 59 MB for a month another process held.
+    #[test]
+    fn the_faults_field_is_bounded_whatever_went_wrong() {
+        assert_eq!(faults_json(&[]), "null");
+        assert_eq!(faults_json(&["a", "b"]), r#""a; b""#);
+        let one = "2025-03: another writer holds the month";
+        let many = vec![one; 100_000];
+        let field = faults_json(&many);
+        assert_eq!(field.matches(one).count(), MAX_FAULTS_NAMED);
+        assert!(
+            field.contains(&format!(
+                "and {} more fault(s) not listed here",
+                100_000 - MAX_FAULTS_NAMED
+            )),
+            "{}",
+            &field[field.len() - 80..]
+        );
+        let bound = MAX_FAULTS_NAMED * (MAX_FAULT_BYTES + 40) + 80;
+        assert!(field.len() < bound, "{} bytes", field.len());
+        // 1,000,001 BYTES WHOSE 512TH IS INSIDE A CHARACTER: cut at 511.
+        let long = format!("x{}", "é".repeat(500_000));
+        let field = faults_json(&[long.as_str(); 200]);
+        assert!(field.len() < bound, "{} bytes", field.len());
+        assert!(field.contains("[cut: 999490 more bytes]"), "a cut is named");
+    }
     use crate::server::Site;
     use crate::server::tests::{masters, store_root};
     use brutex_core::vendor::Vendor;
@@ -1271,5 +1422,93 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("the scan pool stayed full for two seconds after the slots were returned");
+    }
+
+    /// **AN ABANDONED REQUEST STOPS ITS BLOCKING WORK** (DB-N15). The future
+    /// a route awaits owns the cancellation guard; dropping it — what the
+    /// server does when the client closes the connection, and what
+    /// `JoinHandle::abort` does here — sets the flag the blocking work reads.
+    /// Before, the work ran to its end on a blocking thread nobody waited
+    /// for: a 97-month scan kept reading for 6.5 s after the client left.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abandoned_request_stops_its_blocking_work() {
+        for _ in 0..400 {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let task = tokio::spawn(cancellable(false, move |cancel: &bars::Cancel| {
+                let _ = started_tx.send(());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let _ = done_tx.send(cancel.is_cancelled());
+            }));
+            if started_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
+            {
+                // THE POOL WAS FULL (another test's reads): the work never
+                // started and the future answered 429. Asked again.
+                let _ = task.await;
+                continue;
+            }
+            task.abort();
+            assert_eq!(
+                done_rx.recv_timeout(std::time::Duration::from_secs(10)),
+                Ok(true),
+                "the blocking work saw the client go"
+            );
+            return;
+        }
+        panic!("the store-read pool stayed full");
+    }
+
+    /// An abandoned request writes ONE `api.bars` line naming its route; an
+    /// answered one, and one refused for any other reason, write none.
+    #[test]
+    fn an_abandoned_request_is_named_once() {
+        let from = crate::emitted::mark();
+        note_cancelled::<()>(
+            "/bars/window.json",
+            &Err("cancelled: the client that asked went away".to_owned()),
+        );
+        note_cancelled::<()>("/bars.json", &Ok(()));
+        note_cancelled::<()>("/bars.json", &Err("scan_budget_exceeded: no".to_owned()));
+        let lines = crate::emitted::landed(from, "api.bars", "request abandoned; work stopped");
+        let mine: Vec<_> = lines
+            .iter()
+            .filter(|line| crate::emitted::says(line, "route", "/bars"))
+            .collect();
+        assert_eq!(mine.len(), 1, "{lines:?}");
+        assert!(crate::emitted::says(mine[0], "route", "/bars/window.json"));
+        assert_eq!(mine[0].level, telemetry::Level::Info);
+    }
+
+    /// An answered request cancels nothing: the guard is disarmed before the
+    /// future ends.
+    #[tokio::test]
+    async fn an_answered_request_cancels_nothing() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let held = std::sync::Arc::clone(&seen);
+        for _ in 0..400 {
+            let held = std::sync::Arc::clone(&held);
+            let answered = cancellable(true, move |cancel: &bars::Cancel| {
+                if let Ok(mut slot) = held.lock() {
+                    *slot = Some(cancel.clone());
+                }
+            })
+            .await;
+            if answered.is_ok() {
+                let kept = seen
+                    .lock()
+                    .expect("the slot")
+                    .clone()
+                    .expect("the work ran");
+                assert!(!kept.is_cancelled());
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the scan pool stayed full");
     }
 }

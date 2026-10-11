@@ -54,19 +54,52 @@
 //! # Cost
 //!
 //! Per request: one open and `fstat` of each of the two files, one bounded
-//! tail read of the cursor ([`CURSOR_TAIL_BYTES`]), then one hash probe per
-//! `key=` (at most [`MAX_KEYS`]) and at most [`MAX_FINDINGS`] findings rendered
-//! per key; `standing_findings` is a sum over the passes that still stand. The
-//! ledger is indexed INCREMENTALLY: only the bytes appended since the last
-//! request are read (from the kept byte offset, whole lines only, one hash
-//! probe per line), so every finding of the whole ledger is indexed, none
-//! drops out behind newer ones, and an unchanged ledger costs nothing. A
+//! tail read of the cursor ([`CURSOR_TAIL_BYTES`]), then for each `key=` (at
+//! most [`MAX_KEYS`]) one hash probe and one ordered seek per standing pass,
+//! and at most [`MAX_FINDINGS`] findings rendered; `standing_findings` and
+//! each series' `more` are sums over the passes that still stand. None of it
+//! grows with the ledger.
+//!
+//! The ledger is indexed INCREMENTALLY and IN PLACE: only the bytes appended
+//! since the last request are read (from the kept byte offset, whole lines
+//! only, a constant number of hash and tree operations per line) and they are
+//! added to the one index the vendor keeps — nothing already indexed is
+//! copied, walked or sorted again. An unchanged ledger costs nothing. A
 //! request reads at most [`INDEX_STEP_BYTES`] of it — the first request after
 //! a start over a longer ledger answers `truncated: true` and the next ones
 //! continue — and a ledger that is another file than the one indexed (moved
 //! aside, shortened, rewritten in place) is indexed again from its start.
 //! Nothing here opens a bar file.
+//!
+//! ## What this replaced, measured (WP-81 repair 2)
+//!
+//! The index was an `Arc` handed to each request and extended through
+//! `Arc::make_mut`: whenever another request still held it — always, under
+//! concurrency — the WHOLE index was deep-copied to add a few lines, and each
+//! answer collected and sorted the series' findings (the `/disk.json` summary:
+//! every finding of the vendor). On a ledger of 385,419 standing findings
+//! being appended by a running scrub, 20 clients got 205 of 800 answers
+//! refused 429, and — the route sharing the store-read pool with bar seeks —
+//! 283 of 960 concurrent `/bars/window.json` seeks were refused with it. Now
+//! the index is extended and read under its vendor's lock, findings are kept
+//! in their answer's order as they are indexed, and the route is admitted in
+//! a pool of its own (`crate::detail::run_ops_read`).
+//!
+//! And a third cause, found by measuring that repair: each request measured
+//! the ledger BEFORE it took the vendor's lock, so behind a request that had
+//! indexed further the ledger looked shorter than its own index — "another
+//! file at the name" — and the whole index was thrown away and read again
+//! from byte 0 (still 1,055 of 80,000 answers refused 429, waits of up to
+//! 869 ms, on a 128 MB ledger under a running scrub). The ledger is now
+//! measured under the lock (`with_index_in_steps`).
+//!
+//! ## What stays O(ledger), by name (`docs/06-limits.md`)
+//!
+//! The first index after a start reads the whole ledger once, at most
+//! [`INDEX_STEP_BYTES`] a request. The index holds one entry per distinct
+//! finding the ledger ever named, for the life of the process.
 
+use std::collections::btree_map;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -266,25 +299,35 @@ pub(crate) struct Finding {
     pub(crate) why: String,
 }
 
-/// What makes two findings one: the kind, the month and the block.
-type Same = (&'static str, String, Option<u64>);
+/// What makes two findings one, and what orders them in an answer: the series
+/// directory, the month, the block and the kind. A summary names findings in
+/// series, month and block order, and a series' own are that order's slice.
+type Key = (Arc<str>, String, Option<u64>, &'static str);
 
-/// One series' findings, and where each is in the list.
-#[derive(Debug, Clone, Default)]
-struct Held {
-    list: Vec<Finding>,
-    at: HashMap<Same, usize>,
-}
-
-/// The findings of one ledger, by series directory (the month file's parent,
-/// relative to the store root).
-#[derive(Debug, Clone, Default)]
+/// The findings of one ledger, kept in the order they are answered in.
+///
+/// # Shape
+///
+/// A finding lives in the map of the pass that last found it (`by_pass`), and
+/// each map is ordered by [`Key`]. The findings that STAND at a pass are those
+/// of pass 0 ("not told") and of every pass from it on — a handful of maps —
+/// so the first few of a series, or of the whole vendor, are the heads of a
+/// merge of those maps: a seek and a constant number of steps, whatever the
+/// ledger holds. A finding found again by a later pass moves to that pass's
+/// map (`at` says where it was), so it is one finding carrying its newest
+/// pass and a stale one is never walked past to reach a standing one.
+#[derive(Debug, Default)]
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Index {
-    by_series: HashMap<String, Held>,
+    /// The findings each pass holds now; pass 0 is "not told".
+    by_pass: BTreeMap<u64, BTreeMap<Key, Finding>>,
+    /// The pass whose map holds each finding.
+    at: HashMap<Key, u64>,
+    /// Every series a finding names — one allocation of the name, shared by
+    /// its keys — with how many of its findings each pass holds.
+    series: HashMap<Arc<str>, BTreeMap<u64, usize>>,
     /// The pass of each run whose `run` line was read.
     passes: HashMap<u64, u64>,
-    /// How many findings each pass holds now; pass 0 is "not told".
-    by_pass: BTreeMap<u64, usize>,
     /// Bytes of the ledger indexed: the offset after the last whole line read.
     pub(crate) indexed_bytes: u64,
     /// Whether ledger bytes past `indexed_bytes` were left for the next
@@ -293,13 +336,13 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    /// Indexes more whole lines of the ledger, oldest first.
+    /// Indexes more whole lines of the ledger, oldest first, IN PLACE.
     ///
-    /// One hash probe per line. A finding of the same kind for the same month
-    /// and block replaces the older one, so a month re-read after a killed
-    /// run, or found again by a later pass, is one finding carrying its
-    /// newest pass. A void line — the ended tail of a killed run — and a line
-    /// of no kind this build reads are skipped.
+    /// A constant number of hash and tree operations per line. A finding of
+    /// the same kind for the same month and block replaces the older one, so
+    /// a month re-read after a killed run, or found again by a later pass, is
+    /// one finding carrying its newest pass. A void line — the ended tail of
+    /// a killed run — and a line of no kind this build reads are skipped.
     fn extend(&mut self, text: &str) {
         for line in cli::scrub_whole_lines(text, false) {
             let mut words = line.splitn(3, ' ');
@@ -337,35 +380,61 @@ impl Index {
                 let (first, last) = field(head, "records")?.split_once('-')?;
                 Some((block, first.parse().ok()?, last.parse().ok()?))
             });
-            let finding = Finding {
-                kind,
-                month: month.to_owned(),
-                block,
-                pass: self.passes.get(&run).copied().unwrap_or(0),
-                run,
-                why: capped_at(why, MAX_WHY),
-            };
-            *self.by_pass.entry(finding.pass).or_default() += 1;
-            let of_series = self.by_series.entry(series.to_owned()).or_default();
-            let same = (
-                kind,
-                finding.month.clone(),
-                block.map(|(block, _, _)| block),
+            let pass = self.passes.get(&run).copied().unwrap_or(0);
+            self.put(
+                series,
+                Finding {
+                    kind,
+                    month: month.to_owned(),
+                    block,
+                    pass,
+                    run,
+                    why: capped_at(why, MAX_WHY),
+                },
             );
-            let older = of_series
-                .at
-                .get(&same)
-                .and_then(|at| of_series.list.get_mut(*at));
-            if let Some(older) = older {
-                if let Some(count) = self.by_pass.get_mut(&older.pass) {
-                    *count = count.saturating_sub(1);
+        }
+    }
+
+    /// Files one finding of `series` under its pass, taking it out of the
+    /// pass that held it before.
+    fn put(&mut self, series: &str, finding: Finding) {
+        let name = if let Some((name, _)) = self.series.get_key_value(series) {
+            Arc::clone(name)
+        } else {
+            let name: Arc<str> = Arc::from(series);
+            self.series.insert(Arc::clone(&name), BTreeMap::new());
+            name
+        };
+        let pass = finding.pass;
+        let key: Key = (
+            name,
+            finding.month.clone(),
+            finding.block.map(|(block, _, _)| block),
+            finding.kind,
+        );
+        let older = self.at.insert(key.clone(), pass);
+        if let Some(older) = older.filter(|older| *older != pass) {
+            if let Some(held) = self.by_pass.get_mut(&older) {
+                held.remove(&key);
+                if held.is_empty() {
+                    self.by_pass.remove(&older);
                 }
-                *older = finding;
-            } else {
-                of_series.at.insert(same, of_series.list.len());
-                of_series.list.push(finding);
+            }
+            if let Some(counts) = self.series.get_mut(series)
+                && let Some(count) = counts.get_mut(&older)
+            {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&older);
+                }
             }
         }
+        if older != Some(pass)
+            && let Some(counts) = self.series.get_mut(series)
+        {
+            *counts.entry(pass).or_default() += 1;
+        }
+        self.by_pass.entry(pass).or_default().insert(key, finding);
     }
 
     /// The index of `text`'s whole lines.
@@ -376,57 +445,120 @@ impl Index {
         index
     }
 
-    /// The findings under `series` that still stand at `from_pass`, oldest
-    /// month first. A finding whose pass could not be told (no `run` line of
-    /// its run is in the ledger) is kept: unknown is not "repaired".
+    /// The maps whose findings still stand at `from_pass`: the one of no
+    /// told pass (unknown is not "repaired") and every pass from it on.
+    fn standing_maps(&self, from_pass: u64) -> impl Iterator<Item = &BTreeMap<Key, Finding>> {
+        let untold = if from_pass > 0 {
+            self.by_pass.get(&0)
+        } else {
+            None
+        };
+        untold
+            .into_iter()
+            .chain(self.by_pass.range(from_pass..).map(|(_, held)| held))
+    }
+
+    /// The first `most` findings under `series` that still stand at
+    /// `from_pass`, oldest month first: a seek in each standing pass's map
+    /// and a merge of their heads. Never a walk or a sort of the series.
+    pub(crate) fn first_standing(
+        &self,
+        series: &str,
+        from_pass: u64,
+        most: usize,
+    ) -> Vec<&Finding> {
+        let Some((name, _)) = self.series.get_key_value(series) else {
+            return Vec::new();
+        };
+        let from: Key = (Arc::clone(name), String::new(), None, "");
+        let ranges = self
+            .standing_maps(from_pass)
+            .map(|held| held.range(&from..))
+            .collect();
+        heads(ranges, most, |key| *key.0 == *series)
+            .into_iter()
+            .map(|(_, finding)| finding)
+            .collect()
+    }
+
+    /// How many findings under `series` still stand at `from_pass`: a sum
+    /// over that series' standing passes.
+    pub(crate) fn standing_in(&self, series: &str, from_pass: u64) -> usize {
+        let Some(counts) = self.series.get(series) else {
+            return 0;
+        };
+        let untold = if from_pass > 0 {
+            counts.get(&0).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        counts
+            .range(from_pass..)
+            .map(|(_, count)| *count)
+            .sum::<usize>()
+            .saturating_add(untold)
+    }
+
+    /// Every finding under `series` that still stands at `from_pass`.
+    #[cfg(test)]
     pub(crate) fn standing(&self, series: &str, from_pass: u64) -> Vec<&Finding> {
-        let mut out: Vec<&Finding> = self
-            .by_series
-            .get(series)
-            .map(|held| {
-                held.list
-                    .iter()
-                    .filter(|finding| finding.pass == 0 || finding.pass >= from_pass)
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.sort_by(|a, b| (&a.month, a.block).cmp(&(&b.month, b.block)));
-        out
+        self.first_standing(series, from_pass, usize::MAX)
     }
 
     /// At most `most` standing findings of the vendor with the series each is
-    /// in, in series and month order: what a summary names.
+    /// in, in series and month order: what a summary names. The heads of the
+    /// standing passes' maps, merged; never a walk of the findings.
     pub(crate) fn named(&self, from_pass: u64, most: usize) -> Vec<(&str, &Finding)> {
-        let mut out: Vec<(&str, &Finding)> = self
-            .by_series
-            .iter()
-            .flat_map(|(series, held)| {
-                held.list
-                    .iter()
-                    .map(move |finding| (series.as_str(), finding))
-            })
-            .filter(|(_, finding)| finding.pass == 0 || finding.pass >= from_pass)
+        let ranges = self
+            .standing_maps(from_pass)
+            .map(|held| held.range::<Key, _>(..))
             .collect();
-        out.sort_by(|a, b| (a.0, &a.1.month, a.1.block).cmp(&(b.0, &b.1.month, b.1.block)));
-        out.truncate(most);
-        out
+        heads(ranges, most, |_| true)
+            .into_iter()
+            .map(|(key, finding)| (&*key.0, finding))
+            .collect()
     }
 
     /// Every standing finding of the vendor, counted: those of no told pass
     /// and those of each pass from `from_pass` on. A sum over those passes,
     /// never a walk of the findings.
     pub(crate) fn standing_count(&self, from_pass: u64) -> usize {
-        let untold = if from_pass > 0 {
-            self.by_pass.get(&0).copied().unwrap_or(0)
-        } else {
-            0
-        };
-        self.by_pass
-            .range(from_pass..)
-            .map(|(_, count)| *count)
-            .sum::<usize>()
-            .saturating_add(untold)
+        self.standing_maps(from_pass).map(BTreeMap::len).sum()
     }
+}
+
+/// The first `most` entries of the ordered `ranges` merged, while `within`
+/// holds: each step compares the ranges' heads — one a standing pass — and
+/// takes the smallest. A head outside `within` ends its range.
+fn heads<'a>(
+    mut ranges: Vec<btree_map::Range<'a, Key, Finding>>,
+    most: usize,
+    within: impl Fn(&Key) -> bool,
+) -> Vec<(&'a Key, &'a Finding)> {
+    let pull = |range: &mut btree_map::Range<'a, Key, Finding>| {
+        range.next().filter(|(key, _)| within(key))
+    };
+    let mut next: Vec<Option<(&Key, &Finding)>> = ranges.iter_mut().map(pull).collect();
+    let mut out = Vec::with_capacity(most.min(64));
+    while out.len() < most {
+        let Some(at) = next
+            .iter()
+            .enumerate()
+            .filter_map(|(at, head)| head.map(|(key, _)| (key, at)))
+            .min()
+            .map(|(_, at)| at)
+        else {
+            break;
+        };
+        let (Some(slot), Some(range)) = (next.get_mut(at), ranges.get_mut(at)) else {
+            break;
+        };
+        if let Some(taken) = slot.take() {
+            out.push(taken);
+        }
+        *slot = pull(range);
+    }
+    out
 }
 
 /// `text` cut at `max` bytes on a character boundary, marked when cut.
@@ -458,8 +590,21 @@ struct Kept {
     /// The length and modified time at which the ledger was last indexed to
     /// its last whole line: while they stand, nothing is read.
     settled: Option<(u64, Option<SystemTime>)>,
-    index: Arc<Index>,
+    /// The one index of this ledger. It is extended and read under the
+    /// vendor's lock and never handed out, so adding lines copies nothing.
+    index: Index,
+    /// Ledger bytes read by every extension so far: what a test counts to
+    /// prove an unchanged ledger is not read again.
+    #[cfg(test)]
+    read_bytes: u64,
 }
+
+/// How often the index of each ledger path was thrown away and that SAME
+/// ledger indexed again from its start: what a test counts to prove a growing
+/// ledger is never taken for another file. By path, because the kept index is
+/// one per vendor and tests of other roots share it.
+#[cfg(test)]
+static REBUILDS: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
 
 impl Kept {
     fn new(path: PathBuf, file: (u64, u64)) -> Self {
@@ -470,7 +615,29 @@ impl Kept {
             seam: Vec::new(),
             in_long_line: false,
             settled: None,
-            index: Arc::new(Index::default()),
+            index: Index::default(),
+            #[cfg(test)]
+            read_bytes: 0,
+        }
+    }
+
+    /// Forgets everything indexed: what is at the name is not the ledger this
+    /// index was built from. It is indexed again from its start.
+    fn restart(&mut self, path: PathBuf, file: (u64, u64)) {
+        #[cfg(test)]
+        let read = self.read_bytes;
+        #[cfg(test)]
+        if self.path == path {
+            let mut rebuilds = REBUILDS.lock().unwrap_or_else(PoisonError::into_inner);
+            match rebuilds.iter_mut().find(|(of, _)| *of == path) {
+                Some((_, count)) => *count += 1,
+                None => rebuilds.push((path.clone(), 1)),
+            }
+        }
+        *self = Self::new(path, file);
+        #[cfg(test)]
+        {
+            self.read_bytes = read;
         }
     }
 
@@ -497,8 +664,14 @@ impl Kept {
         if !bytes.starts_with(&self.seam) {
             // NOT THE BYTES THIS INDEX WAS BUILT FROM: the ledger was
             // rewritten in place. Everything held is of another file.
-            *self = Self::new(std::mem::take(&mut self.path), self.file);
+            self.restart(self.path.clone(), self.file);
             bytes = read(0, step)?;
+        }
+        #[cfg(test)]
+        {
+            self.read_bytes = self
+                .read_bytes
+                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         }
         let held = self.seam.len();
         let fresh = bytes.get(held..).unwrap_or_default();
@@ -521,7 +694,8 @@ impl Kept {
         let taken = match whole {
             Some(end) => {
                 let text = String::from_utf8_lossy(fresh.get(from..end).unwrap_or_default());
-                Arc::make_mut(&mut self.index).extend(&text);
+                // IN PLACE: nothing already indexed is copied or walked.
+                self.index.extend(&text);
                 end
             }
             // A WHOLE STEP WITH NO NEWLINE is no line this build writes; it
@@ -540,7 +714,7 @@ impl Kept {
             .get(upto.saturating_sub(SEAM_BYTES)..upto)
             .unwrap_or_default()
             .to_vec();
-        let index = Arc::make_mut(&mut self.index);
+        let index = &mut self.index;
         index.indexed_bytes = self.consumed;
         // BYTES THE STEP DID NOT REACH are the next request's; a torn tail
         // after the last whole line is not "truncated", it is not a line.
@@ -554,24 +728,35 @@ impl Kept {
 static KEPT: [Mutex<Option<Kept>>; Vendor::ALL.len()] =
     [const { Mutex::new(None) }; Vendor::ALL.len()];
 
-/// `vendor`'s findings index, brought up to its ledger's end.
+/// Reads `vendor`'s findings index, brought up to its ledger's end first.
 ///
-/// The kept one while the ledger has not moved; extended by the lines
-/// appended since when it has ([`Kept::advance`]). A ledger that does not
-/// exist is an empty index — one that never ran is [`standing`]'s refusal,
-/// not this function's. One request at a time extends a vendor's index; the
-/// others wait for it and share the result.
+/// The kept one while the ledger has not moved; extended IN PLACE by the
+/// lines appended since when it has ([`Kept::advance`]). `read` runs under
+/// the vendor's lock, so it must be what the callers' are: bounded work on a
+/// bounded number of findings. A ledger that does not exist is an empty index
+/// — one that never ran is [`standing`]'s refusal, not this function's. One
+/// request at a time extends or reads a vendor's index; the others wait for
+/// it in this route's own admission pool, never in the bar seeks'.
 ///
 /// # Errors
 ///
 /// A ledger that is not a regular file or cannot be read: what the scrub
 /// found cannot be told, and an empty index would say "nothing".
-pub(crate) fn index(root: &Path, vendor: Vendor) -> Result<Arc<Index>, String> {
-    index_in_steps(root, vendor, INDEX_STEP_BYTES)
+pub(crate) fn with_index<T>(
+    root: &Path,
+    vendor: Vendor,
+    read: impl FnOnce(&Index) -> T,
+) -> Result<T, String> {
+    with_index_in_steps(root, vendor, INDEX_STEP_BYTES, read)
 }
 
-/// [`index`], reading at most `step` ledger bytes.
-fn index_in_steps(root: &Path, vendor: Vendor, step: u64) -> Result<Arc<Index>, String> {
+/// [`with_index`], reading at most `step` ledger bytes.
+fn with_index_in_steps<T>(
+    root: &Path,
+    vendor: Vendor,
+    step: u64,
+    read: impl FnOnce(&Index) -> T,
+) -> Result<T, String> {
     use std::os::unix::fs::MetadataExt as _;
     let path = root.join(cli::scrub_ledger_name(vendor));
     let unreadable = |why: std::io::Error| {
@@ -581,34 +766,82 @@ fn index_in_steps(root: &Path, vendor: Vendor, step: u64) -> Result<Arc<Index>, 
             vendor.as_str()
         )
     };
+    let Some(cell) = KEPT.get(vendor as usize) else {
+        return Ok(read(&Index::default()));
+    };
+    let mut held = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    // THE LEDGER IS MEASURED UNDER THE LOCK, NEVER BEFORE IT. A request that
+    // measured first and then waited here met an index a request ahead of it
+    // had already taken PAST that stale length; "indexed further than the
+    // file is long" read as another file at the name, and the whole index was
+    // thrown away and built again from byte 0 — 208 times in one run of
+    // `a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start`,
+    // and on a 128 MB ledger under a running scrub 1,055 of 80,000 answers
+    // refused 429 behind those rebuilds. Measured here, the length can only
+    // be the index's own or longer while the file is the same one.
     let (mut file, meta) = match open_plain(&path) {
         Ok(opened) => opened,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Arc::new(Index::default()));
+            return Ok(read(&Index::default()));
         }
         Err(why) => return Err(unreadable(why)),
     };
     let stamp = (meta.len(), meta.modified().ok());
     let identity = (meta.dev(), meta.ino());
-    let Some(cell) = KEPT.get(vendor as usize) else {
-        return Ok(Arc::new(Index::default()));
-    };
-    let mut held = cell.lock().unwrap_or_else(PoisonError::into_inner);
     // THE SAME FILE, NO SHORTER, is the ledger this index was built from;
     // anything else at the name is indexed from its start.
-    let same = held
-        .as_ref()
-        .is_some_and(|kept| kept.path == path && kept.file == identity && kept.consumed <= stamp.0);
-    if !same {
-        *held = Some(Kept::new(path.clone(), identity));
-    }
-    let Some(kept) = held.as_mut() else {
-        return Ok(Arc::new(Index::default()));
+    let kept = match held.as_mut() {
+        Some(kept) if kept.path == path && kept.file == identity && kept.consumed <= stamp.0 => {
+            kept
+        }
+        Some(kept) => {
+            kept.restart(path.clone(), identity);
+            kept
+        }
+        None => held.insert(Kept::new(path.clone(), identity)),
     };
     if kept.settled != Some(stamp) {
         kept.advance(&mut file, stamp, step).map_err(unreadable)?;
     }
-    Ok(Arc::clone(&kept.index))
+    Ok(read(&kept.index))
+}
+
+/// Ledger bytes `vendor`'s index has read since this process started.
+#[cfg(test)]
+fn ledger_bytes_read(vendor: Vendor) -> u64 {
+    KEPT.get(vendor as usize)
+        .and_then(|cell| {
+            cell.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|kept| kept.read_bytes)
+        })
+        .unwrap_or(0)
+}
+
+/// How often the index of the ledger at `path` was thrown away and that same
+/// ledger indexed again from its start, since this process started.
+#[cfg(test)]
+fn index_rebuilds(path: &Path) -> u64 {
+    REBUILDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(of, _)| of == path)
+        .map_or(0, |(_, count)| *count)
+}
+
+/// A copy of `vendor`'s index after bringing it up to its ledger's end: what
+/// the tests look at. No request copies an index.
+#[cfg(test)]
+fn index(root: &Path, vendor: Vendor) -> Result<Index, String> {
+    with_index(root, vendor, Index::clone)
+}
+
+/// [`index`], reading at most `step` ledger bytes.
+#[cfg(test)]
+fn index_in_steps(root: &Path, vendor: Vendor, step: u64) -> Result<Index, String> {
+    with_index_in_steps(root, vendor, step, Index::clone)
 }
 
 /// The series directory of `key` at `timeframe`, relative to the store root:
@@ -676,53 +909,60 @@ pub(crate) fn answer(root: &Path, query: &str) -> Result<String, String> {
             return Ok(out);
         }
     };
-    let found = match index(root, vendor) {
-        Ok(found) => found,
+    let from_pass = state.standing_from();
+    // EVERYTHING READ FROM THE INDEX IS READ HERE, under its lock, and is
+    // bounded: two sums and at most `MAX_FINDINGS` findings a key.
+    let rendered = with_index(root, vendor, |found| {
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            r#","recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"indexed_bytes":{},"truncated":{},"series":["#,
+            state.pass,
+            render::json_string(if state.complete {
+                "complete"
+            } else {
+                "in progress"
+            }),
+            state.totals_json(),
+            found.standing_count(from_pass),
+            found.indexed_bytes,
+            found.truncated
+        );
+        for (n, (text, dir)) in series.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let standing = found.first_standing(dir, from_pass, MAX_FINDINGS);
+            let _ = write!(
+                out,
+                r#"{{"key":{},"timeframe":{},"more":{},"findings":["#,
+                render::json_string(text),
+                render::json_string(timeframe.as_str()),
+                found
+                    .standing_in(dir, from_pass)
+                    .saturating_sub(standing.len())
+            );
+            for (m, finding) in standing.iter().enumerate() {
+                if m > 0 {
+                    out.push(',');
+                }
+                finding_json(&mut out, finding);
+            }
+            out.push_str("]}");
+        }
+        out.push_str("]}");
+        out
+    });
+    match rendered {
+        Ok(rest) => out.push_str(&rest),
         Err(why) => {
             let _ = write!(
                 out,
                 r#","recorded":false,"why":{},"series":[]}}"#,
                 render::json_string(&why)
             );
-            return Ok(out);
         }
-    };
-    let from_pass = state.standing_from();
-    let _ = write!(
-        out,
-        r#","recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"indexed_bytes":{},"truncated":{},"series":["#,
-        state.pass,
-        render::json_string(if state.complete {
-            "complete"
-        } else {
-            "in progress"
-        }),
-        state.totals_json(),
-        found.standing_count(from_pass),
-        found.indexed_bytes,
-        found.truncated
-    );
-    for (n, (text, dir)) in series.iter().enumerate() {
-        if n > 0 {
-            out.push(',');
-        }
-        let standing = found.standing(dir, from_pass);
-        let _ = write!(
-            out,
-            r#"{{"key":{},"timeframe":{},"more":{},"findings":["#,
-            render::json_string(text),
-            render::json_string(timeframe.as_str()),
-            standing.len().saturating_sub(MAX_FINDINGS)
-        );
-        for (m, finding) in standing.iter().take(MAX_FINDINGS).enumerate() {
-            if m > 0 {
-                out.push(',');
-            }
-            finding_json(&mut out, finding);
-        }
-        out.push_str("]}");
     }
-    out.push_str("]}");
     Ok(out)
 }
 
@@ -760,7 +1000,8 @@ pub(super) async fn scrub_json(
         (axum::http::header::CACHE_CONTROL, "no-store"),
     ];
     let query = uri.query().unwrap_or_default().to_owned();
-    let ran = crate::detail::run_store_read(move || answer(&site.store_root, &query)).await;
+    // A POOL BAR SEEKS DO NOT SHARE (WP-81 repair 2): see the module header.
+    let ran = crate::detail::run_ops_read(move || answer(&site.store_root, &query)).await;
     match ran {
         Ok(Ok(body)) => (axum::http::StatusCode::OK, headers, body),
         Ok(Err(why)) => (
@@ -771,7 +1012,7 @@ pub(super) async fn scrub_json(
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
                 "a scrub lookup",
-                crate::detail::MAX_STORE_READ_CONCURRENT,
+                crate::detail::MAX_OPS_READ_CONCURRENT,
                 &why,
             );
             (status, headers, body)
@@ -1025,10 +1266,10 @@ mod tests {
         let first = index(&root, Vendor::Dhan).expect("indexed");
         assert_eq!(first.standing(series, 2).len(), 1, "undated, so kept");
         assert_eq!(first.standing(series, 2)[0].pass, 0);
-        assert!(
-            Arc::ptr_eq(&first, &index(&root, Vendor::Dhan).expect("kept")),
-            "reused"
-        );
+        // KEPT: an unchanged ledger is not read again.
+        let read = ledger_bytes_read(Vendor::Dhan);
+        let _kept = index(&root, Vendor::Dhan).expect("kept");
+        assert_eq!(ledger_bytes_read(Vendor::Dhan), read, "reused, not re-read");
         std::fs::write(
             root.join(cli::scrub_ledger_name(Vendor::Dhan)),
             format!(
@@ -1040,7 +1281,10 @@ mod tests {
         // REWRITTEN IN PLACE (same inode, longer): not the bytes the index
         // was built from, so it is indexed again from its start.
         let second = index(&root, Vendor::Dhan).expect("indexed again");
-        assert!(!Arc::ptr_eq(&first, &second), "the ledger moved");
+        assert!(
+            ledger_bytes_read(Vendor::Dhan) > read,
+            "the ledger moved, so it was read"
+        );
         assert!(
             second.standing(series, 2).is_empty(),
             "pass 1, and pass 2 is complete"
@@ -1170,6 +1414,7 @@ mod tests {
         let whole = index(&root, Vendor::TrueData).expect("indexed");
         assert!(!whole.truncated);
         assert_eq!(whole.indexed_bytes, ledger.len() as u64);
+        let read_at_first = ledger_bytes_read(Vendor::TrueData);
         assert_eq!(whole.standing_count(1), 20_000);
         assert_eq!(
             whole.standing(&series(0), 1).len(),
@@ -1220,6 +1465,15 @@ mod tests {
             grown.indexed_bytes,
             std::fs::metadata(&path).unwrap().len(),
             "to the ledger's end"
+        );
+        // ONLY WHAT WAS APPENDED WAS READ, twice at most (the fragment is read
+        // again with its end), plus the seam each read begins with — never
+        // the 6.6 MiB already indexed.
+        let appended = std::fs::metadata(&path).unwrap().len() - ledger.len() as u64;
+        let read_since = ledger_bytes_read(Vendor::TrueData) - read_at_first;
+        assert!(
+            read_since <= 2 * (appended + SEAM_BYTES as u64),
+            "{read_since} bytes read for {appended} appended"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1351,6 +1605,216 @@ mod tests {
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE ORDERED INDEX ANSWERS WHAT A WALK AND A SORT OF EVERY FINDING
+    /// ANSWERS (WP-81 repair 2).** 60,000 ledger lines over 1,500 series and
+    /// four passes — findings found again by later passes, findings left
+    /// behind by them, runs whose `run` line was never read (pass 0), two
+    /// kinds on one block — indexed in pieces, as requests index a growing
+    /// ledger. At every standing pass the first findings of a series, a
+    /// series' count, the vendor's count and the summary's first names equal
+    /// those of a model that keeps the newest of each finding in a map and
+    /// filters and sorts ALL of them per question: what the route did on
+    /// every request, and what it must agree with now that it does not.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ledger, one model, and every question asked of both"
+    )]
+    fn the_ordered_index_answers_what_a_walk_and_a_sort_of_every_finding_answers() {
+        type Same = (String, String, Option<u64>, &'static str);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |below: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % below
+        };
+        let mut ledger = String::new();
+        // RUNS 1..=4 ARE PASSES 1..=4; RUN 9 HAS NO `run` LINE: pass 0.
+        for run in 1..=4_u64 {
+            let _ = writeln!(
+                ledger,
+                "run {run} vendor=groww commit=c pass={run} resume=-"
+            );
+            for _ in 0..15_000 {
+                let series = next(1_500);
+                let month = 1 + next(12);
+                let run_said = if next(40) == 0 { 9 } else { run };
+                let file = format!("bars/groww/NSE/CASH/S{series}/1min/2024-{month:02}.bin");
+                let _ = match next(4) {
+                    0 => writeln!(ledger, "missing {file} run={run_said}"),
+                    1 => writeln!(ledger, "unverifiable {file} run={run_said} why=no sidecar"),
+                    _ => {
+                        let block = next(6);
+                        writeln!(
+                            ledger,
+                            "bad {file} block={block} records={}-{} run={run_said} why=crc",
+                            block * 73,
+                            block * 73 + 72
+                        )
+                    }
+                };
+            }
+        }
+        // INDEXED IN PIECES, cut at line ends.
+        let mut index = Index::default();
+        let mut from = 0;
+        while from < ledger.len() {
+            let upto = (from + 70_000).min(ledger.len());
+            let end = ledger[..upto].rfind('\n').map_or(ledger.len(), |at| at + 1);
+            index.extend(&ledger[from..end]);
+            from = end;
+        }
+        // THE MODEL: the newest of each (series, month, block, kind).
+        let mut model: HashMap<Same, Finding> = HashMap::new();
+        for (series, findings) in Index::of(&ledger)
+            .by_pass
+            .values()
+            .flat_map(|held| held.iter())
+            .map(|(key, finding)| (key.0.to_string(), finding))
+        {
+            let same = (
+                series,
+                findings.month.clone(),
+                findings.block.map(|(block, _, _)| block),
+                findings.kind,
+            );
+            assert!(model.insert(same, findings.clone()).is_none(), "one each");
+        }
+        assert!(model.len() > 20_000, "{}", model.len());
+        // ... AND IT IS THE LEDGER'S, read line by line with no index at all.
+        let mut by_line: HashMap<Same, u64> = HashMap::new();
+        for line in ledger.lines().filter(|line| !line.starts_with("run ")) {
+            let mut words = line.split(' ');
+            let kind = match words.next().unwrap() {
+                "bad" => "bad",
+                "missing" => "missing",
+                _ => "unverifiable",
+            };
+            let (series, file) = words.next().unwrap().rsplit_once('/').unwrap();
+            let number = |key: &str| field(line, key).and_then(|v| v.parse::<u64>().ok());
+            let run = number("run").unwrap();
+            by_line.insert(
+                (
+                    series.to_owned(),
+                    file.trim_end_matches(".bin").to_owned(),
+                    number("block"),
+                    kind,
+                ),
+                if run == 9 { 0 } else { run },
+            );
+        }
+        assert_eq!(by_line.len(), model.len());
+        for (same, pass) in &by_line {
+            assert_eq!(model[same].pass, *pass, "{same:?}");
+        }
+
+        for from_pass in 0..=5_u64 {
+            let stands = |finding: &Finding| finding.pass == 0 || finding.pass >= from_pass;
+            let mut all: Vec<(&Same, &Finding)> = model
+                .iter()
+                .filter(|(_, finding)| stands(finding))
+                .collect();
+            all.sort_by(|a, b| a.0.cmp(b.0));
+            assert_eq!(
+                index.standing_count(from_pass),
+                all.len(),
+                "pass {from_pass}"
+            );
+            let named = index.named(from_pass, 16);
+            assert_eq!(named.len(), all.len().min(16));
+            for ((series, finding), (same, modelled)) in named.iter().zip(&all) {
+                assert_eq!((*series, *finding), (same.0.as_str(), *modelled));
+            }
+            for series in [0_u64, 1, 7, 499, 1_499, 5_000] {
+                let dir = format!("bars/groww/NSE/CASH/S{series}/1min");
+                let of_series: Vec<&Finding> = all
+                    .iter()
+                    .filter(|(same, _)| same.0 == dir)
+                    .map(|(_, finding)| *finding)
+                    .collect();
+                assert_eq!(index.standing_in(&dir, from_pass), of_series.len());
+                assert_eq!(index.standing(&dir, from_pass), of_series);
+                assert_eq!(
+                    index.first_standing(&dir, from_pass, 3),
+                    of_series.iter().take(3).copied().collect::<Vec<_>>(),
+                    "S{series} from pass {from_pass}"
+                );
+            }
+        }
+        // A SERIES WHOSE NAME IS A PREFIX OF ANOTHER'S takes none of its
+        // findings: `S1` is not `S10`..`S19`.
+        let one = index.standing("bars/groww/NSE/CASH/S1/1min", 0);
+        assert!(!one.is_empty());
+        assert_eq!(
+            one.len(),
+            model
+                .keys()
+                .filter(|same| same.0 == "bars/groww/NSE/CASH/S1/1min")
+                .count()
+        );
+    }
+
+    /// **A LEDGER THAT GROWS WHILE MANY REQUESTS READ IT IS NEVER TAKEN FOR
+    /// ANOTHER FILE (WP-81 repair 2).** A request measured the ledger, THEN
+    /// waited for the vendor's lock. A request ahead of it had meanwhile
+    /// indexed further than that stale length, so the ledger looked SHORTER
+    /// than its own index — "another file at the name" — and everything
+    /// indexed was thrown away and read again from byte 0, 16 MiB a request,
+    /// with every other request waiting behind it. On a 128 MB ledger being
+    /// appended, 20 clients got 1,055 of 80,000 answers refused 429 and waits
+    /// of up to 869 ms. Eight readers and one appender: the index is never
+    /// rebuilt, and it ends holding every line.
+    #[test]
+    fn a_growing_ledger_read_by_many_is_never_indexed_again_from_its_start() {
+        use std::io::Write as _;
+        let root = root_of("scrub-route-growing");
+        let vendor = Vendor::Zerodha;
+        let line =
+            |n: usize| format!("missing bars/zerodha/NSE/CASH/G{n}/1min/2025-05.bin run=1\n");
+        let mut ledger = String::from("run 1 vendor=zerodha commit=c pass=1 resume=-\n");
+        for n in 0..2_000 {
+            ledger.push_str(&line(n));
+        }
+        write(&root, vendor, &format!("done run=1 pass=1 {T1}\n"), &ledger);
+        assert_eq!(
+            with_index(&root, vendor, |index| index.standing_count(1)),
+            Ok(2_000)
+        );
+        let path = root.join(cli::scrub_ledger_name(vendor));
+        assert_eq!(index_rebuilds(&path), 0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    while !done.load(std::sync::atomic::Ordering::Acquire) {
+                        let count = with_index(&root, vendor, |index| index.standing_count(1))
+                            .expect("indexed");
+                        assert!(count >= 2_000, "never fewer than were indexed: {count}");
+                    }
+                });
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for n in 2_000..22_000 {
+                file.write_all(line(n).as_bytes()).unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Release);
+        });
+        assert_eq!(
+            with_index(&root, vendor, |index| index.standing_count(1)),
+            Ok(22_000)
+        );
+        assert_eq!(
+            index_rebuilds(&path),
+            0,
+            "a growing ledger was indexed again from its start"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

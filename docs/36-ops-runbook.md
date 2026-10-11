@@ -20,7 +20,7 @@ Nothing here names a credential, a vendor row or a parameter path.
 | Has a pre-version-4 writer touched a migrated census? | `/store.json`'s `x-brutex-census-legacy-drift` (empty when nothing moved), the `legacy drift:` lead of `x-brutex-census-reason`, the state word `behind`, and `/audit.json`'s `store.legacy_drift` (DB-B70) |
 | How much room is left, how big is the store, what does the census keep, is there a copy? | `GET /disk.json` and the disk line on `/ingest` (DB-B73, DB-B59) |
 | Was a request refused because the server was busy? | a 429 always carries `Retry-After`; a full pool first queues a request for up to 250 ms (DB-B51) |
-| Is this server allowed to write? | `BRUTEX_READ_ONLY=1` refuses every non-GET/HEAD request and grounds the autopilot (DB-B79) |
+| Is this server allowed to write? | `BRUTEX_READ_ONLY=1` refuses every non-GET/HEAD request (403), grounds the autopilot and does not resume a spot recovery left in flight; the start banner's `READ-ONLY:` and `recovery not resumed:` lines and one `api.recovery` event say so (DB-B79, §7). A build with no commit stamp is held to the same three (DB-B71) |
 | Has every block been checked against its checksum? | `cli scrub-blocks VENDOR`; its findings in `audit/scrub-blocks.<vendor>.log` and its pass in `audit/scrub-blocks.<vendor>.cursor`; each feed's `scrub` in `/disk.json` and the disk line on `/ingest`; `/scrub.json?feed&timeframe&key` and the note under the `/db` grid for the series on the page (DB-B74) |
 | Is a month file the month its name says? | every bar door asks the month's `.prv` (`StoreError::Misfiled`); `cli scrub-blocks` counts `misfiled` months and the `unbound` months no `.prv` binds (DB-B65, §8) |
 | May this build read this store's census? | `manifest/REQUIRES`; a build without a named feature answers the census `unreadable` with the file, the line and the feature (DB-B68, §2) |
@@ -100,11 +100,30 @@ not answer, and wrote no `deploys.log` line. The procedure:
 3. Refuse the candidate unless its commit descends from every
    `manifest/v4/*/SEALED`'s `reader_since` (§2) and its binary is stamped
    (`/inspection.json`'s `commit` is not null).
-4. Start it on a side port with `BRUTEX_READ_ONLY=1` over the real store and
-   probe: `/health` answers, `/db` answers 200, `/store.json?feed=gdfl`'s
-   `x-brutex-census-state` is not `unreadable`, and `x-brutex-build` equals the
-   candidate's commit. Stop it. Any failure: stop here, the old server still
-   serves.
+4. Start it on a side port with `BRUTEX_READ_ONLY=1` over a **shadow root of
+   the store, never the store root itself**, and probe: `/health` answers,
+   `/db` answers 200, `/store.json?feed=gdfl`'s `x-brutex-census-state` is not
+   `unreadable`, and `x-brutex-build` equals the candidate's commit. Stop it.
+   Any failure: stop here, the old server still serves.
+
+   *Why a shadow.* One store root is served by one api: the candidate started
+   over the real root while :8080 serves it exits at once with `REFUSED:
+   another brutex api is already serving this store` (`serve.lock`),
+   `BRUTEX_READ_ONLY=1` or not — read-only refuses writes, it does not share
+   the lock, and a read-only server still writes its own lock, log,
+   invocation journal and pull-journal read index (§7). This step said "over
+   the real store" until 12 Oct and could not be run as written. A shadow
+   root (§7) is a new directory whose `manifest/`, `imports/` and `audit/`
+   are clones of the store's (`cp -c`, copy-on-write) and whose `bars/` is a
+   link to the store's `bars/`.
+
+   *What the probe proves and what it does not.* It proves the candidate
+   binary starts, serves its pages, reads THIS store's census as it stood
+   when the shadow was cloned (seal, `REQUIRES`, format) and reads its bars.
+   It does not prove the candidate takes the live store's `serve.lock`, nor
+   that it reads a census a writer has moved since the clone: step 5 is the
+   first time it meets the real root, which is why step 5 probes again and
+   rolls back.
 5. Record the running target (`tgt/current`) as `tgt/previous`; stop the old
    server; start the candidate on :8080; probe as in step 4. If it fails,
    start `tgt/previous` again on :8080 with its own `BRUTEX_WEB`, and say so.
@@ -114,6 +133,12 @@ not answer, and wrote no `deploys.log` line. The procedure:
 
 A rollback is step 5 with `tgt/previous` as the candidate, after step 3's
 reader check.
+
+A server that is already running reads `manifest/REQUIRES` when it loads a
+census, not on a timer: a line added while it runs was seen to change nothing
+until the server was restarted. Sealing (§2) is therefore followed by a
+restart of every server over that root, and step 3 is checked against the
+file, never against what a running server answers.
 
 **Never write over the file of a program that is running** (rules audit
 RA-334): a deploy copies into a NEW `tgt/<name>/` (step 2) and moves
@@ -288,7 +313,11 @@ so a scrub and an import of one vendor can still meet on a month — the scrub
 counts it `busy` and moves on, the importer sees the month locked and
 retries. Nothing yet makes the scrub yield to a live run of the kind or says
 `scrub paused` on a page; until that exists, prefer not to run both for one
-vendor. On the
+vendor. A pass also walks the census as it stood when its run began, in path
+order: months an import adds BEHIND the cursor while the pass runs are not
+read by that pass, and its `done` line does not say so — they are the next
+pass's. `complete` therefore means "every month the census held when each run
+of the pass began, from its cursor on", not "every month now on disk". On the
 operator's ~437 GB of bars a pass is hours at the default rate (extrapolated
 from the rate, not measured). A month suspected of rot can also be read whole:
 `/bars.json?...&month=<yyyy-mm>` answers 206 with `faulted_records` and one
@@ -300,9 +329,29 @@ generation (DB-N22), never an edit.
 `state/fix/shadow.sh` LINKS the real `bars/` tree (`ln -s`, writable); its
 comment says "read-only", which is false. The protection is the store writer's
 refusal of a linked path component (`store::file`, `refuse_links_below`).
-Start every test server with `BRUTEX_READ_ONLY=1` (in `serve.sh`): no HTTP
-write reaches a handler and the autopilot never flies. The invocation journal
-and the log still write, into the shadow's own cloned directories.
+Start every test server with `BRUTEX_READ_ONLY=1` (in `serve.sh`). With it:
+
+* no request that is not a GET or a HEAD reaches a handler (403, by name);
+* the autopilot never flies;
+* a spot recovery left in flight is **not resumed at start**. The shadow
+  clones `audit/`, and `audit/recovery-v1/` is where an in-flight plan lives:
+  until 12 Oct the start resumed it whatever this variable said — vendor
+  requests and writes through the linked bars, started by no request. Now
+  the banner says `recovery not resumed: read-only (BRUTEX_READ_ONLY=1); …`
+  with the plan's identity when one is in flight (`no plan is in flight`
+  otherwise), the same sentence is one `api.recovery` event, and the plan's
+  journals are read through a shared lock and not opened for append. A
+  server that may write resumes the plan at its own start.
+
+A build with no commit stamp is held to the same three rules, for its own
+reason (`NO WRITES:` and `recovery not resumed: unstamped …`).
+
+What a read-only server still writes, all under its own root and none of it a
+bar, a sidecar, a census or a vendor journal: `serve.lock`, `telemetry/` (its
+log), `audit/invocations-v1` (audited reads) and `audit/pull.journal.idx`
+(the pull journal's read index, rebuilt beside the old one when stale). On a
+shadow those are the shadow's clones. One root is still served by one api at
+a time, read-only or not (§3 step 4).
 
 ## 8. A month filed under another name (DB-B65)
 

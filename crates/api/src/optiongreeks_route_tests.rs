@@ -723,3 +723,32 @@ fn an_option_contract_segment_reads_its_expiry_strike_and_side() {
         assert_eq!(option_parts(bad), None, "{bad}");
     }
 }
+
+/// **AN ABANDONED GREEKS READ STOPS, AND A LIVE ONE ANSWERS AS BEFORE**
+/// (DB-N15, D-3349): up to 400 lookups and solves look at the request's
+/// cancellation flag, and stop by name once the client is gone.
+#[test]
+fn a_greeks_read_whose_client_went_away_stops_by_name() {
+    let fixture = Fixture::new("greeks-cancel");
+    let rate = RateTable::Loaded(table(&[12, 19]));
+    let query = format!(
+        "feed=dhan&exchange=NSE&segment=FNO&symbol=NIFTY&contract={ATM}&timeframe=1min&month=2026-08&t={},{}",
+        t0(),
+        t0() + 60
+    );
+    let (gone, guard) = crate::bars::Cancel::pair();
+    drop(guard);
+    let (status, _, body) = super::optiongreeks::respond_with(&fixture.root, &query, &rate, &gone);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("cancelled"), "{body}");
+    let (live, guard) = crate::bars::Cancel::pair();
+    let (status, _, body) = super::optiongreeks::respond_with(&fixture.root, &query, &rate, &live);
+    guard.disarm();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (plain_status, _, plain) = respond(&fixture.root, &query, &rate);
+    assert_eq!(
+        (status, body),
+        (plain_status, plain),
+        "the flag changes nothing it does not stop"
+    );
+}

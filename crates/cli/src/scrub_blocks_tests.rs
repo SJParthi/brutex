@@ -450,6 +450,9 @@ fn a_second_run_of_the_same_vendor_is_refused_while_one_holds_the_cursor() {
         !root.join(ledger_name(Vendor::Zerodha)).exists(),
         "nothing was read"
     );
+    // ANOTHER VENDOR — one that holds a month: a vendor with no census is
+    // refused for that, which would say nothing about the lock.
+    fill(&root, Vendor::Gdfl, 1, 10, false);
     assert!(
         run(&root, Vendor::Gdfl, WHOLE).is_ok(),
         "another vendor is free"
@@ -535,15 +538,40 @@ fn a_misfiled_month_a_missing_month_and_an_unbound_month_are_named() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The extremes: a vendor with no census is an empty, complete pass; a month
-/// of one record is one block; a ledger that cannot be opened stops the run
+/// The extremes: a vendor with no census is REFUSED and leaves no file (it
+/// was an empty pass that ended `complete` and created a ledger and a cursor
+/// saying so, for a feed that holds nothing — seen for `dhan`); a month of
+/// one record is one block; a ledger that cannot be opened stops the run
 /// before the cursor moves.
 #[test]
 fn an_empty_census_a_single_record_and_an_unwritable_ledger() {
     let root = root_of("extremes");
-    let empty = run(&root, Vendor::Gdfl, WHOLE).expect("no census, no months");
-    assert!(empty.finished_pass);
-    assert_eq!(empty.pass_totals, Totals::default());
+    std::fs::create_dir_all(&root).unwrap();
+    let why = run(&root, Vendor::Gdfl, WHOLE).expect_err("no census, nothing to scrub");
+    assert!(
+        why.contains("no census of gdfl names a month") && why.contains("nothing to scrub"),
+        "{why}"
+    );
+    for name in [ledger_name(Vendor::Gdfl), cursor_name(Vendor::Gdfl)] {
+        assert!(
+            !root.join(&name).exists(),
+            "{name} was created for a vendor that holds nothing"
+        );
+    }
+    // AND THE VERB SAYS IT, exit FAILED, under its own heading.
+    let mut out = String::new();
+    let store = root.clone();
+    let code = command_with(
+        &["gdfl"],
+        &move || Ok(store.clone()),
+        Some("c0ffee"),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(
+        out.starts_with("SCRUB BLOCKS REFUSED: no census of gdfl names a month"),
+        "{out}"
+    );
 
     fill(&root, Vendor::Zerodha, 1, 1, false);
     let one = run(&root, Vendor::Zerodha, WHOLE).expect("one record");
@@ -1105,4 +1133,43 @@ fn the_rate_is_slept_with_no_month_open_so_a_writer_is_not_held_for_it() {
         "the month was held {at:?} of a {took:?} run"
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// **A CENSUS ENTRY THAT NAMES NO STORE PATH IS COUNTED AND NAMED, NEVER
+/// DROPPED.** Such an entry was skipped in silence, so a pass ended `complete`
+/// over months it had not tried. Three entries, the middle one unaddressable:
+/// two months to read in path order, one counted, and it is the one named.
+#[test]
+fn a_census_entry_that_names_no_store_path_is_counted_and_named() {
+    let entry = |m: u8| Entry {
+        key: EntryKey {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").unwrap(),
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, m).unwrap(),
+        },
+        rows: 1,
+        first_ts_micros: 0,
+        last_ts_micros: 0,
+    };
+    let (months, unaddressed) = addressed([entry(3), entry(2), entry(1)].into_iter(), |entry| {
+        (entry.key.month != YearMonth::new(2025, 2).unwrap())
+            .then(|| format!("bars/x/{}.bin", entry.key.month))
+    });
+    assert_eq!(
+        months
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["bars/x/2025-01.bin", "bars/x/2025-03.bin"]
+    );
+    assert_eq!(unaddressed.entries, 1);
+    let first = unaddressed.first.expect("named");
+    assert!(first.contains("NIFTY") && first.contains("2025"), "{first}");
+    assert_eq!(
+        addressed(std::iter::empty(), |_| None).1,
+        Unaddressed::default()
+    );
 }

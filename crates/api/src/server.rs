@@ -5010,6 +5010,74 @@ fn note_recovery_not_resumed(why: &str) {
     );
 }
 
+/// What the start has to say about the recovery it did or did not resume.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryStart {
+    /// Nothing was in flight, or the plan in flight is being driven: the
+    /// recovery page says which.
+    Silent,
+    /// This server writes nothing, so it resumed nothing: the banner's line.
+    Grounded(String),
+    /// A server that may write could not resume: the refusal.
+    Refused(String),
+}
+
+/// The start's decision about a recorded recovery, with its one event.
+///
+/// The gate is the process's ([`WriteGate`]); the decision and its proof are
+/// [`crate::recovery::at_start`]'s. A grounded start emits ONE event, a
+/// warning when a plan is left in flight and information when none is, and
+/// returns the sentence the banner prints.
+pub(crate) fn recovery_at_start(site: &Loaded, gate: WriteGate) -> RecoveryStart {
+    use crate::recovery::AtStart;
+    match (
+        crate::recovery::at_start(site, gate.refuses_writes()),
+        gate.grounds(),
+    ) {
+        (Ok(AtStart::Grounded { plan }), grounds) => {
+            let line = recovery_grounded_line(grounds.unwrap_or("no writes"), Ok(plan.as_deref()));
+            let event = if plan.is_some() {
+                telemetry::Event::warn("api.recovery", "recovery not resumed")
+            } else {
+                telemetry::Event::info("api.recovery", "recovery not resumed")
+            };
+            let _noted = telemetry::emit(&event.with("why", telemetry::Value::Str(&line)).with(
+                "plan",
+                telemetry::Value::Str(plan.as_deref().unwrap_or("none in flight")),
+            ));
+            RecoveryStart::Grounded(line)
+        }
+        (Err(why), Some(grounds)) => {
+            let line = recovery_grounded_line(grounds, Err(&why));
+            note_recovery_not_resumed(&line);
+            RecoveryStart::Grounded(line)
+        }
+        (Err(why), None) => {
+            note_recovery_not_resumed(&why);
+            RecoveryStart::Refused(why)
+        }
+        (Ok(AtStart::Nothing | AtStart::Driving), _) => RecoveryStart::Silent,
+    }
+}
+
+/// The sentence of a start that resumed no recovery because it writes
+/// nothing: why, and the plan left in flight — or that none is, or that what
+/// is in flight could not be read.
+fn recovery_grounded_line(grounds: &str, in_flight: Result<Option<&str>, &str>) -> String {
+    match in_flight {
+        Ok(None) => format!("recovery not resumed: {grounds}; no plan is in flight"),
+        Ok(Some(plan)) => format!(
+            "recovery not resumed: {grounds}; plan {plan} is IN FLIGHT and was left exactly \
+             as it is — nothing claimed, nothing asked of a vendor, nothing written. A \
+             server that may write resumes it at its start"
+        ),
+        Err(why) => format!(
+            "recovery not resumed: {grounds}; what is in flight could NOT be read ({why}) — \
+             nothing was claimed or written"
+        ),
+    }
+}
+
 /// Both wire fields come from one catalogue snapshot. Recheck at the fetch
 /// boundary so a refresh cannot pair a class from one snapshot with another ID.
 #[cfg(test)]
@@ -14138,10 +14206,12 @@ fn admitted_gated(
         .layer(axum::middleware::from_fn(move |request, next| {
             refuse_writes(gate.read_only, request, next)
         }))
-        // AND SO DOES A BUILD NOBODY CAN NAME (DB-B71): every write this API
-        // can make — a Zerodha pull, an import queued from /ingest, a repair,
-        // a masters refresh, a sweep's run record — starts with a request
-        // that is not a GET or a HEAD.
+        // AND SO DOES A BUILD NOBODY CAN NAME (DB-B71): every write a
+        // REQUEST can start — a Zerodha pull, an import queued from /ingest,
+        // a repair, a masters refresh, a sweep's run record — starts with one
+        // that is not a GET or a HEAD. The two writes NO request starts are
+        // gated where they start: the autopilot (`autopilot::fly`) and the
+        // resume of a recovery left in flight (`recovery::at_start`).
         .layer(axum::middleware::from_fn(move |request, next| {
             refuse_unstamped_writes(gate.unstamped, request, next)
         }))
@@ -15109,9 +15179,21 @@ async fn same_origin_writes_only(
 /// tree (`state/fix/shadow.sh`), so a test server that could take a `POST`
 /// could start a pull that writes through the link; the store writer's
 /// refusal of a linked component (`store::file`, `refuse_links_below`) was the
-/// only protection. With this set, a write never reaches a handler. It does
-/// NOT stop the invocation journal recording an audited read (D-1445), nor the
-/// log: both write under the shadow's own cloned directories.
+/// only protection. With this set:
+///
+/// * a request that is not a GET or a HEAD never reaches a handler (403);
+/// * the autopilot does not fly;
+/// * a spot recovery left in flight is NOT resumed at start
+///   ([`crate::recovery::at_start`]) — the one write path no request starts,
+///   and until WP-81's second repair the one this variable did not cover.
+///
+/// WHAT A READ-ONLY SERVER STILL WRITES, all under its own store root and
+/// none of it a bar, a sidecar, a census or a vendor journal: `serve.lock`
+/// (the one-server-a-store claim), `telemetry/` (its log), the invocation
+/// journal `audit/invocations-v1` recording audited reads (D-1445), and the
+/// pull journal's read index `audit/pull.journal.idx`, rebuilt beside the
+/// old one when stale. On a shadow those are the shadow's own cloned
+/// directories.
 pub const READ_ONLY_ENV: &str = "BRUTEX_READ_ONLY";
 
 static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -15184,10 +15266,25 @@ impl WriteGate {
         }
     }
 
-    /// Whether any write is refused: what grounds the autopilot.
+    /// Whether any write is refused: what grounds the autopilot and the
+    /// start's recovery resume.
     #[must_use]
     pub const fn refuses_writes(self) -> bool {
         self.read_only || self.unstamped.is_some()
+    }
+
+    /// Why no write is made, in the words a banner and an event carry, or
+    /// `None` for a server that may write. Read-only is said first: it is the
+    /// operator's own word, where `unstamped` is the build's.
+    #[must_use]
+    pub const fn grounds(self) -> Option<&'static str> {
+        if self.read_only {
+            Some("read-only (BRUTEX_READ_ONLY=1)")
+        } else if self.unstamped.is_some() {
+            Some("unstamped (this build carries no commit stamp)")
+        } else {
+            None
+        }
     }
 }
 
@@ -17861,7 +17958,12 @@ async fn run_in_over(
                 let gate = WriteGate::of_process();
                 let flying_on_start = autopilot::flies_on_startup() && !gate.refuses_writes();
                 if gate.read_only {
-                    say!("  READ-ONLY: every write is refused ({READ_ONLY_ENV}=1)");
+                    say!(
+                        "  READ-ONLY: every write request is refused, the autopilot is \
+                         grounded and no recovery is resumed ({READ_ONLY_ENV}=1); only this \
+                         server's own lock, log, invocation journal and pull-journal read \
+                         index are written"
+                    );
                 }
                 if let Some(why) = gate.unstamped {
                     say!("  NO WRITES: {why}");
@@ -17953,9 +18055,13 @@ async fn run_in_over(
                 if let Err(why) = calendar_route::warm_at_start(&site) {
                     warn_line!("Calendars NOT warmed at start: {why}");
                 }
-                if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
-                    note_recovery_not_resumed(&why);
-                    warn_line!("Recovery NOT resumed: {why}");
+                // THE ONE WRITE PATH NO REQUEST STARTS, BEHIND THE SAME GATE
+                // (DB-B79, DB-B71): a plan left in flight is resumed only by
+                // a server that may write. See `recovery::at_start`.
+                match recovery_at_start(&site, gate) {
+                    RecoveryStart::Silent => {}
+                    RecoveryStart::Grounded(line) => say!("  {line}"),
+                    RecoveryStart::Refused(why) => warn_line!("Recovery NOT resumed: {why}"),
                 }
                 let code = stopped_over(
                     serve(

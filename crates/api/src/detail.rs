@@ -62,6 +62,20 @@ pub const MAX_STORE_READ_CONCURRENT: usize = 8;
 /// D-2327.
 pub const MAX_LOG_READ_CONCURRENT: usize = 4;
 
+/// Operations reads — `/scrub.json` and `/disk.json` — that may be queued or
+/// running at once on the blocking pool (DB-B74, DB-B73; WP-81 repair 2).
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one, and
+/// measured: these two routes took [`run_store_read`]'s slots, which every
+/// `/bars/window.json` seek also takes. While a scrub appended to a ledger of
+/// 385,419 findings, 20 clients polling `/scrub.json` had 283 of 960
+/// concurrent bar seeks refused 429. A page polling what a scrub found must
+/// never be what refuses `/db` its bars. Each admitted read is bounded
+/// (`scrub_route`'s cost section); the one long one — the first index of a
+/// long ledger after a start — holds the vendor's lock for at most one
+/// 16 MiB step, and the requests behind it wait here, not in the seeks' pool.
+pub const MAX_OPS_READ_CONCURRENT: usize = 4;
+
 /// `/store.json` census reads that may be queued or running at once on the
 /// blocking pool (DB-B51, WP-81; D-3327).
 ///
@@ -237,6 +251,7 @@ static ACTIVE: Pool = Pool::new(MAX_CONCURRENT);
 static CALENDAR: Pool = Pool::new(MAX_CALENDAR_CONCURRENT);
 static STORE_READ: Pool = Pool::new(MAX_STORE_READ_CONCURRENT);
 static LOG_READ: Pool = Pool::new(MAX_LOG_READ_CONCURRENT);
+static OPS_READ: Pool = Pool::new(MAX_OPS_READ_CONCURRENT);
 static CENSUS: Pool = Pool::new(MAX_CENSUS_CONCURRENT);
 
 /// One admitted request in one pool.  Dropping it always returns the slot,
@@ -336,6 +351,24 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = STORE_READ.take().await.ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a `/scrub.json` or `/disk.json` read outside Tokio's worker pool, in
+/// its own pool of [`MAX_OPS_READ_CONCURRENT`] slots, apart from the bar
+/// seeks' [`run_store_read`] (WP-81 repair 2).
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] when every slot stays occupied for
+/// [`ADMISSION_WAIT_MS`], or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_ops_read<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = OPS_READ.take().await.ok_or(RunError::Saturated)?;
     admitted(permit, work).await
 }
 
@@ -1826,6 +1859,39 @@ mod tests {
         drop(held);
         assert_eq!(run_store_read(|| 9).await, Ok(9));
         assert_eq!(STORE_READ.active.load(Ordering::Acquire), 0);
+    }
+
+    /// **A FULL OPERATIONS POOL REFUSES NO BAR SEEK, AND A FULL SEEK POOL
+    /// REFUSES NO OPERATIONS READ (WP-81 repair 2).** `/scrub.json` and
+    /// `/disk.json` took the store-read slots every bar seek takes, and a
+    /// page polling a scrub refused `/db` its bars. Every slot of one pool
+    /// held: that pool refuses once its wait ends, and the other admits.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_ops_read_and_a_bar_seek_never_wait_on_each_other() {
+        let _apart = super::apart_from_slot_owners().await;
+        let worker = std::thread::current().id();
+        let blocking = super::run_ops_read(|| std::thread::current().id())
+            .await
+            .expect("admitted ops read");
+        assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+        let held: Vec<Permit> = std::iter::from_fn(|| super::OPS_READ.try_take()).collect();
+        assert!(!held.is_empty() && held.len() <= super::MAX_OPS_READ_CONCURRENT);
+        assert_eq!(super::run_ops_read(|| ()).await, Err(RunError::Saturated));
+        assert_eq!(
+            run_store_read(|| 7).await,
+            Ok(7),
+            "a bar seek is admitted while every operations slot is held"
+        );
+        drop(held);
+        assert_eq!(super::run_ops_read(|| 9).await, Ok(9));
+        let seeks: Vec<Permit> = std::iter::from_fn(|| STORE_READ.try_take()).collect();
+        assert!(!seeks.is_empty());
+        assert_eq!(
+            super::run_ops_read(|| 11).await,
+            Ok(11),
+            "an operations read is admitted while every seek slot is held"
+        );
+        drop(seeks);
     }
 
     /// A log read runs on a blocking thread, and past

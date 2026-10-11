@@ -41,7 +41,7 @@
 //! listing per migrated segment — O(epochs), which compaction alone grows, a
 //! handful today — a 4 KiB tail read of the receipt log, and per feed one
 //! 8 KiB tail read of its scrub cursor (the findings index behind it is
-//! rebuilt only when its ledger moves, `scrub_route::index`). The answer is
+//! rebuilt only when its ledger moves, `scrub_route::with_index`). The answer is
 //! kept for [`DISK_TTL`] per store root, so a page polling it costs one
 //! `Mutex` read between measurements.
 
@@ -239,42 +239,44 @@ pub(crate) fn scrub_json(root: &Path, vendor: Vendor) -> String {
             );
         }
     };
-    let found = match super::scrub_route::index(root, vendor) {
-        Ok(found) => found,
-        Err(why) => {
-            return format!(
-                r#"{{"ledger":{ledger},"recorded":false,"why":{}}}"#,
-                render::json_string(&why)
-            );
-        }
-    };
     let from_pass = state.standing_from();
-    let mut out = format!(
-        r#"{{"ledger":{ledger},"recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"truncated":{},"named":["#,
-        state.pass,
-        render::json_string(if state.complete {
-            "complete"
-        } else {
-            "in progress"
-        }),
-        state.totals_json(),
-        found.standing_count(from_pass),
-        found.truncated
-    );
-    for (n, (series, finding)) in found.named(from_pass, MAX_NAMED_BAD).iter().enumerate() {
-        if n > 0 {
-            out.push(',');
-        }
-        let _ = write!(
-            out,
-            r#"{{"series":{},"finding":"#,
-            render::json_string(series)
+    // READ UNDER THE INDEX'S LOCK, AND BOUNDED: one sum and the first
+    // `MAX_NAMED_BAD` standing findings, kept in this order as they are
+    // indexed — never a walk or a sort of the ledger's findings.
+    let rendered = super::scrub_route::with_index(root, vendor, |found| {
+        let mut out = format!(
+            r#"{{"ledger":{ledger},"recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"truncated":{},"named":["#,
+            state.pass,
+            render::json_string(if state.complete {
+                "complete"
+            } else {
+                "in progress"
+            }),
+            state.totals_json(),
+            found.standing_count(from_pass),
+            found.truncated
         );
-        super::scrub_route::finding_json(&mut out, finding);
-        out.push('}');
-    }
-    out.push_str("]}");
-    out
+        for (n, (series, finding)) in found.named(from_pass, MAX_NAMED_BAD).iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                r#"{{"series":{},"finding":"#,
+                render::json_string(series)
+            );
+            super::scrub_route::finding_json(&mut out, finding);
+            out.push('}');
+        }
+        out.push_str("]}");
+        out
+    });
+    rendered.unwrap_or_else(|why| {
+        format!(
+            r#"{{"ledger":{ledger},"recorded":false,"why":{}}}"#,
+            render::json_string(&why)
+        )
+    })
 }
 
 /// The longest receipt line served, in bytes: a timestamp, a path and three
@@ -334,16 +336,66 @@ pub(crate) fn last_backup(root: &Path) -> Result<String, String> {
             .find_map(|word| word.strip_prefix(key)?.strip_prefix('='))
             .filter(|value| !value.is_empty())
     };
-    if line.len() > MAX_RECEIPT_LINE || value("copied").is_none() || value("dest").is_none() {
+    // `copied=` IS A UTC INSTANT, NOT ANY WORD: `copied=banana` was served as
+    // a recorded copy, and only the page refused to date it.
+    if line.len() > MAX_RECEIPT_LINE
+        || !value("copied").is_some_and(is_utc_instant)
+        || value("dest").is_none()
+    {
         return Err(format!(
             "{}'s newest line is an unreadable receipt, so no copy is taken as recorded: a \
-             receipt is one line of at most {MAX_RECEIPT_LINE} bytes carrying copied=<when> \
-             and dest=<where> (docs/36-ops-runbook.md); it reads {:?}",
+             receipt is one line of at most {MAX_RECEIPT_LINE} bytes carrying \
+             copied=<YYYY-MM-DDTHH:MM[:SS]Z> and dest=<where> (docs/36-ops-runbook.md); it \
+             reads {:?}",
             path.display(),
             crate::fault_log::capped(line.to_owned())
         ));
     }
     Ok(line.to_owned())
+}
+
+/// Whether `word` is a UTC instant as a receipt writes it:
+/// `YYYY-MM-DDTHH:MM[:SS]Z`, each field in its range. The shape the page's
+/// own reader takes (`web/src/lib/disk.js`), so the two cannot disagree about
+/// whether a copy is dated. A day past its month's length is not caught here
+/// (31 for every month): a receipt is written by `date -u`, and this refuses
+/// what is no date at all.
+fn is_utc_instant(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let number = |from: usize, len: usize| -> Option<u32> {
+        let digits = bytes.get(from..from + len)?;
+        digits
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| digits.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+    };
+    let is = |at: usize, byte: u8| bytes.get(at) == Some(&byte);
+    let seconds = match bytes.len() {
+        17 => Some(0),
+        20 if is(16, b':') => number(17, 2),
+        _ => None,
+    };
+    let fields = (
+        number(0, 4),
+        number(5, 2),
+        number(8, 2),
+        number(11, 2),
+        number(14, 2),
+        seconds,
+    );
+    let (Some(_), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = fields else {
+        return false;
+    };
+    is(4, b'-')
+        && is(7, b'-')
+        && is(10, b'T')
+        && is(13, b':')
+        && bytes.last() == Some(&b'Z')
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second < 60
 }
 
 /// One feed's object in `feeds`, written to `out`; returns its kept bytes.
@@ -499,12 +551,12 @@ pub(super) async fn disk_json(
         ),
         (axum::http::header::CACHE_CONTROL, "no-store"),
     ];
-    match crate::detail::run_store_read(move || answer(&site)).await {
+    match crate::detail::run_ops_read(move || answer(&site)).await {
         Ok(body) => (axum::http::StatusCode::OK, headers, body),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
                 "a disk measurement",
-                crate::detail::MAX_STORE_READ_CONCURRENT,
+                crate::detail::MAX_OPS_READ_CONCURRENT,
                 &why,
             );
             (status, headers, body)
@@ -651,6 +703,10 @@ mod tests {
     /// **ONLY A WHOLE RECEIPT, IN A REGULAR FILE, IS A RECORDED BACKUP
     /// (DB-B73).**
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table of every shape a receipt log's last line takes"
+    )]
     fn only_a_whole_receipt_in_a_regular_file_is_a_recorded_backup() {
         let root = crate::scratch::path("disk-route-receipt");
         let _ = std::fs::remove_dir_all(&root);
@@ -672,6 +728,28 @@ mod tests {
                 "unreadable receipt",
             ),
             (format!("{good}dest=/Volumes/B\n"), "unreadable receipt"),
+            // `copied=` THAT IS NO UTC INSTANT IS NO RECEIPT: these were
+            // answered `recorded: true`.
+            (
+                format!("{good}copied=banana dest=/Volumes/B\n"),
+                "unreadable receipt",
+            ),
+            (
+                format!("{good}copied=2026-13-01T01:00:00Z dest=/Volumes/B\n"),
+                "unreadable receipt",
+            ),
+            (
+                format!("{good}copied=2026-10-12T24:00:00Z dest=/Volumes/B\n"),
+                "unreadable receipt",
+            ),
+            (
+                format!("{good}copied=2026-10-12T01:00:00 dest=/Volumes/B\n"),
+                "unreadable receipt",
+            ),
+            (
+                format!("{good}copied=2026-10-12 dest=/Volumes/B\n"),
+                "unreadable receipt",
+            ),
             (
                 format!(
                     "{good}copied=x dest=/Volumes/B pad={}\n",
@@ -702,6 +780,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(last_backup(&root).expect("the whole one"), good.trim_end());
+        // MINUTES WITHOUT SECONDS is the other shape the page reads.
+        for word in [
+            "2026-10-13T01:00Z",
+            "2026-02-28T23:59:59Z",
+            "0001-01-01T00:00:00Z",
+        ] {
+            assert!(is_utc_instant(word), "{word}");
+        }
+        for word in [
+            "",
+            "Z",
+            "2026-10-13T01:00:0Z",
+            "2026-10-13t01:00:00Z",
+            "2026-00-13T01:00Z",
+        ] {
+            assert!(!is_utc_instant(word), "{word}");
+        }
         let parsed: serde_json::Value = serde_json::from_str(&measured(&root, None)).expect("JSON");
         assert_eq!(parsed["backup"]["recorded"], true);
         assert_eq!(parsed["backup"]["last"], good.trim_end());

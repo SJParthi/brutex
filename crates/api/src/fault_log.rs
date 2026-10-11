@@ -15,11 +15,28 @@
 //! A **run** is consecutive records of one file refused for the same reason
 //! (`StoreError` equality, compared without formatting). A run is one sentence,
 //! `<file> records <first>–<last> (<n>): <why>`, so the path appears once per
-//! run and never once per record. At most [`MAX_NAMED_FAULTS`] sentences are
-//! kept, each cut at [`MAX_FAULT_CHARS`]; every later run is counted, and the
+//! run and never once per record. At most [`MAX_NAMED_FAULTS`] runs are
+//! named, each cut at [`MAX_FAULT_CHARS`]; every later run is counted, and the
 //! last sentence says how many runs and records were not named. The COUNT of
 //! refused records is always whole: nothing is dropped from the arithmetic,
 //! only from the prose (`CLAUDE.md` §4: degrade loudly, never silently).
+//!
+//! # One design for every bar reader (the merge with D-3349)
+//!
+//! Two packages bounded this text. This one coalesced record refusals into
+//! runs; the sort index's readers (D-3349) name a month once however many of
+//! its rows a stretch read left unread, and name each place of a PAGE that
+//! could not be served. They are one design, and this log is its one sink:
+//!
+//! * what grows with the DATA — one refusal per record — comes in through
+//!   [`FaultLog::record`] or a `ReadFault::Record` and is a run, capped here;
+//! * what a reader has already bounded by the REQUEST — a month named once
+//!   with its count ([`FaultLog::counted`]), a month that would not open, a
+//!   place of a page ([`FaultLog::push`], [`FaultLog::push_once`]) — is a
+//!   sentence kept as it is, in the order it came;
+//! * the route bounds the whole list once more where it renders it
+//!   (`bars_route::faults_json`), and [`FaultLog::records`] is every refused
+//!   record whichever way it was said.
 //!
 //! # Cost
 //!
@@ -29,12 +46,12 @@
 //! response is bounded by `MAX_NAMED_FAULTS × MAX_FAULT_CHARS` plus one summary
 //! sentence, whatever the month holds.
 
-use std::fmt::Write as _;
-
 use store::file::StoreError;
 
-/// The most fault sentences one answer names. Every fault past it is counted
-/// in the closing sentence. A choice, not a vendor fact: enough to show every
+/// The most RUNS of unreadable records one answer names. Every run past it
+/// is counted in the closing sentence. (A sentence a reader bounded itself —
+/// one a month, one a place of a page — is not a run and is not counted
+/// against this; the route bounds the list.) A choice, not a vendor fact: enough to show every
 /// distinct damaged block of a typical decayed month, small enough that the
 /// banner stays a banner.
 pub const MAX_NAMED_FAULTS: usize = 16;
@@ -129,10 +146,27 @@ enum Cause {
     LostSidecarThrough(u64),
 }
 
+/// One kept sentence.
+#[derive(Debug, Clone)]
+struct Said {
+    sentence: String,
+    /// The records it stands for.
+    records: u64,
+    /// Whether it is a run of unreadable records (capped) or a sentence its
+    /// reader bounded (kept).
+    run: bool,
+}
+
 /// Faults collected by one request, coalesced and capped.
 #[derive(Debug, Clone, Default)]
 pub struct FaultLog {
-    named: Vec<String>,
+    /// Each kept sentence, in the order it came.
+    named: Vec<Said>,
+    /// How many of them are runs: what [`MAX_NAMED_FAULTS`] caps.
+    runs_named: usize,
+    /// The sentence [`Self::push_once`] last took, so the same refusal of the
+    /// same month is said once however many rows of a page lie in it.
+    said_once: Option<String>,
     /// Every record refused, named or not.
     records: u64,
     /// Every fault (a run counts once, a sentence once) past the cap.
@@ -160,10 +194,55 @@ impl FaultLog {
         match fault.into() {
             ReadFault::Text(text) => {
                 self.close();
-                self.keep(text, 0);
+                self.say(text, 0);
             }
             ReadFault::Record { file, row, why } => self.record_owned(file, row, why),
         }
+    }
+
+    /// Notes one fault unless it is, word for word, the sentence this method
+    /// was last given: a month that will not open refuses every row of a page
+    /// in the same words, and that is one fault, said once. A record of a
+    /// month that did open is never "the same": it goes to its run.
+    pub fn push_once(&mut self, fault: impl Into<ReadFault>) {
+        match fault.into() {
+            ReadFault::Text(text) => {
+                if self.said_once.as_deref() == Some(text.as_str()) {
+                    return;
+                }
+                self.said_once = Some(text.clone());
+                self.close();
+                self.say(text, 0);
+            }
+            ReadFault::Record { file, row, why } => self.record_owned(file, row, why),
+        }
+    }
+
+    /// Notes ONE sentence that stands for `records` refused records: a reader
+    /// that already names a month once (a stretch read, D-3349) hands its line
+    /// and its count here, so [`Self::records`] stays whole and the month is
+    /// still one sentence.
+    pub fn counted(&mut self, sentence: String, records: u64) {
+        self.close();
+        self.records = self.records.saturating_add(records);
+        self.say(sentence, records);
+    }
+
+    /// Takes everything `other` noted, after everything this log holds: the
+    /// counts add exactly, and the cap is this log's own.
+    pub fn absorb(&mut self, mut other: Self) {
+        self.close();
+        other.close();
+        self.records = self.records.saturating_add(other.records);
+        for said in other.named {
+            if said.run {
+                self.keep(said.sentence, said.records);
+            } else {
+                self.named.push(said);
+            }
+        }
+        self.unnamed = self.unnamed.saturating_add(other.unnamed);
+        self.unnamed_records = self.unnamed_records.saturating_add(other.unnamed_records);
     }
 
     /// Notes record `row` of `file`, refused for `why`, without formatting
@@ -226,7 +305,7 @@ impl FaultLog {
             return;
         };
         let count = run.last.saturating_sub(run.first).saturating_add(1);
-        if self.named.len() >= MAX_NAMED_FAULTS {
+        if self.runs_named >= MAX_NAMED_FAULTS {
             self.unnamed = self.unnamed.saturating_add(1);
             self.unnamed_records = self.unnamed_records.saturating_add(count);
             return;
@@ -251,13 +330,28 @@ impl FaultLog {
         self.keep(sentence, count);
     }
 
+    /// Keeps one run's sentence, or counts it once the cap is reached.
     fn keep(&mut self, sentence: String, records: u64) {
-        if self.named.len() >= MAX_NAMED_FAULTS {
+        if self.runs_named >= MAX_NAMED_FAULTS {
             self.unnamed = self.unnamed.saturating_add(1);
             self.unnamed_records = self.unnamed_records.saturating_add(records);
             return;
         }
-        self.named.push(capped(sentence));
+        self.runs_named += 1;
+        self.named.push(Said {
+            sentence: capped(sentence),
+            records,
+            run: true,
+        });
+    }
+
+    /// Keeps a sentence its reader bounded, as it is.
+    fn say(&mut self, sentence: String, records: u64) {
+        self.named.push(Said {
+            sentence,
+            records,
+            run: false,
+        });
     }
 
     /// Every sentence, the open run closed, and — when the cap was reached —
@@ -265,14 +359,16 @@ impl FaultLog {
     #[must_use]
     pub fn sentences(mut self) -> Vec<String> {
         self.close();
+        let mut said: Vec<String> = self.named.into_iter().map(|said| said.sentence).collect();
         if self.unnamed > 0 {
-            self.named.push(format!(
+            said.push(format!(
                 "… and {} more fault(s) not named ({} record(s) in them; {} record(s) \
-                 refused in all) — at most {MAX_NAMED_FAULTS} are named per answer",
+                 refused in all) — at most {MAX_NAMED_FAULTS} runs of unreadable records \
+                 are named per answer",
                 self.unnamed, self.unnamed_records, self.records
             ));
         }
-        self.named
+        said
     }
 }
 
@@ -289,32 +385,6 @@ pub fn capped(mut sentence: String) -> String {
     sentence.truncate(end);
     sentence.push('…');
     sentence
-}
-
-/// Joins `faults` with `separator`, naming at most [`MAX_NAMED_FAULTS`] of
-/// them, each capped, and counting the rest: the last line of defence that
-/// keeps a response's fault text a constant size whatever produced the list.
-#[must_use]
-pub fn joined<S: AsRef<str>>(faults: &[S], separator: &str) -> String {
-    let mut out = String::new();
-    for (at, fault) in faults.iter().take(MAX_NAMED_FAULTS).enumerate() {
-        if at > 0 {
-            out.push_str(separator);
-        }
-        out.push_str(&capped(fault.as_ref().to_owned()));
-    }
-    if let Some(more) = faults
-        .len()
-        .checked_sub(MAX_NAMED_FAULTS)
-        .filter(|n| *n > 0)
-    {
-        let _ = write!(
-            out,
-            "{separator}… and {more} more fault(s) not named — at most \
-             {MAX_NAMED_FAULTS} are named per answer"
-        );
-    }
-    out
 }
 
 #[cfg(test)]
@@ -464,23 +534,15 @@ mod tests {
         assert_eq!(said[1], "2026-01: does not open");
     }
 
-    /// A long sentence is cut on a character boundary; `joined` caps both the
-    /// count and each sentence.
+    /// A long sentence is cut on a character boundary, and one record's fault
+    /// still reads as the sentence every reader printed before runs existed.
+    /// (The LIST is bounded where it is rendered: `bars_route::faults_json`.)
     #[test]
     fn long_sentences_and_long_lists_are_capped() {
         let long = "₹".repeat(MAX_FAULT_CHARS);
         let cut = capped(long);
         assert!(cut.len() <= MAX_FAULT_CHARS + '…'.len_utf8());
         assert!(cut.ends_with('…'));
-        let list: Vec<String> = (0..100).map(|n| format!("fault {n}")).collect();
-        let text = joined(&list, "; ");
-        assert_eq!(text.matches("fault ").count(), MAX_NAMED_FAULTS);
-        assert!(text.ends_with(&format!(
-            "… and {} more fault(s) not named — at most {MAX_NAMED_FAULTS} are named per answer",
-            100 - MAX_NAMED_FAULTS
-        )));
-        assert_eq!(joined(&["one"], "; "), "one");
-        assert_eq!(joined::<&str>(&[], "; "), "");
         assert_eq!(
             String::from(ReadFault::Record {
                 file: "/f".to_owned(),
@@ -488,6 +550,89 @@ mod tests {
                 why: missing("/g")
             }),
             format!("/f record 3: {}", missing("/g"))
+        );
+    }
+
+    /// **A MONTH NAMED ONCE BY ITS READER KEEPS ITS COUNT, THE SAME REFUSAL IS
+    /// SAID ONCE, AND ONE LOG TAKES ANOTHER'S EXACTLY** (the merge of DB-B75
+    /// with the sort index's one-fault-a-month readers, D-3349). A stretch
+    /// read hands one sentence for 73 records: one sentence, 73 counted. A
+    /// month that will not open, met on 50 rows of a page, is one sentence. An
+    /// absorbed log adds its records, its sentences in order under THIS log's
+    /// cap, and what it had already counted without naming.
+    #[test]
+    fn a_counted_line_a_repeated_refusal_and_an_absorbed_log_keep_every_count() {
+        let mut log = FaultLog::default();
+        log.counted(
+            "/m.bin record 73: bad; 73 kept rows would not read".to_owned(),
+            73,
+        );
+        assert_eq!(log.records(), 73);
+        for _ in 0..50 {
+            log.push_once("2025-03: another writer holds the month".to_owned());
+        }
+        log.push_once("2025-04: another writer holds the month".to_owned());
+        log.push_once("2025-03: another writer holds the month".to_owned());
+        assert_eq!(
+            log.records(),
+            73,
+            "a month that did not open counts no record"
+        );
+        assert_eq!(
+            log.clone().sentences(),
+            [
+                "/m.bin record 73: bad; 73 kept rows would not read",
+                "2025-03: another writer holds the month",
+                "2025-04: another writer holds the month",
+                "2025-03: another writer holds the month",
+            ],
+            "only the sentence JUST said is not said again"
+        );
+
+        // A RECORD GIVEN TO `push_once` GOES TO ITS RUN, never dropped.
+        let mut records = FaultLog::default();
+        for row in 0..5 {
+            records.push_once(ReadFault::Record {
+                file: "/f".to_owned(),
+                row,
+                why: missing("/f"),
+            });
+        }
+        assert_eq!(records.records(), 5);
+        assert_eq!(records.clone().sentences().len(), 1);
+
+        // ABSORBED: an open run of the taker and of the taken both close; the
+        // taken log's runs come under THIS log's cap, its sentences are kept.
+        let mut other = FaultLog::default();
+        for n in 0..40_u64 {
+            other.counted(format!("month {n}"), 10);
+        }
+        for n in 0..(MAX_NAMED_FAULTS as u64 + 4) {
+            // Every other record of /g: one-record runs.
+            other.record(std::path::Path::new("/g"), n * 2, missing("/g"));
+        }
+        log.absorb(records);
+        log.absorb(other);
+        let total = 73 + 5 + 40 * 10 + (MAX_NAMED_FAULTS as u64 + 4);
+        assert_eq!(log.records(), total);
+        let said = log.sentences();
+        // 4 sentences, 1 run, 40 month lines, then the runs of /g: the cap is
+        // 16 runs in all, so 15 of /g's 20 are named and 5 counted.
+        assert_eq!(said.len(), 4 + 1 + 40 + (MAX_NAMED_FAULTS - 1) + 1);
+        assert_eq!(said[4], format!("/f records 0–4 (5): {}", missing("/f")));
+        assert_eq!(said[5], "month 0");
+        assert_eq!(
+            said[44], "month 39",
+            "a month line is never dropped for the cap"
+        );
+        assert_eq!(said[45], format!("/g record 0: {}", missing("/g")));
+        assert_eq!(
+            *said.last().unwrap(),
+            format!(
+                "… and 5 more fault(s) not named (5 record(s) in them; {total} record(s) \
+                 refused in all) — at most {MAX_NAMED_FAULTS} runs of unreadable records \
+                 are named per answer"
+            )
         );
     }
 }

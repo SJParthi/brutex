@@ -25,11 +25,12 @@
 //!
 //! # What is and is not covered
 //!
-//! Every `cli` verb. The API's own writers (a Zerodha pull, the autopilot) are
-//! NOT refused here: an unstamped API names itself on every response
-//! (`x-brutex-build: unstamped`) and in red on every page, and its provenance
-//! records say so, but it still pulls. [`unstamped_write_refusal`] is public
-//! so a writer inside the API can ask the same question.
+//! Every `cli` verb, by name ([`WRITERS`]; the classification test fails when a
+//! verb of `COMMANDS` is on neither side). The API asks the same question
+//! through [`unstamped_write_refusal`]: an unstamped `api` answers 403 to
+//! every request that is not a GET or a HEAD, grounds its autopilot and does
+//! not resume a spot recovery at start (`api::server::WriteGate`), and names
+//! itself on every response (`x-brutex-build: unstamped`).
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -63,13 +64,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// and matched" is a claim about the store that some code made, and a run line
 /// saying `commit=unstamped` cannot say which. It was listed as a reader while
 /// it wrote those two files.
-pub(crate) const WRITERS: [&str; 8] = [
+pub(crate) const WRITERS: [&str; 9] = [
     "census-migrate",
     "census-recount",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
     "scrub-blocks",
+    "srt-build",
     "tix-rebuild",
     "zerodha-repair",
 ];
@@ -77,13 +79,13 @@ pub(crate) const WRITERS: [&str; 8] = [
 /// Whether `verb`, invoked with `arguments`, writes the store.
 ///
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
-/// form: `tix-rebuild ... --dry-run`, `gdfl-rekey` without `--apply`, and
-/// `zerodha-repair` without `--from-store` each state in their own module
-/// that they write nothing.
+/// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`, `gdfl-rekey`
+/// without `--apply`, and `zerodha-repair` without `--from-store` each state
+/// in their own module that they write nothing.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
-        "tix-rebuild" => !arguments.contains(&"--dry-run"),
+        "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
         "gdfl-rekey" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
@@ -242,6 +244,23 @@ mod tests {
                 &[
                     "gdfl",
                     "NSE/INDEX/NIFTY",
+                    "1s",
+                    "2019-11",
+                    "2019-11",
+                    "--dry-run",
+                ],
+                false,
+            ),
+            (
+                "srt-build",
+                &["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-11", "2019-11"],
+                true,
+            ),
+            (
+                "srt-build",
+                &[
+                    "gdfl",
+                    "NSE/FNO/NIFTY/*",
                     "1s",
                     "2019-11",
                     "2019-11",

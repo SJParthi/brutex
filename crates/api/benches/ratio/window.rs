@@ -7,11 +7,16 @@
 //! 100,000 bars on disk, reading 50 bars a page: the `stat`s, the `.tix` seek
 //! and the page read are all in the figure, as they are on the route.
 //!
-//! **What is not here, said so.** A non-time sort streams every kept row and a
-//! time-of-day bound locates two instants per day: both grow with the window
-//! by design (D-3326 states them), so a flatness ratio would assert the wrong
-//! thing. Their costs are printed beside the ratios, unasserted, and their
-//! p50/p99 on real data are in the WP-31 report for `docs/06-limits.md`.
+//! **A value sort is here since D-3349 (WP-39).** It was a stream of every
+//! kept row; it is served from the month's `.srt` sort index, which the
+//! store's writer keeps as it appends, so a close or volume page — first or
+//! last, either direction — is asserted flat between 1x and 100x like a seek.
+//!
+//! **What is not here, said so.** A time-of-day bound locates two instants
+//! per day and keeps windows no index run is cut to: it grows with the window
+//! by design (D-3326 states it), so a flatness ratio would assert the wrong
+//! thing. Its cost is printed beside the ratios, unasserted, and its p50/p99
+//! on real data is in the WP-31 report for `docs/06-limits.md`.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -166,9 +171,31 @@ pub(crate) fn seeks_are_flat() -> bool {
         costs.push(cost_ps(200, || page(black_box(root), black_box(&asked))));
     }
     ok &= flat("window at= k=2", &costs);
+    // A VALUE SORT FROM THE SORT INDEX (D-3349): flat like a seek, first and
+    // last page, both directions, ties (an index's volume is all zeros) too.
+    for (label, sort, desc) in [
+        ("window sort=c asc", SortKey::Close, false),
+        ("window sort=c desc", SortKey::Close, true),
+        ("window sort=v desc", SortKey::Volume, true),
+    ] {
+        for (place, last) in [("first page", false), ("last page", true)] {
+            let mut costs = Vec::with_capacity(months.len());
+            for (n, root) in &months {
+                let offset = if last { n.saturating_sub(PAGE) } else { 0 };
+                let mut asked = query(&["NIFTY"], Some(offset), None, Filter::default());
+                asked.sort = sort;
+                asked.desc = desc;
+                if page(root, &asked) != PAGE {
+                    refuse("a sorted page of the fixture months is a full page");
+                }
+                costs.push(cost_ps(200, || page(black_box(root), black_box(&asked))));
+            }
+            ok &= flat(&format!("{label} {place}"), &costs);
+        }
+    }
     // PRINTED, NOT ASSERTED: a time-of-day bound locates each day's window,
-    // two lookups per calendar day (D-3326, O(days)), and a close sort streams
-    // every row (O(bars)). Both are the stated cost.
+    // two lookups per calendar day (D-3326, O(days)), and reads its kept rows
+    // (D-3349: no index run is cut to a window). That is the stated cost.
     for (n, root) in &months {
         let tod = Filter {
             from: None,
@@ -184,7 +211,7 @@ pub(crate) fn seeks_are_flat() -> bool {
         let started = Instant::now();
         let _rows = page(root, &sorted);
         println!(
-            "  window tod k=2 n={n:<7} {tod_us:>8} us   sort=c k=2 {:>8} us   (stated O(days) and O(bars), not asserted)",
+            "  window tod k=2 n={n:<7} {tod_us:>8} us   sort=c k=2 {:>8} us   (tod stated O(days), not asserted; the sort is indexed)",
             started.elapsed().as_micros()
         );
     }

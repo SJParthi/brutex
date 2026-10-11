@@ -35,7 +35,7 @@ test('every /db bar read asks again when the server is busy, and so does the cen
   // The grid reads bars only through `readWindowPage`, whose own loop asks a
   // 429 again after a jittered pause (WP-52); it holds no window read of its own.
   const grid = readFileSync(new URL('../src/routes/db/DbBarsGrid.svelte', import.meta.url), 'utf8');
-  assert.match(grid, /import \{ readWindowPage, readAllRows \} from '\$lib\/database-pages\.js'/);
+  assert.match(grid, /import \{ readWindowPage, readAllRows(, [A-Za-z]+)* \} from '\$lib\/database-pages\.js'/);
   assert.doesNotMatch(grid, /ask\(`\/bars/, 'no bar read in the grid bypasses the retrying reader');
   const pages = readFileSync(new URL('../src/lib/database-pages.js', import.meta.url), 'utf8');
   assert.match(pages, /response\.status === 429 && attempt < SATURATED_TRIES/);

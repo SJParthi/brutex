@@ -22,7 +22,7 @@
   import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { readWindowPage, readAllRows } from '$lib/database-pages.js';
+  import { readWindowPage, readAllRows, sortIndexNote } from '$lib/database-pages.js';
   import { dirOf, bpsText } from '$lib/bps.js';
   import { timeLabel, stampLabel, dayLabel, barTimeLabel } from '$lib/dates.js';
   import { refreshStore } from '$lib/store.svelte.js';
@@ -772,6 +772,8 @@
     const barFails = $derived(barState.error ? [{ key: 'read', error: barState.error }] : []);
     /** A read answered in part (206): the rows are real, the set is not whole, and the fault is named. */
     const barFaults = $derived(barState.answer?.faults ? [{ key: 'faults', faults: barState.answer.faults }] : []);
+    /** What a value sort read instead of serving from sort indexes, in the server's words (D-3349, DB-N14). */
+    const barSortNote = $derived(sortIndexNote(barState.answer));
 
     /* ======================================================================
        THE DIGITS THAT REPEAT DOWN EVERY ROW EARN NONE OF THEIR WEIGHT
@@ -1357,6 +1359,7 @@
       barState: { get: () => barState, set: (v) => (barState = v) },
       barFails: { get: () => barFails },
       barFaults: { get: () => barFaults },
+      barSortNote: { get: () => barSortNote },
       pageMs: { get: () => pageMs },
       pricePfx: { get: () => pricePfx },
       priceSplit: { get: () => priceSplit },
@@ -2181,10 +2184,13 @@
          failed read is the grid's own state above, in the server's words, so
          it is not said twice here. None of these is allowed to be a shorter
          grid. -->
-    {#if db.sortWhy || db.barFaults.length || db.barDisagree.length || db.barHoleMonths > 0}
+    {#if db.sortWhy || db.barSortNote || db.barFaults.length || db.barDisagree.length || db.barHoleMonths > 0}
       <div class="bnotes">
         {#if db.sortWhy}
           <p class="bnote warn">{db.sortWhy}</p>
+        {/if}
+        {#if db.barSortNote}
+          <p class="bnote">{db.barSortNote}</p>
         {/if}
         {#if db.barDisagree.length}
           <!-- THE CENSUS IS BEHIND THE FILE, SAID AS A LAG (DB-G02, DB-G61,

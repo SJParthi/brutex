@@ -1517,6 +1517,22 @@ const ALLOW_SORT: Allow = &[
     ("crates/cli/src/pool.rs", 2),
     ("crates/cli/src/admission_store.rs", 1),
     ("crates/cli/src/population.rs", 1),
+    // D-3349 (WP-39): the `.srt` sort index pays ONE sort per column of the
+    // rows a writer just committed (or of a month the rebuild door writes
+    // whole), O(b log b) at write time, so that no window read ever sorts a
+    // month again. Never on a request path.
+    ("crates/store/src/sort_index.rs", 1),
+    // D-3349 (WP-39): the series holding a row at ONE instant of a value
+    // page's tie, at most one per series of the request (<= MAX_SERIES),
+    // ordered so the page's `(value, time, series)` order is total; and the
+    // rows no index orders, kept in place at the page's depth (a partition
+    // when twice that is held, then one in-place order of what is kept) —
+    // bounded by MAX_READ_HELD and MAX_SORT_DEPTH, never by the window.
+    ("crates/api/src/bars_sort.rs", 3),
+    // D-3349 (WP-39): `cli srt-build NSE/FNO/SYMBOL/*` walks contract
+    // directories in name order so two runs print the same receipt. Never on
+    // a request path.
+    ("crates/cli/src/srt_build.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.

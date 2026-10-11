@@ -567,6 +567,9 @@ pub(crate) struct Ran {
     /// Each torn tail this run ended before it appended: the file, relative
     /// to the store root, and the fragment's bytes.
     pub(crate) torn: Vec<(String, u64)>,
+    /// Census entries that name no legal store path, so no file of theirs
+    /// could be looked for: not read, and said.
+    pub(crate) unaddressed: Unaddressed,
 }
 
 /// `entry`'s bar file, as the store addresses it, or `None` for an entry that
@@ -585,21 +588,49 @@ fn path_of(vendor: Vendor, entry: &Entry) -> Option<StorePath<'_>> {
     .ok()
 }
 
-/// The census's months of `vendor`, as (relative path, entry), in path order.
-fn months_of(root: &Path, vendor: Vendor) -> Result<Vec<(String, Entry)>, String> {
+/// Census entries a run could not address: how many, and the first by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Unaddressed {
+    /// How many entries name no legal store path.
+    pub(crate) entries: u64,
+    /// The first of them, as the census names it.
+    pub(crate) first: Option<String>,
+}
+
+/// `entries` as (relative path, entry) in path order, and those `path` could
+/// not address — COUNTED AND NAMED, never dropped: a census entry that names
+/// no legal store path was skipped in silence, so a pass could say `complete`
+/// over months it never tried.
+fn addressed(
+    entries: impl Iterator<Item = Entry>,
+    path: impl Fn(&Entry) -> Option<String>,
+) -> (Vec<(String, Entry)>, Unaddressed) {
     let mut out = Vec::new();
-    for read in census_store::read_vendor(root, vendor)? {
-        for entry in read.census.newest() {
-            let Some(relative) = path_of(vendor, &entry)
-                .map(|path| path.to_path_buf(Path::new("")).display().to_string())
-            else {
-                continue;
-            };
+    let mut unaddressed = Unaddressed::default();
+    for entry in entries {
+        if let Some(relative) = path(&entry) {
             out.push((relative, entry));
+            continue;
+        }
+        unaddressed.entries += 1;
+        if unaddressed.first.is_none() {
+            unaddressed.first = Some(format!("{:?}", entry.key));
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    (out, unaddressed)
+}
+
+/// The census's months of `vendor`, as (relative path, entry), in path order,
+/// with the entries that name no store path.
+fn months_of(root: &Path, vendor: Vendor) -> Result<(Vec<(String, Entry)>, Unaddressed), String> {
+    let censuses = census_store::read_vendor(root, vendor)?;
+    Ok(addressed(
+        censuses.iter().flat_map(|read| read.census.newest()),
+        |entry| {
+            path_of(vendor, entry).map(|path| path.to_path_buf(Path::new("")).display().to_string())
+        },
+    ))
 }
 
 /// How a run is bounded.
@@ -653,6 +684,36 @@ fn begin_ledger(
     Ok((ledger, id))
 }
 
+/// The months a run of `vendor` has to read, or the refusal of a vendor that
+/// holds none.
+///
+/// THE CENSUS FIRST, BEFORE EITHER FILE EXISTS. A vendor with no census —
+/// never imported, or a name typed for another — was scrubbed "complete" over
+/// zero months, and its ledger and cursor were created to say so: `/disk.json`
+/// then showed a finished pass of a feed that holds nothing.
+fn months_to_scrub(
+    root: &Path,
+    vendor: Vendor,
+) -> Result<(Vec<(String, Entry)>, Unaddressed), String> {
+    let (all, unaddressed) = months_of(root, vendor)?;
+    if all.is_empty() {
+        return Err(format!(
+            "no census of {} names a month under {}, so there is nothing to scrub; no \
+             ledger and no cursor was written{}",
+            vendor.as_str(),
+            root.display(),
+            unaddressed
+                .first
+                .as_deref()
+                .map_or_else(String::new, |first| format!(
+                    " ({} census entr(ies) name no legal store path, the first {first})",
+                    unaddressed.entries
+                ))
+        ));
+    }
+    Ok((all, unaddressed))
+}
+
 /// One run over `vendor`'s months.
 ///
 /// # Errors
@@ -663,6 +724,7 @@ fn begin_ledger(
 /// or flushed — the run stops there, and the next resumes from the last line
 /// that was.
 pub(crate) fn run(root: &Path, vendor: Vendor, bounds: Bounds<'_>) -> Result<Ran, String> {
+    let (all, unaddressed) = months_to_scrub(root, vendor)?;
     let mut cursor_file = Lines::open(root, &cursor_name(vendor))?;
     // THE LOCK IS THE OPEN FILE DESCRIPTION'S, which a duplicate shares: the
     // guard owns one duplicate, the tail is read through another, and the
@@ -696,13 +758,13 @@ pub(crate) fn run(root: &Path, vendor: Vendor, bounds: Bounds<'_>) -> Result<Ran
             cursor_file.path.display()
         )
     })?;
-    let all = months_of(root, vendor)?;
     let (mut ledger, id) = begin_ledger(root, vendor, &resume, &mut torn, bounds.commit)?;
     let mut ran = Ran {
         pass: resume.pass,
         pass_totals: resume.totals,
         id,
         torn,
+        unaddressed,
         ..Ran::default()
     };
     let started = Instant::now();
@@ -966,6 +1028,15 @@ pub(crate) fn command_with(
                     out,
                     "  torn tail ended     {file}: {bytes} byte(s) of a line a killed run never \
                      finished, ended as a void line and not read"
+                );
+            }
+            if let Some(first) = &ran.unaddressed.first {
+                let _ = writeln!(
+                    out,
+                    "  NOT ADDRESSED       {} census entr(ies) name no legal store path, so no \
+                     file of theirs was looked for and this pass did not read them (the first: \
+                     {first})",
+                    ran.unaddressed.entries
                 );
             }
             let _ = writeln!(
