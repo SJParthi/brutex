@@ -66513,6 +66513,428 @@ any document under `docs/`.
 **Proof.** `grep` for a vendor row's shape under `docs/` returns nothing; the
 charter rows each name their date, path and count.
 
+### D-4813 — `/imports.json` returns a page of runs and finds a run's lines by an index, never by decoding every line — 2026-10-11
+
+**Implemented by** IA-11r (R6's O(1) half; design §7.2). **Findings** F79.
+Search by run, reason, day, month and instrument is WP-33c's (merged at
+f350c156): `run` and `code` are indexed dimensions, `month=` is a key and a
+conjunction probes its most selective key first. This entry is the sentence
+that merge left open.
+
+**What was wrong.** `imports::runs_json` decoded every `run` line of the
+journal on every request (three callers), and the answer then kept 20: O(runs)
+per page.
+
+**What changed.** `import_journal::Parsed` keeps, beside `runs` (file order),
+a map from run id to the positions of that id's lines, filled as each `run`
+line is parsed (one probe, one push). `/imports.json` returns the newest
+`RUNS_PAGE` = 20 `run` lines with `runs_total`, and `runs_next`, the cursor of
+the next older page; `runs_before=<id>` is the page older than run `id`'s
+oldest line, and `runs_before=<id>.<n>` the page older than its `n`-th line,
+which is what `runs_next` names when a page ends inside an id that has
+several lines (two processes that start in one second share an id). `run=<id>`
+decodes that id's lines through the index and no other. A cursor that names no
+line shows no run and says so in `runs_cursor_refused`; a word that is not a
+cursor is a 400. No binary search and no sort.
+
+**What it does not change.** `/dayflags.json`'s day band resolves a refusal's
+run by time over the whole list, so the crate-internal caller
+(`imports::RunsAsked::Every`) still decodes every run: O(runs), the cost it had,
+named in `docs/06-limits.md` L-IA-13's section. The design's "the third caller
+takes the same page" would have dropped runs the day band needs.
+
+**Proof.** `api::server::imports::tests::the_runs_page_reads_only_its_runs`
+(IA-LG-03: a journal of 100,002 `run` lines, decodes counted); bench C-LG-02.
+
+### D-4838 — No posting tree is deleted on the emit path: a roll renames the retired generation aside and one reaper thread deletes it — 2026-10-11
+
+**Implemented by** IA-11r (R3; design §7.2). **Findings** F26, F78, F47 (gate
+21's list for these sites).
+
+**What was wrong.** `Audit::roll` ran `remove_dir_all` on the index generation
+of the audit file it dropped, under the sink's lock, so every emitter in the
+process waited for a delete whose cost is the generation's posting files.
+
+**What changed.** The roll renames `<dir>/audit.idx/<serial>` to
+`<dir>/audit.idx.gone/<serial>`: one rename inside the sink's own directory,
+after the next audit file is open. One thread per sink, `telemetry-reaper`
+(the only thread the crate starts outside its tests), started by the stream's
+open, takes each renamed path from a channel and deletes it outside every lock
+of the sink. At each start the stream lists `audit.idx.gone/` once and hands
+over what an earlier process left, and retires the one generation a process
+killed between a roll's serial write and its rename could have stranded. A
+reader finds a renamed generation absent, as it found a deleted one. A name
+already taken in `audit.idx.gone/` is not written over: the generation is
+renamed to a second, stamped name. A rename that fails both ways is the roll's
+failure (`rotation_failures`, named in `last_error`), and the stream goes on
+in the file it just opened.
+
+**What is reported.** `AuditHealth::gone_waiting` (renamed aside and not yet
+deleted), `reaped`, `reap_failures` with `reap_error`, and `reaper_behind()`
+once more than `AUDIT_KEEP_FILES` = 16 wait; each makes the health loud. A
+delete that fails is counted and the entry stays for the next start: one
+attempt per process, never a loop. A reaper thread that cannot start is named,
+and the generations then wait, counted.
+
+**Proof.** `telemetry::sink::tests::an_audit_roll_never_waits_for_a_delete`
+(IA-LG-01), `a_delete_cut_short_is_finished_at_the_next_start`,
+`a_failed_delete_is_counted_named_and_left_for_the_next_start`,
+`without_a_reaper_the_retired_generations_wait_counted`,
+`a_name_already_taken_aside_is_kept_and_the_generation_renamed_beside_it`,
+`a_rename_aside_that_cannot_happen_fails_the_roll_by_name`; benches C-AU-01 and
+C-AU-02; `docs/06-limits.md` L-IA-36; gate 21's declared list in the same
+change.
+
+### D-4862 — Every reader of a run's events reads the directory the run logged to, and names a directory it could not read — 2026-10-11
+
+**Implemented by** IA-11r (R5 widened; design §7.1, §7.2): the readers. The
+directory switch itself (each run process logging to the directory of the one
+lock that makes it alone there) is IA-1's and lands after this; until then
+every run still logs to `logs/cli`. **Findings** F78.
+
+**The closed set.** Under `<store>/logs`: `cli`, `gdfl/indices`, `gdfl/stocks`,
+`gdfl/options` (the kind lock), `gdfl/store` (the store lock: the census verbs
+and every v3 run), `verify/zerodha` and `verify/merge`; with the server's own
+directory, 8 (`api::logs::run_dirs`, read from the table D-4897 puts in
+`telemetry`). A run of a GDFL kind can write `cli`, `gdfl/<kind>` and
+`gdfl/store` (`api::logs::import_dirs`).
+
+**What was wrong.** `/logs` read the server's directory and `logs/cli`. The
+importer-evidence readers (`logs::import_refusals`,
+`logs::audited_import_refusals`) read `logs/cli` alone, and through them so did
+`/imports.json` (each row's logged refusals, the logged-only days, each kind's
+pace, `run=`'s attempt), `/dayflags.json`'s day band and `/store`'s behind. A
+run logging anywhere else would have read `"none"` on all of them.
+
+**What changed.** `/logs` and `/logs.json` read the 8 directories, keyed and
+unkeyed, and answer `dirs`: each directory by name with `read`, `absent` or
+`unreadable` and its error. `import_refusals` keeps one tail per directory
+(five) and answers a merged view chosen by kind; the same reads are the same
+`Arc`, so `imports::summary` and `store_route::behind` keep their answers
+against the tuple of per-directory reads by one pointer. A row's `logged_from`
+names its source directory (`logs/gdfl/indices ring`, `… audit stream`); it
+says `"none"` only when every directory a run of the row's kind can write was
+read and holds nothing, and otherwise names each directory that was absent or
+unreadable. A kind's pace names the directories its events were read from.
+`run=<id>` also answers the run's lifecycle events (target
+`gdfl.import.lifecycle`), read keyed through the `run` posting of the five
+directories. `/imports.json`'s `evidence` block lists each directory with its
+state, files, bytes, malformed lines and errors, in place of `cli_ring_files`
+and `cli_ring_bytes`.
+
+**The bound.** A keyed `/logs.json` request opens at most 8 × 3 = 24 posting
+streams under one budget of `MAX_KEYED_READS` = 2,000 line reads
+(`docs/06-limits.md` L-IA-13); the ring tails are L-IA-37.
+
+**Proof.** IA-LG-02's four tests, each failing when its reader reads
+`logs/cli` alone (checked by reverting the readers):
+`api::logs::tests::logs_reads_every_run_directory`,
+`api::server::imports::tests::imports_json_reads_importer_evidence_where_the_run_logged`,
+`…::dayflags_day_band_reads_importer_evidence_where_the_run_logged`,
+`…::store_behind_reads_importer_evidence_where_the_run_logged`; and
+`api::logs::tests::the_run_directories_name_every_import_kind`. Bench C-LG-01.
+
+### D-4897 — One table of run directories, in `telemetry`: the readers read it and the writers choose through it (continues D-4862) — 2026-10-11
+
+**Implemented by** IA-11r (the table, and the readers that read it; round-7
+critic IA-11r-2). IA-1, IA-9 and IA-10a choose a run's directory through it
+when they land the directory switch; until then every run still logs to
+`logs/cli`. **Continues** D-4862, which this entry does not edit beyond the two
+names it gave the readers' lists.
+
+**What was wrong.** D-4862's closed set was declared by the readers only:
+`api::logs` spelt the seven run directories and the five importer directories,
+the api's bench spelt the seven again, and the packages that start runs would
+each have spelt their own (`cli/src/main.rs` for a verb, the api for its child,
+`pull` for a verification run). Four or five hand-kept copies of one list,
+which the operator's rule 2 bans, and a reader looking where no writer logs is
+the fault D-4862 was written against.
+
+**The table.** `telemetry::run_dirs` (a new file of names; it opens nothing):
+`ALL: [RunDir; 6]`, each entry its path beneath `<store>/logs`, the lock file
+beneath `<store>` whose exclusive holder is the one process that logs there,
+and, for a kind's own directory, the kind. `GDFL_KINDS` (`gdfl/indices`,
+`gdfl/stocks`, `gdfl/options`; locks `imports/gdfl.<kind>.lock`), `GDFL_STORE`
+(`gdfl/store`; `imports/gdfl.lock`), `VERIFY_ZERODHA` (`verify/zerodha`;
+`verify/zerodha.lock`), `VERIFY_MERGE` (`verify/merge`; `verify/merge.lock`).
+`for_gdfl(kind, layout)` answers where a GDFL run logs: `GDFL_STORE` on v3, the
+kind's own on v4, and `None` for a word that is not a kind, which the caller
+refuses. `gdfl_evidence(kind)` answers the directories a reader of that kind
+reads (`cli`, the kind's own, `gdfl/store`) and `gdfl_evidence_all()` the five.
+`CLI` and `LOGS` are the two names every reader and `cli` already used.
+`telemetry` is where it lives because every crate that logs already names it
+and it depends on nothing (gate 21 holds it to that).
+
+**The lock paths are the design's, and the locks are not built.** They are the
+names the ingest automation design gives in its §4 ("the locks"). No lock of
+that table exists at this head; IA-1 and IA-9 take them. The table records
+which lock makes a directory one process's, so the package that takes the lock
+and the package that reads the directory cannot disagree about the pairing.
+
+**What changed.** `api::logs::run_dirs()` is `CLI` then `ALL` in the table's
+order, `import_dirs()` is `gdfl_evidence_all()`, a kind's three directories are
+`gdfl_evidence(kind)`, and `halves_of`, `import_refusals`,
+`audited_import_refusals` and `run_lifecycle` read those. The api's bench
+(C-LG-01) builds its store from the table and refuses to run if the table and
+`docs/06-limits.md` L-IA-13's 8 disagree. Nothing in `api` spells a run
+directory any more. `cli`'s own `log_dir` still spells `logs/cli` (not this
+package's file); it is one name, equal to `telemetry::run_dirs::CLI`, and IA-1
+replaces it when it chooses the directory from the verb.
+
+**The three kinds are the importer's.** `telemetry` may not depend on `pull`,
+so the table names the kinds as words and
+`api::logs::tests::the_run_directories_name_every_import_kind` holds them to
+`pull::gdfl_import::ImportKind::ALL`, in order, where both are in scope: a
+fourth kind fails there until it is a row.
+
+**Also fixed here, in D-4862's own rule ("`none` only when every directory was
+read").** A directory's state is asked of the disk on every call and no longer
+depends on what the api process read before (`api::logs::DirState::of`: the
+directory, then its current ring file by name). Before, a run directory first
+seen absent or empty and then made unreadable read `read` with no error, and
+its rows said `"none"`, until the api restarted: the importer-evidence tail
+remembered "no such file" and "permission denied" as one value
+(`logs::refusals_in`), and `/logs.json` asked `metadata` of the directory
+alone, which a directory without search permission answers. Now each ring
+file's `metadata` answer is kept as absent, there, or failed in its own words;
+a change between them reads the ring again; a file that stays unreadable is
+named once, not once a request; and `telemetry::audit_state` uses `try_exists`,
+so a stream that cannot be looked for is an error and no longer "never
+written".
+
+**Proof.** `api::logs::tests::the_readers_read_the_table_of_run_directories`
+(the readers' set equals `logs/`, `logs/cli/` and `ALL`; where the table sends
+a run of a kind, on both layouts, is one of the directories that kind is read
+from); `telemetry::run_dirs::tests::every_run_directory_and_lock_is_named_once`,
+`…::a_gdfl_run_logs_where_its_lock_is`,
+`…::a_kinds_evidence_is_in_its_three_directories`;
+`api::logs::tests::a_directory_that_turns_unreadable_is_never_answered_as_read`,
+`…::a_ring_file_that_stays_unreadable_is_named_once`,
+`telemetry::sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`
+(`docs/04-invariants.md` IA-LG-04, IA-LG-05). IA-GR-24's writer half (a run
+logged where `for_gdfl` says) is IA-1's.
+
+### D-3354 — An option is filed under the newest symbol its name reaches; an import never opens a second key for a contract the store holds — 2026-10-12
+
+**Implemented by** WP-12e. **Findings** DB-B05, DB-B11, DB-B62. D-3349 to
+D-3353 are cited in code by WP-39, WP-13c and WP-16, so this package's entries
+start here.
+
+**What was wrong.** The options decoder took the underlying from each day's
+file name. A contract alive across `NIITTECH -> COFORGE` (2020-08-20) was two
+store contracts, one ending the day before the change and one starting on it:
+904 contracts over 14 renames in the vendor's names, 197 in the store.
+
+**What is decided.**
+
+1. `pull::gdfl_lineage::filed_underlying(stem, trade day)` is the option side
+   of D-3333: `core::alias::LINEAGE.filed_under`, the NEWEST symbol the stem's
+   dated changes reach. `gdfl_nfo::decode_ticker` files every option under it,
+   so the contract is one key on both sides of every change in the table. The
+   vendor's spelling stays the alias (`LINEAGE.backward`, `/aliases.json`).
+2. A name for a symbol the exchange was not using that day (an old symbol on
+   or after its change, a new one before it) is refused as
+   `NfoRefusal::UnderlyingStale`, cause `underlying_stale`. Never guessed: a
+   reused symbol would name another company. Measured: 0 of the archive's
+   1,218,362 names.
+3. A rename with no row in `core::alias::SYMBOL_CHANGES` keeps both keys. No
+   successor is guessed (`TATAGLOBAL -> TATACONSUM`, `KPIT -> BSOFT`).
+4. **The import refuses to split a contract it already holds.** A store filled
+   before this entry holds renamed underlyings under their OLD symbols. At the
+   start of an options run, one directory open per applied row of
+   `SYMBOL_CHANGES` whose newest symbol the filter wants: while
+   `<store>/bars/gdfl/NSE/FNO/<old symbol>` holds a contract the lineage
+   ledger has neither superseded nor retired (the re-key's records, D-3331),
+   the run is refused before it reads or journals anything
+   (`ImportRefusal::UnderlyingSplit`, code `underlying_split`, an `error`
+   event `run refused`), naming every such directory and the key it is filed
+   under. A run whose filter cannot touch them is not refused. What lifts the
+   refusal is the ledger, never a deletion: once every contract under an old
+   symbol is recorded superseded or retired, its directory is history and
+   blocks nothing. A ledger that cannot be read whole refuses the run. The
+   remedy is a store write (WP-80), and it needs the re-key to learn an
+   underlying move first (WP-12c): today the re-key judges the expiry only.
+5. **An options filter names the filed key.** A filter naming an old symbol
+   matched no file and journaled the day `done` with `files=0`; it is refused
+   (`ImportRefusal::FilterRenamed`, code `filter_renamed`) with the key to ask
+   for. An old-name file that does not decode is claimed by the new-name
+   filter (`claims_undecodable` asks `LINEAGE.current` of the shaped stem). A
+   capital-market filter is not refused: `cli`'s stored scope hands both names
+   of a renamed share, and that day's journal key is those names as given.
+
+**What it does not change.** No stored bar. The cash side (D-3333). A contract
+key has no generation component.
+
+**Proof.** `pull::gdfl_lineage::tests::an_option_file_is_filed_under_the_newest_symbol_its_name_reaches`;
+`pull::gdfl_import::wp12e_tests::a_store_holding_an_old_symbols_options_refuses_the_run_that_would_split_it`
+and `…::a_filter_naming_an_old_symbol_is_refused_and_the_new_one_reads_its_files`
+(both fail with the refusals removed); the real-archive name test
+`the_real_names_are_one_key_per_contract_across_renames_and_redatings`
+(ignored; needs the vendor archive).
+
+### D-3355 — An ex-date that keeps the lot is an event; every event and every key it retires is a ledger record, and the retired keys are read back from the ledger — 2026-10-12
+
+**Implemented by** WP-12e. **Findings** DB-B02, DB-B03 (the re-listing half),
+DB-B13. **Builds on** D-3331, D-3343. **Sources** `NSE/FAOP/53079` and
+`NSE/FAOP/73857` for the two SHAPES only (charter, "NSE F&O circulars read for
+the options lineage"); no cause is recorded for any measured event.
+
+**What was wrong.** `gdfl_lineage::detect` returned nothing when the
+underlying's inferred lot was unchanged, so a strike adjustment that keeps the
+lot, and a scheme that expires every contract and lists the same expiries
+again, left every series ending weeks before its expiry and restarting
+unlinked. When the first repair detected a re-listing it wrote nothing for it:
+a re-listing pairs no contract, and only pairs were ledger lines. The keys an
+event retired lived in the run's memory, so a run restarted more than the
+warm-up after an ex-date no longer marked a reused text `stitched`.
+
+**What is decided.**
+
+1. `EventKind` is what moved, measured: `lot_step` (D-3331), `strike_offset`
+   with its shift (old strike less new, paisa), `relisted`. The cause is never
+   written.
+2. With the lot unchanged, the OPEN INTEREST names the partner: each key of
+   the day votes for the shift to the one pre-ex key of its expiry and side
+   whose close OI it opens on. The thresholds are CHOSEN, from the audit's
+   measured events, and are constants of `pull::gdfl_lineage`:
+   `MIN_OI_PAIRS` 5 votes when pre-ex texts trade on; `MIN_OI_FRESH` 3 when
+   none does (a name break); the winning shift needs more than 4 times the
+   same-text carries; `MIN_EVENT_KEYS` 8 keys on each side make a name break;
+   `OI_BUCKET_CAP` 8 pre-ex keys of one ladder may share an OI value before it
+   is not walked. A name break with no proved shift is a re-listing and pairs
+   nothing. A re-listing that REUSES its texts shows neither fact and is
+   declared only from a sourced row.
+3. **Two new records in `<store>/imports/gdfl.lineage`** (D-3317's line rules,
+   `v=1`, appended, never rewritten):
+   `event NSE-FNO-<underlying> ex=<day> kind=<lot_step|strike_offset|relisted> shift=<paisa> lot_old=<n> lot_new=<n> paired=<n> stopped=<n> v=1`
+   and `stopped NSE-FNO-<underlying>-<contract> ex=<day> v=1`, one per pre-ex
+   key the event retired with no partner. An offset pair stays a D-3331
+   `lineage` record with `factor=1/1`. Each new `event` line is also an `info`
+   event `lineage event recorded`, emitted after the lines are durable.
+4. **The last `event` record of an (underlying, ex-date) is the one in
+   force.** A run that holds more of the pre-ex state than an earlier one adds
+   the pairs and stops it alone saw and one more `event` record with the
+   larger counts; a run that holds less writes nothing; a re-listing verdict
+   never overrules recorded pairs; a key with both a `lineage` and a `stopped`
+   record of one ex-date is paired.
+5. **The retired keys are the ledger's.** `LineageRun::load` rebuilds, for
+   every ex-date whose last retired expiry has not passed, the keys it retired
+   from the `event`, `lineage`, `stopped` and `stitched` records (a ledger
+   written before this entry has only the second and fourth), and which of
+   them had their lot restarted from `gdfl.lots`. An event read back for a
+   later day has retired nothing yet.
+6. `/dayflags.json` shows a key's `stopped` record and its underlying's
+   `events`; `/chain.json` and `/bars/window.json` read both kinds (neither is
+   an unread ledger line).
+
+**What it does not change.** No stored bar, no series split (D-3331 item 3).
+What a detection can still miss is the PRE-EX state a run lacks: the warm-up
+is three sessions, and a key that last traded earlier is neither paired nor
+stopped by that run (`docs/06-limits.md`).
+
+**Proof.** `pull::gdfl_lineage::tests::an_offset_that_keeps_the_lot_links_every_contract_to_its_shifted_key`,
+`…::a_name_break_with_no_carried_oi_is_a_relisting_that_pairs_nothing`,
+`…::an_ordinary_day_with_an_unchanged_lot_declares_nothing`,
+`…::an_event_record_reads_back_exactly_and_refuses_any_other_text`, `…::a_stopped_record_reads_back_exactly_and_refuses_any_other_text`;
+`pull::gdfl_import::wp12e_tests::an_offset_met_by_the_import_is_recorded_with_its_kind_shift_and_counts`,
+`…::a_relisting_is_recorded_and_its_retired_keys_survive_a_restart`,
+`…::a_fuller_run_adds_its_pairs_and_a_second_event_record_with_larger_counts`,
+`…::a_ledger_without_event_records_still_rebuilds_the_retired_keys` (all four
+fail with the writes or the rebuild removed);
+`api::dayflags::tests::an_event_and_its_stopped_keys_are_read_and_shown`,
+`api::chain::tests::the_event_and_stopped_records_are_read_and_move_no_rung`,
+`api::bars::…::the_event_and_stopped_records_parse_and_label_no_bar`.
+
+### D-3356 — A contract a scheme expired early settles on the day the circular states, and keeps its stated key — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B03. **Source** `NSE/FAOP/73857`
+(charter, "NSE F&O circulars read for the options lineage").
+
+**What is decided.** `pull::expiry_alias::EARLY_SETTLEMENTS` holds one row per
+circular that STATES the early expiry day: VEDL, ex-date 2026-04-30, the
+contracts stated 26-May, 30-Jun and 28-Jul-2026 expired on 2026-04-29.
+`settle()` answers a trade day before the ex-date with
+`Settlement::ExpiredEarly` and `Settled::last_day()` the cum-date. The
+contract's IDENTITY stays the stated expiry: three stated expiries expired on
+one day, so keying by that day would collide them. From the ex-date the same
+text is the re-listed generation and settles as stated. A scheme whose
+circular does not state the day (`NSE/FAOP/71627`, HINDUNILVR) is not a row.
+
+**What it does not change, and what is NOT DONE.** No reader uses
+`Settled::last_day` yet (greeks tenor, `/db` label): DTE across an early
+expiry is still measured to the stated day. The contract key has no
+generation component, so the two generations share one key and are told apart
+by the ledger's `event`, `stopped` and `stitched` records (D-3355).
+
+**Proof.** `pull::expiry_alias::tests::a_contract_a_scheme_expired_early_names_the_day_it_really_expired`.
+
+### D-3357 — A contract's lot follows the circular while two lots are in force, and is refused near a revision whose circular was not read — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B04. **Sources** `NSE/FAOP/64625`,
+`NSE/FAOP/70616` (charter, same section).
+
+**What was wrong.** `costs::lot::lot_size_on` answers one lot per trade day. A
+revision does not land on a trade day: contracts that already existed keep
+the existing lot, by rules each circular states. The audit measured 3x and 2x
+errors from Nov 2024 to Jan 2025 and 15% in Oct to Dec 2025.
+
+**What is decided.**
+
+1. `lot_size_of(slot, expiry, trade day)` answers the CONTRACT's lot. Inside a
+   sourced rule's window (`CONTRACT_RULES`, one row per circular and
+   underlying, each naming the trade-day table row it explains) the circular's
+   rule answers: contracts expiring on or before the last existing-lot expiry
+   keep the old lot, the named last monthly keeps it, existing quarterly and
+   half-yearly contracts switch after a named end of day, everything else
+   carries the revised lot. Basis `ContractRule(citation)`.
+2. **Near a revision with no rule the answer is a refusal.** The revisions of
+   July 2021, June 2023, April 2024 and July 2025 have no circular read. For a
+   trade day within `UNREAD_REVISION_DAYS` = 92 calendar days of such a row,
+   either side, `lot_size_of` returns `CostError::Unverified`, naming the
+   window and the remedy (one `ContractRule` row and a charter row). 92 is
+   CHOSEN, not an exchange fact: wider than both read circulars' windows (71
+   and 62 days) and than the audit's three contracts measured off the table
+   (4 to 15 days before the row). A new table row with no rule is refused the
+   same way, by construction.
+3. An expiry before the trade day is `CostError::ExpiryBeforeTrade`: a
+   contract has no lot after it expires.
+4. Elsewhere the trade-day row is answered with basis `TradeDayRow`, which
+   says it is not proved per contract by a circular of its own.
+
+**What it does not change.** `lot_size_on`, and every caller that sizes by
+trade day. The only caller that passes an expiry is `costs::trip` (`in_lots`
+of a `Contract::expiring`); nothing outside `crates/costs` does yet, so no
+stored result moves. DB-B04 is therefore PARTIAL.
+
+**Proof.** `costs::lot::tests::a_contracts_lot_follows_the_circulars_rule_while_two_lots_are_in_force`,
+`…::a_revision_whose_circular_was_not_read_refuses_the_contract_lot` (the
+audit's three measured contracts, the window's edges, and the count of unread
+rows), `…::an_expiry_before_the_trade_day_is_refused_by_name`,
+`…::outside_a_transition_the_contract_lot_is_the_trade_day_row_and_says_so`.
+
+### D-3358 — Ten re-dated expiry texts gain alias rows: five sourced, five inferred and labelled so — 2026-10-12
+
+**Implemented by** WP-12e. **Finding** DB-B01. **Source** `NSE/FAOP/68747`
+for the five NIFTY rows (charter, same section).
+
+**What is decided.** `pull::expiry_alias::ALIASES` gains ten rows, each dated
+to the rename day of its underlying's regime change rather than to the text's
+own last trade: NIFTY `24JUN27 -> 29JUN27`, `29JUN28 -> 27JUN28`,
+`28DEC28 -> 26DEC28`, `28JUN29 -> 26JUN29`, `27DEC29 -> 24DEC29` (the
+circular's annexure); FINNIFTY `03NOV21 -> 02NOV21`, `11NOV21 -> 09NOV21`,
+`18NOV21 -> 16NOV21`, `30DEC21 -> 28DEC21` and MIDCPNIFTY `27SEP23 ->
+25SEP23`, INFERRED from the underlying's measured weekday move with the cause
+UNVERIFIED (FINNIFTY `18NOV21` rests on the weekday move alone: one name, and
+no strike of it traded under `16NOV21`).
+
+**What is NOT DONE.** The five inferred rows carry the kind `vendor_redated`
+like the measured rows: a row's standing (measured, sourced, inferred) is in
+its source comment, not in the `alias` record or in any answer.
+
+**Proof.** `pull::expiry_alias::tests::a_text_that_stopped_before_its_rename_day_is_the_contract_its_successor_names`;
+the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
+(ignored; needs the vendor archive).
+
 ### D-4808 — Verdicts live in an append-only store family: immutable day images under a two-slot year index — 2026-10-10
 
 **Implemented by** IA-5 (`store::verdict`, `docs/02-store-format.md` §35).

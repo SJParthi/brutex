@@ -137,7 +137,7 @@ export const BAR_COLS = [
     w: 106,
     num: true,
     nosort: NO_SPOT_SORT,
-    why: 'ATM, ITM-k or OTM+k: k listed strikes of this expiry from the strike nearest the underlying’s close at this bar’s own instant'
+    why: 'ATM, ITM-k or OTM+k: k strikes of this expiry from the strike nearest the underlying’s close at this bar’s own instant, counted over the strikes stored by then (/chain.json, D-3329); a refusal shows its reason word'
   },
   {
     key: 'intr',
@@ -336,6 +336,8 @@ export const BAR_WHY = {
   oi_null_before:
     'the previous bar carries no open interest, so there is nothing to measure this one against.',
   previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
+  oi_to_zero:
+    'open interest printed exactly 0 straight after a non-zero value, so the change is withheld rather than shown as −100%: GDFL carries lone zero prints between non-zero ones (NIFTY 28 Mar 2019 11,600 CE: 8,025, 0, 8,325 on consecutive bars), and which zeros are real closes is UNVERIFIED. The 0 itself is shown as stored.',
   previous_unreadable:
     'the bar before this one failed its checksum and was not read, so there is no trusted value to measure this one against. Its own value is shown; only the change is withheld.',
   overflow:

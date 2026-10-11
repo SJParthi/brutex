@@ -74,11 +74,50 @@ pub(super) struct LineageEvent {
     pub(super) oi_until: i64,
 }
 
-/// The lineage ledger, parsed: events by census key, and the lines that did
-/// not parse.
+/// What the re-key's records (D-3331; WP-12c, `pull::gdfl_rekey`) say of
+/// one stored key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeyStatus {
+    /// The decoder files this key under `by`; the re-key published its bars
+    /// there. The key stays readable, and every read of it carries the
+    /// pointer.
+    Superseded {
+        /// The census key it continues as.
+        by: String,
+        /// Why its expiry moved (`closed_day` or `vendor_redated`).
+        kind: &'static str,
+    },
+    /// The decoder refuses every day of this key; no reader serves it. The
+    /// sentence every reader refuses it with.
+    Retired(String),
+}
+
+/// One stored key whose bars the re-key copied INTO the asked key: the
+/// reverse of [`KeyStatus::Superseded`], so a reader of the decoded key can
+/// audit where its copied bars came from (D-3331; WP-12c).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Predecessor {
+    /// The census key the bars were copied from (still readable, kept).
+    pub(crate) of: String,
+    /// Why its expiry moved (`closed_day` or `vendor_redated`).
+    pub(crate) kind: &'static str,
+    /// Month files and bars copied, and the BLAKE3 of those bars' records in
+    /// write order, as the ledger line states them.
+    pub(crate) months: u64,
+    /// Bars copied.
+    pub(crate) bars: u64,
+    /// The digest, 64 lower-case hex digits.
+    pub(crate) blake3: String,
+}
+
+/// The lineage ledger, parsed: events by census key, the re-key's statuses
+/// by census key, its predecessors by the key they were copied into, and the
+/// lines that did not parse.
 #[derive(Debug, Clone, Default)]
 struct Ledger {
     events: HashMap<String, Vec<LineageEvent>>,
+    status: HashMap<String, KeyStatus>,
+    predecessors: HashMap<String, Vec<Predecessor>>,
     unreadable: usize,
 }
 
@@ -256,9 +295,15 @@ impl Rules {
     }
 
     /// The phase of instant `ts` on IST day `day`, for this series' venue.
+    ///
+    /// A rung finer than a minute is labelled to the SECOND
+    /// (`calendar::phase_at_second`, DB-B43): a halt begins mid-minute
+    /// (09:21:10 for the index on 2020-03-13) and its flat seconds are
+    /// halted, never `continuous`.
     fn phase_at(&self, day: i64, ts: i64) -> Option<Phase> {
         let venue = self.venue?;
-        let minute = u16::try_from((ts - day_start(day)).div_euclid(60 * MICROS)).ok()?;
+        let since = ts - day_start(day);
+        let minute = u16::try_from(since.div_euclid(60 * MICROS)).ok()?;
         // ELIGIBILITY IS READ ONLY WHERE THE PHASE DEPENDS ON IT: a share,
         // from the closing auction's first minute on.
         let cas = if venue == Venue::NseCash && minute >= calendar::CAS_CONTINUOUS_CLOSE {
@@ -266,6 +311,10 @@ impl Rules {
         } else {
             CasEligibility::Unknown
         };
+        if self.rung_micros < 60 * MICROS {
+            let second = u32::try_from(since.div_euclid(MICROS)).ok()?;
+            return Some(calendar::phase_at_second(venue, day, second, cas));
+        }
         Some(calendar::phase_at(venue, day, minute, cas))
     }
 
@@ -406,6 +455,23 @@ impl Lineage {
         }
     }
 
+    /// What the re-key's records say of census key `key`, if anything. One
+    /// hash probe.
+    pub(crate) fn status_of(&self, key: &str) -> Option<&KeyStatus> {
+        self.ledger
+            .as_ref()
+            .and_then(|ledger| ledger.status.get(key))
+    }
+
+    /// The stored keys whose bars the re-key copied into census key `key`,
+    /// in ledger order; empty for every other key. One hash probe.
+    pub(crate) fn predecessors_of(&self, key: &str) -> &[Predecessor] {
+        self.ledger
+            .as_ref()
+            .and_then(|ledger| ledger.predecessors.get(key))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The events of census key `key`.
     fn events_of(&self, key: &str) -> Vec<LineageEvent> {
         self.ledger
@@ -416,14 +482,53 @@ impl Lineage {
 }
 
 /// The ledger's `lineage` and `stitched` records, by the key whose first
-/// post-ex bar they label. `alias` records are the decoder's, not a read's.
+/// post-ex bar they label, and the re-key's `superseded` and `retired`
+/// records by the key they name. `alias` records are the decoder's, not a
+/// read's.
+///
+/// A superseded key's events also label the key it continues as: its bars
+/// are there now, at the same instants (D-3331; WP-12c).
 fn parse_ledger(text: &str) -> Ledger {
     let mut ledger = Ledger {
         events: HashMap::with_capacity(64),
+        status: HashMap::with_capacity(16),
+        predecessors: HashMap::with_capacity(16),
         unreadable: 0,
     };
+    let mut moved: Vec<(String, String)> = Vec::with_capacity(16);
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         if line.starts_with("alias ") {
+            continue;
+        }
+        if let Some(record) = pull::gdfl_lineage::SupersededRecord::parse(line) {
+            let old = pull::gdfl_lineage::option_key(record.underlying, record.old);
+            let by = pull::gdfl_lineage::option_key(record.underlying, record.new);
+            moved.push((old.clone(), by.clone()));
+            ledger
+                .predecessors
+                .entry(by.clone())
+                .or_default()
+                .push(Predecessor {
+                    of: old.clone(),
+                    kind: record.kind.as_str(),
+                    months: record.months,
+                    bars: record.bars,
+                    blake3: record.digest_hex(),
+                });
+            let _ = ledger.status.insert(
+                old,
+                KeyStatus::Superseded {
+                    by,
+                    kind: record.kind.as_str(),
+                },
+            );
+            continue;
+        }
+        if let Some(record) = pull::gdfl_lineage::RetiredRecord::parse(line) {
+            let _ = ledger.status.insert(
+                pull::gdfl_lineage::option_key(record.underlying, record.key),
+                KeyStatus::Retired(record.refusal()),
+            );
             continue;
         }
         if let Some(record) = pull::gdfl_lineage::LineageRecord::parse(line) {
@@ -450,11 +555,59 @@ fn parse_ledger(text: &str) -> Ledger {
                     ex_start: day_start(i64::from(record.ex_date.days_from_epoch())),
                     oi_until: 0,
                 });
-        } else {
+        } else if pull::gdfl_lineage::EventRecord::parse(line).is_none()
+            && pull::gdfl_lineage::StoppedRecord::parse(line).is_none()
+        {
+            // An `event` and a `stopped` record (D-3355) are read and label
+            // no bar: a stopped key's next contract, if one ever trades
+            // under it, is a `stitched` record, which does.
             ledger.unreadable = ledger.unreadable.saturating_add(1);
         }
     }
+    for (old, by) in moved {
+        if let Some(events) = ledger.events.get(&old).cloned() {
+            ledger.events.entry(by).or_default().extend(events);
+        }
+    }
     ledger
+}
+
+/// The refusal a reader answers a RETIRED key of `vendor` with (D-3331;
+/// WP-12c), or `None` for every other key: one `stat` of the ledger and one
+/// hash probe, through the same memo the window reads it by. A ledger that
+/// will not read refuses nothing here; the window route names its fault.
+pub(in crate::bars) fn retired_refusal(root: &Path, vendor: Vendor, key: &str) -> Option<String> {
+    match Lineage::read(root, vendor).status_of(key) {
+        Some(KeyStatus::Retired(why)) => Some(why.clone()),
+        Some(KeyStatus::Superseded { .. }) | None => None,
+    }
+}
+
+/// The sentence an AUDIT reader (`/provenance.json`) adds about a key the
+/// re-key moved, copied into or retired (D-3331; WP-12c), or `None` for any
+/// other key: the provenance of a copied month is the import of the key it
+/// was copied from, and a reader must be told so rather than read the import
+/// days as this key's own. One `stat` of the ledger and two hash probes.
+pub(in crate::bars) fn rekey_note(root: &Path, vendor: Vendor, key: &str) -> Option<String> {
+    let lineage = Lineage::read(root, vendor);
+    let mut said: Vec<String> = Vec::with_capacity(2);
+    match lineage.status_of(key) {
+        Some(KeyStatus::Superseded { by, kind }) => said.push(format!(
+            "{key} is superseded by {by} ({kind}, D-3331): `cli gdfl-rekey` copied its bars \
+             there as new month files; these files are kept exactly as they were"
+        )),
+        Some(KeyStatus::Retired(why)) => said.push(why.clone()),
+        None => {}
+    }
+    for one in lineage.predecessors_of(key) {
+        said.push(format!(
+            "the bars of {} were copied into {key} by `cli gdfl-rekey` ({}, D-3331; {} bar(s) in \
+             {} month file(s), BLAKE3 {} in imports/gdfl.lineage): the import days below are \
+             the days {} was imported on, and the copy landed when this file was last modified",
+            one.of, one.kind, one.bars, one.months, one.blake3, one.of
+        ));
+    }
+    (!said.is_empty()).then(|| said.join("; "))
 }
 
 /// What the window's tests read of the ledger parse.
@@ -464,5 +617,17 @@ pub(super) mod for_tests {
     pub(in crate::bars) fn ledger_counts(text: &str) -> (usize, usize) {
         let ledger = super::parse_ledger(text);
         (ledger.events.len(), ledger.unreadable)
+    }
+
+    /// The re-key status of `key` in a ledger text, and the events it labels.
+    pub(in crate::bars) fn ledger_status(
+        text: &str,
+        key: &str,
+    ) -> (Option<super::KeyStatus>, usize) {
+        let ledger = super::parse_ledger(text);
+        (
+            ledger.status.get(key).cloned(),
+            ledger.events.get(key).map_or(0, Vec::len),
+        )
     }
 }

@@ -144,6 +144,14 @@ fn settled(under: &str, stated: Day, on: Day) -> Result<Day, crate::expiry_alias
 
 /// Whether a decoded ticker's name is the canonical spelling of its
 /// contract: since D-3161 refuses padded fractions, the only spelling.
+/// ADAPTED (WP-12e; D-3333): whether `under` is a symbol the exchange was
+/// NOT using on `on` (a new symbol before its dated change, or an old one on
+/// or after it). Such a name is refused as `UnderlyingStale`, never filed.
+fn stale(under: &str, on: Day) -> bool {
+    brutex_core::symbol::Symbol::new(under)
+        .is_ok_and(|symbol| crate::gdfl_lineage::filed_underlying(symbol, on).is_err())
+}
+
 fn reencodes(ticker: &str, got: &OptionTicker) -> bool {
     reencode(got) == ticker
 }
@@ -312,12 +320,19 @@ fn dpn_02_no_monthly_name_before_the_cutover_decodes_to_another_contract() {
                         expired += 1;
                     }
                     NfoRefusal::TickerAmbiguous { .. } => ambiguous += 1,
-                    NfoRefusal::UnderlyingRefused { .. } => {
+                    // ADAPTED (WP-12e): a name for a symbol the exchange
+                    // was not using that day is refused by name.
+                    NfoRefusal::UnderlyingRefused { .. } | NfoRefusal::UnderlyingStale { .. } => {
                         other += 1;
                     }
                     why => panic!("{ticker} on {on}: {why:?}"),
                 }
-                if reference.is_some() && !matches!(why, NfoRefusal::TickerAmbiguous { .. }) {
+                if reference.is_some()
+                    && !matches!(
+                        why,
+                        NfoRefusal::TickerAmbiguous { .. } | NfoRefusal::UnderlyingStale { .. }
+                    )
+                {
                     missed.push(format!("{ticker} on {on}: {why:?}"));
                 }
             }
@@ -403,6 +418,9 @@ fn monthly_reference(ticker: &str, on: Day) -> Option<(String, String)> {
             return None;
         }
         let under = std::str::from_utf8(&b[..at]).ok()?.to_owned();
+        // ADAPTED (D-3331, WP-12e): keyed on the SETTLED day, as every
+        // dated reading is; a monthly day a row re-dates is that row's.
+        let expiry = settled(&under, expiry, on).unwrap_or(expiry);
         return Some((under, segment(expiry, paisa, call)));
     }
     None
@@ -595,6 +613,7 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
                                 before_share_monthly += 1;
                             }
                             Ok(got) => {
+                                assert!(!stale(under, on), "{name} on {on}");
                                 assert_eq!(got.underlying.as_str(), under, "{name} on {on}");
                                 // ADAPTED (D-3331): keyed on the SETTLED day.
                                 let settles = settled(under, expiry, on).unwrap();
@@ -615,6 +634,12 @@ fn dpn_04_every_dated_name_round_trips_or_is_refused_by_name() {
                                 assert_eq!(ticker, name);
                                 assert_eq!(settled(under, expiry, on), Err(why), "{name} on {on}");
                                 unsettled += 1;
+                            }
+                            // ADAPTED (WP-12e): refused exactly when the
+                            // exchange was not using the symbol that day.
+                            Err(NfoRefusal::UnderlyingStale { ticker, .. }) => {
+                                assert_eq!(ticker, name);
+                                assert!(stale(under, on), "{name} on {on}");
                             }
                             Err(why) => {
                                 assert!(on < cutover(), "{name} on {on}: {why}");
@@ -675,6 +700,15 @@ fn dpn_04b_every_measured_re_dating_decodes_to_its_settled_contract() {
             .map_or_else(|| FNO_UNDERLYINGS.to_vec(), |u| vec![u]);
         for under in unders {
             let name = encode(under, stated, 7_750, true);
+            // ADAPTED (WP-12e): the every-underlying row meets symbols the
+            // exchange was not using yet on its day.
+            if stale(under, on) {
+                assert!(matches!(
+                    decode_ticker(&name, on),
+                    Err(NfoRefusal::UnderlyingStale { .. })
+                ));
+                continue;
+            }
             let got = decode_ticker(&name, on).unwrap();
             assert_eq!(
                 got.contract.as_str(),
@@ -878,7 +912,18 @@ fn dpn_08_every_underlying_with_decimal_and_extreme_strikes() {
     // retired on 2024-03-01 (re-dated to the 24th); a day no row touches.
     let expiry = d(2024, 4, 18);
     let mut tried = 0;
+    let mut not_in_use = 0;
     for under in FNO_UNDERLYINGS {
+        // ADAPTED (WP-12e): a symbol the exchange adopted after this day.
+        if stale(under, on) {
+            let name = encode(under, expiry, 7_750, true);
+            assert!(matches!(
+                decode_ticker(&name, on),
+                Err(NfoRefusal::UnderlyingStale { .. })
+            ));
+            not_in_use += 1;
+            continue;
+        }
         for paisa in [
             1_i64,
             5,
@@ -912,7 +957,8 @@ fn dpn_08_every_underlying_with_decimal_and_extreme_strikes() {
             "{wide}"
         );
     }
-    assert_eq!(tried, FNO_UNDERLYINGS.len() * 20);
+    assert_eq!(tried, (FNO_UNDERLYINGS.len() - not_in_use) * 20);
+    assert_eq!(not_in_use, 6, "the symbols adopted after 2024-04-01");
     // A zero strike is no strike.
     assert!(decode_ticker("X25APR240CE", on).is_err());
     assert!(decode_ticker("X25APR240.0CE", on).is_err());

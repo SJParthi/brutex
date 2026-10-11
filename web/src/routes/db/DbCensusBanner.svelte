@@ -2,11 +2,21 @@
   /**
    * /db — THE CENSUS CLIENT, ITS LOADING SKELETON AND ITS BANNER
    *
-   * The page's reading of `/store.json` (`censusState`) and what the page draws
+   * The page's reading of `/store.json` (`censusState`), what the page draws
    * while that reading is in flight (`censusLoading`, the skeleton the shell
-   * renders in its loading branch). The banner that will name a capped, degraded
-   * or behind census renders nothing yet; it is mounted at the top of the pane,
-   * above every state.
+   * renders in its loading branch), and THE BANNER (WP-56, D-3327), mounted at
+   * the top of the pane above every state. The banner says:
+   *
+   *   - when the census on screen was read, and at which generation — the
+   *     page is a snapshot, and said nowhere that it was (DB-022);
+   *   - that the store moved after that read, from a header-only HEAD of the
+   *     census every few seconds, and what moved for the instrument on screen
+   *     (`/census/facets.json?since=`, O(changes)), with Refresh (DB-022);
+   *   - a census that is `capped` or `behind` its import, in the server's own
+   *     sentence, with its capacity, its headroom and the import days it
+   *     refused (DB-G03, DB-G11, DB-G60, DB-G78);
+   *   - a census this page decoded or prepared on its own thread because no
+   *     worker could, and why (DB-G84).
    *
    * Every line below was MOVED out of `routes/db/+page.svelte` by WP-00 (the /db
    * page split). The only edits to a moved line are the ones the move needs: a
@@ -19,11 +29,17 @@
    *
    * Owner after WP-00: WP-56 (census client: facets, worker, refresh, lag banner).
    */
-  import { store, syncStore, surveyStores, survey } from '$lib/store.svelte.js';
+  import { untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { store, syncStore, wholeStore, surveyStores, survey, refreshStore, watchCensus, checkCensusHead, facets } from '$lib/store.svelte.js';
+  import { decodeDb, DB_DEFAULTS } from '$lib/urlstate.js';
+  import { linkOfKey, DEFAULT_INSTRUMENT } from '$lib/db/selection-model.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { denominators } from '$lib/completeness.js';
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
   import { instrumentMemo, databasePreparation } from '$lib/database-preparation.js';
+  import { yieldTask, inSlices } from '$lib/census-worker.js';
+  import { censusMoved, sinceFor, censusLines, movedLines, refreshText, searchRefreshes, scopeNeed, scopeWanted } from '$lib/store-census.js';
   import { fmt } from '$lib/db/notes-labels.js';
   import { COLS } from '$lib/db/notes-coverage.js';
   import { SKELETON } from '$lib/db/bars-plan.js';
@@ -58,9 +74,24 @@
        `rows` IS THE RAW ARRAY, exactly what the wire sent — this page reads ten
        fields off a row and derives its own denominators, so it takes the array
        and not the census's normalised view of it. */
-    const rows = $derived(store.feed === feeds.active ? store.rows : []);
-    /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>}|null,why:string|null}} */
-    let prepared = $state.raw({ input: null, body: null, why: null });
+    const live = $derived(store.feed === feeds.active ? store.rows : []);
+    /** @type {{input:StoreRow[]|null,body:{rows:DecoRow[],observed:ReturnType<typeof denominators>,prefix:Map<string,DecoRow[]>,heldNames:number|null}|null,why:string|null,scope:import('$lib/store-census.js').CensusScope|null,feed:string|null}} */
+    let prepared = $state.raw({ input: null, body: null, why: null, scope: null, feed: null });
+    /* ONE INSTRUMENT'S ROWS STAY ON SCREEN WHILE THE WHOLE CENSUS IS PREPARED
+       BEHIND THEM (WP-56b). The first paint is drawn from the census rows of
+       the instrument on screen (`store.scope`, `readScope`); when the whole
+       census then lands, decorating its rows takes about a second on GDFL,
+       and blanking the page for it would take away the control the reader
+       had just reached for. `behind` is true for exactly that interval: the
+       store holds the whole census, the page still shows the instrument's
+       prepared rows, and the banner still says so. */
+    const behind = $derived(
+      prepared.scope !== null && prepared.body !== null && prepared.feed === feeds.active &&
+        store.scope === null && live.length > 0 && prepared.input !== live
+    );
+    const rows = $derived(behind ? /** @type {StoreRow[]} */ (prepared.input) : live);
+    /** The scope of the rows ON SCREEN, or null when they are the whole census. */
+    const shownScope = $derived(behind ? prepared.scope : store.feed === feeds.active ? store.scope : null);
     const preparing = $derived(rows.length > 0 && (prepared.input !== rows || (!prepared.body && !prepared.why)));
     const error = $derived(store.error ?? (prepared.input === rows ? prepared.why : null));
     /* A READING THIS FEED HAS NOT ANSWERED FOR YET IS STILL "IN FLIGHT", even in
@@ -118,7 +149,72 @@
        rather than by care: the shared reading CLEARS its value on a feed change
        before the request leaves, and `rows` above refuses to hand back anything
        the reading did not stamp with this feed. */
-    $effect(() => syncStore(feeds.active));
+    /* THE INSTRUMENT THE FIRST PAINT IS FOR (WP-56b): the one the address
+       bar names, else the page's opening instrument (operator answer 11).
+       Read once. The Coverage grid lists every instrument, so a link that
+       opens on it asks for the whole census from the start. */
+    /** @type {import('$lib/store-census.js').ScopeWanted | null | undefined} */
+    let first;
+    /* THE FEED `first` WAS WORKED OUT FOR. A feed chosen later is asked for
+       the instrument on screen then, never for the page's opening one (the
+       second check's follow-up): `scopeWanted` decides, and is tested. */
+    /** @type {string | null | undefined} */
+    let firstFeed;
+    const firstScope = () => {
+      const { sel } = decodeDb(page.url.search);
+      if (sel.view && sel.view !== DB_DEFAULTS.view) return null;
+      const link = sel.key ? linkOfKey(sel.key) : null;
+      return { underlying: sel.sym ?? link?.sym ?? DEFAULT_INSTRUMENT, expiry: sel.exp ?? link?.expiry ?? null };
+    };
+    $effect(() => {
+      const f = feeds.active;
+      if (first === undefined) {
+        first = untrack(firstScope);
+        firstFeed = f;
+      } else if (f && firstFeed && f !== firstFeed) {
+        first = untrack(() => scopeWanted({ view: db.view, defaultView: DB_DEFAULTS.view,
+          filter: db.filter, expiry: db.expiry, fallback: DEFAULT_INSTRUMENT }));
+        firstFeed = f;
+      } else if (f && !firstFeed) {
+        firstFeed = f;
+      }
+      syncStore(f, first);
+    });
+
+    /* WHAT NEEDS EVERY ROW ASKS FOR EVERY ROW (WP-56b), and says why in the
+       refresh log: the Coverage grid, an instrument other than the one read,
+       a selection the rows read do not hold (a segment or an expiry that was
+       not listed). Waited 60 ms and re-armed on every change, so a rung the
+       seeds are still filling is not mistaken for an empty selection. */
+    /* `shownScope`, NOT `store.scope`: the scope of the rows ON SCREEN. While
+       the whole census is prepared behind one instrument's rows (`behind`)
+       the store already holds the whole census and the page still draws the
+       instrument's rows, and a grid drawn from them said 'No
+       instrument-month matches' for the 0.3 s the preparation took (seen in
+       headless Chrome on the real store, fix-WP-56b-r2-cdp.mjs M). */
+    const need = $derived(scopeNeed({ scope: shownScope, view: db.view, defaultView: DB_DEFAULTS.view,
+      filter: db.filter, kind: db.kind, reconciling: db.reconciling, matched: db.matched.length }));
+    /* THE SELECTION ON SCREEN IS NOT IN THE ROWS READ (WP-56b, the second
+       check's blocking 2): one instrument's rows cannot say the store holds
+       none of it, so the page shows its reading state (`+page.svelte`) from
+       this moment until the whole census has landed, and the grid's 'No
+       instrument-month matches this query' is never drawn from a scope. */
+    const scopeMissing = $derived(shownScope !== null && need?.missing === true);
+    $effect(() => {
+      const scope = store.scope;
+      if (!scope || store.feed !== feeds.active || store.state !== 'ready' || preparing || deco.length === 0) return;
+      const why = need?.why ?? null;
+      if (why === null) return;
+      const timer = setTimeout(() => void wholeStore(why), 60);
+      return () => clearTimeout(timer);
+    });
+    /** A control outside the bar rows was reached for: its lists need every row. */
+    const reach = (/** @type {Event} */ event) => {
+      if (store.scope === null) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-census-rows]')) return;
+      void wholeStore('a control outside the bar rows was used');
+    };
 
     $effect(() => {
       const f = feeds.active;
@@ -178,24 +274,163 @@
 
     const deco = $derived(prepared.input === rows ? prepared.body?.rows ?? [] : []);
 
+    /* THE PREPARATION — DECORATED ROWS AND DENOMINATORS, NO PREFIX INDEX.
+       ----------------------------------------------------------------------
+       In slices of 1,024 rows (about 2 ms of decoration each), each followed
+       by a real task (`yieldTask`). The old default, `scheduler.yield`,
+       resumes AHEAD of timers and input, so a "yielding" preparation still
+       froze the page for over two seconds (DB-G84). The census worker parses
+       and decodes; decorating there and sending the rows back cost more than
+       decorating here in slices (`$lib/census-worker.js` has the figures).
+
+       NO PREFIX TOKENS (DB-B52): every row used to be filed under four
+       prefixes of four tokens — 4,586,125 references, the largest bucket
+       holding every row, about 8 times the preparation's time and 42 MB of
+       heap — for a search box WP-51 replaced and nothing reads. The empty
+       map stays the shape `DbSearch.svelte`'s unpublished `index` reads.
+
+       THE NAMES HELD (DB-N07) are counted in the same slices, so the
+       Everything universe row counts underlyings like every other row. */
     $effect(() => {
-      const input = rows;
+      const input = live;
+      const scope = store.feed === feeds.active ? store.scope : null;
+      const stated = store.observed;
+      const feed = feeds.active;
       const controller = new AbortController();
-      prepared = { input, body: null, why: null };
+      // THE WHOLE CENSUS BEHIND ONE INSTRUMENT'S ROWS is prepared without
+      // taking those rows off the screen (`behind`, above); every other
+      // input replaces what was prepared before it, as it always did.
+      const before = untrack(() => prepared);
+      const keep = scope === null && input.length > 0 && before.scope !== null && before.body !== null && before.feed === feed;
+      if (!keep) prepared = { input, body: null, why: null, scope, feed };
       if (input.length > 0) {
         const describe = instrumentMemo(instrumentDescription);
-        // Preparation starts after a yield and stays outside reactive dependency
-        // tracking. Publish only one complete immutable snapshot for this input.
-        void databasePreparation.read(input, (row, observed) => decorateRow(row, observed, describe(row.instrument)), {
-          signal: controller.signal, tokens: row => [row.instrument, row.sym, row.underlying, row.month]
-        }).then(body => {
-          if (!controller.signal.aborted) prepared = { input, body, why: null };
-        }).catch(why => {
-          if (!controller.signal.aborted) prepared = { input, body: null, why: `Database view preparation failed: ${String(why)}` };
+        const work = scope !== null && stated !== null
+          /* ONE INSTRUMENT'S ROWS, AGAINST THE FEED'S OWN DENOMINATORS
+             (WP-56b): the fullest row and the key count of each (month,
+             rung) are the server's, counted over the whole census, so a
+             row's shortfall here is the number the whole census gives.
+             The names held are NOT counted from one instrument: `null`. */
+          ? (async () => {
+            /** @type {DecoRow[]} */
+            const out = new Array(input.length);
+            await inSlices(input.length, (start, end) => {
+              for (let i = start; i < end; i++) out[i] = decorateRow(input[i], stated, describe(input[i].instrument));
+            }, controller.signal);
+            return { rows: out, observed: stated, prefix: new Map(), heldNames: null };
+          })()
+          : databasePreparation.read(input, (row, observed) => decorateRow(row, observed, describe(row.instrument)), {
+            signal: controller.signal, yieldControl: yieldTask, chunkSize: 1024
+          }).then(async (body) => {
+            const names = new Set();
+            await inSlices(body.rows.length, (start, end) => {
+              for (let i = start; i < end; i++) names.add(body.rows[i].underlying);
+            }, controller.signal);
+            return { ...body, heldNames: names.size };
+          });
+        void work.then((body) => {
+          // Preparation stays outside reactive dependency tracking. Publish
+          // only one complete immutable snapshot for this input.
+          if (!controller.signal.aborted) prepared = { input, body, why: null, scope, feed };
+        }).catch((why) => {
+          if (!controller.signal.aborted) prepared = { input, body: null, why: `Database view preparation failed: ${String(why)}`, scope, feed };
         });
       }
       return () => controller.abort();
     });
+
+    /* ======================================================================
+       THE SNAPSHOT AND WHAT MOVED SINCE (DB-022)
+       ====================================================================== */
+    /* THE GENERATION WATCH: a HEAD of the census every few seconds while the
+       tab is visible, released when the page goes or the feed changes. */
+    $effect(() => watchCensus(feeds.active));
+
+    const moved = $derived(store.feed === feeds.active ? censusMoved({ feed: store.feed, lag: store.lag }, store.head) : null);
+
+    /* WHAT MOVED FOR THE INSTRUMENT ON SCREEN, at O(changes): the facets of
+       its underlying in each segment whose part moved, asked `since` the part
+       generation this page READ. Asked once per new generation the HEAD
+       reports, never per tick. */
+    let selectionDelta = $state.raw(/** @type {{key: string, answers: any[]} | null} */ (null));
+    $effect(() => {
+      const m = moved;
+      const underlying = db.picked;
+      const feed = store.feed;
+      const lag = store.lag;
+      if (!m || !underlying || !feed || !lag) {
+        selectionDelta = null;
+        return;
+      }
+      // WHICH SEGMENTS TO ASK. A partitioned census names the parts that
+      // moved. A single file names none, and the segments it holds are the
+      // SERVER'S to state (the root answer, `/census/facets.json?feed=`):
+      // this page keeps no list of segments, so a new one needs no change
+      // here (WP-56b).
+      const key = `${feed}|${underlying}|${m.to}|${m.segments.join(',')}`;
+      if (selectionDelta?.key === key) return;
+      let live = true;
+      const asked = m.segments.length > 0
+        ? Promise.resolve({ segments: m.segments, why: null })
+        : facets.root(feed).then(
+          (root) => (root.ok
+            ? { segments: root.body.segments.map((/** @type {any} */ row) => row.segment), why: null }
+            : { segments: [], why: root.reason ?? 'the feed\'s segments could not be read' }),
+          (why) => ({ segments: [], why: String(why?.message ?? why) }));
+      asked.then(({ segments, why }) => (why !== null
+        ? [{ ok: false, status: 0, query: { feed, segment: 'every segment', underlying }, reason: `which segments ${feed} holds could not be read (${why})`, body: null }]
+        : Promise.all(segments.map((/** @type {string} */ segment) => {
+        const since = sinceFor(lag, segment);
+        return since === null
+          ? Promise.resolve({ ok: false, status: 0, query: { feed, segment, underlying }, reason: 'this census names no generation for the segment, so no delta can be asked', body: null })
+          : facets.changesSince({ feed, segment, underlying }, since).catch((why) => ({ ok: false, status: 0, query: { feed, segment, underlying }, reason: String(why?.message ?? why), body: null }));
+      })))).then((answers) => {
+        if (live) selectionDelta = { key, answers };
+      });
+      return () => { live = false; };
+    });
+
+    /** The banner's lines, from the census headers and the watch. */
+    const banner = $derived.by(() => {
+      const feed = store.feed;
+      // ONE INSTRUMENT'S ROWS KEEP THEIR LINE while the whole census is read
+      // and prepared behind them: the page still shows them, so it says so.
+      const scope = shownScope;
+      const reading = scope !== null && (store.state === 'reading' || behind);
+      return feed !== null && feed === feeds.active && (store.state === 'ready' || reading)
+        ? censusLines({ feed, at: store.at, lag: store.lag, worker: store.worker, head: store.head, how: store.how,
+          scope, scopeWhy: store.scopeWhy, reading })
+        : [];
+    });
+    const movedSaid = $derived(store.feed === feeds.active && moved
+      ? movedLines(moved, store.head, store.at, db.picked ?? null, selectionDelta?.answers ?? null)
+      : []);
+
+    /** Distinct underlyings held — the unit every universe row counts (DB-N07). */
+    const heldNamesNow = $derived(prepared.input === rows ? prepared.body?.heldNames ?? null : null);
+
+    /* A LIVE FILE TOTAL IS NOT HELD AGAINST A SNAPSHOT (DB-022, WP-56b).
+       The grid compares the files' totals with the census rows only while
+       the watch says the census has NOT moved since this page read it
+       (`db.censusMoved === false`). The watch asks every five seconds, so a
+       difference may be a commit it has not seen yet: the moment one is
+       drawn, the census is asked again, once per difference. If it moved,
+       the "store moved" line replaces the warning and says what moved. */
+    let disagreeChecked = '';
+    $effect(() => {
+      const first = db.barDisagree?.[0];
+      const feed = store.feed;
+      if (!first || !feed || moved !== false) return;
+      const key = `${feed}|${first.key}|${first.file}|${first.census}`;
+      if (disagreeChecked === key) return;
+      disagreeChecked = key;
+      void checkCensusHead(feed);
+    });
+
+    /* THE REFRESH LOG, FILTERED (WP-56b): how every read of the census
+       ended, newest first, from the browser's storage. */
+    let refreshFilter = $state('');
+    const refreshesShown = $derived(searchRefreshes(store.refreshes, refreshFilter));
 
     Object.defineProperties(db, {
       rows: { get: () => rows },
@@ -203,11 +438,28 @@
       preparing: { get: () => preparing },
       error: { get: () => error },
       loading: { get: () => loading },
+      scopeMissing: { get: () => scopeMissing },
       fetchedAt: { get: () => fetchedAt },
       nonce: { get: () => nonce },
       loadedFeed: { get: () => loadedFeed, set: (v) => (loadedFeed = v) },
       elsewhere: { get: () => elsewhere },
-      deco: { get: () => deco }
+      deco: { get: () => deco },
+      heldNames: { get: () => heldNamesNow },
+      censusScope: { get: () => shownScope },
+      // WHAT A COUNT OF "THE STORE" IS COUNTED FROM while one instrument's
+      // rows are on screen (WP-56b): appended to every sentence that counts
+      // rows, so none of them states the store's total from one instrument.
+      censusScopeNote: { get: () => (shownScope
+        ? ` Counted from the census rows read for ${shownScope.underlying} alone: the whole census is not read yet.`
+        : '') },
+      censusReach: { get: () => reach },
+      readWholeCensus: { get: () => () => wholeStore('the reader asked for the whole census') },
+      censusMoved: { get: () => moved },
+      censusBanner: { get: () => banner },
+      censusMovedSaid: { get: () => movedSaid },
+      refreshCensus: { get: () => () => refreshStore() },
+      refreshFilter: { get: () => refreshFilter, set: (v) => (refreshFilter = v) },
+      refreshesShown: { get: () => refreshesShown }
     });
   }
 
@@ -219,8 +471,52 @@
   let { db } = $props();
 </script>
 
+<!-- THE BANNER. Every line is a fact the census headers or the watch
+     stated, in the server's own words where it has them; a line with
+     nothing to say is not drawn. `role="status"` for the quiet lines, an
+     alert for a census that cannot be called complete. -->
+{#if db.censusBanner.length || db.censusMovedSaid.length}
+  <section class="cbanner" aria-label="Census" data-census-rows>
+    {#each db.censusBanner as line (line.key)}
+      <p class="cline {line.tone}" role={line.tone === 'warn' ? 'alert' : 'status'}>{line.text}{#if line.key === 'read' && db.censusScope && store.state === 'ready' && store.scope}{' '}<button class="btn" onclick={() => db.readWholeCensus()}>Read the whole census now</button>{/if}</p>
+    {/each}
+    {#if db.censusMovedSaid.length}
+      <div class="cline moved" role="status">
+        <!-- ONE SPACE BETWEEN SENTENCES, IN THE TEXT ITSELF (WP-56b): the
+             spans were adjacent, so a reader (and a screen reader, and a
+             copy) got "…IST.Nothing changed". -->
+        {#each db.censusMovedSaid as line, i (line.key)}{i > 0 ? ' ' : ''}<span>{line.text}</span>{/each}
+        {' '}<button class="btn" onclick={() => db.refreshCensus()}>Refresh</button>
+      </div>
+    {/if}
+    <!-- THE REFRESH LOG (WP-56b): closed until asked for; every read of the
+         census this browser made, newest first, with a filter over its
+         sentences. A log that could not be saved says so. -->
+    {#if store.refreshes.length || store.refreshFault}
+      <details class="clog">
+        <summary>Census reads logged in this browser: {store.refreshes.length}</summary>
+        {#if store.refreshFault}<p class="cline warn" role="alert">{store.refreshFault[0].toUpperCase()}{store.refreshFault.slice(1)}.</p>{/if}
+        <label class="clog-find">Filter <input type="search" bind:value={db.refreshFilter} placeholder="whole, delta, failed, a feed, a reason…" /></label>
+        <p class="cline info" role="status">{db.refreshesShown.length} of {store.refreshes.length} shown, newest first.</p>
+        <ol class="clog-list">
+          {#each db.refreshesShown.slice(0, 50) as entry (`${entry.at}|${entry.feed}|${entry.kind}`)}
+            <li class={entry.kind === 'failed' || (entry.kind === 'whole' && entry.why) ? 'warn' : ''}>{refreshText(entry)}</li>
+          {/each}
+        </ol>
+        {#if db.refreshesShown.length > 50}<p class="cline info">The newest 50 are listed; narrow the filter to see older ones.</p>{/if}
+      </details>
+    {/if}
+  </section>
+{/if}
+
 
 {#snippet censusLoading(/** @type {any} */ db)}
+  {#if db.scopeMissing}
+    <!-- WHY THE PAGE IS READING AGAIN (WP-56b): said, not left as a bare
+         skeleton. One instrument's rows cannot say the store holds none of
+         the selection; the whole census can, and is being read. -->
+    <p class="inline-note" role="status" data-scope-missing>Reading the whole census of {db.feedName}: the rows read for one instrument do not list the selection on screen, and only the whole census can say whether the store holds it.</p>
+  {/if}
   {#if db.preparing}
     <p class="inline-note" role="status">Preparing the database view for {fmt(db.rows.length)} stored month rows… Totals appear after the complete snapshot is ready.</p>
   {/if}
@@ -316,6 +612,72 @@
 {/snippet}
 
 <style>
+  /* ---- THE BANNER ------------------------------------------------------
+     Above every state, one line per fact. Quiet lines (`info`) are the
+     snapshot stamp and where the census was decoded; `warn` is a census that
+     cannot be called complete; `moved` carries the Refresh it offers. */
+  .cbanner {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    padding: var(--s2) var(--s5);
+  }
+  .cline {
+    margin: 0;
+    font-size: var(--fs-xs);
+    line-height: var(--lh-base);
+    color: var(--faint);
+    word-break: break-word;
+  }
+  .cline.warn {
+    color: var(--ink);
+    background: var(--warn-soft);
+    border: 1px solid var(--warn);
+    border-radius: var(--r2);
+    padding: var(--s2) var(--s4);
+  }
+  .cline.moved {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2) var(--s4);
+    color: var(--ink);
+    background: var(--info-soft);
+    border: 1px solid var(--info);
+    border-radius: var(--r2);
+    padding: var(--s2) var(--s4);
+  }
+  .cline.moved .btn {
+    margin-left: auto;
+  }
+  /* The refresh log: closed by default, one line per read. */
+  .clog {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .clog summary {
+    cursor: pointer;
+  }
+  .clog-find {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    margin: var(--s2) 0;
+  }
+  .clog-find input {
+    flex: 1;
+    min-width: 0;
+  }
+  .clog-list {
+    margin: 0;
+    padding-left: var(--s5);
+    max-height: 30vh;
+    overflow-y: auto;
+  }
+  .clog-list li.warn {
+    color: var(--ink);
+  }
   /* Also in the shell, +page.svelte, where its reasons are written. */
   .board {
     flex: 1;

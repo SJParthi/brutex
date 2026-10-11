@@ -29,7 +29,10 @@ import { DB_PAGE_FILES, dbSource } from './database-page-fixture.js';
 const SHELL = '../src/routes/db/+page.svelte';
 // DbExtremes WAS FILLED BY ITS OWNER, WP-52 (DB-G95), and left this list in
 // the same change, as the note above asks; it stays mounted exactly once.
-const PLACEHOLDERS = ['DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge', 'DbChart'];
+// DbDayFlags and DbCalendar WERE FILLED BY WP-54 (DB-025, DB-012) the same way,
+// and DbProvenance and DbBasisBadge by WP-55 (DB-078, DB-A40, DB-017).
+const PLACEHOLDERS = ['DbChart'];
+const FILLED = ['DbExtremes', 'DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge'];
 const COMPONENTS = DB_PAGE_FILES.filter((path) => path.endsWith('.svelte'));
 
 /** The number of times `<Name {db} />` is written across the page's components. */
@@ -48,7 +51,7 @@ test('the shell stays under 400 lines', () => {
 });
 
 test('every placeholder is mounted exactly once, by a component of this page', () => {
-  for (const name of [...PLACEHOLDERS, 'DbExtremes']) assert.equal(mounts(name), 1, `${name} is mounted ${mounts(name)} times`);
+  for (const name of [...PLACEHOLDERS, ...FILLED]) assert.equal(mounts(name), 1, `${name} is mounted ${mounts(name)} times`);
   assert.equal(mounts('DbCensusBanner'), 1);
   assert.match(dbSource(SHELL), /<DbCensusBanner \{db\} \/>/);
 });
@@ -62,9 +65,10 @@ test('a placeholder renders nothing until its owner fills it', () => {
     assert.equal(ast.module ?? null, null, `${name} carries a module script`);
     assert.match(source, /let \{ db \} = \$props\(\);/, `${name} does not take the shared state`);
   }
-  // The census banner's markup is a placeholder too; it already owns the
-  // census state and the loading snippet the shell renders, and nothing else.
-  assert.deepEqual(drawn(dbSource('../src/routes/db/DbCensusBanner.svelte')).map((/** @type {any} */ node) => node.type), ['SnippetBlock']);
+  // The census banner was a placeholder too (state and the loading snippet
+  // only). WP-56 filled it: its markup is the banner, drawn only when it has
+  // a line to say, and the loading snippet the shell renders.
+  assert.deepEqual(drawn(dbSource('../src/routes/db/DbCensusBanner.svelte')).map((/** @type {any} */ node) => node.type), ['IfBlock', 'SnippetBlock']);
 });
 
 test('every file of the page is in the fixture, so a source test reads the whole page', () => {

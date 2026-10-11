@@ -68,6 +68,9 @@
   import * as prefix from '$lib/prefix.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { mastersStatusRefused } from '$lib/masters-status.js';
+  // THE COLLIDED NAMES AND THE ROW'S SENTENCE (DB-G27), and where the list of
+  // symbols came from: a master, or GDFL's census (it ships no master).
+  import { candidatesOf, noteOf, listedFrom } from '$lib/mapping-row.js';
 
   /* ====================================================================
      THE PAYLOAD
@@ -485,18 +488,10 @@
 
   /** @param {any} row */
   function note(row) {
-    if (row.kind === 'ambiguous') {
-      return `${row.candidates} published names accept this abbreviation. Picking one would be a guess.`;
-    }
-    if (row.kind === 'absent') {
-      return 'No published name accepts it. Either the vendor reordered the words, dropped a number the name carries, or this is not an NSE index at all.';
-    }
-    if (row.kind === 'abbreviation') return 'Shortens exactly one published name.';
-    if (row.kind === 'aliased') {
-      return `This engine renamed it. The exchange publishes the vendor's own name for it, and the store keys on ${row.symbol} instead.`;
-    }
-    return 'The symbol is the published name.';
+    return noteOf(row);
   }
+
+  const source = $derived(listedFrom(join));
 </script>
 
 <svelte:head><title>Mapping · brutex</title></svelte:head>
@@ -533,8 +528,8 @@
         <span class="s">Index names on the exchange's own list.</span>
       </div>
       <div class="cell rise">
-        <span class="n">{listed}</span><span class="k">Listed by feed</span>
-        <span class="s">Index symbols in this feed's master.</span>
+        <span class="n">{listed}</span><span class="k">{source.label}</span>
+        <span class="s">{source.sentence}</span>
       </div>
       <div class="cell p rise">
         <span class="n">{verbatim}</span><span class="k">Confirmed</span>
@@ -609,7 +604,16 @@
                   </span>
                 </td>
                 <td class="nse">{row.nse ?? '—'}</td>
-                <td class="note">{note(row)}</td>
+                <td class="note">
+                  {note(row)}
+                  {#if candidatesOf(row)?.names.length}
+                    <ul class="cands" aria-label="Published names that accept {row.symbol}">
+                      {#each candidatesOf(row)?.names ?? [] as name (name)}
+                        <li class:chosen={row.nse === name}>{name}{row.nse === name ? ' — chosen by the alias table' : ''}</li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -1307,4 +1311,13 @@
     padding: var(--s2) 0;
   }
   .none summary:hover { color: var(--n9); }
+  .cands {
+    margin: 4px 0 0;
+    padding-left: 16px;
+    font-size: 12px;
+    color: var(--text-2, inherit);
+  }
+  .cands li.chosen {
+    font-weight: 600;
+  }
 </style>

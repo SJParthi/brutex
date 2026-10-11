@@ -63,8 +63,9 @@
 //! **Re-checked 2026-10-09 against the same zips** by the ignored test
 //! `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
 //! (names only, from each day zip's central directory: 1,997 vendor days,
-//! 20,825,673 file-days): the table re-keys exactly 14,835 distinct names, its
-//! own `contracts` total, in 276,971 file-days; no two names of one vendor
+//! 20,825,673 file-days): the table of that day re-keyed exactly 14,835
+//! distinct names, its own `contracts` total, in 276,971 file-days (14,860
+//! and 277,220 with DB-B01's ten rows, by the name census); no two names of one vendor
 //! day settle on one contract; no name is refused as unsettled; and the
 //! closed-day rule answers no name of the archive, because every closed
 //! stated day it holds is a row.
@@ -72,7 +73,51 @@
 //! **What the table does not claim.** Exchange circulars for these re-datings
 //! are not recorded in `docs/00-charter.md`; the source of every row is the
 //! vendor's own rename, measured. A recorded circular would upgrade a row's
-//! standing (D-3331); none is recorded.
+//! standing (D-3331); one is read (below), none is recorded in the charter.
+//!
+//! # The texts that stopped BEFORE the rename day (DB-B01, WP-12e)
+//!
+//! The measuring rule above writes a row only when every name of a text
+//! stops on one vendor day and reappears on the next. A thinly traded text
+//! whose last trade fell earlier got no row, so past its rename each piece
+//! stayed a separate contract. Ten such texts, 25 names, are rows now, each
+//! dated to the rename day of ITS UNDERLYING'S REGIME CHANGE (the day the
+//! underlying's other texts moved, already rows above), not to its own last
+//! trade:
+//!
+//! * five NIFTY half-yearly texts, re-dated from 2025-08-01. These are
+//!   SOURCED: NSE circular `NSE/FAOP/68747` (25 Jun 2025,
+//!   <https://nsearchives.nseindia.com/content/circulars/FAOP68747.pdf>),
+//!   annexure, lists `24-Jun-27` to `29-Jun-27`, `29-Jun-28` to `27-Jun-28`,
+//!   `28-Dec-28` to `26-Dec-28`, `28-Jun-29` to `26-Jun-29` and `27-Dec-29`
+//!   to `24-Dec-29` beside the six already rows. Read by the audit and its
+//!   second agent (2026-10-10); recorded in `docs/00-charter.md`, "NSE F&O
+//!   circulars read for the options lineage" (D-3358);
+//! * four FINNIFTY texts of 2021-10-18 and one MIDCPNIFTY text of 2023-08-17.
+//!   These are INFERRED, cause UNVERIFIED: the underlying's whole weekday
+//!   moved that day (its other texts are measured rows), and the successor is
+//!   the same week's new weekday. Names, last trades and reappearing strikes
+//!   are in each row's comment; `FINNIFTY 18NOV21` has one name and no strike
+//!   of it traded under `16NOV21`, so that row rests on the weekday move
+//!   alone.
+//!
+//! Re-measured 2026-10-11 from the name census (names only): 5, 2, 8, 2 and
+//! 1 NIFTY names; 2, 2, 1 and 1 FINNIFTY names; 1 MIDCPNIFTY name; none of
+//! them traded on or after its rename day.
+//!
+//! # A scheme of arrangement expires contracts EARLY (DB-B03, WP-12e)
+//!
+//! On a demerger NSE expires every open contract of the security on the
+//! cum-date and lists the same expiries again from the ex-date. The stated
+//! text cannot tell the two generations apart. [`EARLY_SETTLEMENTS`] holds
+//! the SOURCED cases (one: VEDL, `NSE/FAOP/73857`), and [`settle`] answers a
+//! trade day before the ex-date with [`Settlement::ExpiredEarly`]: the
+//! identity stays the stated expiry (three stated expiries expired on one
+//! cum-date; keying them by it would file three contracts under one key),
+//! and the row names the day the generation really expired, which is what a
+//! days-to-expiry reader must measure to. A demerger with no recorded
+//! circular is not a row; `crate::gdfl_lineage::detect` finds its generation
+//! break from the names and marks it measured.
 //!
 //! # What is refused, by name
 //!
@@ -215,7 +260,7 @@ const fn chained(
 }
 
 /// How many rows [`ALIASES`] holds: the bound of every walk over it.
-pub const ALIAS_ROWS: usize = 39;
+pub const ALIAS_ROWS: usize = 49;
 
 /// Every measured re-dating (module doc). Grouped by the vendor day the
 /// rename happened; `contracts` is the count of distinct names carrying the
@@ -365,7 +410,108 @@ pub const ALIASES: [ExpiryAlias; ALIAS_ROWS] = [
         (2025, 12, 29),
         15,
     ),
+    // ---- WP-12e: the texts that stopped before their rename day. Appended,
+    // so every earlier row keeps its place.
+    // DB-B01. Four FINNIFTY texts that stopped before the 2021-10-18 move
+    // (last trades 2021-10-04..10-14; module doc). INFERRED from the
+    // underlying's weekday move, cause UNVERIFIED. `03NOV21` is the Wednesday
+    // the Thursday weekly was stated on; 1 of its 2 strikes, 2 of 2 of
+    // `11NOV21` and 1 of 1 of `30DEC21` traded under the successor; `18NOV21`
+    // (1 name) has none.
+    redated("FINNIFTY", (2021, 11, 3), (2021, 11, 2), (2021, 10, 18), 2),
+    redated("FINNIFTY", (2021, 11, 11), (2021, 11, 9), (2021, 10, 18), 2),
+    redated(
+        "FINNIFTY",
+        (2021, 11, 18),
+        (2021, 11, 16),
+        (2021, 10, 18),
+        1,
+    ),
+    redated(
+        "FINNIFTY",
+        (2021, 12, 30),
+        (2021, 12, 28),
+        (2021, 10, 18),
+        1,
+    ),
+    // DB-B01. One name, last traded 2023-08-16, the day before the move; its
+    // strike traded under `25SEP23` from 2023-08-23. INFERRED, cause
+    // UNVERIFIED.
+    redated("MIDCPNIFTY", (2023, 9, 27), (2023, 9, 25), (2023, 8, 17), 1),
+    // DB-B01. The five half-yearly texts NSE/FAOP/68747's annexure lists
+    // beside the rows above (SOURCED; module doc). None of their names traded
+    // on 2025-07-31, which is why the measuring rule wrote no row: last
+    // trades 2025-07-30, 2024-06-12, 2025-07-28, 2024-11-14 and 2025-06-26.
+    // 4 of 5, 1 of 2, 7 of 8, 2 of 2 and 1 of 1 strikes traded under the
+    // successor.
+    redated("NIFTY", (2027, 6, 24), (2027, 6, 29), (2025, 8, 1), 5),
+    redated("NIFTY", (2028, 6, 29), (2028, 6, 27), (2025, 8, 1), 2),
+    redated("NIFTY", (2028, 12, 28), (2028, 12, 26), (2025, 8, 1), 8),
+    redated("NIFTY", (2029, 6, 28), (2029, 6, 26), (2025, 8, 1), 2),
+    redated("NIFTY", (2029, 12, 27), (2029, 12, 24), (2025, 8, 1), 1),
 ];
+
+/// One SOURCED early settlement: a scheme of arrangement on which the
+/// exchange expired every open contract of the security on the cum-date and
+/// listed the same expiries again from the ex-date (module doc, DB-B03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EarlySettlement {
+    /// The underlying.
+    pub underlying: &'static str,
+    /// The ex-date: the first day of the re-listed generation.
+    pub ex_date: Ymd,
+    /// The day every contract of the old generation expired (the cum-date).
+    pub settled: Ymd,
+    /// The stated expiries the circular names. A stated expiry it does not
+    /// name is not answered by this row.
+    pub expiries: &'static [Ymd],
+    /// The circular's reference.
+    pub circular: &'static str,
+    /// Where it was read.
+    pub url: &'static str,
+}
+
+/// Every sourced early settlement. One row: the only circular read that
+/// STATES the early expiry day. `NSE/FAOP/71627` (HINDUNILVR, ex 2025-12-05)
+/// lists the re-introduced expiries but not the day the old ones expired, so
+/// it is not a row: UNVERIFIED, left to the measured generation break.
+pub const EARLY_SETTLEMENTS: [EarlySettlement; 1] = [EarlySettlement {
+    underlying: "VEDL",
+    ex_date: (2026, 4, 30),
+    settled: (2026, 4, 29),
+    // "All existing contracts with expiry dates May 26, 2026, June 30, 2026
+    // and July 28, 2026, will expire on Wednesday, April 29, 2026."
+    expiries: &[(2026, 5, 26), (2026, 6, 30), (2026, 7, 28)],
+    circular: "NSE/FAOP/73857",
+    url: "https://nsearchives.nseindia.com/content/circulars/FAOP73857.pdf",
+}];
+
+/// The early settlement that expired the contract `underlying` states as
+/// `stated`, for a file of trade day `trade`: a row naming that expiry whose
+/// ex-date is after the trade day. `None` on or after the ex-date (the
+/// re-listed generation settles as stated) and for every other contract.
+/// O(rows × expiries), both compile-time constants.
+#[must_use]
+pub fn early_settlement(
+    underlying: &str,
+    stated: Day,
+    trade: Day,
+) -> Option<&'static EarlySettlement> {
+    EARLY_SETTLEMENTS.iter().find(|row| {
+        row.underlying == underlying
+            && row.expiries.iter().any(|&ymd| is(stated, ymd))
+            && day_of(row.ex_date).is_ok_and(|ex| trade.days_from_epoch() < ex.days_from_epoch())
+    })
+}
+
+/// The sourced early settlement of `underlying` whose ex-date is `day`, if
+/// any: the day its contracts were listed again.
+#[must_use]
+pub fn relisted_on(underlying: &str, day: Day) -> Option<&'static EarlySettlement> {
+    EARLY_SETTLEMENTS
+        .iter()
+        .find(|row| row.underlying == underlying && is(day, row.ex_date))
+}
 
 /// How a contract's settled expiry was established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -383,6 +529,12 @@ pub enum Settlement {
     /// the charter's rule settles it on the previous open session (module
     /// doc). The vendor's text is the alias.
     ClosedDayRule,
+    /// A sourced scheme of arrangement expired this contract EARLY, on the
+    /// row's `settled` day; the same stated expiry was listed again from the
+    /// row's ex-date as another contract. [`Settled::expiry`] is still the
+    /// stated day (the identity); [`Settled::last_day`] is the day it
+    /// expired.
+    ExpiredEarly(&'static EarlySettlement),
 }
 
 impl Settlement {
@@ -394,6 +546,7 @@ impl Settlement {
             Self::AsStatedUnmeasured => "as_stated_unmeasured",
             Self::Aliased(_) => "aliased",
             Self::ClosedDayRule => "closed_day_rule",
+            Self::ExpiredEarly(_) => "expired_early",
         }
     }
 
@@ -402,7 +555,7 @@ impl Settlement {
     #[must_use]
     pub const fn kind(self) -> Option<AliasKind> {
         match self {
-            Self::AsStated | Self::AsStatedUnmeasured => None,
+            Self::AsStated | Self::AsStatedUnmeasured | Self::ExpiredEarly(_) => None,
             Self::Aliased(row) => Some(row.kind),
             Self::ClosedDayRule => Some(AliasKind::ClosedDay),
         }
@@ -416,6 +569,23 @@ pub struct Settled {
     pub expiry: Day,
     /// How that was established.
     pub settlement: Settlement,
+}
+
+impl Settled {
+    /// The last day the contract could trade: [`Self::expiry`], except for a
+    /// contract a scheme of arrangement expired early
+    /// ([`Settlement::ExpiredEarly`]), whose last day is the cum-date. What a
+    /// days-to-expiry reader measures to.
+    ///
+    /// # Errors
+    ///
+    /// [`SettleRefusal::RowDayInvalid`] for a table date that is not a day.
+    pub fn last_day(&self) -> Result<Day, SettleRefusal> {
+        match self.settlement {
+            Settlement::ExpiredEarly(row) => day_of(row.settled),
+            _ => Ok(self.expiry),
+        }
+    }
 }
 
 /// Why a stated expiry could not be settled. Each names what was read.
@@ -567,7 +737,16 @@ pub fn settle(underlying: &str, stated: Day, trade: Option<Day>) -> Result<Settl
                 settled: settled.expiry,
             })
         }
-        _ => Ok(settled),
+        // DB-B03. A file of a day before a sourced scheme's ex-date is the
+        // generation that expired on the cum-date. Asked on the STATED day:
+        // the circular names the expiries as the exchange stated them.
+        Some(trade) => Ok(
+            early_settlement(underlying, stated, trade).map_or(settled, |row| Settled {
+                expiry: settled.expiry,
+                settlement: Settlement::ExpiredEarly(row),
+            }),
+        ),
+        None => Ok(settled),
     }
 }
 
@@ -771,8 +950,9 @@ mod tests {
         assert_eq!(ALIASES.len(), ALIAS_ROWS);
         assert_eq!(
             ALIASES.iter().map(|row| row.contracts).sum::<u32>(),
-            14_835,
-            "the census re-keys exactly this many names"
+            14_860,
+            "the census re-keys exactly this many names (14,835 measured by the every-name-stops \
+             rule, and the 25 of DB-B01's ten texts that stopped before their rename day)"
         );
     }
 
@@ -1030,6 +1210,32 @@ mod tests {
         );
     }
 
+    /// The decoder asks `settle()` with the underlying an option is FILED
+    /// under (D-3354): the newest symbol its dated changes reach. A row keyed
+    /// by an OLD symbol would never be found, silently. Every row's
+    /// underlying is therefore a symbol with no later change.
+    #[test]
+    fn every_row_is_keyed_by_a_symbol_the_decoder_files_under() {
+        let head = |symbol: &str| brutex_core::alias::LINEAGE.current(symbol) == symbol;
+        for row in &ALIASES {
+            if let Some(underlying) = row.underlying {
+                assert!(
+                    head(underlying),
+                    "ALIASES names {underlying}, filed elsewhere"
+                );
+            }
+        }
+        for row in &EARLY_SETTLEMENTS {
+            assert!(
+                head(row.underlying),
+                "EARLY_SETTLEMENTS names {}, filed elsewhere",
+                row.underlying
+            );
+        }
+        // The probe is not vacuous: an old symbol is not a head.
+        assert!(!head("NIITTECH") && head("COFORGE") && head("NIFTY"));
+    }
+
     /// D-3331 decision 3: every table row is one `alias` line that reads
     /// back exactly; anything else is refused, never repaired.
     #[test]
@@ -1111,5 +1317,194 @@ mod tests {
             settle("ACC", d(2023, 6, 29), None).unwrap().expiry,
             d(2023, 6, 28)
         );
+    }
+
+    /// DB-B01's ten texts: underlying, stated, settled, last trade day (name
+    /// census), rename day.
+    const STOPPED_EARLY: [(&str, Ymd, Ymd, Ymd, Ymd); 10] = [
+        (
+            "NIFTY",
+            (2027, 6, 24),
+            (2027, 6, 29),
+            (2025, 7, 30),
+            (2025, 8, 1),
+        ),
+        (
+            "NIFTY",
+            (2028, 6, 29),
+            (2028, 6, 27),
+            (2024, 6, 12),
+            (2025, 8, 1),
+        ),
+        (
+            "NIFTY",
+            (2028, 12, 28),
+            (2028, 12, 26),
+            (2025, 7, 28),
+            (2025, 8, 1),
+        ),
+        (
+            "NIFTY",
+            (2029, 6, 28),
+            (2029, 6, 26),
+            (2024, 11, 14),
+            (2025, 8, 1),
+        ),
+        (
+            "NIFTY",
+            (2029, 12, 27),
+            (2029, 12, 24),
+            (2025, 6, 26),
+            (2025, 8, 1),
+        ),
+        (
+            "FINNIFTY",
+            (2021, 11, 3),
+            (2021, 11, 2),
+            (2021, 10, 13),
+            (2021, 10, 18),
+        ),
+        (
+            "FINNIFTY",
+            (2021, 11, 11),
+            (2021, 11, 9),
+            (2021, 10, 14),
+            (2021, 10, 18),
+        ),
+        (
+            "FINNIFTY",
+            (2021, 11, 18),
+            (2021, 11, 16),
+            (2021, 10, 14),
+            (2021, 10, 18),
+        ),
+        (
+            "FINNIFTY",
+            (2021, 12, 30),
+            (2021, 12, 28),
+            (2021, 10, 4),
+            (2021, 10, 18),
+        ),
+        (
+            "MIDCPNIFTY",
+            (2023, 9, 27),
+            (2023, 9, 25),
+            (2023, 8, 16),
+            (2023, 8, 17),
+        ),
+    ];
+
+    /// DB-B01. Each of the ten texts that stopped before its underlying's
+    /// rename day settles on the same contract as its successor text, on
+    /// every day it could have traded, and is refused from the rename day on.
+    /// Before the rows existed each answered its own stated day
+    /// (`AsStated`, or `AsStatedUnmeasured` past 2026-10-04): two store
+    /// series for one exchange contract.
+    #[test]
+    fn a_text_that_stopped_before_its_rename_day_is_the_contract_its_successor_names() {
+        let mut names = 0;
+        for (under, stated, settled, last_trade, renamed) in STOPPED_EARLY {
+            let (stated, settled) = (day_of(stated).unwrap(), day_of(settled).unwrap());
+            let (last_trade, renamed) = (day_of(last_trade).unwrap(), day_of(renamed).unwrap());
+            let old = settle(under, stated, Some(last_trade)).unwrap();
+            let new = settle(under, settled, Some(renamed)).unwrap();
+            assert_eq!(old.expiry, settled, "{under} {stated}");
+            assert_eq!(old.expiry, new.expiry, "{under} {stated}: one contract");
+            let Settlement::Aliased(row) = old.settlement else {
+                panic!("{under} {stated}: {:?}", old.settlement);
+            };
+            assert_eq!(row.kind, AliasKind::VendorRedated);
+            names += row.contracts;
+            // The tenor reader's question (no trade day) has the same answer.
+            assert_eq!(settle(under, stated, None).unwrap().expiry, settled);
+            // The retired text on or after the rename day names another
+            // contract: refused, never filed.
+            assert_eq!(
+                settle(under, stated, Some(renamed)),
+                Err(SettleRefusal::TextAfterRename {
+                    renamed_on: renamed
+                }),
+                "{under} {stated}"
+            );
+            // Another underlying's same stated day is not this row's.
+            assert_ne!(
+                settle("RELIANCE", stated, None).map(|s| s.expiry),
+                Ok(settled),
+                "{under} {stated}"
+            );
+        }
+        assert_eq!(names, 25, "the audit's 18 + 6 + 1 names");
+        // NSE/FAOP/68747's annexure names eleven NIFTY re-datings; every one
+        // is a row.
+        let nifty = ALIASES
+            .iter()
+            .filter(|row| row.underlying == Some("NIFTY") && row.first_day == (2025, 8, 1))
+            .count();
+        assert_eq!(
+            nifty, 11,
+            "9 half-yearly/quarterly texts and the two 2025 monthlies"
+        );
+    }
+
+    /// DB-B03. The sourced VEDL scheme (NSE/FAOP/73857): a file of a day
+    /// before the ex-date is the generation that expired on the cum-date; the
+    /// same text from the ex-date on is the re-listed contract. The identity
+    /// is the stated expiry for both (three stated expiries expired on one
+    /// cum-date), and only the last day differs.
+    #[test]
+    fn a_contract_a_scheme_expired_early_names_the_day_it_really_expired() {
+        let cum = d(2026, 4, 29);
+        let ex = d(2026, 4, 30);
+        for stated in [d(2026, 5, 26), d(2026, 6, 30), d(2026, 7, 28)] {
+            for trade in [d(2026, 3, 2), cum] {
+                let old = settle("VEDL", stated, Some(trade)).unwrap();
+                assert_eq!(old.expiry, stated, "the identity is the stated expiry");
+                assert_eq!(old.last_day(), Ok(cum), "{stated} on {trade}");
+                assert_eq!(old.settlement.as_str(), "expired_early");
+                assert_eq!(old.settlement.kind(), None, "no alias: the key is the text");
+                let Settlement::ExpiredEarly(row) = old.settlement else {
+                    panic!("{:?}", old.settlement);
+                };
+                assert_eq!(row.circular, "NSE/FAOP/73857");
+                assert!(row.url.ends_with("FAOP73857.pdf"));
+            }
+            for trade in [ex, d(2026, 5, 4), stated] {
+                let new = settle("VEDL", stated, Some(trade)).unwrap();
+                assert_eq!(new.settlement, Settlement::AsStated, "{stated} on {trade}");
+                assert_eq!(new.last_day(), Ok(stated));
+            }
+            // No trade day, no generation: the stated day, as before.
+            let unknown = settle("VEDL", stated, None).unwrap();
+            assert_eq!(unknown.settlement, Settlement::AsStated);
+            // Another underlying, and an expiry the circular does not name.
+            assert_eq!(
+                settle("HINDUNILVR", stated, Some(cum)).unwrap().settlement,
+                Settlement::AsStated
+            );
+            assert!(early_settlement("VEDL", stated, cum).is_some());
+            assert!(early_settlement("VEDL", stated, ex).is_none());
+        }
+        assert!(early_settlement("VEDL", d(2026, 8, 25), cum).is_none());
+        assert_eq!(
+            settle("VEDL", d(2026, 8, 25), Some(cum))
+                .unwrap()
+                .settlement,
+            Settlement::AsStated
+        );
+        // The ex-date is the day the contracts were listed again, and only it.
+        assert!(relisted_on("VEDL", ex).is_some());
+        assert!(relisted_on("VEDL", cum).is_none());
+        assert!(relisted_on("HINDUNILVR", ex).is_none());
+        // Every row is real days in order: cum-date before ex-date before
+        // every expiry it names, and the cum-date is a session.
+        for row in &EARLY_SETTLEMENTS {
+            let (settled, ex) = (day_of(row.settled).unwrap(), day_of(row.ex_date).unwrap());
+            assert!(settled.days_from_epoch() < ex.days_from_epoch(), "{row:?}");
+            assert!(matches!(kind(settled), DayKind::Open(_)), "{row:?}");
+            assert!(!row.expiries.is_empty() && row.circular.starts_with("NSE/FAOP/"));
+            for &expiry in row.expiries {
+                assert!(day_of(expiry).unwrap().days_from_epoch() > ex.days_from_epoch());
+            }
+        }
     }
 }

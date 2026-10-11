@@ -497,8 +497,12 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     let quality =
         (asked.feed == Vendor::Gdfl).then(|| read_ledger(quality_tails(), &quality_path(root)));
     let gaps = read_ledger(gap_tails(), &gaps_path(root));
-    let own = counts(root, asked.feed, inst, finest(asked.feed), &days);
-    let peer = counts(root, peer_feed, inst, finest(peer_feed), &days);
+    // A ZERODHA SHARE'S ZERO-VOLUME MINUTES ARE COUNTED (DB-B16): a candle
+    // for a minute nobody traded is held but not traded. An index has no
+    // volume at all (D-3322), and GDFL holds no bar for a second with no trade.
+    let fills = asked.feed == Vendor::Zerodha && inst.segment == Segment::Cash;
+    let own = counts(root, asked.feed, inst, finest(asked.feed), &days, fills);
+    let peer = counts(root, peer_feed, inst, finest(peer_feed), &days, false);
     notes.extend(own.notes.iter().cloned());
     notes.extend(peer.notes.iter().cloned());
     let day_bars = (asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno)
@@ -543,6 +547,7 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
             ctx.record(
                 *day,
                 own.per_day.get(at).unwrap_or(&Held::NoFile),
+                own.fills.get(at).copied().flatten(),
                 peer.per_day.get(at).unwrap_or(&Held::NoFile),
                 bar,
             )
@@ -582,6 +587,7 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         "days": records,
         "sources": sources_json(journal.as_ref(), quality.as_ref(), &gaps, pull.as_ref()),
         "derive": derive_json(gaps.as_ref().ok(), inst, first, last),
+        "lineage": lineage_json(root, asked.feed, inst),
         "rules": rules_json(),
         "notes": notes,
     })
@@ -592,6 +598,200 @@ fn days_between(first: Day, last: Day) -> Vec<Day> {
     (first.days_from_epoch()..=last.days_from_epoch())
         .filter_map(|days| Day::from_days(days).ok())
         .collect()
+}
+
+/// The lineage ledger, read for one contract's records: by census key, the
+/// records naming it, and the lines that did not parse.
+#[derive(Debug, Default)]
+struct LineageIndex {
+    /// Each key's records, as the answer carries them.
+    by_key: HashMap<String, Vec<Value>>,
+    /// Each underlying's `event` records (D-3355), in ledger order: what
+    /// moved on an ex-date, its lots, and how many keys it paired and
+    /// stopped. The last record of an ex-date is the one in force.
+    events: HashMap<String, Vec<Value>>,
+    /// Lines that are none of `alias`, `lineage`, `stitched`, `event`,
+    /// `stopped` and the re-key's `superseded` and `retired` records.
+    unreadable: usize,
+}
+
+/// The ledger's file stamp: length, mtime seconds and nanoseconds.
+type FileStamp = (u64, i64, i64);
+
+/// The lineage ledger by path, kept under its file stamp: a request that
+/// finds it unchanged is one map probe, whatever the ledger's length.
+static LINEAGE: OnceLock<Mutex<LineageMemo>> = OnceLock::new();
+
+/// Each lineage ledger read, by path: its stamp when read, and its index.
+type LineageMemo = HashMap<PathBuf, (FileStamp, Arc<LineageIndex>)>;
+
+/// One ledger text, indexed by the census key each record is about. A
+/// `lineage` record is filed under both keys (the old key `continues_as` the
+/// new one, the new key is `renamed_from` the old), a `stitched` record under
+/// its key, a re-key `superseded` record under both (`superseded_by`,
+/// `supersedes`) and a `retired` record under its key (D-3331; WP-12c).
+/// `alias` records are the decoder's (D-3331 item 1), not a key's.
+fn index_lineage(text: &str) -> LineageIndex {
+    let mut index = LineageIndex::default();
+    let key = pull::gdfl_lineage::option_key;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        if line.starts_with("alias ") {
+            continue;
+        }
+        if let Some(record) = pull::gdfl_lineage::LineageRecord::parse(line) {
+            let (old, new) = (
+                key(record.underlying, record.old),
+                key(record.underlying, record.new),
+            );
+            let factor = format!("{}/{}", record.factor.0, record.factor.1);
+            let ex = record.ex_date.to_string();
+            index.by_key.entry(old.clone()).or_default().push(json!({
+                "kind": "continues_as", "key": new, "ex": ex, "factor": factor,
+                "lot_old": record.lot_old, "lot_new": record.lot_new,
+            }));
+            index.by_key.entry(new).or_default().push(json!({
+                "kind": "renamed_from", "key": old, "ex": ex, "factor": factor,
+                "lot_old": record.lot_old, "lot_new": record.lot_new,
+            }));
+        } else if let Some(record) = pull::gdfl_lineage::StitchedRecord::parse(line) {
+            let other = |contract: Option<Contract>| contract.map(|c| key(record.underlying, c));
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({
+                    "kind": "stitched", "ex": record.ex_date.to_string(),
+                    "before": other(record.before), "after": other(record.after),
+                }));
+        } else if let Some(record) = pull::gdfl_lineage::SupersededRecord::parse(line) {
+            // THE RE-KEY'S RECORDS ARE READ, never "unreadable" (D-3331;
+            // WP-12c, DB-A17): the stated key is `superseded_by` the key the
+            // decoder files it under, which `supersedes` it with a copy of its
+            // bars, the count and BLAKE3 as the ledger states them.
+            let (old, new) = (
+                key(record.underlying, record.old),
+                key(record.underlying, record.new),
+            );
+            let (why, digest) = (record.kind.as_str(), record.digest_hex());
+            index.by_key.entry(old.clone()).or_default().push(json!({
+                "kind": "superseded_by", "key": new, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+            index.by_key.entry(new).or_default().push(json!({
+                "kind": "supersedes", "key": old, "why": why,
+                "months": record.months, "bars": record.bars, "blake3": digest,
+            }));
+        } else if let Some(record) = pull::gdfl_lineage::RetiredRecord::parse(line) {
+            // AND A KEY THE DECODER REFUSES ON EVERY DAY (DB-A18), with the
+            // sentence every reader refuses it by.
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({
+                    "kind": "retired", "why": record.why.as_str(),
+                    "day": record.day.to_string(), "median": record.median,
+                    "days": record.days, "bars": record.bars,
+                    "refusal": record.refusal(),
+                }));
+        } else if let Some(record) = pull::gdfl_lineage::StoppedRecord::parse(line) {
+            // A PRE-EX KEY AN EVENT RETIRED WITH NO PARTNER (D-3355, DB-B13):
+            // the exchange contract under it ended the day before `ex`.
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({ "kind": "stopped", "ex": record.ex_date.to_string() }));
+        } else if let Some(record) = pull::gdfl_lineage::EventRecord::parse(line) {
+            // THE EVENT ITSELF, by underlying: a re-listing pairs nothing, so
+            // this is the only line that says what happened to its keys.
+            index
+                .events
+                .entry(record.underlying.as_str().to_owned())
+                .or_default()
+                .push(json!({
+                    "ex": record.ex_date.to_string(), "kind": record.kind.as_str(),
+                    "shift_paisa": record.kind.shift(),
+                    "lot_old": record.lot_old, "lot_new": record.lot_new,
+                    "paired": record.paired, "stopped": record.stopped,
+                }));
+        } else {
+            index.unreadable = index.unreadable.saturating_add(1);
+        }
+    }
+    index
+}
+
+/// The ledger at `path`, read once per stamp: `Ok(None)` when no ledger is
+/// written yet, `Err` naming why one that exists would not read.
+fn read_lineage(path: &Path) -> Result<Option<Arc<LineageIndex>>, String> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    let stamp = (
+        meta.len(),
+        std::os::unix::fs::MetadataExt::mtime(&meta),
+        std::os::unix::fs::MetadataExt::mtime_nsec(&meta),
+    );
+    let memo = LINEAGE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((kept, index)) = memo
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+        && *kept == stamp
+    {
+        return Ok(Some(Arc::clone(index)));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|why| format!("cannot read {}: {why}", path.display()))?;
+    let index = Arc::new(index_lineage(&text));
+    memo.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_path_buf(), (stamp, Arc::clone(&index)));
+    Ok(Some(index))
+}
+
+/// WHERE A CONTRACT'S SERIES CONTINUES, from the import's lineage ledger
+/// (D-3331 item 4, DB-G72). At a share's bonus or split the vendor renames
+/// every open contract to its adjusted strike: BRITANNIA's 2018-12-27 6000
+/// CE stops on 2018-11-28 and the same contract trades on as the 3000 CE
+/// from 2018-11-29. The ledger links the two keys; this names the link on
+/// either key, so /db says "renamed at the ex-date, continues as <key>"
+/// instead of a life that seems to stop weeks before expiry.
+///
+/// `null` for anything but a GDFL option or future. A ledger not written yet
+/// is an answer (`present: false`, with the reason), never an empty list a
+/// reader could take for "never renamed". O(1) a request once the ledger is
+/// indexed: one stamp, one probe.
+fn lineage_json(root: &Path, feed: Vendor, inst: &Instrument) -> Value {
+    if feed != Vendor::Gdfl || inst.segment != Segment::Fno || inst.contract.is_none() {
+        return Value::Null;
+    }
+    let path = pull::gdfl_lineage::lineage_path(root);
+    match read_lineage(&path) {
+        Ok(None) => json!({
+            "present": false,
+            "records": [],
+            "why": format!(
+                "no lineage ledger at {} yet: the GDFL options import writes it as it detects \
+                 an ex-date (D-3331), and days imported before it are covered by a rescan \
+                 (`cli gdfl-dayflags options`, WP-80)",
+                path.display()
+            ),
+        }),
+        Ok(Some(index)) => json!({
+            "present": true,
+            "records": index.by_key.get(&inst.key()).cloned().unwrap_or_default(),
+            "events": index
+                .events
+                .get(inst.symbol.as_str())
+                .cloned()
+                .unwrap_or_default(),
+            "unreadable_lines": index.unreadable,
+            "why": null,
+        }),
+        Err(why) => json!({ "present": true, "records": [], "why": why }),
+    }
 }
 
 // ══ The import journal, through /imports.json's reader ══════════════════════
@@ -606,6 +806,45 @@ struct JournalRows {
     last_day: Option<Day>,
     /// The journal file's own state, as `/imports.json` gives it.
     journal: Value,
+    /// Every `run` line (D-3317 item 4): its id, the second it started and
+    /// the commit it was built from, oldest first. A logged refusal is
+    /// attributed to the run that was running when it was logged (DB-B45).
+    runs: Vec<RunLine>,
+}
+
+/// One `run` line of the import journal, as a refusal's attribution needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunLine {
+    /// The run's id (`run=` on its closing lines).
+    id: u64,
+    /// Unix seconds the run started (`started=`), its id where absent.
+    started: u64,
+    /// The commit the run was built from, where the line names one.
+    commit: Option<String>,
+}
+
+/// The run lines of an `/imports.json` answer, oldest first.
+fn runs_of(body: &Value) -> Vec<RunLine> {
+    let mut runs: Vec<RunLine> = body
+        .get("runs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|run| {
+            let id = run.get("id").and_then(Value::as_u64)?;
+            let fields = run.get("fields");
+            let field = |name: &str| fields.and_then(|f| f.get(name)).and_then(Value::as_str);
+            Some(RunLine {
+                id,
+                started: field("started")
+                    .and_then(|text| text.parse::<u64>().ok())
+                    .unwrap_or(id),
+                commit: field("commit").map(str::to_owned),
+            })
+        })
+        .collect();
+    runs.sort_by_key(|run| (run.started, run.id));
+    runs
 }
 
 /// The journal rows of `first..=last` for `inst`'s kind, read by
@@ -621,6 +860,7 @@ fn journal_rows(
     let mut page = 0usize;
     let mut journal = Value::Null;
     let mut last_day = None;
+    let mut runs = Vec::new();
     loop {
         let asked = super::imports::Asked {
             from: Some(first),
@@ -633,6 +873,7 @@ fn journal_rows(
         let body = super::imports::answer(root, &asked)?;
         if page == 0 {
             journal = body.get("journal").cloned().unwrap_or(Value::Null);
+            runs = runs_of(&body);
             last_day = body
                 .get("kinds")
                 .and_then(Value::as_array)
@@ -674,6 +915,7 @@ fn journal_rows(
         by_day,
         last_day,
         journal,
+        runs,
     })
 }
 
@@ -727,15 +969,60 @@ struct Refusals {
     /// The first of those, so a day incomplete for another file says which
     /// (DB-G69).
     other_first: Option<(String, String)>,
+    /// Distinct refusals an EARLIER run logged for this kind-day, the first
+    /// [`MAX_REFUSALS_NAMED`]: history, never the current reason (DB-B45).
+    superseded: Vec<Superseded>,
+    /// How many distinct refusals earlier runs logged.
+    superseded_count: usize,
+}
+
+/// One refusal an earlier run logged, attributed to its run where the
+/// journal records one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Superseded {
+    /// The run that was running when it was logged, or `None` for a run
+    /// before the journal recorded `run` lines (D-3317).
+    run: Option<u64>,
+    /// That run's commit, where its line names one.
+    commit: Option<String>,
+    /// When it was logged, epoch milliseconds.
+    at_ms: Option<u64>,
+    /// The file or stage it is about.
+    about: String,
+    /// The importer's words.
+    why: String,
 }
 
 /// The refusals the importer logged for a row, split into those about this
-/// instrument and those about another file of the same kind-day. Each distinct
-/// refusal is decided once.
-fn refusals_of(row: &Value, inst: &Instrument, day: Day) -> Refusals {
+/// instrument and those about another file of the same kind-day, and those
+/// logged by an EARLIER run than the one whose line closes the row (DB-B45).
+/// Each distinct refusal is decided once.
+///
+/// # Grouped by run
+///
+/// A day attempted by several runs logged each run's refusals, and the
+/// importer's events carry no run id. The row's closing line does
+/// (`run=`, D-3317), and every `run` line names the second it started: a
+/// refusal logged at or after the closing run's start is that run's, and
+/// one logged before it is an earlier run's, attributed to the latest run
+/// started before it, or to none for a run before the journal recorded run
+/// lines. 2024-03-02's indices were refused by a build that called the drill
+/// "not a regular session", then admitted and refused at filing by run
+/// 1791602895: the current reason is the filing, and the calendar refusal is
+/// history. A row with no `run=` (a line written before D-3317) keeps every
+/// refusal current: nothing says which run logged it.
+fn refusals_of(row: &Value, inst: &Instrument, day: Day, runs: &[RunLine]) -> Refusals {
     let mut distinct: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
+    let mut history: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
     let mut out = Refusals::default();
+    let started_ms = row.get("run").and_then(Value::as_u64).map(|id| {
+        runs.iter()
+            .find(|run| run.id == id)
+            .map_or(id, |run| run.started)
+            .saturating_mul(1_000)
+    });
     for logged in row
         .get("logged")
         .and_then(Value::as_array)
@@ -750,6 +1037,29 @@ fn refusals_of(row: &Value, inst: &Instrument, day: Day) -> Refusals {
                 .to_owned()
         };
         let pair = (text("about"), text("why"));
+        let at_ms = logged.get("at_ms").and_then(Value::as_u64);
+        let earlier = matches!((started_ms, at_ms), (Some(start), Some(at)) if at < start);
+        if earlier {
+            if !history.insert(pair.clone()) {
+                continue;
+            }
+            out.superseded_count = out.superseded_count.saturating_add(1);
+            if out.superseded.len() < MAX_REFUSALS_NAMED {
+                let by = at_ms.and_then(|at| {
+                    runs.iter()
+                        .rev()
+                        .find(|run| run.started.saturating_mul(1_000) <= at)
+                });
+                out.superseded.push(Superseded {
+                    run: by.map(|run| run.id),
+                    commit: by.and_then(|run| run.commit.clone()),
+                    at_ms,
+                    about: pair.0,
+                    why: pair.1,
+                });
+            }
+            continue;
+        }
         // DISTINCT, NOT LOG LINES: a day attempted by two runs logs each
         // refusal twice. `distinct` holds every distinct pair of one row:
         // bounded by the files of one kind-day.
@@ -781,7 +1091,10 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "reached": reached,
             "stage": null, "reason": null, "files": null, "failures": null, "run": null,
             "from": null, "line": null, "late": null, "max_back_s": null,
-            "refusals": { "this": [], "this_count": 0, "other_count": 0, "other_first": null },
+            "refusals": {
+                "this": [], "this_count": 0, "other_count": 0, "other_first": null,
+                "superseded": [], "superseded_count": 0,
+            },
         });
     };
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
@@ -791,7 +1104,7 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
     } else {
         field("outcome")
     };
-    let refusals = refusals_of(row, inst, day);
+    let refusals = refusals_of(row, inst, day, &rows.runs);
     let pair = |(about, why): &(String, String)| json!({ "about": about, "why": why });
     json!({
         "outcome": outcome,
@@ -810,6 +1123,14 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "this_count": refusals.this_count,
             "other_count": refusals.other_count,
             "other_first": refusals.other_first.as_ref().map(pair),
+            "superseded": refusals.superseded.iter().map(|old| json!({
+                "run": old.run,
+                "commit": old.commit,
+                "at_ms": old.at_ms,
+                "about": old.about,
+                "why": old.why,
+            })).collect::<Vec<_>>(),
+            "superseded_count": refusals.superseded_count,
         },
     })
 }
@@ -1993,6 +2314,46 @@ fn read_pull_journal(root: &Path, symbol: &str) -> Result<PullRead, PullUnread> 
     })
 }
 
+/// `symbol`'s Zerodha pull refusals as JSON, oldest record first, and how they
+/// were found: the reader `/ingest/refusals.json` shares with this route, so a
+/// month cell on /ingest and a day on /db name the same records (WP-61,
+/// DB-G23). One read of the symbol's index file, O(its refusals).
+///
+/// # Errors
+///
+/// The journal is there and cannot be read, or the served process is still
+/// walking it at start, in the sentence this route's notes give.
+pub(crate) fn zerodha_refusals_of(
+    root: &Path,
+    symbol: &str,
+) -> Result<(Vec<Value>, Value), String> {
+    let read = read_pull_journal(root, symbol).map_err(|unread| unread.note())?;
+    let refusals = read
+        .parsed
+        .by_symbol
+        .get(symbol)
+        .map(|found| found.iter().map(PullRefusal::json).collect())
+        .unwrap_or_default();
+    let via = match read.via {
+        Via::Absent => json!({ "kind": "absent" }),
+        Via::Index { covered, runs } => {
+            json!({ "kind": "index", "covered": covered, "runs": runs })
+        }
+        Via::Walk { ref why } => json!({ "kind": "walk", "why": why }),
+    };
+    Ok((
+        refusals,
+        json!({
+            "path": read.path.display().to_string(),
+            "present": read.present,
+            "records": read.records,
+            "read_now": read.read_now,
+            "read_micros": read.read_micros,
+            "via": via,
+        }),
+    ))
+}
+
 /// `symbol`'s Zerodha refusals through the index: the records its `refusals`
 /// file names, each filed under the run before it, then the records past the
 /// cover, decoded in order from the vendor of the last run the index holds.
@@ -2480,8 +2841,17 @@ impl Held {
 /// One feed's counts over the page, and what could not be read.
 struct Counts {
     per_day: Vec<Held>,
+    /// Per day, how many of the held bars carry zero volume — a candle for a
+    /// minute with no trade in it (DB-B16) — where counted: a Zerodha share's
+    /// one-minute bars only, `None` elsewhere.
+    fills: Vec<Option<u64>>,
     notes: Vec<String>,
 }
+
+/// The most bars one day's zero-volume count reads: a whole session of
+/// one-minute bars is 375, so a day holding more is not counted (it is not a
+/// one-minute share's day) and the count says `None` rather than scanning.
+const MAX_FILL_SCAN: u64 = 1_440;
 
 /// A month file, opened for reading, or why not.
 enum Opened {
@@ -2525,6 +2895,16 @@ fn open_month(
         Ok(path) => path,
         Err(why) => return Opened::Refused(format!("{} {month:?}: {why}", inst.key())),
     };
+    // A KEY THE RE-KEY RETIRED IS NOT COUNTED (D-3331; WP-12c, DB-A18): its
+    // files are kept, and this reader refuses it by the ledger's sentence, as
+    // every bar route does with 410. One `stat` and one hash probe.
+    if feed == Vendor::Gdfl
+        && inst.segment == Segment::Fno
+        && inst.contract.is_some()
+        && let Some(why) = crate::bars::retired_refusal(root, feed, &inst.key())
+    {
+        return Opened::Refused(why);
+    }
     match BarFile::open_existing(root, path, symbol_id(&inst.symbol)) {
         Ok(file) => Opened::File(Box::new(file)),
         Err(StoreError::Missing { path: missing, .. }) if missing == path.to_path_buf(root) => {
@@ -2554,12 +2934,30 @@ fn month_run(days: &[Day], at: usize) -> usize {
 
 /// The bars `feed` holds for `inst` at `rung` on each of `days` (oldest
 /// first, consecutive): one open per month and one lookup per day boundary.
-fn counts(root: &Path, feed: Vendor, inst: &Instrument, rung: Timeframe, days: &[Day]) -> Counts {
+///
+/// With `fills`, each day's bars are also read once to count those with zero
+/// volume (DB-B16): at most [`MAX_FILL_SCAN`] records a day, so a page costs
+/// at most 92 x 1,440 record reads — a Zerodha share's one-minute session is
+/// 375. Every other series is not read past its day boundaries.
+fn counts(
+    root: &Path,
+    feed: Vendor,
+    inst: &Instrument,
+    rung: Timeframe,
+    days: &[Day],
+    fills: bool,
+) -> Counts {
     let mut per_day = Vec::with_capacity(days.len());
+    let mut zero = Vec::with_capacity(days.len());
     let mut notes = Vec::new();
     if inst.segment == Segment::Fno && inst.contract.is_none() {
         per_day.extend(days.iter().map(|_| Held::NoContract));
-        return Counts { per_day, notes };
+        zero.extend(days.iter().map(|_| None));
+        return Counts {
+            per_day,
+            fills: zero,
+            notes,
+        };
     }
     let mut at = 0usize;
     while let Some(first) = days.get(at) {
@@ -2592,7 +2990,29 @@ fn counts(root: &Path, feed: Vendor, inst: &Instrument, rung: Timeframe, days: &
                         });
                     match counted {
                         Ok((lo, hi)) => {
-                            per_day.push(Held::Bars(hi.saturating_sub(lo)));
+                            let held = hi.saturating_sub(lo);
+                            per_day.push(Held::Bars(held));
+                            zero.push(
+                                (fills && held <= MAX_FILL_SCAN)
+                                    .then(|| {
+                                        (lo..hi).try_fold(0_u64, |n, at| {
+                                            file.read_record(at)
+                                                .map(|bar| n + u64::from(bar.volume == 0))
+                                        })
+                                    })
+                                    .and_then(|counted| match counted {
+                                        Ok(n) => Some(n),
+                                        Err(why) => {
+                                            notes.push(format!(
+                                                "{} {} {} {day}: zero-volume bars could not be counted: {why}",
+                                                feed.as_str(),
+                                                inst.key(),
+                                                rung.as_str()
+                                            ));
+                                            None
+                                        }
+                                    }),
+                            );
                             lower = Some(hi);
                         }
                         Err(why) => {
@@ -2603,15 +3023,21 @@ fn counts(root: &Path, feed: Vendor, inst: &Instrument, rung: Timeframe, days: &
                                 rung.as_str()
                             ));
                             per_day.push(Held::Unreadable);
+                            zero.push(None);
                             lower = None;
                         }
                     }
                 }
             }
         }
+        zero.resize(per_day.len(), None);
         at = at.saturating_add(run);
     }
-    Counts { per_day, notes }
+    Counts {
+        per_day,
+        fills: zero,
+        notes,
+    }
 }
 
 /// One Zerodha `1day` bar's values, paisa and shares.
@@ -3072,6 +3498,7 @@ impl Context<'_> {
         &self,
         day: Day,
         own: &Held,
+        fills: Option<u64>,
         peer: &Held,
         bar: Option<(DayBarAt, Option<i64>)>,
     ) -> Value {
@@ -3143,10 +3570,18 @@ impl Context<'_> {
             day,
             segment: inst.segment,
             own: *own,
+            fills,
             peer: *peer,
             feed: asked.feed,
         }
         .phrases();
+        let mut held = own.json(asked.feed, finest(asked.feed));
+        if let Some(fields) = held.as_object_mut() {
+            fields.insert(
+                "zero_volume".to_owned(),
+                fills.map_or(Value::Null, Value::from),
+            );
+        }
         json!({
             "feed": asked.feed.as_str(),
             "instrument": inst.key(),
@@ -3161,7 +3596,7 @@ impl Context<'_> {
             "day_bar": day_bar,
             "refused_front": front.refused,
             "pull": front.json,
-            "held": own.json(asked.feed, finest(asked.feed)),
+            "held": held,
             "peer": peer.json(peer_of(asked.feed), finest(peer_of(asked.feed))),
             "says": says,
         })
@@ -3200,6 +3635,8 @@ struct Says<'a> {
     day: Day,
     segment: Segment,
     own: Held,
+    /// The own feed's zero-volume bars that day, where counted (DB-B16).
+    fills: Option<u64>,
     peer: Held,
     feed: Vendor,
 }
@@ -3381,6 +3818,28 @@ impl Says<'_> {
                 );
             }
             _ => {}
+        }
+        Self::history_and_late_phrases(import, out);
+    }
+
+    /// The import's phrases after its outcome: an earlier run's refusals,
+    /// said as history (DB-B45), and the late rows deferred (DB-029).
+    fn history_and_late_phrases(import: &Value, out: &mut Vec<String>) {
+        let count = |key: &str| import.get(key).and_then(Value::as_u64);
+        // AN EARLIER RUN'S REFUSALS ARE HISTORY (DB-B45): counted and said
+        // as such, never as the day's current reason.
+        if let Some(earlier) = import
+            .get("refusals")
+            .and_then(|r| r.get("superseded_count"))
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+        {
+            out.push(match count("run") {
+                Some(run) => format!(
+                    "{earlier} refusal(s) logged by an earlier run are history, superseded by run {run}"
+                ),
+                None => format!("{earlier} refusal(s) logged by an earlier run are history"),
+            });
         }
         if let Some(late) = count("late").filter(|n| *n > 0) {
             let back = count("max_back_s").unwrap_or(0);
@@ -3574,6 +4033,16 @@ impl Says<'_> {
             }
             Held::Unreadable => out.push(format!("{}'s month could not be read", name(self.feed))),
             _ => {}
+        }
+        // HELD IS NOT TRADED (DB-B16): a zero-volume candle is a minute
+        // nobody traded in, and a day of them reads complete by count alone.
+        if let (Held::Bars(held), Some(zero)) = (self.own, self.fills)
+            && zero > 0
+        {
+            out.push(format!(
+                "{zero} of {held} {} bar(s) carry zero volume: held, but no trade in that minute",
+                name(self.feed)
+            ));
         }
         let peer = peer_of(self.feed);
         match self.peer {
@@ -4175,6 +4644,374 @@ mod tests {
         assert!(
             phases.contains(&"halted") && phases.contains(&"reopening_auction"),
             "{phases:?}"
+        );
+    }
+
+    /// **AN EARLIER RUN'S REFUSAL IS HISTORY, NOT THE DAY'S REASON** (DB-B45).
+    /// 2024-03-02's indices were refused by a build that called the drill "not
+    /// a regular session", then admitted and refused at filing by run
+    /// 1791602895, which closed the day `incomplete`. The importer's events
+    /// carry no run id; the run line's `started` splits them: the filing
+    /// refusal is current, the calendar one is history with no run line of its
+    /// own (logged before the journal recorded runs), and the phrases lead with
+    /// the filing.
+    #[test]
+    fn an_earlier_runs_refusal_is_history_and_the_newest_run_is_current() {
+        let root = root_of("runs");
+        write(
+            &pull::gdfl_import::journal_path(&root),
+            "run 1791602895 source=zip archive=/tmp/a.zip archive_bytes=7 commit=abc started=1791602895 archive_cd_blake3=00\n\
+             begin indices 2024-03-02 *\n\
+             incomplete indices 2024-03-02 * definition=2 files=8 seconds=0 failures=2 late=0 late_unresolved=0 max_back_s=0 stage=file reason=filing run=1791602895\n",
+        );
+        let event = |seq: u64, ms: u64, about: &str, why: &str| {
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"error\",\
+                 \"target\":\"gdfl.import\",\"msg\":\"refused\",\"fields\":{{\"kind\":\"indices\",\
+                 \"day\":\"2024-03-02\",\"about\":\"{about}\",\"why\":\"{why}\"}}}}\n"
+            )
+        };
+        write(
+            &root.join("logs").join("cli").join("events.ndjson"),
+            &format!(
+                "{}{}{}",
+                event(
+                    1,
+                    1_791_171_132_660,
+                    "calendar",
+                    "the calendar says Open(two windows), not a regular session"
+                ),
+                event(
+                    2,
+                    1_791_271_117_373,
+                    "calendar",
+                    "the calendar says Open(two windows), not a regular session"
+                ),
+                event(
+                    3,
+                    1_791_602_900_000,
+                    "NIFTY 50.NSE_IDX.csv",
+                    "the store refused to file the bars"
+                ),
+            ),
+        );
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-03-02"),
+        );
+        let drill = record(&got, "2024-03-02");
+        assert_eq!(drill["import"]["outcome"], "incomplete");
+        assert_eq!(drill["import"]["run"], 1_791_602_895_u64);
+        let refusals = &drill["import"]["refusals"];
+        assert_eq!(refusals["this_count"], 1, "{refusals:#}");
+        assert_eq!(refusals["this"][0]["about"], "NIFTY 50.NSE_IDX.csv");
+        assert_eq!(
+            refusals["superseded_count"], 1,
+            "two log lines, one distinct refusal"
+        );
+        assert_eq!(refusals["superseded"][0]["about"], "calendar");
+        assert_eq!(
+            refusals["superseded"][0]["run"],
+            Value::Null,
+            "logged before the journal recorded any run line"
+        );
+        assert_eq!(refusals["superseded"][0]["at_ms"], 1_791_171_132_660_u64);
+        let said = says(drill);
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("incomplete at import (file): filing; NIFTY 50.NSE_IDX.csv")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|s| s.contains("not a regular session")),
+            "the earlier build's reason is not the current one: {said:#?}"
+        );
+        says_has(
+            drill,
+            "1 refusal(s) logged by an earlier run are history, superseded by run 1791602895",
+        );
+    }
+
+    /// **A REFUSAL LOGGED BEFORE THE CLOSING RUN STARTED IS ATTRIBUTED TO THE
+    /// RUN THAT WAS RUNNING** (DB-B45): the latest run line started before
+    /// it, with that run's commit; a row with no `run=` keeps every refusal
+    /// current, since nothing says which run logged it.
+    #[test]
+    fn an_earlier_refusal_names_the_run_that_logged_it() {
+        let runs = vec![
+            RunLine {
+                id: 10,
+                started: 10,
+                commit: Some("aaa".to_owned()),
+            },
+            RunLine {
+                id: 20,
+                started: 20,
+                commit: None,
+            },
+        ];
+        let row = json!({
+            "run": 20,
+            "logged": [
+                { "about": "calendar", "why": "old", "at_ms": 15_000 },
+                { "about": "calendar", "why": "new", "at_ms": 21_000 },
+            ],
+        });
+        let inst = instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
+        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs);
+        assert_eq!(split.this, vec![("calendar".to_owned(), "new".to_owned())]);
+        assert_eq!(split.superseded.len(), 1);
+        assert_eq!(split.superseded[0].run, Some(10));
+        assert_eq!(split.superseded[0].commit.as_deref(), Some("aaa"));
+        // A row with no `run=` keeps every refusal current: nothing says which run logged it.
+        let unrun = json!({ "logged": [{ "about": "calendar", "why": "old", "at_ms": 15_000 }] });
+        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs);
+        assert_eq!(kept.this_count, 1);
+        assert_eq!(kept.superseded_count, 0);
+    }
+
+    /// **A CONTRACT RENAMED AT AN EX-DATE NAMES WHERE IT CONTINUES** (DB-G72,
+    /// D-3331 item 4). The import's lineage ledger links the pre-ex key to the
+    /// adjusted one; the answer names the link on both keys, a `stitched`
+    /// key as stitched, and a ledger not written yet as absent with its
+    /// reason, never as "never renamed". An index or a Zerodha page carries
+    /// no lineage at all. The keys are invented (`ZZBRIT`), the shape is
+    /// BRITANNIA 2018-11-29's: strikes halved, the lot doubled.
+    #[test]
+    fn a_renamed_contract_names_the_key_it_continues_as() {
+        let root = root_of("lineage");
+        let old_key = "NSE-FNO-ZZBRIT-2018-12-27-600000-CE";
+        let new_key = "NSE-FNO-ZZBRIT-2018-12-27-300000-CE";
+        let asked_old = ask(&format!("feed=gdfl&instrument={old_key}&from=2018-11-28"));
+        let none = answer(&root, &asked_old);
+        assert_eq!(none["lineage"]["present"], false);
+        assert!(
+            none["lineage"]["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("no lineage ledger")),
+            "{:#}",
+            none["lineage"]
+        );
+        let (under, old) = pull::gdfl_lineage::parse_option_key(old_key).expect("an option key");
+        let (_, new) = pull::gdfl_lineage::parse_option_key(new_key).expect("an option key");
+        let (_, stitched) =
+            pull::gdfl_lineage::parse_option_key("NSE-FNO-ZZBRIT-2018-12-27-310000-CE")
+                .expect("an option key");
+        let lineage = pull::gdfl_lineage::LineageRecord {
+            underlying: under,
+            old,
+            new,
+            ex_date: day("2018-11-29"),
+            factor: (2, 1),
+            lot_old: 100,
+            lot_new: 200,
+            oi_unadjusted_until: 0,
+        };
+        let stitch = pull::gdfl_lineage::StitchedRecord {
+            underlying: under,
+            key: stitched,
+            ex_date: day("2018-11-29"),
+            before: None,
+            after: Some(old),
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n{}\nnot a record\n", lineage.line(), stitch.line()),
+        );
+        let got = answer(&root, &asked_old);
+        let records = &got["lineage"]["records"];
+        assert_eq!(got["lineage"]["present"], true);
+        assert_eq!(got["lineage"]["unreadable_lines"], 1);
+        assert_eq!(records[0]["kind"], "continues_as", "{records:#}");
+        assert_eq!(records[0]["key"], new_key);
+        assert_eq!(records[0]["ex"], "2018-11-29");
+        assert_eq!(records[0]["factor"], "2/1");
+        let back = answer(
+            &root,
+            &ask(&format!("feed=gdfl&instrument={new_key}&from=2018-11-29")),
+        );
+        assert_eq!(back["lineage"]["records"][0]["kind"], "renamed_from");
+        assert_eq!(back["lineage"]["records"][0]["key"], old_key);
+        let joined = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-FNO-ZZBRIT-2018-12-27-310000-CE&from=2018-11-29"),
+        );
+        assert_eq!(joined["lineage"]["records"][0]["kind"], "stitched");
+        assert_eq!(joined["lineage"]["records"][0]["after"], old_key);
+        assert_eq!(joined["lineage"]["records"][0]["before"], Value::Null);
+        let index = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2018-11-29"),
+        );
+        assert_eq!(index["lineage"], Value::Null, "an index is never renamed");
+        let zerodha = answer(
+            &root,
+            &ask(&format!(
+                "feed=zerodha&instrument={old_key}&from=2018-11-28"
+            )),
+        );
+        assert_eq!(
+            zerodha["lineage"],
+            Value::Null,
+            "only GDFL keeps a lineage ledger"
+        );
+    }
+
+    /// **AN EVENT AND ITS STOPPED KEYS ARE READ AND SHOWN** (D-3355;
+    /// DB-B13): a re-listing pairs nothing, so the `event` record of its
+    /// underlying and the `stopped` record of each retired key are the only
+    /// lines that say what happened. Neither is an unreadable line; the key
+    /// carries `stopped`, and every key of the underlying carries the event.
+    #[test]
+    fn an_event_and_its_stopped_keys_are_read_and_shown() {
+        let root = root_of("lineage-event");
+        let stopped = "NSE-FNO-ZZIDX-2020-06-25-1000000-CE";
+        let other = "NSE-FNO-ZZIDX-2020-06-25-1100000-CE";
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!(
+                "event NSE-FNO-ZZIDX ex=2020-06-16 kind=relisted shift=0 lot_old=75 lot_new=75 \
+                 paired=0 stopped=1 v=1\nstopped {stopped} ex=2020-06-16 v=1\n"
+            ),
+        );
+        let lineage_of = |key: &str| {
+            answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={key}&from=2020-06-15")),
+            )["lineage"]
+                .clone()
+        };
+        let on_key = lineage_of(stopped);
+        assert_eq!(on_key["unreadable_lines"], 0, "{on_key:#}");
+        assert_eq!(
+            on_key["records"],
+            json!([{ "kind": "stopped", "ex": "2020-06-16" }])
+        );
+        let event = json!([{
+            "ex": "2020-06-16", "kind": "relisted", "shift_paisa": 0,
+            "lot_old": 75, "lot_new": 75, "paired": 0, "stopped": 1,
+        }]);
+        assert_eq!(on_key["events"], event);
+        let beside = lineage_of(other);
+        assert_eq!(beside["records"], json!([]));
+        assert_eq!(beside["events"], event, "the event is the underlying's");
+        let elsewhere = lineage_of("NSE-FNO-ZZOTHER-2020-06-25-1000000-CE");
+        assert_eq!(elsewhere["events"], json!([]));
+    }
+
+    /// **THE RE-KEY'S RECORDS ARE READ AND NAMED ON EACH KEY** (D-3331;
+    /// WP-12c, DB-A17, DB-A18): the stated key is `superseded_by` the
+    /// decoded one, the decoded key `supersedes` it, and a retired key says
+    /// so with its refusal -- never counted as unreadable ledger lines.
+    #[test]
+    fn the_rekeys_records_are_read_and_named_on_each_key() {
+        let root = root_of("lineage-rekey");
+        let stated = "NSE-FNO-ZZIDX-2023-06-29-1000000-PE";
+        let settled = "NSE-FNO-ZZIDX-2023-06-28-1000000-PE";
+        let refused = "NSE-FNO-ZZIDX-2020-06-25-191250000-CE";
+        let parse = |key: &str| pull::gdfl_lineage::parse_option_key(key).expect("an option key");
+        let (under, old) = parse(stated);
+        let moved = pull::gdfl_lineage::SupersededRecord {
+            underlying: under,
+            old,
+            new: parse(settled).1,
+            kind: pull::expiry_alias::AliasKind::VendorRedated,
+            months: 2,
+            bars: 3,
+            digest: [7; 32],
+        };
+        let retired = pull::gdfl_lineage::RetiredRecord {
+            underlying: under,
+            key: parse(refused).1,
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-05-30"),
+            median: Some(1_170_000),
+            days: 1,
+            bars: 5,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n{}\n", moved.line(), retired.line()),
+        );
+        let lineage_of = |key: &str, from: &str| {
+            answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={key}&from={from}")),
+            )["lineage"]
+                .clone()
+        };
+        let old_side = lineage_of(stated, "2020-06-15");
+        assert_eq!(old_side["unreadable_lines"], 0, "{old_side:#}");
+        let record = &old_side["records"][0];
+        assert_eq!(record["kind"], "superseded_by");
+        assert_eq!(record["key"], settled);
+        assert_eq!(record["why"], "vendor_redated");
+        assert_eq!(
+            (record["months"].clone(), record["bars"].clone()),
+            (json!(2), json!(3))
+        );
+        assert_eq!(record["blake3"], moved.digest_hex());
+        let new_side = lineage_of(settled, "2020-06-15");
+        assert_eq!(new_side["records"][0]["kind"], "supersedes");
+        assert_eq!(new_side["records"][0]["key"], stated);
+        let gone = lineage_of(refused, "2019-05-30");
+        assert_eq!(gone["records"][0]["kind"], "retired");
+        assert_eq!(gone["records"][0]["why"], "strike_implausible");
+        assert_eq!(gone["records"][0]["refusal"], retired.refusal());
+    }
+
+    /// **A ZERODHA SHARE'S ZERO-VOLUME MINUTES ARE HELD, NOT TRADED** (DB-B16).
+    /// A circuit-locked or illiquid share's day reads complete by count: 375
+    /// minute bars, most with no trade in them. The record counts them apart;
+    /// an index (no volume at all) and GDFL are not counted.
+    #[test]
+    fn a_shares_zero_volume_minutes_are_counted_apart() {
+        let root = root_of("fills");
+        let mut bars = minutes("2020-02-03", 375);
+        for bar in bars.iter_mut().take(75) {
+            bar.volume = 100;
+        }
+        file_bars(
+            &root,
+            Vendor::Zerodha,
+            "NSE-CASH-ZZFILL",
+            Timeframe::MINUTE_1,
+            bars,
+        );
+        file_bars(
+            &root,
+            Vendor::Zerodha,
+            "NSE-INDEX-ZZIDX",
+            Timeframe::MINUTE_1,
+            minutes("2020-02-03", 375),
+        );
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-CASH-ZZFILL&from=2020-02-03"),
+        );
+        let day = record(&got, "2020-02-03");
+        assert_eq!(day["held"]["bars"], 375);
+        assert_eq!(day["held"]["zero_volume"], 300);
+        says_has(
+            day,
+            "300 of 375 Zerodha bar(s) carry zero volume: held, but no trade in that minute",
+        );
+        let index = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-ZZIDX&from=2020-02-03"),
+        );
+        assert_eq!(
+            record(&index, "2020-02-03")["held"]["zero_volume"],
+            Value::Null,
+            "an index has no volume to count"
+        );
+        let gdfl = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-CASH-ZZFILL&from=2020-02-03"),
+        );
+        assert_eq!(
+            record(&gdfl, "2020-02-03")["held"]["zero_volume"],
+            Value::Null
         );
     }
 
@@ -4939,6 +5776,61 @@ mod tests {
         assert_eq!(kind["import"]["refusals"]["this_count"], 2);
         assert_eq!(kind["held"]["why"], "no_contract");
         assert_eq!(kind["peer"]["why"], "no_contract");
+    }
+
+    #[test]
+    fn a_key_the_rekey_retired_is_refused_by_the_ledgers_sentence() {
+        // D-3331; WP-12c, DB-A18. An INVENTED strike far past any ladder,
+        // one bar, and a neighbour the ledger never names.
+        let root = root_of("rekey-retired");
+        let retired_key = "NSE-FNO-NIFTY-2019-03-28-90000000-CE";
+        let kept_key = "NSE-FNO-NIFTY-2019-03-28-1150000-CE";
+        for key in [retired_key, kept_key] {
+            file_bars(
+                &root,
+                Vendor::Gdfl,
+                key,
+                Timeframe::SECOND_1,
+                vec![bar("2019-03-19", 34_000, [500; 4], 75)],
+            );
+        }
+        let asked = |key: &str| ask(&format!("feed=gdfl&instrument={key}&from=2019-03-19"));
+        // BEFORE THE RE-KEY RECORDS IT, the bar is counted like any other.
+        let before = answer(&root, &asked(retired_key));
+        assert_eq!(record(&before, "2019-03-19")["held"]["bars"], 1);
+        let record_line = pull::gdfl_lineage::RetiredRecord {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            key: Contract::parse("2019-03-28-90000000-CE").expect("a contract"),
+            why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+            day: day("2019-03-19"),
+            median: Some(1_150_000),
+            days: 1,
+            bars: 1,
+        };
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!("{}\n", record_line.line()),
+        );
+        // AFTER: not counted, and the ledger's own sentence says why.
+        let after = answer(&root, &asked(retired_key));
+        let one = record(&after, "2019-03-19");
+        assert_eq!(one["held"]["bars"], Value::Null, "{one:#}");
+        assert_eq!(one["held"]["why"], "unreadable");
+        let notes: Vec<&str> = after["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let refusal = record_line.refusal();
+        assert!(
+            notes.iter().any(|note| note.ends_with(&refusal)),
+            "{refusal:?} not in {notes:#?}"
+        );
+        assert!(pull::gdfl_lineage::is_contract_refused(&refusal));
+        // A KEY THE LEDGER DOES NOT NAME is counted as before.
+        let kept = answer(&root, &asked(kept_key));
+        assert_eq!(record(&kept, "2019-03-19")["held"]["bars"], 1);
     }
 
     // ── The Zerodha pull journal ──────────────────────────────────────────

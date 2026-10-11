@@ -98,7 +98,11 @@ test('the DB route publishes only a complete current raw snapshot and names its 
   assert.match(page.source,/<svelte:head><title>Database · brutex<\/title><\/svelte:head>/);
   assert.match(page.source,/let prepared = \$state.raw/);
   assert.match(page.source,/const deco = \$derived\(prepared.input === rows/);
-  assert.match(page.source,/if \(!controller.signal.aborted\) prepared = \{ input, body, why: null \}/);
+  // WP-56b: a preparation is published with the scope and the feed it was prepared for.
+  assert.match(page.source,/if \(!controller.signal.aborted\) prepared = \{ input, body, why: null, scope, feed \}/);
+  // WP-56b: the whole census behind one instrument's rows is prepared without blanking them.
+  assert.match(page.source,/if \(!keep\) prepared = \{ input, body: null, why: null, scope, feed \}/);
+  assert.match(page.source,/const rows = \$derived\(behind \? [^;]*prepared\.input[^;]* : live\)/);
   assert.match(page.source,/return \(\) => controller.abort\(\)/);
   assert.match(page.source,/Preparing the database view for/);
   assert.doesNotMatch(page.source,/denominators\(rows\)/);

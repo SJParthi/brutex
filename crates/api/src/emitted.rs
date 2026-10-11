@@ -229,7 +229,12 @@ struct Case {
 /// 35 -> 37 at WP-33c: `api.audit journal index build finished`, the pull
 /// journal's index built by the first append to a journal with none, and
 /// `api.access read refused`, a refused `/db` read's access record.
-const ROWS: usize = 37;
+/// 37 -> 38 at D-3349 (WP-39; DB-N17): `api.bars window range holds months
+/// not stored`, one line per window request with holes, driven over a store
+/// holding January and March only.
+/// 38 -> 39 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, the hand
+/// runs' own stop generation moving on the operator's Stop.
+const ROWS: usize = 39;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -623,6 +628,49 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/bars.rs — a window whose range holds a hole, named once
+    // per request with its count, never once per month (DB-N17).
+    {
+        let root = fixture("emit-bar-holes");
+        cases.push(Case {
+            site: "bars.rs api.bars window range holds months not stored",
+            target: "api.bars",
+            message: "window range holds months not stored",
+            level: telemetry::Level::Info,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    for month in [1, 3] {
+                        write_one_bar(&root, "EMITHOLE", YearMonth::new(2026, month).expect("m"));
+                    }
+                    let answer = crate::bars::window(
+                        &root,
+                        &crate::bars::WindowQuery::single(
+                            Vendor::Dhan,
+                            crate::bars::SeriesKey::new("NSE", "INDEX", "EMITHOLE", None),
+                            Timeframe::MINUTE_1,
+                            YearMonth::new(2026, 1).expect("m"),
+                            YearMonth::new(2026, 3).expect("m"),
+                            crate::bars::SortKey::Ts,
+                            true,
+                            0,
+                            5,
+                            false,
+                        ),
+                    )
+                    .expect("a legal window");
+                    assert_eq!(answer.missing_months, ["2026-02"]);
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "key", "EMITHOLE")
+                    && says(record, "first", "2026-02")
+                    && says(record, "last", "2026-02")
+                    && counts(record, "months", 1)
+            }),
+        });
+    }
+
     // crates/api/src/ingest.rs — a form that never started a run.
     cases.push(Case {
         site: "ingest.rs api.ingest form refused",
@@ -756,6 +804,25 @@ fn cases() -> Vec<Case> {
             assert_eq!(control.epoch(), 0, "and resuming does NOT bump the epoch");
         }),
         mine: Box::new(|record| counts(record, "epoch", 0)),
+    });
+    // WP-61 (DB-B28, DB-B29): the hand runs' own stop generation. Stop moves
+    // it and the autopilot's is untouched.
+    cases.push(Case {
+        site: "autopilot.rs hand runs asked to stop",
+        target: "api.pull",
+        message: "hand runs asked to stop",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let control = crate::autopilot::Control::new();
+            let at = control.epoch_for(crate::autopilot::Driver::Hand);
+            assert_eq!(control.stop_hand(), 1, "the hand generation moved");
+            assert!(
+                control.stopped_for(crate::autopilot::Driver::Hand, at),
+                "a hand run that captured the old value stops"
+            );
+            assert_eq!(control.epoch(), 0, "and the autopilot's did not move");
+        }),
+        mine: Box::new(|record| counts(record, "hand_epoch", 1)),
     });
 
     // crates/api/src/audit_json.rs — two refusals a status code cannot carry.
@@ -1544,6 +1611,37 @@ fn the_silent_arms_stay_silent() {
     }
 }
 
+/// One invented one-minute INDEX bar for `symbol` on the 2nd of `month`,
+/// 09:15 IST, through the store's writer.
+fn write_one_bar(root: &std::path::Path, symbol: &str, month: YearMonth) {
+    let symbol_id = u32::try_from(brutex_core::universe::fnv1a(symbol) & 0xFFFF_FFFF)
+        .expect("the low half of a 64-bit fold fits a u32");
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol,
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month,
+        file: FileKind::Bars,
+    })
+    .expect("a well-formed store path");
+    let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
+    let ts_micros = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+    writer
+        .append(&[Bar {
+            ts_micros,
+            open: 2_450_000,
+            high: 2_451_000,
+            low: 2_449_000,
+            close: 2_450_500,
+            volume: 0,
+            open_interest: OI_NULL,
+        }])
+        .expect("one legal bar");
+}
+
 /// A month with one bar, read back whole. The premise of the silence above.
 fn clean_month_reads_every_row(root: &std::path::Path) {
     const SYMBOL: &str = "EMITCLEAN";
@@ -1753,7 +1851,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 21 -> 22 at D-3313: `pull.spot empty chunks before the series' first
     // bar`, driven through `before_first_bar_line` and read back by
     // `server::tests::a_before_first_bar_note_is_a_named_receipt_line`.
-    const REACHED_IN_SERVER_TESTS: usize = 22;
+    // 22 -> 23 at D-3349 (WP-39; DB-N15): `api.bars request abandoned; work
+    // stopped`, driven through `note_cancelled` and read back by
+    // `server::bars_route::tests::an_abandoned_request_is_named_once`.
+    const REACHED_IN_SERVER_TESTS: usize = 23;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1888,9 +1989,16 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 68 -> 70 at WP-33c: `audit::note_index` and `logs::note_access`, both
     // driven in the table above.
+    //
+    // 70 -> 72 at D-3349 (WP-39): the window's one hole line (DB-N17), driven
+    // in the table above, and the abandoned-request line (DB-N15), reached in
+    // server tests.
+    //
+    // 72 -> 73 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, driven
+    // in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 70,
+        lib_sites, 73,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

@@ -3592,6 +3592,47 @@ impl Manifest {
         Ok(epoch)
     }
 
+    /// This partition as its next epoch, compacted exactly as
+    /// [`Self::compacted`] compacts it, WITHOUT the keys `withdrawn` names.
+    /// The re-key's census half (D-3331 lineage, D-3316 epochs; WP-12c): a
+    /// stored option key the current decoder files under another key, or
+    /// refuses on every day, stops being a series the census lists, while the
+    /// epoch it was listed in is kept whole as the history of what was.
+    ///
+    /// `n_keys` and `total_rows` fall by exactly the withdrawn keys' newest
+    /// rows; every other key's [`Manifest::held`] answers as before. The
+    /// generation advances past the replaced epoch's by the kept keys (at
+    /// least one), so a reader keyed on it sees the change and generations
+    /// stay monotonic across epochs.
+    ///
+    /// # Cost
+    ///
+    /// [`Self::compacted`]'s, plus one `withdrawn` call per key. Never on a
+    /// request path: `cli gdfl-rekey` only. UNVERIFIED as a measurement; it
+    /// is the shape of [`Self::compacted`], which bench C-14 times.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::compacted`]'s.
+    pub fn compacted_without(
+        &self,
+        withdrawn: impl Fn(&EntryKey) -> bool,
+    ) -> Result<Self, ManifestError> {
+        let Some(segment) = self.header.segment else {
+            return Err(ManifestError::SingleFileNotCompacted);
+        };
+        let mut rows = self.newest_in_key_order();
+        rows.retain(|held| !withdrawn(&held.entry.key));
+        let kept = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        let Some(generation) = self.header.generation.checked_add(kept.max(1)) else {
+            return Err(ManifestError::GenerationExhausted);
+        };
+        let mut epoch = Self::epoch_of(self.header.vendor, segment, &rows, generation)?;
+        epoch.degraded = self.degraded;
+        epoch.loaded_version = self.loaded_version;
+        Ok(epoch)
+    }
+
     /// The version this census was **loaded** from.
     ///
     /// [`FORMAT_VERSION`] for a genesis census and for one read from a file this

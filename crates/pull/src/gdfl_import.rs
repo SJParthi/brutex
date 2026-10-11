@@ -71,10 +71,60 @@
 //! line naming another definition, or none, is not done: the day is imported
 //! again and named in `resumed` and [`Report::restated`]. The store is
 //! append-only, so it answers `AlreadyPresent` for the same bars and refuses
-//! the file by name for different ones; a day built under an old definition
-//! is never rewritten in place and never passes as a clean result. A day
-//! older than what a month file already holds is refused by the store by
-//! name, never inserted.
+//! the file by name for different ones (the repair below refuses them too:
+//! it never changes a held bar); a day built under an old definition is
+//! never rewritten in place and never passes as a clean result.
+//!
+//! # A day its month lacks, where no append can land it: a new generation (D-3350; DB-N26)
+//!
+//! A day the month lacks between, before or among the days it holds — the
+//! 8 Muhurat sessions, the 2 DR drills, 2021-02-24 and 2022-03-07, refused by
+//! the calendar when their months were first imported and admitted since
+//! D-3319 (WP-12a) — cannot be appended: the append-only month refuses a
+//! batch inside its held range at a stamp it never held, and until WP-12d
+//! that refusal was the day's end (10 Oct 2026: every NIFTY and BANKNIFTY
+//! file of the 12 days, which stayed `incomplete`). Every file is now filed
+//! through `ingest::repair_rows`, WP-13c's one repair authority reached from
+//! this door: the append door first, so a tail, a new month and a day
+//! already held land exactly as before. When it refuses, the month as every
+//! reader opens it is asked one thing: does it hold any bar inside the
+//! file's span, first second to last? Only a month that holds NONE, where no
+//! append can ever land the file (the span starts at or before the month's
+//! last held bar, or the month is served from a revision), is REPAIRED — a
+//! new generation holding every bar the month served plus the day's,
+//! published under `bar-revisions-v1/<n>` and promoted so every reader
+//! (`BarFile::open_existing`, the census, `.tix` lookups, `/provenance.json`)
+//! opens it. Never in place: the original's files stay byte-identical.
+//!
+//! Every other refusal of the append door stands, in its own words, and
+//! nothing is repaired: a month another process holds locked, a host error,
+//! and above all a day the month already holds read differently — other
+//! values at a held second, or more seconds than it holds. A back-fill adds
+//! a day the month lacks; it never completes, restates or mixes a held one,
+//! so no month is ever left holding what no single reading of a day
+//! produces, and a passing lock never becomes a generation.
+//!
+//! Journaled before and after, in `<store>/audit/gdfl.repairs`, each line
+//! naming this run's id, whose `run` line names the archive: `repairing`
+//! before anything is published (the month, the generation served, the bars
+//! offered and their span), then `repair` (the generations, bars kept and
+//! added, the new span) or `refused` (why). A run killed between the
+//! promotion and its `repair` line leaves the `repairing` line, so no
+//! generation is served that the journal does not name. Resumable: a crash
+//! between publication and promotion is promoted by the next run, a revision
+//! torn mid-write is stepped over and named, never reused, and a day re-read
+//! after its repair finds every bar held and writes nothing
+//! ([`Report::months_repaired`] counts the repairs; such a landing writes no
+//! `.prv` record, below).
+//!
+//! Once a month is served from a revision, every later day it lacks is a
+//! repair too — a revision is never appended to — so each costs one more
+//! generation and O(month), bounded by `store::repair::MAX_REVISIONS` per
+//! month; `docs/06-limits.md` is WP-99's to state it. The 12 index days'
+//! months were complete, so each instrument-month of theirs is one
+//! generation. A month that holds only a later day (the six alias indices'
+//! special-session months, DB-B40) takes every other day of the month this
+//! way, one generation a day.
 //!
 //! # Refusals
 //!
@@ -180,7 +230,11 @@
 //!   day file, the day, the bars appended, the bar definition, the journal's
 //!   `begin` line and the build commit. The bar file is opened read-only and
 //!   the record refused unless its commit counter is still the one the
-//!   append left. A refused record is a named failure of the file.
+//!   append left. A refused record is a named failure of the file. A file
+//!   that repaired its month (above) writes none, and says so in a `warn`
+//!   event: a record covers the tail one append committed, and a revision
+//!   carries no `.prv` (`crates/store/REPAIR.md`), so `/provenance.json`
+//!   answers that month from this journal's day lines, reconstructed.
 //! - **The lineage** (D-3331, D-3343; [`lineage`]): an options run feeds
 //!   every day's contract-days to `gdfl_lineage::detect` and appends the
 //!   `alias`, `lineage` and `stitched` records to `<store>/imports/gdfl.lineage`
@@ -192,7 +246,13 @@
 //! Per day: one listing (O(entries)), then per instrument file one fetch,
 //! check and decode (O(bytes)), one placement (two passes, O(rows)), two
 //! folds (O(rows)), and two `from_rows` appends (O(bars + log n_valid +
-//! blocks touched), `docs/06-limits.md`). The census is published once per
+//! blocks touched), `docs/06-limits.md`), each through `repair_rows`, which
+//! for a month the append door refuses reads, merges, writes and reads back
+//! the whole month instead (O(held + offered), at most
+//! `store::repair::MAX_ROWS`), once per repaired month: measured on 24 real
+//! NIFTY and BANKNIFTY one-second months of 395,000 to 473,000 bars in a
+//! scratch store, p50 142 ms and max 323 ms a month, the file's read and
+//! fold included (WP-12d). The census is published once per
 //! day ([`crate::ingest::record_held`], O(entries held)). None of this is a
 //! constant-time claim; `docs/06-limits.md` states it. What IS constant per
 //! lookup is the stored result: a bar by index is one positional read
@@ -230,7 +290,7 @@ use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
 use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, read_listed, session_gate, split_name};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
-use crate::ingest::{Failure, Ingested, Plan, from_rows, record_held};
+use crate::ingest::{Failure, Filed, Ingested, Plan, record_held, repair_rows};
 use crate::manifest::{ENTRY_STRIDE, HEADER_LEN, Held, MAX_ENTRIES, Manifest, manifest_path};
 use crate::session::{Day, IST_OFFSET_SECS, Window};
 use crate::vendor::{Granularity, Listing, PriceScale, TimestampEncoding};
@@ -428,6 +488,26 @@ pub enum ImportRefusal {
         /// Why.
         why: String,
     },
+    /// An options filter names a symbol the lineage files under another key
+    /// (D-3354): the decoder files `NIITTECH...` under `COFORGE`, so the
+    /// name as given would match no file, and the day would be journaled
+    /// `done` with nothing read.
+    FilterRenamed {
+        /// The name as given.
+        name: String,
+        /// The key its option files are filed under.
+        filed: String,
+    },
+    /// The store holds live option series under a symbol the lineage files
+    /// elsewhere (D-3354): the run would open a second key for contracts
+    /// the store already holds under the old one, on a day the exchange
+    /// changed nothing. Refused before any day is read. A directory whose
+    /// every contract the ledger records superseded or retired is history
+    /// and is not named.
+    UnderlyingSplit {
+        /// Each old symbol with a directory, and the key it is filed under.
+        held: Vec<(String, String)>,
+    },
 }
 
 impl ImportRefusal {
@@ -453,6 +533,8 @@ impl ImportRefusal {
             Self::Provenance { .. } => "provenance",
             Self::DayLedger { .. } => "day_ledger",
             Self::Lineage { .. } => "lineage",
+            Self::FilterRenamed { .. } => "filter_renamed",
+            Self::UnderlyingSplit { .. } => "underlying_split",
         }
     }
 
@@ -465,6 +547,27 @@ impl ImportRefusal {
             _ => None,
         }
     }
+}
+
+/// [`ImportRefusal::UnderlyingSplit`]'s sentence: every old-symbol directory
+/// with the key its files are filed under, then the remedy.
+fn split_said(f: &mut core::fmt::Formatter<'_>, held: &[(String, String)]) -> core::fmt::Result {
+    write!(
+        f,
+        "the store holds option series under {} old symbol(s) the import now files elsewhere \
+         (D-3354):",
+        held.len()
+    )?;
+    for (old, filed) in held {
+        write!(f, " {old} (filed under {filed});")?;
+    }
+    write!(
+        f,
+        " importing would open a second key for contracts the store already holds. Supersede \
+         each bars/gdfl/NSE/FNO/<old symbol> first (its months re-imported under the filed key \
+         as new generations and the old keys recorded superseded), then run again. Nothing was \
+         read or written"
+    )
 }
 
 impl core::fmt::Display for ImportRefusal {
@@ -548,6 +651,14 @@ impl core::fmt::Display for ImportRefusal {
             ),
             Self::DayLedger { why } => write!(f, "the GDFL day ledger: {why}"),
             Self::Lineage { why } => write!(f, "the lineage ledger: {why}"),
+            Self::FilterRenamed { name, filed } => write!(
+                f,
+                "{name} is filed under {filed} (D-3354: an option is filed under the newest \
+                 symbol its name's dated changes reach); ask for {filed}, which reads the \
+                 {name} files of the days before the change too. Refused: the name as given \
+                 matches no file"
+            ),
+            Self::UnderlyingSplit { held } => split_said(f, held),
         }
     }
 }
@@ -740,6 +851,9 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         // Settled against the calendar (D-3331), which can learn the day.
         NfoRefusal::ExpiryUnsettled { .. } => Cause::open(Stage::Calendar, "expiry_unsettled"),
         NfoRefusal::UnderlyingRefused { .. } => Cause::open(Stage::File, "underlying_refused"),
+        // Judged against the dated symbol-change table (D-3333), which can
+        // learn a row (WP-12e).
+        NfoRefusal::UnderlyingStale { .. } => Cause::open(Stage::File, "underlying_stale"),
         NfoRefusal::ContractUnrenderable { .. } => {
             Cause::open(Stage::File, "contract_unrenderable")
         }
@@ -1625,6 +1739,13 @@ pub struct Report {
     /// (D-3334): one per file that committed bars, when the run names its
     /// origin.
     pub provenance_records: usize,
+    /// Month files a day was back-filled into as a NEW GENERATION (D-3350;
+    /// DB-N26, WP-12d): one per file whose day the append-only month refused
+    /// because it lies inside what the month holds, and the versioned repair
+    /// took. Each is journaled in `<store>/audit/gdfl.repairs`; its added
+    /// bars are in [`Report::seconds_committed`], and it writes no `.prv`
+    /// record (a revision carries none).
+    pub months_repaired: usize,
 }
 
 /// What one run is asked to do.
@@ -1645,6 +1766,13 @@ pub struct Run<'a> {
 impl Run<'_> {
     /// Refuses a filter name that is not a symbol as the store files it
     /// (D-2811): the journal key and the match are both by exact bytes.
+    ///
+    /// An OPTIONS filter is matched against the key a file is filed under,
+    /// which for a renamed underlying is its newest symbol (D-3354). An old
+    /// symbol there matched no file and still journaled the day `done` with
+    /// `files=0`, so it is refused with the key to ask for. A capital-market
+    /// filter is not refused: `cli`'s stored scope hands both names of a
+    /// renamed share, and the day's key is those names as given.
     fn check_filter(&self) -> Result<(), ImportRefusal> {
         for name in self.only {
             let filed = brutex_core::symbol::Symbol::new(name)
@@ -1652,8 +1780,95 @@ impl Run<'_> {
             if !filed {
                 return Err(ImportRefusal::FilterName { name: name.clone() });
             }
+            let current = brutex_core::alias::LINEAGE.current(name);
+            if self.kind == ImportKind::Options && current != name.as_str() {
+                return Err(ImportRefusal::FilterRenamed {
+                    name: name.clone(),
+                    filed: current.to_owned(),
+                });
+            }
         }
         Ok(())
+    }
+
+    /// The old symbols the store holds LIVE option series under whose files
+    /// this run would file under another key (D-3354), each with that key.
+    /// Empty for a spot run.
+    ///
+    /// One directory open per applied row of `core::alias::SYMBOL_CHANGES`
+    /// whose newest symbol the filter wants. A directory that is there is
+    /// walked until its first contract the lineage ledger has neither
+    /// superseded nor retired (the re-key's records, D-3331): that one
+    /// contract is what the run would split. A directory whose every
+    /// contract is withdrawn, or that holds none, is history and blocks
+    /// nothing, so superseding the old keys is what lifts the refusal; the
+    /// walk is then the directory's length, once per run. A name in it that
+    /// is no contract segment is not a contract the store holds.
+    ///
+    /// A directory or an entry that cannot be looked at counts as held: that
+    /// is not proof of absence.
+    ///
+    /// # Errors
+    ///
+    /// [`ImportRefusal::Lineage`] when an old-symbol directory exists and
+    /// the ledger that would say whether it is superseded cannot be read.
+    fn split_underlyings(&self) -> Result<Vec<(String, String)>, ImportRefusal> {
+        use brutex_core::instrument::{Exchange, Segment};
+        if self.kind != ImportKind::Options {
+            return Ok(Vec::new());
+        }
+        let base = self
+            .store_root
+            .join(store::path::STORE_ROOT)
+            .join(Vendor::Gdfl.as_str())
+            .join(Exchange::Nse.as_str())
+            .join(Segment::Fno.as_str());
+        let mut held = Vec::new();
+        let mut ledger: Option<crate::gdfl_rekey::Withdrawn> = None;
+        for row in brutex_core::alias::LINEAGE.rows() {
+            let filed = brutex_core::alias::LINEAGE.current(row.old);
+            if !row.status.applies() || filed == row.old || !self.wants(filed) {
+                continue;
+            }
+            let entries = match std::fs::read_dir(base.join(row.old)) {
+                Ok(entries) => entries,
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    held.push((row.old.to_owned(), filed.to_owned()));
+                    continue;
+                }
+            };
+            let withdrawn = match &mut ledger {
+                Some(read) => read,
+                slot => slot.insert(
+                    crate::gdfl_rekey::withdrawn(self.store_root)
+                        .map_err(|why| ImportRefusal::Lineage { why })?,
+                ),
+            };
+            let symbol = brutex_core::symbol::Symbol::new(row.old).ok();
+            let live = entries.into_iter().any(|entry| {
+                let Ok(entry) = entry else {
+                    return true;
+                };
+                let name = entry.file_name();
+                let contract = name
+                    .to_str()
+                    .and_then(|name| Contract::parse(name).filter(|c| c.as_str() == name));
+                match (symbol, contract) {
+                    (Some(symbol), Some(contract)) => {
+                        withdrawn.superseded(symbol, contract).is_none()
+                            && withdrawn.retired(symbol, contract).is_none()
+                    }
+                    // Not a contract the store files, or a table symbol the
+                    // store cannot spell: nothing here to split.
+                    _ => false,
+                }
+            });
+            if live {
+                held.push((row.old.to_owned(), filed.to_owned()));
+            }
+        }
+        Ok(held)
     }
 
     /// Whether `symbol` passes the filter.
@@ -2814,13 +3029,30 @@ impl DayWork<'_> {
             self.begun = true;
         }
         let origin = format!("gdfl {} {} {}", run.kind.as_str(), self.day, file.name);
-        let done: Ingested = from_rows(
+        // A DAY ITS MONTH LACKS, WHERE NO APPEND CAN LAND IT, LANDS AS A NEW
+        // GENERATION OF THE MONTH (D-3350; DB-N26). The append-only month
+        // refuses it, and was the end of it: the 12 index days WP-12a
+        // admitted were refused for every NIFTY and BANKNIFTY file on 10 Oct
+        // 2026. The back-fill door tries the append door first, so a tail, a
+        // new month and a day already held land exactly as before; it
+        // repairs only a month that holds no bar inside the file's span and
+        // cannot be appended to, never in place, and every other refusal
+        // stands as it was. The reason names the run, whose `run` line names
+        // the archive.
+        let reason = format!(
+            "gdfl-import {} {} {} run:{}: a day the month lacks where no append can land it",
+            run.kind.as_str(),
+            self.day,
+            file.name,
+            self.ctx.id
+        );
+        let (done, filed): (Ingested, Filed) = repair_rows(
             &converted.seconds,
-            &[],
             &file.symbol,
             &origin,
             run.store_root,
             plan(run.kind, self.request, file.contract),
+            &reason,
         );
         self.report.outside_session += usize::try_from(done.census.total()).unwrap_or(0);
         self.report.seconds += done.bars_stored;
@@ -2828,7 +3060,10 @@ impl DayWork<'_> {
         if done.bars_committed > 0
             && let Some(held) = done.pending.as_ref()
         {
-            self.provenance(handed, held, done.bars_committed);
+            match filed {
+                Filed::Appended => self.provenance(handed, held, done.bars_committed),
+                Filed::NewGeneration => self.repaired(handed, held, done.bars_committed),
+            }
         }
         self.held.extend(done.pending);
         for failure in done.failures {
@@ -2897,6 +3132,48 @@ impl DayWork<'_> {
                 self.failures.push(refused);
             }
         }
+    }
+
+    /// A file whose day its month lacked inside what it holds, landed as a
+    /// NEW GENERATION of the month (D-3350; DB-N26): counted in
+    /// [`Report::months_repaired`] and logged with the month's rows now
+    /// served. The repair door journaled it in `<store>/audit/gdfl.repairs`
+    /// with this run's id.
+    ///
+    /// **No `.prv` record is written, and the event says so.** A sidecar
+    /// record covers the bars ONE append committed at the end of its file,
+    /// at that file's commit generation (`store::provenance::record`); the
+    /// added bars sit inside the new generation, and its records would index
+    /// bars the original never held, so a revision carries no `.prv`
+    /// (`crates/store/REPAIR.md`). `/provenance.json` reads beside the
+    /// generation every reader opens and rebuilds the month's answer from
+    /// this journal's day lines, labelled reconstructed; the original's
+    /// `.prv`, if any, is left byte-identical. When the run names its origin
+    /// — so an append would have been recorded — the event is a `warn`.
+    fn repaired(&mut self, handed: &Handed, held: &Held, added: usize) {
+        self.report.months_repaired += 1;
+        let unrecorded = self.ctx.options.origin.is_some()
+            && handed.facts.member.is_some()
+            && self.source.is_some();
+        let (day, month) = (self.day.to_string(), held.entry.key.month.to_string());
+        let event = if unrecorded {
+            telemetry::Event::warn(
+                TARGET,
+                "day back-filled as a new generation of its month; no .prv record: a revision \
+                 carries none (D-3350), the repair journal and this journal's day line name it",
+            )
+        } else {
+            telemetry::Event::info(TARGET, "day back-filled as a new generation of its month")
+        };
+        let _dropped_when_filtered = telemetry::emit(
+            &event
+                .with("file", handed.file.name.as_str())
+                .with("day", day.as_str())
+                .with("month", month.as_str())
+                .with("added", added)
+                .with("rows", held.entry.rows)
+                .with("run", self.ctx.id),
+        );
     }
 }
 
@@ -3656,7 +3933,11 @@ pub fn run_nfo<S: NfoSource>(source: &S, run: &Run<'_>) -> Result<Report, Import
 /// # Errors
 ///
 /// As [`run_nfo`], and [`ImportRefusal::Lineage`] when a lineage ledger
-/// exists and cannot be read.
+/// exists and cannot be read; [`ImportRefusal::FilterRenamed`] for a filter
+/// name the lineage files under another key, and
+/// [`ImportRefusal::UnderlyingSplit`] while the store holds option series
+/// under an old symbol whose files the run would file elsewhere (D-3354),
+/// both before any day is read.
 pub fn run_nfo_from<S: NfoSource>(
     source: &S,
     run: &Run<'_>,
@@ -3666,6 +3947,24 @@ pub fn run_nfo_from<S: NfoSource>(
         return Err(ImportRefusal::KindUnknown {
             word: format!("{} read from an options source", run.kind.as_str()),
         });
+    }
+    // BEFORE ANYTHING IS READ OR JOURNALED (D-3354): a name the lineage files
+    // elsewhere, then an old-symbol directory the run would split from. Each
+    // is logged as well as returned: a refused run leaves a line to find.
+    let refused = match run.check_filter().and_then(|()| run.split_underlyings()) {
+        Ok(held) if held.is_empty() => None,
+        Ok(held) => Some(ImportRefusal::UnderlyingSplit { held }),
+        Err(refusal) => Some(refusal),
+    };
+    if let Some(refusal) = refused {
+        let why = refusal.to_string();
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::error(TARGET, "run refused")
+                .with("kind", run.kind.as_str())
+                .with("code", refusal.code())
+                .with("why", why.as_str()),
+        );
+        return Err(refusal);
     }
     let mut lineage = lineage::LineageRun::load(run.store_root, run.from)
         .map_err(|why| ImportRefusal::Lineage { why })?;
@@ -3699,7 +3998,10 @@ fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) ->
 /// undecodable name, on the refusal path only.
 fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
     if let Some(underlying) = crate::gdfl_nfo::shaped_underlying(ticker) {
-        return run.wants(underlying);
+        // By the key it would be FILED under (D-3354), as a name that does
+        // decode is matched: an undecodable `NIITTECH...` is a `COFORGE`
+        // filter's to refuse, never nobody's.
+        return run.wants(brutex_core::alias::LINEAGE.current(underlying));
     }
     let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
     let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
@@ -4243,6 +4545,10 @@ pub mod quality;
 
 #[path = "gdfl_import_lineage.rs"]
 pub mod lineage;
+
+#[cfg(test)]
+#[path = "gdfl_wp12e_tests.rs"]
+mod wp12e_tests;
 
 #[cfg(test)]
 #[path = "gdfl_import_tests.rs"]

@@ -550,11 +550,35 @@ fn a_lineage_record_takes_a_renamed_strike_out_from_its_ex_date() {
         }
         .line()
     };
+    // THE RE-KEY'S TWO RECORDS (D-3331; WP-12c) are read records, never
+    // "unread": the census epoch installed with them lists neither key.
+    let superseded = pull::gdfl_lineage::SupersededRecord {
+        underlying: symbol,
+        old: contract("2023-06-29-400000-CE"),
+        new: contract("2023-06-28-400000-CE"),
+        kind: pull::expiry_alias::AliasKind::VendorRedated,
+        months: 1,
+        bars: 2,
+        digest: [5; 32],
+    }
+    .line();
+    let retired = pull::gdfl_lineage::RetiredRecord {
+        underlying: symbol,
+        key: contract("2018-09-27-90000000-CE"),
+        why: pull::gdfl_lineage::RetiredWhy::StrikeImplausible,
+        day: Day::new(2018, 9, 3).expect("a day"),
+        median: Some(410_000),
+        days: 1,
+        bars: 1,
+    }
+    .line();
     let lines = [
         rename("2018-09-27-430000-CE", "2018-09-27-215000-CE"),
         rename("2018-09-27-400000-CE", "2018-09-27-200000-CE"),
         stitch("2018-09-27-400000-CE", None),
         stitch("2018-09-27-420000-CE", Some("2018-09-27-840000-CE")),
+        superseded,
+        retired,
         "a line this build does not read".to_owned(),
     ];
     let ledger = pull::gdfl_lineage::lineage_path(&built.store_root);
@@ -567,7 +591,7 @@ fn a_lineage_record_takes_a_renamed_strike_out_from_its_ex_date() {
         body["lineage"]["state"], "partial",
         "the unread line is said"
     );
-    assert_eq!(body["lineage"]["records"], 4);
+    assert_eq!(body["lineage"]["records"], 6);
     assert_eq!(body["lineage"]["unread_lines"], 1);
     assert_eq!(body["spot_series"]["segment"], "CASH");
     let strikes = |body: &Value| -> Vec<i64> {
@@ -762,4 +786,18 @@ fn a_rung_is_named_the_way_the_page_reads_it() {
     for bad in ["2019-03-28-x", "19-03-28", "2019-3-28", "2019-02-30", ""] {
         assert_eq!(expiry_param(bad), None, "{bad}");
     }
+}
+
+/// An `event` and a `stopped` record of the lineage ledger (D-3355) are read
+/// by the chain's index and move no rung: before they were known here each
+/// would have counted as unread and turned the chain's lineage state to
+/// `partial`. Any other unknown line still does.
+#[test]
+fn the_event_and_stopped_records_are_read_and_move_no_rung() {
+    let text = "event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted shift=0 lot_old=75 lot_new=75 paired=0 stopped=1 v=1\n\
+                stopped NSE-FNO-NIFTY-2020-06-25-1000000-CE ex=2020-06-16 v=1\n";
+    let index = LineageIndex::of(text);
+    assert_eq!((index.records, index.unread), (2, 0));
+    let torn = LineageIndex::of(&format!("{text}stopped NSE-FNO-NIFTY ex=2020-06-16 v=1\n"));
+    assert_eq!((torn.records, torn.unread), (2, 1));
 }

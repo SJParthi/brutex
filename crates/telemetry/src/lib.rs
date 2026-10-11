@@ -127,6 +127,7 @@ mod event;
 mod json;
 mod level;
 mod record;
+pub mod run_dirs;
 mod sink;
 mod tail;
 mod value;

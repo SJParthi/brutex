@@ -23,6 +23,7 @@ export const DB_PAGE_FILES = [
   '../src/routes/db/DbCalendar.svelte',
   '../src/routes/db/DbBarsGrid.svelte',
   '../src/routes/db/DbOptionCells.svelte',
+  '../src/routes/db/DbOptionNotes.svelte',
   '../src/routes/db/DbExtremes.svelte',
   '../src/routes/db/DbDayFlags.svelte',
   '../src/routes/db/DbProvenance.svelte',
@@ -40,6 +41,7 @@ export const DB_PAGE_FILES = [
   '../src/lib/db/notes-options.js',
   '../src/lib/db/decoration.js',
   '../src/lib/db/notes-coverage.js',
+  '../src/lib/db/dayflags.js',
   '../src/lib/db/notes-labels.js'
 ];
 

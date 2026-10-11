@@ -1571,6 +1571,8 @@ mod facets;
 pub(crate) mod import_journal;
 #[path = "imports.rs"]
 pub(crate) mod imports;
+#[path = "ingest_refusals.rs"]
+pub(crate) mod ingest_refusals;
 #[path = "provenance.rs"]
 mod provenance;
 #[path = "sources.rs"]
@@ -1625,6 +1627,7 @@ pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
 use repair_route::repair_plan_json;
 pub(crate) use store_route::behind as census_behind;
+pub use store_route::census_delta;
 #[cfg(test)]
 use store_route::census_headers;
 pub use store_route::{CENSUS_DEGRADED_HEADER, CENSUS_NOTE_HEADER, CENSUS_STATE_HEADER};
@@ -5185,9 +5188,13 @@ pub(crate) async fn broker_run_by(
         ..BrokerRun::default()
     };
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
-    // started with, so a pause that arrives after this run began stops it and a
-    // pause that happened before it began does not.
-    let epoch = site.autopilot.epoch();
+    // started with, so a stop that arrives after this run began stops it and a
+    // stop that happened before it began does not.
+    //
+    // PER DRIVER (DB-B28, DB-B29): a hand run captures the hand generation,
+    // which the operator's Stop moves and the autopilot's Pause does not; the
+    // autopilot and a recovery keep the autopilot's, which Pause moves.
+    let epoch = site.autopilot.epoch_for(driver);
 
     // WHAT EACH INSTRUMENT IS FETCHED FOR: the window, and its month only when
     // it lies inside one. This was the window's FIRST month, named once, and
@@ -5211,11 +5218,12 @@ pub(crate) async fn broker_run_by(
         // month is five to thirty-seven minutes on this store, and an operator
         // who presses Pause must not wait out the other seven hundred
         // instruments to be obeyed.
-        if site.autopilot.stopped(epoch) {
+        if site.autopilot.stopped_for(driver, epoch) {
             out.stopped = Some(format!(
-                "{} — stopped after {} of {} instruments. The partial month is \
+                "{} — {} after {} of {} instruments. The partial month is \
                  refilled on resume, because the resume point is the store's own.",
                 crate::autopilot::CANCELLED,
+                stop_bit_by(driver),
                 out.reached,
                 targets.len()
             ));
@@ -8713,8 +8721,10 @@ pub(crate) async fn pull_run(
                 run_refusal_json(&crate::pullrun::Refusal::AlreadyRunning.why()),
             );
         }
-        // CLAIMED HERE, UNDER THE SAME TAKE THAT CHECKED IT.
-        let claimed = crate::pullrun::Progress::claimed();
+        // CLAIMED HERE, UNDER THE SAME TAKE THAT CHECKED IT, stamped with its
+        // start and its legs' asks so a page resumed after a reload states the
+        // run's own feed, rungs and window (DB-B32).
+        let claimed = crate::pullrun::Progress::claimed_for(&legs, std::time::SystemTime::now());
         let run = claimed.generation;
         *held = Some(claimed);
         run
@@ -8771,13 +8781,22 @@ pub(crate) async fn pull_run_stop(
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stopping = match held.as_mut() {
+    let run_stopping = match held.as_mut() {
         Some(progress) if progress.running() => {
             progress.stopping = true;
             true
         }
         _ => false,
     };
+    // THE STOP BITES AT THE NEXT INSTRUMENT, NOT THE NEXT LEG (DB-B28), and it
+    // reaches a single per-row pull too (DB-B30): every hand run in flight
+    // checks the hand generation per instrument. A hand pull with no run slot
+    // (`POST /pull/spot` from a row's Pull) is named by the cell it publishes.
+    let hand_pull = !run_stopping && site.autopilot.hand_in_flight();
+    let stopping = run_stopping || hand_pull;
+    if stopping {
+        let _hand_epoch = site.autopilot.stop_hand();
+    }
     if stopping && let Err(why) = crate::recovery_control::stop(&site) {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -8793,7 +8812,49 @@ pub(crate) async fn pull_run_stop(
     (
         axum::http::StatusCode::OK,
         json_headers(),
-        format!("{{\"stopping\":{stopping}}}"),
+        pull_stop_json(run_stopping, hand_pull),
+    )
+}
+
+/// Which control stopped a run `driver` drives, for the run's own stop
+/// sentence: a hand run answers to Stop, the autopilot and a recovery to Pause
+/// (DB-B28, DB-B29).
+const fn stop_bit_by(driver: crate::autopilot::Driver) -> &'static str {
+    match driver {
+        crate::autopilot::Driver::Hand => "Stop (POST /pull/run/stop) bit",
+        crate::autopilot::Driver::Autopilot | crate::autopilot::Driver::Recovery => {
+            "the autopilot's pause bit"
+        }
+    }
+}
+
+/// What `POST /pull/run/stop` answers: whether anything was asked to stop,
+/// what it was, and when it takes effect (DB-B28, DB-B30).
+fn pull_stop_json(run_stopping: bool, hand_pull: bool) -> String {
+    let (what, when) = if run_stopping {
+        (
+            "run",
+            "the run's leg in flight stops at its next instrument, and no further leg or \
+             pass starts; bars already landed stay",
+        )
+    } else if hand_pull {
+        (
+            "hand_pull",
+            "the single hand pull in flight (POST /pull/spot) stops at its next instrument; \
+             bars already landed stay",
+        )
+    } else {
+        (
+            "nothing",
+            "no hand run or hand pull is in flight; the autopilot is paused and resumed on \
+             its own controls, which this does not touch",
+        )
+    };
+    format!(
+        "{{\"stopping\":{},\"what\":{},\"when\":{}}}",
+        run_stopping || hand_pull,
+        render::json_string(what),
+        render::json_string(when)
     )
 }
 
@@ -8933,6 +8994,79 @@ fn repair_refusal(scope: &'static str, why: &str) -> SpotAnswer {
     )
 }
 
+/// Who holds `feed`'s pull seat, as this server's own published state names
+/// it, and what releases it (DB-B29). The seat itself records no holder, so
+/// the answer is read from the three surfaces that do: the `/pull/run` slot,
+/// the cell a hand pull publishes, and the autopilot's phase. A seat none of
+/// them explains is said to be unexplained, never guessed.
+fn seat_holder(site: &Site, feed: pull::vendor::Feed) -> String {
+    let wire = feed.wire();
+    let run = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|progress| progress.running())
+        .and_then(|progress| {
+            progress
+                .feeds
+                .iter()
+                .find(|report| report.vendor == wire)
+                .map(|report| (progress.generation, report.doing.clone()))
+        });
+    if let Some((generation, doing)) = run {
+        return format!(
+            "It is held by the hand run started on /ingest (POST /pull/run, run {generation}){}. \
+             Its Stop (POST /pull/run/stop) stops it at its next instrument; pausing the \
+             autopilot does not touch it.",
+            if doing.is_empty() {
+                String::new()
+            } else {
+                format!(", now on its leg {doing:?}")
+            }
+        );
+    }
+    let cell = site.autopilot.inspect(|status| {
+        status
+            .now
+            .as_ref()
+            .filter(|now| now.feed == wire)
+            .map(|now| {
+                (
+                    now.driver,
+                    now.instrument.clone(),
+                    now.timeframe.clone(),
+                    now.index,
+                    now.of,
+                )
+            })
+    });
+    match cell.flatten() {
+        Some((crate::autopilot::Driver::Hand, instrument, timeframe, index, of)) => format!(
+            "It is held by a single hand pull (POST /pull/spot), now on {instrument} at \
+             {timeframe}, instrument {index} of {of}. Stop on /ingest (POST /pull/run/stop) \
+             stops it at its next instrument; pausing the autopilot does not touch it."
+        ),
+        Some((driver, instrument, timeframe, index, of)) => format!(
+            "It is held by the {} (now on {instrument} at {timeframe}, instrument {index} of \
+             {of}). Pause it at /autopilot and try again; it resumes from wherever the store \
+             reaches, so nothing is lost by pausing.",
+            driver.label()
+        ),
+        None if site.autopilot.is_paused() => "No run this server publishes names the holder: \
+             the autopilot is paused, no hand run is in /pull/run.json and no cell is in \
+             flight for this feed, so the seat is held between two cells of a pull or by a \
+             recovery. Read /ingest/status.json and /pull/run.json, then try again."
+            .to_owned(),
+        None => "No run this server publishes names the holder: no hand run is in \
+             /pull/run.json and no cell is in flight for this feed. The autopilot is running, \
+             and its round takes every feed's seat for the whole of each pass; if it is the \
+             holder, pause it at /autopilot and try again (it resumes from wherever the store \
+             reaches, so nothing is lost by pausing)."
+            .to_owned(),
+    }
+}
+
 /// The body of `POST /pull/spot`, run detached by [`pull_spot`].
 async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
     // ONE STAMP, EVERY ARM. Built once here rather than at each `return`, so a
@@ -9012,13 +9146,10 @@ async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
                         "another pull already holds {}'s seat, so this request was \
                          refused rather than run against a manifest that pull is \
                          already writing to. Other feeds are unaffected — the seats \
-                         are per feed, because the census they stand for is. If it \
-                         is the autopilot, pause it at /autopilot and try again; it \
-                         resumes from wherever the store reaches, so nothing is lost \
-                         by pausing.",
-                        wants.display()
-                    )
-                    .to_owned(),
+                         are per feed, because the census they stand for is. {}",
+                        wants.display(),
+                        seat_holder(site, wants)
+                    ),
                 )],
                 site.broker,
             )),
@@ -14410,6 +14541,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         )
         .route("/chain.json", axum::routing::get(chain::chain_json))
         .route("/imports.json", axum::routing::get(imports::imports_json))
+        // EACH ROW'S PULL REFUSALS, so /ingest says a month was requested and
+        // refused rather than never pulled (WP-61, DB-G23).
+        .route(
+            "/ingest/refusals.json",
+            axum::routing::get(ingest_refusals::refusals_json),
+        )
         .route(
             "/dayflags.json",
             axum::routing::get(dayflags::dayflags_json),
@@ -31692,3 +31829,7 @@ mod calendar_identity {
 #[cfg(test)]
 #[path = "http_admission_tests.rs"]
 mod http_admission_tests;
+
+#[cfg(test)]
+#[path = "hand_stop_tests.rs"]
+mod hand_stop_tests;

@@ -182,6 +182,7 @@ const _: () = {
         greek_checksums,
         time_index,
         provenance,
+        sort_index,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -192,6 +193,7 @@ const _: () = {
     assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
     assert!(provenance.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(sort_index.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -707,11 +709,16 @@ pub enum FileKind {
     /// Written after the bars it names are committed and never touching them.
     /// See [`crate::provenance`]. D-3334.
     Provenance,
+    /// The bar file's sort index: for each sortable column, the month's rows
+    /// ordered by value and then time, in runs appended after the bars they
+    /// order are committed. Derived from the bars, never a record stream
+    /// itself. See [`crate::sort_index`]. D-3349.
+    SortIndex,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -721,6 +728,7 @@ impl FileKind {
         Self::GreekChecksums,
         Self::TimeIndex,
         Self::Provenance,
+        Self::SortIndex,
     ];
 
     /// The file extension, dot included.
@@ -736,6 +744,7 @@ impl FileKind {
             Self::GreekChecksums => ".grk.crc",
             Self::TimeIndex => ".tix",
             Self::Provenance => ".prv",
+            Self::SortIndex => ".srt",
         }
     }
 
@@ -752,7 +761,8 @@ impl FileKind {
             | Self::OverlayChecksums
             | Self::GreekChecksums
             | Self::TimeIndex
-            | Self::Provenance => None,
+            | Self::Provenance
+            | Self::SortIndex => None,
         }
     }
 }

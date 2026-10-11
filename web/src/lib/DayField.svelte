@@ -82,6 +82,14 @@
      * @type {((iso: string) => boolean | null) | null}
      */
     closed = null,
+    /**
+     * Which days carry a day flag (WP-54, DB-025): `(iso) => text` names
+     * why — refused or incomplete at import, a degraded vendor day, a halt —
+     * and `null` leaves the day unmarked. Only days a band has read are
+     * marked; an unmarked day is unread or ordinary, never "clean".
+     * @type {((iso: string) => string | null) | null}
+     */
+    flagged = null,
     disabled = false
   } = $props();
 
@@ -341,7 +349,8 @@
         day: +iso.slice(8, 10),
         other: n < 1 || n > len,
         ok: inRange(iso),
-        shut: closed ? closed(iso) === true : false
+        shut: closed ? closed(iso) === true : false,
+        flag: flagged ? flagged(iso) : null
       });
     }
     return out;
@@ -677,12 +686,15 @@
                 class:on={c.iso === value}
                 class:no={!c.ok}
                 class:shut={c.ok && c.shut}
+                class:flag={c.flag !== null}
                 disabled={!c.ok}
                 aria-current={c.iso === value ? 'date' : undefined}
                 title={c.ok
-                  ? c.shut
-                    ? 'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.'
-                    : undefined
+                  ? c.flag !== null
+                    ? `Flagged: ${c.flag}`
+                    : c.shut
+                      ? 'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.'
+                      : undefined
                   : boundsReason || 'Outside what this field may take.'}
                 onclick={() => pick(c.iso)}>{c.day}</button
               >
@@ -1004,6 +1016,10 @@
     cursor: not-allowed;
   }
   /* A CLOSED DAY: struck like an out-of-range day, and still pickable. */
+  /* A FLAGGED DAY (WP-54): a dot under the number, the reason on hover. */
+  .day.flag {
+    box-shadow: inset 0 -3px 0 var(--warn);
+  }
   .day.shut {
     color: var(--faint);
     text-decoration: line-through;

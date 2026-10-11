@@ -343,7 +343,9 @@ mod tests {
         activate(&site, id);
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":true}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], true, "{body}");
+        assert_eq!(json["what"], "run", "{body}");
         assert!(site.run.lock().unwrap().as_ref().unwrap().stopping);
         let restarted = Site::load(&root.join("missing-masters"), &root);
         assert!(is_stopped(&restarted, id).unwrap());
@@ -379,11 +381,15 @@ mod tests {
         let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":false}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], false, "{body}");
+        assert_eq!(json["what"], "nothing", "{body}");
         *site.run.lock().unwrap() = Some(Progress::claimed());
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":true}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], true, "{body}");
+        assert_eq!(json["what"], "run", "{body}");
         assert!(!root.exists());
     }
 }

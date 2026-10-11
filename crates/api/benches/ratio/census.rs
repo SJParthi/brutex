@@ -102,6 +102,8 @@ pub(crate) fn probes_are_flat() -> bool {
     }
     // THE PER-VENDOR CACHE'S ROW, on this file's call from `main` (WP-30).
     ok &= tails_are_flat();
+    // THE REFRESH'S ROW (WP-56): a delta costs what was appended.
+    ok &= deltas_are_flat();
     ok
 }
 
@@ -207,6 +209,66 @@ fn tails_are_flat() -> bool {
     );
     ok &= ratio(
         &format!("census tail of {APPENDED} {}->{}", SIZES[0], SIZES[2]),
+        base,
+        big,
+        RATIO_CEILING_PERMILLE,
+    );
+    ok
+}
+
+/// A `/store.json?...&since=` delta costs the entries appended since that
+/// generation, whatever the census holds (WP-56; D-3327 item 3; DB-060,
+/// DB-G59, DB-G70).
+///
+/// Over the same three censuses on disk as [`tails_are_flat`], each read
+/// whole and then extended by [`APPENDED`] entries appended in place, the
+/// timed call is `api::server::census_delta` since the whole read's
+/// generation: a binary search of the tail, two probes per changed row and
+/// the encoding of those rows. The answer is checked before timing: 200,
+/// [`APPENDED`] rows, and the census's own counters beside them. The whole
+/// body's encode grows with the census; this must not.
+fn deltas_are_flat() -> bool {
+    let built: Vec<(std::path::PathBuf, VendorCensus)> =
+        SIZES.iter().map(|&n| on_disk(n)).collect();
+    let mut costs = Vec::with_capacity(built.len());
+    for (&n, (root, whole)) in SIZES.iter().zip(&built) {
+        let extended = api::census::read_vendor_after(root, Vendor::Gdfl, Some(whole));
+        let Some(since) = whole.generation().map(|generation| generation.to_string()) else {
+            refuse("the whole read holds a generation");
+        };
+        let (code, body) = api::server::census_delta(&extended, &since, "");
+        let Ok(answer) = serde_json::from_str::<serde_json::Value>(&body) else {
+            refuse("the delta is JSON");
+        };
+        let rows = answer
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len);
+        let months = answer
+            .get("held")
+            .and_then(|held| held.get("months"))
+            .and_then(serde_json::Value::as_u64);
+        if code != 200 || rows != Some(APPENDED) || months != u64::try_from(n + APPENDED).ok() {
+            refuse("the delta is not the appended entries with the census's counters");
+        }
+        costs.push(cost_ps(200, || {
+            api::server::census_delta(black_box(&extended), black_box(&since), "")
+        }));
+    }
+    for (root, _) in &built {
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (costs.first(), costs.get(1), costs.get(2)) else {
+        refuse("three sizes measured");
+    };
+    let mut ok = ratio(
+        &format!("census delta of {APPENDED} {}->{}", SIZES[0], SIZES[1]),
+        base,
+        mid,
+        RATIO_CEILING_PERMILLE,
+    );
+    ok &= ratio(
+        &format!("census delta of {APPENDED} {}->{}", SIZES[0], SIZES[2]),
         base,
         big,
         RATIO_CEILING_PERMILLE,

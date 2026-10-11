@@ -64,6 +64,10 @@ const ROUTES = [
 	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
 	'/selection-v6.json',
 	'/store.json',
+	// THE SELECTION'S FACETS (D-3327 item 3, WP-30) and their `?since=`
+	// deltas, read by /db's census banner (WP-56) for what moved for the
+	// instrument on screen.
+	'/census/facets.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
@@ -215,6 +219,9 @@ const ROUTES = [
 	// producing a plausible error message about JSON.
 	'/folder.json',
 	'/ingest/status.json',
+	// Each row's pull refusals, joined to /ingest's month cells (WP-61, DB-G23;
+	// `crates/api/src/ingest_refusals.rs`).
+	'/ingest/refusals.json',
 	// THE FIFTH DRIFT, and the test above called its shot: it said a fifth
 	// would fail a test rather than produce a plausible error about JSON, and
 	// this is it. `/mapping` reads `/masters/status.json` to learn which
@@ -268,6 +275,12 @@ const ROUTES = [
 	// SILENTLY (`if (!response.ok) { sweptSurface = null; return; }` and a bare
 	// `catch {}`), so the swept-target sentence just vanishes.
 	'/calendar.json',
+	// THE DAY FLAGS AND THE IMPORT JOURNAL /db's day band, coverage calendar
+	// and contract-life marks read (WP-54; `crates/api/src/dayflags.rs`,
+	// `crates/api/src/imports.rs`). Without them `npm run dev` answers the
+	// HTML fallback and the band reports a JSON error for a routing gap.
+	'/dayflags.json',
+	'/imports.json',
 	'/vocab.json',
 	'/universes.json',
 	// THE OPTION BAR'S SPOT AND GREEKS `/db` reads per page of rows
@@ -276,7 +289,20 @@ const ROUTES = [
 	// GDFL line was merged onto the mainline, whose widened scanner in
 	// `tests/proxy.test.js` caught both.
 	'/spot.json',
-	'/greeks.json'
+	'/greeks.json',
+	// EACH OPTION BAR'S RUNG at its own instant, over the strikes stored by
+	// then (`web/src/lib/moneyness.js` readRungs; `crates/api/src/chain.rs`,
+	// D-3329). WP-53.
+	'/chain.json',
+	// WHERE A BAR CAME FROM (WP-55, D-3334): the Source lines under /db's
+	// grid and their drawer read `/provenance.json` per month file and per
+	// bar, and `/sources/day.json` for a share's closing-auction record and
+	// last print (D-3320). The day route is listed EXACTLY and never as
+	// `/sources`: that path is where the All sources page goes (D-3339,
+	// WP-58), and a prefix claiming it would hand that page to Rust in
+	// development only — the `/audit` trap the notes above record.
+	'/provenance.json',
+	'/sources/day.json'
 ];
 
 export default {

@@ -493,3 +493,96 @@ export function contractSym(p, cut, raw) {
    working, and the next reader of this file would have had to establish that
    for themselves. They are still the same two constants this section uses. */
 export const OVER = 6;
+
+/* ======================================================================
+   A CONTRACT'S LIFE, AND WHERE THE STORE CUTS IT (WP-54)
+   ----------------------------------------------------------------------
+   "Days held" was honest and silent: nothing said a life that ends before
+   its expiry was cut by the vendor's archive (2026-09-24), by an import that
+   has not reached those days, or by trades that simply stopped — and nothing
+   said a life that begins on the archive's first day began before it
+   (DB-G67, DB-G68, DB-G69, DB-G72). On 2018-09-03, 3,703 of the 4,368 option
+   contracts that traded already carried open interest: they were listed
+   earlier, and their earlier life is not in the vendor's files.
+   ====================================================================== */
+
+/**
+ * The marks on one contract's stored life, from facts the caller holds:
+ * the first and last stored day, the expiry, the archive's span, the day the
+ * import has reached, today, how many sessions lie between the last stored
+ * day and the expiry, and the import's lineage records for this key
+ * (`/dayflags.json` `lineage`, D-3331). Every mark names its cause; none is
+ * guessed.
+ *
+ * `lineage` is `null` when nobody read it (Zerodha keeps none, or the read is
+ * in flight), `{ present: false }` when the ledger is not written yet — said,
+ * because a renamed contract then cannot be told from one whose trades
+ * stopped — or the ledger's records naming this key.
+ *
+ * @param {{ firstDay: string, lastDay: string, expiry: string | null }} life ISO days
+ * @param {{
+ *   archive: { from: string, to: string } | null,
+ *   importedTo: string | null,
+ *   today: string,
+ *   sessionsAfter: number | null,
+ *   lineage: { present: boolean, records?: any[] } | null
+ * }} ctx
+ * @returns {{ code: string, text: string }[]}
+ */
+export function contractLife(life, ctx) {
+  /** @type {{ code: string, text: string }[]} */
+  const out = [];
+  const { archive } = ctx;
+  const records = ctx.lineage?.present ? ctx.lineage.records ?? [] : [];
+  const continues = records.find((r) => r?.kind === 'continues_as');
+  const from = records.find((r) => r?.kind === 'renamed_from');
+  const stitched = records.find((r) => r?.kind === 'stitched');
+  if (from) {
+    out.push({
+      code: 'renamed_from',
+      text: `begins at the ${from.ex} ex-date: the same exchange contract traded before it as ${from.key}, renamed to its adjusted strike (factor ${from.factor}, D-3331)`
+    });
+  } else if (archive && life.firstDay === archive.from) {
+    out.push({
+      code: 'before_archive',
+      text: `life began before the archive: the first stored day is the vendor archive's first day, ${archive.from}, so any trading before it is not in the vendor's files`
+    });
+  }
+  if (stitched) {
+    out.push({
+      code: 'stitched',
+      text: `this key holds two exchange contracts: the vendor reused its name at the ${stitched.ex} ex-date${stitched.after ? `, and from then it is the contract that was ${stitched.after}` : ''}${stitched.before ? `; the contract it held before continues as ${stitched.before}` : ''} (D-3331)`
+    });
+  }
+  if (!life.expiry) return out;
+  if (life.expiry >= ctx.today) {
+    out.push({
+      code: 'unexpired',
+      text: `not expired: it settles on ${life.expiry}, on or after today (${ctx.today})`
+    });
+  }
+  const cut = ctx.sessionsAfter !== null ? ctx.sessionsAfter > 0 : life.lastDay < life.expiry;
+  if (!cut) return out;
+  if (continues) {
+    out.push({
+      code: 'renamed',
+      text: `renamed at the ${continues.ex} ex-date, continues as ${continues.key} (factor ${continues.factor}, lot ${continues.lot_old} to ${continues.lot_new}, D-3331): the contract did not stop trading on ${life.lastDay}`
+    });
+  } else if (archive && life.expiry > archive.to) {
+    out.push({
+      code: 'archive_ended',
+      text: `the vendor archive ends ${archive.to}; the sessions from then to the ${life.expiry} expiry are not in it`
+    });
+  } else if (ctx.importedTo && life.expiry > ctx.importedTo) {
+    out.push({
+      code: 'import_behind',
+      text: `the GDFL options import has reached ${ctx.importedTo}; the days from then to the ${life.expiry} expiry are not imported yet`
+    });
+  } else {
+    out.push({
+      code: 'no_trade_after',
+      text: `no bar stored after ${life.lastDay}${ctx.sessionsAfter !== null ? `, ${ctx.sessionsAfter} session(s) before the ${life.expiry} expiry` : ''}: no trade printed after it${ctx.lineage && !ctx.lineage.present ? ', or the contract was renamed at an ex-date and continues under its adjusted strike (no lineage ledger is written yet, so the new key cannot be named — D-3331, WP-80)' : ''}`
+    });
+  }
+  return out;
+}

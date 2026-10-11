@@ -429,6 +429,22 @@ impl GreeksAsk {
         store_root: &std::path::Path,
         rate: &RateTable,
     ) -> Result<(Vec<Cell>, Vec<String>), String> {
+        self.answer_with(store_root, rate, &crate::bars::Cancel::never())
+    }
+
+    /// [`Self::answer`], looking at `cancel` every
+    /// [`crate::server::spot::CANCEL_EVERY`] instants and stopping by name
+    /// once the client went away (DB-N15, D-3349).
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::answer`] refuses, and `cancelled`.
+    pub fn answer_with(
+        &self,
+        store_root: &std::path::Path,
+        rate: &RateTable,
+        cancel: &crate::bars::Cancel,
+    ) -> Result<(Vec<Cell>, Vec<String>), String> {
         let mut faults = Vec::new();
         let option = match crate::bars::open_classified(
             store_root,
@@ -463,28 +479,29 @@ impl GreeksAsk {
                 }
             },
         };
-        let cells = self
-            .times
-            .iter()
-            .map(|&ts| {
-                // A WRONG MONTH IS A WRONG QUESTION (D-3328, DB-039), answered
-                // before any file is consulted, held or not.
-                if !in_month(self.month, ts) {
-                    return Cell::refused(
-                        "t_outside_month",
-                        Some(format!(
-                            "t={} is not in the IST month {} this request names; ask it in its own month",
-                            ts.div_euclid(MICROS),
-                            self.month
-                        )),
-                    );
-                }
-                match &option {
-                    Ok(file) => self.cell(ts, file, underlying.as_ref(), rate, &mut faults),
-                    Err((why, detail)) => Cell::refused(why, detail.clone()),
-                }
-            })
-            .collect();
+        let mut cells = Vec::with_capacity(self.times.len());
+        for (at, &ts) in self.times.iter().enumerate() {
+            if at % crate::server::spot::CANCEL_EVERY == 0 {
+                cancel.check()?;
+            }
+            // A WRONG MONTH IS A WRONG QUESTION (D-3328, DB-039), answered
+            // before any file is consulted, held or not.
+            if !in_month(self.month, ts) {
+                cells.push(Cell::refused(
+                    "t_outside_month",
+                    Some(format!(
+                        "t={} is not in the IST month {} this request names; ask it in its own month",
+                        ts.div_euclid(MICROS),
+                        self.month
+                    )),
+                ));
+                continue;
+            }
+            cells.push(match &option {
+                Ok(file) => self.cell(ts, file, underlying.as_ref(), rate, &mut faults),
+                Err((why, detail)) => Cell::refused(why, detail.clone()),
+            });
+        }
         Ok((cells, faults))
     }
 
@@ -773,12 +790,33 @@ pub const EXPIRY_CLOSE: &str = "from the bar's own stamp to the close of the NSE
 /// The handler's body, with the rate table handed in so a test can name it.
 #[must_use]
 pub fn respond(store_root: &std::path::Path, query: &str, rate: &RateTable) -> Answered {
+    respond_with(store_root, query, rate, &crate::bars::Cancel::never())
+}
+
+/// [`respond`], stopping once `cancel` is set (DB-N15, D-3349).
+#[must_use]
+pub fn respond_with(
+    store_root: &std::path::Path,
+    query: &str,
+    rate: &RateTable,
+    cancel: &crate::bars::Cancel,
+) -> Answered {
     let asked = match GreeksAsk::parse(query) {
         Ok(asked) => asked,
         Err(why) => return bad_request(&why),
     };
-    let (cells, faults) = match asked.answer(store_root, rate) {
+    let (cells, faults) = match asked.answer_with(store_root, rate, cancel) {
         Ok(answered) => answered,
+        // A CONTRACT THE DECODER REFUSES IS GONE, as on `/bars/window.json`
+        // and `/bars.json`: 410 and the refusal the re-key recorded, never a
+        // 400 that reads as a malformed question (D-3331; WP-12c, DB-A18).
+        Err(why) if pull::gdfl_lineage::is_contract_refused(&why) => {
+            return (
+                axum::http::StatusCode::GONE,
+                json_headers(),
+                format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            );
+        }
         Err(why) => return bad_request(&why),
     };
     let status = if faults.is_empty() {
@@ -803,15 +841,17 @@ pub async fn greeks_json(
     let root = site.store_root.clone();
     // OFF THE ASYNC WORKERS (DB-066, DB-G80): the rate table's stamp, two
     // month files and up to 400 lookups and solves are blocking work.
-    match crate::detail::run_store_read(move || {
-        respond(
+    // STOPPED WHEN THE CLIENT GOES (DB-N15, D-3349).
+    let answered = super::bars_route::cancellable(false, move |cancel| {
+        respond_with(
             &root,
             &query,
             &RateTable::current(std::env::var_os(RATE_ENV)),
+            cancel,
         )
     })
-    .await
-    {
+    .await;
+    match answered {
         Ok(answered) => answered,
         Err(why) => not_admitted("a greeks read", &why),
     }

@@ -1964,12 +1964,52 @@ fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, 
 // is one `open`, and at most one `create_dir_all`). None of that grows with the
 // stream, the index or the number of earlier events. Once per
 // [`AUDIT_MAX_FILE_BYTES`] the stream rolls: at most `2 * AUDIT_KEEP_FILES`
-// renames and two small writes, amortised over every line of a 64 MiB file.
+// renames and two small writes, one more rename for the index generation it
+// retires and one channel send, amortised over every line of a 64 MiB file
+// and never a delete (D-4838, below).
 // Nothing is `fsync`ed per event, for the reason the module header gives; the
 // stream is long-lived, not power-cut-proof.
 //
-// **UNVERIFIED as a measurement.** No bench in this crate times an audited
-// emit; the claim above is a count of operations (`CLAUDE.md` §3 rule 6).
+// **What is measured, and what is not.** The emit that triggers a roll is
+// timed by `crates/telemetry/benches/ratio.rs` (C-AU-01) with the retired
+// generation at 10, 1,000 and 100,000 posting files. An ordinary audited emit
+// (the line and its index appends) is still UNVERIFIED as a measurement: no
+// bench in this crate times one, and the claim above is a count of operations
+// (`CLAUDE.md` §3 rule 6).
+//
+// # Retiring an index generation: renamed on the emit path, deleted off it
+// (D-4838; IA-11r)
+//
+// A roll past [`AUDIT_KEEP_FILES`] ends one index generation: the one whose
+// audit file the roll just dropped. Until IA-11r the roll deleted that tree
+// itself, `remove_dir_all` under the sink's lock, so every emitter in the
+// process waited for a delete whose cost is the number of posting files the
+// generation held (F26). Now the roll RENAMES the generation from
+// `audit.idx/<serial>` to `audit.idx.gone/<serial>`, one rename inside the
+// sink's own directory whatever the tree holds, and hands the new path to the
+// stream's reaper: one thread per sink ([`REAPER_THREAD`], the only thread
+// this crate starts in production), which waits on a channel and deletes
+// outside every lock of the sink. A reader finds a renamed generation absent
+// from the instant of the rename, exactly as it found a deleted one
+// ([`audit_postings_before`] passes over a generation that is not there).
+//
+// What waits is counted, never silent: [`AuditHealth::gone_waiting`] is the
+// generations renamed aside and not yet deleted, [`AuditHealth::reaped`] the
+// ones deleted, [`AuditHealth::reap_failures`] the deletes that failed (the
+// entry then stays where it is until the next start, never retried in a
+// loop), and [`AuditHealth::reaper_behind`] says so once more than
+// [`AUDIT_KEEP_FILES`] wait. A process that exits in the middle of a delete
+// leaves the rest of the tree in `audit.idx.gone/`; the next
+// [`Sink::open`] on the directory lists that directory once and hands every
+// entry to its reaper, and also retires the one generation a process killed
+// between a roll's serial write and its rename could have left behind.
+//
+// The disk held meanwhile is the generations rolled since the reaper last
+// finished: normally none or one, each at most eight 32-byte pointers per
+// audited line of one 64 MiB file and a directory per distinct value
+// (`docs/06-limits.md` L-IA-36). The roll's emit is timed at 10, 1,000 and
+// 100,000 posting files, and the reaper's delete beside it, by
+// `crates/telemetry/benches/ratio.rs` (C-AU-01, C-AU-02).
 //
 // # Seeding
 //
@@ -2003,6 +2043,17 @@ pub const AUDIT_KEEP_FILES: u8 = 16;
 
 /// The index directory beside the stream.
 pub const AUDIT_INDEX_DIR: &str = "audit.idx";
+
+/// Where a roll puts the index generation it is done with, beside
+/// [`AUDIT_INDEX_DIR`] and never inside it, so the count of generations a
+/// reader can reach is unchanged: `audit.idx.gone/<serial>`. The stream's
+/// reaper deletes what it holds (D-4838).
+const AUDIT_GONE_DIR: &str = "audit.idx.gone";
+
+/// The name of the thread that deletes retired index generations: one per
+/// sink that keeps an audit stream, and the only thread this crate starts
+/// outside its tests (D-4838).
+const REAPER_THREAD: &str = "telemetry-reaper";
 
 /// One index record: serial, offset, seq, length, level and a mark.
 pub const AUDIT_POINTER_BYTES: usize = 32;
@@ -2257,7 +2308,22 @@ pub struct AuditHealth {
     pub unindexed: u64,
     /// Lines copied from the ring when the stream was first opened.
     pub seeded: u64,
-    /// The most recent failure, in its own words.
+    /// Index generations renamed aside to `audit.idx.gone/` and not deleted
+    /// yet: the ones this process's rolls retired and the ones an earlier
+    /// process left there, less those the reaper has deleted. An entry whose
+    /// delete failed stays counted: it is still on disk (D-4838).
+    pub gone_waiting: u64,
+    /// Retired generations the reaper deleted in this process.
+    pub reaped: u64,
+    /// Deletes of a retired generation that failed. The entry stays in
+    /// `audit.idx.gone/` for the next start, is not retried before it, and
+    /// its failure is in [`Self::last_error`].
+    pub reap_failures: u64,
+    /// The reaper's most recent failed delete, in its own words: always
+    /// here, whatever [`Self::last_error`] carries.
+    pub reap_error: Option<String>,
+    /// The most recent failure of the stream's writer, in its own words;
+    /// when it has none, the reaper's ([`Self::reap_error`]).
     pub last_error: Option<String>,
 }
 
@@ -2265,7 +2331,20 @@ impl AuditHealth {
     /// Whether an operator has to be told about the stream.
     #[must_use]
     pub const fn is_loud(&self) -> bool {
-        self.dropped > 0 || self.rotation_failures > 0 || self.index_failures > 0
+        self.dropped > 0
+            || self.rotation_failures > 0
+            || self.index_failures > 0
+            || self.reap_failures > 0
+            || self.reaper_behind()
+    }
+
+    /// Whether more retired generations wait for the reaper than the stream
+    /// keeps files ([`AUDIT_KEEP_FILES`]): the reaper is not keeping up with
+    /// the rolls, or it could not be started, and the disk they hold is
+    /// growing (D-4838; `docs/06-limits.md` L-IA-36).
+    #[must_use]
+    pub const fn reaper_behind(&self) -> bool {
+        self.gone_waiting > AUDIT_KEEP_FILES as u64
     }
 }
 
@@ -2394,7 +2473,15 @@ fn postings_of(keys: &impl Keyed) -> [Option<std::borrow::Cow<'_, str>>; 8] {
 ///
 /// As [`audit_serial`].
 pub fn audit_state(dir: &Path) -> Result<Option<u64>, String> {
-    if !audit_current_path(dir).exists() && !audit_serial_path(dir).exists() {
+    // `try_exists`, NOT `exists`: `exists` answers `false` for a path that
+    // could not be asked about, so the stream of a directory nobody may
+    // search read as "never written" and its reader said "nothing audited"
+    // where it had to say "could not look" (D-4862).
+    let there = |path: PathBuf| {
+        path.try_exists()
+            .map_err(|e| format!("{}: cannot be looked for — {e}", path.display()))
+    };
+    if !there(audit_current_path(dir))? && !there(audit_serial_path(dir))? {
         return Ok(None);
     }
     audit_serial(dir).map(Some)
@@ -2687,6 +2774,97 @@ struct Audit {
     handles: std::collections::HashMap<PathBuf, File>,
     /// The counters [`Sink::audit_health`] copies out.
     health: AuditHealth,
+    /// What the reaper counts, shared with its thread (D-4838).
+    reap: std::sync::Arc<Reap>,
+    /// The reaper's channel: a roll sends it each generation it renamed
+    /// aside. `None` when the thread could not be started, which
+    /// [`AuditHealth::last_error`] names; the entries then wait for the next
+    /// start. Dropping the stream closes the channel and ends the thread.
+    reaper: Option<std::sync::mpsc::Sender<PathBuf>>,
+}
+
+/// What a stream's reaper has done, counted where both the stream (under the
+/// sink's lock) and the reaper's thread (outside it) can reach it. Atomics
+/// and one small mutex for the words of a failure: neither side ever waits
+/// for a delete to read or write them.
+#[derive(Debug, Default)]
+struct Reap {
+    /// Entries in `audit.idx.gone/` handed over, or left for the next start,
+    /// and not deleted.
+    waiting: AtomicU64,
+    /// Entries deleted.
+    reaped: AtomicU64,
+    /// Deletes that failed.
+    failures: AtomicU64,
+    /// The last failed delete, in its own words.
+    said: Mutex<Option<String>>,
+    /// Held by a test for as long as the reaper must not delete, so the test
+    /// can look at what a roll alone did. Taken by the reaper around each
+    /// delete; never taken by an emit.
+    #[cfg(test)]
+    gate: Mutex<()>,
+}
+
+impl Reap {
+    /// Records one failure of the reaper's side, in its own words.
+    fn fail(&self, why: String) {
+        let _earlier = self.failures.fetch_add(1, Ordering::Relaxed);
+        *self.said.lock().unwrap_or_else(PoisonError::into_inner) = Some(why);
+    }
+}
+
+/// Whether `gone` (a sink's `audit.idx.gone`) is there, asked WITHOUT
+/// following a link: `Ok(false)` when nothing has that name.
+///
+/// # Errors
+///
+/// When the name is taken by something that is not a directory (a symbolic
+/// link, even one to a directory, or a file), or cannot be asked about: the
+/// sink renames nothing into it and deletes nothing from it. The words are
+/// the reason alone; the caller says what it could not do, and to what.
+fn audit_gone_is_ours(gone: &Path) -> Result<bool, String> {
+    match gone.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(
+            "it is not a directory (a symbolic link or a file is in its place), so no retired \
+             index generation is renamed into it and nothing in it is deleted; remove it"
+                .to_owned(),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The reaper: deletes each retired index generation it is sent, until the
+/// stream that owns the channel is dropped (D-4838).
+///
+/// It runs on its own thread and takes no lock of the sink, so an emit never
+/// waits for it. One `remove_dir_all` per entry, whose cost is the entry's
+/// posting files: `docs/06-limits.md` L-IA-36, timed by
+/// `crates/telemetry/benches/ratio.rs` (C-AU-02). A delete that fails is
+/// counted with its words and the entry is left where it is for the next
+/// start; it is not tried again in this process, so a tree that cannot be
+/// deleted costs one attempt, never a loop.
+fn reaper(jobs: &std::sync::mpsc::Receiver<PathBuf>, reap: &Reap) {
+    while let Ok(path) = jobs.recv() {
+        #[cfg(test)]
+        let _released_by_the_test = reap.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            // GONE ALREADY is done: nothing of it waits.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                reap.fail(format!(
+                    "{}: cannot delete the retired index generation — {e}; it stays for the \
+                     next start",
+                    path.display()
+                ));
+                continue;
+            }
+        }
+        let _earlier = reap.reaped.fetch_add(1, Ordering::Relaxed);
+        let _earlier = reap.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Audit {
@@ -2706,6 +2884,8 @@ impl Audit {
                 path: current.clone(),
                 ..AuditHealth::default()
             },
+            reap: std::sync::Arc::new(Reap::default()),
+            reaper: None,
         };
         // A STREAM THAT HAS NEVER EXISTED, and only that, is seeded: a
         // current file or a serial on disk means a stream that was written
@@ -2737,7 +2917,180 @@ impl Audit {
         if fresh {
             audit.seed(ring_keep);
         }
-        (audit, torn.or(marked.err()))
+        // THE REAPER STARTS LAST, with what an earlier process left it: a
+        // stream that could not open returned above and starts no thread.
+        let reaping = audit.start_reaper();
+        (audit, torn.or(marked.err()).or(reaping.err()))
+    }
+
+    /// Starts the stream's reaper and hands it what is already waiting
+    /// (D-4838): every entry `audit.idx.gone/` holds, listed once, and the
+    /// one generation a process killed between a roll's serial write and its
+    /// rename left in `audit.idx/`.
+    ///
+    /// One `read_dir` per start, over the generations rolled since a reaper
+    /// last finished: `docs/06-limits.md` L-IA-36. A thread that cannot start
+    /// is named and returned; the stream still writes, its rolls still rename
+    /// aside, and what they rename waits, counted, for the next start.
+    fn start_reaper(&mut self) -> Result<(), String> {
+        self.start_reaper_with(|jobs, reap| {
+            std::thread::Builder::new()
+                .name(REAPER_THREAD.to_owned())
+                .spawn(move || reaper(&jobs, &reap))
+                .map(|_detached| ())
+        })
+    }
+
+    /// [`Self::start_reaper`] with the thread's start handed in, so a test
+    /// can state a start that fails, which no test can cause.
+    fn start_reaper_with(
+        &mut self,
+        spawn: impl FnOnce(
+            std::sync::mpsc::Receiver<PathBuf>,
+            std::sync::Arc<Reap>,
+        ) -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        let (send, jobs) = std::sync::mpsc::channel::<PathBuf>();
+        let started = spawn(jobs, std::sync::Arc::clone(&self.reap)).map_err(|e| {
+            format!(
+                "{}: cannot start the {REAPER_THREAD} thread — {e}; retired index generations \
+                 wait in {AUDIT_GONE_DIR}/ for the next start",
+                self.dir.display()
+            )
+        });
+        match started {
+            Ok(()) => self.reaper = Some(send),
+            Err(ref why) => {
+                self.reaper = None;
+                self.health.last_error = Some(why.clone());
+            }
+        }
+        // WHAT AN EARLIER PROCESS LEFT ASIDE, listed before anything this
+        // start renames there, so no entry is handed over twice.
+        let listed = self.hand_over_what_waits();
+        if let Err(ref why) = listed {
+            self.health.last_error = Some(why.clone());
+        }
+        // A PROCESS KILLED AFTER IT RECORDED A SERIAL AND BEFORE IT RENAMED
+        // THE GENERATION THAT SERIAL ENDED left that one generation in
+        // `audit.idx/`, where no later roll looks for it. Retired here: one
+        // rename that finds nothing on every other start.
+        let stranded = self
+            .serial
+            .checked_sub(u64::from(AUDIT_KEEP_FILES))
+            .map_or(Ok(()), |gone| self.retire(gone));
+        started.and(stranded).and(listed)
+    }
+
+    /// Lists `audit.idx.gone/` once and hands every retired generation in it
+    /// to the reaper.
+    ///
+    /// # What is not handed over
+    ///
+    /// **The directory itself, when it is not one.** `read_dir` follows a
+    /// symbolic link, so a link planted under this name would have had the
+    /// reaper delete another directory's entries. Asked without following
+    /// ([`audit_gone_is_ours`]), and refused by name: nothing in it is listed.
+    ///
+    /// **An entry that is not a directory.** A retired generation is a
+    /// directory; a file there (a `.DS_Store` a file browser left) is not
+    /// this sink's, and handing it over made a delete that fails at every
+    /// start and a health that is loud for ever. It is left where it is,
+    /// never counted as waiting or as a failed delete, and named apart in
+    /// [`AuditHealth::last_error`] when the writer has no error of its own.
+    fn hand_over_what_waits(&mut self) -> Result<(), String> {
+        let gone = self.dir.join(AUDIT_GONE_DIR);
+        let there = audit_gone_is_ours(&gone)
+            .map_err(|why| format!("{}: cannot list — {why}", gone.display()))?;
+        if !there {
+            return Ok(());
+        }
+        let cannot_list = |e: std::io::Error| format!("{}: cannot list — {e}", gone.display());
+        let mut strays = 0u64;
+        let mut first_stray = None;
+        for entry in std::fs::read_dir(&gone).map_err(cannot_list)? {
+            let entry = entry.map_err(cannot_list)?;
+            if entry.file_type().map_err(cannot_list)?.is_dir() {
+                self.hand_over(entry.path());
+            } else {
+                strays = strays.saturating_add(1);
+                let _kept = first_stray.get_or_insert_with(|| entry.path());
+            }
+        }
+        if let Some(stray) = first_stray
+            && self.health.last_error.is_none()
+        {
+            self.health.last_error = Some(format!(
+                "{}: is not a retired index generation (it is not a directory), and {} such \
+                 entr{} in {AUDIT_GONE_DIR}/ left where {}: nothing here made {}, so nothing \
+                 here deletes {}",
+                stray.display(),
+                strays,
+                if strays == 1 { "y is" } else { "ies are" },
+                if strays == 1 { "it is" } else { "they are" },
+                if strays == 1 { "it" } else { "them" },
+                if strays == 1 { "it" } else { "them" },
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts one entry of `audit.idx.gone/` as waiting and sends it to the
+    /// reaper: one channel send, which never blocks. With no reaper the entry
+    /// stays counted and waits for the next start.
+    fn hand_over(&self, path: PathBuf) {
+        let _earlier = self.reap.waiting.fetch_add(1, Ordering::Relaxed);
+        // WITH NO THREAD (it could not be started) nothing is deleted on this
+        // path instead: the entry stays, and the health counts it.
+        if let Some(reaper) = self.reaper.as_ref() {
+            let _waits_for_the_next_start_if_unsent = reaper.send(path);
+        }
+    }
+
+    /// Retires index generation `gone`: renames `audit.idx/<gone>` to
+    /// `audit.idx.gone/<gone>` and hands it to the reaper (D-4838). A
+    /// generation that is not there is nothing to retire.
+    ///
+    /// One `create_dir_all` of the sibling directory, one `rename` inside the
+    /// sink's own directory and one channel send, whatever the generation
+    /// holds; no delete. Proven by
+    /// `telemetry::sink::tests::an_audit_roll_never_waits_for_a_delete`
+    /// (IA-LG-01) and timed by `crates/telemetry/benches/ratio.rs` (C-AU-01).
+    ///
+    /// A name already taken in `audit.idx.gone/` (an entry an earlier stream
+    /// of this directory left, which its delete could not remove) is not
+    /// written over: the generation is renamed to a second, stamped name. A
+    /// rename that fails both ways is the caller's failure, named.
+    fn retire(&self, gone: u64) -> Result<(), String> {
+        let generation = audit_generation_path(&self.dir, gone);
+        let aside = self.dir.join(AUDIT_GONE_DIR);
+        // A LINK UNDER THIS NAME IS NOT A PLACE TO RENAME INTO: the
+        // generation would leave the sink's directory and the next start
+        // would not find it. Refused by name; the generation stays in
+        // `audit.idx/`, where a reader already takes it for rolled off.
+        let _there = audit_gone_is_ours(&aside)
+            .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?;
+        std::fs::create_dir_all(&aside)
+            .map_err(|e| format!("{}: cannot create — {e}", aside.display()))?;
+        let stamped = format!("{gone}.{}.{}", self.health.rotations, now_millis());
+        let mut refused = None;
+        for name in [gone.to_string(), stamped] {
+            let to = aside.join(name);
+            match std::fs::rename(&generation, &to) {
+                Ok(()) => {
+                    self.hand_over(to);
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => {
+                    refused = Some(format!("{} -> {}: {e}", generation.display(), to.display()));
+                }
+            }
+        }
+        Err(format!(
+            "cannot retire the index generation — {}",
+            refused.unwrap_or_default()
+        ))
     }
 
     /// Writes this build's coverage into the current generation's
@@ -2916,6 +3269,12 @@ impl Audit {
     /// `.n + 1`, the oldest is deleted, and the serial advances. The serial is
     /// written AFTER the renames, so a crash between them leaves it one behind
     /// and [`audit_read`]'s second try finds the line one file older.
+    ///
+    /// The index generation of the file just dropped is RENAMED ASIDE for the
+    /// reaper, never deleted here ([`Self::retire`], D-4838), and only after
+    /// the next file is open: a rename that fails is this roll's failure (the
+    /// stream stops rolling, as after any failed roll), but the stream goes on
+    /// in the file it just opened, with pointers that name it.
     fn roll(&mut self) -> Result<(), String> {
         let named = |path: &Path, what: &str, e: &std::io::Error| {
             format!("{}: {what} — {e}", path.display())
@@ -2939,18 +3298,8 @@ impl Audit {
             .and_then(|()| std::fs::rename(&staged, &path))
             .map_err(|e| named(&path, "cannot record the audit serial", &e))?;
         self.serial = next;
-        // THE GENERATION OF THE FILE JUST DELETED GOES WITH IT, so the index
-        // never outlives the lines it points at. Its handles are closed first.
+        // Every posting handle is of a generation this roll closed.
         self.handles.clear();
-        if let Some(gone) = next.checked_sub(u64::from(AUDIT_KEEP_FILES)) {
-            let generation = audit_generation_path(&self.dir, gone);
-            match std::fs::remove_dir_all(&generation) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(named(&generation, "cannot delete the index generation", &e));
-                }
-                _ => {}
-            }
-        }
         self.file = Some(
             OpenOptions::new()
                 .append(true)
@@ -2965,14 +3314,37 @@ impl Audit {
         // reader then treats the generation as the first build's and says the
         // newer dimensions do not cover it, which is the safe reading.
         let _named_in_last_error = self.mark_coverage();
-        Ok(())
+        // THE GENERATION OF THE FILE JUST DELETED GOES WITH IT, so the index
+        // never outlives the lines it points at: renamed aside here, deleted
+        // by the reaper off this path (D-4838). Never a delete under the
+        // sink's lock, which this runs under.
+        next.checked_sub(u64::from(AUDIT_KEEP_FILES))
+            .map_or(Ok(()), |gone| self.retire(gone))
     }
 
-    /// The counters, with the running size and serial filled in.
+    /// The counters, with the running size and serial filled in, and what
+    /// the reaper has counted on its side. The reaper's words are always in
+    /// `reap_error`, and in `last_error` too when the writer has none of its
+    /// own, so neither failure hides the other.
     fn health(&self) -> AuditHealth {
+        let reap_error = self
+            .reap
+            .said
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         AuditHealth {
             current_bytes: self.bytes,
             serial: self.serial,
+            gone_waiting: self.reap.waiting.load(Ordering::Relaxed),
+            reaped: self.reap.reaped.load(Ordering::Relaxed),
+            reap_failures: self.reap.failures.load(Ordering::Relaxed),
+            last_error: self
+                .health
+                .last_error
+                .clone()
+                .or_else(|| reap_error.clone()),
+            reap_error,
             ..self.health.clone()
         }
     }
@@ -6167,10 +6539,11 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
-    /// **AN INDEX GENERATION IS DELETED WITH ITS FILE**: past
+    /// **AN INDEX GENERATION GOES WITH ITS FILE**: past
     /// [`AUDIT_KEEP_FILES`] rolls the oldest file and its pointers go
-    /// together, so a probe finds exactly the lines still kept and the index
-    /// never outgrows the stream.
+    /// together (the generation renamed aside for the reaper, D-4838), so a
+    /// probe finds exactly the lines still kept and the index a reader can
+    /// reach never outgrows the stream.
     #[test]
     fn the_oldest_index_generation_goes_with_the_oldest_file() {
         let dir = scratch("audit-generations");
@@ -6208,6 +6581,646 @@ mod tests {
             Some(lines - 1),
             "newest first"
         );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // IA-11r, R3 (D-4838): A ROLL RENAMES THE RETIRED GENERATION ASIDE AND THE
+    // REAPER DELETES IT OFF THE EMIT PATH
+    // -----------------------------------------------------------------------
+
+    /// A posting tree of `files` files in index generation `serial` of `dir`:
+    /// a synthetic generation, one posting per value of one dimension.
+    fn posting_tree(dir: &Path, serial: u64, files: usize) {
+        let dimension = super::audit_generation_path(dir, serial).join("contract");
+        std::fs::create_dir_all(&dimension).expect("a dimension directory");
+        for n in 0..files {
+            std::fs::write(dimension.join(format!("ZZ{n:07}.idx")), [0u8; 0]).expect("a posting");
+        }
+    }
+
+    /// Every file under `root`, counted by walking it; 0 when it is not there.
+    fn files_under(root: &Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        entries
+            .map(|entry| entry.expect("an entry").path())
+            .map(|path| if path.is_dir() { files_under(&path) } else { 1 })
+            .sum()
+    }
+
+    /// What `audit.idx.gone/` of `dir` holds, by name, sorted.
+    fn gone_entries(dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir.join(super::AUDIT_GONE_DIR)) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The stream's reaper counters, shared with its thread.
+    fn reap_of(sink: &Sink) -> Arc<super::Reap> {
+        Arc::clone(
+            &sink
+                .inner
+                .lock()
+                .unwrap()
+                .audit
+                .as_ref()
+                .expect("a stream")
+                .reap,
+        )
+    }
+
+    /// Waits until the reaper has nothing left that it can delete: nothing
+    /// waiting beyond the deletes that failed. Panics after two minutes.
+    fn reaped(sink: &Sink) -> super::AuditHealth {
+        for _ in 0..120_000 {
+            let health = sink.audit_health().expect("a stream");
+            if health.gone_waiting <= health.reap_failures {
+                return health;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the reaper did not finish: {:?}", sink.audit_health());
+    }
+
+    /// A stream in `dir` fifteen rolls old with nothing written since, so the
+    /// next roll is the first that ends an index generation (generation 0),
+    /// and that generation holds `files` posting files.
+    fn fifteen_rolls_old(dir: &Path, files: usize) {
+        std::fs::create_dir_all(dir.join(super::AUDIT_INDEX_DIR)).expect("the index directory");
+        std::fs::write(audit_serial_path(dir), 15u64.to_le_bytes()).expect("a serial");
+        std::fs::write(audit_current_path(dir), b"").expect("a stream");
+        posting_tree(dir, 0, files);
+    }
+
+    /// **IA-LG-01: AN AUDIT ROLL NEVER WAITS FOR A DELETE** (D-4838; F26).
+    /// With the reaper held, so that nothing can be deleted at all, eight
+    /// threads emit through a stream whose every line rolls, and the first
+    /// roll ends a generation of 10 and then of 1,000 posting files: every
+    /// emit returns, the generation is whole under `audit.idx.gone/` (the roll
+    /// renamed it and deleted nothing), a reader finds it absent from
+    /// `audit.idx/` and reads only kept lines, and the health counts what
+    /// waits. Released, the reaper deletes it all. 100,000 files are timed by
+    /// the bench (C-AU-01, C-AU-02), not built here.
+    #[test]
+    fn an_audit_roll_never_waits_for_a_delete() {
+        for files in [10usize, 1_000] {
+            let dir = scratch(&format!("audit-reap-{files}"));
+            fifteen_rolls_old(&dir, files);
+            let sink = Arc::new(Sink::open(&Config::new(&dir)).expect("opens"));
+            assert_eq!(sink.audit_health().expect("a stream").serial, 15);
+            sink.inner
+                .lock()
+                .unwrap()
+                .audit
+                .as_mut()
+                .expect("a stream")
+                .max_file_bytes = 1;
+            let reap = reap_of(&sink);
+            let held = reap.gate.lock().unwrap();
+            // THE FIRST LINE lands in the empty current file; every line after
+            // it rolls first.
+            let per_thread = 6u64;
+            std::thread::scope(|scope| {
+                for thread in 0..8u64 {
+                    let sink = Arc::clone(&sink);
+                    scope.spawn(move || {
+                        for i in 0..per_thread {
+                            assert!(
+                                sink.emit(
+                                    &Event::error("pull.spot", "refused")
+                                        .with("instrument", "VBL")
+                                        .with("thread", thread)
+                                        .with("i", i),
+                                )
+                                .is_written(),
+                                "an emit returned unwritten while the reaper was held"
+                            );
+                        }
+                    });
+                }
+            });
+            let lines = 8 * per_thread;
+            let health = sink.audit_health().expect("a stream");
+            assert_eq!(health.written, lines);
+            assert_eq!(
+                health.rotations,
+                lines - 1,
+                "every line after the first rolled"
+            );
+            assert_eq!(health.rotation_failures, 0, "{health:?}");
+            assert_eq!(health.serial, 15 + lines - 1);
+            // THE ROLL RENAMED, AND DELETED NOTHING: the reaper is held, yet
+            // every roll finished; the generation the first roll ended is whole
+            // where the reaper will find it, and absent where a reader looks.
+            assert!(!super::audit_generation_path(&dir, 0).exists());
+            let aside = dir.join(super::AUDIT_GONE_DIR);
+            assert_eq!(files_under(&aside.join("0")), files, "generation 0, whole");
+            // Generations 1..=15 never existed (nothing was indexed in them);
+            // 16.. are this run's, one line each, retired as they aged out.
+            let retired = lines - 1 - 15;
+            assert_eq!(health.gone_waiting, 1 + retired, "{health:?}");
+            assert_eq!((health.reaped, health.reap_failures), (0, 0));
+            assert!(
+                health.reaper_behind(),
+                "more wait than the stream keeps files"
+            );
+            assert!(health.is_loud(), "and that is said");
+            assert_eq!(gone_entries(&dir).len() as u64, 1 + retired);
+            // A READER SEES ONLY KEPT GENERATIONS, never a retired one, and no
+            // error for the ones that are gone.
+            let found = probed(&dir, "instrument", "VBL");
+            assert_eq!(
+                found.len(),
+                usize::from(AUDIT_KEEP_FILES),
+                "one line a kept file"
+            );
+            assert!(
+                audit_postings(&dir, "contract", "ZZ0000000", 10)
+                    .expect("a probe of a retired generation's value")
+                    .pointers
+                    .is_empty()
+            );
+            // RELEASED, the reaper deletes every retired generation, off the
+            // emit path, and counts each.
+            drop(held);
+            let health = reaped(&sink);
+            assert_eq!(health.gone_waiting, 0, "{health:?}");
+            assert_eq!(health.reaped, 1 + retired);
+            assert_eq!(health.reap_failures, 0);
+            assert!(!health.reaper_behind() && !health.is_loud());
+            assert!(gone_entries(&dir).is_empty(), "{:?}", gone_entries(&dir));
+            assert!(aside.is_dir(), "the directory itself stays");
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// **A PROCESS KILLED IN THE MIDDLE OF A DELETE FINISHES IT AT ITS NEXT
+    /// START** (IA-LG-01): what `audit.idx.gone/` holds when a sink opens, a
+    /// half-deleted tree and a whole one, is handed to the reaper and deleted,
+    /// and counted while it waits. So is the one generation a process killed
+    /// between a roll's serial write and its rename left in `audit.idx/`.
+    #[test]
+    fn a_delete_cut_short_is_finished_at_the_next_start() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-restart");
+        fifteen_rolls_old(&dir, 0);
+        // The serial says 20: generations 5..=20 are kept, and generation 4
+        // was ended by the roll that wrote 20, which never renamed it.
+        std::fs::write(audit_serial_path(&dir), 20u64.to_le_bytes()).expect("a serial");
+        posting_tree(&dir, 4, 7);
+        posting_tree(&dir, 5, 3);
+        let aside = dir.join(super::AUDIT_GONE_DIR);
+        // A tree a killed reaper left half deleted, and one it never began.
+        std::fs::create_dir_all(aside.join("2").join("day")).expect("a half-deleted tree");
+        std::fs::write(aside.join("2").join("day").join("2022-03-07.idx"), b"x").expect("a file");
+        std::fs::create_dir_all(aside.join("3").join("code")).expect("a whole tree");
+        std::fs::write(aside.join("3").join("code").join("ZZ.idx"), b"x").expect("a file");
+        std::fs::write(aside.join("3").join("dims"), b"day 0\n").expect("a file");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = reaped(&sink);
+            assert_eq!(
+                health.reaped, 3,
+                "the two left aside and the stranded one: {health:?}"
+            );
+            assert_eq!((health.gone_waiting, health.reap_failures), (0, 0));
+            assert_eq!(health.last_error, None);
+            assert!(gone_entries(&dir).is_empty(), "{:?}", gone_entries(&dir));
+            assert!(
+                !super::audit_generation_path(&dir, 4).exists(),
+                "the stranded generation"
+            );
+            assert_eq!(
+                files_under(&super::audit_generation_path(&dir, 5)),
+                3,
+                "a kept generation is never touched"
+            );
+        }
+        // NOTHING LEFT: the next start lists an empty directory and reaps
+        // nothing.
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        let health = again.audit_health().expect("a stream");
+        assert_eq!((health.gone_waiting, health.reaped), (0, 0), "{health:?}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A DELETE THAT FAILS IS COUNTED, NAMED, LEFT FOR THE NEXT START AND
+    /// NOT RETRIED** (IA-LG-01): a retired tree the reaper cannot delete stays
+    /// in `audit.idx.gone/`, `reap_failures` is one and stays one, its words
+    /// are in the health, and the stream goes on writing and rolling. The next
+    /// start, with the obstacle gone, deletes it.
+    #[test]
+    fn a_failed_delete_is_counted_named_and_left_for_the_next_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-fails");
+        fifteen_rolls_old(&dir, 0);
+        let stuck = dir.join(super::AUDIT_GONE_DIR).join("0").join("day");
+        std::fs::create_dir_all(&stuck).expect("a tree");
+        std::fs::write(stuck.join("2022-03-07.idx"), b"x").expect("a file");
+        let mode = |mode: u32| {
+            std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        };
+        // A directory nothing can be unlinked from.
+        mode(0o555);
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = reaped(&sink);
+            assert_eq!(health.reap_failures, 1, "{health:?}");
+            assert_eq!(
+                (health.gone_waiting, health.reaped),
+                (1, 0),
+                "still on disk, still counted"
+            );
+            let said = health.reap_error.clone().expect("the reaper's words");
+            assert!(
+                said.contains("cannot delete the retired index generation"),
+                "{said}"
+            );
+            assert!(said.contains("stays for the next start"), "{said}");
+            assert_eq!(
+                health.last_error, health.reap_error,
+                "the writer has no error of its own"
+            );
+            assert!(health.is_loud());
+            // THE STREAM IS UNHARMED, and the failed delete is not tried again.
+            assert!(sink.emit(&Event::error("x", "refused")).is_written());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let later = sink.audit_health().expect("a stream");
+            assert_eq!((later.reap_failures, later.written), (1, 1), "{later:?}");
+            assert_eq!(gone_entries(&dir), ["0"]);
+        }
+        mode(0o755);
+        let sink = Sink::open(&Config::new(&dir)).expect("reopens");
+        let health = reaped(&sink);
+        assert_eq!(
+            (health.reaped, health.reap_failures, health.gone_waiting),
+            (1, 0, 0)
+        );
+        assert!(gone_entries(&dir).is_empty());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **WITH NO REAPER THREAD NOTHING IS DELETED ON THE EMIT PATH INSTEAD**
+    /// (IA-LG-01): a thread that cannot start is named in the health, the
+    /// rolls still rename each ended generation aside, what waits is counted,
+    /// and past [`AUDIT_KEEP_FILES`] waiting the health says the reaper is
+    /// behind. The next start deletes them.
+    #[test]
+    fn without_a_reaper_the_retired_generations_wait_counted() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-none");
+        let lines = 2 * u64::from(AUDIT_KEEP_FILES) + 3;
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            {
+                let mut guard = sink.inner.lock().unwrap();
+                let audit = guard.audit.as_mut().expect("a stream");
+                audit.max_file_bytes = 1;
+                let said = audit
+                    .start_reaper_with(|_jobs, _reap| Err(std::io::Error::other("no threads left")))
+                    .expect_err("a start that fails");
+                assert!(
+                    said.contains("cannot start the telemetry-reaper thread"),
+                    "{said}"
+                );
+                assert!(said.contains("no threads left"), "{said}");
+            }
+            for i in 0..lines {
+                assert!(
+                    sink.emit(&Event::error("x", "refused").with("i", i))
+                        .is_written(),
+                    "line {i}"
+                );
+            }
+            let health = sink.audit_health().expect("a stream");
+            assert_eq!(health.rotation_failures, 0, "{health:?}");
+            // Generation g is ended by the roll to serial g + 16: of the
+            // `lines - 1` rolls, the last `lines - 1 - 15` each ended one.
+            let retired = lines - 1 - u64::from(AUDIT_KEEP_FILES) + 1;
+            assert_eq!(
+                (health.gone_waiting, health.reaped),
+                (retired, 0),
+                "{health:?}"
+            );
+            assert!(
+                health.reaper_behind(),
+                "{retired} wait, the stream keeps 16 files"
+            );
+            assert!(health.is_loud());
+            assert!(
+                health
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|why| why.contains("cannot start the telemetry-reaper thread")),
+                "{health:?}"
+            );
+            assert_eq!(gone_entries(&dir).len() as u64, retired);
+            assert_eq!(
+                probed(&dir, "target", "x").len(),
+                usize::from(AUDIT_KEEP_FILES)
+            );
+        }
+        let sink = Sink::open(&Config::new(&dir)).expect("reopens");
+        let health = reaped(&sink);
+        assert_eq!(health.gone_waiting, 0, "{health:?}");
+        assert!(gone_entries(&dir).is_empty());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A NAME ALREADY TAKEN ASIDE IS NOT WRITTEN OVER** (D-4838): an entry
+    /// an earlier stream left under the same serial keeps its name and what
+    /// it holds, and the generation is renamed beside it under a stamped
+    /// name, whole.
+    #[test]
+    fn a_name_already_taken_aside_is_kept_and_the_generation_renamed_beside_it() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-taken");
+        fifteen_rolls_old(&dir, 4);
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let reap = reap_of(&sink);
+        let held = reap.gate.lock().unwrap();
+        let aside = dir.join(super::AUDIT_GONE_DIR);
+        // AFTER THE START'S LISTING: the same name, not empty, appears aside.
+        std::fs::create_dir_all(aside.join("0").join("earlier")).expect("a taken name");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        for i in 0..2u32 {
+            assert!(
+                sink.emit(&Event::error("x", "refused").with("i", i))
+                    .is_written()
+            );
+        }
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(
+            (health.rotations, health.rotation_failures),
+            (1, 0),
+            "{health:?}"
+        );
+        let names = gone_entries(&dir);
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert_eq!(names[0], "0", "the earlier entry keeps its name");
+        assert!(
+            names[1].starts_with("0."),
+            "the generation, under a stamped name: {names:?}"
+        );
+        assert_eq!(files_under(&aside.join(&names[1])), 4, "and whole");
+        assert!(
+            aside.join("0").join("earlier").is_dir(),
+            "the earlier entry untouched"
+        );
+        assert_eq!(
+            health.gone_waiting, 1,
+            "only what this stream handed over is counted"
+        );
+        drop(held);
+        let _done = reaped(&sink);
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A RENAME THAT CANNOT HAPPEN IS THE ROLL'S FAILURE, NAMED** (D-4838):
+    /// with `audit.idx.gone` unusable (nothing can be renamed into it, or a
+    /// file stands where it has to be) the roll fails by name, rotation stops
+    /// as after any failed roll, nothing is deleted in the rename's place,
+    /// and the stream goes on in the file the roll opened, every line found.
+    #[test]
+    fn a_rename_aside_that_cannot_happen_fails_the_roll_by_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _gate = crate::tests::no_fork_in_flight();
+        // A DIRECTORY NOTHING CAN BE RENAMED INTO.
+        let blocked = scratch("audit-reap-blocked");
+        fifteen_rolls_old(&blocked, 2);
+        let aside = blocked.join(super::AUDIT_GONE_DIR);
+        std::fs::create_dir_all(&aside).expect("the directory");
+        let sink = Sink::open(&Config::new(&blocked)).expect("opens");
+        std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        for i in 0..3u32 {
+            assert!(
+                sink.emit(&Event::error("x", "refused").with("i", i))
+                    .is_written()
+            );
+        }
+        std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(health.rotation_failures, 1, "{health:?}");
+        assert_eq!(
+            health.rotations, 1,
+            "the files rolled once, and never again"
+        );
+        let said = health.last_error.clone().expect("the roll's failure");
+        assert!(
+            said.contains("cannot retire the index generation"),
+            "{said}"
+        );
+        assert!(said.contains(super::AUDIT_GONE_DIR), "{said}");
+        assert_eq!(health.dropped, 0, "no line was lost to it");
+        assert_eq!(health.gone_waiting, 0);
+        assert!(
+            super::audit_generation_path(&blocked, 0).exists(),
+            "not renamed, not deleted"
+        );
+        assert_eq!(
+            probed(&blocked, "target", "x").len(),
+            3,
+            "every line is found"
+        );
+        drop(sink);
+
+        // AND WHERE THE DIRECTORY CANNOT EXIST AT ALL: a file in its place.
+        let filed = scratch("audit-reap-filed");
+        fifteen_rolls_old(&filed, 1);
+        std::fs::write(filed.join(super::AUDIT_GONE_DIR), b"in the way").expect("a file");
+        let sink = Sink::open(&Config::new(&filed)).expect("opens anyway");
+        let listed = sink.audit_health().expect("a stream").last_error;
+        assert!(
+            listed
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot list")),
+            "the start's listing is named: {listed:?}"
+        );
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        for i in 0..2u32 {
+            assert!(
+                sink.emit(&Event::error("x", "refused").with("i", i))
+                    .is_written()
+            );
+        }
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(health.rotation_failures, 1, "{health:?}");
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot create")),
+            "{health:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&blocked);
+        let _ignored = std::fs::remove_dir_all(&filed);
+    }
+
+    /// **A FILE IN `audit.idx.gone/` IS NOT A RETIRED GENERATION** (D-4838).
+    /// A `.DS_Store` a file browser left there was handed to the reaper, its
+    /// delete failed, and the health was loud at every start for ever. It is
+    /// left where it is, counted neither as waiting nor as a failed delete,
+    /// and named apart; the real generation beside it is still deleted. At
+    /// the second start too, when nothing but the stray is there.
+    #[test]
+    fn a_stray_file_in_the_graveyard_is_named_and_never_a_failed_delete() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-stray");
+        fifteen_rolls_old(&dir, 0);
+        let gone = dir.join(super::AUDIT_GONE_DIR);
+        std::fs::create_dir_all(gone.join("0").join("day")).expect("a retired generation");
+        std::fs::write(gone.join("0").join("day").join("2022-03-07.idx"), b"x").expect("a file");
+        std::fs::write(gone.join(".DS_Store"), b"not this sink's").expect("a stray");
+        for start in 0..2u64 {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = reaped(&sink);
+            assert_eq!(
+                (health.reap_failures, health.gone_waiting, health.reaped),
+                (0, 0, 1 - start),
+                "start {start}: {health:?}"
+            );
+            assert_eq!(health.reap_error, None, "no delete failed");
+            assert!(!health.is_loud(), "start {start}: {health:?}");
+            let said = health.last_error.clone().expect("the stray is named");
+            assert!(said.contains(".DS_Store"), "{said}");
+            assert!(said.contains("is not a retired index generation"), "{said}");
+            assert!(said.contains("1 such entry is"), "{said}");
+            assert_eq!(gone_entries(&dir), [".DS_Store"], "left where it is");
+            assert!(sink.emit(&Event::error("x", "refused")).is_written());
+        }
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINK NAMED `audit.idx.gone` IS REFUSED, AND NOTHING BEHIND IT IS
+    /// DELETED** (D-4838). The start's listing followed the link, so the
+    /// reaper deleted every entry of the directory it pointed at; and a roll
+    /// renamed its generation through it, out of the sink's directory. Both
+    /// are refused by name: the other directory is untouched, the generation
+    /// stays in `audit.idx/`, and no line is lost.
+    #[test]
+    fn a_linked_graveyard_is_refused_by_name_and_nothing_behind_it_is_deleted() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-reap-linked");
+        let elsewhere = scratch("audit-reap-linked-elsewhere");
+        fifteen_rolls_old(&dir, 2);
+        let kept = elsewhere.join("someone-elses").join("file");
+        std::fs::create_dir_all(kept.parent().expect("a parent")).expect("a directory");
+        std::fs::write(&kept, b"not this sink's").expect("a file");
+        std::os::unix::fs::symlink(&elsewhere, dir.join(super::AUDIT_GONE_DIR)).expect("a link");
+
+        let sink = Sink::open(&Config::new(&dir)).expect("opens anyway");
+        let health = sink.audit_health().expect("a stream");
+        let said = health.last_error.clone().expect("the listing is refused");
+        assert!(said.contains("cannot list"), "{said}");
+        assert!(said.contains("a symbolic link or a file"), "{said}");
+        assert!(said.contains(super::AUDIT_GONE_DIR), "{said}");
+        assert_eq!(health.gone_waiting, 0, "nothing behind the link is counted");
+
+        // A ROLL DOES NOT RENAME THROUGH IT EITHER.
+        sink.inner
+            .lock()
+            .unwrap()
+            .audit
+            .as_mut()
+            .expect("a stream")
+            .max_file_bytes = 1;
+        for i in 0..3u32 {
+            assert!(
+                sink.emit(&Event::error("x", "refused").with("i", i))
+                    .is_written()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let health = sink.audit_health().expect("a stream");
+        assert_eq!(health.rotation_failures, 1, "{health:?}");
+        let said = health.last_error.clone().expect("the roll's failure");
+        assert!(said.contains("cannot create"), "{said}");
+        assert!(said.contains("a symbolic link or a file"), "{said}");
+        assert_eq!(
+            (health.gone_waiting, health.reaped, health.dropped),
+            (0, 0, 0)
+        );
+        assert!(
+            super::audit_generation_path(&dir, 0).exists(),
+            "not renamed out of the sink's directory"
+        );
+        assert_eq!(
+            std::fs::read(&kept).expect("still there"),
+            b"not this sink's",
+            "nothing behind the link was deleted"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).expect("lists").count(),
+            1,
+            "and nothing was renamed into it"
+        );
+        assert_eq!(probed(&dir, "target", "x").len(), 3, "every line is found");
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// **A STREAM NOBODY MAY LOOK FOR IS NOT "NEVER WRITTEN"** (D-4862):
+    /// `audit_state` answered `Ok(None)` for a directory without search
+    /// permission, so a reader said "nothing audited" where it could not
+    /// look. It is an error, in the failure's own words; a directory that
+    /// can be searched and holds no stream is still `Ok(None)`.
+    #[test]
+    fn an_audit_stream_that_cannot_be_looked_for_is_an_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("audit-state-unsearchable");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        assert_eq!(
+            super::audit_state(&dir),
+            Ok(None),
+            "searchable, never written"
+        );
+        assert_eq!(super::audit_state(&dir.join("absent")), Ok(None));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let answer = super::audit_state(&dir);
+        let bound = std::fs::metadata(audit_current_path(&dir)).is_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(
+            bound,
+            "mode 000 does not bind this process: run as a user it binds"
+        );
+        let said = answer.expect_err("it could not be looked for");
+        assert!(said.contains("cannot be looked for"), "{said}");
+        assert!(said.contains("Permission denied"), "{said}");
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

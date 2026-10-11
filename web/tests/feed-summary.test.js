@@ -67,3 +67,22 @@ test('a failed shared HEAD is released and the same feed can recover on the next
   assert.deepEqual(await readFeedHeader('zerodha', request), { cells: 148222, bars: 282845758 });
   assert.equal(calls, 2);
 });
+
+/* WP-56 (D-3327 item 2): `capped` and `behind` are a census that LOADED and
+   cannot be called complete. Its counts are its own; refusing them would
+   survey a feed holding 3.6 billion bars as unreadable. */
+import { readCensusSummary, LOADED_STATES } from '../src/lib/feed-summary.js';
+
+test('a capped or behind census is counted, with its state, generation and refused days beside the counts', () => {
+  assert.deepEqual(LOADED_STATES, ['held', 'capped', 'behind']);
+  for (const state of ['capped', 'behind']) {
+    assert.deepEqual(readFeedSummary('zerodha', held({ 'x-brutex-census-state': state })), { cells: 148222, bars: 282845758 });
+  }
+  const summary = readCensusSummary('zerodha', held({ 'x-brutex-census-state': 'behind',
+    'x-brutex-census-behind-days': '32', 'x-brutex-census-behind-from': '2019-11-14' }));
+  assert.equal(summary.generation, 210950);
+  assert.equal(summary.lag.state, 'behind');
+  assert.equal(summary.lag.behindDays, 32);
+  assert.equal(summary.lag.behindFrom, '2019-11-14');
+  assert.throws(() => readFeedSummary('zerodha', held({ 'x-brutex-census-state': 'sleepy' })), /unavailable census summary/);
+});

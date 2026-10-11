@@ -16,6 +16,7 @@
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //! | [`flock`] | the advisory-lock guard, released by unlock and never by close |
 //! | [`provenance`] | where a month's bars came from: the `.prv` sidecar (D-3334) |
+//! | [`sort_index`] | a month's rows ordered by each sortable column: the `.srt` sidecar (D-3349) |
 //! | [`verdict`] | what verification found: day images and year indexes (D-4808) |
 //!
 //! # Seven properties the types enforce rather than document
@@ -80,6 +81,7 @@ pub mod path;
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
 pub mod repair;
+pub mod sort_index;
 pub mod time_index;
 pub mod verdict;
 
