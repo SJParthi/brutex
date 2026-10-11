@@ -4997,9 +4997,10 @@ fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<
     })
 }
 
-/// Every entry of the batch, one barrier, then the newest commit of each slot
-/// and one more barrier (WP-16; it was one barrier per entry and one per
-/// slot, which is the same bytes at twice the batch's length in flushes).
+/// Every entry of the batch, one barrier, then the newest commit of each slot,
+/// the older slot first, each followed by its own barrier (WP-16; it was one
+/// barrier per entry and one per slot, which is the same bytes at twice the
+/// batch's length in flushes).
 ///
 /// The barrier is not optional and not an optimisation to skip: issuing the
 /// slot write before the entry bytes are on stable storage publishes a counter
@@ -5027,12 +5028,15 @@ fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
 /// one, so the next request reads again. The whole-image install needs none
 /// of this: its rename publishes an inode whose bytes were complete first.
 ///
-/// # One batch, two flushes (WP-16, DB-N25)
+/// # One batch, three flushes (WP-16, DB-N25)
 ///
 /// This flushed twice PER ENTRY, so an import day of 5,641 option files paid
-/// 11,282 flushes for its census alone. The batch is now every entry, one
-/// barrier, the newest commit of each slot, one barrier: the same bytes, and
-/// still no slot over an entry that is not durable.
+/// 11,282 flushes for its census alone. The batch is now every entry, a
+/// barrier; the newest commit of the slot that held the OLDER generation, a
+/// barrier; the newest commit of the other slot, a barrier. The same bytes,
+/// still no slot over an entry that is not durable, and still one slot write
+/// in flight at a time, never onto the newest durable generation: a torn
+/// slot write leaves the census where it was or further on, never behind.
 /// [`census_store::write_batch`] carries the argument.
 fn write_appends_observed(
     path: &Path,

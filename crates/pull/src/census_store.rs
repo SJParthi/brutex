@@ -1054,21 +1054,26 @@ fn write_whole(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Re
     fs::File::open(dir)?.sync_all()
 }
 
-// ═══ One batch, two flushes (WP-16, DB-N25) ═══════════════════════════════
+// ═══ One batch, three flushes (WP-16, DB-N25) ═════════════════════════════
 
-/// Which of a batch's two flushes [`write_batch_with`] is about to issue.
+/// Which of a batch's flushes [`write_batch_with`] is about to issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BatchBarrier {
     /// After every entry of the batch is written, before any header slot.
     Entries,
-    /// After the header slots, before the batch is answered.
-    Slots,
+    /// After the ONE write to the slot the batch's first commit belongs in:
+    /// the slot that held the older generation, or nothing, before the batch.
+    OlderSlot,
+    /// After the ONE write to the other slot, the one that held the newest
+    /// generation before the batch. A batch of one commit never asks it.
+    NewerSlot,
 }
 
-/// Appends a census batch with TWO flushes, however many entries it holds
-/// (WP-16, DB-N25): every entry, one barrier, then the newest commit of each
-/// header slot the batch wrote — the batch's LAST commit first — and one more
-/// barrier.
+/// Appends a census batch with THREE flushes, however many entries it holds
+/// (WP-16, DB-N25): every entry, a barrier; the newest commit the batch gives
+/// the slot its FIRST commit belongs in, a barrier; the newest commit it
+/// gives the other slot, a barrier. A batch of one commit is two flushes: it
+/// has one slot write.
 ///
 /// # Why, and why the bytes are the bytes one entry at a time leaves
 ///
@@ -1082,19 +1087,48 @@ pub(super) enum BatchBarrier {
 /// batch are the same bytes (`census_store_tests::
 /// a_batch_lands_the_bytes_one_entry_at_a_time_leaves`).
 ///
-/// # Crash safety
+/// # Crash safety: the two-slot rule, kept (`docs/02-store-format.md` §11.7)
 ///
-/// The slot rule is unchanged: no slot names an entry that is not durable,
-/// because every entry is flushed before the first slot is written (each
-/// commit's [`crate::manifest::Commit::durable_through`] is checked against
-/// the batch's end first, and a batch that would break it is refused before
-/// a byte is written). The batch's last commit is written first, so a crash
-/// between the two slot writes leaves the newest generation naming the whole
-/// batch and the other slot an older generation that names a prefix of it,
-/// which [`crate::manifest::ManifestHeader::read_region`] reads as it reads
-/// any two slots. A crash before the first slot leaves the census as it was.
-/// Where one entry at a time could leave a census holding part of a day, this
-/// leaves all of it or none of it.
+/// **No slot names an entry that is not durable.** Every entry is flushed
+/// before the first slot is written; each commit's
+/// [`crate::manifest::Commit::durable_through`] is checked against the
+/// batch's end first, and a batch that would break it is refused before a
+/// byte is written.
+///
+/// **At most one header-slot write is in flight, and it never lands on the
+/// slot holding the newest durable generation.** A commit belongs in slot
+/// `generation % 2`, and the batch's first commit is the generation after the
+/// newest on disk, so its slot is the one that held the OLDER generation (or
+/// nothing: a census written whole as an image has one slot). That slot is
+/// written first, with the newest commit the batch gives it, and flushed.
+/// Only then is the other slot written: by then the first durably holds a
+/// newer generation than the one this write replaces.
+///
+/// What a cut leaves, a kill or a power cut that TEARS the write in flight
+/// (`census_store_tests::a_torn_write_inside_a_batch_never_leaves_the_census_
+/// behind`):
+///
+/// | Cut | The census loads as |
+/// |---|---|
+/// | before or during the entries' barrier | it was: no slot counts them |
+/// | during the first slot write | it was: the other slot is untouched |
+/// | between the slot writes, or during the second | the batch through the first slot's commit: all of it for an odd batch, all but its last entry for an even one |
+/// | after the last barrier | all of it |
+///
+/// Every row is a generation whose entries are durable, never one below
+/// where the census was. A batch is therefore NOT all-or-nothing in the
+/// census file: an even batch cut at its second slot write holds all but its
+/// last entry. The import does not depend on it: a day is closed by the
+/// journal line written after this returns, and a day left open is read and
+/// published again (D-3353).
+///
+/// **Before repair 2 this wrote the batch's LAST commit first and the other
+/// slot straight after, one barrier for both.** For an even batch the last
+/// commit belongs in the slot holding the newest durable generation, so a
+/// torn write of it left the census one generation BEHIND where it was (a
+/// published row no longer counted, and nothing refusing), or unreadable
+/// when that was the census's only slot; and two writes in flight could tear
+/// both slots at once.
 ///
 /// `landed` sees the file once its last slot is durable, before its
 /// modification time is moved past the writes (census-1, D-2766).
@@ -1111,8 +1145,8 @@ pub(super) fn write_batch(
     write_batch_with(path, appends, landed, &mut |file, _| file.sync_all())
 }
 
-/// [`write_batch`], with each of its two flushes issued through `barrier`:
-/// the seam a test counts them by, or fails one at.
+/// [`write_batch`], with each of its flushes issued through `barrier`: the
+/// seam a test counts them by, fails one at, or looks at the file through.
 pub(super) fn write_batch_with(
     path: &Path,
     appends: &[Append],
@@ -1120,12 +1154,12 @@ pub(super) fn write_batch_with(
     barrier: &mut dyn FnMut(&fs::File, BatchBarrier) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt as _;
-    let Some(last) = appends.last() else {
+    let Some(first) = appends.first() else {
         return Ok(());
     };
     // ONE PASS before a byte is written: the batch's end, and every commit
-    // checked against it, so no slot can name an entry the one barrier below
-    // does not cover.
+    // checked against it, so no slot can name an entry the entries' barrier
+    // below does not cover.
     let mut end = 0_u64;
     for append in appends {
         end = end.max(append.offset.saturating_add(ENTRY_STRIDE));
@@ -1145,18 +1179,24 @@ pub(super) fn write_batch_with(
     }
     // THE BARRIER: every entry is durable before any slot may count it.
     barrier(&file, BatchBarrier::Entries)?;
-    // THE NEWEST COMMIT OF EACH SLOT, the batch's last first. Two slots
-    // (`manifest::SLOT_COUNT`), so at most two writes: the last commit, then
-    // the newest commit the batch gave the other slot, found walking back
-    // from the end. O(batch), and nothing is allocated.
-    file.write_all_at(&last.commit.bytes, last.commit.offset)?;
-    for append in appends.iter().rev() {
-        if append.commit.offset != last.commit.offset {
-            file.write_all_at(&append.commit.bytes, append.commit.offset)?;
-            break;
-        }
+    // ONE SLOT WRITE IN FLIGHT AT A TIME, the older slot first. Two slots
+    // (`manifest::SLOT_COUNT`), so at most two writes: the newest commit the
+    // batch gives each, found walking back from the end (commits alternate,
+    // so each is one of the last two). Nothing is allocated.
+    let older = first.commit.offset;
+    let mut newest = appends.iter().rev();
+    let in_older = newest
+        .clone()
+        .find(|append| append.commit.offset == older)
+        .unwrap_or(first);
+    file.write_all_at(&in_older.commit.bytes, older)?;
+    barrier(&file, BatchBarrier::OlderSlot)?;
+    // Only now, with a newer generation durable in the older slot, may the
+    // slot that held the newest generation before the batch be written.
+    if let Some(append) = newest.find(|append| append.commit.offset != older) {
+        file.write_all_at(&append.commit.bytes, append.commit.offset)?;
+        barrier(&file, BatchBarrier::NewerSlot)?;
     }
-    barrier(&file, BatchBarrier::Slots)?;
     landed(&file);
     let written = file.metadata()?.modified()?;
     let past = written

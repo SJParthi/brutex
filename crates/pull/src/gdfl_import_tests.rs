@@ -5479,6 +5479,46 @@ fn a_month_torn_inside_a_day_left_open_is_named_on_resume_and_the_day_is_never_d
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// WP-16, repair 2: A RUN SAYS WHAT IT WAS STARTED WITH. "run settings"
+/// carries the run's id, its workers and its durability unit by the word the
+/// operator sets it with, so the audit trail can tell which durability a day
+/// left open ran under; an `each-write` run leaves no "day made durable"
+/// event to infer it from. Three fields, none dropped, at `info`.
+#[test]
+fn a_run_says_its_workers_and_durability_beside_its_id() {
+    for (durability, word) in [
+        (Durability::EachWrite, "each-write"),
+        (
+            Durability::Day(store::file::BatchFlush::OncePerDevice),
+            "day",
+        ),
+        (
+            Durability::Day(store::file::BatchFlush::EveryFile),
+            "day-each-file",
+        ),
+    ] {
+        for workers in [1_usize, 3, Workers::MAX] {
+            let options = RunOptions {
+                workers: Workers::new(workers).unwrap(),
+                durability,
+                ..RunOptions::default()
+            };
+            let event = settings_event(41, &options);
+            assert_eq!(event.message(), "run settings");
+            assert_eq!(event.level(), telemetry::Level::Info);
+            assert_eq!(
+                event.fields(),
+                [
+                    ("run", telemetry::Value::from(41_u64)),
+                    ("workers", telemetry::Value::from(workers)),
+                    ("durability", telemetry::Value::from(word)),
+                ]
+            );
+            assert_eq!(event.dropped_fields(), 0);
+        }
+    }
+}
+
 /// WP-16, repair 1: THE DEFAULT WORKERS ARE READ FROM THE HOST, not written
 /// down for one machine: every core but two, never fewer than one, never past
 /// the eight where more stopped paying. What a caller may ask for is bounded

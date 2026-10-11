@@ -305,7 +305,9 @@
 //! flush is issued per append. When the day's last job is folded the batch is
 //! made durable (one `F_FULLFSYNC` per directory that gained a name and one
 //! per device); only then are the day's ledger lines written, its census
-//! published as ONE batch of two flushes (it was two flushes per entry,
+//! published as ONE batch of three flushes (it was two flushes per entry;
+//! the entries, then each header slot on its own, the older slot first, so a
+//! torn slot write never leaves the census behind where it was:
 //! `census_store::write_batch`) and its closing line appended. So a day's
 //! closing line is never written over writes that are not durable, and a day
 //! that cannot be made durable stops the run with the day left open
@@ -4176,6 +4178,21 @@ fn note_started(ctx: &Ctx<'_>, filter: &str) {
         origin.map(|origin| (origin, path.as_str(), digest.as_str())),
     );
     let _dropped_when_filtered = telemetry::emit(&event);
+    let _dropped_when_filtered = telemetry::emit(&settings_event(ctx.id, &ctx.options));
+}
+
+/// "run settings" (WP-16, D-3353): the workers and the durability unit the
+/// run was started with, beside its id, so the audit trail can say which
+/// durability a day left open ran under without inferring it from the "day
+/// made durable" counts (an `each-write` run leaves none of those). Its own
+/// event because "run started" is already [`telemetry::MAX_FIELDS`] wide,
+/// and not on the journal's `run` line because neither setting changes a
+/// byte the run leaves, the journal included.
+fn settings_event(id: u64, options: &RunOptions<'_>) -> telemetry::Event<'static> {
+    telemetry::Event::info(TARGET, "run settings")
+        .with("run", id)
+        .with("workers", options.workers.get())
+        .with("durability", options.durability.as_str())
 }
 
 /// "run started" (D-3317 item 4; DB-G56): what the run reads and where its
