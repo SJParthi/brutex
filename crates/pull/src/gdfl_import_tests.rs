@@ -1623,13 +1623,37 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
 /// A store refusal of a file is this import's (`stage=file`), and a source
 /// that hands on a damaged block is the copy's (`stage=vendor`, a code that
 /// never closes): neither closes the day.
+///
+/// The store refusal was a day older than what its month holds, which is
+/// back-filled as a new generation since WP-12d (DB-N26); a file that would
+/// change a held bar is refused by the store and by the repair alike.
 #[test]
 fn a_file_or_copy_refusal_journals_its_stage_and_leaves_the_day_incomplete() {
     let root = scratch("import-stages");
     world(&root, &[d1(), d2()]);
     let store = root.join("S");
-    import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
-    let late = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    let restated = root.join("restated");
+    world_of(
+        &restated,
+        &[(
+            d1(),
+            Tree::Indices,
+            vec![(
+                entry_of(Tree::Indices, d1(), "NIFTY 50.NSE_IDX"),
+                index_file("NIFTY 50.NSE_IDX", d1(), 22_001),
+            )],
+        )],
+    );
+    let late = import_only(
+        &restated,
+        Src::Store,
+        ImportKind::Indices,
+        d1(),
+        d1(),
+        &store,
+        &["NIFTY".to_owned()],
+    );
     assert_eq!(late.closed_incomplete, vec![d1()]);
     let line = line_of(&store, "indices", "2024-04-01");
     assert!(
@@ -2221,17 +2245,32 @@ fn closed_unmeasured_special_and_missing_days_are_each_named() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// A day older than what its month holds is back-filled as a NEW GENERATION
+/// of the month (D-3350; DB-N26, WP-12d), never inserted in place. It was
+/// refused by the store and stayed `incomplete` for ever: the append-only
+/// month cannot take a day before its first. `gdfl_backfill_tests` proves
+/// the shape the real store has, a day between held ones.
 #[test]
-fn a_day_older_than_what_the_month_holds_is_refused_by_the_store() {
+fn a_day_older_than_what_the_month_holds_lands_as_a_new_generation() {
     let root = scratch("import-order");
     world(&root, &[d1(), d2()]);
     let store = root.join("S");
     import(&root, Src::Store, ImportKind::Indices, d2(), d2(), &store);
+    let held = bars(&store, "INDEX", "NIFTY", None);
+    let originals = tree(&store.join("bars"));
     let late = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
-    assert!(!late.failures.is_empty(), "never inserted behind the tail");
-    assert_eq!(late.seconds_committed, 0);
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    assert_eq!(late.months_repaired, late.files);
+    assert!(late.seconds_committed > 0);
+    let now = bars(&store, "INDEX", "NIFTY", None);
+    assert_eq!(&now[now.len() - held.len()..], held.as_slice(), "held kept");
+    assert!(
+        now[0].ts_micros < held[0].ts_micros,
+        "the earlier day first"
+    );
+    assert_eq!(tree(&store.join("bars")), originals, "never in place");
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
-    assert!(text.contains("incomplete indices 2024-04-01"), "{text}");
+    assert!(text.contains("\ndone indices 2024-04-01 *"), "{text}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -4298,8 +4337,9 @@ fn a_day_with_no_file_read_writes_no_ledger_line() {
 
 /// Every file of a store, the wall clock taken out of its provenance records
 /// (`landed_at_micros`, the one field a run writes from the clock, re-encoded
-/// as zero so the record's own check still covers every other byte); every
-/// other file byte for byte.
+/// as zero so the record's own check still covers every other byte) and out
+/// of its generation records (`promoted_at_micros` and the seal over it, a
+/// back-filled month's, D-3350); every other file byte for byte.
 fn store_bytes(store: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     tree(store)
         .into_iter()
@@ -4312,6 +4352,22 @@ fn store_bytes(store: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                     assert!(record.landed_at_micros > 0, "{}", rel.display());
                     record.landed_at_micros = 0;
                     out.extend_from_slice(&record.image());
+                }
+                (rel, out)
+            } else if rel
+                .extension()
+                .is_some_and(|ext| ext == store::generation::EXTENSION)
+            {
+                // A generation record's promotion time (bytes 48..56) and the
+                // seal over it (60..64) are the clock's too; every other byte
+                // of every record stands.
+                let mut out = bytes;
+                for record in out.chunks_mut(64) {
+                    for at in (48..56).chain(60..64) {
+                        if let Some(byte) = record.get_mut(at) {
+                            *byte = 0;
+                        }
+                    }
                 }
                 (rel, out)
             } else {
@@ -5285,3 +5341,141 @@ fn a_day_an_earlier_run_left_open_is_confirmed_durable_before_it_closes() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// WP-16 with WP-12d (D-3353 beside D-3350): A DAY ITS MONTH LACKS IS
+/// BACK-FILLED OUTSIDE THE DAY'S BATCH, IN LISTING ORDER, AND LEAVES THE STORE
+/// ONE WORKER LEAVES. Every month holds two later days when the first is
+/// offered, so the append door refuses each file and each lands as a new
+/// generation of its month. The versioned repair flushes a revision's bars
+/// before the receipt that publishes them and before their promotion; run on
+/// a worker inside the day's batch, those flushes were left to the batch,
+/// past both. So the day's batch may be handed no file and no directory of a
+/// revision, and the store (bars, revisions, receipts, the repair journal,
+/// the census, the journal, every ledger) is byte for byte the one a single
+/// worker flushing each write leaves, the repair journal's lines in listing
+/// order.
+#[test]
+fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store() {
+    let root = scratch("wp16-back-fill");
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 6)))
+        .collect();
+    world_of(&root, &plan);
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin {
+        started: 1_790_000_000,
+        ..Origin::measure(kind_of_source, &path, Some(COMMIT))
+    };
+    let of_a_revision = |path: &Path| {
+        path.components()
+            .any(|part| part.as_os_str() == "bar-revisions-v1")
+    };
+    let runs = [
+        (1, Durability::EachWrite),
+        (8, Durability::Day(store::file::BatchFlush::OncePerDevice)),
+        (4, Durability::Day(store::file::BatchFlush::EveryFile)),
+    ];
+    let done: Vec<(Report, BTreeMap<PathBuf, Vec<u8>>)> = runs
+        .iter()
+        .map(|&(workers, durability)| {
+            let word = durability.as_str();
+            let store = root.join(word);
+            std::fs::create_dir_all(&store).unwrap();
+            let later = run_durable(
+                &root,
+                (Src::Zips, ImportKind::Options),
+                (d2(), d3()),
+                &store,
+                (workers, &origin, durability),
+            )
+            .unwrap();
+            assert_eq!(
+                (later.days_imported, later.months_repaired),
+                (2, 0),
+                "{word}"
+            );
+            let flushed: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>> = std::sync::Arc::default();
+            let hook = {
+                let flushed = std::sync::Arc::clone(&flushed);
+                HookedFlushes::new(
+                    &store,
+                    Box::new(move |path| {
+                        flushed.lock().unwrap().push(path.to_path_buf());
+                        Ok(())
+                    }),
+                )
+            };
+            let report = run_durable(
+                &root,
+                (Src::Zips, ImportKind::Options),
+                (d1(), d3()),
+                &store,
+                (workers, &origin, durability),
+            )
+            .unwrap();
+            drop(hook);
+            let held_back: Vec<PathBuf> = flushed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| of_a_revision(path))
+                .cloned()
+                .collect();
+            assert!(
+                held_back.is_empty(),
+                "{word}: the day's batch was left a revision's flushes: {held_back:?}"
+            );
+            (report, store_bytes(&store))
+        })
+        .collect();
+    let (want_report, want) = &done[0];
+    assert_eq!(want_report.days_imported, 1);
+    assert!(want_report.months_repaired > 1, "{want_report:?}");
+    let journal = String::from_utf8_lossy(
+        want.get(Path::new("audit/gdfl.repairs"))
+            .expect("the repair journal"),
+    )
+    .into_owned();
+    let repaired = |verb: &str| {
+        journal
+            .lines()
+            .filter(|line| line.split(' ').next() == Some(verb))
+            .count()
+    };
+    assert_eq!(
+        (
+            repaired("repairing"),
+            repaired("repair"),
+            repaired("refused")
+        ),
+        (want_report.months_repaired, want_report.months_repaired, 0),
+        "{journal}"
+    );
+    assert!(
+        want.keys().any(|rel| of_a_revision(rel)),
+        "a revision is published"
+    );
+    for ((report, have), (_, durability)) in done.iter().zip(runs).skip(1) {
+        let word = durability.as_str();
+        assert_eq!(report, want_report, "{word}: the same report");
+        assert_eq!(
+            have.keys().collect::<Vec<_>>(),
+            want.keys().collect::<Vec<_>>(),
+            "{word}: the same files"
+        );
+        for (rel, bytes) in want {
+            assert!(
+                have.get(rel) == Some(bytes),
+                "{word}: {} differs",
+                rel.display()
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ── DB-N26, WP-12d: a day inside what its month holds ──────────────────────
+
+#[path = "gdfl_backfill_tests.rs"]
+mod backfill;

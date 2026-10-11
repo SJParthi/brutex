@@ -81,7 +81,11 @@
   import { untrack, tick } from 'svelte';
   import { page as routePage } from '$app/state';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
-  import { readStoreCensus } from '$lib/store.svelte.js';
+  import { readStoreCensus, survey, surveyStores } from '$lib/store.svelte.js';
+  // THE HELD-OR-READY RULE (DB-G14): a feed whose store holds bars can be
+  // swept whatever its ingest readiness; only the operator's feeds are
+  // offered (D-3338). The same rule /db and the top bar apply.
+  import { feedPickerRow, offeredFeeds } from '$lib/feed-row.js';
   import { censusFailure } from '$lib/store-census.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
@@ -1240,6 +1244,13 @@
       for (const key of [...dead]) if (!g.inert.has(key)) dead.delete(key);
     }
     return dead;
+  });
+
+  // THE FEED RUNG'S HELD COUNTS (DB-G14): one header read per offered feed,
+  // deduped per store generation by `surveyStores` — never a whole census.
+  $effect(() => {
+    const list = offeredFeeds(feeds.all);
+    if (list.length > 0) untrack(() => void surveyStores(list));
   });
 
   // FETCHED WHEN THE LEDGER CHANGES, NOT WHEN A WEIGHT MOVES. The effect reads
@@ -6480,7 +6491,7 @@
       <span>feed</span>
       <Picker
         single
-        filter={feeds.all.length > 8}
+        filter={offeredFeeds(feeds.all).length > 8}
         label="feeds"
         title={`Every run below is this feed's. A sweep is stamped with the feed its bars came from, so changing this changes which runs the ledger shows and which instruments the sweep can be built over — it is not a different view of one set.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}.` : ''}`}
         summary={feeds.error
@@ -6488,8 +6499,11 @@
           : feeds.all.length === 0
             ? 'No feeds'
             : (feeds.all.find((f) => f.wire === feeds.active)?.display ?? 'Select a feed')}
-        rows={feeds.all.map((f) => {
-          const ready = f.ready === true;
+        rows={offeredFeeds(feeds.all).map((f) => {
+          /* HELD OR READY (DB-G14): the shared rule decides `disabled`, `why`
+             and the held count; this page adds the fact it owns, the runs
+             the ledger holds under the feed. */
+          const rule = feedPickerRow(f, survey.byFeed.get(f.wire), group);
           /* COUNTED OFF THE LEDGER THIS PAGE ALREADY HOLDS — `allRuns` is the
              whole file before the feed filter, so this is a measurement and
              not a second request. Zero runs is a measured zero and says so. */
@@ -6497,19 +6511,16 @@
           return {
             key: f.wire,
             name: f.display,
-            detail: !ready
-              ? 'unavailable'
+            detail: rule.disabled
+              ? rule.detail
               : load.phase !== 'ready'
-                ? 'ledger not read'
-                : `${exact(held)} run${held === 1 ? '' : 's'}`,
-            disabled: !ready,
-            why: ready
-              ? undefined
-              : (f.why ??
-                'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
-            title: ready
-              ? `Scopes this page to ${f.display}. The ledger shows the runs stamped with it, and a new sweep is built over the instruments its store holds.`
-              : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'no reason stated.'}`
+                ? `${rule.detail} · ledger not read`
+                : `${rule.detail} · ${exact(held)} run${held === 1 ? '' : 's'}`,
+            disabled: rule.disabled,
+            why: rule.why,
+            title: rule.disabled
+              ? rule.title
+              : `Scopes this page to ${f.display}. The ledger shows the runs stamped with it, and a new sweep is built over the instruments its store holds. ${rule.title}`
           };
         })}
         selected={new Set([feeds.active])}

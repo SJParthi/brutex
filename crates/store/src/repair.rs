@@ -26,7 +26,18 @@ use crate::path::{FileKind, StorePath};
 
 /// Maximum rows in both the source snapshot and the complete replacement.
 /// This is a resource ceiling, not an assertion about calendar completeness.
-pub const MAX_ROWS: usize = 100_000;
+///
+/// **The most bars one month can hold on the finest rung the store files**:
+/// 31 days of one-second bars ([`crate::path::Timeframe::SECOND_1`]), one per
+/// second, which the month admission (D-0915) already bounds any month to.
+/// It was 100,000, which no one-second month of a full session calendar fits
+/// under — 23 sessions of 22,500 seconds are 517,500 bars, and the GDFL
+/// NIFTY 2018-11 month is 22,949,312 bytes on the operator's store (10 Oct
+/// 2026), 409,224 records past its 32,768-byte header region — so every
+/// repair of one was refused `RowLimit` and the GDFL days a month lacks could
+/// never be back-filled (DB-N26, WP-12d). At 56 bytes a bar the ceiling
+/// bounds one repair's merged rows to 150 MB.
+pub const MAX_ROWS: usize = 31 * 86_400;
 /// Maximum explicit revision ordinal per logical month. There is no scan for
 /// a free ordinal and exhausted ordinals are never reused for different data.
 pub const MAX_REVISIONS: u32 = 1_024;
@@ -127,7 +138,7 @@ impl fmt::Display for RepairError {
         match self {
             Self::Store(error) => error.fmt(f),
             Self::RevisionLimit => f.write_str("repair revision ordinal outside 1..=1024"),
-            Self::RowLimit => f.write_str("repair exceeds the 100000-row ceiling"),
+            Self::RowLimit => write!(f, "repair exceeds the {MAX_ROWS}-row ceiling"),
             Self::StaleSource => f.write_str("repair source header changed; merge again"),
             Self::MissingTimestamp(ts) => write!(f, "repair omits source timestamp {ts}"),
             Self::UnsealedSource => f.write_str("repair requires checksum-protected source bars"),

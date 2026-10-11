@@ -14,7 +14,7 @@
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
 import { ask } from '$lib/ask.js';
-import { createFeedStartup } from '$lib/feed-startup.js';
+import { createFeedStartup, urlFeedOf } from '$lib/feed-startup.js';
 
 /**
  * ONE FEED, AS `/feeds.json` SENDS IT.
@@ -97,16 +97,37 @@ import { createFeedStartup } from '$lib/feed-startup.js';
  * }} Feed
  */
 
-/** @type {{ all: Feed[], active: string | null, error: string | null }} */
-export const feeds = $state({ all: [], active: null, error: null });
+/** @type {{ all: Feed[], active: string | null, error: string | null, notice: string | null }} */
+export const feeds = $state({ all: [], active: null, error: null, notice: null });
 
 // Descriptors validate a saved preference. First visits use only census HEAD
 // headers to retain the data-backed default; full inventories are requested by
 // pages that need them. Late summaries cannot replace an explicit selection.
-const startup = createFeedStartup(feeds, ask, () => globalThis.localStorage);
+// THE ADDRESS'S FEED IS RESOLVED BEFORE ANY CENSUS IS ASKED FOR, AND IS NEVER
+// SAVED (DB-B54): see `createFeedStartup`.
+//
+// READ ONCE, WHEN THIS MODULE LOADS, NOT WHEN /feeds.json ANSWERS. /ingest
+// writes its own selection back to the address in an effect that runs before
+// the feed list lands, and at that moment its feed set is still empty: the
+// address read `?feed=&universe=...` by the time a lazy read looked (measured
+// 11 Oct 2026: /feeds.json asked at 681 ms with `?feed=` in the address that
+// was opened as `?feed=gdfl`), so the saved feed won and Zerodha's 16 MB
+// census was downloaded on the way to GDFL's. This module is imported by the
+// layout, so it loads before any page effect can rewrite the address.
+const addressedAtLoad = urlFeedOf(globalThis.location?.search);
+const startup = createFeedStartup(
+  feeds,
+  ask,
+  () => globalThis.localStorage,
+  () => addressedAtLoad
+);
 
 /** @param {boolean} [force] */
 export const loadFeeds = (force = false) => startup.load(force);
 
-/** @param {string | null} wire The explicit choice, including clearing it. */
-export const selectFeed = (wire) => startup.select(wire);
+/**
+ * @param {string | null} wire The explicit choice, including clearing it.
+ * @param {{ persist?: boolean }} [how] `persist: false` when the feed came from
+ *   the page's address, not from a picker (DB-B54): it is shown, not saved.
+ */
+export const selectFeed = (wire, how) => startup.select(wire, how);

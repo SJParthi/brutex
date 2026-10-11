@@ -419,3 +419,34 @@ fn durability_is_the_default_or_one_of_its_words() {
     assert!(out.contains(DURABILITY_VAR), "{out}");
     std::fs::remove_dir_all(&store).ok();
 }
+
+/// A run that back-filled days inside held months says how many month files
+/// it repaired to a new generation, and where each is journaled (D-3350;
+/// DB-N26, WP-12d); a run that repaired none says 0.
+#[test]
+fn the_receipt_counts_the_months_a_back_fill_repaired() {
+    for (repaired, line) in [
+        (
+            24,
+            "  months repaired     24 (a new generation each; audit/gdfl.repairs)\n",
+        ),
+        (
+            0,
+            "  months repaired     0 (a new generation each; audit/gdfl.repairs)\n",
+        ),
+    ] {
+        let report = Report {
+            months_repaired: repaired,
+            ..Report::default()
+        };
+        let mut out = String::new();
+        render(
+            &mut out,
+            ImportKind::Indices,
+            "zip",
+            Path::new("store"),
+            &report,
+        );
+        assert!(out.contains(line), "{out}");
+    }
+}

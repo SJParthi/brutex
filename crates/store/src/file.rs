@@ -4693,6 +4693,23 @@ impl DurableBatch {
         }
     }
 
+    /// This thread's writers defer to NO batch until the answer drops, which
+    /// puts back the batch the thread was in, if any.
+    ///
+    /// For a writer whose own flushes are its protocol, reached on a thread
+    /// that may be inside a batch: the versioned month repair
+    /// (`crate::repair::publish`) flushes a revision's bars before it writes
+    /// the receipt that publishes them and before it promotes them, and a
+    /// batch would hold those flushes back past both (WP-16 with WP-12d,
+    /// D-3353 beside D-3350). Suspended, every writer flushes for itself as
+    /// it does outside any batch.
+    pub fn suspend() -> InBatch {
+        InBatch {
+            before: ENTERED.with(|cell| cell.replace(None)),
+            _this_thread: std::marker::PhantomData,
+        }
+    }
+
     /// The batch this thread has entered, while it is open; `None` outside
     /// one, or once it is sealed.
     #[must_use]
@@ -5954,6 +5971,58 @@ mod tests {
         assert!(DurableBatch::current().is_none());
         assert_eq!(outer.flush(), BatchFlush::OncePerDevice);
         assert_eq!(inner.flush(), BatchFlush::EveryFile);
+    }
+
+    /// WP-16 with WP-12d (D-3353 beside D-3350): A WRITER THAT SUSPENDS THE
+    /// BATCH FLUSHES FOR ITSELF, AND THE BATCH HOLDS NOTHING OF IT. Inside an
+    /// entered batch a suspended thread is in no batch: a new month and two
+    /// appends written there issue their own barriers (an armed fault fires)
+    /// and their own directory flushes, the batch is left with nothing to make
+    /// durable, and when the guard drops the thread is back in the batch it
+    /// was in. Without this a versioned repair reached from a day's batch
+    /// published a revision whose bars no flush had covered.
+    #[test]
+    fn a_suspended_batch_defers_nothing_and_comes_back() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("suspended");
+        let batch = DurableBatch::new(BatchFlush::EveryFile);
+        let _ = (directory_flushes(), index_flushes());
+        let _inside = batch.enter();
+        let is_in = || DurableBatch::current().is_some_and(|now| Arc::ptr_eq(&now.0, &batch.0));
+        assert!(is_in());
+        {
+            let _outside = DurableBatch::suspend();
+            assert!(DurableBatch::current().is_none(), "suspended: no batch");
+            // The first barrier a writer issues for itself is refused: proof
+            // that it issued one. Inside the batch the same fault never fires
+            // (`a_batch_defers_every_flush_and_ends_with_one_per_directory_and_device`).
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            let faulted = batch_root("suspended-fault");
+            let first: Vec<Bar> = (0..3).map(bar).collect();
+            let outcome = BarFile::open_or_create(&faulted, second_month("NIFTY"), SYMBOL)
+                .and_then(|mut writer| writer.append(&first));
+            SYNC_FAULT.with(|armed| armed.set(None));
+            assert!(
+                outcome.is_err(),
+                "a suspended writer issues its own barrier, which the armed fault refuses"
+            );
+            let _ = directory_flushes();
+            two_appends(&root);
+            assert!(
+                !directory_flushes().is_empty(),
+                "a suspended writer flushes the directories it names"
+            );
+        }
+        assert!(is_in(), "the batch is back when the guard drops");
+        assert_eq!(
+            batch.make_durable(2).expect("nothing to refuse"),
+            MadeDurable::default(),
+            "the batch held nothing of the suspended writer"
+        );
+        assert!(batch_flushes_under(&root).is_empty());
+        for dir in [root, batch_root("suspended-fault")] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// The month's own directory and every one above it up to `root`.

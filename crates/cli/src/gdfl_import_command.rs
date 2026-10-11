@@ -504,6 +504,13 @@ fn render(out: &mut String, kind: ImportKind, source: &str, store: &Path, report
     let _ = writeln!(out, "  late rows dropped   {}", report.late_unresolved);
     let _ = writeln!(out, "  seconds offered     {}", report.seconds);
     let _ = writeln!(out, "  seconds written     {}", report.seconds_committed);
+    // A DAY INSIDE WHAT ITS MONTH HOLDS (D-3350; DB-N26): each such month is
+    // a new generation, journaled in `<store>/audit/gdfl.repairs`.
+    let _ = writeln!(
+        out,
+        "  months repaired     {} (a new generation each; audit/gdfl.repairs)",
+        report.months_repaired
+    );
     let _ = writeln!(out, "  outside session     {}", report.outside_session);
     let _ = writeln!(out, "  failures            {}", report.failures.len());
     for failure in &report.failures {

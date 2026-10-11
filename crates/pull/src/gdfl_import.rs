@@ -71,10 +71,64 @@
 //! line naming another definition, or none, is not done: the day is imported
 //! again and named in `resumed` and [`Report::restated`]. The store is
 //! append-only, so it answers `AlreadyPresent` for the same bars and refuses
-//! the file by name for different ones; a day built under an old definition
-//! is never rewritten in place and never passes as a clean result. A day
-//! older than what a month file already holds is refused by the store by
-//! name, never inserted.
+//! the file by name for different ones (the repair below refuses them too:
+//! it never changes a held bar); a day built under an old definition is
+//! never rewritten in place and never passes as a clean result.
+//!
+//! # A day its month lacks, where no append can land it: a new generation (D-3350; DB-N26)
+//!
+//! A day the month lacks between, before or among the days it holds — the
+//! 8 Muhurat sessions, the 2 DR drills, 2021-02-24 and 2022-03-07, refused by
+//! the calendar when their months were first imported and admitted since
+//! D-3319 (WP-12a) — cannot be appended: the append-only month refuses a
+//! batch inside its held range at a stamp it never held, and until WP-12d
+//! that refusal was the day's end (10 Oct 2026: every NIFTY and BANKNIFTY
+//! file of the 12 days, which stayed `incomplete`). Every file is filed
+//! through the append door first (`ingest::from_rows`, on whichever worker
+//! takes it, WP-16), so a tail, a new month and a day already held land
+//! exactly as before. A file that door refuses outright is filed again
+//! through `ingest::repair_rows`, WP-13c's one repair authority reached from
+//! this door, by the coordinating thread, in listing order and outside the
+//! day's batch (`Door`, below): the append door once more, and when it
+//! refuses, the month as every
+//! reader opens it is asked one thing: does it hold any bar inside the
+//! file's span, first second to last? Only a month that holds NONE, where no
+//! append can ever land the file (the span starts at or before the month's
+//! last held bar, or the month is served from a revision), is REPAIRED — a
+//! new generation holding every bar the month served plus the day's,
+//! published under `bar-revisions-v1/<n>` and promoted so every reader
+//! (`BarFile::open_existing`, the census, `.tix` lookups, `/provenance.json`)
+//! opens it. Never in place: the original's files stay byte-identical.
+//!
+//! Every other refusal of the append door stands, in its own words, and
+//! nothing is repaired: a month another process holds locked, a host error,
+//! and above all a day the month already holds read differently — other
+//! values at a held second, or more seconds than it holds. A back-fill adds
+//! a day the month lacks; it never completes, restates or mixes a held one,
+//! so no month is ever left holding what no single reading of a day
+//! produces, and a passing lock never becomes a generation.
+//!
+//! Journaled before and after, in `<store>/audit/gdfl.repairs`, each line
+//! naming this run's id, whose `run` line names the archive: `repairing`
+//! before anything is published (the month, the generation served, the bars
+//! offered and their span), then `repair` (the generations, bars kept and
+//! added, the new span) or `refused` (why). A run killed between the
+//! promotion and its `repair` line leaves the `repairing` line, so no
+//! generation is served that the journal does not name. Resumable: a crash
+//! between publication and promotion is promoted by the next run, a revision
+//! torn mid-write is stepped over and named, never reused, and a day re-read
+//! after its repair finds every bar held and writes nothing
+//! ([`Report::months_repaired`] counts the repairs; such a landing writes no
+//! `.prv` record, below).
+//!
+//! Once a month is served from a revision, every later day it lacks is a
+//! repair too — a revision is never appended to — so each costs one more
+//! generation and O(month), bounded by `store::repair::MAX_REVISIONS` per
+//! month; `docs/06-limits.md` is WP-99's to state it. The 12 index days'
+//! months were complete, so each instrument-month of theirs is one
+//! generation. A month that holds only a later day (the six alias indices'
+//! special-session months, DB-B40) takes every other day of the month this
+//! way, one generation a day.
 //!
 //! # Refusals
 //!
@@ -180,7 +234,11 @@
 //!   day file, the day, the bars appended, the bar definition, the journal's
 //!   `begin` line and the build commit. The bar file is opened read-only and
 //!   the record refused unless its commit counter is still the one the
-//!   append left. A refused record is a named failure of the file.
+//!   append left. A refused record is a named failure of the file. A file
+//!   that repaired its month (above) writes none, and says so in a `warn`
+//!   event: a record covers the tail one append committed, and a revision
+//!   carries no `.prv` (`crates/store/REPAIR.md`), so `/provenance.json`
+//!   answers that month from this journal's day lines, reconstructed.
 //! - **The lineage** (D-3331, D-3343; [`lineage`]): an options run feeds
 //!   every day's contract-days to `gdfl_lineage::detect` and appends the
 //!   `alias`, `lineage` and `stitched` records to `<store>/imports/gdfl.lineage`
@@ -192,7 +250,13 @@
 //! Per day: one listing (O(entries)), then per instrument file one fetch,
 //! check and decode (O(bytes)), one placement (two passes, O(rows)), two
 //! folds (O(rows)), and two `from_rows` appends (O(bars + log n_valid +
-//! blocks touched), `docs/06-limits.md`). The census is published once per
+//! blocks touched), `docs/06-limits.md`), each through `repair_rows`, which
+//! for a month the append door refuses reads, merges, writes and reads back
+//! the whole month instead (O(held + offered), at most
+//! `store::repair::MAX_ROWS`), once per repaired month: measured on 24 real
+//! NIFTY and BANKNIFTY one-second months of 395,000 to 473,000 bars in a
+//! scratch store, p50 142 ms and max 323 ms a month, the file's read and
+//! fold included (WP-12d). The census is published once per
 //! day ([`crate::ingest::record_held`], O(entries held)). None of this is a
 //! constant-time claim; `docs/06-limits.md` states it. What IS constant per
 //! lookup is the stored result: a bar by index is one positional read
@@ -218,6 +282,21 @@
 //! the bytes one worker writes (`gdfl_import_tests::
 //! w_workers_build_the_same_store_journal_and_census_as_one`). The lineage
 //! warm-up at a run's start reads its files on the same workers.
+//!
+//! A BACK-FILL IS NOT A WORKER'S, AND NOT THE BATCH'S (D-3350 beside D-3353).
+//! A worker files through the append door alone. A file that door refuses
+//! outright is filed again through the back-fill door when the day's workers
+//! are done: by the coordinating thread, one file after the other in listing
+//! order, with the day's batch suspended (`store::file::DurableBatch::suspend`).
+//! The versioned repair flushes a revision's bars before the receipt that
+//! publishes them and before their promotion, and inside a batch those
+//! flushes would be held back past both; and its journal,
+//! `<store>/audit/gdfl.repairs`, is one ledger whose lines stay in the order
+//! one worker writes them (`gdfl_import_tests::
+//! a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store`).
+//! A refused file is therefore offered to the append door twice, and its
+//! rows stay in memory until its day's workers are done: at most one day's
+//! rows, when every file of the day is refused.
 //!
 //! A DAY IS DURABLE ONCE, TOGETHER (D-3353). By default every write of a
 //! day's files (records, checksums, time index, header slot, provenance
@@ -280,7 +359,9 @@ use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
 use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, read_listed, session_gate, split_name};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
-use crate::ingest::{Failure, Ingested, Plan, from_rows, record_held};
+use crate::ingest::{
+    Failure, Filed as Landed, Ingested, Plan, from_rows, record_held, repair_rows,
+};
 use crate::manifest::{ENTRY_STRIDE, HEADER_LEN, Held, MAX_ENTRIES, Manifest, manifest_path};
 use crate::session::{Day, IST_OFFSET_SECS, Window};
 use crate::vendor::{Granularity, Listing, PriceScale, TimestampEncoding};
@@ -1846,6 +1927,13 @@ pub struct Report {
     /// (D-3334): one per file that committed bars, when the run names its
     /// origin.
     pub provenance_records: usize,
+    /// Month files a day was back-filled into as a NEW GENERATION (D-3350;
+    /// DB-N26, WP-12d): one per file whose day the append-only month refused
+    /// because it lies inside what the month holds, and the versioned repair
+    /// took. Each is journaled in `<store>/audit/gdfl.repairs`; its added
+    /// bars are in [`Report::seconds_committed`], and it writes no `.prv`
+    /// record (a revision carries none).
+    pub months_repaired: usize,
 }
 
 /// What one run is asked to do.
@@ -3282,6 +3370,23 @@ struct Filing<'a> {
     /// it, so what that run wrote and never made durable is flushed for
     /// itself before this run closes the day.
     confirm: Option<&'a store::file::DurableBatch>,
+    /// The run's id, which a back-fill's reason and event name (D-3350).
+    id: u64,
+}
+
+/// What a file's landing left beside the bars it committed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Receipt {
+    /// Nothing: no bar committed, or a run that names no origin.
+    #[default]
+    None,
+    /// The provenance record of its append (D-3334): counted in
+    /// [`Report::provenance_records`].
+    Provenance,
+    /// A new generation of its month (D-3350; DB-N26, WP-12d), journaled in
+    /// `<store>/audit/gdfl.repairs`: counted in [`Report::months_repaired`].
+    /// A revision carries no provenance record.
+    NewGeneration,
 }
 
 /// One file as a worker filed it, folded into its day in listing order by
@@ -3302,8 +3407,8 @@ struct Filed {
     seconds: usize,
     /// Bars the store wrote.
     committed: usize,
-    /// Whether its landing was recorded (D-3334).
-    provenance: bool,
+    /// What its landing left beside its bars.
+    receipt: Receipt,
     /// Whether its month was confirmed in the day's batch (D-3353): the day
     /// had been left open by an earlier run.
     confirmed: bool,
@@ -3355,12 +3460,42 @@ fn take_quality(
     ledger.take(&handed.file.symbol, &measured);
 }
 
+/// The store's door a file is filed through (WP-16 with WP-12d).
+///
+/// A day's files run on workers inside the day's batch, where no writer
+/// flushes for itself (D-3353). The versioned month repair (D-3350) is not
+/// such a writer: its own flushes order a revision's bars before its receipt
+/// and its promotion, it journals to one ledger, `<store>/audit/gdfl.repairs`,
+/// and it costs O(month). So a worker files through the append door alone,
+/// and a file that door refuses outright is filed again through the
+/// back-fill door by the coordinating thread, in listing order and outside
+/// the batch: the repair keeps every flush it was written with, and the
+/// repair journal's lines are in the order one worker writes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Door {
+    /// `ingest::from_rows`: a tail, a new month, a day already held.
+    Append,
+    /// `ingest::repair_rows`: the append door again, then the repair for a
+    /// day its month lacks where no append can land it.
+    BackFill,
+}
+
 impl Filing<'_> {
     /// Converts and files one instrument file, measures its quality and
     /// records its landing: what one file of a day does, on whichever worker
     /// took it. `begin` answers the day's `begin` line, written the first time
     /// a file has a second to file.
-    fn file(&self, handed: &Handed, begin: &dyn Fn() -> Result<u64, ImportRefusal>) -> Filed {
+    ///
+    /// The flag is `true` only through [`Door::Append`], when the append door
+    /// refused the file and committed nothing: the answer is then not the
+    /// file's, nothing of it is to be counted, and the caller files it again
+    /// through [`Door::BackFill`], whose answer is always the file's.
+    fn file(
+        &self,
+        handed: &Handed,
+        begin: &dyn Fn() -> Result<u64, ImportRefusal>,
+        door: Door,
+    ) -> (Filed, bool) {
         let run = self.run;
         let file = &handed.file;
         let mut filed = Filed::default();
@@ -3373,7 +3508,7 @@ impl Filing<'_> {
                 filed
                     .failures
                     .push(staged(run, self.day, &file.name, Stage::File, &why));
-                return filed;
+                return (filed, false);
             }
         };
         if let Some(session) = self.session {
@@ -3383,7 +3518,7 @@ impl Filing<'_> {
         let p = converted.placement;
         filed.placement = Some(p);
         if converted.seconds.is_empty() {
-            return filed;
+            return (filed, false);
         }
         let begin_line = match begin() {
             Ok(line) => line,
@@ -3391,27 +3526,41 @@ impl Filing<'_> {
                 filed
                     .failures
                     .push(staged(run, self.day, "journal", Stage::Journal, &why));
-                return filed;
+                return (filed, false);
             }
         };
         let origin = format!("gdfl {} {} {}", run.kind.as_str(), self.day, file.name);
-        let done: Ingested = from_rows(
-            &converted.seconds,
-            &[],
-            &file.symbol,
-            &origin,
-            run.store_root,
-            plan(run.kind, self.request, file.contract),
-        );
+        // A DAY ITS MONTH LACKS, WHERE NO APPEND CAN LAND IT, LANDS AS A NEW
+        // GENERATION OF THE MONTH (D-3350; DB-N26). The append-only month
+        // refuses it, and was the end of it: the 12 index days WP-12a
+        // admitted were refused for every NIFTY and BANKNIFTY file on 10 Oct
+        // 2026. The back-fill door tries the append door first, so a tail, a
+        // new month and a day already held land exactly as before; it
+        // repairs only a month that holds no bar inside the file's span and
+        // cannot be appended to, never in place, and every other refusal
+        // stands as it was. The reason names the run, whose `run` line names
+        // the archive.
+        let Some((done, landed)) = self.through(door, file, &converted.seconds, &origin) else {
+            return (filed, true);
+        };
         filed.outside_session = usize::try_from(done.census.total()).unwrap_or(0);
         filed.seconds = done.bars_stored;
         filed.committed = done.bars_committed;
         if done.bars_committed > 0
             && let Some(held) = done.pending.as_ref()
         {
-            match self.provenance(handed, held, done.bars_committed, begin_line) {
-                Ok(recorded) => filed.provenance = recorded,
-                Err(refused) => filed.failures.push(refused),
+            match landed {
+                Landed::Appended => {
+                    match self.provenance(handed, held, done.bars_committed, begin_line) {
+                        Ok(true) => filed.receipt = Receipt::Provenance,
+                        Ok(false) => {}
+                        Err(refused) => filed.failures.push(refused),
+                    }
+                }
+                Landed::NewGeneration => {
+                    filed.receipt = Receipt::NewGeneration;
+                    self.repaired(handed, held, done.bars_committed);
+                }
             }
         }
         // A DAY AN EARLIER RUN LEFT OPEN: whatever that run wrote of this
@@ -3443,7 +3592,49 @@ impl Filing<'_> {
                 .with("rows", p.rows)
                 .with("seconds", converted.seconds.len()),
         );
-        filed
+        (filed, false)
+    }
+
+    /// Offers a file's bars to the store through `door`: what the store
+    /// answered and how the bars landed, or `None` when [`Door::Append`]
+    /// refused them and committed nothing.
+    fn through(
+        &self,
+        door: Door,
+        file: &TickFile,
+        seconds: &[Bar],
+        origin: &str,
+    ) -> Option<(Ingested, Landed)> {
+        let run = self.run;
+        let month = || plan(run.kind, self.request, file.contract);
+        match door {
+            Door::Append => {
+                let done = from_rows(seconds, &[], &file.symbol, origin, run.store_root, month());
+                (done.bars_committed > 0 || done.failures.is_empty())
+                    .then_some((done, Landed::Appended))
+            }
+            Door::BackFill => {
+                let reason = format!(
+                    "gdfl-import {} {} {} run:{}: a day the month lacks where no append can land it",
+                    run.kind.as_str(),
+                    self.day,
+                    file.name,
+                    self.id
+                );
+                // OUTSIDE THE DAY'S BATCH, whichever thread this is: the
+                // repair's flushes are its own (D-3350), and so are those of
+                // an append the door takes this second time.
+                let _outside_the_batch = store::file::DurableBatch::suspend();
+                Some(repair_rows(
+                    seconds,
+                    &file.symbol,
+                    origin,
+                    run.store_root,
+                    month(),
+                    &reason,
+                ))
+            }
+        }
     }
 
     /// Writes the provenance record of a file's landing (D-3334) when the
@@ -3499,6 +3690,46 @@ impl Filing<'_> {
             staged(run, self.day, &handed.file.name, Stage::File, &refusal)
         })
     }
+
+    /// A file whose day its month lacked inside what it holds, landed as a
+    /// NEW GENERATION of the month (D-3350; DB-N26): logged with the month's
+    /// rows now served, and counted in [`Report::months_repaired`] when the
+    /// file is folded into its day. The repair door journaled it in `<store>/audit/gdfl.repairs`
+    /// with this run's id.
+    ///
+    /// **No `.prv` record is written, and the event says so.** A sidecar
+    /// record covers the bars ONE append committed at the end of its file,
+    /// at that file's commit generation (`store::provenance::record`); the
+    /// added bars sit inside the new generation, and its records would index
+    /// bars the original never held, so a revision carries no `.prv`
+    /// (`crates/store/REPAIR.md`). `/provenance.json` reads beside the
+    /// generation every reader opens and rebuilds the month's answer from
+    /// this journal's day lines, labelled reconstructed; the original's
+    /// `.prv`, if any, is left byte-identical. When the run names its origin
+    /// — so an append would have been recorded — the event is a `warn`.
+    fn repaired(&self, handed: &Handed, held: &Held, added: usize) {
+        let unrecorded =
+            self.origin.is_some() && handed.facts.member.is_some() && self.source.is_some();
+        let (day, month) = (self.day.to_string(), held.entry.key.month.to_string());
+        let event = if unrecorded {
+            telemetry::Event::warn(
+                TARGET,
+                "day back-filled as a new generation of its month; no .prv record: a revision \
+                 carries none (D-3350), the repair journal and this journal's day line name it",
+            )
+        } else {
+            telemetry::Event::info(TARGET, "day back-filled as a new generation of its month")
+        };
+        let _dropped_when_filtered = telemetry::emit(
+            &event
+                .with("file", handed.file.name.as_str())
+                .with("day", day.as_str())
+                .with("month", month.as_str())
+                .with("added", added)
+                .with("rows", held.entry.rows)
+                .with("run", self.id),
+        );
+    }
 }
 
 /// What reading one file of a day came to, answered to its source in listing
@@ -3517,6 +3748,9 @@ enum JobRead {
 enum JobDone {
     /// Read and filed.
     Filed(Box<Filed>, Option<lineage::DayContract>),
+    /// Read, and refused outright by the append door: the coordinating
+    /// thread files it through the back-fill door ([`Door::BackFill`]).
+    BackFill(Box<Handed>, Option<lineage::DayContract>),
     /// The source or the reader refused it.
     Refused(Refused),
 }
@@ -3524,6 +3758,33 @@ enum JobDone {
 /// One file read by a source for a day's job: its rows and facts, and the
 /// contract-day the lineage folds, when asked.
 type ReadJob = Result<(Handed, Option<lineage::DayContract>), Refused>;
+
+/// One job of a day once every file is filed: the file as it was filed and
+/// the contract-day the lineage folds, or the read's refusal.
+type FiledJob = Result<(Box<Filed>, Option<lineage::DayContract>), Refused>;
+
+/// THE BACK-FILL PASS (D-3350 under WP-16): every file the append door refused
+/// outright, filed through the back-fill door ([`Door::BackFill`]), one after
+/// the other in listing order on the calling thread. Each had asked for the
+/// day's `begin` line before it reached a door, so `begun` holds it.
+fn back_fill(filing: &Filing<'_>, begun: Option<u64>, done: Vec<JobDone>) -> Vec<FiledJob> {
+    let begin_again = || {
+        begun.ok_or_else(|| ImportRefusal::Journal {
+            why: "the day's begin line was not written".to_owned(),
+        })
+    };
+    done.into_iter()
+        .map(|one| match one {
+            JobDone::Filed(filed, contract) => Ok((filed, contract)),
+            JobDone::BackFill(handed, contract) => {
+                let (filed, _never_through_this_door) =
+                    filing.file(&handed, &begin_again, Door::BackFill);
+                Ok((Box::new(filed), contract))
+            }
+            JobDone::Refused(refused) => Err(refused),
+        })
+        .collect()
+}
 
 /// One admitted day's filing (WP-16): the source hands it the day's wanted
 /// files, it files them on the run's workers, and it folds what each file
@@ -3627,6 +3888,7 @@ impl DayFiler<'_> {
             origin: self.ctx.options.origin,
             source: self.source.as_ref(),
             confirm: self.batch.as_ref().filter(|_| self.confirm),
+            id: self.ctx.id,
         };
         let mut done: Option<Vec<JobDone>> = None;
         if self.workers > 1 && jobs.len() > 1 {
@@ -3640,10 +3902,12 @@ impl DayFiler<'_> {
                 &|job| {
                     let _in_the_day = batch.map(store::file::DurableBatch::enter);
                     match read(job) {
-                        Ok((handed, contract)) => JobDone::Filed(
-                            Box::new(filing.file(&handed, &|| gate.line())),
-                            contract,
-                        ),
+                        Ok((handed, contract)) => {
+                            match filing.file(&handed, &|| gate.line(), Door::Append) {
+                                (_, true) => JobDone::BackFill(Box::new(handed), contract),
+                                (filed, false) => JobDone::Filed(Box::new(filed), contract),
+                            }
+                        }
                         Err(refused) => JobDone::Refused(refused),
                     }
                 },
@@ -3679,22 +3943,24 @@ impl DayFiler<'_> {
             let all = jobs
                 .iter()
                 .map(|job| match read(job) {
-                    Ok((handed, contract)) => {
-                        JobDone::Filed(Box::new(filing.file(&handed, &begin)), contract)
-                    }
+                    Ok((handed, contract)) => match filing.file(&handed, &begin, Door::Append) {
+                        (_, true) => JobDone::BackFill(Box::new(handed), contract),
+                        (filed, false) => JobDone::Filed(Box::new(filed), contract),
+                    },
                     Err(refused) => JobDone::Refused(refused),
                 })
                 .collect();
             self.begin = line.get();
             all
         });
+        let done = back_fill(&filing, self.begin, done);
         done.into_iter()
             .map(|one| match one {
-                JobDone::Filed(filed, contract) => {
+                Ok((filed, contract)) => {
                     self.fold(*filed);
                     JobRead::Read(contract)
                 }
-                JobDone::Refused(refused) => JobRead::Refused(refused),
+                Err(refused) => JobRead::Refused(refused),
             })
             .collect()
     }
@@ -3722,8 +3988,10 @@ impl DayFiler<'_> {
         self.report.outside_session += filed.outside_session;
         self.report.seconds += filed.seconds;
         self.report.seconds_committed += filed.committed;
-        if filed.provenance {
-            self.report.provenance_records += 1;
+        match filed.receipt {
+            Receipt::None => {}
+            Receipt::Provenance => self.report.provenance_records += 1,
+            Receipt::NewGeneration => self.report.months_repaired += 1,
         }
         self.confirmed += usize::from(filed.confirmed);
         self.held.extend(filed.held);

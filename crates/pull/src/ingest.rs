@@ -1578,6 +1578,154 @@ pub fn from_rows(
     store_root: &Path,
     plan: Plan<'_>,
 ) -> Ingested {
+    let (done, _appended) = rows_mode(
+        bars,
+        overlays,
+        (instrument, origin),
+        store_root,
+        plan,
+        RowsDoor::Append,
+    );
+    done
+}
+
+/// How [`repair_rows`] filed a month's bars (D-3350; DB-N26, WP-12d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filed {
+    /// Through the append-only door, exactly as [`from_rows`] files them:
+    /// appended, already held, or refused (the failures name why). No new
+    /// generation of the month was published.
+    Appended,
+    /// As a NEW GENERATION of the month (`store::repair::repair_month`): the
+    /// generation it served, every bar kept and none changed, plus the
+    /// offered bars, of which it held none, published under
+    /// `bar-revisions-v1/<n>`, promoted so every reader opens it, and
+    /// journaled in `<store>/audit/<vendor>.repairs`. The original's files
+    /// are untouched.
+    NewGeneration,
+}
+
+/// Bars ALREADY DECODED, filed as [`from_rows`] files them — the same session
+/// filter, the same census row handed back, the same refusals — but a batch
+/// the served month holds NOTHING of and the append-only store cannot take
+/// is BACK-FILLED as a versioned repair (D-3350) rather than refused: a day
+/// the month lacks between, before or among the days it holds, or any day a
+/// month already served from a revision lacks. DB-N26, WP-12d.
+///
+/// # Why the GDFL import needs it
+///
+/// `store::file::BarFile::append` takes a month's bars only after the last
+/// one it holds: a batch inside the held range at a stamp the month never
+/// held is refused (`store::file::Conflict::NotHeld`), and must be, since an
+/// append-only file cannot insert. So a GDFL day that lies inside a month
+/// already held past it — the 8 Muhurat sessions, the 2 DR drills,
+/// 2021-02-24 and 2022-03-07, which the calendar refused when the months
+/// were first imported and admits since D-3319 (WP-12a) — could never land:
+/// the run of 10 Oct 2026 refused every NIFTY and BANKNIFTY file of the 12
+/// days. This is the one repair authority WP-13c built for the Zerodha
+/// holes ([`repair_window`]'s door, `repair_after`), reached from the
+/// decoded-bar door; it is not a second one.
+///
+/// # What is back-filled, and what is not
+///
+/// The append door is tried first, so a tail, a new month and a batch
+/// already held land, or answer, exactly as [`from_rows`] does. When it
+/// refuses, the served month is read (`lack_of`: one generation probe, one
+/// open, one time-indexed lookup and one record) and the batch is
+/// back-filled only when BOTH hold:
+///
+/// * the month holds no bar anywhere in the batch's span, first stamp to
+///   last — it is bars the month LACKS, never a held day completed, restated
+///   or mixed with another reading of it; and
+/// * the append door cannot ever take it: the span starts at or before the
+///   month's last held stamp, or the month is served from a revision, which
+///   is never appended to.
+///
+/// Every other refusal of the append door stands as it was, in its own
+/// words, and nothing is repaired: a month another process holds locked, a
+/// host error, a batch after an original month's tail that the store refused
+/// for a reason of its own, and a batch that overlaps held bars and disagrees
+/// with them. So this door, which every GDFL file is filed through, cannot
+/// turn a passing lock or a full disk into a new generation of a month that
+/// needed none.
+///
+/// # What it never does
+///
+/// It never writes a month in place: a repair publishes a new generation and
+/// leaves the original's `.bin`, `.crc`, `.tix` and `.prv` byte-identical. It
+/// never changes or drops a held bar: it adds bars at stamps the month holds
+/// nothing near, and `store::repair::repair_month` refuses the month whole
+/// if a held bar would differ. It files no overlay: inserting bars would
+/// shift every row an overlay indexes, which is why `repair_month` refuses a
+/// month that has one.
+///
+/// # Journaled before and after
+///
+/// One `repairing` line is appended to `<store>/audit/<vendor>.repairs`
+/// BEFORE the repair (the month, the generation served, the bars offered and
+/// their span, the reason), and the repair's own `repair` or `refused` line
+/// after it. A process killed between the promotion and its `repair` line
+/// leaves the `repairing` line: no generation is ever served that the
+/// journal does not name. A `repairing` line that cannot be written refuses
+/// the back-fill before anything is published.
+///
+/// # Errors
+///
+/// As [`from_rows`], through [`Ingested::failures`]; a refused repair names
+/// the append door's refusal and the repair's, and is journaled `refused`.
+///
+/// # Cost
+///
+/// [`from_rows`]'s when the append door takes the bars. A back-fill reads
+/// every bar the served generation holds, merges, writes and reads back the
+/// new generation, all O(held + offered), bounded by
+/// `store::repair::MAX_ROWS`, and appends one pointer record and two journal
+/// lines: NOT O(1), and not on a read path. A month already served from a
+/// revision pays that for EVERY later batch it lacks, one generation each (a
+/// revision is never appended to), bounded by `store::repair::MAX_REVISIONS`
+/// per month. A reader's cost is unchanged: one pointer resolution per open.
+#[must_use]
+pub fn repair_rows(
+    bars: &[store::format::Bar],
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+    reason: &str,
+) -> (Ingested, Filed) {
+    rows_mode(
+        bars,
+        &[],
+        (instrument, origin),
+        store_root,
+        plan,
+        RowsDoor::BackFill { reason },
+    )
+}
+
+/// Which door [`rows_mode`] writes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowsDoor<'a> {
+    /// The append-only door, and nothing else ([`from_rows`]).
+    Append,
+    /// The append-only door, and a versioned repair of a month that lacks
+    /// the whole batch where no append can ever land it ([`repair_rows`]).
+    BackFill {
+        /// Why, journaled with every repair.
+        reason: &'a str,
+    },
+}
+
+/// [`from_rows`] and [`repair_rows`], one implementation: `door` decides only
+/// the write.
+fn rows_mode(
+    bars: &[store::format::Bar],
+    overlays: &[store::format::Overlay],
+    (instrument, origin): (&str, &str),
+    store_root: &Path,
+    plan: Plan<'_>,
+    door: RowsDoor<'_>,
+) -> (Ingested, Filed) {
     let mut done = Ingested {
         members: 1,
         rows_read: bars.len(),
@@ -1589,10 +1737,10 @@ pub fn from_rows(
     done.census = census;
     let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
     if bars.is_empty() {
-        return done;
+        return (done, Filed::Appended);
     }
     let Some((first, last)) = bars.first().zip(bars.last()) else {
-        return done;
+        return (done, Filed::Appended);
     };
     let addressed = month_of(first, last).and_then(|ym| {
         plan.timeframe().and_then(|timeframe| {
@@ -1608,7 +1756,7 @@ pub fn from_rows(
         Err(why) => {
             note_not_filed(instrument, "address", &why);
             done.failures.push(Failure::new(instrument, why));
-            return done;
+            return (done, Filed::Appended);
         }
     };
     let Identity {
@@ -1628,31 +1776,39 @@ pub fn from_rows(
         month: ym,
         file: FileKind::Bars,
     };
-    let held = write_and_count(
-        bars,
-        store_root,
-        symbol_id,
-        parts,
-        EntryKey {
-            contract: plan.contract,
-            exchange,
-            segment,
-            symbol,
-            timeframe,
-            month: ym,
-        },
-    );
-    let one = match held {
-        Ok((one, committed)) => {
+    let key = EntryKey {
+        contract: plan.contract,
+        exchange,
+        segment,
+        symbol,
+        timeframe,
+        month: ym,
+    };
+    // THE ONE DIFFERENCE BETWEEN THE TWO DOORS (D-3350; DB-N26). The
+    // back-fill door tries the append door first, and repairs only a month
+    // that lacks the whole batch where no append can ever land it.
+    let held = match door {
+        RowsDoor::Append => write_and_count(bars, store_root, symbol_id, parts, key)
+            .map(|(one, committed)| (one, committed, Filed::Appended)),
+        RowsDoor::BackFill { reason } => back_fill_or_append(
+            bars,
+            store_root,
+            symbol_id,
+            (parts, key),
+            (repair_policy(plan), reason),
+        ),
+    };
+    let (one, filed) = match held {
+        Ok((one, committed, filed)) => {
             done.bars_stored = bars.len();
             done.bars_committed = committed;
-            one
+            (one, filed)
         }
         Err(why) => {
             note_not_filed(instrument, "bars", &why);
             done.failures
                 .push(Failure::new(instrument, why).in_month(ym));
-            return done;
+            return (done, Filed::Appended);
         }
     };
 
@@ -1695,7 +1851,7 @@ pub fn from_rows(
             .push(Failure::new(instrument, why).in_month(ym));
     }
     name_the_origin(&mut done, origin);
-    done
+    (done, filed)
 }
 
 /// Drops the bars this engine declines, and counts why.
@@ -2229,10 +2385,30 @@ fn repair_or_append(
     (parts, key): (PathParts<'_>, EntryKey),
     (policy, reason): (store::repair::Policy, &str),
 ) -> Result<(Held, usize, Vec<i64>), String> {
-    let appended = match write_and_count(bars, store_root, symbol_id, parts, key) {
-        Ok((held, written)) => return Ok((held, written, Vec::new())),
-        Err(why) => why,
-    };
+    match write_and_count(bars, store_root, symbol_id, parts, key) {
+        Ok((held, written)) => Ok((held, written, Vec::new())),
+        Err(appended) => repair_after(
+            &appended,
+            bars,
+            (store_root, symbol_id),
+            (parts, key),
+            (policy, reason),
+        ),
+    }
+}
+
+/// The repair half of [`repair_or_append`]: the month the append door
+/// refused, in `appended`'s words, handed to
+/// [`store::repair::repair_month`], journaled either way. Shared by the
+/// repair door and the back-fill door ([`back_fill_or_append`]), so there is
+/// one repair, one journal line and one refusal sentence.
+fn repair_after(
+    appended: &str,
+    bars: &[store::format::Bar],
+    (store_root, symbol_id): (&Path, u32),
+    (parts, key): (PathParts<'_>, EntryKey),
+    (policy, reason): (store::repair::Policy, &str),
+) -> Result<(Held, usize, Vec<i64>), String> {
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
     match store::repair::repair_month(store_root, path, symbol_id, bars, policy) {
         Ok(store::repair::MonthRepair::NothingNew { .. }) => Ok((
@@ -2300,6 +2476,183 @@ fn held_of_served(
         },
         closes,
     ))
+}
+
+/// What the served month holds of an offered batch, as the back-fill door
+/// asks it ([`lack_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lack {
+    /// The month holds no bar anywhere in the batch's span, and no append can
+    /// ever land the batch: its span starts at or before the last stamp an
+    /// original month holds, or the month is served from revision `served`
+    /// (`0` the original), which is never appended to. Only a repair lands it.
+    Lacked {
+        /// The generation served now.
+        served: u32,
+    },
+    /// The month holds a bar inside the batch's span, at `held_at`: the batch
+    /// is another reading of bars the month has, not bars it lacks.
+    Overlaps {
+        /// The first held stamp at or after the batch's first.
+        held_at: i64,
+    },
+    /// Nothing a repair answers: the month does not exist or holds nothing
+    /// (the append door creates and fills it), the batch lies wholly after
+    /// what an original month holds (the append door appends it), or the
+    /// batch is not in ascending order (no door takes it). Whatever refused
+    /// the append is not the month's shape.
+    AppendDoors,
+}
+
+/// What the month at `path`, as every reader opens it, holds of `bars`.
+///
+/// # Cost
+///
+/// One pass over the batch's stamps (its order), one generation probe, one
+/// read-only open, one time-indexed lookup (`BarFile::first_at_or_after`,
+/// O(log n) at worst) and one record read. On the refusal path of the append
+/// door only.
+///
+/// # Errors
+///
+/// The store's words for a pointer, an open or a read it refuses (a month a
+/// writer holds locked among them): the month could not be judged.
+fn lack_of(
+    store_root: &Path,
+    path: StorePath<'_>,
+    symbol_id: u32,
+    bars: &[store::format::Bar],
+) -> Result<Lack, String> {
+    let Some((first, last)) = bars.first().zip(bars.last()) else {
+        return Ok(Lack::AppendDoors);
+    };
+    // A SPAN IS FIRST TO LAST ONLY OF AN ORDERED BATCH. One that is not is
+    // the store's refusal, by name, at every door.
+    if bars
+        .iter()
+        .zip(bars.iter().skip(1))
+        .any(|(earlier, later)| earlier.ts_micros >= later.ts_micros)
+    {
+        return Ok(Lack::AppendDoors);
+    }
+    let served = store::generation::served(store_root, path).map_err(|why| why.to_string())?;
+    let file = match BarFile::open_existing(store_root, path, symbol_id) {
+        Ok(file) => file,
+        Err(store::file::StoreError::Missing { .. }) => return Ok(Lack::AppendDoors),
+        Err(why) => return Err(why.to_string()),
+    };
+    let header = file.header();
+    if header.n_valid == 0 {
+        return Ok(Lack::AppendDoors);
+    }
+    let original = served.ordinal() == 0;
+    if original && first.ts_micros > header.last_ts_micros {
+        return Ok(Lack::AppendDoors);
+    }
+    let at = file
+        .first_at_or_after(first.ts_micros)
+        .map_err(|why| why.to_string())?;
+    if at < header.n_valid {
+        let held = file.read_record(at).map_err(|why| why.to_string())?;
+        if held.ts_micros <= last.ts_micros {
+            return Ok(Lack::Overlaps {
+                held_at: held.ts_micros,
+            });
+        }
+    }
+    Ok(Lack::Lacked {
+        served: served.ordinal(),
+    })
+}
+
+/// THE BACK-FILL DOOR (D-3350; DB-N26, WP-12d): the append door first, and a
+/// versioned repair only of a month that LACKS the whole batch where no
+/// append can ever land it ([`Lack::Lacked`]). [`repair_rows`] says why the
+/// rule is this narrow; in short, every GDFL file comes through here, so a
+/// refusal that is not the month's shape (a lock, the host, a held day read
+/// differently) must stay a refusal and never become a generation.
+///
+/// The repair itself is [`repair_after`], the one WP-13c built; this door
+/// adds the judgement before it and the `repairing` line.
+fn back_fill_or_append(
+    bars: &[store::format::Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    (parts, key): (PathParts<'_>, EntryKey),
+    (policy, reason): (store::repair::Policy, &str),
+) -> Result<(Held, usize, Filed), String> {
+    let appended = match write_and_count(bars, store_root, symbol_id, parts, key) {
+        Ok((held, written)) => return Ok((held, written, Filed::Appended)),
+        Err(why) => why,
+    };
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let served = match lack_of(store_root, path, symbol_id, bars) {
+        Ok(Lack::Lacked { served }) => served,
+        // THE APPEND DOOR'S REFUSAL, UNCHANGED: nothing about the month's
+        // shape asks for a repair.
+        Ok(Lack::AppendDoors) => return Err(appended),
+        Ok(Lack::Overlaps { held_at }) => {
+            return Err(format!(
+                "{appended}; not back-filled: the month holds a bar at {held_at}, inside the offered span, and a back-fill adds only bars the month holds nothing of (D-3350): it never completes, restates or mixes a held day, so nothing was written"
+            ));
+        }
+        Err(why) => {
+            return Err(format!(
+                "{appended}; not back-filled: the month as served could not be read to judge it ({why}), so nothing was written"
+            ));
+        }
+    };
+    // JOURNALED BEFORE ANYTHING IS PUBLISHED, so a generation is never served
+    // that the journal does not name, whatever kills the process after it.
+    journal_intent(store_root, &parts, served, bars, reason).map_err(|why| {
+        format!(
+            "{appended}; not back-filled: the repair journal would not take the `repairing` line ({why}), so nothing was published"
+        )
+    })?;
+    repair_after(
+        &appended,
+        bars,
+        (store_root, symbol_id),
+        (parts, key),
+        (policy, reason),
+    )
+    .map(|(held, added, added_at)| {
+        let filed = if added_at.is_empty() {
+            Filed::Appended
+        } else {
+            Filed::NewGeneration
+        };
+        (held, added, filed)
+    })
+}
+
+/// One `repairing` line in `<store>/audit/<vendor>.repairs`, written by the
+/// back-fill door BEFORE the repair: the month, the generation served, the
+/// bars offered and the stamps they span, and why. The `repair` or `refused`
+/// line that follows closes it; a `repairing` line with neither is a process
+/// that died in between, and the month's pointer says whether its generation
+/// was promoted.
+fn journal_intent(
+    store_root: &Path,
+    parts: &PathParts<'_>,
+    served: u32,
+    bars: &[store::format::Bar],
+    reason: &str,
+) -> Result<(), String> {
+    let (first, last) = bars
+        .first()
+        .zip(bars.last())
+        .map_or((0, 0), |(first, last)| (first.ts_micros, last.ts_micros));
+    let line = format!(
+        "repairing {} {} {} v=1 from_generation={served} offered={} first={first} last={last} reason={} run={}",
+        ledger_key(parts),
+        parts.timeframe.as_str(),
+        parts.month,
+        bars.len(),
+        ledger_field(reason),
+        telemetry::global().map_or(0, telemetry::Sink::run)
+    );
+    request_minutes::append_named(store_root, parts.vendor, "repairs", &[line])
 }
 
 /// The census key text a ledger line names a month by.
@@ -3885,7 +4238,7 @@ fn already_served(
             .and_then(|index| file.read_record(index).ok());
         if held != Some(*bar) {
             return Err(format!(
-                "the month is served from repair revision {} (D-3350) and does not hold the offered bar at {} as offered; an ordinary append cannot add to it, so nothing was written. Repair it: POST /pull/repair, or cli zerodha-repair",
+                "the month is served from repair revision {} (D-3350) and does not hold the offered bar at {} as offered; an ordinary append cannot add to it, so nothing was written. Only a further versioned repair adds to such a month: POST /pull/repair or cli zerodha-repair for a pulled feed; a GDFL import back-fills a day the month lacks by itself",
                 pointer.revision.ordinal(),
                 bar.ts_micros
             ));
