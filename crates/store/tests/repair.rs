@@ -250,10 +250,11 @@ fn exact_resource_boundaries_and_bar_only_contract() {
         Revision::new(MAX_REVISIONS).unwrap().ordinal(),
         MAX_REVISIONS
     );
-    // THE ROW CEILING IS THE MOST BARS ONE MONTH CAN HOLD: 31 days of
-    // one-second bars, the finest rung the store files (DB-N26, WP-12d). It
-    // was 100,000, and a GDFL one-second month holds about 409,000 bars, so
-    // no such month could be repaired.
+    // THE ROW CEILING IS THE MOST BARS THE PATH'S MONTH CAN HOLD ON ITS RUNG
+    // (D-4875 (1), D-4898, IA-17): June's 30 days of one-second bars here.
+    // `MAX_ROWS`, 31 days of them, is the largest any path has (DB-N26,
+    // WP-12d). It was 100,000, and a GDFL one-second month holds about
+    // 409,000 bars, so no such month could be repaired.
     assert_eq!(
         MAX_ROWS,
         31 * 86_400 / usize::try_from(Timeframe::SECOND_1.secs()).unwrap()
@@ -267,21 +268,28 @@ fn exact_resource_boundaries_and_bar_only_contract() {
     let expected_seconds = BarFile::open_or_create(&fixture.0, seconds, 7)
         .unwrap()
         .header();
-    let maximum = i64::try_from(MAX_ROWS).unwrap();
+    let ceiling = repair::row_ceiling(seconds);
+    assert_eq!(ceiling, 30 * 86_400);
+    let over = RepairError::RowLimit {
+        rows: ceiling + 1,
+        ceiling,
+    };
+    let maximum = i64::try_from(ceiling).unwrap();
     let mut rows: Vec<_> = (0..=maximum).map(second).collect();
     let publish_seconds =
         |rows: &[Bar]| repair::publish(&fixture.0, seconds, 7, revision(), expected_seconds, rows);
-    assert_eq!(publish_seconds(&rows), Err(RepairError::RowLimit));
+    assert_eq!(publish_seconds(&rows), Err(over.clone()));
     let index = repair::Policy {
         open_interest_applies: false,
         basis_witness: false,
     };
     assert_eq!(
         repair::repair_month(&fixture.0, seconds, 7, &rows, index),
-        Err(RepairError::RowLimit)
+        Err(over)
     );
     // AT THE CEILING the count passes, and what refuses is the month
-    // admission (D-0915): `MAX_ROWS` seconds from 2024-06-03 run past June.
+    // admission (D-0915): June's whole count of seconds, begun on 2024-06-03,
+    // runs past June.
     rows.pop();
     assert!(matches!(
         publish_seconds(&rows),
@@ -304,10 +312,18 @@ fn exact_resource_boundaries_and_bar_only_contract() {
     );
     let expected = fixture.source(&[]);
     let mut too_many = expected;
-    too_many.n_valid = MAX_ROWS as u64 + 1;
+    // A SOURCE HEADER COUNTING MORE THAN ITS OWN MONTH HOLDS: 43,201 on the
+    // one-minute rung of a 30-day month, far under the flat `MAX_ROWS` this
+    // was compared against.
+    let minute_ceiling = repair::row_ceiling(path());
+    assert_eq!(minute_ceiling, 30 * 1_440);
+    too_many.n_valid = minute_ceiling + 1;
     assert_eq!(
         fixture.publish(too_many, &[bar(0)]),
-        Err(RepairError::RowLimit)
+        Err(RepairError::RowLimit {
+            rows: minute_ceiling + 1,
+            ceiling: minute_ceiling,
+        })
     );
     assert!(matches!(
         repair::publish(
