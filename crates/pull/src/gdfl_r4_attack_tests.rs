@@ -448,11 +448,13 @@ fn r4_07_every_name_is_shaped_to_the_underlying_it_was_built_from() {
         let shaped = crate::gdfl_nfo::shaped_underlying(&name);
         if let Ok(ticker) = decode_ticker(&name, on) {
             decoded += 1;
-            assert_eq!(
-                shaped,
-                Some(ticker.underlying.as_str()),
-                "case {case}: {name}"
-            );
+            // ADAPTED (WP-12e; D-3333): the shape spells the VENDOR's
+            // symbol; the decoded underlying is the store key that symbol is
+            // filed under on the day (`LTI` under `LTM`).
+            let filed = shaped
+                .and_then(|stem| brutex_core::symbol::Symbol::new(stem).ok())
+                .and_then(|stem| crate::gdfl_lineage::filed_underlying(stem, on).ok());
+            assert_eq!(filed, Some(ticker.underlying), "case {case}: {name}");
         }
         built += 1;
         assert_eq!(shaped, Some(under), "case {case}: {name}");

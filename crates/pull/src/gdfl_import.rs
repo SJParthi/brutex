@@ -800,6 +800,9 @@ pub const fn nfo_cause(why: &NfoRefusal) -> Cause {
         // Settled against the calendar (D-3331), which can learn the day.
         NfoRefusal::ExpiryUnsettled { .. } => Cause::open(Stage::Calendar, "expiry_unsettled"),
         NfoRefusal::UnderlyingRefused { .. } => Cause::open(Stage::File, "underlying_refused"),
+        // Judged against the dated symbol-change table (D-3333), which can
+        // learn a row (WP-12e).
+        NfoRefusal::UnderlyingStale { .. } => Cause::open(Stage::File, "underlying_stale"),
         NfoRefusal::ContractUnrenderable { .. } => {
             Cause::open(Stage::File, "contract_unrenderable")
         }

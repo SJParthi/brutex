@@ -732,3 +732,580 @@ fn the_prediction_is_half_up_on_the_grid_and_refuses_what_it_cannot_hold() {
     assert_eq!(single_near(&[148, 300], 150), Some(148));
     assert_eq!(single_near(&[], 150), None);
 }
+
+// ---------------------------------------------------------------------------
+// WP-12e: events that keep the lot (DB-B02, DB-B03, DB-B13) and one contract
+// across a symbol change (DB-B05, DB-B11, DB-B62). Every strike, lot and open
+// interest is invented; the shapes follow the audit's measured events (a
+// 9-rupee shift off a 5-rupee grid, a 20-rupee shift on a 10-rupee grid, a
+// re-listing) without copying a vendor row.
+// ---------------------------------------------------------------------------
+
+/// A distinct, positive open interest per (strike, side): no two keys of a
+/// ladder share it, so each can name a partner.
+fn oi_of(strike: i64, side: OptionSide) -> i64 {
+    7_000_000 + strike * 3 + i64::from(side == OptionSide::Put)
+}
+
+/// Both sides of every strike, each closing on its own OI.
+fn ladder(expiry: Day, strikes: &[i64], lot: u64) -> Vec<ContractDay> {
+    strikes
+        .iter()
+        .flat_map(|&k| {
+            [OptionSide::Call, OptionSide::Put].map(|side| {
+                let oi = oi_of(k, side);
+                cd(expiry, k, side, lot, oi, oi)
+            })
+        })
+        .collect()
+}
+
+/// DB-B02, DB-B13. A strike adjustment that keeps the lot (the shape of a
+/// dividend: every strike less one constant, off the grid) is an event: each
+/// pre-ex contract is linked to the key it continues as. Before WP-12e
+/// `detect` returned `None` whenever the lot was unchanged, so every such
+/// series ended weeks before its expiry and restarted unlinked.
+#[test]
+fn an_offset_that_keeps_the_lot_links_every_contract_to_its_shifted_key() {
+    let (e1, e2) = (d(2020, 2, 27), d(2020, 3, 26));
+    let strikes: Vec<i64> = (0..7).map(|i| 12_000 + i * 500).collect();
+    let mut before = ladder(e1, &strikes, 3_400);
+    before.extend(ladder(e2, &strikes[..3], 3_400));
+    // Every key moves down 9.00. The first OI of most is some other number;
+    // on four of them it is exactly the pre-ex close of the key 9.00 above.
+    let mut after: Vec<ContractDay> = before
+        .iter()
+        .enumerate()
+        .map(|(i, old)| {
+            let carried = old.close_oi.unwrap();
+            let first = if i % 5 == 0 { carried } else { carried + 3_400 };
+            cd(
+                old.expiry,
+                old.strike - 900,
+                old.side,
+                3_400,
+                first,
+                first + 1,
+            )
+        })
+        .collect();
+    // One pre-ex contract did not trade on the ex-date: unpaired, not guessed.
+    let absent = after.pop().unwrap();
+    let action = detect(sym("OIL"), d(2020, 2, 20), &before, &after).expect("an event");
+    assert_eq!(action.kind, EventKind::StrikeOffset { shift: 900 });
+    assert_eq!(action.kind.as_str(), "strike_offset");
+    assert_eq!((action.lot_before, action.lot_after), (3_400, 3_400));
+    assert_eq!(action.lineage.len(), before.len() - 1);
+    assert_eq!(action.unpaired.len(), 1);
+    assert_eq!(
+        action.unpaired[0].to_string(),
+        seg(absent.expiry, absent.strike + 900, absent.side)
+    );
+    assert!(action.stitched.is_empty(), "no pre-ex text trades again");
+    for pair in &action.lineage {
+        let (expiry, old, side) = contract_parts(pair.old).unwrap();
+        assert_eq!(
+            contract_parts(pair.new),
+            Some((expiry, old - 900, side)),
+            "{pair:?}"
+        );
+        assert!(!pair.reused);
+        // The record is D-3331's line, factor 1/1: the keys carry the shift.
+        let record = pair.record(&[]);
+        assert_eq!(
+            (record.factor, record.lot_old, record.lot_new),
+            ((1, 1), 3_400, 3_400)
+        );
+        assert_eq!(record.oi_unadjusted_until, 0);
+        assert_eq!(LineageRecord::parse(&record.line()), Some(record));
+    }
+    // Every pre-ex key is retired, so a later file under one is stitched.
+    assert_eq!(action.retired().len(), before.len());
+    // The day after, the shifted keys carry on: not an event.
+    assert_eq!(detect(sym("OIL"), d(2020, 2, 24), &after, &after), None);
+}
+
+/// DB-B02. When the shift is a multiple of the strike step the pre-ex TEXTS
+/// trade on the ex-date as other contracts. The names continue, so only the
+/// OI tells: it carries on the shifted key and on no same text (the audit's
+/// VEDL 2024-09-10: 0 of 37 same-text, 13 of 43 shifted). Every reused key
+/// is named stitched with the contract it held before and the one renamed
+/// onto it. Before WP-12e: `None`, and one store series silently held two
+/// exchange contracts.
+#[test]
+fn an_offset_on_the_strike_grid_is_proved_by_the_oi_and_names_the_stitched_keys() {
+    let e = d(2024, 9, 26);
+    let strikes: Vec<i64> = (0..9).map(|i| 40_000 + i * 1_000).collect();
+    let before = ladder(e, &strikes, 2_300);
+    // Minus 20.00 on a 10.00 grid: 38,000..46,000; seven texts are reused.
+    let moved = |carry_every: usize| -> Vec<ContractDay> {
+        before
+            .iter()
+            .enumerate()
+            .map(|(i, old)| {
+                let carried = old.close_oi.unwrap();
+                let first = if i % carry_every == 0 {
+                    carried
+                } else {
+                    carried + 2_300
+                };
+                cd(e, old.strike - 2_000, old.side, 2_300, first, first)
+            })
+            .collect()
+    };
+    let after = moved(3);
+    let action = detect(sym("VEDL"), d(2024, 9, 10), &before, &after).expect("an event");
+    assert_eq!(action.kind, EventKind::StrikeOffset { shift: 2_000 });
+    assert_eq!(action.lineage.len(), 18);
+    assert_eq!(
+        action.stitched.len(),
+        14,
+        "seven reused strikes, both sides"
+    );
+    assert_eq!(action.lineage.iter().filter(|pair| pair.reused).count(), 14);
+    let key = action.stitched[0];
+    let (_, strike, side) = contract_parts(key).unwrap();
+    let record = action.stitched_record(key).expect("a retired key");
+    assert_eq!(
+        record.before.unwrap().to_string(),
+        seg(e, strike - 2_000, side)
+    );
+    assert_eq!(
+        record.after.unwrap().to_string(),
+        seg(e, strike + 2_000, side)
+    );
+    assert_eq!(StitchedRecord::parse(&record.line()), Some(record));
+    assert_eq!(action.stitched_records().len(), 14);
+
+    // Fewer carried pairs than the bar proves nothing while texts continue.
+    assert_eq!(MIN_OI_PAIRS, 5);
+    let four = moved(5);
+    assert_eq!(
+        four.iter()
+            .zip(&before)
+            .filter(|(new, old)| new.first_oi == old.close_oi)
+            .count(),
+        4
+    );
+    assert_eq!(detect(sym("VEDL"), d(2024, 9, 10), &before, &four), None);
+}
+
+/// The ordinary day. The same texts trade; some open on their own previous
+/// close. Nothing is declared, whatever else the day's numbers look like.
+#[test]
+fn an_ordinary_day_with_an_unchanged_lot_declares_nothing() {
+    let e = d(2024, 9, 26);
+    let strikes: Vec<i64> = (0..9).map(|i| 40_000 + i * 1_000).collect();
+    let before = ladder(e, &strikes, 2_300);
+    let day = d(2024, 9, 6);
+    // Every text carries its own OI.
+    assert_eq!(detect(sym("VEDL"), day, &before, &before), None);
+    // No text carries, and no shift is voted for: an absent carry alone is
+    // what a thin underlying's ordinary day looks like.
+    let moved_oi: Vec<ContractDay> = before
+        .iter()
+        .map(|c| cd(e, c.strike, c.side, 2_300, c.close_oi.unwrap() + 2_300, 1))
+        .collect();
+    assert_eq!(detect(sym("VEDL"), day, &before, &moved_oi), None);
+    // Six keys open on the close of the key 20.00 above, but two same texts
+    // carry too: six is not more than four times two.
+    let mixed: Vec<ContractDay> = before
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let first = match i {
+                0 | 1 => c.close_oi.unwrap(),
+                2..=7 => oi_of(c.strike + 2_000, c.side),
+                _ => 11,
+            };
+            cd(e, c.strike, c.side, 2_300, first, first)
+        })
+        .collect();
+    assert_eq!(detect(sym("VEDL"), day, &before, &mixed), None);
+    // An OI two pre-ex keys of a ladder share names no partner: every pre-ex
+    // key closes on one lot, every key opens on it, and no shift is voted.
+    let flat: Vec<ContractDay> = strikes
+        .iter()
+        .map(|&k| cd(e, k, OptionSide::Call, 2_300, 2_300, 2_300))
+        .collect();
+    let flat_moved: Vec<ContractDay> = strikes
+        .iter()
+        .map(|&k| cd(e, k - 2_000, OptionSide::Call, 2_300, 2_300, 2_300))
+        .collect();
+    assert_eq!(detect(sym("VEDL"), day, &flat, &flat_moved), None);
+    // Two shifts with equal votes: neither is chosen.
+    let tie: Vec<ContractDay> = before
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let first = if i < 6 {
+                oi_of(c.strike + 2_000, c.side)
+            } else if i < 12 {
+                oi_of(c.strike - 3_000, c.side)
+            } else {
+                13
+            };
+            cd(e, c.strike, c.side, 2_300, first, first)
+        })
+        .collect();
+    assert_eq!(detect(sym("VEDL"), day, &before, &tie), None);
+    // A non-positive or missing OI never votes and never carries.
+    let zero: Vec<ContractDay> = strikes
+        .iter()
+        .map(|&k| cd(e, k, OptionSide::Call, 2_300, 0, 0))
+        .collect();
+    assert_eq!(detect(sym("VEDL"), day, &zero, &zero), None);
+}
+
+/// DB-B03, DB-B13. Every pre-ex contract stops and the same expiries are
+/// listed again under strikes the OI does not relate: a re-listing (the
+/// shape of an early expiry on a scheme of arrangement). Nothing is paired;
+/// every pre-ex key is retired, so a text of the old generation listed again
+/// later is named stitched rather than read as one series. Before WP-12e:
+/// `None`.
+#[test]
+fn a_name_break_with_no_carried_oi_is_a_relisting_that_pairs_nothing() {
+    let (e1, e2) = (d(2020, 3, 26), d(2020, 4, 30));
+    let old: Vec<i64> = (0..4).map(|i| 70_000 + i * 2_000).collect();
+    let mut before = ladder(e1, &old, 900);
+    before.extend(ladder(e2, &old[..1], 900));
+    // The same expiries, new strikes around a new price, OI starting afresh.
+    let fresh = |expiry, n: i64| -> Vec<ContractDay> {
+        (0..n)
+            .flat_map(|i| {
+                [OptionSide::Call, OptionSide::Put]
+                    .map(|side| cd(expiry, 27_000 + i * 1_000, side, 900, 900 * (i + 1), 1_800))
+            })
+            .collect()
+    };
+    let mut after = fresh(e1, 3);
+    after.extend(fresh(e2, 1));
+    let ex = d(2020, 3, 4);
+    let action = detect(sym("TATACHEM"), ex, &before, &after).expect("a name break");
+    assert_eq!(action.kind, EventKind::Relisted);
+    assert_eq!(action.kind.as_str(), "relisted");
+    assert!(
+        action.lineage.is_empty(),
+        "no arithmetic relates the generations"
+    );
+    assert_eq!(action.unpaired.len(), before.len());
+    assert!(action.stitched.is_empty());
+    let retired = action.retired();
+    assert_eq!(retired.len(), 10);
+    // An old-generation text listed again after the ex-date is stitched, with
+    // no partner on either side.
+    let again = before[0].contract().unwrap();
+    let record = action.stitched_record(again).expect("retired");
+    assert_eq!((record.before, record.after), (None, None));
+    assert_eq!(record.ex_date, ex);
+    assert_eq!(StitchedRecord::parse(&record.line()), Some(record));
+
+    // Not a break: fewer than the bar on the day's side...
+    assert_eq!(MIN_EVENT_KEYS, 8);
+    assert_eq!(detect(sym("TATACHEM"), ex, &before, &after[..7]), None);
+    // ...or on the pre-ex side...
+    assert_eq!(detect(sym("TATACHEM"), ex, &before[..7], &after), None);
+    // ...a NEW expiry the underlying did not hold (a listing, not a break)...
+    let listing = fresh(d(2020, 5, 28), 5);
+    assert_eq!(detect(sym("TATACHEM"), ex, &before, &listing), None);
+    // ...no pre-ex state at all (the first day of a run)...
+    assert_eq!(detect(sym("TATACHEM"), ex, &[], &after), None);
+    // ...or one pre-ex text still trading.
+    let mut one_continues = after.clone();
+    one_continues.push(cd(e1, old[0], OptionSide::Call, 900, 5, 5));
+    assert_eq!(detect(sym("TATACHEM"), ex, &before, &one_continues), None);
+
+    // The same break with three keys opening on the close of the key 430.00
+    // above is an offset: the OI relates the generations.
+    assert_eq!(MIN_OI_FRESH, 3);
+    let mut carried = after.clone();
+    for (slot, k) in carried.iter_mut().zip([70_000, 72_000, 74_000]) {
+        *slot = cd(
+            e1,
+            k - 43_000,
+            OptionSide::Call,
+            900,
+            oi_of(k, OptionSide::Call),
+            1,
+        );
+    }
+    let offset = detect(sym("TATACHEM"), ex, &before, &carried).expect("an offset");
+    assert_eq!(offset.kind, EventKind::StrikeOffset { shift: 43_000 });
+    // Two are not enough: it stays a re-listing.
+    carried[2] = after[2];
+    let two = detect(sym("TATACHEM"), ex, &before, &carried).expect("a name break");
+    assert_eq!(two.kind, EventKind::Relisted);
+}
+
+/// DB-B03. A re-listing whose new strikes REUSE the old texts shows no name
+/// break, and is declared only on a SOURCED ex-date (NSE/FAOP/73857, VEDL
+/// 2026-04-30). The reused keys are stitched. The same rows on any other day
+/// or underlying declare nothing: NOT DETECTED without a source.
+#[test]
+fn a_relisting_that_reuses_the_texts_is_declared_only_from_a_sourced_ex_date() {
+    let e = d(2026, 5, 26);
+    let strikes: Vec<i64> = (0..6).map(|i| 40_000 + i * 1_000).collect();
+    let before = ladder(e, &strikes, 1_150);
+    let after: Vec<ContractDay> = before
+        .iter()
+        .map(|c| cd(e, c.strike, c.side, 1_150, 1_150, 2_300))
+        .collect();
+    let action = detect(sym("VEDL"), d(2026, 4, 30), &before, &after).expect("sourced");
+    assert_eq!(action.kind, EventKind::Relisted);
+    assert!(action.lineage.is_empty());
+    assert_eq!(action.stitched.len(), 12);
+    assert_eq!(action.stitched_records().len(), 12);
+    assert_eq!(detect(sym("VEDL"), d(2026, 4, 29), &before, &after), None);
+    assert_eq!(
+        detect(sym("HINDUNILVR"), d(2026, 4, 30), &before, &after),
+        None
+    );
+    // A lot step is still a lot step, and says so.
+    let split: Vec<ContractDay> = before
+        .iter()
+        .map(|c| cd(e, c.strike / 2, c.side, 2_300, c.close_oi.unwrap() * 2, 1))
+        .collect();
+    let step = detect(sym("ACC"), d(2026, 4, 30), &before, &split).expect("a lot step");
+    assert_eq!(step.kind, EventKind::LotStep);
+    assert_eq!(step.kind.as_str(), "lot_step");
+}
+
+/// DB-B05, DB-B11, DB-B62. An option file is filed under the newest symbol
+/// its name's dated changes reach, on the days the exchange used the name,
+/// and refused on the days it did not. A symbol with no row keeps its key.
+#[test]
+fn an_option_file_is_filed_under_the_newest_symbol_its_name_reaches() {
+    let filed =
+        |stem: &str, on: Day| filed_underlying(sym(stem), on).map(|s| s.as_str().to_owned());
+    // The day before the change, the old name; the day of it, the new one.
+    assert_eq!(filed("NIITTECH", d(2020, 8, 19)).as_deref(), Ok("COFORGE"));
+    assert_eq!(filed("COFORGE", d(2020, 8, 20)).as_deref(), Ok("COFORGE"));
+    assert_eq!(
+        filed("IDFCBANK", d(2019, 1, 15)).as_deref(),
+        Ok("IDFCFIRSTB")
+    );
+    // A chain files under its end from the first name on.
+    assert_eq!(filed("LTI", d(2022, 12, 2)).as_deref(), Ok("LTM"));
+    assert_eq!(filed("LTIM", d(2022, 12, 5)).as_deref(), Ok("LTM"));
+    assert_eq!(filed("LTM", d(2026, 2, 27)).as_deref(), Ok("LTM"));
+    // The wrong side of a change is refused with the change it is on.
+    let Err(Stale::AfterChange(change)) = filed("NIITTECH", d(2020, 8, 20)) else {
+        panic!("an old name on its change day");
+    };
+    assert_eq!((change.old, change.new), ("NIITTECH", "COFORGE"));
+    assert!(matches!(
+        filed("COFORGE", d(2020, 8, 19)),
+        Err(Stale::BeforeChange(_))
+    ));
+    // No row, no successor guessed: indices, ordinary shares, and the two
+    // renames NSE's file does not carry under these names.
+    for own in [
+        "NIFTY",
+        "BANKNIFTY",
+        "RELIANCE",
+        "TATAGLOBAL",
+        "KPIT",
+        "M&M",
+    ] {
+        assert_eq!(filed(own, d(2020, 2, 26)).as_deref(), Ok(own));
+    }
+
+    // Through the decoder: one exchange contract traded on both sides of the
+    // rename is ONE store key. Before WP-12e these were two.
+    let old = crate::gdfl_nfo::decode_ticker("NIITTECH27AUG201900CE", d(2020, 8, 19)).unwrap();
+    let new = crate::gdfl_nfo::decode_ticker("COFORGE27AUG201900CE", d(2020, 8, 20)).unwrap();
+    assert_eq!(old.underlying.as_str(), "COFORGE");
+    assert_eq!(
+        option_key(old.underlying, old.contract),
+        option_key(new.underlying, new.contract)
+    );
+    assert_eq!(
+        option_key(old.underlying, old.contract),
+        "NSE-FNO-COFORGE-2020-08-27-190000-CE"
+    );
+    // The old name on the change day is refused by name, never filed.
+    let stale =
+        crate::gdfl_nfo::decode_ticker("NIITTECH27AUG201900CE", d(2020, 8, 20)).unwrap_err();
+    assert!(matches!(
+        stale,
+        crate::gdfl_nfo::NfoRefusal::UnderlyingStale { .. }
+    ));
+    let said = stale.to_string();
+    assert!(
+        said.contains("NIITTECH27AUG201900CE")
+            && said.contains("NIITTECH became COFORGE on 2020-08-20"),
+        "{said}"
+    );
+    // An index and an unrenamed share decode exactly as before.
+    let nifty = crate::gdfl_nfo::decode_ticker("NIFTY27AUG2011500CE", d(2020, 8, 19)).unwrap();
+    assert_eq!(nifty.underlying.as_str(), "NIFTY");
+}
+
+/// Cost of the unchanged-lot arm on an ordinary day: one pass, measured.
+/// `cargo test -p pull --release -- --ignored the_unchanged_lot_arm --nocapture`
+#[test]
+#[ignore = "a measurement: prints p50, p99 and max"]
+fn the_unchanged_lot_arm_costs_one_pass_on_an_ordinary_day() {
+    let strikes: Vec<i64> = (0..50).map(|i| 1_000_000 + i * 5_000).collect();
+    let mut day = Vec::new();
+    for expiry in [
+        d(2020, 9, 17),
+        d(2020, 9, 24),
+        d(2020, 10, 1),
+        d(2020, 10, 29),
+    ] {
+        day.extend(ladder(expiry, &strikes, 75));
+    }
+    assert_eq!(day.len(), 400);
+    let mut nanos: Vec<u128> = (0..2_000)
+        .map(|_| {
+            let at = std::time::Instant::now();
+            let got = detect(sym("NIFTY"), d(2020, 9, 16), &day, &day);
+            let took = at.elapsed().as_nanos();
+            assert_eq!(got, None);
+            took
+        })
+        .collect();
+    nanos.sort_unstable();
+    println!(
+        "detect, 400 contracts, unchanged lot, n=2000: p50 {} ns, p99 {} ns, max {} ns",
+        nanos[1_000], nanos[1_980], nanos[1_999]
+    );
+}
+
+/// The keys two vendor symbols name, counted by the symbols in order of
+/// their lives; panics when two lives of one key overlap.
+fn joined_across_renames(
+    keys: &HashMap<String, std::collections::BTreeMap<String, (Day, Day)>>,
+) -> std::collections::BTreeMap<String, u32> {
+    use std::collections::BTreeMap;
+    let mut joined: BTreeMap<String, u32> = BTreeMap::new();
+    for (key, stems) in keys {
+        if stems.len() < 2 {
+            continue;
+        }
+        let mut lives: Vec<(&String, &(Day, Day))> = stems.iter().collect();
+        lives.sort_by_key(|(_, life)| life.0.days_from_epoch());
+        for pair in lives.windows(2) {
+            assert!(
+                pair[0].1.1.days_from_epoch() < pair[1].1.0.days_from_epoch(),
+                "{key}: {pair:?} overlap"
+            );
+        }
+        let label = lives
+            .iter()
+            .map(|(stem, _)| stem.as_str())
+            .collect::<Vec<_>>()
+            .join("->");
+        *joined.entry(label).or_default() += 1;
+    }
+    joined
+}
+
+/// WP-12e against the operator's REAL option file NAMES, read-only: the name
+/// census `BRUTEX_NAME_CENSUS` (one line per name: name, first vendor day,
+/// last vendor day, days; tab-separated; no vendor row). Every name is
+/// decoded on its first and its last day. It proves, on the whole archive:
+/// no name is on the wrong side of a symbol change; every contract two
+/// symbols name is one key whose old-name life ends before its new-name life
+/// begins (DB-B05, DB-B11, DB-B62); and the alias table re-keys exactly its
+/// own count of names, each onto a key its successor text also names or
+/// alone (DB-B01). Prints the per-rename counts.
+#[test]
+#[ignore = "requires BRUTEX_NAME_CENSUS (names only); read-only"]
+fn the_real_names_are_one_key_per_contract_across_renames_and_redatings() {
+    use std::collections::BTreeMap;
+    let path = std::env::var_os("BRUTEX_NAME_CENSUS").expect("BRUTEX_NAME_CENSUS");
+    let text = std::fs::read_to_string(path).unwrap();
+    // key -> stem -> (first, last)
+    let mut keys: HashMap<String, BTreeMap<String, (Day, Day)>> = HashMap::new();
+    let (mut names, mut decoded, mut stale, mut aliased) = (0_u32, 0_u32, Vec::new(), 0_u32);
+    let mut refused: BTreeMap<String, u32> = BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let (Some(name), Some(first), Some(last)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Some(first), Some(last)) = (parse_day(first), parse_day(last)) else {
+            continue;
+        };
+        names += 1;
+        let mut both = Vec::new();
+        for on in [first, last] {
+            match crate::gdfl_nfo::decode_ticker(name, on) {
+                Ok(ticker) => both.push(ticker),
+                Err(crate::gdfl_nfo::NfoRefusal::UnderlyingStale { .. }) => {
+                    stale.push(format!("{name} on {on}"));
+                }
+                Err(why) => {
+                    let word = format!("{why:?}");
+                    let word = word.split([' ', '{']).next().unwrap_or_default().to_owned();
+                    *refused.entry(word).or_default() += 1;
+                }
+            }
+        }
+        let [a, b] = both.as_slice() else {
+            continue;
+        };
+        decoded += 1;
+        assert_eq!(
+            (a.underlying, a.contract),
+            (b.underlying, b.contract),
+            "{name}: one name, one key, on its first and last day"
+        );
+        aliased += u32::from(matches!(
+            a.settlement,
+            crate::expiry_alias::Settlement::Aliased(_)
+        ));
+        let stem_len = name.len() - 2;
+        let stem: String = name[..stem_len]
+            .chars()
+            .take_while(|c| !c.is_ascii_digit())
+            .collect();
+        let slot = keys
+            .entry(option_key(a.underlying, a.contract))
+            .or_default()
+            .entry(stem)
+            .or_insert((first, last));
+        slot.0 = if first.days_from_epoch() < slot.0.days_from_epoch() {
+            first
+        } else {
+            slot.0
+        };
+        slot.1 = if last.days_from_epoch() > slot.1.days_from_epoch() {
+            last
+        } else {
+            slot.1
+        };
+    }
+    let joined = joined_across_renames(&keys);
+    println!("names {names}, decoded on both days {decoded}, aliased names {aliased}");
+    println!("refused (first or last day), by kind: {refused:?}");
+    println!(
+        "contracts named by two symbols, now one key: {} in {} renames",
+        joined.values().sum::<u32>(),
+        joined.len()
+    );
+    for (label, n) in &joined {
+        println!("  {label}: {n}");
+    }
+    assert!(
+        stale.is_empty(),
+        "{} stale names, first {:?}",
+        stale.len(),
+        stale.first()
+    );
+    assert!(
+        joined.values().sum::<u32>() > 0,
+        "no contract crossed a rename"
+    );
+    assert_eq!(
+        aliased,
+        crate::expiry_alias::ALIASES
+            .iter()
+            .map(|row| row.contracts)
+            .sum::<u32>(),
+        "the table re-keys exactly its own count of names"
+    );
+}
