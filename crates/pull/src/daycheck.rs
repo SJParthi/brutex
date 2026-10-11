@@ -103,6 +103,12 @@ pub struct Report {
     /// The first disagreement, in words, or `None` when every compared day
     /// agreed and no day bar was absent.
     pub first: Option<String>,
+    /// Price FIELDS (open, high, low, close; not days) where the pulled value
+    /// is exactly one paisa under its own minutes' and ends in 4 or 9 paisa:
+    /// the rule `vendor_truncated` (WP-13d, DB-B19). See [`truncated`].
+    pub vendor_truncated: usize,
+    /// The first such field, in words, or `None`.
+    pub first_truncated: Option<String>,
 }
 
 impl Report {
@@ -132,6 +138,16 @@ impl Report {
             self.first = Some(format!("IST day {day}: {why}"));
         }
         self.differed += 1;
+        let cut = truncated(served, made);
+        if !cut.is_empty() {
+            self.vendor_truncated += cut.len();
+            if self.first_truncated.is_none() {
+                self.first_truncated = Some(format!(
+                    "IST day {day}: {} one paisa under its 1min on the 5-paisa grid",
+                    cut.join(", ")
+                ));
+            }
+        }
         self.close_differs += usize::from(served.close != made.close);
         self.open_differs += usize::from(served.open != made.open);
         self.range_wider += usize::from(served.high > made.high || served.low < made.low);
@@ -184,6 +200,36 @@ fn contradicting(pulled: &Bar, folded: &Bar) -> String {
         .map(|(_, name, minutes, relation, served)| format!("{name} {minutes} {relation} {served}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The price fields of `pulled` that carry the fingerprint of a value cut,
+/// not rounded, to the paisa: exactly ONE paisa under what its own minutes
+/// fold to, and ending in 4 or 9 paisa, so the folded value is a multiple of
+/// five. WP-13d, DB-B19.
+///
+/// # Why this shape
+///
+/// Measured on the operator's store by the audit (DB-B19, twice): Zerodha
+/// NIFTY 1day open is one paisa under its own first 1min open on 51 days and
+/// its high or low on 5, and every one of those values ends in 4 or 9 paisa.
+/// A level quoted in steps of five paisa cannot end there; a binary float
+/// just under the step, cut to two places, does. The rule names the field
+/// and changes nothing: the pulled day stays as served (D-0077).
+///
+/// A series whose prices are not on a five-paisa grid — a share the vendor
+/// has adjusted — can meet the shape by chance, which is why this is a named
+/// count on `/logs` and never a refusal.
+fn truncated(pulled: &Bar, folded: &Bar) -> Vec<&'static str> {
+    [
+        ("open", pulled.open, folded.open),
+        ("high", pulled.high, folded.high),
+        ("low", pulled.low, folded.low),
+        ("close", pulled.close, folded.close),
+    ]
+    .into_iter()
+    .filter(|(_, served, made)| made.checked_sub(*served) == Some(1) && served.rem_euclid(5) == 4)
+    .map(|(name, _, _)| name)
+    .collect()
 }
 
 /// The IST calendar day a bar's stamp falls on, as days since the epoch.
@@ -276,7 +322,7 @@ pub fn compare(minutes: &[Bar], days: &[Bar]) -> Result<Report, FoldError> {
     clippy::panic
 )]
 mod tests {
-    use super::{Report, compare, differing, ist_day};
+    use super::{Report, compare, differing, ist_day, truncated};
     use store::format::Bar;
 
     /// 09:15 IST on 2026-10-03, in seconds since the epoch.
@@ -509,5 +555,52 @@ mod tests {
         let report = compare(&minutes, &[served(0)]).unwrap();
         assert_eq!(report.contradicted, 0);
         assert!(!report.consistent());
+    }
+
+    /// DB-B19: a pulled field one paisa under its own minutes and ending in 4
+    /// or 9 paisa is named `vendor_truncated`; nothing else is.
+    #[test]
+    fn a_pulled_field_cut_to_the_paisa_is_named_and_nothing_else_is() {
+        // Minutes fold to open 1,000,005, high 1,000,100, low 999,900, close
+        // 1,000,050: every one a multiple of five paisa.
+        let minutes = vec![
+            bar(OPEN, 1_000_005, 1_000_100, 1_000_000, 1_000_010, 1),
+            bar(OPEN + 60, 1_000_010, 1_000_020, 999_900, 1_000_050, 1),
+        ];
+        let folded = bar(OPEN, 1_000_005, 1_000_100, 999_900, 1_000_050, 2);
+        // Open and close cut by one paisa; the high wider by its own
+        // convention; the low agreeing.
+        let cut = bar(OPEN, 1_000_004, 1_000_150, 999_900, 1_000_049, 2);
+        assert_eq!(truncated(&cut, &folded), vec!["open", "close"]);
+        let report = compare(&minutes, std::slice::from_ref(&cut)).expect("one session folds");
+        assert_eq!(report.vendor_truncated, 2);
+        assert_eq!(report.differed, 1);
+        let first = report
+            .first_truncated
+            .expect("the first cut field is named");
+        assert!(first.contains("open, close one paisa under"), "{first}");
+
+        // One paisa under but not ending in 4 or 9: the folded value is not
+        // on the grid, so nothing says it was cut.
+        let off_grid = bar(OPEN, 1_000_006, 1_000_100, 999_900, 1_000_050, 2);
+        let under = bar(OPEN, 1_000_005, 1_000_100, 999_900, 1_000_050, 2);
+        assert!(truncated(&under, &off_grid).is_empty());
+        // Two paisa under, one paisa OVER, and equal: none is the shape.
+        let two = bar(OPEN, 1_000_003, 1_000_100, 999_900, 1_000_050, 2);
+        assert!(truncated(&two, &folded).is_empty());
+        let over = bar(OPEN, 1_000_006, 1_000_100, 999_900, 1_000_051, 2);
+        assert!(truncated(&over, &folded).is_empty());
+        assert!(truncated(&folded, &folded).is_empty());
+        // The widest values do not overflow the subtraction.
+        let floor = bar(OPEN, i64::MIN, i64::MIN, i64::MIN, i64::MIN, 0);
+        let roof = bar(OPEN, i64::MAX, i64::MAX, i64::MAX, i64::MAX, 0);
+        assert!(truncated(&floor, &roof).is_empty());
+
+        // A clean day and a day that differs otherwise count none.
+        let clean = compare(&minutes, std::slice::from_ref(&folded)).expect("folds");
+        assert_eq!((clean.vendor_truncated, clean.first_truncated), (0, None));
+        let wide = bar(OPEN, 1_000_005, 1_000_500, 999_000, 1_000_050, 2);
+        let differs = compare(&minutes, std::slice::from_ref(&wide)).expect("folds");
+        assert_eq!((differs.differed, differs.vendor_truncated), (1, 0));
     }
 }

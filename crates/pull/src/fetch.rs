@@ -708,6 +708,15 @@ pub enum RowCause {
     OffGrid,
     /// Two candles at one stamp with different values: neither is kept.
     Conflicting,
+    /// A minute on a day before the first day bar the series was served: not
+    /// listed yet, or a day pass that has not reached it
+    /// ([`crate::series_identity`], WP-13d, DB-B08).
+    BeforeFirstDayBar,
+    /// A minute whose whole range lies outside its own served day's range by
+    /// more than [`crate::series_identity::FOREIGN_BAND_BPS`]: another
+    /// instrument's, another index's or another price basis (WP-13d, DB-B07,
+    /// DB-B10, DB-B60).
+    ForeignLevel,
 }
 
 impl RowCause {
@@ -720,6 +729,8 @@ impl RowCause {
             Self::Price => "price_off_grid",
             Self::OffGrid => "off_grid_candle",
             Self::Conflicting => "conflicting_candles",
+            Self::BeforeFirstDayBar => "before_first_day_bar",
+            Self::ForeignLevel => "foreign_level",
         }
     }
 }
@@ -827,7 +838,7 @@ fn note_refused(days: &mut Vec<RefusedDay>, day: u32) {
 /// `paisa`, through `Paisa::from_rupee_text_half_up` — and a second rounding
 /// site here would be a second answer. (This said the snap was at the write
 /// boundary until D-1494; the store's append snaps nothing.)
-const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
+pub(crate) const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
     match scale {
         PriceScale::Paisa => Some(raw),
         PriceScale::Rupees => raw.checked_mul(100),
