@@ -1203,6 +1203,35 @@ pub struct SortIndex {
     walked: Walked,
 }
 
+/// Opens a month's `.srt` for reading, NEVER THROUGH A LINK: the store's doors
+/// refuse every symbolic link below the root, and a reader that followed one
+/// at this name would serve another file's order as this month's. The host
+/// refuses the final link itself (`O_NOFOLLOW`), so no check can go stale
+/// between a look and the open; a FIFO at the name opens at once and is then
+/// refused as not a regular file by the caller's `fstat`.
+fn open_no_follow(path: &Path) -> Result<File, Why> {
+    match crate::open_flags::open_read_no_follow(path) {
+        Ok(file) => Ok(file),
+        Err(why) if why.kind() == ErrorKind::NotFound => Err(Why::Absent),
+        Err(why) => {
+            #[cfg(any(
+                target_os = "macos",
+                all(
+                    any(target_os = "linux", target_os = "android"),
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            ))]
+            if why.raw_os_error() == Some(crate::open_flags::ELOOP) {
+                return Err(Why::Unreadable(format!(
+                    "{} is a symbolic link; no link is followed",
+                    path.display()
+                )));
+            }
+            Err(Why::Unreadable(format!("{}: {why}", path.display())))
+        }
+    }
+}
+
 impl SortIndex {
     /// Opens `path` read-only and walks its runs.
     ///
@@ -1210,11 +1239,7 @@ impl SortIndex {
     ///
     /// [`Why::Absent`] when there is no file; whatever [`walk`] refuses.
     pub fn open(path: &Path, shape: &Shape) -> Result<Self, Why> {
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(why) if why.kind() == ErrorKind::NotFound => return Err(Why::Absent),
-            Err(why) => return Err(Why::Unreadable(format!("{}: {why}", path.display()))),
-        };
+        let file = open_no_follow(path)?;
         let meta = file
             .metadata()
             .map_err(|why| Why::Unreadable(format!("{}: {why}", path.display())))?;
@@ -1243,11 +1268,7 @@ impl SortIndex {
     /// [`Why::Absent`] when there is no file; [`Why::Unreadable`] when it is
     /// not a regular file or is shorter than the walk.
     pub fn open_walked(path: &Path, shape: &Shape, walked: Walked) -> Result<Self, Why> {
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(why) if why.kind() == ErrorKind::NotFound => return Err(Why::Absent),
-            Err(why) => return Err(Why::Unreadable(format!("{}: {why}", path.display()))),
-        };
+        let file = open_no_follow(path)?;
         let meta = file
             .metadata()
             .map_err(|why| Why::Unreadable(format!("{}: {why}", path.display())))?;

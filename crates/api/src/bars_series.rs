@@ -1115,6 +1115,17 @@ impl SeriesPlan {
             .ok_or_else(|| format!("{} did not open", at.month))
     }
 
+    /// Whether the month of `slot` opens, and why not: the MONTH's refusal,
+    /// the same for every row of it, which a page that reads one row at a
+    /// time says once a month rather than once a row.
+    ///
+    /// # Errors
+    ///
+    /// The month's name and the reason its bar file did not open.
+    pub(super) fn opens(&mut self, root: &Path, slot: usize) -> Result<(), String> {
+        self.file(root, slot).map(|_| ())
+    }
+
     /// The first row of `slot` at or after `ts`.
     pub(super) fn locate(&mut self, root: &Path, slot: usize, ts: i64) -> Result<u64, String> {
         let file = self.file(root, slot)?;

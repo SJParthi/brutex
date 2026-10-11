@@ -681,3 +681,227 @@ fn the_rebuild_door_sorts_the_served_generation() {
         "never the original's index"
     );
 }
+
+/// The names beside the month, each with its bytes, its inode and its
+/// modification time: what "nothing else changed" is measured against.
+fn beside(root: &Root) -> Vec<(String, Vec<u8>, u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let bars = root.file(FileKind::Bars);
+    let mut held: Vec<_> = fs::read_dir(bars.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| !entry.file_name().to_string_lossy().ends_with(".srt"))
+        .map(|entry| {
+            let meta = fs::symlink_metadata(entry.path()).unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).unwrap_or_default(),
+                meta.ino(),
+                meta.modified().unwrap(),
+            )
+        })
+        .collect();
+    held.sort();
+    held
+}
+
+/// **THE STAGING FILE IS ALWAYS A NEW INODE: THE DOOR.** The staging name
+/// `<yyyy-mm>.new.srt` is a HARD LINK to another file — here the month's own
+/// bar file, the worst thing it could be — when the door builds the month.
+/// Before, the door opened that name, cut it to zero and wrote the index
+/// into it: the bar file lost every byte and was then renamed to be the
+/// month's `.srt`. Now only the NAME is removed; the bar file keeps its
+/// bytes, its inode and its modification time, the index is a new file, and
+/// what it serves is a brute-force sort of the bars.
+#[test]
+fn the_rebuild_door_never_writes_through_a_hard_link_at_the_staging_name() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = Root::new();
+    {
+        let mut writer = root.writer();
+        append(&mut writer, &bars(0, 500));
+        append(&mut writer, &bars(500, 1_200));
+    }
+    let index = root.file(FileKind::SortIndex);
+    fs::remove_file(&index).unwrap();
+    let staging = index.with_file_name("2031-02.new.srt");
+    let victim = root.file(FileKind::Bars);
+    fs::hard_link(&victim, &staging).unwrap();
+    assert_eq!(fs::metadata(&victim).unwrap().nlink(), 2);
+    let before = beside(&root);
+
+    let built = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
+    assert!(
+        matches!(&built.outcome, Resorted::Built(why) if why.contains("no .srt")),
+        "{:?}",
+        built.outcome
+    );
+    assert_eq!(
+        beside(&root),
+        before,
+        "the bar file, its checksums, its time index and its lock keep their bytes, inodes and times"
+    );
+    let victim_meta = fs::metadata(&victim).unwrap();
+    assert_eq!(victim_meta.nlink(), 1, "only the staging NAME was removed");
+    assert_ne!(
+        fs::metadata(&index).unwrap().ino(),
+        victim_meta.ino(),
+        "the index is a new file, never the linked one renamed"
+    );
+    assert!(!staging.exists(), "renamed, not left");
+    let held = root.index().unwrap();
+    assert_eq!(held.coverage(), 1_200);
+    assert_eq!(held.verify(), Ok(()));
+    for column in Column::ALL {
+        assert_eq!(
+            served(&held, column),
+            vec![brute(0, 1_200, column)],
+            "{}",
+            column.as_str()
+        );
+    }
+    // And the writer reads the month it always had.
+    let mut writer = root.writer();
+    append(&mut writer, &bars(1_200, 1_300));
+    assert_eq!(root.index().unwrap().coverage(), 1_300);
+}
+
+/// **THE STAGING FILE IS ALWAYS A NEW INODE: THE WRITER'S WHOLE REWRITE.**
+/// The same planted link, met by a writer that opens a month whose index is
+/// gone (`write_whole`, the path an import takes for a month that predates
+/// D-3349). The linked file keeps every byte; the month is ordered whole.
+#[test]
+fn a_writer_open_never_writes_through_a_hard_link_at_the_staging_name() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = Root::new();
+    {
+        let mut writer = root.writer();
+        append(&mut writer, &bars(0, 900));
+    }
+    let index = root.file(FileKind::SortIndex);
+    fs::remove_file(&index).unwrap();
+    let victim = index.with_file_name("somebody-elses.file");
+    let content = vec![0xAB_u8; 70_000];
+    fs::write(&victim, &content).unwrap();
+    let victim_ino = fs::metadata(&victim).unwrap().ino();
+    fs::hard_link(&victim, index.with_file_name("2031-02.new.srt")).unwrap();
+
+    let writer = root.writer();
+    drop(writer);
+
+    assert_eq!(fs::read(&victim).unwrap(), content, "not a byte of it");
+    let victim_meta = fs::metadata(&victim).unwrap();
+    assert_eq!((victim_meta.ino(), victim_meta.nlink()), (victim_ino, 1));
+    assert_ne!(fs::metadata(&index).unwrap().ino(), victim_ino);
+    let held = root.index().unwrap();
+    assert_eq!(held.runs().len(), 1);
+    assert_eq!(held.coverage(), 900);
+    assert_eq!(
+        served(&held, Column::Close),
+        vec![brute(0, 900, Column::Close)]
+    );
+}
+
+/// **AN INDEX THAT HAS A SECOND NAME IS NEVER APPENDED TO IN PLACE.** An
+/// append is the one edit of an existing `.srt` inode. When that inode has
+/// another name — a backup made with `ln`, a snapshot tool — appending a run
+/// would change the file under that name too. The writer asks the open
+/// handle for its link count and writes such a month whole into a NEW file
+/// renamed over the name: the other name keeps the bytes it had, and the
+/// month's index orders every committed row.
+#[test]
+fn an_index_with_a_second_name_is_written_whole_never_appended_in_place() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = Root::new();
+    let mut writer = root.writer();
+    append(&mut writer, &bars(0, 600));
+    let index = root.file(FileKind::SortIndex);
+    let other = index.with_file_name("kept-by-somebody.copy");
+    fs::hard_link(&index, &other).unwrap();
+    let before = fs::read(&other).unwrap();
+    let other_ino = fs::metadata(&other).unwrap().ino();
+
+    append(&mut writer, &bars(600, 1_000));
+
+    assert_eq!(
+        fs::read(&other).unwrap(),
+        before,
+        "the other name keeps the bytes it had"
+    );
+    assert_eq!(fs::metadata(&other).unwrap().nlink(), 1);
+    assert_ne!(fs::metadata(&index).unwrap().ino(), other_ino);
+    let held = root.index().unwrap();
+    assert_eq!(held.coverage(), 1_000, "every committed row is ordered");
+    assert_eq!(held.runs().len(), 1, "written whole, as one run");
+    assert_eq!(held.runs()[0].kind, RunKind::Whole);
+    for column in Column::ALL {
+        assert_eq!(
+            served(&held, column),
+            vec![brute(0, 1_000, column)],
+            "{}",
+            column.as_str()
+        );
+    }
+    // The next commit finds an index with one name and appends as usual.
+    append(&mut writer, &bars(1_000, 1_100));
+    let held = root.index().unwrap();
+    assert_eq!(held.runs().len(), 2);
+    assert_eq!(held.runs()[1].kind, RunKind::Appended);
+}
+
+/// **A STAGING NAME THAT IS NOT A REGULAR FILE IS REFUSED BY NAME**, and
+/// nothing is removed, written or renamed: a directory (with something in
+/// it), and a symbolic link to another file. The month stays without an
+/// index — a reader names it and reads it — until the name is cleared.
+#[test]
+fn a_staging_name_that_is_not_a_regular_file_is_refused_by_name() {
+    let root = Root::new();
+    {
+        let mut writer = root.writer();
+        append(&mut writer, &bars(0, 300));
+    }
+    let index = root.file(FileKind::SortIndex);
+    fs::remove_file(&index).unwrap();
+    let staging = index.with_file_name("2031-02.new.srt");
+
+    // A DIRECTORY.
+    fs::create_dir_all(staging.join("inside")).unwrap();
+    let before = beside(&root);
+    let refused = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL);
+    assert!(
+        matches!(&refused, Err(StoreError::SortIndex { reason, .. })
+            if reason.contains("2031-02.new.srt") && reason.contains("not a regular file")),
+        "{refused:?}"
+    );
+    assert!(staging.join("inside").is_dir(), "left as it is");
+    assert!(!index.exists(), "nothing renamed into place");
+    assert_eq!(beside(&root), before);
+    fs::remove_dir_all(&staging).unwrap();
+
+    // A SYMBOLIC LINK to another file in the month's directory.
+    let target = index.with_file_name("linked-to.file");
+    fs::write(&target, vec![0xCD_u8; 5_000]).unwrap();
+    std::os::unix::fs::symlink(&target, &staging).unwrap();
+    let refused = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL);
+    assert!(
+        matches!(&refused, Err(StoreError::SortIndex { reason, .. })
+            if reason.contains("2031-02.new.srt")),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&target).unwrap(), vec![0xCD_u8; 5_000]);
+    assert!(
+        fs::symlink_metadata(&staging)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link is left as it is"
+    );
+    assert!(!index.exists());
+    fs::remove_file(&staging).unwrap();
+    fs::remove_file(&target).unwrap();
+
+    // CLEARED: the month builds.
+    let built = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
+    assert!(matches!(built.outcome, Resorted::Built(_)));
+    assert_eq!(root.index().unwrap().coverage(), 300);
+}

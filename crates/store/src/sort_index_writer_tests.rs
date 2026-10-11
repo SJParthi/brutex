@@ -154,7 +154,7 @@ fn an_appended_run_whose_sync_fails_is_cut_and_written_again() {
 /// **A WHOLE IMAGE WHOSE SYNC FAILS IS NEVER RENAMED INTO PLACE.** The month
 /// has no index; the image is written into `<yyyy-mm>.new.srt` and the disk
 /// refuses the sync. No `.srt` appears — a reader is told the month has none
-/// and reads it — and the next step cuts the staging file, writes the image
+/// and reads it — and the next step removes the staging name, writes the image into a new file
 /// again and renames it.
 #[test]
 fn a_whole_image_whose_sync_fails_is_never_renamed_into_place() {
@@ -175,7 +175,7 @@ fn a_whole_image_whose_sync_fails_is_never_renamed_into_place() {
     assert!(root.staging().exists(), "the unsynced image stays staged");
 
     // A STAGING FILE LONGER THAN THE IMAGE, as a writer killed mid-write of
-    // a larger month would leave: it is cut, never trusted or appended to.
+    // a larger month would leave: its name is removed; it is never trusted, cut or appended to.
     let mut junk = fs::read(root.staging()).unwrap();
     junk.extend_from_slice(&[0xA5; 4_096]);
     fs::write(root.staging(), &junk).unwrap();

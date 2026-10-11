@@ -1,5 +1,6 @@
-//! The two `store.srt` lines reach the log through the production calls that
-//! own them, and the writer's ordinary upkeep writes none. D-3349, WP-39.
+//! The `store.srt` lines reach the log through the production calls that own
+//! them — a lag, a rebuild, a sort-index name that is a second name of its
+//! file — and the writer's ordinary upkeep writes none. D-3349, WP-39.
 //!
 //! Its own test binary, because `telemetry::install` takes the process's one
 //! sink and this test counts every line written into it.
@@ -106,19 +107,55 @@ fn a_lagging_index_warns_a_rebuild_informs_and_upkeep_is_silent() {
     .unwrap();
     let rebuilt = BarFile::sort_index_existing(&root, path(quiet), SYMBOL).unwrap();
     assert!(matches!(rebuilt.outcome, Resorted::Built(_)));
+    // A STAGING NAME THAT IS A SECOND NAME OF ANOTHER FILE: the name is
+    // removed, the file is not written, and the log says so by name.
+    let linked = YearMonth::new(2032, 9).unwrap();
+    {
+        let mut writer = BarFile::open_or_create(&root, path(linked), SYMBOL).unwrap();
+        let _ = writer.append(&session(linked));
+    }
+    let linked_srt = path(linked)
+        .with_file(FileKind::SortIndex)
+        .to_path_buf(&root);
+    fs::remove_file(&linked_srt).unwrap();
+    let elsewhere = linked_srt.with_file_name("somebody-elses.file");
+    fs::write(&elsewhere, vec![0xEE_u8; 9_000]).unwrap();
+    fs::hard_link(&elsewhere, linked_srt.with_file_name("2032-09.new.srt")).unwrap();
+    {
+        // The writer's whole rewrite meets the link: ordinary upkeep is
+        // silent, the second name is not.
+        let _writer = BarFile::open_or_create(&root, path(linked), SYMBOL).unwrap();
+    }
+    assert_eq!(fs::read(&elsewhere).unwrap(), vec![0xEE_u8; 9_000]);
+    assert!(linked_srt.is_file());
 
     let found = telemetry::tail(
         &log,
         sink.keep_files(),
         &Query::last(256).from_target("store.srt"),
     );
-    assert_eq!(found.records.len(), 2, "{:?}", found.records);
+    assert_eq!(found.records.len(), 3, "{:?}", found.records);
+    let second = found
+        .records
+        .iter()
+        .find(|line| line.message == "sort index name is a second name of its file")
+        .expect("a second name is said");
+    assert_eq!(second.level, Level::Warn);
+    assert!(
+        field(&second.fields, "file").ends_with("2032-09.new.srt"),
+        "{second:?}"
+    );
+    assert_eq!(field(&second.fields, "links"), "2");
+    assert!(
+        field(&second.fields, "did").contains("left as it is"),
+        "{second:?}"
+    );
     let warn = found
         .records
         .iter()
-        .find(|line| line.level == Level::Warn)
+        .find(|line| line.message == "sort index lags the bars")
         .expect("the lag is a warning");
-    assert_eq!(warn.message, "sort index lags the bars");
+    assert_eq!(warn.level, Level::Warn);
     assert!(
         field(&warn.fields, "file").ends_with("2032-08.srt"),
         "{warn:?}"

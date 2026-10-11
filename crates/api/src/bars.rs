@@ -1877,6 +1877,14 @@ fn seek(
     };
     let mut last: Vec<Last> = vec![None; plans.len()];
     let mut out = Vec::with_capacity(picked.len());
+    // A MONTH THAT WILL NOT OPEN IS ONE FAULT, however many of the page's rows
+    // lie in it: the refusal is the month's, the same words for every row,
+    // and a line a row was 50 copies of it on a page of 50. Counted here by
+    // (series, slot), in the order first met, and said once below. A record
+    // of a month that DID open and will not read is still named by itself.
+    let mut unopened: Vec<(String, u64)> = Vec::new();
+    let mut unopened_at: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
     for (series, at) in picked {
         let (Some(plan), Some(series_rules)) = (plans.get_mut(series), rules.get(series)) else {
             continue;
@@ -1884,6 +1892,19 @@ fn seek(
         let Some(run) = plan.runs.get(at.run).copied() else {
             continue;
         };
+        if let Err(why) = plan.opens(root, run.slot) {
+            let index = *unopened_at.entry((series, run.slot)).or_insert_with(|| {
+                unopened.push((why, 0));
+                unopened.len() - 1
+            });
+            if let Some((_, rows)) = unopened.get_mut(index) {
+                *rows += 1;
+            }
+            if let Some(slot) = last.get_mut(series) {
+                *slot = Some((run.slot, at.row, None));
+            }
+            continue;
+        }
         let held = last.get(series).copied().flatten();
         let behind = behind_of(root, plan, at, held, query.lookback);
         // POSITIONS USED, NOT ROWS RETURNED. An unreadable record still
@@ -1897,6 +1918,11 @@ fn seek(
             Ok(bar) => out.push(window_bar(series_rules, behind, bar, series)),
             Err(why) => faults.push(why),
         }
+    }
+    for (why, rows) in unopened {
+        faults.push(format!(
+            "{why}; the month did not open, so none of its {rows} rows on this page was read"
+        ));
     }
     if query.desc {
         out.reverse();

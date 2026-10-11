@@ -74,7 +74,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use store::format::{Bar, OI_NULL};
 use store::path::YearMonth;
-use store::sort_index::{Column, ColumnInfo, Entry, FENCE, Fences, Shape, SortIndex, Walked};
+use store::sort_index::{Column, ColumnInfo, Entry, FENCE, Fences, Shape, SortIndex, Walked, Why};
 
 use super::series::{self, Position, SeriesPlan, Stamp};
 use super::{
@@ -323,6 +323,15 @@ static BROKEN: series::Memo<(PathBuf, Stamp), Arc<str>> = series::Memo::new();
 /// it was read, before it is refused instead.
 const MAX_BROKEN: usize = 8;
 
+/// The months ONE REQUEST sets aside because the HOST refused their index
+/// while the page read it — the `.srt`'s path and stamp, and why. A host's
+/// refusal (permission, too many open files, a file gone) says nothing about
+/// the file's bytes and moves no stamp when it passes, so it is never put in
+/// [`BROKEN`], where it would outlive its cause until the server restarted:
+/// the month's rows are read for this request, and the next request asks the
+/// host again.
+type Aside = Vec<(PathBuf, Stamp, Arc<str>)>;
+
 /// The extremes of rows `[start, end)` of a month file that is not a whole
 /// month — a stretch a day bound cuts — by the file's path and stamp.
 static CUT_EXTREMES: series::Memo<(PathBuf, Stamp, u64, u64), Extremes> = series::Memo::new();
@@ -334,24 +343,47 @@ fn view(
     plan: &mut SeriesPlan,
     slot: usize,
     timeframe_secs: u32,
+    aside: &Aside,
 ) -> Result<Held, String> {
     let Some(at) = plan.slots.get(slot) else {
         return Err(format!("slot {slot} is not a month of this window"));
     };
     let (bars_path, bars_stamp, held, month) = (at.path.clone(), at.stamp, at.held, at.month);
     let path = bars_path.with_extension("srt");
-    let meta = match std::fs::metadata(&path) {
+    // NEVER THROUGH A LINK, as every door of the store refuses one below the
+    // root: the name itself is asked (`symlink_metadata`), and the open below
+    // refuses a final link in the kernel, so a link put there between the two
+    // is refused as well. A followed link would serve another file's order
+    // as this month's whenever that file passed the bind.
+    let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
-            return Err(store::sort_index::Why::Absent.to_string());
+            return Err(Why::Absent.to_string());
         }
         Err(why) => return Err(format!("{}: {why}", path.display())),
     };
+    if !meta.is_file() {
+        let what = if meta.file_type().is_symlink() {
+            "a symbolic link; no link is followed"
+        } else {
+            "not a regular file"
+        };
+        return Err(Why::Unreadable(format!("{} is {what}", path.display())).to_string());
+    }
     let stamp = Stamp::of(&meta);
     if let Some(why) = BROKEN.get(&(path.clone(), stamp)) {
         return Err(format!(
             "its .srt sort index failed when it was read and is not used until it is rebuilt \
              ({why})"
+        ));
+    }
+    if let Some((_, _, why)) = aside
+        .iter()
+        .find(|(at, as_of, _)| *at == path && *as_of == stamp)
+    {
+        return Err(format!(
+            "the host refused its .srt sort index while this request read it, so its rows are \
+             read; the next request asks again ({why})"
         ));
     }
     let key = (path.clone(), stamp, bars_stamp);
@@ -360,25 +392,38 @@ fn view(
     }
     let symbol_id = symbol_id(&plan.key.symbol);
     let shape = Shape::of(month, timeframe_secs, symbol_id);
-    let opened = SortIndex::open(&path, &shape).map_err(|why| why.to_string());
-    let bound = opened.and_then(|index| {
+    let mut bar_refused = false;
+    let bound = SortIndex::open(&path, &shape).and_then(|index| {
         let walked = index.walked().clone();
         store::sort_index::bind(
             &walked.runs,
             held.n_valid,
             held.first_ts,
             held.last_ts,
-            |row| plan.read(root, slot, row).map(|bar| bar.ts_micros),
-        )
-        .map_err(|why| why.to_string())?;
+            |row| {
+                plan.read(root, slot, row)
+                    .map(|bar| bar.ts_micros)
+                    .inspect_err(|_| bar_refused = true)
+            },
+        )?;
         Ok(View {
             path: path.clone(),
             shape,
             walked,
         })
     });
-    let found = Arc::new(bound);
-    VIEWS.put(key, Arc::clone(&found));
+    // ONLY WHAT THE BYTES SAY IS REMEMBERED. The memo's key is the two
+    // files' stamps (size, mtime, inode), so a verdict read from their bytes
+    // stays true until a stamp moves. A refusal by the HOST — permission, an
+    // I/O error, too many open files, a file gone since the stat — says
+    // nothing about the bytes and changes no stamp when it passes: held, it
+    // made the month unindexed until the server restarted, and the printed
+    // `cli srt-build` answered `kept`. It is asked again by the next request.
+    let passing = bar_refused || matches!(bound, Err(Why::Absent | Why::Unreadable(_)));
+    let found = Arc::new(bound.map_err(|why| why.to_string()));
+    if !passing {
+        VIEWS.put(key, Arc::clone(&found));
+    }
     Ok((found, stamp))
 }
 
@@ -435,7 +480,13 @@ struct Cut {
 }
 
 /// Cuts every kept run of every series into indexed and read pieces.
-fn cut(root: &Path, plans: &mut [SeriesPlan], query: &WindowQuery, views: &mut Views) -> Vec<Cut> {
+fn cut(
+    root: &Path,
+    plans: &mut [SeriesPlan],
+    query: &WindowQuery,
+    views: &mut Views,
+    aside: &Aside,
+) -> Vec<Cut> {
     let timeframe_secs = query.timeframe.secs();
     let mut out = Vec::new();
     for (series, plan) in plans.iter_mut().enumerate() {
@@ -461,7 +512,7 @@ fn cut(root: &Path, plans: &mut [SeriesPlan], query: &WindowQuery, views: &mut V
             let loaded = if let Some(held) = views.get(&(series, run.slot)).cloned() {
                 Ok(held)
             } else {
-                let found = view(root, plan, run.slot, timeframe_secs);
+                let found = view(root, plan, run.slot, timeframe_secs, aside);
                 if let Ok(held) = &found {
                     views.insert((series, run.slot), held.clone());
                 }
@@ -592,16 +643,23 @@ struct RunArray {
     /// index, for a refusal to name.
     named: (Arc<str>, Arc<str>),
     /// Why reading this run's index failed, once it has: the page is then
-    /// asked again with the month read instead (see [`page`]).
-    failure: Option<String>,
+    /// asked again with the month read instead (see [`page`]). The flag is
+    /// whether the HOST refused it (see [`Aside`]) rather than its bytes
+    /// failing a check.
+    failure: Option<(String, bool)>,
 }
 
 impl RunArray {
     /// Records that reading this run's index failed for `why`, and says so,
     /// naming the month and the command that rebuilds it.
-    fn fail(&mut self, why: impl std::fmt::Display) -> String {
-        let said = format!("{}: {why}; rebuild it with: {}", self.named.0, self.named.1);
-        self.failure = Some(said.clone());
+    fn fail(&mut self, why: &Why) -> String {
+        let host = matches!(why, Why::Absent | Why::Unreadable(_));
+        let said = if host {
+            format!("{}: {why}", self.named.0)
+        } else {
+            format!("{}: {why}; rebuild it with: {}", self.named.0, self.named.1)
+        };
+        self.failure = Some((said.clone(), host));
         said
     }
 
@@ -613,7 +671,7 @@ impl RunArray {
         if self.file.is_none() {
             let view = self.view()?;
             let opened = SortIndex::open_walked(&view.path, &view.shape, view.walked.clone());
-            let opened = opened.map_err(|why| self.fail(why))?;
+            let opened = opened.map_err(|why| self.fail(&why))?;
             self.file = Some(opened);
         }
         self.file
@@ -631,7 +689,7 @@ impl RunArray {
         } else {
             let (run, column) = (self.run, self.column);
             let read = self.file()?.fences(run, column);
-            let read = Arc::new(read.map_err(|why| self.fail(why))?);
+            let read = Arc::new(read.map_err(|why| self.fail(&why))?);
             FENCE_TABLES.put(key, Arc::clone(&read), read.weight());
             read
         };
@@ -653,7 +711,7 @@ impl RunArray {
             let fences = self.fences()?;
             let (run, column) = (self.run, self.column);
             let read = self.file()?.block(run, column, block, &fences);
-            let read: Arc<[Entry]> = read.map_err(|why| self.fail(why))?.into();
+            let read: Arc<[Entry]> = read.map_err(|why| self.fail(&why))?.into();
             self.blocks.insert(block, Arc::clone(&read));
             read
         };
@@ -1690,6 +1748,7 @@ pub(super) fn page(
     cancel: &Cancel,
 ) -> Result<Sorted, String> {
     let mut set_aside = Vec::new();
+    let mut aside = Aside::new();
     for _ in 0..=MAX_BROKEN {
         let mut tried = Vec::new();
         match page_once(
@@ -1699,15 +1758,26 @@ pub(super) fn page(
             query,
             (offset, limit),
             &mut tried,
-            cancel,
+            (cancel, &aside),
         ) {
             Ok(sorted) => {
                 faults.append(&mut tried);
                 return Ok(sorted);
             }
             Err(Attempt::Refused(why)) => return Err(why),
-            Err(Attempt::Broken { path, stamp, why }) => {
-                BROKEN.put((path, stamp), Arc::from(why.as_str()));
+            Err(Attempt::Broken {
+                path,
+                stamp,
+                why,
+                host,
+            }) => {
+                // BYTES THAT FAIL A CHECK are remembered until the file
+                // changes; a refusal by the host is this request's alone.
+                if host {
+                    aside.push((path, stamp, Arc::from(why.as_str())));
+                } else {
+                    BROKEN.put((path, stamp), Arc::from(why.as_str()));
+                }
                 set_aside.push(why);
             }
         }
@@ -1729,6 +1799,8 @@ enum Attempt {
         path: PathBuf,
         stamp: Stamp,
         why: String,
+        /// The host refused the file, rather than its bytes failing a check.
+        host: bool,
     },
 }
 
@@ -1752,7 +1824,7 @@ fn page_once(
     query: &WindowQuery,
     (offset, limit): (usize, usize),
     faults: &mut Vec<String>,
-    cancel: &Cancel,
+    (cancel, aside): (&Cancel, &Aside),
 ) -> Result<Sorted, Attempt> {
     let Some(column) = column_of(query.sort) else {
         return Err(Attempt::Refused(
@@ -1766,7 +1838,7 @@ fn page_once(
         plan.clear_unread();
     }
     let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
-    let mut cuts = cut(root, plans, query, &mut views);
+    let mut cuts = cut(root, plans, query, &mut views, aside);
     cancel.check()?;
     let null_series = |series: usize| {
         column == Column::OpenInterest
@@ -2247,10 +2319,11 @@ fn page_once(
                     .runs
                     .iter()
                     .find_map(|run| {
-                        run.failure.as_ref().map(|failed| Attempt::Broken {
+                        run.failure.as_ref().map(|(failed, host)| Attempt::Broken {
                             path: run.path.clone(),
                             stamp: run.stamp,
                             why: failed.clone(),
+                            host: *host,
                         })
                     })
                     .unwrap_or(Attempt::Refused(why)));
@@ -2381,7 +2454,7 @@ pub(super) fn extremes_of(
         plan.clear_unread();
     }
     let mut views = HashMap::with_capacity(plans.iter().map(|plan| plan.slots.len()).sum());
-    let cuts = cut(root, plans, query, &mut views);
+    let cuts = cut(root, plans, query, &mut views, &Aside::new());
     let mut extremes = Extremes::default();
     let mut owed = 0_u64;
     let mut read: Vec<(usize, usize, u64, u64)> = Vec::new();

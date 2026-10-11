@@ -810,6 +810,15 @@ absent, damaged, not these bars', or would reach 32 runs with the next
 append is written WHOLE as one run into `<yyyy-mm>.new.srt`, synced, and
 renamed over the name; a file is never edited in place, and the only bytes an
 append may overwrite are those past the last valid run, which no reader used.
+**The staging file is always a new inode**: whatever already holds the staging
+name is never opened and never cut — a regular file there has its *name*
+removed (`unlink`, which changes no byte behind it), anything else is refused
+by name, and the file is created with `O_CREAT | O_EXCL`. Cutting an existing
+staging file wrote the index through a hard link into the file behind it. For
+the same reason an append asks the open `.srt` for its link count and, when
+the inode has a second name, writes the month whole instead; both cases are a
+`store.srt` WARN naming the file and the count, since the store publishes by
+rename and makes no second name itself.
 `cli srt-build` writes named months whole the same way, beside the generation
 every reader opens (D-3350). **It keeps a month as it is only after reading
 its run's body against the body checksum in the run header** (one read of the
@@ -892,8 +901,8 @@ one-second NIFTY hold 2.0 GB of `.srt` beside 2.3 GB of `.bin`.
 written, so a run never refuses them. An appended run whose write or sync
 fails is cut off again — the file ends where the last synced run ended — and
 a whole image whose write or sync fails stays in `<yyyy-mm>.new.srt` and is
-never renamed into place; the next writer step cuts that staging file and
-writes the image again. Either way the writer says so once (`store.srt`,
+never renamed into place; the next writer step removes that staging name and
+writes the image again into a new file. Either way the writer says so once (`store.srt`,
 WARN) and a reader reads the rows no run orders, named on the wire.
 
 **What it does not prove.** The checksums are integrity, not authentication.

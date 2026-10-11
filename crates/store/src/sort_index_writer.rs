@@ -29,17 +29,17 @@
 //! predates D-3349, every [`COMPACT_AT`] appends, or by
 //! [`BarFile::sort_index_existing`].
 
-use std::fs;
-use std::io::ErrorKind;
-use std::os::unix::fs::FileExt as _;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind};
+use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::path::{Path, PathBuf};
 
 use std::sync::PoisonError;
 
 use super::{
-    Access, Action, BarFile, StoreError, VerifiedBlock, fault, fsync_dir, lock_fault, open_read,
-    open_rw, refuse_link, refuse_links_below, sync_hooked, table_of, time_index_path, write_fully,
-    writer_open,
+    Access, Action, BarFile, StoreError, VerifiedBlock, fault, fsync_dir, lock_fault, no_follow,
+    open_read, open_rw, refuse_link, refuse_links_below, sync_hooked, table_of, time_index_path,
+    write_fully, writer_open,
 };
 use crate::flock::Flock;
 use crate::format::Bar;
@@ -240,12 +240,30 @@ impl BarFile {
     /// failed is cut off again, so no later run is appended after a body that
     /// may not be whole.
     fn append_sort_run(&self, sidecar: &SortSidecar, from: u64, at: u64) -> Result<(), String> {
-        let bars = self.committed_rows(from, self.header.n_valid)?;
-        let run =
-            sort_index::build_run(&sidecar.shape, from, &bars).map_err(|why| why.to_string())?;
         refuse_link(&sidecar.path).map_err(|why| why.to_string())?;
         let file =
             writer_open(open_rw(&sidecar.path), &sidecar.path).map_err(|why| why.to_string())?;
+        // NEVER THROUGH A SECOND NAME. An append edits the index's own inode,
+        // and an inode that has another name is also whatever that name is
+        // taken to be. Asked of the OPEN handle, so no name can change between
+        // the question and the write. Such a month is written whole instead:
+        // a new inode renamed over this name, the other name's bytes left as
+        // they are.
+        let links = fault(file.metadata(), &sidecar.path, Action::Measure)
+            .map_err(|why| why.to_string())?
+            .nlink();
+        if links != 1 {
+            drop(file);
+            note_second_name(
+                &sidecar.path,
+                links,
+                "the index is written whole as a new file",
+            );
+            return self.write_whole(sidecar).map(|_| ());
+        }
+        let bars = self.committed_rows(from, self.header.n_valid)?;
+        let run =
+            sort_index::build_run(&sidecar.shape, from, &bars).map_err(|why| why.to_string())?;
         let end = at + run.len() as u64;
         let written = write_fully(&file, &sidecar.path, at, &run)
             .and_then(|()| fault(file.set_len(end), &sidecar.path, Action::Write))
@@ -463,15 +481,24 @@ impl BarFile {
 /// Writes `run` as the month's whole index: the header and the run into
 /// `<yyyy-mm>.new.srt`, a sync, then a rename over `<yyyy-mm>.srt` and a sync
 /// of the directory — never an edit of the file a reader may hold.
+///
+/// **THE STAGING FILE IS ALWAYS A NEW INODE.** Whatever already holds the
+/// staging name is never opened and never cut: a regular file there has its
+/// NAME removed ([`clear_staging`]) and anything else is refused by name; the
+/// file is then created with `O_EXCL` ([`open_new`]), which fails rather than
+/// open something that appeared in between. Opening the name and cutting it to
+/// zero — what this did before — wrote the index THROUGH a hard link into the
+/// file behind it: a bar file linked under the staging name lost its bytes and
+/// became the month's `.srt`.
 fn write_image(sidecar: &SortSidecar, run: &[u8]) -> Result<(), String> {
     let staging = sidecar.staging();
     let io = |why: StoreError| why.to_string();
     refuse_link(&staging).map_err(io)?;
     refuse_link(&sidecar.path).map_err(io)?;
     // A STAGING FILE LEFT BY A WRITER THAT DIED is never the month's index —
-    // only a rename makes one — so it is cut, not trusted.
-    let file = writer_open(open_rw(&staging), &staging).map_err(io)?;
-    fault(file.set_len(0), &staging, Action::Write).map_err(io)?;
+    // only a rename makes one — so its name is removed, not trusted.
+    clear_staging(sidecar)?;
+    let file = writer_open(open_new(&staging), &staging).map_err(io)?;
     write_fully(&file, &staging, 0, &sidecar.shape.encode()).map_err(io)?;
     write_fully(&file, &staging, HEADER_LEN, run).map_err(io)?;
     fault(sync_hooked(&file), &staging, Action::Sync).map_err(io)?;
@@ -483,6 +510,13 @@ fn write_image(sidecar: &SortSidecar, run: &[u8]) -> Result<(), String> {
     )
     .map_err(io)?;
     fsync_dir(sidecar.path.parent().unwrap_or(&sidecar.path)).map_err(io)
+}
+
+/// Creates `path` for writing and refuses a name that exists: `O_CREAT |
+/// O_EXCL`, under which the kernel opens nothing that is already there — not
+/// a regular file, not a second name of one, not a link of either kind.
+fn open_new(path: &Path) -> io::Result<File> {
+    no_follow(File::options().write(true).create_new(true)).open(path)
 }
 
 /// Why the walked index's bodies are not whole, or `None` when every run's
@@ -497,23 +531,35 @@ fn damaged(sidecar: &SortSidecar, walked: &Walked) -> Result<Option<Why>, String
     }
 }
 
-/// Removes `<yyyy-mm>.new.srt` when a build that died left one beside an
-/// index that is kept: the staging name is never a month's index (only a
-/// rename makes one), the month's lock is held, and a build that writes
-/// would have cut it. Nothing is removed that is not a regular file.
+/// Removes the NAME `<yyyy-mm>.new.srt` when something left one: a build
+/// that died, beside an index that is kept or before a build that writes.
+/// The staging name is never a month's index (only a rename makes one) and
+/// the month's lock is held. Only the name goes — `unlink`, which changes no
+/// byte of the file behind it — so a file that also has another name keeps
+/// every byte under that name, and that case is a `store.srt` WARN naming the
+/// link count, because nothing in the store makes one. Nothing is removed
+/// that is not a regular file: it is refused by name.
 fn clear_staging(sidecar: &SortSidecar) -> Result<(), String> {
     let staging = sidecar.staging();
     match fs::symlink_metadata(&staging) {
         Ok(meta) if meta.is_file() => {
             fs::remove_file(&staging).map_err(|why| format!("{}: {why}", staging.display()))?;
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::info("store.srt", "staging file of a dead build removed")
-                    .with(
-                        "file",
-                        telemetry::Value::Str(&staging.display().to_string()),
-                    )
-                    .with("bytes", telemetry::Value::Uint(meta.len())),
-            );
+            if meta.nlink() == 1 {
+                let _dropped_when_filtered = telemetry::emit(
+                    &telemetry::Event::info("store.srt", "staging file of a dead build removed")
+                        .with(
+                            "file",
+                            telemetry::Value::Str(&staging.display().to_string()),
+                        )
+                        .with("bytes", telemetry::Value::Uint(meta.len())),
+                );
+            } else {
+                note_second_name(
+                    &staging,
+                    meta.nlink(),
+                    "the staging name was removed and the file behind it left as it is",
+                );
+            }
             Ok(())
         }
         Ok(_) => Err(format!(
@@ -557,6 +603,19 @@ fn note_sort_index_lags(path: &Path, why: &str, n_valid: u64) {
             .with("file", telemetry::Value::Str(&path.display().to_string()))
             .with("reason", telemetry::Value::Str(why))
             .with("n_valid", telemetry::Value::Uint(n_valid)),
+    );
+}
+
+/// `store.srt`, WARN: a sort-index name was one of `links` names of its file.
+/// The store publishes by rename and never makes a second name, so somebody
+/// else did; the file is not written through this name, and `did` says what
+/// was done instead.
+fn note_second_name(path: &Path, links: u64, did: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.srt", "sort index name is a second name of its file")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("links", telemetry::Value::Uint(links))
+            .with("did", telemetry::Value::Str(did)),
     );
 }
 

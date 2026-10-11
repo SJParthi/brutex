@@ -1521,3 +1521,209 @@ fn concurrent_value_pages_are_each_the_brute_force() {
         }
     });
 }
+
+/// **A REFUSAL BY THE HOST IS NOT REMEMBERED.** February's `.srt` cannot be
+/// opened for one request (its permission bits here; an I/O error or a
+/// process out of file handles does the same) and can for the next. The
+/// failed open was held by the file's stamp — size, mtime and inode, none of
+/// which a passing refusal moves — so the month stayed unindexed until the
+/// server restarted and the printed `cli srt-build` answered `kept`. Now the
+/// refused month is read and named, and the next request, the file readable
+/// again and not a byte of it changed, is served from the index.
+#[test]
+fn a_host_refusal_of_an_index_is_not_remembered() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = Root::new("host-refusal");
+    write(&root);
+    let [ce, ..] = keys();
+    let feb = path(&ce, months()[1], FileKind::SortIndex).to_path_buf(&root.0);
+    let ask = query(&[0], Column::Close, true, 0, Filter::default());
+    let want = served(&window(&root.0, &ask).unwrap());
+
+    // A FRESH ROOT'S FIRST REQUEST MET IT READABLE; refuse it now. The memo
+    // key is the stamp, so the walk above would be served from memory: move
+    // the stamp once (a rewrite of the same bytes) so the open is asked.
+    let bytes = std::fs::read(&feb).unwrap();
+    std::fs::remove_file(&feb).unwrap();
+    std::fs::write(&feb, &bytes).unwrap();
+    std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&feb).is_ok() {
+        // A process that may read anything (root) cannot be refused this way.
+        std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+    let refused = window(&root.0, &ask).unwrap();
+    std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let page = served(&refused);
+    let report = refused.sort_index.unwrap();
+    assert_eq!(report.scanned_rows, 360, "{report:?}");
+    assert!(
+        report.scanned_why[0].contains("2031-02")
+            && report.scanned_why[0].contains("would not read"),
+        "{report:?}"
+    );
+    assert_eq!(page, want, "the month is read, the page the same");
+
+    let again = window(&root.0, &ask).unwrap();
+    let page = served(&again);
+    let report = again.sort_index.unwrap();
+    assert_eq!(
+        (report.scanned_rows, report.scanned_months),
+        (0, 0),
+        "readable again and unchanged: served from the index, {report:?}"
+    );
+    assert!(report.scanned_why.is_empty() && report.build.is_empty());
+    assert_eq!(page, want);
+}
+
+/// **THE SAME REFUSAL MET BY A SERVER THAT ALREADY HOLDS THE MONTH'S WALK** —
+/// what a running server meets: the first request walked February's index
+/// and kept the walk by the file's stamp; the host then refuses the file, so
+/// the walk is served from memory and the refusal comes when the page READS
+/// the index. That set the month aside by its stamp "until it is rebuilt" —
+/// and `chmod` moves no stamp, so it stayed set aside after the refusal had
+/// passed, and the rebuild it asked for answered `kept`. Now the refusal is
+/// this request's alone: the month is read and named WITHOUT a rebuild
+/// command (there is nothing to rebuild), and the next request is served
+/// from the index.
+#[test]
+fn a_host_refusal_met_while_reading_an_index_is_this_requests_alone() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = Root::new("host-refusal-read");
+    write(&root);
+    let [ce, ..] = keys();
+    let feb = path(&ce, months()[1], FileKind::SortIndex).to_path_buf(&root.0);
+    // A PAGE DEEP IN THE ORDER, so its entries come from blocks no earlier
+    // request of this process read.
+    let ask = query(&[0], Column::High, false, 500, Filter::default());
+    let warm = query(&[0], Column::Low, true, 0, Filter::default());
+    let want = served(&window(&root.0, &ask).unwrap());
+    window(&root.0, &warm).unwrap();
+
+    std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&feb).is_ok() {
+        std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+    let refused = window(&root.0, &ask);
+    std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let refused = refused.unwrap();
+    let page = served(&refused);
+    let report = refused.sort_index.unwrap();
+    assert_eq!(
+        (report.scanned_rows, report.scanned_months),
+        (360, 1),
+        "{report:?}"
+    );
+    assert!(
+        report.scanned_why[0].contains("2031-02")
+            && report.scanned_why[0].contains("the host refused its .srt sort index")
+            && report.scanned_why[0].contains("the next request asks again"),
+        "{report:?}"
+    );
+    assert_eq!(page, want, "the month is read, the page the same");
+
+    for _ in 0..2 {
+        let again = window(&root.0, &ask).unwrap();
+        let page = served(&again);
+        let report = again.sort_index.unwrap();
+        assert_eq!(
+            (report.scanned_rows, report.scanned_months),
+            (0, 0),
+            "readable again, not a byte changed: served from the index, {report:?}"
+        );
+        assert_eq!(page, want);
+    }
+}
+
+/// **NO LINK IS FOLLOWED AT A MONTH'S `.srt` NAME.** The name is a symbolic
+/// link to a file that holds this very month's valid index — the one link a
+/// followed open could not tell from the real thing. Every door of the
+/// store refuses a link below the root; the reader followed this one and
+/// served the target's order. Now the month is read, named as a link, and
+/// the page is the brute force.
+#[test]
+fn a_symbolic_link_at_an_index_name_is_never_followed() {
+    let root = Root::new("srt-link");
+    write(&root);
+    let [ce, ..] = keys();
+    let feb = path(&ce, months()[1], FileKind::SortIndex).to_path_buf(&root.0);
+    let elsewhere = root.0.join("elsewhere.srt");
+    std::fs::rename(&feb, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &feb).unwrap();
+    let answer = window(
+        &root.0,
+        &query(&[0], Column::Volume, false, 0, Filter::default()),
+    )
+    .unwrap();
+    let report = answer.sort_index.unwrap();
+    assert_eq!(report.scanned_rows, 360, "{report:?}");
+    assert_eq!(report.scanned_months, 1);
+    assert!(
+        report.scanned_why[0].contains("2031-02")
+            && report.scanned_why[0].contains("symbolic link; no link is followed"),
+        "{report:?}"
+    );
+    assert!(check(&root, &[0], Filter::default(), &|_| true) > 0);
+    assert!(
+        std::fs::symlink_metadata(&feb)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "a reader changes nothing"
+    );
+}
+
+/// **A TIME-ORDERED PAGE NAMES A MONTH THAT WILL NOT OPEN ONCE.** February's
+/// bars are held; a page in time order whose 37 rows all lie in February
+/// pushed the month's refusal once a ROW — 37 copies here, 50 on the /db
+/// default page. One fault now, saying how many of the page's rows it took;
+/// a page that straddles January and February serves January's rows and
+/// names February once.
+#[test]
+fn a_time_ordered_page_names_a_month_that_will_not_open_once() {
+    let root = Root::new("held-ts");
+    write(&root);
+    let feb = months()[1];
+    let mut by_time = query(&[0], Column::Close, false, 360, Filter::default());
+    by_time.sort = SortKey::Ts;
+    // SEEN BEFORE IT IS HELD: the plan counts February from its header memo.
+    let free = window(&root.0, &by_time).unwrap();
+    assert_eq!(free.bars.len(), 37);
+    assert!(free.faults.is_empty(), "{:?}", free.faults);
+    let _held = hold(&root, feb);
+
+    let answer = window(&root.0, &by_time).unwrap();
+    assert!(
+        answer.bars.is_empty(),
+        "no row of a month that did not open"
+    );
+    assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+    assert!(
+        answer.faults[0].contains("2031-02")
+            && answer.faults[0].contains("none of its 37 rows on this page was read"),
+        "{:?}",
+        answer.faults
+    );
+    assert_eq!(
+        answer.total, free.total,
+        "the total is the plan's, unchanged"
+    );
+
+    // STRADDLING: 20 rows of January, 17 of February.
+    by_time.offset = Some(340);
+    let answer = window(&root.0, &by_time).unwrap();
+    assert_eq!(answer.bars.len(), 20);
+    assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+    assert!(
+        answer.faults[0].contains("none of its 17 rows on this page was read"),
+        "{:?}",
+        answer.faults
+    );
+    // DESCENDING, the same month once.
+    by_time.desc = true;
+    by_time.offset = Some(360);
+    let answer = window(&root.0, &by_time).unwrap();
+    assert_eq!(answer.faults.len(), 1, "{:?}", answer.faults);
+    assert!(answer.faults[0].contains("2031-02"), "{:?}", answer.faults);
+}

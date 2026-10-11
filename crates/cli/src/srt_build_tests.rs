@@ -477,7 +477,7 @@ fn a_repaired_month_is_indexed_in_its_served_generation() {
 /// months written before D-3349. A first run builds two and is "killed"
 /// while writing the third: its staging file `2032-11.new.srt` is left half
 /// written, and the fourth month was never reached. The rerun keeps the two
-/// that are built, cuts the staging file and builds the third from its bars,
+/// that are built, removes the staging file and builds the third from its bars,
 /// builds the fourth, and exits clean; a third run changes no byte. Through
 /// all of it every `.bin`, `.crc` and `.tix` keeps its bytes AND its
 /// modification time — the door opens them read-only.
@@ -581,4 +581,141 @@ fn a_run_killed_partway_resumes_and_never_rewrites_a_bar_file() {
         before,
         "no bar file, checksum file or time index was written or touched"
     );
+}
+
+/// **A DRY RUN SAYS WHAT THE REAL RUN DOES.** Two months where it did not:
+/// bytes past the only run (dry `indexed`, real `built because bytes past
+/// its last run are not a run`), and a symbolic link at the `.srt` name (dry
+/// `would build`, real `REFUSED`, exit 1). And a staging name that is not a
+/// regular file, which the real run refuses whether it would keep the month
+/// or build it. The dry run now prints each as the real run then does, and
+/// still writes nothing.
+#[test]
+fn a_dry_run_and_the_real_run_agree_on_a_torn_tail_and_on_names_that_are_not_files() {
+    let root = Root::new();
+    let (torn, linked, blocked) = (ym(2033, 4), ym(2033, 5), ym(2033, 6));
+    for month in [torn, linked, blocked] {
+        root.month(None, month, 1, false);
+    }
+    let both = |month: &str| -> ((u8, String), (u8, String)) {
+        let dry = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", month, month, "--dry-run"]);
+        let real = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", month, month]);
+        (dry, real)
+    };
+
+    // BYTES PAST THE LAST RUN.
+    let srt = root.file(None, torn, FileKind::SortIndex);
+    let mut bytes = fs::read(&srt).unwrap();
+    bytes.extend_from_slice(&[0x3C_u8; 300]);
+    fs::write(&srt, &bytes).unwrap();
+    let ((dry_code, dry), (code, real)) = both("2033-04");
+    assert_eq!((dry_code, code), (OK, OK), "{dry}\n{real}");
+    assert!(
+        dry.contains("2033-04  would build") && dry.contains("bytes past its last run"),
+        "{dry}"
+    );
+    assert!(
+        real.contains("2033-04  built") && real.contains("bytes past its last run"),
+        "{real}"
+    );
+
+    // A SYMBOLIC LINK AT THE `.srt` NAME, to this month's own valid index.
+    let srt = root.file(None, linked, FileKind::SortIndex);
+    let elsewhere = srt.with_file_name("elsewhere.keep");
+    fs::rename(&srt, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &srt).unwrap();
+    let held = fs::read(&elsewhere).unwrap();
+    let ((dry_code, dry), (code, real)) = both("2033-05");
+    assert_ne!(dry_code, OK, "{dry}");
+    assert_ne!(code, OK, "{real}");
+    assert!(
+        dry.contains("2033-05  REFUSED") && dry.contains("not a regular file"),
+        "{dry}"
+    );
+    assert!(real.contains("2033-05  REFUSED"), "{real}");
+    assert!(fs::symlink_metadata(&srt).unwrap().file_type().is_symlink());
+    assert_eq!(
+        fs::read(&elsewhere).unwrap(),
+        held,
+        "the link's target is untouched"
+    );
+
+    // A STAGING NAME THAT IS A DIRECTORY, beside a month that would be kept.
+    let srt = root.file(None, blocked, FileKind::SortIndex);
+    let staging = srt.with_file_name("2033-06.new.srt");
+    fs::create_dir_all(&staging).unwrap();
+    let ((dry_code, dry), (code, real)) = both("2033-06");
+    assert_ne!(dry_code, OK, "{dry}");
+    assert_ne!(code, OK, "{real}");
+    assert!(
+        dry.contains("2033-06  REFUSED") && dry.contains("2033-06.new.srt"),
+        "{dry}"
+    );
+    assert!(
+        real.contains("2033-06  REFUSED") && real.contains("2033-06.new.srt"),
+        "{real}"
+    );
+    assert!(staging.is_dir(), "left as it is");
+}
+
+/// **THE VERB NEVER WRITES THROUGH A HARD LINK AT THE STAGING NAME.** A bar
+/// file of ANOTHER month is linked under this month's `.new.srt`: the run
+/// that built this month cut that bar file to the index's bytes and renamed
+/// it into place, exit 0, `built`. Now the dry run and the real run both
+/// leave every `.bin`, `.crc` and `.tix` byte for byte, the month is built
+/// as a new file, and the other month still reads.
+#[test]
+fn a_hard_link_at_the_staging_name_costs_no_bar_file_a_byte() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = Root::new();
+    let (built, victim) = (ym(2033, 8), ym(2033, 9));
+    root.month(None, built, 1, true);
+    root.month(None, victim, 1, false);
+    let files = |root: &Root| -> Vec<Vec<u8>> {
+        [built, victim]
+            .iter()
+            .flat_map(|&month| {
+                [FileKind::Bars, FileKind::Checksums, FileKind::TimeIndex]
+                    .map(|kind| fs::read(root.file(None, month, kind)).unwrap_or_default())
+            })
+            .collect()
+    };
+    let before = files(&root);
+    let victim_bin = root.file(None, victim, FileKind::Bars);
+    let staging = root
+        .file(None, built, FileKind::SortIndex)
+        .with_file_name("2033-08.new.srt");
+    fs::hard_link(&victim_bin, &staging).unwrap();
+
+    let (code, out) = root.run(&[
+        "gdfl",
+        "NSE/INDEX/NIFTY",
+        "1s",
+        "2033-08",
+        "2033-08",
+        "--dry-run",
+    ]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2033-08  would build"), "{out}");
+    assert_eq!(files(&root), before, "a dry run writes nothing");
+    assert_eq!(fs::metadata(&victim_bin).unwrap().nlink(), 2);
+
+    let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2033-08", "2033-09"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2033-08  built"), "{out}");
+    assert!(out.contains("2033-09  kept"), "{out}");
+    assert_eq!(
+        files(&root),
+        before,
+        "no bar file, checksum or time index changed"
+    );
+    let meta = fs::metadata(&victim_bin).unwrap();
+    assert_eq!(meta.nlink(), 1, "only the staging name was removed");
+    assert_ne!(
+        fs::metadata(root.file(None, built, FileKind::SortIndex))
+            .unwrap()
+            .ino(),
+        meta.ino()
+    );
+    assert!(!staging.exists());
 }

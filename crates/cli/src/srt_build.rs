@@ -374,7 +374,7 @@ impl Line {
 }
 
 /// How a reader now sees the month's index: one run over every row, or why
-/// not.
+/// not, and the `.srt` name it looked at.
 ///
 /// `body` also reads the run's body against the checksum its header holds
 /// (one read of the file): a reader that reaches a damaged fence table or
@@ -387,7 +387,7 @@ fn reader_view(
     path: StorePath<'_>,
     symbol_id: u32,
     body: bool,
-) -> Result<(u64, Option<String>), StoreError> {
+) -> Result<(u64, Option<String>, PathBuf), StoreError> {
     // THE GENERATION EVERY READER OPENS (D-3350): `open_existing` resolves
     // it, and the `.srt` a reader reads sits beside the `.bin` it opened.
     let file = BarFile::open_existing(root, path, symbol_id)?;
@@ -395,6 +395,12 @@ fn reader_view(
     let shape = Shape::of(path.month(), header.timeframe_secs, header.symbol_id);
     let srt = file.path().with_extension("srt");
     let verdict = match SortIndex::open(&srt, &shape) {
+        // BYTES PAST THE LAST RUN ARE NOT ONE WHOLE RUN: the build step writes
+        // such a month again, so a dry run that called it `indexed` promised
+        // a real run that then built it.
+        Ok(index) if index.torn().is_some() => index.torn().map(|(at, why)| {
+            format!("bytes past its last run are not a run (at byte {at}: {why})")
+        }),
         Ok(index) if index.runs().len() == 1 && index.coverage() == header.n_valid => {
             // BOUND TO THESE BARS: one run over every row is checked against
             // the header's own first and last stamps, which a reader checks
@@ -422,7 +428,7 @@ fn reader_view(
         )),
         Err(why) => Some(why.to_string()),
     };
-    Ok((header.n_valid, verdict))
+    Ok((header.n_valid, verdict, srt))
 }
 
 /// One month, built or confirmed, then checked from the read side.
@@ -461,20 +467,45 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         }
     };
     match reader_view(root, path, symbol_id, read_back_body) {
-        Ok((_, None)) => line,
-        Ok((_, Some(reader))) => Line::NotIndexed { n_valid, reader },
+        Ok((_, None, _)) => line,
+        Ok((_, Some(reader), _)) => Line::NotIndexed { n_valid, reader },
         Err(why) => Line::Refused {
             why: format!("the step finished and the read-back was refused: {why}"),
         },
     }
 }
 
-/// One month as a reader sees it, writing nothing.
+/// Why the build step would refuse this month for what sits at `name` — the
+/// month's `.srt` or its staging name — when that is there and is not a
+/// regular file: a link, a directory, a pipe. The store's door leaves such a
+/// name as it is and refuses the month, so a dry run says the same.
+fn name_refused(name: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(name).ok()?;
+    (!meta.is_file()).then(|| {
+        format!(
+            "{} is not a regular file; the build step leaves it as it is and refuses the month",
+            name.display()
+        )
+    })
+}
+
+/// One month as a reader sees it, writing nothing — and saying what the
+/// build step WOULD do, never something else: a month whose `.srt` name or
+/// `.new.srt` staging name is there and is not a regular file is `REFUSED`
+/// here as it is there (the store's door refuses it whether it would keep
+/// the month or build it).
 fn inspect(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
     match reader_view(root, path, symbol_id, true) {
-        Ok((0, _)) => Line::Empty,
-        Ok((n_valid, None)) => Line::Indexed { n_valid },
-        Ok((n_valid, Some(why))) => Line::WouldBuild { n_valid, why },
+        Ok((0, _, _)) => Line::Empty,
+        Ok((n_valid, verdict, srt)) => {
+            let refused =
+                name_refused(&srt).or_else(|| name_refused(&srt.with_extension("new.srt")));
+            match (refused, verdict) {
+                (Some(why), _) => Line::Refused { why },
+                (None, None) => Line::Indexed { n_valid },
+                (None, Some(why)) => Line::WouldBuild { n_valid, why },
+            }
+        }
         Err(StoreError::Missing { .. }) => Line::NotHeld,
         Err(why) => Line::Refused {
             why: why.to_string(),
