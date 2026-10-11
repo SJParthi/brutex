@@ -25,8 +25,12 @@
  * |---|---|---|
  * | which instruments exist | `/store.json` census, via `$lib/store.svelte.js` | ONE request per (feed, generation), ETag → 304 |
  * | which months, which rungs | the same census | free, same pass |
- * | Change, Change % | the census's own `chg_bps` | free, one Map probe |
- * | LTP, Open, High, Low, Volume, OI | `/bars/window.json` | ONE request PER SERIES |
+ * | LTP, Open, High, Low, Volume, OI | `/bars/window.json`, ONE bar | ONE seek PER SERIES |
+ * | Change, Change % | that bar's own `chg`: against the previous STORED bar at this timeframe, never a day change (DB-G17) | same request |
+ * | OI Change % | that bar's own `oichg`, with `oichg_why` (DB-G15) | same request |
+ * | Spot Price, Premium | `/spot.json`, at the bar's own instant (D-2807, D-3328) | ONE request per underlying and month, at most 400 instants each |
+ * | index strip order | `/aliases.json` `index`, in the order served (DB-G13) | ONE request per page |
+ * | a rung behind its source | the census cells' own `last_ts` (DB-G12) | free |
  *
  * That last row is the whole design problem. The census cannot carry a price:
  * `chg_bps` is a RATIO, and `/db` already recorded why a ratio is not enough —
@@ -51,14 +55,19 @@
  * repaint, which is how one broken series becomes a request storm.
  */
 
-import { ask } from '$lib/ask.js';
-import { pooled, IN_FLIGHT } from '$lib/pooled.js';
-import { parseKey } from '$lib/instrument.js';
-/* THE EXCHANGE'S DAY, NOT THE BROWSER'S. A bar timestamped 15:29 IST is
-   09:59 UTC, and a machine west of Greenwich would file the whole afternoon
-   session under the previous date. `$lib/dates.js` owns the `Asia/Kolkata`
-   clock; see `istDay` there for why a second spelling of it is forbidden. */
-import { istDay, istClock } from '$lib/dates.js';
+import { ask } from './ask.js';
+import { pooled, IN_FLIGHT } from './pooled.js';
+import { parseKey } from './instrument.js';
+/* THE EXCHANGE'S DAY, NOT THE BROWSER'S. `./dates.js` owns the `Asia/Kolkata`
+   clock and `./db/bars-plan.js` the IST day-and-time to instant conversion
+   `/db` uses for Go to; a second spelling of either is forbidden.
+   RELATIVE IMPORTS, so `web/tests/terminal.test.js` loads this module as it
+   is, with no bundler alias. */
+import { istDay, secondLabel } from './dates.js';
+import { istInstant } from './db/bars-plan.js';
+import { readSpots, spotKey, SPOT_CHUNK } from './moneyness.js';
+
+export { SPOT_CHUNK };
 
 /**
  * The tab strip — THREE ASSET CLASSES, AND DELIBERATELY NOT THE SOURCE
@@ -103,49 +112,46 @@ export const TABS = [
 ];
 
 /**
- * Which asset classes this feed's store can actually fill, right now.
+ * Which asset classes this feed's store can actually fill, right now, AND the
+ * census keys that could be filed under none of them.
  *
- * Derived from the census keys on every call — NOTHING here is a list of
+ * Derived from the census keys on every call: nothing here is a list of
  * instruments, and adding a symbol to the store is the only action that makes
- * it appear. That is the whole point: a hardcoded universe is correct the day
- * it is written and silently wrong the first time the store changes underneath
- * it, which is the defect `/db` recorded as a hardcoded span throwing away 40
- * of 121 months while reporting no hole.
+ * it appear. O(n) over census keys, once per census generation (the caller is
+ * a `$derived`).
  *
- * O(n) over census keys, once per call, where n is instruments HELD and not
- * instruments listed. The caller is a `$derived`, so it runs when the census
- * generation changes and not per repaint.
+ * A KEY THAT WILL NOT PARSE IS COUNTED AND NAMED, NOT DROPPED (DB-G32). It
+ * cannot be filed under a segment it never named, and until this returned
+ * `unparsed` it vanished from every count on the page, so the store looked
+ * smaller than it is. The page prints the count and the first few keys.
  *
  * @param {string[]} keys every instrument key the census holds for this feed
- * @returns {{id: string, label: string, keys: string[], why: string|null}[]}
+ * @returns {{tabs: {id: string, label: string, keys: string[], why: string|null}[],
+ *            indices: string[],
+ *            unparsed: {count: number, sample: string[]}}}
+ *          `indices` is every INDEX-segment key, in the order given: the
+ *          strip's candidates, which are in no tab.
  */
-export function tabsFrom(keys) {
+export function tabsAndRest(keys) {
   /** @type {Map<string, string[]>} */
   const bySegment = new Map();
   /** @type {Map<string, string[]>} */
   const byKind = new Map();
+  const unparsed = { count: 0, sample: /** @type {string[]} */ ([]) };
   for (const key of keys) {
     const p = parseKey(key);
-    // A KEY THAT WILL NOT PARSE IS DROPPED FROM THE TABS AND COUNTED NOWHERE.
-    // It cannot be filed under a segment it never named, and filing it under a
-    // guess is the invention section 3 rule 1 forbids.
-    //
-    // THIS COMMENT USED TO SAY "the page surfaces those separately", AND NO
-    // PAGE DOES. `tabsFrom` has one caller and it renders no parse refusal
-    // anywhere, so an unreadable census key vanishes from every count on the
-    // terminal and the store looks smaller than it is — precisely the outcome
-    // the sentence claimed was prevented. A comment that describes a safeguard
-    // nobody built is worse than no comment: it stops the next reader looking.
-    // `parseKey` does carry the `why`; surfacing it is work this page has not
-    // done, and saying so is the honest state until it does.
-    if (!p.underlying || !p.segment || !p.kind) continue;
+    if (!p.underlying || !p.segment || !p.kind) {
+      unparsed.count += 1;
+      if (unparsed.sample.length < UNPARSED_SAMPLE) unparsed.sample.push(String(key));
+      continue;
+    }
     if (!bySegment.has(p.segment)) bySegment.set(p.segment, []);
     (bySegment.get(p.segment) ?? []).push(key);
     if (!byKind.has(p.kind)) byKind.set(p.kind, []);
     (byKind.get(p.kind) ?? []).push(key);
   }
 
-  return TABS.map((tab) => {
+  const tabs = TABS.map((tab) => {
     const from = tab.sourced === 'segment' ? bySegment : byKind;
     const found = from.get(/** @type {string} */ (tab.match)) ?? [];
     return {
@@ -159,7 +165,17 @@ export function tabsFrom(keys) {
           `market with nothing to show.`
     };
   });
+  return { tabs, indices: bySegment.get('INDEX') ?? [], unparsed };
 }
+
+/** How many unreadable census keys are named; the count is always whole. */
+export const UNPARSED_SAMPLE = 5;
+
+/**
+ * The tabs alone; see {@link tabsAndRest}.
+ * @param {string[]} keys
+ */
+export const tabsFrom = (keys) => tabsAndRest(keys).tabs;
 
 /**
  * The `/bars/window.json` parameters for one census key.
@@ -190,80 +206,316 @@ export function seriesParams(key) {
 }
 
 /**
- * One quote's cache key. The four things that change the answer, and no more.
+ * A timeframe's length in seconds, or `null` for a name this page cannot read.
  *
- * @param {string} feed
- * @param {string} key
- * @param {string} timeframe
- * @param {string} month
- * @returns {string}
+ * `1s` is one second (DB-G32): the old pattern knew `min` and `day` only, so
+ * `1s` came back as "unknown", sorted as the COARSEST rung and would have been
+ * the default beside any minute rung.
+ *
+ * @param {unknown} t `1s`, `5min`, `1day`, ...
+ * @returns {number|null}
  */
-export const quoteKey = (feed, key, timeframe, month) =>
-  `${feed}|${key}|${timeframe}|${month}`;
+export function timeframeSeconds(t) {
+  const m = String(t ?? '').match(/^([1-9]\d*)(s|min|day)$/);
+  if (!m) return null;
+  return Number(m[1]) * (m[2] === 's' ? 1 : m[2] === 'min' ? 60 : 86_400);
+}
 
 /**
- * CACHED ON THE PROMISE, NOT THE ANSWER.
+ * Timeframe order by duration: `1s` below `1min`, `2min` below `10min`, `1day`
+ * last. A name that will not read sorts after every name that does, so it can
+ * never be taken for the finest rung.
+ * @param {unknown} t @returns {number}
+ */
+export function timeframeOrder(t) {
+  return timeframeSeconds(t) ?? Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * WHETHER A CELL'S LAST BAR IS BEHIND THE FINER RUNG IT IS FOLDED FROM (DB-G12).
  *
- * A cache of finished reads lets two rows that want the same series in the same
- * frame both miss, both fetch, and both fill it — one request wasted per
- * duplicate, every time. Storing the in-flight promise means the second asker
- * awaits the first asker's request. `/db` learned this on bar files and the
- * note there says the same thing; this is that lesson applied to quotes.
+ * A derived rung (D-3000) is folded from the feed's finer bars. When that fold
+ * stopped early, the rung's month ends days before its source does, and its
+ * "last bar" is an old bar under the month's name: Zerodha NIFTY 60min for
+ * Sep 2026 ended on the 4th while 1min reached the 30th, so the page printed
+ * the 4th's close as the month's.
+ *
+ * The census already carries each cell's `last` stamp, so this costs no
+ * request: it reads the instrument's own cells for the month, takes the
+ * FINEST rung held there as the source (whatever the feed calls it), and
+ * answers `behind` when the source holds a bar at or after the END of this
+ * cell's last bucket: a bucket this rung should hold and does not.
+ *
+ * @param {{month: string, timeframe: string, last: number|null}[]|undefined} cells
+ *        the instrument's census cells; `last` in MICROSECONDS
+ * @param {string} timeframe @param {string} month
+ * @returns {{source: string, last: number, sourceLast: number, lastDay: string, sourceDay: string, text: string}|null}
+ */
+export function behindSource(cells, timeframe, month) {
+  const own = timeframeSeconds(timeframe);
+  if (!cells || own === null) return null;
+  let mine = null;
+  let finest = null;
+  let finestSecs = own;
+  for (const cell of cells) {
+    if (cell.month !== month || typeof cell.last !== 'number') continue;
+    if (cell.timeframe === timeframe) {
+      mine = cell;
+      continue;
+    }
+    const secs = timeframeSeconds(cell.timeframe);
+    if (secs !== null && secs < finestSecs) {
+      finest = cell;
+      finestSecs = secs;
+    }
+  }
+  if (!mine || !finest) return null;
+  const last = /** @type {number} */ (mine.last);
+  const sourceLast = /** @type {number} */ (finest.last);
+  if (sourceLast < last + own * 1_000_000) return null;
+  const lastDay = istDay(last / 1000);
+  const sourceDay = istDay(sourceLast / 1000);
+  return {
+    source: finest.timeframe,
+    last,
+    sourceLast,
+    lastDay,
+    sourceDay,
+    text: `behind ${finest.timeframe} (last ${lastDay})`
+  };
+}
+
+/** How many indices the strip draws. */
+export const STRIP_MAX = 6;
+
+/**
+ * THE INDEX STRIP, IN THE SERVER'S OWN ORDER (DB-G13).
+ *
+ * The strip was the first six INDEX names in alphabetical order out of 135,
+ * which on Zerodha is BANKNIFTY and five bond indices, with NIFTY not shown.
+ * `/aliases.json` serves the index names this store keys, the F&O index
+ * underlyings first and NIFTY then BANKNIFTY at their head, each with the key
+ * it is stored under. So the order is read, not typed here:
+ *
+ *   1. the F&O index underlyings the census holds, in the order served. They
+ *      appear even when the chosen cell is absent; their cell then says why.
+ *   2. the other served index names that hold the chosen cell, in that order;
+ *   3. every other index that holds the chosen cell, by name.
+ *
+ * @param {string[]} indexKeys every INDEX-segment key the census holds, sorted
+ * @param {(key: string) => boolean} holdsCell whether a key holds the chosen cell
+ * @param {{key: string, fno: boolean}[]} served `/aliases.json` `index`, in order; `[]` when unread
+ * @param {number} [limit]
+ * @returns {string[]}
+ */
+export function stripOf(indexKeys, holdsCell, served, limit = STRIP_MAX) {
+  const held = new Set(indexKeys);
+  /** @type {string[]} */
+  const out = [];
+  const seen = new Set();
+  /** @param {string} key */
+  const take = (key) => {
+    if (out.length < limit && !seen.has(key)) {
+      seen.add(key);
+      out.push(key);
+    }
+  };
+  for (const s of served) if (s.fno && held.has(s.key)) take(s.key);
+  for (const s of served) if (!s.fno && held.has(s.key) && holdsCell(s.key)) take(s.key);
+  for (const key of indexKeys) {
+    if (out.length >= limit) break;
+    if (holdsCell(key)) take(key);
+  }
+  return out;
+}
+
+/**
+ * A change in a value's own units from the value and its change in integer
+ * basis points: `value - value / (1 + bps / 10000)`.
+ *
+ * DERIVED, never measured: the wire carries the value and the ratio, not the
+ * earlier value. `null` when there is nothing to derive from, and at exactly
+ * -10000 bps, where the divisor is zero and the earlier value cannot be
+ * recovered from a ratio at all.
+ *
+ * @param {number|null|undefined} value @param {number|null|undefined} bps
+ * @returns {number|null}
+ */
+export function moveFromBps(value, bps) {
+  if (typeof value !== 'number' || typeof bps !== 'number') return null;
+  if (bps === -10_000) return null;
+  const before = value / (1 + bps / 10_000);
+  if (!Number.isFinite(before)) return null;
+  return value - before;
+}
+
+/**
+ * A bar column's header: the name, and whose change or volume it is (DB-G17).
+ * `Change %` copied a broker terminal's DAY change, but the cell is the last
+ * bar's move against the bar before it at the chosen timeframe: one second on
+ * a `1s` rung.
+ * @param {string} name @param {string} timeframe
+ */
+export const barHeader = (name, timeframe) => `${name} · last bar (${timeframe || 'no timeframe'})`;
+
+/* ====================================================================
+   THE ONE REQUEST POOL, AND ITS MEASURED COUNT (DB-G86, RA-143)
+   --------------------------------------------------------------------
+   Every request this page makes goes through `gated`: the quote seeks, the
+   spot joins and the strip's order. At most `traffic.cap` are in flight at
+   once, page-wide, however many batches are alive; before this, each batch
+   had its own six and a superseded batch's started reads ran beside the new
+   one's. The counters are what the page prints, so the fan-out is a number
+   on screen and not an estimate: `sent` requests, `peak` in flight.
+   ==================================================================== */
+
+/** The page's request counters. `peak` never exceeds `cap`. */
+export const traffic = { cap: IN_FLIGHT, inFlight: 0, peak: 0, sent: 0, waited: 0 };
+
+/** Waiters for a slot, read from `head` so taking one is O(1). @type {(() => void)[]} */
+let waiting = [];
+let head = 0;
+
+/** The transport. Replaced only by tests. @type {typeof ask} */
+let transport = ask;
+
+/**
+ * Points every request of this module at `request`, and empties its caches
+ * and counters. For tests; the page never calls it.
+ * @param {typeof ask} [request]
+ */
+export function useTransport(request = ask) {
+  transport = request;
+  forgetQuotes();
+  aliases = null;
+  traffic.inFlight = 0;
+  traffic.peak = 0;
+  traffic.sent = 0;
+  traffic.waited = 0;
+  waiting = [];
+  head = 0;
+}
+
+function release() {
+  if (head < waiting.length) {
+    const next = waiting[head];
+    head += 1;
+    if (head === waiting.length) {
+      waiting = [];
+      head = 0;
+    }
+    // The slot passes straight to the next waiter: `inFlight` does not move.
+    next();
+  } else {
+    traffic.inFlight -= 1;
+  }
+}
+
+/**
+ * One request through the page's pool.
+ * @param {string} url @param {{signal?: AbortSignal}} [options]
+ * @returns {Promise<Response>}
+ */
+export async function gated(url, options = {}) {
+  if (traffic.inFlight < traffic.cap) {
+    traffic.inFlight += 1;
+  } else {
+    traffic.waited += 1;
+    await new Promise((resolve) => waiting.push(() => resolve(undefined)));
+  }
+  if (traffic.inFlight > traffic.peak) traffic.peak = traffic.inFlight;
+  try {
+    options.signal?.throwIfAborted();
+    traffic.sent += 1;
+    return await transport(url, options);
+  } finally {
+    release();
+  }
+}
+
+/**
+ * One quote's cache key: the six things that change the answer.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe
+ * @param {string} month @param {string} [day] @param {string} [time]
+ * @returns {string}
+ */
+export const quoteKey = (feed, key, timeframe, month, day = '', time = '') =>
+  `${feed}|${key}|${timeframe}|${month}|${day}|${time}`;
+
+/**
+ * CACHED ON THE PROMISE, NOT THE ANSWER, so two rows that want the same series
+ * in one frame make one request. A failure is cached as a failure: a cell that
+ * could not be read must not retry on every repaint.
+ *
+ * BOUNDED: at most {@link QUOTE_CACHE} entries, oldest out first (a `Map`
+ * keeps insertion order, so the eviction is one `delete`). Scrubbing through
+ * times on a `1s` rung would otherwise grow it for the life of the tab.
  *
  * @type {Map<string, Promise<Quote>>}
  */
 const inflight = new Map();
 
+/** The most quotes held at once. */
+export const QUOTE_CACHE = 4_096;
+
 /**
  * @typedef {object} Quote
  * @property {string} key         the census key this answers for
- * @property {number|null} close  last close, PAISA INTEGER, or null
+ * @property {number|null} close  the bar's close, PAISA INTEGER, or null
  * @property {number|null} open
  * @property {number|null} high
  * @property {number|null} low
- * @property {number|null} volume
+ * @property {number|null} volume null when the bar has no traded volume (`volumeWhy`)
+ * @property {string|null} volumeWhy the server's word for a volume that is not one (`index_no_volume`)
  * @property {number|null} oi     open interest, or null when the store filed the null sentinel
- * @property {number|null} chg    change on the bar, INTEGER BASIS POINTS, or null
+ * @property {number|null} chg    change against the previous STORED bar, INTEGER BASIS POINTS, or null
  * @property {string|null} chgWhy the reason `chg` is null, or null
+ * @property {number|null} oichg  open-interest change against the previous stored bar, INTEGER BASIS POINTS, or null
+ * @property {string|null} oichgWhy the reason `oichg` is null, or null
  * @property {number|null} at     the bar's timestamp, epoch SECONDS
+ * @property {number|null} asked  the instant asked for with a time, epoch seconds, or null
+ * @property {number|null} lag    seconds from the bar to the instant asked, 0 for an exact hit, or null
+ * @property {string|null} faults the server's word when a record in the window would not read
  * @property {string|null} why    why this quote holds nothing at all
  */
 
 /**
- * ONE BAR AS A QUOTE — the single mapping from the wire's row to this page's.
- *
- * Extracted so the two fetch paths cannot disagree about what a bar means. The
- * cheap path asks for `limit=1` and reads the month's last bar; the day path
- * reads a whole month and picks a bar out of it. Two copies of this mapping
- * would drift the first time a field is added, and the drift would be invisible
- * — both paths would render, and only one would be right.
+ * ONE BAR AS A QUOTE: the single mapping from the wire's row to this page's.
  *
  * @param {string} key
  * @param {any} bar
  * @returns {Quote}
  */
-function fromBar(key, bar) {
+export function fromBar(key, bar) {
+  const volumeWhy = typeof bar.v_why === 'string' ? bar.v_why : null;
   return {
     key,
     close: typeof bar.c === 'number' ? bar.c : null,
     open: typeof bar.o === 'number' ? bar.o : null,
     high: typeof bar.h === 'number' ? bar.h : null,
     low: typeof bar.l === 'number' ? bar.l : null,
-    volume: typeof bar.v === 'number' ? bar.v : null,
-    // NULL IS THE WIRE'S OWN WORD HERE, not a coercion. The server writes
-    // `null` when the record carries `OI_NULL`, and `CLAUDE.md` section 7 says
-    // the sentinel means absent while zero means zero. Reading a missing open
-    // interest as `0` is the single defect most visible in the captures this
-    // page recreates.
+    // A `0` beside `index_no_volume` is not a traded volume of zero (D-3322).
+    volume: volumeWhy === null && typeof bar.v === 'number' ? bar.v : null,
+    volumeWhy,
+    // NULL IS THE WIRE'S OWN WORD: the server writes `null` for `OI_NULL`, and
+    // the sentinel means absent while zero means zero (`CLAUDE.md` section 7).
     oi: typeof bar.oi === 'number' ? bar.oi : null,
     chg: typeof bar.chg === 'number' ? bar.chg : null,
     chgWhy: typeof bar.chg_why === 'string' ? bar.chg_why : null,
+    // DB-G15: the window has carried these since D-3325 and this mapping
+    // dropped them, so the OI Change columns were drawn as "no source".
+    oichg: typeof bar.oichg === 'number' ? bar.oichg : null,
+    oichgWhy: typeof bar.oichg_why === 'string' ? bar.oichg_why : null,
     at: typeof bar.t === 'number' ? bar.t : null,
+    asked: null,
+    lag: null,
+    faults: null,
     why: null
   };
 }
 
-/** A quote that answers nothing, and says which reason. @param {string} key @param {string} why */
+/** A quote that answers nothing, and says which reason. @param {string} key @param {string} why @returns {Quote} */
 const nothing = (key, why) => ({
   key,
   close: null,
@@ -271,372 +523,178 @@ const nothing = (key, why) => ({
   high: null,
   low: null,
   volume: null,
+  volumeWhy: null,
   oi: null,
   chg: null,
   chgWhy: null,
+  oichg: null,
+  oichgWhy: null,
   at: null,
+  asked: null,
+  lag: null,
+  faults: null,
   why
 });
 
 /**
- * The newest bar this store holds for one series, or a named reason it holds
- * none.
+ * THE ONE-BAR QUESTION, AS A URL (DB-G16, DB-G86).
  *
- * ONE ROW, ASKED FOR AS ONE ROW. `limit=1&sort=ts&dir=desc` is a seek, not a
- * scan — `/bars/window.json` distinguishes the two on the wire and says which
- * it did, and asking for the whole month to read its last line would be the
- * scan this endpoint was built to avoid. Measured elsewhere in this tree at
- * about 81 bytes per bar, so a month asked for whole to find one close is
- * roughly 8,000 wasted bytes per row per repaint.
+ * Always `limit=1&sort=ts&dir=desc`, which `/bars/window.json` answers with a
+ * seek and says so (`scanned: false`):
  *
- * NEVER THROWS. Every failure — a refused parameter, a transport error, a
- * timeout, a body that is not a window — comes back as a `Quote` whose numbers
- * are `null` and whose `why` is the reason, because a table renders cells and a
- * cell has to say something. A rejection here would take out the other sixteen
- * rows in the same pool.
+ *   no day        the month's last bar;
+ *   a day         `from_day` and `to_day` both that day: the day's last bar;
+ *   a day, a time `at=` that IST instant as well: the last bar AT OR BEFORE
+ *                 it on that day. Never a later bar.
  *
- * @param {string} feed
+ * Until the window took day bounds this page read the first 512 bars of the
+ * month and looked through them, which reaches 09:23:31 of the first day of a
+ * `1s` month and nothing else.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe
+ * @param {string} month `YYYY-MM` @param {string} [day] `YYYY-MM-DD` or `''`
+ * @param {string} [time] `HH:MM` or `HH:MM:SS` in IST, or `''`
+ * @returns {{url: string, at: number|null} | {why: string}}
+ */
+export function windowUrl(feed, key, timeframe, month, day = '', time = '') {
+  const parts = seriesParams(key);
+  if (!parts) return { why: `${key} is not a series key this store can name.` };
+  const q = new URLSearchParams({
+    feed,
+    exchange: parts.exchange,
+    segment: parts.segment,
+    symbol: parts.symbol,
+    contract: parts.contract,
+    timeframe,
+    from: month,
+    to: month,
+    sort: 'ts',
+    dir: 'desc',
+    limit: '1'
+  });
+  let at = null;
+  if (day) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day.slice(0, 7) !== month) {
+      return { why: `${day} is not a day of ${month}, so there is no bar of that month to read for it.` };
+    }
+    q.set('from_day', day);
+    q.set('to_day', day);
+    if (time) {
+      at = istInstant(day, time);
+      if (at === null) return { why: `${time} is not an IST time of day (HH:MM or HH:MM:SS).` };
+      q.set('at', String(at));
+    }
+  } else if (time) {
+    return { why: `A time needs a day: ${time} was asked with no date.` };
+  } else {
+    q.set('offset', '0');
+  }
+  return { url: `/bars/window.json?${q}`, at };
+}
+
+/**
+ * The quote one `/bars/window.json` answer holds, or the named reason it
+ * holds none. Pure: the answer in, the quote out.
+ *
  * @param {string} key
- * @param {string} timeframe
- * @param {string} month `YYYY-MM`
+ * @param {any} body the parsed answer, or null when it was not JSON
+ * @param {number} status the HTTP status
+ * @param {{timeframe: string, month: string, day?: string, time?: string, at?: number|null}} asked
+ * @returns {Quote}
+ */
+export function quoteFrom(key, body, status, asked) {
+  const { timeframe, month, day = '', time = '', at = null } = asked;
+  if (!body || !Array.isArray(body.bars)) {
+    return nothing(
+      key,
+      typeof body?.error === 'string'
+        ? body.error
+        : `/bars/window.json answered HTTP ${status} with no window, so there is no bar ` +
+            `to read and no reason recorded for it.`
+    );
+  }
+  const faults = typeof body.faults === 'string' ? body.faults : null;
+  const bar = body.bars[0];
+  if (!bar) {
+    /* THREE ABSENCES, NOT ONE. A damaged record is a fact about this read; a
+       day with no bars is a fact about the store; and neither says the market
+       did not trade. */
+    if (faults) {
+      return nothing(
+        key,
+        `The store holds ${month} for this series but a record would not read: ${faults}` +
+          (day ? `. Whether it holds ${day} is not something this read can say.` : '')
+      );
+    }
+    if (day) {
+      return nothing(
+        key,
+        `The store holds no ${timeframe} bars for this series on ${day}. The day was ` +
+          `asked by its own bounds, so this is the whole day: the series did not trade ` +
+          `then, or its bars were never stored.`
+      );
+    }
+    return nothing(key, `The store holds no ${timeframe} bars for this series in ${month}.`);
+  }
+  const quote = fromBar(key, bar);
+  quote.faults = faults;
+  if (at !== null) {
+    if (quote.at === null || quote.at > at) {
+      /* NEVER A LATER BAR FOR AN EARLIER TIME. With no bar at or before the
+         instant, the window's page holds the day's FIRST bar, which is after
+         it; showing that would be look-ahead. */
+      return nothing(
+        key,
+        `This series has no ${timeframe} bar at or before ${time} on ${day}` +
+          (quote.at === null ? '.' : `: its first bar that day is stamped ${secondLabel(quote.at * 1000)}.`) +
+          ` A later bar is never shown for an earlier time.`
+      );
+    }
+    quote.asked = at;
+    quote.lag = at - quote.at;
+  }
+  return quote;
+}
+
+/**
+ * The quote for one series: the month's last bar, a day's last bar, or the
+ * last bar at or before a time on that day. ONE seek on the wire in every
+ * case (see {@link windowUrl}).
+ *
+ * NEVER THROWS. A refused parameter, a transport error, a timeout or a body
+ * that is not a window comes back as a `Quote` whose numbers are `null` and
+ * whose `why` is the reason; a rejection would take out the other rows of the
+ * same batch.
+ *
+ * @param {string} feed @param {string} key @param {string} timeframe
+ * @param {string} month @param {string} [day] `YYYY-MM-DD`, or `''`
+ * @param {string} [time] `HH:MM[:SS]` in IST, or `''` for the day's last bar
  * @returns {Promise<Quote>}
  */
-export function quote(feed, key, timeframe, month) {
-  const id = quoteKey(feed, key, timeframe, month);
+export function quoteOn(feed, key, timeframe, month, day = '', time = '') {
+  const id = quoteKey(feed, key, timeframe, month, day, time);
   const held = inflight.get(id);
   if (held) return held;
 
   const run = (async () => {
-    const parts = seriesParams(key);
-    if (!parts) {
-      return nothing(key, `${key} is not a series key this store can name.`);
-    }
-    const q = new URLSearchParams({
-      feed,
-      exchange: parts.exchange,
-      segment: parts.segment,
-      symbol: parts.symbol,
-      contract: parts.contract,
-      timeframe,
-      from: month,
-      to: month,
-      sort: 'ts',
-      dir: 'desc',
-      offset: '0',
-      limit: '1'
-    });
+    const asked = windowUrl(feed, key, timeframe, month, day, time);
+    if ('why' in asked) return nothing(key, asked.why);
     try {
-      const res = await ask(`/bars/window.json?${q}`);
+      const res = await gated(asked.url);
       const body = await res.json().catch(() => null);
-      if (!body || !Array.isArray(body.bars)) {
-        return nothing(
-          key,
-          body?.error ??
-            `/bars/window.json answered HTTP ${res.status} with no window, so ` +
-              `there is no bar to read and no reason recorded for it.`
-        );
-      }
-      const bar = body.bars[0];
-      if (!bar) {
-        // 206 AND AN EMPTY WINDOW ARE DIFFERENT ABSENCES. `faults` means a
-        // record would not read — the month exists and part of it is damaged.
-        // No faults and no bars means the month simply is not held. A reader
-        // must be able to tell those apart; both are absences and only one is a
-        // fault.
-        return nothing(
-          key,
-          body.faults
-            ? `The store holds ${month} for this series but a record would not ` +
-              `read: ${body.faults}`
-            : `The store holds no ${timeframe} bars for this series in ${month}.`
-        );
-      }
-      return fromBar(key, bar);
+      return quoteFrom(key, body, res.status, { timeframe, month, day, time, at: asked.at });
     } catch (error) {
       const e = /** @type {any} */ (error);
       return nothing(key, String(e && e.message ? e.message : e));
     }
   })();
 
+  if (inflight.size >= QUOTE_CACHE) {
+    const oldest = inflight.keys().next().value;
+    if (oldest !== undefined) inflight.delete(oldest);
+  }
   inflight.set(id, run);
   return run;
-}
-
-/* `quotesFor` WAS REMOVED. It was exported, had no importer anywhere in
-   `web/src` or `web/tests`, and was superseded by `quotesOn` the day the day
-   and time pickers landed — `quotesOn` with an empty `day` takes the identical
-   cheap path. The one comment that named it pointed a reader at the wrong
-   function for the live mechanism. Two spellings of one job, one of them
-   unreachable. */
-
-/**
- * How many bars this page will read to answer a question about ONE DAY.
- *
- * # Why there is a budget at all, and why the census decides before the fetch
- *
- * `/bars/window.json` takes a MONTH range and has no day parameter. So the only
- * honest way to answer "what did this instrument do on the 12th" is to read the
- * month and look — there is no seek to a day, and inventing one by multiplying
- * a bars-per-day guess by a day index would be arithmetic on an assumption,
- * which section 3 rule 1 forbids.
- *
- * Reading a month costs what the month holds, and that varies by three orders
- * of magnitude: a `1day` month is about 21 bars, a `60min` month about 150, a
- * `1min` month about 8,000. Measured elsewhere in this tree at roughly 81 bytes
- * per bar, seventeen visible rows of `1min` is about 11 MB to fill one screen.
- *
- * The census already carries `rows` per instrument-month-timeframe, so the cost
- * is KNOWN BEFORE ANYTHING IS FETCHED and the check is one Map probe — see
- * `store.byCell`.
- *
- * WHERE 512 ACTUALLY FALLS, counted rather than guessed. This paragraph used to
- * claim it admitted "down to about `5min`" and refused "the two finest", and
- * both halves were wrong — by a factor of three on the rung and by three on the
- * count. Against the measured figures above (a `1day` month ~21 bars, `60min`
- * ~150, `1min` ~8,000) and `docs/06-limits.md`, which records a real
- * `15min` month at 475 bars:
- *
- *   admitted   1day ~21 · 60min ~150 · 30min ~275 · 15min 475 (measured)
- *   refused    10min ~750 · 5min ~1,425 · 3min · 2min · 1min ~7,125
- *
- * So it admits four rungs and refuses five, and `5min` is on the refused side
- * rather than the admitted one. A reader following the old sentence would have
- * expected day selection to work at `5min`, where it never can, and anyone
- * re-tuning this constant would have started from a number wrong by 3x.
- *
- * The refusal is shown with the count so the reader can see which side of the
- * line they are on rather than finding a control mysteriously disabled.
- */
-export const DAY_BUDGET = 512;
-
-/**
- * Every bar the store holds for one (feed, key, timeframe, month), ascending.
- *
- * CACHED ON THE PROMISE, like `quote`, and for the same reason: seventeen rows
- * asking for the same series in one frame make one request.
- *
- * `limit` is the budget rather than the month's true count, so a caller that
- * ignores the census guard still cannot pull an unbounded body. `dir=asc` so
- * the array is in time order and the LAST match for a day is that day's close
- * without a second sort.
- *
- * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
- * @returns {Promise<{bars: any[], why: string|null, faults: string|null, total: number}>}
- *          `faults` is the server's word when a record in the month would not
- *          read (it answers 206 for that), and `total` is the month's real bar
- *          count against `bars`, which is only the page this budget asked for.
- *          Both are carried because dropping them collapses three different
- *          absences into one wrong sentence downstream.
- */
-export function monthBars(feed, key, timeframe, month) {
-  const id = `bars|${quoteKey(feed, key, timeframe, month)}`;
-  const held = months.get(id);
-  if (held) return held;
-
-  const run = (async () => {
-    const parts = seriesParams(key);
-    if (!parts) {
-      return {
-        bars: [],
-        why: `${key} is not a series key this store can name.`,
-        faults: null,
-        total: 0
-      };
-    }
-    const q = new URLSearchParams({
-      feed,
-      exchange: parts.exchange,
-      segment: parts.segment,
-      symbol: parts.symbol,
-      contract: parts.contract,
-      timeframe,
-      from: month,
-      to: month,
-      sort: 'ts',
-      dir: 'asc',
-      offset: '0',
-      limit: String(DAY_BUDGET)
-    });
-    try {
-      const res = await ask(`/bars/window.json?${q}`);
-      const body = await res.json().catch(() => null);
-      if (!body || !Array.isArray(body.bars)) {
-        return {
-          bars: [],
-          why:
-            body?.error ??
-            `/bars/window.json answered HTTP ${res.status} with no window for ${month}.`,
-          faults: null,
-          total: 0
-        };
-      }
-      /* `faults` AND `total` TRAVEL WITH THE BARS, because dropping them turns
-         two different absences into one wrong sentence.
-         ---------------------------------------------------------------------
-         `faults` is non-null when a record in the month would not read, and the
-         server answers 206 for it. Discarding it made a DAMAGED month
-         indistinguishable from a complete one, so `quoteOn` went on to state
-         that the series did not trade that day — converting "part of this month
-         is unreadable" into a factual claim about the market. The single-bar
-         path in this same module reads `faults` and says exactly why: a reader
-         must be able to tell those apart.
-
-         `total` is the month's real bar count. `bars` is the server's page,
-         capped at `DAY_BUDGET` by the `limit` this function pins, so reporting
-         `bars.length` as the store's holding states the budget as if it were
-         the month — and then concludes a day is absent when it is merely past
-         the truncation point. */
-      return {
-        bars: body.bars,
-        why: null,
-        faults: typeof body.faults === 'string' ? body.faults : null,
-        total: typeof body.total === 'number' ? body.total : body.bars.length
-      };
-    } catch (error) {
-      const e = /** @type {any} */ (error);
-      return { bars: [], why: String(e && e.message ? e.message : e), faults: null, total: 0 };
-    }
-  })();
-
-  months.set(id, run);
-  return run;
-}
-
-/** @type {Map<string, Promise<{bars: any[], why: string|null, faults: string|null, total: number}>>} */
-const months = new Map();
-
-/**
- * The quote for one series AS OF one day, or the month's last when no day is
- * chosen.
- *
- * The empty `day` takes the cheap path — `limit=1`, one bar on the wire — so
- * the default view costs exactly what it did before days existed. A named day
- * reads the month and picks the LAST bar whose IST calendar date matches, which
- * is that day's close at this timeframe.
- *
- * A day the series did not trade is an ABSENCE WITH A REASON, not an empty row:
- * the month was read, the day was looked for, and it is not there. That is a
- * different fact from "the store holds no bars for this month", and both are
- * different from "nobody asked" — and different again from the two this
- * function now separates below: a month whose records partly would not read,
- * and a month longer than the budget that was read only as far as the cap.
- *
- * @param {string} feed @param {string} key @param {string} timeframe
- * @param {string} month @param {string} day `YYYY-MM-DD`, or `''` for the month's last bar
- * @param {string} [time] `HH:MM` in IST, or `''` for the day's last bar. Named
- *        here because the code branches on it and a doc that omits a parameter
- *        the function reads describes a different function.
- * @returns {Promise<Quote>}
- */
-export async function quoteOn(feed, key, timeframe, month, day, time = '') {
-  if (!day) return quote(feed, key, timeframe, month);
-  const { bars, why, faults, total } = await monthBars(feed, key, timeframe, month);
-  if (why) return nothing(key, why);
-
-  /* THE LAST MATCH WINS, WHICH IS WHAT MAKES THIS A CLOSE.
-     Bars arrive ascending, so folding forward and keeping the last one whose
-     IST date matches leaves that day's FINAL bar — the day's close at this
-     timeframe. With a minute named as well, the match is exact and there is at
-     most one, so "last" and "only" coincide. */
-  let found = null;
-  let onDay = 0;
-  /* THE LATEST DAY THIS READ ACTUALLY REACHED, folded in the same pass.
-     The truncation branch below used to assert that a missing day was "past
-     the cut" without ever checking, so a day sitting well INSIDE the part that
-     was read — genuinely absent, a holiday or an unpulled day — was told the
-     page's budget had hidden it. That is a wrong reason stated confidently,
-     which reads as an answer. Taken as a MAXIMUM rather than as the last
-     element, so the claim does not rest on the ascending order the comment
-     above merely asserts. */
-  let reached = '';
-  for (const bar of bars) {
-    if (typeof bar.t !== 'number') continue;
-    const ms = bar.t * 1000;
-    const d = istDay(ms);
-    if (d > reached) reached = d;
-    if (d !== day) continue;
-    onDay += 1;
-    if (!time || istClock(ms) === time) found = bar;
-  }
-
-  /* WHAT THIS READ COULD NOT SEE, in the words the branches below share.
-     Both of them describe a day, and both were written as though the month had
-     arrived whole — but `monthBars` reports two ways it may not have, and
-     neither branch consulted them before asserting. */
-  const partial = faults
-    ? ` A record in ${month} would not read (${faults}), so this day may be ` +
-      `held only in part.`
-    : total > bars.length
-      ? ` Only the first ${bars.length.toLocaleString('en-IN')} of ` +
-        `${total.toLocaleString('en-IN')} bars in ${month} were read — the ` +
-        `budget stops at ${DAY_BUDGET.toLocaleString('en-IN')} — so this day ` +
-        `may be held only in part.`
-      : '';
-
-  if (!found && onDay > 0) {
-    /* THE DAY IS HELD AND THE MINUTE IS NOT. A different absence from the ones
-       below, and the count is what tells them apart for the reader.
-       The closing sentence is now EARNED rather than assumed: it claims the day
-       was read whole only when neither a damaged record nor the budget cut
-       stands between this read and the rest of the month. */
-    return nothing(
-      key,
-      `The store holds ${onDay} ${timeframe} bars for this series on ${day}, ` +
-        `and none of the ones read is stamped ${time}.` +
-        (partial || ` The day was read whole and that minute is not in it.`)
-    );
-  }
-  if (!found) {
-    /* THREE REASONS A DAY IS NOT HERE, AND THEY ARE NOT INTERCHANGEABLE.
-       This said one thing — "this series did not trade that day" — for all
-       three, which is a claim about the MARKET made from a fact about the read.
-       A damaged record and a truncated page are facts about this request. */
-    if (faults) {
-      return nothing(
-        key,
-        `The store holds ${month} for this series, but a record in it would ` +
-          `not read: ${faults}. ${day} may be inside the damaged part, so ` +
-          `whether this series traded that day is not something this read can say.`
-      );
-    }
-    if (total > bars.length) {
-      const cut =
-        `${month} holds ${total.toLocaleString('en-IN')} ${timeframe} bars for ` +
-        `this series and only the first ${bars.length.toLocaleString('en-IN')} ` +
-        `were read — the budget stops at ${DAY_BUDGET.toLocaleString('en-IN')}. `;
-      /* WHICH SIDE OF THE CUT THE DAY IS ON, ASKED RATHER THAN ASSUMED.
-         Past what the read reached, the budget is the honest reason. At or
-         before it, the day sits inside the part that WAS read and is absent
-         from it, so blaming the budget would name the wrong cause — and the
-         wrong cause sends the operator to change the timeframe, which would
-         not bring the day back. */
-      if (reached && day > reached) {
-        return nothing(
-          key,
-          cut +
-            `${day} is past ${reached}, the last day this read reached, so its ` +
-            `absence here is this page's limit and not the store's. A coarser ` +
-            `timeframe puts the whole month inside the budget.`
-        );
-      }
-      return nothing(
-        key,
-        cut +
-          `${day} is not past ${reached || 'the start of the month'}, so it lies ` +
-          `inside the part that was read and has no bars there — this series did ` +
-          `not trade that day, or its bars were never pulled. The cut is real but ` +
-          `it is not what is hiding this day.`
-      );
-    }
-    return nothing(
-      key,
-      `The store holds ${bars.length} ${timeframe} bars for this series in ` +
-        `${month}, and none of them fall on ${day}. The month was read whole and ` +
-        `the day is not in it — this series did not trade that day, or its bars ` +
-        `were never pulled.`
-    );
-  }
-  return fromBar(key, found);
 }
 
 /**
@@ -654,89 +712,136 @@ export function quotesOn(feed, rows, day, time = '', signal) {
 }
 
 /**
- * The minutes this series is stamped with on one day, ascending, as `HH:MM`.
+ * THE UNDERLYING'S SPOT FOR EACH CONTRACT QUOTE, AT THAT BAR'S OWN INSTANT
+ * (DB-G15).
  *
- * Folded out of bars already fetched and cached by `monthBars`, so this costs a
- * Map probe and a pass over an array bounded by `DAY_BUDGET`.
+ * `/spot.json` already joins a contract's bar to its underlying's series, and
+ * `/db` already reads it through `readSpots`; this is that reader, not a
+ * second one. One request per underlying, timeframe and month, each holding at
+ * most {@link SPOT_CHUNK} (400) instants, so seventeen rows of one chain are
+ * one request and a widened 250-row view of one underlying is still one.
  *
- * A `1day` series returns ONE minute, and that is not a defect to hide: a
- * timeframe with one bar a day has one time, and the caller can see from the
- * length that there is nothing to choose between. Deciding here that one is the
- * same as none would be this module guessing at presentation.
+ * `exact` is the default (D-2807): the spot stamped at the bar's own second.
+ * `prev` opts in to the last spot at or before it, and the answer then
+ * carries its age (D-3328). Never a later spot.
  *
- * @param {string} feed @param {string} key @param {string} timeframe
- * @param {string} month @param {string} day `YYYY-MM-DD`
- * @returns {Promise<{times: string[], why: string|null}>} `why` is the reason
- *          the month could not be read, so an empty list and a failed read are
- *          not the same answer.
+ * @param {string} feed
+ * @param {Quote[]} quotes the quotes on screen; only contracts with a bar are asked
+ * @param {string} timeframe
+ * @param {AbortSignal} signal
+ * @param {'exact'|'prev'} [asof]
+ * @returns {Promise<Map<string, import('./moneyness.js').SpotAnswer>>} by census key
  */
-export async function timesOn(feed, key, timeframe, month, day) {
-  if (!day) return { times: [], why: null };
-  // The `why` travels for the reason `daysIn` states directly above.
-  const { bars, why } = await monthBars(feed, key, timeframe, month);
-  /** @type {Set<string>} */
-  const times = new Set();
-  for (const bar of bars) {
-    if (typeof bar.t !== 'number') continue;
-    const ms = bar.t * 1000;
-    if (istDay(ms) !== day) continue;
-    const c = istClock(ms);
-    if (c) times.add(c);
+export async function spotsFor(feed, quotes, timeframe, signal, asof = 'exact') {
+  /** @type {{instrument: string, tf: string, ts: number, side: string}[]} */
+  const rows = [];
+  for (const q of quotes) {
+    if (!q || q.at === null) continue;
+    const p = parseKey(q.key);
+    if (p.kind !== 'future' && p.kind !== 'option') continue;
+    // `readSpots` asks for every row that names a side; a future has none of
+    // its own and is asked the same question, so it is given the word FUT.
+    rows.push({ instrument: q.key, tf: timeframe, ts: q.at * 1000, side: p.side ?? 'FUT' });
   }
-  return { times: [...times].sort(), why };
+  /** @type {Map<string, import('./moneyness.js').SpotAnswer>} */
+  const out = new Map();
+  if (rows.length === 0) return out;
+  const read = await readSpots(feed, rows, signal, /** @type {typeof ask} */ (gated), asof);
+  for (const row of rows) {
+    const spot = read.get(spotKey(row));
+    if (spot) out.set(row.instrument, spot);
+  }
+  return out;
+}
+
+/** The strip's order, cached on the promise. @type {Promise<{served: {key: string, fno: boolean}[], why: string|null}>|null} */
+let aliases = null;
+
+/**
+ * The index names `/aliases.json` serves, in its order, each with the key it
+ * is stored under and whether it is an F&O index underlying. ONE request per
+ * page load: the list is the build's, so a read that succeeded is never
+ * repeated. A failed read is an EMPTY list beside its reason, so the strip
+ * falls back to name order and says so; it never guesses an order, and the
+ * failure is not kept, so the next call asks again.
+ *
+ * @returns {Promise<{served: {key: string, fno: boolean}[], why: string|null}>}
+ */
+export function servedIndices() {
+  if (aliases) return aliases;
+  const run = (async () => {
+    try {
+      const res = await gated('/aliases.json');
+      const body = await res.json().catch(() => null);
+      if (!body || !Array.isArray(body.index)) {
+        return {
+          served: [],
+          why:
+            typeof body?.error === 'string'
+              ? body.error
+              : `/aliases.json answered HTTP ${res.status} with no index list.`
+        };
+      }
+      const served = [];
+      for (const row of body.index) {
+        if (typeof row?.key !== 'string') continue;
+        served.push({ key: row.key, fno: row.in_fno_universe === true });
+      }
+      return { served, why: null };
+    } catch (error) {
+      const e = /** @type {any} */ (error);
+      return { served: [], why: String(e && e.message ? e.message : e) };
+    }
+  })();
+  aliases = run;
+  run.then((answer) => {
+    if (answer.why !== null && aliases === run) aliases = null;
+  });
+  return run;
 }
 
 /**
- * The days this series actually traded in the month, ascending, as `YYYY-MM-DD`.
- *
- * Derived from bars that have already been fetched and cached, so asking again
- * costs a Map probe and a fold over an array that is bounded by `DAY_BUDGET`.
- * Every day it returns has at least one bar behind it — the picker cannot offer
- * a weekend, a holiday, or a day nobody pulled.
- *
- * @param {string} feed @param {string} key @param {string} timeframe @param {string} month
- * @returns {Promise<{days: string[], why: string|null}>} `why` is the reason
- *          the month could not be read, so an empty list and a failed read are
- *          not the same answer.
+ * The first and last calendar day of a month, `YYYY-MM-DD`: the Date control's
+ * bounds. Any day of the chosen month may be asked for; one that holds no bars
+ * answers per row with that reason.
+ * @param {string} month `YYYY-MM` @returns {{min: string, max: string}|null}
  */
-export async function daysIn(feed, key, timeframe, month) {
-  /* THE `why` IS CARRIED OUT, NOT DESTRUCTURED AWAY.
-     Discarding it turned a FAILED month read into an empty list, and an empty
-     list is what the caller uses to disable the Date picker. So a transport
-     error, a refused parameter or a damaged month all produced a control that
-     was silently unavailable with no reason attached — the shape section 4
-     bans, reached by dropping a value this module already had in hand. */
-  const { bars, why } = await monthBars(feed, key, timeframe, month);
-  /** @type {Set<string>} */
-  const days = new Set();
-  for (const bar of bars) {
-    if (typeof bar.t !== 'number') continue;
-    const d = istDay(bar.t * 1000);
-    if (d) days.add(d);
+export function monthSpan(month) {
+  const m = String(month ?? '').match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+  if (!m) return null;
+  const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+  return { min: `${m[0]}-01`, max: `${m[0]}-${String(last).padStart(2, '0')}` };
+}
+
+/**
+ * The first and last IST day a set of census cells covers: what the series in
+ * view hold, said beside the Date control. Free: the census carries each
+ * cell's stamps.
+ *
+ * @param {({first: number|null, last: number|null}|undefined)[]} cells `first` and `last` in MICROSECONDS
+ * @returns {{min: string, max: string}|null}
+ */
+export function daySpan(cells) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const cell of cells) {
+    if (!cell) continue;
+    if (typeof cell.first === 'number' && cell.first < lo) lo = cell.first;
+    if (typeof cell.last === 'number' && cell.last > hi) hi = cell.last;
   }
-  return { days: [...days].sort(), why };
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  const min = istDay(lo / 1000);
+  const max = istDay(hi / 1000);
+  return min && max ? { min, max } : null;
 }
 
 /**
  * Forgets every cached quote.
  *
- * CALLED WHEN THE FEED CHANGES OR A PULL FINISHES, and at no other time. The
- * cache is keyed on the feed already, so a feed switch does not strictly need
- * this — but a pull writes new bars under keys the cache already holds answers
- * for, and a terminal that kept serving the pre-pull close would be reporting a
- * measurement that has been superseded, which is the stale-value half of the
- * rule `store.svelte.js` keeps on the census.
+ * CALLED WHEN THE CENSUS GENERATION CHANGES: a pull or an import writes new
+ * bars under keys the cache already holds answers for, and a terminal that
+ * kept serving the earlier close would report a superseded measurement.
  */
 export function forgetQuotes() {
   inflight.clear();
-  /* AND THE MONTH CACHE, WHICH THIS FUNCTION USED TO LEAVE STANDING.
-     `inflight` holds single-bar reads; `months` holds whole-month reads and is
-     what the day path, the Date picker and the Time picker are all served
-     from. Clearing only the first meant that after a pull the terminal went on
-     serving PRE-PULL bars for every day-scoped reading, and did so
-     permanently: `months` has no generation in its key and no expiry, so once
-     a month was read it was frozen for the life of the tab.
-     That is precisely the staleness the paragraph above says this function
-     exists to prevent, and it was true of exactly half the caches. */
-  months.clear();
 }
