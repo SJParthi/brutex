@@ -71,10 +71,60 @@
 //! line naming another definition, or none, is not done: the day is imported
 //! again and named in `resumed` and [`Report::restated`]. The store is
 //! append-only, so it answers `AlreadyPresent` for the same bars and refuses
-//! the file by name for different ones; a day built under an old definition
-//! is never rewritten in place and never passes as a clean result. A day
-//! older than what a month file already holds is refused by the store by
-//! name, never inserted.
+//! the file by name for different ones (the repair below refuses them too:
+//! it never changes a held bar); a day built under an old definition is
+//! never rewritten in place and never passes as a clean result.
+//!
+//! # A day its month lacks, where no append can land it: a new generation (D-3350; DB-N26)
+//!
+//! A day the month lacks between, before or among the days it holds — the
+//! 8 Muhurat sessions, the 2 DR drills, 2021-02-24 and 2022-03-07, refused by
+//! the calendar when their months were first imported and admitted since
+//! D-3319 (WP-12a) — cannot be appended: the append-only month refuses a
+//! batch inside its held range at a stamp it never held, and until WP-12d
+//! that refusal was the day's end (10 Oct 2026: every NIFTY and BANKNIFTY
+//! file of the 12 days, which stayed `incomplete`). Every file is now filed
+//! through `ingest::repair_rows`, WP-13c's one repair authority reached from
+//! this door: the append door first, so a tail, a new month and a day
+//! already held land exactly as before. When it refuses, the month as every
+//! reader opens it is asked one thing: does it hold any bar inside the
+//! file's span, first second to last? Only a month that holds NONE, where no
+//! append can ever land the file (the span starts at or before the month's
+//! last held bar, or the month is served from a revision), is REPAIRED — a
+//! new generation holding every bar the month served plus the day's,
+//! published under `bar-revisions-v1/<n>` and promoted so every reader
+//! (`BarFile::open_existing`, the census, `.tix` lookups, `/provenance.json`)
+//! opens it. Never in place: the original's files stay byte-identical.
+//!
+//! Every other refusal of the append door stands, in its own words, and
+//! nothing is repaired: a month another process holds locked, a host error,
+//! and above all a day the month already holds read differently — other
+//! values at a held second, or more seconds than it holds. A back-fill adds
+//! a day the month lacks; it never completes, restates or mixes a held one,
+//! so no month is ever left holding what no single reading of a day
+//! produces, and a passing lock never becomes a generation.
+//!
+//! Journaled before and after, in `<store>/audit/gdfl.repairs`, each line
+//! naming this run's id, whose `run` line names the archive: `repairing`
+//! before anything is published (the month, the generation served, the bars
+//! offered and their span), then `repair` (the generations, bars kept and
+//! added, the new span) or `refused` (why). A run killed between the
+//! promotion and its `repair` line leaves the `repairing` line, so no
+//! generation is served that the journal does not name. Resumable: a crash
+//! between publication and promotion is promoted by the next run, a revision
+//! torn mid-write is stepped over and named, never reused, and a day re-read
+//! after its repair finds every bar held and writes nothing
+//! ([`Report::months_repaired`] counts the repairs; such a landing writes no
+//! `.prv` record, below).
+//!
+//! Once a month is served from a revision, every later day it lacks is a
+//! repair too — a revision is never appended to — so each costs one more
+//! generation and O(month), bounded by `store::repair::MAX_REVISIONS` per
+//! month; `docs/06-limits.md` is WP-99's to state it. The 12 index days'
+//! months were complete, so each instrument-month of theirs is one
+//! generation. A month that holds only a later day (the six alias indices'
+//! special-session months, DB-B40) takes every other day of the month this
+//! way, one generation a day.
 //!
 //! # Refusals
 //!
@@ -180,7 +230,11 @@
 //!   day file, the day, the bars appended, the bar definition, the journal's
 //!   `begin` line and the build commit. The bar file is opened read-only and
 //!   the record refused unless its commit counter is still the one the
-//!   append left. A refused record is a named failure of the file.
+//!   append left. A refused record is a named failure of the file. A file
+//!   that repaired its month (above) writes none, and says so in a `warn`
+//!   event: a record covers the tail one append committed, and a revision
+//!   carries no `.prv` (`crates/store/REPAIR.md`), so `/provenance.json`
+//!   answers that month from this journal's day lines, reconstructed.
 //! - **The lineage** (D-3331, D-3343; [`lineage`]): an options run feeds
 //!   every day's contract-days to `gdfl_lineage::detect` and appends the
 //!   `alias`, `lineage` and `stitched` records to `<store>/imports/gdfl.lineage`
@@ -192,7 +246,13 @@
 //! Per day: one listing (O(entries)), then per instrument file one fetch,
 //! check and decode (O(bytes)), one placement (two passes, O(rows)), two
 //! folds (O(rows)), and two `from_rows` appends (O(bars + log n_valid +
-//! blocks touched), `docs/06-limits.md`). The census is published once per
+//! blocks touched), `docs/06-limits.md`), each through `repair_rows`, which
+//! for a month the append door refuses reads, merges, writes and reads back
+//! the whole month instead (O(held + offered), at most
+//! `store::repair::MAX_ROWS`), once per repaired month: measured on 24 real
+//! NIFTY and BANKNIFTY one-second months of 395,000 to 473,000 bars in a
+//! scratch store, p50 142 ms and max 323 ms a month, the file's read and
+//! fold included (WP-12d). The census is published once per
 //! day ([`crate::ingest::record_held`], O(entries held)). None of this is a
 //! constant-time claim; `docs/06-limits.md` states it. What IS constant per
 //! lookup is the stored result: a bar by index is one positional read
@@ -230,7 +290,7 @@ use crate::fetch::BarRequest;
 use crate::fold::{Bucket, fold};
 use crate::gdfl_cm::{CmKind, CmRefusal, CmSource, read_listed, session_gate, split_name};
 use crate::gdfl_nfo::{NfoRefusal, NfoSource, decode_ticker, read_file};
-use crate::ingest::{Failure, Ingested, Plan, from_rows, record_held};
+use crate::ingest::{Failure, Filed, Ingested, Plan, record_held, repair_rows};
 use crate::manifest::{ENTRY_STRIDE, HEADER_LEN, Held, MAX_ENTRIES, Manifest, manifest_path};
 use crate::session::{Day, IST_OFFSET_SECS, Window};
 use crate::vendor::{Granularity, Listing, PriceScale, TimestampEncoding};
@@ -1625,6 +1685,13 @@ pub struct Report {
     /// (D-3334): one per file that committed bars, when the run names its
     /// origin.
     pub provenance_records: usize,
+    /// Month files a day was back-filled into as a NEW GENERATION (D-3350;
+    /// DB-N26, WP-12d): one per file whose day the append-only month refused
+    /// because it lies inside what the month holds, and the versioned repair
+    /// took. Each is journaled in `<store>/audit/gdfl.repairs`; its added
+    /// bars are in [`Report::seconds_committed`], and it writes no `.prv`
+    /// record (a revision carries none).
+    pub months_repaired: usize,
 }
 
 /// What one run is asked to do.
@@ -2814,13 +2881,30 @@ impl DayWork<'_> {
             self.begun = true;
         }
         let origin = format!("gdfl {} {} {}", run.kind.as_str(), self.day, file.name);
-        let done: Ingested = from_rows(
+        // A DAY ITS MONTH LACKS, WHERE NO APPEND CAN LAND IT, LANDS AS A NEW
+        // GENERATION OF THE MONTH (D-3350; DB-N26). The append-only month
+        // refuses it, and was the end of it: the 12 index days WP-12a
+        // admitted were refused for every NIFTY and BANKNIFTY file on 10 Oct
+        // 2026. The back-fill door tries the append door first, so a tail, a
+        // new month and a day already held land exactly as before; it
+        // repairs only a month that holds no bar inside the file's span and
+        // cannot be appended to, never in place, and every other refusal
+        // stands as it was. The reason names the run, whose `run` line names
+        // the archive.
+        let reason = format!(
+            "gdfl-import {} {} {} run:{}: a day the month lacks where no append can land it",
+            run.kind.as_str(),
+            self.day,
+            file.name,
+            self.ctx.id
+        );
+        let (done, filed): (Ingested, Filed) = repair_rows(
             &converted.seconds,
-            &[],
             &file.symbol,
             &origin,
             run.store_root,
             plan(run.kind, self.request, file.contract),
+            &reason,
         );
         self.report.outside_session += usize::try_from(done.census.total()).unwrap_or(0);
         self.report.seconds += done.bars_stored;
@@ -2828,7 +2912,10 @@ impl DayWork<'_> {
         if done.bars_committed > 0
             && let Some(held) = done.pending.as_ref()
         {
-            self.provenance(handed, held, done.bars_committed);
+            match filed {
+                Filed::Appended => self.provenance(handed, held, done.bars_committed),
+                Filed::NewGeneration => self.repaired(handed, held, done.bars_committed),
+            }
         }
         self.held.extend(done.pending);
         for failure in done.failures {
@@ -2897,6 +2984,48 @@ impl DayWork<'_> {
                 self.failures.push(refused);
             }
         }
+    }
+
+    /// A file whose day its month lacked inside what it holds, landed as a
+    /// NEW GENERATION of the month (D-3350; DB-N26): counted in
+    /// [`Report::months_repaired`] and logged with the month's rows now
+    /// served. The repair door journaled it in `<store>/audit/gdfl.repairs`
+    /// with this run's id.
+    ///
+    /// **No `.prv` record is written, and the event says so.** A sidecar
+    /// record covers the bars ONE append committed at the end of its file,
+    /// at that file's commit generation (`store::provenance::record`); the
+    /// added bars sit inside the new generation, and its records would index
+    /// bars the original never held, so a revision carries no `.prv`
+    /// (`crates/store/REPAIR.md`). `/provenance.json` reads beside the
+    /// generation every reader opens and rebuilds the month's answer from
+    /// this journal's day lines, labelled reconstructed; the original's
+    /// `.prv`, if any, is left byte-identical. When the run names its origin
+    /// — so an append would have been recorded — the event is a `warn`.
+    fn repaired(&mut self, handed: &Handed, held: &Held, added: usize) {
+        self.report.months_repaired += 1;
+        let unrecorded = self.ctx.options.origin.is_some()
+            && handed.facts.member.is_some()
+            && self.source.is_some();
+        let (day, month) = (self.day.to_string(), held.entry.key.month.to_string());
+        let event = if unrecorded {
+            telemetry::Event::warn(
+                TARGET,
+                "day back-filled as a new generation of its month; no .prv record: a revision \
+                 carries none (D-3350), the repair journal and this journal's day line name it",
+            )
+        } else {
+            telemetry::Event::info(TARGET, "day back-filled as a new generation of its month")
+        };
+        let _dropped_when_filtered = telemetry::emit(
+            &event
+                .with("file", handed.file.name.as_str())
+                .with("day", day.as_str())
+                .with("month", month.as_str())
+                .with("added", added)
+                .with("rows", held.entry.rows)
+                .with("run", self.ctx.id),
+        );
     }
 }
 

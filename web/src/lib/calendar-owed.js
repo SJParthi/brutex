@@ -268,12 +268,17 @@ export async function askCalendar(url, request, signal, wait = pause) {
  * @param {(url: string, init: RequestInit) => Promise<Response>} request
  * @param {AbortSignal} signal
  * @param {(ms: number, signal: AbortSignal) => Promise<void>} [wait]
+ * @param {'held' | 'record'} [span] `record` asks for the calendar of record's
+ *   WHOLE span (`/calendar.json?span=record`, DB-B42): a day past the feed's
+ *   last held bar then carries the record's own code (2026-10-02 closed)
+ *   instead of being outside the answer, where a page had to assume a weekday
+ *   is a session. `held`, the default, is the answer every caller got before.
  * @returns {Promise<Calendar>}
  */
-export async function readCalendar(feed, request, signal, wait = pause) {
+export async function readCalendar(feed, request, signal, wait = pause, span = 'held') {
   try {
     const { response, body: building } = await settledCalendar(
-      `/calendar.json?feed=${encodeURIComponent(feed)}`,
+      `/calendar.json?feed=${encodeURIComponent(feed)}${span === 'record' ? '&span=record' : ''}`,
       request,
       signal,
       wait
@@ -354,10 +359,11 @@ export async function readCalendar(feed, request, signal, wait = pause) {
  * @param {{
  *   request: (url: string, init: RequestInit) => Promise<Response>,
  *   apply: (calendar: Calendar) => void,
- *   requests: { run: (work: (ticket: { signal: AbortSignal, current: () => boolean }) => Promise<void>) => Promise<void>, cancel: () => void }
- * }} options
+ *   requests: { run: (work: (ticket: { signal: AbortSignal, current: () => boolean }) => Promise<void>) => Promise<void>, cancel: () => void },
+ *   span?: 'held' | 'record'
+ * }} options `span: 'record'` reads the calendar of record's whole span (DB-B42).
  */
-export function createCalendarLoader({ request, apply, requests }) {
+export function createCalendarLoader({ request, apply, requests, span = 'held' }) {
   return {
     /** @param {string | null | undefined} feed */
     load(feed) {
@@ -368,7 +374,7 @@ export function createCalendarLoader({ request, apply, requests }) {
       }
       apply(emptyCalendar(''));
       return requests.run(async (ticket) => {
-        const calendar = await readCalendar(feed, request, ticket.signal);
+        const calendar = await readCalendar(feed, request, ticket.signal, undefined, span);
         if (ticket.current()) apply(calendar);
       });
     }

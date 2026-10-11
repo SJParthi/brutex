@@ -90,6 +90,13 @@
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { mergePages, nextOrdinal, pageFor } from '$lib/audit-pages.js';
+  // THE JOURNALS' HALF OF THE PULSE, THE IMPORT PANEL AND THE LAST RUN (WP-61;
+  // DB-G07, DB-G21, DB-A51). The pulse read the census generation and bar
+  // count alone, so it said IDLE while an import wrote a million bars a minute
+  // into a census that was refusing them, and no page drew `imports`.
+  import ImportPanel from '$lib/ImportPanel.svelte';
+  import { journalStep, newestImportAt, readImportExtras } from '$lib/import-panel.js';
+  import { lastRun } from '$lib/ingest-run.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -311,7 +318,8 @@
 
   /**
    * Growth samples. One per successful poll, bounded.
-   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>}[]}
+   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>,
+   *   journal:number|null, importLines:number|null, importAt:number|null}[]}
    */
   let samples = $state([]);
 
@@ -400,7 +408,13 @@
         bars: body.store.bars,
         im: body.store.instrument_months,
         gen: body.store.generation ?? 0,
-        months
+        months,
+        // THE JOURNALS' OWN COUNTERS (WP-61, DB-G07): the pull journal's
+        // records, the import journal's lines and the importer's newest
+        // event. `null` where the answer carries none, never a zero.
+        journal: Number.isSafeInteger(body.journal?.records) ? body.journal.records : null,
+        importLines: Number.isSafeInteger(body.imports?.journal?.lines) ? body.imports.journal.lines : null,
+        importAt: newestImportAt(body)
       };
       // The server's own clock decides the ordering. Two answers with the same
       // `at` are one sample: a rate over a zero-second window is a division by
@@ -492,11 +506,18 @@
     const prev = samples.at(-2);
     const stepped = prev && last ? last.gen - prev.gen : 0;
     const steppedBars = prev && last ? last.bars - prev.bars : 0;
+    // THE JOURNALS MOVED (WP-61, DB-G07). A census held steady by a refusal
+    // while a pull or an import appends to its journal is MOVING: the pull
+    // journal's record count, the import journal's line count and the
+    // importer's newest event are compared between answers, as the census is.
+    const jStep = journalStep(prev, last);
+    const jSpan = journalStep(first, last);
+    const journalsMoved = jStep.moved || jSpan.moved;
 
     /** @type {'moving'|'fresh'|'still'|'unknown'} */
     let state = 'unknown';
     if (!store || store.state !== 'held') state = 'unknown';
-    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0) state = 'moving';
+    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0 || journalsMoved) state = 'moving';
     else if (sinceCommit != null && sinceCommit <= FRESH_SECS) state = 'fresh';
     else state = 'still';
 
@@ -525,6 +546,7 @@
       barsPerMin,
       stepped,
       filling,
+      journals: { moved: journalsMoved, records: jSpan.journal, importLines: jSpan.importLines, importAt: jSpan.importAt ?? jStep.importAt, shrank: jStep.shrank || jSpan.shrank },
       sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: last.gen - base.gen, secs: last.at - base.at } : null
     };
   });
@@ -542,6 +564,44 @@
    * would have fired, forever.
    */
   const hot = $derived(pulse.moving);
+
+  /* THE IMPORT'S NOT-DONE DAYS (WP-61; DB-G07, DB-A51). Read when the answer
+     first carries an `imports` block for this feed and again only when its
+     journal's line count changes: `/imports.json` pages, never on the poll's
+     own clock. */
+  /** @type {{ key: string, notDone: any[] | null, notDoneError: string | null, optionsLeft: number | null }} */
+  let importExtras = $state.raw({ key: '', notDone: null, notDoneError: null, optionsLeft: null });
+  const importRequests = createPageRequests();
+  onDestroy(() => importRequests.dispose());
+  $effect(() => {
+    const feed = feeds.active;
+    const lines = payload?.imports?.journal?.lines;
+    const key = feed && Number.isSafeInteger(lines) ? `${feed}|${lines}` : '';
+    untrack(() => {
+      if (key === importExtras.key) return;
+      importRequests.cancel();
+      if (key === '') {
+        importExtras = { key: '', notDone: null, notDoneError: null, optionsLeft: null };
+        return;
+      }
+      const summary = payload?.imports;
+      void importRequests.run(async (ticket) => {
+        try {
+          const got = await readImportExtras(ask, summary, ticket.signal);
+          if (!ticket.current()) return;
+          importExtras = { key, notDone: got.notDone, notDoneError: got.notDoneError, optionsLeft: got.optionsLeft };
+        } catch (why) {
+          if (!ticket.current()) return;
+          importExtras = { key, notDone: null, optionsLeft: null, notDoneError: String(why instanceof Error ? why.message : why) };
+        }
+      });
+    });
+  });
+
+  /** The last run of this feed, as the pull journal names it (DB-G21). */
+  const lastRunSays = $derived(payload ? lastRun(payload) : null);
+  /** What the pull journal holds for this feed, in the server's words. */
+  const feedScope = $derived(payload?.journal?.feed_scope ?? null);
 
   let watchedFeed = /** @type {string|null|undefined} */ (undefined);
   $effect(() => {
@@ -1088,16 +1148,27 @@
           </span>
         </div>
 
+        {#if pulse.journals.shrank}
+          <p class="why" role="alert" data-pulse-shrank>
+            <b>A JOURNAL GOT SHORTER</b> between two answers of this page: {pulse.journals.shrank}. Both
+            journals are append-only, so a smaller count is a truncated or replaced file, not a quiet one. Nothing
+            here counts it as "not moved".
+          </p>
+        {/if}
         <div class="verdict">
           {#if pulse.state === 'moving'}
             <span class="big up">
               <span class="beacon" aria-hidden="true"></span>RUNNING
             </span>
             <span class="sep">·</span>
-            <span>
+            <span data-pulse-from={pulse.journals.moved ? 'journals' : 'census'}>
               the manifest committed <b>{n0(pulse.dGen)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
               store gained <b>{n0(pulse.dBars)}</b> bars in the last <b>{dur(pulse.span)}</b> — measured,
-              not timed
+              not timed{#if pulse.journals.moved}; the journals moved too: <b>{n0(pulse.journals.records)}</b>
+                pull-journal record(s) and <b>{n0(pulse.journals.importLines)}</b> import-journal line(s)
+                appended{pulse.journals.importAt ? `, the importer's newest event at ${stampLabel(pulse.journals.importAt)} IST` : ''}.
+                A journal that grows while the census stands still is a run whose landings are being
+                refused or are not committed yet{/if}
             </span>
           {:else if pulse.state === 'fresh'}
             <span class="big warn">JUST WROTE</span>
@@ -1110,9 +1181,10 @@
           {:else if pulse.state === 'still'}
             <span class="big">IDLE</span>
             <span class="sep">·</span>
-            <span>
-              the store has not been written for <b>{dur(pulse.sinceCommit ?? 0)}</b>. Nothing is
-              filing bars.
+            <span data-pulse-from="census-and-journals">
+              the store has not been written for <b>{dur(pulse.sinceCommit ?? 0)}</b>, and neither the
+              pull journal nor the import journal gained a record between this page's answers. Nothing
+              is filing bars.
             </span>
           {:else}
             <span class="big down">UNKNOWN</span>
@@ -1212,6 +1284,47 @@
           request has finished. Use <a href="/autopilot">Autopilot</a> for the pull scheduler's
           state and <a href="/backtest">Backtest</a> for sweep execution and saved outcomes.
         </p>
+      </section>
+
+      <!-- ══ THE JOURNALS: THE LAST RUN, WHAT THE PULL JOURNAL HOLDS FOR THIS
+           FEED, AND THE IMPORT (WP-61; DB-G07, DB-G21, DB-A51). `last_runs`
+           names the newest run records wherever their member failures put
+           them; `feed_scope` says whose records the journal holds; `imports`
+           is the import journal's own summary, drawn by the panel /ingest
+           draws. None of these was on any page. -->
+      <section class="card" aria-label="Journals" data-audit-journals={payload.store.feed}>
+        <div class="card-head">
+          <h2>Journals</h2>
+          <span class="spacer"></span>
+          <span class="fine">pull journal{payload.imports ? ' · import journal' : ''}</span>
+        </div>
+        {#if lastRunSays}
+          <p class="jline" class:down={lastRunSays.tone === 'down'} data-audit-last-run={lastRunSays.state}>
+            <b>Last run{lastRunSays.outcome ? ` · ${lastRunSays.outcome}` : ''}.</b>
+            {lastRunSays.sentence}
+          </p>
+        {/if}
+        {#if feedScope}
+          <p class="jline" data-audit-feed-scope={feedScope.feed}>
+            <b>Pull journal, this feed.</b>
+            {n0(feedScope.records ?? 0)} record(s) in {n0(feedScope.runs ?? 0)} run(s) are {feedScope.feed}'s;
+            {n0(feedScope.unattributed_records ?? 0)} record(s) in {n0(feedScope.unattributed_runs ?? 0)} run(s)
+            name no feed this build can attribute{feedScope.undecodable ? `; ${n0(feedScope.undecodable)} could not be decoded` : ''}.
+            {feedScope.holds ?? ''}
+            {#if feedScope.error}<span class="down">{feedScope.error}</span>{/if}
+          </p>
+        {/if}
+        {#if payload.imports}
+          <ImportPanel
+            summary={payload.imports}
+            store={payload.store}
+            archiveTo={payload.imports?.span?.to ?? null}
+            optionsLeft={importExtras.optionsLeft}
+            notDone={importExtras.notDone}
+            notDoneError={importExtras.notDoneError}
+            now={(payload.at ?? 0) * 1000}
+          />
+        {/if}
       </section>
 
       <!-- ════════════════════════════════════════════════════════════════
@@ -2388,5 +2501,14 @@
         background: color-mix(in srgb, var(--acc) calc(var(--fill) * 72%), var(--well));
       }
     }
+  }
+  .jline {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .jline.down b:first-child {
+    color: var(--down, inherit);
   }
 </style>

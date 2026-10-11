@@ -250,10 +250,14 @@ fn exact_resource_boundaries_and_bar_only_contract() {
         Revision::new(MAX_REVISIONS).unwrap().ordinal(),
         MAX_REVISIONS
     );
-    // THE ROW CEILING IS EXERCISED ON THE ONE-SECOND RUNG. A one-minute month
-    // holds at most 44,640 bars, so `MAX_ROWS` consecutive minutes cannot all
-    // be inside 2024-06 and the month admission (D-0915) refuses them before
-    // the ceiling could be reached. 100,000 seconds is under 28 hours.
+    // THE ROW CEILING IS THE MOST BARS ONE MONTH CAN HOLD: 31 days of
+    // one-second bars, the finest rung the store files (DB-N26, WP-12d). It
+    // was 100,000, and a GDFL one-second month holds about 409,000 bars, so
+    // no such month could be repaired.
+    assert_eq!(
+        MAX_ROWS,
+        31 * 86_400 / usize::try_from(Timeframe::SECOND_1.secs()).unwrap()
+    );
     let fixture = Fixture::new();
     let seconds = path_on(Timeframe::SECOND_1);
     let second = |index: i64| Bar {
@@ -264,19 +268,39 @@ fn exact_resource_boundaries_and_bar_only_contract() {
         .unwrap()
         .header();
     let maximum = i64::try_from(MAX_ROWS).unwrap();
-    let mut rows: Vec<_> = (0..maximum).map(second).collect();
-    rows.push(second(maximum));
+    let mut rows: Vec<_> = (0..=maximum).map(second).collect();
     let publish_seconds =
         |rows: &[Bar]| repair::publish(&fixture.0, seconds, 7, revision(), expected_seconds, rows);
     assert_eq!(publish_seconds(&rows), Err(RepairError::RowLimit));
+    let index = repair::Policy {
+        open_interest_applies: false,
+        basis_witness: false,
+    };
+    assert_eq!(
+        repair::repair_month(&fixture.0, seconds, 7, &rows, index),
+        Err(RepairError::RowLimit)
+    );
+    // AT THE CEILING the count passes, and what refuses is the month
+    // admission (D-0915): `MAX_ROWS` seconds from 2024-06-03 run past June.
     rows.pop();
+    assert!(matches!(
+        publish_seconds(&rows),
+        Err(RepairError::Store(StoreError::OutsideMonth { .. }))
+    ));
+    assert!(matches!(
+        repair::repair_month(&fixture.0, seconds, 7, &rows, index),
+        Err(RepairError::Store(StoreError::OutsideMonth { .. }))
+    ));
+    // A ONE-SECOND MONTH THE SIZE OF GDFL NIFTY 2018-11 publishes whole, and
+    // its revision opens: 409,224 rows, four times the old ceiling.
+    rows.truncate(409_224);
     assert_eq!(publish_seconds(&rows).unwrap(), Published::Created);
     assert_eq!(
         RevisionReader::open(&fixture.0, seconds, 7, revision())
             .unwrap()
             .header()
             .n_valid,
-        MAX_ROWS as u64
+        409_224
     );
     let expected = fixture.source(&[]);
     let mut too_many = expected;

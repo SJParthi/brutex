@@ -232,7 +232,9 @@ struct Case {
 /// 37 -> 38 at D-3349 (WP-39; DB-N17): `api.bars window range holds months
 /// not stored`, one line per window request with holes, driven over a store
 /// holding January and March only.
-const ROWS: usize = 38;
+/// 38 -> 39 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, the hand
+/// runs' own stop generation moving on the operator's Stop.
+const ROWS: usize = 39;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -802,6 +804,25 @@ fn cases() -> Vec<Case> {
             assert_eq!(control.epoch(), 0, "and resuming does NOT bump the epoch");
         }),
         mine: Box::new(|record| counts(record, "epoch", 0)),
+    });
+    // WP-61 (DB-B28, DB-B29): the hand runs' own stop generation. Stop moves
+    // it and the autopilot's is untouched.
+    cases.push(Case {
+        site: "autopilot.rs hand runs asked to stop",
+        target: "api.pull",
+        message: "hand runs asked to stop",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let control = crate::autopilot::Control::new();
+            let at = control.epoch_for(crate::autopilot::Driver::Hand);
+            assert_eq!(control.stop_hand(), 1, "the hand generation moved");
+            assert!(
+                control.stopped_for(crate::autopilot::Driver::Hand, at),
+                "a hand run that captured the old value stops"
+            );
+            assert_eq!(control.epoch(), 0, "and the autopilot's did not move");
+        }),
+        mine: Box::new(|record| counts(record, "hand_epoch", 1)),
     });
 
     // crates/api/src/audit_json.rs — two refusals a status code cannot carry.
@@ -1972,9 +1993,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 70 -> 72 at D-3349 (WP-39): the window's one hole line (DB-N17), driven
     // in the table above, and the abandoned-request line (DB-N15), reached in
     // server tests.
+    //
+    // 72 -> 73 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, driven
+    // in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 72,
+        lib_sites, 73,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

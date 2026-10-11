@@ -356,3 +356,34 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
     assert!(out.contains("\"acc\" is not a share symbol"), "{out}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A run that back-filled days inside held months says how many month files
+/// it repaired to a new generation, and where each is journaled (D-3350;
+/// DB-N26, WP-12d); a run that repaired none says 0.
+#[test]
+fn the_receipt_counts_the_months_a_back_fill_repaired() {
+    for (repaired, line) in [
+        (
+            24,
+            "  months repaired     24 (a new generation each; audit/gdfl.repairs)\n",
+        ),
+        (
+            0,
+            "  months repaired     0 (a new generation each; audit/gdfl.repairs)\n",
+        ),
+    ] {
+        let report = Report {
+            months_repaired: repaired,
+            ..Report::default()
+        };
+        let mut out = String::new();
+        render(
+            &mut out,
+            ImportKind::Indices,
+            "zip",
+            Path::new("store"),
+            &report,
+        );
+        assert!(out.contains(line), "{out}");
+    }
+}
