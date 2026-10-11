@@ -1218,12 +1218,13 @@ mod tests {
     }
 
     /// An observed date no calendar attests may still acquire its master.
-    /// 2026-10-05 is past the calendar of record (`SOURCED_LAST_DAY` is
-    /// 2026-10-04); this test used 2026-09-11, which D-3319 moved inside it.
+    /// 2027-01-01 is past the calendar of record (`SOURCED_LAST_DAY` is
+    /// 2026-12-31, DB-B41); this test used 2026-09-11 and then 2026-10-05,
+    /// each of which a later extension of the record moved inside it.
     #[tokio::test]
     async fn observed_unknown_date_loads_flag_without_attesting_a_session() {
         let temp = Temp::new();
-        let date = Day::new(2026, 10, 5).expect("unattested fixture date");
+        let date = Day::new(2027, 1, 1).expect("unattested fixture date");
         let epoch = date.days_from_epoch();
         assert_eq!(i64::from(epoch), calendar::SOURCED_LAST_DAY + 1);
         assert_eq!(calendar::kind_of(i64::from(epoch)), DayKind::Unmeasured);
@@ -1241,7 +1242,7 @@ mod tests {
         .expect("an observed date may acquire eligibility evidence");
         assert_eq!(
             requested,
-            ["https://nsearchives.nseindia.com//content/cm/NSE_CM_security_05102026.csv.gz"]
+            ["https://nsearchives.nseindia.com//content/cm/NSE_CM_security_01012027.csv.gz"]
         );
         assert_eq!(cache.len(), 1);
         assert!(

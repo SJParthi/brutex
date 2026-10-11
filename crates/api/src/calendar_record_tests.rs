@@ -63,6 +63,15 @@ fn a_weekend_is_a_session_only_where_the_record_names_one() {
     for day in pull::calendar::SOURCED_FIRST_DAY..=pull::calendar::SOURCED_LAST_DAY {
         let code = record_code(day).expect("inside the record");
         if is_session(code) && pull::calendar::weekday_of(day).is_weekend() {
+            // The 2026-11-08 Muhurat: NSE/CMTR/71775 names the Sunday and
+            // leaves its timings to be notified, so the record holds the
+            // session with no window (DB-B41).
+            if day == 20_765 {
+                assert_eq!(code, UNSIZED, "{}", iso(day));
+                assert_eq!(pull::calendar::special_session(day), None);
+                weekend_sessions.push(iso(day));
+                continue;
+            }
             assert!(
                 pull::calendar::special_session(day).is_some(),
                 "{} is a weekend session with no recorded special session",
@@ -84,6 +93,7 @@ fn a_weekend_is_a_session_only_where_the_record_names_one() {
             "2024-05-18",
             "2025-02-01",
             "2026-02-01",
+            "2026-11-08",
         ],
         "every weekend session of the record, and nothing else"
     );
@@ -453,7 +463,7 @@ fn a_whole_zerodha_span_is_tens_of_kilobytes() {
 
 /// **DB-B42: WIDENED TO THE RECORD, A DAY PAST THE HELD SPAN IS THE RECORD'S,
 /// NEVER A GUESSED WEEKDAY.** A GDFL-like answer held 2022-03-02..2022-03-31 is
-/// widened to 2018-01-01..2026-10-04: 2026-10-02 (Gandhi Jayanti) reads
+/// widened to 2018-01-01..2026-12-31: 2026-10-02 (Gandhi Jayanti) reads
 /// closed, 2026-09-30 an auction session, every added day is held `-`, the
 /// held count and the held span are unchanged, and the added sessions are
 /// counted and listed as unread, in day order.
@@ -491,7 +501,7 @@ fn a_held_answer_widened_to_the_record_reads_the_records_codes_beyond_it() {
     let widened = parse(&widen_to_record(&held_body, None).expect("an ok answer widens"));
     assert_eq!(widened["span"], "record");
     assert_eq!(widened["fromDate"], "2018-01-01");
-    assert_eq!(widened["toDate"], "2026-10-04");
+    assert_eq!(widened["toDate"], "2026-12-31");
     assert_eq!(widened["heldSpan"]["from"], held["fromDate"]);
     assert_eq!(widened["heldSpan"]["to"], held["toDate"]);
     assert_eq!(

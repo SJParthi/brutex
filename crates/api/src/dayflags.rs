@@ -5539,7 +5539,11 @@ mod tests {
             ("2020-03-13", "H"),
             ("2020-03-23", "H"),
             ("2017-12-29", "-"),
-            ("2026-10-05", "-"),
+            // The record runs to 2026-12-31 (DB-B41): the first weekday past
+            // its old end is a session, and the first past its new end is not
+            // answered.
+            ("2026-10-05", "X"),
+            ("2027-01-04", "-"),
         ] {
             let epoch_day = i64::from(day(on).days_from_epoch());
             assert_eq!(day_code(epoch_day).0.to_string(), code, "{on}");

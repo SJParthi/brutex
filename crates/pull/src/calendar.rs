@@ -531,8 +531,68 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 /// First day [`sourced_kind_of`] answers: **2018-01-01**.
 pub const SOURCED_FIRST_DAY: i64 = 17_532;
 
-/// Last day [`sourced_kind_of`] answers: **2026-10-04**.
-pub const SOURCED_LAST_DAY: i64 = 20_730;
+/// Last day [`sourced_kind_of`] answers: **2026-12-31**, the last day
+/// NSE/CMTR/71775 (calendar year 2026) covers.
+///
+/// It was 2026-10-04 (`20_730`), the day the D-2805 spans were read, and from
+/// 2026-10-05 every minute pull of a newer day failed for every instrument
+/// (DB-B25, DB-B41): the record ended while the circular it cites ran on.
+/// [`record_horizon`] is the health check that says so BEFORE the next end.
+pub const SOURCED_LAST_DAY: i64 = 20_818;
+
+/// How many days before [`SOURCED_LAST_DAY`] the record is said to end soon:
+/// **30** (DB-B41's expected "warns when the record ends within 30 days").
+pub const RECORD_ENDS_SOON_DAYS: i64 = 30;
+
+/// Where `today` stands against the end of the calendar of record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordHorizon {
+    /// The last day the record answers, [`SOURCED_LAST_DAY`].
+    pub last_day: i64,
+    /// Days from `today` to `last_day`: negative once the record has ended.
+    pub days_left: i64,
+    /// `days_left` is at most [`RECORD_ENDS_SOON_DAYS`] (ended included).
+    pub ends_soon: bool,
+    /// `today` is past the record: every day from here is `Unmeasured`.
+    pub ended: bool,
+}
+
+/// The record's horizon seen from `today` (days since the epoch): one
+/// subtraction and two comparisons, no allocation. The status document of a
+/// pull run carries it, so a page can warn before the record ends rather than
+/// after every pull has failed (DB-B25, DB-B41).
+#[must_use]
+pub const fn record_horizon(today: i64) -> RecordHorizon {
+    let days_left = SOURCED_LAST_DAY.saturating_sub(today);
+    RecordHorizon {
+        last_day: SOURCED_LAST_DAY,
+        days_left,
+        ends_soon: days_left <= RECORD_ENDS_SOON_DAYS,
+        ended: days_left < 0,
+    }
+}
+
+/// The days of `first..=last` that lie past the record, as `(first, last,
+/// count)`, or `None` when the whole window is inside it. A run reports them
+/// in ONE line rather than once per instrument and month (DB-B25).
+#[must_use]
+pub const fn past_record(first: i64, last: i64) -> Option<(i64, i64, i64)> {
+    if last <= SOURCED_LAST_DAY || first > last {
+        return None;
+    }
+    let from = if first > SOURCED_LAST_DAY {
+        first
+    } else {
+        SOURCED_LAST_DAY + 1
+    };
+    Some((from, last, last - from + 1))
+}
+
+/// The leading words of a member's finding about days past the record. One
+/// constant, so the run that folds those findings into its single line
+/// recognises them by the words the writer used and not by a guess at prose.
+pub const PAST_RECORD_FINDING: &str =
+    "request minute coverage NOT JUDGED past the calendar of record";
 
 /// Every weekday trading holiday NSE notified for the capital-market segment
 /// outside the measured span, as days since the epoch (D-2805). Sources,
@@ -544,12 +604,18 @@ pub const SOURCED_LAST_DAY: i64 = 20_730;
 /// calendar year 2026). Holidays those circulars list on a Saturday or a
 /// Sunday are closed by the weekday rule and are not repeated here.
 ///
+/// The four 2026 holidays after 2026-10-04 (20 Oct, 10 Nov, 24 Nov, 25 Dec)
+/// are NSE/CMTR/71775's too: the circular was fetched and read again on
+/// 2026-10-10 by the audit that found the record expired (DB-B41, two
+/// readers; `state/blindspots/time-calendar-edges-r1.md`). No vendor day zip
+/// corroborates them yet: they are days that have not happened.
+///
 /// Cross-checked against the vendor's GDFL capital-market day zips over
 /// 2018-09-03..=2019-12-01 and 2026-09-05..=2026-09-30: every weekday that
 /// is not in this table has an index and a stock day zip (0 missing), and
 /// the only day zips on a day this table or the weekend closes are the two
 /// Muhurat sessions of [`SOURCED_SPECIAL`].
-pub const SOURCED_HOLIDAYS: [i64; 34] = [
+pub const SOURCED_HOLIDAYS: [i64; 38] = [
     17_557, // 2018-01-26 Fri Republic Day
     17_575, // 2018-02-13 Tue Mahashivratri
     17_592, // 2018-03-02 Fri Holi
@@ -584,13 +650,21 @@ pub const SOURCED_HOLIDAYS: [i64; 34] = [
     18_212, // 2019-11-12 Tue Gurunanak Jayanti
     20_710, // 2026-09-14 Mon Ganesh Chaturthi
     20_728, // 2026-10-02 Fri Mahatma Gandhi Jayanti
+    20_746, // 2026-10-20 Tue Dussehra
+    20_767, // 2026-11-10 Tue Diwali-Balipratipada
+    20_781, // 2026-11-24 Tue Guru Nanak Jayanti
+    20_812, // 2026-12-25 Fri Christmas
 ];
 
 /// The Muhurat sessions in the sourced spans: each circular names the day
 /// and says the timings "shall be notified subsequently", so the LENGTH is
 /// not sourced here and the day is [`DayKind::OpenLengthUnmeasured`], never a
-/// regular day: 2018-11-07 (a Wednesday holiday) and 2019-10-27 (a Sunday).
-pub const SOURCED_SPECIAL: [i64; 2] = [17_842, 18_196];
+/// regular day: 2018-11-07 (a Wednesday holiday) and 2019-10-27 (a Sunday),
+/// and 2026-11-08 (a Sunday): NSE/CMTR/71775 says Muhurat trading "will be
+/// conducted on Sunday, November 08, 2026" with timings to be notified, so
+/// the day is a session of no recorded length until a circular states one
+/// (DB-B41). It has no [`SPECIAL_SESSIONS`] row: no window is recorded.
+pub const SOURCED_SPECIAL: [i64; 3] = [17_842, 18_196, 20_765];
 
 /// Whether `day` is one of a compile-time table's entries: a walk bounded by
 /// the table's own constant length, never by the data (the shape `kind_of`
@@ -606,7 +680,7 @@ fn listed(table: &[i64], day: i64) -> bool {
 
 /// A day of the sourced spans: a Muhurat is open with no length, a weekend
 /// or a listed holiday is closed, every other weekday is a regular session.
-/// Two bounded walks over compile-time tables (2 and 34 entries) and one
+/// Two bounded walks over compile-time tables (3 and 38 entries) and one
 /// remainder, no allocation.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
@@ -778,7 +852,8 @@ pub const MUHURAT_TICKS: &str = "MEASURED 2026-10-09 from the GDFL capital-marke
      trades at least three times run unbroken from the window's open to its last minute, and \
      NIFTY 50 changes in every one of them";
 
-/// Every special session from 2018-01-01 to 2026-10-04, sorted by day.
+/// Every special session with a recorded window from 2018-01-01 to
+/// 2026-12-31, sorted by day.
 ///
 /// Every window is a row of the charter's §3: the Muhurat table (whose
 /// 2018-11-07, 2019-10-27 and 2023-11-12 rows are [`MUHURAT_TICKS`]; the
@@ -937,7 +1012,7 @@ pub fn special_session(epoch_day: i64) -> Option<SpecialSession> {
 /// # Cost
 ///
 /// [`sourced_kind_of`] (at most nine comparisons in the measured window, or
-/// the 2- and 34-entry walks in a sourced span) and, only for an unsized
+/// the 3- and 38-entry walks in a sourced span) and, only for an unsized
 /// session, one walk of [`SPECIAL_SESSIONS`]. O(1), no allocation.
 /// Timed by `pull::calendar::record_tests::calendar_of_record_costs`
 /// (release, 2026-10-09, three runs: p50 2 ns, p99 13 ns). That test is ignored, so a
@@ -1052,7 +1127,7 @@ const fn halt_seconds(from: (u32, u32, u32), resume: (u32, u32, u32)) -> HaltSec
     }
 }
 
-/// Every market-wide halt recorded from 2018-01-01 to 2026-10-04.
+/// Every market-wide halt recorded from 2018-01-01 to 2026-12-31.
 ///
 /// The two March 2020 circuit breakers are **suspected** (D-3320): their
 /// windows are the charter's "Historical circuit-breaker evidence boundary" —
@@ -1607,7 +1682,7 @@ const CMTR_71775: &str = "NSE/CMTR/71775 of 12 Dec 2025";
 /// there, day for day (`the_holiday_notes_are_the_sourced_holidays_day_for_day`).
 /// The measured window's closed weekdays have no entry: they were measured
 /// from the store, and no circular naming them is recorded in the charter.
-pub const SOURCED_HOLIDAY_NOTES: [HolidayNote; 34] = [
+pub const SOURCED_HOLIDAY_NOTES: [HolidayNote; 38] = [
     note(17_557, "Republic Day", CMTR_36475),
     note(17_575, "Mahashivratri", CMTR_36475),
     note(17_592, "Holi", CMTR_36475),
@@ -1642,6 +1717,10 @@ pub const SOURCED_HOLIDAY_NOTES: [HolidayNote; 34] = [
     note(18_212, "Gurunanak Jayanti", CMTR_39612),
     note(20_710, "Ganesh Chaturthi", CMTR_71775),
     note(20_728, "Mahatma Gandhi Jayanti", CMTR_71775),
+    note(20_746, "Dussehra", CMTR_71775),
+    note(20_767, "Diwali-Balipratipada", CMTR_71775),
+    note(20_781, "Guru Nanak Jayanti", CMTR_71775),
+    note(20_812, "Christmas", CMTR_71775),
 ];
 
 const fn note(day: i64, name: &'static str, circular: &'static str) -> HolidayNote {
@@ -1653,7 +1732,7 @@ const fn note(day: i64, name: &'static str, circular: &'static str) -> HolidayNo
 }
 
 /// The circular's note for `epoch_day`, if it is a sourced holiday. A walk of
-/// the 34-entry table: O(1). Timed inside [`record_of`] by
+/// the 38-entry table: O(1). Timed inside [`record_of`] by
 /// `pull::calendar::record_tests::calendar_of_record_costs`, an ignored
 /// test: UNVERIFIED as a gated measurement.
 #[must_use]
@@ -1719,6 +1798,12 @@ pub enum ExpiryDay {
 #[must_use]
 pub fn expiry_day(epoch_day: i64) -> ExpiryDay {
     match exchange_kind_of(epoch_day) {
+        // A MUHURAT THE CIRCULAR NAMES AND NO RECORD HAS SIZED (2026-11-08,
+        // DB-B41) is still a Muhurat: a session, and no settlement day. Its
+        // missing window is a question about minutes, not about expiries.
+        DayKind::OpenLengthUnmeasured if listed(&SOURCED_SPECIAL, epoch_day) => {
+            ExpiryDay::NotASession(NoSettlement::SpecialSessionOnly(SpecialKind::Muhurat))
+        }
         DayKind::Unmeasured | DayKind::OpenLengthUnmeasured => ExpiryDay::Unmeasured,
         DayKind::Closed if weekday_of(epoch_day).is_weekend() => {
             ExpiryDay::NotASession(NoSettlement::Weekend)
@@ -1737,7 +1822,7 @@ pub fn expiry_day(epoch_day: i64) -> ExpiryDay {
 
 /// The most days [`settlement_on_or_before`] walks back.
 ///
-/// The longest run of non-settlement days from 2018-01-01 to 2026-10-04 is
+/// The longest run of non-settlement days from 2018-01-01 to 2026-12-31 is
 /// four (`no_run_of_non_settlement_days_reaches_the_walk_bound` measures it),
 /// so a walk that passes this bound has met a gap no calendar fact explains.
 pub const MAX_SETTLEMENT_WALK: i64 = 7;
@@ -1952,8 +2037,45 @@ mod tests {
         };
         assert_eq!(
             (SOURCED_FIRST_DAY, SOURCED_LAST_DAY),
-            (at(2018, 1, 1), at(2026, 10, 4))
+            (at(2018, 1, 1), at(2026, 12, 31))
         );
+        // DB-B41: the record runs to the last day NSE/CMTR/71775 covers. The
+        // four holidays after 2026-10-04 are closed, the weekday after the
+        // old end is a regular session, the Sunday Muhurat is a session of
+        // no recorded length, and the day after the record is not answered.
+        for (y, m, d) in [
+            (2026, 10, 20),
+            (2026, 11, 10),
+            (2026, 11, 24),
+            (2026, 12, 25),
+        ] {
+            assert_eq!(sourced_kind_of(at(y, m, d)), DayKind::Closed, "{y}-{m}-{d}");
+            assert_eq!(
+                holiday_note(at(y, m, d)).map(|n| n.circular),
+                Some(CMTR_71775),
+                "{y}-{m}-{d}"
+            );
+        }
+        assert_eq!(
+            sourced_kind_of(at(2026, 10, 5)),
+            DayKind::Open(Session::full()),
+            "the first weekday past the old end, which every pull failed on"
+        );
+        assert_eq!(
+            sourced_kind_of(at(2026, 11, 8)),
+            DayKind::OpenLengthUnmeasured,
+            "the Sunday Muhurat, timings not notified"
+        );
+        assert_eq!(
+            exchange_kind_of(at(2026, 11, 8)),
+            DayKind::OpenLengthUnmeasured,
+            "no window is recorded, so none is claimed"
+        );
+        assert_eq!(
+            sourced_kind_of(at(2026, 12, 31)),
+            DayKind::Open(Session::full())
+        );
+        assert_eq!(sourced_kind_of(at(2027, 1, 1)), DayKind::Unmeasured);
         assert_eq!((FIRST_DAY, LAST_DAY), (at(2019, 12, 2), at(2026, 9, 4)));
         // Every listed holiday is a weekday inside a sourced span, and closed.
         for day in SOURCED_HOLIDAYS {
@@ -2009,6 +2131,74 @@ mod tests {
         // the 303 GDFL day zips of that span.
         assert_eq!(sourced_sessions(at(2018, 9, 3), at(2019, 12, 1)), Some(303));
         assert_eq!(sourced_sessions(at(2026, 9, 5), at(2026, 9, 30)), Some(17));
+    }
+
+    /// **THE RECORD SAYS WHEN IT ENDS BEFORE IT HAS** (DB-B25, DB-B41). It
+    /// expired on 2026-10-04 with no warning and every pull of a newer day
+    /// failed; the horizon is what a page reads to warn 30 days ahead, and
+    /// `past_record` is the part of a window nothing can judge.
+    #[test]
+    fn the_record_horizon_warns_before_the_end_and_names_the_days_past_it() {
+        let last = SOURCED_LAST_DAY;
+        let far = record_horizon(last - RECORD_ENDS_SOON_DAYS - 1);
+        assert_eq!(
+            (far.last_day, far.days_left, far.ends_soon, far.ended),
+            (last, RECORD_ENDS_SOON_DAYS + 1, false, false)
+        );
+        let soon = record_horizon(last - RECORD_ENDS_SOON_DAYS);
+        assert!(soon.ends_soon && !soon.ended, "{soon:?}");
+        let on = record_horizon(last);
+        assert_eq!((on.days_left, on.ends_soon, on.ended), (0, true, false));
+        let past = record_horizon(last + 1);
+        assert_eq!(
+            (past.days_left, past.ends_soon, past.ended),
+            (-1, true, true)
+        );
+        // Garbage in: no overflow, and a far past day is simply not soon.
+        assert!(record_horizon(i64::MAX).ended);
+        assert!(!record_horizon(i64::MIN).ends_soon);
+
+        assert_eq!(past_record(SOURCED_FIRST_DAY, last), None, "wholly inside");
+        assert_eq!(
+            past_record(last, last),
+            None,
+            "the last day itself is answered"
+        );
+        assert_eq!(
+            past_record(last - 3, last + 2),
+            Some((last + 1, last + 2, 2))
+        );
+        assert_eq!(
+            past_record(last + 5, last + 5),
+            Some((last + 5, last + 5, 1))
+        );
+        assert_eq!(
+            past_record(last + 5, last + 4),
+            None,
+            "an inverted window names nothing"
+        );
+        for day in last + 1..=last + 9 {
+            assert_eq!(sourced_kind_of(day), DayKind::Unmeasured, "{day}");
+        }
+        // The Muhurat no circular has sized is a session and no settlement
+        // day, never an unmeasured one: an expiry stated on it settles on
+        // the session before it.
+        assert_eq!(
+            expiry_day(20_765),
+            ExpiryDay::NotASession(NoSettlement::SpecialSessionOnly(SpecialKind::Muhurat))
+        );
+        assert_eq!(
+            expiry_day(20_767),
+            ExpiryDay::NotASession(NoSettlement::Holiday {
+                note: holiday_note(20_767),
+            })
+        );
+        assert_eq!(
+            settlement_on_or_before(20_767).map(|s| s.settles),
+            Ok(20_766),
+            "Tuesday 2026-11-10 is a holiday; Monday the 9th is the session before it"
+        );
+        assert!(PAST_RECORD_FINDING.starts_with("request minute coverage"));
     }
 
     /// Sessions `sourced_kind_of` counts in `first..=last`.
@@ -2673,8 +2863,8 @@ impl<'a> Runtime<'a> {
     /// # Cost
     ///
     /// [`sourced_kind_of`]: inside the measured window `kind_of`'s at most
-    /// nine comparisons; in a sourced span one walk of the two-entry
-    /// [`SOURCED_SPECIAL`] and one of the 34-entry [`SOURCED_HOLIDAYS`], both
+    /// nine comparisons; in a sourced span one walk of the three-entry
+    /// [`SOURCED_SPECIAL`] and one of the 38-entry [`SOURCED_HOLIDAYS`], both
     /// compile-time constants. O(1), no allocation. **UNVERIFIED as a
     /// gated measurement**: timed once in a throwaway release run
     /// (`docs/06-limits.md`, D-3346) and by no bench, so a regression would
@@ -3325,6 +3515,13 @@ mod record_tests {
         let mut moved = Vec::new();
         for day in SOURCED_FIRST_DAY - 2..=SOURCED_LAST_DAY + 2 {
             let (older, record) = (sourced_kind_of(day), exchange_kind_of(day));
+            // The one session no circular has sized yet: the 2026-11-08
+            // Muhurat, "timings to be notified" (NSE/CMTR/71775, DB-B41).
+            if day == 20_765 {
+                assert_eq!(record, DayKind::OpenLengthUnmeasured);
+                assert_eq!(special_session(day), None);
+                continue;
+            }
             assert_ne!(record, DayKind::OpenLengthUnmeasured, "day {day}");
             if older != record {
                 assert_eq!(older, DayKind::OpenLengthUnmeasured, "day {day}");
@@ -3987,10 +4184,16 @@ mod record_tests {
                 day: SOURCED_LAST_DAY + 1
             })
         );
+        // 2026-12-31, the record's last day, is a Thursday session and
+        // settles on itself.
+        assert_eq!(
+            settlement_on_or_before(SOURCED_LAST_DAY).map(|s| s.settles),
+            Ok(SOURCED_LAST_DAY)
+        );
         // 2026-10-04 is a Sunday and 2026-10-02 a holiday: the walk crosses
         // them to Thursday 2026-10-01.
         assert_eq!(
-            settlement_on_or_before(SOURCED_LAST_DAY).map(|s| s.settles),
+            settlement_on_or_before(at(2026, 10, 4)).map(|s| s.settles),
             Ok(at(2026, 10, 1))
         );
         // The walk reaches the calendar's first day and refuses past it.
@@ -4125,9 +4328,9 @@ mod record_tests {
                 day: SOURCED_LAST_DAY + 1
             })
         );
-        // 2026-10-01 is the last day answered; the Monday after is not.
+        // 2026-12-31 is the last day answered; the Friday after is not.
         assert_eq!(
-            shift_reason(at(2026, 10, 1), Weekday::Monday),
+            shift_reason(at(2026, 12, 31), Weekday::Friday),
             Err(SettlementRefusal::Unmeasured {
                 day: SOURCED_LAST_DAY + 1
             })

@@ -2190,6 +2190,10 @@ pub struct Site {
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
+    /// The pull run a previous process opened in the journal and never
+    /// closed, read once when the site loads (DB-B34). `/pull/run.json`
+    /// carries it until a run is pressed in this process.
+    pub interrupted: Option<crate::pullrun::Interrupted>,
     /// Active recovery plan for durable STOP routing; normal pulls leave None.
     pub(crate) recovery_active: std::sync::Mutex<Option<[u8; 32]>>,
     /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
@@ -2457,6 +2461,9 @@ impl Site {
             // for, which is the shape `CLAUDE.md` §4 bans in the other
             // direction: a report with nothing behind it.
             run: std::sync::Mutex::new(None),
+            // READ ONCE, HERE: nothing of this process is in flight yet, so a
+            // run the journal holds open is one a previous process left.
+            interrupted: crate::pullrun::interrupted_run(&audit::Journal::at(&store_root)),
             recovery_active: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
@@ -3515,6 +3522,7 @@ async fn broker_answer(
         )
         .with_window(asked.window);
         facts.push(("Refused because", blocked.why.clone()));
+        facts.extend(order_class_fact(blocked.code));
         facts.push(recorded_fact(journal, &record));
         return (blocked.code, refused_html("Spot pull", facts, &blocked.why));
     }
@@ -3577,6 +3585,9 @@ async fn broker_answer(
     if let Some(ref why) = run.stopped {
         facts.push(("Stopped", why.clone()));
     }
+    // WHO WAS WITHHELD, AND WHAT ANOTHER ATTEMPT COULD CHANGE, as facts the
+    // conductor reads back (DB-B26, DB-B27, DB-B35). See `RetryTally`.
+    facts.extend(run.order_and_retry_facts());
 
     // THE CREDENTIAL VERDICT, STATED AS A FACT RATHER THAN LEFT TO BE INFERRED
     // FROM THE PROSE.
@@ -3739,6 +3750,143 @@ pub(crate) struct BrokerRun {
     /// What this run put in the pull journal while it ran: its opening record
     /// and every member failure, as each member landed. D-3341, DB-055.
     pub ledger: RunLedger,
+    /// What another attempt at this run could change, counted where each
+    /// fault is still typed (DB-B26). See [`RetryTally`].
+    pub retry: RetryTally,
+    /// Set when the store would not take a write and the run stopped asking
+    /// the vendor, with what the probe found (DB-B35).
+    pub store_unavailable: Option<String>,
+    /// Instruments the pull order left out of this run by name (DB-B27).
+    pub withheld: usize,
+    /// The store breaker's streak (DB-B35): instruments in a row that landed
+    /// nothing on a store that would not take a write.
+    store_fault_streak: u32,
+    /// How many member findings about days past the calendar of record were
+    /// folded into the run's one line (DB-B25).
+    pub past_record: usize,
+}
+
+/// The class fact of a run the pull order refused whole, or nothing for any
+/// other refusal (DB-B26, DB-B27).
+///
+/// The order's refusal is STANDING: it is decided from what the store holds
+/// at the rung below, which no later pass of the same run changes. It was a
+/// bare 409, which the conductor reads as a busy seat and asked again 400
+/// times.
+fn order_class_fact(code: axum::http::StatusCode) -> Option<(&'static str, String)> {
+    (code == axum::http::StatusCode::CONFLICT).then(|| {
+        (
+            crate::pullrun::RETRY_CLASS_FACT,
+            format!(
+                "{} — the pull order withholds every instrument asked for; asking again \
+                 returns the same until the pass it names has landed",
+                crate::pullrun::RetryClass::Standing.word()
+            ),
+        )
+    })
+}
+
+/// A run's failures by what another attempt could change (DB-B26).
+///
+/// # Why the run counts this
+///
+/// The conductor read a receipt's badge: anything not STORED or EMPTY was
+/// asked again, whole, up to 400 passes. But a failure is typed only HERE,
+/// by the arm of the sweep it came from: an instrument that did not answer,
+/// or a stop part-way, can succeed on another attempt; an instrument that
+/// answered and whose minutes have gaps, or one the pull order withheld, will
+/// answer the same again. The receipt carries the count as its
+/// [`crate::pullrun::RETRY_CLASS_FACT`], and the conductor reads that.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetryTally {
+    /// Failures another attempt could change.
+    pub transient: usize,
+    /// Failures another attempt would repeat.
+    pub standing: usize,
+}
+
+/// How many instruments in a row may land nothing on a store that will not
+/// take a write before the run stops asking the vendor: **3**, the vendor
+/// breaker's own count ([`breaker_trips`]). With [`BROKER_LANES`] fetched
+/// ahead, the requests spent past the fault are bounded by it (DB-B35).
+const STORE_BREAKER: u32 = 3;
+
+/// Whether a member that was handed rows committed none and said why: the
+/// one shape a store that will not take a write leaves, and the only time
+/// [`store_fault`] is asked.
+const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
+    done.rows_read > 0 && done.bars_committed == 0 && !done.failures.is_empty()
+}
+
+/// What stops the store at `root` taking a write, or `None` when it takes
+/// one (DB-B35).
+///
+/// # Why a probe and not the failure's words
+///
+/// A landing failure is prose by the time it is here, and classifying prose
+/// is how a 403 came to be filed as a transport blip elsewhere in this file.
+/// The store is asked directly instead: the root must be a directory, and a
+/// 4 KiB file must be created, written and synced under `audit/`. A drive
+/// that was unplugged fails the first; a full or read-only one the second.
+/// The probe file is this process's own and is removed again.
+///
+/// The root is never created: `create_dir` makes `audit/` one level under a
+/// root that exists, so a vanished drive is not answered by an empty folder
+/// at its old path.
+///
+/// # Cost
+///
+/// One `stat`, one `mkdir` that usually finds the directory, one create,
+/// one 4 KiB write, one sync and one unlink. Paid only after a member landed
+/// nothing it was handed, never on a healthy member.
+fn store_fault(root: &std::path::Path) -> Option<String> {
+    use std::io::Write as _;
+    match std::fs::metadata(root) {
+        Err(why) => return Some(format!("{}: {why}", root.display())),
+        Ok(meta) if !meta.is_dir() => {
+            return Some(format!("{} is not a directory", root.display()));
+        }
+        Ok(_) => {}
+    }
+    let dir = root.join("audit");
+    if let Err(why) = std::fs::create_dir(&dir)
+        && why.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return Some(format!("{}: {why}", dir.display()));
+    }
+    let probe = dir.join(format!(".store-probe-{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .and_then(|mut file| {
+            file.write_all(&[0_u8; 4096])
+                .and_then(|()| file.sync_data())
+        });
+    let _gone = std::fs::remove_file(&probe);
+    written
+        .err()
+        .map(|why| format!("{}: {why}", probe.display()))
+}
+
+/// The store breaker's streak after one more landed member: one longer when
+/// the member landed nothing and the store would not take a write, and back
+/// to zero otherwise, for the reason [`breaker_next`] resets.
+const fn store_breaker_next(streak: u32, fault: bool) -> u32 {
+    if fault { streak.saturating_add(1) } else { 0 }
+}
+
+/// The stop a tripped store breaker records, naming what the probe found and
+/// how much of the run was not asked for.
+fn store_unavailable_sentence(fault: &str, streak: u32, done: usize, total: usize) -> String {
+    format!(
+        "STORE UNAVAILABLE — {streak} instruments in a row were answered by the vendor and \
+         none of their bars could be written: {fault}. The run stopped after {done} of {total} \
+         instruments rather than spend requests on answers it cannot keep. Nothing already in \
+         the store is affected; check that the store's drive is mounted and has room, then pull \
+         again."
+    )
 }
 
 /// What a broker run has put in the pull journal while it was still running.
@@ -4003,7 +4151,27 @@ fn before_first_bar_line(instrument: &str, note: Option<&str>) -> Option<String>
 impl BrokerRun {
     /// One reached member's landing, summed, and its before-first-bar note
     /// kept for the receipt. D-3313.
-    fn absorb_member(&mut self, landed: &BrokerWindow, landed_one: pull::ingest::Ingested) {
+    fn absorb_member(&mut self, landed: &BrokerWindow, mut landed_one: pull::ingest::Ingested) {
+        // DAYS PAST THE CALENDAR OF RECORD ARE THE RUN'S ONE LINE, not one
+        // per instrument and month (DB-B25): the member's findings about
+        // them are counted here and said once by `record_past_record`.
+        let before = landed_one.failures.len();
+        landed_one
+            .failures
+            .retain(|failure| !failure.why.starts_with(pull::calendar::PAST_RECORD_FINDING));
+        self.past_record = self
+            .past_record
+            .saturating_add(before.saturating_sub(landed_one.failures.len()));
+        // THE INSTRUMENT ANSWERED, so what it failed on is what the vendor
+        // holds: standing. The one exception is a window the vendor cut
+        // short (`note_short_window` adds exactly one failure for it), which
+        // another attempt can finish.
+        let short = usize::from(landed.unfetched.is_some());
+        self.retry.transient = self.retry.transient.saturating_add(short);
+        self.retry.standing = self
+            .retry
+            .standing
+            .saturating_add(landed_one.failures.len().saturating_sub(short));
         self.total.absorb(landed_one);
         self.before_first_bar.extend(before_first_bar_line(
             &landed.instrument,
@@ -4047,6 +4215,170 @@ impl BrokerRun {
             day: None,
         });
         self.refused.push(why);
+        // AN INSTRUMENT THAT DID NOT ANSWER can answer on another attempt.
+        self.retry.transient = self.retry.transient.saturating_add(1);
+    }
+
+    /// A run opened in `journal` over `of` instruments, with the instruments
+    /// the pull order `withheld` named on it before the first is asked.
+    ///
+    /// `attempted` is EVERY instrument asked for, the withheld ones included:
+    /// they are part of what this run was expected to cover and did not.
+    fn opened(
+        journal: &audit::Journal,
+        asked: &ingest::SpotRequest,
+        of: usize,
+        withheld: Vec<(brutex_core::instrument::InstrumentKey, String)>,
+    ) -> Self {
+        let mut out = Self {
+            attempted: of.saturating_add(withheld.len()),
+            window: Some(asked.window),
+            ledger: RunLedger::open(journal, asked, of),
+            ..Self::default()
+        };
+        for (key, why) in withheld {
+            out.record_withheld(key.underlying.as_str(), why);
+        }
+        out
+    }
+
+    /// Absorbs a landed member and answers the store breaker's streak after
+    /// it (DB-B35). The store is asked only when the member landed nothing it
+    /// was handed: a landing failure was only noted, and the loop went on to
+    /// fetch the next lanes, so a store that had vanished or filled cost the
+    /// rest of the leg's requests. A tripped breaker records its stop here;
+    /// `place` is (instruments done, instruments in the run).
+    fn absorb_landed(
+        &mut self,
+        landed: &BrokerWindow,
+        landed_one: pull::ingest::Ingested,
+        store_root: &std::path::Path,
+        place: (usize, usize),
+    ) {
+        let fault = if landed_nothing(&landed_one) {
+            store_fault(store_root)
+        } else {
+            None
+        };
+        let streak = store_breaker_next(self.store_fault_streak, fault.is_some());
+        self.store_fault_streak = streak;
+        self.absorb_member(landed, landed_one);
+        if let Some(fault) = fault.filter(|_| streak >= STORE_BREAKER) {
+            self.stopped = Some(store_unavailable_sentence(&fault, streak, place.0, place.1));
+            self.store_unavailable = Some(fault);
+        }
+    }
+
+    /// Names an instrument the pull order left out of this run (DB-B27): one
+    /// failure under its own name, standing, because no later pass of this
+    /// run can change what its lower rung holds.
+    fn record_withheld(&mut self, instrument: &str, why: String) {
+        let _noted = telemetry::emit(
+            &telemetry::Event::error("api.pull", "instrument withheld by the pull order")
+                .with("instrument", telemetry::Value::Str(instrument))
+                .with("why", telemetry::Value::Str(&why)),
+        );
+        self.total.failures.push(pull::ingest::Failure {
+            instrument: instrument.to_owned(),
+            why,
+            month: self.window.and_then(only_month),
+            day: None,
+        });
+        self.withheld = self.withheld.saturating_add(1);
+        self.retry.standing = self.retry.standing.saturating_add(1);
+    }
+
+    /// The run's ONE line about days past the calendar of record, in place of
+    /// one per instrument and month (DB-B25). Standing: asking again cannot
+    /// extend the record. Nothing when the window lies inside it, and nothing
+    /// for a run no member of which reported such a day: a run that reached
+    /// nobody judged no day.
+    fn record_past_record(&mut self) {
+        if self.past_record == 0 {
+            return;
+        }
+        let Some(window) = self.window else {
+            return;
+        };
+        let Some((first, last, days)) = pull::calendar::past_record(
+            i64::from(window.from().days_from_epoch()),
+            i64::from(window.to().days_from_epoch()),
+        ) else {
+            return;
+        };
+        let day = |at: i64| {
+            u32::try_from(at)
+                .ok()
+                .and_then(|at| pull::session::Day::from_days(at).ok())
+                .map_or_else(|| at.to_string(), |day| day.to_string())
+        };
+        let why = format!(
+            "{} (it ends on {}): {days} day(s) of this window, {}..{}, for every instrument \
+             asked ({} member finding(s) folded into this line). Bars the vendor sent for \
+             those days are kept as landed and no completeness is claimed for them; extend \
+             the record from NSE's next holiday circular to have them judged.",
+            pull::calendar::PAST_RECORD_FINDING,
+            day(pull::calendar::SOURCED_LAST_DAY),
+            day(first),
+            day(last),
+            self.past_record
+        );
+        let _noted = telemetry::emit(
+            &telemetry::Event::error("api.pull", "window runs past the calendar of record")
+                .with("why", telemetry::Value::Str(&why)),
+        );
+        self.total.failures.push(pull::ingest::Failure {
+            instrument: "calendar of record".to_owned(),
+            why,
+            month: None,
+            day: None,
+        });
+        self.retry.standing = self.retry.standing.saturating_add(1);
+    }
+
+    /// The receipt's facts about who the pull order withheld and what another
+    /// attempt could change, in that order; none for a clean run.
+    fn order_and_retry_facts(&self) -> Vec<(&'static str, String)> {
+        let mut facts = Vec::with_capacity(2);
+        if self.withheld > 0 {
+            facts.push((
+                "Withheld by the pull order",
+                format!(
+                    "{} instrument(s) owe months at the rung below and were not asked for; \
+                     each is named under Failed and in the journal. The rest were pulled.",
+                    self.withheld
+                ),
+            ));
+        }
+        facts.extend(self.retry_fact());
+        facts
+    }
+
+    /// The receipt's [`crate::pullrun::RETRY_CLASS_FACT`], or nothing for a
+    /// run with no failure to class (DB-B26, DB-B35).
+    fn retry_fact(&self) -> Option<(&'static str, String)> {
+        use crate::pullrun::RetryClass;
+        if self.total.failures.is_empty() && self.store_unavailable.is_none() {
+            return None;
+        }
+        let class = if self.store_unavailable.is_some() {
+            RetryClass::Store
+        } else if self.retry.transient > 0 {
+            RetryClass::Transient
+        } else {
+            RetryClass::Standing
+        };
+        Some((
+            crate::pullrun::RETRY_CLASS_FACT,
+            format!(
+                "{} — {} failure(s) another attempt could change (an instrument that did \
+                 not answer, a window cut short, a stop) and {} it would repeat (from an \
+                 instrument that answered, or one the pull order withheld)",
+                class.word(),
+                self.retry.transient,
+                self.retry.standing
+            ),
+        ))
     }
 
     /// Reads a credential death out of a window that landed its first chunks.
@@ -4081,6 +4413,8 @@ impl BrokerRun {
                 month: None,
                 day: None,
             });
+            // A STOP LEFT INSTRUMENTS UNASKED: another attempt asks them.
+            self.retry.transient = self.retry.transient.saturating_add(1);
         }
     }
 
@@ -4418,6 +4752,136 @@ fn note_member_failure(failure: &pull::ingest::Failure, asked: &ingest::SpotRequ
 /// directory — the latter because `pull::ingest::Plan::timeframe` already
 /// refuses it AT THE WRITE BOUNDARY in that refusal's own words, and a second
 /// refusal here would be a worse-worded duplicate of a better one.
+/// The instruments of `targets` the pull order withholds from this run, each
+/// with its reason, when SOME of them owe months at the rung below and others
+/// do not (DB-B27). Empty when nothing is owed, and empty when EVERY target
+/// owes: that is the day pass not having run, and [`ladder_refusal`] refuses
+/// the whole run for it as it always did.
+///
+/// # Why per instrument
+///
+/// One instrument with a hole in its daily months closed the minute pass for
+/// all of them: MAZDOCK (26 months) and FORCEMOT (3) shut the whole 1min
+/// stock leg with 409, and `/pull/run` asked again 400 times. A minute month
+/// needs its own instrument's daily month, so the instruments that owe are
+/// left out by name and the rest are pulled.
+///
+/// # Cost
+///
+/// [`crate::ladder::owing`]: two probes per instrument-month asked, then one
+/// pass over the owed runs. Bounded by the ask.
+fn ladder_withheld(
+    asked: &ingest::SpotRequest,
+    targets: &[brutex_core::instrument::InstrumentKey],
+    censuses: &[census::VendorCensus],
+) -> Vec<(brutex_core::instrument::InstrumentKey, String)> {
+    use crate::ladder;
+
+    if !ladder::is_gated(asked.feed) {
+        return Vec::new();
+    }
+    let Some(rung) = asked.granularity.store_timeframe() else {
+        return Vec::new();
+    };
+    let Some(first) = ladder::precedes(rung) else {
+        return Vec::new();
+    };
+    let months = ladder::months_of(asked.window);
+    let wanted: Vec<ladder::Wanted> = targets
+        .iter()
+        .flat_map(|key| {
+            let leg = ladder::Leg::of(key.kind);
+            let mine = ladder::months_for(leg, &months);
+            mine.into_iter().map(move |month| ladder::Wanted {
+                leg,
+                symbol: key.underlying,
+                exchange: key.exchange,
+                segment: key.segment,
+                month,
+            })
+        })
+        .collect();
+    let state = asked
+        .feed
+        .store_vendor()
+        .and_then(|v| censuses.iter().find(|c| c.vendor == v))
+        .map(|c| &c.state);
+    // An unreadable census is the whole run's refusal, and an absent one
+    // holds nothing for anybody: both are `ladder_refusal`'s to say.
+    let Some(census::Census::Held { manifest }) = state else {
+        return Vec::new();
+    };
+    let owed = ladder::owing(ladder::probing(manifest), asked.feed, rung, &wanted);
+    let mut reasons: std::collections::BTreeMap<
+        (
+            brutex_core::instrument::Exchange,
+            brutex_core::instrument::Segment,
+            brutex_core::symbol::Symbol,
+        ),
+        Vec<String>,
+    > = std::collections::BTreeMap::new();
+    for run in &owed {
+        reasons
+            .entry((run.exchange, run.segment, run.symbol))
+            .or_default()
+            .push(format!(
+                "{}..={}, {} month(s), {}",
+                run.from,
+                run.to,
+                run.months,
+                run.why.label()
+            ));
+    }
+    let owing: Vec<_> = targets
+        .iter()
+        .filter_map(|key| {
+            reasons
+                .get(&(key.exchange, key.segment, key.underlying))
+                .map(|runs| {
+                    (
+                        *key,
+                        format!(
+                            "{WITHHELD_BY_ORDER}: {first} is owed for {}; its {rung} was not \
+                             asked for. Pull {first} for it over this window first, or leave it \
+                             out; a month the vendor answers with nothing stays owed, because \
+                             the store cannot tell that from a pass that never ran",
+                            runs.join("; "),
+                            first = first.as_str(),
+                            rung = rung.as_str(),
+                        ),
+                    )
+                })
+        })
+        .collect();
+    if owing.len() == targets.len() {
+        return Vec::new();
+    }
+    owing
+}
+
+/// The pull order, asked of a run's targets: the instruments it withholds by
+/// name are taken out of `targets` and returned, and what is left is asked of
+/// the whole-run gate, whose refusal is the `Err` (DB-B27).
+fn order_gate(
+    asked: &ingest::SpotRequest,
+    targets: &mut Vec<brutex_core::instrument::InstrumentKey>,
+    censuses: &[census::VendorCensus],
+) -> Result<Vec<(brutex_core::instrument::InstrumentKey, String)>, String> {
+    let withheld = ladder_withheld(asked, targets, censuses);
+    if !withheld.is_empty() {
+        let left_out: std::collections::HashSet<_> = withheld.iter().map(|(key, _)| *key).collect();
+        targets.retain(|key| !left_out.contains(key));
+    }
+    match ladder_refusal(asked, targets, censuses) {
+        Some(why) => Err(why),
+        None => Ok(withheld),
+    }
+}
+
+/// The leading words of the failure an instrument withheld by the pull order
+/// is named with (DB-B27).
+const WITHHELD_BY_ORDER: &str = "withheld by the pull order";
+
 fn ladder_refusal(
     asked: &ingest::SpotRequest,
     targets: &[brutex_core::instrument::InstrumentKey],
@@ -4898,6 +5362,10 @@ async fn land_broker_member(
     // it is a different one from a refusal — the socket worked and the store did
     // not. Both belong on the page; only naming the first would hide the disk.
     for failure in &landed_one.failures {
+        // Days past the calendar of record are the run's one line (DB-B25).
+        if failure.why.starts_with(pull::calendar::PAST_RECORD_FINDING) {
+            continue;
+        }
         note_member_failure(failure, asked, site);
     }
     landed_one
@@ -5173,20 +5641,20 @@ pub(crate) async fn broker_run_by(
     // It is a parameter rather than a read inside here so the two callers can
     // each answer honestly: `autopilot::tick` already takes a fresh census
     // either side of this call, and a hand run reads one per request.
-    if let Some(why) = ladder_refusal(asked, &targets, censuses) {
-        return BrokerRun::out_of_order(why);
-    }
+    // PER INSTRUMENT FIRST (DB-B27): the instruments that owe months at the
+    // rung below are left out by name and the rest are pulled. What remains
+    // is then asked of the whole-run gate, which still refuses a run whose
+    // every instrument owes, a leg out of order, or an unreadable census.
+    let withheld = match order_gate(asked, &mut targets, censuses) {
+        Ok(withheld) => withheld,
+        Err(why) => return BrokerRun::out_of_order(why),
+    };
 
     let claimed_run = note_run_started(asked, targets.len());
     // THE RUN IS ON THE JOURNAL BEFORE ITS FIRST INSTRUMENT, and each failure
     // follows as its member lands (`RunLedger`, D-3341, DB-055, DB-G46).
     let journal = site.journal();
-    let mut out = BrokerRun {
-        attempted: targets.len(),
-        window: Some(asked.window),
-        ledger: RunLedger::open(&journal, asked, targets.len()),
-        ..BrokerRun::default()
-    };
+    let mut out = BrokerRun::opened(&journal, asked, targets.len(), withheld);
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
     // started with, so a stop that arrives after this run began stops it and a
     // stop that happened before it began does not.
@@ -5214,6 +5682,9 @@ pub(crate) async fn broker_run_by(
     // why it lives in `Lanes` (D-3002).
     let mut lanes = Lanes::default();
     for (index, instrument) in targets.iter().enumerate() {
+        // (instruments begun, instruments in the run), for every line below
+        // that says how far the run got.
+        let place = (index.saturating_add(1), targets.len());
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
         // who presses Pause must not wait out the other seven hundred
@@ -5303,7 +5774,8 @@ pub(crate) async fn broker_run_by(
                 out.origin.clone_from(&landed.origin);
                 let landed_one =
                     land_broker_member(&landed, instrument, site, &mut dated, asked).await;
-                out.absorb_member(&landed, landed_one);
+                // THE STORE BREAKER (DB-B35): see `BrokerRun::absorb_landed`.
+                out.absorb_landed(&landed, landed_one, &site.store_root, place);
                 rejected
             }
         };
@@ -5318,13 +5790,13 @@ pub(crate) async fn broker_run_by(
         if credential_halts(&mut lanes, (site, asked.feed), rejected, &mut out, index).await {
             break;
         }
+        // THE STORE BREAKER: its stop is already recorded on `out`.
+        if out.store_unavailable.is_some() {
+            break;
+        }
         // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
         if breaker_trips(vendor_down_streak) {
-            out.stopped = Some(vendor_down_sentence(
-                vendor_down_streak,
-                index.saturating_add(1),
-                targets.len(),
-            ));
+            out.stopped = Some(vendor_down_sentence(vendor_down_streak, place.0, place.1));
             break;
         }
     }
@@ -5337,6 +5809,8 @@ pub(crate) async fn broker_run_by(
     // process lived.
     site.autopilot.publish(|status| status.now = None);
     out.record_stop();
+    // ONE LINE FOR THE DAYS PAST THE CALENDAR OF RECORD (DB-B25).
+    out.record_past_record();
     out.ledger.flush(&journal, &out.total.failures);
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     note_run_finished(&out, out.total.balances(), claimed_run);
@@ -5702,21 +6176,130 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     // ONE LOOKUP. A day the exchange did not trade answers `Err`, and that reads
     // as CLOSED — there is no session left to finish, so nothing is gained by
     // refusing it.
-    let closed = pull::vendor::Venue::NseCash
+    //
+    // THE CALENDAR OF RECORD DECIDES WHICH SESSION, AND A MARGIN FOLLOWS ITS
+    // CLOSE (DB-B36). The paragraph above claimed a holiday "answers `Err`":
+    // it does not. `hours_on` is a lookup by date range and answers the
+    // regular hours on a holiday too, so on a weekday holiday with an evening
+    // Muhurat (17:30, 18:00 and 18:15 are on record) today read as closed
+    // from 15:30 — before the session it was about to hold had opened — and a
+    // daily candle taken mid-Muhurat would have been stored for good. And the
+    // comparison had no margin: at 15:30:00 by this machine's clock the last
+    // minute's candle was asked for in the second it ended. See
+    // `settled_today`.
+    let venue_close = pull::vendor::Venue::NseCash
         .hours_on(today)
-        .map_or(true, |session| {
-            now.minute_of_day() >= session.close_minute()
-        });
+        .ok()
+        .map(pull::vendor::Session::close_minute);
+    let settled = settled_today(
+        pull::calendar::exchange_kind_of(i64::from(today.days_from_epoch())),
+        venue_close,
+        now.minute_of_day(),
+    );
+    let closed = settled.is_ok();
     if asked.window.to() > today || (asked.window.to() == today && !closed) {
         // ONE COPY of this prose, in the `Refusal` that owns it. A second
-        // hand-written sentence here would be the thing that drifts.
-        return Err(ingest::Refusal::WindowReachesToday {
+        // hand-written sentence here would be the thing that drifts. What it
+        // cannot know is WHICH rule held today back, so that follows it.
+        let refusal = ingest::Refusal::WindowReachesToday {
             to: asked.window.to(),
             today,
         }
-        .to_string());
+        .to_string();
+        return Err(match settled {
+            Err(why) if asked.window.to() == today => format!("{refusal} Today: {why}."),
+            _ => refusal,
+        });
     }
     Ok(())
+}
+
+/// Minutes after a session's close before its day may be asked of a vendor:
+/// **5** (DB-B36).
+///
+/// A policy of this build, not a vendor fact: no source recorded in the
+/// charter states when a vendor's last candle of a session is final, so the
+/// figure is UNVERIFIED as a sufficient wait. It is what the gate lacked
+/// entirely. This machine's clock is not compared with any vendor's: the
+/// HTTP layer keeps no response `Date`, so a clock that runs ahead by more
+/// than the margin is still not caught (NOT DONE, named in the package
+/// report).
+const SETTLE_MARGIN_MINUTES: u32 = 5;
+
+/// Whether today's session has ended and settled at `minute` of the day, or
+/// why today may not be asked for yet (DB-B36).
+///
+/// `kind` is the calendar of record's answer for today
+/// ([`pull::calendar::exchange_kind_of`]) and `venue_close` the venue
+/// table's dated close for a regular day, which moves (D-0151).
+///
+/// - a closed day holds no session: settled;
+/// - a regular session settles [`SETTLE_MARGIN_MINUTES`] after the venue's
+///   close;
+/// - a special session settles the same margin after its own last recorded
+///   minute, so an evening Muhurat is never read as closed at 15:30;
+/// - a session whose hours no record states, and a day past the record, are
+///   not settled today at all: nothing here can say when they end, and the
+///   day is askable from tomorrow.
+///
+/// # Cost
+///
+/// A match and, for a special session, a walk of its windows (at most
+/// [`pull::calendar::MAX_WINDOWS`]). No allocation on the settled path.
+fn settled_today(
+    kind: pull::calendar::DayKind,
+    venue_close: Option<u32>,
+    minute: u32,
+) -> Result<(), String> {
+    use pull::calendar::{DayKind, Session};
+    let close = match kind {
+        DayKind::Closed => return Ok(()),
+        DayKind::OpenLengthUnmeasured => {
+            return Err(String::from(
+                "it holds a special session whose hours no record states, so when it \
+                 ends cannot be established; it is askable from tomorrow",
+            ));
+        }
+        DayKind::Unmeasured => {
+            return Err(String::from(
+                "it is past the end of the calendar of record, so whether a session is \
+                 still to run today (an evening Muhurat on a weekday holiday is one) \
+                 cannot be established; it is askable from tomorrow",
+            ));
+        }
+        DayKind::Open(session) if session == Session::full() => match venue_close {
+            Some(close) => close,
+            None => {
+                return Err(String::from(
+                    "the venue table states no close for it; it is askable from tomorrow",
+                ));
+            }
+        },
+        DayKind::Open(session) => {
+            // The last recorded minute of the day's windows, inclusive.
+            let mut last = 0_u32;
+            for window in session.windows.iter().take(usize::from(session.count)) {
+                last = last.max(u32::from(window.to));
+            }
+            last.saturating_add(1)
+        }
+    };
+    let settles = close.saturating_add(SETTLE_MARGIN_MINUTES);
+    if minute >= settles {
+        Ok(())
+    } else {
+        Err(format!(
+            "its session ends at {:02}:{:02} IST and is asked for from {:02}:{:02}, \
+             {SETTLE_MARGIN_MINUTES} minutes after, so the last candles are whole; it is \
+             {:02}:{:02} now",
+            close / 60,
+            close % 60,
+            settles / 60,
+            settles % 60,
+            minute / 60,
+            minute % 60,
+        ))
+    }
 }
 
 /// A [`pull::chain::Discovery`] that charges the rate governor before EVERY
@@ -8759,10 +9342,21 @@ pub(crate) async fn pull_run_json(
         .run
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let body = held.as_ref().map_or_else(
-        || crate::pullrun::Progress::default().json(),
-        crate::pullrun::Progress::json,
-    );
+    // TODAY, FOR THE CALENDAR'S HORIZON (DB-B25, DB-B41). An unusable clock
+    // answers `null` there rather than a horizon measured from nowhere.
+    let today = ingest::ist_moment(std::time::SystemTime::now())
+        .ok()
+        .map(|now| i64::from(now.day().days_from_epoch()));
+    let body = match held.as_ref() {
+        Some(progress) => crate::pullrun::status_json(progress, today, None),
+        // NO RUN IN THIS PROCESS: the run a restart cut short, if the journal
+        // holds one, is what there is to say (DB-B34).
+        None => crate::pullrun::status_json(
+            &crate::pullrun::Progress::default(),
+            today,
+            site.interrupted.as_ref(),
+        ),
+    };
     (axum::http::StatusCode::OK, json_headers(), body)
 }
 
@@ -18181,6 +18775,694 @@ mod tests {
         );
     }
 
+    /// A census of `vendor` holding the daily months named, `(symbol, month)`
+    /// of 2026.
+    fn daily_months_held(vendor: Vendor, held: &[(&str, u8)]) -> census::VendorCensus {
+        let mut manifest =
+            pull::manifest::Manifest::open(vendor, &[], &[]).expect("a genesis census");
+        for (name, month) in held {
+            manifest
+                .record_held(pull::manifest::Held::unknown(pull::manifest::Entry {
+                    key: pull::manifest::EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
+                        timeframe: store::path::Timeframe::DAY_1,
+                        month: month_of(2026, *month),
+                    },
+                    rows: 3,
+                    first_ts_micros: 1,
+                    last_ts_micros: 2,
+                }))
+                .expect("the census has room");
+        }
+        census::VendorCensus {
+            vendor,
+            path: PathBuf::from("/nonexistent/ladder-gate/census.man"),
+            state: census::Census::Held {
+                manifest: crate::census::Manifests::single(manifest),
+            },
+        }
+    }
+
+    /// **ONE INSTRUMENT'S DAILY HOLE WITHHOLDS THAT INSTRUMENT, NOT THE LEG**
+    /// (DB-B27). Three instruments are asked for minutes over June to August:
+    /// one holds every daily month, one has a hole in July, one was first
+    /// held in August (its earlier months are its listing gap, never owed).
+    /// The whole-run gate refused all three for the one hole; now the holed
+    /// instrument is named and left out, and the other two pass.
+    #[test]
+    fn an_instrument_with_a_daily_hole_is_withheld_alone_and_the_rest_are_pulled() {
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-06-01&to=2026-08-05&granularity=1min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+        let index = brutex_core::instrument::Segment::Index;
+        let (whole, holed, young) = (
+            spot_key("NIFTY", index),
+            spot_key("BANKNIFTY", index),
+            spot_key("NIFTYIT", index),
+        );
+        let censuses = [daily_months_held(
+            Vendor::Dhan,
+            &[
+                ("NIFTY", 6),
+                ("NIFTY", 7),
+                ("NIFTY", 8),
+                ("BANKNIFTY", 6),
+                ("BANKNIFTY", 8),
+                ("NIFTYIT", 8),
+            ],
+        )];
+        assert!(
+            ladder_refusal(&asked, &[whole, holed, young], &censuses)
+                .is_some_and(|why| why.contains("1 of 9 instrument-months")),
+            "the premise: asked whole, the one hole refuses all three"
+        );
+        let withheld = ladder_withheld(&asked, &[whole, holed, young], &censuses);
+        assert_eq!(withheld.len(), 1, "{withheld:?}");
+        assert_eq!(withheld[0].0, holed);
+        assert!(
+            withheld[0].1.starts_with(
+                "withheld by the pull order: 1day is owed for 2026-07..=2026-07, 1 month(s), \
+                 a hole between held months; its 1min was not asked for."
+            ),
+            "{}",
+            withheld[0].1
+        );
+        assert_eq!(
+            ladder_refusal(&asked, &[whole, young], &censuses),
+            None,
+            "what is left clears the whole-run gate and is pulled"
+        );
+        // EVERY instrument owing is the day pass not having run: nobody is
+        // singled out, and the whole run is refused as before.
+        assert!(ladder_withheld(&asked, &[holed], &censuses).is_empty());
+        assert!(ladder_refusal(&asked, &[holed], &censuses).is_some());
+        // Nothing held at all, an absent census and a daily ask: nothing to
+        // withhold, each for its own reason.
+        assert!(ladder_withheld(&asked, &[whole, holed], &[]).is_empty());
+        let daily = ingest::parse_spot(
+            "target=swept&from=2026-06-01&to=2026-08-05&granularity=1day",
+            day(2026, 8, 10),
+        )
+        .expect("a daily ask");
+        assert!(ladder_withheld(&daily, &[whole, holed, young], &censuses).is_empty());
+
+        // The run names each withheld instrument once, as a standing failure,
+        // and says so in the log as well as on the receipt.
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        let mut out = BrokerRun {
+            window: Some(asked.window),
+            ..BrokerRun::default()
+        };
+        for (key, why) in withheld {
+            out.record_withheld(key.underlying.as_str(), why);
+        }
+        assert_eq!(
+            (out.withheld, out.retry.standing, out.retry.transient),
+            (1, 1, 0)
+        );
+        assert_eq!(out.total.failures.len(), 1);
+        assert_eq!(out.total.failures[0].instrument, "BANKNIFTY");
+        assert!(
+            crate::emitted::landed(from, "api.pull", "instrument withheld by the pull order")
+                .iter()
+                .any(
+                    |record| crate::emitted::says(record, "instrument", "BANKNIFTY")
+                        && crate::emitted::says(record, "why", "2026-07..=2026-07")
+                ),
+            "the withholding is logged with the instrument and what it owes"
+        );
+        let (label, said) = out.retry_fact().expect("a failure is classed");
+        assert_eq!(label, crate::pullrun::RETRY_CLASS_FACT);
+        assert!(said.starts_with("standing — 0 failure(s)"), "{said}");
+    }
+
+    /// The uncapped per-instrument answer the withholding reads: thirteen
+    /// instruments each owing one month are thirteen runs, where the gate's
+    /// refusal names twelve.
+    #[test]
+    fn owing_names_every_run_past_the_refusals_cap() {
+        use crate::ladder::{self, Leg, Wanted};
+        let names: Vec<String> = (0..13).map(|n| format!("S{n}")).collect();
+        let wanted: Vec<Wanted> = names
+            .iter()
+            .flat_map(|name| {
+                [6_u8, 7, 8].map(|month| Wanted {
+                    leg: Leg::Spot,
+                    symbol: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
+                    exchange: brutex_core::instrument::Exchange::Nse,
+                    segment: brutex_core::instrument::Segment::Index,
+                    month: month_of(2026, month),
+                })
+            })
+            .collect();
+        // Every instrument holds June and August and lacks July.
+        let held = |key: &pull::manifest::EntryKey| key.month != month_of(2026, 7);
+        let feed = minute_ask().feed;
+        let owed = ladder::owing(held, feed, store::path::Timeframe::MINUTE_1, &wanted);
+        assert_eq!(owed.len(), 13);
+        assert!(owed.iter().all(|run| {
+            run.months == 1 && run.from == month_of(2026, 7) && run.why == ladder::OwedWhy::Interior
+        }));
+        assert!(matches!(
+            ladder::gate(held, feed, store::path::Timeframe::MINUTE_1, &wanted),
+            ladder::Gate::RungFirst { missing: 13, runs: 13, ref owed, .. } if owed.len() == ladder::OWED_NAMED
+        ));
+        assert!(
+            ladder::owing(held, feed, store::path::Timeframe::DAY_1, &wanted).is_empty(),
+            "nothing precedes the daily rung"
+        );
+        assert!(
+            ladder::owing(|_| true, feed, store::path::Timeframe::MINUTE_1, &wanted).is_empty()
+        );
+    }
+
+    /// **TODAY IS ASKABLE ONLY ONCE ITS OWN SESSION HAS ENDED AND SETTLED**
+    /// (DB-B36): a margin after a regular close, the special session's own
+    /// end on a Muhurat day (never 15:30), and not at all today when no
+    /// record says when the session ends.
+    #[test]
+    fn today_settles_after_its_own_session_and_a_margin() {
+        use pull::calendar::{DayKind, Session, exchange_kind_of};
+        let regular = DayKind::Open(Session::full());
+        let close = 15 * 60 + 30;
+        assert!(settled_today(regular, Some(close), close - 1).is_err());
+        let at_close = settled_today(regular, Some(close), close).expect_err("no margin yet");
+        assert!(
+            at_close.contains("ends at 15:30 IST and is asked for from 15:35")
+                && at_close.contains("it is 15:30 now"),
+            "{at_close}"
+        );
+        assert!(settled_today(regular, Some(close), close + SETTLE_MARGIN_MINUTES - 1).is_err());
+        assert_eq!(
+            settled_today(regular, Some(close), close + SETTLE_MARGIN_MINUTES),
+            Ok(())
+        );
+        // The close MOVES with the venue table (D-0151): 15:15 settles 15:20.
+        assert_eq!(
+            settled_today(regular, Some(15 * 60 + 15), 15 * 60 + 20),
+            Ok(())
+        );
+        assert!(
+            settled_today(regular, None, 23 * 60).is_err(),
+            "no close on record"
+        );
+
+        // 2021-11-04, a Thursday holiday with a Muhurat 18:15-19:14.
+        let muhurat = exchange_kind_of(18_935);
+        assert!(matches!(muhurat, DayKind::Open(session) if session != Session::full()));
+        let mid = settled_today(muhurat, Some(close), close + 60).expect_err("16:30 is before it");
+        assert!(mid.contains("ends at 19:15 IST"), "{mid}");
+        assert!(
+            settled_today(muhurat, Some(close), 18 * 60 + 40).is_err(),
+            "mid-session"
+        );
+        assert!(settled_today(muhurat, Some(close), 19 * 60 + 19).is_err());
+        assert_eq!(settled_today(muhurat, Some(close), 19 * 60 + 20), Ok(()));
+        // 2021-02-24: two windows, the later ending 16:59.
+        let outage = exchange_kind_of(pull::calendar::SYSTEMS_OUTAGE_DAY);
+        assert!(settled_today(outage, Some(close), 16 * 60).is_err());
+        assert_eq!(settled_today(outage, Some(close), 17 * 60 + 5), Ok(()));
+
+        // A holiday or a weekend holds no session.
+        assert_eq!(settled_today(DayKind::Closed, None, 0), Ok(()));
+        // 2026-11-08: a Muhurat no circular has sized. Not today, at any hour.
+        assert_eq!(exchange_kind_of(20_765), DayKind::OpenLengthUnmeasured);
+        let unsized_day = settled_today(DayKind::OpenLengthUnmeasured, Some(close), 23 * 60 + 59)
+            .expect_err("no end is on record");
+        assert!(
+            unsized_day.contains("askable from tomorrow"),
+            "{unsized_day}"
+        );
+        let beyond = settled_today(DayKind::Unmeasured, Some(close), 23 * 60 + 59)
+            .expect_err("past the record");
+        assert!(
+            beyond.contains("past the end of the calendar of record"),
+            "{beyond}"
+        );
+    }
+
+    /// **THE STORE IS ASKED DIRECTLY WHETHER IT TAKES A WRITE** (DB-B35): a
+    /// root that is gone, a root that is a file and a directory that refuses
+    /// a write are faults; a healthy store is none and keeps no probe file.
+    #[test]
+    fn a_store_that_cannot_take_a_write_is_found_by_asking_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::scratch::path("store-fault-probe");
+        let _ = std::fs::remove_dir_all(&root);
+        let gone = store_fault(&root).expect("a missing root is a fault");
+        assert!(gone.contains("store-fault-probe"), "{gone}");
+        assert!(
+            !root.exists(),
+            "the probe never creates the root: a vanished drive stays gone"
+        );
+
+        std::fs::create_dir_all(&root).expect("mkdir");
+        assert_eq!(store_fault(&root), None, "a healthy store");
+        let left: Vec<_> = std::fs::read_dir(root.join("audit"))
+            .expect("audit/")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(left.is_empty(), "the probe file is removed: {left:?}");
+        assert_eq!(
+            store_fault(&root),
+            None,
+            "and asking twice is the same answer"
+        );
+
+        let audit = root.join("audit");
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let refused = store_fault(&root);
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let refused = refused.expect("a directory that refuses a write is a fault");
+        assert!(refused.contains(".store-probe-"), "{refused}");
+
+        let file = crate::scratch::path("store-fault-probe-file");
+        let _ = std::fs::remove_dir_all(&file);
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, b"x").expect("write");
+        assert!(store_fault(&file).is_some_and(|why| why.contains("is not a directory")));
+
+        // The breaker: only a member that was handed rows and kept none asks,
+        // and three such in a row trip it; anything else resets it.
+        let mut done = pull::ingest::Ingested {
+            rows_read: 375,
+            ..pull::ingest::Ingested::default()
+        };
+        assert!(!landed_nothing(&done), "no failure, nothing to ask about");
+        done.failures.push(pull::ingest::Failure::new(
+            "X",
+            "the month file would not open",
+        ));
+        assert!(landed_nothing(&done));
+        done.bars_committed = 1;
+        assert!(!landed_nothing(&done), "something landed");
+        assert!(
+            !landed_nothing(&pull::ingest::Ingested::default()),
+            "an empty answer"
+        );
+        let mut streak = 0;
+        for _ in 0..STORE_BREAKER - 1 {
+            streak = store_breaker_next(streak, true);
+            assert!(streak < STORE_BREAKER);
+        }
+        assert_eq!(
+            store_breaker_next(streak, false),
+            0,
+            "one good landing resets it"
+        );
+        assert_eq!(store_breaker_next(streak, true), STORE_BREAKER);
+        let said = store_unavailable_sentence("disk full", 3, 9, 208);
+        assert!(
+            said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
+            "{said}"
+        );
+    }
+
+    /// **A RUN'S FAILURES ARE CLASSED WHERE THEY ARE TYPED** (DB-B26), and
+    /// days past the calendar of record are ONE line of the run (DB-B25).
+    #[test]
+    fn a_runs_retry_class_and_its_one_line_past_the_calendar() {
+        use crate::pullrun::RetryClass;
+        let mut out = BrokerRun::default();
+        assert_eq!(out.retry_fact(), None, "nothing failed, nothing to class");
+
+        out.record_refusal("NIFTY", "NIFTY: the vendor did not answer".to_owned());
+        let said = out.retry_fact().expect("a fact").1;
+        assert!(said.starts_with("transient — 1 failure(s)"), "{said}");
+        let page = stored_html(
+            "Spot pull",
+            "FAILED",
+            "r",
+            &[out.retry_fact().expect("a fact")],
+        );
+        assert_eq!(RetryClass::of_receipt(&page), Some(RetryClass::Transient));
+
+        // A window that runs two days past the record: the member findings
+        // are folded and the run says it once.
+        let last = pull::session::Day::from_days(
+            u32::try_from(pull::calendar::SOURCED_LAST_DAY).expect("a day"),
+        )
+        .expect("the record's last day");
+        let after = pull::session::Day::from_days(last.days_from_epoch() + 2).expect("a day");
+        let mut run = BrokerRun {
+            window: Some(pull::session::Window::new(last, after).expect("a window")),
+            past_record: 416,
+            ..BrokerRun::default()
+        };
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        run.record_past_record();
+        assert!(
+            crate::emitted::landed(from, "api.pull", "window runs past the calendar of record")
+                .iter()
+                .any(|record| crate::emitted::says(record, "why", "2027-01-01..2027-01-02")),
+            "the run's one line is logged"
+        );
+        assert_eq!(run.total.failures.len(), 1);
+        let line = &run.total.failures[0];
+        assert_eq!(line.instrument, "calendar of record");
+        assert!(
+            line.why.starts_with(pull::calendar::PAST_RECORD_FINDING)
+                && line.why.contains(
+                    "(it ends on 2026-12-31): 2 day(s) of this window, 2027-01-01..2027-01-02"
+                )
+                && line
+                    .why
+                    .contains("416 member finding(s) folded into this line"),
+            "{}",
+            line.why
+        );
+        let page = stored_html(
+            "Spot pull",
+            "FAILED",
+            "r",
+            &[run.retry_fact().expect("a fact")],
+        );
+        assert_eq!(RetryClass::of_receipt(&page), Some(RetryClass::Standing));
+        // A window inside the record adds no line, whatever was counted, and
+        // neither does a run no member of which reported such a day.
+        let mut inside = BrokerRun {
+            window: Some(pull::session::Window::new(last, last).expect("a window")),
+            past_record: 3,
+            ..BrokerRun::default()
+        };
+        let mut nobody = BrokerRun {
+            window: Some(pull::session::Window::new(last, after).expect("a window")),
+            ..BrokerRun::default()
+        };
+        nobody.record_past_record();
+        assert!(nobody.total.failures.is_empty());
+        inside.record_past_record();
+        assert!(inside.total.failures.is_empty());
+
+        // A store that will not take a write outranks both.
+        out.store_unavailable = Some("disk full".to_owned());
+        let page = stored_html(
+            "Spot pull",
+            "FAILED",
+            "r",
+            &[out.retry_fact().expect("a fact")],
+        );
+        assert_eq!(RetryClass::of_receipt(&page), Some(RetryClass::Store));
+    }
+
+    /// **THE SWEEP'S LOOP IS WIRED TO THE THREE RUN-LEVEL RULES** (DB-B27,
+    /// DB-B35, DB-B25), read off the source as
+    /// `a_finished_session_is_askable_today_and_an_unfinished_one_is_not` reads
+    /// its guard: driving the loop takes a vendor that answers candles, and
+    /// each rule's own arithmetic is driven by the tests beside this one.
+    #[test]
+    fn the_sweep_withholds_per_instrument_probes_the_store_and_says_the_horizon_once() {
+        let src = include_str!("server.rs");
+        let at = src
+            .split_once("pub(crate) async fn broker_run_by(")
+            .expect("the sweep exists")
+            .1;
+        let body = &at[..at.find("\n}\n").expect("it has an end")];
+        let before = |first: &str, second: &str| {
+            let (a, b) = (body.find(first), body.find(second));
+            assert!(a.is_some(), "{first} is in the sweep");
+            assert!(b.is_some(), "{second} is in the sweep");
+            assert!(a < b, "{first} comes before {second}");
+        };
+        // The instruments that owe are left out BEFORE the whole-run gate is
+        // asked about the rest, and before the run opens its journal record.
+        before(
+            "order_gate(asked, &mut targets, censuses)",
+            "BrokerRun::out_of_order(why)",
+        );
+        before(
+            "BrokerRun::out_of_order(why)",
+            "BrokerRun::opened(&journal, asked, targets.len(), withheld)",
+        );
+        let gate = src
+            .split_once("\nfn order_gate(")
+            .expect("the gate exists")
+            .1;
+        let gate = &gate[..gate.find("\n}\n").expect("it has an end")];
+        for needle in [
+            "ladder_withheld(asked, targets, censuses)",
+            "targets.retain(|key| !left_out.contains(key))",
+            "ladder_refusal(asked, targets, censuses)",
+        ] {
+            assert!(gate.contains(needle), "{needle} is in the gate");
+        }
+        assert!(
+            gate.find("targets.retain(") < gate.find("ladder_refusal("),
+            "the whole-run gate is asked about what is left"
+        );
+        // The store is asked only after a member landed nothing, and a
+        // tripped breaker leaves the loop before the next lanes are fetched.
+        before("land_broker_member(", "out.absorb_landed(");
+        before("out.absorb_landed(", "if out.store_unavailable.is_some()");
+        before(
+            "if out.store_unavailable.is_some()",
+            "if breaker_trips(vendor_down_streak)",
+        );
+        let absorb = src
+            .split_once("    fn absorb_landed(")
+            .expect("the absorb exists")
+            .1;
+        let absorb = &absorb[..absorb.find("\n    }\n").expect("it has an end")];
+        for needle in [
+            "if landed_nothing(&landed_one)",
+            "store_fault(store_root)",
+            "store_breaker_next(self.store_fault_streak, fault.is_some())",
+            "streak >= STORE_BREAKER",
+            "self.store_unavailable = Some(fault)",
+        ] {
+            assert!(absorb.contains(needle), "{needle} is in the absorb");
+        }
+        // The horizon line is the run's, once, before its last flush.
+        before("out.record_stop();", "out.record_past_record();");
+        before("out.record_past_record();", "note_run_finished(");
+    }
+
+    /// The costs of the pull runtime's new operations, measured. Ignored: it
+    /// prints figures and asserts only the bounds that are structural, so a
+    /// slow shared machine fails no gate (the figures are in the package
+    /// report). Run with
+    /// `cargo test -p api --release pull_runtime_costs -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn pull_runtime_costs() {
+        fn spread(label: &str, mut nanos: Vec<u128>) {
+            nanos.sort_unstable();
+            let at = |q: usize| nanos[(nanos.len() * q / 100).min(nanos.len() - 1)];
+            println!(
+                "{label}: n={} p50={}ns p99={}ns max={}ns",
+                nanos.len(),
+                at(50),
+                at(99),
+                nanos[nanos.len() - 1]
+            );
+        }
+        let timed = |n: usize, work: &mut dyn FnMut()| -> Vec<u128> {
+            (0..n)
+                .map(|_| {
+                    let began = std::time::Instant::now();
+                    work();
+                    began.elapsed().as_nanos()
+                })
+                .collect()
+        };
+        // The store probe: one small file created, synced and removed.
+        let root = crate::scratch::path("pull-runtime-costs-store");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        spread(
+            "store_fault (healthy store)",
+            timed(200, &mut || assert_eq!(store_fault(&root), None)),
+        );
+        // The settle gate.
+        let regular = pull::calendar::DayKind::Open(pull::calendar::Session::full());
+        spread(
+            "settled_today",
+            timed(100_000, &mut || {
+                assert!(std::hint::black_box(settled_today(regular, Some(930), 936)).is_ok());
+            }),
+        );
+        spread(
+            "record_horizon + past_record",
+            timed(100_000, &mut || {
+                let _ = std::hint::black_box(pull::calendar::record_horizon(20_738));
+                let _ = std::hint::black_box(pull::calendar::past_record(17_532, 20_900));
+            }),
+        );
+        // The restart scan, over a journal ten times its bound: the read
+        // stays the newest 800 records whatever the journal holds.
+        let journal = audit::Journal::at(&root);
+        let window =
+            pull::session::Window::new(day(2026, 8, 3), day(2026, 8, 5)).expect("a window");
+        let head = audit::Record::opened(
+            audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            "kite",
+            window,
+            208,
+        );
+        let mut thread = journal.open_run(&head).expect("the opening record lands");
+        let failure = audit::Record::member_failure(
+            audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            "NIFTY",
+            window,
+            "a gap",
+        );
+        for _ in 0..8_000 {
+            journal
+                .append_failure(&mut thread, &failure, "a gap")
+                .expect("a failure lands");
+        }
+        let found = crate::pullrun::interrupted_run(&journal).expect("the run is open");
+        assert_eq!(found.ordinal, None, "the opening lies before the scan");
+        assert_eq!(found.failures, crate::pullrun::INTERRUPTED_SCAN);
+        spread(
+            "interrupted_run (8,001-record journal, 800 read)",
+            timed(200, &mut || {
+                assert!(crate::pullrun::interrupted_run(&journal).is_some());
+            }),
+        );
+        let doc_of = crate::pullrun::Progress::default();
+        spread(
+            "status_json (default document, with the interrupted run)",
+            timed(100_000, &mut || {
+                let _ = std::hint::black_box(crate::pullrun::status_json(
+                    &doc_of,
+                    Some(20_738),
+                    Some(&found),
+                ));
+            }),
+        );
+    }
+
+    /// What the pull order withholds on a real store, read only (DB-B27).
+    /// Ignored: it needs the operator's masters and a shadow of the store,
+    /// named by `BRUTEX_WP62_MASTERS` and `BRUTEX_WP62_STORE`, and prints
+    /// what it finds for the package report. It reads the census and nothing
+    /// else, and opens no socket.
+    #[test]
+    #[ignore = "real-store evidence, run by hand against a shadow"]
+    fn the_pull_order_on_a_real_census() {
+        let (Ok(masters), Ok(store)) = (
+            std::env::var("BRUTEX_WP62_MASTERS"),
+            std::env::var("BRUTEX_WP62_STORE"),
+        ) else {
+            println!("BRUTEX_WP62_MASTERS and BRUTEX_WP62_STORE are not set: nothing read");
+            return;
+        };
+        let site = Site::load(Path::new(&masters), Path::new(&store));
+        println!(
+            "interrupted run in the journal: {:?}",
+            site.interrupted
+                .as_ref()
+                .map(crate::pullrun::Interrupted::words)
+        );
+        let censuses = census::read_all(&site.store_root);
+        for target in ["indices", "fno"] {
+            let asked = ingest::parse_spot(
+                &format!(
+                    "vendor=zerodha&target={target}&cash_identity=zerodha_nse_checked\
+                     &granularity=1min&from=2018-01-01&to=2026-09-30"
+                ),
+                day(2026, 10, 12),
+            )
+            .expect("the operator's own window");
+            let mut targets = spot_targets(&asked, &site);
+            targets.sort_unstable();
+            let asked_for = targets.len();
+            let whole = ladder_refusal(&asked, &targets, &censuses);
+            let began = std::time::Instant::now();
+            let gate = order_gate(&asked, &mut targets, &censuses);
+            let took = began.elapsed();
+            println!(
+                "{target}: {asked_for} instruments asked; whole-run gate before: {}",
+                whole.map_or_else(|| "open".to_owned(), |why| why.chars().take(160).collect())
+            );
+            match gate {
+                Ok(withheld) => {
+                    println!(
+                        "{target}: per-instrument gate in {took:?}: {} withheld, {} pulled",
+                        withheld.len(),
+                        targets.len()
+                    );
+                    for (key, why) in withheld {
+                        println!(
+                            "  withheld {}: {}",
+                            key.underlying,
+                            why.chars().take(150).collect::<String>()
+                        );
+                    }
+                }
+                Err(why) => println!(
+                    "{target}: still refused whole in {took:?}: {}",
+                    why.chars().take(300).collect::<String>()
+                ),
+            }
+        }
+    }
+
+    /// **A RUN CUT SHORT BY A RESTART IS LOGGED WHEN IT IS FOUND** (DB-B34),
+    /// with how many failures it left behind, and a journal with nothing
+    /// open logs nothing.
+    #[test]
+    fn a_run_cut_short_by_a_restart_is_logged_when_it_is_found() {
+        let root = crate::scratch::path("server-interrupted-run-logged");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let journal = audit::Journal::at(&root);
+        let window =
+            pull::session::Window::new(day(2026, 8, 3), day(2026, 8, 5)).expect("a window");
+        let source = "wp62-interrupted-fixture";
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        assert_eq!(crate::pullrun::interrupted_run(&journal), None);
+        let logged = |from| {
+            crate::emitted::landed(from, "pull.run", "a pull run was interrupted by a restart")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "source", source))
+                .collect::<Vec<_>>()
+        };
+        assert!(logged(from).is_empty(), "nothing open, nothing logged");
+        let mut thread = journal
+            .open_run(&audit::Record::opened(
+                audit::Scope::Spot,
+                std::time::SystemTime::now(),
+                source,
+                window,
+                2,
+            ))
+            .expect("the opening record lands");
+        for name in ["NIFTY", "BANKNIFTY", "NIFTYIT"] {
+            let failure = audit::Record::member_failure(
+                audit::Scope::Spot,
+                std::time::SystemTime::now(),
+                name,
+                window,
+                "a gap",
+            );
+            journal
+                .append_failure(&mut thread, &failure, "a gap")
+                .expect("a failure lands");
+        }
+        let found = crate::pullrun::interrupted_run(&journal).expect("the run is open");
+        assert_eq!((found.ordinal, found.failures), (Some(0), 3));
+        let lines = logged(from);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(crate::emitted::counts(&lines[0], "failures", 3));
+        assert!(crate::emitted::says(
+            &lines[0],
+            "reason",
+            "INTERRUPTED: a pull run for 2026-08-03..2026-08-05"
+        ));
+    }
+
     /// A DERIVATIVE WITH NO SPOT BEHIND IT IS REFUSED FOR *THAT*, not the rung.
     ///
     /// Unreachable from `/pull/spot`, which names index and cash instruments
@@ -19428,7 +20710,12 @@ mod tests {
             // A DAY OF THE D-2805 SOURCED SPAN IS ATTESTED BY THE INGEST CALENDAR
             // (D-3346); a day after it ends on 2026-10-04 still is not.
             ("runtime-calendar-sourced", day(2026, 9, 11), true),
-            ("runtime-calendar-beyond", day(2026, 10, 9), false),
+            // DB-B25, DB-B41: 2026-10-09 is NIFTY's first Friday past the old
+            // end of the record (2026-10-04). It was "beyond" here, and every
+            // minute pull of it failed for every instrument.
+            ("runtime-calendar-extended", day(2026, 10, 9), true),
+            ("runtime-calendar-year-end", day(2026, 12, 31), true),
+            ("runtime-calendar-beyond", day(2027, 1, 8), false),
         ] {
             let (site, _) = readiness_fixture(tag, "INE002A01018");
             let midnight = i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
@@ -19487,12 +20774,11 @@ mod tests {
                     continue;
                 }
                 assert_eq!(done.derived_files, 0);
-                assert!(
-                    done.failures
-                        .iter()
-                        .any(|f| f.why.starts_with("request minute coverage UNVERIFIED")
-                            && f.why.contains("observed trading does not attest"))
-                );
+                assert!(done.failures.iter().any(|f| {
+                    f.why.starts_with(pull::calendar::PAST_RECORD_FINDING)
+                        && f.why.contains("(it ends on 2026-12-31): 2027-01-08")
+                        && f.why.contains("observed trading does not attest")
+                }));
                 assert!(
                     done.failures
                         .iter()
@@ -27449,7 +28735,7 @@ mod tests {
 
         // The comparison is against the SESSION, not the calendar day alone.
         assert!(
-            body.contains("close_minute()"),
+            body.contains("Session::close_minute"),
             "whether today may be stored is a question about the session, and \
              the guard must ask the session table: {body}"
         );

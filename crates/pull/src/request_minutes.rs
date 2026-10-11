@@ -50,6 +50,10 @@ enum Why {
     WithheldUnsized,
     /// A day no calendar or venue table can attest.
     Unverified,
+    /// A day past the end of the calendar of record
+    /// ([`crate::calendar::SOURCED_LAST_DAY`]): nothing judges it, and the
+    /// run says so in one line rather than once per instrument (DB-B25).
+    PastRecord,
     /// Broker stamps out of order: nothing about the window is attested.
     Unordered,
     /// Rows the vendor sent on this day were refused — by name, a row at a
@@ -73,6 +77,7 @@ impl Why {
             Self::VendorEmpty => "vendor_empty",
             Self::WithheldUnsized => "withheld_unmeasured_session",
             Self::Unverified => "calendar_unverified",
+            Self::PastRecord => "calendar_past_record",
             Self::Unordered => "unordered_stamps",
             Self::RefusedDay => "refused_day",
             Self::RefusedFront => "refused_front",
@@ -294,6 +299,9 @@ enum DayPlan {
     Unsized,
     /// A day nothing can attest, and why.
     Unverified(&'static str, String),
+    /// A day past the end of the calendar of record, and what the calendar
+    /// says of it (DB-B25).
+    PastRecord(&'static str),
 }
 
 /// The session a day owes, by the same calendar the landing and the derive
@@ -308,6 +316,12 @@ fn day_plan(day: Day, number: u32, plan: Plan<'_>, venue: Venue) -> DayPlan {
         DayKind::Open(session) if session == Session::full() => regular_plan(day, plan, venue),
         DayKind::Open(session) => DayPlan::Owed(special_windows(session)),
         DayKind::OpenLengthUnmeasured => DayPlan::Unsized,
+        // PAST THE RECORD'S LAST DAY, NAMED AS THAT (DB-B25). It was the same
+        // "calendar authority missing" finding as any other unknown day, once
+        // per instrument: 332 identical failures a day when the record ended.
+        DayKind::Unmeasured if at > crate::calendar::SOURCED_LAST_DAY => {
+            DayPlan::PastRecord(plan.calendar.unverified_reason(at))
+        }
         DayKind::Unmeasured => DayPlan::Unverified(
             plan.calendar.unverified_reason(at),
             plan.calendar.unverified_reason(at).to_owned(),
@@ -412,13 +426,11 @@ fn audit_refused(rows: &[RawRow], plan: Plan<'_>, venue: Venue, refusals: &Refus
             DayPlan::Closed => continue,
             DayPlan::Owed(owed) => owed,
             DayPlan::Unverified(detail, why) => {
-                audit.findings.push(Finding {
-                    why: Why::Unverified,
-                    day: Some(day),
-                    detail,
-                    minutes: 0,
-                    text: format!("request minute coverage UNVERIFIED on {day}: {why}"),
-                });
+                audit.findings.push(unverified_finding(day, detail, &why));
+                continue;
+            }
+            DayPlan::PastRecord(reason) => {
+                audit.findings.push(past_record_finding(day, reason));
                 continue;
             }
             DayPlan::Unsized => {
@@ -610,6 +622,40 @@ impl Group {
     }
 }
 
+/// The finding for one `day` nothing can attest, with why.
+fn unverified_finding(day: Day, detail: &'static str, why: &str) -> Finding {
+    Finding {
+        why: Why::Unverified,
+        day: Some(day),
+        detail,
+        minutes: 0,
+        text: format!("request minute coverage UNVERIFIED on {day}: {why}"),
+    }
+}
+
+/// The finding for one `day` past the calendar of record (DB-B25).
+fn past_record_finding(day: Day, reason: &'static str) -> Finding {
+    Finding {
+        why: Why::PastRecord,
+        day: Some(day),
+        detail: reason,
+        minutes: 0,
+        text: past_record_text(&day.to_string(), reason),
+    }
+}
+
+/// The sentence of a finding about `days` past the calendar of record. It
+/// leads with [`crate::calendar::PAST_RECORD_FINDING`], the words a run
+/// recognises these findings by when it folds them into one line (DB-B25).
+fn past_record_text(days: &str, reason: &str) -> String {
+    let last = Day::from_days(u32::try_from(crate::calendar::SOURCED_LAST_DAY).unwrap_or(0))
+        .map_or_else(|_| String::from("its last day"), |day| day.to_string());
+    format!(
+        "{} (it ends on {last}): {days}: {reason}; bars the vendor sent for it are kept as landed, and no completeness is claimed until the record is extended",
+        crate::calendar::PAST_RECORD_FINDING
+    )
+}
+
 /// One group per (month, code, detail), in first-occurrence order. A group
 /// of one finding carries its sentence unchanged; a larger one counts its
 /// findings, days and minutes and quotes the first.
@@ -653,6 +699,10 @@ fn aggregate(findings: &[Finding], vendor: brutex_core::vendor::Vendor) -> Vec<G
                     open.minutes,
                     vendor.as_str(),
                     open.first
+                ),
+                Why::PastRecord => past_record_text(
+                    &format!("{} day(s) of {month}, {first_day}..{last_day}", open.days),
+                    open.detail,
                 ),
                 Why::WithheldUnsized
                 | Why::Unverified
@@ -1033,7 +1083,9 @@ mod tests {
                     }
                 }
                 DayPlan::Closed => {}
-                DayPlan::Unsized | DayPlan::Unverified(..) => panic!("{day} is attested"),
+                DayPlan::Unsized | DayPlan::Unverified(..) | DayPlan::PastRecord(..) => {
+                    panic!("{day} is attested")
+                }
             }
         }
         assert_eq!(sessions, 40, "D-3344 measured 41 sessions with the Muhurat");
@@ -1077,6 +1129,7 @@ mod tests {
         );
         assert_eq!(Why::VendorEmpty.code(), "vendor_empty");
         assert_eq!(Why::Unverified.code(), "calendar_unverified");
+        assert_eq!(Why::PastRecord.code(), "calendar_past_record");
         assert_eq!(Why::Unordered.code(), "unordered_stamps");
     }
 
