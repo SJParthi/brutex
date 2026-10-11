@@ -606,8 +606,12 @@ fn days_between(first: Day, last: Day) -> Vec<Day> {
 struct LineageIndex {
     /// Each key's records, as the answer carries them.
     by_key: HashMap<String, Vec<Value>>,
-    /// Lines that are none of `alias`, `lineage`, `stitched` and the
-    /// re-key's `superseded` and `retired` records.
+    /// Each underlying's `event` records (D-3355), in ledger order: what
+    /// moved on an ex-date, its lots, and how many keys it paired and
+    /// stopped. The last record of an ex-date is the one in force.
+    events: HashMap<String, Vec<Value>>,
+    /// Lines that are none of `alias`, `lineage`, `stitched`, `event`,
+    /// `stopped` and the re-key's `superseded` and `retired` records.
     unreadable: usize,
 }
 
@@ -690,6 +694,27 @@ fn index_lineage(text: &str) -> LineageIndex {
                     "days": record.days, "bars": record.bars,
                     "refusal": record.refusal(),
                 }));
+        } else if let Some(record) = pull::gdfl_lineage::StoppedRecord::parse(line) {
+            // A PRE-EX KEY AN EVENT RETIRED WITH NO PARTNER (D-3355, DB-B13):
+            // the exchange contract under it ended the day before `ex`.
+            index
+                .by_key
+                .entry(key(record.underlying, record.key))
+                .or_default()
+                .push(json!({ "kind": "stopped", "ex": record.ex_date.to_string() }));
+        } else if let Some(record) = pull::gdfl_lineage::EventRecord::parse(line) {
+            // THE EVENT ITSELF, by underlying: a re-listing pairs nothing, so
+            // this is the only line that says what happened to its keys.
+            index
+                .events
+                .entry(record.underlying.as_str().to_owned())
+                .or_default()
+                .push(json!({
+                    "ex": record.ex_date.to_string(), "kind": record.kind.as_str(),
+                    "shift_paisa": record.kind.shift(),
+                    "lot_old": record.lot_old, "lot_new": record.lot_new,
+                    "paired": record.paired, "stopped": record.stopped,
+                }));
         } else {
             index.unreadable = index.unreadable.saturating_add(1);
         }
@@ -757,6 +782,11 @@ fn lineage_json(root: &Path, feed: Vendor, inst: &Instrument) -> Value {
         Ok(Some(index)) => json!({
             "present": true,
             "records": index.by_key.get(&inst.key()).cloned().unwrap_or_default(),
+            "events": index
+                .events
+                .get(inst.symbol.as_str())
+                .cloned()
+                .unwrap_or_default(),
             "unreadable_lines": index.unreadable,
             "why": null,
         }),
@@ -4825,6 +4855,48 @@ mod tests {
             Value::Null,
             "only GDFL keeps a lineage ledger"
         );
+    }
+
+    /// **AN EVENT AND ITS STOPPED KEYS ARE READ AND SHOWN** (D-3355;
+    /// DB-B13): a re-listing pairs nothing, so the `event` record of its
+    /// underlying and the `stopped` record of each retired key are the only
+    /// lines that say what happened. Neither is an unreadable line; the key
+    /// carries `stopped`, and every key of the underlying carries the event.
+    #[test]
+    fn an_event_and_its_stopped_keys_are_read_and_shown() {
+        let root = root_of("lineage-event");
+        let stopped = "NSE-FNO-ZZIDX-2020-06-25-1000000-CE";
+        let other = "NSE-FNO-ZZIDX-2020-06-25-1100000-CE";
+        write(
+            &pull::gdfl_lineage::lineage_path(&root),
+            &format!(
+                "event NSE-FNO-ZZIDX ex=2020-06-16 kind=relisted shift=0 lot_old=75 lot_new=75 \
+                 paired=0 stopped=1 v=1\nstopped {stopped} ex=2020-06-16 v=1\n"
+            ),
+        );
+        let lineage_of = |key: &str| {
+            answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={key}&from=2020-06-15")),
+            )["lineage"]
+                .clone()
+        };
+        let on_key = lineage_of(stopped);
+        assert_eq!(on_key["unreadable_lines"], 0, "{on_key:#}");
+        assert_eq!(
+            on_key["records"],
+            json!([{ "kind": "stopped", "ex": "2020-06-16" }])
+        );
+        let event = json!([{
+            "ex": "2020-06-16", "kind": "relisted", "shift_paisa": 0,
+            "lot_old": 75, "lot_new": 75, "paired": 0, "stopped": 1,
+        }]);
+        assert_eq!(on_key["events"], event);
+        let beside = lineage_of(other);
+        assert_eq!(beside["records"], json!([]));
+        assert_eq!(beside["events"], event, "the event is the underlying's");
+        let elsewhere = lineage_of("NSE-FNO-ZZOTHER-2020-06-25-1000000-CE");
+        assert_eq!(elsewhere["events"], json!([]));
     }
 
     /// **THE RE-KEY'S RECORDS ARE READ AND NAMED ON EACH KEY** (D-3331;
