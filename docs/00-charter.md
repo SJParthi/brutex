@@ -1202,3 +1202,32 @@ their share files are filed under their own keys (D-3333), and why each
 stopped trading is not recorded here (UNVERIFIED). Rows of the file not listed here are not
 needed by any stored series today; `core::alias` may transcribe them later
 from the same file and digest.
+
+## NSE F&O circulars read for the options lineage — read 10 and 11 Oct 2026 (D-3354 to D-3358)
+
+`CLAUDE.md` §3 rule 1 requires every exchange claim the code applies to trace
+to a source recorded here. Each circular below was fetched over HTTPS from
+`nsearchives.nseindia.com` on 10 Oct 2026 (IST) by the /db audit and its
+second agent, and read again by WP-12e on 11 Oct 2026 from the bytes fetched.
+The digest is of those bytes; the exchange may serve other bytes later.
+
+| Circular | Date | URL | sha256 of the bytes read | What it says, as far as the code relies on it | Where it is applied |
+|---|---|---|---|---|---|
+| `NSE/FAOP/68747` | 25 Jun 2025 | `https://nsearchives.nseindia.com/content/circulars/FAOP68747.pdf` | `e1b56024a511135ffd5c6c3c097881dd0ac2c37b15b5f61e94fe84e51cf66762` | "Revision in Expiry Day of Index and Stock Derivatives Contracts - Update", in partial modification of circular 68685 of 23 Jun 2025. Its annexure lists each existing NIFTY long-dated expiry with its revised day; the code uses five rows of it: `24-Jun-27` to `29-Jun-27`, `29-Jun-28` to `27-Jun-28`, `28-Dec-28` to `26-Dec-28`, `28-Jun-29` to `26-Jun-29` and `27-Dec-29` to `24-Dec-29`. | `pull::expiry_alias::ALIASES`, the five NIFTY half-yearly rows (D-3358) |
+| `NSE/FAOP/73857` | 22 Apr 2026 | `https://nsearchives.nseindia.com/content/circulars/FAOP73857.pdf` | `7d567d564732742bbc81bf5008752fa66a27ce6a3b87e2f2fb4847ddfc525005` | "Scheme of Arrangement: Adjustment of Futures and Options contracts of Vedanta Limited (VEDL)": a demerger, ex-date and effective date Thursday 30 Apr 2026; "All existing contracts with expiry dates May 26, 2026, June 30, 2026 and July 28, 2026, will expire on Wednesday, April 29, 2026." | `pull::expiry_alias::EARLY_SETTLEMENTS`, its one row (D-3356) |
+| `NSE/FAOP/64625` | 18 Oct 2024 | `https://nsearchives.nseindia.com/content/circulars/FAOP64625.pdf` | `ee1169239eed9cc06519537c6af53751e031903fe709b2bf296283412dc028f8` | The index lot revision "effective for all new index derivatives contracts ... introduced from November 20, 2024"; "the existing weekly and monthly expiry contracts will continue with the existing lot size till its respective expiry date"; existing quarterly and half-yearly contracts move "on December 24, 2024, end of the day for BANKNIFTY and December 26, 2024, end of the day for NIFTY". Annexure: NIFTY 30-Jan-2025 and BANKNIFTY 29-Jan-2025 are the last monthly expiries with the existing lot; 27-Mar-2025 and 26-Mar-2025 the first existing quarterly ones. | `costs::lot::CONTRACT_RULES`, the first rule of each underlying (D-3357) |
+| `NSE/FAOP/70616` | 3 Oct 2025 | `https://nsearchives.nseindia.com/content/circulars/FAOP70616.pdf` | `0718cf0cc7e6c74105dc946497369270fca807f59912586560c9552cad8050ef` | "This circular shall come into effect from October 28, 2025 (EOD). The existing lot size will be applicable for weekly and monthly contracts till December 30, 2025 expiry date. Lot size of existing quarterly and half yearly contracts will be revised on 30-Dec-2025 EOD." Annexure: first monthly expiry with the revised lot 27-Jan-2026; first existing quarterly expiry 31-Mar-2026. | `costs::lot::CONTRACT_RULES`, the second rule of each underlying (D-3357) |
+| `NSE/FAOP/53079` | 25 Jul 2022 | `https://nsearchives.nseindia.com/content/circulars/FAOP53079.pdf` | `d46f719c942df40de6507ec3c3e0d6fc83d615c52a731f3790129c9ef8322304` | "Adjustment of Futures and Options contracts in the security VEDL": an interim dividend of Rs 19.50 per share, ex-date 26 Jul 2022. "The full value of dividend i.e. Rs. 19.50 /- would be deducted from all the cum-dividend strike prices on the ex-dividend date." The circular states no lot change (the word "lot" does not occur in it). | The SHAPE `pull::gdfl_lineage::EventKind::StrikeOffset` names (D-3355). No record states a cause: the detector measures the shift and never writes "dividend". |
+| `NSE/FAOP/71627` | 4 Dec 2025 | `https://nsearchives.nseindia.com/content/circulars/FAOP71627.pdf` | `c6007698f03bd83c197848176b5d59e7e4457505cceae6844c344769c6e4f0a1` | "Scheme of Arrangement: Adjustment of Futures and Options contracts of Hindustan Unilever Limited (HINDUNILVR)", a demerger. It lists the re-introduced expiries and does NOT state the day the existing contracts expired. | Applied nowhere: no `EARLY_SETTLEMENTS` row is written from it. The early expiry of HINDUNILVR's contracts before 2025-12-05 stays UNVERIFIED. |
+
+**What is NOT sourced here, and so is labelled in the code.** The four
+FINNIFTY alias rows of 2021-10-18 and the MIDCPNIFTY row of 2023-08-17 are
+INFERRED from the underlying's measured weekday move; their cause is
+UNVERIFIED. No circular was read for the lot revisions of July 2021, June
+2023, April 2024 and July 2025, so `costs::lot::lot_size_of` refuses a
+contract's lot near each of them (D-3357). No circular was read for any
+measured unchanged-lot event of 2019 to 2020 (OIL, NATIONALUM, RECLTD, ONGC,
+BEL, GAIL, TATACHEM, CENTURYTEX and the others the sweep lists): each `event`
+record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
+`KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
+(above), so their options keep two keys (D-3354).

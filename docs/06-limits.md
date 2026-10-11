@@ -16241,6 +16241,47 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   p99 2.21 ms, max 5.96 ms (the journal's 2 `run` lines: L-IA-39's term is
   not visible at that size).
 
+## Options lineage: what is per underlying-day, per ledger line or not detected — D-3354 to D-3358, 12 October 2026
+
+None of this is on a read path: it is the options import's, once per day.
+
+- **`pull::gdfl_lineage::detect` is O(contracts of the underlying-day), not
+  O(1).** One pass over the pre-ex keys and one over the day's, two hash
+  probes per contract; O(contracts x log contracts) on a lot-step ex-date.
+  Measured on the real archive, one call per stock underlying-day
+  2019-02-01 to 2020-09-15 (n = 63,213, release, `Instant` around each call):
+  p50 6.6 us, p99 23.5 us, max 303.6 us. A pre-ex OI value shared by more
+  than `OI_BUCKET_CAP` = 8 keys of one ladder is not walked.
+- **`LineageRun::load` is O(lines of the two ledgers), once per run**, and
+  holds the retired keys of every ex-date whose last expiry has not passed
+  (D-3355). Bounded by the ledger, which grows by one line per renamed or
+  stopped contract.
+- **The split probe is one directory open per applied row of
+  `core::alias::SYMBOL_CHANGES`** (18 today), once per options run (D-3354).
+  A directory that is there is walked to its first contract the ledger has
+  not withdrawn: one entry while it blocks, the directory's whole length
+  (about 1,600 names at most in the store today) once it is superseded.
+- **A detection sees only the pre-ex state the run holds.** A run that starts
+  mid-history folds three sessions before its first day; a key that last
+  traded earlier is neither paired nor stopped by that run (measured by the
+  second agent: OIL 2020-02-20 gives 19 pairs from a two-day run and 23 with
+  full state). A fuller run adds what is missing (D-3355 item 4); nothing is
+  invented.
+- **A pre-ex key whose shifted partner first trades AFTER the ex-date is
+  recorded `stopped`, never linked** (measured by the second agent: OIL
+  2020-02-20, 29 of 52; VEDL 2022-07-26, 50 of 157).
+- **NOT DETECTED:** a re-listing that reuses its pre-ex texts without a
+  sourced row (HINDUNILVR 2025-12-05); an adjustment by a ratio whose
+  inferred lot reads unchanged.
+- **NOT MEASURED:** the detector on index underlyings and on any day after
+  2020-09-15 beyond the named cases (VEDL 2022 and 2024, HEROMOTOCO 2023).
+  Its thresholds are chosen from the 2019 to 2020 stock sweep.
+- **`costs::lot::lot_size_of` has a contract rule for two revisions only**
+  (Nov 2024, Oct 2025). Near the four others it refuses (D-3357); outside
+  every window it answers the trade-day row, not proved per contract.
+- **`TATAGLOBAL/TATACONSUM` and `KPIT/BSOFT` options stay two keys** until
+  NSE's symbol-change file has a row for each (D-3354 item 3).
+
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
 Rows landed by WP-81 with the code they bound. Every figure is a closed-loop

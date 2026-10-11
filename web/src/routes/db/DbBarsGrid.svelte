@@ -976,8 +976,16 @@
      * month written after the census was read) is said here, as a lag, never
      * as a corrupt store. Asked only when no bound narrows the read.
      */
+    /* NEVER A LIVE TOTAL AGAINST A SNAPSHOT (DB-022, WP-56b): the files'
+       totals are the server's NOW and the census rows are what this page
+       read. They are compared only while the census watch says the census
+       has not moved since that read (`db.censusMoved === false`); a census
+       that moved, or one not checked yet, is the banner's "store moved"
+       line (with what moved for this series), never this warning. */
     const barDisagree = $derived(
-      !barState.answer || dayWindowNarrows || timeNarrows ? [] : censusBehind(barState.answer.series_totals, plan.series)
+      !barState.answer || dayWindowNarrows || timeNarrows || db.censusMoved !== false
+        ? []
+        : censusBehind(barState.answer.series_totals, plan.series)
     );
 
     /** Months inside a series' span with no file — the holes the server names. */

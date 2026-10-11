@@ -211,29 +211,56 @@ export function rungOrder(timeframe) {
   return m ? Number(m[1]) * RUNG_UNIT[/** @type {'s' | 'min' | 'day'} */ (m[2])] : NaN;
 }
 
-const EXCHANGE_ORDER = new Map([['NSE', 0], ['BSE', 1]]);
-const SEGMENT_ORDER = new Map([['INDEX', 0], ['CASH', 1], ['FNO', 2]]);
 const NAME = /^([A-Z]+)-([A-Z]+)-(.+)$/;
 /** `<symbol>-<YYYY-MM-DD>-FUT` or `<symbol>-<YYYY-MM-DD>-<strike paisa>-CE|PE`. */
 const CONTRACT = /^(.+)-(\d{4}-\d{2}-\d{2}-(?:FUT|\d+-(?:CE|PE)))$/;
+
+/* ----------------------------------------------------------------------
+   THE ORDER OF EXCHANGES AND SEGMENTS IS LEARNED FROM THE CENSUS (WP-56b;
+   the WP-56 second agent's follow-up 6)
+   ----------------------------------------------------------------------
+   This file used to carry `NSE, BSE` and `INDEX, CASH, FNO` as lists of its
+   own. A census holding an exchange or a segment not in them could not be
+   ordered here, so every refresh of it read the whole census until the
+   lists were edited. The census the server sends IS in the server's order,
+   so the order is read off it: wherever two neighbouring rows of one month
+   and one contract differ by exchange, the first row's exchange comes
+   first; where they share the exchange and differ by segment, the first
+   row's segment comes first. Which segments name contracts is read off the
+   names too (a segment in which any name ends in a contract; a name of such
+   a segment that ends in none cannot be placed). A census whose neighbours
+   contradict each other is in no single order, and is said so.
+
+   A name the order was never learned for (a delta's row on an exchange or
+   a segment the census held has none of) cannot be placed: that refresh
+   reads the census whole, says why, and the whole census teaches the order.
+   ---------------------------------------------------------------------- */
+
+/**
+ * The census's order of exchanges and segments, and the segments whose
+ * names end in a contract.
+ * @typedef {{exchanges: string[], segments: string[], contracts: string[]}} CensusRanks
+ */
 
 /**
  * @typedef {{contract: string | null, exchange: number, segment: number, symbol: string}} SeriesOrder
  */
 
 /**
- * An instrument name as the parts the server orders a series by, or `null`
- * for a name this page cannot take apart (an exchange or a segment it does
- * not know, an F&O name that ends in no contract).
+ * An instrument name as the parts the server orders a series by, in the
+ * order `ranks` learned, or `null` for a name it cannot place (an exchange
+ * or a segment `ranks` does not hold, a contract segment's name that ends in
+ * no contract).
  * @param {string} instrument `NSE-INDEX-NIFTY`, `NSE-FNO-NIFTY-2019-03-28-1150000-CE`
+ * @param {CensusRanks} ranks
  * @returns {SeriesOrder | null}
  */
-export function seriesOrder(instrument) {
+export function seriesOrder(instrument, ranks) {
   const m = NAME.exec(instrument);
   if (!m) return null;
-  const exchange = EXCHANGE_ORDER.get(m[1]), segment = SEGMENT_ORDER.get(m[2]);
-  if (exchange === undefined || segment === undefined) return null;
-  if (segment !== 2) return { contract: null, exchange, segment, symbol: m[3] };
+  const exchange = ranks.exchanges.indexOf(m[1]), segment = ranks.segments.indexOf(m[2]);
+  if (exchange < 0 || segment < 0) return null;
+  if (!ranks.contracts.includes(m[2])) return { contract: null, exchange, segment, symbol: m[3] };
   const c = CONTRACT.exec(m[3]);
   return c ? { contract: c[2], exchange, segment, symbol: c[1] } : null;
 }
@@ -252,18 +279,131 @@ function compareSeries(a, b) {
 }
 
 /**
- * A comparator over census rows in the server's order: negative when `a` is
- * listed before `b`, zero when they are the same key. Parses each instrument
- * name once (`memo`). Throws for a row it cannot order; callers that merge
- * have checked the census first, so that is a census that changed shape.
+ * Words in one order that honours every `first|second` pair of `before`, or
+ * the pair that cannot be honoured. Words no pair names keep the order they
+ * were first seen in. The sets are an exchange list or a segment list: a
+ * handful of words, so the quadratic pass is a few comparisons.
+ * @param {string[]} seen in order of first appearance
+ * @param {Set<string>} before
+ * @returns {{order: string[]} | {cycle: string}}
+ */
+function inOneOrder(seen, before) {
+  const left = [...seen];
+  /** @type {string[]} */
+  const order = [];
+  while (left.length > 0) {
+    const at = left.findIndex((word) => !left.some((other) => other !== word && before.has(`${other}|${word}`)));
+    if (at < 0) {
+      const [a, b] = left;
+      return { cycle: `${a} and ${b}` };
+    }
+    order.push(...left.splice(at, 1));
+  }
+  return { order };
+}
+
+/**
+ * LEARNS THE ORDER, pair of neighbours by pair. `pair` is called for every
+ * row after the first with the row before it; `done` answers the ranks, or
+ * the sentence naming why the census is in no single order.
+ */
+/**
+ * The segments in which a name ends in a contract. @param {Iterable<string>} instruments
+ * @param {Set<string>} [into]
+ */
+function contractSegments(instruments, into = new Set()) {
+  for (const instrument of instruments) {
+    const m = NAME.exec(instrument);
+    if (m && !into.has(m[2]) && CONTRACT.test(m[3])) into.add(m[2]);
+  }
+  return into;
+}
+
+/** @param {Set<string>} contracts the segments whose names end in a contract (`contractSegments`) */
+function orderLearner(contracts) {
+  /** @type {Map<string, {exchange: string, segment: string, contract: string | null} | null>} */
+  const parsed = new Map();
+  /** @type {string[]} */ const exchanges = [];
+  /** @type {string[]} */ const segments = [];
+  /** @type {Set<string>} */ const exchangeBefore = new Set();
+  /** @type {Set<string>} */ const segmentBefore = new Set();
+  /** @type {string | null} */
+  let fault = null;
+  /** The first row (0-based) whose place contradicts an earlier pair of neighbours, or -1. */
+  let contradicts = -1;
+
+  /** @param {string} instrument */
+  function parts(instrument) {
+    let held = parsed.get(instrument);
+    if (held !== undefined) return held;
+    const m = NAME.exec(instrument);
+    if (!m) {
+      held = null;
+    } else {
+      if (!exchanges.includes(m[1])) exchanges.push(m[1]);
+      if (!segments.includes(m[2])) segments.push(m[2]);
+      const c = contracts.has(m[2]) ? CONTRACT.exec(m[3]) : null;
+      held = contracts.has(m[2]) && c === null ? null : { exchange: m[1], segment: m[2], contract: c ? c[2] : null };
+    }
+    if (held === null && fault === null) fault = `${JSON.stringify(instrument)} is not a name this page can place in the census's order`;
+    parsed.set(instrument, held);
+    return held;
+  }
+
+  return {
+    /** @param {string} instrument */
+    first(instrument) { parts(instrument); },
+    /** @param {string} beforeMonth @param {string} beforeName @param {string} month @param {string} name @param {number} at the later row, 0-based */
+    pair(beforeMonth, beforeName, month, name, at) {
+      const b = parts(name);
+      if (beforeMonth !== month || beforeName === name) return;
+      const a = parts(beforeName);
+      if (!a || !b || a.contract !== b.contract) return;
+      const [set, first, second] = a.exchange !== b.exchange
+        ? [exchangeBefore, a.exchange, b.exchange]
+        : [segmentBefore, a.segment, b.segment];
+      if (first === second) return;
+      // THE OTHER WAY ROUND WAS SEEN FIRST: this row is the one out of the
+      // order the rows before it are in, and it is named.
+      if (set.has(`${second}|${first}`)) {
+        if (contradicts < 0) contradicts = at;
+        return;
+      }
+      set.add(`${first}|${second}`);
+    },
+    /**
+     * @param {(at: number) => string} nameOf a row's `month instrument timeframe`
+     * @returns {{ranks: CensusRanks} | {fault: string}}
+     */
+    done(nameOf) {
+      if (fault !== null) return { fault };
+      if (contradicts >= 0) {
+        return { fault: `row ${contradicts + 1} (${nameOf(contradicts)}) does not follow row ${contradicts} (${nameOf(contradicts - 1)}) in the order this page places a refreshed row by` };
+      }
+      const byExchange = inOneOrder(exchanges, exchangeBefore), bySegment = inOneOrder(segments, segmentBefore);
+      if ('cycle' in byExchange) return { fault: `the census lists the exchanges ${byExchange.cycle} in no single order` };
+      if ('cycle' in bySegment) return { fault: `the census lists the segments ${bySegment.cycle} in no single order` };
+      return { ranks: { exchanges: byExchange.order, segments: bySegment.order,
+        contracts: segments.filter((word) => contracts.has(word)) } };
+    }
+  };
+}
+
+/**
+ * A comparator over census rows in the census's order (`ranks`, learned from
+ * it): negative when `a` is listed before `b`, zero when they are the same
+ * key. Parses each instrument name once (`memo`). Throws for a row it cannot
+ * order: an exchange or a segment the census held has none of, which is a
+ * refresh that reads the census whole.
+ * @param {CensusRanks} ranks
  * @param {Map<string, SeriesOrder | null>} [memo]
  * @returns {(a: {instrument: string, month: string, timeframe: string}, b: {instrument: string, month: string, timeframe: string}) => number}
  */
-export function censusOrder(memo = new Map()) {
+export function censusOrder(ranks, memo = new Map()) {
   /** @param {string} instrument */
   const parts = (instrument) => {
     let held = memo.get(instrument);
-    if (held === undefined) memo.set(instrument, (held = seriesOrder(instrument)));
+    if (held === undefined) memo.set(instrument, (held = seriesOrder(instrument, ranks)));
     if (held === null) throw new Error(`${JSON.stringify(instrument)} is not a name this page can place in the census's order`);
     return held;
   };
@@ -284,68 +424,154 @@ export function censusOrder(memo = new Map()) {
 const rowName = (row) => `${row.month} ${row.instrument} ${row.timeframe}`;
 
 /**
- * WHETHER A COLUMNAR CENSUS IS IN THE ORDER THIS PAGE KNOWS: `null` when
- * every row follows the one before it, else the sentence naming the first
- * that does not (or the first name or rung that cannot be ordered at all).
- * One pass, in the census worker; each instrument name is parsed once.
+ * THE ORDER OF A COLUMNAR CENSUS: the ranks learned from it, and `fault`
+ * `null` when every row follows the one before it in that order, else the
+ * sentence naming the first that does not (or the first name or rung that
+ * cannot be ordered at all, or the two words listed in no single order).
+ * Two passes, in the census worker; each instrument name is parsed once.
  * @param {CensusColumns} cols
- * @returns {string | null}
+ * @returns {{fault: string | null, ranks: CensusRanks | null}}
  */
-export function columnsOrderFault(cols) {
+export function columnsOrder(cols) {
   const { instruments, months, timeframes } = cols;
-  /** @type {(SeriesOrder | null)[]} */
-  const series = new Array(instruments.length);
-  for (let i = 0; i < instruments.length; i++) {
-    series[i] = seriesOrder(instruments[i]);
-    if (series[i] === null) return `${JSON.stringify(instruments[i])} is not a name this page can place in the census's order`;
+  const k = instruments.length;
+  const name = (/** @type {number} */ at) => `${months[cols.month[at]]} ${instruments[cols.inst[at]]} ${timeframes[cols.tf[at]]}`;
+  const unplaced = (/** @type {number} */ at) => `${JSON.stringify(instruments[at])} is not a name this page can place in the census's order`;
+  const follows = (/** @type {number} */ i) => `row ${i + 1} (${name(i)}) does not follow row ${i} (${name(i - 1)}) in the order this page places a refreshed row by`;
+  // ONE PARSE PER NAME A ROW USES (a dictionary entry no row names says
+  // nothing about the census): the same reading `orderLearner` makes, kept
+  // by dictionary index so the two passes over the rows compare integers.
+  const used = new Uint8Array(k);
+  for (let i = 0; i < cols.n; i++) used[cols.inst[i]] = 1;
+  /** @type {(string | null)[]} */ const exchange = new Array(k).fill(null);
+  /** @type {string[]} */ const segment = new Array(k);
+  /** @type {string[]} */ const tail = new Array(k);
+  /** @type {(RegExpExecArray | null)[]} */ const ends = new Array(k).fill(null);
+  /** @type {Set<string>} */ const contracts = new Set();
+  for (let at = 0; at < k; at++) {
+    if (used[at] === 0) continue;
+    const m = NAME.exec(instruments[at]);
+    if (!m) continue;
+    exchange[at] = m[1];
+    segment[at] = m[2];
+    tail[at] = m[3];
+    ends[at] = CONTRACT.exec(m[3]);
+    if (ends[at] !== null) contracts.add(m[2]);
+  }
+  /** The contract a name ends in, where its segment names contracts. @type {(string | null)[]} */
+  const contract = new Array(k).fill(null);
+  /** @type {string[]} */ const symbol = new Array(k);
+  /** @type {string[]} */ const exchanges = [];
+  /** @type {string[]} */ const segments = [];
+  const seen = (/** @type {number} */ at) => {
+    if (exchange[at] === null) return;
+    if (!exchanges.includes(/** @type {string} */ (exchange[at]))) exchanges.push(/** @type {string} */ (exchange[at]));
+    if (!segments.includes(segment[at])) segments.push(segment[at]);
+  };
+  for (let at = 0; at < k; at++) {
+    if (used[at] === 0 || exchange[at] === null) continue;
+    const c = contracts.has(segment[at]) ? ends[at] : null;
+    if (contracts.has(segment[at]) && c === null) { exchange[at] = null; continue; }
+    contract[at] = c ? c[2] : null;
+    symbol[at] = c ? c[1] : tail[at];
+  }
+  // LEARN: the first name that cannot be placed, in row order, is the fault;
+  // else every pair of neighbours that settles two exchanges or two segments.
+  /** @type {Set<string>} */ const exchangeBefore = new Set();
+  /** @type {Set<string>} */ const segmentBefore = new Set();
+  let contradicts = -1;
+  for (let i = 0; i < cols.n; i++) {
+    const b = cols.inst[i];
+    if (exchange[b] === null) return { fault: unplaced(b), ranks: null };
+    if (i === 0) { seen(b); continue; }
+    const a = cols.inst[i - 1];
+    if (a === b) continue;
+    seen(b);
+    if (cols.month[i - 1] !== cols.month[i] || contract[a] !== contract[b]) continue;
+    const byExchange = exchange[a] !== exchange[b];
+    if (!byExchange && segment[a] === segment[b]) continue;
+    const set = byExchange ? exchangeBefore : segmentBefore;
+    const first = /** @type {string} */ (byExchange ? exchange[a] : segment[a]), second = /** @type {string} */ (byExchange ? exchange[b] : segment[b]);
+    if (set.has(`${second}|${first}`)) { if (contradicts < 0) contradicts = i; } else set.add(`${first}|${second}`);
+  }
+  if (contradicts >= 0) return { fault: follows(contradicts), ranks: null };
+  const byExchange = inOneOrder(exchanges, exchangeBefore), bySegment = inOneOrder(segments, segmentBefore);
+  if ('cycle' in byExchange) return { fault: `the census lists the exchanges ${byExchange.cycle} in no single order`, ranks: null };
+  if ('cycle' in bySegment) return { fault: `the census lists the segments ${bySegment.cycle} in no single order`, ranks: null };
+  /** @type {CensusRanks} */
+  const ranks = { exchanges: byExchange.order, segments: bySegment.order, contracts: segments.filter((word) => contracts.has(word)) };
+  // CHECK: every row follows the one before it in that order.
+  const exchangeRank = new Int32Array(k), segmentRank = new Int32Array(k);
+  for (let at = 0; at < k; at++) {
+    if (used[at] === 0) continue;
+    exchangeRank[at] = ranks.exchanges.indexOf(/** @type {string} */ (exchange[at]));
+    segmentRank[at] = ranks.segments.indexOf(segment[at]);
   }
   const rungs = timeframes.map(rungOrder);
   const bad = rungs.findIndex((seconds) => Number.isNaN(seconds));
-  if (bad >= 0) return `${JSON.stringify(timeframes[bad])} is not a rung this page can place in the census's order`;
+  if (bad >= 0) return { fault: `${JSON.stringify(timeframes[bad])} is not a rung this page can place in the census's order`, ranks };
   for (let i = 1; i < cols.n; i++) {
     const ma = cols.month[i - 1], mb = cols.month[i];
     let by = 0;
     if (ma !== mb) by = months[ma] > months[mb] ? -1 : months[ma] < months[mb] ? 1 : 0;
-    if (by === 0 && cols.inst[i - 1] !== cols.inst[i]) {
-      by = compareSeries(/** @type {SeriesOrder} */ (series[cols.inst[i - 1]]), /** @type {SeriesOrder} */ (series[cols.inst[i]]));
+    const a = cols.inst[i - 1], b = cols.inst[i];
+    if (by === 0 && a !== b) {
+      const ca = contract[a], cb = contract[b];
+      if (ca !== cb) by = ca === null ? -1 : cb === null ? 1 : ca < cb ? -1 : 1;
+      else if (exchangeRank[a] !== exchangeRank[b]) by = exchangeRank[a] - exchangeRank[b];
+      else if (segmentRank[a] !== segmentRank[b]) by = segmentRank[a] - segmentRank[b];
+      else if (symbol[a] !== symbol[b]) by = symbol[a] < symbol[b] ? -1 : 1;
     }
     if (by === 0) by = rungs[cols.tf[i - 1]] - rungs[cols.tf[i]];
-    if (by >= 0) {
-      const name = (/** @type {number} */ at) => `${months[cols.month[at]]} ${instruments[cols.inst[at]]} ${timeframes[cols.tf[at]]}`;
-      return `row ${i + 1} (${name(i)}) does not follow row ${i} (${name(i - 1)}) in the order this page places a refreshed row by`;
-    }
+    if (by >= 0) return { fault: follows(i), ranks };
   }
-  return null;
+  return { fault: null, ranks };
 }
 
+/** `columnsOrder`'s fault alone. @param {CensusColumns} cols @returns {string | null} */
+export const columnsOrderFault = (cols) => columnsOrder(cols).fault;
+
 /**
- * `columnsOrderFault` over row objects (a census this page decoded itself),
- * and the bars they hold, in slices.
+ * `columnsOrder` over row objects (a census this page decoded itself), and
+ * the bars they hold, in slices: one pass learns the order, one checks it.
  * @param {any[]} rows
  * @param {(n: number, work: (start: number, end: number) => void, signal?: AbortSignal) => Promise<void>} slices
  * @param {AbortSignal} [signal]
- * @returns {Promise<{order: string | null, bars: number}>}
+ * @returns {Promise<{order: string | null, bars: number, ranks: CensusRanks | null}>}
  */
 export async function measureCensus(rows, slices, signal) {
-  const before = censusOrder();
-  /** @type {string | null} */
-  let order = null;
+  /** @type {Set<string>} */
+  const contracts = new Set();
+  await slices(rows.length, (start, end) => {
+    for (let i = start; i < end; i++) contractSegments([String(rows[i]?.instrument)], contracts);
+  }, signal);
+  const learner = orderLearner(contracts);
   let bars = 0;
   await slices(rows.length, (start, end) => {
     for (let i = start; i < end; i++) {
       const row = rows[i];
       bars += Number(row?.rows) || 0;
-      if (order !== null || i === 0) continue;
+      if (i === 0) learner.first(String(row?.instrument));
+      else learner.pair(String(rows[i - 1]?.month), String(rows[i - 1]?.instrument), String(row?.month), String(row?.instrument), i);
+    }
+  }, signal);
+  const learned = learner.done((at) => rowName(rows[at]));
+  if ('fault' in learned) return { order: learned.fault, bars, ranks: null };
+  const before = censusOrder(learned.ranks);
+  /** @type {string | null} */
+  let order = null;
+  await slices(rows.length, (start, end) => {
+    for (let i = Math.max(1, start); i < end && order === null; i++) {
       try {
-        if (before(rows[i - 1], row) >= 0) {
-          order = `row ${i + 1} (${rowName(row)}) does not follow row ${i} (${rowName(rows[i - 1])}) in the order this page places a refreshed row by`;
+        if (before(rows[i - 1], rows[i]) >= 0) {
+          order = `row ${i + 1} (${rowName(rows[i])}) does not follow row ${i} (${rowName(rows[i - 1])}) in the order this page places a refreshed row by`;
         }
       } catch (why) {
         order = String(/** @type {any} */ (why)?.message ?? why);
       }
     }
   }, signal);
-  return { order, bars };
+  return { order, bars, ranks: learned.ranks };
 }
 
 /**
@@ -354,10 +580,12 @@ export async function measureCensus(rows, slices, signal) {
  * what is not) and the bars they sum to. Kept against the array itself, so a
  * census decoded in the worker carries its own measure and one merged from a
  * delta the measure of its merge; an array nobody measured has none.
- * @type {WeakMap<object, {order: string | null, bars: number}>}
+ * `ranks` is the order of exchanges and segments learned from it, which a
+ * merge into it places rows by.
+ * @type {WeakMap<object, {order: string | null, bars: number, ranks?: CensusRanks | null}>}
  */
 const measures = new WeakMap();
-/** @param {any[]} rows @param {{order: string | null, bars: number}} measure */
+/** @param {any[]} rows @param {{order: string | null, bars: number, ranks?: CensusRanks | null}} measure */
 export const noteCensusMeasure = (rows, measure) => { measures.set(rows, measure); };
 /** @param {any[]} rows */
 export const censusMeasureOf = (rows) => measures.get(rows) ?? null;
@@ -380,10 +608,12 @@ export const censusMeasureOf = (rows) => measures.get(rows) ?? null;
  * @param {any[]} delta
  * @param {(n: number, work: (start: number, end: number) => void, signal?: AbortSignal) => Promise<void>} slices
  * @param {AbortSignal} [signal]
+ * @param {CensusRanks | null} [ranks] the order learned from `held`; its own measure's when omitted
  * @returns {Promise<{rows: any[], added: number, replaced: number, bars: number}>} `bars` is the CHANGE in bars held
  */
-export async function mergeCensus(held, delta, slices, signal) {
-  const before = censusOrder();
+export async function mergeCensus(held, delta, slices, signal, ranks = censusMeasureOf(held)?.ranks ?? null) {
+  if (!ranks) throw new Error('the order of the census held was never learned, so a row cannot be placed in it');
+  const before = censusOrder(ranks);
   const n = held.length, k = delta.length;
   /** Where each delta row goes in `held`, and whether it replaces the row there. */
   const at = new Int32Array(k);

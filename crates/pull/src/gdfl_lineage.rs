@@ -93,6 +93,72 @@
 //! 18 BAJFINANCE pairs carry the pre-ex OI unscaled. Ex-dates are measured,
 //! not sourced.
 //!
+//! # Events that keep the lot (DB-B02, DB-B03, DB-B13; WP-12e)
+//!
+//! Step 4 saw only a lot step. NSE also renames every open contract with the
+//! lot UNCHANGED, and the detector declared nothing:
+//!
+//! * a **dividend** the exchange adjusts the contracts for: "The full value
+//!   of dividend ... would be deducted from all the cum-dividend strike
+//!   prices" (`NSE/FAOP/53079`, 25 Jul 2022, VEDL; `docs/00-charter.md`,
+//!   "NSE F&O circulars read for the options lineage"), and the circular
+//!   states no lot change. Every strike moves by one constant
+//!   ([`EventKind::StrikeOffset`]);
+//! * a **scheme of arrangement**: every open contract expires on the
+//!   cum-date and the same expiries are listed again from the ex-date under
+//!   new strikes (`NSE/FAOP/73857`, VEDL 2026). No pre-ex contract continues
+//!   ([`EventKind::Relisted`]).
+//!
+//! Both are found from the same two facts, read off one pass over the day
+//! ([`detect`]'s unchanged-lot arm):
+//!
+//! 1. **The OI names the partner.** A contract's first OI of a day is, on
+//!    about a quarter of ordinary contract-days, exactly its previous close
+//!    OI (the audit measured 12 of 42, 15 of 69 and 15 of 56). On an offset
+//!    ex-date that equality holds on the SHIFTED key and never on the same
+//!    text (VEDL 2024-09-10: 0 of 37 same-text, 13 of 43 at minus 20). So
+//!    each of the day's keys votes for the shift to the one pre-ex key of its
+//!    expiry and side whose close OI it opens on, a value two pre-ex keys
+//!    share votes for nothing, and the shift with the most votes is the
+//!    event's when it has at least [`MIN_OI_PAIRS`] votes and more than four
+//!    times the same-text carries. Strikes alone cannot name the shift: on a
+//!    regular grid every multiple of the step pairs most of a ladder.
+//! 2. **The names break.** When NONE of the day's keys was a pre-ex key, at
+//!    least [`MIN_EVENT_KEYS`] of them are in expiries the underlying already
+//!    held, and those expiries held at least as many pre-ex keys, every open
+//!    contract was renamed or re-listed. With [`MIN_OI_FRESH`] OI votes for
+//!    one shift it is an offset; with none it is a re-listing, which pairs
+//!    nothing: the old generation expired, and no arithmetic relates the two.
+//!
+//! A re-listing whose new strikes REUSE pre-ex texts shows neither fact (the
+//! names continue, and an absent carry is what one ordinary day in ten looks
+//! like on a thin underlying), so it is declared only from a SOURCED row
+//! ([`crate::expiry_alias::relisted_on`]). HINDUNILVR 2025-12-05 is that
+//! case and has no row: NOT DETECTED, named for `docs/06-limits.md`.
+//!
+//! An offset pair is a [`LineageRecord`] with `factor=1/1` and equal lots;
+//! the shift is the difference of the two keys' strikes. The CAUSE is never
+//! written: no circular for any measured event is recorded, so "dividend" is
+//! UNVERIFIED and the record says only what moved.
+//!
+//! Every event the import meets is one [`EventRecord`] in the ledger (its
+//! kind, shift, lots and counts) and every pre-ex key it retired with no
+//! partner one [`StoppedRecord`] (D-3355). A re-listing pairs nothing, so
+//! without these two it left no line at all, and the keys it retired were
+//! known only to the run that met it.
+//!
+//! # One contract across a symbol change (DB-B05, DB-B11, DB-B62)
+//!
+//! The decoder took the underlying from each day's file name, so a contract
+//! alive across `NIITTECH -> COFORGE` was two store contracts.
+//! [`filed_underlying`] is the option side of D-3333: a file named for a
+//! symbol the exchange used that day is filed under the NEWEST symbol its
+//! dated changes reach (`brutex_core::alias::LINEAGE`, NSE's
+//! `symbolchange.csv`), exactly as the cash side files old stems, and a name
+//! the exchange was not using that day is refused. A rename with no row in
+//! that table (`TATAGLOBAL -> TATACONSUM`, `KPIT -> BSOFT`) keeps both keys:
+//! no successor is guessed.
+//!
 //! # What it does not decide
 //!
 //! Whether a stitched series is split, refused or flagged, and how a bar's
@@ -104,15 +170,21 @@
 //!
 //! [`ContractDay::from_rows`] is O(rows), one pass, once per file.
 //! [`LotLedger::observe`] is one hash probe and one Euclid (O(log lot)).
-//! [`day_lot`] is O(contracts). [`detect`] returns after the two lots when
-//! they are equal, which is every day but an ex-date; on an ex-date it is
-//! O(contracts · log contracts) for the underlying, once. [`Lineage::stale_oi`]
+//! [`day_lot`] is O(contracts). [`detect`] on an ordinary day (equal lots) is
+//! one pass over the underlying's pre-ex keys and one over the day's: two
+//! hash probes per contract, O(contracts), no sort; on a lot-step ex-date it
+//! is O(contracts · log contracts) for the underlying, once. A pre-ex OI
+//! value shared by more than [`OI_BUCKET_CAP`] keys of one ladder is not
+//! walked. [`filed_underlying`] is at most `1 + R` probes of a compile-time
+//! table (`R` its row count). Measured by the ignored test
+//! `the_unchanged_lot_arm_costs_one_pass_on_an_ordinary_day`. [`Lineage::stale_oi`]
 //! is O(the key's ex-date rows), once per renamed contract. An import-path
 //! cost, not a query: no reader calls any of it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use brutex_core::alias::{LINEAGE, Stale, Ymd};
 use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
 use brutex_core::price::Paisa;
 use brutex_core::symbol::Symbol;
@@ -1174,11 +1246,250 @@ impl LotLedger {
     }
 }
 
+/// The fewest contracts on each side of an ex-date that make a name break
+/// (module doc): the audit's own bar, "at least 8 live contracts of one
+/// underlying stop and the same expiries restart".
+pub const MIN_EVENT_KEYS: usize = 8;
+
+/// The fewest OI-carried pairs that prove a strike offset when pre-ex texts
+/// trade again on the ex-date (module doc, fact 1).
+pub const MIN_OI_PAIRS: usize = 5;
+
+/// The fewest OI-carried pairs that make a name break an offset rather than
+/// a re-listing (module doc, fact 2).
+pub const MIN_OI_FRESH: usize = 3;
+
+/// How many pre-ex keys of one ladder may share one close OI before the
+/// value is not walked: a bound on [`detect`]'s vote, never reached by a
+/// value that names a partner (one key).
+pub const OI_BUCKET_CAP: usize = 8;
+
+/// What moved on an ex-date. Measured; the cause is never claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    /// The underlying-day lot stepped and every strike moved by its ratio
+    /// (the shape of a bonus or split; module doc, step 4).
+    LotStep,
+    /// The lot is unchanged and every strike moved by one constant: the old
+    /// strike less the new, paisa (the shape of a dividend adjustment).
+    StrikeOffset {
+        /// Old strike minus new strike, paisa; never zero.
+        shift: i64,
+    },
+    /// The lot is unchanged, every pre-ex contract stopped and the same
+    /// expiries were listed again: nothing is paired (the shape of an early
+    /// expiry on a scheme of arrangement).
+    Relisted,
+}
+
+impl EventKind {
+    /// The word a log line or a page names it by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LotStep => "lot_step",
+            Self::StrikeOffset { .. } => "strike_offset",
+            Self::Relisted => "relisted",
+        }
+    }
+
+    /// The strike shift, paisa: the offset's own, 0 for the other kinds.
+    #[must_use]
+    pub const fn shift(self) -> i64 {
+        match self {
+            Self::StrikeOffset { shift } => shift,
+            Self::LotStep | Self::Relisted => 0,
+        }
+    }
+
+    /// The kind [`Self::as_str`] and [`Self::shift`] spell, or `None` for a
+    /// word that is no kind, an offset of nothing, or a shift on a kind that
+    /// has none.
+    #[must_use]
+    pub fn parse(word: &str, shift: i64) -> Option<Self> {
+        match (word, shift) {
+            ("lot_step", 0) => Some(Self::LotStep),
+            ("relisted", 0) => Some(Self::Relisted),
+            ("strike_offset", shift) if shift != 0 => Some(Self::StrikeOffset { shift }),
+            _ => None,
+        }
+    }
+}
+
+/// A signed decimal in its canonical spelling: digits, with one leading `-`
+/// for a negative.
+fn signed(text: &str) -> Option<i64> {
+    match text.strip_prefix('-') {
+        Some(rest) => i64::try_from(digits(rest)?).ok()?.checked_neg(),
+        None => i64::try_from(digits(text)?).ok(),
+    }
+}
+
+/// One `event` record (D-3355): what [`detect`] declared for one underlying
+/// on one ex-date. In `<store>/imports/gdfl.lineage`, D-3317's line rules:
+///
+/// `event NSE-FNO-<underlying> ex=<YYYY-MM-DD> kind=<lot_step|strike_offset|relisted> shift=<paisa> lot_old=<n> lot_new=<n> paired=<n> stopped=<n> v=1`
+///
+/// `shift` is the old strike less the new, signed, and 0 unless the kind is
+/// `strike_offset`. `paired` counts the pre-ex keys with a `lineage` record
+/// of this ex-date and `stopped` those with a [`StoppedRecord`]: together
+/// every pre-ex key the event retired. A run that sees more of the pre-ex
+/// state than an earlier one appends a second record with the larger counts;
+/// the LAST record of an (underlying, ex-date) is the one in force. The cause
+/// (bonus, dividend, scheme) is never written: it is not measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventRecord {
+    /// The underlying.
+    pub underlying: Symbol,
+    /// The ex-date.
+    pub ex_date: Day,
+    /// What moved.
+    pub kind: EventKind,
+    /// The inferred lot before, shares.
+    pub lot_old: u64,
+    /// The inferred lot from the ex-date, shares.
+    pub lot_new: u64,
+    /// Pre-ex keys paired with a post-ex key.
+    pub paired: u64,
+    /// Pre-ex keys retired with no partner.
+    pub stopped: u64,
+}
+
+impl EventRecord {
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "event NSE-FNO-{} ex={} kind={} shift={} lot_old={} lot_new={} paired={} stopped={} v={RECORD_VERSION}",
+            self.underlying.as_str(),
+            self.ex_date,
+            self.kind.as_str(),
+            self.kind.shift(),
+            self.lot_old,
+            self.lot_new,
+            self.paired,
+            self.stopped,
+        )
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text: a kind
+    /// its lots or its counts contradict (a lot step with equal lots, any
+    /// other kind with unequal ones, a re-listing that pairs), an event that
+    /// retired nothing, or a value not in its canonical spelling.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[word, subject], rest) = fields.split_first_chunk::<2>()?;
+        if word != "event" {
+            return None;
+        }
+        let [ex, kind, shift, lot_old, lot_new, paired, stopped, version] = named(
+            rest,
+            [
+                "ex", "kind", "shift", "lot_old", "lot_new", "paired", "stopped", "v",
+            ],
+        )?;
+        let under = subject.strip_prefix("NSE-FNO-")?;
+        let underlying = Symbol::new(under)
+            .ok()
+            .filter(|symbol| symbol.as_str() == under)?;
+        let record = Self {
+            underlying,
+            ex_date: parse_day(ex)?,
+            kind: EventKind::parse(kind, signed(shift)?)?,
+            lot_old: digits(lot_old)?,
+            lot_new: digits(lot_new)?,
+            paired: digits(paired)?,
+            stopped: digits(stopped)?,
+        };
+        let consistent = match record.kind {
+            EventKind::LotStep => record.lot_old != record.lot_new,
+            EventKind::StrikeOffset { .. } => record.lot_old == record.lot_new,
+            EventKind::Relisted => record.lot_old == record.lot_new && record.paired == 0,
+        };
+        let retired = record.paired.checked_add(record.stopped)? > 0;
+        (consistent && retired && version == RECORD_VERSION && record.line() == line)
+            .then_some(record)
+    }
+}
+
+/// One `stopped` record (D-3355): a pre-ex key an event retired with no
+/// partner. The exchange contract under it stopped on the day before `ex`
+/// (expired early, or its adjusted key was not found), so a file under the
+/// key on the ex-date or later is another exchange contract (a
+/// [`StitchedRecord`] is written when one appears). In
+/// `<store>/imports/gdfl.lineage`:
+///
+/// `stopped NSE-FNO-<underlying>-<contract> ex=<YYYY-MM-DD> v=1`
+///
+/// A key with both a `lineage` record and a `stopped` record of one ex-date
+/// is PAIRED: a run that held less of the pre-ex state wrote the `stopped`
+/// line, and the pair is the measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StoppedRecord {
+    /// The underlying.
+    pub underlying: Symbol,
+    /// The retired key's contract segment.
+    pub key: Contract,
+    /// The ex-date.
+    pub ex_date: Day,
+}
+
+impl StoppedRecord {
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "stopped {} ex={} v={RECORD_VERSION}",
+            option_key(self.underlying, self.key),
+            self.ex_date,
+        )
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[word, key], rest) = fields.split_first_chunk::<2>()?;
+        if word != "stopped" {
+            return None;
+        }
+        let [ex, version] = named(rest, ["ex", "v"])?;
+        let (underlying, key) = parse_option_key(key)?;
+        let record = Self {
+            underlying,
+            key,
+            ex_date: parse_day(ex)?,
+        };
+        (version == RECORD_VERSION && record.line() == line).then_some(record)
+    }
+}
+
+/// The store underlying an option file named for `stem` on trade day `trade`
+/// is filed under (module doc; D-3333): the newest symbol the stem's dated
+/// changes reach.
+///
+/// # Errors
+///
+/// [`Stale`] when the exchange was not using `stem` on `trade`: an old symbol
+/// on or after its change, or a new one before it. Refused, as the cash side
+/// refuses it; a reused symbol would name another company.
+pub fn filed_underlying(stem: Symbol, trade: Day) -> Result<Symbol, Stale> {
+    let on = Ymd::new(trade.year(), trade.month(), trade.day());
+    let current = LINEAGE.filed_under(stem.as_str(), on)?;
+    // A table symbol `Symbol` cannot hold would be a table fault; the stem
+    // itself is then the only honest key, and the core table's own test
+    // builds every row.
+    Ok(Symbol::new(current).unwrap_or(stem))
+}
+
 /// One underlying's adjustment on one ex-date.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorporateAction {
     /// The underlying.
     pub underlying: Symbol,
+    /// What moved.
+    pub kind: EventKind,
     /// The ex-date.
     pub ex_date: Day,
     /// The inferred lot before, shares.
@@ -1281,8 +1592,9 @@ fn single_near(ladder: &[i64], want: i64) -> Option<i64> {
 
 /// The adjustment of `underlying` on `ex_date`, from its pre-ex state
 /// (`before`) and its contract-days of `ex_date` (`after`), or `None` when the
-/// day lot did not change or the strikes did not move with it (a lot
-/// revision, or a day whose lot reads wrongly). Module doc, step 4.
+/// strikes did not move: a lot revision, an ordinary day, or a day whose lot
+/// reads wrongly. A lot step is module doc step 4; an unchanged lot is
+/// "Events that keep the lot".
 ///
 /// `before` is the latest pre-ex contract-day of every key the underlying
 /// holds that has not expired by `ex_date`: the vendor day before for every
@@ -1300,7 +1612,7 @@ pub fn detect(
 ) -> Option<CorporateAction> {
     let (lot_before, lot_after) = (day_lot(before)?, day_lot(after)?);
     if lot_before == lot_after {
-        return None;
+        return detect_unchanged_lot(underlying, ex_date, lot_before, before, after);
     }
     let before_keys: HashSet<(Day, i64, OptionSide)> =
         before.iter().map(ContractDay::key).collect();
@@ -1352,9 +1664,150 @@ pub fn detect(
     }
     (!lineage.is_empty() && lineage.len() > continuing).then_some(CorporateAction {
         underlying,
+        kind: EventKind::LotStep,
         ex_date,
         lot_before,
         lot_after,
+        lineage,
+        unpaired,
+        stitched,
+    })
+}
+
+/// Every pre-ex contract of an unchanged-lot event paired with the day's key
+/// `shift` below it (same expiry and side), and those with no such key. With
+/// no shift (a re-listing) nothing pairs.
+fn pairs_at(
+    underlying: Symbol,
+    ex_date: Day,
+    lot: u64,
+    offset: Option<i64>,
+    before: &[ContractDay],
+    after: &[ContractDay],
+) -> (Vec<Lineage>, Vec<Contract>) {
+    type Key = (Day, i64, OptionSide);
+    let before_keys: HashSet<Key> = before.iter().map(ContractDay::key).collect();
+    let after_by_key: HashMap<Key, &ContractDay> = after.iter().map(|c| (c.key(), c)).collect();
+    let mut lineage = Vec::new();
+    let mut unpaired = Vec::new();
+    for old in before {
+        let Some(old_contract) = old.contract() else {
+            continue;
+        };
+        let partner = offset
+            .and_then(|shift| old.strike.checked_sub(shift))
+            .and_then(|strike| after_by_key.get(&(old.expiry, strike, old.side)))
+            .and_then(|new| new.contract().map(|contract| (new, contract)));
+        let Some((new, new_contract)) = partner else {
+            unpaired.push(old_contract);
+            continue;
+        };
+        lineage.push(Lineage {
+            underlying,
+            ex_date,
+            old: old_contract,
+            new: new_contract,
+            lot_before: lot,
+            lot_after: lot,
+            pre_close_oi: old.close_oi,
+            oi: OiCarry::of(old.close_oi, new.first_oi, lot, lot),
+            reused: before_keys.contains(&new.key()),
+        });
+    }
+    (lineage, unpaired)
+}
+
+/// [`detect`]'s arm for an unchanged lot (module doc, "Events that keep the
+/// lot"): a strike offset proved by the OI, a name break, or nothing. One
+/// pass over each side; no sort.
+fn detect_unchanged_lot(
+    underlying: Symbol,
+    ex_date: Day,
+    lot: u64,
+    before: &[ContractDay],
+    after: &[ContractDay],
+) -> Option<CorporateAction> {
+    type Key = (Day, i64, OptionSide);
+    let before_by_key: HashMap<Key, &ContractDay> = before.iter().map(|c| (c.key(), c)).collect();
+    // Pre-ex strikes by (expiry, side, close OI): the partner a carried OI
+    // names. Only a positive OI can name one.
+    let mut by_oi: HashMap<(Day, OptionSide, i64), Vec<i64>> = HashMap::new();
+    let mut old_expiries: HashMap<Day, usize> = HashMap::new();
+    for c in before {
+        *old_expiries.entry(c.expiry).or_default() += 1;
+        if let Some(oi) = c.close_oi.filter(|&oi| oi > 0) {
+            let bucket = by_oi.entry((c.expiry, c.side, oi)).or_default();
+            if bucket.len() <= OI_BUCKET_CAP {
+                bucket.push(c.strike);
+            }
+        }
+    }
+    let mut continuing = 0_usize;
+    let mut carried_same = 0_usize;
+    let mut relisted = 0_usize;
+    let mut shared: HashSet<Day> = HashSet::new();
+    let mut votes: HashMap<i64, usize> = HashMap::new();
+    for c in after {
+        if old_expiries.contains_key(&c.expiry) {
+            relisted += 1;
+            shared.insert(c.expiry);
+        }
+        let Some(first) = c.first_oi.filter(|&oi| oi > 0) else {
+            continuing += usize::from(before_by_key.contains_key(&c.key()));
+            continue;
+        };
+        // The same text carrying its OI is the ordinary day's evidence,
+        // counted however many keys share the value; a shift is voted for
+        // only by a value exactly one pre-ex key of the ladder closed on.
+        if let Some(old) = before_by_key.get(&c.key()) {
+            continuing += 1;
+            carried_same += usize::from(old.close_oi == Some(first));
+        }
+        let Some(bucket) = by_oi.get(&(c.expiry, c.side, first)) else {
+            continue;
+        };
+        if let [strike] = bucket.as_slice()
+            && *strike != c.strike
+        {
+            *votes.entry(strike - c.strike).or_default() += 1;
+        }
+    }
+    let stopped: usize = shared
+        .iter()
+        .filter_map(|expiry| old_expiries.get(expiry))
+        .sum();
+    let name_break = continuing == 0 && relisted >= MIN_EVENT_KEYS && stopped >= MIN_EVENT_KEYS;
+    // The shift with the most votes, when no other has as many.
+    let best = votes.values().copied().max().unwrap_or(0);
+    let mut at_best = votes.iter().filter(|&(_, &n)| n == best);
+    let shift = match (at_best.next(), at_best.next()) {
+        (Some((&shift, _)), None) => Some(shift),
+        _ => None,
+    };
+    let need = if name_break {
+        MIN_OI_FRESH
+    } else {
+        MIN_OI_PAIRS
+    };
+    let offset = shift.filter(|_| best >= need && best > carried_same.saturating_mul(4));
+    let sourced = crate::expiry_alias::relisted_on(underlying.as_str(), ex_date).is_some();
+    let kind = match offset {
+        Some(shift) => EventKind::StrikeOffset { shift },
+        None if name_break || (sourced && relisted > 0) => EventKind::Relisted,
+        None => return None,
+    };
+    let (lineage, unpaired) = pairs_at(underlying, ex_date, lot, offset, before, after);
+    let stitched: Vec<Contract> = after
+        .iter()
+        .filter(|c| before_by_key.contains_key(&c.key()))
+        .filter_map(ContractDay::contract)
+        .collect();
+    Some(CorporateAction {
+        underlying,
+        kind,
+        ex_date,
+        lot_before: lot,
+        lot_after: lot,
         lineage,
         unpaired,
         stitched,
