@@ -217,17 +217,29 @@ export function censusRefusedSentence(refused) {
  * @param {{ journal: number | null, importLines: number | null, importAt: number | null } | undefined} last
  */
 export function journalStep(prev, last) {
-  if (!prev || !last) return { moved: false, journal: 0, importLines: 0, importAt: null };
+  if (!prev || !last) return { moved: false, journal: 0, importLines: 0, importAt: null, shrank: '' };
+  const known = (/** @type {number | null} */ a, /** @type {number | null} */ b) => Number.isSafeInteger(a) && Number.isSafeInteger(b);
   const delta = (/** @type {number | null} */ a, /** @type {number | null} */ b) =>
-    Number.isSafeInteger(a) && Number.isSafeInteger(b) ? Math.max(0, /** @type {number} */ (b) - /** @type {number} */ (a)) : 0;
+    known(a, b) ? Math.max(0, /** @type {number} */ (b) - /** @type {number} */ (a)) : 0;
   const journal = delta(prev.journal, last.journal);
   const importLines = delta(prev.importLines, last.importLines);
   const newer = last.importAt !== null && (prev.importAt === null || last.importAt > prev.importAt);
+  // A JOURNAL THAT GOT SHORTER IS SAID, never clamped to "did not move": both
+  // are append-only, so a smaller count is a truncated or replaced file.
+  /** @type {string[]} */
+  const fell = [];
+  const say = (/** @type {string} */ what, /** @type {number | null} */ a, /** @type {number | null} */ b) => {
+    if (known(a, b) && /** @type {number} */ (b) < /** @type {number} */ (a))
+      fell.push(`${what} fell from ${Number(a).toLocaleString('en-IN')} to ${Number(b).toLocaleString('en-IN')}`);
+  };
+  say('the pull journal’s record count', prev.journal, last.journal);
+  say('the import journal’s line count', prev.importLines, last.importLines);
   return {
     moved: journal > 0 || importLines > 0 || newer,
     journal,
     importLines,
-    importAt: newer ? last.importAt : null
+    importAt: newer ? last.importAt : null,
+    shrank: fell.join('; ')
   };
 }
 

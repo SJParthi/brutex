@@ -546,7 +546,7 @@
       barsPerMin,
       stepped,
       filling,
-      journals: { moved: journalsMoved, records: jSpan.journal, importLines: jSpan.importLines, importAt: jSpan.importAt ?? jStep.importAt },
+      journals: { moved: journalsMoved, records: jSpan.journal, importLines: jSpan.importLines, importAt: jSpan.importAt ?? jStep.importAt, shrank: jStep.shrank || jSpan.shrank },
       sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: last.gen - base.gen, secs: last.at - base.at } : null
     };
   });
@@ -1148,6 +1148,13 @@
           </span>
         </div>
 
+        {#if pulse.journals.shrank}
+          <p class="why" role="alert" data-pulse-shrank>
+            <b>A JOURNAL GOT SHORTER</b> between two answers of this page: {pulse.journals.shrank}. Both
+            journals are append-only, so a smaller count is a truncated or replaced file, not a quiet one. Nothing
+            here counts it as "not moved".
+          </p>
+        {/if}
         <div class="verdict">
           {#if pulse.state === 'moving'}
             <span class="big up">

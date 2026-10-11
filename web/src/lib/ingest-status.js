@@ -186,12 +186,6 @@ export function flightOf(cell) {
   };
 }
 
-/** The bare symbol of an instrument spelling: `NSE-INDEX-NIFTY` -> `NIFTY`. */
-const bare = (/** @type {string} */ text) => {
-  const parts = String(text ?? '').split('-');
-  return (parts.length > 2 ? parts.slice(2).join('-') : String(text ?? '')).toUpperCase();
-};
-
 /**
  * WHETHER THE CELL IN FLIGHT IS THIS ROW (DB-G20).
  *
@@ -210,8 +204,14 @@ export function flightRow(flight, row) {
   if (!row.feed || row.feed !== flight.feed) return false;
   if (row.seg !== 'spot') return false;
   if (row.tf !== flight.timeframe) return false;
-  const want = bare(flight.instrument);
-  return [row.sym, row.key, row.mkey].some((name) => typeof name === 'string' && name !== '' && bare(name) === want);
+  // THE EXACT NAME, in any of the row's three spellings, and nothing derived
+  // from one. This stripped "two dash-separated parts" to reach a bare symbol,
+  // so the master key `NSE-BAJAJ-AUTO` compared as `AUTO` and `NSE-MCDOWELL-N`
+  // as `N`: a symbol that itself holds a dash matched a cell naming its tail.
+  // The server publishes the store symbol (`server.rs` `in_flight`:
+  // `instrument.underlying`), which is `row.sym`.
+  const want = flight.instrument.toUpperCase();
+  return [row.sym, row.key, row.mkey].some((name) => typeof name === 'string' && name !== '' && name.toUpperCase() === want);
 }
 
 /**

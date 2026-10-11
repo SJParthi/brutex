@@ -97,8 +97,8 @@ import { createFeedStartup, urlFeedOf } from '$lib/feed-startup.js';
  * }} Feed
  */
 
-/** @type {{ all: Feed[], active: string | null, error: string | null }} */
-export const feeds = $state({ all: [], active: null, error: null });
+/** @type {{ all: Feed[], active: string | null, error: string | null, notice: string | null }} */
+export const feeds = $state({ all: [], active: null, error: null, notice: null });
 
 // Descriptors validate a saved preference. First visits use only census HEAD
 // headers to retain the data-backed default; full inventories are requested by

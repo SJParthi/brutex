@@ -36,8 +36,15 @@ export function urlFeedOf(search) {
  * selection, and a feed taken from it or from any non-explicit source is
  * selected with `{ persist: false }`: only a picker choice is remembered.
  *
+ * AN ADDRESS THAT NAMES A FEED /feeds.json DOES NOT LIST IS SAID (WP-61
+ * repair). `?feed=nosuch` opened the saved or default feed with no word, so a
+ * mistyped or stale link showed another vendor's data under the address the
+ * reader had asked for. `state.notice` now carries one sentence naming the
+ * feed asked for, the feeds that exist and the one shown instead; it is
+ * cleared by an explicit pick. The comparison is exact, as the wire names are.
+ *
  * @template {{wire: string, ready: boolean}} F
- * @param {{all: F[], active: string | null, error: string | null}} state
+ * @param {{all: F[], active: string | null, error: string | null, notice?: string | null}} state
  * @param {import('./ask.js').ask} request
  * @param {() => Pick<Storage, 'getItem' | 'setItem'>} storage
  * @param {() => string | null} [urlFeed] the feed the page's address names
@@ -46,6 +53,24 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
   let selectionRevision = 0;
   /** @type {Promise<void> | null} */
   let flight = null;
+  /** The feed the address named that the descriptor list does not hold. */
+  /** @type {string | null} */
+  let unlisted = null;
+
+  /** Say, once the choice is made, that the address's feed is not a feed. */
+  function sayUnlisted() {
+    if (unlisted === null) return;
+    // ONLY THE FEEDS THE OPERATOR IS OFFERED (D-3338): a feed excluded from
+    // every picker is not suggested here either.
+    const listed = state.all
+      .filter((feed) => /** @type {any} */ (feed).offered !== false)
+      .map((feed) => feed.wire)
+      .join(', ') || 'none';
+    const shown = state.active === null ? 'No feed is selected' : `Showing ${state.active} instead`;
+    state.notice =
+      `The address names feed ${JSON.stringify(unlisted.slice(0, 64))}, which /feeds.json does not list ` +
+      `(the feeds offered are: ${listed}). ${shown}; the address was not followed and nothing was saved.`;
+  }
 
   /**
    * @param {string | null} wire
@@ -59,6 +84,9 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
     selectionRevision += 1;
     state.active = wire;
     state.error = null;
+    // The reader chose: the notice about the address has been answered.
+    unlisted = null;
+    state.notice = null;
     if (how.persist === false) return;
     try {
       storage().setItem(FEED_PREFERENCE_KEY, JSON.stringify(wire));
@@ -79,6 +107,7 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
       addressed = null;
     }
     if (addressed !== null && list.some((feed) => feed.wire === addressed)) return addressed;
+    unlisted = addressed;
     try {
       const saved = storage().getItem(FEED_PREFERENCE_KEY);
       if (saved !== null) {
@@ -112,15 +141,22 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
       const preferred = initial(list);
       if (preferred !== undefined) {
         state.active = preferred;
+        sayUnlisted();
         return;
       }
       try {
         // ONLY THE OFFERED FEEDS ARE SURVEYED (D-3338): a feed the operator
         // excluded is never the default, so its census is not asked for.
         const held = await surveyFeedHeaders(list.filter((feed) => /** @type {any} */ (feed).offered !== false), request);
-        if (selectionRevision === revision) state.active = pickDefaultFeed(held);
+        if (selectionRevision === revision) {
+          state.active = pickDefaultFeed(held);
+          sayUnlisted();
+        }
       } catch (why) {
-        if (selectionRevision === revision) throw why;
+        if (selectionRevision === revision) {
+          sayUnlisted();
+          throw why;
+        }
       }
     } catch (why) {
       state.error = String(why);

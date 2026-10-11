@@ -1006,7 +1006,19 @@ fn note_leg_failure(
     // returns before any journal write, so "the reason is in the audit
     // journal" sent the operator to a record that was never written. The
     // receipt's `Refused because` line is the reason, and it is carried.
+    //
+    // WHETHER A RECORD EXISTS IS THE RECEIPT'S OWN `Recorded` LINE, never an
+    // inference from the refusal: two spot receipts carry `Refused because`
+    // AND a journal record (`server::recorded_fact` appends it: a blocked run,
+    // and a mapping that reached nothing), and for those this said "no journal
+    // record was written" about a record that exists. Only a receipt with no
+    // `Recorded` fact (the seat 409, the unknown-feed 400: both return before
+    // any append) is a door refusal.
     if let Some(said) = receipt_refusal(html) {
+        let journal = match receipt_fact(html, "Recorded") {
+            Some(recorded) => format!("the receipt's Recorded line: {recorded}"),
+            None => "no journal record was written for a request refused at the door".to_owned(),
+        };
         let kind = if outcome == LegOutcome::Retry {
             "this leg remains owed and is eligible for another pass"
         } else {
@@ -1018,8 +1030,7 @@ fn note_leg_failure(
                     || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
                 {
                     feed.last_error = Some(format!(
-                        "{} answered HTTP {}: {said} ({kind}; no journal record was written \
-                         for a request refused at the door)",
+                        "{} answered HTTP {}: {said} ({kind}; {journal})",
                         leg.label,
                         status.as_u16()
                     ));
@@ -1065,8 +1076,14 @@ fn note_leg_failure(
 /// the receipt states none: the reason a request refused at the door (a held
 /// seat, an unreadable feed) gives, which no journal record repeats. DB-B37.
 fn receipt_refusal(html: &str) -> Option<String> {
-    const LABEL: &str = "<th>Refused because</th><td>";
-    let (_, rest) = html.split_once(LABEL)?;
+    receipt_fact(html, "Refused because")
+}
+
+/// One fact of a receipt page by its label, unescaped, or `None` when the
+/// receipt carries no such row (or an empty one). The first row wins, as the
+/// first verdict badge does in [`leg_outcome`].
+fn receipt_fact(html: &str, label: &str) -> Option<String> {
+    let (_, rest) = html.split_once(&format!("<th>{label}</th><td>"))?;
     let (cell, _) = rest.split_once("</td>")?;
     let text = cell
         .replace("&lt;", "<")
@@ -2810,6 +2827,90 @@ mod tests {
         );
         let old = seen.feeds[1].last_error.clone().expect("a reason");
         assert!(old.contains("The reason is in the audit journal"), "{old}");
+        // THE DOOR REFUSAL, AND ONLY IT, SAYS NO RECORD WAS WRITTEN.
+        assert!(said.contains("no journal record was written"), "{said}");
+    }
+
+    /// DB-B37, repair: a receipt that carries `Refused because` AND its own
+    /// `Recorded` line (a blocked run, a mapping that reached nothing: both
+    /// append a record before answering) is never said to have written none.
+    /// The receipt's `Recorded` line is carried as it stands, whichever way
+    /// the append went.
+    #[test]
+    fn a_journalled_refusal_is_never_said_to_have_no_record() {
+        let receipt_with = |recorded: &str| {
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict: "NOT STARTED",
+                reason: "x",
+                good: false,
+                facts: &[
+                    (
+                        "Refused because",
+                        "Instrument mapping is not ready".to_owned(),
+                    ),
+                    ("Recorded", recorded.to_owned()),
+                ],
+                footnote: "Nothing here was written to the store.",
+            })
+        };
+        let landed = receipt_with("yes — appended to /x/pull.journal");
+        let lost = receipt_with("NO — this run is NOT in the journal. the disk is full");
+        assert_eq!(
+            receipt_fact(&landed, "Recorded").as_deref(),
+            Some("yes — appended to /x/pull.journal")
+        );
+        assert_eq!(receipt_fact(&landed, "Stored"), None);
+        assert_eq!(receipt_fact("<th>Recorded</th><td>", "Recorded"), None);
+        assert_eq!(
+            receipt_fact("<th>Recorded</th><td>  </td>", "Recorded"),
+            None
+        );
+        let held = site("journalled-refusal");
+        claim(&held);
+        let run = current(&held);
+        with_progress(&held, run, |progress| {
+            progress.feeds = vec![FeedReport::default(), FeedReport::default()];
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "zerodha".to_owned(),
+            dir: "1min".to_owned(),
+            label: "Spot · 1 minute".to_owned(),
+            body: String::new(),
+        };
+        for (nth, page) in [&landed, &lost].into_iter().enumerate() {
+            note_leg_failure(
+                &held,
+                run,
+                nth,
+                &leg,
+                (axum::http::StatusCode::BAD_REQUEST, page),
+                LegOutcome::Retry,
+            );
+        }
+        let seen = observed(&held);
+        let said = seen.feeds[0].last_error.clone().expect("a reason");
+        assert!(
+            said.contains("answered HTTP 400: Instrument mapping is not ready"),
+            "{said}"
+        );
+        assert!(
+            said.contains("the receipt's Recorded line: yes — appended to /x/pull.journal"),
+            "{said}"
+        );
+        assert!(!said.contains("no journal record was written"), "{said}");
+        let failed = seen.feeds[1].last_error.clone().expect("a reason");
+        assert!(
+            failed.contains(
+                "the receipt's Recorded line: NO — this run is NOT in the journal. the disk is full"
+            ),
+            "{failed}"
+        );
+        assert!(
+            !failed.contains("no journal record was written"),
+            "{failed}"
+        );
     }
 
     #[tokio::test]

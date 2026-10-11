@@ -963,6 +963,40 @@ pub fn widen_to_record(body: &str, rung: Option<Timeframe>) -> Option<String> {
     Some(value.to_string())
 }
 
+/// **AN ANSWER THAT WAS ASKED FOR `span=record` AND IS NOT WIDENED SAYS SO**
+/// (WP-61 repair). A withheld, building or refused answer was returned as it
+/// stood, with no `span` field, so a reader that asked for the record's span
+/// could not tell a widened answer from one that was not. The body gains
+/// `span: "held"` and a `spanNote` with the reason; every other field is
+/// untouched.
+///
+/// `None` when `body` is not a JSON object (it is then answered as it is).
+///
+/// # Cost
+///
+/// One parse of the kept answer: O(1) per request in the store's size.
+#[must_use]
+pub fn not_widened(body: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("no status")
+        .to_owned();
+    let object = value.as_object_mut()?;
+    let _was = object.insert("span".to_owned(), "held".into());
+    let _note = object.insert(
+        "spanNote".to_owned(),
+        format!(
+            "span=record was asked and this answer is NOT widened to the calendar of record: \
+             only a finished answer (status ok, with its day string) is widened, and this one \
+             is {status:?}. No day outside what it states is claimed open or closed"
+        )
+        .into(),
+    );
+    Some(value.to_string())
+}
+
 /// `before`, the list `middle` already holds, and `after`, as one bounded list
 /// in day order.
 fn merged_list(

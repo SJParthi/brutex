@@ -107,8 +107,9 @@
   // Both are pure modules with their own tests; this file lays them out.
   import { adoptRun, adoptedSentence, isAskTimeout, lastRun, stopSaid, waitedOut } from '$lib/ingest-run.js';
   import {
-    VERDICT_ORDER, VERDICTS, defaultWindow, emptySeen, feedSpan, monthVerdict, outsideSpan,
-    refusalBatches, refusalIndex, refusalSentence, refusedMonth, seriesVerdict, unsettledSpans
+    VERDICT_ORDER, archiveLane, defaultWindow, emptySeen, feedSpan, monthVerdict, outsideSpan,
+    refusalBatches, refusalErrorsSentence, refusalIndex, refusalJoin, refusalSentence, refusedMonth, seriesVerdict, unsettledSpans,
+    verdictWords, wholeUnlisted
   } from '$lib/ingest-months.js';
   // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14): a feed whose store
   // holds bars is selectable whatever its ingest readiness, and only the
@@ -338,6 +339,7 @@
    *     month: string, sessions: number, exp: number | null,
    *     got: number | null, k: Verdict,
    *     why: import('$lib/ingest-months.js').MonthRefusal | null,
+   *     unread: string,
    *     flight: boolean
    *   }[],
    *   got: number, exp: number, unproved: number, missing: number,
@@ -1196,7 +1198,7 @@
    */
   const calendarGap = $derived(
     calendarSpan
-      ? `the exchange calendar of record covers ${calendarSpan} only, so a weekday outside it is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
+      ? `the calendar this page holds (the exchange calendar of record, and before it the days this feed's bars were observed on) covers ${calendarSpan} only, so a weekday outside it is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
       : `no measured calendar is available — ${calendar.why || 'it has not loaded yet'} — so a weekday is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
   );
 
@@ -3309,7 +3311,15 @@
       // `known` is carried so the lane can draw the third state instead of
       // rounding it to the friendlier of the other two.
       const known = pairFloor(leg.vendor, leg.dir).known;
+      /* AN ARCHIVE'S MEASURED SPAN IS A REACH THAT WAS STATED (WP-61 repair).
+         A feed with no per-rung floor read "reach not stated" while its own
+         descriptor on /feeds.json states the archive's first and last day.
+         Read off that field of the leg's own feed, never a vendor name. */
+      const archive = known
+        ? null
+        : archiveLane(feedSpan(/** @type {any} */ (feeds.all.find((f) => f.wire === leg.vendor))), from, to);
       return {
+        archive,
         key: `${leg.vendor}·${leg.dir}`,
         wire: leg.vendor,
         feed: feedName(leg.vendor),
@@ -4782,7 +4792,12 @@
   /* THE TABLE AND ITS ORDER ARE `$lib/ingest-months.js`'s (WP-61), where a
      test reads every label: `in flight` (never `retrying`, DB-G20), `requested
      and refused` (DB-G23), `partly never pulled` (DB-B38). */
-  const VERDICT = VERDICTS;
+  /* IN THE FEED'S OWN WORDS (WP-61 repair): an imported feed's rows read
+     "partly never pulled … the row's Pull asks for exactly those" on rows that
+     offer no Pull. `verdictWords` keeps the keys, tones and order and words
+     the pull verdicts as imports for a feed whose descriptor states an
+     archive. */
+  const VERDICT = $derived(verdictWords(isImported));
   /** Worst first, and the order is a claim about what the reader has to DO. */
   const VORDER = VERDICT_ORDER;
   const VRANK = new Map(VORDER.map((k, i) => [k, i]));
@@ -4883,7 +4898,11 @@
           n: i - start,
           a: (start / total) * 100,
           b: (i / total) * 100,
-          said: why ? refusalSentence(why, (secs) => `${stampLabel(secs * 1000)} IST`) : '',
+          said: why
+            ? refusalSentence(why, (secs) => `${stampLabel(secs * 1000)} IST`)
+            : months[start].unread
+              ? `refusals unread — ${months[start].unread}. Whether these months were asked for and refused is not known.`
+              : '',
           flying
         });
         start = i;
@@ -5009,6 +5028,14 @@
     const refused = refusals.feed === feedNow ? refusals.bySymbol : null;
     for (const m of ticked) {
       const key = censusKey(m);
+      /* WHETHER THE JOURNAL ANSWERED FOR THIS INSTRUMENT (WP-61 repair). A
+         per-symbol read failure arrives in a 200 answer's `errors`; it was
+         stored and never read, so the month fell to "never pulled — nothing
+         has asked the vendor for it". `refusalJoin` says read or unread with
+         the reason, and an unread instrument's open months are `unread`.
+         Asked only of a pulled feed: an imported feed has no pull journal to
+         have refused anything. */
+      const join = isBroker ? refusalJoin(refusals, feedNow, m.symbol) : { read: true, why: '' };
       for (const s of segmentsReached) {
         for (const r of rungsChosen) {
           const inFlight = flightRow(flight, { feed: feedNow, seg: s.key, tf: r.dir, sym: m.symbol, key, mkey: m.key });
@@ -5096,15 +5123,27 @@
                pull's instrument, and a contract segment's months are not what
                it refused. */
             const why = refused !== null && s.key === 'spot' ? refusedMonth(refused, m.symbol, ym) : null;
-            const k = monthVerdict({ beyond, bars, expect, refused: why !== null });
+            /* A WHOLE-WINDOW REFUSAL THE SERVER COUNTED AND DID NOT LIST may
+               cover this month (it lists the newest few, `whole_count` counts
+               all). With any unlisted, "no refusal names this month" cannot be
+               said of a month no listed refusal covers: it is unread, with the
+               count, never "never pulled". */
+            const unlisted = why === null && join.read && refused !== null && s.key === 'spot' ? wholeUnlisted(refused, m.symbol) : 0;
+            const unreadWhy = !join.read
+              ? join.why
+              : unlisted > 0
+                ? `the pull journal holds ${n(unlisted)} more whole-window refusal(s) of this instrument than /ingest/refusals.json lists, and one of them may cover this month`
+                : '';
+            const k = monthVerdict({ beyond, bars, expect, sessions, refused: why !== null, unread: s.key === 'spot' && unreadWhy !== '' });
             got += bars ?? 0;
             exp += expect ?? 0;
             if (k !== 'ok' && k !== 'beyond') unproved += 1;
-            if (k === 'never' || k === 'short' || k === 'refused') missing += 1;
+            if (k === 'never' || k === 'short' || k === 'refused' || k === 'unread') missing += 1;
             seen[k] += 1;
             months.push({
               month: ym, sessions, exp: expect, got: bars, k,
               why: k === 'refused' ? why : null,
+              unread: k === 'unread' ? unreadWhy : '',
               flight: inFlight && k !== 'ok' && k !== 'beyond' && flightMonth(flight, ym)
             });
           }
@@ -5694,6 +5733,14 @@
    * what a waiting governor looks like from outside, and also what a slow
    * vendor looks like. It is named as an inference, not as a reading.
    */
+  /* DECLARED BEFORE THEIR FIRST READER. Both stood 1,700 lines below the two
+     deriveds that read them; a derived is lazy, so that held only while
+     nothing read `stall` during the script's first run, and the checker
+     reported both as used before assigned. */
+  /** The cell in flight, normalised; `null` when the server names none. */
+  const flight = $derived(flightOf(pilot.inFlight));
+  /** When anything the server reports last moved (DB-B39). */
+  let lastMoveAt = $state(0);
   /* JUDGED AGAINST THE RUN'S OWN MEASURED CADENCE (WP-61, DB-B39). This was
      `stalledSecs >= 20`, reset only by census growth, and a 1min stock leg
      lands once per INSTRUMENT at about 45 s each, so a healthy pull read
@@ -7399,8 +7446,6 @@
   /** How often an idle page asks whether a pull is going on the server. */
   const IDLE_POLL_MS = 15_000;
 
-  /** The cell in flight, normalised; `null` when the server names none. */
-  const flight = $derived(flightOf(pilot.inFlight));
   /** Its position, measured pace and labelled ETA. */
   const pace = $derived(flightPace(flight));
   /** `/pull/run.json` as the idle poll last read it. */
@@ -7409,8 +7454,6 @@
   let adopted = $state(/** @type {ReturnType<typeof adoptRun> | null} */ (null));
   /** What the last Stop said it stopped, in the server's words. */
   let stopNote = $state('');
-  /** When anything the server reports last moved (DB-B39). */
-  let lastMoveAt = $state(0);
   let lastMoveKey = '';
 
   $effect(() => {
@@ -8045,9 +8088,11 @@
                       <span class="note quiet">reading {active.display}'s folder…</span>
                     {:else if c.state === 'halted'}
                       <span class="note wrap warn" title={c.why}>
-                        the folder could not be read{c.path ? ` — ${c.path}` : ''}. This is a HALT
-                        and not an empty folder: nothing was counted, so nothing below is a census
-                        of anything.
+                        the vendor folder could not be read{c.why ? `: ${c.why}` : c.path ? ` — ${c.path}` : ''}. This
+                        is a HALT and not an empty folder: nothing in the FOLDER was counted, so
+                        this line says nothing about what is waiting to be imported. The rows below
+                        are not the folder's: they are the bars the STORE already holds for this
+                        feed, counted from the store.
                       </span>
                     {:else if c.state === 'days'}
                       <span
@@ -8721,13 +8766,23 @@
                           <span
                             class="ltrack"
                             role="img"
-                            aria-label={!lane.known
+                            aria-label={lane.archive
+                              ? `${lane.feed} is imported from an archive that /feeds.json measures from ${dayLabel(lane.archive.from)} to ${dayLabel(lane.archive.to)}: ${Math.round(lane.archive.livePct)}% of the window. Nothing outside that span can be imported.`
+                              : !lane.known
                               ? `${lane.feed} states no reach at ${lane.rung}. This is a folder of bought files, so what it covers is whatever is in it — not a claim this page can make for it.`
                               : lane.whole
                                 ? `${lane.feed} at ${lane.rung} answers for the whole window.`
                                 : `${lane.feed} at ${lane.rung} answers for ${Math.round(lane.livePct)}% of the window, from ${dayLabel(lane.at)}. The earlier ${Math.round(lane.deadPct)}% returns nothing.`}
                           >
-                            {#if !lane.known}
+                            {#if lane.archive}
+                              {#if lane.archive.beforePct > 0}
+                                <i class="ldead" style="width:{lane.archive.beforePct}%"></i>
+                              {/if}
+                              <i class="llive" style="width:{lane.archive.livePct}%"></i>
+                              {#if lane.archive.afterPct > 0}
+                                <i class="ldead" style="width:{lane.archive.afterPct}%"></i>
+                              {/if}
+                            {:else if !lane.known}
                               <!-- NEITHER GREEN NOR RED. A green track would
                                    assert a reach the vendor never claimed; a red
                                    one would assert a refusal nobody made. The
@@ -8741,8 +8796,10 @@
                               <i class="llive" style="width:{lane.livePct}%"></i>
                             {/if}
                           </span>
-                          <span class="lat" class:dim={lane.whole || !lane.known}>
-                            {!lane.known
+                          <span class="lat" class:dim={lane.whole || (!lane.known && !lane.archive)} data-lane-reach={lane.archive ? 'archive' : lane.known ? 'floor' : 'unstated'}>
+                            {lane.archive
+                              ? `archive ${dayLabel(lane.archive.from)} – ${dayLabel(lane.archive.to)}`
+                              : !lane.known
                               ? 'reach not stated'
                               : lane.whole
                                 ? 'whole window'
@@ -9537,10 +9594,23 @@
           <p class="caution loud" role="alert" data-ingest-refusals="unread">
             <span class="tag down">refusals unread</span>
             <span class="msg"
-              >{refusals.why} A month with no file reads "never pulled" below without the journal having been asked whether it was refused.</span
+              >{refusals.why} A missing or short month reads "refusals unread" below: whether it was asked for and refused is not known, and "never pulled" is not claimed.</span
             >
           </p>
-        {:else if refusals.feed === feeds.active && refusals.state === 'ready' && refusedInstruments > 0}
+        {:else if refusals.feed === feeds.active && refusals.state === 'unsupported'}
+          <p class="caution loud" role="alert" data-ingest-refusals="unsupported">
+            <span class="tag down">refusals unread</span>
+            <span class="msg"
+              >/ingest/refusals.json refused the question for this feed: {refusals.why} A missing or short month reads "refusals unread" below, and "never pulled" is not claimed.</span
+            >
+          </p>
+        {:else if refusals.feed === feeds.active && refusals.state === 'ready' && refusals.errors.size > 0}
+          <p class="caution loud" role="alert" data-ingest-refusals="unread-symbols" data-count={refusals.errors.size}>
+            <span class="tag down">refusals unread</span>
+            <span class="msg">{refusalErrorsSentence(refusals.errors)}</span>
+          </p>
+        {/if}
+        {#if refusals.feed === feeds.active && refusals.state === 'ready' && refusedInstruments > 0}
           <p class="caution" data-ingest-refusals="joined">
             <span class="tag warn">requested and refused</span>
             <span class="msg"

@@ -81,6 +81,19 @@ fn json_header() -> [(axum::http::HeaderName, &'static str); 1] {
 /// The sentence a 400 carries: no feed, a feed with no pull journal, no
 /// symbol, too many, a repeat, or one that is not a store symbol.
 pub(crate) fn asked(query: &str) -> Result<Vec<String>, String> {
+    // A FIELD THIS ROUTE DOES NOT READ IS REFUSED BY NAME, never ignored: a
+    // `from=`, `limit=` or `timeframe=` here would be answered as if it had
+    // narrowed the question, and it narrows nothing.
+    for field in query.split('&').filter(|field| !field.is_empty()) {
+        let name = field.split('=').next().unwrap_or(field);
+        if !matches!(name, "feed" | "symbols") {
+            let shown: String = name.chars().take(32).collect();
+            return Err(format!(
+                "/ingest/refusals.json does not read the field {shown:?}: it reads feed and \
+                 symbols, and answers every refusal the journal's index holds for each symbol"
+            ));
+        }
+    }
     let feed = param(query, "feed");
     let zerodha = brutex_core::vendor::Vendor::Zerodha.as_str();
     if feed.is_empty() {
@@ -118,6 +131,7 @@ pub(crate) fn asked(query: &str) -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::with_capacity(symbols.len());
     for symbol in &symbols {
         if symbol.len() > 64
+            || symbol.chars().all(|c| c == '.')
             || !symbol
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '&' | '-' | '_' | '.'))
@@ -330,6 +344,32 @@ mod tests {
                 .contains("needs symbols=")
         );
         assert!(asked("feed=zerodha&symbols=..%2Fx").is_err());
+        // DOTS ALONE ARE NOT A STORE SYMBOL (they answered count 0, no error).
+        for dots in [".", "..", "..."] {
+            assert!(
+                asked(&format!("feed=zerodha&symbols=NIFTY,{dots}"))
+                    .unwrap_err()
+                    .contains("not a store symbol"),
+                "{dots}"
+            );
+        }
+        assert_eq!(
+            asked("feed=zerodha&symbols=M.M").map(|list| list.len()),
+            Ok(1)
+        );
+        // A FIELD THE ROUTE DOES NOT READ IS REFUSED BY NAME, never ignored.
+        for extra in ["bogus=1", "from=-1", "limit=1e20", "timeframe=1min", "x"] {
+            let refused = asked(&format!("feed=zerodha&symbols=NIFTY&{extra}")).unwrap_err();
+            assert!(refused.contains("does not read the field"), "{refused}");
+            assert!(
+                refused.contains(extra.split('=').next().expect("a name")),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            asked("&feed=zerodha&&symbols=NIFTY&").map(|list| list.len()),
+            Ok(1)
+        );
         assert!(
             asked("feed=zerodha&symbols=NIFTY,NIFTY")
                 .unwrap_err()

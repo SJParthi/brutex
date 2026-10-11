@@ -31,7 +31,7 @@
 
 /** The verdict keys, worst first: the order is a claim about what to do. */
 export const VERDICT_ORDER = /** @type {const} */ ([
-  'fail', 'refused', 'never', 'partial', 'short', 'flight', 'unknown', 'beyond', 'ok'
+  'fail', 'refused', 'unread', 'never', 'partial', 'short', 'flight', 'unknown', 'beyond', 'ok'
 ]);
 
 /** @typedef {typeof VERDICT_ORDER[number]} Verdict */
@@ -52,10 +52,15 @@ export const VERDICTS = {
     'requested and refused',
     'At least one month file in this window is missing or short, AND the pull journal holds this instrument’s refusal for a day in that month (or for a whole window that covers it): it WAS asked for, and it was refused. The reason, as journalled, is in the cell’s title. A re-pull meets the same refusal until its cause is fixed, so read the reason before pressing Pull. The journal records no timeframe, so the refusal is this instrument’s for that day, at whichever rung was asked.'
   ],
+  unread: [
+    'down',
+    'refusals unread',
+    'At least one month file in this window is missing or short, and the pull journal’s refusals for this instrument were NOT read: the server could not read them, or the read failed or has not answered. Whether the month was asked for and refused is therefore NOT KNOWN, and neither “never pulled” nor “short” is claimed, because both say the journal names no refusal. The reason the refusals are unread is in the cell’s title and on the notice above the table. The bars stored are counted and exact.'
+  ],
   never: [
     'warn',
     'never pulled',
-    'No month file in this window holds a bar for this series, and the pull journal names no refusal of this instrument for any of them: nothing has asked the vendor for it. A pull IS warranted.'
+    'No month file in this window holds a bar for this series, and the pull journal’s refusal index names no refusal of this instrument for any of them. That is one of two things, and this page cannot tell them apart: nothing has asked the vendor for it, or it was asked and the vendor answered with no bars and no refusal (a month before the instrument was listed reads this way: the journal indexes refusals per instrument, not the windows that were asked). The run records on /audit name the windows that were asked. A pull is warranted unless the instrument did not trade in these months.'
   ],
   partial: [
     'warn',
@@ -65,7 +70,7 @@ export const VERDICTS = {
   short: [
     'warn',
     'short',
-    'Every month file in this window has been written, and at least one holds fewer bars than the NSE calendar expects for the days inside the window. No refusal in the pull journal names those months.'
+    'Every month file in this window has been written, and at least one holds fewer bars than the NSE calendar expects for the days inside the window. The pull journal’s refusal index names no refusal for those months. That index holds refusals only: a member failure that is not a refusal (a minute coverage gap inside a day that was answered, for one) is NOT joined here and may exist; /dayflags and /audit list those by day.'
   ],
   flight: [
     'info',
@@ -89,9 +94,96 @@ export const VERDICTS = {
   ]
 };
 
+/**
+ * THE SAME VERDICTS IN AN IMPORTED FEED'S WORDS (WP-61 repair).
+ *
+ * An archive feed's bars come from an import run, not from a request this page
+ * can send, and it has no pull journal. Its rows read "partly never pulled …
+ * a pull of those months is warranted, and the row's Pull asks for exactly
+ * those" on a feed whose rows offer no Pull at all. The keys, tones and order
+ * are the one table's; only the label and the sentence change for the three
+ * verdicts that name a pull. Chosen by the feed's own `archive` field (the
+ * caller passes `feedSpan(feed).kind === 'archive'`), never by a vendor name.
+ *
+ * @param {boolean} imported
+ * @returns {Record<Verdict, readonly [string, string, string]>}
+ */
+export function verdictWords(imported) {
+  if (!imported) return VERDICTS;
+  return {
+    ...VERDICTS,
+    never: [
+      VERDICTS.never[0],
+      'never imported',
+      'No month file in this window holds a bar for this series. This feed is imported from an archive, not pulled: either no import has reached the archive days of these months, or the archive holds no file of this series for them. The import panel above lists the days not done and the days refused, with reasons. No pull can be asked for; an import is what fills it.'
+    ],
+    partial: [
+      VERDICTS.partial[0],
+      'partly never imported',
+      'This series holds bars, and at least one month file in this window has never been written. This feed is imported from an archive, not pulled: either the import has not reached those archive days, or the archive holds no file of this series for them (an instrument that was not listed yet, or was renamed, reads this way). The cells show which months; the import panel above lists the days not done and the days refused. No pull can be asked for.'
+    ],
+    short: [
+      VERDICTS.short[0],
+      'short',
+      'Every month file in this window has been written, and at least one holds fewer bars than the NSE calendar expects for the days inside the window. This feed is imported from an archive, not pulled, so no pull journal exists to name a refusal: the import panel above lists the days not done and the days refused, and /db shows the day band of what is held.'
+    ]
+  };
+}
+
+/**
+ * HOW MANY WHOLE-WINDOW REFUSALS OF `symbol` THE SERVER COUNTED AND DID NOT
+ * LIST (WP-61 repair). `/ingest/refusals.json` lists the newest few and counts
+ * the rest (`whole_count`); a month that only an unlisted one covers was read
+ * as "no refusal", so it fell to "never pulled". With any unlisted, "the
+ * journal names no refusal for this month" cannot be said of a month no listed
+ * refusal covers: the caller marks such a month unread, with this count.
+ *
+ * @param {Map<string, SymbolRefusals> | null | undefined} bySymbol
+ * @param {string} symbol
+ * @returns {number} 0 when every whole-window refusal is listed
+ */
+export function wholeUnlisted(bySymbol, symbol) {
+  const held = bySymbol instanceof Map ? bySymbol.get(symbol) : undefined;
+  if (!held) return 0;
+  const more = held.wholeCount - held.whole.length;
+  return Number.isSafeInteger(more) && more > 0 ? more : 0;
+}
+
+/**
+ * WHERE AN ARCHIVE'S MEASURED SPAN FALLS IN THE CHOSEN WINDOW (WP-61 repair).
+ *
+ * The reach strip said "reach not stated" for an imported feed whose
+ * descriptor states its archive's first and last day on `/feeds.json`. The
+ * span is the reach: nothing outside it can be imported. Percentages are of
+ * the window, exact on three UTC midnights.
+ *
+ * @param {ReturnType<typeof feedSpan>} span
+ * @param {string} from the window's first day, ISO
+ * @param {string} to the window's last day, ISO
+ * @returns {{ from: string, to: string, beforePct: number, livePct: number, afterPct: number } | null}
+ *   `null` when the feed states no archive span or the window is not a span
+ */
+export function archiveLane(span, from, to) {
+  if (!span || span.kind !== 'archive' || !span.from || !span.to) return null;
+  const opens = Date.parse(from);
+  const closes = Date.parse(to);
+  const first = Date.parse(span.from);
+  const last = Date.parse(span.to);
+  if (![opens, closes, first, last].every(Number.isFinite) || !(closes > opens) || last < first) return null;
+  const width = closes - opens;
+  const a = Math.min(width, Math.max(0, first - opens));
+  const b = Math.min(width, Math.max(0, last - opens));
+  const live = Math.max(0, b - a);
+  // A window wholly outside the archive holds none of it.
+  const overlap = last >= opens && first <= closes;
+  const beforePct = overlap ? (a / width) * 100 : 100;
+  const livePct = overlap ? (live / width) * 100 : 0;
+  return { from: span.from, to: span.to, beforePct, livePct, afterPct: Math.max(0, 100 - beforePct - livePct) };
+}
+
 /** A zeroed tally with one slot per verdict. @returns {Record<Verdict, number>} */
 export function emptySeen() {
-  return { fail: 0, refused: 0, never: 0, partial: 0, short: 0, flight: 0, unknown: 0, beyond: 0, ok: 0 };
+  return { fail: 0, refused: 0, unread: 0, never: 0, partial: 0, short: 0, flight: 0, unknown: 0, beyond: 0, ok: 0 };
 }
 
 /* ======================================================================
@@ -189,6 +281,62 @@ export function refusedMonth(bySymbol, symbol, ym) {
 }
 
 /**
+ * WHETHER THE JOURNAL'S REFUSALS WERE READ FOR ONE INSTRUMENT (WP-61 repair).
+ *
+ * "Never pulled" and "short" both say the pull journal names no refusal, so
+ * they may be said only of an instrument the journal answered for. The server
+ * answers 200 with a per-symbol `errors` list when one instrument's index
+ * could not be read; that list was stored and never looked at, so such an
+ * instrument's months read "never pulled — nothing has asked the vendor for
+ * it". An instrument is `read` only when the answer for THIS feed lists it
+ * among `symbols` and not among `errors`; every other case is unread, with
+ * the reason in words.
+ *
+ * @param {{
+ *   feed: string | null, state: string, bySymbol: Map<string, SymbolRefusals>,
+ *   errors: Map<string, string>, why: string | null
+ * } | null | undefined} refusals the page's reading of `/ingest/refusals.json`
+ * @param {string | null | undefined} feed the feed the table is drawn for
+ * @param {string} symbol
+ * @returns {{ read: true, why: '' } | { read: false, why: string }}
+ */
+export function refusalJoin(refusals, feed, symbol) {
+  const unread = (/** @type {string} */ why) => /** @type {{ read: false, why: string }} */ ({ read: false, why });
+  if (!refusals || !feed || refusals.feed !== feed)
+    return unread('the pull journal’s refusals have not been read for this feed');
+  const failed = refusals.errors instanceof Map ? refusals.errors.get(symbol) : undefined;
+  if (failed !== undefined) return unread(`the server could not read this instrument’s refusals: ${failed}`);
+  if (refusals.bySymbol instanceof Map && refusals.bySymbol.has(symbol)) return { read: true, why: '' };
+  if (refusals.state === 'error') return unread(refusals.why ?? '/ingest/refusals.json could not be read, and no reason was kept');
+  if (refusals.state === 'unsupported')
+    return unread(`the server refused to answer for this feed’s refusals: ${refusals.why ?? 'it named no reason'}`);
+  if (refusals.state === 'reading') return unread('/ingest/refusals.json is still being read');
+  if (refusals.state === 'ready')
+    return unread('the answer of /ingest/refusals.json names this instrument neither among its symbols nor among its errors');
+  return unread('the pull journal’s refusals were not asked for');
+}
+
+/**
+ * The per-symbol read failures of a refusals answer, as one sentence for the
+ * notice above the table: how many, and the first few with the server's words.
+ *
+ * @param {Map<string, string>} errors
+ * @param {number} [show] how many to spell out
+ * @returns {string} empty when there are none
+ */
+export function refusalErrorsSentence(errors, show = 3) {
+  if (!(errors instanceof Map) || errors.size === 0) return '';
+  const listed = [...errors].slice(0, show).map(([symbol, why]) => `${symbol}: ${why}`);
+  const more = errors.size - listed.length;
+  return (
+    `The pull journal’s refusals could not be read for ${errors.size.toLocaleString('en-IN')} instrument(s) — ` +
+    `${listed.join('; ')}${more > 0 ? `; and ${more.toLocaleString('en-IN')} more` : ''}. ` +
+    `Their missing or short months read “refusals unread” below: whether they were asked for and refused is not known, ` +
+    `and “never pulled” is not claimed.`
+  );
+}
+
+/**
  * A month's refusal in words, for a cell's title.
  * @param {MonthRefusal} r
  * @param {(secs: number) => string} [stamp] formats the record's time
@@ -223,17 +371,29 @@ export function refusalBatches(symbols, max = 120) {
 /**
  * ONE MONTH FILE'S VERDICT.
  *
- * @param {{ beyond: boolean, bars: number | null, expect: number | null, refused: boolean }} m
+ * @param {{ beyond: boolean, bars: number | null, expect: number | null, refused: boolean, unread?: boolean, sessions?: number }} m
  *   `bars` is `null` when the store holds no file for the month (which is not
- *   zero bars); `expect` is `null` when no denominator can be stated.
+ *   zero bars); `expect` is `null` when no denominator can be stated; `unread`
+ *   is true when the pull journal's refusals were not read for the instrument
+ *   (`refusalJoin`), so "no refusal names it" cannot be said; `sessions` is the
+ *   number of sessions the calendar holds for the month's days inside the
+ *   window, when the caller knows it.
  * @returns {Verdict}
  */
 export function monthVerdict(m) {
   if (m.beyond) return 'beyond';
-  if (m.bars === null) return m.refused ? 'refused' : 'never';
+  const open = m.refused ? 'refused' : m.unread ? 'unread' : null;
+  // NOTHING OWED IS NOT "NEVER PULLED": a month whose days inside the window
+  // hold no session (expect 0) owes no bar, so a missing file is not a gap. A
+  // journalled refusal is still shown; an unread journal changes nothing owed.
+  // Said only when the caller states the month's session count is zero too:
+  // an expectation of 0 that came from a denominator the page failed to look
+  // up is not evidence that nothing is owed.
+  if (m.bars === null && m.expect === 0 && m.sessions === 0) return m.refused ? 'refused' : 'ok';
+  if (m.bars === null) return open ?? 'never';
   if (m.expect === null) return 'unknown';
   if (m.bars >= m.expect) return 'ok';
-  return m.refused ? 'refused' : 'short';
+  return open ?? 'short';
 }
 
 /**
@@ -251,10 +411,16 @@ export function monthVerdict(m) {
  */
 export function seriesVerdict(s) {
   const { seen } = s;
-  const missing = seen.never + seen.short + seen.refused;
+  const unread = seen.unread ?? 0;
+  const missing = seen.never + seen.short + seen.refused + unread;
   if (s.months > 0 && seen.beyond === s.months) return 'beyond';
   if (s.inFlight) return 'flight';
+  // NO MONTH WAS JUDGED, so nothing was verified: "verified" over zero month
+  // files is a claim with no evidence. The verdict is withheld.
+  if (!(s.months > 0)) return 'unknown';
   if (s.halted && missing > 0) return 'fail';
+  // BEFORE `never`: a series whose refusals were not read is not "never pulled".
+  if (unread > 0) return 'unread';
   if (seen.never > 0 && s.got === 0 && seen.refused === 0) return 'never';
   if (seen.refused > 0) return 'refused';
   if (seen.never > 0) return 'partial';

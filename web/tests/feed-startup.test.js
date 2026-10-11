@@ -203,6 +203,44 @@ test('an address naming no feed, an unknown one or a broken reader falls back to
   assert.equal(urlFeedOf(undefined), null);
 });
 
+test('an address naming a feed /feeds.json does not list is said, never silently replaced', async () => {
+  // Saved preference present: the saved feed is shown, and the notice says so.
+  const saved = state();
+  const startup = createFeedStartup(saved, async () => response(), () => preferences('"first"'), () => urlFeedOf('?feed=nosuch'));
+  await startup.load();
+  assert.equal(saved.active, 'first');
+  assert.match(String(/** @type {any} */ (saved).notice), /names feed "nosuch", which \/feeds\.json does not list \(the feeds offered are: first, ready\)\. Showing first instead/);
+  // A feed the operator excluded from every picker (D-3338) is not suggested.
+  const some = state();
+  const offered = [{ wire: 'kept', ready: true }, { wire: 'excluded', ready: true, offered: false }];
+  await createFeedStartup(some, async () => response(offered), () => preferences('"kept"'), () => 'nosuch').load();
+  assert.match(String(/** @type {any} */ (some).notice), /\(the feeds offered are: kept\)\. Showing kept instead/);
+  assert.match(String(/** @type {any} */ (saved).notice), /nothing was saved/);
+  // An explicit pick answers it: the notice is cleared.
+  startup.select('ready');
+  assert.equal(/** @type {any} */ (saved).notice, null);
+  // First visit (no preference): the default is picked from headers and named.
+  const first = state();
+  await createFeedStartup(first, ordinary, () => preferences(), () => urlFeedOf('?feed=GDFL')).load();
+  assert.match(String(/** @type {any} */ (first).notice), /names feed "GDFL"/, 'wire names are exact: a wrong case is not that feed');
+  assert.ok(first.active === null || String(/** @type {any} */ (first).notice).includes(`Showing ${first.active} instead`));
+  // A feed that IS listed, no feed at all, and a broken reader: no notice.
+  for (const reader of [() => urlFeedOf('?feed=ready'), () => urlFeedOf(''), () => { throw new Error('no location'); }]) {
+    const feeds = state();
+    await createFeedStartup(feeds, async () => response(), () => preferences('"first"'), reader).load();
+    assert.equal(/** @type {any} */ (feeds).notice ?? null, null);
+  }
+  // A hostile name is quoted and bounded, never echoed whole.
+  const long = state();
+  await createFeedStartup(long, async () => response(), () => preferences('"first"'), () => 'x'.repeat(5_000)).load();
+  assert.ok(String(/** @type {any} */ (long).notice).length < 400);
+  // The layout draws it in <main>, on every page, not inside the closed picker.
+  const layout = readFileSync(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
+  assert.match(layout, /\{#if feeds\.notice\}\s+<div class="inspection-banner" role="alert" data-feed-notice>/);
+  const module = readFileSync(new URL('../src/lib/feeds.svelte.js', import.meta.url), 'utf8');
+  assert.match(module, /\$state\(\{ all: \[\], active: null, error: null, notice: null \}\)/);
+});
+
 test('WP-61 (DB-B54): the address is read when the feed module loads, before a page can rewrite it', () => {
   // /ingest writes its selection back to the address before /feeds.json
   // answers, with an empty feed set at that moment: a lazy read saw `?feed=`

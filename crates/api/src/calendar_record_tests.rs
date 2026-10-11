@@ -543,4 +543,25 @@ fn a_held_answer_widened_to_the_record_reads_the_records_codes_beyond_it() {
     // A WITHHELD ANSWER IS NOT WIDENED.
     let none = withheld("gdfl", None, Target::Exchange, None, "nothing held");
     assert_eq!(widen_to_record(&none, None), None);
+    // AND IT SAYS IT WAS NOT (WP-61 repair): `span: held`, the reason, and
+    // every field it had, unchanged. It used to carry no `span` at all.
+    let before = parse(&none);
+    assert_eq!(before.get("span"), None);
+    let said = parse(&not_widened(&none).expect("a JSON object is marked"));
+    assert_eq!(said["span"], "held");
+    let sentence = said["spanNote"].as_str().expect("a sentence");
+    assert!(sentence.contains("NOT widened"), "{sentence}");
+    assert!(
+        sentence.contains(before["status"].as_str().expect("a status")),
+        "{sentence}"
+    );
+    for (key, field) in before.as_object().expect("an object") {
+        assert_eq!(&said[key], field, "{key} is untouched");
+    }
+    // A FINISHED ANSWER KEEPS THE WIDENED SPAN'S OWN WORD, never this one.
+    assert_eq!(widened["span"], "record");
+    // Not an object: answered as it is, never invented into one.
+    assert_eq!(not_widened("[1,2]"), None);
+    assert_eq!(not_widened("not json"), None);
+    assert_eq!(not_widened(""), None);
 }

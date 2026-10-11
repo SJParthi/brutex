@@ -270,6 +270,13 @@ pub(super) async fn calendar_json(
     {
         return (answer.0, answer.1, widened);
     }
+    // ASKED FOR THE RECORD AND NOT WIDENED (withheld, building, refused): the
+    // answer says so in `span` and `spanNote` instead of looking widened.
+    if span == "record"
+        && let Some(marked) = crate::calendar_of::record::not_widened(&answer.2)
+    {
+        return (answer.0, answer.1, marked);
+    }
     answer
 }
 

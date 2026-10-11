@@ -111,14 +111,28 @@ test('a not-done day carries its stage, reason and the importer\'s own words', (
 
 test('DB-G07: the pulse moves when a journal moves, even while the census stands still', () => {
   const at = (/** @type {number | null} */ journal, /** @type {number | null} */ importLines, /** @type {number | null} */ importAt) => ({ journal, importLines, importAt });
-  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 5, 100)), { moved: false, journal: 0, importLines: 0, importAt: null });
-  assert.deepEqual(journalStep(at(10, 5, 100), at(13, 5, 100)), { moved: true, journal: 3, importLines: 0, importAt: null });
-  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 9, 100)), { moved: true, journal: 0, importLines: 4, importAt: null });
-  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 5, 160)), { moved: true, journal: 0, importLines: 0, importAt: 160 });
+  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 5, 100)), { moved: false, journal: 0, importLines: 0, importAt: null, shrank: '' });
+  assert.deepEqual(journalStep(at(10, 5, 100), at(13, 5, 100)), { moved: true, journal: 3, importLines: 0, importAt: null, shrank: '' });
+  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 9, 100)), { moved: true, journal: 0, importLines: 4, importAt: null, shrank: '' });
+  assert.deepEqual(journalStep(at(10, 5, 100), at(10, 5, 160)), { moved: true, journal: 0, importLines: 0, importAt: 160, shrank: '' });
   assert.equal(journalStep(at(10, 5, null), at(10, 5, 160)).moved, true, 'a first event is movement');
   assert.equal(journalStep(undefined, at(1, 1, 1)).moved, false, 'one answer measures nothing');
   assert.equal(journalStep(at(null, null, null), at(4, 4, null)).moved, false, 'an unknown count is not a zero to grow from');
   assert.equal(journalStep(at(10, 5, 100), at(8, 5, 100)).journal, 0, 'a shrink is not negative growth');
+  // AND A SHRINK IS SAID (WP-61 repair): an append-only journal that got
+  // shorter was clamped to "not moved" with no word.
+  assert.deepEqual(journalStep(at(10, 5, 100), at(8, 5, 100)), {
+    moved: false, journal: 0, importLines: 0, importAt: null, shrank: 'the pull journal’s record count fell from 10 to 8'
+  });
+  assert.equal(journalStep(at(1_200_000, 9, 100), at(1_200_004, 2, 100)).shrank, 'the import journal’s line count fell from 9 to 2');
+  assert.equal(journalStep(at(10, 5, 100), at(0, 0, 100)).shrank, 'the pull journal’s record count fell from 10 to 0; the import journal’s line count fell from 5 to 0');
+  assert.equal(journalStep(at(null, 5, 100), at(3, 5, 100)).shrank, '', 'an unknown count did not fall');
+  assert.equal(journalStep(undefined, at(1, 1, 1)).shrank, '');
+  {
+    const page = readFileSync(new URL('../src/routes/audit/+page.svelte', import.meta.url), 'utf8');
+    assert.match(page, /shrank: jStep\.shrank \|\| jSpan\.shrank/);
+    assert.match(page, /\{#if pulse\.journals\.shrank\}[\s\S]{0,160}role="alert"/);
+  }
   assert.equal(newestImportAt({ imports: { kinds: [{ pace: { newest_at_ms: 5 } }, { pace: { newest_at_ms: 9 } }, { pace: {} }] } }), 9);
   assert.equal(newestImportAt({}), null);
   const audit = readFileSync(new URL('../src/routes/audit/+page.svelte', import.meta.url), 'utf8');

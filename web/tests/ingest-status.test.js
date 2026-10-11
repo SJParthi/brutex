@@ -87,6 +87,15 @@ test('DB-G20: only the row the cell names is in flight: same feed, rung, spot se
   assert.equal(flightRow(flight, { ...row, sym: 'ABBOTINDIA', key: 'NSE-CASH-ABBOTINDIA', mkey: 'NSE-ABBOTINDIA' }), false, 'a longer symbol');
   assert.equal(flightRow(flight, { ...row, feed: null }), false, 'no feed chosen');
   assert.equal(flightRow(null, row), false, 'no cell');
+  // A SYMBOL THAT HOLDS A DASH is matched whole, never by its tail (WP-61
+  // repair): the master key `NSE-BAJAJ-AUTO` used to compare as `AUTO`.
+  const dashed = { feed: 'zerodha', seg: 'spot', tf: '1min', sym: 'BAJAJ-AUTO', key: 'NSE-CASH-BAJAJ-AUTO', mkey: 'NSE-BAJAJ-AUTO' };
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'BAJAJ-AUTO' }), dashed), true, 'the store symbol the server publishes');
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'bajaj-auto' }), dashed), true, 'case is not identity');
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'AUTO' }), dashed), false, 'the tail of a dashed symbol');
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'BAJAJ' }), dashed), false, 'the head of a dashed symbol');
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'N' }), { ...dashed, sym: 'MCDOWELL-N', key: 'NSE-CASH-MCDOWELL-N', mkey: 'NSE-MCDOWELL-N' }), false);
+  assert.equal(flightRow(flightOf({ ...cell, instrument: 'ABB' }), row), true, 'the bare store symbol');
   // AN API OLDER THAN WP-34 NAMES NO FEED OR RUNG: it marks NO row, where it
   // used to mark every row of the symbol in every feed and rung.
   const old = flightOf({ instrument: 'NSE-CASH-ABB', month: '2020-11', index: 1, of: 9 });

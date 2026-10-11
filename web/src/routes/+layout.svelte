@@ -1108,6 +1108,16 @@
         <button class="btn ghost" onclick={() => { void loadInspection(); }}>Recheck server mode</button>
       {/if}
     </div>
+    <!-- AN ADDRESS NAMING A FEED THAT DOES NOT EXIST IS SAID ON EVERY PAGE
+         (WP-61 repair): `?feed=nosuch` opened the saved or default feed with no
+         word. In <main>, not in the picker's list, because the picker is closed
+         until opened and is not drawn at all on the pages that own their feed
+         control. Cleared by any explicit pick (`lib/feed-startup.js`). -->
+    {#if feeds.notice}
+      <div class="inspection-banner" role="alert" data-feed-notice>
+        <span><strong>The address's feed was not followed.</strong> {feeds.notice}</span>
+      </div>
+    {/if}
     {@render children()}
   </main>
 </div>

@@ -52,3 +52,86 @@ export function tailPlan(months) {
       `${TAIL_PAGE.toLocaleString('en-IN')} at a time from /bars/window.json, and not the whole file.`
   };
 }
+
+/**
+ * @typedef {{ t: number, o: number, h: number, l: number, c: number, v: number }} TailBar
+ */
+
+/**
+ * FOLD BARS INTO BUCKETS OF `seconds`, on the integers they arrive as: min,
+ * max and last are exact on integers. `offset` shifts the bucket edges (the
+ * page passes IST's +05:30, so an hourly candle breaks on the hour a trader in
+ * India sees). Bars arrive oldest first.
+ *
+ * @param {TailBar[]} raw
+ * @param {number | null} seconds
+ * @param {number} [offset] seconds added before bucketing, removed after
+ * @returns {TailBar[]}
+ */
+export function foldBars(raw, seconds, offset = 0) {
+  if (seconds === null || !(seconds > 0)) return [];
+  /** @type {TailBar[]} */
+  const out = [];
+  /** @type {TailBar | null} */
+  let cur = null;
+  for (const b of raw) {
+    const start = Math.floor((b.t + offset) / seconds) * seconds - offset;
+    if (!cur || cur.t !== start) {
+      cur = { t: start, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v };
+      out.push(cur);
+    } else {
+      if (b.h > cur.h) cur.h = b.h;
+      if (b.l < cur.l) cur.l = b.l;
+      cur.c = b.c;
+      cur.v += b.v;
+    }
+  }
+  return out;
+}
+
+/**
+ * CUT A BOUNDED READ ON A BUCKET EDGE OF THE DRAWN RUNG (WP-61 repair).
+ *
+ * A read of the newest N bars ends at whatever second the Nth bar fell on. The
+ * oldest bucket of the drawn rung then holds only the bars after that second,
+ * and folding it gives a candle whose open, high and low are the fragment's:
+ * measured on GDFL NIFTY 1s 2026-09 at 5m, the 14:05 IST candle of 24 Sep was
+ * folded from 200 of its 300 seconds and drew an open 6.80 above the stored
+ * one. A fragment is not a candle, so it is not drawn.
+ *
+ * The rule, on what was read and nothing else: when older bars exist that were
+ * NOT read (`olderExist`) and the oldest bar read does not sit on its bucket's
+ * first second, every bar of that bucket is dropped and the cut is reported. A
+ * bucket whose first second WAS read is whole (the read is the newest
+ * contiguous run, so nothing older can belong to it) and is kept. This can drop
+ * a bucket that happens to be whole, when the series holds no bar on the
+ * bucket's first second; that costs one candle and is said, where keeping it
+ * would risk a wrong one.
+ *
+ * @param {TailBar[]} raw the bars read, in any order
+ * @param {number | null} seconds the drawn rung's bucket length
+ * @param {number} offset the bucketing offset `foldBars` is given
+ * @param {boolean} olderExist whether the series holds bars older than the read
+ * @returns {{ bars: TailBar[], cut: { bucket: number, until: number, dropped: number, first: number, last: number } | null }}
+ */
+export function tailCut(raw, seconds, offset, olderExist) {
+  const bars = Array.isArray(raw) ? raw : [];
+  if (!olderExist || bars.length === 0 || seconds === null || !(seconds > 0)) return { bars, cut: null };
+  let oldest = Infinity;
+  for (const b of bars) if (Number.isFinite(b?.t) && b.t < oldest) oldest = b.t;
+  if (oldest === Infinity) return { bars, cut: null };
+  const bucket = Math.floor((oldest + offset) / seconds) * seconds - offset;
+  if (oldest === bucket) return { bars, cut: null };
+  const until = bucket + seconds;
+  /** @type {TailBar[]} */
+  const kept = [];
+  let dropped = 0;
+  let last = oldest;
+  for (const b of bars) {
+    if (Number.isFinite(b?.t) && b.t < until) {
+      dropped += 1;
+      if (b.t > last) last = b.t;
+    } else kept.push(b);
+  }
+  return { bars: kept, cut: { bucket, until, dropped, first: oldest, last } };
+}
