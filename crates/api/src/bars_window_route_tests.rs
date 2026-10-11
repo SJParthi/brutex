@@ -2109,3 +2109,16 @@ fn provenance_names_the_rekey_for_a_copied_a_superseded_and_a_retired_key() {
         "{retired:?}"
     );
 }
+
+/// An `event` and a `stopped` record of the lineage ledger (D-3355) are read
+/// by the change rules and label no bar: before they were known here each
+/// would have counted as a line that does not parse and raised the window's
+/// ledger fault. Any other unknown line still does.
+#[test]
+fn the_event_and_stopped_records_parse_and_label_no_bar() {
+    let text = "event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted shift=0 lot_old=75 lot_new=75 paired=0 stopped=1 v=1\n\
+                stopped NSE-FNO-NIFTY-2020-06-25-1000000-CE ex=2020-06-16 v=1\n";
+    assert_eq!(bars::test_access::lineage_ledger_counts(text), (0, 0));
+    let torn = format!("{text}event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted\n");
+    assert_eq!(bars::test_access::lineage_ledger_counts(&torn), (0, 1));
+}

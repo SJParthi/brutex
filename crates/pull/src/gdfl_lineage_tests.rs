@@ -1309,3 +1309,137 @@ fn the_real_names_are_one_key_per_contract_across_renames_and_redatings() {
         "the table re-keys exactly its own count of names"
     );
 }
+
+/// D-3355: an `event` record is one line that reads back exactly, and any
+/// other text is no record: a kind its lots or counts contradict, an event
+/// that retired nothing, a value not in its canonical spelling, a field out
+/// of place.
+#[test]
+fn an_event_record_reads_back_exactly_and_refuses_any_other_text() {
+    let ex = d(2020, 3, 4);
+    let events = [
+        (
+            EventKind::LotStep,
+            (6_000, 5_000),
+            (31, 2),
+            "event NSE-FNO-NTPC ex=2020-03-04 kind=lot_step shift=0 lot_old=6000 lot_new=5000 \
+             paired=31 stopped=2 v=1",
+        ),
+        (
+            EventKind::StrikeOffset { shift: 900 },
+            (3_400, 3_400),
+            (19, 1),
+            "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=900 lot_old=3400 \
+             lot_new=3400 paired=19 stopped=1 v=1",
+        ),
+        (
+            EventKind::StrikeOffset { shift: -250 },
+            (3_400, 3_400),
+            (4, 0),
+            "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=-250 lot_old=3400 \
+             lot_new=3400 paired=4 stopped=0 v=1",
+        ),
+        (
+            EventKind::Relisted,
+            (900, 900),
+            (0, 32),
+            "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 \
+             paired=0 stopped=32 v=1",
+        ),
+    ];
+    for (kind, (lot_old, lot_new), (paired, stopped), line) in events {
+        let record = EventRecord {
+            underlying: sym("NTPC"),
+            ex_date: ex,
+            kind,
+            lot_old,
+            lot_new,
+            paired,
+            stopped,
+        };
+        assert_eq!(record.line(), line);
+        assert_eq!(EventRecord::parse(line), Some(record), "{line}");
+        assert_eq!(EventKind::parse(kind.as_str(), kind.shift()), Some(kind));
+    }
+    // An underlying holding a dash reads back whole.
+    let dashed = EventRecord {
+        underlying: sym("BAJAJ-AUTO"),
+        ex_date: ex,
+        kind: EventKind::Relisted,
+        lot_old: 250,
+        lot_new: 250,
+        paired: 0,
+        stopped: 8,
+    };
+    assert_eq!(EventRecord::parse(&dashed.line()), Some(dashed));
+    for bad in [
+        // A lot step with equal lots; an offset and a re-listing with unequal.
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=lot_step shift=0 lot_old=900 lot_new=900 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=900 lot_old=900 lot_new=800 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=800 paired=0 stopped=3 v=1",
+        // A re-listing that pairs; an offset of nothing; a shift on a kind without one.
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=1 stopped=3 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=0 lot_old=900 lot_new=900 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=900 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        // An event that retired nothing.
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=0 v=1",
+        // Not canonical, out of place, unknown, torn, another version.
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=+900 lot_old=900 lot_new=900 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=-0 lot_old=900 lot_new=900 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=strike_offset shift=0900 lot_old=900 lot_new=900 paired=3 stopped=0 v=1",
+        "event NSE-FNO-NTPC ex=2020-3-4 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event NSE-FNO-NTPC kind=relisted ex=2020-03-04 shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=dividend shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=2",
+        "event NSE-FNO-ntpc ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event  NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "events NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=3 v=1",
+        "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 paired=0 stopped=99999999999999999999 v=1",
+        "",
+    ] {
+        assert_eq!(EventRecord::parse(bad), None, "{bad:?}");
+    }
+}
+
+/// D-3355: a `stopped` record is one line that reads back exactly, and it is
+/// no other record kind, nor any other kind it.
+#[test]
+fn a_stopped_record_reads_back_exactly_and_refuses_any_other_text() {
+    let ex = d(2020, 3, 4);
+    let key = cd(d(2020, 3, 26), 70_000, OptionSide::Put, 1, 0, 0)
+        .contract()
+        .unwrap();
+    let stopped = StoppedRecord {
+        underlying: sym("BAJAJ-AUTO"),
+        key,
+        ex_date: ex,
+    };
+    let line = "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE ex=2020-03-04 v=1";
+    assert_eq!(stopped.line(), line);
+    assert_eq!(StoppedRecord::parse(line), Some(stopped));
+    for bad in [
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE ex=2020-03-04",
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE ex=2020-03-04 v=2",
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-070000-PE ex=2020-03-04 v=1",
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-XX ex=2020-03-04 v=1",
+        "stopped NSE-FNO-BAJAJ-AUTO ex=2020-03-04 v=1",
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE v=1 ex=2020-03-04",
+        "stitched NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE ex=2020-03-04 v=1",
+        "stopped NSE-FNO-BAJAJ-AUTO-2020-03-26-70000-PE ex=2020-03-04 v=1 ",
+    ] {
+        assert_eq!(StoppedRecord::parse(bad), None, "{bad:?}");
+    }
+    // Neither reads as any other record kind, nor any other kind as these.
+    let event = "event NSE-FNO-NTPC ex=2020-03-04 kind=relisted shift=0 lot_old=900 lot_new=900 \
+                 paired=0 stopped=32 v=1";
+    assert!(EventRecord::parse(event).is_some());
+    assert_eq!(LineageRecord::parse(line), None);
+    assert_eq!(StitchedRecord::parse(line), None);
+    assert_eq!(RetiredRecord::parse(line), None);
+    assert_eq!(EventRecord::parse(line), None);
+    assert_eq!(StoppedRecord::parse(event), None);
+    assert_eq!(StitchedRecord::parse(event), None);
+    assert_eq!(LineageRecord::parse(event), None);
+}

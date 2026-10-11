@@ -33,7 +33,7 @@
 use brutex_core::instrument::{Exchange, InstrumentKey};
 use brutex_core::price::Paisa;
 
-use crate::dated::{DatedRow, DatedTable, boundary};
+use crate::dated::{Dated, DatedRow, DatedTable, boundary};
 use crate::day::TradeDay;
 use crate::error::{CostError, Refusal};
 use crate::venue::SweptSlot;
@@ -255,6 +255,9 @@ pub fn lot_size_on(slot: SweptSlot, day: TradeDay) -> Result<LotSize, Refusal> {
 /// re-dated is written under both days, because a caller may hold either.
 #[derive(Debug, Clone, Copy)]
 struct ContractRule {
+    /// The row of the trade-day table this rule explains: the day that
+    /// table turns from the existing lot to the revised one.
+    boundary: TradeDay,
     /// The first trade day both lots are in force: contracts introduced from
     /// it carry the revised lot.
     from: TradeDay,
@@ -292,10 +295,10 @@ impl ContractRule {
 }
 
 /// What `NSE/FAOP/64625` (18 Oct 2024) says, for both underlyings.
-const FAOP64625: &str = "NSE/FAOP/64625 (18 Oct 2024,      https://nsearchives.nseindia.com/content/circulars/FAOP64625.pdf): the revised lot is      'effective for all new index derivatives contracts ... introduced from November 20, 2024';      'the existing weekly and monthly expiry contracts will continue with the existing lot size      till its respective expiry date'; existing quarterly and half-yearly contracts move 'on      December 24, 2024, end of the day for BANKNIFTY and December 26, 2024, end of the day for      NIFTY'. Annexure: NIFTY 30-Jan-2025 and BANKNIFTY 29-Jan-2025 are the last monthly expiries      with the existing lot; 27-Mar-2025 and 26-Mar-2025 the first existing quarterly ones. Read      by the audit and its second agent (2026-10-10) and by WP-12e (2026-10-11); not yet a      docs/00-charter.md row.";
+const FAOP64625: &str = "NSE/FAOP/64625 (18 Oct 2024,      https://nsearchives.nseindia.com/content/circulars/FAOP64625.pdf): the revised lot is      'effective for all new index derivatives contracts ... introduced from November 20, 2024';      'the existing weekly and monthly expiry contracts will continue with the existing lot size      till its respective expiry date'; existing quarterly and half-yearly contracts move 'on      December 24, 2024, end of the day for BANKNIFTY and December 26, 2024, end of the day for      NIFTY'. Annexure: NIFTY 30-Jan-2025 and BANKNIFTY 29-Jan-2025 are the last monthly expiries      with the existing lot; 27-Mar-2025 and 26-Mar-2025 the first existing quarterly ones. Read      by the audit and its second agent (2026-10-10) and by WP-12e (2026-10-11); docs/00-charter.md,      'NSE F&O circulars read for the options lineage', D-3357.";
 
 /// What `NSE/FAOP/70616` (3 Oct 2025) says, for both underlyings.
-const FAOP70616: &str = "NSE/FAOP/70616 (3 Oct 2025,      https://nsearchives.nseindia.com/content/circulars/FAOP70616.pdf): 'This circular shall come      into effect from October 28, 2025 (EOD). The existing lot size will be applicable for weekly      and monthly contracts till December 30, 2025 expiry date. Lot size of existing quarterly and      half yearly contracts will be revised on 30-Dec-2025 EOD.' Annexure: first monthly expiry      with the revised lot 27-Jan-2026; first existing quarterly expiry 31-Mar-2026. Read by the      audit and its second agent (2026-10-10) and by WP-12e (2026-10-11); not yet a      docs/00-charter.md row.";
+const FAOP70616: &str = "NSE/FAOP/70616 (3 Oct 2025,      https://nsearchives.nseindia.com/content/circulars/FAOP70616.pdf): 'This circular shall come      into effect from October 28, 2025 (EOD). The existing lot size will be applicable for weekly      and monthly contracts till December 30, 2025 expiry date. Lot size of existing quarterly and      half yearly contracts will be revised on 30-Dec-2025 EOD.' Annexure: first monthly expiry      with the revised lot 27-Jan-2026; first existing quarterly expiry 31-Mar-2026. Read by the      audit and its second agent (2026-10-10) and by WP-12e (2026-10-11); docs/00-charter.md,      'NSE F&O circulars read for the options lineage', D-3357.";
 
 /// How many sourced rules an underlying has: the bound of [`lot_size_of`]'s
 /// walk.
@@ -303,14 +306,14 @@ const RULES_PER_SLOT: usize = 2;
 
 /// The sourced contract rules, in [`LOT_SIZES`]' slot order. The revisions of
 /// July 2021, June 2023, April 2024 and July 2025 have NO rule: their
-/// circulars were not read, so [`lot_size_of`] answers those windows from the
-/// trade-day table and says so ([`LotBasis::TradeDayRow`]). The audit measured
-/// contracts off the table inside them (NIFTY 2021-07-15, BANKNIFTY
-/// 2023-06-15 and 2025-06-27): UNVERIFIED per contract until each circular is
-/// a row here.
+/// circulars were not read, so [`lot_size_of`] REFUSES a contract's lot near
+/// them ([`UNREAD_REVISION_DAYS`]) rather than answer the trade-day table
+/// under a verified label. The audit measured contracts off that table
+/// inside them (NIFTY 2021-07-15, BANKNIFTY 2023-06-15 and 2025-06-27).
 const CONTRACT_RULES: [[ContractRule; RULES_PER_SLOT]; SweptSlot::COUNT] = [
     [
         ContractRule {
+            boundary: boundary!(2024 - 11 - 20),
             from: boundary!(2024 - 11 - 20),
             through: boundary!(2025 - 1 - 30),
             old: LotSize::new_const(25),
@@ -322,6 +325,7 @@ const CONTRACT_RULES: [[ContractRule; RULES_PER_SLOT]; SweptSlot::COUNT] = [
             citation: FAOP64625,
         },
         ContractRule {
+            boundary: boundary!(2026 - 1 - 1),
             from: boundary!(2025 - 10 - 29),
             // The trade-day table turns to 65 on 2026-01-01; the circular's
             // last existing-lot contract expired on 2025-12-30, so the rule
@@ -339,6 +343,7 @@ const CONTRACT_RULES: [[ContractRule; RULES_PER_SLOT]; SweptSlot::COUNT] = [
     ],
     [
         ContractRule {
+            boundary: boundary!(2024 - 11 - 20),
             from: boundary!(2024 - 11 - 20),
             through: boundary!(2025 - 1 - 30),
             old: LotSize::new_const(15),
@@ -353,6 +358,7 @@ const CONTRACT_RULES: [[ContractRule; RULES_PER_SLOT]; SweptSlot::COUNT] = [
             citation: FAOP64625,
         },
         ContractRule {
+            boundary: boundary!(2025 - 12 - 30),
             from: boundary!(2025 - 10 - 29),
             through: boundary!(2025 - 12 - 30),
             old: LotSize::new_const(35),
@@ -367,15 +373,37 @@ const CONTRACT_RULES: [[ContractRule; RULES_PER_SLOT]; SweptSlot::COUNT] = [
     ],
 ];
 
+/// How many calendar days either side of a lot revision with no sourced
+/// contract rule a contract's lot is UNVERIFIED (D-3357). CHOSEN, not an
+/// exchange fact: it is wider than both windows the read circulars state (71
+/// days for `NSE/FAOP/64625`, 62 for `NSE/FAOP/70616`) and than the audit's
+/// three contracts measured off the table (4 to 15 days before the row).
+/// Outside it the trade-day row is answered, and says so.
+pub const UNREAD_REVISION_DAYS: i32 = 92;
+
+/// The citation gap [`lot_size_of`] refuses with inside an unread revision.
+const UNREAD_REVISION: &str = "UNVERIFIED — the lot of a CONTRACT near a lot revision whose \
+     circular was not read. The trade-day table changes rows here, the circular that says which \
+     contracts carry which lot is not a row of CONTRACT_RULES, and the audit measured contracts \
+     off the table inside such windows (NIFTY 2021-07-15: 50 against the table's 75; BANKNIFTY \
+     2023-06-15: 15 against 25; BANKNIFTY 2025-06-27: 35 against 30).";
+
+/// How to close that gap.
+const UNREAD_REMEDIATION: &str = "read the revision's NSE F&O circular, record it in \
+     docs/00-charter.md, and add ONE ContractRule row (its dates and the two lots) to \
+     CONTRACT_RULES in crates/costs/src/lot.rs, with a docs/05-decisions.md entry — zero \
+     mechanism change";
+
 /// Where a contract's lot came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LotBasis {
     /// A circular's rule for the contracts trading while two lots were in
     /// force; the text is the citation.
     ContractRule(&'static str),
-    /// The trade-day table: every contract carries one lot that day, or the
-    /// day lies in a revision whose contract rule was not read (UNVERIFIED
-    /// per contract; see `CONTRACT_RULES`).
+    /// The trade-day table, on a day more than [`UNREAD_REVISION_DAYS`] from
+    /// every revision with no contract rule and outside every rule's window:
+    /// one lot is in force for the contracts the read circulars speak of.
+    /// Not proved per contract by a circular of its own.
     TradeDayRow,
 }
 
@@ -388,18 +416,55 @@ pub struct ContractLot {
     pub basis: LotBasis,
 }
 
+/// The revision of `slot`'s trade-day table that `day` lies within
+/// [`UNREAD_REVISION_DAYS`] of and no contract rule explains: a row that
+/// follows a verified row (the first verified row revises nothing) and is
+/// no rule's `boundary`. At most `MAX_LATER_ROWS` rows, each one compare and
+/// a walk over `RULES_PER_SLOT` rules.
+// In bounds by construction, as in `lot_size_on`.
+#[allow(clippy::indexing_slicing)]
+fn unread_revision(slot: SweptSlot, day: TradeDay) -> Option<TradeDay> {
+    let table = &LOT_SIZES[slot.index()];
+    let mut previous = &table.anchor;
+    for row in table.later.iter().flatten() {
+        let revises =
+            matches!(previous.value, Dated::Verified(_)) && matches!(row.value, Dated::Verified(_));
+        let ruled = CONTRACT_RULES[slot.index()]
+            .iter()
+            .any(|rule| rule.boundary.same_day(row.start));
+        let near = day
+            .ordinal()
+            .saturating_sub(row.start.ordinal())
+            .saturating_abs()
+            <= UNREAD_REVISION_DAYS;
+        if revises && !ruled && near {
+            return Some(row.start);
+        }
+        previous = row;
+    }
+    None
+}
+
 /// The lot of the `slot` contract expiring on `expiry`, on trade day `day`
-/// (DB-B04): the circular's contract rule while two lots were in force, the
-/// trade-day table otherwise. `expiry` may be the day the name states or the
-/// day the contract settled.
+/// (DB-B04, D-3357): the circular's contract rule while two lots were in
+/// force, the trade-day table otherwise. `expiry` may be the day the name
+/// states or the day the contract settled, except on a trade day after the
+/// stated day of a contract re-dated later, where only the settled day is
+/// on or after the trade day.
 ///
-/// O(1): at most `RULES_PER_SLOT` window tests, then four compares or
-/// [`lot_size_on`]'s bounded walk.
+/// O(1): one compare, at most `RULES_PER_SLOT` window tests, a bounded walk
+/// over the table's rows, then four compares or [`lot_size_on`]'s bounded
+/// walk.
 ///
 /// # Errors
 ///
-/// [`Refusal`] for a day before [`LOT_VERIFIED_FROM`], exactly as
-/// [`lot_size_on`].
+/// * [`CostError::ExpiryBeforeTrade`] when `expiry` is before `day`: a
+///   contract has no lot after it expires, and the rule in force that day
+///   would otherwise answer for it.
+/// * [`CostError::Unverified`] for a day within [`UNREAD_REVISION_DAYS`] of a
+///   revision whose circular was not read (July 2021, June 2023, April 2024,
+///   July 2025), naming the window and the remedy; and for a day before
+///   [`LOT_VERIFIED_FROM`], exactly as [`lot_size_on`].
 ///
 /// # Examples
 ///
@@ -415,6 +480,11 @@ pub struct ContractLot {
 /// // revision and keeps 25; the 2-Jan weekly was introduced after it.
 /// assert_eq!(lot_size_of(nifty, TradeDay::new(2025, 1, 30)?, on)?.lot.units(), 25);
 /// assert_eq!(lot_size_of(nifty, TradeDay::new(2025, 1, 2)?, on)?.lot.units(), 75);
+/// // A revision whose circular was not read is refused, never guessed.
+/// let unread = TradeDay::new(2021, 7, 15)?;
+/// assert!(lot_size_of(nifty, TradeDay::new(2021, 7, 29)?, unread).is_err());
+/// // And so is a contract asked about after it expired.
+/// assert!(lot_size_of(nifty, TradeDay::new(2020, 1, 1)?, on).is_err());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 // In bounds by construction, as in `lot_size_on`.
@@ -423,7 +493,10 @@ pub fn lot_size_of(
     slot: SweptSlot,
     expiry: TradeDay,
     day: TradeDay,
-) -> Result<ContractLot, Refusal> {
+) -> Result<ContractLot, CostError> {
+    if expiry.before(day) {
+        return Err(CostError::ExpiryBeforeTrade { expiry, day });
+    }
     for rule in &CONTRACT_RULES[slot.index()] {
         if rule.from <= day && day <= rule.through {
             return Ok(ContractLot {
@@ -432,8 +505,21 @@ pub fn lot_size_of(
             });
         }
     }
-    lot_size_on(slot, day).map(|lot| ContractLot {
-        lot,
+    if let Some(revision) = unread_revision(slot, day) {
+        let table = &LOT_SIZES[slot.index()];
+        let edge = |days: i32| revision.plus_days(days).unwrap_or(revision);
+        return Err(CostError::Unverified(Refusal::with_remediation(
+            table.subject,
+            table.exchange,
+            day,
+            edge(-UNREAD_REVISION_DAYS),
+            Some(edge(UNREAD_REVISION_DAYS.saturating_add(1))),
+            UNREAD_REVISION,
+            UNREAD_REMEDIATION,
+        )));
+    }
+    Ok(ContractLot {
+        lot: lot_size_on(slot, day)?,
         basis: LotBasis::TradeDayRow,
     })
 }
@@ -940,10 +1026,6 @@ mod tests {
             ("BANKNIFTY", (2025, 1, 31)),
             ("BANKNIFTY", (2025, 10, 28)),
             ("BANKNIFTY", (2025, 12, 31)),
-            // Revisions whose contract rule was not read.
-            ("NIFTY", (2021, 7, 15)),
-            ("BANKNIFTY", (2023, 6, 15)),
-            ("BANKNIFTY", (2025, 6, 27)),
         ] {
             let on = day(y, m, d);
             let table = lot_size_on(slot(subject), on).expect("priced");
@@ -979,11 +1061,122 @@ mod tests {
                 assert!(rule.from <= rule.far_switch && rule.far_switch <= rule.through);
                 assert!(rule.old_through_expiry < rule.far_from_expiry);
                 assert_ne!(rule.old, rule.new);
+                // The rule explains one row of the trade-day table: that
+                // row's day, with the two lots on either side of it.
+                let before = rule.boundary.plus_days(-1).expect("a real date");
+                assert_eq!(lot_size_on(slot(subject), before), Ok(rule.old));
+                assert_eq!(lot_size_on(slot(subject), rule.boundary), Ok(rule.new));
+                assert_eq!(unread_revision(slot(subject), rule.boundary), None);
                 let eve = rule.from.plus_days(-1).expect("a real date");
                 assert_eq!(lot_size_on(slot(subject), eve), Ok(rule.old), "{subject}");
                 let after = rule.through.plus_days(1).expect("a real date");
                 assert_eq!(lot_size_on(slot(subject), after), Ok(rule.new), "{subject}");
             }
         }
+    }
+
+    /// DB-B04, second pass: the audit measured three contracts off the
+    /// trade-day table inside revisions whose circular was not read. The
+    /// table's lot was answered for them under the label a verified day
+    /// carries; it is a refusal now, naming the window and the remedy.
+    #[test]
+    fn a_revision_whose_circular_was_not_read_refuses_the_contract_lot() {
+        // (underlying, expiry, trade day, the table's lot, the measured lot)
+        for (subject, expiry, on, table, measured) in [
+            ("NIFTY", (2021, 7, 29), (2021, 7, 15), 75, 50),
+            ("BANKNIFTY", (2023, 7, 27), (2023, 6, 15), 25, 15),
+            ("BANKNIFTY", (2025, 7, 31), (2025, 6, 27), 30, 35),
+        ] {
+            let (expiry, on) = (day(expiry.0, expiry.1, expiry.2), day(on.0, on.1, on.2));
+            assert_eq!(
+                lot_size_on(slot(subject), on).map(LotSize::units),
+                Ok(table)
+            );
+            assert_ne!(table, measured, "the table is wrong for this contract");
+            let Err(CostError::Unverified(refusal)) = lot_size_of(slot(subject), expiry, on) else {
+                panic!("{subject} {on:?}: an unread revision answered a lot");
+            };
+            assert_eq!(refusal.on(), on);
+            assert!(refusal.to_string().contains("UNVERIFIED"), "{refusal}");
+            assert!(refusal.to_string().contains("CONTRACT_RULES"), "{refusal}");
+        }
+        // Exactly the four revisions with no rule, each refused through the
+        // chosen bound on both sides and answered one day past it.
+        let unread = [
+            ("NIFTY", (2021, 7, 29)),
+            ("NIFTY", (2024, 4, 26)),
+            ("BANKNIFTY", (2023, 6, 30)),
+            ("BANKNIFTY", (2025, 7, 1)),
+        ];
+        for (subject, (y, m, d)) in unread {
+            let row = day(y, m, d);
+            for offset in [-UNREAD_REVISION_DAYS, -1, 0, 1, UNREAD_REVISION_DAYS] {
+                let on = row.plus_days(offset).expect("a real date");
+                assert_eq!(
+                    unread_revision(slot(subject), on),
+                    Some(row),
+                    "{subject} {offset}"
+                );
+                assert!(
+                    matches!(
+                        lot_size_of(slot(subject), on, on),
+                        Err(CostError::Unverified(_))
+                    ),
+                    "{subject} {on:?}"
+                );
+            }
+            for offset in [-UNREAD_REVISION_DAYS - 1, UNREAD_REVISION_DAYS + 1] {
+                let on = row.plus_days(offset).expect("a real date");
+                assert_eq!(
+                    unread_revision(slot(subject), on),
+                    None,
+                    "{subject} {offset}"
+                );
+                let got = lot_size_of(slot(subject), on, on).expect("outside the window");
+                assert_eq!(got.basis, LotBasis::TradeDayRow, "{subject} {on:?}");
+                assert_eq!(Ok(got.lot), lot_size_on(slot(subject), on));
+            }
+        }
+        // Every other row of both tables is the first verified row or a
+        // rule's: counted, so a new row without a rule is refused by
+        // construction and shows up here.
+        for (table, subject) in LOT_SIZES.iter().zip(["NIFTY", "BANKNIFTY"]) {
+            let refused = table
+                .later
+                .iter()
+                .flatten()
+                .filter(|row| unread_revision(slot(subject), row.start) == Some(row.start))
+                .count();
+            assert_eq!(refused, 2, "{subject}");
+        }
+        // The first verified row revises nothing: the day it starts is the
+        // table's, and the day before it is the pre-history refusal.
+        let first = lot_size_of(slot("NIFTY"), LOT_VERIFIED_FROM, LOT_VERIFIED_FROM);
+        assert_eq!(first.map(|lot| lot.basis), Ok(LotBasis::TradeDayRow));
+    }
+
+    /// A contract has no lot after it expires. Before this the rule in force
+    /// on the trade day answered for it: `(NIFTY, expiry 2020-01-01, day
+    /// 2024-12-10)` was 25 with a circular's citation.
+    #[test]
+    fn an_expiry_before_the_trade_day_is_refused_by_name() {
+        let on = day(2024, 12, 10);
+        for subject in ["NIFTY", "BANKNIFTY"] {
+            for expiry in [day(2020, 1, 1), day(2024, 12, 9)] {
+                assert_eq!(
+                    lot_size_of(slot(subject), expiry, on),
+                    Err(CostError::ExpiryBeforeTrade { expiry, day: on }),
+                    "{subject} {expiry:?}"
+                );
+            }
+            // The expiry day itself is a trade day of the contract.
+            assert!(lot_size_of(slot(subject), on, on).is_ok(), "{subject}");
+        }
+        // Outside every rule and every unread window too.
+        let (expiry, later) = (day(2022, 6, 30), day(2022, 7, 1));
+        assert_eq!(
+            lot_size_of(slot("NIFTY"), expiry, later),
+            Err(CostError::ExpiryBeforeTrade { expiry, day: later })
+        );
     }
 }

@@ -91,8 +91,8 @@
 //!   annexure, lists `24-Jun-27` to `29-Jun-27`, `29-Jun-28` to `27-Jun-28`,
 //!   `28-Dec-28` to `26-Dec-28`, `28-Jun-29` to `26-Jun-29` and `27-Dec-29`
 //!   to `24-Dec-29` beside the six already rows. Read by the audit and its
-//!   second agent (2026-10-10); NOT yet recorded in `docs/00-charter.md`
-//!   (WP-99's ledger pass);
+//!   second agent (2026-10-10); recorded in `docs/00-charter.md`, "NSE F&O
+//!   circulars read for the options lineage" (D-3358);
 //! * four FINNIFTY texts of 2021-10-18 and one MIDCPNIFTY text of 2023-08-17.
 //!   These are INFERRED, cause UNVERIFIED: the underlying's whole weekday
 //!   moved that day (its other texts are measured rows), and the successor is
@@ -1208,6 +1208,32 @@ mod tests {
                 .to_string()
                 .contains("does not exist")
         );
+    }
+
+    /// The decoder asks `settle()` with the underlying an option is FILED
+    /// under (D-3354): the newest symbol its dated changes reach. A row keyed
+    /// by an OLD symbol would never be found, silently. Every row's
+    /// underlying is therefore a symbol with no later change.
+    #[test]
+    fn every_row_is_keyed_by_a_symbol_the_decoder_files_under() {
+        let head = |symbol: &str| brutex_core::alias::LINEAGE.current(symbol) == symbol;
+        for row in &ALIASES {
+            if let Some(underlying) = row.underlying {
+                assert!(
+                    head(underlying),
+                    "ALIASES names {underlying}, filed elsewhere"
+                );
+            }
+        }
+        for row in &EARLY_SETTLEMENTS {
+            assert!(
+                head(row.underlying),
+                "EARLY_SETTLEMENTS names {}, filed elsewhere",
+                row.underlying
+            );
+        }
+        // The probe is not vacuous: an old symbol is not a head.
+        assert!(!head("NIITTECH") && head("COFORGE") && head("NIFTY"));
     }
 
     /// D-3331 decision 3: every table row is one `alias` line that reads

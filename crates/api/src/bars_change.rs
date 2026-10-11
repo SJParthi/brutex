@@ -555,7 +555,12 @@ fn parse_ledger(text: &str) -> Ledger {
                     ex_start: day_start(i64::from(record.ex_date.days_from_epoch())),
                     oi_until: 0,
                 });
-        } else {
+        } else if pull::gdfl_lineage::EventRecord::parse(line).is_none()
+            && pull::gdfl_lineage::StoppedRecord::parse(line).is_none()
+        {
+            // An `event` and a `stopped` record (D-3355) are read and label
+            // no bar: a stopped key's next contract, if one ever trades
+            // under it, is a `stitched` record, which does.
             ledger.unreadable = ledger.unreadable.saturating_add(1);
         }
     }

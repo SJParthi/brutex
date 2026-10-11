@@ -268,6 +268,19 @@ pub enum CostError {
         /// The exit day, which is earlier.
         exit: TradeDay,
     },
+    /// A contract's lot was asked for on a trade day after the contract's
+    /// expiry (DB-B04).
+    ///
+    /// A contract does not trade after it expires, so the question has no
+    /// answer and the circular in force that day says nothing about it. When
+    /// the name states an expiry the exchange re-dated to a LATER day, the
+    /// settled day is the one to ask with.
+    ExpiryBeforeTrade {
+        /// The expiry that was given.
+        expiry: TradeDay,
+        /// The trade day, which is later.
+        day: TradeDay,
+    },
     /// The trade outcome is one this crate does not price.
     ///
     /// Only a normal close is implemented. The three expiry outcomes need the
@@ -355,6 +368,12 @@ impl fmt::Display for CostError {
                 f,
                 "the exit day {exit} is before the entry day {entry}; \
                  a round trip does not close before it opens"
+            ),
+            Self::ExpiryBeforeTrade { expiry, day } => write!(
+                f,
+                "the expiry {expiry} is before the trade day {day}; a contract has no lot \
+                 after it expires (for an expiry the exchange re-dated later, ask with the \
+                 settled day)"
             ),
             Self::UnsupportedOutcome { outcome } => write!(
                 f,
@@ -610,6 +629,16 @@ mod tests {
             .to_string(),
             "the exit day 2026-05-14 is before the entry day 2026-05-15; \
              a round trip does not close before it opens"
+        );
+        assert_eq!(
+            CostError::ExpiryBeforeTrade {
+                expiry: day(2020, 1, 1),
+                day: day(2024, 12, 10),
+            }
+            .to_string(),
+            "the expiry 2020-01-01 is before the trade day 2024-12-10; a contract has no lot \
+             after it expires (for an expiry the exchange re-dated later, ask with the \
+             settled day)"
         );
         assert_eq!(
             CostError::UnsupportedOutcome {

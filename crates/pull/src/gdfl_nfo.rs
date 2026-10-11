@@ -404,7 +404,10 @@ pub enum TickerForm {
 /// The contract one option ticker names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionTicker {
-    /// The underlying's symbol, exactly as the ticker spells it.
+    /// The underlying the contract is FILED under (D-3354): the newest
+    /// symbol the ticker's own spelling reaches through the dated symbol
+    /// changes (`crate::gdfl_lineage::filed_underlying`), which is the
+    /// ticker's spelling for every symbol that was never renamed.
     pub underlying: Symbol,
     /// The store's contract segment, keyed on the SETTLED expiry (D-3331).
     pub contract: Contract,

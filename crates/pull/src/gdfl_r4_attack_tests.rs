@@ -358,23 +358,29 @@ fn r4_06_a_shape_whose_strike_is_no_strike_still_names_its_underlying() {
     let huge = "9".repeat(24);
     let long = "1".repeat(70);
     let cases: [(String, &str); 13] = [
-        ("LTI06APR24100.125CE".to_owned(), "LTI"),
-        ("LTI06APR24100.50CE".to_owned(), "LTI"),
-        (format!("LTI06APR24{huge}PE"), "LTI"),
-        ("LTI06APR24-100CE".to_owned(), "LTI"),
-        ("LTI06APR24100..5CE".to_owned(), "LTI"),
-        ("LTI24APR100.505CE".to_owned(), "LTI"),
-        ("LTI06APR24CE".to_owned(), "LTI"),
+        ("LTI06APR24100.125CE".to_owned(), "LTM"),
+        ("LTI06APR24100.50CE".to_owned(), "LTM"),
+        (format!("LTI06APR24{huge}PE"), "LTM"),
+        ("LTI06APR24-100CE".to_owned(), "LTM"),
+        ("LTI06APR24100..5CE".to_owned(), "LTM"),
+        ("LTI24APR100.505CE".to_owned(), "LTM"),
+        ("LTI06APR24CE".to_owned(), "LTM"),
         ("NIFTYIT06APR24100.125CE".to_owned(), "NIFTYIT"),
         (format!("NIFTYIT25APR{huge}PE"), "NIFTYIT"),
         (format!("NIFTYIT25APR24{long}CE"), "NIFTYIT"),
-        (format!("LTI25APR24{long}PE"), "LTI"),
+        (format!("LTI25APR24{long}PE"), "LTM"),
         ("LT06APR24100.125CE".to_owned(), "LT"),
         ("NIFTY06APR24100.125CE".to_owned(), "NIFTY"),
     ];
     for (name, owner) in &cases {
         assert!(decode_ticker(name, d1()).is_err(), "{name} must not decode");
-        let got = claimants(name, &["LT", "LTI", "NIFTY", "NIFTYIT", "NIFTYNXT50"]);
+        // The claimant is the key the name would be FILED under (D-3354):
+        // `LTI` was renamed twice, so its broken files are the `LTM`
+        // filter's, and never `LT`'s nor the retired `LTI`'s.
+        let got = claimants(
+            name,
+            &["LT", "LTI", "LTM", "NIFTY", "NIFTYIT", "NIFTYNXT50"],
+        );
         assert_eq!(got, vec![(*owner).to_owned()], "{name}");
     }
 }

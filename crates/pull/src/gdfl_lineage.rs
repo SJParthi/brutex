@@ -98,10 +98,11 @@
 //! Step 4 saw only a lot step. NSE also renames every open contract with the
 //! lot UNCHANGED, and the detector declared nothing:
 //!
-//! * a **dividend** above the exchange's threshold: "The full value of
-//!   dividend ... would be deducted from all the cum-dividend strike prices"
-//!   (`NSE/FAOP/53079`, 25 Jul 2022, VEDL; read by the audit, not yet in the
-//!   charter), no lot change. Every strike moves by one constant
+//! * a **dividend** the exchange adjusts the contracts for: "The full value
+//!   of dividend ... would be deducted from all the cum-dividend strike
+//!   prices" (`NSE/FAOP/53079`, 25 Jul 2022, VEDL; `docs/00-charter.md`,
+//!   "NSE F&O circulars read for the options lineage"), and the circular
+//!   states no lot change. Every strike moves by one constant
 //!   ([`EventKind::StrikeOffset`]);
 //! * a **scheme of arrangement**: every open contract expires on the
 //!   cum-date and the same expiries are listed again from the ex-date under
@@ -139,6 +140,12 @@
 //! the shift is the difference of the two keys' strikes. The CAUSE is never
 //! written: no circular for any measured event is recorded, so "dividend" is
 //! UNVERIFIED and the record says only what moved.
+//!
+//! Every event the import meets is one [`EventRecord`] in the ledger (its
+//! kind, shift, lots and counts) and every pre-ex key it retired with no
+//! partner one [`StoppedRecord`] (D-3355). A re-listing pairs nothing, so
+//! without these two it left no line at all, and the keys it retired were
+//! known only to the run that met it.
 //!
 //! # One contract across a symbol change (DB-B05, DB-B11, DB-B62)
 //!
@@ -1284,6 +1291,177 @@ impl EventKind {
             Self::StrikeOffset { .. } => "strike_offset",
             Self::Relisted => "relisted",
         }
+    }
+
+    /// The strike shift, paisa: the offset's own, 0 for the other kinds.
+    #[must_use]
+    pub const fn shift(self) -> i64 {
+        match self {
+            Self::StrikeOffset { shift } => shift,
+            Self::LotStep | Self::Relisted => 0,
+        }
+    }
+
+    /// The kind [`Self::as_str`] and [`Self::shift`] spell, or `None` for a
+    /// word that is no kind, an offset of nothing, or a shift on a kind that
+    /// has none.
+    #[must_use]
+    pub fn parse(word: &str, shift: i64) -> Option<Self> {
+        match (word, shift) {
+            ("lot_step", 0) => Some(Self::LotStep),
+            ("relisted", 0) => Some(Self::Relisted),
+            ("strike_offset", shift) if shift != 0 => Some(Self::StrikeOffset { shift }),
+            _ => None,
+        }
+    }
+}
+
+/// A signed decimal in its canonical spelling: digits, with one leading `-`
+/// for a negative.
+fn signed(text: &str) -> Option<i64> {
+    match text.strip_prefix('-') {
+        Some(rest) => i64::try_from(digits(rest)?).ok()?.checked_neg(),
+        None => i64::try_from(digits(text)?).ok(),
+    }
+}
+
+/// One `event` record (D-3355): what [`detect`] declared for one underlying
+/// on one ex-date. In `<store>/imports/gdfl.lineage`, D-3317's line rules:
+///
+/// `event NSE-FNO-<underlying> ex=<YYYY-MM-DD> kind=<lot_step|strike_offset|relisted> shift=<paisa> lot_old=<n> lot_new=<n> paired=<n> stopped=<n> v=1`
+///
+/// `shift` is the old strike less the new, signed, and 0 unless the kind is
+/// `strike_offset`. `paired` counts the pre-ex keys with a `lineage` record
+/// of this ex-date and `stopped` those with a [`StoppedRecord`]: together
+/// every pre-ex key the event retired. A run that sees more of the pre-ex
+/// state than an earlier one appends a second record with the larger counts;
+/// the LAST record of an (underlying, ex-date) is the one in force. The cause
+/// (bonus, dividend, scheme) is never written: it is not measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EventRecord {
+    /// The underlying.
+    pub underlying: Symbol,
+    /// The ex-date.
+    pub ex_date: Day,
+    /// What moved.
+    pub kind: EventKind,
+    /// The inferred lot before, shares.
+    pub lot_old: u64,
+    /// The inferred lot from the ex-date, shares.
+    pub lot_new: u64,
+    /// Pre-ex keys paired with a post-ex key.
+    pub paired: u64,
+    /// Pre-ex keys retired with no partner.
+    pub stopped: u64,
+}
+
+impl EventRecord {
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "event NSE-FNO-{} ex={} kind={} shift={} lot_old={} lot_new={} paired={} stopped={} v={RECORD_VERSION}",
+            self.underlying.as_str(),
+            self.ex_date,
+            self.kind.as_str(),
+            self.kind.shift(),
+            self.lot_old,
+            self.lot_new,
+            self.paired,
+            self.stopped,
+        )
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text: a kind
+    /// its lots or its counts contradict (a lot step with equal lots, any
+    /// other kind with unequal ones, a re-listing that pairs), an event that
+    /// retired nothing, or a value not in its canonical spelling.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[word, subject], rest) = fields.split_first_chunk::<2>()?;
+        if word != "event" {
+            return None;
+        }
+        let [ex, kind, shift, lot_old, lot_new, paired, stopped, version] = named(
+            rest,
+            [
+                "ex", "kind", "shift", "lot_old", "lot_new", "paired", "stopped", "v",
+            ],
+        )?;
+        let under = subject.strip_prefix("NSE-FNO-")?;
+        let underlying = Symbol::new(under)
+            .ok()
+            .filter(|symbol| symbol.as_str() == under)?;
+        let record = Self {
+            underlying,
+            ex_date: parse_day(ex)?,
+            kind: EventKind::parse(kind, signed(shift)?)?,
+            lot_old: digits(lot_old)?,
+            lot_new: digits(lot_new)?,
+            paired: digits(paired)?,
+            stopped: digits(stopped)?,
+        };
+        let consistent = match record.kind {
+            EventKind::LotStep => record.lot_old != record.lot_new,
+            EventKind::StrikeOffset { .. } => record.lot_old == record.lot_new,
+            EventKind::Relisted => record.lot_old == record.lot_new && record.paired == 0,
+        };
+        let retired = record.paired.checked_add(record.stopped)? > 0;
+        (consistent && retired && version == RECORD_VERSION && record.line() == line)
+            .then_some(record)
+    }
+}
+
+/// One `stopped` record (D-3355): a pre-ex key an event retired with no
+/// partner. The exchange contract under it stopped on the day before `ex`
+/// (expired early, or its adjusted key was not found), so a file under the
+/// key on the ex-date or later is another exchange contract (a
+/// [`StitchedRecord`] is written when one appears). In
+/// `<store>/imports/gdfl.lineage`:
+///
+/// `stopped NSE-FNO-<underlying>-<contract> ex=<YYYY-MM-DD> v=1`
+///
+/// A key with both a `lineage` record and a `stopped` record of one ex-date
+/// is PAIRED: a run that held less of the pre-ex state wrote the `stopped`
+/// line, and the pair is the measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StoppedRecord {
+    /// The underlying.
+    pub underlying: Symbol,
+    /// The retired key's contract segment.
+    pub key: Contract,
+    /// The ex-date.
+    pub ex_date: Day,
+}
+
+impl StoppedRecord {
+    /// The line, no trailing newline.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "stopped {} ex={} v={RECORD_VERSION}",
+            option_key(self.underlying, self.key),
+            self.ex_date,
+        )
+    }
+
+    /// The record [`Self::line`] wrote, or `None` for any other text.
+    #[must_use]
+    pub fn parse(line: &str) -> Option<Self> {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (&[word, key], rest) = fields.split_first_chunk::<2>()?;
+        if word != "stopped" {
+            return None;
+        }
+        let [ex, version] = named(rest, ["ex", "v"])?;
+        let (underlying, key) = parse_option_key(key)?;
+        let record = Self {
+            underlying,
+            key,
+            ex_date: parse_day(ex)?,
+        };
+        (version == RECORD_VERSION && record.line() == line).then_some(record)
     }
 }
 
