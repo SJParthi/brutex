@@ -27,8 +27,11 @@
 //! * each feed's `scrub` — where its full-block scrub stands (`cli
 //!   scrub-blocks`, DB-B74): the pass, whether it is complete, its totals of
 //!   months, blocks, bad, unverifiable, misfiled and unbound months, how many
-//!   findings still stand and the first of them by name — or `"recorded":
-//!   false` with the reason when no scrub of that feed ever ran. The series a
+//!   findings still stand (`standing_findings`, which counts the ones KEPT
+//!   for a month a pass met busy and did not read) and the first of them by
+//!   name, how many months the standing passes did not read
+//!   (`standing_busy`) — or `"recorded": false` with the reason when no
+//!   scrub of that feed ever ran. The series a
 //!   page shows asks `/scrub.json` for its own findings.
 //! * `backup` — the last line of `<store>/ops/backups.log`, the receipt the
 //!   runbook's copy procedure appends (`docs/36-ops-runbook.md`), or
@@ -245,7 +248,7 @@ pub(crate) fn scrub_json(root: &Path, vendor: Vendor) -> String {
     // indexed — never a walk or a sort of the ledger's findings.
     let rendered = super::scrub_route::with_index(root, vendor, |found| {
         let mut out = format!(
-            r#"{{"ledger":{ledger},"recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"truncated":{},"named":["#,
+            r#"{{"ledger":{ledger},"recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"standing_busy":{},"truncated":{},"named":["#,
             state.pass,
             render::json_string(if state.complete {
                 "complete"
@@ -254,6 +257,7 @@ pub(crate) fn scrub_json(root: &Path, vendor: Vendor) -> String {
             }),
             state.totals_json(),
             found.standing_count(from_pass),
+            found.busy_count(from_pass),
             found.truncated
         );
         for (n, (series, finding)) in found.named(from_pass, MAX_NAMED_BAD).iter().enumerate() {
@@ -357,9 +361,9 @@ pub(crate) fn last_backup(root: &Path) -> Result<String, String> {
 /// Whether `word` is a UTC instant as a receipt writes it:
 /// `YYYY-MM-DDTHH:MM[:SS]Z`, each field in its range. The shape the page's
 /// own reader takes (`web/src/lib/disk.js`), so the two cannot disagree about
-/// whether a copy is dated. A day past its month's length is not caught here
-/// (31 for every month): a receipt is written by `date -u`, and this refuses
-/// what is no date at all.
+/// whether a copy is dated. A day is in ITS month's length, leap years
+/// counted: `2026-02-31` is no date, and a receipt that carries it is not a
+/// recorded copy (it was taken as one, and the page then dated it).
 fn is_utc_instant(word: &str) -> bool {
     let bytes = word.as_bytes();
     let number = |from: usize, len: usize| -> Option<u32> {
@@ -383,8 +387,16 @@ fn is_utc_instant(word: &str) -> bool {
         number(14, 2),
         seconds,
     );
-    let (Some(_), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = fields else {
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = fields
+    else {
         return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 31,
     };
     is(4, b'-')
         && is(7, b'-')
@@ -392,7 +404,7 @@ fn is_utc_instant(word: &str) -> bool {
         && is(13, b':')
         && bytes.last() == Some(&b'Z')
         && (1..=12).contains(&month)
-        && (1..=31).contains(&day)
+        && (1..=days).contains(&day)
         && hour < 24
         && minute < 60
         && second < 60
@@ -785,6 +797,11 @@ mod tests {
             "2026-10-13T01:00Z",
             "2026-02-28T23:59:59Z",
             "0001-01-01T00:00:00Z",
+            // The last day of each month length, and of a leap February.
+            "2026-01-31T00:00Z",
+            "2026-04-30T00:00Z",
+            "2024-02-29T00:00Z",
+            "2000-02-29T00:00Z",
         ] {
             assert!(is_utc_instant(word), "{word}");
         }
@@ -794,9 +811,25 @@ mod tests {
             "2026-10-13T01:00:0Z",
             "2026-10-13t01:00:00Z",
             "2026-00-13T01:00Z",
+            // A DAY ITS MONTH DOES NOT HAVE is no date: `2026-02-31` was
+            // taken as a recorded copy and the page dated it.
+            "2026-02-31T01:00:00Z",
+            "2026-02-29T01:00:00Z",
+            "1900-02-29T01:00:00Z",
+            "2026-04-31T01:00Z",
+            "2026-01-32T01:00Z",
+            "2026-01-00T01:00Z",
         ] {
             assert!(!is_utc_instant(word), "{word}");
         }
+        // ... and a receipt that carries one is not a recorded backup.
+        std::fs::write(
+            root.join(BACKUP_RECEIPTS),
+            "copied=2026-02-31T01:00:00Z dest=/Volumes/B bytes=2\n",
+        )
+        .unwrap();
+        assert!(last_backup(&root).is_err(), "no such day");
+        std::fs::write(root.join(BACKUP_RECEIPTS), good).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&measured(&root, None)).expect("JSON");
         assert_eq!(parsed["backup"]["recorded"], true);
         assert_eq!(parsed["backup"]["last"], good.trim_end());

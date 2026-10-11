@@ -79,7 +79,20 @@
 //!
 //! Each month is opened through `BarFile::open_existing`: read-only, under
 //! the month's SHARED lock, exactly as the API reads it. A month a writer
-//! holds is a `busy` line, counted and skipped, never waited for. While this
+//! holds is a `busy` line, counted and skipped, never waited for.
+//!
+//! **A `busy` line means NOT READ, and every reader of the ledger must take
+//! it so.** The pass says nothing about that month's blocks: what an earlier
+//! pass found in it still stands, and the pass does not vouch for it. The
+//! ledger's one reader, the API's findings index
+//! (`api::server::scrub_route`, `Index::keep`), files the month's standing
+//! findings under the busy pass as KEPT and names the month as not read, on
+//! `/scrub.json`, `/db` and the `/ingest` tile; this verb's own last lines
+//! say how many months the pass did not read. A reader that skipped the line
+//! lost a known-bad block the moment an importer held its month while a pass
+//! went by (second agent, 12 Oct 2026). The scrub does not carry the findings
+//! forward itself: that would need the whole ledger read at every run, and
+//! the index already holds it. While this
 //! reads a month a writer of that month is refused by the store
 //! (`StoreError::Locked`) — for as long as that month's blocks take to READ,
 //! and no longer: what the rate limit owes is slept after the month is
@@ -468,23 +481,62 @@ impl Lines {
             .read(true)
             .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
             .open(&path)
-            .map_err(|why| {
-                format!(
-                    "{}: {why} (it must be a plain file, never a link)",
-                    path.display()
-                )
-            })?;
+            .map_err(|why| Self::refusal(&path, &why))?;
+        Self::plain(&file, &path)?;
+        Ok(Self { file, path })
+    }
+
+    /// Why `path` did not open, by its cause: a link at the name is said to
+    /// be one, and anything else is the system's own reason. (Every refusal
+    /// used to end "it must be a plain file, never a link", which is not why
+    /// a file this user may not write was refused.)
+    fn refusal(path: &Path, why: &std::io::Error) -> String {
+        let link = std::fs::symlink_metadata(path).is_ok_and(|at| at.file_type().is_symlink());
+        if link {
+            format!(
+                "{}: {why} (it must be a plain file, never a link)",
+                path.display()
+            )
+        } else {
+            format!("{}: {why}; nothing was read or written", path.display())
+        }
+    }
+
+    /// Refuses what was opened at `path` unless it is a plain file.
+    fn plain(file: &std::fs::File, path: &Path) -> Result<(), String> {
         let plain = file
             .metadata()
             .map_err(|why| format!("{}: {why}", path.display()))?
             .is_file();
-        if !plain {
-            return Err(format!(
+        if plain {
+            Ok(())
+        } else {
+            Err(format!(
                 "{} is not a plain file; nothing was read or written",
                 path.display()
-            ));
+            ))
         }
-        Ok(Self { file, path })
+    }
+
+    /// Whether the line file at `relative` could be appended to, WITHOUT
+    /// creating it: nothing at the name is fine, and so is a plain file this
+    /// process may append to. Both of a run's files are asked this before
+    /// either is created, so a run refused at its ledger leaves no empty
+    /// cursor behind — `/scrub.json` read that 0-byte cursor as "a scrub
+    /// started and recorded no progress" for a vendor no scrub had read.
+    fn usable(root: &Path, relative: &str) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let path = root.join(relative);
+        let opened = std::fs::OpenOptions::new()
+            .append(true)
+            .read(true)
+            .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+            .open(&path);
+        match opened {
+            Ok(file) => Self::plain(&file, &path),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(why) => Err(Self::refusal(&path, &why)),
+        }
     }
 
     /// Ends a tail no newline ends, as a void line, and returns the bytes of
@@ -725,6 +777,9 @@ fn months_to_scrub(
 /// that was.
 pub(crate) fn run(root: &Path, vendor: Vendor, bounds: Bounds<'_>) -> Result<Ran, String> {
     let (all, unaddressed) = months_to_scrub(root, vendor)?;
+    // BOTH FILES ARE LOOKED AT BEFORE EITHER IS CREATED (`Lines::usable`).
+    Lines::usable(root, &cursor_name(vendor))?;
+    Lines::usable(root, &ledger_name(vendor))?;
     let mut cursor_file = Lines::open(root, &cursor_name(vendor))?;
     // THE LOCK IS THE OPEN FILE DESCRIPTION'S, which a duplicate shares: the
     // guard owns one duplicate, the tail is read through another, and the
@@ -1037,6 +1092,16 @@ pub(crate) fn command_with(
                      file of theirs was looked for and this pass did not read them (the first: \
                      {first})",
                     ran.unaddressed.entries
+                );
+            }
+            if ran.pass_totals.busy > 0 {
+                let _ = writeln!(
+                    out,
+                    "  NOT READ            {} month(s) of this pass were held by a writer when \
+                     it reached them (`busy` lines in the ledger): the pass does not vouch for \
+                     them, what earlier passes found in them still stands (kept, on \
+                     /scrub.json), and the next pass reads them",
+                    ran.pass_totals.busy
                 );
             }
             let _ = writeln!(

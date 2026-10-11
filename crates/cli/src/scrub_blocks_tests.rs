@@ -587,6 +587,41 @@ fn an_empty_census_a_single_record_and_an_unwritable_ledger() {
         "",
         "the cursor did not move past findings that were never kept"
     );
+    // BOTH FILES ARE LOOKED AT BEFORE EITHER IS CREATED: a run refused at its
+    // ledger used to leave a 0-byte cursor, which `/scrub.json` read as "a
+    // scrub started and recorded no progress".
+    assert!(
+        !blocked.join(cursor_name(Vendor::Zerodha)).exists(),
+        "a run refused at its ledger created a cursor"
+    );
+    // A LEDGER THIS USER MAY NOT WRITE is refused by ITS cause, and again no
+    // cursor is created. The refusal used to end "it must be a plain file,
+    // never a link" for a plain file that is no link.
+    std::fs::remove_dir(blocked.join(ledger_name(Vendor::Zerodha))).unwrap();
+    std::fs::write(blocked.join(ledger_name(Vendor::Zerodha)), "").unwrap();
+    let locked = |mode: u32| {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            blocked.join(ledger_name(Vendor::Zerodha)),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+    };
+    locked(0o444);
+    let why = run(&blocked, Vendor::Zerodha, WHOLE).expect_err("an unwritable ledger");
+    assert!(
+        why.contains("scrub-blocks.zerodha.log")
+            && why.contains("nothing was read or written")
+            && !why.contains("never a link"),
+        "{why}"
+    );
+    assert!(
+        !blocked.join(cursor_name(Vendor::Zerodha)).exists(),
+        "{why}"
+    );
+    locked(0o644);
+    let ran = run(&blocked, Vendor::Zerodha, WHOLE).expect("writable again");
+    assert!(ran.finished_pass);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&blocked);
 }
@@ -1131,6 +1166,94 @@ fn the_rate_is_slept_with_no_month_open_so_a_writer_is_not_held_for_it() {
     assert!(
         at < Duration::from_millis(1_500),
         "the month was held {at:?} of a {took:?} run"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// **A MONTH WITH A KNOWN-BAD BLOCK, MET BUSY BY THE NEXT PASS, IS A `busy`
+/// LINE AND IS SAID AS NOT READ (DB-B74; WP-81 repair 3).** Pass 1 finds the
+/// rotted block of month 2. A writer then holds month 2 while pass 2 runs:
+/// the pass completes with `busy=1 bad=0`, its ledger line for the month is
+/// `busy`, not silence — what the API's index keeps the finding on — and the
+/// verb says the pass did not read one month instead of ending as a clean
+/// `pass complete`. With the writer gone, pass 3 reads the month and finds
+/// the block again.
+#[test]
+fn a_month_met_busy_is_a_busy_line_and_the_verb_says_the_pass_did_not_read_it() {
+    let root = store("busy-kept", 3);
+    rot(&root, 2, 80);
+    let at = root.clone();
+    let mut out = String::new();
+    let scrub = |out: &mut String| {
+        out.clear();
+        command_with(
+            &["zerodha", "--mib-per-s", "0"],
+            &|| Ok(at.clone()),
+            None,
+            out,
+        )
+    };
+    assert_eq!(scrub(&mut out), FAILED, "{out}");
+    assert!(out.contains("pass 1") && out.contains("bad=1"), "{out}");
+    assert!(!out.contains("NOT READ"), "nothing was busy: {out}");
+    let month = bin(Vendor::Zerodha, 2);
+    let ledger = read(&root, &ledger_name(Vendor::Zerodha));
+    assert!(
+        ledger.contains(&format!("bad {month} block=1 records=73-145 run=")),
+        "{ledger}"
+    );
+
+    // A WRITER HOLDS THE MONTH while pass 2 goes by.
+    let writer =
+        BarFile::open_or_create(&root, month_path(Vendor::Zerodha, 2), symbol_id()).unwrap();
+    assert_eq!(
+        scrub(&mut out),
+        OK,
+        "a busy month is not a fault of the run: {out}"
+    );
+    drop(writer);
+    assert!(
+        out.contains("pass 2") && out.contains("pass complete") && out.contains("busy=1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("NOT READ            1 month(s) of this pass were held by a writer")
+            && out.contains("what earlier passes found in them still stands"),
+        "{out}"
+    );
+    let ledger = read(&root, &ledger_name(Vendor::Zerodha));
+    let second = ledger
+        .split("pass=2 resume=-\n")
+        .nth(1)
+        .expect("pass 2's run line");
+    assert!(
+        second.starts_with(&format!("busy {month} run=")),
+        "{second}"
+    );
+    assert!(!second.contains("bad "), "the month was not read: {second}");
+    let cursor = read(&root, &cursor_name(Vendor::Zerodha));
+    assert!(
+        cursor.lines().last().unwrap().starts_with("done run=")
+            && cursor.lines().last().unwrap().contains(
+                "pass=2 months=3 blocks=6 bad=0 unverifiable=0 misfiled=0 unbound=2 busy=1 missing=0"
+            ),
+        "{cursor}"
+    );
+
+    // THE WRITER IS GONE: pass 3 reads the month and finds the block again.
+    assert_eq!(scrub(&mut out), FAILED, "{out}");
+    assert!(
+        out.contains("pass 3") && out.contains("bad=1") && !out.contains("NOT READ"),
+        "{out}"
+    );
+    let ledger = read(&root, &ledger_name(Vendor::Zerodha));
+    let third = ledger
+        .split("pass=3 resume=-\n")
+        .nth(1)
+        .expect("pass 3's run line");
+    assert!(
+        third.starts_with(&format!("bad {month} block=1 records=73-145 run=")),
+        "{third}"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }

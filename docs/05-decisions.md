@@ -67048,7 +67048,14 @@ byte offset, IN PLACE under the vendor's lock, keeping each finding in the
 map of the pass that last found it and each map in (series, month, block,
 kind) order, so a series' first findings, its count and the vendor's first
 names are a seek and a merge of a few heads and never a walk, a copy or a
-sort of what is indexed. A backup is recorded only by a whole line of
+sort of what is indexed. A `busy` line means NOT READ: the index files what
+stood in that month when the pass began under the busy pass, unchanged but
+for the pass and run that kept it (`kept_pass`, `kept_run`), names the month
+in its series' `busy` list and counts it in `standing_busy`; `/db` and the
+`/ingest` tile say both, so a complete pass with a busy month is never shown
+as a clean one. The scrub does not re-append kept findings: the index holds
+them, and re-reading the ledger at each run would be the work an index
+exists to remember. A backup is recorded only by a whole line of
 `ops/backups.log` of at most 1,024 bytes carrying `copied=<YYYY-MM-DDTHH:MM[:SS]Z>`
 and `dest=`. A month whose `.prv` names another store
 path is refused at every bar door (`Misfiled`); a month with no `.prv` opens
@@ -67058,7 +67065,15 @@ superseded file is kept, and `/disk.json` says what that costs.
 **Why.** A flipped byte in the middle of a month was found only by a read of
 that block; and a killed run's fragment, joined to the next line, was served
 as a pass's totals and moved the resume point past months no run had read.
+And a `busy` line that the index skipped read a month nobody had read as
+"read again, and clean": a known-bad block left every page when a writer
+held its month for the moment a pass went by (second agent, 12 October).
 
-**Proof.** `cli` `scrub_blocks::tests`; `api` `scrub_route::tests`
-(`the_ordered_index_answers_what_a_walk_and_a_sort_of_every_finding_answers`
-among them), `disk_route::tests`; `store` `tests/misfiled.rs`.
+**Proof.** `cli` `scrub_blocks::tests`
+(`a_month_met_busy_is_a_busy_line_and_the_verb_says_the_pass_did_not_read_it`
+among them); `api` `scrub_route::tests`
+(`the_ordered_index_answers_what_a_walk_and_a_sort_of_every_finding_answers`,
+`a_month_a_pass_met_busy_keeps_its_findings_and_is_named_as_not_read`,
+`the_index_keeps_what_a_walk_of_every_finding_at_each_busy_line_keeps`,
+`the_edges_of_a_busy_line`), `disk_route::tests`; `store`
+`tests/misfiled.rs`; `web/tests/scrub.test.js`, `web/tests/disk.test.js`.

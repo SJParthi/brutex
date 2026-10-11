@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SCRUB_MAX_KEYS, findingText, scrubNote, scrubUrl } from '../src/lib/db/scrub.js';
+import {
+  SCRUB_BUSY_NAMED, SCRUB_MAX_KEYS, SCRUB_REASK_MOST, SCRUB_REASK_MS, busyText, findingText, scrubAskAgainMs,
+  scrubNote, scrubUrl
+} from '../src/lib/db/scrub.js';
 
 test('/db asks /scrub.json for the series it shows, or asks nothing (DB-B74)', () => {
   assert.equal(scrubUrl(null, { keys: ['NSE-INDEX-NIFTY'], timeframe: '1s' }), null);
@@ -69,6 +72,66 @@ test('"never looked" and "nothing found" are different notes, and a finding warn
     series: [{ key: 'K', more: 7, findings: [] }] }, 1);
   assert.equal(counted.tone, 'warn');
   assert.match(counted.head, /7 finding\(s\) stand .* 7 more are not listed\./);
+});
+
+test('a month a pass met busy keeps its findings on the page and is named as not read (DB-B74, WP-81 repair 3)', () => {
+  // THE ANSWER THE SERVER GIVES NOW for the second agent's case: pass 7 met
+  // NIFTY 2020-07 busy and completed; block 16, found by pass 6, is kept.
+  const kept = { kind: 'bad', month: '2020-07', block: 16, first: 1168, last: 1240, pass: 6, run: 600,
+    kept_pass: 7, kept_run: 700 };
+  assert.equal(findingText('NSE-INDEX-NIFTY', kept),
+    'NSE-INDEX-NIFTY 2020-07: block 16 (records 1168–1240) does not match its stored checksum — found by scrub pass 6; kept, not read again: pass 7 met this month busy');
+  // Every kind says it, and a run that cannot be dated is not called pass 0.
+  for (const kind of ['unverifiable', 'misfiled', 'missing', 'novel']) {
+    assert.match(findingText('K', { kind, month: '2020-07', pass: 6, kept_pass: 0 }),
+      /scrub pass 6; kept, not read again: a later pass met this month busy$/, kind);
+  }
+  // A finding the newest pass read says nothing of the kind.
+  assert.doesNotMatch(findingText('K', { kind: 'bad', month: '2020-07', pass: 7, kept_pass: null }), /kept/);
+
+  const body = { feed: 'gdfl', recorded: true, pass: 7, state: 'complete', standing_busy: 1,
+    series: [{ key: 'NSE-INDEX-NIFTY', timeframe: '1s', more: 0, findings: [kept],
+      busy: [{ month: '2020-07', pass: 7, run: 700 }], busy_more: 0 }] };
+  const note = scrubNote(body, 1);
+  assert.equal(note.tone, 'warn');
+  assert.equal(note.lines.length, 1);
+  assert.equal(note.head,
+    'Scrub pass 7 (complete): 1 finding(s) stand against this selection. 1 month(s) not read: busy (a writer held them when the pass reached them), earlier findings kept — NSE-INDEX-NIFTY 2020-07 (pass 7).');
+
+  // A BUSY MONTH WITH NOTHING FOUND IN IT is still not a clean answer: the
+  // note warns and never says the pass names no damaged block in the
+  // selection without saying which months it did not read.
+  const unread = scrubNote({ ...body, series: [{ key: 'NSE-INDEX-NIFTY', more: 0, findings: [],
+    busy: [{ month: '2020-07', pass: 7, run: 700 }, { month: '2020-08', pass: 0, run: 9 }], busy_more: 3 }] }, 1);
+  assert.equal(unread.tone, 'warn');
+  assert.deepEqual(unread.lines, []);
+  assert.equal(unread.head,
+    'Scrub pass 7 (complete) names no damaged block in the months it read of this selection. 5 month(s) not read: busy (a writer held them when the pass reached them), earlier findings kept — NSE-INDEX-NIFTY 2020-07 (pass 7), NSE-INDEX-NIFTY 2020-08 (a pass that cannot be dated) and 3 more.');
+
+  // The head names a bounded number of months and counts the rest.
+  const many = Array.from({ length: SCRUB_BUSY_NAMED + 4 }, (_, i) => ({ month: `2020-${String(i + 1).padStart(2, '0')}`, pass: 7 }));
+  const capped = busyText([{ key: 'K', busy: many, busy_more: 2 }]);
+  assert.equal(capped.count, SCRUB_BUSY_NAMED + 6);
+  assert.equal(capped.text.split(' (pass 7)').length - 1, SCRUB_BUSY_NAMED);
+  assert.match(capped.text, / and 6 more\.$/);
+  // No busy month, an old server's answer, or garbage: no sentence at all.
+  assert.deepEqual(busyText([{ key: 'K', findings: [] }]), { count: 0, text: '' });
+  assert.deepEqual(busyText(undefined), { count: 0, text: '' });
+  assert.deepEqual(busyText([{ key: 'K', busy: 'x', busy_more: 'y' }]), { count: 0, text: '' });
+});
+
+test('/db asks again by itself while the server is still indexing its ledger, a bounded number of times (L-WP81-1)', () => {
+  const partial = { recorded: true, truncated: true };
+  assert.equal(scrubAskAgainMs(partial, 1), SCRUB_REASK_MS);
+  assert.equal(scrubAskAgainMs(partial, SCRUB_REASK_MOST - 1), SCRUB_REASK_MS);
+  assert.equal(scrubAskAgainMs(partial, SCRUB_REASK_MOST), null, 'bounded');
+  assert.equal(scrubAskAgainMs(partial, NaN), null);
+  assert.equal(scrubAskAgainMs({ recorded: true, truncated: false }, 1), null, 'a whole answer is not asked again');
+  assert.equal(scrubAskAgainMs({ recorded: false, truncated: true }, 1), null);
+  assert.equal(scrubAskAgainMs(null, 1), null);
+  const note = readFileSync(new URL('../src/routes/db/DbScrubNote.svelte', import.meta.url), 'utf8');
+  assert.match(note, /const wait = scrubAskAgainMs\(body, tries\);\s+if \(wait === null\) return;/);
+  assert.match(note, /if \(controller\.signal\.aborted\) return;\s+\}\s+\} catch/, 'a changed selection stops the asking');
 });
 
 test('/db mounts the scrub note under the grid and the dev proxy carries /scrub.json', () => {

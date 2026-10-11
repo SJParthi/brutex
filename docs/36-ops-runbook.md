@@ -276,8 +276,9 @@ two append-only files per vendor under `<store>/audit/`:
   the build's commit, the pass), one `bad` line per damaged block (month,
   block, records, the store's own reason), `unverifiable` for a month whose
   `.crc` is gone, `misfiled` for a month whose `.prv` names another month
-  (§8), `busy` for a month a writer held (skipped, not waited for) and
-  `missing` for a month the census holds and the disk does not;
+  (§8), `busy` for a month a writer held (skipped, not waited for: the pass
+  did NOT read it) and `missing` for a month the census holds and the disk
+  does not;
 * `scrub-blocks.<vendor>.cursor`, where the pass stands: `progress` and `done`
   lines carrying the pass's totals. A run resumes after the last `progress`
   cursor; after `done` the next run starts the next pass. One run per vendor
@@ -311,7 +312,13 @@ with no month open (rules audit RA-128; `--mib-per-s` no longer lengthens the
 hold). The hold is O(blocks of one month) and is NOT MEASURED on this drive,
 so a scrub and an import of one vendor can still meet on a month — the scrub
 counts it `busy` and moves on, the importer sees the month locked and
-retries. Nothing yet makes the scrub yield to a live run of the kind or says
+retries. A busy month is NOT READ by that pass and nothing is lost by it:
+what earlier passes found in the month still stands (each such finding says
+the pass that found it and the pass that kept it), `/db` names the month as
+not read under the grid, the `/ingest` tile says `N months NOT READ (busy)`,
+and the verb's own output ends with a `NOT READ` line; the next pass reads
+it. A pass whose totals say `busy=` above zero is therefore not a clean
+pass, and no page shows it as one. Nothing yet makes the scrub yield to a live run of the kind or says
 `scrub paused` on a page; until that exists, prefer not to run both for one
 vendor. A pass also walks the census as it stood when its run began, in path
 order: months an import adds BEHIND the cursor while the pass runs are not

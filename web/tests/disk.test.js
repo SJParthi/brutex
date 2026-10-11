@@ -73,6 +73,34 @@ test('a standing scrub finding raises the disk line\'s alarm, and a clean or unr
   assert.equal(alarmed.scrub, 'gdfl: scrub pass 1 complete, 2 months, 1 bad blocks');
 });
 
+test('a pass that met a month busy never reads as a clean one on the tile, and a half-built index says so (DB-B74, WP-81 repair 3)', () => {
+  // THE SECOND AGENT'S CASE: pass 7 complete, bad=0 in the months it read,
+  // one month met busy, and the block pass 6 found in that month kept. The
+  // tile used to read "0 bad blocks" and raise no alarm.
+  const kept = { feed: 'gdfl', bar_bytes_lower_bound: 1, scrub: { recorded: true, pass: 7, state: 'complete',
+    standing_findings: 1, standing_busy: 1,
+    totals: { months: 385442, blocks: 647416, bad: 0, unverifiable: 0, misfiled: 0, unbound: 0, busy: 1, missing: 0 } } };
+  assert.equal(scrubText([kept]),
+    'gdfl: scrub pass 7 complete, 385442 months, 0 bad blocks, 1 months NOT READ (busy), 1 findings standing with those kept from earlier passes');
+  assert.equal(scrubAlarm([kept]), true, 'the kept finding still raises the alarm');
+  // A busy month with nothing kept is said too, and is no alarm by itself.
+  const unread = { feed: 'gdfl', scrub: { ...kept.scrub, standing_findings: 0 } };
+  assert.match(scrubText([unread]), /0 bad blocks, 1 months NOT READ \(busy\), 0 findings standing/);
+  assert.equal(scrubAlarm([unread]), false);
+  // An answer of a server that sends no `standing_busy` falls back to the
+  // pass's own `busy` total; none of either adds nothing.
+  const older = { feed: 'gdfl', scrub: { recorded: true, pass: 2, state: 'complete',
+    totals: { months: 9, bad: 0, busy: 2 } } };
+  assert.equal(scrubText([older]),
+    'gdfl: scrub pass 2 complete, 9 months, 0 bad blocks, 2 months NOT READ (busy), ? findings standing with those kept from earlier passes');
+  assert.equal(scrubText([{ feed: 'gdfl', scrub: { recorded: true, pass: 2, state: 'complete', standing_busy: 0,
+    totals: { months: 9, bad: 0, busy: 0 } } }]), 'gdfl: scrub pass 2 complete, 9 months, 0 bad blocks');
+  // THE INDEX IS STILL BEING BUILT after a restart: its counts are of what it
+  // has reached, and the tile says so instead of serving them as the whole.
+  assert.equal(scrubText([{ feed: 'gdfl', scrub: { recorded: true, pass: 2, state: 'complete', truncated: true,
+    standing_findings: 0, totals: { months: 9, bad: 0 } } }]),
+    'gdfl: scrub pass 2 complete, 9 months, 0 bad blocks (findings still being indexed after a restart: counts may be low)');
+});
 
 test('every page says when no copy of the store is recorded, when it is old, and when its date cannot be read (RA-163)', () => {
   const now = Date.parse('2026-10-11T12:00:00Z');

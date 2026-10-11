@@ -193,6 +193,10 @@ mod tests {
             "research-plan",
             "results",
             "screen",
+            // WP-13d's verb, merged in beside this table: it judges stored
+            // minutes against stored day bars and "writes nothing" (its
+            // header); it opens no file for writing.
+            "series-identity",
             "sweep",
             "sweep-all",
             "sweep-audited-stored",

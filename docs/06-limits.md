@@ -16285,7 +16285,8 @@ None of this is on a read path: it is the options import's, once per day.
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
 Rows landed by WP-81 with the code they bound. Every figure is a closed-loop
-measurement of the release build of commit 9665ee3a over a scratch store
+measurement of a release build of this package's branch (the report names
+the build each figure is of) over a scratch store
 (`bars/` a real directory of copy-on-write clones; the census is the
 operator's 385,442 GDFL months, nearly all of them `missing` there, which is
 what makes the ledger large): python threads, one connection a client, GET
@@ -16304,8 +16305,9 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
 - **L-WP81-2. The ledger is append-only for ever, and each pass re-appends
   every standing finding.** 32.1 MB a pass at 385,440 findings; nine passes
   were 257 MB. Nothing compacts it (append-only law); the index holds one
-  entry per distinct finding the ledger ever named, for the life of the
-  process. A store whose findings are few — the expected case: the operator's
+  entry per distinct finding the ledger ever named, and one per month, pass
+  and series a pass met busy, for the life of the process. A store whose
+  findings are few — the expected case: the operator's
   store has never been scrubbed, and a healthy pass writes one `run` line —
   never meets this row.
 - **L-WP81-3. After the first index every answer is bounded, whatever the
@@ -16358,3 +16360,31 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   6.78, 5.48 ms). A value sort of a month with no sort index goes to the
   scan pool of 2 (D-3349's row): 16 x 5 answered 70 x 429, every one with
   `Retry-After`, and 10 x 200; 16 x 30 seeks straight after: 480 of 480.
+- **L-WP81-9. A month a pass met `busy` is not read by that pass, and its
+  findings stand one pass longer than a clean re-read would keep them.** The
+  scrub never waits for a month a writer holds (`busy`, counted and named).
+  The findings index keeps what stood in that month under the busy pass
+  (`kept_pass`), and `/scrub.json`, `/db` and the `/ingest` tile name the
+  month as not read. Two things stay conservative, by name: (a) a month met
+  busy by a run that was then killed, and read CLEAN by the run that resumed
+  the same pass, still shows busy and keeps its findings until the next pass
+  completes — a pass writes a line only for what it found, so a clean
+  re-read cannot be told from no read; (b) a `busy` line of a run whose
+  `run` line was never indexed cannot be dated, and what it keeps stands
+  until a dated pass finds it again. Each `busy` line costs one ordered seek
+  in one pass's map plus the findings of that one month: O(log findings +
+  findings of the month), measured as part of the index step in L-WP81-1.
+  A month that is busy at EVERY pass (a writer that never lets go) is never
+  read by the scrub; the page says so at each pass and nothing forces the
+  read: NOT DONE.
+- **L-WP81-10. The census keeps every epoch and every superseded file for
+  ever, and nothing enforces a budget for them (DB-B59).** Compaction writes
+  a new epoch and deletes nothing (append-only law). `/disk.json` reports
+  what that costs as `census_kept_bytes`, with each census file's role and
+  size, and the `/ingest` tile prints it beside the free space: 297,641,984
+  bytes for GDFL on the operator's store on 12 October 2026 (one `lstat` per
+  census file: O(epochs), a handful today). It grows by one census epoch per
+  compaction — about the size of the live census each time. NOT DONE: a
+  bound, an alarm at a threshold, or an archive step that moves older epochs
+  off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
+  of its own (L-WP81-4), cached for 30 s in the operations pool.

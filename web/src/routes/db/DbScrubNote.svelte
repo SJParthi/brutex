@@ -6,7 +6,10 @@
    * One `/scrub.json` per change of the selection's series and rung — never
    * per page, sort or scroll — answered from an index the server keeps of its
    * scrub ledger: one hash probe per series, no bar file opened. A failed
-   * read is said in the note; it never blanks it.
+   * read is said in the note; it never blanks it. While the server says its
+   * index is not caught up (`truncated`, after a restart over a long ledger)
+   * the note asks again by itself, a bounded number of times
+   * (`scrubAskAgainMs`); it used to say "ask again" and never did.
    *
    * Mounted under the grid, beside the source lines, so WP-52's grid columns
    * are untouched.
@@ -14,7 +17,7 @@
   import { ask } from '$lib/ask.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { seriesPlan } from '$lib/db/bars-plan.js';
-  import { scrubUrl, scrubNote } from '$lib/db/scrub.js';
+  import { scrubUrl, scrubNote, scrubAskAgainMs } from '$lib/db/scrub.js';
 
   /** @type {{db: any}} */
   let { db } = $props();
@@ -37,11 +40,17 @@
     const controller = new AbortController();
     (async () => {
       try {
-        const response = await ask(target, { cache: 'no-store', signal: controller.signal });
-        const body = await response.json();
-        if (controller.signal.aborted) return;
-        if (!response.ok) throw new Error(String(body?.error ?? `/scrub.json answered HTTP ${response.status}`));
-        note = scrubNote(body, count);
+        for (let tries = 1; ; tries += 1) {
+          const response = await ask(target, { cache: 'no-store', signal: controller.signal });
+          const body = await response.json();
+          if (controller.signal.aborted) return;
+          if (!response.ok) throw new Error(String(body?.error ?? `/scrub.json answered HTTP ${response.status}`));
+          note = scrubNote(body, count);
+          const wait = scrubAskAgainMs(body, tries);
+          if (wait === null) return;
+          await new Promise((done) => setTimeout(done, wait));
+          if (controller.signal.aborted) return;
+        }
       } catch (why) {
         if (controller.signal.aborted) return;
         failed = why instanceof Error ? why.message : String(why);

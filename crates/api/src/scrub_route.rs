@@ -17,10 +17,13 @@
 //! {"feed":"gdfl","recorded":true,"pass":2,"state":"complete",
 //!  "totals":{"months":…,"blocks":…,"bad":…,"unverifiable":…,"misfiled":…,
 //!            "unbound":…,"busy":…,"missing":…},
-//!  "standing_from_pass":2,"indexed_bytes":…,"truncated":false,
+//!  "standing_from_pass":2,"standing_findings":…,"standing_busy":…,
+//!  "indexed_bytes":…,"truncated":false,
 //!  "series":[{"key":"NSE-INDEX-NIFTY","timeframe":"1s","more":0,
 //!    "findings":[{"kind":"bad","month":"2020-07","block":21,"first":1533,
-//!                 "last":1605,"pass":2,"run":1791547200,"why":"…"}]}]}
+//!                 "last":1605,"pass":2,"run":1791547200,"kept_pass":null,
+//!                 "kept_run":null,"why":"…"}],
+//!    "busy":[{"month":"2020-09","pass":2,"run":1791547200}],"busy_more":0}]}
 //! ```
 //!
 //! With no `key=` it answers the vendor's state alone. `recorded` is `false`,
@@ -33,9 +36,47 @@
 //! finding it. So the findings served are those of the last complete pass and
 //! of any pass after it (`standing_from_pass`): once a later pass completes,
 //! a block that was repaired — its month re-imported as a new generation —
-//! drops out, and one still damaged is found again and stays. A month a pass
-//! met `busy` was not re-read by it; that limit is `cli scrub-blocks`'s and is
-//! in its header.
+//! drops out, and one still damaged is found again and stays.
+//!
+//! # A month a pass did not read keeps what was found in it
+//!
+//! A month a writer held when the pass reached it is a `busy <month>
+//! run=<id>` ledger line: the pass did NOT read it. So that line is not
+//! silence about the month, and the index does two things with it
+//! ([`Index::keep`]):
+//!
+//! * every finding that stood in that month when the pass began (those the
+//!   pass before it holds) is filed under the busy pass, UNCHANGED but for
+//!   `kept_pass` and `kept_run` — the pass and run that met the month busy.
+//!   Its `pass` and `run` stay those of the run that last READ the block, so
+//!   an answer says both "found by pass 6" and "not read again by pass 7";
+//! * the month is named in its series' `busy` list (`busy_more` counts the
+//!   ones past [`MAX_FINDINGS`]) and counted in `standing_busy`, for as long
+//!   as that pass's findings stand. A complete pass with a busy month is never
+//!   answered as a pass that vouches for it.
+//!
+//! Before this a `busy` line was skipped: a month an importer, a repair or an
+//! index build held for the moment the pass reached it LOST every standing
+//! finding when that pass completed — the page said "names no damaged block"
+//! and the tile "0 bad blocks" while the block was still refused on read and
+//! no pass had read the month again (second agent, 12 Oct 2026).
+//!
+//! A `busy` line of a run whose `run` line was not indexed cannot be dated:
+//! what stood in its month is kept under pass 0, "not told", which stands
+//! until a dated pass finds it again — unknown is not "repaired".
+//!
+//! A finding line of the SAME dated pass for that month, after its `busy`
+//! line, says the month was read after all — a run met it busy and was
+//! killed, and the run that resumed the pass read it: the busy mark is taken
+//! away and what it kept is released ([`Index::release`]), so the month's
+//! findings are what that run finds. The other order — found by one run,
+//! then met busy by the run that resumed the pass and re-read its months —
+//! keeps: the killed run may not have read every block.
+//!
+//! One thing stays conservative, by name: a pass names only what it FOUND, so
+//! a month met busy by a run that was then killed, and read CLEAN by the run
+//! that resumed the same pass, still shows as busy and keeps its findings
+//! until the NEXT pass completes (`docs/06-limits.md` L-WP81-9).
 //!
 //! # What is read, and what is never read
 //!
@@ -56,9 +97,10 @@
 //! Per request: one open and `fstat` of each of the two files, one bounded
 //! tail read of the cursor ([`CURSOR_TAIL_BYTES`]), then for each `key=` (at
 //! most [`MAX_KEYS`]) one hash probe and one ordered seek per standing pass,
-//! and at most [`MAX_FINDINGS`] findings rendered; `standing_findings` and
-//! each series' `more` are sums over the passes that still stand. None of it
-//! grows with the ledger.
+//! and at most [`MAX_FINDINGS`] findings and as many busy months rendered;
+//! `standing_findings`, `standing_busy` and each series' `more` and
+//! `busy_more` are sums over the passes that still stand. None of it grows
+//! with the ledger.
 //!
 //! The ledger is indexed INCREMENTALLY and IN PLACE: only the bytes appended
 //! since the last request are read (from the kept byte offset, whole lines
@@ -97,7 +139,8 @@
 //!
 //! The first index after a start reads the whole ledger once, at most
 //! [`INDEX_STEP_BYTES`] a request. The index holds one entry per distinct
-//! finding the ledger ever named, for the life of the process.
+//! finding, and one per month, pass and series met busy, that the ledger ever
+//! named, for the life of the process.
 
 use std::collections::btree_map;
 use std::collections::{BTreeMap, HashMap};
@@ -295,6 +338,11 @@ pub(crate) struct Finding {
     pub(crate) pass: u64,
     /// The run that found it.
     pub(crate) run: u64,
+    /// The newest pass, and its run, that met this finding's month `busy` and
+    /// so kept the finding without reading the month again; `None` while the
+    /// pass that found it is the newest to have reached its month. Pass 0 is
+    /// a run that cannot be dated.
+    pub(crate) kept: Option<(u64, u64)>,
     /// The store's own reason, capped.
     pub(crate) why: String,
 }
@@ -308,8 +356,9 @@ type Key = (Arc<str>, String, Option<u64>, &'static str);
 ///
 /// # Shape
 ///
-/// A finding lives in the map of the pass that last found it (`by_pass`), and
-/// each map is ordered by [`Key`]. The findings that STAND at a pass are those
+/// A finding lives in the map of the pass that last found it — or that last
+/// met its month busy and kept it ([`Index::keep`]) — (`by_pass`), and each
+/// map is ordered by [`Key`]. The findings that STAND at a pass are those
 /// of pass 0 ("not told") and of every pass from it on — a handful of maps —
 /// so the first few of a series, or of the whole vendor, are the heads of a
 /// merge of those maps: a seek and a constant number of steps, whatever the
@@ -328,6 +377,13 @@ pub(crate) struct Index {
     series: HashMap<Arc<str>, BTreeMap<u64, usize>>,
     /// The pass of each run whose `run` line was read.
     passes: HashMap<u64, u64>,
+    /// The newest pass any indexed `run` line told.
+    newest: u64,
+    /// The months a pass met `busy` and did not read, with the run that met
+    /// each: series, then pass (0 is "not told"), then month.
+    busy: HashMap<Arc<str>, BTreeMap<u64, BTreeMap<String, u64>>>,
+    /// How many months each pass met busy, over every series.
+    busy_in: BTreeMap<u64, usize>,
     /// Bytes of the ledger indexed: the offset after the last whole line read.
     pub(crate) indexed_bytes: u64,
     /// Whether ledger bytes past `indexed_bytes` were left for the next
@@ -355,6 +411,7 @@ impl Index {
                     field(line, "pass").and_then(|value| value.parse::<u64>().ok()),
                 ) {
                     self.passes.insert(run, pass);
+                    self.newest = self.newest.max(pass);
                 }
                 continue;
             }
@@ -363,6 +420,8 @@ impl Index {
                 "unverifiable" => "unverifiable",
                 "misfiled" => "misfiled",
                 "missing" => "missing",
+                // NOT READ, which is not "read and found clean": see `keep`.
+                "busy" => "busy",
                 _ => continue,
             };
             let Some((series, file)) = second.rsplit_once('/') else {
@@ -381,6 +440,10 @@ impl Index {
                 Some((block, first.parse().ok()?, last.parse().ok()?))
             });
             let pass = self.passes.get(&run).copied().unwrap_or(0);
+            if kind == "busy" {
+                self.keep(series, month, pass, run);
+                continue;
+            }
             self.put(
                 series,
                 Finding {
@@ -389,38 +452,121 @@ impl Index {
                     block,
                     pass,
                     run,
+                    kept: None,
                     why: capped_at(why, MAX_WHY),
                 },
             );
         }
     }
 
-    /// Files one finding of `series` under its pass, taking it out of the
-    /// pass that held it before.
+    /// The one allocation of `series`' name, shared by everything that names
+    /// the series.
+    fn name_of(&mut self, series: &str) -> Arc<str> {
+        if let Some((name, _)) = self.series.get_key_value(series) {
+            return Arc::clone(name);
+        }
+        let name: Arc<str> = Arc::from(series);
+        self.series.insert(Arc::clone(&name), BTreeMap::new());
+        name
+    }
+
+    /// Files one finding of `series` under the pass that found it, taking it
+    /// out of the pass that held it before.
+    ///
+    /// A finding line of a dated pass says the pass READ the month. So when
+    /// an earlier run of the same pass met that month busy — it was killed,
+    /// and the run that resumed the pass read the month — the busy mark is
+    /// taken away and what that mark kept is released to the pass before
+    /// ([`Index::release`]): the month's findings are then what this run
+    /// finds, line by line, and what it does not find lapses with the pass.
+    /// A run that cannot be dated releases nothing: which pass read the
+    /// month cannot be told.
     fn put(&mut self, series: &str, finding: Finding) {
-        let name = if let Some((name, _)) = self.series.get_key_value(series) {
-            Arc::clone(name)
-        } else {
-            let name: Arc<str> = Arc::from(series);
-            self.series.insert(Arc::clone(&name), BTreeMap::new());
-            name
-        };
+        let name = self.name_of(series);
         let pass = finding.pass;
+        if pass > 0 && self.unmark(&name, pass, &finding.month) {
+            self.release(&name, &finding.month, pass);
+        }
         let key: Key = (
             name,
             finding.month.clone(),
             finding.block.map(|(block, _, _)| block),
             finding.kind,
         );
-        let older = self.at.insert(key.clone(), pass);
-        if let Some(older) = older.filter(|older| *older != pass) {
+        self.file(key, finding, pass);
+    }
+
+    /// Takes away the busy mark of `month` for `pass`; whether there was one.
+    fn unmark(&mut self, name: &Arc<str>, pass: u64, month: &str) -> bool {
+        let Some(marks) = self.busy.get_mut(name) else {
+            return false;
+        };
+        let Some(months) = marks.get_mut(&pass) else {
+            return false;
+        };
+        if months.remove(month).is_none() {
+            return false;
+        }
+        if months.is_empty() {
+            marks.remove(&pass);
+        }
+        if let Some(count) = self.busy_in.get_mut(&pass) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.busy_in.remove(&pass);
+            }
+        }
+        true
+    }
+
+    /// Undoes what `pass`'s busy mark on `month` kept: each finding of the
+    /// month that stands under `pass` only because the pass met it busy goes
+    /// back under the pass before — where it stood — kept by THAT pass's busy
+    /// mark when it was not that pass's own finding. O(log findings +
+    /// findings of the month).
+    fn release(&mut self, name: &Arc<str>, month: &str, pass: u64) {
+        let Some(before) = pass.checked_sub(1).filter(|before| *before > 0) else {
+            return;
+        };
+        let from: Key = (Arc::clone(name), month.to_owned(), None, "");
+        let keys: Vec<Key> = self.by_pass.get(&pass).map_or_else(Vec::new, |held| {
+            held.range(&from..)
+                .take_while(|(key, _)| key.0 == *name && key.1 == month)
+                .filter(|(_, finding)| finding.kept.is_some_and(|(by, _)| by == pass))
+                .map(|(key, _)| key.clone())
+                .collect()
+        });
+        let earlier = self
+            .busy
+            .get(name)
+            .and_then(|marks| marks.get(&before))
+            .and_then(|months| months.get(month))
+            .copied();
+        for key in keys {
+            let Some(mut finding) = self
+                .by_pass
+                .get_mut(&pass)
+                .and_then(|held| held.remove(&key))
+            else {
+                continue;
+            };
+            finding.kept = (finding.pass != before).then(|| (before, earlier.unwrap_or_default()));
+            self.file(key, finding, before);
+        }
+    }
+
+    /// Files `finding` under the pass `under`, taking the finding of the same
+    /// key out of the pass that held it before.
+    fn file(&mut self, key: Key, finding: Finding, under: u64) {
+        let older = self.at.insert(key.clone(), under);
+        if let Some(older) = older.filter(|older| *older != under) {
             if let Some(held) = self.by_pass.get_mut(&older) {
                 held.remove(&key);
                 if held.is_empty() {
                     self.by_pass.remove(&older);
                 }
             }
-            if let Some(counts) = self.series.get_mut(series)
+            if let Some(counts) = self.series.get_mut(&*key.0)
                 && let Some(count) = counts.get_mut(&older)
             {
                 *count = count.saturating_sub(1);
@@ -429,12 +575,86 @@ impl Index {
                 }
             }
         }
-        if older != Some(pass)
-            && let Some(counts) = self.series.get_mut(series)
+        if older != Some(under)
+            && let Some(counts) = self.series.get_mut(&*key.0)
         {
-            *counts.entry(pass).or_default() += 1;
+            *counts.entry(under).or_default() += 1;
         }
-        self.by_pass.entry(pass).or_default().insert(key, finding);
+        self.by_pass.entry(under).or_default().insert(key, finding);
+    }
+
+    /// A `busy` line: the run `run` of `pass` met `month` of `series` held by
+    /// a writer and DID NOT READ IT.
+    ///
+    /// The month is marked busy for that pass, and every finding that stood
+    /// in it when the pass began is filed under the pass with `kept` set, so
+    /// it stands for as long as that pass's own findings do: a pass that did
+    /// not read a month says nothing about its blocks, and skipping the line
+    /// read that silence as "read again, and clean" (see the module header).
+    ///
+    /// What stood when pass `pass` began is what the pass before it holds:
+    /// passes run one after another, and each `busy` carries a month's
+    /// findings forward by one, so one ordered seek in ONE pass's map finds
+    /// them — O(log findings + findings of that month), never a walk. A run
+    /// that cannot be dated (pass 0) keeps what the newest told pass and the
+    /// one before it hold, under pass 0: it stands until found again.
+    fn keep(&mut self, series: &str, month: &str, pass: u64, run: u64) {
+        let name = self.name_of(series);
+        if self
+            .busy
+            .entry(Arc::clone(&name))
+            .or_default()
+            .entry(pass)
+            .or_default()
+            .insert(month.to_owned(), run)
+            .is_none()
+        {
+            *self.busy_in.entry(pass).or_default() += 1;
+        }
+        let sources: Vec<u64> = if pass == 0 {
+            self.by_pass
+                .range(self.newest.saturating_sub(1).max(1)..)
+                .map(|(of, _)| *of)
+                .collect()
+        } else {
+            // PASS 0 IS NEVER A SOURCE: what cannot be dated already stands.
+            pass.checked_sub(1)
+                .filter(|before| *before > 0)
+                .into_iter()
+                .collect()
+        };
+        let from: Key = (Arc::clone(&name), month.to_owned(), None, "");
+        // WHAT AN EARLIER RUN OF THIS PASS ALREADY KEPT is kept by this run
+        // now: the finding and the month's busy mark name one run.
+        if let Some(held) = self.by_pass.get_mut(&pass) {
+            for (_, finding) in held
+                .range_mut(&from..)
+                .take_while(|(key, _)| *key.0 == *series && key.1 == month)
+            {
+                if finding.kept.is_some() {
+                    finding.kept = Some((pass, run));
+                }
+            }
+        }
+        for source in sources {
+            let keys: Vec<Key> = self.by_pass.get(&source).map_or_else(Vec::new, |held| {
+                held.range(&from..)
+                    .take_while(|(key, _)| *key.0 == *series && key.1 == month)
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            });
+            for key in keys {
+                let Some(mut finding) = self
+                    .by_pass
+                    .get_mut(&source)
+                    .and_then(|held| held.remove(&key))
+                else {
+                    continue;
+                };
+                finding.kept = Some((pass, run));
+                self.file(key, finding, pass);
+            }
+        }
     }
 
     /// The index of `text`'s whole lines.
@@ -493,6 +713,68 @@ impl Index {
             0
         };
         counts
+            .range(from_pass..)
+            .map(|(_, count)| *count)
+            .sum::<usize>()
+            .saturating_add(untold)
+    }
+
+    /// The busy maps of `series` that still stand at `from_pass`, with their
+    /// pass: the one of no told pass and every pass from it on — at most the
+    /// last complete pass and the one running.
+    fn standing_busy_maps(
+        &self,
+        series: &str,
+        from_pass: u64,
+    ) -> impl Iterator<Item = (u64, &BTreeMap<String, u64>)> {
+        let marks = self.busy.get(series);
+        let untold = marks
+            .filter(|_| from_pass > 0)
+            .and_then(|marks| marks.get(&0))
+            .map(|months| (0, months));
+        untold.into_iter().chain(
+            marks
+                .into_iter()
+                .flat_map(move |marks| marks.range(from_pass..))
+                .map(|(pass, months)| (*pass, months)),
+        )
+    }
+
+    /// The first `most` months of `series` that a standing pass met busy and
+    /// did not read, as (month, pass, run), in pass then month order.
+    pub(crate) fn first_busy(
+        &self,
+        series: &str,
+        from_pass: u64,
+        most: usize,
+    ) -> Vec<(&str, u64, u64)> {
+        self.standing_busy_maps(series, from_pass)
+            .flat_map(|(pass, months)| {
+                months
+                    .iter()
+                    .map(move |(month, run)| (month.as_str(), pass, *run))
+            })
+            .take(most)
+            .collect()
+    }
+
+    /// How many months of `series` the standing passes met busy: a sum over
+    /// those passes, never a walk of the months.
+    pub(crate) fn busy_in(&self, series: &str, from_pass: u64) -> usize {
+        self.standing_busy_maps(series, from_pass)
+            .map(|(_, months)| months.len())
+            .sum()
+    }
+
+    /// How many months of the vendor the standing passes met busy and did
+    /// not read: a sum over those passes.
+    pub(crate) fn busy_count(&self, from_pass: u64) -> usize {
+        let untold = if from_pass > 0 {
+            self.busy_in.get(&0).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        self.busy_in
             .range(from_pass..)
             .map(|(_, count)| *count)
             .sum::<usize>()
@@ -916,7 +1198,7 @@ pub(crate) fn answer(root: &Path, query: &str) -> Result<String, String> {
         let mut out = String::new();
         let _ = write!(
             out,
-            r#","recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"indexed_bytes":{},"truncated":{},"series":["#,
+            r#","recorded":true,"pass":{},"state":{},"totals":{},"standing_from_pass":{from_pass},"standing_findings":{},"standing_busy":{},"indexed_bytes":{},"truncated":{},"series":["#,
             state.pass,
             render::json_string(if state.complete {
                 "complete"
@@ -925,6 +1207,7 @@ pub(crate) fn answer(root: &Path, query: &str) -> Result<String, String> {
             }),
             state.totals_json(),
             found.standing_count(from_pass),
+            found.busy_count(from_pass),
             found.indexed_bytes,
             found.truncated
         );
@@ -932,23 +1215,7 @@ pub(crate) fn answer(root: &Path, query: &str) -> Result<String, String> {
             if n > 0 {
                 out.push(',');
             }
-            let standing = found.first_standing(dir, from_pass, MAX_FINDINGS);
-            let _ = write!(
-                out,
-                r#"{{"key":{},"timeframe":{},"more":{},"findings":["#,
-                render::json_string(text),
-                render::json_string(timeframe.as_str()),
-                found
-                    .standing_in(dir, from_pass)
-                    .saturating_sub(standing.len())
-            );
-            for (m, finding) in standing.iter().enumerate() {
-                if m > 0 {
-                    out.push(',');
-                }
-                finding_json(&mut out, finding);
-            }
-            out.push_str("]}");
+            series_json(&mut out, found, (text, dir.as_str()), timeframe, from_pass);
         }
         out.push_str("]}");
         out
@@ -966,12 +1233,58 @@ pub(crate) fn answer(root: &Path, query: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// One series' object of the answer: its first standing findings, how many
+/// more stand, and the months a standing pass met busy and did not read.
+fn series_json(
+    out: &mut String,
+    found: &Index,
+    (text, dir): (&str, &str),
+    timeframe: store::path::Timeframe,
+    from_pass: u64,
+) {
+    let standing = found.first_standing(dir, from_pass, MAX_FINDINGS);
+    let _ = write!(
+        out,
+        r#"{{"key":{},"timeframe":{},"more":{},"findings":["#,
+        render::json_string(text),
+        render::json_string(timeframe.as_str()),
+        found
+            .standing_in(dir, from_pass)
+            .saturating_sub(standing.len())
+    );
+    for (m, finding) in standing.iter().enumerate() {
+        if m > 0 {
+            out.push(',');
+        }
+        finding_json(out, finding);
+    }
+    // THE MONTHS A STANDING PASS DID NOT READ: a pass that met a
+    // month busy does not vouch for it, and says so by name.
+    let busy = found.first_busy(dir, from_pass, MAX_FINDINGS);
+    out.push_str(r#"],"busy":["#);
+    for (m, (month, pass, run)) in busy.iter().enumerate() {
+        if m > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"month":{},"pass":{pass},"run":{run}}}"#,
+            render::json_string(month)
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"busy_more":{}}}"#,
+        found.busy_in(dir, from_pass).saturating_sub(busy.len())
+    );
+}
+
 /// One finding as JSON.
 pub(crate) fn finding_json(out: &mut String, finding: &Finding) {
     let number = |value: Option<u64>| value.map_or_else(|| "null".to_owned(), |n| n.to_string());
     let _ = write!(
         out,
-        r#"{{"kind":{},"month":{},"block":{},"first":{},"last":{},"pass":{},"run":{},"why":{}}}"#,
+        r#"{{"kind":{},"month":{},"block":{},"first":{},"last":{},"pass":{},"run":{},"kept_pass":{},"kept_run":{},"why":{}}}"#,
         render::json_string(finding.kind),
         render::json_string(&finding.month),
         number(finding.block.map(|(block, _, _)| block)),
@@ -979,6 +1292,8 @@ pub(crate) fn finding_json(out: &mut String, finding: &Finding) {
         number(finding.block.map(|(_, _, last)| last)),
         finding.pass,
         finding.run,
+        number(finding.kept.map(|(pass, _)| pass)),
+        number(finding.kept.map(|(_, run)| run)),
         render::json_string(&finding.why)
     );
 }
@@ -1105,8 +1420,12 @@ mod tests {
         assert_eq!(
             findings[0],
             serde_json::json!({"kind":"bad","month":"2020-07","block":21,"first":1533,"last":1605,
-                "pass":2,"run":200,"why":"block 21 sealed 1 computed 2"})
+                "pass":2,"run":200,"kept_pass":null,"kept_run":null,
+                "why":"block 21 sealed 1 computed 2"})
         );
+        // PASS 1's busy month is pass 1's: pass 2 completed and read it.
+        assert_eq!(nifty["busy"], serde_json::json!([]));
+        assert_eq!(parsed["standing_busy"], 0);
         assert_eq!(findings[1]["kind"], "missing");
         assert_eq!(findings[1]["month"], "2020-11");
         assert!(findings[1]["block"].is_null());
@@ -1143,7 +1462,438 @@ mod tests {
             ],
             "{body}"
         );
+        // ... and the month pass 1 met busy, with no finding to keep, is
+        // named as not read by it: pass 1 does not vouch for 2020-10.
+        assert_eq!(
+            parsed["series"][0]["busy"],
+            serde_json::json!([{"month":"2020-10","pass":1,"run":100}])
+        );
+        assert_eq!(parsed["series"][0]["busy_more"], 0);
+        assert_eq!(parsed["standing_busy"], 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One `done` cursor line of `pass` with `busy` months.
+    fn done_line(run: u64, pass: u64, busy: u64) -> String {
+        format!(
+            "done run={run} pass={pass} months=4 blocks=9 bad=0 unverifiable=0 misfiled=0 \
+             unbound=0 busy={busy} missing=0\n"
+        )
+    }
+
+    /// **A MONTH A PASS MET BUSY KEEPS WHAT EARLIER PASSES FOUND IN IT, AND
+    /// IS NAMED AS NOT READ (DB-B74; WP-81 repair 3).** Pass 1 found two bad
+    /// blocks and a short sidecar in NIFTY 2020-07, one bad block in 2020-08
+    /// and one in BANKNIFTY 2020-07. Pass 2 met NIFTY 2020-07 held by a
+    /// writer (`busy`), read every other month clean, and completed.
+    ///
+    /// Before this the `busy` line was skipped, so with pass 2 complete the
+    /// answer was `findings: []` for NIFTY — "pass 2 names no damaged block"
+    /// on /db and "0 bad blocks" on /ingest, while no pass had read 2020-07
+    /// again and its block was still refused on read (second agent, 12 Oct
+    /// 2026, on a clone of the operator's NIFTY 1s 2020-07). Now the three
+    /// findings of the busy month stand, each saying the pass that found it
+    /// AND the pass that kept it; the two a complete pass read clean are gone;
+    /// and the month is named busy. A third pass that meets it busy again
+    /// keeps them again; a fourth that reads it keeps only what it finds.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one month followed through five passes, every answer asserted"
+    )]
+    fn a_month_a_pass_met_busy_keeps_its_findings_and_is_named_as_not_read() {
+        let root = root_of("scrub-route-busy");
+        let nifty = "bars/gdfl/NSE/INDEX/NIFTY/1s";
+        let bank = "bars/gdfl/NSE/INDEX/BANKNIFTY/1s";
+        let ask = "feed=gdfl&timeframe=1s&key=NSE-INDEX-NIFTY&key=NSE-INDEX-BANKNIFTY";
+        let asked = |root: &Path| -> serde_json::Value {
+            serde_json::from_str(&answer(root, ask).expect("answered")).expect("JSON")
+        };
+        let mut cursor = done_line(100, 1, 0);
+        let mut ledger = format!(
+            "run 100 vendor=gdfl commit=unstamped pass=1 resume=-\n\
+             bad {nifty}/2020-07.bin block=16 records=1168-1240 run=100 why=was sealed 1 and now reads 2\n\
+             bad {nifty}/2020-07.bin block=40 records=2920-2992 run=100 why=was sealed 3 and now reads 4\n\
+             unverifiable {nifty}/2020-07.bin run=100 why=its sidecar is short\n\
+             bad {nifty}/2020-08.bin block=4 records=292-364 run=100 why=was sealed 5 and now reads 6\n\
+             bad {bank}/2020-07.bin block=2 records=146-218 run=100 why=was sealed 7 and now reads 8\n"
+        );
+        write(&root, Vendor::Gdfl, &cursor, &ledger);
+        let first = asked(&root);
+        assert_eq!(first["standing_findings"], 5);
+        assert_eq!(first["standing_busy"], 0);
+        assert_eq!(first["series"][0]["busy"], serde_json::json!([]));
+
+        // PASS 2: the month is held by a writer when the pass reaches it.
+        cursor.push_str(&done_line(200, 2, 1));
+        let _ = write!(
+            ledger,
+            "run 200 vendor=gdfl commit=unstamped pass=2 resume=-\nbusy {nifty}/2020-07.bin run=200\n"
+        );
+        write(&root, Vendor::Gdfl, &cursor, &ledger);
+        let second = asked(&root);
+        assert_eq!(
+            (&second["pass"], &second["state"]),
+            (&serde_json::json!(2), &serde_json::json!("complete"))
+        );
+        assert_eq!(second["standing_from_pass"], 2);
+        assert_eq!(second["totals"]["busy"], 1);
+        assert_eq!(second["standing_findings"], 3, "{second}");
+        assert_eq!(second["standing_busy"], 1);
+        let kept = second["series"][0]["findings"].as_array().expect("a list");
+        assert_eq!(
+            kept.iter()
+                .map(|f| (
+                    f["month"].as_str().unwrap(),
+                    f["kind"].as_str().unwrap(),
+                    f["block"].as_u64()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("2020-07", "unverifiable", None),
+                ("2020-07", "bad", Some(16)),
+                ("2020-07", "bad", Some(40))
+            ],
+            "{second}"
+        );
+        assert_eq!(
+            kept[1],
+            serde_json::json!({"kind":"bad","month":"2020-07","block":16,"first":1168,"last":1240,
+                "pass":1,"run":100,"kept_pass":2,"kept_run":200,
+                "why":"was sealed 1 and now reads 2"}),
+            "found by pass 1's run, kept by pass 2's"
+        );
+        assert_eq!(second["series"][0]["more"], 0);
+        assert_eq!(
+            second["series"][0]["busy"],
+            serde_json::json!([{"month":"2020-07","pass":2,"run":200}])
+        );
+        assert_eq!(second["series"][0]["busy_more"], 0);
+        // WHAT A COMPLETE PASS READ CLEAN IS GONE: 2020-08 and BANKNIFTY.
+        assert_eq!(second["series"][1]["findings"], serde_json::json!([]));
+        assert_eq!(second["series"][1]["busy"], serde_json::json!([]));
+        // ... and `/disk.json`'s summary names the kept ones too.
+        let tile: serde_json::Value =
+            serde_json::from_str(&super::super::disk_route::scrub_json(&root, Vendor::Gdfl))
+                .expect("JSON");
+        assert_eq!(tile["standing_findings"], 3);
+        assert_eq!(tile["standing_busy"], 1);
+        assert_eq!(tile["named"][1]["finding"]["block"], 16);
+        assert_eq!(tile["named"][1]["finding"]["kept_pass"], 2);
+
+        // PASS 3, IN PROGRESS AND THEN COMPLETE, meets it busy again — twice
+        // in the ledger, a killed run's line and the resumed run's — and it
+        // is one busy month and the same three findings, kept by pass 3.
+        let _ = write!(
+            ledger,
+            "run 300 vendor=gdfl commit=unstamped pass=3 resume=-\nbusy {nifty}/2020-07.bin run=300\n\
+             run 301 vendor=gdfl commit=unstamped pass=3 resume=-\nbusy {nifty}/2020-07.bin run=301\n"
+        );
+        write(
+            &root,
+            Vendor::Gdfl,
+            &format!("{cursor}progress run=301 pass=3 {T1} cursor=x\n"),
+            &ledger,
+        );
+        let running = asked(&root);
+        assert_eq!(running["standing_from_pass"], 2);
+        assert_eq!(running["standing_findings"], 3);
+        assert_eq!(running["standing_busy"], 2, "pass 2's and pass 3's");
+        assert_eq!(
+            running["series"][0]["busy"],
+            serde_json::json!([
+                {"month":"2020-07","pass":2,"run":200},
+                {"month":"2020-07","pass":3,"run":301}
+            ])
+        );
+        cursor.push_str(&done_line(301, 3, 1));
+        write(&root, Vendor::Gdfl, &cursor, &ledger);
+        let third = asked(&root);
+        assert_eq!(third["standing_from_pass"], 3);
+        assert_eq!(third["standing_findings"], 3, "{third}");
+        assert_eq!(third["standing_busy"], 1);
+        for finding in third["series"][0]["findings"].as_array().expect("a list") {
+            assert_eq!(
+                (&finding["pass"], &finding["run"]),
+                (&serde_json::json!(1), &serde_json::json!(100))
+            );
+            assert_eq!(
+                (&finding["kept_pass"], &finding["kept_run"]),
+                (&serde_json::json!(3), &serde_json::json!(301))
+            );
+        }
+
+        // PASS 4: a run meets it busy and is killed; the run that resumes
+        // the pass READS it and finds block 16 alone. The month was read:
+        // no busy mark, block 16 is pass 4's own finding, and block 40 and
+        // the sidecar — read again by a complete pass and not found — are gone.
+        let _ = write!(
+            ledger,
+            "run 400 vendor=gdfl commit=unstamped pass=4 resume=-\nbusy {nifty}/2020-07.bin run=400\n\
+             run 401 vendor=gdfl commit=unstamped pass=4 resume=-\n\
+             bad {nifty}/2020-07.bin block=16 records=1168-1240 run=401 why=was sealed 1 and now reads 2\n"
+        );
+        cursor.push_str(&done_line(401, 4, 0));
+        write(&root, Vendor::Gdfl, &cursor, &ledger);
+        let fourth = asked(&root);
+        assert_eq!(fourth["standing_findings"], 1, "{fourth}");
+        assert_eq!(fourth["standing_busy"], 0);
+        assert_eq!(fourth["series"][0]["busy"], serde_json::json!([]));
+        assert_eq!(
+            fourth["series"][0]["findings"],
+            serde_json::json!([{"kind":"bad","month":"2020-07","block":16,"first":1168,"last":1240,
+                "pass":4,"run":401,"kept_pass":null,"kept_run":null,
+                "why":"was sealed 1 and now reads 2"}])
+        );
+
+        // PASS 5 reads it clean: nothing stands, nothing is busy.
+        ledger.push_str("run 500 vendor=gdfl commit=unstamped pass=5 resume=-\n");
+        cursor.push_str(&done_line(500, 5, 0));
+        write(&root, Vendor::Gdfl, &cursor, &ledger);
+        let fifth = asked(&root);
+        assert_eq!(fifth["standing_findings"], 0);
+        assert_eq!(fifth["series"][0]["findings"], serde_json::json!([]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The edges of a `busy` line: a month with nothing found in it is only
+    /// named; a month of ANOTHER series or another month keeps nothing; a
+    /// busy line of the first pass has no earlier pass to keep from; a run
+    /// that cannot be dated keeps what the newest passes hold as "not told",
+    /// which stands until a dated pass finds it again; and a line that names
+    /// no month file is no busy line.
+    #[test]
+    fn the_edges_of_a_busy_line() {
+        let a = "bars/gdfl/NSE/INDEX/A/1s";
+        let b = "bars/gdfl/NSE/INDEX/AB/1s";
+        let ledger = format!(
+            "busy {a}/2020-01.bin run=10\n\
+             run 10 vendor=gdfl commit=c pass=1 resume=-\n\
+             busy {a}/2020-02.bin run=10\n\
+             bad {a}/2020-03.bin block=1 records=73-145 run=10 why=crc\n\
+             bad {b}/2020-03.bin block=2 records=146-218 run=10 why=crc\n\
+             missing {a}/2020-04.bin run=10\n\
+             run 20 vendor=gdfl commit=c pass=2 resume=-\n\
+             busy {b}/2020-03.bin run=20\n\
+             busy {a}/2020-05.bin run=20\n\
+             busy {a}/2020-04.bin run=20\n\
+             busy {a}/nothing run=20\n\
+             busy\n\
+             busy {a}/2020-04.bin\n"
+        );
+        let index = Index::of(&ledger);
+        // PASS 2 COMPLETE: A's bad block of 2020-03 was read clean by pass 2
+        // (no line), so it is gone; A's missing 2020-04 and AB's bad block
+        // were met busy, so they stand, kept by pass 2's run.
+        let kept: Vec<(&str, Option<(u64, u64)>)> = index
+            .standing(a, 2)
+            .iter()
+            .map(|f| (f.month.as_str(), f.kept))
+            .collect();
+        // THE LAST LINE names no run: it cannot be dated, so what pass 2
+        // holds of 2020-04 is kept as "not told" (pass 0, run 0).
+        assert_eq!(kept, [("2020-04", Some((0, 0)))]);
+        assert_eq!(index.standing(a, 9).len(), 1, "undated, so it stands on");
+        let other: Vec<(&str, Option<(u64, u64)>)> = index
+            .standing(b, 2)
+            .iter()
+            .map(|f| (f.month.as_str(), f.kept))
+            .collect();
+        assert_eq!(
+            other,
+            [("2020-03", Some((2, 20)))],
+            "A's 2020-03 is not AB's"
+        );
+        assert!(index.standing(b, 3).is_empty(), "a pass that read it clean");
+        // BUSY MONTHS: the undated ones (the first line, before any `run`
+        // line, and the last) stand at every pass; pass 1's and pass 2's
+        // stand from their pass on.
+        assert_eq!(
+            index.first_busy(a, 1, 9),
+            [
+                ("2020-01", 0, 10),
+                ("2020-04", 0, 0),
+                ("2020-02", 1, 10),
+                ("2020-04", 2, 20),
+                ("2020-05", 2, 20)
+            ]
+        );
+        assert_eq!(index.busy_in(a, 1), 5);
+        assert_eq!(index.busy_in(a, 2), 4);
+        assert_eq!(index.busy_in(a, 3), 2);
+        assert_eq!(index.first_busy(a, 2, 3).len(), 3, "capped");
+        assert_eq!(index.first_busy(b, 2, 9), [("2020-03", 2, 20)]);
+        assert_eq!(index.busy_count(2), 5);
+        assert_eq!(index.busy_count(3), 2);
+        assert_eq!(index.busy_count(0), 6, "every month ever met busy");
+        assert_eq!(index.busy_in("bars/gdfl/NSE/INDEX/NONE/1s", 0), 0);
+        // A DATED PASS THAT FINDS THE UNDATED FINDING AGAIN dates it.
+        let mut found = index.clone();
+        found.extend(&format!(
+            "run 30 vendor=gdfl commit=c pass=3 resume=-\nmissing {a}/2020-04.bin run=30\n"
+        ));
+        let again = found.standing(a, 3);
+        assert_eq!((again.len(), again[0].pass, again[0].kept), (1, 3, None));
+        assert!(found.standing(a, 4).is_empty());
+    }
+
+    /// **THE INDEX KEEPS EXACTLY WHAT THE RULE KEEPS, ON A LEDGER OF BUSY
+    /// MONTHS (WP-81 repair 3).** 12,000 lines over 40 series, 12 months and
+    /// six passes, one line in eight a `busy`, some by a run with no `run`
+    /// line, indexed in pieces. A model applies the rule of the module header
+    /// by WALKING every finding at each busy line — what the index must agree
+    /// with while it seeks one pass's map. Every standing set, count and busy
+    /// list is compared at every pass.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one ledger, one model, and every question asked of both"
+    )]
+    fn the_index_keeps_what_a_walk_of_every_finding_at_each_busy_line_keeps() {
+        type Same = (String, String, Option<u64>, &'static str);
+        // (the pass it stands under, the pass that found it, who kept it)
+        type Held = (u64, u64, Option<(u64, u64)>);
+        // (month, block, kind, the pass that found it, who kept it)
+        type Row<'a> = (&'a str, Option<u64>, &'a str, u64, Option<(u64, u64)>);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |below: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % below
+        };
+        let mut ledger = String::new();
+        let mut model: BTreeMap<Same, Held> = BTreeMap::new();
+        // (series, pass, month) -> run
+        let mut marks: BTreeMap<(String, u64, String), u64> = BTreeMap::new();
+        for pass in 1..=6_u64 {
+            let told = pass * 10;
+            let _ = writeln!(
+                ledger,
+                "run {told} vendor=groww commit=c pass={pass} resume=-"
+            );
+            let newest = pass;
+            for _ in 0..2_000 {
+                let series = format!("bars/groww/NSE/CASH/S{}/1min", next(40));
+                let month = format!("2024-{:02}", 1 + next(12));
+                // RUN 7 HAS NO `run` LINE: it cannot be dated.
+                let (run, dated) = if next(25) == 0 { (7, 0) } else { (told, pass) };
+                let file = format!("{series}/{month}.bin");
+                if next(8) == 0 {
+                    let _ = writeln!(ledger, "busy {file} run={run}");
+                    marks.insert((series.clone(), dated, month.clone()), run);
+                    for (same, held) in &mut model {
+                        if same.0 != series || same.1 != month {
+                            continue;
+                        }
+                        let stood = if dated == 0 {
+                            held.0 >= newest.saturating_sub(1).max(1)
+                        } else {
+                            held.0 > 0 && held.0 + 1 == dated
+                        };
+                        if stood || (held.0 == dated && held.2.is_some()) {
+                            *held = (dated, held.1, Some((dated, run)));
+                        }
+                    }
+                    continue;
+                }
+                let (kind, block) = match next(3) {
+                    0 => ("missing", None),
+                    1 => ("unverifiable", None),
+                    _ => ("bad", Some(next(4))),
+                };
+                let _ = match block {
+                    Some(block) => writeln!(
+                        ledger,
+                        "bad {file} block={block} records={}-{} run={run} why=crc",
+                        block * 73,
+                        block * 73 + 72
+                    ),
+                    None => writeln!(ledger, "{kind} {file} run={run} why=said"),
+                };
+                // A DATED PASS READ THE MONTH: its busy mark goes, and what
+                // the mark kept goes back under the pass before.
+                if dated > 0
+                    && marks
+                        .remove(&(series.clone(), dated, month.clone()))
+                        .is_some()
+                {
+                    let earlier = marks
+                        .get(&(series.clone(), dated - 1, month.clone()))
+                        .copied();
+                    for (same, held) in &mut model {
+                        if same.0 == series
+                            && same.1 == month
+                            && held.0 == dated
+                            && held.2.is_some_and(|(by, _)| by == dated)
+                        {
+                            let kept = (held.1 != dated - 1)
+                                .then(|| (dated - 1, earlier.unwrap_or_default()));
+                            *held = (dated - 1, held.1, kept);
+                        }
+                    }
+                }
+                model.insert((series, month, block, kind), (dated, dated, None));
+            }
+        }
+        let mut index = Index::default();
+        let mut from = 0;
+        while from < ledger.len() {
+            let upto = (from + 9_000).min(ledger.len());
+            let end = ledger[..upto].rfind('\n').map_or(ledger.len(), |at| at + 1);
+            index.extend(&ledger[from..end]);
+            from = end;
+        }
+        assert!(
+            model.values().filter(|held| held.2.is_some()).count() > 200,
+            "the ledger must keep findings for the comparison to mean anything"
+        );
+        for from_pass in 0..=7_u64 {
+            let stands = |under: u64| under == 0 || under >= from_pass;
+            let all: Vec<(&Same, &Held)> =
+                model.iter().filter(|(_, held)| stands(held.0)).collect();
+            assert_eq!(
+                index.standing_count(from_pass),
+                all.len(),
+                "pass {from_pass}"
+            );
+            assert_eq!(
+                index.busy_count(from_pass),
+                marks.keys().filter(|mark| stands(mark.1)).count(),
+                "busy at pass {from_pass}"
+            );
+            for series in 0..40_u64 {
+                let dir = format!("bars/groww/NSE/CASH/S{series}/1min");
+                let modelled: Vec<Row<'_>> = all
+                    .iter()
+                    .filter(|(same, _)| same.0 == dir)
+                    .map(|(same, held)| (same.1.as_str(), same.2, same.3, held.1, held.2))
+                    .collect();
+                let indexed: Vec<Row<'_>> = index
+                    .standing(&dir, from_pass)
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.month.as_str(),
+                            f.block.map(|b| b.0),
+                            f.kind,
+                            f.pass,
+                            f.kept,
+                        )
+                    })
+                    .collect();
+                assert_eq!(indexed, modelled, "S{series} from pass {from_pass}");
+                assert_eq!(index.standing_in(&dir, from_pass), modelled.len());
+                let mut busy: Vec<(&str, u64, u64)> = marks
+                    .iter()
+                    .filter(|(mark, _)| mark.0 == dir && stands(mark.1))
+                    .map(|(mark, run)| (mark.2.as_str(), mark.1, *run))
+                    .collect();
+                busy.sort_by_key(|(month, pass, _)| (*pass, *month));
+                assert_eq!(index.first_busy(&dir, from_pass, usize::MAX), busy);
+                assert_eq!(index.busy_in(&dir, from_pass), busy.len());
+            }
+        }
     }
 
     /// "Never looked" is not "nothing found"; a vendor's state alone needs no

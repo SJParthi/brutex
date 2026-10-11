@@ -103,7 +103,19 @@ export function scrubText(feeds) {
     if (t.misfiled) found.push(`${t.misfiled} misfiled`);
     if (t.missing) found.push(`${t.missing} missing`);
     if (t.unbound) found.push(`${t.unbound} months bound by symbol hash only`);
-    return `${name}: scrub pass ${scrub.pass} ${state}, ${n('months')} months, ${found.join(', ')}`;
+    // MONTHS A STANDING PASS DID NOT READ (a writer held them: `busy`). The
+    // totals above are what THIS pass found in the months it read; a block an
+    // earlier pass found in a busy month still stands, so the count that
+    // stands is said beside it and a pass with a busy month never reads clean.
+    const busy = typeof scrub.standing_busy === 'number' ? scrub.standing_busy : Number(t.busy) || 0;
+    if (busy > 0) {
+      const standing = typeof scrub.standing_findings === 'number' ? scrub.standing_findings : '?';
+      found.push(`${busy} months NOT READ (busy), ${standing} findings standing with those kept from earlier passes`);
+    }
+    // A HALF-BUILT INDEX COUNTS ONLY WHAT IT HAS REACHED: said, never served
+    // as the whole.
+    const partial = scrub.truncated === true ? ' (findings still being indexed after a restart: counts may be low)' : '';
+    return `${name}: scrub pass ${scrub.pass} ${state}, ${n('months')} months, ${found.join(', ')}${partial}`;
   }).join(' · ');
 }
 
