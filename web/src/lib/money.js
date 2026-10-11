@@ -15,12 +15,23 @@
 export const LOC = 'en-IN';
 
 /**
+ * ONE FORMATTER, MADE ONCE. `Number.prototype.toLocaleString(LOC)` is
+ * defined as formatting with `new Intl.NumberFormat(LOC)` (ECMA-402), and
+ * Chrome builds that formatter on every call: 100,000 calls took 578 ms
+ * there against 19 ms through one kept formatter (headless Chrome, 10 Oct
+ * 2026). /db formats a strike per stored contract while it prepares the
+ * census, 213,581 of them on GDFL, so the per-call build was most of that
+ * preparation (WP-56, DB-G84). Same locale, same options, same output.
+ */
+const GROUPING = new Intl.NumberFormat(LOC);
+
+/**
  * Indian digit grouping — `8,78,28,617` and never `87,828,617`.
  *
  * @param {number | string} n
  * @returns {string}
  */
-export const group = (n) => Number(n).toLocaleString(LOC);
+export const group = (n) => GROUPING.format(Number(n));
 
 /**
  * A paisa integer as a rupee string, always to two places.

@@ -1625,6 +1625,7 @@ pub(crate) use month_change::{Unknown, basis_points};
 use month_change::{month_before, month_change};
 use repair_route::repair_plan_json;
 pub(crate) use store_route::behind as census_behind;
+pub use store_route::census_delta;
 #[cfg(test)]
 use store_route::census_headers;
 pub use store_route::{CENSUS_DEGRADED_HEADER, CENSUS_NOTE_HEADER, CENSUS_STATE_HEADER};

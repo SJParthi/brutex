@@ -69,3 +69,29 @@ test('every page that folds the selected census shows the refusal', () => {
   // The backtest form reads the census directly, and names the refusal.
   assert.match(source('../src/routes/backtest/+page.svelte'), /\$\{censusFailure\(response\)\}/);
 });
+
+/* WP-56: the /db census client's wiring, read off the component source the
+   way `db-seam.test.js` reads it (a component with runes cannot be imported
+   by node). Each assertion names the finding it holds. */
+test('/db prepares the census with no prefix tokens and in real-task slices (DB-B52, DB-G84)', () => {
+  const banner = source('../src/routes/db/DbCensusBanner.svelte');
+  const preparation = banner.match(/databasePreparation\.read\(input,[\s\S]*?\}\)\.then/);
+  assert.ok(preparation, 'the preparation call is where it was');
+  assert.doesNotMatch(preparation[0], /tokens/, 'no prefix index for a search box nothing draws (DB-B52)');
+  assert.match(preparation[0], /yieldControl: yieldTask/, 'slices end the task, so timers and input run (DB-G84)');
+});
+
+test('/db watches the census generation and draws the banner lines with a Refresh (DB-022, DB-G03, DB-G78)', () => {
+  const banner = source('../src/routes/db/DbCensusBanner.svelte');
+  assert.match(banner, /\$effect\(\(\) => watchCensus\(feeds\.active\)\);/);
+  assert.match(banner, /censusMoved\(\{ feed: store\.feed, lag: store\.lag \}, store\.head\)/);
+  assert.match(banner, /facets\.changesSince\(\{ feed, segment, underlying \}, since\)/);
+  assert.match(banner, /\{#each db\.censusBanner as line \(line\.key\)\}/);
+  assert.match(banner, /onclick=\{\(\) => db\.refreshCensus\(\)\}>Refresh<\/button>/);
+});
+
+test('the Everything universe row counts names, the unit of every other row (DB-N07)', () => {
+  const controls = source('../src/routes/db/DbControls.svelte');
+  assert.match(controls, /\$\{fmt\(db\.heldNames\)\} held · \$\{fmt\(db\.deco\.length\)\} instrument-month\(s\)/);
+  assert.doesNotMatch(controls, /`\$\{fmt\(db\.deco\.length\)\} instrument-month\(s\) held`/);
+});

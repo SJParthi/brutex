@@ -64,6 +64,10 @@ const ROUTES = [
 	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
 	'/selection-v6.json',
 	'/store.json',
+	// THE SELECTION'S FACETS (D-3327 item 3, WP-30) and their `?since=`
+	// deltas, read by /db's census banner (WP-56) for what moved for the
+	// instrument on screen.
+	'/census/facets.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
