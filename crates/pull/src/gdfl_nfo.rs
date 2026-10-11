@@ -84,7 +84,9 @@
 //!
 //! # Cost
 //!
-//! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
+//! A yearly zip's central directory is read once per [`NfoZips`] and year,
+//! O(entries in the year zip), and a day is then one hash probe into it
+//! (WP-16). A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
 //! one hash probe (expected O(1), measured by `C-GI-01` in
 //! `crates/pull/benches/ratio.rs`). [`decode_ticker`] is O(ticker length),
 //! bounded by the 64-byte cap it refuses past, plus one settlement (bounded
@@ -1025,13 +1027,36 @@ impl NfoSource for NfoTickStore {
 }
 
 /// The vendor's yearly options zips in one directory, `<yyyy>.zip` each,
-/// read in place: the year's central directory once per day asked
-/// (O(entries in the year zip), about three hundred), the day zip's own
-/// directory once (O(its entries)), and a file by one local header and one
-/// inflate. Nothing is extracted.
+/// read in place: the year zip opened and its central directory walked ONCE
+/// per value and year (O(entries in the year zip), 84 to 265 measured), then
+/// each day one hash probe for its day zip, the day zip's own directory once
+/// (O(its entries)), and a file by one local header and one inflate. Nothing
+/// is extracted.
+///
+/// # The year's directory once per run (WP-16, design F6)
+///
+/// [`NfoSource::day`] reopened the year zip and walked its whole central
+/// directory for every day it was asked, about 260 records to find one name,
+/// 250 times a year. A run holds one `NfoZips`, so the year zip is opened and
+/// its directory indexed the first time a day of that year is asked, and the
+/// open file is reused by every later day and every file read of the run
+/// (`gdfl_nfo_tests::a_year_zip_is_indexed_once_and_each_day_is_one_lookup`).
+/// A year whose zip is absent is asked again each day, so a zip that appears
+/// mid-run is read; one that refuses is not kept, so each day names the
+/// refusal as before. Clones share the index.
 #[derive(Debug, Clone)]
 pub struct NfoZips {
     dir: PathBuf,
+    years: Arc<std::sync::Mutex<HashMap<u16, Arc<YearIndex>>>>,
+}
+
+/// One year zip, open, and its day zips by exact entry name: the entry, or
+/// [`None`] where two records share the name, which every day of that name
+/// refuses as [`CmRefusal::ArchiveDuplicateDay`].
+#[derive(Debug)]
+struct YearIndex {
+    file: Arc<std::fs::File>,
+    days: HashMap<String, Option<ZipEntry>>,
 }
 
 impl NfoZips {
@@ -1040,7 +1065,54 @@ impl NfoZips {
     pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
+            years: Arc::new(std::sync::Mutex::new(HashMap::with_capacity(16))),
         }
+    }
+
+    /// The index of `year`'s zip, built on first use and kept; [`None`] when
+    /// the zip is absent.
+    ///
+    /// # Errors
+    ///
+    /// The zip refusals of [`zip_entries`], and
+    /// [`CmRefusal::ArchiveUnavailable`] for a zip that cannot be opened or
+    /// measured.
+    fn year(&self, year: u16) -> Result<Option<Arc<YearIndex>>, CmRefusal> {
+        let unavailable = |why: std::io::Error| CmRefusal::ArchiveUnavailable { kind: why.kind() };
+        // A poisoned index is still a correct one: every value in it was
+        // inserted whole, after its walk finished.
+        let mut years = self
+            .years
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = years.get(&year) {
+            return Ok(Some(Arc::clone(index)));
+        }
+        let path = self.dir.join(format!("{year:04}.zip"));
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(why) => return Err(unavailable(why)),
+        };
+        let len = file.metadata().map_err(unavailable)?.len();
+        let entries = zip_entries(&file, 0, len)?;
+        let mut days: HashMap<String, Option<ZipEntry>> = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            match days.entry(entry.name.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut twice) => {
+                    twice.insert(None);
+                }
+                std::collections::hash_map::Entry::Vacant(first) => {
+                    first.insert(Some(entry));
+                }
+            }
+        }
+        let index = Arc::new(YearIndex {
+            file: Arc::new(file),
+            days,
+        });
+        years.insert(year, Arc::clone(&index));
+        Ok(Some(index))
     }
 }
 
@@ -1056,15 +1128,15 @@ impl NfoSource for NfoZips {
     type Locator = ZipFileLocator;
 
     fn day(&self, day: Day) -> Result<Option<NfoDay<ZipFileLocator>>, CmRefusal> {
-        let unavailable = |why: std::io::Error| CmRefusal::ArchiveUnavailable { kind: why.kind() };
-        let path = self.dir.join(format!("{:04}.zip", day.year()));
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(why) => return Err(unavailable(why)),
+        let Some(year) = self.year(day.year())? else {
+            return Ok(None);
         };
-        let len = file.metadata().map_err(unavailable)?.len();
-        listing_in(&Arc::new(file), len, day)
+        let want = format!("{}/{}.zip", month_folder(day), day_folder_name(day));
+        match year.days.get(&want) {
+            None => Ok(None),
+            Some(None) => Err(CmRefusal::ArchiveDuplicateDay { day }),
+            Some(Some(inner)) => day_listing(&year.file, inner, day).map(Some),
+        }
     }
 
     fn fetch(&self, file: &ListedFile<ZipFileLocator>) -> Result<Vec<u8>, CmRefusal> {
@@ -1098,7 +1170,21 @@ pub fn listing_in<B: ReadAt>(
     let Some(inner) = inner else {
         return Ok(None);
     };
-    let (base, span) = stored_span(&**file, &inner)?;
+    day_listing(file, &inner, day).map(Some)
+}
+
+/// The listing of `day` from its stored day zip `inner`, a record of the year
+/// zip `file`: the day zip's own directory, read in place.
+///
+/// # Errors
+///
+/// The zip refusals of [`zip_entries`] and [`stored_span`].
+fn day_listing<B: ReadAt>(
+    file: &Arc<B>,
+    inner: &ZipEntry,
+    day: Day,
+) -> Result<NfoDay<ZipFileLocator<B>>, CmRefusal> {
+    let (base, span) = stored_span(&**file, inner)?;
     let members = zip_entries(&**file, base, span)?;
     let mut listing = NfoDay::new(day, members.len()).with_member_bytes(span);
     for entry in members {
@@ -1112,7 +1198,7 @@ pub fn listing_in<B: ReadAt>(
             },
         );
     }
-    Ok(Some(listing))
+    Ok(listing)
 }
 
 /// One decoded row, in file order.

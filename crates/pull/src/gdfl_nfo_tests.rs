@@ -1681,3 +1681,71 @@ fn the_decoders_costs_on_real_days_are_measured() {
         assert_eq!(decoded.len(), names.len(), "{on}: every real name decodes");
     }
 }
+
+/// WP-16 (design F6): A YEAR ZIP IS INDEXED ONCE AND EACH DAY IS ONE
+/// LOOKUP. The first day asked opens the year zip and reads its central
+/// directory; every later day of that year is found in the index and read
+/// through the same open file, so a run never reopens or rewalks it — shown
+/// here by moving the zip away after the first day: the same `NfoZips` still
+/// lists and reads the second day, while a new one finds no year zip at all.
+/// Two records of one day zip in the index refuse that day by name; an absent
+/// year is asked again, so a zip that appears later is read.
+#[test]
+fn a_year_zip_is_indexed_once_and_each_day_is_one_lookup() {
+    let (d1, d2) = (day(2024, 4, 1), day(2024, 4, 2));
+    let ticker = "NIFTY04APR2422000CE";
+    let stem = format!("{ticker}.NFO");
+    let one = file_bytes(ticker, &[(33_300, "10", 75, 300)]);
+    let two = csv(&[row(&stem, d2, 33_301, "11", 50, 310)]);
+    let day_zip = |d: Day, bytes: &[u8]| zip(&[(&entry(d, ticker), bytes, Method::Deflated)]);
+    let (z1, z2) = (day_zip(d1, &one), day_zip(d2, &two));
+    let year = zip(&[
+        ("APR_2024/GFDLNFO_TICK_01042024.zip", &z1, Method::Stored),
+        ("APR_2024/GFDLNFO_TICK_02042024.zip", &z2, Method::Stored),
+        ("APR_2024/GFDLNFO_TICK_03042024.zip", &z2, Method::Stored),
+        ("APR_2024/GFDLNFO_TICK_03042024.zip", &z2, Method::Stored),
+    ]);
+    let root = scratch("nfo-year-once");
+    let at = put(&root.join("zips"), "2024.zip", &year);
+    let zips = NfoZips::new(&root.join("zips"));
+    let first = zips.day(d1).unwrap().unwrap();
+    assert_eq!(
+        read_file(&zips, &first, &first.entries()[0])
+            .unwrap()
+            .file
+            .rows[0]
+            .oi,
+        300
+    );
+
+    std::fs::rename(&at, root.join("moved.zip")).unwrap();
+    assert!(
+        NfoZips::new(&root.join("zips")).day(d2).unwrap().is_none(),
+        "a new source finds no year zip"
+    );
+    let shared = zips.clone();
+    let second = shared.day(d2).unwrap().unwrap();
+    let got = read_file(&shared, &second, &second.entries()[0]).unwrap();
+    assert_eq!(
+        got.file.rows[0].oi, 310,
+        "read through the year zip opened once"
+    );
+    assert_eq!(
+        zips.day(day(2024, 4, 3)).err(),
+        Some(CmRefusal::ArchiveDuplicateDay {
+            day: day(2024, 4, 3)
+        })
+    );
+    assert!(
+        zips.day(day(2024, 4, 4)).unwrap().is_none(),
+        "not in the index"
+    );
+
+    // An absent year is not remembered as absent.
+    assert!(zips.day(day(2025, 4, 1)).unwrap().is_none());
+    let z3 = day_zip(day(2025, 4, 1), &one);
+    let later = zip(&[("APR_2025/GFDLNFO_TICK_01042025.zip", &z3, Method::Stored)]);
+    put(&root.join("zips"), "2025.zip", &later);
+    assert!(zips.day(day(2025, 4, 1)).unwrap().is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}

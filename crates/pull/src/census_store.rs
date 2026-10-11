@@ -1054,6 +1054,117 @@ fn write_whole(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Re
     fs::File::open(dir)?.sync_all()
 }
 
+// ═══ One batch, two flushes (WP-16, DB-N25) ═══════════════════════════════
+
+/// Which of a batch's two flushes [`write_batch_with`] is about to issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BatchBarrier {
+    /// After every entry of the batch is written, before any header slot.
+    Entries,
+    /// After the header slots, before the batch is answered.
+    Slots,
+}
+
+/// Appends a census batch with TWO flushes, however many entries it holds
+/// (WP-16, DB-N25): every entry, one barrier, then the newest commit of each
+/// header slot the batch wrote — the batch's LAST commit first — and one more
+/// barrier.
+///
+/// # Why, and why the bytes are the bytes one entry at a time leaves
+///
+/// One flush per entry and one per slot cost an import day of 5,641 option
+/// files 11,282 flushes, 12.3 s of its 94.5 s on the external drive
+/// (measured on 2020-09-15 into a scratch store, every flush an
+/// `F_FULLFSYNC`). Writing the entries one by one, each followed by its own
+/// commit, overwrites each header slot again and again; the file ends with
+/// every entry at its offset and, in each slot, the LAST commit the batch
+/// gave that slot. That is exactly what this writes, so the bytes after the
+/// batch are the same bytes (`census_store_tests::
+/// a_batch_lands_the_bytes_one_entry_at_a_time_leaves`).
+///
+/// # Crash safety
+///
+/// The slot rule is unchanged: no slot names an entry that is not durable,
+/// because every entry is flushed before the first slot is written (each
+/// commit's [`crate::manifest::Commit::durable_through`] is checked against
+/// the batch's end first, and a batch that would break it is refused before
+/// a byte is written). The batch's last commit is written first, so a crash
+/// between the two slot writes leaves the newest generation naming the whole
+/// batch and the other slot an older generation that names a prefix of it,
+/// which [`crate::manifest::ManifestHeader::read_region`] reads as it reads
+/// any two slots. A crash before the first slot leaves the census as it was.
+/// Where one entry at a time could leave a census holding part of a day, this
+/// leaves all of it or none of it.
+///
+/// `landed` sees the file once its last slot is durable, before its
+/// modification time is moved past the writes (census-1, D-2766).
+///
+/// # Errors
+///
+/// The host's refusal, or a commit whose `durable_through` lies past every
+/// entry of the batch.
+pub(super) fn write_batch(
+    path: &Path,
+    appends: &[Append],
+    landed: impl FnMut(&fs::File),
+) -> std::io::Result<()> {
+    write_batch_with(path, appends, landed, &mut |file, _| file.sync_all())
+}
+
+/// [`write_batch`], with each of its two flushes issued through `barrier`:
+/// the seam a test counts them by, or fails one at.
+pub(super) fn write_batch_with(
+    path: &Path,
+    appends: &[Append],
+    mut landed: impl FnMut(&fs::File),
+    barrier: &mut dyn FnMut(&fs::File, BatchBarrier) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+    let Some(last) = appends.last() else {
+        return Ok(());
+    };
+    // ONE PASS before a byte is written: the batch's end, and every commit
+    // checked against it, so no slot can name an entry the one barrier below
+    // does not cover.
+    let mut end = 0_u64;
+    for append in appends {
+        end = end.max(append.offset.saturating_add(ENTRY_STRIDE));
+    }
+    for append in appends {
+        if append.commit.durable_through > end {
+            return Err(std::io::Error::other(format!(
+                "entry {} would be published through byte {} and the batch ends at {end}; \
+                 nothing was written",
+                append.ordinal, append.commit.durable_through
+            )));
+        }
+    }
+    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    for append in appends {
+        file.write_all_at(&append.bytes, append.offset)?;
+    }
+    // THE BARRIER: every entry is durable before any slot may count it.
+    barrier(&file, BatchBarrier::Entries)?;
+    // THE NEWEST COMMIT OF EACH SLOT, the batch's last first. Two slots
+    // (`manifest::SLOT_COUNT`), so at most two writes: the last commit, then
+    // the newest commit the batch gave the other slot, found walking back
+    // from the end. O(batch), and nothing is allocated.
+    file.write_all_at(&last.commit.bytes, last.commit.offset)?;
+    for append in appends.iter().rev() {
+        if append.commit.offset != last.commit.offset {
+            file.write_all_at(&append.commit.bytes, append.commit.offset)?;
+            break;
+        }
+    }
+    barrier(&file, BatchBarrier::Slots)?;
+    landed(&file);
+    let written = file.metadata()?.modified()?;
+    let past = written
+        .checked_add(std::time::Duration::from_nanos(1))
+        .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+    file.set_modified(std::time::SystemTime::now().max(past))
+}
+
 /// Records a batch of census rows for `vendor` — the door `ingest::record_held`
 /// and the GDFL import use. All-or-nothing PER CENSUS.
 ///

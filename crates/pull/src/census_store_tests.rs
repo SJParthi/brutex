@@ -692,3 +692,151 @@ fn journal_days_and_spans_read_the_store_s_own_spelling() {
     let open = Span { to: None, ..span };
     assert!(open.holds(ym(2026, 9)) && open.contains(Day::new(2026, 9, 30).expect("a day")));
 }
+
+// ═══ One batch, two flushes (WP-16, DB-N25) ═══════════════════════════════
+
+/// A census already holding three rows, and the appends a day of `new` rows
+/// (fresh keys from 100, and key 1 restated) asks of it, with the image they
+/// are appended to.
+fn a_day_of(new: u32) -> (Vec<u8>, Vec<crate::manifest::Append>, Manifest) {
+    let mut census = Manifest::open_image(Vendor::Gdfl, &[]).expect("a genesis census");
+    for n in 0..3 {
+        census
+            .record_held(row(n, 40 + u64::from(n)))
+            .expect("a held row");
+    }
+    let before = census.image();
+    let mut appends = Vec::new();
+    for n in 0..new {
+        let held = if n == 1 { row(1, 99) } else { row(100 + n, 7) };
+        appends.push(census.record_held(held).expect("an append"));
+    }
+    (before, appends, census)
+}
+
+/// The writer this replaced, one entry at a time, each followed by its own
+/// commit — kept here as the reference the batch's bytes are held to.
+fn one_at_a_time(path: &Path, appends: &[crate::manifest::Append]) {
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("the census");
+    for append in appends {
+        file.write_all_at(&append.bytes, append.offset)
+            .expect("the entry");
+        file.write_all_at(&append.commit.bytes, append.commit.offset)
+            .expect("the slot");
+    }
+}
+
+/// A BATCH LANDS THE BYTES ONE ENTRY AT A TIME LEAVES (WP-16, DB-N25): seven
+/// entries, both slots written; one entry, one slot; and the census each loads
+/// is the census the batch was counted into.
+#[test]
+fn a_batch_lands_the_bytes_one_entry_at_a_time_leaves() {
+    let scratch = Scratch::new("batch-bytes");
+    for new in [1_u32, 2, 7] {
+        let (before, appends, census) = a_day_of(new);
+        let reference = scratch.root().join(format!("reference-{new}.man"));
+        let batched = scratch.root().join(format!("batched-{new}.man"));
+        std::fs::write(&reference, &before).expect("reference");
+        std::fs::write(&batched, &before).expect("batched");
+        one_at_a_time(&reference, &appends);
+        super::write_batch(&batched, &appends, |_| {}).expect("the batch lands");
+        let (want, got) = (
+            std::fs::read(&reference).expect("reference"),
+            std::fs::read(&batched).expect("batched"),
+        );
+        assert_ne!(want, before, "{new}: the day changed the census");
+        assert_eq!(got, want, "{new}: the batch's bytes are the reference's");
+        let loaded = Manifest::open_image(Vendor::Gdfl, &got).expect("it loads");
+        assert_eq!(loaded.header(), census.header(), "{new}");
+        assert_eq!(loaded.entries(), 3 + u64::from(new), "{new}");
+    }
+}
+
+/// A BATCH IS TWO FLUSHES HOWEVER LONG IT IS, entries first and slots second;
+/// it was two per entry. And an empty batch opens nothing.
+#[test]
+fn a_batch_is_two_flushes_however_long() {
+    let scratch = Scratch::new("batch-flushes");
+    for new in [1_u32, 7, 40] {
+        let (before, appends, _) = a_day_of(new);
+        let path = scratch.root().join(format!("census-{new}.man"));
+        std::fs::write(&path, &before).expect("census");
+        let mut seen = Vec::new();
+        super::write_batch_with(&path, &appends, |_| {}, &mut |file, step| {
+            seen.push(step);
+            file.sync_all()
+        })
+        .expect("the batch lands");
+        assert_eq!(
+            seen,
+            [super::BatchBarrier::Entries, super::BatchBarrier::Slots],
+            "{new} entries"
+        );
+    }
+    let absent = scratch.root().join("never.man");
+    let mut flushed = 0;
+    super::write_batch_with(&absent, &[], |_| {}, &mut |_, _| {
+        flushed += 1;
+        Ok(())
+    })
+    .expect("nothing to write");
+    assert_eq!(flushed, 0);
+    assert!(!absent.exists(), "an empty batch creates nothing");
+}
+
+/// A CRASH IS ALL OF THE DAY OR NONE OF IT: entries written and their flush
+/// failed leaves no slot naming them, so the census loads as it was; the
+/// batch's last commit alone, the other slot not yet rewritten, already names
+/// the whole batch.
+#[test]
+fn a_crash_inside_a_batch_leaves_all_of_it_or_none() {
+    use std::os::unix::fs::FileExt as _;
+    let scratch = Scratch::new("batch-crash");
+    let (before, appends, census) = a_day_of(7);
+    let path = scratch.root().join("census.man");
+    std::fs::write(&path, &before).expect("census");
+    let refused = super::write_batch_with(&path, &appends, |_| {}, &mut |_, step| match step {
+        super::BatchBarrier::Entries => Err(std::io::Error::other("the drive went away")),
+        super::BatchBarrier::Slots => Ok(()),
+    })
+    .expect_err("the first flush failed");
+    assert!(refused.to_string().contains("went away"), "{refused}");
+    let loaded = Manifest::open_image(Vendor::Gdfl, &std::fs::read(&path).expect("census"))
+        .expect("it loads");
+    assert_eq!(loaded.entries(), 3, "no slot names an entry of the batch");
+
+    let last = appends.last().expect("a last append");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("census");
+    file.write_all_at(&last.commit.bytes, last.commit.offset)
+        .expect("the newest slot alone");
+    let loaded = Manifest::open_image(Vendor::Gdfl, &std::fs::read(&path).expect("census"))
+        .expect("it loads");
+    assert_eq!(
+        loaded.header(),
+        census.header(),
+        "the newest slot names all of it"
+    );
+}
+
+/// A COMMIT PAST THE BATCH IS REFUSED BEFORE A BYTE IS WRITTEN: a slot may
+/// never name an entry the batch's one barrier did not cover.
+#[test]
+fn a_commit_past_the_batch_is_refused_before_a_byte() {
+    let scratch = Scratch::new("batch-past");
+    let (before, mut appends, _) = a_day_of(3);
+    let path = scratch.root().join("census.man");
+    std::fs::write(&path, &before).expect("census");
+    if let Some(first) = appends.first_mut() {
+        first.commit.durable_through = u64::MAX;
+    }
+    let why = super::write_batch(&path, &appends, |_| {}).expect_err("refused");
+    assert!(why.to_string().contains("nothing was written"), "{why}");
+    assert_eq!(std::fs::read(&path).expect("census"), before);
+}

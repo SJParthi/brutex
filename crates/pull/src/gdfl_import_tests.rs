@@ -956,6 +956,7 @@ fn a_day_with_only_vendor_refusals_closes_done_and_is_not_read_again() {
     let retry = RunOptions {
         origin: None,
         retry_refused: true,
+        ..RunOptions::default()
     };
     let retried = run_nfo_from(&NfoTickStore::new(&root.join("ts")), &run, retry).unwrap();
     assert_eq!((retried.days_skipped, retried.days_imported), (0, 1));
@@ -1549,6 +1550,7 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
     let options = RunOptions {
         origin: Some(&origin),
         retry_refused: false,
+        ..RunOptions::default()
     };
     run_cm_from(&TickStore::new(&ts), &run, options).unwrap();
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
@@ -1577,6 +1579,7 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
     let options = RunOptions {
         origin: Some(&zips),
         retry_refused: false,
+        ..RunOptions::default()
     };
     run_nfo_from(&NfoZips::new(&root.join("zips/options")), &opt, options).unwrap();
     let text = std::fs::read_to_string(journal_path(&store)).unwrap();
@@ -3052,6 +3055,7 @@ fn run_from(
     let options = RunOptions {
         origin: origin.then_some(&measured),
         retry_refused: false,
+        ..RunOptions::default()
     };
     match (src, kind) {
         (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
@@ -3893,6 +3897,7 @@ fn a_refused_provenance_record_is_named_and_leaves_the_day_open() {
     let options = RunOptions {
         origin: Some(&origin),
         retry_refused: false,
+        ..RunOptions::default()
     };
     let got = run_cm_from(&TickStore::new(&root.join("ts")), &run, options).unwrap();
     assert_eq!(got.closed_incomplete, vec![d1()]);
@@ -4286,5 +4291,997 @@ fn a_day_with_no_file_read_writes_no_ledger_line() {
     assert_eq!(got.closed_refused, vec![on]);
     assert_eq!(got.flags_lines, 0);
     assert!(flags_lines(&store).is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ═══ WP-16: W workers leave the bytes one worker leaves ═══════════════════
+
+/// Every file of a store, the wall clock taken out of its provenance records
+/// (`landed_at_micros`, the one field a run writes from the clock, re-encoded
+/// as zero so the record's own check still covers every other byte); every
+/// other file byte for byte.
+fn store_bytes(store: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    tree(store)
+        .into_iter()
+        .map(|(rel, bytes)| {
+            if rel.extension().is_some_and(|ext| ext == "prv") {
+                let mut out = bytes.get(..64).unwrap().to_vec();
+                for (ordinal, chunk) in (0_u64..).zip(bytes.get(64..).unwrap().chunks(256)) {
+                    let image = <&[u8; 256]>::try_from(chunk).unwrap();
+                    let mut record = store::provenance::Record::decode(image, ordinal).unwrap();
+                    assert!(record.landed_at_micros > 0, "{}", rel.display());
+                    record.landed_at_micros = 0;
+                    out.extend_from_slice(&record.image());
+                }
+                (rel, out)
+            } else {
+                (rel, bytes)
+            }
+        })
+        .collect()
+}
+
+/// The options files of `d` for the workers' test: `n` NIFTY strikes, both
+/// sides, a BANKNIFTY pair, one file whose price the reader refuses, one
+/// that never traded and one whose name does not decode; every price
+/// invented.
+fn many_options(d: Day, n: u32) -> Vec<(String, Vec<u8>)> {
+    let folder = crate::gdfl_nfo::day_folder_name(d);
+    let entry = |ticker: &str| format!("{folder}\\Options\\{ticker}.NFO.csv");
+    let mut out = Vec::new();
+    for i in 0..n {
+        let strike = 21_000 + i * 50;
+        for side in ["CE", "PE"] {
+            let ticker = format!("NIFTY04APR24{strike}{side}");
+            let ltp = format!("{}.{:02}", 40 + i, (i % 20) * 5);
+            out.push((entry(&ticker), option_file(&ticker, d, &ltp)));
+        }
+        if i == n / 3 {
+            let bad = "NIFTY04APR2422975CE";
+            out.push((entry(bad), option_file(bad, d, "101.505")));
+            let idle = "NIFTY04APR2422985PE";
+            let rows: Vec<String> = (0..5)
+                .map(|s| {
+                    row(
+                        &format!("{idle}.NFO"),
+                        d,
+                        NINE_FIFTEEN + s * 60,
+                        "7.05",
+                        0,
+                        900,
+                    )
+                })
+                .collect();
+            out.push((entry(idle), csv(&rows)));
+        }
+        if i == 2 * n / 3 {
+            let odd = "NIFTYQQ04APR24";
+            out.push((entry(odd), option_file(odd, d, "3.05")));
+        }
+    }
+    for side in ["CE", "PE"] {
+        let ticker = format!("BANKNIFTY10APR2447000{side}");
+        out.push((entry(&ticker), option_file(&ticker, d, "212.35")));
+    }
+    out
+}
+
+/// A run of `kind` from `src` under `root` into `store` on `workers`, its
+/// origin the one given (so every run line is the same line), each day made
+/// durable as [`Durability::DEFAULT`] makes it.
+fn run_on(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    store: &Path,
+    (workers, origin): (usize, &Origin),
+) -> Report {
+    run_durable(
+        root,
+        (src, kind),
+        (from, to),
+        store,
+        (workers, origin, Durability::DEFAULT),
+    )
+    .unwrap()
+}
+
+/// [`run_on`] with the durability given, answering what the run answers.
+fn run_durable(
+    root: &Path,
+    (src, kind): (Src, ImportKind),
+    (from, to): (Day, Day),
+    store: &Path,
+    (workers, origin, durability): (usize, &Origin, Durability),
+) -> Result<Report, ImportRefusal> {
+    let run = Run {
+        kind,
+        from,
+        to,
+        only: &[],
+        store_root: store,
+    };
+    let (_, path) = source_path(root, src, kind);
+    let options = RunOptions {
+        origin: Some(origin),
+        retry_refused: false,
+        workers: Workers::new(workers).unwrap(),
+        durability,
+    };
+    match (src, kind) {
+        (Src::Store, ImportKind::Options) => run_nfo_from(&NfoTickStore::new(&path), &run, options),
+        (Src::Zips, ImportKind::Options) => run_nfo_from(&NfoZips::new(&path), &run, options),
+        (Src::Store, _) => run_cm_from(&TickStore::new(&path), &run, options),
+        (Src::Zips, _) => run_cm_from(&Archive::open(&path).unwrap(), &run, options),
+    }
+}
+
+/// WP-16 (DB-N25), IA-GR-08: THE FILES OF A DAY ON W WORKERS LEAVE THE BYTES
+/// ONE WORKER LEAVES — every bar file, checksum and time index, the census,
+/// the journal (its run lines included, the origin being one), the day ledger,
+/// the lineage and lot ledgers, and every provenance record but the second it
+/// was written — and the same report, failures in the same order. Three
+/// options days of 66 files, from both sources, on 2, 5 and 12 workers.
+#[test]
+fn w_workers_build_the_same_store_journal_and_census_as_one() {
+    let root = scratch("wp16-workers");
+    let days = [d1(), d2(), d3()];
+    let plan: Vec<DayPlan> = days
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 30)))
+        .collect();
+    world_of(&root, &plan);
+    for src in [Src::Store, Src::Zips] {
+        let (kind_of_source, path) = source_path(&root, src, ImportKind::Options);
+        let origin = Origin {
+            started: 1_790_000_000,
+            ..Origin::measure(kind_of_source, &path, Some(COMMIT))
+        };
+        let one_store = root.join(format!("one-{}", src as u8));
+        let one = run_on(
+            &root,
+            (src, ImportKind::Options),
+            (d1(), d3()),
+            &one_store,
+            (1, &origin),
+        );
+        assert_eq!(one.days_imported, 3);
+        assert_eq!(
+            (one.files, one.files_refused),
+            (3 * 63, 3 * 2),
+            "{:?}",
+            one.failures
+        );
+        assert!(one.provenance_records > 0 && one.seconds_committed > 0);
+        let want = store_bytes(&one_store);
+        assert!(want.keys().any(|rel| rel.starts_with("manifest")));
+        assert!(want.contains_key(Path::new("imports/gdfl.journal")));
+        for workers in [2, 5, Workers::MAX] {
+            let store = root.join(format!("w{workers}-{}", src as u8));
+            let got = run_on(
+                &root,
+                (src, ImportKind::Options),
+                (d1(), d3()),
+                &store,
+                (workers, &origin),
+            );
+            assert_eq!(got, one, "{workers} workers: the same report");
+            let have = store_bytes(&store);
+            assert_eq!(
+                have.keys().collect::<Vec<_>>(),
+                want.keys().collect::<Vec<_>>(),
+                "{workers} workers: the same files"
+            );
+            for (rel, bytes) in &want {
+                assert!(
+                    have.get(rel) == Some(bytes),
+                    "{workers} workers: {} differs",
+                    rel.display()
+                );
+            }
+        }
+        // A run that starts after d1 warms the lineage up on d1's files
+        // first (D-3331), read on the workers too: the same ledgers.
+        let late: Vec<_> = [1, 6]
+            .iter()
+            .map(|&workers| {
+                let store = root.join(format!("late{workers}-{}", src as u8));
+                let report = run_on(
+                    &root,
+                    (src, ImportKind::Options),
+                    (d2(), d3()),
+                    &store,
+                    (workers, &origin),
+                );
+                (report, store_bytes(&store))
+            })
+            .collect();
+        assert_eq!(late[0].0.days_imported, 2);
+        assert_eq!(late[0], late[1], "the warm-up on 6 workers");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16: a day's refusals keep the order one pass over its listing names
+/// them in, whether the listing refused an entry (two names of one contract)
+/// or the reader refused a file (a price with three places), whichever
+/// worker read it.
+#[test]
+fn a_days_refusals_keep_listing_order_on_any_number_of_workers() {
+    let root = scratch("wp16-order");
+    let d = day(2018, 12, 3);
+    let folder = crate::gdfl_nfo::day_folder_name(d);
+    let entry = |ticker: &str| format!("{folder}\\Options\\{ticker}.NFO.csv");
+    let mut entries = vec![(
+        entry("NIFTY27DEC1810500CE"),
+        option_file("NIFTY27DEC1810500CE", d, "5"),
+    )];
+    for strike in (10_600..11_400).step_by(100) {
+        let good = format!("NIFTY18DEC{strike}CE");
+        entries.push((entry(&good), option_file(&good, d, "5.05")));
+        let bad = format!("NIFTY18DEC{}PE", strike + 50);
+        entries.push((entry(&bad), option_file(&bad, d, "5.055")));
+    }
+    entries.push((
+        entry("NIFTY18DEC10500CE"),
+        option_file("NIFTY18DEC10500CE", d, "5"),
+    ));
+    world_of(&root, &[(d, Tree::Options, entries)]);
+    let (kind_of_source, path) = source_path(&root, Src::Store, ImportKind::Options);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let named = |report: &Report| -> Vec<String> {
+        report
+            .failures
+            .iter()
+            .map(|f| f.instrument.clone())
+            .collect()
+    };
+    let one = run_on(
+        &root,
+        (Src::Store, ImportKind::Options),
+        (d, d),
+        &root.join("one"),
+        (1, &origin),
+    );
+    let mut want = vec![format!("{d} NIFTY27DEC1810500CE")];
+    for strike in (10_600..11_400).step_by(100) {
+        want.push(format!("{d} NIFTY18DEC{}PE", strike + 50));
+    }
+    want.push(format!("{d} NIFTY18DEC10500CE"));
+    assert_eq!(named(&one), want, "listing order: {:?}", one.failures);
+    for workers in [3, 8] {
+        let got = run_on(
+            &root,
+            (Src::Store, ImportKind::Options),
+            (d, d),
+            &root.join(format!("w{workers}")),
+            (workers, &origin),
+        );
+        assert_eq!(named(&got), want, "{workers} workers");
+        assert_eq!(got, one, "{workers} workers");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16 (IA-GR-08's `.auc`): the closing-auction sidecars of a stocks day,
+/// and its index day, are the bytes one worker writes.
+#[test]
+fn w_workers_write_the_auction_sidecars_and_index_days_one_worker_writes() {
+    use std::fmt::Write as _;
+    let on = day(2026, 9, 24);
+    let root = scratch("wp16-auction");
+    let shares = ["RELIANCE", "SBIN", "INFY", "TCS", "ITC"];
+    let mut files = Vec::new();
+    let mut master = String::from("FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n");
+    for (n, share) in (0_u32..).zip(shares) {
+        let stem = format!("{share}.NSE");
+        let mut rows: Vec<String> = (0..10)
+            .map(|i| {
+                quoted_row(
+                    &stem,
+                    on,
+                    hms_at(15, 5, 0) + i * 50,
+                    &format!("{}.{i}5", 1_000 + n * 100),
+                    ("1000.00", "1999.90"),
+                    (3, 0),
+                )
+            })
+            .collect();
+        rows.push(quoted_row(
+            &stem,
+            on,
+            hms_at(15, 28, 7),
+            &format!("{}.65", 1_001 + n * 100),
+            ("0", "0.00"),
+            (98_765, 0),
+        ));
+        files.push((entry_of(Tree::Stocks, on, &stem), csv(&rows)));
+        let at = brutex_core::universe::FNO_INDEX.position(share).unwrap();
+        let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+        writeln!(master, "{},{share},EQ,{isin},1", 2_000 + n).unwrap();
+    }
+    world_of(&root, &[(on, Tree::Stocks, files)]);
+    let masters = root.join("masters");
+    crate::cash_session_cache::install(&masters, on, &gzip(&master)).unwrap();
+    let scope = std::sync::Arc::new(
+        crate::gdfl_cm::CmScope::stored(std::iter::empty::<&str>())
+            .unwrap()
+            .with_masters(masters),
+    );
+    let source = TickStore::new(&root.join("ts")).with_scope(scope);
+    let (kind_of_source, path) = source_path(&root, Src::Store, ImportKind::Stocks);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let stocks = |workers: usize, store: &Path| {
+        let run = Run {
+            kind: ImportKind::Stocks,
+            from: on,
+            to: on,
+            only: &[],
+            store_root: store,
+        };
+        let options = RunOptions {
+            origin: Some(&origin),
+            retry_refused: false,
+            workers: Workers::new(workers).unwrap(),
+            durability: Durability::DEFAULT,
+        };
+        run_cm_from(&source, &run, options).unwrap()
+    };
+    let one = stocks(1, &root.join("one"));
+    assert!(one.failures.is_empty(), "{:?}", one.failures);
+    assert_eq!(one.files, shares.len());
+    let want = store_bytes(&root.join("one"));
+    let sidecars = want
+        .keys()
+        .filter(|rel| rel.extension().is_some_and(|ext| ext == "auc"))
+        .count();
+    assert_eq!(sidecars, shares.len(), "one sidecar per share: {want:?}");
+    let got = stocks(4, &root.join("four"));
+    assert_eq!(got, one);
+    assert_eq!(store_bytes(&root.join("four")), want);
+
+    world(&root, &[d1()]);
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Indices);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let indices: Vec<_> = [1, 3]
+        .iter()
+        .map(|&workers| {
+            let store = root.join(format!("idx{workers}"));
+            let report = run_on(
+                &root,
+                (Src::Zips, ImportKind::Indices),
+                (d1(), d1()),
+                &store,
+                (workers, &origin),
+            );
+            (report, store_bytes(&store))
+        })
+        .collect();
+    assert!(
+        indices[0].0.files == 2 && indices[0].0.failures.is_empty(),
+        "{:?}",
+        indices[0].0
+    );
+    assert_eq!(indices[0], indices[1]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Every month file of `store` opens and reads every committed record back,
+/// each block against its sealed checksum: no month is half written. Answers
+/// how many months hold a commit, and how many were cut off while they were
+/// being created.
+///
+/// A MONTH CUT OFF IN ITS CREATION IS NOT A HALF MONTH, and is told apart by
+/// its bytes rather than excused: it is no longer than the header region,
+/// holds nothing past its first slot, and that slot does not decode, so it
+/// never committed a bar (`store::file`'s `is_interrupted_genesis`, D-1521).
+/// A reader refuses it by name and the writer's next open creates it again,
+/// which the caller proves by comparing the resumed store byte for byte. Any
+/// other month that does not open fails the test here.
+fn every_month_reads_whole(store: &Path) -> (usize, usize) {
+    let (mut months, mut unborn) = (0, 0);
+    for rel in tree(store).into_keys() {
+        let text = rel.to_string_lossy().into_owned();
+        if !(text.starts_with("bars/") && text.ends_with(".bin")) {
+            continue;
+        }
+        let parts: Vec<&str> = text.split('/').collect();
+        let (symbol, contract) = (parts[4], Contract::parse(parts[5]).unwrap());
+        let month = parts[7].trim_end_matches(".bin");
+        let (y, m) = month.split_once('-').unwrap();
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol,
+            contract: Some(contract),
+            timeframe: Timeframe::SECOND_1,
+            month: store::path::YearMonth::new(y.parse().unwrap(), m.parse().unwrap()).unwrap(),
+            file: FileKind::Bars,
+        })
+        .unwrap();
+        let file = match BarFile::open_existing(store, path, symbol_id_of(symbol)) {
+            Ok(file) => file,
+            Err(why) => {
+                let bytes = std::fs::read(store.join(&rel)).unwrap();
+                let (slot, rest) = bytes.split_at(bytes.len().min(store::format::SLOT_LEN));
+                assert!(
+                    u64::try_from(bytes.len()).unwrap() <= store::format::HEADER_LEN
+                        && rest.iter().all(|&byte| byte == 0)
+                        && store::header::Header::decode(slot).is_err(),
+                    "{text} is neither whole nor cut off in its creation ({} bytes): {why}",
+                    bytes.len()
+                );
+                unborn += 1;
+                continue;
+            }
+        };
+        for index in 0..file.header().n_valid {
+            file.read_record(index)
+                .unwrap_or_else(|why| panic!("{text} record {index}: {why}"));
+        }
+        months += 1;
+    }
+    (months, unborn)
+}
+
+/// WP-16 (DB-N25): A KILL -9 AT ANY POINT LEAVES EVERY MONTH AT ITS OLD STATE
+/// OR ITS NEW ONE, NEVER HALF, AND THE DAY IS DONE AGAIN ON RESUME. A child of
+/// this test binary imports three options days on four workers and is killed
+/// (SIGKILL) at points spread over its run; after each kill every month opens
+/// and reads back whole (or was cut off in its creation, holds no commit and
+/// belongs to a day still open), the journal and the census load, and a resumed run
+/// on three workers finishes with no failure and leaves the bars, checksums,
+/// time indexes and census of an import that was never killed, byte for
+/// byte. (A provenance record for a landing the kill cut off before its
+/// record is not written again by the resume, which finds the bars present;
+/// `/provenance.json` labels such bars reconstructed, as before WP-16.)
+#[test]
+fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store() {
+    const CHILD: &str = "BRUTEX_WP16_KILL_CHILD";
+    let child_of = |root: &Path, store: &Path| {
+        let (kind_of_source, path) = source_path(root, Src::Zips, ImportKind::Options);
+        let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+        run_on(
+            root,
+            (Src::Zips, ImportKind::Options),
+            (d1(), d3()),
+            store,
+            (4, &origin),
+        )
+    };
+    if let Some(dirs) = std::env::var_os(CHILD) {
+        let dirs = PathBuf::from(dirs);
+        let _report = child_of(&dirs.join("world"), &dirs.join("store"));
+        return;
+    }
+    let root = scratch("wp16-kill");
+    let world_root = root.join("world");
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 45)))
+        .collect();
+    world_of(&world_root, &plan);
+    let clean = root.join("clean");
+    let started = std::time::Instant::now();
+    let reference = child_of(&world_root, &clean);
+    let took = started.elapsed();
+    assert!(reference.failures.len() == 6, "{:?}", reference.failures);
+    let want: BTreeMap<PathBuf, Vec<u8>> = store_bytes(&clean)
+        .into_iter()
+        .filter(|(rel, _)| {
+            !rel.starts_with("imports") && rel.extension().is_none_or(|e| e != "prv")
+        })
+        .collect();
+    let mut interrupted = 0;
+    for (n, eighths) in [1_u32, 2, 3, 4, 5, 6, 7].into_iter().enumerate() {
+        let run = root.join(format!("kill-{n}"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::os::unix::fs::symlink(&world_root, run.join("world")).unwrap();
+        let store = run.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "gdfl_import::tests::a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &run)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(took * eighths / 8);
+        child.kill().unwrap();
+        let status = child.wait().unwrap();
+        let journal = std::fs::read_to_string(journal_path(&store)).unwrap_or_default();
+        let open_day = journal
+            .lines()
+            .last()
+            .is_some_and(|l| l.starts_with("begin "));
+        if !status.success() && open_day {
+            interrupted += 1;
+        }
+        // Whatever the kill left: every month whole, the journal and the
+        // census readable.
+        let (months, unborn) = every_month_reads_whole(&store);
+        // A month cut off in its creation committed nothing, so the day that
+        // was creating it cannot have closed: the kill left it open.
+        assert!(
+            unborn == 0 || open_day,
+            "kill {n}: {unborn} unborn, day closed"
+        );
+        Journal::load(journal_path(&store)).unwrap();
+        let census = std::fs::read(manifest_path(&store, Vendor::Gdfl)).unwrap_or_default();
+        Manifest::open_image(Vendor::Gdfl, &census).unwrap();
+        // The resume finishes the run and lands what an unkilled run lands.
+        let (kind_of_source, path) = source_path(&world_root, Src::Zips, ImportKind::Options);
+        let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+        let resumed = run_on(
+            &world_root,
+            (Src::Zips, ImportKind::Options),
+            (d1(), d3()),
+            &store,
+            (3, &origin),
+        );
+        let refused: Vec<_> = resumed
+            .failures
+            .iter()
+            .filter(|f| {
+                !f.instrument.ends_with("NIFTY04APR2422975CE")
+                    && !f.instrument.ends_with("NIFTYQQ04APR24")
+            })
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "kill {n} after {months} months, {unborn} unborn: {refused:?}"
+        );
+        // The resume created again every month the kill cut off in creation.
+        let (_whole, still_unborn) = every_month_reads_whole(&store);
+        assert_eq!(still_unborn, 0, "kill {n}");
+        let have: BTreeMap<PathBuf, Vec<u8>> = store_bytes(&store)
+            .into_iter()
+            .filter(|(rel, _)| {
+                !rel.starts_with("imports") && rel.extension().is_none_or(|e| e != "prv")
+            })
+            .collect();
+        assert_eq!(
+            have.keys().collect::<Vec<_>>(),
+            want.keys().collect::<Vec<_>>(),
+            "kill {n}"
+        );
+        for (rel, bytes) in &want {
+            assert!(
+                have.get(rel) == Some(bytes),
+                "kill {n}: {} differs",
+                rel.display()
+            );
+        }
+    }
+    assert!(
+        interrupted >= 2,
+        "only {interrupted} kill(s) landed inside a day"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// ═══ WP-16: the day made durable (D-3353) ═══════════════════════════════
+
+/// What a test asks of each flush a day's batch issues under its store: run
+/// before the flush, on whichever thread issues it; an `Err` is the flush's.
+type DayFlushHook = Box<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+
+/// The hooks, by the store root they watch: a day's flushes run on threads
+/// of their own and the tests of this binary run in parallel, so each test
+/// hooks only its own root.
+static DAY_FLUSH_HOOKS: std::sync::Mutex<Vec<(PathBuf, DayFlushHook)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Runs the hook of the store `path` lies under, if a test set one.
+pub(super) fn before_a_day_flush(path: &Path) -> std::io::Result<()> {
+    let hooks = DAY_FLUSH_HOOKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (root, hook) in hooks.iter() {
+        if path.starts_with(root) {
+            return hook(path);
+        }
+    }
+    Ok(())
+}
+
+/// Hooks every day flush under `root` until the answer drops.
+struct HookedFlushes(PathBuf);
+
+impl HookedFlushes {
+    fn new(root: &Path, hook: DayFlushHook) -> Self {
+        DAY_FLUSH_HOOKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((root.to_path_buf(), hook));
+        Self(root.to_path_buf())
+    }
+}
+
+impl Drop for HookedFlushes {
+    fn drop(&mut self) {
+        DAY_FLUSH_HOOKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(root, _)| *root != self.0);
+    }
+}
+
+/// WP-16 (DB-N25, D-3353): THE DURABILITY UNIT CHANGES NO BYTE A RUN LEAVES.
+/// Three options days imported with every write flushed as it is written
+/// (one worker, as before WP-16), with each day made durable through `O_SYNC`
+/// writes and one flush per device (eight workers), and with each day made
+/// durable by a flush of every file (four workers), leave the same bars,
+/// checksums, time indexes, provenance records (but the second each was
+/// written), census, journal and day ledger, and the same report.
+#[test]
+fn the_durability_unit_changes_no_byte_a_run_leaves() {
+    let root = scratch("wp16-durability");
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 20)))
+        .collect();
+    world_of(&root, &plan);
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin {
+        started: 1_790_000_000,
+        ..Origin::measure(kind_of_source, &path, Some(COMMIT))
+    };
+    let runs = [
+        (1, Durability::EachWrite),
+        (8, Durability::Day(store::file::BatchFlush::OncePerDevice)),
+        (4, Durability::Day(store::file::BatchFlush::EveryFile)),
+    ];
+    let done: Vec<(Report, BTreeMap<PathBuf, Vec<u8>>)> = runs
+        .iter()
+        .map(|&(workers, durability)| {
+            let store = root.join(durability.as_str());
+            let report = run_durable(
+                &root,
+                (Src::Zips, ImportKind::Options),
+                (d1(), d3()),
+                &store,
+                (workers, &origin, durability),
+            )
+            .unwrap();
+            (report, store_bytes(&store))
+        })
+        .collect();
+    let (want_report, want) = &done[0];
+    assert_eq!(want_report.days_imported, 3);
+    assert!(want_report.seconds_committed > 0 && want_report.provenance_records > 0);
+    assert!(want.contains_key(Path::new("imports/gdfl.journal")));
+    assert!(want.keys().any(|rel| rel.starts_with("manifest")));
+    for ((report, have), (_, durability)) in done.iter().zip(runs).skip(1) {
+        assert_eq!(
+            report,
+            want_report,
+            "{}: the same report",
+            durability.as_str()
+        );
+        assert_eq!(
+            have.keys().collect::<Vec<_>>(),
+            want.keys().collect::<Vec<_>>(),
+            "{}: the same files",
+            durability.as_str()
+        );
+        for (rel, bytes) in want {
+            assert!(
+                have.get(rel) == Some(bytes),
+                "{}: {} differs",
+                durability.as_str(),
+                rel.display()
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The journal's `begin` lines and closing lines, counted.
+fn journal_counts(store: &Path) -> (usize, usize) {
+    let text = std::fs::read_to_string(journal_path(store)).unwrap_or_default();
+    let begins = text
+        .lines()
+        .filter(|line| line.starts_with("begin "))
+        .count();
+    let closes = text
+        .lines()
+        .filter(|line| {
+            ["done ", "incomplete ", "refused "]
+                .iter()
+                .any(|verb| line.starts_with(verb))
+        })
+        .count();
+    (begins, closes)
+}
+
+/// WP-16 (D-3353): EACH DAY IS MADE DURABLE AFTER ITS LAST FILE AND BEFORE
+/// ITS CLOSING LINE. Every flush a day's batch issues sees the journal with
+/// that day begun and not closed, and every day before it closed; each of
+/// the three days issues some.
+#[test]
+fn each_day_is_made_durable_before_its_closing_line() {
+    let root = scratch("wp16-order-durable");
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 6)))
+        .collect();
+    world_of(&root, &plan);
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize)>>> = std::sync::Arc::default();
+    let hook = {
+        let (store, seen) = (store.clone(), std::sync::Arc::clone(&seen));
+        HookedFlushes::new(
+            &store.clone(),
+            Box::new(move |_path| {
+                seen.lock().unwrap().push(journal_counts(&store));
+                Ok(())
+            }),
+        )
+    };
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let report = run_on(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1(), d3()),
+        &store,
+        (5, &origin),
+    );
+    drop(hook);
+    assert_eq!(report.days_imported, 3);
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().all(|&(begins, closes)| begins == closes + 1),
+        "a flush saw its day closed, or another day open: {seen:?}"
+    );
+    let mut days: Vec<usize> = seen.iter().map(|&(begins, _)| begins).collect();
+    days.dedup();
+    assert_eq!(days, [1, 2, 3], "every day made durable, in order");
+    assert_eq!(journal_counts(&store), (3, 3));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16 (D-3353): A DAY THAT CANNOT BE MADE DURABLE STOPS THE RUN AND STAYS
+/// OPEN. The second day's flush is refused: the run answers
+/// [`ImportRefusal::Durability`] naming the day and the store's words, the
+/// first day is done, the second begun and never closed (so the next run
+/// reads it again), the third never begun, and no census row or ledger line
+/// was written for the second. Every month the refused batch wrote takes no
+/// further append in this process, by name.
+#[test]
+fn a_day_that_cannot_be_made_durable_stops_the_run_and_stays_open() {
+    let root = scratch("wp16-durable-refused");
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 4)))
+        .collect();
+    world_of(&root, &plan);
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let census_after_d1: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+        std::sync::Arc::default();
+    let hook = {
+        let (at, census) = (store.clone(), std::sync::Arc::clone(&census_after_d1));
+        HookedFlushes::new(
+            &store.clone(),
+            Box::new(move |_path| {
+                if journal_counts(&at).0 == 2 {
+                    let mut census = census.lock().unwrap();
+                    if census.is_none() {
+                        *census = Some(std::fs::read(manifest_path(&at, Vendor::Gdfl)).unwrap());
+                    }
+                    return Err(std::io::Error::other("injected day flush fault"));
+                }
+                Ok(())
+            }),
+        )
+    };
+    let refused = run_durable(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d1(), d3()),
+        &store,
+        (3, &origin, Durability::DEFAULT),
+    );
+    drop(hook);
+    let Err(ImportRefusal::Durability {
+        kind,
+        day,
+        why,
+        done,
+    }) = refused
+    else {
+        panic!("the run stopped at the day's flush: {refused:?}");
+    };
+    assert_eq!((kind, day), (ImportKind::Options, d2()));
+    assert!(
+        why.contains("syncing") && why.contains(&store.display().to_string()),
+        "the flush the host refused, by path: {why}"
+    );
+    assert_eq!(done.days_imported, 1);
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.instrument == format!("{} durability", d2())),
+        "{:?}",
+        done.failures
+    );
+    let text = std::fs::read_to_string(journal_path(&store)).unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.starts_with("run ")).collect();
+    assert!(
+        lines[0].starts_with(&format!("begin options {}", d1())),
+        "{text}"
+    );
+    assert!(
+        lines[1].starts_with(&format!("done options {}", d1())),
+        "{text}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("begin options {}", d2())),
+        "{text}"
+    );
+    assert_eq!(lines.len(), 3, "d2 open, d3 never begun: {text}");
+    assert_eq!(
+        std::fs::read(manifest_path(&store, Vendor::Gdfl)).unwrap(),
+        census_after_d1.lock().unwrap().clone().unwrap(),
+        "no census row of d2"
+    );
+    let ledger = std::fs::read_to_string(quality::dayflags_path(&store)).unwrap_or_default();
+    assert!(
+        !ledger.contains(&d2().to_string()),
+        "no ledger line of d2: {ledger}"
+    );
+    // In this process, the months d2 wrote take no further append.
+    let again = run_on(
+        &root,
+        (Src::Zips, ImportKind::Options),
+        (d2(), d2()),
+        &store,
+        (2, &origin),
+    );
+    assert_eq!(again.resumed, vec![d2()], "d2 is read again");
+    assert!(
+        again
+            .failures
+            .iter()
+            .any(|f| f.why.contains("durability barrier") && f.why.contains("already failed")),
+        "{:?}",
+        again.failures
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16 (D-3353): A DAY AN EARLIER RUN LEFT OPEN IS CONFIRMED DURABLE BEFORE
+/// THIS RUN CLOSES IT. The store is the one a run killed just before its
+/// second day's closing line leaves: every month of that day written and
+/// readable, the journal with the day begun and never closed, and (as far as
+/// this run can know) not one of those writes ever flushed. Read again, every
+/// month answers "already present" and nothing is written, so no writer has
+/// a flush to defer; the run must still flush every file of every month the
+/// day files (bars, checksums, time index, provenance) for itself, while the
+/// day is still open, whatever its own durability. Without the confirmation
+/// the day closed over writes that only the kernel held.
+#[test]
+fn a_day_an_earlier_run_left_open_is_confirmed_durable_before_it_closes() {
+    let root = scratch("wp16-left-open");
+    let plan: Vec<DayPlan> = [d1(), d2()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 4)))
+        .collect();
+    world_of(&root, &plan);
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let closed_d2 = format!("done options {}", d2());
+    for (workers, durability) in [
+        (3, Durability::DEFAULT),
+        (2, Durability::Day(store::file::BatchFlush::EveryFile)),
+        (1, Durability::EachWrite),
+    ] {
+        let store = root.join(durability.as_str());
+        std::fs::create_dir_all(&store).unwrap();
+        let first = run_on(
+            &root,
+            (Src::Zips, ImportKind::Options),
+            (d1(), d2()),
+            &store,
+            (4, &origin),
+        );
+        assert_eq!(first.days_imported, 2);
+        // The kill: the second day's closing line was never written.
+        let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
+        let mut kept = String::with_capacity(journal.len());
+        for line in journal.lines().filter(|line| !line.starts_with(&closed_d2)) {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        assert!(kept.len() < journal.len(), "{journal}");
+        std::fs::write(journal_path(&store), kept).unwrap();
+        let before = store_bytes(&store);
+        // (the path flushed, whether the day was already closed when it was)
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, bool)>>> =
+            std::sync::Arc::default();
+        let hook = {
+            let (at, seen, closed_d2) = (
+                store.clone(),
+                std::sync::Arc::clone(&seen),
+                closed_d2.clone(),
+            );
+            HookedFlushes::new(
+                &store.clone(),
+                Box::new(move |path| {
+                    let text = std::fs::read_to_string(journal_path(&at)).unwrap();
+                    let closed = text.lines().any(|line| line.starts_with(&closed_d2));
+                    seen.lock().unwrap().push((path.to_path_buf(), closed));
+                    Ok(())
+                }),
+            )
+        };
+        let resumed = run_durable(
+            &root,
+            (Src::Zips, ImportKind::Options),
+            (d1(), d2()),
+            &store,
+            (workers, &origin, durability),
+        )
+        .unwrap();
+        drop(hook);
+        let word = durability.as_str();
+        assert_eq!(resumed.resumed, vec![d2()], "{word}: d2 is read again");
+        assert_eq!(resumed.seconds_committed, 0, "{word}: nothing was written");
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().all(|(_, closed)| !closed),
+            "{word}: a flush came after the day was closed: {seen:?}"
+        );
+        let flushed: std::collections::BTreeSet<&Path> =
+            seen.iter().map(|(path, _)| path.as_path()).collect();
+        let mut months = 0;
+        for rel in before.keys() {
+            if !rel.starts_with("bars") || rel.extension().is_some_and(|e| e == "lock") {
+                continue;
+            }
+            let at = store.join(rel);
+            assert!(
+                flushed.contains(at.as_path()),
+                "{word}: {} was never flushed",
+                rel.display()
+            );
+            months += usize::from(rel.extension().is_some_and(|e| e == "bin"));
+            // And every directory down to it, whose names that run never
+            // flushed either.
+            let mut dir = at.parent();
+            while let Some(one) = dir.filter(|one| one.starts_with(&store)) {
+                assert!(
+                    flushed.contains(one),
+                    "{word}: {} was never flushed",
+                    one.display()
+                );
+                dir = one.parent();
+            }
+        }
+        assert!(months >= 8, "{word}: four strikes, both sides: {months}");
+        // Not a byte of a bar, a checksum or an index moved, and the day is
+        // closed now.
+        let after = store_bytes(&store);
+        for (rel, bytes) in &before {
+            if rel.starts_with("bars") {
+                assert!(after.get(rel) == Some(bytes), "{word}: {}", rel.display());
+            }
+        }
+        let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
+        assert!(
+            journal.lines().any(|line| line.starts_with(&closed_d2)),
+            "{word}: {journal}"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

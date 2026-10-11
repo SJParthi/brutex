@@ -30,6 +30,53 @@
 //! records this commit publishes: `store::write::the_committed_length_is_exactly_durable_through`
 //! asserts the file's length against it after every commit of a ladder.
 //!
+//! # Inside a durable batch, the batch is the unit (WP-16, DB-N25, D-3353)
+//!
+//! The table above is the default, and every writer gets it unless it asks
+//! otherwise. A writer that runs inside a [`DurableBatch`] (the GDFL import's
+//! day, `pull::gdfl_import`) gets this instead:
+//!
+//! * the writes are the same writes, in the same order (records, checksums,
+//!   index, header slot), so a process killed at any point leaves every month
+//!   at its last commit or its new one, exactly as above: what a killed
+//!   process wrote is in the kernel, in the order it was written;
+//! * no flush is issued per append, per new name or per sidecar record. With
+//!   [`BatchFlush::OncePerDevice`] every file is opened `O_SYNC`, so each
+//!   write is on the device when it returns, and the batch ends with one
+//!   `F_FULLFSYNC` per device (and one per directory that gained a name);
+//!   with [`BatchFlush::EveryFile`] the batch ends with one `F_FULLFSYNC` of
+//!   every file and directory it wrote;
+//! * so nothing is durable until [`DurableBatch::make_durable`] returns `Ok`,
+//!   and the caller's unit (the import's day) is not closed until then, so a
+//!   unit cut off before it is read again;
+//! * a unit read again finds months an earlier process wrote and never made
+//!   durable. The store answers them `AlreadyPresent` from the kernel's
+//!   cache and writes nothing, so nothing of theirs would be in the new batch:
+//!   the caller names each one with [`DurableBatch::confirm_month`], and the
+//!   batch then flushes every file of that month for itself, and every
+//!   directory down to it, whatever its kind.
+//!
+//! **What a power loss inside an open batch can leave, said rather than
+//! implied away.** Between a batch's first write and its `make_durable` no
+//! barrier orders a month's records before its header slot on the drive, so a
+//! power cut (not a killed process) can leave a month the batch appended to
+//! with its slot on the platter and its records, or its checksums, not. Such
+//! a month is not served: its length, its header and its block checksums
+//! refuse it by name, and it stays refused until it is repaired; the bars it
+//! held before the batch are behind that refusal too. A writer that cannot
+//! accept that asks for no batch and keeps the table above.
+//!
+//! `F_FULLFSYNC` is what [`File::sync_all`] and [`File::sync_data`] issue on
+//! macOS (`std` 1.97.1, `sys/fs/unix.rs:1397` and `:1411`); fcntl(2) says of
+//! it: "As this drains the entire queue of the device and acts as a barrier,
+//! data that had been fsync'd on the same device before is guaranteed to be
+//! persisted when this call returns." `O_SYNC` is the macOS SDK's
+//! `sys/_types/_o_sync.h:29`, "synch I/O file integrity". That an `O_SYNC`
+//! write counts as fsync'd for that guarantee is the POSIX meaning of the
+//! flag (synchronized I/O file integrity completion); it is UNVERIFIED
+//! against a power cut on the operator's drive, and [`BatchFlush::EveryFile`]
+//! is the batch that does not rest on it.
+//!
 //! # No writable mapping, and why the ban is load-bearing here
 //!
 //! `CLAUDE.md` §4 bans a writable memory mapping and this module is where that
@@ -143,14 +190,14 @@
 //! passing a block because a mismatch *might* be this case is still refused,
 //! as `CLAUDE.md` §4 requires.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem::Discriminant;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::format::{
     Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
@@ -1306,6 +1353,12 @@ pub struct BarFile {
     /// in-module test harness, whose lookups bisect as they always have.
     /// D-2329.
     tix: Option<Tix>,
+    /// The [`DurableBatch`] this writer was opened in, when its thread had
+    /// entered one (WP-16, D-3353): its files are opened `O_SYNC` when the
+    /// batch [`DurableBatch::writes_through`], and every flush it would issue
+    /// is the batch's while the batch is open. `None` for every reader and for
+    /// a writer outside a batch, which flushes for itself.
+    batch: Option<DurableBatch>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1479,10 +1532,39 @@ impl BarFile {
     /// **Not [`StoreError::RaggedTail`].** Bytes past the committed extent are
     /// an interrupted append, and this door opens the month and logs them
     /// rather than refusing it; see `Self::validated`.
+    ///
+    /// # Inside a [`DurableBatch`]
+    ///
+    /// On a thread that entered an open batch, the writer belongs to it for
+    /// its whole life (WP-16, D-3353): nothing it creates or appends is
+    /// durable until the batch is made durable. The module header says what a
+    /// crash leaves.
     pub fn open_or_create(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
+    ) -> Result<Self, StoreError> {
+        // ONE FLUSH PER DIRECTORY PER OPEN (WP-16, DB-N25). A new month names
+        // three files in its directory -- the bars, the checksum sidecar and
+        // the time index -- and each name was flushed on its own, three
+        // `F_FULLFSYNC`s of one directory on macOS. Every name is still
+        // durable before this returns, so before any commit can need it
+        // (D-0688's reason for the sidecar's): the flushes are only gathered
+        // to the end of the open, and each directory is flushed once.
+        //
+        // A writer inside a durable batch leaves every flush, its names'
+        // included, to the batch (D-3353).
+        let batch = DurableBatch::current();
+        with_directories_flushed_once(|| Self::open_or_create_once(root, path, symbol_id, batch))
+    }
+
+    /// [`Self::open_or_create`]'s body, its directory flushes gathered by
+    /// [`with_directories_flushed_once`].
+    fn open_or_create_once(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+        batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
         // BARS OR A SIDECAR BESIDE THEM, and nothing else. A `.crc` or a
         // `.lock` opened here would be read as records at whichever geometry
@@ -1545,7 +1627,7 @@ impl BarFile {
         let created = missing_below(root, &dir);
         fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
         for made in &created {
-            fsync_dir(made.parent().unwrap_or(root))?;
+            fsync_dir(made.parent().unwrap_or(root), batch.as_ref())?;
         }
 
         // The lock is taken before the bar file is opened, let alone measured.
@@ -1569,7 +1651,8 @@ impl BarFile {
         // existed can have been truncated or zeroed; one this open creates was
         // deleted whole, an explicit act D-1520 does not second-guess.
         let existed = matches!(fs::symlink_metadata(&bars_path), Ok(meta) if meta.is_file());
-        let bars = writer_open(open_rw(&bars_path), &bars_path)?;
+        let through = batch.as_ref().is_some_and(DurableBatch::writes_through);
+        let bars = writer_open(open_rw_through(&bars_path, through), &bars_path)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
 
         // `len == 0` WAS THE REPAIR CONDITION, AND IT DID NOT COVER THE CRASH.
@@ -1625,8 +1708,15 @@ impl BarFile {
                 if existed {
                     refuse_if_sealed(&bars_path, &path.with_file(checksum_kind).to_path_buf(root))?;
                 }
-                initialise(&bars, &bars_path, symbol_id, timeframe_secs, born)?;
-                fsync_dir(&dir)?;
+                initialise(
+                    &bars,
+                    &bars_path,
+                    symbol_id,
+                    timeframe_secs,
+                    born,
+                    batch.as_ref(),
+                )?;
+                fsync_dir(&dir, batch.as_ref())?;
                 len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
             }
         }
@@ -1659,6 +1749,7 @@ impl BarFile {
             // THE SAME ANSWER CREATION USED, from the same function.
             table_of(path.file()),
             Access::Write,
+            batch,
         )
     }
 
@@ -1803,6 +1894,7 @@ impl BarFile {
             // the same function the creating door uses.
             table_of(path.file()),
             Access::Read,
+            None,
         )
     }
 
@@ -1904,6 +1996,7 @@ impl BarFile {
             // and never made. The index step is run below, by hand, so its
             // outcome can be reported.
             Access::Read,
+            None,
         )?;
         if let crate::generation::Served::Revision(pointer) = served
             && !pointer.describes(&file.header)
@@ -1963,6 +2056,7 @@ impl BarFile {
             path.month(),
             table_of(path.file()),
             Access::Audit,
+            None,
         )
         .map_err(|why| why.to_string())?;
         if let crate::generation::Served::Revision(pointer) = served
@@ -2040,6 +2134,10 @@ impl BarFile {
         // parameter so that cannot happen by omission.
         table: &[Layout],
         access: Access,
+        // The writer's durable batch, when it was opened inside one (WP-16,
+        // D-3353): the sidecar it opens or makes, and the index it keeps, are
+        // the batch's too. `None` for every other door.
+        batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
         let (header, claimed) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
@@ -2248,13 +2346,15 @@ impl BarFile {
                     // never permission to seal history anew.
                     let fresh = header.n_valid == 0;
                     refuse_link(at)?;
+                    let through = batch.as_ref().is_some_and(DurableBatch::writes_through);
                     let sidecar = writer_open(
-                        no_follow(
+                        no_follow_through(
                             File::options()
                                 .read(true)
                                 .write(true)
                                 .create(fresh)
                                 .truncate(false),
+                            through,
                         )
                         .open(at),
                         at,
@@ -2270,7 +2370,7 @@ impl BarFile {
                     // the same flush for its sibling. Only a fresh stream can
                     // have created one, so only a fresh stream pays it. D-0688.
                     if fresh {
-                        fsync_dir(at.parent().unwrap_or(at))?;
+                        fsync_dir(at.parent().unwrap_or(at), batch.as_ref())?;
                     }
                     Some(sidecar)
                 }
@@ -2310,6 +2410,7 @@ impl BarFile {
             verified: Mutex::new(VerifiedBlock::EMPTY),
             admission: Admission::new(month, timeframe_secs),
             tix,
+            batch,
             _lock: lock,
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
@@ -2425,7 +2526,8 @@ impl BarFile {
                 &sum.to_le_bytes(),
             )?;
         }
-        barrier(crc, &self.bars_path)
+        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
+        barrier_in(self.batch.as_ref(), crc, crc_path, &self.bars_path)
     }
 
     /// Verifies the old tail block's committed prefix against its existing
@@ -2730,7 +2832,12 @@ impl BarFile {
         // below `commit.durable_through` is on stable storage when the second
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
-        barrier(&self.bars, &self.bars_path)?;
+        barrier_in(
+            self.batch.as_ref(),
+            &self.bars,
+            &self.bars_path,
+            &self.bars_path,
+        )?;
 
         // THE CHECKSUMS, BETWEEN THE RECORDS AND THE COMMIT. The ORDER is the
         // whole guarantee, and the other order is unsafe:
@@ -2760,7 +2867,12 @@ impl BarFile {
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        barrier(&self.bars, &self.bars_path)?;
+        barrier_in(
+            self.batch.as_ref(),
+            &self.bars,
+            &self.bars_path,
+            &self.bars_path,
+        )?;
 
         self.header = commit.header;
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
@@ -2982,9 +3094,11 @@ impl BarFile {
             return Ok(Reindexed::Unindexable(Why::NotBars));
         };
         let existed = matches!(fs::symlink_metadata(&tix.path), Ok(meta) if meta.is_file());
-        let index = fault(open_rw(&tix.path), &tix.path, Action::Open)?;
+        let batch = self.batch.as_ref();
+        let through = batch.is_some_and(DurableBatch::writes_through);
+        let index = fault(open_rw_through(&tix.path, through), &tix.path, Action::Open)?;
         if !existed {
-            fsync_dir(tix.path.parent().unwrap_or(&tix.path))?;
+            fsync_dir(tix.path.parent().unwrap_or(&tix.path), batch)?;
         }
         // WHY IT MUST BE WRITTEN, NAMED AS WHAT IT IS. An index this open just
         // made is ABSENT — confirming the empty file it created would call it
@@ -3005,7 +3119,7 @@ impl BarFile {
         let (state, outcome) = match checked {
             Ok(()) => (TixState::Ready(index), Reindexed::Kept),
             Err(why) if self.header.n_valid == 0 => {
-                write_index(&index, tix, &[])?;
+                write_index(&index, tix, &[], batch)?;
                 (TixState::Ready(index), Reindexed::Built(why))
             }
             Err(why) => {
@@ -3061,13 +3175,13 @@ impl BarFile {
         );
         match built {
             Ok(entries) => {
-                write_index(&index, tix, &entries)?;
+                write_index(&index, tix, &entries, self.batch.as_ref())?;
                 note_index_built(&tix.path, why, held.n_valid, len_u64(entries.len()));
                 Ok(TixState::Ready(index))
             }
             Err(cannot) => {
                 drop(index);
-                remove_index(&tix.path)?;
+                remove_index(&tix.path, self.batch.as_ref())?;
                 Ok(bisecting(&tix.path, cannot))
             }
         }
@@ -3164,7 +3278,7 @@ impl BarFile {
         };
         // Dropping the `Ready` state closes the handle before the unlink.
         self.set_tix_state(bisecting(&path, why));
-        remove_index(&path)
+        remove_index(&path, self.batch.as_ref())
     }
 
     /// Rebuilds a writer's index mid-life, because `why`: reopens the `.tix`
@@ -3173,7 +3287,11 @@ impl BarFile {
         let Some(tix) = self.tix.as_ref() else {
             return Ok(());
         };
-        let index = fault(open_rw(&tix.path), &tix.path, Action::Open)?;
+        let through = self
+            .batch
+            .as_ref()
+            .is_some_and(DurableBatch::writes_through);
+        let index = fault(open_rw_through(&tix.path, through), &tix.path, Action::Open)?;
         let state = self.rebuild_index(index, tix, why)?;
         self.set_tix_state(state);
         Ok(())
@@ -3190,7 +3308,7 @@ impl BarFile {
             return Ok(());
         };
         put_entries(index, &tix.path, bucket, entries)?;
-        fault(index.sync_all(), &tix.path, Action::Sync)
+        sync_index(index, &tix.path, self.batch.as_ref())
     }
 
     /// One record of whatever kind this file holds.
@@ -3971,12 +4089,25 @@ fn read_entry(index: &File, path: &Path, bucket: u64) -> Result<Entry, Why> {
 /// header and a sync. The header goes LAST so a crash mid-write leaves a file
 /// whose header does not check, which every reader refuses and the next
 /// writer rebuilds — never a valid header over entries half old, half new.
-fn write_index(index: &File, tix: &Tix, entries: &[Entry]) -> Result<(), StoreError> {
+///
+/// An index of NO entries -- a new or an empty month's -- takes one flush, not
+/// two (WP-16): there is no entry for the header to be ordered after, and a
+/// crash before its one flush leaves a file of the wrong length or with no
+/// header that checks, which the next writer rebuilds and a reader of an
+/// empty month has nothing to look up in.
+fn write_index(
+    index: &File,
+    tix: &Tix,
+    entries: &[Entry],
+    batch: Option<&DurableBatch>,
+) -> Result<(), StoreError> {
     fault(index.set_len(0), &tix.path, Action::Write)?;
     put_entries(index, &tix.path, 0, entries)?;
-    fault(index.sync_all(), &tix.path, Action::Sync)?;
+    if !entries.is_empty() {
+        sync_index(index, &tix.path, batch)?;
+    }
     write_fully(index, &tix.path, 0, &tix.geometry.encode())?;
-    fault(index.sync_all(), &tix.path, Action::Sync)
+    sync_index(index, &tix.path, batch)
 }
 
 /// Writes `entries` from `bucket` on in one positional write, and sets the
@@ -4008,9 +4139,9 @@ fn bisecting(path: &Path, why: Why) -> TixState {
 
 /// Removes a `.tix` that must no longer claim its month, and syncs the
 /// directory so the removal survives a crash. Already gone is done.
-fn remove_index(path: &Path) -> Result<(), StoreError> {
+fn remove_index(path: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
     match fs::remove_file(path) {
-        Ok(()) => fsync_dir(path.parent().unwrap_or(path)),
+        Ok(()) => fsync_dir(path.parent().unwrap_or(path), batch),
         Err(gone) if gone.kind() == ErrorKind::NotFound => Ok(()),
         Err(refusal) => Err(classify(path, Action::Write, &refusal)),
     }
@@ -4115,6 +4246,9 @@ fn initialise(
     // would validate and the CRC would pass because the bytes written are the
     // bytes read.
     layout: Layout,
+    // The writer's durable batch (WP-16, D-3353): the genesis is its flush to
+    // issue while it is open.
+    batch: Option<&DurableBatch>,
 ) -> Result<(), StoreError> {
     // BORN WITH CHECKSUMS, AND ONLY EVER BORN WITH THEM.
     //
@@ -4150,6 +4284,11 @@ fn initialise(
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
     write_fully(dst, path, commit.offset, &commit.bytes)?;
+    if let Some(batch) = batch
+        && batch.defer_file(dst, path)?
+    {
+        return Ok(());
+    }
     fault(dst.sync_all(), path, Action::Sync)
 }
 
@@ -4337,20 +4476,581 @@ fn missing_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
 ///
 /// Without it the bars can be on stable storage inside a file the directory
 /// does not yet mention after a crash, which is the same as not having them.
-fn fsync_dir(dir: &Path) -> Result<(), StoreError> {
+///
+/// Inside [`with_directories_flushed_once`] the flush is gathered instead,
+/// and issued once per directory when that open ends (WP-16). Inside an open
+/// [`DurableBatch`] it is the batch's, issued once when the batch is made
+/// durable.
+fn fsync_dir(dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
+    let gathered = GATHERED_DIRECTORIES.with(|cell| {
+        let mut gathered = cell.borrow_mut();
+        let Some(dirs) = gathered.as_mut() else {
+            return false;
+        };
+        if !dirs.iter().any(|known| known == dir) {
+            dirs.push(dir.to_path_buf());
+        }
+        true
+    });
+    if gathered {
+        return Ok(());
+    }
+    flush_directory(dir)
+}
+
+/// One flush of a month's time index, or its deferral to `batch`.
+fn sync_index(index: &File, path: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if let Some(batch) = batch
+        && batch.defer_file(index, path)?
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    tests::count_index_flush(path);
+    fault(index.sync_all(), path, Action::Sync)
+}
+
+/// An append's durability barrier on `file` (the records, the checksum
+/// sidecar or the header slot of the month at `month`), or its deferral to
+/// `batch` while the batch is open. A failed barrier is remembered for
+/// `month` ([`barrier`]).
+fn barrier_in(
+    batch: Option<&DurableBatch>,
+    file: &File,
+    path: &Path,
+    month: &Path,
+) -> Result<(), StoreError> {
+    if let Some(batch) = batch
+        && batch.defer_file(file, path)?
+    {
+        return Ok(());
+    }
+    barrier(file, month)
+}
+
+// ═══ A batch made durable together (WP-16, DB-N25, D-3353) ═══════════════
+//
+// Measured on the operator's drive (an external WD_BLACK, APFS; a scratch
+// probe of 1,000 months, each one 25,000-byte record write, a 4-byte checksum
+// write, a 16-byte index write and a 64-byte header write; `tgt/p-WP-16/
+// probe2`, never in the repository; 10 Oct 2026, and again on 11 Oct with the
+// machine under load 13, the second figure of each pair):
+//
+// | per month                                     | 1 thread        | 8 threads         | 12 threads        |
+// |-----------------------------------------------|-----------------|-------------------|-------------------|
+// | four `F_FULLFSYNC`s (this module's default)   | 6.05-7.00, 5.52 ms | 1.85-2.54, 1.65 ms | 1.85, 1.44 ms   |
+// | `F_BARRIERFSYNC` for each of the four         | 6.05, 5.75 ms   | 2.12, 3.44 ms     | 1.82 ms           |
+// | `fsync(2)` for each, one `F_FULLFSYNC` at the end | 0.77 ms     | 0.24, 0.36 ms     | 0.19 ms           |
+// | `O_SYNC` writes, one `F_FULLFSYNC` at the end | 0.35, 0.37 ms   | 0.11-0.16, 0.12 ms | 0.12-0.14, 0.11 ms |
+// | plain writes, an `F_FULLFSYNC` of each file at the end | 4.4, 5.7 ms | 1.3, 1.4 ms  | 1.1, 1.25 ms      |
+//
+// `F_BARRIERFSYNC` costs a full flush on this drive, and the drive serves
+// about 850 to 3,400 `F_FULLFSYNC`s a second however many threads ask, so no
+// scheme with a flush per month can make an options day of 5,600 to 6,500
+// months ten times faster. Every crate here forbids `unsafe`, so a plain
+// `fsync(2)` is not reachable either: `std`'s `sync_all` and `sync_data` both
+// issue `F_FULLFSYNC` on macOS.
+
+/// How a [`DurableBatch`] makes what it deferred durable (D-3353).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchFlush {
+    /// Every file a writer opens inside the batch is opened `O_SYNC`, so each
+    /// write is on the device when it returns; the batch ends with one
+    /// `F_FULLFSYNC` per directory that gained a name and one per device.
+    /// The measured choice (WP-16).
+    OncePerDevice,
+    /// Writes are plain; the batch ends with one `F_FULLFSYNC` of every file
+    /// and directory whose flush it deferred. Rests on fcntl(2) alone, and
+    /// costs a flush per file.
+    EveryFile,
+}
+
+/// Writes whose flushes are deferred and then made durable together: the
+/// GDFL import's day (WP-16, DB-N25, D-3353).
+///
+/// A writer on a thread that has [`DurableBatch::enter`]ed a batch, through
+/// [`BarFile::open_or_create`], [`crate::provenance::record`] or anything
+/// else that asks [`DurableBatch::current`], writes what it always writes, in
+/// the order it always writes it, and leaves each flush it would have issued
+/// to the batch. Nothing it wrote is durable until
+/// [`DurableBatch::make_durable`] returns `Ok`; after that call the batch is
+/// sealed, and a writer still holding it flushes for itself again, so no
+/// write can slip past the flush that sealed it. The module header says what
+/// a crash or a power loss leaves.
+///
+/// Clones share one batch, so every worker thread of a day enters the same
+/// one.
+#[derive(Debug, Clone)]
+pub struct DurableBatch(Arc<Batch>);
+
+/// The batch the clones share.
+#[derive(Debug)]
+struct Batch {
+    flush: BatchFlush,
+    deferred: Mutex<Deferred>,
+}
+
+/// What a batch has deferred, under its lock.
+#[derive(Debug, Default)]
+struct Deferred {
+    /// Made durable, or being made so: nothing more is deferred.
+    sealed: bool,
+    /// Every file whose flush was deferred, each once.
+    files: HashSet<PathBuf>,
+    /// Every directory whose flush was deferred, each once.
+    directories: HashSet<PathBuf>,
+    /// One file per device written through the batch
+    /// ([`BatchFlush::OncePerDevice`]).
+    devices: BTreeMap<u64, PathBuf>,
+    /// Every file of a month the caller asked to confirm
+    /// ([`DurableBatch::confirm_month`]), each once: flushed for itself
+    /// whatever the batch's kind, because this batch did not write it.
+    confirmed: HashSet<PathBuf>,
+}
+
+/// What [`DurableBatch::make_durable`] flushed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MadeDurable {
+    /// Files whose flushes the batch held.
+    pub files: usize,
+    /// Directories whose flushes the batch held.
+    pub directories: usize,
+    /// Files of confirmed months ([`DurableBatch::confirm_month`]) that the
+    /// batch flushed for themselves.
+    pub confirmed: usize,
+    /// `F_FULLFSYNC`s issued to make them durable.
+    pub flushes: usize,
+}
+
+thread_local! {
+    /// The batch this thread's writers defer to, if any.
+    static ENTERED: std::cell::RefCell<Option<DurableBatch>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A thread inside a [`DurableBatch`]: dropping it puts back the batch the
+/// thread was in before, if any. Never sent to another thread.
+#[derive(Debug)]
+#[must_use = "the batch is left as soon as this is dropped"]
+pub struct InBatch {
+    before: Option<DurableBatch>,
+    _this_thread: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for InBatch {
+    fn drop(&mut self) {
+        let before = self.before.take();
+        ENTERED.with(|cell| cell.replace(before));
+    }
+}
+
+/// `O_SYNC` on the hosts `crate::open_flags` verified one for.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+const O_SYNC: Option<i32> = Some(crate::open_flags::O_SYNC);
+
+/// No verified `O_SYNC` for any other host: there a
+/// [`BatchFlush::OncePerDevice`] batch defers nothing, and every writer
+/// flushes for itself as it always did.
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+const O_SYNC: Option<i32> = None;
+
+impl DurableBatch {
+    /// A new, open batch.
+    #[must_use]
+    pub fn new(flush: BatchFlush) -> Self {
+        Self(Arc::new(Batch {
+            flush,
+            deferred: Mutex::new(Deferred::default()),
+        }))
+    }
+
+    /// How it flushes.
+    #[must_use]
+    pub fn flush(&self) -> BatchFlush {
+        self.0.flush
+    }
+
+    /// This thread's writers defer to this batch until the answer drops.
+    pub fn enter(&self) -> InBatch {
+        InBatch {
+            before: ENTERED.with(|cell| cell.replace(Some(self.clone()))),
+            _this_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// The batch this thread has entered, while it is open; `None` outside
+    /// one, or once it is sealed.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        ENTERED
+            .with(|cell| cell.borrow().clone())
+            .filter(|batch| !batch.deferred().sealed)
+    }
+
+    /// The lock, whatever a panicking writer left: every field is written
+    /// whole under it.
+    fn deferred(&self) -> std::sync::MutexGuard<'_, Deferred> {
+        self.0
+            .deferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a writer inside this batch opens its files `O_SYNC`:
+    /// [`BatchFlush::OncePerDevice`] on a host with a verified `O_SYNC`.
+    #[must_use]
+    pub fn writes_through(&self) -> bool {
+        self.0.flush == BatchFlush::OncePerDevice && O_SYNC.is_some()
+    }
+
+    /// Defers the flush of `file`, open at `path` and opened `O_SYNC` when
+    /// [`Self::writes_through`]: `Ok(true)` when the batch holds it,
+    /// `Ok(false)` when the batch is sealed, or cannot hold a flush on this
+    /// host, and the caller must flush now.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal to measure the file's device.
+    pub fn defer_file(&self, file: &File, path: &Path) -> Result<bool, StoreError> {
+        let device = match self.0.flush {
+            BatchFlush::OncePerDevice if O_SYNC.is_none() => return Ok(false),
+            BatchFlush::OncePerDevice => {
+                use std::os::unix::fs::MetadataExt as _;
+                Some(fault(file.metadata(), path, Action::Measure)?.dev())
+            }
+            BatchFlush::EveryFile => None,
+        };
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return Ok(false);
+        }
+        if !deferred.files.contains(path) {
+            deferred.files.insert(path.to_path_buf());
+        }
+        if let Some(device) = device {
+            deferred
+                .devices
+                .entry(device)
+                .or_insert_with(|| path.to_path_buf());
+        }
+        Ok(true)
+    }
+
+    /// Defers the flush of the directory `dir`, which gained or lost a name:
+    /// `true` when the batch holds it, `false` when it is sealed.
+    #[must_use]
+    pub fn defer_directory(&self, dir: &Path) -> bool {
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return false;
+        }
+        if !deferred.directories.contains(dir) {
+            deferred.directories.insert(dir.to_path_buf());
+        }
+        true
+    }
+
+    /// Holds a flush of every file the month at `path` has under `root`, and
+    /// of every directory from the month's own up to `root`: `Ok(true)` when
+    /// the batch holds them, `Ok(false)` when it is sealed and holds nothing.
+    ///
+    /// For a month an EARLIER PROCESS may have written and never made durable
+    /// (a unit cut off before its batch was, D-3353). Read again, such a
+    /// month answers [`Appended::AlreadyPresent`] from the kernel's cache and
+    /// nothing is written, so no writer defers anything of it and the device
+    /// flush of a [`BatchFlush::OncePerDevice`] batch may never be issued at
+    /// all. Each file named here is therefore flushed for itself when the
+    /// batch is made durable, whatever the batch's kind, and so is each
+    /// directory, whose names that process never flushed either.
+    ///
+    /// O(1): one `lstat` per sibling kind ([`FileKind::ALL`], the lock aside,
+    /// which holds no byte) and one set insert per directory level. A sibling
+    /// that is absent, or is not a regular file, is not the month's and is
+    /// passed over: the doors that open it refuse it by name. A month with no
+    /// file at all holds nothing to confirm.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal to measure a sibling, by path.
+    pub fn confirm_month(&self, root: &Path, path: StorePath<'_>) -> Result<bool, StoreError> {
+        let mut files = Vec::with_capacity(FileKind::ALL.len());
+        for kind in FileKind::ALL {
+            if kind == FileKind::Lock {
+                continue;
+            }
+            let at = path.with_file(kind).to_path_buf(root);
+            match fs::symlink_metadata(&at) {
+                Ok(meta) if meta.is_file() => files.push(at),
+                Ok(_) => {}
+                Err(gone) if gone.kind() == ErrorKind::NotFound => {}
+                Err(refusal) => return Err(classify(&at, Action::Measure, &refusal)),
+            }
+        }
+        let bars = path.to_path_buf(root);
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return Ok(false);
+        }
+        // A month the store holds no file of has nothing to confirm, and its
+        // directories may not exist.
+        if files.is_empty() {
+            return Ok(true);
+        }
+        deferred.confirmed.extend(files);
+        let mut next = bars.parent();
+        while let Some(dir) = next {
+            if !dir.starts_with(root) {
+                break;
+            }
+            if !deferred.directories.contains(dir) {
+                deferred.directories.insert(dir.to_path_buf());
+            }
+            next = dir.parent();
+        }
+        Ok(true)
+    }
+
+    /// Seals the batch and makes everything it deferred durable, on up to
+    /// `threads` threads: every directory, one file per device
+    /// ([`BatchFlush::OncePerDevice`]) or every file
+    /// ([`BatchFlush::EveryFile`]), and every file of a confirmed month
+    /// ([`Self::confirm_month`]), each by `F_FULLFSYNC`. A second call has
+    /// nothing left and flushes nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first flush the host refused, by path. Every file of the batch is
+    /// then remembered as a failed barrier ([`StoreError::BarrierFailed`]),
+    /// so no later append in this process can confirm its bytes with a
+    /// second flush.
+    pub fn make_durable(&self, threads: usize) -> Result<MadeDurable, StoreError> {
+        self.make_durable_by(threads, &|file, _| sync_hooked(file))
+    }
+
+    /// [`Self::make_durable`] with each flush issued through `flush`: the
+    /// seam a test fails one at.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::make_durable`].
+    pub fn make_durable_by(
+        &self,
+        threads: usize,
+        flush: &(dyn Fn(&File, &Path) -> io::Result<()> + Sync),
+    ) -> Result<MadeDurable, StoreError> {
+        let (files, directories, devices, mut confirmed) = {
+            let mut deferred = self.deferred();
+            deferred.sealed = true;
+            (
+                std::mem::take(&mut deferred.files),
+                std::mem::take(&mut deferred.directories),
+                std::mem::take(&mut deferred.devices),
+                std::mem::take(&mut deferred.confirmed),
+            )
+        };
+        let mut targets: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
+        match self.0.flush {
+            BatchFlush::OncePerDevice => targets.extend(devices.values().map(PathBuf::as_path)),
+            BatchFlush::EveryFile => {
+                // A file this batch wrote is flushed once, confirmed or not.
+                confirmed.retain(|path| !files.contains(path));
+                targets.extend(files.iter().map(PathBuf::as_path));
+            }
+        }
+        targets.extend(confirmed.iter().map(PathBuf::as_path));
+        let made = MadeDurable {
+            files: files.len(),
+            directories: directories.len(),
+            confirmed: confirmed.len(),
+            flushes: targets.len(),
+        };
+        let refused = flush_all(&targets, threads, flush);
+        if let Some((path, why)) = refused {
+            let mut failed = FAILED_BARRIERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            failed.extend(files);
+            failed.extend(confirmed);
+            return Err(classify(&path, Action::Sync, &why));
+        }
+        Ok(made)
+    }
+}
+
+/// `F_FULLFSYNC`s each of `targets` through `flush` on up to `threads`
+/// threads (at least one); the first refusal, by path. Every target is
+/// asked even after one refuses, so the batch's failure names what it can.
+fn flush_all(
+    targets: &[&Path],
+    threads: usize,
+    flush: &(dyn Fn(&File, &Path) -> io::Result<()> + Sync),
+) -> Option<(PathBuf, io::Error)> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let one = |path: &Path| -> Result<(), (PathBuf, io::Error)> {
+        // A FILE THE BATCH HELD AND THAT IS GONE was removed by its own
+        // writer after its flush was deferred (a time index retired by a
+        // later append, D-2330). Nothing of it is left to flush; what is left
+        // to make durable is its removal, so its directory is flushed in its
+        // place, and the device with it.
+        let (opened, at) = match no_follow(File::options().read(true)).open(path) {
+            Err(gone) if gone.kind() == ErrorKind::NotFound => {
+                let dir = path.parent().unwrap_or(path);
+                (File::open(dir), dir)
+            }
+            opened => (opened, path),
+        };
+        #[cfg(test)]
+        tests::count_batch_flush(at);
+        opened
+            .and_then(|file| flush(&file, at))
+            .map_err(|why| (at.to_path_buf(), why))
+    };
+    let next = AtomicUsize::new(0);
+    let first: Mutex<Option<(usize, PathBuf, io::Error)>> = Mutex::new(None);
+    let work = || {
+        loop {
+            let at = next.fetch_add(1, Ordering::Relaxed);
+            let Some(path) = targets.get(at) else {
+                break;
+            };
+            if let Err((path, why)) = one(path) {
+                let mut first = first.lock().unwrap_or_else(PoisonError::into_inner);
+                if first.as_ref().is_none_or(|(earlier, _, _)| at < *earlier) {
+                    *first = Some((at, path, why));
+                }
+            }
+        }
+    };
+    let wanted = threads.clamp(1, targets.len().max(1));
+    if wanted == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 1..wanted {
+                // A thread the host will not start leaves its share to the
+                // others; this one always works.
+                let _started = std::thread::Builder::new()
+                    .name("store-flush".to_owned())
+                    .spawn_scoped(scope, work);
+            }
+            work();
+        });
+    }
+    first
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(|(_, path, why)| (path, why))
+}
+
+/// One directory flush, now.
+fn flush_directory(dir: &Path) -> Result<(), StoreError> {
+    #[cfg(test)]
+    tests::count_directory_flush(dir);
     let handle = fault(File::open(dir), dir, Action::Open)?;
-    fault(handle.sync_all(), dir, Action::Sync)
+    fault(sync_hooked(&handle), dir, Action::Sync)
+}
+
+thread_local! {
+    /// The directories an open in progress on this thread has asked to flush,
+    /// each once, in the order first asked (WP-16). `None` outside one.
+    static GATHERED_DIRECTORIES: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Puts back what [`GATHERED_DIRECTORIES`] held before an open began, even
+/// when the open unwinds, so no later flush on this thread is gathered by an
+/// open that is over.
+struct Gathering {
+    /// What the thread held before: `None` outside any open.
+    before: Option<Vec<PathBuf>>,
+    /// Whether [`Gathering::finish`] already put it back.
+    finished: bool,
+}
+
+impl Gathering {
+    /// Starts gathering on this thread.
+    fn begin() -> Self {
+        Self {
+            before: GATHERED_DIRECTORIES.with(|cell| cell.replace(Some(Vec::new()))),
+            finished: false,
+        }
+    }
+
+    /// The directories gathered since [`Gathering::begin`], the earlier
+    /// state back.
+    fn finish(mut self) -> Vec<PathBuf> {
+        self.finished = true;
+        let before = self.before.take();
+        GATHERED_DIRECTORIES
+            .with(|cell| cell.replace(before))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Gathering {
+    fn drop(&mut self) {
+        if !self.finished {
+            let before = self.before.take();
+            GATHERED_DIRECTORIES.with(|cell| cell.replace(before));
+        }
+    }
+}
+
+/// Runs `open` with every directory flush it asks for gathered, then flushes
+/// each gathered directory once, in the order first asked, before answering
+/// (WP-16, DB-N25). A name is therefore durable when the open returns, as it
+/// was when each was flushed on its own.
+///
+/// An open that fails flushes nothing it gathered: no record can have been
+/// committed inside an open (the only commit it makes is an empty month's
+/// genesis), so a name lost to a crash after a refused open loses a month
+/// that holds nothing, which the next open creates again (`is_interrupted_
+/// genesis`); the checksum sidecar of a month with records is never created
+/// by an open (D-0688).
+fn with_directories_flushed_once<T>(
+    open: impl FnOnce() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
+    let gathering = Gathering::begin();
+    let opened = open();
+    let dirs = gathering.finish();
+    let value = opened?;
+    for dir in &dirs {
+        flush_directory(dir)?;
+    }
+    Ok(value)
 }
 
 /// Opens for reading and writing, creating but never truncating, and never
 /// through a final symlink (CE-62, D-2686).
 fn open_rw(path: &Path) -> io::Result<File> {
-    no_follow(
+    open_rw_through(path, false)
+}
+
+/// [`open_rw`], and `O_SYNC` as well when `through` (a writer inside a
+/// [`DurableBatch`] that [`DurableBatch::writes_through`]).
+fn open_rw_through(path: &Path, through: bool) -> io::Result<File> {
+    no_follow_through(
         File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false),
+        through,
     )
     .open(path)
 }
@@ -4360,6 +5060,20 @@ fn open_rw(path: &Path) -> io::Result<File> {
 /// `symlink_metadata` check is the only guard, which is weaker by the window
 /// between the check and the open.
 fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    no_follow_through(options, false)
+}
+
+/// [`no_follow`], and `O_SYNC` as well when `through`.
+fn no_follow_through(options: &mut fs::OpenOptions, through: bool) -> &mut fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.custom_flags(writer_flags(through));
+    options
+}
+
+/// The custom open flags of a writer: `O_NOFOLLOW` where `crate::open_flags`
+/// verified it, and `O_SYNC` too when `through` and this host has one. The
+/// provenance sidecar's writer opens with the same flags.
+pub(crate) const fn writer_flags(through: bool) -> i32 {
     #[cfg(any(
         target_os = "macos",
         all(
@@ -4368,10 +5082,25 @@ fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
         )
     ))]
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(crate::open_flags::O_NOFOLLOW);
+        if through {
+            crate::open_flags::O_NOFOLLOW_SYNC
+        } else {
+            crate::open_flags::O_NOFOLLOW
+        }
     }
-    options
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        match O_SYNC {
+            Some(flag) if through => flag,
+            _ => 0,
+        }
+    }
 }
 
 /// A writer open's failure, named: a final symlink the kernel refused under
@@ -4712,6 +5441,693 @@ mod tests {
     thread_local! {
         /// Barriers to let pass on this thread before one fails.
         static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+        /// Every directory flushed on this thread, in order (WP-16).
+        static DIRECTORY_FLUSHES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Counts one directory flush on this thread.
+    pub(super) fn count_directory_flush(dir: &Path) {
+        DIRECTORY_FLUSHES.with(|flushed| flushed.borrow_mut().push(dir.to_path_buf()));
+    }
+
+    thread_local! {
+        /// Time indexes flushed on this thread (WP-16).
+        static INDEX_FLUSHES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts one time-index flush on this thread.
+    pub(super) fn count_index_flush(_path: &Path) {
+        INDEX_FLUSHES.with(|flushed| flushed.set(flushed.get() + 1));
+    }
+
+    /// The time-index flushes on this thread since the last call.
+    fn index_flushes() -> usize {
+        INDEX_FLUSHES.with(|flushed| flushed.replace(0))
+    }
+
+    /// The directories flushed on this thread since the last call.
+    fn directory_flushes() -> Vec<PathBuf> {
+        DIRECTORY_FLUSHES.with(|flushed| std::mem::take(&mut *flushed.borrow_mut()))
+    }
+
+    /// WP-16 (DB-N25): A NEW MONTH FLUSHES EACH DIRECTORY ONCE. Its bars, its
+    /// checksum sidecar and its time index are three names in one directory,
+    /// which used to be three flushes of it; every directory the open created
+    /// still has its entry flushed in its parent, and all of it before the
+    /// open returns. Opening the month again flushes nothing, and an open
+    /// that refuses leaves this thread flushing as before.
+    #[test]
+    fn a_new_month_flushes_each_directory_once() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-dirflush-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let bars = month.to_path_buf(&root);
+        let dir = bars.parent().expect("the month's directory").to_path_buf();
+        let _ = (directory_flushes(), index_flushes());
+        let mut writer =
+            BarFile::open_or_create(&root, month, SYMBOL).expect("a fresh month opens");
+        let flushed = directory_flushes();
+        assert_eq!(
+            index_flushes(),
+            1,
+            "an empty month's time index is its header: one flush, not two"
+        );
+        for name in ["crc", "tix"] {
+            assert!(bars.with_extension(name).exists(), "{name} was created");
+        }
+        assert_eq!(
+            flushed.iter().filter(|one| **one == dir).count(),
+            1,
+            "three names, one flush of their directory: {flushed:?}"
+        );
+        let mut distinct = flushed.clone();
+        distinct.dedup();
+        assert_eq!(distinct, flushed, "no directory flushed twice");
+        let mut created = Vec::new();
+        let mut at = dir.as_path();
+        while at != root {
+            created.push(at.parent().expect("below the root").to_path_buf());
+            at = at.parent().expect("below the root");
+        }
+        for parent in &created {
+            assert!(
+                flushed.contains(parent),
+                "{} not flushed: {flushed:?}",
+                parent.display()
+            );
+        }
+        assert_eq!(flushed.len(), created.len() + 1, "{flushed:?}");
+        let batch: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&batch),
+            Ok(Appended::Committed { .. })
+        ));
+        assert_eq!(index_flushes(), 1, "an append still flushes its index once");
+        drop(writer);
+
+        let again = BarFile::open_or_create(&root, month, SYMBOL).expect("it reopens");
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "nothing new to name"
+        );
+        let refused = BarFile::open_or_create(&root, month, SYMBOL ^ 1);
+        assert!(
+            refused.is_err(),
+            "a second writer, or another symbol, is refused"
+        );
+        drop(again);
+        let _ = directory_flushes();
+        super::fsync_dir(&dir, None).expect("a flush outside any open");
+        assert_eq!(
+            directory_flushes(),
+            vec![dir],
+            "issued at once, never gathered"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// WP-16: A GATHERED DIRECTORY FLUSH THAT FAILS FAILS THE OPEN, by name,
+    /// as the flush it replaced did; nothing is answered as opened, and the
+    /// next open of the month is a clean one.
+    #[test]
+    fn a_gathered_directory_flush_that_fails_fails_the_open() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = std::env::temp_dir().join(format!(
+            "brutex-store-file-dirflush-fault-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "BANKNIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        SYNC_FAULT.with(|armed| armed.set(Some(0)));
+        let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
+        assert!(
+            matches!(
+                refused,
+                Err(StoreError::Io {
+                    action: Action::Sync,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(!sync_fault_fires(), "the fault fired at the gathered flush");
+        let _ = directory_flushes();
+        let mut again =
+            BarFile::open_or_create(&root, month, SYMBOL).expect("the month opens again");
+        let dir = month
+            .to_path_buf(&root)
+            .parent()
+            .expect("the month's directory")
+            .to_path_buf();
+        assert_eq!(
+            directory_flushes(),
+            vec![dir],
+            "only the month's own directory again: an empty month's checksum \
+             sidecar is named again before its first commit (D-0688)"
+        );
+        let batch: Vec<Bar> = (0..2).map(bar).collect();
+        assert!(matches!(
+            again.append(&batch),
+            Ok(Appended::Committed { .. })
+        ));
+        drop(again);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    // ═══ A durable batch (WP-16, DB-N25, D-3353) ═══════════════════════════
+
+    /// Every flush a batch issued, from any thread, in the order issued:
+    /// `flush_all` runs on threads of its own, so a test filters this by its
+    /// own root.
+    static BATCH_FLUSHES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Counts one flush a batch issued.
+    pub(super) fn count_batch_flush(path: &Path) {
+        BATCH_FLUSHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.to_path_buf());
+    }
+
+    /// The flushes batches issued under `root` so far.
+    fn batch_flushes_under(root: &Path) -> Vec<PathBuf> {
+        BATCH_FLUSHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect()
+    }
+
+    /// A fresh store root for one batch test.
+    fn batch_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-store-file-batch-{tag}-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        root
+    }
+
+    /// A one-second NIFTY month of `symbol` under any root.
+    fn second_month(symbol: &str) -> crate::path::StorePath<'_> {
+        crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol,
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path")
+    }
+
+    /// Every file under `root`, by its path below it, with its bytes.
+    fn files_under(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a directory of the store") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("below the root")
+                        .to_path_buf();
+                    out.insert(rel, std::fs::read(&path).expect("a file of the store"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Opens NIFTY's month under `root`, appends two batches and drops it,
+    /// on this thread.
+    fn two_appends(root: &Path) {
+        let mut writer =
+            BarFile::open_or_create(root, second_month("NIFTY"), SYMBOL).expect("the month opens");
+        let first: Vec<Bar> = (0..3).map(bar).collect();
+        let second: Vec<Bar> = (3..80).map(bar).collect();
+        for batch in [&first, &second] {
+            assert!(matches!(
+                writer.append(batch),
+                Ok(Appended::Committed { .. })
+            ));
+        }
+    }
+
+    /// WP-16 (DB-N25, D-3353): INSIDE A BATCH NO APPEND FLUSHES, THE BYTES ARE
+    /// THE BYTES, AND THE BATCH ENDS WITH ONE FLUSH PER DIRECTORY AND ONE PER
+    /// DEVICE. A new month and two appends to it, written inside a
+    /// once-per-device batch, issue no barrier (an armed fault never fires),
+    /// no index flush and no directory flush; every file is byte for byte what
+    /// the same writes outside a batch leave; and making the batch durable
+    /// flushes each directory that gained a name once and the device once.
+    #[test]
+    fn a_batch_defers_every_flush_and_ends_with_one_per_directory_and_device() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let plain = batch_root("plain");
+        two_appends(&plain);
+        let root = batch_root("once");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        assert!(batch.writes_through(), "O_SYNC is verified on this host");
+        let _ = (directory_flushes(), index_flushes());
+        {
+            let _inside = batch.enter();
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            two_appends(&root);
+            assert!(
+                SYNC_FAULT.with(Cell::get) == Some(0),
+                "no barrier was issued inside the batch"
+            );
+            SYNC_FAULT.with(|armed| armed.set(None));
+        }
+        assert_eq!(index_flushes(), 0, "no index flush inside the batch");
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "no directory flush inside the batch"
+        );
+        assert_eq!(files_under(&root), files_under(&plain), "the same bytes");
+        let made = batch.make_durable(4).expect("the batch is made durable");
+        let month_dir = second_month("NIFTY")
+            .to_path_buf(&root)
+            .parent()
+            .expect("the month's directory")
+            .to_path_buf();
+        // The root and every directory below it down to the month's own
+        // gained a name (the month's own gained three: bars, checksums,
+        // index), and each is flushed once.
+        let mut gained = vec![root.clone()];
+        let mut at = month_dir.as_path();
+        while at != root {
+            gained.push(at.to_path_buf());
+            at = at.parent().expect("below the root");
+        }
+        gained.sort();
+        assert_eq!(made.directories, gained.len(), "{made:?}");
+        assert_eq!(
+            made.files, 3,
+            "the bars, the checksums, the index: {made:?}"
+        );
+        assert_eq!(made.flushes, made.directories + 1, "one for the device");
+        let flushed = batch_flushes_under(&root);
+        assert_eq!(flushed.len(), made.flushes, "{flushed:?}");
+        let mut directories: Vec<PathBuf> = flushed
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect();
+        directories.sort();
+        assert_eq!(directories, gained, "each directory once");
+        let device: Vec<&PathBuf> = flushed.iter().filter(|path| path.is_file()).collect();
+        assert_eq!(device.len(), 1, "one file flushes the device: {flushed:?}");
+        assert_eq!(
+            batch.make_durable(4).expect("a second call"),
+            MadeDurable::default(),
+            "nothing left to flush"
+        );
+        assert_eq!(batch_flushes_under(&root).len(), made.flushes);
+        for dir in [plain, root] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// WP-16 (D-3353): AN EVERY-FILE BATCH WRITES PLAINLY AND ENDS WITH ONE
+    /// FLUSH OF EACH FILE AND EACH DIRECTORY IT WROTE, each once however many
+    /// appends touched it, on as many threads as it is given.
+    #[test]
+    fn an_every_file_batch_flushes_each_file_and_directory_once() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let plain = batch_root("plain-every");
+        two_appends(&plain);
+        let root = batch_root("every");
+        let batch = DurableBatch::new(BatchFlush::EveryFile);
+        assert!(!batch.writes_through(), "plain writes");
+        let _ = (directory_flushes(), index_flushes());
+        {
+            let _inside = batch.enter();
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            two_appends(&root);
+            assert!(SYNC_FAULT.with(Cell::get) == Some(0), "no barrier");
+            SYNC_FAULT.with(|armed| armed.set(None));
+        }
+        assert_eq!((index_flushes(), directory_flushes()), (0, Vec::new()));
+        assert_eq!(files_under(&root), files_under(&plain), "the same bytes");
+        let made = batch.make_durable(3).expect("durable");
+        assert_eq!(made.files, 3, "{made:?}");
+        assert_eq!(made.flushes, made.files + made.directories, "{made:?}");
+        let flushed = batch_flushes_under(&root);
+        let mut files: Vec<String> = flushed
+            .iter()
+            .filter(|path| path.is_file())
+            .filter_map(|path| {
+                path.extension()
+                    .map(|ext| ext.to_string_lossy().into_owned())
+            })
+            .collect();
+        files.sort();
+        assert_eq!(files, ["bin", "crc", "tix"], "each file once: {flushed:?}");
+        for dir in [plain, root] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// WP-16 (D-3353): ONCE A BATCH IS MADE DURABLE IT HOLDS NOTHING MORE. A
+    /// writer opened inside it, appending after it was sealed, flushes for
+    /// itself again (its barrier fires), and a new open on a thread still
+    /// inside it belongs to no batch.
+    #[test]
+    fn a_sealed_batch_leaves_each_writer_to_flush_for_itself() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("sealed");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        let _inside = batch.enter();
+        assert!(DurableBatch::current().is_some(), "inside an open batch");
+        let mut writer =
+            BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL).expect("opens");
+        let first: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&first),
+            Ok(Appended::Committed { .. })
+        ));
+        batch.make_durable(2).expect("durable");
+        assert!(DurableBatch::current().is_none(), "sealed: no batch");
+        let _ = index_flushes();
+        SYNC_FAULT.with(|armed| armed.set(Some(0)));
+        let after: Vec<Bar> = (3..6).map(bar).collect();
+        let refused = writer.append(&after);
+        assert!(
+            matches!(
+                refused,
+                Err(StoreError::Io {
+                    action: Action::Sync,
+                    ..
+                })
+            ),
+            "the writer's own barrier, armed to fail, was issued: {refused:?}"
+        );
+        drop(writer);
+        let _ = directory_flushes();
+        let other = BarFile::open_or_create(&root, second_month("BANKNIFTY"), SYMBOL)
+            .expect("another month opens");
+        assert!(other.batch.is_none(), "a writer of no batch");
+        assert!(
+            !directory_flushes().is_empty(),
+            "its new names were flushed by the open itself"
+        );
+        assert!(index_flushes() > 0, "and its index");
+        drop(other);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// WP-16 (D-3353): A BATCH THAT CANNOT BE MADE DURABLE NAMES THE PATH AND
+    /// BARS EVERY MONTH IT WROTE, so no later append in this process can
+    /// confirm bytes whose flush failed with a second one (D-1907's rule for
+    /// one barrier, applied to the batch's).
+    #[test]
+    fn a_batch_that_cannot_be_made_durable_bars_every_month_it_wrote() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("refused");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        {
+            let _inside = batch.enter();
+            two_appends(&root);
+        }
+        let refused = batch.make_durable_by(2, &|file, path| {
+            if path.is_file() {
+                Err(io::Error::other("injected batch flush fault"))
+            } else {
+                file.sync_all()
+            }
+        });
+        let bars = second_month("NIFTY").to_path_buf(&root);
+        match refused {
+            Err(StoreError::Io {
+                action: Action::Sync,
+                path,
+                ..
+            }) => assert!(path.starts_with(&root), "{}", path.display()),
+            other => panic!("the flush was refused by path: {other:?}"),
+        }
+        let mut reopened =
+            BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL).expect("reopens");
+        assert_eq!(
+            reopened.append(&[bar(200)]),
+            Err(StoreError::BarrierFailed { path: bars }),
+            "the month takes no further append in this process"
+        );
+        drop(reopened);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// WP-16: THE WRITER'S FLAGS ARE THE UNIONS THEY NAME, on this host.
+    #[test]
+    fn the_writer_flags_are_the_unions_they_name() {
+        let sync = super::O_SYNC.expect("a verified O_SYNC on this host");
+        assert_eq!(sync, crate::open_flags::O_SYNC);
+        #[cfg(target_os = "macos")]
+        assert_eq!(sync, 0x80, "sys/fcntl.h");
+        assert_eq!(super::writer_flags(false), crate::open_flags::O_NOFOLLOW);
+        assert_eq!(
+            super::writer_flags(true),
+            crate::open_flags::O_NOFOLLOW | sync
+        );
+        assert_eq!(crate::open_flags::O_NOFOLLOW & sync, 0, "disjoint bits");
+    }
+
+    /// WP-16: A BATCH IS ENTERED BY ONE THREAD AT A TIME, NESTS, AND IS LEFT
+    /// WHEN ITS GUARD DROPS; another thread is in none until it enters.
+    #[test]
+    fn entering_a_batch_is_this_threads_alone_and_nests() {
+        assert!(DurableBatch::current().is_none());
+        let outer = DurableBatch::new(BatchFlush::OncePerDevice);
+        let inner = DurableBatch::new(BatchFlush::EveryFile);
+        let in_outer = outer.enter();
+        let is = |batch: &DurableBatch| {
+            DurableBatch::current().is_some_and(|now| Arc::ptr_eq(&now.0, &batch.0))
+        };
+        assert!(is(&outer));
+        {
+            let _in_inner = inner.enter();
+            assert!(is(&inner));
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| assert!(DurableBatch::current().is_none(), "another thread"))
+                    .join()
+                    .expect("the other thread");
+            });
+        }
+        assert!(is(&outer), "the outer batch is back");
+        drop(in_outer);
+        assert!(DurableBatch::current().is_none());
+        assert_eq!(outer.flush(), BatchFlush::OncePerDevice);
+        assert_eq!(inner.flush(), BatchFlush::EveryFile);
+    }
+
+    /// The month's own directory and every one above it up to `root`.
+    fn directories_down_to(root: &Path, month: crate::path::StorePath<'_>) -> Vec<PathBuf> {
+        let bars = month.to_path_buf(root);
+        let mut dirs = Vec::new();
+        let mut at = bars.parent().expect("the month's directory");
+        loop {
+            dirs.push(at.to_path_buf());
+            if at == root {
+                break;
+            }
+            at = at.parent().expect("below the root");
+        }
+        dirs.sort();
+        dirs
+    }
+
+    /// WP-16 (D-3353): A MONTH AN EARLIER PROCESS WROTE AND NEVER MADE DURABLE
+    /// IS FLUSHED FOR ITSELF, WHATEVER THE BATCH. Read again it answers
+    /// `AlreadyPresent` and nothing is written, so a once-per-device batch
+    /// would hold no file and issue no flush at all: this failed before
+    /// `confirm_month`, the batch reporting zero flushes for a month whose
+    /// bytes no flush had ever covered. Confirmed, every file the month has
+    /// (bars, checksums, index; no lock) and every directory down to it is
+    /// flushed once.
+    #[test]
+    fn a_confirmed_month_is_flushed_for_itself_whatever_the_batch() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for (tag, kind) in [
+            ("confirm-once", BatchFlush::OncePerDevice),
+            ("confirm-every", BatchFlush::EveryFile),
+        ] {
+            let root = batch_root(tag);
+            // The earlier process: a batch that wrote and was never made
+            // durable (dropped, as a kill drops it).
+            {
+                let cut_off = DurableBatch::new(kind);
+                let _inside = cut_off.enter();
+                two_appends(&root);
+            }
+            let present_again = |batch: &DurableBatch| {
+                let _inside = batch.enter();
+                let mut writer = BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL)
+                    .expect("the month opens again");
+                let again: Vec<Bar> = (0..3).map(bar).collect();
+                assert!(
+                    matches!(writer.append(&again), Ok(Appended::AlreadyPresent { .. })),
+                    "the month already holds them"
+                );
+            };
+            // THE HOLE: a batch that only found the month present holds
+            // nothing, so it flushes nothing.
+            let unconfirmed = DurableBatch::new(kind);
+            present_again(&unconfirmed);
+            assert_eq!(
+                unconfirmed.make_durable(2).expect("an empty batch"),
+                MadeDurable::default(),
+                "{kind:?}: nothing of a month found present is in a batch"
+            );
+            let batch = DurableBatch::new(kind);
+            present_again(&batch);
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("the month is measured"),
+                "an open batch holds the month"
+            );
+            // A month the store does not hold has nothing to confirm.
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("BANKNIFTY"))
+                    .expect("an absent month")
+            );
+            let before = batch_flushes_under(&root).len();
+            let made = batch.make_durable(3).expect("durable");
+            let dirs = directories_down_to(&root, second_month("NIFTY"));
+            assert_eq!(made.confirmed, 3, "bars, checksums, index: {made:?}");
+            assert_eq!(made.files, 0, "this batch wrote nothing: {made:?}");
+            assert_eq!(made.directories, dirs.len(), "{made:?}");
+            assert_eq!(made.flushes, 3 + dirs.len(), "{made:?}");
+            let flushed: Vec<PathBuf> = batch_flushes_under(&root).split_off(before);
+            let mut files: Vec<String> = flushed
+                .iter()
+                .filter(|path| path.is_file())
+                .filter_map(|path| {
+                    path.extension()
+                        .map(|ext| ext.to_string_lossy().into_owned())
+                })
+                .collect();
+            files.sort();
+            assert_eq!(files, ["bin", "crc", "tix"], "{kind:?}: {flushed:?}");
+            let mut directories: Vec<PathBuf> = flushed
+                .iter()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .collect();
+            directories.sort();
+            assert_eq!(directories, dirs, "{kind:?}: each directory once");
+            assert!(
+                !batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("a sealed batch"),
+                "a sealed batch holds nothing more"
+            );
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16 (D-3353): A CONFIRMED MONTH THE BATCH ALSO WROTE IS FLUSHED ONCE
+    /// PER FILE by an every-file batch, never twice; a once-per-device batch
+    /// flushes its files for themselves beside the device.
+    #[test]
+    fn a_confirmed_month_the_batch_wrote_is_flushed_once_per_file() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for (tag, kind, device) in [
+            ("confirm-wrote-every", BatchFlush::EveryFile, 0),
+            ("confirm-wrote-once", BatchFlush::OncePerDevice, 1),
+        ] {
+            let root = batch_root(tag);
+            let batch = DurableBatch::new(kind);
+            {
+                let _inside = batch.enter();
+                two_appends(&root);
+            }
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("measured")
+            );
+            let made = batch.make_durable(2).expect("durable");
+            let dirs = directories_down_to(&root, second_month("NIFTY"));
+            assert_eq!(made.files, 3, "{made:?}");
+            assert_eq!(made.directories, dirs.len(), "{made:?}");
+            assert_eq!(made.flushes, 3 + dirs.len() + device, "{kind:?}: {made:?}");
+            let files = batch_flushes_under(&root)
+                .iter()
+                .filter(|path| path.is_file())
+                .count();
+            assert_eq!(files, 3 + device, "{kind:?}");
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16 (D-3353): A FILE REMOVED AFTER ITS FLUSH WAS DEFERRED DOES NOT
+    /// FAIL THE BATCH. A writer may retire a month's time index after an
+    /// earlier write of it was deferred (D-2330); the file is gone when the
+    /// batch is made durable, and the batch failed on it, by name, before the
+    /// flush fell back to the file's directory, which is what is left to make
+    /// durable.
+    #[test]
+    fn a_file_removed_after_its_flush_was_deferred_is_flushed_through_its_directory() {
+        for (tag, kind) in [
+            ("gone-every", BatchFlush::EveryFile),
+            ("gone-once", BatchFlush::OncePerDevice),
+        ] {
+            let root = batch_root(tag);
+            let gone = root.join("retired.tix");
+            let file = open_rw(&gone).expect("a file under the root");
+            let batch = DurableBatch::new(kind);
+            assert!(batch.defer_file(&file, &gone).expect("held"));
+            drop(file);
+            std::fs::remove_file(&gone).expect("removed by its writer");
+            let made = batch
+                .make_durable(2)
+                .expect("the batch is still made durable");
+            assert_eq!((made.files, made.flushes), (1, 1), "{made:?}");
+            assert_eq!(
+                batch_flushes_under(&root),
+                vec![root.clone()],
+                "{kind:?}: its directory in its place"
+            );
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// Whether the armed barrier fault fires now; it fires once.
@@ -4772,14 +6188,15 @@ mod tests {
     }
 
     use super::{
-        Action, Appended, Bar, BarFile, FormatError, Layout, NO_BLOCK, Positional, StoreError,
-        already_stored, bytes_past_the_counter, classify, first_at_or_after, initialise, len_u64,
-        lock_fault, open_rw, read_fully, write_fully,
+        Action, Appended, Bar, BarFile, BatchFlush, DurableBatch, FormatError, Layout, MadeDurable,
+        NO_BLOCK, Positional, StoreError, already_stored, bytes_past_the_counter, classify,
+        first_at_or_after, initialise, len_u64, lock_fault, open_rw, read_fully, write_fully,
     };
     use crate::format::{OI_NULL, RECORDS_PER_BLOCK};
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, PoisonError};
 
     /// THE PER-MEMBER `store.append` LINE BUILDS NOTHING WHEN IT IS FILTERED.
     ///
@@ -5162,7 +6579,7 @@ mod tests {
         let path = scratch(tag);
         let _ignored = std::fs::remove_file(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        initialise(&bars, &path, SYMBOL, 60, Layout::CURRENT)
+        initialise(&bars, &path, SYMBOL, 60, Layout::CURRENT, None)
             .expect("a fresh header region is written");
         (path.clone(), reopen(&path).expect("and reads back"))
     }
@@ -5187,6 +6604,7 @@ mod tests {
             crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Write,
+            None,
         )
     }
 
@@ -5212,6 +6630,7 @@ mod tests {
             crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Read,
+            None,
         )
     }
 
@@ -5797,7 +7216,7 @@ mod tests {
         let path = scratch("v2still");
         scrub_month(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        initialise(&bars, &path, SYMBOL, 60, Layout::V2).expect("a version-2 header region");
+        initialise(&bars, &path, SYMBOL, 60, Layout::V2, None).expect("a version-2 header region");
         drop(bars);
 
         let mut file = reopen(&path).expect("a version-2 month opens");

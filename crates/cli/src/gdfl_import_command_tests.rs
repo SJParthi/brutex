@@ -356,3 +356,66 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
     assert!(out.contains("\"acc\" is not a share symbol"), "{out}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// WP-16: `BRUTEX_GDFL_WORKERS` is optional; when set it is a count from 1 to
+/// the bound, and anything else is refused by name before anything is read.
+#[test]
+fn workers_are_the_default_or_a_count_within_the_bound() {
+    let none = env_of(&[]);
+    assert_eq!(workers_of(&none), Ok(Workers::DEFAULT));
+    let four = env_of(&[(WORKERS_VAR, PathBuf::from("4"))]);
+    assert_eq!(workers_of(&four).map(Workers::get), Ok(4));
+    for bad in ["0", "13", "x", "-1", ""] {
+        let env = env_of(&[(WORKERS_VAR, PathBuf::from(bad))]);
+        let why = workers_of(&env).expect_err(bad);
+        assert!(why.starts_with(WORKERS_VAR), "{bad}: {why}");
+    }
+    let store = scratch("workers");
+    let env = env_of(&[
+        (WORKERS_VAR, PathBuf::from("0")),
+        (TICKSTORE_VAR, store.clone()),
+    ]);
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.contains(WORKERS_VAR), "{out}");
+    std::fs::remove_dir_all(&store).ok();
+}
+
+/// WP-16 (D-3353): `BRUTEX_GDFL_DURABILITY` is optional; when set it is one
+/// of the three words, and anything else is refused by name before anything
+/// is read. A run says which it used, and its workers.
+#[test]
+fn durability_is_the_default_or_one_of_its_words() {
+    let none = env_of(&[]);
+    assert_eq!(durability_of(&none), Ok(Durability::DEFAULT));
+    for word in ["day", "day-each-file", "each-write"] {
+        let env = env_of(&[(DURABILITY_VAR, PathBuf::from(word))]);
+        assert_eq!(durability_of(&env).map(Durability::as_str), Ok(word));
+    }
+    for bad in ["", "Day", "daily", "each"] {
+        let env = env_of(&[(DURABILITY_VAR, PathBuf::from(bad))]);
+        let why = durability_of(&env).expect_err(bad);
+        assert!(why.starts_with(DURABILITY_VAR), "{bad}: {why}");
+    }
+    let store = scratch("durability");
+    let env = env_of(&[
+        (DURABILITY_VAR, PathBuf::from("weekly")),
+        (TICKSTORE_VAR, store.clone()),
+    ]);
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.contains(DURABILITY_VAR), "{out}");
+    std::fs::remove_dir_all(&store).ok();
+}
