@@ -66946,12 +66946,13 @@ ATTACK-10.
 
 1. What verification finds is kept per (feed, instrument, day, timeframe) as
    one fixed 160-byte record, in an immutable **day image** per (feed,
-   segment, timeframe, day, generation) at
-   `<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt`,
+   exchange, segment, timeframe, day, generation) at
+   `<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt`
+   (the exchange level is D-4923's),
    under a **year index** `<yyyy>.vdi` that commits through two slots, the bar
    file's own rule. A separate tree, because per-instrument sidecars would add
    a 32 KiB header region to each of about 20,000 option contract-months a day.
-2. **One generation per (feed, segment, timeframe, day) per run.** A run that
+2. **One generation per (feed, exchange, segment, timeframe, day) per run.** A run that
    verified only some keys of a day (a Zerodha window, a filtered GDFL run)
    carries every other key of the committed generation whole, each keeping its
    own run, flags and details; a whole-day run carries nothing. The commit
@@ -67155,3 +67156,147 @@ explain. A key with no record on a day not imported answers `owed
 `the_codes_and_their_severity_are_the_designs`,
 `format_v1_holds_every_fact_it_names`,
 `a_key_without_a_record_never_shows_another_keys_code`.
+
+### D-4922 — A writer's temporary is born `O_EXCL` by one shared helper, `store::staging`: a name that exists is never opened, truncated or written through — 2026-10-12
+
+**Implemented by** IA-5 (`store::staging::create`, and `store::verdict`'s two
+temporaries through it). IA-2, IA-7, IA-9 and IA-11a use the same helper for
+the stop file, the alert queue's birth, the request file and the deferred
+marker when they land (the rules audit's NEW-22). **Findings** the rules audit
+of 11 October 2026, RA-290 (led by IA-5) and RA-287.
+
+**Context.** `store::verdict` opened its temporaries "create, truncate, no
+symbolic link". `O_NOFOLLOW` does not stop a hard link: a second name of
+another file, planted or left at `<final name>.<pid>-<run>.tmp`, was cut to
+zero and written through. The sort index's second check lost a bar file to the
+same open (verify-WP-39), and five more temporaries are designed.
+
+**Decision.** `store::staging::create(path)` opens with `O_CREAT | O_EXCL`.
+When the name exists it is looked at with `lstat`: a regular file with exactly
+one name is a dead writer's leftover, so the NAME is removed (`unlink`, which
+changes no byte) and the create is tried once more, and the caller is told how
+many bytes it held (`Staged::cleared`; `Committed::staging_cleared` for a
+verdict commit); a file with more than one name is refused `staging_linked`; a
+symbolic link, a directory or a special file is refused `staging_not_regular`;
+a name that exists again after its one removal is refused `staging_contended`.
+No path truncates, and nothing is removed but a name whose file has no other.
+The helper does not log (the `store` crate proves each of its emit sites, and
+a shared helper has no caller context): the caller reports the cleared count
+and every refusal in its own event.
+
+**Rejected.** *Remove the name whatever its link count, as the sort index
+does* (`sort_index_writer::clear_staging`): safe for the file behind it, but a
+planted link then disappears with only a warning; a verdict commit is refused
+instead, so the operator sees the name. *`O_TRUNC` after a link-count check*:
+the check and the open are two steps, and the file can be swapped between them.
+
+**Proof.** `crates/store/src/staging_tests.rs` (every row of the module's
+table: `a_free_name_is_created_empty_and_nothing_is_cleared`,
+`a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`,
+`a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`,
+`a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left`,
+`a_missing_directory_is_the_hosts_refusal_by_name`) and, through
+`verdict::commit`, `crates/store/tests/verdict.rs`
+`a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`.
+With the open put back to create-and-truncate both hard-link tests fail (the
+file behind the link is cut), with the link-count refusal removed the unit
+test fails, and with the lock file opened truncating step 5 of the commit
+test fails: mutations run on 12 October 2026.
+
+### D-4923 — A verdict family is (feed, exchange, segment, timeframe): the exchange is a directory level and a header byte, the feed is the vendor table's own, and a timeframe is its seconds — 2026-10-12
+
+**Implemented by** IA-5, before `store::verdict` merges, so it is part of
+format version 1 and not a second version. Continues D-4808 (the paths) and
+D-4844 (the header). **Findings** the rules audit of 11 October 2026: RA-243
+(led by IA-5), and IA-5's part of RA-253 and RA-255.
+
+**Context.** The round-5 format filed verdicts under
+`verify/<feed>/<SEGMENT>/<tf>/` with no exchange, knew two feeds through its
+own enum and ten timeframes through its own table of bytes. A second exchange
+would have shared one day record with NSE although its holidays differ, so
+"open or closed, complete or not" would have been wrong for one of them; a
+third feed or an eleventh timeframe was a format change, and nothing failed if
+one of the three lists was missed.
+
+**Decision.**
+
+1. The path is `verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/…`, the bar store's
+   own four levels in its order, and `Series` carries the exchange.
+2. Header offset 14 is the exchange (`NSE` 1, `BSE` 2), by an exhaustive match
+   on `core::instrument::Exchange`: a new exchange does not compile until it
+   has a byte. A lookup refuses an image whose header names another exchange
+   than the series asked for.
+3. `verdict::Feed` is `core::vendor::Vendor` itself. Its byte (offset 12) is
+   one more than the vendor's position in `Vendor::ALL`, computed from the
+   table, for every vendor in it (`gdfl` stays 4 and `zerodha` 5, frozen by a
+   test). A third feed is a row appended to `Vendor::ALL`.
+4. The timeframe is its own length in seconds, a u32 at offset 184 (taken from
+   the reserved bytes), read back through `Timeframe::from_secs`; the typed
+   table of ten bytes is removed. The unit of the counts is the largest of
+   day, minute and second that divides it. A value the running build's
+   `Timeframe::KNOWN` does not hold is refused `written_by_newer_build`.
+
+**Not done here.** `core` has no exchange table and `store::path` no feed
+capability table (the rules audit's NEW-36): the verdict store now reads
+whatever those tables hold, and adding a timeframe is still one row in
+`Timeframe::KNOWN`, which is `store::path`'s.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`two_exchanges_on_one_day_are_two_day_records`,
+`every_feed_and_timeframe_the_store_knows_files_a_verdict`,
+`the_series_bytes_are_pinned`,
+`the_bytes_sit_at_the_offsets_section_35_states`.
+
+### D-4924 — The verdict commit lock is waited for at most 30 seconds, then refused `lock_stalled` — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::LOCK_WAIT`, `verdict::commit_within`).
+Adopts, for this one lock, the critic's round-7 resolution IA-2-2 (its D-4906,
+which lands with IA-2 for the journal, runs-ledger, audit-ledger and alert
+locks); the critic's "IA-5's commit lock adopts it in IA-6's change if IA-5
+has merged" does not apply because IA-5 had not merged. **Findings** RA-051
+(the lock half).
+
+**Decision.** `commit` takes `<yyyy>.vdi.lock` with `try_lock` in a counted
+loop of 10 ms steps for at most `LOCK_WAIT` = 30 s. Past it the commit is
+refused `lock_stalled`, naming the lock file and the wait, with nothing
+published: the day reads "verdict pending" and the caller raises the event and
+the alert. A holder that dies frees the lock at once, so only a holder that
+hangs (a write stuck on a stalled drive) reaches the refusal. `commit_within`
+takes another wait; zero tries once.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_commit_lock_held_past_the_wait_is_refused_by_name`; IA-VD-07
+(`two_writers_on_one_day_never_lose_a_record`) still holds through the
+counted wait.
+
+### D-4925 — The record ceiling is a band, and a commit says when a day reaches half of it — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::RECORDS_PLACED`, `verdict::RECORDS_WATCH`,
+`Committed::near_ceiling`). The alert is IA-7's, raised from that answer.
+**Findings** RA-261.
+
+**Context.** L-IA-33 quoted "137,900 records placed, 275,800 refused" from one
+made-up key set per size. Whether a key set fits depends on its hashes.
+
+**Measured** (12 October 2026, `verdict::table` over uniform random 64-bit
+hashes, fixed seeds, pinned in the test below): at 26,820 records (the largest
+real day) 1,000 of 1,000 key sets are placed with at least one doubling to
+spare; at 68,950 records 1,000 of 1,000; at 137,900 records **184 of 200**;
+at 206,850 records 16 of 200. So 137,900 is not a number the format
+guarantees: about one random key set in twelve is refused there.
+
+**Decision.** `RECORDS_WATCH` is 68,950, half of the 137,900 once placed and a
+count at which every measured key set fits. A commit of at least that many
+records answers `near_ceiling()`, while the day still commits. Before a real
+day reaches it (2.6 times today's largest), format version 2 splits a day's
+image by underlying or widens the table. A day that does not fit is still
+refused `table_too_large` whole, by name, with nothing written.
+
+**Not done.** The fit of the real key sets of the 20 largest days was not
+run: a day's key set is the vendor's day listing, which this package does not
+read. The 25 real month contract sets (8,582 to 19,000 keys, each a superset
+of any of its days) were placed; see `docs/06-limits.md` L-IA-33.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_days_keys_fit_whatever_the_keys_are` and
+`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`.

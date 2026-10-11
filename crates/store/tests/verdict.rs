@@ -20,8 +20,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use brutex_core::instrument::Segment;
+use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
 use store::path::Timeframe;
 use store::provenance::Day;
@@ -55,6 +56,7 @@ impl Root {
         Series {
             root: &self.0,
             feed: Feed::Gdfl,
+            exchange: Exchange::Nse,
             segment: Segment::Fno,
             timeframe: Timeframe::SECOND_1,
         }
@@ -169,6 +171,15 @@ fn a_verdict_is_found_by_one_bounded_probe_at_every_day_size() {
         let series = root.series();
         let done = verdict::commit(&series, &generation(41, day_of(n))).unwrap();
         assert_eq!(done.records, u32::try_from(n).unwrap());
+        // Half the measured ceiling is named while the day still fits
+        // (RA-261): 1x and 10x are under it, 50x is at the ceiling itself.
+        assert_eq!(
+            done.near_ceiling(),
+            n >= 68_950,
+            "n={n}: the watch is half of the {} records placed",
+            verdict::RECORDS_PLACED
+        );
+        assert_eq!(done.staging_cleared, 0, "n={n}: no leftover to clear");
 
         // A present key, cold and then warm.
         let probe_at = [0, n / 2, n - 1];
@@ -1260,8 +1271,14 @@ fn format_v1_holds_every_fact_it_names() {
     );
     let h = image.header;
     assert_eq!(
-        (h.feed, h.segment, h.timeframe, h.unit),
-        (Feed::Gdfl, Segment::Fno, Timeframe::SECOND_1, Unit::Second)
+        (h.feed, h.exchange, h.segment, h.timeframe, h.unit),
+        (
+            Feed::Gdfl,
+            Exchange::Nse,
+            Segment::Fno,
+            Timeframe::SECOND_1,
+            Unit::Second
+        )
     );
     assert_eq!(
         (h.run, h.written_at, h.verifier, h.mode, h.rule_set),
@@ -1492,57 +1509,75 @@ fn the_codes_and_their_severity_are_the_designs() {
     assert_eq!(Code::Owed.code(), 18);
 }
 
-/// The feed, segment, timeframe and unit bytes, pinned to their sources: a
-/// feed's code is its position in `Vendor::ALL` plus one.
+/// The feed, exchange, segment and unit bytes, pinned to their sources: a
+/// feed is the bar store's own vendor and its byte is the vendor's position
+/// in `Vendor::ALL` plus one, for EVERY vendor of the table (no list of
+/// feeds lives here; RA-243). The two feeds in use are frozen at the bytes
+/// their images already carry, so an insertion into `Vendor::ALL` fails
+/// here. An exchange's and a segment's bytes are frozen numbers.
 #[test]
 fn the_series_bytes_are_pinned() {
-    for feed in Feed::ALL {
-        let at = Vendor::ALL
-            .iter()
-            .position(|v| *v == feed.vendor())
-            .unwrap();
-        assert_eq!(usize::from(feed.code()), at + 1);
-        assert_eq!(Feed::from_code(feed.code()), Some(feed));
-        assert_eq!(Feed::of(feed.vendor()), Some(feed));
-        assert_eq!(feed.as_str(), feed.vendor().as_str());
+    for (at, vendor) in Vendor::ALL.iter().enumerate() {
+        let feed: Feed = *vendor;
+        let code = verdict::feed_code(feed).unwrap();
+        assert_eq!(usize::from(code), at + 1);
+        assert_eq!(verdict::feed_of(code), Some(feed));
     }
+    assert_eq!(verdict::feed_code(Feed::Gdfl), Some(4));
+    assert_eq!(verdict::feed_code(Feed::Zerodha), Some(5));
+    assert_eq!(verdict::feed_of(0), None, "0 is no feed");
     assert_eq!(
-        Feed::of(Vendor::Dhan),
+        verdict::feed_of(u8::try_from(Vendor::ALL.len() + 1).unwrap()),
         None,
-        "only the feeds the operator uses"
+        "a byte past the table is no feed"
     );
+    assert_eq!(verdict::exchange_code(Exchange::Nse), 1);
+    assert_eq!(verdict::exchange_code(Exchange::Bse), 2);
+    for exchange in [Exchange::Nse, Exchange::Bse] {
+        assert_eq!(
+            verdict::exchange_of(verdict::exchange_code(exchange)),
+            Some(exchange)
+        );
+    }
+    assert_eq!(verdict::exchange_of(0), None);
+    assert_eq!(verdict::exchange_of(3), None);
     for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
         assert_eq!(
             verdict::segment_of(verdict::segment_code(segment)),
             Some(segment)
         );
     }
-    let mut codes: Vec<u8> = Timeframe::KNOWN
-        .iter()
-        .map(|tf| verdict::timeframe_code(*tf).unwrap())
-        .collect();
+    // A timeframe has no byte: it is its own seconds, and its unit is the
+    // largest of day, minute and second that divides them.
     for tf in Timeframe::KNOWN {
-        assert_eq!(
-            verdict::timeframe_of(verdict::timeframe_code(*tf).unwrap()),
-            Some(*tf)
-        );
+        let want = match tf.secs() {
+            1 => Unit::Second,
+            86_400 => Unit::Day,
+            _ => Unit::Minute,
+        };
+        assert_eq!(verdict::unit_of(*tf), want, "{}", tf.as_str());
     }
-    codes.sort_unstable();
-    assert_eq!(codes, (1..=10).collect::<Vec<u8>>());
-    assert_eq!(verdict::unit_of(Timeframe::SECOND_1), Unit::Second);
-    assert_eq!(verdict::unit_of(Timeframe::MINUTE_15), Unit::Minute);
-    assert_eq!(verdict::unit_of(Timeframe::DAY_1), Unit::Day);
     let root = Root::new();
     let series = Series {
         root: &root.0,
         feed: Feed::Zerodha,
+        exchange: Exchange::Nse,
         segment: Segment::Index,
         timeframe: Timeframe::MINUTE_1,
     };
     assert_eq!(
         series.image_path(day(), 7),
         root.0
-            .join("verify/zerodha/INDEX/1min/2031/2031-03-04.g0000000007.vdt")
+            .join("verify/zerodha/NSE/INDEX/1min/2031/2031-03-04.g0000000007.vdt")
+    );
+    assert_eq!(
+        Series {
+            exchange: Exchange::Bse,
+            ..series
+        }
+        .dir(),
+        root.0.join("verify/zerodha/BSE/INDEX/1min"),
+        "the exchange is a directory level, as in the bar store"
     );
     // Ten digits, the width of u32::MAX: every generation has one name, and
     // one day's names sort in generation order.
@@ -1574,11 +1609,11 @@ fn the_series_bytes_are_pinned() {
     );
     assert_eq!(
         series.year_index(2031),
-        root.0.join("verify/zerodha/INDEX/1min/2031.vdi")
+        root.0.join("verify/zerodha/NSE/INDEX/1min/2031.vdi")
     );
     assert_eq!(
         series.lock_path(2031),
-        root.0.join("verify/zerodha/INDEX/1min/2031.vdi.lock")
+        root.0.join("verify/zerodha/NSE/INDEX/1min/2031.vdi.lock")
     );
 }
 
@@ -1602,7 +1637,29 @@ fn the_bytes_sit_at_the_offsets_section_35_states() {
     assert_eq!(&b[0..8], b"BRUTEXVD");
     assert_eq!(u16_at(8), 1);
     assert_eq!(u16_at(10), 160);
-    assert_eq!(&b[12..16], &[4, 3, 1, 0], "gdfl, FNO, 1s, seconds");
+    assert_eq!(&b[12..16], &[4, 3, 1, 0], "gdfl, FNO, NSE, seconds");
+    assert_eq!(u32_at(184), 1, "the timeframe is its own seconds: 1s");
+    assert!(b[188..252].iter().all(|x| *x == 0), "reserved, zero");
+    // Another series, so no byte above is right by coincidence: Zerodha,
+    // BSE, INDEX, 15-minute bars counted in minutes.
+    let other = Series {
+        feed: Feed::Zerodha,
+        exchange: Exchange::Bse,
+        segment: Segment::Index,
+        timeframe: Timeframe::MINUTE_15,
+        ..series
+    };
+    let other_bytes = fs::read(verdict::commit(&other, &g).unwrap().path).unwrap();
+    assert_eq!(
+        &other_bytes[12..16],
+        &[5, 1, 2, 1],
+        "zerodha, INDEX, BSE, minutes"
+    );
+    assert_eq!(
+        u32::from_le_bytes(other_bytes[184..188].try_into().unwrap()),
+        900,
+        "15 minutes"
+    );
     assert_eq!(
         u32_at(16),
         22_342,
@@ -1835,6 +1892,21 @@ fn a_commit_reports_what_it_published() {
     assert_eq!(done.path, series.image_path(day(), 1));
     assert!(done.path.starts_with(&root.0));
     assert!(Path::new(&done.path).exists());
+    assert_eq!(done.records, 4);
+    assert_eq!(done.staging_cleared, 0);
+    assert!(!done.near_ceiling());
+    // The watch level is exact: 68,950 records is near the ceiling, one
+    // fewer is not (RA-261).
+    let at = Committed {
+        records: verdict::RECORDS_WATCH,
+        ..done.clone()
+    };
+    assert!(at.near_ceiling());
+    let under = Committed {
+        records: verdict::RECORDS_WATCH - 1,
+        ..done
+    };
+    assert!(!under.near_ceiling());
 }
 
 /// `docs/02-store-format.md` §35 states the constants and offsets this
@@ -1876,6 +1948,18 @@ fn section_35_states_the_format_this_module_writes() {
         "`flag_unknown`",
         "`no_record`",
         "`stale: unknown (month busy)`",
+        "<EXCHANGE>",
+        "timeframe seconds",
+        "`feed_unknown`",
+        "`store::staging::create`",
+        "`staging_linked`",
+        "`staging_not_regular`",
+        "`staging_contended`",
+        "`lock_stalled`",
+        "`LOCK_WAIT` = 30 s",
+        "D-4922",
+        "D-4923",
+        "D-4924",
         "10 digits",
         "L-IA-33",
         "D-4808",
@@ -2062,4 +2146,376 @@ fn a_key_without_a_record_never_shows_another_keys_code() {
         .unwrap();
     assert_eq!(answer.code(), Some(Code::SourceLacksDay));
     assert_eq!(NoRecord::SourceLacksDay.word(), "source_lacks_day");
+}
+
+// ------------------------------------------------ the rules audit, 11 Oct --
+
+/// The committed entry of the fixture day in `series`' year index, or
+/// `None` when the day has no committed generation.
+fn committed_day(series: &Series<'_>) -> Option<verdict::DayEntry> {
+    Reader::new()
+        .year(series, 2031)
+        .unwrap()
+        .map(|year| year.entry(day()))
+        .filter(|entry| entry.generation > 0)
+}
+
+/// RA-243: the exchange is part of a verdict family. NSE and BSE keep
+/// different calendars, so one day is two day records, in two directories,
+/// each read back as its own; and an image filed under one exchange is
+/// refused when it is read as the other's.
+#[test]
+fn two_exchanges_on_one_day_are_two_day_records() {
+    let root = Root::new();
+    let nse = Series {
+        segment: Segment::Cash,
+        ..root.series()
+    };
+    let bse = Series {
+        exchange: Exchange::Bse,
+        ..nse
+    };
+    // On NSE the day's run stopped part-way and found a mismatch; on BSE
+    // the same day is complete and clean.
+    let mut stopped = generation(301, vec![entry("NSE-CASH-ZZTWOEX", Code::ValueMismatch)]);
+    stopped.day_block.state = DayState::Stopped;
+    let clean = generation(302, vec![entry("BSE-CASH-ZZTWOEX", Code::Match)]);
+    let a = verdict::commit(&nse, &stopped).unwrap();
+    let b = verdict::commit(&bse, &clean).unwrap();
+    assert_ne!(a.path, b.path);
+    assert_eq!(
+        (a.generation, b.generation),
+        (1, 1),
+        "neither is the other's generation 2"
+    );
+    assert!(a.path.starts_with(root.0.join("verify/gdfl/NSE/CASH/1s")));
+    assert!(b.path.starts_with(root.0.join("verify/gdfl/BSE/CASH/1s")));
+
+    let mut reader = Reader::new();
+    let first = committed_day(&nse).unwrap();
+    let second = committed_day(&bse).unwrap();
+    assert_eq!(first.worst_code(), Some(Code::ValueMismatch));
+    assert_eq!(first.state, DayState::Stopped.code());
+    assert_eq!((first.records, first.mismatches), (1, 1));
+    assert_eq!(second.worst_code(), Some(Code::Match));
+    assert_eq!(second.state, DayState::Complete.code());
+    assert_eq!((second.records, second.mismatches), (1, 0));
+    assert_eq!(
+        verdict::read_image(&a.path).unwrap().header.exchange,
+        Exchange::Nse
+    );
+    assert_eq!(
+        verdict::read_image(&b.path).unwrap().header.exchange,
+        Exchange::Bse
+    );
+    // A key of one exchange has no record on the other.
+    let key = Key::instrument("NSE-CASH-ZZTWOEX").unwrap();
+    assert!(matches!(
+        reader
+            .lookup(&nse, day(), &key)
+            .unwrap()
+            .answer
+            .unwrap()
+            .found,
+        Found::Record { .. }
+    ));
+    assert!(matches!(
+        reader
+            .lookup(&bse, day(), &key)
+            .unwrap()
+            .answer
+            .unwrap()
+            .found,
+        Found::NoRecord(_)
+    ));
+    // The NSE image put where BSE's generation 2 would be is refused: the
+    // header names its own exchange, and the path is not believed over it.
+    let planted = bse.image_path(day(), 1);
+    fs::remove_file(&planted).unwrap();
+    fs::copy(&a.path, &planted).unwrap();
+    let refused = Reader::new().lookup(&bse, day(), &key).unwrap_err();
+    assert_eq!(refused.word(), "image_corrupt", "{refused}");
+}
+
+/// RA-243, RA-255: nothing in the verdict store lists the feeds or the
+/// timeframes. Every vendor of `Vendor::ALL` and every rung of
+/// `Timeframe::KNOWN` files a verdict and reads it back with its own
+/// identity, and a timeframe the running build does not know is refused by
+/// name, never read as another.
+#[test]
+fn every_feed_and_timeframe_the_store_knows_files_a_verdict() {
+    let root = Root::new();
+    let key = Key::instrument("NSE-INDEX-ZZEVERY").unwrap();
+    let mut last = None;
+    for feed in Vendor::ALL {
+        for timeframe in Timeframe::KNOWN {
+            let series = Series {
+                root: &root.0,
+                feed,
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                timeframe: *timeframe,
+            };
+            let done = verdict::commit(
+                &series,
+                &generation(77, vec![entry("NSE-INDEX-ZZEVERY", Code::Match)]),
+            )
+            .unwrap();
+            let header = verdict::read_image(&done.path).unwrap().header;
+            assert_eq!(
+                (header.feed, header.timeframe, header.unit),
+                (feed, *timeframe, verdict::unit_of(*timeframe)),
+                "{} {}",
+                feed.as_str(),
+                timeframe.as_str()
+            );
+            let got = Reader::new().lookup(&series, day(), &key).unwrap();
+            assert_eq!(found(&got.answer.unwrap()).facts.code, Code::Match);
+            assert_eq!((got.cost.opens, got.cost.reads), (2, 5));
+            last = Some(done.path);
+        }
+    }
+    // 7 seconds is no rung of this build: an image that says so was written
+    // by a newer one.
+    let path = last.unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[184..188].copy_from_slice(&7u32.to_le_bytes());
+    let crc = store::crc::crc32c(&bytes[..252]);
+    bytes[252..256].copy_from_slice(&crc.to_le_bytes());
+    let end = bytes.len() - 32;
+    let trailer = brutex_core::blake3::hash(&bytes[..end]);
+    bytes[end..].copy_from_slice(&trailer);
+    let strange = root.0.join("strange.vdt");
+    fs::write(&strange, &bytes).unwrap();
+    let refused = verdict::read_image(&strange).unwrap_err();
+    assert_eq!(refused.word(), "written_by_newer_build", "{refused}");
+    assert!(
+        refused.to_string().contains("timeframe seconds 7"),
+        "{refused}"
+    );
+}
+
+/// The temporary a writer of this process and run would use beside `path`.
+fn tmp_beside(path: &Path, run: u64) -> PathBuf {
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push(format!(".{}-{run}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// RA-290: a hard link planted at a writer's temporary name is never
+/// opened. The commit is refused `staging_linked`, the file behind the link
+/// keeps every byte, nothing is published, and once the name is gone the
+/// same commit is generation 1. At the year index's temporary the same
+/// holds and no index is born. A dead writer's own leftover (a regular
+/// file with one name) is cleared and counted, never written through.
+#[test]
+fn a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched() {
+    let root = Root::new();
+    let series = root.series();
+    let run = 4_242u64;
+    let body = b"a month of bars that must survive".to_vec();
+    let victim = root.0.join("victim.bin");
+    fs::write(&victim, &body).unwrap();
+    let g = generation(run, day_of(9));
+
+    // 1. At the year index's temporary: refused before any index exists.
+    let year_dir = series.dir();
+    fs::create_dir_all(&year_dir).unwrap();
+    let index_tmp = tmp_beside(&series.year_index(2031), run);
+    fs::hard_link(&victim, &index_tmp).unwrap();
+    let refused = verdict::commit(&series, &g).unwrap_err();
+    assert_eq!(refused.word(), "staging_linked", "{refused}");
+    assert!(refused.to_string().contains("one of 2 names"), "{refused}");
+    assert_eq!(fs::read(&victim).unwrap(), body, "not one byte changed");
+    assert!(!series.year_index(2031).exists(), "no index was born");
+    assert!(
+        fs::symlink_metadata(&index_tmp).is_ok(),
+        "the name is left to be seen"
+    );
+    fs::remove_file(&index_tmp).unwrap();
+
+    // 2. At the image's temporary: refused, nothing published.
+    let image = series.image_path(day(), 1);
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    let image_tmp = tmp_beside(&image, run);
+    fs::hard_link(&victim, &image_tmp).unwrap();
+    let refused = verdict::commit(&series, &g).unwrap_err();
+    assert!(
+        matches!(&refused, VerdictError::Staging(why) if why.path() == image_tmp),
+        "{refused}"
+    );
+    assert_eq!(fs::read(&victim).unwrap(), body, "not one byte changed");
+    assert!(!image.exists(), "no image was linked");
+    assert_eq!(
+        committed_day(&series),
+        None,
+        "the day has no committed generation"
+    );
+    fs::remove_file(&image_tmp).unwrap();
+
+    // 3. A symbolic link at the name is refused the same way.
+    std::os::unix::fs::symlink(&victim, &image_tmp).unwrap();
+    let refused = verdict::commit(&series, &g).unwrap_err();
+    assert_eq!(refused.word(), "staging_not_regular", "{refused}");
+    assert_eq!(fs::read(&victim).unwrap(), body);
+    fs::remove_file(&image_tmp).unwrap();
+
+    // 4. A dead writer's leftover: cleared, counted, and the day commits.
+    fs::write(&image_tmp, b"half an image").unwrap();
+    let done = verdict::commit(&series, &g).unwrap();
+    assert_eq!(done.generation, 1);
+    assert_eq!(done.staging_cleared, 1, "the leftover is reported");
+    assert!(!image_tmp.exists(), "the temporary is gone after the link");
+    assert_eq!(fs::read(&victim).unwrap(), body);
+    assert_eq!(verdict::read_image(&done.path).unwrap().records.len(), 9);
+
+    // 5. The commit lock file is shared, never a temporary: it is opened
+    // without truncation and never written, so even a hard link at ITS name
+    // costs the file behind it nothing.
+    let lock_path = series.lock_path(2031);
+    fs::remove_file(&lock_path).unwrap();
+    fs::hard_link(&victim, &lock_path).unwrap();
+    let again = Generation {
+        run: run + 1,
+        ..g.clone()
+    };
+    assert_eq!(verdict::commit(&series, &again).unwrap().generation, 2);
+    assert_eq!(fs::read(&victim).unwrap(), body, "not one byte changed");
+}
+
+/// D-4924 (the critic's D-4906 for this lock): a commit lock held past the
+/// wait is a refusal by name, never a writer that waits for ever. Nothing
+/// is published while it is held, and the same commit goes through once it
+/// is free.
+#[test]
+fn a_commit_lock_held_past_the_wait_is_refused_by_name() {
+    let root = Root::new();
+    let series = root.series();
+    let g = generation(55, day_of(5));
+    verdict::commit(&series, &g).unwrap();
+
+    let lock_path = series.lock_path(2031);
+    let holder = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.lock().unwrap();
+    let again = Generation {
+        run: 56,
+        ..g.clone()
+    };
+    let started = std::time::Instant::now();
+    let refused = verdict::commit_within(&series, &again, Duration::from_millis(60)).unwrap_err();
+    let waited = started.elapsed();
+    match &refused {
+        VerdictError::LockStalled {
+            path,
+            waited_ms,
+            tries,
+        } => {
+            assert_eq!(path, &lock_path);
+            assert_eq!(*waited_ms, 60);
+            assert_eq!(*tries, 7, "one try, and one more per 10 ms step of 60 ms");
+        }
+        other => panic!("expected lock_stalled, got {other:?}"),
+    }
+    assert_eq!(refused.word(), "lock_stalled");
+    assert!(
+        waited >= Duration::from_millis(60),
+        "it waited the whole wait"
+    );
+    assert!(
+        waited < Duration::from_secs(20),
+        "and no longer: {waited:?}"
+    );
+    assert_eq!(
+        committed_day(&series).unwrap().generation,
+        1,
+        "nothing was published under the held lock"
+    );
+    assert!(!series.image_path(day(), 2).exists());
+    // No wait at all is one try.
+    let once = verdict::commit_within(&series, &again, Duration::ZERO).unwrap_err();
+    assert!(
+        matches!(
+            &once,
+            VerdictError::LockStalled {
+                tries: 1,
+                waited_ms: 0,
+                ..
+            }
+        ),
+        "{once}"
+    );
+    assert!(once.to_string().contains("1 tries over 0 ms"), "{once}");
+    assert_eq!(verdict::LOCK_WAIT, Duration::from_secs(30));
+
+    holder.unlock().unwrap();
+    let done = verdict::commit_within(&series, &again, Duration::from_millis(60)).unwrap();
+    assert_eq!(done.generation, 2);
+}
+
+/// A deterministic 64-bit generator (splitmix64) for the fit test: the
+/// table's rule reads a key only through its 64-bit hash, so a random key
+/// set is a set of random hashes.
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// How many of `sets` random key sets of `n` keys the table places, and the
+/// largest capacity any of them needed.
+fn fit(n: usize, sets: usize, seed: u64) -> (usize, usize) {
+    let mut state = seed;
+    let mut placed = 0usize;
+    let mut largest = 0usize;
+    for _ in 0..sets {
+        let hashes: Vec<u64> = (0..n).map(|_| splitmix(&mut state)).collect();
+        if let Ok((capacity, _)) = verdict::table(&hashes) {
+            placed += 1;
+            largest = largest.max(capacity);
+        }
+    }
+    (placed, largest)
+}
+
+/// RA-261: whether a day fits depends on its keys, so one made-up key set
+/// per size proved little. Over 1,000 random key sets at the largest real
+/// day's size (26,820 records) every set is placed with a doubling to
+/// spare, and every one of 1,000 sets at the watch level (68,950, half the
+/// measured ceiling) is placed too: `near_ceiling` fires while every day
+/// still fits.
+///
+/// The ceiling itself is a band, not a number, and the last two lines pin
+/// what was measured so nobody reads 137,900 as a promise: at 137,900
+/// records 184 of 200 random key sets fit (16 are refused
+/// `table_too_large`), and at 206,850 (1.5x) 16 of 200 fit. The seeds are
+/// fixed, so the counts are exact; a change to the placement rule moves
+/// them and must be measured again (L-IA-33).
+#[test]
+fn a_days_keys_fit_whatever_the_keys_are() {
+    let (placed, largest) = fit(26_820, 1_000, 0x00C0_FFEE);
+    assert_eq!(placed, 1_000, "every key set of the largest real day fits");
+    assert!(
+        largest <= verdict::MAX_CAPACITY / 2,
+        "with at least one doubling to spare: the largest table was {largest} slots"
+    );
+    let watch = usize::try_from(verdict::RECORDS_WATCH).unwrap();
+    assert_eq!(watch, 68_950);
+    let (placed, largest) = fit(watch, 1_000, 0x5EED_CE13);
+    assert_eq!(placed, 1_000, "every key set at the watch level fits");
+    assert!(largest <= verdict::MAX_CAPACITY);
+    let top = usize::try_from(verdict::RECORDS_PLACED).unwrap();
+    assert_eq!(top, 137_900);
+    let (placed_top, _) = fit(top, 200, 0x5EED_CE11);
+    let (placed_over, _) = fit(top * 3 / 2, 200, 0x5EED_CE12);
+    assert_eq!(
+        (placed_top, placed_over),
+        (184, 16),
+        "the ceiling is a band: measured fits of 200 random key sets at 137,900 and at 206,850"
+    );
 }

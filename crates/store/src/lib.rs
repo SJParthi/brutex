@@ -18,6 +18,7 @@
 //! | [`provenance`] | where a month's bars came from: the `.prv` sidecar (D-3334) |
 //! | [`sort_index`] | a month's rows ordered by each sortable column: the `.srt` sidecar (D-3349) |
 //! | [`verdict`] | what verification found: day images and year indexes (D-4808) |
+//! | [`staging`] | a writer's temporary, born without opening anything already there (D-4922) |
 //!
 //! # Seven properties the types enforce rather than document
 //!
@@ -82,6 +83,10 @@ pub mod path;
 pub mod provenance;
 pub mod repair;
 pub mod sort_index;
+/// A writer's temporary file, created `O_EXCL` so a name that already exists
+/// (a hard link planted there, a dead writer's leftover) is never opened,
+/// truncated or written through (RA-290, RA-287; D-4922).
+pub mod staging;
 pub mod time_index;
 pub mod verdict;
 

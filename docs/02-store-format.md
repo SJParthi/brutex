@@ -2804,8 +2804,9 @@ binds this section to the constants.
 
 What automatic verification found, per (feed, instrument, day, timeframe):
 one fixed 160-byte record per key verified that day, in an immutable **day
-image** per (feed, segment, timeframe, day, generation), under a **year
-index** per (feed, segment, timeframe, year) that commits through two slots.
+image** per (feed, exchange, segment, timeframe, day, generation), under a
+**year index** per (feed, exchange, segment, timeframe, year) that commits
+through two slots.
 `store::verdict` writes and reads every byte below; D-4808 is the store,
 D-4844 the format (its codes, flags, the no-record answer, the record ceiling
 and the month answers a staleness probe hands a lookup), D-4865 the crash
@@ -2822,19 +2823,35 @@ field relies on alignment.
 ### 35.1 Paths
 
 ```
-<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi                             year index
-<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                        commit lock
-<store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt   day image, one per generation
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi                             year index
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                        commit lock
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt   day image, one per generation
 ```
 
-`<feed>` is `gdfl` or `zerodha` (the vendor's own segment), `<SEGMENT>` is
-`INDEX`, `CASH` or `FNO`, and `<tf>` is a `store::path::Timeframe` word
-(`1s`, `1min` … `60min`, `1day`). Every segment comes from a closed set, so no
-path can leave `<store>/verify/`. `NNNNNNNNNN` is the u32 generation in
+The four levels are the bar store's own, in its order
+(`bars/<vendor>/<exchange>/<segment>/…/<timeframe>/`, §2). `<feed>` is a
+`core::vendor::Vendor` segment (`gdfl`, `zerodha`, and any vendor `Vendor::ALL`
+gains), `<EXCHANGE>` is `NSE` or `BSE`, `<SEGMENT>` is `INDEX`, `CASH` or
+`FNO`, and `<tf>` is a `store::path::Timeframe` word (`1s`, `1min` … `60min`,
+`1day`). Two exchanges keep two calendars, so one day is two day records in
+two directories, never one shared between them (D-4923; the rules audit of
+11 October 2026, RA-243). The verdict store holds no list of feeds, exchanges
+or timeframes of its own: a feed is its position in `Vendor::ALL`, an exchange
+and a segment are `core`'s enums matched exhaustively (a new variant does not
+compile until it has a byte), and a timeframe is its own number of seconds.
+Every segment comes from a closed set, so no path can leave `<store>/verify/`. `NNNNNNNNNN` is the u32 generation in
 decimal, zero-padded to 10 digits, the width of `u32::MAX` (4,294,967,295), so
 every generation has exactly one name and one day's names sort in generation
 order. A writer's temporary is `<final name>.<pid>-<run>.tmp`; **no reader
-ever opens a `.tmp`**. A Zerodha run's spool (`verify/spool/<run>/…`) and its
+ever opens a `.tmp`**, and **no writer opens one that already exists**: it is
+born by `store::staging::create` (`O_CREAT | O_EXCL`), so a name that is
+already there is looked at without following it and never truncated. A regular
+file with one name (a dead writer's leftover) loses that name and the create is
+tried once more, counted in the commit's `staging_cleared`; a file with more
+than one name (a hard link planted there) is refused `staging_linked`, a
+symbolic link, directory or special file `staging_not_regular`, and a name
+that exists again after its one removal `staging_contended`, each with
+nothing written and the file behind the name untouched (D-4922; RA-290). A Zerodha run's spool (`verify/spool/<run>/…`) and its
 merge log are IA-9's subsection of this section (D-4881), written with IA-9;
 the rest of §35 is IA-5's.
 
@@ -2847,10 +2864,10 @@ Never opened for writing once linked into place.
 | 0 | 8 | magic `BRUTEXVD` |
 | 8 | 2 | version = 1 |
 | 10 | 2 | record stride = 160 |
-| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL` (`gdfl` 4, `zerodha` 5) |
+| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL`, for every vendor of that table (`gdfl` 4, `zerodha` 5); a vendor outside it is refused `feed_unknown` |
 | 13 | 1 | segment (`INDEX` 1, `CASH` 2, `FNO` 3) |
-| 14 | 1 | timeframe (`1s` 1, `1min` 2, `2min` 3, `3min` 4, `5min` 5, `10min` 6, `15min` 7, `30min` 8, `60min` 9, `1day` 10) |
-| 15 | 1 | unit of every count (0 second for `1s`, 1 minute for the minute rungs, 2 day for `1day`) |
+| 14 | 1 | exchange (`NSE` 1, `BSE` 2) |
+| 15 | 1 | unit of every count: the largest of day, minute and second that divides the timeframe (0 second for `1s`, 1 minute for the minute rungs, 2 day for `1day`) |
 | 16 | 4 | day, as days since 1970-01-01 (a day before it is refused `day_out_of_range`) |
 | 20 | 4 | generation (≥ 1) |
 | 24 | 4 | records n |
@@ -2867,7 +2884,8 @@ Never opened for writing once linked into place.
 | 172 | 4 | detail section offset (absolute; 0 = none) |
 | 176 | 4 | detail section bytes |
 | 180 | 4 | detail entries |
-| 184 | 68 | reserved, zero |
+| 184 | 4 | timeframe seconds: the timeframe's own length (`1s` 1, `1min` 60, `15min` 900, `1day` 86,400), read back through `Timeframe::from_secs`, so a rung the store learns later needs no row here; a value this build's `Timeframe::KNOWN` does not hold is refused `written_by_newer_build` |
+| 188 | 64 | reserved, zero |
 | 252 | 4 | header CRC-32C over bytes 0..252 |
 | 256 | 256 | day block (§35.2a) |
 | 512 | 8(c + 7) | hash table (§35.4) |
@@ -3053,16 +3071,22 @@ linked into place with `hard_link`, which fails if the file exists; the
 temporary is removed and the directory made durable. The loser of a creation
 race reads the winner's file. Nothing opens a `.vdi` with create.
 
-**Commit.** One generation per (feed, segment, timeframe, day) per run
+**Commit.** One generation per (feed, exchange, segment, timeframe, day) per run
 (D-4808). Every refusal comes before anything is published. The inputs
 are checked before any file is touched (`run_id_overflow`, `flag_unknown`,
-`detail_invalid`, `day_out_of_range`, `timeframe_unknown`), and a whole-day
+`detail_invalid`, `day_out_of_range`, `feed_unknown`), and a whole-day
 generation is also planned and built then (`duplicate_key`,
 `table_too_large`), so a refused whole-day commit writes nothing at all; a
 carrying generation is planned and built under the lock (step 3), so its
 refusal leaves at most the series' directories and the lock file, never a
-year index or an image. The commit lock (`<yyyy>.vdi.lock`, exclusive,
-blocking) is held across the whole write:
+year index or an image. The commit lock (`<yyyy>.vdi.lock`, exclusive) is
+held across the whole write. It is never waited for without a bound: the
+writer tries it in a counted loop of 10 ms steps for at most `LOCK_WAIT` =
+30 s and then refuses `lock_stalled` with nothing published, so a holder that
+hangs on a stalled drive is a named refusal and never a writer that does not
+return (`commit_within` takes another wait; D-4924, which adopts the critic's
+D-4906 for this lock). The lock file is opened without truncation and never
+written:
 
 1. read the year index and take the day's committed generation g;
 2. for a run that verified only some keys (a Zerodha window, a filtered

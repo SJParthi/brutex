@@ -17,10 +17,18 @@
 //! # Layout
 //!
 //! ```text
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi                            year index
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                       commit lock
-//! <store>/verify/<feed>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt  day image
+//! <store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi                            year index
+//! <store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                       commit lock
+//! <store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt  day image
 //! ```
+//!
+//! The four directory levels are the bar store's own, in its order
+//! (`bars/<vendor>/<exchange>/<segment>/…/<timeframe>/`): two exchanges have
+//! two calendars, so one day is two day records, never one shared between
+//! them (D-4923). Nothing here lists the feeds, the exchanges or the
+//! timeframes: a feed is its position in `Vendor::ALL`, an exchange and a
+//! segment are `core`'s enums matched exhaustively, and a timeframe is its
+//! own number of seconds, read back through [`Timeframe::from_secs`].
 //!
 //! The generation in an image's name is zero-padded to 10 digits, the width
 //! of `u32::MAX`, so every generation has one name and one day's names sort in
@@ -68,19 +76,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use brutex_core::blake3;
-use brutex_core::instrument::Segment;
+use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
 
 use crate::crc::crc32c;
 use crate::flock::Flock;
 use crate::path::Timeframe;
 use crate::provenance::Day;
+use crate::staging::{self, StagingError};
 
 // ------------------------------------------------------------- constants --
 
@@ -126,6 +136,19 @@ pub const MIN_CAPACITY: usize = 16;
 /// 10n slots, so this caps the records one image holds: a named, measured
 /// ceiling (L-IA-33: 137,900 records placed, 275,800 refused), not a proof.
 pub const MAX_CAPACITY: usize = 1 << 20;
+
+/// The most records one made-up key set has been placed at (L-IA-33). A
+/// measurement, not a bound the format guarantees: whether a day's keys fit
+/// depends on the keys, and of 200 random key sets of this size 184 fit and
+/// 16 are refused (`crates/store/tests/verdict.rs`,
+/// `a_days_keys_fit_whatever_the_keys_are`).
+pub const RECORDS_PLACED: u32 = 137_900;
+
+/// Half of [`RECORDS_PLACED`]: a commit of at least this many records says
+/// so ([`Committed::near_ceiling`]), so the day that halves the margin is
+/// named while every day still fits: 1,000 of 1,000 random key sets of this
+/// size are placed (RA-261; D-4925).
+pub const RECORDS_WATCH: u32 = RECORDS_PLACED / 2;
 
 /// Bytes of a record's key field.
 pub const KEY_LEN: usize = 64;
@@ -178,6 +201,16 @@ const INDEX_HEAD_LEN: usize = 24;
 /// How many generations a writer steps past an image a crash left linked
 /// and uncommitted before it refuses `generation_collision`.
 pub const MAX_LINK_TRIES: u32 = 16;
+
+/// How long [`commit`] waits for the commit lock before it refuses
+/// `lock_stalled` (D-4924, adopting the critic's D-4906). A holder that dies
+/// frees its lock at once; one that hangs on a stalled drive would otherwise
+/// hold every later commit of the year for ever, with no refusal and no
+/// event (L-IA-41).
+pub const LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// One step of the counted wait for the commit lock.
+pub const LOCK_STEP: Duration = Duration::from_millis(10);
 
 /// The reader's handle cache: year indexes and day images, least recently
 /// used out (D-4844).
@@ -647,63 +680,44 @@ byte_enum! {
 
 // ------------------------------------------------------------ the series --
 
-/// The feeds the verdict store files under: the two the operator uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Feed {
-    /// GDFL's archives.
-    Gdfl,
-    /// Zerodha's historical endpoint.
-    Zerodha,
+/// The feed a verdict family is filed under: the bar store's own vendor, so
+/// a third feed is a row of `Vendor::ALL` and no change here (RA-243;
+/// D-4923).
+pub type Feed = Vendor;
+
+/// The byte a feed is filed under (image offset 12): one more than the
+/// vendor's position in `Vendor::ALL`, which is appended to and never
+/// inserted into. `None` for a vendor the table does not hold.
+#[must_use]
+pub fn feed_code(feed: Feed) -> Option<u8> {
+    let at = Vendor::ALL.iter().position(|vendor| *vendor == feed)?;
+    u8::try_from(at.checked_add(1)?).ok()
 }
 
-impl Feed {
-    /// Both feeds.
-    pub const ALL: [Self; 2] = [Self::Gdfl, Self::Zerodha];
+/// The feed a byte names.
+#[must_use]
+pub fn feed_of(code: u8) -> Option<Feed> {
+    let at = usize::from(code).checked_sub(1)?;
+    Vendor::ALL.get(at).copied()
+}
 
-    /// The byte on disk: one more than the vendor's position in
-    /// `Vendor::ALL`, which is appended and never inserted into.
-    #[must_use]
-    pub const fn code(self) -> u8 {
-        match self {
-            Self::Gdfl => 4,
-            Self::Zerodha => 5,
-        }
+/// The byte an exchange is filed under (image offset 14). An exhaustive
+/// match: an exchange added to `core` does not compile until it has a byte.
+#[must_use]
+pub const fn exchange_code(exchange: Exchange) -> u8 {
+    match exchange {
+        Exchange::Nse => 1,
+        Exchange::Bse => 2,
     }
+}
 
-    /// The feed a byte names.
-    #[must_use]
-    pub const fn from_code(code: u8) -> Option<Self> {
-        match code {
-            4 => Some(Self::Gdfl),
-            5 => Some(Self::Zerodha),
-            _ => None,
-        }
-    }
-
-    /// The store vendor.
-    #[must_use]
-    pub const fn vendor(self) -> Vendor {
-        match self {
-            Self::Gdfl => Vendor::Gdfl,
-            Self::Zerodha => Vendor::Zerodha,
-        }
-    }
-
-    /// The feed of a vendor, or `None` for a vendor the verdict store does
-    /// not file under.
-    #[must_use]
-    pub const fn of(vendor: Vendor) -> Option<Self> {
-        match vendor {
-            Vendor::Gdfl => Some(Self::Gdfl),
-            Vendor::Zerodha => Some(Self::Zerodha),
-            _ => None,
-        }
-    }
-
-    /// The path segment, the vendor's own.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.vendor().as_str()
+/// The exchange a byte names.
+#[must_use]
+pub const fn exchange_of(code: u8) -> Option<Exchange> {
+    match code {
+        1 => Some(Exchange::Nse),
+        2 => Some(Exchange::Bse),
+        _ => None,
     }
 }
 
@@ -728,58 +742,32 @@ pub const fn segment_of(code: u8) -> Option<Segment> {
     }
 }
 
-/// Every timeframe's byte (image offset 14), in code order.
-const TIMEFRAME_CODES: [(Timeframe, u8); 10] = [
-    (Timeframe::SECOND_1, 1),
-    (Timeframe::MINUTE_1, 2),
-    (Timeframe::MINUTE_2, 3),
-    (Timeframe::MINUTE_3, 4),
-    (Timeframe::MINUTE_5, 5),
-    (Timeframe::MINUTE_10, 6),
-    (Timeframe::MINUTE_15, 7),
-    (Timeframe::MINUTE_30, 8),
-    (Timeframe::MINUTE_60, 9),
-    (Timeframe::DAY_1, 10),
-];
-
-/// The byte a timeframe is filed under, or `None` for one §35 does not name.
-#[must_use]
-pub fn timeframe_code(timeframe: Timeframe) -> Option<u8> {
-    TIMEFRAME_CODES
-        .into_iter()
-        .filter(|(tf, _)| *tf == timeframe)
-        .map(|(_, code)| code)
-        .next()
-}
-
-/// The timeframe a byte names.
-#[must_use]
-pub fn timeframe_of(code: u8) -> Option<Timeframe> {
-    TIMEFRAME_CODES
-        .into_iter()
-        .filter(|(_, c)| *c == code)
-        .map(|(tf, _)| tf)
-        .next()
-}
-
-/// The unit a timeframe's counts are in: seconds for 1s, days for 1day,
-/// minutes for every minute rung.
+/// The unit a timeframe's counts are in: the largest of day, minute and
+/// second that divides it. Seconds for 1s, minutes for every minute rung,
+/// days for 1day, by arithmetic on the timeframe's own length, so a rung the
+/// store learns later has a unit without a row here.
 #[must_use]
 pub const fn unit_of(timeframe: Timeframe) -> Unit {
-    match timeframe.secs() {
-        1 => Unit::Second,
-        86_400 => Unit::Day,
-        _ => Unit::Minute,
+    let secs = timeframe.secs();
+    if secs.is_multiple_of(86_400) {
+        Unit::Day
+    } else if secs.is_multiple_of(60) {
+        Unit::Minute
+    } else {
+        Unit::Second
     }
 }
 
-/// One verdict family: a feed, a segment and a timeframe under a store root.
+/// One verdict family: a feed, an exchange, a segment and a timeframe under
+/// a store root.
 #[derive(Debug, Clone, Copy)]
 pub struct Series<'a> {
     /// The store root (the directory holding `bars/`).
     pub root: &'a Path,
     /// The feed.
     pub feed: Feed,
+    /// The exchange, whose calendar the day records answer to.
+    pub exchange: Exchange,
     /// The segment.
     pub segment: Segment,
     /// The timeframe.
@@ -787,12 +775,13 @@ pub struct Series<'a> {
 }
 
 impl Series<'_> {
-    /// `<root>/verify/<feed>/<SEGMENT>/<tf>`.
+    /// `<root>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>`.
     #[must_use]
     pub fn dir(&self) -> PathBuf {
         self.root
             .join("verify")
             .join(self.feed.as_str())
+            .join(self.exchange.as_str())
             .join(self.segment.as_str())
             .join(self.timeframe.as_str())
     }
@@ -820,17 +809,11 @@ impl Series<'_> {
             .join(format!("{day}.g{generation:010}.vdt"))
     }
 
-    /// The codes this series writes into every image header, or the refusal.
-    fn codes(&self) -> Result<(u8, u8, u8, Unit), VerdictError> {
-        let tf = timeframe_code(self.timeframe).ok_or(VerdictError::TimeframeUnknown {
-            secs: self.timeframe.secs(),
-        })?;
-        Ok((
-            self.feed.code(),
-            segment_code(self.segment),
-            tf,
-            unit_of(self.timeframe),
-        ))
+    /// The feed's byte for every image header, or the refusal.
+    fn feed_byte(&self) -> Result<u8, VerdictError> {
+        feed_code(self.feed).ok_or(VerdictError::FeedUnknown {
+            feed: self.feed.as_str(),
+        })
     }
 }
 
@@ -1164,6 +1147,8 @@ impl DayBlock {
 pub struct ImageHeader {
     /// The feed.
     pub feed: Feed,
+    /// The exchange.
+    pub exchange: Exchange,
     /// The segment.
     pub segment: Segment,
     /// The timeframe.
@@ -1293,10 +1278,27 @@ pub enum VerdictError {
         /// The day.
         day: Day,
     },
-    /// `timeframe_unknown`: a timeframe §35 has no code for.
-    TimeframeUnknown {
-        /// Its seconds.
-        secs: u32,
+    /// `feed_unknown`: a vendor `Vendor::ALL` does not hold, so it has no
+    /// feed byte.
+    FeedUnknown {
+        /// The vendor's path segment.
+        feed: &'static str,
+    },
+    /// `staging_linked`, `staging_not_regular` or `staging_contended`: a
+    /// writer's temporary could not be created without opening something
+    /// that was already there ([`crate::staging`]; RA-290). Nothing was
+    /// truncated or written through.
+    Staging(StagingError),
+    /// `lock_stalled`: the commit lock stayed held for the whole wait. The
+    /// day is "verdict pending"; nothing was published (D-4924).
+    LockStalled {
+        /// The lock file.
+        path: PathBuf,
+        /// How long the commit waited, in milliseconds.
+        waited_ms: u64,
+        /// How many times it tried the lock: one, and one more per
+        /// [`LOCK_STEP`] of the wait.
+        tries: u32,
     },
     /// `written_by_newer_build`: a value this build does not know, which a
     /// later format addition wrote. Refused, never read as something else.
@@ -1385,7 +1387,9 @@ impl VerdictError {
             Self::FlagUnknown { .. } => "flag_unknown",
             Self::DetailInvalid { .. } => "detail_invalid",
             Self::DayOutOfRange { .. } => "day_out_of_range",
-            Self::TimeframeUnknown { .. } => "timeframe_unknown",
+            Self::FeedUnknown { .. } => "feed_unknown",
+            Self::Staging(why) => why.word(),
+            Self::LockStalled { .. } => "lock_stalled",
             Self::Unknown { .. } => "written_by_newer_build",
             Self::IndexShort { .. } => "index_short",
             Self::IndexUnreadable { .. } => "index_unreadable",
@@ -1442,9 +1446,22 @@ impl fmt::Display for VerdictError {
                     "{word}: {day} is before 1970-01-01, which a day field cannot hold"
                 )
             }
-            Self::TimeframeUnknown { secs } => {
-                write!(f, "{word}: a {secs}-second timeframe has no verdict code")
+            Self::FeedUnknown { feed } => {
+                write!(
+                    f,
+                    "{word}: vendor {feed} is not in the store's vendor table"
+                )
             }
+            Self::Staging(why) => write!(f, "{why}"),
+            Self::LockStalled {
+                path,
+                waited_ms,
+                tries,
+            } => write!(
+                f,
+                "{word}: {} stayed held through {tries} tries over {waited_ms} ms; the commit was not made",
+                path.display()
+            ),
             Self::Unknown { path, what, value } => write!(
                 f,
                 "{word}: {} holds {what} {value}, which this build does not know",
@@ -1496,6 +1513,7 @@ impl std::error::Error for VerdictError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Staging(why) => Some(why),
             _ => None,
         }
     }
@@ -1773,9 +1791,9 @@ fn encode_header(header: &ImageHeader) -> [u8; HEADER_LEN] {
         &mut out,
         12,
         &[
-            header.feed.code(),
+            feed_code(header.feed).unwrap_or(0),
             segment_code(header.segment),
-            timeframe_code(header.timeframe).unwrap_or(0),
+            exchange_code(header.exchange),
             header.unit.code(),
         ],
     );
@@ -1796,6 +1814,7 @@ fn encode_header(header: &ImageHeader) -> [u8; HEADER_LEN] {
     put(&mut out, 172, &header.detail_offset.to_le_bytes());
     put(&mut out, 176, &header.detail_bytes.to_le_bytes());
     put(&mut out, 180, &header.detail_entries.to_le_bytes());
+    put(&mut out, 184, &header.timeframe.secs().to_le_bytes());
     let crc = crc_to(&out, 252);
     put(&mut out, 252, &crc.to_le_bytes());
     out
@@ -1821,7 +1840,7 @@ fn decode_header(bytes: &[u8], path: &Path) -> Result<ImageHeader, VerdictError>
     if bytes.len() < HEADER_LEN || crc_to(bytes, 252) != u32_at(bytes, 252) {
         return Err(corrupt(path, "the header fails its CRC-32C"));
     }
-    if !zero(bytes, 184, 252) {
+    if !zero(bytes, 188, 252) {
         return Err(corrupt(path, "the header's reserved bytes are not zero"));
     }
     let raw = |at| u8_at(bytes, at);
@@ -1829,13 +1848,19 @@ fn decode_header(bytes: &[u8], path: &Path) -> Result<ImageHeader, VerdictError>
     for (i, slot) in counts.iter_mut().enumerate() {
         *slot = u32_at(bytes, 32 + 4 * i);
     }
-    let timeframe = known(timeframe_of(raw(14)), path, "timeframe", raw(14))?;
+    let secs = u32_at(bytes, 184);
+    let timeframe = Timeframe::from_secs(secs).map_err(|_| VerdictError::Unknown {
+        path: path.to_path_buf(),
+        what: "timeframe seconds",
+        value: u64::from(secs),
+    })?;
     let unit = known(Unit::from_code(raw(15)), path, "unit", raw(15))?;
     if unit != unit_of(timeframe) {
         return Err(corrupt(path, "the unit is not the timeframe's"));
     }
     Ok(ImageHeader {
-        feed: known(Feed::from_code(raw(12)), path, "feed", raw(12))?,
+        feed: known(feed_of(raw(12)), path, "feed", raw(12))?,
+        exchange: known(exchange_of(raw(14)), path, "exchange", raw(14))?,
         segment: known(segment_of(raw(13)), path, "segment", raw(13))?,
         timeframe,
         unit,
@@ -2040,6 +2065,10 @@ pub struct Committed {
     pub carried: u32,
     /// Generations stepped past because a crash left them linked.
     pub stepped_past: u32,
+    /// Temporaries a dead writer of the same process number and run left at
+    /// this writer's names, cleared before it wrote ([`crate::staging`]).
+    /// The caller's "day verified" event carries it.
+    pub staging_cleared: u32,
     /// The day's worst code.
     pub worst: Code,
     /// Whether the detail section reached [`DETAIL_CAP`].
@@ -2175,7 +2204,8 @@ fn build(
     previous: u32,
     carried: u32,
 ) -> Result<Built, VerdictError> {
-    let (_, _, _, unit) = series.codes()?;
+    series.feed_byte()?;
+    let unit = unit_of(series.timeframe);
     // THE ONE SORT (gate 11's ALLOW_SORT, L-IA-4): records by (code, key
     // text, hash), so one code's records are one slice and the bytes do not
     // depend on the order the entries arrived in. O(n log n) per image; a
@@ -2203,6 +2233,7 @@ fn build(
     let at = Path::new("(being built)");
     let header = ImageHeader {
         feed: series.feed,
+        exchange: series.exchange,
         segment: series.segment,
         timeframe: series.timeframe,
         unit,
@@ -2693,17 +2724,45 @@ fn open_existing(path: &Path) -> Result<File, VerdictError> {
     options.open(path).map_err(|why| opened(path, why))
 }
 
-/// Opens for writing, creating, never through a final link; `truncate` for a
-/// writer's own temporary, never for a shared file.
-fn open_write(path: &Path, truncate: bool) -> Result<File, VerdictError> {
+/// Opens the commit lock file for writing, creating it, never through a
+/// final link and NEVER truncating: the lock file is shared, holds no byte
+/// and is never written, so whatever is at its name is not changed by this
+/// open. A writer's own temporary is not opened here: it is born by
+/// [`staging::create`], which opens nothing that already exists (RA-290).
+fn open_lock(path: &Path) -> Result<File, VerdictError> {
     let mut options = File::options();
-    options
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(truncate);
+    options.read(true).write(true).create(true).truncate(false);
     no_follow(&mut options);
     options.open(path).map_err(|why| opened(path, why))
+}
+
+/// Takes the commit lock within `wait`, in a counted loop of
+/// [`LOCK_STEP`]s: never a blocking wait, so a holder that hangs is a named
+/// refusal and not a writer that never returns (D-4924).
+fn lock_within<'f>(
+    file: &'f File,
+    path: &Path,
+    wait: Duration,
+) -> Result<Flock<&'f File, PathBuf>, VerdictError> {
+    let steps = u32::try_from(wait.as_millis() / LOCK_STEP.as_millis().max(1)).unwrap_or(u32::MAX);
+    let mut step = 0u32;
+    loop {
+        match Flock::try_lock(file, path.to_path_buf()) {
+            Ok(lock) => return Ok(lock),
+            Err(TryLockError::WouldBlock) if step < steps => {
+                step += 1;
+                std::thread::sleep(LOCK_STEP);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(VerdictError::LockStalled {
+                    path: path.to_path_buf(),
+                    waited_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                    tries: step.saturating_add(1),
+                });
+            }
+            Err(TryLockError::Error(why)) => return Err(io_error(path, "lock", why)),
+        }
+    }
 }
 
 /// `O_NOFOLLOW` where `crate::open_flags` has a value for it.
@@ -2753,12 +2812,33 @@ fn sync_dir(dir: &Path) -> Result<(), VerdictError> {
         .map_err(|why| io_error(dir, "sync directory", why))
 }
 
-/// Writes all of `bytes` to a new file at `path` and makes them durable.
-fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), VerdictError> {
-    let file = open_write(path, true)?;
-    file.write_all_at(bytes, 0)
+/// Writes all of `bytes` to a NEW file at `path` and makes them durable.
+/// The file is born by [`staging::create`]: a name that already exists is
+/// never opened, so a hard link planted at a temporary's name is refused
+/// `staging_linked` with the file behind it untouched (RA-290). Returns
+/// whether a dead writer's leftover of the same name was cleared first.
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<bool, VerdictError> {
+    let staged = staging::create(path).map_err(|why| match why {
+        StagingError::Io {
+            path,
+            action,
+            source,
+        } => VerdictError::Io {
+            path,
+            action,
+            source,
+        },
+        other => VerdictError::Staging(other),
+    })?;
+    staged
+        .file
+        .write_all_at(bytes, 0)
         .map_err(|why| io_error(path, "write", why))?;
-    file.sync_all().map_err(|why| io_error(path, "sync", why))
+    staged
+        .file
+        .sync_all()
+        .map_err(|why| io_error(path, "sync", why))?;
+    Ok(staged.cleared.is_some())
 }
 
 /// The writer-unique temporary beside `path`: `<name>.<pid>-<run>.tmp`.
@@ -2780,7 +2860,7 @@ fn remove_tmp(path: &Path) -> Result<(), VerdictError> {
 /// whole (D-4865), both slots written to a writer-unique temporary, made
 /// durable, and linked with `hard_link`, which never replaces a file. The
 /// loser of a creation race reads the winner's.
-fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<File, VerdictError> {
+fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<(File, bool), VerdictError> {
     let path = series.year_index(year);
     let tmp = tmp_of(&path, run);
     let empty = vec![DayEntry::default(); YEAR_DAYS];
@@ -2788,7 +2868,7 @@ fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<File, VerdictErro
     let mut bytes = vec![0u8; INDEX_LEN];
     put(&mut bytes, 0, &slot);
     put(&mut bytes, INDEX_SLOT_STRIDE, &slot);
-    write_durable(&tmp, &bytes)?;
+    let cleared = write_durable(&tmp, &bytes)?;
     #[cfg(test)]
     tests::crash("index tmp written")?;
     match fs::hard_link(&tmp, &path) {
@@ -2801,7 +2881,7 @@ fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<File, VerdictErro
     }
     remove_tmp(&tmp)?;
     sync_dir(&series.dir())?;
-    open_existing(&path)
+    Ok((open_existing(&path)?, cleared))
 }
 
 /// The year index's length, refused below [`INDEX_LEN`].
@@ -2846,7 +2926,7 @@ fn validate(series: &Series<'_>, generation: &Generation) -> Result<u32, Verdict
     let run = u32::try_from(generation.run).map_err(|_| VerdictError::RunIdOverflow {
         run: generation.run,
     })?;
-    series.codes()?;
+    series.feed_byte()?;
     epoch_day(generation.day)?;
     check_entry(generation.day_block.flags, &generation.day_details)?;
     for entry in &generation.entries {
@@ -2920,18 +3000,30 @@ fn plan(
     Ok((planned, carried))
 }
 
+/// What [`publish`] linked.
+struct Published {
+    /// The generation.
+    generation: u32,
+    /// Its image.
+    path: PathBuf,
+    /// Generations a crash had left linked.
+    stepped_past: u32,
+    /// Temporaries of a dead writer cleared on the way.
+    cleared: u32,
+}
+
 /// Publishes built bytes as the first free generation after `committed`:
 /// written to a writer-unique temporary, made durable, linked with
 /// `hard_link` (which fails rather than replace a file), the temporary
-/// removed, and the directory made durable. Returns the generation, its
-/// path and how many generations a crash had left linked.
+/// removed, and the directory made durable.
 fn publish(
     series: &Series<'_>,
     generation: &Generation,
     built: &mut Built,
     committed: u32,
-) -> Result<(u32, PathBuf, u32), VerdictError> {
+) -> Result<Published, VerdictError> {
     let mut stepped_past = 0u32;
+    let mut cleared = 0u32;
     for attempt in 1..=MAX_LINK_TRIES {
         let g = committed.checked_add(attempt).ok_or_else(|| {
             corrupt(
@@ -2942,14 +3034,19 @@ fn publish(
         stamp(built, g);
         let path = series.image_path(generation.day, g);
         let tmp = tmp_of(&path, generation.run);
-        write_durable(&tmp, &built.bytes)?;
+        cleared += u32::from(write_durable(&tmp, &built.bytes)?);
         #[cfg(test)]
         tests::crash("image tmp written")?;
         match fs::hard_link(&tmp, &path) {
             Ok(()) => {
                 remove_tmp(&tmp)?;
                 sync_dir(path.parent().unwrap_or(series.root))?;
-                return Ok((g, path, stepped_past));
+                return Ok(Published {
+                    generation: g,
+                    path,
+                    stepped_past,
+                    cleared,
+                });
             }
             Err(why) if why.kind() == ErrorKind::AlreadyExists => {
                 remove_tmp(&tmp)?;
@@ -2993,10 +3090,25 @@ fn publish(
 /// Every input refusal ([`VerdictError::DuplicateKey`],
 /// [`VerdictError::RunIdOverflow`], [`VerdictError::FlagUnknown`],
 /// [`VerdictError::DetailInvalid`], [`VerdictError::TableTooLarge`],
-/// [`VerdictError::DayOutOfRange`], [`VerdictError::TimeframeUnknown`]),
+/// [`VerdictError::DayOutOfRange`], [`VerdictError::FeedUnknown`]),
 /// [`VerdictError::GenerationCollision`], a refusal reading the year index
 /// or the committed image for the carry, and the host's.
 pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed, VerdictError> {
+    commit_within(series, generation, LOCK_WAIT)
+}
+
+/// [`commit`] with the caller's own wait for the commit lock: past `wait`
+/// the commit is refused `lock_stalled` with nothing published (D-4924).
+/// `Duration::ZERO` tries the lock once.
+///
+/// # Errors
+///
+/// As [`commit`], and [`VerdictError::LockStalled`].
+pub fn commit_within(
+    series: &Series<'_>,
+    generation: &Generation,
+    wait: Duration,
+) -> Result<Committed, VerdictError> {
     let run = validate(series, generation)?;
     let early = match generation.carry {
         Carry::WholeDay => {
@@ -3008,8 +3120,8 @@ pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed,
     let year = generation.day.year();
     make_dirs(series, year)?;
     let lock_path = series.lock_path(year);
-    let lock = Flock::lock(open_write(&lock_path, false)?, lock_path.clone())
-        .map_err(|why| io_error(&lock_path, "lock", why))?;
+    let lock_file = open_lock(&lock_path)?;
+    let lock = lock_within(&lock_file, &lock_path, wait)?;
 
     let index_path = series.year_index(year);
     let held = match open_existing(&index_path) {
@@ -3047,11 +3159,16 @@ pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed,
         )
     };
     built.header.previous = committed;
-    let index = match held {
-        Some(file) => file,
+    let (index, born_over) = match held {
+        Some(file) => (file, false),
         None => genesis(series, year, generation.run)?,
     };
-    let (g, path, stepped_past) = publish(series, generation, &mut built, committed)?;
+    let Published {
+        generation: g,
+        path,
+        stepped_past,
+        cleared,
+    } = publish(series, generation, &mut built, committed)?;
     #[cfg(test)]
     tests::crash("image linked")?;
 
@@ -3085,11 +3202,22 @@ pub fn commit(series: &Series<'_>, generation: &Generation) -> Result<Committed,
         records: built.header.records,
         carried,
         stepped_past,
+        staging_cleared: cleared.saturating_add(u32::from(born_over)),
         worst: built.worst,
         details_capped: built.capped,
         path,
         commit,
     })
+}
+
+impl Committed {
+    /// Whether the day holds at least [`RECORDS_WATCH`] records: half of the
+    /// most the format has been measured to place (L-IA-33). The caller
+    /// raises the alert; the commit itself succeeded.
+    #[must_use]
+    pub const fn near_ceiling(&self) -> bool {
+        self.records >= RECORDS_WATCH
+    }
 }
 
 // ------------------------------------------------------------- the reader --
@@ -3633,10 +3761,10 @@ impl Reader {
         let header = decode_header(&bytes, path)?;
         let block = decode_day(bytes.get(HEADER_LEN..).unwrap_or_default(), path)?;
         let geo = geometry(&header, path)?;
-        let (feed, segment, timeframe, _) = series.codes()?;
-        let same = header.feed.code() == feed
-            && segment_code(header.segment) == segment
-            && timeframe_code(header.timeframe) == Some(timeframe)
+        let same = header.feed == series.feed
+            && header.exchange == series.exchange
+            && header.segment == series.segment
+            && header.timeframe == series.timeframe
             && header.epoch_day == epoch_day(day)?
             && header.generation == generation;
         if !same {

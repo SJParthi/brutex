@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use brutex_core::instrument::Segment;
+use brutex_core::instrument::{Exchange, Segment};
 
 use super::{
     Carry, Code, Day, DayBlock, Entry, Facts, Feed, Generation, Key, Mode, Reader, Series,
@@ -65,6 +65,7 @@ impl Root {
         Series {
             root: &self.0,
             feed: Feed::Gdfl,
+            exchange: Exchange::Nse,
             segment: Segment::Fno,
             timeframe: Timeframe::SECOND_1,
         }

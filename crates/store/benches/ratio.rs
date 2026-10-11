@@ -693,6 +693,7 @@ fn vd_series(root: &std::path::Path) -> verdict::Series<'_> {
     verdict::Series {
         root,
         feed: verdict::Feed::Gdfl,
+        exchange: brutex_core::instrument::Exchange::Nse,
         segment: brutex_core::instrument::Segment::Fno,
         timeframe: Timeframe::SECOND_1,
     }
@@ -703,6 +704,7 @@ fn vd_zerodha(root: &std::path::Path) -> verdict::Series<'_> {
     verdict::Series {
         root,
         feed: verdict::Feed::Zerodha,
+        exchange: brutex_core::instrument::Exchange::Nse,
         segment: brutex_core::instrument::Segment::Cash,
         timeframe: Timeframe::MINUTE_1,
     }
