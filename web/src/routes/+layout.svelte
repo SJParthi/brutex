@@ -26,8 +26,15 @@
    * animating over a dead request.
    */
   import '$lib/theme.css';
+  import { untrack } from 'svelte';
   import { page } from '$app/state';
   import { feeds, loadFeeds, selectFeed } from '$lib/feeds.svelte.js';
+  // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14, commit 1ac13ae8): a
+  // feed whose store holds bars is selectable whatever its ingest readiness,
+  // and only the operator's feeds are offered (D-3338).
+  import { feedPickerRow, offeredFeeds } from '$lib/feed-row.js';
+  import { survey, surveyStores } from '$lib/store.svelte.js';
+  import { group } from '$lib/money.js';
   import { loadCatalogue } from '$lib/index.svelte.js';
   // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
   //
@@ -306,7 +313,10 @@
 
      Prefix-matched with `current()` so `/ingest/anything` and `/db/anything`
      are covered by the same entries, for the same reason the nav is. ==== */
-  const FEED_OWNED = ['/ingest', '/db', '/backtest'];
+  /* `/terminal` JOINED (DB-G32): it draws its own feed control, so a second
+     one here was two controls for one value, and its select skipped
+     `selectFeed`. One control per value per route. */
+  const FEED_OWNED = ['/ingest', '/db', '/backtest', '/terminal'];
   const feedInBar = $derived(!FEED_OWNED.some(current));
 
   /* ====================================================================
@@ -421,7 +431,17 @@
   /** @type {Array<HTMLDivElement | null>} */
   let optEls = $state([]);
 
-  const options = $derived(feeds.all ?? []);
+  const options = $derived(offeredFeeds(feeds.all ?? []));
+  /* ONE HEADER READ PER FEED, deduped per store generation by `surveyStores`:
+     what the held-or-ready rule needs, never a whole census. */
+  $effect(() => {
+    const list = options;
+    if (list.length > 0) untrack(() => void surveyStores(list));
+  });
+  /** The picker row per wire, from the shared rule. */
+  const rowOf = $derived(
+    new Map(options.map((f) => [f.wire, feedPickerRow(f, survey.byFeed.get(f.wire), group)]))
+  );
   const active = $derived(options.find((f) => f.wire === feeds.active) ?? null);
   const activeIndex = $derived(options.findIndex((f) => f.wire === feeds.active));
 
@@ -432,7 +452,9 @@
      a feed the server marked unready. */
   /** @param {Feed | undefined} f */
   function usable(f) {
-    return f?.ready === true;
+    if (!f) return false;
+    const row = rowOf.get(f.wire);
+    return row ? !row.disabled : f.ready === true;
   }
 
   function openList() {
@@ -994,10 +1016,10 @@
               aria-disabled={!usable(f)}
               data-hi={hi === i}
               title={!usable(f)
-                ? (f.why ?? `${f.display} is not available.`)
+                ? (rowOf.get(f.wire)?.title ?? f.why ?? `${f.display} is not available.`)
                 : f.wire === feeds.active
                   ? `${f.display} is the chosen feed. Choosing it again clears the selection, and every page then shows what it shows with no feed scoped.`
-                  : `Scope every page to ${f.display}.`}
+                  : `Scope every page to ${f.display}. ${rowOf.get(f.wire)?.title ?? ''}`}
               onclick={() => commit(i)}
               onpointerdown={(e) => e.preventDefault()}
               onpointerenter={() => usable(f) && (hi = i)}
@@ -1005,10 +1027,11 @@
               <span class="tick" aria-hidden="true">{f.wire === feeds.active ? '✓' : ''}</span>
               <span class="name">{f.display}</span>
               <span class="side"
-                >{f.kind_label ?? 'kind not stated'}{usable(f) ? '' : ' · unavailable'}</span
+                >{f.kind_label ?? 'kind not stated'} · {rowOf.get(f.wire)?.detail ??
+                  (usable(f) ? 'not surveyed' : 'unavailable')}</span
               >
-              {#if f.why}
-                <span class="why">{f.why}</span>
+              {#if rowOf.get(f.wire)?.why ?? f.why}
+                <span class="why">{rowOf.get(f.wire)?.why ?? f.why}</span>
               {/if}
             </div>
           {/each}
@@ -1085,6 +1108,16 @@
         <button class="btn ghost" onclick={() => { void loadInspection(); }}>Recheck server mode</button>
       {/if}
     </div>
+    <!-- AN ADDRESS NAMING A FEED THAT DOES NOT EXIST IS SAID ON EVERY PAGE
+         (WP-61 repair): `?feed=nosuch` opened the saved or default feed with no
+         word. In <main>, not in the picker's list, because the picker is closed
+         until opened and is not drawn at all on the pages that own their feed
+         control. Cleared by any explicit pick (`lib/feed-startup.js`). -->
+    {#if feeds.notice}
+      <div class="inspection-banner" role="alert" data-feed-notice>
+        <span><strong>The address's feed was not followed.</strong> {feeds.notice}</span>
+      </div>
+    {/if}
     {@render children()}
   </main>
 </div>

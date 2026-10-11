@@ -219,6 +219,9 @@ const ROUTES = [
 	// producing a plausible error message about JSON.
 	'/folder.json',
 	'/ingest/status.json',
+	// Each row's pull refusals, joined to /ingest's month cells (WP-61, DB-G23;
+	// `crates/api/src/ingest_refusals.rs`).
+	'/ingest/refusals.json',
 	// THE FIFTH DRIFT, and the test above called its shot: it said a fifth
 	// would fail a test rather than produce a plausible error about JSON, and
 	// this is it. `/mapping` reads `/masters/status.json` to learn which

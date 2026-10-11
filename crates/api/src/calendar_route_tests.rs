@@ -486,7 +486,19 @@ fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
     // SINCE WP-36 (DB-N19) the handler hands out a confirmed answer itself
     // and leads a build through `lead`, which runs the reading in the pool;
     // the handler never reads the census or builds inline.
-    let calendar = body_of("async fn calendar_json(");
+    //
+    // SINCE WP-61 (DB-B42) `calendar_json` reads the `span` asked, refuses an
+    // unknown one and widens a finished answer to the record's span; the
+    // build is `calendar_json_held`, which is what this pins. The wrapper
+    // reads no census and builds nothing itself.
+    let spanned = body_of("async fn calendar_json(");
+    assert!(
+        spanned.contains("calendar_json_held(site, uri).await")
+            && !spanned.contains("census")
+            && !spanned.contains("lead("),
+        "/calendar.json's span wrapper only awaits the held answer:\n{spanned}"
+    );
+    let calendar = body_of("async fn calendar_json_held(");
     assert!(
         calendar.contains("lead(&site, uri, &asked, &build, now)")
             && !calendar.contains("calendar_json_reading(")
