@@ -328,9 +328,12 @@ type BehindKept = (
 ///
 /// # Cost
 ///
-/// The journal and the `cli` log are each read through their own tail
+/// The journal and the importer's logs are each read through their own tail
 /// (`import_journal::snapshot`, `logs::import_refusals`): a `stat`, and the
-/// new bytes. The count is a walk of the journal's days (2,000 on the
+/// new bytes. The log read is every directory a GDFL run can write, merged
+/// (`logs/cli`, `logs/gdfl/<kind>`, `logs/gdfl/store`; D-4862 round 6), and
+/// its `Arc` stands for the tuple of the per-directory reads: the same
+/// pointer again means none of them moved. The count is a walk of the journal's days (2,000 on the
 /// operator's store) made once per change of either, and kept against them;
 /// a request with neither changed is two pointer comparisons.
 pub(crate) fn behind(site: &Site, feed: Vendor) -> Behind {
@@ -387,7 +390,7 @@ fn behind_in(
         }
         let logged = evidence.of(row.kind.as_str(), &row.day.to_string());
         let refused_by_census =
-            super::imports::stage_of(row, logged).is_some_and(|(stage, _)| stage == census_stage);
+            super::imports::stage_of(row, &logged).is_some_and(|(stage, _)| stage == census_stage);
         if !refused_by_census || counted == Some(row.day) {
             continue;
         }

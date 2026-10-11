@@ -771,6 +771,14 @@ pub enum StoreError {
         /// What went wrong, as `crate::time_index::Why` says it.
         reason: String,
     },
+    /// The month's `.srt` sort index could not be written by the rebuild
+    /// door, for the reason given. The bar file is untouched. D-3349.
+    SortIndex {
+        /// The `.srt` file.
+        path: PathBuf,
+        /// What went wrong.
+        reason: String,
+    },
     /// A bar file whose header region is gone while its checksum sidecar
     /// proves records were committed. audit-20261003 attackdata-1, D-1520.
     ///
@@ -984,6 +992,11 @@ fn write_time_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fm
     write!(f, "{}: time index refused: {reason}", path.display())
 }
 
+/// The [`StoreError::SortIndex`] sentence.
+fn write_sort_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(f, "{}: sort index not written: {reason}", path.display())
+}
+
 /// The [`StoreError::NotABarPath`] sentence.
 ///
 /// Lifted out for [`write_impossible_count`]'s reason and no other: that match
@@ -1164,6 +1177,7 @@ impl fmt::Display for StoreError {
                 timeframe_secs,
             } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
             Self::TimeIndex { path, reason } => write_time_index(f, path, reason),
+            Self::SortIndex { path, reason } => write_sort_index(f, path, reason),
             Self::CommittedRecordsLost {
                 path,
                 sidecar,
@@ -1359,6 +1373,10 @@ pub struct BarFile {
     /// is the batch's while the batch is open. `None` for every reader and for
     /// a writer outside a batch, which flushes for itself.
     batch: Option<DurableBatch>,
+    /// The month's `.srt` sort index, for a BAR file opened by a door that
+    /// keeps it — the writer's and `Self::sort_index_existing`; `None` for
+    /// every reader, which never writes. D-3349.
+    srt: Option<sort_writer::SortSidecar>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1753,6 +1771,13 @@ impl BarFile {
             Access::Write,
             batch,
         )
+        .map(|mut file| {
+            // THE SORT INDEX IS THE WRITER'S TO KEEP, after the bars it orders
+            // are committed — at open for rows an earlier writer left
+            // unordered, and after every commit (D-3349).
+            file.attach_sort_index(root, path);
+            file
+        })
     }
 
     /// Open a month that already exists, **without creating anything**.
@@ -2413,6 +2438,7 @@ impl BarFile {
             admission: Admission::new(month, timeframe_secs),
             tix,
             batch,
+            srt: None,
             _lock: lock,
         };
         // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
@@ -2877,6 +2903,12 @@ impl BarFile {
         )?;
 
         self.header = commit.header;
+        // THE SORT INDEX, AFTER THE COMMIT AND NEVER BEFORE IT (D-3349): a
+        // run is written only over bars already durable, so no index ever
+        // claims a bar that is not committed. It cannot refuse them either:
+        // a run that would not write is a `store.srt` warning, and readers
+        // read the rows it would have ordered themselves.
+        self.keep_sort_index();
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
         // never before. An event emitted ahead of the commit would claim a
         // durability the file does not have yet, and a crash between the two
@@ -5674,6 +5706,12 @@ mod tests {
             Ok(Appended::Committed { .. })
         ));
         assert_eq!(index_flushes(), 1, "an append still flushes its index once");
+        assert!(bars.with_extension("srt").exists(), "srt was created");
+        assert_eq!(
+            directory_flushes(),
+            vec![dir.clone()],
+            "a month's first commit names its sort index (D-3349): one flush"
+        );
         drop(writer);
 
         let again = BarFile::open_or_create(&root, month, SYMBOL).expect("it reopens");
@@ -5999,8 +6037,9 @@ mod tests {
             .expect("the month's directory")
             .to_path_buf();
         // The root and every directory below it down to the month's own
-        // gained a name (the month's own gained three: bars, checksums,
-        // index), and each is flushed once.
+        // gained a name (the month's own gained four: bars, checksums, time
+        // index, and the sort index its first commit writes, D-3349), and
+        // each is flushed once.
         let mut gained = vec![root.clone()];
         let mut at = month_dir.as_path();
         while at != root {
@@ -6010,8 +6049,8 @@ mod tests {
         gained.sort();
         assert_eq!(made.directories, gained.len(), "{made:?}");
         assert_eq!(
-            made.files, 3,
-            "the bars, the checksums, the index: {made:?}"
+            made.files, 4,
+            "the bars, the checksums, the time index, the sort index: {made:?}"
         );
         assert_eq!(made.flushes, made.directories + 1, "one for the device");
         let flushed = batch_flushes_under(&root);
@@ -6058,7 +6097,7 @@ mod tests {
         assert_eq!((index_flushes(), directory_flushes()), (0, Vec::new()));
         assert_eq!(files_under(&root), files_under(&plain), "the same bytes");
         let made = batch.make_durable(3).expect("durable");
-        assert_eq!(made.files, 3, "{made:?}");
+        assert_eq!(made.files, 4, "{made:?}");
         assert_eq!(made.flushes, made.files + made.directories, "{made:?}");
         let flushed = batch_flushes_under(&root);
         let mut files: Vec<String> = flushed
@@ -6070,7 +6109,11 @@ mod tests {
             })
             .collect();
         files.sort();
-        assert_eq!(files, ["bin", "crc", "tix"], "each file once: {flushed:?}");
+        assert_eq!(
+            files,
+            ["bin", "crc", "srt", "tix"],
+            "each file once: {flushed:?}"
+        );
         for dir in [plain, root] {
             let _ignored = std::fs::remove_dir_all(&dir);
         }
@@ -6335,10 +6378,13 @@ mod tests {
             let before = batch_flushes_under(&root).len();
             let made = batch.make_durable(3).expect("durable");
             let dirs = directories_down_to(&root, second_month("NIFTY"));
-            assert_eq!(made.confirmed, 3, "bars, checksums, index: {made:?}");
+            assert_eq!(
+                made.confirmed, 4,
+                "bars, checksums, time index, sort index: {made:?}"
+            );
             assert_eq!(made.files, 0, "this batch wrote nothing: {made:?}");
             assert_eq!(made.directories, dirs.len(), "{made:?}");
-            assert_eq!(made.flushes, 3 + dirs.len(), "{made:?}");
+            assert_eq!(made.flushes, 4 + dirs.len(), "{made:?}");
             let flushed: Vec<PathBuf> = batch_flushes_under(&root).split_off(before);
             let mut files: Vec<String> = flushed
                 .iter()
@@ -6349,7 +6395,7 @@ mod tests {
                 })
                 .collect();
             files.sort();
-            assert_eq!(files, ["bin", "crc", "tix"], "{kind:?}: {flushed:?}");
+            assert_eq!(files, ["bin", "crc", "srt", "tix"], "{kind:?}: {flushed:?}");
             let mut directories: Vec<PathBuf> = flushed
                 .iter()
                 .filter(|path| path.is_dir())
@@ -6390,14 +6436,14 @@ mod tests {
             );
             let made = batch.make_durable(2).expect("durable");
             let dirs = directories_down_to(&root, second_month("NIFTY"));
-            assert_eq!(made.files, 3, "{made:?}");
+            assert_eq!(made.files, 4, "{made:?}");
             assert_eq!(made.directories, dirs.len(), "{made:?}");
-            assert_eq!(made.flushes, 3 + dirs.len() + device, "{kind:?}: {made:?}");
+            assert_eq!(made.flushes, 4 + dirs.len() + device, "{kind:?}: {made:?}");
             let files = batch_flushes_under(&root)
                 .iter()
                 .filter(|path| path.is_file())
                 .count();
-            assert_eq!(files, 3 + device, "{kind:?}");
+            assert_eq!(files, 4 + device, "{kind:?}");
             let _ignored = std::fs::remove_dir_all(&root);
         }
     }
@@ -6432,6 +6478,12 @@ mod tests {
             );
             let _ignored = std::fs::remove_dir_all(&root);
         }
+    }
+
+    /// Arms the fault: `skip` hooked syncs pass on this thread, the next one
+    /// fails, once. For a sibling test module that cannot name the cell.
+    pub(super) fn arm_sync_fault(skip: u32) {
+        SYNC_FAULT.with(|armed| armed.set(Some(skip)));
     }
 
     /// Whether the armed barrier fault fires now; it fires once.
@@ -9375,6 +9427,11 @@ enum Access {
     /// `open_existing`: the reader's door, which creates nothing.
     Read,
 }
+
+/// The writer's half of the `.srt` sort index. D-3349.
+#[path = "sort_index_writer.rs"]
+mod sort_writer;
+pub use sort_writer::{Resorted, SortIndexed};
 
 #[cfg(test)]
 #[path = "sidecar_checksum_tests.rs"]

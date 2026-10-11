@@ -299,7 +299,11 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
     assert_eq!(opening["bars"][0]["chg_why"], "no_earlier_stored_bar");
     let (_, scan) = fixture.get("sort=c&extremes=true&limit=2").await;
     assert_eq!(scan["scanned"], true);
-    assert_eq!(scan["scan_rows"], 4);
+    // SERVED FROM THE MONTHS' SORT INDEXES (D-3349): no row is read beyond
+    // the page, and the extremes are the runs' own summaries.
+    assert_eq!(scan["scan_rows"], 0);
+    assert_eq!(scan["sort_index"]["indexed_rows"], 4);
+    assert_eq!(scan["sort_index"]["scanned_rows"], 0);
     assert_eq!(scan["extremes"]["range"], 80);
     assert_eq!(scan["extremes"]["volume"], 0, "an index trades no volume");
     assert!(scan["extremes"]["volume_max"].is_null());
@@ -1657,7 +1661,11 @@ async fn the_route_reads_keys_at_day_and_time_bounds_and_refuses_each_by_name() 
         ),
         (format!("&key={CE}&lookback=maybe"), "lookback flag"),
         (format!("&key={CE}&coverage=2"), "coverage flag"),
-        (format!("&key={CE}&sort=c&offset=100000"), "sort_too_deep"),
+        // A DEEP PAGE OF A TIME-OF-DAY ORDER, which streams every kept row,
+        // is refused by name (D-3326). A deep VALUE page is served: from the
+        // sort indexes, or, under a time-of-day bound, from a read order held
+        // whole (D-3349, below).
+        (format!("&key={CE}&sort=tod&offset=100000"), "sort_too_deep"),
     ] {
         let (status, refused) = window_get(&site, &format!("{base}{extra}")).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {refused}");
@@ -1668,6 +1676,22 @@ async fn the_route_reads_keys_at_day_and_time_bounds_and_refuses_each_by_name() 
             "{extra}: {refused}"
         );
     }
+    let (status, deep) = window_get(&site, &format!("{base}&key={CE}&sort=c&offset=100000")).await;
+    assert_eq!(status, StatusCode::OK, "{deep}");
+    assert_eq!(deep["bars"], serde_json::json!([]));
+    assert_eq!(deep["sort_index"]["scanned_rows"], 0, "{deep}");
+    let (status, deep) = window_get(
+        &site,
+        &format!("{base}&key={CE}&sort=c&offset=100000&tod_from=09:15:00&tod_to=15:30:00"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deep}");
+    assert_eq!(deep["bars"], serde_json::json!([]));
+    assert!(
+        deep["sort_index"]["scanned_why"][0]
+            .as_str()
+            .is_some_and(|why| why.contains("time-of-day"))
+    );
     let many: String = (0..=bars::MAX_SERIES).fold(String::new(), |mut keys, n| {
         use std::fmt::Write as _;
         let _ = write!(

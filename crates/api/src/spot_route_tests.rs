@@ -516,9 +516,17 @@ async fn the_route_answers_from_the_store_read_pool_and_a_full_pool_is_a_named_4
         .split("pub async fn spot_json(")
         .nth(1)
         .expect("the handler");
+    // Through the store-read pool, with the request's cancellation flag
+    // (D-3349, DB-N15): `cancellable(false, ..)` is `run_store_read`.
     assert!(
-        handler.contains("crate::detail::run_store_read(move || respond(&root, &query))"),
+        handler.contains(
+            "super::bars_route::cancellable(false, move |cancel| respond_with(&root, &query, cancel))"
+        ),
         "{handler}"
+    );
+    assert!(
+        include_str!("bars_route.rs").contains("crate::detail::run_store_read(job).await"),
+        "a cancellable read that is not heavy is admitted by the store-read pool"
     );
     let greeks = include_str!("optiongreeks.rs")
         .split("pub async fn greeks_json(")
@@ -526,7 +534,7 @@ async fn the_route_answers_from_the_store_read_pool_and_a_full_pool_is_a_named_4
         .expect("the greeks handler")
         .to_owned();
     assert!(
-        greeks.contains("crate::detail::run_store_read(move || {")
+        greeks.contains("super::bars_route::cancellable(false, move |cancel| {")
             && greeks.contains("RateTable::current(std::env::var_os(RATE_ENV))"),
         "{greeks}"
     );
@@ -557,4 +565,34 @@ async fn the_route_answers_from_the_store_read_pool_and_a_full_pool_is_a_named_4
         spot_json(axum::extract::State(Loaded::clone(&fixture.site)), uri).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(r#""close":2400000"#), "{body}");
+}
+
+/// **AN ABANDONED SPOT READ STOPS, AND A LIVE ONE ANSWERS AS BEFORE** (DB-N15,
+/// D-3349). The handler hands the read the request's cancellation flag; once
+/// the client is gone the lookups stop by name before the next instant
+/// instead of running to the last of up to 400. Before, the read had no flag
+/// to look at and always ran to its end.
+#[test]
+fn a_spot_read_whose_client_went_away_stops_by_name() {
+    let fixture = Fixture::new("spot-cancel");
+    let t0 = open_second();
+    let query = format!(
+        "feed=dhan&exchange=NSE&symbol=NIFTY&timeframe=1min&month=2025-05&t={t0},{}",
+        t0 + 60
+    );
+    let (gone, guard) = crate::bars::Cancel::pair();
+    drop(guard);
+    let (status, _, body) = super::spot::respond_with(&fixture.root, &query, &gone);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("cancelled"), "{body}");
+    let (live, guard) = crate::bars::Cancel::pair();
+    let (status, _, body) = super::spot::respond_with(&fixture.root, &query, &live);
+    guard.disarm();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (plain_status, _, plain) = respond(&fixture.root, &query);
+    assert_eq!(
+        (status, body),
+        (plain_status, plain),
+        "the flag changes nothing it does not stop"
+    );
 }

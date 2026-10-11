@@ -224,6 +224,12 @@ pub(crate) struct Parsed {
     rows: BTreeMap<Key, DayRow>,
     /// Every `run` line, in file order.
     pub(crate) runs: Vec<RunLine>,
+    /// Where each run id's lines are in [`Self::runs`], oldest first: kept as
+    /// each `run` line is parsed, one probe and one push, so `run=<id>` and a
+    /// `runs_before=<id>` cursor find an id's lines without decoding any
+    /// other (D-4813 round 6, R6; IA-LG-03). Two processes that start in one
+    /// second share an id, which is why a value is a list.
+    runs_by_id: std::collections::HashMap<u64, Vec<u32>>,
     /// Whole lines read.
     pub(crate) lines: u64,
     /// Lines this reader cannot name: the first [`MAX_NAMED_FAULTS`], by
@@ -239,6 +245,9 @@ pub(crate) struct Parsed {
     /// Per kind, in [`ImportKind::ALL`] order: the last line about that kind
     /// (its number, day and verb), so a page can say where each kind stands.
     pub(crate) last: [Option<(u64, Day, String)>; 3],
+    /// `run` lines past the 4,294,967,295th, which [`Self::runs_of`] cannot
+    /// name: counted, never silently missing from a `run=` answer.
+    pub(crate) runs_unindexed: u64,
 }
 
 impl Parsed {
@@ -263,6 +272,39 @@ impl Parsed {
     /// How many keys the journal names.
     pub(crate) fn keys(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The `run` lines of one id, oldest first, through the id index: one
+    /// hash probe and the id's own lines, whatever the journal holds
+    /// (D-4813 round 6; IA-LG-03).
+    pub(crate) fn runs_of(&self, id: u64) -> impl DoubleEndedIterator<Item = &RunLine> {
+        self.runs_by_id
+            .get(&id)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|at| self.runs.get(usize::try_from(*at).ok()?))
+    }
+
+    /// How many `run` lines are older than the `nth` line (from 0, oldest
+    /// first) of run `id`: where a `runs_before=<id>` page (`nth` 0), or one
+    /// continued inside an id that has several lines (`<id>.<nth>`), starts.
+    /// `None` for an id, or a line of it, the journal does not hold. One hash
+    /// probe and one index.
+    pub(crate) fn runs_before(&self, id: u64, nth: usize) -> Option<usize> {
+        let at = self.runs_by_id.get(&id)?.get(nth)?;
+        usize::try_from(*at).ok()
+    }
+
+    /// Which of its id's lines (from 0, oldest first) the `run` line at
+    /// position `at` of [`Self::runs`] is: what a page that ends there names
+    /// as its cursor. A walk of that id's own lines only.
+    pub(crate) fn nth_of(&self, at: usize) -> Option<usize> {
+        let id = self.runs.get(at)?.id;
+        let wanted = u32::try_from(at).ok()?;
+        self.runs_by_id
+            .get(&id)?
+            .iter()
+            .position(|held| *held == wanted)
     }
 
     /// Folds one whole line in. `number` counts from 1.
@@ -297,6 +339,13 @@ impl Parsed {
                 for field in rest {
                     let (name, value) = field.split_once('=')?;
                     decoded.push((name.to_owned(), percent_decoded(value)?));
+                }
+                // THE INDEX BESIDE THE LIST, in the same step: a line past
+                // `u32::MAX` runs is not indexed and `runs_unindexed` says so,
+                // rather than a position that wraps and names another run.
+                match u32::try_from(self.runs.len()) {
+                    Ok(at) => self.runs_by_id.entry(id).or_default().push(at),
+                    Err(_) => self.runs_unindexed = self.runs_unindexed.saturating_add(1),
                 }
                 self.runs.push(RunLine {
                     id,
