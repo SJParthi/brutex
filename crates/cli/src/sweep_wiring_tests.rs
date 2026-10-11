@@ -147,7 +147,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
     for word in super::COMMANDS {
         let non_sweep = matches!(
             word,
-            "census-migrate"
+            // The alert queue (D-4883, IA-11a): a store verb, never a sweep.
+            "alerts"
+                | "census-migrate"
                 | "census-recount"
                 | "checksum-audit-stored"
                 | "fold-audit"

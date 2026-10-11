@@ -66713,3 +66713,212 @@ from); `telemetry::run_dirs::tests::every_run_directory_and_lock_is_named_once`,
 `telemetry::sink::tests::an_audit_stream_that_cannot_be_looked_for_is_an_error`
 (`docs/04-invariants.md` IA-LG-04, IA-LG-05). IA-GR-24's writer half (a run
 logged where `for_gdfl` says) is IA-1's.
+
+### D-4883 — One durable alert queue, `<store>/audit/alerts`, format v1: put once per key, read in one window, replaced when damaged — 2026-10-11
+
+**Implemented by** IA-11a (the queue: `pull::alerts`, `cli alerts`, the format
+in `docs/02-store-format.md` §38, benches C-AL-01 and C-AL-02). Each caller
+adds its own `alerts::put` in its own change: IA-2 (`runs_ledger_damaged`),
+IA-7 (`mismatch`, `verdict_refused`), IA-9 (`spool_damaged`), IA-10a
+(`interrupted_twice`, `store_lost`, `build_skew`, `calendar_horizon`, and the
+routes `GET /alerts.json` and `POST /alerts/ack`, with its own bench C-AL-03),
+IA-16 (`disk_full`, `hole`, `store_damaged`). No caller exists at this entry's
+commit: the queue lands first so that none ships without its writer.
+
+**What was wrong.** Finding DB-B78: no notification code existed in `crates/`
+or `web/src`. An audited event reaches someone only if they read `/logs` or
+`/audit`, so a run interrupted twice, a lost store, a full disk or a new hole
+reached nobody without an open tab. Two fix packages named "alerts" and
+neither owned a Rust writer.
+
+**Decision.** One queue per store, `<store>/audit/alerts`, written once as
+format v1: a 64-byte header (`BRUTEXAL`, version, stride 128, header length,
+created, CRC-32C at 60) born whole by a temporary name and a hard link, and
+128-byte records (type, kind, flags, day, run, put-at, a 16-byte BLAKE3 key
+hash, the acknowledged ordinal, "open after", a 75-byte text, CRC-32C at 124).
+Keys are per run or per store-wide fact, never per day or per path, so one run
+puts a bounded number of alerts. Kind numbers are append-only.
+
+- **The put** (`alerts::put`) holds `audit/alerts.lock` exclusive for one read
+  of the newest 1,024 records (at most 128 KiB), a length-based tail rule that
+  checks only the last whole record (a torn append and an unsynced last record
+  are written over, the second with an error event naming the offset; two bad
+  records refuse `alerts_damaged`; a record whose CRC passes is never written
+  over), de-duplication by key hash against that window, one 128-byte append
+  and one `sync_data`.
+- **The readers** (`alerts::window`, `alerts::page`) take the same one read
+  under the lock held shared, list the window's unacknowledged alerts newest
+  first, name damaged records, and give `older_unacknowledged` = the newest
+  good record's "open after" less the alerts listed: exact, and no
+  unacknowledged alert ever leaves view.
+- **An acknowledgement** inside the window is the same cost as a put. An
+  older one is the cli's (`Scope::Whole`), O(records after the alert).
+- **A damaged queue is replaced, never repaired**: `cli alerts
+  --replace-damaged` keeps the file as `audit/alerts.damaged-<unix_s>` and the
+  new queue's first alert (kind 12) names the kept file and its open count.
+- **A text over 75 bytes** is cut at a character boundary and flagged.
+
+**Beyond the design's text, and why.** (1) Kinds 13 to 20 (`run_ended_early`,
+`interrupted`, `stalled`, `autopilot_stalled`, `disk_low`, `file_shrank`,
+`month_damaged`, `index_refused`) are in the table from the start: the rules
+audit of 11 October 2026 asked for them "before its format is pinned", and
+their callers are later packages. (2) `alerts::page(root, before)` reads the
+1,024 records before any ordinal in one read and returns the acknowledged
+ordinals older than the page, so a page can walk backwards at constant cost
+per step (audit row RA-264); the route that uses it is IA-10a's. (3) An
+acknowledgement's text field holds who acknowledged, so the queue itself says
+who and not only the event (RA-231). (4) The kept file is made by a hard link,
+which fails where a rename would write over an earlier kept file, and a second
+replacement in the same second takes `.2` (RA-326). (5) A link or a directory
+at the queue's or the lock's name is refused `alerts_not_a_file`, and a name
+planted at a temporary name is removed before `create_new` (RA-287, RA-317).
+(6) `audit/alerts.reserve`, see D-4895.
+
+**Proof.** `docs/04-invariants.md` IA-AL-01 to IA-AL-17, C-AL-01, C-AL-02.
+Limits: `docs/06-limits.md` L-IA-30, L-IA-34.
+
+### D-4871 — One owner per piece: an ingest-automation package edits a shared file only after the fix-round package that owns it has merged — 2026-10-11
+
+**Implemented by** every ingest-automation (IA) package; headed here by IA-11a
+because the first IA package to merge, IA-11r, did not head it (round-7 critic,
+gap X-4: the first lander heads the whole text and later packages never add a
+second heading).
+
+**Decision.** Each piece of the ingest automation has exactly one owning
+package, and a piece that a `/db` fix-round package (WP-*) already owns stays
+that package's. The map, as of this entry:
+
+- WP-16: the import workers, per-day durability, the once-per-run year-zip
+  directory. WP-33c: audit and log search and the `/imports.json` filters, with
+  IA-11r's residue (the audit roll's reaper, the widened importer-evidence
+  readers, the O(1) runs index). WP-12d: the GDFL month repair, through
+  WP-13c's engine. WP-12f: the capital-market scope, hand-overs, the scope
+  record, `SYMBOL_CHANGES` rows. WP-12e: options lineage and identity.
+  WP-13d: Zerodha landing identity. WP-62: the pull runtime and the calendar
+  horizon. WP-81: backups, the free-space surface, the store scrub, the
+  unstamped-write check (which stays in `cli::store_write`, D-4894).
+  WP-61: the alert finding (DB-B78) and its page.
+- IA-11a: the alert queue's writer, format, readers, shared lock and
+  damaged-queue replacement, landing before every caller (D-4883). IA-2: the
+  stop, whole. IA-7: the deferred pass's driver. IA-6p: the peer tolerance, one
+  function in `pull`. IA-16: `admit`'s table, the repair-reason rule, the
+  `audit/<vendor>.<name>` ledger lock. IA-17: the store half of the versioned
+  repair that WP-13c left. IA-10a: the api's journal reader for member keys
+  and holes, the routes over this queue. IA-10b: durable run ids for the pull
+  routes. IA-14: the runbook steps, including the queue replacement.
+- The cause arm of each new refusal variant belongs to the package that adds
+  the variant.
+
+Every other file an IA package edits is edited only after the fix-round
+packages that own it have merged. Where two packages must each add a line to
+one shared file (a `lib.rs` module list, a `ci.yml` pin, a ledger document),
+each adds only its own line and D-4891 says how the lines meet.
+
+### D-4891 — Gate 14's `cover` line is a shared exact line: union and recount; shared ledger files merge as "both" (amends D-4861) — 2026-10-11
+
+**Implemented by** IA-11a (this entry, and the `pull` line). Every later
+package that adds a bench applies it.
+
+**What was wrong.** `ci.yml`'s gate 14 pins, per crate, an exact count of
+measurements and the ids its bench prints. Several packages in different lanes
+raise the same crate's line (`pull`: IA-11a, IA-1, IA-2, IA-3, IA-16, IA-6,
+IA-7, IA-8, IA-9), and no rule said what a merge does with two versions of one
+line. Taking either side drops the other's ids with the gate still parsing.
+Measured at this entry's parent commit: the `pull` line said 14 while the
+gate's own rule (lines of `crates/pull/benches/ratio.rs` that call a helper
+whose name ends in `ratio`) counts 18, so the line had already fallen behind.
+
+**Decision.** (1) A crate's `cover` line is a shared exact line. As its last
+step before its gates a package merges the head, recounts its bench by the
+gate's own rule, and writes the head's ids plus its own with that count. A
+merger never takes "ours" or "theirs" on that line: it takes the union of the
+ids and recounts. (2) `docs/04-invariants.md`, `docs/05-decisions.md`,
+`docs/06-limits.md` and `.github/gates_ledger.rs` are append-only shared
+files: two packages' appended sections conflict textually and resolve as
+"both, in merge order". Entries are never renumbered to restore numeric
+order: D-4883 after D-4897 in this file is correct.
+
+**Applied here.** `pull`'s line is 22 (the 18 the bench carried, plus two
+calls each for C-AL-01 and C-AL-02) and names C-AL-01 and C-AL-02.
+
+### D-4893 — The events that were not audited or had no name: queue replaced, alert acknowledged, run dismissed, stop requested — 2026-10-11
+
+**Implemented by** IA-11a (the queue's events, below). IA-2 ("stop
+requested", and `stop_by` and `requested` on "run stopped") and IA-10a ("run
+dismissed"; "stop requested" from its route and its shutdown) cite this entry
+when they add theirs.
+
+**What was wrong.** `telemetry::is_audited` takes an event at `error`, or at
+`info` and above when its target's last segment is `lifecycle` (or the access
+segment) or its message holds a lifecycle word. The design's "alert queue
+replaced", a warn at `pull.alerts`, is therefore not audited and would roll out
+of the 64 MiB ring within minutes of an import; an acknowledgement, a dismissed
+run and a stop request had no event at all.
+
+**Decision.** A state change is an event at a target ending in `lifecycle`,
+and the package that adds it asserts `telemetry::is_audited(level, target,
+message)` in a table test. The queue's events, all at `pull.alerts.lifecycle`:
+
+| Message | Level | Fields |
+|---|---|---|
+| alert put | info | ordinal, kind, run, day, key |
+| alert acknowledged | info | ordinal, kind, run, by (`cli` or `api`) |
+| alert queue replaced | warn | kept, open |
+| alert queue created | info | path |
+| alert record written over | error | offset, ordinal |
+| alert reserve spent | error | freed, bytes |
+| alert not saved | error | kind, run, key, code, why |
+
+The other packages' rows: "run dismissed", warn, `gdfl.import.lifecycle`,
+fields run, kind, lock, by, old claim (IA-10a); "stop requested", info,
+`gdfl.import.lifecycle`, fields run, kind, by, requested, from every writer of
+a stop file (IA-2, IA-10a).
+
+**Proof.** `docs/04-invariants.md` IA-AL-15: the table test, and seven rows
+of `pull::emit_sites` that drive each shipped function and read its line back.
+
+### D-4895 — The alert queue's garbage inputs; de-duplication against unacknowledged alerts only; the reserve for a full disk (amends D-4883) — 2026-10-11
+
+**Implemented by** IA-11a.
+
+**Decision.**
+
+- A fresh store with no `audit/`: the put creates it. A store root that is not
+  a directory is refused `alerts_unavailable` and never created. A read
+  creates nothing.
+- A kind outside the table is refused `alert_kind_unknown`; an empty key
+  `alert_key_empty`. Control characters in a text become spaces before the
+  cut, because the text is shown on a page.
+- `--ack 0`, an ordinal past the last record, and the ordinal of an
+  acknowledgement record all answer `no_such_alert` and write nothing.
+- An acknowledgement is appended only for an open alert, and "open after" is
+  computed saturating, so it never goes below zero.
+- **De-duplication is against unacknowledged alerts only.** An acknowledged
+  key is put again the next time its condition is met, so a fault that
+  persists after its acknowledgement (`runs_ledger:<offset>`,
+  `build_skew:<pair>`) comes back. D-4883's "a key in the window writes
+  nothing" is narrowed to "an open alert with that key".
+- **A put that fails is never silent.** It returns `Err(AlertError)` (never a
+  panic) and emits the error event "alert not saved" with the alert's kind,
+  run, key and the refusal, so the log has what the queue could not take. The
+  caller prints the error through its own stderr writer and goes on.
+- **A full disk.** The queue keeps `audit/alerts.reserve`, 65,536 written zero
+  bytes. A put whose append meets `StorageFull` deletes it and tries once
+  more, so the `disk_full` alert has room on the disk that is full; the put
+  reports the reserve as spent and the next put that finds room writes it
+  again. The design's alternative, a queue created with room for 512 records,
+  would break the length-based tail rule of format v1 (the file's length is
+  the record count), and `std` has no allocation past the end of a file
+  without `unsafe`, which the workspace denies.
+- **A later build.** A reader shows a kind it cannot name as `kind_<n>` and a
+  record type it cannot name as unknown; a header of another version is
+  refused `alerts_version_unknown` by every door and never replaced.
+
+**Not proved.** The reserve is tested through a failing write (the seam
+`FULL_WRITES`), not on a volume that is really full: that deleting 64 KiB on
+APFS frees the blocks a 128-byte append then needs is not measured here
+(`docs/06-limits.md` L-IA-30). A lost store drive is not covered by a reserve
+on that drive: the in-memory list of alerts that could not be saved is the
+api's (IA-10a, audit row RA-161).
+
+**Proof.** `docs/04-invariants.md` IA-AL-09 to IA-AL-13.

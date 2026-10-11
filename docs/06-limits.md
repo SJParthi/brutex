@@ -16240,3 +16240,69 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   1.86 ms, p99 6.21 ms, max 8.15 ms; NIFTY 28 Nov 2019 12000 CE p50 1.48 ms,
   p99 2.21 ms, max 5.96 ms (the journal's 2 `run` lines: L-IA-39's term is
   not visible at that size).
+
+## Ingest automation: the alert queue — D-4883, D-4895, 11 October 2026
+
+Rows L-IA-30 and L-IA-34 of the ingest automation design (its §10.2), landed
+by IA-11a with the code they bound (`pull::alerts`, `cli alerts`).
+
+- **L-IA-30. The alert window.** The writer compares a new alert's key with
+  the newest 1,024 records only, and the readers list the unacknowledged
+  alerts among those same 1,024: one positional read of at most 128 KiB per
+  put, per acknowledgement inside the window and per read, whatever the file's
+  length. **A repeat, never a loss:** a key whose open alert is more than
+  1,024 records old is put again; an unacknowledged alert older than the
+  window leaves the list but never leaves view, because every reader returns
+  `older_unacknowledged` (the newest good record's "open after" less the
+  alerts listed, O(1)) and `alerts::page(root, before)` reads any older page
+  in one read. What is NOT bounded:
+  - *The file only grows.* 128 bytes per alert and per acknowledgement, never
+    compacted and never rotated. At the design's bound of 22 alerts a run,
+    each acknowledged, a thousand runs are 5.6 MB. Nothing reads the whole
+    file on a route, so its length costs disk and nothing else.
+  - *A reader waits for at most one put.* The put holds the lock exclusive for
+    its read, its append and its `sync_data`; a reader behind it waits that
+    long (measured below: 1.09 ms at p50, 2.46 ms at p99).
+  - *The reserve is proved through a failing write, not a full volume.*
+    `audit/alerts.reserve` (65,536 bytes) is deleted when an append meets
+    `StorageFull` and the append is tried once more (IA-AL-13). That deleting
+    it on APFS frees the block the append needs is NOT MEASURED: no test here
+    fills a volume. If the second try fails too the put returns the error and
+    emits "alert not saved"; an alert for a store drive that is gone is not
+    saved anywhere by this crate (the api's in-memory list is IA-10a's).
+  - *A damaged record inside the window inflates the older count by one* for
+    as long as it stays in the window; the readers say so beside `damaged`.
+  - *The lock is taken blocking, with no time limit.* A holder is bounded by
+    its own one read, one write and one `sync_data`; a holder that hangs (a
+    drive that stalls inside `sync_data`) makes every later put, and every
+    reader, wait with it. Nothing here times a wait out or names it; the lock
+    waits' rule is IA-2's (the round-7 review's gap IA-2-2).
+- **L-IA-30, measured.** Bench C-AL-01 and C-AL-02 (`cargo bench -p pull
+  --bench ratio`), 11 Oct 2026, with `TMPDIR` on the WD_BLACK volume (the
+  store's own drive), the machine shared with other builds. Queues of 1,024
+  (a full window), 10,240 and 102,400 records.
+  - The put, minimum over 60 trials of 8: 0.917 ms at 1x; 1.021x at 10x and
+    0.918x at 100x. Single puts: full window p50 1.26 ms, p99 3.80 ms, max
+    4.08 ms (n = 400); 100x p50 1.67 ms, p99 5.17 ms, max 5.66 ms (n = 400).
+  - The put over a torn tail, 100x (the timing includes writing the 57 torn
+    bytes): p50 3.00 ms, p99 7.80 ms, max 11.70 ms (n = 200).
+  - The acknowledgement inside the window, 100x: p50 1.07 ms, p99 4.03 ms,
+    max 17.27 ms (n = 200).
+  - The readers' one read, minimum over 60 trials of 40: 0.104 ms at 1x;
+    1.009x at 10x and 0.929x at 100x. Single reads, 100x: p50 97 µs, p99
+    163 µs, max 390 µs (n = 2,000). An older page (`before = 50000`), 100x:
+    p50 104 µs, p99 183 µs, max 462 µs (n = 2,000).
+  - The same read with a put in flight (one thread putting without pause),
+    100x: p50 1.09 ms, p99 2.46 ms, max 7.52 ms (n = 2,000).
+- **L-IA-34. Alerts older than the window.** Listing them, or acknowledging
+  one, needs the records after it, because an acknowledgement is a later
+  record and the file is append-only: no index says "already acknowledged"
+  without reading on. `alerts::older` (`cli alerts --older`) is O(records in
+  the queue); `alerts::ack` with `Scope::Whole` (`cli alerts --ack <k>`) for k
+  outside the newest 1,024 is one read of k's own record at its known offset
+  plus O(records after k); `alerts::of_file` (`cli alerts --file`) is
+  O(records in that file). All three are the operator's command only, never
+  on a page or a route: a route acknowledges with `Scope::Window` and is
+  refused `ack_outside_window` for an older alert. NOT MEASURED: none of the
+  three has a bench; their cost is the window read above times the number of
+  windows (about 0.1 ms per 1,024 records on the run above, an extrapolation).
