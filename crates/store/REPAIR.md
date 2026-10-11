@@ -133,11 +133,18 @@ alternate root with the general `BarFile` writer is outside this protocol.
 
 ## Bounds and cost
 
-Source and revised rows are each capped at `MAX_ROWS`, 2,678,400: 31 days of
-one-second bars, the most one month can hold on the finest rung the store
-files. It was 100,000, under which no one-second month of a full session
+Source, offered and revised rows are each capped at `row_ceiling(path)`, the
+most bars the path's month can hold on the path's rung: the month's length
+over the rung's width (D-4875 (1), D-4898, IA-17). That is 2,678,400 for a
+31-day one-second month, 44,640 for its one-minute month and 31 for its daily
+one, and 28 days of the rung for a February. A count past it is refused
+`RowLimit { rows, ceiling }` before a bar is read. `MAX_ROWS`, 2,678,400, is
+the largest value the ceiling takes and is compared against nowhere. The
+ceiling was a flat 100,000, under which no one-second month of a full session
 calendar fits (a GDFL NIFTY one-second month holds about 409,000 bars), so no
-GDFL month could be repaired (DB-N26, WP-12d). Ordinals are 1..=1,024 per
+GDFL month could be repaired (DB-N26, WP-12d), and then a flat 2,678,400 on
+every rung. What one repair holds in memory is `docs/06-limits.md` L-IA-26;
+bench C-RP-01 times it at a full month. Ordinals are 1..=1,024 per
 logical month; no free-ordinal search or implicit latest lookup is performed.
 Each publication or completed retry is O(source + revised rows), with a fixed
 number of directory operations and bounded buffers besides caller-owned rows.
@@ -215,6 +222,18 @@ The blockers the next section named, and how `crate::generation` meets each:
   greeks sibling (`RepairError::IndexedSibling`): an insertion would shift
   every row it indexes. The `.tix` is the revision's own, written when it was
   published and rebuilt in place by `index_existing`.
+- **A caller's own sibling of the month.** `repair_month_with` takes one
+  step, `before_promote`, and calls it with the revision's root after
+  `publish` has returned (`Created` or `Reused`) and before
+  `generation::promote`: the revision is whole and durable and no reader is
+  served from it, so a file the step writes beside the revision's bars is
+  first seen by readers at the promotion, with the bars. `store` names no type
+  of the caller's. A step that refuses stops the repair unpromoted
+  (`RepairError::BeforePromote`, the step's words kept); the revision stays
+  published and unserved, and the same repair offered again reuses it, runs
+  the step again and promotes, so the step must be repeatable. `repair_month`
+  is the same call with no step, byte for byte. D-4875 (5), D-4898; tests
+  `store/tests/month_repair.rs`.
 - **Caches.** A cache keyed by a month's file keys by
   `generation::served_bars_path`, so a promotion is a new key
   (`api::bars_series`). The census row is the served month's header, written
