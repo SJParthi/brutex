@@ -1473,7 +1473,7 @@ impl Default for Durability {
 const FLUSH_THREADS: usize = 32;
 
 /// The workers that read and file one day's files at once (WP-16, DB-N25):
-/// 1 to [`Workers::MAX`], [`Workers::DEFAULT`] unless a caller asks.
+/// 1 to [`Workers::MAX`], [`Workers::for_host`] unless a caller asks.
 ///
 /// Days still run in order, one after the other. Inside a day each wanted
 /// file is one job, taken in listing order by whichever worker is free; one
@@ -1487,18 +1487,50 @@ const FLUSH_THREADS: usize = 32;
 pub struct Workers(usize);
 
 impl Workers {
-    /// The bound: 12 on the operator's 14 cores (WP-16), so two stay free
-    /// for the api and the rest of the machine.
+    /// The most a caller may ask for, on any host: the end of what was
+    /// measured (WP-16). It bounds the threads one run starts and is not a
+    /// count of cores: a worker waits on the drive more than on a core, so a
+    /// caller may ask for more workers than the host has cores, up to this.
+    /// Nothing past 12 was measured, so nothing past 12 is taken.
     pub const MAX: usize = 12;
 
-    /// The default, chosen by measurement (WP-16, the operator's drive,
-    /// options 2020-09-14 and 15 one day per run): 4 workers took 85.5 s and
-    /// 52.1 s, 8 took 65.5 s and 45.9 s, 12 took 67.8 s and 46.0 s. Past
-    /// eight the drive's flushes, not the cores, set the pace. With the day
-    /// made durable together (D-3353; 11 Oct 2026, 2020-09-15 into an empty
-    /// store, machine load 23 to 30) 4 workers took 18.7 s, 8 took 13.2 s and
-    /// 12 took 12.4 s: eight keeps most of the gain and leaves cores free.
-    pub const DEFAULT: Self = Self(8);
+    /// Where more workers stopped paying, by measurement (WP-16, the
+    /// operator's drive, options 2020-09-14 and 15 one day per run): 4
+    /// workers took 85.5 s and 52.1 s, 8 took 65.5 s and 45.9 s, 12 took
+    /// 67.8 s and 46.0 s. Past eight the drive's flushes, not the cores, set
+    /// the pace. With the day made durable together (D-3353; 11 Oct 2026,
+    /// 2020-09-15 into an empty store, machine load 23 to 30) 4 workers took
+    /// 18.7 s, 8 took 13.2 s and 12 took 12.4 s.
+    const KNEE: usize = 8;
+
+    /// Cores a default run leaves free, for the api and the rest of the
+    /// machine.
+    const SPARE: usize = 2;
+
+    /// The workers a run takes when nobody asks, on a host of `cores`: every
+    /// core but [`Self::SPARE`], never fewer than one and never past
+    /// [`Self::KNEE`].
+    #[must_use]
+    pub const fn for_cores(cores: usize) -> Self {
+        let free = cores.saturating_sub(Self::SPARE);
+        Self(if free < 1 {
+            1
+        } else if free > Self::KNEE {
+            Self::KNEE
+        } else {
+            free
+        })
+    }
+
+    /// The workers a run takes when nobody asks, READ FROM THE HOST when the
+    /// run starts (`std::thread::available_parallelism`, which honours a
+    /// limit set on the process), not written down for one machine. A host
+    /// that will not say is taken as one core, so one worker; a run prints
+    /// the workers it used either way.
+    #[must_use]
+    pub fn for_host() -> Self {
+        Self::for_cores(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+    }
 
     /// `n` workers.
     ///
@@ -1525,7 +1557,7 @@ impl Workers {
 
 impl Default for Workers {
     fn default() -> Self {
-        Self::DEFAULT
+        Self::for_host()
     }
 }
 

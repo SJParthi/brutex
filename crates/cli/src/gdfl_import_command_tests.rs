@@ -362,7 +362,7 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
 #[test]
 fn workers_are_the_default_or_a_count_within_the_bound() {
     let none = env_of(&[]);
-    assert_eq!(workers_of(&none), Ok(Workers::DEFAULT));
+    assert_eq!(workers_of(&none), Ok(Workers::for_host()));
     let four = env_of(&[(WORKERS_VAR, PathBuf::from("4"))]);
     assert_eq!(workers_of(&four).map(Workers::get), Ok(4));
     for bad in ["0", "13", "x", "-1", ""] {

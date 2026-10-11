@@ -5342,6 +5342,173 @@ fn a_day_an_earlier_run_left_open_is_confirmed_durable_before_it_closes() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// WP-16, repair 1 (the second agent's A6; the operator's rule 4: torn,
+/// truncated): A MONTH TORN INSIDE A DAY LEFT OPEN IS NAMED ON RESUME, AND THE
+/// DAY NEVER CLOSES `done` OVER IT. What a power cut inside an open day can
+/// leave under the default durability (D-3353): the day begun and never
+/// closed, and a month whose header slot counts the day's records while the
+/// records themselves never reached the drive. The resume reads the day
+/// again, is refused that month by name, writes not one byte into it, closes
+/// the day `incomplete` with the failure counted, and leaves the closed day
+/// before it and every other month as they were. A second resume answers the
+/// same: nothing here heals a torn month (a named limit, for
+/// `docs/06-limits.md`; the versioned month repair is `store::repair`).
+#[test]
+fn a_month_torn_inside_a_day_left_open_is_named_on_resume_and_the_day_is_never_done() {
+    let root = scratch("wp16-torn-open");
+    let plan: Vec<DayPlan> = [d1(), d2()]
+        .iter()
+        .map(|&d| (d, Tree::Options, many_options(d, 4)))
+        .collect();
+    world_of(&root, &plan);
+    let (kind_of_source, path) = source_path(&root, Src::Zips, ImportKind::Options);
+    let origin = Origin::measure(kind_of_source, &path, Some(COMMIT));
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let source = (Src::Zips, ImportKind::Options);
+    let lengths = |store: &Path| -> BTreeMap<PathBuf, usize> {
+        tree(store)
+            .into_iter()
+            .filter(|(rel, _)| {
+                rel.starts_with("bars") && rel.extension().is_some_and(|e| e == "bin")
+            })
+            .map(|(rel, bytes)| (rel, bytes.len()))
+            .collect()
+    };
+    let first = run_on(&root, source, (d1(), d1()), &store, (4, &origin));
+    assert_eq!(first.days_imported, 1);
+    let after_d1 = lengths(&store);
+    let second = run_on(&root, source, (d2(), d2()), &store, (4, &origin));
+    assert_eq!(second.days_imported, 1);
+    // The fixture's own refused files, which a whole day counts too.
+    let refused = second.failures.len();
+    // THE POWER CUT. The day's closing line was never written, and one month
+    // both days filed is back at its first day's length, its header slot and
+    // its sidecars still the second day's.
+    let closed_d2 = format!("done options {}", d2());
+    let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
+    let kept: String = journal
+        .lines()
+        .filter(|line| !line.starts_with(&closed_d2))
+        .flat_map(|line| [line, "\n"])
+        .collect();
+    assert!(kept.len() < journal.len(), "{journal}");
+    std::fs::write(journal_path(&store), kept).unwrap();
+    let (torn, short) = lengths(&store)
+        .into_iter()
+        .find_map(|(rel, now)| {
+            let before = *after_d1.get(&rel)?;
+            (before < now).then_some((rel, before))
+        })
+        .expect("a month both days filed");
+    let cut = std::fs::OpenOptions::new()
+        .write(true)
+        .open(store.join(&torn))
+        .unwrap();
+    cut.set_len(u64::try_from(short).unwrap()).unwrap();
+    drop(cut);
+    let before = tree(&store);
+    let name = torn.file_stem().unwrap().to_string_lossy().into_owned();
+    let contract = torn
+        .components()
+        .rev()
+        .nth(2)
+        .unwrap()
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned();
+    for attempt in ["the resume", "a second resume"] {
+        let resumed = run_durable(
+            &root,
+            source,
+            (d1(), d2()),
+            &store,
+            (3, &origin, Durability::DEFAULT),
+        )
+        .unwrap();
+        assert_eq!(resumed.resumed, vec![d2()], "{attempt}: d2 is read again");
+        assert_eq!(
+            resumed.seconds_committed, 0,
+            "{attempt}: nothing is written"
+        );
+        assert_eq!(
+            resumed.failures.len(),
+            refused + 1,
+            "{attempt}: one failure more than the whole day had: {:?}",
+            resumed.failures
+        );
+        let named = resumed
+            .failures
+            .iter()
+            .filter(|failure| failure.why.contains(&*torn.to_string_lossy()))
+            .count();
+        assert_eq!(
+            named, 1,
+            "{attempt}: the torn month ({contract} {name}) is named once: {:?}",
+            resumed.failures
+        );
+        let journal = std::fs::read_to_string(journal_path(&store)).unwrap();
+        assert!(
+            !journal.lines().any(|line| line.starts_with(&closed_d2)),
+            "{attempt}: the day closed done over a torn month: {journal}"
+        );
+        let last = journal.lines().last().unwrap();
+        assert!(
+            last.starts_with(&format!("incomplete options {}", d2()))
+                && last.contains(&format!(" failures={} ", refused + 1)),
+            "{attempt}: {last}"
+        );
+        assert!(
+            journal
+                .lines()
+                .any(|line| line.starts_with(&format!("done options {}", d1()))),
+            "{attempt}: the closed day stays closed: {journal}"
+        );
+        // Not a byte of any month moved, the torn one included.
+        let after = tree(&store);
+        for (rel, bytes) in &before {
+            if rel.starts_with("bars") && rel.extension().is_none_or(|e| e != "lock") {
+                assert!(
+                    after.get(rel) == Some(bytes),
+                    "{attempt}: {}",
+                    rel.display()
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16, repair 1: THE DEFAULT WORKERS ARE READ FROM THE HOST, not written
+/// down for one machine: every core but two, never fewer than one, never past
+/// the eight where more stopped paying. What a caller may ask for is bounded
+/// on its own, by the end of what was measured.
+#[test]
+fn the_default_workers_follow_the_hosts_cores() {
+    for (cores, workers) in [
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 2),
+        (9, 7),
+        (10, 8),
+        (14, 8),
+        (usize::MAX, 8),
+    ] {
+        assert_eq!(Workers::for_cores(cores).get(), workers, "{cores} cores");
+    }
+    let host = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    assert_eq!(Workers::for_host(), Workers::for_cores(host));
+    assert_eq!(Workers::default(), Workers::for_host());
+    assert!(Workers::new(Workers::for_host().get()).is_ok());
+    assert!(Workers::new(0).is_err() && Workers::new(Workers::MAX + 1).is_err());
+    assert_eq!(
+        Workers::new(Workers::MAX).map(Workers::get),
+        Ok(Workers::MAX)
+    );
+}
+
 /// WP-16 with WP-12d (D-3353 beside D-3350): A DAY ITS MONTH LACKS IS
 /// BACK-FILLED OUTSIDE THE DAY'S BATCH, IN LISTING ORDER, AND LEAVES THE STORE
 /// ONE WORKER LEAVES. Every month holds two later days when the first is

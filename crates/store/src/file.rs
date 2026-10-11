@@ -1550,7 +1550,9 @@ impl BarFile {
         // `F_FULLFSYNC`s of one directory on macOS. Every name is still
         // durable before this returns, so before any commit can need it
         // (D-0688's reason for the sidecar's): the flushes are only gathered
-        // to the end of the open, and each directory is flushed once.
+        // to the end of the open, and each directory is flushed once. The
+        // name of a directory this open MAKES is not gathered: it is flushed
+        // the moment the directory exists (`create_below`).
         //
         // A writer inside a durable batch leaves every flush, its names'
         // included, to the batch (D-3353).
@@ -1624,18 +1626,18 @@ impl BarFile {
         // is created; the leaves are then opened with `O_NOFOLLOW` as well, so
         // a link swapped in after this walk still fails at the open.
         refuse_links_below(root, &bars_path)?;
-        let created = missing_below(root, &dir);
-        fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
-        for made in &created {
-            fsync_dir(made.parent().unwrap_or(root), batch.as_ref())?;
-        }
+        // MADE ONE LEVEL AT A TIME, EACH NAME FLUSHED AT ONCE, so a directory
+        // this open made is named durably whatever refuses the open next: the
+        // next level, the lock, the bar file, the genesis. These flushes are
+        // never gathered to the end of the open ([`create_below`] says why).
+        create_below(root, &dir, batch.as_ref())?;
 
         // The lock is taken before the bar file is opened, let alone measured.
         // Everything below this line assumes exactly one writer. Every `?`
         // below it releases the month through the guard's explicit unlock.
         refuse_link(&lock_path)?;
         let lock = Flock::try_lock(
-            writer_open(open_rw(&lock_path), &lock_path)?,
+            writer_open(open_lock_hooked(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
@@ -4472,15 +4474,106 @@ fn missing_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
     missing
 }
 
+/// Makes every directory between `root` and `dir` that is missing, ONE LEVEL
+/// AT A TIME, the name of each flushed in its parent before the next level is
+/// made and before anything else can refuse the open.
+///
+/// # Why the flush is not gathered, and not left until the levels are all made
+///
+/// A later open finds a directory present and flushes nothing for it, so the
+/// open that made it is the only one that ever names it durably. WP-16 first
+/// gathered these flushes to the end of the open with the month's own, and an
+/// open refused in between (the lock, the bar file, the genesis) dropped them:
+/// the next open committed records under a directory whose name no flush had
+/// reached (the second agent's probe, 11 Oct 2026). Before that the levels
+/// were made by one `create_dir_all` and flushed after it, so a making that
+/// stopped half way (a level the host refused) left the levels above it
+/// unnamed in the same way. Now a level exists only for as long as it takes to
+/// flush its name: whatever refuses the open afterwards, by `Ok` or by `Err`,
+/// every directory it made is already durable (D-1522).
+///
+/// # A flush the host refuses
+///
+/// The level just made holds nothing, so it is taken away again and the open
+/// refused by the flush's own words: the next open finds the level missing,
+/// makes it again and asks the flush again. `remove_dir` takes only an empty
+/// directory, so a level another opener has already put a name in stays, and
+/// is then the one residue named below.
+///
+/// # What this cannot cover (for `docs/06-limits.md`)
+///
+/// A process killed between making a level and flushing its name, and a
+/// refused flush whose level could not be taken away again, leave a directory
+/// no later open flushes. Inside a [`DurableBatch`] every flush here is the
+/// batch's: a batch never made durable leaves its day open, and the next run
+/// confirms every directory of that day's months ([`DurableBatch::
+/// confirm_month`]).
+///
+/// A level another opener made between the walk and the `create_dir` is
+/// flushed here as well: this open saw it missing a moment ago and cannot
+/// know that its maker's flush will succeed. Bounded by the path's depth
+/// below the root, six; a path whose directories exist costs the one
+/// `try_exists` of [`missing_below`] and the one `create_dir_all` it always
+/// did, which also refuses by name a component the walk could not examine.
+fn create_below(root: &Path, dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    for made in &missing_below(root, dir) {
+        match create_dir_hooked(made) {
+            Ok(()) => {}
+            Err(raced) if raced.kind() == ErrorKind::AlreadyExists => {}
+            Err(refusal) => return Err(classify(dir, Action::CreateDir, &refusal)),
+        }
+        if let Err(refusal) = fsync_dir_now(made.parent().unwrap_or(root), batch) {
+            // Nothing is lost if the host refuses this too: the level then
+            // stays, which is the residue the doc comment names.
+            let _unmade = fs::remove_dir(made);
+            return Err(refusal);
+        }
+    }
+    fault(fs::create_dir_all(dir), dir, Action::CreateDir)
+}
+
+/// `create_dir`, through the thread-local test fault injector: the shape of
+/// [`sync_hooked`], and for the same reason.
+fn create_dir_hooked(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::name_fault_fires() {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    fs::create_dir(dir)
+}
+
+/// [`open_rw`] of a month's lock, through the same injector as
+/// [`create_dir_hooked`]: the first thing that can refuse an open after its
+/// directories are made.
+fn open_lock_hooked(path: &Path) -> io::Result<File> {
+    #[cfg(test)]
+    if tests::name_fault_fires() {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    open_rw(path)
+}
+
+/// One directory flush that is NEVER gathered by an open in progress: now, or
+/// the batch's. For the name of a directory an open just made
+/// ([`create_below`]).
+fn fsync_dir_now(dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
+    flush_directory(dir)
+}
+
 /// Flushes a directory, so a newly created file's **name** is durable.
 ///
 /// Without it the bars can be on stable storage inside a file the directory
 /// does not yet mention after a crash, which is the same as not having them.
 ///
 /// Inside [`with_directories_flushed_once`] the flush is gathered instead,
-/// and issued once per directory when that open ends (WP-16). Inside an open
-/// [`DurableBatch`] it is the batch's, issued once when the batch is made
-/// durable.
+/// and issued once per directory when that open ends (WP-16): the month's own
+/// directory, for the names of its files. The name of a DIRECTORY an open
+/// made is never asked here ([`fsync_dir_now`]). Inside an open
+/// [`DurableBatch`] the flush is the batch's, issued once when the batch is
+/// made durable.
 fn fsync_dir(dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
     if batch.is_some_and(|batch| batch.defer_directory(dir)) {
         return Ok(());
@@ -5033,12 +5126,22 @@ impl Drop for Gathering {
 /// (WP-16, DB-N25). A name is therefore durable when the open returns, as it
 /// was when each was flushed on its own.
 ///
-/// An open that fails flushes nothing it gathered: no record can have been
-/// committed inside an open (the only commit it makes is an empty month's
-/// genesis), so a name lost to a crash after a refused open loses a month
-/// that holds nothing, which the next open creates again (`is_interrupted_
-/// genesis`); the checksum sidecar of a month with records is never created
-/// by an open (D-0688).
+/// ONLY THE MONTH'S OWN DIRECTORY IS GATHERED: the names of its bar file, its
+/// checksum sidecar and its time index, three flushes of one directory made
+/// one. The name of a directory the open MADE is flushed at once and never
+/// passes through here ([`create_below`]): a later open finds that directory
+/// present and flushes nothing for it, so a flush dropped here would be
+/// dropped for good.
+///
+/// An open that fails flushes nothing it gathered, and for the month's own
+/// directory that loses nothing. No record can have been committed inside an
+/// open (the only commit it makes is an empty month's genesis), so a name
+/// lost to a crash after a refused open is the name of a month that holds
+/// nothing, and every later open of a month that holds nothing asks this
+/// flush again before it answers: it makes the month again (`is_interrupted_
+/// genesis`) or names its checksum sidecar again (`fresh`, D-0688). The
+/// checksum sidecar of a month with records is never created by an open, and
+/// its time index is rebuilt from its records when it is missing.
 fn with_directories_flushed_once<T>(
     open: impl FnOnce() -> Result<T, StoreError>,
 ) -> Result<T, StoreError> {
@@ -5460,6 +5563,24 @@ mod tests {
         static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
         /// Every directory flushed on this thread, in order (WP-16).
         static DIRECTORY_FLUSHES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+        /// Names an open may make on this thread (a directory level, then
+        /// the month's lock) before the host refuses one (WP-16).
+        static NAME_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Whether the armed name fault fires now; it fires once.
+    pub(super) fn name_fault_fires() -> bool {
+        NAME_FAULT.with(|armed| match armed.get() {
+            Some(0) => {
+                armed.set(None);
+                true
+            }
+            Some(left) => {
+                armed.set(Some(left - 1));
+                false
+            }
+            None => false,
+        })
     }
 
     /// Counts one directory flush on this thread.
@@ -5577,16 +5698,19 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&root);
     }
 
-    /// WP-16: A GATHERED DIRECTORY FLUSH THAT FAILS FAILS THE OPEN, by name,
-    /// as the flush it replaced did; nothing is answered as opened, and the
-    /// next open of the month is a clean one.
-    #[test]
-    fn a_gathered_directory_flush_that_fails_fails_the_open() {
-        let _sink_is_mine = crate::emits::hold_the_sink();
-        let root = std::env::temp_dir().join(format!(
-            "brutex-store-file-dirflush-fault-{}",
-            std::process::id()
-        ));
+    /// A month of its own under a root of its own, nothing below the root
+    /// made yet: the root, the month, the month's directory, and the parent
+    /// each of the six levels is named in, outermost first.
+    fn unmade_month(
+        tag: &str,
+    ) -> (
+        PathBuf,
+        crate::path::StorePath<'static>,
+        PathBuf,
+        Vec<PathBuf>,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-{tag}-{}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the store root (D-1522)");
         let month = crate::path::StorePath::new(crate::path::PathParts {
@@ -5600,40 +5724,151 @@ mod tests {
             file: crate::path::FileKind::Bars,
         })
         .expect("a legal path");
-        SYNC_FAULT.with(|armed| armed.set(Some(0)));
-        let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
-        assert!(
-            matches!(
-                refused,
-                Err(StoreError::Io {
-                    action: Action::Sync,
-                    ..
-                })
-            ),
-            "{refused:?}"
-        );
-        assert!(!sync_fault_fires(), "the fault fired at the gathered flush");
-        let _ = directory_flushes();
-        let mut again =
-            BarFile::open_or_create(&root, month, SYMBOL).expect("the month opens again");
         let dir = month
             .to_path_buf(&root)
             .parent()
             .expect("the month's directory")
             .to_path_buf();
-        assert_eq!(
-            directory_flushes(),
-            vec![dir],
-            "only the month's own directory again: an empty month's checksum \
-             sidecar is named again before its first commit (D-0688)"
-        );
-        let batch: Vec<Bar> = (0..2).map(bar).collect();
-        assert!(matches!(
-            again.append(&batch),
-            Ok(Appended::Committed { .. })
-        ));
-        drop(again);
-        let _ignored = std::fs::remove_dir_all(&root);
+        let mut parents = Vec::new();
+        let mut at = dir.as_path();
+        while at != root {
+            at = at.parent().expect("below the root");
+            parents.push(at.to_path_buf());
+        }
+        parents.reverse();
+        assert_eq!(parents.len(), 6, "six levels below the root: {parents:?}");
+        (root, month, dir, parents)
+    }
+
+    /// WP-16, repair 1 (the second agent's probe, 11 Oct 2026): A REFUSED OPEN
+    /// LEAVES NO DIRECTORY IT MADE UNNAMED. A later open finds a directory
+    /// present and flushes nothing for it, so the open that made it must have
+    /// flushed its name before it answered, `Err` as much as `Ok`. The host
+    /// refuses each name an open of a new month makes in turn: one of the six
+    /// levels (a making that stops half way), then the month's lock (every
+    /// level made, the open refused after them). The refused open has flushed
+    /// the name of every level it made and made none it did not flush; the
+    /// next open makes and names the rest, and only then commits.
+    ///
+    /// Before the repair the flushes were gathered to the end of the open and
+    /// dropped when it was refused: at the lock, six directories existed and
+    /// not one name was flushed, by that open or by any later one.
+    #[test]
+    fn a_refused_open_leaves_no_directory_it_made_unnamed() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for refused_at in 0..=6_usize {
+            let (root, month, dir, parents) = unmade_month(&format!("refused-{refused_at}"));
+            let _ = directory_flushes();
+            NAME_FAULT.with(|armed| armed.set(u32::try_from(refused_at).ok()));
+            let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
+            assert!(
+                NAME_FAULT.with(Cell::get).is_none(),
+                "{refused_at}: the fault never fired"
+            );
+            let action = if refused_at < 6 {
+                Action::CreateDir
+            } else {
+                Action::Open
+            };
+            assert!(
+                matches!(&refused, Err(StoreError::Denied { action: at, .. }) if *at == action),
+                "{refused_at}: {refused:?}"
+            );
+            // What exists is exactly what was named: the levels above the
+            // refusal, each flushed in its parent, in the order made.
+            let made: Vec<&PathBuf> = parents
+                .iter()
+                .skip(1)
+                .chain(std::iter::once(&dir))
+                .filter(|level| level.is_dir())
+                .collect();
+            assert_eq!(made.len(), refused_at, "{refused_at}: {made:?}");
+            assert_eq!(
+                directory_flushes(),
+                parents[..refused_at],
+                "{refused_at}: every level the refused open made is named, and no other"
+            );
+            let mut again = BarFile::open_or_create(&root, month, SYMBOL).expect("opens now");
+            let mut rest = parents[refused_at..].to_vec();
+            rest.push(dir.clone());
+            assert_eq!(
+                directory_flushes(),
+                rest,
+                "{refused_at}: the next open names the levels it makes, then the month's files"
+            );
+            let batch: Vec<Bar> = (0..2).map(bar).collect();
+            assert!(matches!(
+                again.append(&batch),
+                Ok(Appended::Committed { .. })
+            ));
+            drop(again);
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16, repair 1: A DIRECTORY FLUSH THE HOST REFUSES FAILS THE OPEN, BY
+    /// NAME, AND IS ASKED AGAIN BY THE NEXT ONE. The seven flushes of a new
+    /// month's open fail in turn: the name of each of the six levels, then
+    /// the month's own directory (its three files' names, gathered into one
+    /// flush). Nothing is answered as opened. A level whose name could not be
+    /// flushed is taken away again, so the next open makes it again and asks
+    /// that very flush again, before it commits; when the gathered flush is
+    /// the one refused, every level is already named and the next open asks
+    /// only for the month's own directory (an empty month's checksum sidecar
+    /// is named again before its first commit, D-0688).
+    ///
+    /// Before the repair a refused flush left every level in place and the
+    /// next open asked for the month's own directory alone: records were
+    /// committed under directories whose names no flush had reached.
+    #[test]
+    fn a_directory_flush_that_fails_fails_the_open_and_is_asked_again() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for refused_at in 0..=6_usize {
+            let (root, month, dir, parents) = unmade_month(&format!("flush-fault-{refused_at}"));
+            SYNC_FAULT.with(|armed| armed.set(u32::try_from(refused_at).ok()));
+            let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
+            assert!(
+                matches!(
+                    refused,
+                    Err(StoreError::Io {
+                        action: Action::Sync,
+                        ..
+                    })
+                ),
+                "{refused_at}: {refused:?}"
+            );
+            assert!(!sync_fault_fires(), "{refused_at}: the fault never fired");
+            let levels: Vec<&PathBuf> = parents
+                .iter()
+                .skip(1)
+                .chain(std::iter::once(&dir))
+                .collect();
+            for (depth, level) in levels.iter().enumerate() {
+                assert_eq!(
+                    level.is_dir(),
+                    depth < refused_at,
+                    "{refused_at}: a level stays only when its name was flushed: {}",
+                    level.display()
+                );
+            }
+            let _ = directory_flushes();
+            let mut again =
+                BarFile::open_or_create(&root, month, SYMBOL).expect("the month opens again");
+            let mut asked_again = parents[refused_at.min(6)..].to_vec();
+            asked_again.push(dir.clone());
+            assert_eq!(
+                directory_flushes(),
+                asked_again,
+                "{refused_at}: the refused flush and every one after it, asked again"
+            );
+            let batch: Vec<Bar> = (0..2).map(bar).collect();
+            assert!(matches!(
+                again.append(&batch),
+                Ok(Appended::Committed { .. })
+            ));
+            drop(again);
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
     }
 
     // ═══ A durable batch (WP-16, DB-N25, D-3353) ═══════════════════════════

@@ -80,8 +80,9 @@ pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
 /// The flag that narrows a capital-market run to what D-3333 adds.
 pub(crate) const STORED: &str = "--stored";
 /// How many workers read and file one day's files (WP-16): optional, 1 to
-/// `pull::gdfl_import::Workers::MAX`; absent is the import's measured
-/// default. The bytes a run leaves do not depend on it.
+/// `pull::gdfl_import::Workers::MAX`; absent is the import's default for
+/// this host's cores (`Workers::for_host`). The bytes a run leaves do not
+/// depend on it.
 pub(crate) const WORKERS_VAR: &str = "BRUTEX_GDFL_WORKERS";
 /// When a day's writes are made durable (WP-16, D-3353): optional, `day`
 /// (the measured default), `day-each-file` or `each-write`. The bytes a run
@@ -231,7 +232,7 @@ pub(crate) fn day(text: &str) -> Result<Day, String> {
 /// by name, never read as the default.
 pub(crate) fn workers_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Workers, String> {
     let Some(value) = env(WORKERS_VAR) else {
-        return Ok(Workers::DEFAULT);
+        return Ok(Workers::for_host());
     };
     value
         .to_str()
