@@ -961,6 +961,139 @@ fn rate_lookup_is_flat() -> bool {
     a && b
 }
 
+// ══ The alert queue (D-4883): C-AL-01, C-AL-02 ══════════════════════════════
+
+/// The stamp every invented alert of this bench carries.
+const ALERT_AT: u64 = 1_791_234_567;
+
+/// A queue of `n` invented open alerts under a scratch store root, written
+/// whole so the bench times the queue and not its own set-up.
+fn alert_queue(root: &std::path::Path, n: u32) {
+    use pull::alerts::{Names, Record, TYPE_ALERT, header, key_hash};
+    let names = Names::under(root);
+    std::fs::create_dir_all(&names.dir).unwrap_or_else(|_| refuse("a scratch audit/"));
+    let mut bytes = header(ALERT_AT);
+    for i in 1..=n {
+        let record = Record {
+            kind_of_record: TYPE_ALERT,
+            kind: 6,
+            flags: 0,
+            day: 0,
+            run: u64::from(i),
+            put_at: ALERT_AT,
+            key: key_hash(&format!("seed:{i}")),
+            acked: 0,
+            open_after: i,
+            text: "an invented alert".to_owned(),
+        };
+        bytes.extend_from_slice(&record.encode());
+    }
+    std::fs::write(&names.queue, bytes).unwrap_or_else(|_| refuse("a scratch queue"));
+}
+
+/// One put of a key no record carries, so it always appends.
+fn alert_put(store: &std::path::Path, next: &std::cell::Cell<u64>) -> u32 {
+    let n = next.get();
+    next.set(n + 1);
+    let key = format!("bench:{n}");
+    let alert = pull::alerts::NewAlert {
+        kind: 6,
+        key: &key,
+        day: 0,
+        run: n,
+        text: "an invented alert",
+    };
+    match pull::alerts::put_at(store, &alert, ALERT_AT) {
+        Ok(pull::alerts::Put::Written { ordinal, .. }) => ordinal,
+        _ => refuse("an alert put"),
+    }
+}
+
+/// The three scratch queues: a full window (1,024 records), 10x and 100x.
+fn alert_queues() -> (std::path::PathBuf, [std::path::PathBuf; 3]) {
+    let root = std::env::temp_dir().join(format!("brutex-bench-alerts-{}", std::process::id()));
+    let stores = [root.join("1"), root.join("10"), root.join("100")];
+    for (store, n) in stores.iter().zip([1_024_u32, 10_240, 102_400]) {
+        alert_queue(store, n);
+    }
+    (root, stores)
+}
+
+/// C-AL-01: one put (one read of the newest 1,024 records, one 128-byte
+/// append, one `sync_data`) costs the same with a full window, 10x and 100x
+/// the records in the file. The acknowledgement and the put over a torn tail
+/// are the same path and are printed beside it, never gated.
+fn alert_put_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
+    let [one, ten, hundred] = stores;
+    let next = std::cell::Cell::new(0_u64);
+    let put = |store: &std::path::Path| cost_ps(8, || alert_put(black_box(store), &next));
+    let base = put(one);
+    let a = ratio("C-AL-01 alert put, 10x queue", base, put(ten));
+    let b = ratio("C-AL-01 alert put, 100x queue", base, put(hundred));
+    spread("C-AL-01 alert put, full window", 400, || {
+        black_box(alert_put(one, &next));
+    });
+    spread("C-AL-01 alert put, 100x queue", 400, || {
+        black_box(alert_put(hundred, &next));
+    });
+    let queue = pull::alerts::Names::under(hundred).queue;
+    spread("C-AL-01 alert put over a torn tail, 100x", 200, || {
+        let torn = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&queue)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &[0xAB; 57]));
+        if torn.is_err() {
+            refuse("a torn tail");
+        }
+        black_box(alert_put(hundred, &next));
+    });
+    let mut open: Vec<u32> = (0..200).map(|_| alert_put(hundred, &next)).collect();
+    spread("C-AL-01 acknowledgement, 100x queue", 200, || {
+        let ordinal = open.pop().unwrap_or(0);
+        let scope = pull::alerts::Scope::Window;
+        if pull::alerts::ack_at(hundred, ordinal, "bench", scope, ALERT_AT).is_err() {
+            refuse("an acknowledgement");
+        }
+    });
+    a && b
+}
+
+/// C-AL-02: the readers' one read (`alerts::window`, under the lock held
+/// shared) costs the same with a full window, 10x and 100x the records. The
+/// same read with a put in flight, and an older page by `before`, are printed
+/// beside it (p50, p99, max), never gated: a reader waits for at most one put.
+fn alert_window_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
+    let [one, ten, hundred] = stores;
+    let read = |store: &std::path::Path| {
+        cost_ps(40, || {
+            pull::alerts::window(black_box(store)).map_or(0, |page| page.alerts.len())
+        })
+    };
+    let base = read(one);
+    let a = ratio("C-AL-02 alert window read, 10x queue", base, read(ten));
+    let b = ratio("C-AL-02 alert window read, 100x queue", base, read(hundred));
+    spread("C-AL-02 alert window read, 100x queue", 2_000, || {
+        black_box(pull::alerts::window(hundred).is_ok());
+    });
+    spread("C-AL-02 older page (before=50000), 100x", 2_000, || {
+        black_box(pull::alerts::page(hundred, Some(50_000)).is_ok());
+    });
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let next = std::cell::Cell::new(1_u64 << 40);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                black_box(alert_put(hundred, &next));
+            }
+        });
+        spread("C-AL-02 alert window read, a put in flight", 2_000, || {
+            black_box(pull::alerts::window(hundred).is_ok());
+        });
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    a && b
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -973,6 +1106,10 @@ fn main() {
     ok &= append_after_load_is_flat();
     ok &= census_is_flat_across_a_compaction();
     ok &= rate_lookup_is_flat();
+    let (alert_root, alert_stores) = alert_queues();
+    ok &= alert_put_is_flat(&alert_stores);
+    ok &= alert_window_is_flat(&alert_stores);
+    let _cleanup = std::fs::remove_dir_all(&alert_root);
     if ok {
         println!("all ratios within the ceiling");
     } else {
