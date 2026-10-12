@@ -1121,7 +1121,10 @@ pub fn record(
 
     let at = path.with_file(FileKind::Provenance).to_path_buf(root);
     refuse_odd(&at)?;
-    let file = opened_rw(&at)?;
+    // Inside a durable batch (WP-16, D-3353) the record is written as every
+    // other write of the batch is, and its flushes are the batch's.
+    let batch = crate::file::DurableBatch::current();
+    let file = opened_rw(&at, batch.as_ref())?;
     let file = Flock::try_lock(file, at.clone()).map_err(|why| match why {
         fs::TryLockError::WouldBlock => ProvenanceError::Locked { path: at.clone() },
         fs::TryLockError::Error(why) => io_error(&at, "lock", why),
@@ -1136,8 +1139,8 @@ pub fn record(
                 0,
                 &Header::of(path, committed.symbol_id).image(),
             )?;
-            file.sync_data().map_err(|why| io_error(&at, "sync", why))?;
-            sync_parent(&at)?;
+            sync_data(&file, &at, batch.as_ref())?;
+            sync_parent(&at, batch.as_ref())?;
             Sidecar {
                 header: Header::of(path, committed.symbol_id),
                 records: Vec::new(),
@@ -1160,7 +1163,7 @@ pub fn record(
         follows(previous, &fresh, &at)?;
     }
     write_fully(&file, &at, offset_of(ordinal), &fresh.image())?;
-    file.sync_data().map_err(|why| io_error(&at, "sync", why))?;
+    sync_data(&file, &at, batch.as_ref())?;
     Ok(Recorded::Written(fresh))
 }
 
@@ -1411,9 +1414,38 @@ fn write_fully(file: &File, at: &Path, offset: u64, bytes: &[u8]) -> Result<(), 
         .map_err(|why| io_error(at, "write", why))
 }
 
-/// Makes a new directory entry durable.
-fn sync_parent(at: &Path) -> Result<(), ProvenanceError> {
+/// Makes what was written to the sidecar durable, or leaves it to `batch`
+/// while the batch is open (WP-16, D-3353).
+fn sync_data(
+    file: &File,
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<(), ProvenanceError> {
+    if let Some(batch) = batch {
+        let deferred = batch
+            .defer_file(file, at)
+            .map_err(|why| ProvenanceError::Io {
+                path: at.to_path_buf(),
+                action: "measure the device of",
+                source: io::Error::other(why.to_string()),
+            })?;
+        if deferred {
+            return Ok(());
+        }
+    }
+    file.sync_data().map_err(|why| io_error(at, "sync", why))
+}
+
+/// Makes a new directory entry durable, or leaves it to `batch` while the
+/// batch is open (WP-16, D-3353).
+fn sync_parent(
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<(), ProvenanceError> {
     let dir = at.parent().unwrap_or(at);
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
     File::open(dir)
         .and_then(|handle| handle.sync_all())
         .map_err(|why| io_error(dir, "sync directory", why))
@@ -1437,20 +1469,18 @@ fn refuse_odd(at: &Path) -> Result<(), ProvenanceError> {
 
 /// Opens for reading and writing, creating but never truncating, and never
 /// through a final symlink on the hosts `crate::open_flags` has a value for.
-fn opened_rw(at: &Path) -> Result<File, ProvenanceError> {
+fn opened_rw(
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<File, ProvenanceError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = File::options();
     options.read(true).write(true).create(true).truncate(false);
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            any(target_os = "linux", target_os = "android"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(crate::open_flags::O_NOFOLLOW);
-    }
+    // `O_NOFOLLOW` where it is verified, as the bar writer opens; and
+    // `O_SYNC` too inside a batch that writes through (WP-16, D-3353).
+    options.custom_flags(crate::file::writer_flags(
+        batch.is_some_and(crate::file::DurableBatch::writes_through),
+    ));
     options.open(at).map_err(|why| opened(at, why))
 }
 
