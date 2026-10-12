@@ -1859,7 +1859,9 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // an_instrument_with_a_daily_hole_is_withheld_alone_and_the_rest_are_pulled`;
     // `api.pull window runs past the calendar of record` (DB-B25), read back
     // by `server::tests::a_runs_retry_class_and_its_one_line_past_the_calendar`;
-    // and `pull.run a pull run was interrupted by a restart` (DB-B34), whose
+    // and `pull.run a pull run has no closing record` (DB-B34; it said
+    // "was interrupted by a restart", which blames a restart for what may be
+    // another process's run still in flight), whose
     // site is in `pullrun` and is read back by `server::tests::
     // a_run_cut_short_by_a_restart_is_logged_when_it_is_found`.
     // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open

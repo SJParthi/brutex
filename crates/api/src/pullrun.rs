@@ -708,12 +708,14 @@ impl Interrupted {
 /// false one ("INTERRUPTED ... The server stopped while it ran").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Restart {
-    /// Every run record read is closed, or the journal holds none.
+    /// Every run record read is closed, or none was read, AND every record
+    /// read could be decoded. How far the scan reads is in [`Self::words`].
     Clean,
     /// An opening record was read and no closing record follows it.
     Interrupted(Interrupted),
-    /// The newest run record could not be read, so whether a run is open is
-    /// NOT KNOWN; the reason, in its own words.
+    /// The newest run record could not be read, or a record that was read
+    /// would not decode and may be a run's opening or closing record, so
+    /// whether a run is open is NOT KNOWN; the reason, in its own words.
     NotKnown(String),
 }
 
@@ -741,9 +743,13 @@ impl Restart {
     #[must_use]
     pub fn words(&self) -> String {
         match self {
-            Self::Clean => "No pull run was left open: every run record the journal's newest \
-                            records hold is closed, or it holds none."
-                .to_owned(),
+            Self::Clean => format!(
+                "No pull run was left open as far as the scan looked: every run record it read \
+                 is closed, or it read none, and every record it read could be decoded. It \
+                 reads the journal's newest {INTERRUPTED_SCAN} records and, where the journal's \
+                 index can be read, the {INTERRUPTED_RUNS} newest run records before them; a \
+                 run left open further back than that is not reported."
+            ),
             Self::Interrupted(run) => run.words(),
             Self::NotKnown(why) => format!(
                 "NOT KNOWN whether a pull run was left open: {why}. Nothing is claimed either \
@@ -772,7 +778,9 @@ fn day_text(days: u32) -> String {
 ///   window and time, so it stands for an opening record that lies before
 ///   `read`. A restatement written AFTER its run closed (a failure whose first
 ///   append was refused, offered again behind the closing record) is not a
-///   new run.
+///   new run. A restatement of a run that IS open rejoins it whatever closed
+///   before it: an earlier run's closing record of the same window and
+///   source says nothing about this one.
 /// * A closing run record ends the newest open run of its window and source,
 ///   else of its window: a run that reached no instrument is closed under its
 ///   target's name, not its endpoint's. A record of
@@ -812,6 +820,7 @@ pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupte
                     .and_then(|rest| rest.trim().parse::<u64>().ok());
                 let first = restated.unwrap_or(*ordinal);
                 if restated.is_some()
+                    && !open.iter().any(|run| run.ordinal == first)
                     && (closed.contains(&first)
                         || closed_unseen
                             .iter()
@@ -898,10 +907,24 @@ pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupte
 /// server stopped while it ran", on a journal whose newest run record was a
 /// closing one.
 ///
+/// # A record that cannot be decoded is never dropped (repair 2)
+///
+/// Every record the scan is handed and cannot decode -- among the newest
+/// [`INTERRUPTED_SCAN`], among the run records the index names, and among
+/// the records the index's `faults` file names in the walk's span
+/// ([`older_runs`]) -- is kept with its ordinal and the decoder's reason. If
+/// one lies anywhere it could decide the answer, the answer is
+/// [`Restart::NotKnown`] naming it: it is never "clean" (the damaged record
+/// may be an opening record) and never "has no closing record" (it may be
+/// that closing record). The one place it cannot decide is before the
+/// opening record of the run the readable records leave open; that run is
+/// still reported, and the damage is named on its log line.
+///
 /// # Cost
 ///
 /// One `stat`, at most four page reads (800 records), one read of the
-/// index's `runs` file and at most 64 positional reads: bounded whatever the
+/// index's `runs` and `faults` files and at most 128 positional reads (64
+/// run records, and the 64 newest filed faults among them): bounded whatever the
 /// journal's length, except the `runs` file itself, which is 32 bytes per
 /// run record ever written. When the index has to be built: one pass over
 /// the whole journal, once per journal file, not per start.
@@ -932,6 +955,12 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
         return Restart::Clean;
     }
     let mut tail: Vec<(u64, crate::audit::Record)> = Vec::new();
+    // EVERY RECORD THE SCAN IS HANDED AND CANNOT DECODE IS KEPT, by ordinal
+    // and reason. They were filtered out, and the scan then answered as if
+    // it had read everything: "clean" of a journal whose opening record was
+    // the damaged one, "has no closing record" of one whose closing record
+    // was (DB-B34, repair 2).
+    let mut damaged: Vec<Damaged> = Vec::new();
     let mut skip = 0_u64;
     while skip < INTERRUPTED_SCAN.min(records) {
         let page = match journal.page(records, skip, crate::audit::MAX_PAGE_RECORDS) {
@@ -942,10 +971,12 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
             break;
         }
         skip = skip.saturating_add(page.len() as u64);
-        tail.extend(
-            page.into_iter()
-                .filter_map(|entry| entry.decoded.ok().map(|record| (entry.ordinal, record))),
-        );
+        for entry in page {
+            match entry.decoded {
+                Ok(record) => tail.push((entry.ordinal, record)),
+                Err(fault) => damaged.push((entry.ordinal, fault.to_string())),
+            }
+        }
     }
     // `page` is newest first; the walk is oldest first.
     tail.reverse();
@@ -956,26 +987,53 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     let mut unread: Option<String> = None;
     if scan_first > 0 {
         match older_runs_built(journal, records, scan_first, waits) {
-            Ok(older) => read = older,
+            Ok(older) => {
+                read = older.read;
+                damaged.extend(older.damaged);
+            }
             Err(why) => unread = Some(why),
         }
     }
     read.extend(tail);
+    damaged.sort_by_key(|(ordinal, _)| *ordinal);
+    damaged.dedup_by_key(|(ordinal, _)| *ordinal);
     // A run record that settles the question was read: an opening record, or
     // a closing one. A refusal settles nothing.
     let settled = read
         .iter()
         .any(|(_, record)| record.kind == Kind::Run && record.outcome != Outcome::Refused);
-    match interrupted_in(&read) {
+    let found = interrupted_in(&read);
+    // WHICH OF THE DAMAGED RECORDS PUT THE ANSWER IN DOUBT. A record that
+    // would not decode may be a run's opening record or its closing record.
+    // Before the opening record of the run the readable records leave open
+    // it can be neither that run's close (a close follows its opening) nor a
+    // newer open run (the newest is the one reported), so the answer stands
+    // and the damage is named on its log line. Anywhere else -- after that
+    // opening record, or anywhere at all when the readable records leave no
+    // run open -- it may be the record that decides, and the answer is NOT
+    // KNOWN.
+    let opened = found.as_ref().map(|run| run.ordinal);
+    let (before, doubt): (Vec<Damaged>, Vec<Damaged>) = damaged
+        .into_iter()
+        .partition(|(ordinal, _)| opened.is_some_and(|open| *ordinal <= open));
+    if !doubt.is_empty() {
+        return not_known(damaged_words(&doubt, found.as_ref()));
+    }
+    match found {
         Some(mut run) => {
             // The count is the run's whole count only when every record
             // after its opening record was read.
             run.failures_whole = run.failures_whole && run.ordinal >= scan_first;
             let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::error("pull.run", "a pull run was interrupted by a restart")
+                &telemetry::Event::error("pull.run", "a pull run has no closing record")
                     .with("ordinal", telemetry::Value::Uint(run.ordinal))
                     .with("failures", telemetry::Value::Uint(run.failures))
                     .with("source", telemetry::Value::Str(&run.source))
+                    .with(
+                        "undecodable_before",
+                        telemetry::Value::Uint(before.len() as u64),
+                    )
+                    .with("undecodable", telemetry::Value::Str(&damaged_list(&before)))
                     .with("reason", telemetry::Value::Str(&run.words())),
             );
             Restart::Interrupted(run)
@@ -991,6 +1049,56 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     }
 }
 
+/// A record the restart scan was handed, or was told of by the journal's
+/// index, and could not decode: its ordinal, and why in the decoder's words.
+type Damaged = (u64, String);
+
+/// How many damaged records a sentence names one by one: **3**. The rest
+/// are counted and the newest of them named, so the sentence is bounded
+/// whatever the damage.
+const DAMAGED_NAMED: usize = 3;
+
+/// `damaged` (ascending) as a list: the first [`DAMAGED_NAMED`] with their
+/// reasons, then how many more and the newest of them. Empty for none.
+fn damaged_list(damaged: &[Damaged]) -> String {
+    let mut out = damaged
+        .iter()
+        .take(DAMAGED_NAMED)
+        .map(|(ordinal, why)| format!("record {ordinal} ({why})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let (Some(more), Some((newest, _))) = (
+        damaged.len().checked_sub(DAMAGED_NAMED).filter(|n| *n > 0),
+        damaged.last(),
+    ) {
+        use core::fmt::Write as _;
+        let _infallible = write!(out, " and {more} more, the newest record {newest}");
+    }
+    out
+}
+
+/// Why the answer is NOT KNOWN when `doubt` would not decode: which records,
+/// why each could decide, and what the records that DID decode say, so the
+/// reader is told the half that is known and not handed it as the answer.
+fn damaged_words(doubt: &[Damaged], found: Option<&Interrupted>) -> String {
+    let readable = found.map_or_else(
+        || "The records that could be decoded leave no run open".to_owned(),
+        |run| {
+            format!(
+                "The records that could be decoded leave the run opened at record {} open, \
+                 and a record after it that cannot be decoded may be its closing record",
+                run.ordinal
+            )
+        },
+    );
+    format!(
+        "{} of the journal records the scan read cannot be decoded -- {} -- and a record \
+         that cannot be decoded may be a run's opening record or its closing record. {readable}",
+        doubt.len(),
+        damaged_list(doubt)
+    )
+}
+
 /// [`Restart::NotKnown`] for `why`, logged where an operator reads it.
 fn not_known(why: String) -> Restart {
     let _dropped_when_filtered = telemetry::emit(
@@ -1002,6 +1110,15 @@ fn not_known(why: String) -> Restart {
         .with("reason", telemetry::Value::Str(&why)),
     );
     Restart::NotKnown(why)
+}
+
+/// What [`older_runs`] read before the scan.
+struct Older {
+    /// The records that decoded, oldest first.
+    read: Vec<(u64, crate::audit::Record)>,
+    /// The records that did not, or that the index files as undecodable and
+    /// were not read again.
+    damaged: Vec<Damaged>,
 }
 
 /// [`older_runs`], building the journal's index first when it cannot be read
@@ -1017,7 +1134,7 @@ fn older_runs_built(
     records: u64,
     scan_first: u64,
     waits: u32,
-) -> Result<Vec<(u64, crate::audit::Record)>, String> {
+) -> Result<Older, String> {
     let first = match older_runs(journal, records, scan_first) {
         Ok(read) => return Ok(read),
         Err(why) => why,
@@ -1050,18 +1167,43 @@ fn older_runs_built(
 }
 
 /// The [`INTERRUPTED_RUNS`] newest run records of `journal` below record
-/// `scan_first`, oldest first, read through its index.
+/// `scan_first`, oldest first, read through its index -- and every record in
+/// their span that would not decode.
+///
+/// # A record that cannot be decoded is returned, never dropped
+///
+/// Two ways one is met, and both are reported in [`Older::damaged`]:
+///
+/// * the index's `runs` file names a record and the record does not decode
+///   (it was damaged after it was indexed);
+/// * the index's `faults` file names a record between the oldest run record
+///   read and the scan (it was damaged BEFORE the index was built, so `runs`
+///   does not name it and it may be a run record all the same). The newest
+///   [`INTERRUPTED_RUNS`] of those are read again, since a later build may
+///   decode what an earlier one could not; older ones are reported as the
+///   index filed them.
+///
+/// The span begins at the oldest run record read, or at the journal's first
+/// record when every run record below the scan was read: a fault further
+/// back than the walk looks is outside it, as an open run there is.
 ///
 /// # Errors
 ///
-/// The index is absent, of another file, ahead of the journal, or covers
-/// fewer than `scan_first` records (run records between its cover and the
-/// scan would be missed), or a record it names cannot be read: by name.
+/// The index is absent, of another file, ahead of the journal, covers fewer
+/// than `scan_first` records (run records between its cover and the scan
+/// would be missed) or holds an entry that cannot be read (a run record may
+/// be missing from it), or the journal cannot be read at a named record: by
+/// name.
+///
+/// # Cost
+///
+/// One read of the index and at most `2 * INTERRUPTED_RUNS` positional
+/// reads, whatever the journal's length.
 fn older_runs(
     journal: &crate::audit::Journal,
     records: u64,
     scan_first: u64,
-) -> Result<Vec<(u64, crate::audit::Record)>, String> {
+) -> Result<Older, String> {
     let index = journal.read_index(records)?;
     if index.covered < scan_first {
         return Err(format!(
@@ -1069,21 +1211,60 @@ fn older_runs(
             index.covered
         ));
     }
+    if index.malformed > 0 {
+        return Err(format!(
+            "{} of the index's entries cannot be read, so a run record may be missing from it",
+            index.malformed
+        ));
+    }
     let below = index
         .runs
         .partition_point(|(ordinal, _)| *ordinal < scan_first);
-    let ordinals: Vec<u64> = index
+    let named = index
         .runs
         .get(below.saturating_sub(INTERRUPTED_RUNS)..below)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // WHERE THE WALK BEGINS: the oldest run record read, or the journal's
+    // first record when no run record below the scan was left unread.
+    let begins = if below > INTERRUPTED_RUNS {
+        named.first().map_or(0, |(ordinal, _)| *ordinal)
+    } else {
+        0
+    };
+    let filed = index
+        .fault_ordinals
+        .get(
+            index.fault_ordinals.partition_point(|at| *at < begins)
+                ..index.fault_ordinals.partition_point(|at| *at < scan_first),
+        )
+        .unwrap_or_default();
+    let (as_filed, again) = filed.split_at(filed.len().saturating_sub(INTERRUPTED_RUNS));
+    let mut ordinals: Vec<u64> = named
         .iter()
         .map(|(ordinal, _)| *ordinal)
+        .chain(again.iter().copied())
         .collect();
-    Ok(journal
-        .records_at(&ordinals)?
-        .into_iter()
-        .filter_map(|(ordinal, decoded)| decoded.ok().map(|record| (ordinal, record)))
-        .collect())
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    let mut out = Older {
+        read: Vec::with_capacity(ordinals.len()),
+        damaged: as_filed
+            .iter()
+            .map(|at| {
+                (
+                    *at,
+                    "the journal's index files it as a record that would not decode".to_owned(),
+                )
+            })
+            .collect(),
+    };
+    for (ordinal, decoded) in journal.records_at(&ordinals)? {
+        match decoded {
+            Ok(record) => out.read.push((ordinal, record)),
+            Err(fault) => out.damaged.push((ordinal, fault.to_string())),
+        }
+    }
+    Ok(out)
 }
 
 /// `/pull/run.json`: the run's document, the calendar of record's horizon
@@ -5026,6 +5207,282 @@ mod tests {
         assert_eq!(
             found.interrupted().map(|run| run.window),
             Some(Some((20_040, 20_050)))
+        );
+    }
+
+    /// Overwrites record `ordinal` of `journal` with bytes no build decodes,
+    /// leaving the journal's length and its index as they are: a record
+    /// damaged on disk after it was written and indexed.
+    fn damage(journal: &crate::audit::Journal, ordinal: u64) {
+        use std::os::unix::fs::FileExt as _;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(journal.index_dir().with_extension(""))
+            .expect("the journal opens");
+        file.write_all_at(
+            &[0xFF_u8; crate::audit::RECORD_LEN],
+            ordinal * crate::audit::RECORD_LEN as u64,
+        )
+        .expect("the record is overwritten");
+    }
+
+    /// The reason of a NOT KNOWN answer, or a failure naming what was
+    /// answered instead.
+    fn not_known_of(found: &Restart) -> &str {
+        match found {
+            Restart::NotKnown(why) => why,
+            other => panic!("NOT KNOWN was expected, and the scan said {other:?}"),
+        }
+    }
+
+    /// **A RECORD THE SCAN CANNOT DECODE IS NEVER DROPPED IN SILENCE**
+    /// (DB-B34, repair 2). The scan filtered such records out and answered
+    /// as if it had read everything, in three shapes a second agent drove:
+    ///
+    /// * `[opened][5 failures]` with the OPENING record damaged read CLEAN
+    ///   ("No pull run was left open") while a run was open;
+    /// * `[opened][closed][3 failures]` with the CLOSING record damaged read
+    ///   INTERRUPTED ("has no closing record") of a run that was closed;
+    /// * `[opened][850 failures]` with the opening record damaged and the
+    ///   index still naming it as a run record read CLEAN.
+    ///
+    /// Each is NOT KNOWN now, naming the record and the decoder's reason and
+    /// saying what the readable half says; and the answer is logged at Warn.
+    #[test]
+    fn a_record_that_cannot_be_decoded_is_named_and_the_answer_is_not_known() {
+        let with_failures = |mut records: Vec<crate::audit::Record>, failures: u64| {
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+        let opened = || opened_at(100, "kite", 20_000, 20_010);
+        let closed = || closed_at(120, "kite", 20_000, 20_010);
+
+        // (a) The opening record, inside the scan.
+        let journal = journal_of("pullrun-damaged-open", &with_failures(vec![opened()], 5));
+        assert_eq!(
+            restart_scan(&journal)
+                .interrupted()
+                .map(|run| (run.ordinal, run.failures)),
+            Some((0, 5)),
+            "whole, the journal says a run is open"
+        );
+        damage(&journal, 0);
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("1 of the journal records"), "{why}");
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+        assert!(why.contains("leave no run open"), "{why}");
+        assert_eq!(found.word(), "not_known");
+        assert_eq!(found.interrupted(), None);
+
+        // (b) The closing record: the run WAS closed, and "has no closing
+        // record" is never said of it.
+        let journal = journal_of(
+            "pullrun-damaged-close",
+            &with_failures(vec![opened(), closed()], 3),
+        );
+        assert_eq!(restart_scan(&journal), Restart::Clean);
+        damage(&journal, 1);
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("record 1 (not an audit record)"), "{why}");
+        assert!(
+            why.contains("leave the run opened at record 0 open")
+                && why.contains("may be its closing record"),
+            "{why}"
+        );
+        assert!(!found.words().contains("has no closing record"));
+
+        // (c) The opening record behind the scan, reached through the index,
+        // which still names it as a run record.
+        let over = INTERRUPTED_SCAN + 50;
+        let journal = journal_of(
+            "pullrun-damaged-indexed",
+            &with_failures(vec![opened()], over),
+        );
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        damage(&journal, 0);
+        assert_eq!(
+            journal
+                .read_index(over + 1)
+                .expect("the index reads")
+                .runs
+                .iter()
+                .map(|run| run.0)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "the index is untouched and still names record 0 as a run record"
+        );
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+        assert!(why.contains("leave no run open"), "{why}");
+
+        // (d) The same journal with its index REBUILT after the damage: the
+        // record is filed under `faults`, not `runs`, and nobody hands it to
+        // the scan. It is still found and still named.
+        std::fs::rename(
+            journal.index_dir(),
+            journal.index_dir().with_extension("old"),
+        )
+        .expect("the index is moved aside");
+        let found = restart_scan(&journal);
+        let rebuilt = journal.read_index(over + 1).expect("the index was rebuilt");
+        assert_eq!(
+            (rebuilt.runs.len(), rebuilt.fault_ordinals.clone()),
+            (0, vec![0])
+        );
+        let why = not_known_of(&found);
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+
+        // (e) A damaged MEMBER FAILURE in the scan is no different: nothing
+        // says it was one.
+        let journal = journal_of(
+            "pullrun-damaged-member",
+            &with_failures(vec![opened(), closed()], 6),
+        );
+        damage(&journal, 5);
+        let why_text = restart_scan(&journal);
+        assert!(not_known_of(&why_text).contains("record 5 (not an audit record)"));
+
+        // (f) MANY: the sentence names three and counts the rest.
+        let journal = journal_of("pullrun-damaged-many", &with_failures(vec![closed()], 9));
+        for ordinal in 2..=8 {
+            damage(&journal, ordinal);
+        }
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.starts_with("7 of the journal records"), "{why}");
+        assert!(
+            why.contains("record 2 (") && why.contains("record 4 (") && !why.contains("record 5 ("),
+            "{why}"
+        );
+        assert!(why.contains("and 4 more, the newest record 8"), "{why}");
+    }
+
+    /// **DAMAGE THAT CANNOT DECIDE THE ANSWER DOES NOT HIDE AN OPEN RUN**
+    /// (DB-B34, repair 2): a record that will not decode BEFORE the opening
+    /// record of the run left open can be neither that run's close nor a
+    /// newer run, so the run is still reported; the same damage AFTER the
+    /// opening record is NOT KNOWN. A restated opening record whose own
+    /// first record is the damaged one still names the run.
+    #[test]
+    fn damage_before_the_open_runs_first_record_leaves_the_run_reported() {
+        let records = vec![
+            opened_at(100, "kite", 20_000, 20_010),
+            closed_at(120, "kite", 20_000, 20_010),
+            failure_at(130),
+            opened_at(200, "kite", 20_020, 20_030),
+            failure_at(210),
+            failure_at(211),
+        ];
+        for before in [0, 1, 2] {
+            let journal = journal_of(&format!("pullrun-damage-before-{before}"), &records);
+            damage(&journal, before);
+            assert_eq!(
+                restart_scan(&journal).interrupted().map(|run| (
+                    run.ordinal,
+                    run.window,
+                    run.failures
+                )),
+                Some((3, Some((20_020, 20_030)), 2)),
+                "record {before} lies before the open run's first record"
+            );
+        }
+        let journal = journal_of("pullrun-damage-after", &records);
+        damage(&journal, 4);
+        let found = restart_scan(&journal);
+        assert!(
+            not_known_of(&found).contains("leave the run opened at record 3 open"),
+            "{found:?}"
+        );
+
+        // The opening record itself is damaged and a restated one names it:
+        // the run is still reported, at its true ordinal.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let journal = journal_of(
+            "pullrun-damage-restated",
+            &[
+                opened_at(100, "kite", 20_000, 20_010),
+                again.clone(),
+                failure_at(140),
+            ],
+        );
+        damage(&journal, 0);
+        assert_eq!(
+            restart_scan(&journal)
+                .interrupted()
+                .map(|run| (run.ordinal, run.failures)),
+            Some((0, 1))
+        );
+        // ... and damage between the two may be the close that makes the
+        // restatement no new run: NOT KNOWN.
+        let journal = journal_of(
+            "pullrun-damage-restated-between",
+            &[
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                again,
+                failure_at(140),
+            ],
+        );
+        damage(&journal, 1);
+        assert_eq!(restart_scan(&journal).word(), "not_known");
+    }
+
+    /// **AN INDEX THAT LOST AN ENTRY IS NOT READ AS A WHOLE ONE** (DB-B34,
+    /// repair 2): a `runs` entry that cannot be read may be the newest run
+    /// record, so the run records before the scan are not known through it,
+    /// and with no run record in the scan the answer is NOT KNOWN. It read
+    /// "clean" of a journal a run was open in.
+    #[test]
+    fn an_index_entry_that_cannot_be_read_is_not_a_run_record_that_is_not_there() {
+        let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
+        records.extend((0..INTERRUPTED_SCAN + 50).map(|at| failure_at(200 + at)));
+        let journal = journal_of("pullrun-index-entry-damaged", &records);
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        assert_eq!(bytes.len(), 32, "one run record, one entry");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(
+            why.contains("1 of the index's entries cannot be read"),
+            "{why}"
+        );
+    }
+
+    /// **A RESTATED HEAD REJOINS ITS OWN OPEN RUN** whatever closed before
+    /// it: an earlier closing record of the same window and source, whose
+    /// opening record was not read, made the restatement "no new run" and
+    /// the failures behind it were counted to nobody.
+    #[test]
+    fn a_restated_head_of_an_open_run_rejoins_it_after_an_older_runs_close() {
+        let mut again = opened_at(300, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 1".to_owned();
+        let read = numbered(
+            vec![
+                closed_at(90, "kite", 20_000, 20_010),
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                again,
+                failure_at(310),
+                failure_at(311),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&read).map(|run| (run.ordinal, run.failures)),
+            Some((1, 3))
         );
     }
 

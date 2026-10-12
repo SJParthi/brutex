@@ -3762,6 +3762,10 @@ pub(crate) struct BrokerRun {
     /// The store breaker's streak (DB-B35): instruments in a row that landed
     /// nothing on a store that would not take a write.
     store_fault_streak: u32,
+    /// The second store streak: instruments in a row the store refused whole
+    /// at a path of its own while its probe write succeeded
+    /// ([`refused_at_store_path`]).
+    store_refused_streak: u32,
     /// How many member findings about days past the calendar of record were
     /// folded into the run's one line (DB-B25).
     pub past_record: usize,
@@ -3806,8 +3810,12 @@ fn order_class_fact(code: axum::http::StatusCode) -> Option<(&'static str, Strin
 /// counted with "what the vendor holds", so one refused write settled the leg
 /// for the run and the receipt said it "would repeat". They are counted
 /// apart ([`Self::store`]) and keep the leg owed: a store that takes the next
-/// write lands them on the next pass, and one that does not trips
-/// [`STORE_BREAKER`].
+/// write lands them on the next pass. One that takes NO write trips
+/// [`STORE_BREAKER`]; one that takes the probe's write and still refuses
+/// every member whole at a path of its own (a census that will not open,
+/// lock or load) trips [`STORE_REFUSED_BREAKER`]. This comment said the
+/// first breaker caught both, and it did not: such a leg was asked again to
+/// the pass ceiling, every instrument's requests spent on each pass.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetryTally {
     /// Failures another attempt could change: the vendor did not answer, or
@@ -3840,6 +3848,48 @@ fn names_the_store(failure: &pull::ingest::Failure) -> bool {
 /// ahead, the requests spent past the fault are bounded by it (DB-B35).
 const STORE_BREAKER: u32 = 3;
 
+/// How many instruments in a row the store may refuse WHOLE at a path of its
+/// own, while its probe write succeeds, before the run stops asking the
+/// vendor: **8**.
+///
+/// `pull::ingest` refuses a whole member under the census's path for four
+/// reasons that need not clear by themselves (a census that cannot be
+/// located, a lock that is no regular file or cannot be opened, a census
+/// that moved, one that will not load) and for one that does (another
+/// ingest holds the lock, and lets go between its own members). The failure
+/// carries no type to tell them apart, so the count is what does: a held
+/// lock is expected to interleave, and eight members in a row refused at
+/// one path is taken as a path that will not clear. The count is this
+/// build's policy; it is NOT MEASURED against a contended run. Without it
+/// such a leg was asked again on every pass to the ceiling (208 members in a
+/// row and no stop, measured by a second agent on the build before).
+const STORE_REFUSED_BREAKER: u32 = 8;
+
+/// The store path `done` was refused whole at, with the store's reason:
+/// `Some` only for a member that was handed rows, committed none, and whose
+/// every failure is named for a store path ([`names_the_store`]).
+fn refused_at_store_path(done: &pull::ingest::Ingested) -> Option<String> {
+    if !landed_nothing(done) || !done.failures.iter().all(names_the_store) {
+        return None;
+    }
+    done.failures
+        .first()
+        .map(|failure| format!("{}: {}", failure.instrument, failure.why))
+}
+
+/// The stop [`STORE_REFUSED_BREAKER`] records: the path that refused, the
+/// reason, and that the drive itself took a write.
+fn store_refused_sentence(refusal: &str, streak: u32, done: usize, total: usize) -> String {
+    format!(
+        "STORE UNAVAILABLE — {streak} instruments in a row were answered by the vendor and the \
+         store refused each whole, the last at {refusal}. The store's own probe write succeeded, \
+         so the drive is there and has room: what refuses is that path. The run stopped after \
+         {done} of {total} instruments rather than spend requests on answers it cannot keep. \
+         Nothing already in the store is affected; if another import holds that census, pull \
+         again when it has finished, otherwise the path named is what to look at."
+    )
+}
+
 /// Whether a member that was handed rows committed none and said why: the
 /// shape a store that will not take a write leaves, and the only time
 /// [`store_fault`] is asked. It is also the shape of an instrument pulled
@@ -3862,8 +3912,10 @@ const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
 /// that was unplugged fails the first; a full or read-only one the second.
 /// The probe file has ONE name, `audit/.store-probe`, and is removed again:
 /// a process killed between the create and the unlink leaves at most that one
-/// 4 KiB file, and the next probe of any process truncates and removes it. It
-/// was named for the process id, so each kill left a file nothing swept.
+/// 4 KiB file, and the next probe of any process unlinks it before it writes
+/// its own. It was named for the process id, so each kill left a file nothing
+/// swept. The name is unlinked and then opened with `O_NOFOLLOW`, so a
+/// symbolic link at that name is removed and its target is never written.
 ///
 /// The root is never created: `create_dir` makes `audit/` one level under a
 /// root that exists, so a vanished drive is not answered by an empty folder
@@ -3877,6 +3929,7 @@ const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
 /// a member with no failure, or one that committed a bar, costs nothing.
 fn store_fault(root: &std::path::Path) -> Option<String> {
     use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     match std::fs::metadata(root) {
         Err(why) => return Some(format!("{}: {why}", root.display())),
         Ok(meta) if !meta.is_dir() => {
@@ -3891,10 +3944,19 @@ fn store_fault(root: &std::path::Path) -> Option<String> {
         return Some(format!("{}: {why}", dir.display()));
     }
     let probe = dir.join(".store-probe");
+    // WHATEVER HOLDS THE NAME IS UNLINKED FIRST, AND A LINK IS NEVER
+    // FOLLOWED. The open was create-and-truncate through whatever the name
+    // pointed at, so a symbolic link left at `audit/.store-probe` had its
+    // TARGET truncated and overwritten with 4 KiB of zeroes. `remove_file`
+    // unlinks the name (a link's target is untouched) and `O_NOFOLLOW`
+    // refuses a link put there in between; a directory at the name cannot be
+    // unlinked and is answered as the fault it is, by name.
+    let _stale = std::fs::remove_file(&probe);
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
+        .custom_flags(store::open_flags::O_NOFOLLOW)
         .open(&probe)
         .and_then(|mut file| {
             file.write_all(&[0_u8; 4096])
@@ -4322,10 +4384,28 @@ impl BrokerRun {
         };
         let streak = store_breaker_next(self.store_fault_streak, fault.is_some());
         self.store_fault_streak = streak;
+        // THE STORE TOOK THE PROBE'S WRITE AND STILL REFUSED THIS MEMBER
+        // WHOLE at a path of its own: counted on a streak of its own, so a
+        // census that will not open is not asked for every instrument of
+        // every pass to the ceiling.
+        let refused = fault
+            .is_none()
+            .then(|| refused_at_store_path(&landed_one))
+            .flatten();
+        let refused_streak = store_breaker_next(self.store_refused_streak, refused.is_some());
+        self.store_refused_streak = refused_streak;
         self.absorb_member(landed, landed_one, fault.is_some());
         if let Some(fault) = fault.filter(|_| streak >= STORE_BREAKER) {
             self.stopped = Some(store_unavailable_sentence(&fault, streak, place.0, place.1));
             self.store_unavailable = Some(fault);
+        } else if let Some(refusal) = refused.filter(|_| refused_streak >= STORE_REFUSED_BREAKER) {
+            self.stopped = Some(store_refused_sentence(
+                &refusal,
+                refused_streak,
+                place.0,
+                place.1,
+            ));
+            self.store_unavailable = Some(refusal);
         }
     }
 
@@ -19643,6 +19723,116 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
     }
 
+    /// **THE STORE PROBE NEVER WRITES THROUGH A LINK** (DB-B35, repair 2), and
+    /// a name it cannot use is a fault said by name, never "healthy".
+    #[test]
+    fn the_store_probe_unlinks_a_link_at_its_name_and_never_follows_it() {
+        let root = crate::scratch::path("wp62-store-probe-link");
+        let _ = std::fs::remove_dir_all(&root);
+        let audit = root.join("audit");
+        std::fs::create_dir_all(&audit).expect("mkdir");
+
+        // A SYMBOLIC LINK AT THE PROBE'S NAME IS UNLINKED, NEVER FOLLOWED:
+        // the probe opened create-and-truncate through it and wrote 4 KiB of
+        // zeroes over whatever it pointed at.
+        let kept = root.join("kept.bin");
+        std::fs::write(&kept, b"bytes the probe must never touch").expect("write");
+        std::os::unix::fs::symlink(&kept, audit.join(".store-probe")).expect("a link");
+        assert_eq!(store_fault(&root), None);
+        assert_eq!(
+            std::fs::read(&kept).expect("the target is still there"),
+            b"bytes the probe must never touch"
+        );
+        assert!(
+            std::fs::symlink_metadata(audit.join(".store-probe")).is_err(),
+            "the link is gone and nothing is left at the probe's name"
+        );
+        // A DIRECTORY AT THE NAME cannot be unlinked or written: the probe
+        // says so by name, and does not answer "healthy" without having
+        // written anything.
+        std::fs::create_dir(audit.join(".store-probe")).expect("mkdir");
+        let blocked = store_fault(&root).expect("no write was proved");
+        assert!(blocked.contains(".store-probe"), "{blocked}");
+        std::fs::remove_dir(audit.join(".store-probe")).expect("rmdir");
+        assert_eq!(store_fault(&root), None);
+    }
+
+    /// **A STORE PATH THAT REFUSES EVERY MEMBER STOPS THE RUN** (DB-B26,
+    /// DB-B35, repair 2). A census that would not open refused each member
+    /// whole while the probe's own write succeeded, so the first breaker's
+    /// streak went back to zero every time, the failures were the store's,
+    /// the leg stayed owed, and it was asked again to the pass ceiling: 208
+    /// members in a row and no stop. Eight in a row now stop it, naming the
+    /// path and the reason; seven do not, a member that lands in between
+    /// starts the count again, and a refusal that also names an instrument
+    /// is not one of these.
+    #[test]
+    fn a_store_path_that_refuses_every_member_stops_the_run_naming_the_path() {
+        let root = crate::scratch::path("wp62-store-path-refused");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("audit")).expect("mkdir");
+        let census = root.join("zerodha").join("census.bin");
+        let landed = answered_window("RELIANCE");
+        let refused = || pull::ingest::Ingested {
+            members: 1,
+            rows_read: 375,
+            failures: vec![pull::ingest::Failure::new(
+                census.display().to_string(),
+                "the census lock is not a regular file",
+            )],
+            ..pull::ingest::Ingested::default()
+        };
+        assert_eq!(
+            refused_at_store_path(&refused()),
+            Some(format!(
+                "{}: the census lock is not a regular file",
+                census.display()
+            ))
+        );
+        let mut run = BrokerRun::default();
+        for at in 1..STORE_REFUSED_BREAKER {
+            run.absorb_landed(&landed, refused(), &root, (at as usize, 208));
+            assert_eq!(run.store_refused_streak, at);
+            assert_eq!(run.store_fault_streak, 0, "the probe's write is taken");
+            assert_eq!(run.store_unavailable, None, "{at} in a row do not stop it");
+        }
+        // A MEMBER THAT LANDS starts the count again.
+        let mut landed_one = refused();
+        landed_one.failures.clear();
+        landed_one.bars_committed = 375;
+        run.absorb_landed(&landed, landed_one, &root, (8, 208));
+        assert_eq!(run.store_refused_streak, 0);
+        // A refusal that names an instrument beside the path is not a member
+        // refused whole at the path.
+        let mut mixed = refused();
+        mixed
+            .failures
+            .push(pull::ingest::Failure::new("RELIANCE", "a gap"));
+        assert_eq!(refused_at_store_path(&mixed), None);
+        // A member that was handed no rows was not answered by the vendor.
+        let mut unanswered = refused();
+        unanswered.rows_read = 0;
+        assert_eq!(refused_at_store_path(&unanswered), None);
+
+        for at in 1..=STORE_REFUSED_BREAKER {
+            assert_eq!(run.store_unavailable, None);
+            run.absorb_landed(&landed, refused(), &root, (8 + at as usize, 208));
+        }
+        let fault = run.store_unavailable.clone().expect("the run is stopped");
+        assert!(fault.contains("census.bin"), "{fault}");
+        let said = run.stopped.clone().expect("a stop sentence");
+        assert!(said.starts_with("STORE UNAVAILABLE — 8 instruments in a row"));
+        assert!(
+            said.contains("the census lock is not a regular file"),
+            "{said}"
+        );
+        assert!(said.contains("probe write succeeded"), "{said}");
+        assert!(said.contains("after 16 of 208 instruments"), "{said}");
+        // Every one of them was the store's, never "what the vendor holds".
+        assert_eq!(run.retry.standing, 0);
+        assert_eq!(run.retry.store, 15);
+    }
+
     /// A window an instrument answered with no body: the smallest thing
     /// `BrokerRun::absorb_landed` takes.
     fn answered_window(instrument: &str) -> BrokerWindow {
@@ -19689,7 +19879,7 @@ mod tests {
             crate::pullrun::Restart::Clean
         );
         let logged = |from| {
-            crate::emitted::landed(from, "pull.run", "a pull run was interrupted by a restart")
+            crate::emitted::landed(from, "pull.run", "a pull run has no closing record")
                 .into_iter()
                 .filter(|record| crate::emitted::says(record, "source", source))
                 .collect::<Vec<_>>()

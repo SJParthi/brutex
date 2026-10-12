@@ -2350,6 +2350,11 @@ pub(crate) struct Indexed {
     pub(crate) runs: Vec<(u64, Option<brutex_core::vendor::Vendor>)>,
     /// Records among them that would not decode.
     pub(crate) faults: u64,
+    /// Which records those are, ascending, one per ordinal: a reader that
+    /// walks the run records must know where a record it was never handed
+    /// lies (DB-B34: a run record damaged before the index was built is
+    /// filed here and not under `runs`).
+    pub(crate) fault_ordinals: Vec<u64>,
     /// Index entries that would not decode, skipped.
     pub(crate) malformed: u64,
 }
@@ -2711,6 +2716,7 @@ impl Journal {
         fault_ordinals.sort_unstable();
         fault_ordinals.dedup();
         out.faults = as_u64(fault_ordinals.len());
+        out.fault_ordinals = fault_ordinals;
         Ok(out)
     }
 

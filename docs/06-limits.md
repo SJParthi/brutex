@@ -16378,7 +16378,38 @@ BUILT; what that costs until it is, is the disk item below.
   (`INTERRUPTED_SCAN`), the index's `runs` file (32 bytes per run record ever
   written; not bounded by a constant) and the 64 newest run records before
   the scan (`INTERRUPTED_RUNS`). A run opened further back than those and
-  never closed is not reported.
+  never closed is not reported, and the "clean" sentence says how far it
+  looked. Where the index names records that would not decode in that span
+  (its `faults` file), the 64 newest of them are read again: at most 128
+  positional reads of 256 bytes in all.
+- **The restart scan builds the journal's index when it cannot read it, and
+  that build is NOT bounded by a constant.** When the index is absent or of
+  another file (a journal copied or restored has a new inode) the scan calls
+  `audit::Journal::build_index`: one pass over the WHOLE journal under its
+  append lock, at site load, before the server answers its first request.
+  Measured on a clone of the operator's journal (1.08 GB, 4,217,027
+  records): 1.9 to 2.1 s. While it runs, another process's appends to that
+  journal are refused (the lock is held). When another writer holds the lock
+  the scan waits at most 100 x 100 ms (`INDEX_WAITS`, `INDEX_WAIT`) and then
+  answers NOT KNOWN. Paid once per journal file, not per start: the next
+  start reads the index.
+- **A record the scan reads and cannot decode makes the answer NOT KNOWN**
+  unless it lies before the opening record of the run the readable records
+  leave open (it can then be neither that run's close nor a newer run). So
+  one damaged record among the newest 800 keeps the answer NOT KNOWN until
+  800 newer records are written, and one damaged run record until 64 newer
+  run records are: nothing is inferred about what a damaged record was.
+- **An index entry that cannot be read makes the run records before the
+  scan unknown** (a run record may be missing from the index). The scan does
+  NOT detect an index whose `runs` file lost WHOLE entries: the cover holds
+  no count of them, so such an index reads as a whole one and a run opened
+  behind the newest 800 records is then not seen (WP-33c's file format).
+- **The restart answer is the state at site load.** It is not refreshed
+  while the process lives: a run another process opens afterwards is not on
+  `/pull/run.json` until the next start.
+- **Only a spot-route run writes an opening record** (`RunLedger::open`). A
+  `/pull/fno` leg cut short by a restart leaves no opening record and reads
+  "clean"; NOT DONE in WP-62.
 - **With no usable index and no run record in the newest 800 records the
   answer is NOT KNOWN**, never a guess: `/pull/run.json` says
   `restart.state = "not_known"` with the index's reason.
@@ -16399,7 +16430,15 @@ BUILT; what that costs until it is, is the disk item below.
   refused write and also of an instrument pulled again whose bars are all
   held and whose months have a standing gap, so those pay it too. Measured
   on this machine's scratch volume by `server::tests::pull_runtime_costs`;
-  NOT MEASURED on the store's own drive.
+  NOT MEASURED on the store's own drive. The probe's name is unlinked and
+  then opened with `O_NOFOLLOW`; a DIRECTORY at `audit/.store-probe` cannot
+  be unlinked and reads as a store fault, by name.
+- **A store path that refuses every member whole stops the run after eight
+  in a row** (`STORE_REFUSED_BREAKER`), not three: `pull::ingest::Failure`
+  carries no type, so a census that will not open cannot be told from one
+  another ingest holds for a moment, and the count is what separates them.
+  Eight is this build's policy, NOT MEASURED against a contended run; up to
+  seven members' requests (and the lanes fetched ahead) are spent first.
 - **A write the store refuses for ONE file while it takes the probe's** (a
   permission on one directory) is named for its instrument and classed
   standing: `pull::ingest::Failure` carries no type, only the name and the
