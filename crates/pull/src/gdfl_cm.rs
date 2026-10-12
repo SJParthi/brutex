@@ -1315,6 +1315,9 @@ impl Cas {
 
     /// The closing-auction rule for a share `symbol` this day: one probe of
     /// the master's parsed index (expected O(1), `cash_session_cache`).
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     fn auction(&self, symbol: &str) -> Auction {
         let master = match self {
             Self::NotRequired => return Auction::NotAsked,
@@ -2401,6 +2404,9 @@ pub fn session_gate(day: Day) -> Result<(), CmRefusal> {
 /// [`CmRefusal::CalendarNotRegular`] for a closed day or a session of
 /// unmeasured length, and [`CmRefusal::CalendarWindowNotLanded`] for a
 /// special session the store's session authority would land nothing of.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 pub fn session_of(day: Day) -> Result<Session, CmRefusal> {
     admitted(
         day,
@@ -2430,6 +2436,9 @@ fn admitted(day: Day, kind: DayKind) -> Result<Session, CmRefusal> {
 /// windows the calendar of record holds but that authority does not would
 /// land nothing and close `done`: refused instead, by name (D-3319). Three
 /// verdicts per window, each O(1).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn landed(day: Day, session: Session) -> bool {
     let Ok(window) = crate::session::Window::new(day, day) else {
         return false;

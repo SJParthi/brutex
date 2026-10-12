@@ -2396,8 +2396,92 @@ const CENSUS_V4_LITERAL: &str = "v4 capacity headroom from_entries to_entries fr
      recounted torn unrecorded broker-shifted-day-two 0123abcd 2019-11 2019-11-4 2019-11-14-1 again closes compacts \
      counted foreign installed listed mismatch parent repairs reset";
 
+// THE /db FIX ROUND AND THE INGEST AUTOMATION, DECLARED TOGETHER (12 Oct 2026).
+// WP-11b to WP-16, IA-5 and IA-11a each added literals under crates/pull and
+// ran no CI gate, so the round's full-gate run found 455 undeclared words at
+// once; the round's base passed this gate. Every word was read before it was
+// listed, and they are of six kinds. (1) Refusal and reason codes of the GDFL
+// import, its journal, its day ledger, its provenance and its lineage ledger:
+// `archive_member_corrupt`, `too_many_entries`, `vendor_renamed`,
+// `underlying_split`, `price_off_grid` and their like. (2) The alert queue's
+// words (IA-11a): `alerts`, `ack`, `acknowledged`, `alert_kind_unknown`,
+// `alerts_full`, `no_such_alert`, `superseded`. (3) The store's own format and
+// directory names: `bars-v4`, `census-v4`, `census-v5`, `census-seal-v2`,
+// `bar-revisions-v1`, `reserved-v1`, `tickstore`, `sidecar`, `ledger`. (4)
+// Telemetry and journal field names: `archive_bytes`, `archive_cd_blake3`,
+// `halt_s`, `hole_max_s`, `flat_max_at`, `lot_old`, `lot_new`, `ltq_gcd`,
+// `months_written`, `from_generation`, `to_generation`. (5) Scratch-directory
+// tags of tests: every `wp11b-*`, `wp11c-*`, `wp12a-*`, `wp12d-*`, `wp12e-*`,
+// `wp16-*`, `import-*`, `older-*`, `walk-*`, `replace-*`, `batch-*` and
+// `settled-*` word. (6) Fixture values and `expect` labels: invented strikes
+// and counts (`12500` to `73857`), malformed days and months (`2019-3-28`,
+// `201903-28`, `x019-03-28`, `2019-03`), invented commit stamps (`abc123`,
+// `feedc0de`), lower-cased fixture tickers (`hdfc`, `ntpc`, `midcpnifty`), and
+// one- and two-letter column and label words. None names an account, an
+// environment, a vendor credential or a field of a parameter path.
+const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800 18000 18909 2019-03 2019-3-28 201903-28 2020-11 \
+     2020-12 2021-01 22500 2691 3555 3591 73857 a-file-not-a-directory abc123 ack ack-far \
+     ack_outside_window acknowledged added after alert-store alert_key_empty alert_kind_unknown \
+     alert_record_damaged alerts alerts_damaged alerts_full alerts_io alerts_not_a_file \
+     alerts_not_damaged alerts_unavailable alerts_version_unknown alias aliased all-foreign alone \
+     already_acknowledged ambiguous_case_twins answered append apply archive archive_bytes \
+     archive_cd_blake3 archive_duplicate_day archive_fault archive_malformed \
+     archive_member_compressed archive_member_corrupt archive_method_unknown archive_unavailable \
+     as_stated as_stated_unmeasured aside auc auction_eligibility_unknown auction_sidecar \
+     autopilot_stalled back-filled bar-revisions-v1 bars-v4 basis batch batch-bytes batch-flushes \
+     batch-past batch-refused batch-torn batched before-first before_first before_first_day_bar \
+     bench blake3 bts build_skew by calendar_horizon calendar_not_regular calendar_unmeasured \
+     calendar_window_not_landed cash_eligibility_unknown cause census-seal-v2 census-v4 census-v5 \
+     census_refused cli closed_day_last_session closed_day_rule collide commit concurrent \
+     confirmed conflicting_candles contract_named_twice contract_refused contract_unrenderable \
+     crc created ctl cut date_mismatch day-each-file day-hole day_bar_unusable day_ledger \
+     day_not_held days_imported directories disk_full disk_low done_with_refusals \
+     duplicate_ticker durability each-write edge eligibility entry event ex expired_early \
+     expiry_passed expiry_unsettled extension_unknown factor feedc0de file_shrank \
+     file_taken_twice filing filter_name filter_renamed finder finished first first_row flags \
+     flat_max_at flat_max_s flushes fold folder_unknown foreign_level format format_sha256 four \
+     free freed from_generation front gaps garbage grown halt_held_s halt_s hdfc header_unknown \
+     hole hole_max_at hole_max_s holed holes_5s i ignored import import-all-refused import-busy \
+     import-cd import-ceiling import-done-refusals import-events import-holes import-loader \
+     import-origin import-provenance import-room import-stages index_ends_in_session \
+     index_refused indistinct inferred info inside interior interrupted interrupted_twice k k1 k2 \
+     k3 kept_as key_bytes kind_77 kind_unknown l later ledger left len limit lineage lines \
+     lines_written linked lock locked logs long longkey lot lot_new lot_old lot_step ltq_gcd m \
+     malformed_row masters median midcpnifty month_damaged monthly_expiry_unmeasured months \
+     months_already months_written more moved ms n_valid named new nfo-year-once no-rung \
+     no-such-store no_day_bar no_day_rung no_session_rows no_such_alert none not-a-commit \
+     not-a-contract not_swept nothing ntpc o odd off_grid off_grid_candle offset \
+     oi_unadjusted_until older older-ack older-crafted older-damaged older-edges older-many \
+     older-newer once open_interest_refused ordinal over paging paired path plan planted present \
+     price_off_grid price_refused prints provenance prv queue_replaced r r2-settle r3-shape-old \
+     range_backwards reader reader_since readonly recou ref reference refused_day refused_front \
+     rekey relisted repair-door repaired replace replace-damaged replace-race replaced rescan \
+     reserved reserved-v1 restates retired retry_refused reused rot rows_over_cap rows_refused ru \
+     rule run_ended_early runs_ledger_damaged s scaled scope session_s settled settled-none \
+     settled-one shift shift_paisa sidecar single source_crc_mismatch source_length_mismatch \
+     sourced sparse spool_damaged ss_distinct staged stalled stamp_past_the_day started stat \
+     stated stitch stitched stopped store-requires-v2 store_damaged store_lost strike_implausible \
+     strike_offset stub superseded superseded_bytes survey suspect suspect_level \
+     symbol_not_in_use syncing tail the-key tick_store_malformed tick_store_unavailable \
+     ticker_ambiguous ticker_mismatch ticker_unparsed tickstore timed timed-replace \
+     timestamp_refused to_generation too_many_bad_rows too_many_entries twice under-a-file \
+     underlying_refused underlying_split underlying_stale unexplained unknown unresolved \
+     unstamped unsynced vendor_oi_unadjusted vendor_redated vendor_refused vendor_renamed \
+     vendor_truncated verdict_refused victim volume_overflow walk-older walk-over walk-page \
+     walk-put warn withheld words workers world wp11b-cas wp11b-index wp11b-journal-lines \
+     wp11b-ledger-fault wp11b-lineage wp11b-nothing-read wp11b-options wp11b-provenance \
+     wp11b-provenance-refused wp11b-rescan wp11b-stocks wp11c-halt wp11c-rescan-once wp12a-auc \
+     wp12a-cas wp12a-indices wp12a-muhurat wp12a-nfo-special wp12a-shares wp12a-special \
+     wp12a-zero-ltp wp12d-backfill wp12d-completes wp12d-differs wp12d-door wp12d-locked \
+     wp12d-muhurat wp12d-provenance wp12d-reader wp12d-resume wp12d-sparse wp12d-stocks-options \
+     wp12d-torn wp12d-unpromoted wp12d-unwritable wp12e-filter wp12e-fuller wp12e-legacy \
+     wp12e-offset wp12e-relisted wp12e-split wp12e-split-lifted wp12e-timed wp12e-timed-split \
+     wp16-auction wp16-back-fill wp16-durability wp16-durable-refused wp16-kill wp16-left-open \
+     wp16-order wp16-order-durable wp16-torn-open wp16-workers x019-03-28 years zero-padded \
+     zero_ltp zip";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 59] = [
+const DECLARED: [&str; 60] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2457,6 +2541,7 @@ const DECLARED: [&str; 59] = [
     RISKFREE_LITERAL,
     GDFL_JOINED_PIECE,
     CENSUS_V4_LITERAL,
+    DB_FIX_ROUND_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

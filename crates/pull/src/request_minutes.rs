@@ -103,6 +103,9 @@ pub(super) struct Refusals {
 
 /// One pointer per time-ordered list of refused seconds, each advanced only
 /// forward, so a membership question asked in time order is O(1) amortised.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 struct Cursor<'a> {
     lists: Vec<(&'a [i64], usize)>,
 }

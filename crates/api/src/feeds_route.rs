@@ -231,6 +231,9 @@ fn finest_fields(feed: pull::vendor::Feed) -> String {
 /// walk bounded by the closed enums (five feeds, three segments, eleven
 /// rungs). Measured on a shadow of the operator's store, 9 Oct 2026, 200
 /// sequential GETs: p50 0.69 ms, p99 1.37 ms (the base build: 0.66 / 1.26).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 pub(super) async fn feeds_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
@@ -397,6 +400,9 @@ pub(super) async fn feeds_json(
 /// `row` is the feed's census row from the one store read the route makes;
 /// only a folder feed reads it (D-3338). O(1): a few field reads and no
 /// filesystem call.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn readiness(
     feed: pull::vendor::Feed,
     kind: pull::vendor::SourceKind,
@@ -498,6 +504,9 @@ fn census_row(
 ///
 /// O(1): the census is already read by the caller, and this is two field
 /// reads. No filesystem call.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn held_ready(feed: pull::vendor::Feed, row: Option<&census::VendorCensus>) -> (bool, String) {
     let Some(row) = row else {
         return (

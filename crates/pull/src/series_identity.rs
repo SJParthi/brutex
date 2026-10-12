@@ -354,6 +354,9 @@ impl Tally {
     /// Count one verdict on the minute stamped `ts_micros` of IST day `day`.
     /// The group is looked for among the last groups of the same day, as
     /// [`crate::fetch::Refused::note`] does: O(1) for minutes in time order.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     pub fn count(&mut self, verdict: Verdict, day: i64, ts_micros: i64) {
         match verdict {
             Verdict::Held => self.held += 1,

@@ -768,6 +768,9 @@ impl Refused {
     /// same day — rows arrive in time order, and a day has at most one group
     /// per [`RowCause`] — so this is O(1) per row; only a group's first row
     /// pays for its sentence.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     pub fn note(
         &mut self,
         cause: RowCause,

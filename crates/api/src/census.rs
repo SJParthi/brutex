@@ -375,6 +375,9 @@ impl Part {
 
     /// The newest row of one key. One probe per tail level and, when the
     /// tail has none, one of the base: expected O(1).
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     #[must_use]
     pub fn held(&self, key: &EntryKey) -> Option<Held> {
         if let Some(tail) = &self.tail
@@ -387,6 +390,9 @@ impl Part {
 
     /// Every key this part holds, each once: the base's, then the keys only
     /// the tail holds. O(1) to call, O(keys) to walk, and unordered.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     pub fn held_keys(&self) -> impl Iterator<Item = &EntryKey> {
         let base = &self.base;
         self.base.held_keys().chain(

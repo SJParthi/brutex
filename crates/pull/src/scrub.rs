@@ -397,6 +397,9 @@ pub struct BlockPass {
 /// O(blocks read): one covered range of at most 4,088 bytes and one 4-byte
 /// sidecar read per block. `limit` bounds a pass so a caller can rate-limit
 /// and resume at [`BlockPass::next`]. Nothing is written.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn blocks(file: &BarFile, from: u64, limit: u64) -> BlockPass {
     let held = file.records();

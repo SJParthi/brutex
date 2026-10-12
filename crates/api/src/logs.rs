@@ -1854,6 +1854,9 @@ pub(crate) struct AccessPlan {
 
 /// Every route's access window. O(1) a read: one probe of a table of at most
 /// [`DB_READS`] routes.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[derive(Debug, Default)]
 pub(crate) struct AccessWindows {
     routes: std::collections::HashMap<&'static str, AccessWindow>,

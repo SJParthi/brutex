@@ -1932,6 +1932,9 @@ impl Refusals {
     /// Count one refused row, keeping its name if it is among the first or is
     /// the latest. O(1): a push into a vector capped at [`NAMED_ROWS`], or one
     /// overwrite.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     fn note(&mut self, refused: RefusedRow) {
         self.count = self.count.saturating_add(1);
         if refused.why == Impossible::ShareAtZero {

@@ -17,6 +17,8 @@
 //! by design (D-3326 states it), so a flatness ratio would assert the wrong
 //! thing. Its cost is printed beside the ratios, unasserted, and its p50/p99
 //! on real data is in the WP-31 report for `docs/06-limits.md`.
+//!
+//! Run by `crates/api/benches/ratio.rs`'s `main`.
 
 use std::hint::black_box;
 use std::time::Instant;

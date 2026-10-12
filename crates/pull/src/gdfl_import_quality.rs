@@ -200,6 +200,9 @@ pub struct ReaderCounts {
 /// The seconds `kind`'s one-second series spends in the halt the calendar of
 /// record holds for `day`, as `[from, resume)`, or `None` on a day with no
 /// recorded halt. O(1): one walk of the calendar's three-entry table.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn halt_window(kind: ImportKind, day: Day) -> Option<(u32, u32)> {
     let venue = match kind {
@@ -776,7 +779,7 @@ impl DayLedger {
     }
 
     /// The day's lines, by scope, without `src=`: D-3335's fields in its
-    /// order, then the halt's (and an index's flat run), `max_defer_s` and
+    /// order, then the halt's (and an index's unchanged-price run), `max_defer_s` and
     /// `member_src`. `whole` is false for a run
     /// filtered to some instruments: a stocks or options line counts the
     /// WHOLE kind-day, so a filtered run writes none. A day none of whose

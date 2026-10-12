@@ -9,6 +9,8 @@
 //! WP-30's per-vendor cache row is the last: a census miss reads the entries
 //! appended since the last read, so its cost is flat in what the census holds
 //! ([`tails_are_flat`], D-3327).
+//!
+//! Run by `crates/api/benches/ratio.rs`'s `main`.
 
 use std::hint::black_box;
 

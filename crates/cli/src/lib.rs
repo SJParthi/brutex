@@ -94,9 +94,9 @@ pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
 /// months that hold them (WP-13d).
 mod series_identity;
 /// `cli srt-build`: the `.srt` sort index for named months of a series (D-3349).
-mod srt_build;
+mod srt_builder;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
-mod tix_rebuild;
+mod tix_rebuilder;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
 /// for every series, or repaired to a new generation from bars another store
 /// holds (D-3350, WP-13c).
@@ -2708,13 +2708,13 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
             census_recount::recount(arguments, out)
         }
         ["tix-rebuild", arguments @ ..] if !arguments.is_empty() => {
-            tix_rebuild::command(arguments, out)
+            tix_rebuilder::command(arguments, out)
         }
         ["scrub-blocks", arguments @ ..] if !arguments.is_empty() => {
             scrub_blocks::command(arguments, out)
         }
         ["srt-build", arguments @ ..] if !arguments.is_empty() => {
-            srt_build::command(arguments, out)
+            srt_builder::command(arguments, out)
         }
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)

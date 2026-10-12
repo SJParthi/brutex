@@ -1331,22 +1331,22 @@ mod tests {
     /// lines with no stage, one day done in the middle, a vendor-refused day
     /// before, and the run stopped mid-day at the end. Invented numbers.
     const JOURNAL: &str = "\
-begin options 2018-11-06 *
-incomplete options 2018-11-06 * definition=2 files=3 seconds=30 failures=1 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-13 *
-done options 2019-11-13 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-14 *
-incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-12-27 *
-done options 2019-12-27 * definition=2 files=6 seconds=60 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2020-01-01 *
-incomplete options 2020-01-01 * definition=2 files=7 seconds=70 failures=1 late=2 late_unresolved=0 max_back_s=3
-begin indices 2022-03-04 *
-done indices 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin indices 2022-03-07 *
-refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=7
-begin options 2020-09-16 *
-";
+        begin options 2018-11-06 *\n\
+        incomplete options 2018-11-06 * definition=2 files=3 seconds=30 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2019-11-13 *\n\
+        done options 2019-11-13 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2019-11-14 *\n\
+        incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2019-12-27 *\n\
+        done options 2019-12-27 * definition=2 files=6 seconds=60 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2020-01-01 *\n\
+        incomplete options 2020-01-01 * definition=2 files=7 seconds=70 failures=1 late=2 late_unresolved=0 max_back_s=3\n\
+        begin indices 2022-03-04 *\n\
+        done indices 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin indices 2022-03-07 *\n\
+        refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=7\n\
+        begin options 2020-09-16 *\n\
+    ";
 
     /// The importer's own refusal events for those days, as the `cli` ring
     /// holds them: the census by `about`, a vendor row by its ticker. Invented.
@@ -1819,16 +1819,16 @@ begin options 2020-09-16 *
     /// `incomplete` on a line with no stage, a stocks day and an indices day
     /// done, and an older options day the census refused. Invented.
     const RUN_JOURNAL: &str = "\
-run 1791700000 source=zip started=1791700000
-begin options 2019-11-14 *
-incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 late_unresolved=0 max_back_s=0
-begin stocks 2022-03-04 *
-done stocks 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin indices 2022-03-04 *
-done indices 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin indices 2022-03-07 *
-incomplete indices 2022-03-07 * files=2 seconds=20 failures=1 late=0 late_unresolved=0 max_back_s=0
-";
+        run 1791700000 source=zip started=1791700000\n\
+        begin options 2019-11-14 *\n\
+        incomplete options 2019-11-14 * definition=2 files=5 seconds=50 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+        begin stocks 2022-03-04 *\n\
+        done stocks 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin indices 2022-03-04 *\n\
+        done indices 2022-03-04 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin indices 2022-03-07 *\n\
+        incomplete indices 2022-03-07 * files=2 seconds=20 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+    ";
 
     /// One store where an INDICES run logged to `logs/gdfl/indices` through a
     /// real sink (its `run claimed`, three `day imported` events, a refusal on

@@ -1537,7 +1537,7 @@ const ALLOW_SORT: Allow = &[
     // D-3349 (WP-39): `cli srt-build NSE/FNO/SYMBOL/*` walks contract
     // directories in name order so two runs print the same receipt. Never on
     // a request path.
-    ("crates/cli/src/srt_build.rs", 1),
+    ("crates/cli/src/srt_builder.rs", 1),
 ];
 
 /// Rule 5. CLAUDE.md section 4: refuse, never die.

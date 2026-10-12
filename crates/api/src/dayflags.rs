@@ -78,6 +78,9 @@
 //!
 //! Measured p50/p99 are in the commit that built this route and go to
 //! `docs/06-limits.md` with WP-99; none is claimed here.
+//!
+//! UNVERIFIED as a bound: `the_real_days_are_labelled_and_the_answer_is_timed`
+//! times the answer (n = 200) and asserts no time.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -761,6 +764,9 @@ fn read_lineage(path: &Path) -> Result<Option<Arc<LineageIndex>>, String> {
 /// is an answer (`present: false`, with the reason), never an empty list a
 /// reader could take for "never renamed". O(1) a request once the ledger is
 /// indexed: one stamp, one probe.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn lineage_json(root: &Path, feed: Vendor, inst: &Instrument) -> Value {
     if feed != Vendor::Gdfl || inst.segment != Segment::Fno || inst.contract.is_none() {
         return Value::Null;
@@ -3455,6 +3461,9 @@ fn percent(held: u64, of: u64) -> Option<String> {
 ///
 /// `null` where no series is named, the day is not a session, or neither
 /// source can say.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn sampled_json(
     own: &Instrument,
     series: Option<&Instrument>,
@@ -4761,7 +4770,7 @@ mod tests {
         }
     }
 
-    /// `n` flat one-minute bars from 09:15 IST on `on`.
+    /// `n` unchanged-price one-minute bars from 09:15 IST on `on`.
     fn minutes(on: &str, n: i64) -> Vec<Bar> {
         (0..n)
             .map(|i| bar(on, 9 * 3_600 + 15 * 60 + i * 60, [500; 4], 0))
