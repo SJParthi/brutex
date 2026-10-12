@@ -54,9 +54,16 @@
     servedIndices,
     stripOf,
     behindSource,
+    marksOf,
     daySpan,
     monthSpan,
-    moveFromBps,
+    moveRange,
+    moveCell,
+    awaited,
+    spotMark,
+    windowLine,
+    copyName,
+    copyCell,
     barHeader,
     timeframeOrder,
     timeframeSeconds,
@@ -68,7 +75,7 @@
   import { barWhyText } from '$lib/db/notes-bars.js';
   import { parseKey, strikeExact } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
-  import { monthLabel, dayLabel, secondLabel, MON } from '$lib/dates.js';
+  import { monthLabel, dayLabel, secondLabel, istDay, MON } from '$lib/dates.js';
 
   /* ==================================================================
      THE FEED, AND THE CENSUS UNDER IT
@@ -105,6 +112,8 @@
   const filed = $derived(tabsAndRest(keys));
   const tabs = $derived(filed.tabs);
   const unparsed = $derived(filed.unparsed);
+  /** Keys that parse and that no tab and not the strip takes: counted, named. */
+  const unplaced = $derived(filed.unplaced);
   const indexKeys = $derived(filed.indices);
 
   /* STOCKS OPENS, because it is the tab the engine surface is ABOUT: section 1
@@ -413,8 +422,9 @@
     if (on === 'name') return labelOf(key);
     const q = quotes.get(key);
     if (!q) return null;
-    if (on === 'chgAbs') return absMove(q);
-    if (on === 'oichgAbs') return moveFromBps(q.oi, q.oichg);
+    // The middle of the range the stored pair allows; exact when the range is one figure.
+    if (on === 'chgAbs') return moveRange(q.close, q.chg)?.mid ?? null;
+    if (on === 'oichgAbs') return moveRange(q.oi, q.oichg)?.mid ?? null;
     if (on === 'spot') return spots.get(key)?.close ?? null;
     if (on === 'premium') {
       const spot = spots.get(key)?.close ?? null;
@@ -548,10 +558,17 @@
          Unknown is not false. It is the same rule the dashes keep in the grid
          and the same one `sortValue` keeps for ordering, where null sorts last
          rather than as zero. A row with no value yet is CARRIED, renders its
-         pending dot, and is filtered on the next pass once its quote lands. */
+         pending dot, and is filtered on the next pass once its quote lands.
+
+         NOT YET IS NOT THE SAME AS NEVER. That rule was written for a quote
+         still on its way, and it also carried a quote that had LANDED with
+         nothing in the field: OI Gainers listed 23 contracts with no OI change
+         beside the 7 that gained, as "17 of 30". A landed absence is not a
+         gainer. `awaited` tells the two apart, and `unranked` below counts
+         what the chip left out so the footer can say it. */
       base = base.filter((k) => {
         const v = sortValue(k, rule.by);
-        if (v === null) return true;
+        if (v === null) return awaited(quotes.get(k), rule.by, spots.has(k));
         return typeof v === 'number' && keep(v);
       });
     }
@@ -869,10 +886,31 @@
   );
   /** @param {string} key */
   const behindOf = (key) => behind.get(key) ?? null;
-  /** The sentence a behind mark carries. @param {NonNullable<ReturnType<typeof behindSource>>} b */
-  const behindWhy = (b) =>
-    `This ${timeframe} month ends on ${b.lastDay}, and the same series at ${b.source} reaches ${b.sourceDay}. ` +
-    `The ${timeframe} bars after ${b.lastDay} were never derived, so the figure beside this is that day's and not the month's last.`;
+
+  /* THE MARKS ONE FIGURE CARRIES, WHEREVER IT IS DRAWN. The lead ticker, the
+     strip and the grid row draw the same quote; `marksOf` decides the marks
+     once (behind its source, a bar older than the time asked, a window with
+     an unreadable record) and the `marks` snippet below is the only place
+     that draws them, so no surface can show the figure without them. */
+  /** @param {string} key */
+  const marksFor = (key) => marksOf(behindOf(key), quotes.get(key), { timeframe, day, time });
+
+  /* WHAT THE LIT FILTER LEFT OUT OR COULD NOT RANK, COUNTED. A chip drops a
+     row whose quote has landed with nothing in the ranked field; the Stocks
+     Gainers/Losers switch has no off position, so it carries those rows (they
+     sort last) rather than leave a tab empty with no control to bring it
+     back. Either way the footer prints the number: nothing leaves the grid,
+     or stays in it unranked, without the page saying so. */
+  const unranked = $derived.by(() => {
+    const rule = canSortByQuote ? chipRule() : null;
+    const by = rule?.keep ? rule.by : moverActive ? 'chg' : '';
+    if (!by) return { count: 0, by: '', dropped: false };
+    let count = 0;
+    for (const k of matching) {
+      if (sortValue(k, by) === null && !awaited(quotes.get(k), by, spots.has(k))) count += 1;
+    }
+    return { count, by, dropped: !!rule?.keep };
+  });
 
   /* ==================================================================
      THE COLUMN MODEL — per tab, exactly as the source terminal draws it.
@@ -1199,12 +1237,27 @@
       barSaid = 'Nothing to copy — the grid is empty.';
       return;
     }
-    const lines = [cols.map(headOf).join('\t')];
+    /* THE COPY SAYS WHICH WINDOW IT IS OF, AND KEEPS EVERY MARK THE SCREEN
+       SHOWS. It named neither the day, the time nor the spot rule, and it
+       dropped `behind`, `bar HH:MM:SS`, `partial` and a spot's age, so a
+       pasted stale or earlier figure read as a current one. */
+    const lines = [
+      windowLine({
+        feed: feedLabel,
+        tab: tab?.label ?? '',
+        timeframe,
+        month,
+        day,
+        time,
+        spot: hasExpiry ? spotAsof : ''
+      }),
+      cols.map(headOf).join('\t')
+    ];
     for (const key of take) {
       const q = quotes.get(key);
       lines.push(
         cols
-          .map((c) => (c.src === 'name' ? labelOf(key) : cellOf(q, c).text || '—'))
+          .map((c) => (c.src === 'name' ? copyName(labelOf(key), marksFor(key)) : copyCell(cellOf(q, c))))
           .join('\t')
       );
     }
@@ -1372,71 +1425,31 @@
     return `${v >= 0 ? '' : '-'}${Math.abs(v).toFixed(2)} %`;
   }
 
-  /** The absolute move implied by a close and its change in basis points.
-      DERIVED, AND SAID TO BE: the wire carries the ratio and the close, not the
-      difference, so this is arithmetic on two measured numbers rather than a
-      third measurement. It is exact for the pair it is computed from.
-      @param {Quote|undefined} quote @returns {number|null} */
-  function absMove(quote) {
-    /* `moveFromBps` answers `null` at exactly -10000 basis points, where the
-       divisor is zero and the previous close cannot be recovered from a ratio
-       at all: a contract that fell to nothing reaches the named-absence branch
-       instead of a number nobody computed. One derivation, shared with the
-       OI Change column. */
-    return quote ? moveFromBps(quote.close, quote.chg) : null;
-  }
-
-  /** THE DERIVED ABSOLUTE MOVE, AS A RENDERED CELL — one spelling, three
-      surfaces.
+  /** THE DERIVED ABSOLUTE MOVE, AS A RENDERED CELL: one spelling, three
+      surfaces (the grid's Change column, the strip and the lead ticker).
       ------------------------------------------------------------------------
-      This was inline in `cellOf` and so belonged to the GRID alone, which is
-      why the strip and the lead ticker showed a percentage with no rupee move
-      beside it while the source terminal shows both everywhere it shows either.
-      Lifting it out is what lets those two render the same figure with the same
-      disclosure rather than a second, quieter version of this arithmetic.
-
-      THE FIGURE IS DERIVED AND SAYS SO ON HOVER — AND THE SLACK IS FAR LARGER
-      THAN THIS COMMENT FIRST CLAIMED. `chg` is INTEGER basis points and `close`
-      is a PAISA integer, so the reconstruction is quantised to about
-      `close / 10000` — and that quotient is in PAISA, not rupees. This block
-      used to read "roughly five paise of slack" for a ₹52,265 contract. The
-      arithmetic is 5,226,500 / 10,000 = 522.65 paisa, which is ₹5.23: the
-      estimate was wrong by a factor of a hundred, and the sentence that followed
-      it — "the last digit is arithmetic" — understated the reach by two more
-      places. On that price the RUPEES are uncertain, not the paise.
-
-      So the note states the slack in the same units it renders, and says which
-      digits it reaches. The figure is still not rounded away: a reader comparing
-      it against the percentage beside it should see a number consistent with
-      that percentage, and rounding to the honest precision would break the
-      correspondence. It is LABELLED instead.
+      The wire carries the close and its change against the previous stored bar
+      in WHOLE basis points, not the previous close. `moveCell` works out every
+      whole-paisa move that pair allows. Where that is one figure it is exact
+      and drawn plain; where it is a range the cell reads `≈` and the hover
+      gives both ends, so a reconstructed move is never drawn as a measured
+      one. On a ₹52,265 close the range is about ₹5 wide: the rupees are
+      uncertain, not the paise.
       @param {Quote} quote
       @returns {{text: string, why: string|null, dir: number}} */
   function absCell(quote) {
-    const v = absMove(quote);
-    if (v === null) {
+    const cell = moveCell(quote.close, quote.chg, rupee, 'close');
+    if (cell === null) {
       return { text: '—', why: whyText(quote.chgWhy, 'No change was recorded for this bar.'), dir: 0 };
     }
-    const slackPaisa = Math.max(1, Math.round((quote.close ?? 0) / 10_000));
-    return {
-      text: rupee(Math.round(v)),
-      dir: Math.sign(v),
-      why:
-        'Derived, not measured. The wire carries the close and the change as ' +
-        'integer basis points, not the previous close, so this move is ' +
-        'reconstructed from the two. Whole basis points leave about ' +
-        rupee(slackPaisa) +
-        ' of slack on this price, so the figure is uncertain from its ' +
-        (slackPaisa >= 100 ? 'rupees' : 'paise') +
-        ' down — it is shown at full precision only to stay consistent with ' +
-        'the change percentage beside it, which is the figure the store holds.'
-    };
+    return cell;
   }
 
   /** One rendered cell: its text, its direction for colour, and the reason it
       is a dash when it is one.
       @param {Quote|undefined} quote @param {Col} col
-      @returns {{text: string, why: string|null, dir: number, pending?: boolean}} */
+      `mark` is a second, smaller figure drawn beside the text (a spot's age).
+      @returns {{text: string, why: string|null, dir: number, pending?: boolean, mark?: string|null, markWhy?: string|null}} */
   function cellOf(quote, col) {
     if (col.src === null) return { text: '—', why: col.why ?? null, dir: 0 };
     if (!quote) return { text: '', why: null, dir: 0, pending: true };
@@ -1460,19 +1473,21 @@
       if (col.src === 'oichg') {
         return { text: pctText(quote.oichg), dir: Math.sign(quote.oichg), why: null };
       }
-      const moved = moveFromBps(quote.oi, quote.oichg);
-      if (moved === null) {
+      /* A COUNT THAT IS NOT THE STORED DIFFERENCE IS NEVER DRAWN AS ONE.
+         This was `round(oi - oi / (1 + bps / 10000))` printed as an integer:
+         -77 on a row whose stored difference is -75, and 0 for any real
+         change under half a basis point. `moveCell` gives the plain count
+         only where the stored pair allows exactly one, and `≈` with both
+         ends of the range on hover everywhere else. */
+      const cell = moveCell(quote.oi, quote.oichg, group, 'open interest');
+      if (cell === null) {
         return {
           text: '—',
-          why: 'The open interest fell by exactly 100 %, or is absent, so the count before it cannot be recovered from a ratio.',
+          why: 'The open interest is absent or zero, or no whole count before it gives the stored change, so the count before it cannot be recovered from a ratio.',
           dir: 0
         };
       }
-      return {
-        text: group(Math.round(moved)),
-        dir: Math.sign(moved),
-        why: 'Derived, not measured: the wire carries the open interest and its change against the previous stored bar in whole basis points, and this is the difference those two imply.'
-      };
+      return cell;
     }
     if (col.src === 'spot' || col.src === 'premium') {
       const spot = spots.get(quote.key);
@@ -1482,21 +1497,27 @@
         const said = /** @type {Record<string, string>} */ (SPOT_WHY)[word] ?? word;
         return { text: '—', why: `No spot: ${said}${spot.detail ? ` (${spot.detail})` : ''}`, dir: 0 };
       }
-      /* THE SPOT'S AGE IS SAID WHENEVER IT IS NOT THE BAR'S OWN INSTANT
-         (D-3328): an opted-in earlier spot must never read as an exact one. */
+      /* THE SPOT'S AGE IS IN THE CELL, NOT ONLY ON HOVER (D-3328, operator
+         answer 4: the opted-in rule "always shows the spot's age"). The cell
+         text of a spot from an earlier second was identical to an exact one.
+         `spotMark` is drawn beside the figure, and copied with it, for every
+         answer of the opted-in rule and for any answer older than its bar. */
+      const mark = spotMark(spot);
       const aged =
         spot.age !== null && spot.age > 0 && spot.spotT !== null
-          ? ` The underlying’s close at ${secondLabel(spot.spotT * 1000)}, ${group(spot.age)} s before this bar: the last spot at or before it.`
+          ? ` The underlying’s close at ${istDay(spot.spotT * 1000)} ${secondLabel(spot.spotT * 1000)}, ${group(spot.age)} s before this bar: the last spot at or before it. Never a later one.`
           : ' The underlying’s close at this bar’s own instant.';
       if (col.src === 'spot') {
-        return { text: rupee(spot.close), dir: 0, why: `From /spot.json.${aged}` };
+        return { text: rupee(spot.close), dir: 0, why: `From /spot.json.${aged}`, mark, markWhy: mark ? aged.trim() : null };
       }
       if (quote.close === null) return { text: '—', why: 'This bar has no close to measure a premium from.', dir: 0 };
       const premium = quote.close - spot.close;
       return {
         text: rupee(premium),
         dir: Math.sign(premium),
-        why: `Derived: this bar’s close less the underlying’s close.${aged}`
+        why: `Derived: this bar’s close less the underlying’s close.${aged}`,
+        mark,
+        markWhy: mark ? aged.trim() : null
       };
     }
     if (col.src === 'volume' && quote.volume === null && quote.volumeWhy) {
@@ -1666,15 +1687,28 @@
      THE CHROME. This page draws its own, and `+layout.svelte` stands its
      console bar down for exactly this route — see `BARE` there.
      ==================================================================== -->
+<!-- THE MARKS BESIDE A FIGURE, DRAWN IN ONE PLACE FOR ALL THREE SURFACES.
+     The lead ticker, each strip cell and each grid row render this snippet
+     and nothing else draws a `stale` or `lag` mark on a name, so a level can
+     not appear on one surface without the mark it carries on another. With a
+     Time chosen the row said `bar 10:08:00` while the lead and the strip drew
+     the same 112-minute-old level bare. -->
+{#snippet marks(/** @type {string} */ key)}
+  {#each marksFor(key) as m (m.kind)}<span
+      class:stale={m.kind === 'behind'}
+      class:lag={m.kind !== 'behind'}
+      title={m.why}>{m.text}</span
+    >{/each}
+{/snippet}
+
 <div class="term">
   <header class="tbar">
     <span class="mark" aria-hidden="true"></span>
     {#if indices.length}
       {@const lead = quotes.get(indices[0])}
-      {@const leadStale = behindOf(indices[0])}
       <span class="tick">
         <span class="tick-n">{labelOf(indices[0])}</span>
-        {#if leadStale}<span class="stale" title={behindWhy(leadStale)}>{leadStale.text}</span>{/if}
+        {@render marks(indices[0])}
         {#if lead?.close != null}
           <span class="tick-v">{rupee(lead.close)}</span>
           <!-- AN ABSENT CHANGE GETS THE SAME DASH THE STRIP GIVES IT. Neither
@@ -1759,10 +1793,9 @@
     {:else}
       {#each indices as key (key)}
         {@const q = quotes.get(key)}
-        {@const stale = behindOf(key)}
         <span class="tcell">
           <span class="c-n">{labelOf(key)}</span>
-          {#if stale}<span class="stale" title={behindWhy(stale)}>{stale.text}</span>{/if}
+          {@render marks(key)}
           {#if q?.close != null}
             <span class="c-v">{rupee(q.close)}</span>
             {#if q.chg != null}
@@ -2102,7 +2135,7 @@
                     ? 'Choose a date first: a time with no date is a minute of nothing.'
                     : !timeCapable
                       ? `At ${timeframe} a day holds one bar, so there is no time to choose.`
-                      : 'IST. The last bar at or before this time on the chosen day; a later bar is never shown. Empty is the day’s last bar.'}
+                      : `IST. The last bar STAMPED at or before this time on the chosen day; a bar stamped later is never shown. A bar is named by its opening stamp${barSeconds !== null && barSeconds > 1 ? `, so at ${timeframe} its close can be up to one bar later than the time asked, and a row whose bar is stamped earlier says so beside its name` : ''}. Empty is the day’s last bar.`}
                 />
               </label>
               <!-- THE EXPIRY, on the two tabs that have one. Every option is an
@@ -2298,7 +2331,6 @@
             <tbody>
               {#each rows as key (key)}
                 {@const q = quotes.get(key)}
-                {@const stale = behindOf(key)}
                 <tr>
                   {#each columns as c (c.h)}
                     {#if c.src === 'name'}
@@ -2324,16 +2356,7 @@
                         />
                       </td>
                       <th scope="row" class="nm"
-                        >{labelOf(key)}{#if stale}<span class="stale" title={behindWhy(stale)}
-                            >{stale.text}</span
-                          >{/if}{#if q?.at != null && q.lag != null && q.lag > 0}<span
-                            class="lag"
-                            title={`The last bar at or before ${time} on ${day} is stamped ${secondLabel(q.at * 1000)}, ${group(q.lag)} s earlier. A later bar is never shown.`}
-                            >bar {secondLabel(q.at * 1000)}</span
-                          >{/if}{#if q?.faults}<span
-                            class="lag"
-                            title={`A record in this window would not read: ${q.faults}`}>partial</span
-                          >{/if}</th
+                        >{labelOf(key)}{@render marks(key)}</th
                       >
                     {:else}
                       {@const cell = cellOf(q, c)}
@@ -2344,7 +2367,10 @@
                         class:dim={cell.text === '—' || cell.pending}
                         title={cell.why ?? undefined}
                       >
-                        {cell.pending ? '·' : cell.text}
+                        {cell.pending ? '·' : cell.text}{#if cell.mark}<span
+                            class="lag"
+                            title={cell.markWhy ?? undefined}>{cell.mark}</span
+                          >{/if}
                       </td>
                     {/if}
                   {/each}
@@ -2441,6 +2467,30 @@
             The index strip is in name order: /aliases.json could not be read.
           </span>
         {/if}
+        {#if unranked.count > 0}
+          <!-- WHAT THE LIT FILTER COULD NOT RANK, COUNTED. A landed quote with
+               nothing in the ranked field is not a gainer or a loser; a chip
+               leaves it out and the Stocks switch lists it last. -->
+          <span class="warn">
+            {unranked.count.toLocaleString('en-IN')} matching
+            {unranked.count === 1 ? 'row has' : 'rows have'} no figure to rank by
+            {#if unranked.dropped}
+              and {unranked.count === 1 ? 'is' : 'are'} left out by {activeChip}; clear the chip to
+              see {unranked.count === 1 ? 'it' : 'them'} and the reason on each dash
+            {:else}
+              and {unranked.count === 1 ? 'is' : 'are'} listed after the {mover}; each dash carries
+              its reason
+            {/if}
+          </span>
+        {/if}
+        {#if unplaced.count > 0}
+          <span class="warn" title={unplaced.sample.join(', ')}>
+            {unplaced.count.toLocaleString('en-IN')} census
+            {unplaced.count === 1 ? 'key is' : 'keys are'} of a segment or kind no tab lists: {unplaced.sample.join(
+              ', '
+            )}{unplaced.count > unplaced.sample.length ? ', …' : ''}
+          </span>
+        {/if}
         {#if unparsed.count > 0}
           <span class="warn" title={unparsed.sample.join(', ')}>
             {unparsed.count.toLocaleString('en-IN')} census
@@ -2521,7 +2571,11 @@
     position: absolute;
     inset: 0;
     display: grid;
-    grid-template-rows: var(--h-bar) var(--h-strip) 1fr;
+    /* FOUR ROWS FOR FOUR CHILDREN: the bar, the strip, the strip's handle and
+       the body. There were three, so the handle took the `1fr` and the body
+       an implicit `auto` row: on a tab with nothing to list the handle
+       stretched to fill the window and pushed the tabs to the bottom. */
+    grid-template-rows: var(--h-bar) var(--h-strip) auto minmax(0, 1fr);
     background: var(--ground);
     color: var(--ink);
     font:

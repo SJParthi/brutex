@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  QUOTE_CACHE, SPOT_CHUNK, STRIP_MAX, UNPARSED_SAMPLE, barHeader, behindSource, daySpan, fromBar, gated,
-  monthSpan, moveFromBps, quoteFrom, quoteKey, quoteOn, quotesOn, servedIndices, spotsFor, stripOf, tabsAndRest,
-  tabsFrom, timeframeOrder, timeframeSeconds, traffic, useTransport, windowUrl
+  QUOTE_CACHE, SPOT_CHUNK, STRIP_MAX, UNPARSED_SAMPLE, awaited, barHeader, behindSource, behindWhy, bpsBetween,
+  copyCell, copyName, daySpan, forgetQuotes, fromBar, gated, marksOf, monthSpan, moveCell, moveFromBps, moveRange,
+  quoteFrom, quoteKey, quoteOn, quotesOn, servedIndices, spotMark, spotsFor, stripOf, tabsAndRest, tabsFrom,
+  timeframeOrder, timeframeSeconds, traffic, useTransport, windowLine, windowUrl
 } from '../src/lib/terminal.svelte.js';
 
 // WP-60: /terminal. DB-G12, DB-G13, DB-G15, DB-G16, DB-G17, DB-G32, DB-G86.
@@ -88,9 +89,290 @@ test('a derived rung whose month ends before its source is marked behind, with t
   assert.equal(behindSource([{ month: '2099-09', timeframe: '1min', last: null }, { month: '2099-09', timeframe: '60min', last: 5 }], '60min', '2099-09'), null);
   assert.equal(behindSource(undefined, '60min', '2099-09'), null);
   assert.equal(behindSource([], '60min', '2099-09'), null);
-  // The page draws it on the grid row, the strip and the lead ticker.
-  assert.equal((page.match(/= behindOf\(/g) ?? []).length, 3);
-  assert.equal((page.match(/class="stale" title=\{behindWhy\(/g) ?? []).length, 3);
+  // The page draws it on the grid row, the strip and the lead ticker: all three
+  // render the one `marks` snippet, which is the only place a `stale` mark is drawn.
+  assert.equal((page.match(/\{@render marks\(/g) ?? []).length, 3);
+  assert.equal((page.match(/class:stale=/g) ?? []).length, 1);
+  assert.doesNotMatch(page, /class="stale"/);
+});
+
+test('repair 1: the lead ticker, the strip and the row carry the same marks, from one snippet', () => {
+  // Three render sites, each for the key whose figure is beside it.
+  assert.match(page, /<span class="tick-n">\{labelOf\(indices\[0\]\)\}<\/span>\s+\{@render marks\(indices\[0\]\)\}/);
+  assert.match(page, /<span class="c-n">\{labelOf\(key\)\}<\/span>\s+\{@render marks\(key\)\}/);
+  assert.match(page, />\{labelOf\(key\)\}\{@render marks\(key\)\}<\/th/);
+  assert.equal((page.match(/\{@render marks\(/g) ?? []).length, 3);
+  // The snippet draws every mark `marksOf` decides, and nothing else decides one.
+  assert.match(page, /\{#snippet marks\([^)]*key\)\}\s+\{#each marksFor\(key\) as m \(m\.kind\)\}/);
+  assert.match(page, /const marksFor = \(key\) => marksOf\(behindOf\(key\), quotes\.get\(key\), \{ timeframe, day, time \}\);/);
+  assert.doesNotMatch(page, /q\.lag|q\?\.faults|lead\.lag|\.faults\b/, 'no site reads lag or faults for itself');
+  assert.equal((page.match(/class:lag=/g) ?? []).length, 1);
+
+  const asked = ist(2099, 2, 24, 12, 0);
+  const q = (/** @type {number} */ at, /** @type {any} */ more = {}) =>
+    ({ ...fromBar(NIFTY, bar(at)), asked, lag: asked - at, ...more });
+  // A bar stamped 112 minutes before the time asked says so, wherever it is drawn.
+  const old = marksOf(null, q(ist(2099, 2, 24, 10, 8)), { timeframe: '1min', day: '2099-02-24', time: '12:00' });
+  assert.deepEqual(old.map((m) => [m.kind, m.text]), [['lag', 'bar 10:08:00']]);
+  assert.match(old[0].why, /stamped at or before 12:00 on 2099-02-24 is stamped 10:08:00, 6,720 s earlier/);
+  assert.match(old[0].why, /A bar stamped later is never shown/);
+  // Its minute ended before the time asked, so nothing is said about a later close.
+  assert.match(old[0].why, /covers up to 10:09:00\.$/);
+  // An exact hit carries no mark; neither does a quote with no time asked, no quote, or an absence.
+  assert.deepEqual(marksOf(null, q(asked), { timeframe: '1min', day: '2099-02-24', time: '12:00' }), []);
+  assert.deepEqual(marksOf(null, fromBar(NIFTY, bar(asked)), { timeframe: '1min' }), []);
+  assert.deepEqual(marksOf(null, undefined, { timeframe: '1min' }), []);
+  assert.deepEqual(marksOf(null, { ...fromBar(NIFTY, {}), why: 'nothing' }, { timeframe: '1min', day: '2099-02-24', time: '12:00' }), []);
+  // One second on the finest rung: a bar is its own second, so no cover is claimed.
+  const second = marksOf(null, q(asked - 1), { timeframe: '1s', day: '2099-02-24', time: '12:00:00' });
+  assert.equal(second[0].text, 'bar 11:59:59');
+  assert.match(second[0].why, /1 s earlier\. A bar stamped later is never shown\.$/);
+  // A coarse bar stamped before the time asked can CLOSE after it, and the mark says so.
+  const hour = marksOf(null, { ...q(ist(2099, 2, 24, 14, 15)), asked: ist(2099, 2, 24, 14, 30), lag: 900 },
+    { timeframe: '60min', day: '2099-02-24', time: '14:30' });
+  assert.match(hour[0].why, /named by its opening stamp: at 60min this one covers up to 15:15:00, which is after the time asked, so its close can be later than 14:30\./);
+  // A window with an unreadable record is `partial`, with the server's word.
+  const partial = marksOf(null, q(asked, { faults: 'crc mismatch at record 7' }), { timeframe: '1min', day: '2099-02-24', time: '12:00' });
+  assert.deepEqual(partial, [{ kind: 'partial', text: 'partial', why: 'A record in this window would not read: crc mismatch at record 7' }]);
+  // All three at once, in a fixed order.
+  const cells = [
+    { month: '2099-02', timeframe: '1min', last: micros(2099, 2, 27, 15, 29) },
+    { month: '2099-02', timeframe: '60min', last: micros(2099, 2, 24, 10, 15) }
+  ];
+  const behind = behindSource(cells, '60min', '2099-02');
+  const all = marksOf(behind, { ...q(ist(2099, 2, 24, 10, 15)), faults: 'torn tail' }, { timeframe: '60min', day: '2099-02-24', time: '12:00' });
+  assert.deepEqual(all.map((m) => m.kind), ['behind', 'lag', 'partial']);
+  // The page also tells the reader, on the Time control, how a bar is named.
+  assert.match(page, /The last bar STAMPED at or before this time on the chosen day; a bar stamped later is never shown\. A bar is named by its opening stamp/);
+});
+
+test('repair 1: the behind mark names the time when both rungs stop on one day, and follows the day chosen', () => {
+  // 60min stops at 14:15 and 1min at 15:29 of the SAME day: the day alone says nothing.
+  const same = behindSource([
+    { month: '2099-11', timeframe: '1min', last: micros(2099, 11, 29, 15, 29) },
+    { month: '2099-11', timeframe: '60min', last: micros(2099, 11, 29, 13, 15) }
+  ], '60min', '2099-11');
+  assert.ok(same);
+  assert.equal(same.text, 'behind 1min (last 2099-11-29 13:15:00)');
+  const sentence = behindWhy(same, '60min');
+  assert.match(sentence, /last bar is stamped 2099-11-29 13:15:00, and the same series at 1min reaches 2099-11-29 15:29:00/);
+  assert.match(sentence, /bars after 2099-11-29 13:15:00 were never derived, so the figure beside this is the bar stamped 2099-11-29 13:15:00 and not the month’s last\.$/);
+  assert.doesNotMatch(sentence, /ends on 2099-11-29, and the same series at 1min reaches 2099-11-29\b\./);
+  // Different days keep the short text, and the sentence still names both times.
+  const apart = behindSource([
+    { month: '2099-09', timeframe: '1min', last: micros(2099, 9, 30, 15, 29) },
+    { month: '2099-09', timeframe: '60min', last: micros(2099, 9, 4, 15, 15) }
+  ], '60min', '2099-09');
+  assert.ok(apart);
+  assert.equal(apart.text, 'behind 1min (last 2099-09-04)');
+  // With a day chosen the sentence is about THAT day's figure, never "the month's last".
+  assert.match(behindWhy(apart, '60min', '2099-09-10'), /so this rung holds no bar for 2099-09-10\.$/);
+  assert.match(behindWhy(apart, '60min', '2099-09-04'), /so on 2099-09-04 this rung stops at 15:15:00: the figure beside this is no later than that bar\.$/);
+  assert.match(behindWhy(same, '60min', '2099-11-29'), /this rung stops at 13:15:00 while 1min reaches 15:29:00/);
+  for (const day of ['2099-09-04', '2099-09-10']) assert.doesNotMatch(behindWhy(apart, '60min', day), /month’s last\.$/);
+  // A day BEFORE the rung's last is that day's own figure: no mark at all.
+  const at = { timeframe: '60min' };
+  assert.deepEqual(marksOf(apart, undefined, { ...at, day: '2099-09-03' }), []);
+  assert.deepEqual(marksOf(apart, undefined, { ...at, day: '2099-09-04' }).map((m) => m.kind), ['behind']);
+  assert.deepEqual(marksOf(apart, undefined, { ...at, day: '2099-09-05' }).map((m) => m.kind), ['behind']);
+  assert.deepEqual(marksOf(apart, undefined, at).map((m) => m.text), ['behind 1min (last 2099-09-04)']);
+  assert.doesNotMatch(page, /const behindWhy/);
+});
+
+test('repair 1: basis points are the server’s own rounding, half away from zero', () => {
+  assert.equal(bpsBetween(50, 55), 1_000);
+  assert.equal(bpsBetween(20_000, 20_001), 1, '+0.5 bp rounds away from zero');
+  assert.equal(bpsBetween(20_000, 19_999), -1, '-0.5 bp rounds away from zero');
+  assert.equal(bpsBetween(20_001, 20_002), 0);
+  assert.equal(bpsBetween(3, 4), 3_333);
+  assert.equal(bpsBetween(3, 2), -3_333);
+  assert.equal(bpsBetween(7, 7), 0);
+  assert.equal(bpsBetween(9, 0), -10_000);
+  for (const [base, value] of [[0, 5], [-1, 5], [1.5, 5], [5, 1.5], [5, Number.MAX_SAFE_INTEGER], [NaN, 1]]) {
+    assert.equal(bpsBetween(base, value), null, `${base} -> ${value}`);
+  }
+});
+
+test('repair 1: a derived change is the whole range the stored pair allows, exact only when that is one figure', () => {
+  /** Every base from 1 to past twice `near` that gives exactly `bps` against `value`, by the server's arithmetic. */
+  const allowed = (/** @type {number} */ value, /** @type {number} */ bps, /** @type {number} */ near) => {
+    const out = [];
+    for (let base = 1; base <= near * 2 + 400; base += 1) if (bpsBetween(base, value) === bps) out.push(value - base);
+    return out.sort((a, b) => a - b);
+  };
+  // Invented open interests and the stored difference a store would hold for each.
+  for (const [before, now] of [[91_450, 91_300], [450, 1_500], [1_600, 1_600], [64_000, 64_025], [200_000, 199_990],
+    [1, 1_000_000], [40_000, 3], [77_777, 77_778], [3, 4], [123_456, 123_456], [999_975, 1_000_050]]) {
+    const bps = /** @type {number} */ (bpsBetween(before, now));
+    const r = moveRange(now, bps);
+    assert.ok(r, `${before} -> ${now}`);
+    const every = allowed(now, bps, before);
+    assert.equal(r.least, every[0], `${before} -> ${now}: least`);
+    assert.equal(r.most, every[every.length - 1], `${before} -> ${now}: most`);
+    assert.equal(every.length, r.most - r.least + 1, 'the allowed changes are one unbroken run');
+    assert.ok(r.least <= now - before && now - before <= r.most, 'the stored difference is inside the range');
+    assert.equal(r.exact, every.length === 1);
+    assert.ok(r.least <= r.mid && r.mid <= r.most);
+  }
+  // THE DEFECT: -150 contracts at -16 bp was printed as a plain "-146".
+  assert.equal(bpsBetween(91_450, 91_300), -16);
+  assert.equal(Math.round(/** @type {number} */ (moveFromBps(91_300, -16))), -146, 'what the cell used to print');
+  const wide = moveCell(91_300, -16, String, 'open interest');
+  assert.ok(wide);
+  assert.equal(wide.approx, true);
+  assert.equal(wide.text, '≈ -146');
+  assert.equal(wide.dir, -1);
+  const range = /** @type {{least: number, most: number}} */ (moveRange(91_300, -16));
+  assert.ok(range.least <= -150 && -150 <= range.most && range.most - range.least >= 8);
+  assert.match(wide.why, new RegExp(`^Approximate\\. The stored change is one figure from ${range.least} to ${range.most}, and the wire cannot say which`));
+  // A real change under half a basis point was printed as a plain "0".
+  assert.equal(bpsBetween(64_000, 64_003), 0);
+  const zero = moveCell(64_003, 0, String, 'open interest');
+  assert.deepEqual([zero?.text, zero?.dir, zero?.approx], ['≈ 0', 0, true]);
+  assert.match(String(zero?.why), /from -3 to 3,/);
+  // Where only one whole count fits, it is exact and drawn plain.
+  const one = moveCell(1_500, /** @type {number} */ (bpsBetween(450, 1_500)), String, 'open interest');
+  assert.deepEqual([one?.text, one?.dir, one?.approx], ['1050', 1, false]);
+  assert.match(String(one?.why), /^Derived, and exact: .* 1050 is the only whole change/);
+  assert.deepEqual([moveCell(1_600, 0, String, 'open interest')?.text, moveCell(1_600, 0, String, 'open interest')?.approx], ['0', false]);
+  // A fall that rounds to -100 % has no upper bound on what stood before it: refused, not guessed.
+  assert.equal(bpsBetween(1_000_000, 1), -10_000);
+  assert.equal(moveRange(1, -10_000), null);
+  // Nothing to derive from, the divisor at zero, or a pair no whole base gives: a named absence, never a guess.
+  for (const [value, bps] of [[null, 5], [5, null], [0, 0], [0, -10_000], [700, -10_000], [700, -10_001], [-5, 3],
+    [1.5, 3], [5, 1.5], [100, 1], [Number.MAX_SAFE_INTEGER, 1]]) {
+    assert.equal(moveRange(/** @type {any} */ (value), /** @type {any} */ (bps)), null, `${value} at ${bps}`);
+    assert.equal(moveCell(/** @type {any} */ (value), /** @type {any} */ (bps), String, 'close'), null);
+  }
+  // The page draws OI Change and Change through it, and no longer rounds a ratio into an integer.
+  assert.match(page, /const cell = moveCell\(quote\.oi, quote\.oichg, group, 'open interest'\);/);
+  assert.match(page, /const cell = moveCell\(quote\.close, quote\.chg, rupee, 'close'\);/);
+  assert.doesNotMatch(page, /Math\.round\(moved\)|moveFromBps/);
+  assert.match(page, /if \(on === 'oichgAbs'\) return moveRange\(q\.oi, q\.oichg\)\?\.mid \?\? null;/);
+});
+
+test('repair 1: a spot from an earlier second shows its age in the cell and in the copy (D-3328)', () => {
+  assert.equal(spotMark({ close: 990_000, age: 1, asof: 'prev' }), 'age 1 s');
+  assert.equal(spotMark({ close: 990_000, age: 4_500, asof: 'prev' }), 'age 4,500 s');
+  // The opted-in rule ALWAYS shows the age, an exact hit included.
+  assert.equal(spotMark({ close: 990_000, age: 0, asof: 'prev' }), 'age 0 s');
+  // The default rule answers at the bar's own instant and has no age to show.
+  assert.equal(spotMark({ close: 990_000, age: 0, asof: 'exact' }), null);
+  // An age above zero is shown whatever rule the answer names; an absence has none.
+  assert.equal(spotMark({ close: 990_000, age: 3, asof: 'exact' }), 'age 3 s');
+  assert.equal(spotMark({ close: null, age: null, asof: 'prev' }), null);
+  assert.equal(spotMark({ close: 990_000, age: null, asof: 'prev' }), null);
+  // Both the Spot Price and the Premium cell carry it, the grid draws it, and the copy keeps it.
+  assert.match(page, /const mark = spotMark\(spot\);/);
+  assert.equal((page.match(/markWhy: mark \? aged\.trim\(\) : null/g) ?? []).length, 2);
+  assert.match(page, /\{cell\.pending \? '·' : cell\.text\}\{#if cell\.mark\}<span\s+class="lag"\s+title=\{cell\.markWhy \?\? undefined\}>\{cell\.mark\}<\/span/);
+  assert.equal(copyCell({ text: '12,345.65', mark: 'age 1 s' }), '12,345.65 [age 1 s]');
+  assert.equal(copyCell({ text: '12,345.65' }), '12,345.65');
+  assert.equal(copyCell({ text: '', pending: true }), '—', 'a pending cell is copied as a dash, never as empty');
+});
+
+test('repair 1: a Snapshot names its window and keeps every mark the screen shows', () => {
+  assert.equal(windowLine({ feed: 'Feed A', tab: 'Stocks', timeframe: '1min', month: '2099-02' }),
+    '# Feed A · Stocks · 1min · 2099-02 · the month’s last bar of each series');
+  assert.equal(windowLine({ feed: 'Feed A', tab: 'Stocks', timeframe: '1min', month: '2099-02', day: '2099-02-24' }),
+    '# Feed A · Stocks · 1min · 2099-02 · the last bar of 2099-02-24');
+  assert.equal(windowLine({ feed: 'Feed B', tab: 'Options', timeframe: '1s', month: '2099-11', day: '2099-11-05', time: '10:15:07', spot: 'prev' }),
+    '# Feed B · Options · 1s · 2099-11 · the last bar stamped at or before 10:15:07 IST on 2099-11-05 · spot: the last at or before the bar, its age beside it');
+  assert.match(windowLine({ feed: 'Feed B', tab: 'Futures', timeframe: '1s', month: '2099-11', spot: 'exact' }), / · spot at the bar’s own instant$/);
+  assert.equal(copyName('ALPHA 28 NOV 1200 CALL', []), 'ALPHA 28 NOV 1200 CALL');
+  assert.equal(copyName('ALPHA', [{ text: 'behind 1min (last 2099-09-04)' }, { text: 'bar 10:08:00' }, { text: 'partial' }]),
+    'ALPHA [behind 1min (last 2099-09-04)] [bar 10:08:00] [partial]');
+  assert.match(page, /const lines = \[\s+windowLine\(\{\s+feed: feedLabel,\s+tab: tab\?\.label \?\? '',\s+timeframe,\s+month,\s+day,\s+time,\s+spot: hasExpiry \? spotAsof : ''\s+\}\),/);
+  assert.match(page, /c\.src === 'name' \? copyName\(labelOf\(key\), marksFor\(key\)\) : copyCell\(cellOf\(q, c\)\)/);
+});
+
+test('repair 1: a chip drops a landed absence and carries only a value still on its way', () => {
+  const landed = fromBar(OPT, bar(ist(2099, 11, 5, 10, 0), { oichg: null, oichg_why: 'no_earlier_stored_bar' }));
+  // No quote yet: carried, so a refetch does not empty the grid.
+  assert.equal(awaited(undefined, 'oichg', false), true);
+  assert.equal(awaited(null, 'premium', false), true);
+  // Landed with nothing in the field: not a gainer, not a loser.
+  assert.equal(awaited(landed, 'oichg', false), false);
+  assert.equal(awaited(landed, 'chg', true), false);
+  assert.equal(awaited({ ...landed, at: null, why: 'no bar' }, 'oichg', false), false);
+  // A premium waits for its spot only while the bar exists and the spot has not landed.
+  assert.equal(awaited(landed, 'premium', false), true);
+  assert.equal(awaited(landed, 'spot', false), true);
+  assert.equal(awaited(landed, 'premium', true), false);
+  assert.equal(awaited({ ...landed, at: null, why: 'no bar' }, 'premium', false), false);
+  assert.match(page, /if \(v === null\) return awaited\(quotes\.get\(k\), rule\.by, spots\.has\(k\)\);/);
+  // What the lit filter could not rank is counted on the page.
+  assert.match(page, /if \(sortValue\(k, by\) === null && !awaited\(quotes\.get\(k\), by, spots\.has\(k\)\)\) count \+= 1;/);
+  assert.match(page, /\{#if unranked\.count > 0\}/);
+});
+
+test('repair 1: a spot answer already read is not asked for again, and a failed one is', async () => {
+  forgetQuotes();
+  /** @type {string[]} */ const asked = [];
+  let fail = false;
+  useTransport(/** @type {any} */ (async (/** @type {string} */ url) => {
+    const q = new URL(url, 'http://x').searchParams;
+    asked.push(String(q.get('t')));
+    if (fail) return reply({ error: 'spot store unavailable: test' }, 503);
+    return reply({ asof: q.get('asof') ?? 'exact', segment: 'INDEX', key: 'NIFTY', faults: null,
+      spots: String(q.get('t')).split(',').map(Number).map((t) => ({ t, close: 2_000_000 + t, spot_t: t, spot_age_s: 0, why: null })) });
+  }));
+  const base = ist(2099, 11, 28, 9, 15);
+  const signal = new AbortController().signal;
+  const first = [fromBar(OPT, bar(base)), fromBar(FUT, bar(base + 5))];
+  const one = await spotsFor('gdfl', first, '1s', signal);
+  assert.deepEqual(asked, [`${base},${base + 5}`]);
+  // The next batch lands: the page calls again with EVERY quote it holds. Only the new instant is asked.
+  const more = [...first, fromBar('NSE-FNO-NIFTY-2099-11-28-1300000-PE', bar(base + 9))];
+  const two = await spotsFor('gdfl', more, '1s', signal);
+  assert.deepEqual(asked, [`${base},${base + 5}`, `${base + 9}`]);
+  assert.equal(two.size, 3);
+  assert.deepEqual(two.get(OPT), one.get(OPT));
+  // Nothing new is no request at all.
+  await spotsFor('gdfl', more, '1s', signal);
+  assert.equal(asked.length, 2);
+  // The rule, the timeframe, the feed and the bar's instant are each part of the question.
+  await spotsFor('gdfl', first, '1s', signal, 'prev');
+  await spotsFor('gdfl', first, '1min', signal);
+  await spotsFor('zerodha', first, '1s', signal);
+  await spotsFor('gdfl', [fromBar(OPT, bar(base + 1))], '1s', signal);
+  assert.equal(asked.length, 6);
+  // A failed request is not remembered: the next call asks again.
+  fail = true;
+  const key = 'NSE-FNO-NIFTY-2099-11-28-1400000-CE';
+  assert.equal((await spotsFor('gdfl', [fromBar(key, bar(base))], '1s', signal)).get(key)?.why, 'spot_request_failed');
+  fail = false;
+  assert.equal((await spotsFor('gdfl', [fromBar(key, bar(base))], '1s', signal)).get(key)?.close, 2_000_000 + base);
+  assert.equal(asked.length, 8);
+  // A new census generation forgets them with the quotes.
+  forgetQuotes();
+  await spotsFor('gdfl', first, '1s', signal);
+  assert.equal(asked.length, 9);
+  forgetQuotes();
+});
+
+test('repair 1: a key that parses and that no tab lists is counted and named', () => {
+  const keys = ['NSE-CASH-ALPHA', NIFTY, OPT, FUT, 'NSE-FNO-ODD', 'NSE-CDS-ODD', 'NSE-CDS-ODD-2099-11-28-FUT', 'garbage'];
+  const { tabs, indices, unparsed, unplaced } = tabsAndRest(keys);
+  // A spot-kind key of a segment that is neither CASH nor INDEX is in no tab and not on the strip.
+  assert.deepEqual(unplaced, { count: 2, sample: ['NSE-FNO-ODD', 'NSE-CDS-ODD'] });
+  const filed = new Set(tabs.flatMap((t) => t.keys));
+  assert.equal(filed.size + indices.length + unparsed.count + unplaced.count, keys.length, 'every key is somewhere');
+  assert.ok(filed.has('NSE-CDS-ODD-2099-11-28-FUT'), 'a future of any segment is on the Futures tab');
+  assert.deepEqual(tabsAndRest([]).unplaced, { count: 0, sample: [] });
+  const many = Array.from({ length: UNPARSED_SAMPLE + 3 }, (_, i) => `NSE-CDS-ODD${i}`);
+  assert.equal(tabsAndRest(many).unplaced.count, UNPARSED_SAMPLE + 3);
+  assert.equal(tabsAndRest(many).unplaced.sample.length, UNPARSED_SAMPLE);
+  assert.match(page, /\{#if unplaced\.count > 0\}/);
+});
+
+test('repair 1: the terminal has a grid row for each of its four children', () => {
+  assert.match(page, /grid-template-rows: var\(--h-bar\) var\(--h-strip\) auto minmax\(0, 1fr\);/);
+  assert.doesNotMatch(page, /grid-template-rows: var\(--h-bar\) var\(--h-strip\) 1fr;/);
+  // header.tbar, .tstrip, .striptab, .body: direct children of .term.
+  for (const child of ['<header class="tbar">', '<div class="tstrip" class:shut={!stripOpen}>', '<div class="striptab">', '<div class="body">']) {
+    assert.match(page, new RegExp(`\\n  ${child.replace(/[{}!.]/g, '\\$&')}`), child);
+  }
 });
 
 test('the strip starts NIFTY, BANKNIFTY, then the F&O index underlyings, in the order served (DB-G13)', () => {

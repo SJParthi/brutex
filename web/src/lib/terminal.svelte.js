@@ -28,7 +28,9 @@
  * | LTP, Open, High, Low, Volume, OI | `/bars/window.json`, ONE bar | ONE seek PER SERIES |
  * | Change, Change % | that bar's own `chg`: against the previous STORED bar at this timeframe, never a day change (DB-G17) | same request |
  * | OI Change % | that bar's own `oichg`, with `oichg_why` (DB-G15) | same request |
- * | Spot Price, Premium | `/spot.json`, at the bar's own instant (D-2807, D-3328) | ONE request per underlying and month, at most 400 instants each |
+ * | Change, OI Change (in rupees, in contracts) | DERIVED from the value and its whole basis points: every whole change that pair allows (`moveRange`); plain when that is one figure, `≈` with the range on hover when it is not | none |
+ * | the marks beside a figure (`behind`, `bar HH:MM:SS`, `partial`, a spot's age) | `marksOf` and `spotMark`: one list for the lead ticker, the strip, the grid row and the Snapshot copy | none |
+ * | Spot Price, Premium | `/spot.json`, at the bar's own instant (D-2807, D-3328) | ONE request per underlying and month, at most 400 instants each; an answer already read is not asked for again |
  * | index strip order | `/aliases.json` `index`, in the order served (DB-G13) | ONE request per page |
  * | a rung behind its source | the census cells' own `last_ts` (DB-G12) | free |
  *
@@ -64,6 +66,7 @@ import { parseKey } from './instrument.js';
    RELATIVE IMPORTS, so `web/tests/terminal.test.js` loads this module as it
    is, with no bundler alias. */
 import { istDay, secondLabel } from './dates.js';
+import { group } from './money.js';
 import { istInstant } from './db/bars-plan.js';
 import { readSpots, spotKey, SPOT_CHUNK } from './moneyness.js';
 
@@ -128,7 +131,8 @@ export const TABS = [
  * @param {string[]} keys every instrument key the census holds for this feed
  * @returns {{tabs: {id: string, label: string, keys: string[], why: string|null}[],
  *            indices: string[],
- *            unparsed: {count: number, sample: string[]}}}
+ *            unparsed: {count: number, sample: string[]},
+ *            unplaced: {count: number, sample: string[]}}}
  *          `indices` is every INDEX-segment key, in the order given: the
  *          strip's candidates, which are in no tab.
  */
@@ -138,12 +142,22 @@ export function tabsAndRest(keys) {
   /** @type {Map<string, string[]>} */
   const byKind = new Map();
   const unparsed = { count: 0, sample: /** @type {string[]} */ ([]) };
+  /* A KEY THAT PARSES AND THAT NO TAB TAKES is not on the strip either unless
+     it is an index: it was in no count at all. Counted and named like the
+     unparsed ones; the tabs' own `match` words decide it, not a list here. */
+  const unplaced = { count: 0, sample: /** @type {string[]} */ ([]) };
+  const taken = (/** @type {{segment: string|null, kind: string|null}} */ p) =>
+    p.segment === 'INDEX' || TABS.some((tab) => (tab.sourced === 'segment' ? p.segment : p.kind) === tab.match);
   for (const key of keys) {
     const p = parseKey(key);
     if (!p.underlying || !p.segment || !p.kind) {
       unparsed.count += 1;
       if (unparsed.sample.length < UNPARSED_SAMPLE) unparsed.sample.push(String(key));
       continue;
+    }
+    if (!taken(p)) {
+      unplaced.count += 1;
+      if (unplaced.sample.length < UNPARSED_SAMPLE) unplaced.sample.push(String(key));
     }
     if (!bySegment.has(p.segment)) bySegment.set(p.segment, []);
     (bySegment.get(p.segment) ?? []).push(key);
@@ -165,7 +179,7 @@ export function tabsAndRest(keys) {
           `market with nothing to show.`
     };
   });
-  return { tabs, indices: bySegment.get('INDEX') ?? [], unparsed };
+  return { tabs, indices: bySegment.get('INDEX') ?? [], unparsed, unplaced };
 }
 
 /** How many unreadable census keys are named; the count is always whole. */
@@ -249,7 +263,8 @@ export function timeframeOrder(t) {
  * @param {{month: string, timeframe: string, last: number|null}[]|undefined} cells
  *        the instrument's census cells; `last` in MICROSECONDS
  * @param {string} timeframe @param {string} month
- * @returns {{source: string, last: number, sourceLast: number, lastDay: string, sourceDay: string, text: string}|null}
+ * @returns {{source: string, last: number, sourceLast: number, lastDay: string, sourceDay: string, lastTime: string, sourceTime: string, text: string}|null}
+ *          `lastTime` and `sourceTime` are the two stamps' IST clock times, `HH:MM:SS`
  */
 export function behindSource(cells, timeframe, month) {
   const own = timeframeSeconds(timeframe);
@@ -275,14 +290,104 @@ export function behindSource(cells, timeframe, month) {
   if (sourceLast < last + own * 1_000_000) return null;
   const lastDay = istDay(last / 1000);
   const sourceDay = istDay(sourceLast / 1000);
+  const lastTime = secondLabel(last / 1000);
+  const sourceTime = secondLabel(sourceLast / 1000);
   return {
     source: finest.timeframe,
     last,
     sourceLast,
     lastDay,
     sourceDay,
-    text: `behind ${finest.timeframe} (last ${lastDay})`
+    lastTime,
+    sourceTime,
+    // The day says nothing when both rungs stop on it: then the mark names the time.
+    text: `behind ${finest.timeframe} (last ${lastDay}${lastDay === sourceDay ? ` ${lastTime}` : ''})`
   };
+}
+
+/**
+ * The sentence a behind mark carries, for the day in view.
+ *
+ * It names both stamps to the second, because 210 of the 536 behind cells of
+ * the Zerodha census stop on the SAME day as their source and "ends on the
+ * 29th, the source reaches the 29th" explains nothing. And it says what the
+ * figure beside it is for the day chosen: with no day it is the stale bar;
+ * on the day the rung stops it is no later than that bar; after it the rung
+ * holds nothing.
+ *
+ * @param {NonNullable<ReturnType<typeof behindSource>>} b
+ * @param {string} timeframe @param {string} [day] `YYYY-MM-DD`, or `''`
+ */
+export function behindWhy(b, timeframe, day = '') {
+  const stops = `${b.lastDay} ${b.lastTime}`;
+  const head =
+    `This ${timeframe} month’s last bar is stamped ${stops}, and the same series at ` +
+    `${b.source} reaches ${b.sourceDay} ${b.sourceTime}. The ${timeframe} bars after ` +
+    `${stops} were never derived`;
+  if (!day) return `${head}, so the figure beside this is the bar stamped ${stops} and not the month’s last.`;
+  if (day > b.lastDay) return `${head}, so this rung holds no bar for ${day}.`;
+  return (
+    `${head}, so on ${day} this rung stops at ${b.lastTime}` +
+    (b.sourceDay === b.lastDay ? ` while ${b.source} reaches ${b.sourceTime}` : '') +
+    `: the figure beside this is no later than that bar.`
+  );
+}
+
+/**
+ * EVERY MARK A FIGURE CARRIES, FOR EVERY PLACE THAT DRAWS THE FIGURE.
+ *
+ * The grid row, the index strip and the lead ticker draw the same quote, and
+ * the row alone said when its bar was older than the time asked. A level on
+ * the strip from 112 minutes before the time chosen read as the level at that
+ * time. So the marks are decided here, once, and the page renders this list
+ * at all three sites and copies it into a Snapshot:
+ *
+ *   behind   the rung's month stops before the rung it is folded from
+ *            (DB-G12). Not drawn for a day before the rung's last: that day's
+ *            figure is its own.
+ *   lag      a time was asked and the bar is stamped earlier than it. On a
+ *            rung coarser than a second the sentence also says how far the
+ *            bar reaches, because a bar is named by its OPENING stamp and its
+ *            close can be later than the time asked.
+ *   partial  a record in the window would not read.
+ *
+ * @param {ReturnType<typeof behindSource>} behind
+ * @param {Quote|undefined|null} quote
+ * @param {{timeframe: string, day?: string, time?: string}} asked
+ * @returns {{kind: 'behind'|'lag'|'partial', text: string, why: string}[]}
+ */
+export function marksOf(behind, quote, asked) {
+  const { timeframe, day = '', time = '' } = asked;
+  /** @type {{kind: 'behind'|'lag'|'partial', text: string, why: string}[]} */
+  const out = [];
+  if (behind && (!day || day >= behind.lastDay)) {
+    out.push({ kind: 'behind', text: behind.text, why: behindWhy(behind, timeframe, day) });
+  }
+  if (quote && quote.at !== null && quote.lag !== null && quote.lag > 0) {
+    const stamp = secondLabel(quote.at * 1000);
+    const own = timeframeSeconds(timeframe);
+    let cover = '';
+    if (own !== null && own > 1) {
+      const until = quote.at + own;
+      cover =
+        ` A bar is named by its opening stamp: at ${timeframe} this one covers up to ` +
+        `${secondLabel(until * 1000)}` +
+        (quote.asked !== null && until > quote.asked
+          ? `, which is after the time asked, so its close can be later than ${time}.`
+          : '.');
+    }
+    out.push({
+      kind: 'lag',
+      text: `bar ${stamp}`,
+      why:
+        `The last bar stamped at or before ${time} on ${day} is stamped ${stamp}, ` +
+        `${group(quote.lag)} s earlier. A bar stamped later is never shown.${cover}`
+    });
+  }
+  if (quote?.faults) {
+    out.push({ kind: 'partial', text: 'partial', why: `A record in this window would not read: ${quote.faults}` });
+  }
+  return out;
 }
 
 /** How many indices the strip draws. */
@@ -348,6 +453,165 @@ export function moveFromBps(value, bps) {
   if (!Number.isFinite(before)) return null;
   return value - before;
 }
+
+/**
+ * The server's own change in basis points, in whole numbers: the same
+ * arithmetic as `crates/api/src/month_change.rs::basis_points`, which rounds
+ * half AWAY from zero. `null` where that function refuses (a base that is not
+ * positive) or where a product would leave the safe integers.
+ *
+ * @param {number} base the earlier value @param {number} value the later one
+ * @returns {number|null}
+ */
+export function bpsBetween(base, value) {
+  if (!Number.isSafeInteger(base) || !Number.isSafeInteger(value) || base <= 0) return null;
+  const scaled = (value - base) * 10_000;
+  if (!Number.isSafeInteger(scaled)) return null;
+  // `%` is exact on safe integers and keeps the sign of `scaled`, as Rust's does.
+  const rest = scaled % base;
+  const whole = (scaled - rest) / base;
+  const magnitude = Math.abs(rest);
+  return magnitude >= base - magnitude ? whole + Math.sign(rest) : whole;
+}
+
+/** How far a float estimate of a bound is searched before the pair is called inconsistent. */
+const SETTLE = 4;
+
+/**
+ * EVERY WHOLE CHANGE THE STORED PAIR ALLOWS (the OI Change and Change cells).
+ *
+ * The wire carries a value and its change against the previous stored bar in
+ * WHOLE basis points, not the earlier value. Rebuilding the difference from
+ * the ratio and printing it as an integer was wrong on real rows: an open
+ * interest of 45,075 at -17 bp printed -77 where the store's own difference
+ * is -75, and any real change under half a basis point printed 0.
+ *
+ * The earlier value is a whole number (contracts, or paisa), and the server's
+ * rounding is known, so the earlier values that give exactly these basis
+ * points are a run of consecutive integers. This returns the change at both
+ * ends of that run. When the run is ONE value the change is exact, and only
+ * then may it be drawn as a plain figure.
+ *
+ * O(1): two float estimates, each settled by at most `2 * SETTLE + 1` exact
+ * evaluations.
+ *
+ * @param {number|null|undefined} value @param {number|null|undefined} bps
+ * @returns {{least: number, most: number, mid: number, exact: boolean}|null}
+ *          `null` when there is nothing to derive from, at -10000 bp or
+ *          below, or when no whole earlier value gives these basis points
+ */
+export function moveRange(value, bps) {
+  if (!Number.isSafeInteger(value) || !Number.isSafeInteger(bps)) return null;
+  const v = /** @type {number} */ (value);
+  const b = /** @type {number} */ (bps);
+  if (v <= 0 || b <= -10_000 || v > Number.MAX_SAFE_INTEGER / 20_000) return null;
+  const hits = (/** @type {number} */ base) => base >= 1 && bpsBetween(base, v) === b;
+  // bpsBetween falls as the base rises, so the bases that hit are one run.
+  let low = Math.ceil((20_000 * v) / (2 * b + 20_001)) - SETTLE;
+  const lowEnd = low + 2 * SETTLE;
+  while (low <= lowEnd && !hits(low)) low += 1;
+  let high = Math.floor((20_000 * v) / (2 * b + 19_999)) + SETTLE;
+  const highEnd = high - 2 * SETTLE;
+  while (high >= highEnd && !hits(high)) high -= 1;
+  if (low > lowEnd || high < highEnd || high < low) return null;
+  // The estimate was more than SETTLE off: the run's true end is not known.
+  if (hits(low - 1) || hits(high + 1)) return null;
+  const least = v - high;
+  const most = v - low;
+  const point = Math.round(/** @type {number} */ (moveFromBps(v, b)));
+  return { least, most, mid: Math.min(most, Math.max(least, point)), exact: low === high };
+}
+
+/**
+ * One derived change as a cell: a plain figure when it is exact, and `≈` with
+ * the whole range on hover when it is not. Never an approximate figure in an
+ * exact one's clothes.
+ *
+ * @param {number|null|undefined} value @param {number|null|undefined} bps
+ * @param {(n: number) => string} format the unit's own formatter
+ * @param {string} of what the value is, for the sentence: `open interest`, `close`
+ * @returns {{text: string, dir: number, approx: boolean, why: string}|null}
+ */
+export function moveCell(value, bps, format, of) {
+  const r = moveRange(value, bps);
+  if (!r) return null;
+  const dir = r.least > 0 ? 1 : r.most < 0 ? -1 : 0;
+  if (r.exact) {
+    return {
+      text: format(r.mid),
+      dir,
+      approx: false,
+      why:
+        `Derived, and exact: the wire carries the ${of} and its change against the previous ` +
+        `stored bar in whole basis points, and ${format(r.mid)} is the only whole change ` +
+        `that gives those basis points.`
+    };
+  }
+  return {
+    text: `≈ ${format(r.mid)}`,
+    dir,
+    approx: true,
+    why:
+      `Approximate. The stored change is one figure from ${format(r.least)} to ${format(r.most)}, ` +
+      `and the wire cannot say which: it carries the ${of} and its change against the previous ` +
+      `stored bar in whole basis points, not the earlier figure, and every change in that range ` +
+      `rounds to the same basis points. The percentage beside it is the store’s own figure.`
+  };
+}
+
+/**
+ * Whether a row's ranking value is still ON ITS WAY, as opposed to landed and
+ * absent.
+ *
+ * A chip that filters carries a row whose value is not known YET, so a
+ * refetch does not empty the grid. It carried a LANDED absence the same way:
+ * OI Gainers listed 23 contracts with no OI change beside 7 that gained.
+ * A quote that has landed with nothing in the field is not a gainer.
+ *
+ * @param {Quote|undefined|null} quote the row's quote, if it has landed
+ * @param {string} on the field ranked on
+ * @param {boolean} hasSpot whether the row's spot answer has landed
+ * @returns {boolean}
+ */
+export function awaited(quote, on, hasSpot) {
+  if (!quote) return true;
+  if (on === 'spot' || on === 'premium') return quote.at !== null && !hasSpot;
+  return false;
+}
+
+/**
+ * A SNAPSHOT'S FIRST LINE: which window the copied figures are of.
+ * A copy named neither the day, the time nor the spot rule, so a figure from
+ * an earlier bar or an earlier spot read as a current one once pasted.
+ *
+ * @param {{feed: string, tab: string, timeframe: string, month: string, day?: string, time?: string, spot?: ''|'exact'|'prev'}} w
+ */
+export function windowLine(w) {
+  const parts = [w.feed, w.tab, w.timeframe, w.month];
+  if (!w.day) parts.push('the month’s last bar of each series');
+  else if (!w.time) parts.push(`the last bar of ${w.day}`);
+  else parts.push(`the last bar stamped at or before ${w.time} IST on ${w.day}`);
+  if (w.spot === 'exact') parts.push('spot at the bar’s own instant');
+  if (w.spot === 'prev') parts.push('spot: the last at or before the bar, its age beside it');
+  return `# ${parts.join(' · ')}`;
+}
+
+/** A name with its marks, as copied text. @param {string} label @param {{text: string}[]} marks */
+export const copyName = (label, marks) => [label, ...marks.map((m) => `[${m.text}]`)].join(' ');
+
+/** A cell with its mark, as copied text. A dash stays a dash. @param {{text: string, mark?: string|null, pending?: boolean}} cell */
+export const copyCell = (cell) => (cell.text || '—') + (cell.mark ? ` [${cell.mark}]` : '');
+
+/**
+ * The age mark of a spot, or `null` when the cell carries none.
+ * The opted-in rule ALWAYS shows the spot's age (D-3328), 0 s included; an
+ * exact answer has none to show.
+ * @param {{close: number|null, age: number|null, asof: string}} spot
+ */
+export const spotMark = (spot) =>
+  spot.close !== null && spot.age !== null && (spot.asof === 'prev' || spot.age > 0)
+    ? `age ${group(spot.age)} s`
+    : null;
 
 /**
  * A bar column's header: the name, and whose change or volume it is (DB-G17).
@@ -733,26 +997,50 @@ export function quotesOn(feed, rows, day, time = '', signal) {
  * @returns {Promise<Map<string, import('./moneyness.js').SpotAnswer>>} by census key
  */
 export async function spotsFor(feed, quotes, timeframe, signal, asof = 'exact') {
-  /** @type {{instrument: string, tf: string, ts: number, side: string}[]} */
+  /** @type {{instrument: string, tf: string, ts: number, side: string, id: string}[]} */
   const rows = [];
+  /** @type {Map<string, import('./moneyness.js').SpotAnswer>} */
+  const out = new Map();
   for (const q of quotes) {
     if (!q || q.at === null) continue;
     const p = parseKey(q.key);
     if (p.kind !== 'future' && p.kind !== 'option') continue;
+    /* AN ANSWER ALREADY READ IS NOT ASKED FOR AGAIN. The page calls this each
+       time a batch of quotes lands, with every quote it holds, so the rows of
+       the batch before were re-read for nothing. The answer for one contract
+       bar under one rule does not change while the census generation stands
+       (`forgetQuotes` drops these with the quotes). */
+    const id = `${feed}|${asof}|${timeframe}|${q.key}|${q.at}`;
+    const known = spotsHeld.get(id);
+    if (known) {
+      out.set(q.key, known);
+      continue;
+    }
     // `readSpots` asks for every row that names a side; a future has none of
     // its own and is asked the same question, so it is given the word FUT.
-    rows.push({ instrument: q.key, tf: timeframe, ts: q.at * 1000, side: p.side ?? 'FUT' });
+    rows.push({ instrument: q.key, tf: timeframe, ts: q.at * 1000, side: p.side ?? 'FUT', id });
   }
-  /** @type {Map<string, import('./moneyness.js').SpotAnswer>} */
-  const out = new Map();
   if (rows.length === 0) return out;
   const read = await readSpots(feed, rows, signal, /** @type {typeof ask} */ (gated), asof);
   for (const row of rows) {
     const spot = read.get(spotKey(row));
-    if (spot) out.set(row.instrument, spot);
+    if (!spot) continue;
+    out.set(row.instrument, spot);
+    // A FAILED REQUEST IS NOT REMEMBERED: the next batch asks again.
+    if (spot.why === 'spot_request_failed') continue;
+    if (spotsHeld.size >= QUOTE_CACHE) {
+      const oldest = spotsHeld.keys().next().value;
+      if (oldest !== undefined) spotsHeld.delete(oldest);
+    }
+    spotsHeld.set(row.id, spot);
   }
   return out;
 }
+
+/** Spot answers already read, by (feed, rule, timeframe, contract, instant);
+    at most {@link QUOTE_CACHE}, oldest out first.
+    @type {Map<string, import('./moneyness.js').SpotAnswer>} */
+const spotsHeld = new Map();
 
 /** The strip's order, cached on the promise. @type {Promise<{served: {key: string, fno: boolean}[], why: string|null}>|null} */
 let aliases = null;
@@ -844,4 +1132,5 @@ export function daySpan(cells) {
  */
 export function forgetQuotes() {
   inflight.clear();
+  spotsHeld.clear();
 }
