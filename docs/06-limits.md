@@ -16251,6 +16251,169 @@ round-7 review added (it cites D-4896, which lands with IA-10a).
   p99 2.21 ms, max 5.96 ms (the journal's 2 `run` lines: L-IA-39's term is
   not visible at that size).
 
+## Ingest automation: the alert queue — D-4883, D-4895, 11 October 2026
+
+Rows L-IA-30 and L-IA-34 of the ingest automation design (its §10.2), landed
+by IA-11a with the code they bound (`pull::alerts`, `cli alerts`).
+
+- **L-IA-30. The alert window.** The writer compares a new alert's key with
+  the newest 1,024 records only, and the readers list the unacknowledged
+  alerts among those same 1,024: one positional read of at most 128 KiB per
+  put, per acknowledgement inside the window and per read, whatever the file's
+  length. **A repeat, never a loss:** a key whose open alert is more than
+  1,024 records old is put again; an unacknowledged alert older than the
+  window leaves the list but never leaves view, because every reader returns
+  `older_unacknowledged` (the newest good record's "open after" less the
+  alerts listed, O(1)) and `alerts::page(root, before)` reads any older page
+  in one read. What is NOT bounded:
+  - *The file only grows.* 128 bytes per alert and per acknowledgement, never
+    compacted and never rotated. At the design's bound of 22 alerts a run,
+    each acknowledged, a thousand runs are 5.6 MB. Nothing reads the whole
+    file on a route, so its length costs disk and nothing else.
+  - *A reader waits for at most one put.* The put holds the lock exclusive for
+    its read, its append and its `sync_data`; a reader behind it waits that
+    long (measured below: 1.09 ms at p50, 2.46 ms at p99).
+  - *The reserve is proved through a failing write, not a full volume.*
+    `audit/alerts.reserve` (65,536 bytes) is deleted when an append meets
+    `StorageFull` and the append is tried once more (IA-AL-13). That deleting
+    it on APFS frees the block the append needs is NOT MEASURED: no test here
+    fills a volume. If the second try fails too the put returns the error and
+    emits "alert not saved"; an alert for a store drive that is gone is not
+    saved anywhere by this crate (the api's in-memory list is IA-10a's).
+  - *A damaged record inside the window inflates the older count by one* for
+    as long as it stays in the window; the readers say so beside `damaged`.
+  - *An acknowledgement damaged in place can lower the count twice, for ever.*
+    The writer finds "already acknowledged" by reading the acknowledgements
+    after the alert. One that fails its CRC cannot be read, so its alert is
+    listed as open again, and acknowledging it again appends a second
+    acknowledgement and lowers "open after" a second time. From then on
+    `older_unacknowledged` is one too low for every such pair (6 shown where
+    7 are open), which is the opposite error to the one above, and nothing in
+    the file can correct it: the damaged record's content is gone. NOT
+    DETECTED by the writer; the reader names the damaged record
+    (`damaged{ordinal}` in its own page, `later_damaged` on a settled older
+    page), which is the only sign.
+  - *A key has no length bound.* Its BLAKE3 is taken before the lock, so the
+    cost of a long key is its caller's alone; the audited events carry at
+    most 160 bytes of it and its length (IA-AL-20).
+  - *A killed replacement can leave `alerts.<pid>.tmp`* (at most 192 bytes)
+    and, when it was killed between its rename and the lines after it, no
+    "alert queue replaced" event: the new queue's first record is the durable
+    statement. Nothing reads or removes a temporary file another process id
+    left.
+  - *A walk answers as of its first read.* `older` and `page_settled` read
+    through the one file their first read opened and up to the records it
+    counted: a put, an acknowledgement or a replacement that lands while the
+    walk runs is not in that answer and is in the next one (IA-AL-22). A
+    listing printed during a replacement can therefore be the replaced
+    queue's; its header gives that queue's record count, and nothing in the
+    listing says a newer queue exists by the time it is read.
+  - *More than 64 replacements in one second are refused.* The kept name is
+    `alerts.damaged-<unix_s>`, then `.2` to `.64`; a 65th in the same second
+    is refused `alerts_io` ("keep the damaged queue", already exists) and the
+    damaged queue stays. Not reachable by an operator's hand.
+  - *A refusal is not always an event.* A put the host refuses, and a
+    replacement refused while writing or renaming its new queue, emit "alert
+    not saved"; a replacement refused at its first step (the kept name or a
+    directory sync) and an acknowledgement whose append the host refuses
+    return their error to the caller with no event. NOT DONE in IA-11a: the
+    cli prints the refusal and exits non-zero, and no audited line records
+    it.
+  - *A reader needs `alerts.lock`.* The writer makes it before the queue, so a
+    queue without it means someone removed it; a reader then makes it again,
+    and in a directory it cannot write it refuses `alerts_io` rather than
+    read unlocked.
+  - *The lock is taken blocking, with no time limit.* A holder is bounded by
+    its own one read, one write and one `sync_data`; a holder that hangs (a
+    drive that stalls inside `sync_data`) makes every later put, and every
+    reader, wait with it. Nothing here times a wait out or names it; the lock
+    waits' rule is IA-2's (the round-7 review's gap IA-2-2).
+- **L-IA-30, measured.** Bench C-AL-01 and C-AL-02 (`cargo bench -p pull
+  --bench ratio`), 11 Oct 2026, with `TMPDIR` on the WD_BLACK volume (the
+  store's own drive), the machine shared with other builds. Queues of 1,024
+  (a full window), 10,240 and 102,400 records.
+  - The put, minimum over 60 trials of 8: 0.917 ms at 1x; 1.021x at 10x and
+    0.918x at 100x. Single puts: full window p50 1.26 ms, p99 3.80 ms, max
+    4.08 ms (n = 400); 100x p50 1.67 ms, p99 5.17 ms, max 5.66 ms (n = 400).
+  - The put over a torn tail, 100x (the timing includes writing the 57 torn
+    bytes): p50 3.00 ms, p99 7.80 ms, max 11.70 ms (n = 200).
+  - The acknowledgement inside the window, 100x: p50 1.07 ms, p99 4.03 ms,
+    max 17.27 ms (n = 200).
+  - The readers' one read, minimum over 60 trials of 40: 0.104 ms at 1x;
+    1.009x at 10x and 0.929x at 100x. Single reads, 100x: p50 97 µs, p99
+    163 µs, max 390 µs (n = 2,000). An older page (`before = 50000`), 100x:
+    p50 104 µs, p99 183 µs, max 462 µs (n = 2,000).
+  - The same read with a put in flight (one thread putting without pause),
+    100x: p50 1.09 ms, p99 2.46 ms, max 7.52 ms (n = 2,000).
+- **L-IA-34. Alerts older than the window.** Listing them, or acknowledging
+  one, needs the records after it, because an acknowledgement is a later
+  record and the file is append-only: no index says "already acknowledged"
+  without reading on. `alerts::older` (`cli alerts --older`) is O(records in
+  the queue); `alerts::page_settled` (`cli alerts --before <n>`) is one read
+  of that page plus O(records after it), so that it never lists an alert a
+  later record acknowledges and its counts agree with `--older` (IA-AL-18).
+  Both walks hold the lock shared for one read of at most 1,024 records at a
+  time and release it between reads, so a put or a replacement waits for one
+  read, never for the walk; both read through one open file, so the answer
+  is one queue's (IA-AL-22); and both return, beside the alerts, every
+  record they could not read: `--older` prints `DAMAGED` for a record older
+  than the window that fails its CRC and exits non-zero, as `--before` does
+  (IA-AL-21). `alerts::ack` with `Scope::Whole` (`cli alerts --ack <k>`) for k
+  outside the newest 1,024 is one read of k's own record at its known offset
+  plus O(records after k), and it reads them under the lock held EXCLUSIVE
+  (the acknowledgement must not race a second one): about 12 ms per 100,000
+  records during which every put and every reader waits; `alerts::of_file` (`cli alerts --file`) is
+  O(records in that file). `alerts::replace_damaged` (`cli alerts
+  --replace-damaged`) is O(1) (one window read, two small writes, one link,
+  one rename, two directory syncs), except after a replacement that was
+  stopped before its rename: then it reads the names in `audit/` once to find
+  the kept name the earlier one gave. All of these are the operator's command
+  only, never on a page or a route: a route acknowledges with `Scope::Window`
+  and is refused `ack_outside_window` for an older alert, and a route that
+  offers `before` must carry `Page::acked_older` from the newer pages it has
+  served or say that its older page is as of that page's last record
+  (IA-10a's). `alerts::page(root, before)` alone stays one read.
+- **L-IA-34, measured.** `cargo test -p pull --lib
+  alerts::tests::the_operators_older_steps_timed -- --ignored --nocapture`
+  (an ignored test that prints; not a bench row), 12 Oct 2026, `TMPDIR` on the
+  WD_BLACK volume, the machine shared with other builds.
+  The build is the workspace's `dev` profile, which is optimised. Queue of
+  102,400 open alerts.
+  - The settled page (`page_settled`), by the records after the page: 1,024
+    after it, p50 210 µs, p99 282 µs, max 2.08 ms; 51,201 after it, p50
+    5.91 ms, p99 13.68 ms, max 14.05 ms; 101,376 after it (the oldest page),
+    p50 11.58 ms, p99 12.50 ms, max 16.59 ms (n = 200 each). About 0.11 ms
+    per 1,024 records read: linear in the records after the page, as stated,
+    and bounded by the file.
+  - The one read at the same depth (`page`, `before = 51200`): p50 105 µs,
+    p99 120 µs, max 142 µs (n = 200).
+  - The replacement (`replace_damaged`): a 7-record damaged queue, p50
+    7.99 ms, p99 and max 78.61 ms (n = 100, so p99 is the one slowest run);
+    a 102,400-record one, p50 10.16 ms, p99 and max 12.87 ms (n = 30). The
+    same at both lengths: two file syncs and two directory syncs on that
+    drive, and one read of the newest 1,024 records.
+  `ack` with `Scope::Whole` and `of_file` have no timing of their own: their
+  cost is the window read times the number of windows, as the settled page's
+  is.
+- **L-IA-34, measured again with the walks on one open file** (the same
+  ignored test, 12 Oct 2026, after the second check; same drive, the machine
+  running two other test suites). Queue of 102,400 open alerts, n = 200 each.
+  - The settled page: 1,024 records after it, p50 213 µs, p99 557 µs, max
+    567 µs; 51,201 after it, p50 5.39 ms, p99 11.11 ms, max 11.65 ms; 101,376
+    after it, p50 10.62 ms, p99 25.07 ms, max 40.63 ms. The one read at the
+    same depth: p50 122 µs, p99 165 µs, max 181 µs.
+  - The whole walk (`older`), 100 reads: p50 11.17 ms, p99 19.48 ms, max
+    19.74 ms.
+  - A put while another thread walks the queue without pause: p50 1.41 ms,
+    p99 2.73 ms, max 3.48 ms (n = 200 puts). The put waits for one read, as
+    it does for a single reader (L-IA-30: 1.09 ms / 2.46 ms / 7.52 ms). The
+    walk is what slows: each of its 100 reads waits its turn behind a put, so
+    3 walks finished while the 200 puts ran, where 25 would have alone. A
+    walk under a writer that never pauses is bounded by the file, not by a
+    time: NOT O(1), the operator's command only.
+  - The replacement: 7 records, p50 7.09 ms, p99 and max 29.80 ms (n = 100);
+    102,400 records, p50 11.41 ms, p99 and max 24.46 ms (n = 30).
+
 ## Options lineage: what is per underlying-day, per ledger line or not detected — D-3354 to D-3358, 12 October 2026
 
 None of this is on a read path: it is the options import's, once per day.

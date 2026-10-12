@@ -953,6 +953,58 @@ static SITES: &[Site] = &[
         says: ("status", Says::Signs(503)),
         drive: drive_http,
     },
+    // THE ALERT QUEUE'S SEVEN EVENTS (D-4893, IA-11a), each driven through the
+    // shipped `crate::alerts` function and found in the file. `alerts::EVENTS`
+    // and IA-AL-15 prove each is AUDITED; these rows prove each is EMITTED.
+    Site {
+        at: "crates/pull/src/alerts.rs — note_created",
+        target: "pull.alerts.lifecycle",
+        message: "alert queue created",
+        says: ("path", Says::Holds("audit/alerts")),
+        drive: drive_alert_put,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_put",
+        target: "pull.alerts.lifecycle",
+        message: "alert put",
+        says: ("kind", Says::Holds("hole")),
+        drive: drive_alert_put,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_acked",
+        target: "pull.alerts.lifecycle",
+        message: "alert acknowledged",
+        says: ("by", Says::Holds("cli")),
+        drive: drive_alert_acked,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_written_over",
+        target: "pull.alerts.lifecycle",
+        message: "alert record written over",
+        says: ("offset", Says::Signs(64)),
+        drive: drive_alert_written_over,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_replaced",
+        target: "pull.alerts.lifecycle",
+        message: "alert queue replaced",
+        says: ("open", Says::Holds("unknown")),
+        drive: drive_alert_replaced,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_reserve_spent",
+        target: "pull.alerts.lifecycle",
+        message: "alert reserve spent",
+        says: ("bytes", Says::Signs(65_536)),
+        drive: drive_alert_reserve_spent,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_not_saved",
+        target: "pull.alerts.lifecycle",
+        message: "alert not saved",
+        says: ("code", Says::Holds("alert_kind_unknown")),
+        drive: drive_alert_not_saved,
+    },
 ];
 
 // ===========================================================================
@@ -1878,4 +1930,78 @@ fn drive_bars_not_counted(scratch: &Scratch) {
         "and the run says which instrument holds bars nothing counts: {:?}",
         done.failures
     );
+}
+
+/// An invented alert of `kind` under `key`.
+fn invented_alert(kind: u8, key: &str) -> crate::alerts::NewAlert<'_> {
+    crate::alerts::NewAlert {
+        kind,
+        key,
+        day: 0,
+        run: 7,
+        text: "an invented alert",
+    }
+}
+
+/// A store root of its own under the scratch directory.
+fn alert_store(scratch: &Scratch) -> PathBuf {
+    let store = scratch.root.join("alert-store");
+    std::fs::create_dir_all(&store).expect("a scratch store root");
+    store
+}
+
+/// Flips one byte of each of the queue's first `records` records.
+fn spoil_alerts(store: &Path, records: u64) {
+    let queue = crate::alerts::Names::under(store).queue;
+    let mut bytes = std::fs::read(&queue).expect("the queue");
+    for ordinal in 1..=records {
+        let at = usize::try_from(crate::alerts::offset_of(ordinal)).expect("an offset") + 50;
+        let byte = bytes.get_mut(at).expect("a byte of the record");
+        *byte ^= 0xFF;
+    }
+    std::fs::write(&queue, bytes).expect("the spoiled queue");
+}
+
+/// The first put on a fresh store: the queue is created and the alert put.
+fn drive_alert_put(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+}
+
+fn drive_alert_acked(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::ack(&store, 1, "cli", crate::alerts::Scope::Whole).expect("an ack");
+}
+
+/// A last record that fails its CRC is written over, at offset 64.
+fn drive_alert_written_over(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    spoil_alerts(&store, 1);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:y")).expect("the put over it");
+}
+
+/// Two bad records at the tail: the operator's replacement.
+fn drive_alert_replaced(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:y")).expect("a put");
+    spoil_alerts(&store, 2);
+    crate::alerts::replace_damaged(&store).expect("a replacement");
+}
+
+/// One write meets a full disk: the reserve is spent and the put lands.
+fn drive_alert_reserve_spent(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::FULL_WRITES.with(|left| left.set(1));
+    crate::alerts::put(&store, &invented_alert(5, "disk_full:7")).expect("the put after it");
+}
+
+/// A put the queue refuses says so in the log: kind 0 is in no table.
+fn drive_alert_not_saved(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    let refused = crate::alerts::put(&store, &invented_alert(0, "nothing:7"));
+    assert_eq!(refused.expect_err("a refusal").code(), "alert_kind_unknown");
 }
