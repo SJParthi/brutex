@@ -29,8 +29,8 @@ use store::provenance::Day;
 use store::verdict::{
     self, Carry, Check, Code, Committed, DETAIL_CAP, DETAIL_NAME, DayBlock, DayState, Detail,
     Entry, Facts, Feed, Found, Generation, INDEX_LEN, JournalOutcome, KEY_LEN, Key, MAX_LINK_TRIES,
-    Mode, MonthNow, NONE, NoRecord, Now, RECORD_STRIDE, Reader, Series, SourceHeld, Stale, Unit,
-    Unknown, V3Manifest, VerdictError, flags,
+    Mode, MonthNow, NONE, NoRecord, Now, ORPHAN_SCAN, RECORD_STRIDE, Reader, Series, SourceHeld,
+    Stale, Unit, Unknown, V3Manifest, VerdictError, flags,
 };
 
 const FORMAT_DOC: &str = include_str!("../../../docs/02-store-format.md");
@@ -2518,4 +2518,257 @@ fn a_days_keys_fit_whatever_the_keys_are() {
         (184, 16),
         "the ceiling is a band: measured fits of 200 random key sets at 137,900 and at 206,850"
     );
+}
+
+/// The year, the day's key and the name of the lost index's refusal.
+fn index_missing(refused: &VerdictError) -> (bool, u32) {
+    assert_eq!(refused.word(), "index_missing", "{refused}");
+    match refused {
+        VerdictError::IndexMissing { path, image, seen } => {
+            assert!(path.ends_with("2031.vdi"), "{}", path.display());
+            if let Some(image) = image {
+                assert!(
+                    image.extension().is_some_and(|ext| ext == "vdt")
+                        && image.parent().is_some_and(|dir| dir.ends_with("2031"))
+                        && image.exists(),
+                    "the refusal names an image that is there: {}",
+                    image.display()
+                );
+            }
+            (image.is_some(), *seen)
+        }
+        other => panic!("expected index_missing, got {other}"),
+    }
+}
+
+/// A lost year index is never born again empty (CLAUDE.md section 4: a
+/// fallback never hides a failure). With `2031.vdi` gone and `2031/` still
+/// holding committed images, every reader call refuses `index_missing`
+/// naming an image, where it used to answer "no generation"; and a commit
+/// refuses before it builds, bears or links anything, where it used to
+/// start the year again at generation 1 and carry nothing. The images are
+/// not touched, so putting the index back restores every answer. A year
+/// directory that holds no image is still a year in the making: its first
+/// commit bears the index.
+#[test]
+fn a_lost_year_index_is_refused_and_never_born_again_empty() {
+    let root = Root::new();
+    let series = root.series();
+    let next_day = Day::new(2031, 3, 5).unwrap();
+    let third_day = Day::new(2031, 3, 6).unwrap();
+    let bad = Key::instrument("NSE-FNO-ZZLOST-A").unwrap();
+    verdict::commit(
+        &series,
+        &generation(401, vec![entry("NSE-FNO-ZZLOST-A", Code::ValueMismatch)]),
+    )
+    .unwrap();
+    let mut second = generation(402, vec![entry("NSE-FNO-ZZLOST-B", Code::Match)]);
+    second.day = next_day;
+    verdict::commit(&series, &second).unwrap();
+
+    let index = series.year_index(2031);
+    let aside = index.with_extension("vdi.lost");
+    fs::rename(&index, &aside).unwrap();
+    let year_dir = series.dir().join("2031");
+    let images = || {
+        let mut names: Vec<String> = fs::read_dir(&year_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = images();
+    assert_eq!(
+        before,
+        ["2031-03-04.g0000000001.vdt", "2031-03-05.g0000000001.vdt"]
+    );
+
+    // The reader: every call that reads the year refuses by name.
+    let mut reader = Reader::new();
+    let (named, seen) = index_missing(&reader.lookup(&series, day(), &bad).unwrap_err());
+    assert!(named && (1..=2).contains(&seen), "seen {seen}");
+    index_missing(&reader.lookup(&series, third_day, &bad).unwrap_err());
+    index_missing(&reader.year(&series, 2031).unwrap_err());
+    index_missing(
+        &reader
+            .page(&series, day(), Code::ValueMismatch, 0, 10)
+            .unwrap_err(),
+    );
+    // A year the series never wrote is still "no generation", at no open.
+    let other_year = reader
+        .lookup(&series, Day::new(2032, 3, 4).unwrap(), &bad)
+        .unwrap();
+    assert_eq!((other_year.answer, other_year.cost.opens), (None, 0));
+    assert_eq!(reader.year(&series, 2032).unwrap(), None);
+
+    // The writer: a whole day of a day never written, and a carrying
+    // generation of a committed day, are both refused with nothing born.
+    let mut third = generation(403, vec![entry("NSE-FNO-ZZLOST-C", Code::Match)]);
+    third.day = third_day;
+    index_missing(&verdict::commit(&series, &third).unwrap_err());
+    let mut carrying = generation(404, vec![entry("NSE-FNO-ZZLOST-D", Code::Match)]);
+    carrying.carry = Carry::Others;
+    index_missing(&verdict::commit(&series, &carrying).unwrap_err());
+    assert!(!index.exists(), "no empty index was born over the images");
+    assert_eq!(images(), before, "no image was linked and none was changed");
+
+    // The index back in place: the committed records answer as before, and
+    // a carrying generation carries them.
+    fs::rename(&aside, &index).unwrap();
+    let mut reader = Reader::new();
+    let held = reader.lookup(&series, day(), &bad).unwrap();
+    assert_eq!(held.answer.unwrap().code(), Some(Code::ValueMismatch));
+    let carried = verdict::commit(&series, &carrying).unwrap();
+    assert_eq!(
+        (carried.generation, carried.previous, carried.carried),
+        (2, 1, 1)
+    );
+
+    // A year directory with no image is a year in the making, whatever
+    // else it holds up to the scan's bound: the first commit bears the
+    // index. One name past the bound and no image can be ruled out, so the
+    // year is refused out loud and not listed to its end.
+    let fresh = Series {
+        segment: Segment::Cash,
+        ..root.series()
+    };
+    let fresh_dir = fresh.dir().join("2031");
+    fs::create_dir_all(&fresh_dir).unwrap();
+    for i in 0..ORPHAN_SCAN {
+        fs::write(fresh_dir.join(format!("zz-left-{i:04}.tmp")), b"").unwrap();
+    }
+    let mut fresh_reader = Reader::new();
+    assert_eq!(fresh_reader.year(&fresh, 2031).unwrap(), None);
+    let extra = fresh_dir.join("zz-left-over.tmp");
+    fs::write(&extra, b"").unwrap();
+    let crowded = verdict::commit(
+        &fresh,
+        &generation(405, vec![entry("NSE-CASH-ZZLOST-E", Code::Match)]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        index_missing(&crowded),
+        (false, u32::try_from(ORPHAN_SCAN).unwrap() + 1)
+    );
+    index_missing(&fresh_reader.year(&fresh, 2031).unwrap_err());
+    assert!(!fresh.year_index(2031).exists());
+    fs::remove_file(&extra).unwrap();
+    let born = verdict::commit(
+        &fresh,
+        &generation(406, vec![entry("NSE-CASH-ZZLOST-E", Code::Match)]),
+    )
+    .unwrap();
+    assert_eq!((born.generation, born.commit), (1, 1));
+}
+
+/// The details of a record are asked by its ordinal: one the generation
+/// does not hold is refused `ordinal_past_records` (at `u32::MAX` the owner
+/// used to overflow: a panic in a debug build and the day's owner 0 in a
+/// build without overflow checks; any other answered an empty list), and a
+/// record that is not
+/// the one at that ordinal is refused `image_corrupt`, never answered with
+/// nothing.
+#[test]
+fn the_details_of_an_ordinal_the_day_does_not_hold_are_refused_by_name() {
+    let root = Root::new();
+    let series = root.series();
+    let mut g = generation(411, day_of(4));
+    g.entries[1].details = vec![Detail {
+        kind: 6,
+        payload: b"ZZ/own/detail".to_vec(),
+    }];
+    g.day_details = vec![Detail {
+        kind: 7,
+        payload: b"ZZ/day/detail".to_vec(),
+    }];
+    let done = verdict::commit(&series, &g).unwrap();
+    let image = verdict::read_image(&done.path).unwrap();
+    let (at, with) = image
+        .records
+        .iter()
+        .enumerate()
+        .find(|(_, (r, _))| r.detail_at != 0)
+        .map(|(i, (r, _))| (u32::try_from(i).unwrap(), r.clone()))
+        .unwrap();
+    let mut reader = Reader::new();
+    assert_eq!(
+        reader
+            .details(&series, day(), 1, Some((at, &with)))
+            .unwrap(),
+        g.entries[1].details
+    );
+    for ordinal in [4, 5, u32::MAX - 1, u32::MAX] {
+        let refused = reader
+            .details(&series, day(), 1, Some((ordinal, &with)))
+            .unwrap_err();
+        assert_eq!(
+            refused.word(),
+            "ordinal_past_records",
+            "{ordinal}: {refused}"
+        );
+        match refused {
+            VerdictError::OrdinalPastRecords {
+                ordinal: asked,
+                records,
+                ..
+            } => assert_eq!((asked, records), (ordinal, 4)),
+            other => panic!("{other}"),
+        }
+    }
+    // The same record under another ordinal of the day: not its own entry.
+    let other = (at + 1) % 4;
+    let refused = reader
+        .details(&series, day(), 1, Some((other, &with)))
+        .unwrap_err();
+    assert_eq!(refused.word(), "image_corrupt", "{refused}");
+    // An offset past the section is refused too, never read.
+    let mut past = with.clone();
+    past.detail_at = u32::MAX - 1;
+    let refused = reader
+        .details(&series, day(), 1, Some((at, &past)))
+        .unwrap_err();
+    assert_eq!(refused.word(), "image_corrupt", "{refused}");
+    // The day's own details and a record with none answer as before.
+    assert_eq!(
+        reader.details(&series, day(), 1, None).unwrap(),
+        g.day_details
+    );
+    let (none_at, none) = image
+        .records
+        .iter()
+        .enumerate()
+        .find(|(_, (r, _))| r.detail_at == 0)
+        .map(|(i, (r, _))| (u32::try_from(i).unwrap(), r.clone()))
+        .unwrap();
+    assert_eq!(
+        reader
+            .details(&series, day(), 1, Some((none_at, &none)))
+            .unwrap(),
+        Vec::new()
+    );
+}
+
+/// A file longer than any day image can be is refused by its length alone,
+/// before a byte is read or allocated for: a sparse file of the ceiling
+/// plus one byte is named `image_corrupt` with both lengths, and one byte
+/// shorter is read and refused for what it holds.
+#[test]
+fn a_file_longer_than_any_day_image_is_refused_unread() {
+    let root = Root::new();
+    let path = root.0.join("zz-too-long.vdt");
+    let file = fs::File::create(&path).unwrap();
+    assert_eq!(verdict::MAX_IMAGE_LEN, 180_355_672, "section 35.9's number");
+    let ceiling = u64::try_from(verdict::MAX_IMAGE_LEN).unwrap();
+    file.set_len(ceiling + 1).unwrap();
+    let refused = verdict::check_trailer(&path).unwrap_err();
+    assert_eq!(refused.word(), "image_corrupt");
+    let said = refused.to_string();
+    assert!(
+        said.contains(&format!("{} bytes", ceiling + 1)) && said.contains("not read"),
+        "{said}"
+    );
+    file.set_len(1_024).unwrap();
+    let refused = verdict::read_image(&path).unwrap_err();
+    assert!(!refused.to_string().contains("not read"), "{refused}");
 }

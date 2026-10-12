@@ -27,6 +27,17 @@
 //! | anything else (a symbolic link, a directory, a pipe) | refused `staging_not_regular`; left as it is |
 //! | a file again after the one removal | refused `staging_contended`: another writer is using this name |
 //!
+//! # What a caller must bring: a name of its own
+//!
+//! The second row cannot tell a DEAD writer's leftover from a LIVE writer's
+//! file: any regular file with one name is cleared. So a staging name must
+//! belong to one writer at a time, by the caller's own means: a name that
+//! is unique to the writer (`store::verdict` puts its process id and run in
+//! it), or a lock held across the create and the publish (`store::verdict`
+//! holds the year's commit lock). Two live writers handed the same name
+//! with neither would each unlink the other's file; this helper does not
+//! and cannot prevent that (L-IA-44).
+//!
 //! No path here truncates, and the only removal is of a name whose file has
 //! no other. A file swapped in between the look and the removal loses a name
 //! at most, never a byte.
@@ -40,8 +51,17 @@
 //! publish them: that is the caller's `sync_all` and its `hard_link` or
 //! `rename`.
 //!
-//! Cost: one `open`; on a name that exists, at most one `lstat`, one
-//! `unlink` and one more `open`. O(1).
+//! # Cost
+//!
+//! One host call (`open`) on a free name; four at most on a name that
+//! exists (`open`, `lstat`, `unlink`, `open`), whatever the leftover holds
+//! and however many names share its directory: no read, no listing, no
+//! loop. O(1) in the helper's own calls, counted in [`Staged::calls`] and
+//! pinned by
+//! `store::staging::tests::a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`
+//! at a leftover of 0 bytes and of 4 MiB, alone and beside 2,000 other
+//! names. What each call costs is the host's (measured: `docs/06-limits.md`
+//! L-IA-44).
 
 use std::fmt;
 use std::fs::{self, File};
@@ -57,6 +77,9 @@ pub struct Staged {
     /// The bytes of a dead writer's leftover whose name was removed first,
     /// or `None` when the name was free. The caller reports it.
     pub cleared: Option<u64>,
+    /// The host calls this create made: 1 on a free name, 4 over a
+    /// leftover (`open`, `lstat`, `unlink`, `open`). Never more.
+    pub calls: u8,
 }
 
 /// Every refusal of [`create`], each named.
@@ -184,11 +207,14 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
             return Ok(Staged {
                 file,
                 cleared: None,
+                calls: 1,
             });
         }
         Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
         Err(why) => return Err(io("create", why)),
     }
+    // Calls so far: the refused `open` and the look below.
+    let mut calls = 2u8;
     let cleared = match fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => {
             return Err(StagingError::NotRegular {
@@ -202,6 +228,7 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
             });
         }
         Ok(meta) => {
+            calls += 1;
             match fs::remove_file(path) {
                 Err(why) if why.kind() != ErrorKind::NotFound => return Err(io("remove", why)),
                 _ => {}
@@ -213,7 +240,11 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
         Err(why) => return Err(io("stat", why)),
     };
     match open_new(path) {
-        Ok(file) => Ok(Staged { file, cleared }),
+        Ok(file) => Ok(Staged {
+            file,
+            cleared,
+            calls: calls + 1,
+        }),
         Err(why) if why.kind() == ErrorKind::AlreadyExists => Err(StagingError::Contended {
             path: path.to_path_buf(),
         }),

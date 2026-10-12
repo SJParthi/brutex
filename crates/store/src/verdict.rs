@@ -216,6 +216,23 @@ pub const LOCK_STEP: Duration = Duration::from_millis(10);
 /// used out (D-4844).
 pub const HANDLE_CACHE: usize = 64;
 
+/// The most names of a year directory that are looked at to rule out a day
+/// image when the year's index is absent (`index_missing`). A year never
+/// written has no directory, and one whose first commit was refused holds
+/// only that writer's temporaries, so the count is 0 in every ordinary run;
+/// past this many names that are not images the year is refused, never
+/// listed to its end (L-IA-43).
+pub const ORPHAN_SCAN: usize = 1_024;
+
+/// The longest file a day image can be: the prefix, the largest table, a
+/// record for every slot of it, the capped detail section and the trailer.
+/// A longer file is refused before a byte of it is read or allocated for.
+pub const MAX_IMAGE_LEN: usize = TABLE_OFFSET
+    + SLOT_LEN * (MAX_CAPACITY + OVERFLOW_SLOTS)
+    + RECORD_STRIDE * MAX_CAPACITY
+    + DETAIL_CAP
+    + TRAILER_LEN;
+
 const _: () = assert!(INDEX_HEAD_LEN + YEAR_DAYS * DAY_ENTRY_LEN + 4 == INDEX_SLOT_LEN);
 const _: () = assert!(4 + 1 + 1 + 2 + 4 + 4 + 8 == DAY_ENTRY_LEN);
 const _: () = assert!(INDEX_SLOT_LEN <= INDEX_SLOT_STRIDE);
@@ -687,10 +704,17 @@ pub type Feed = Vendor;
 
 /// The byte a feed is filed under (image offset 12): one more than the
 /// vendor's position in `Vendor::ALL`, which is appended to and never
-/// inserted into. `None` for a vendor the table does not hold.
+/// inserted into. No search: the position is the vendor's own discriminant
+/// (`Vendor` is declared in `ALL`'s order, and `core` indexes its own
+/// arrays by it), read back through one indexed `get`, so a table that ever
+/// disagreed with the declaration answers `None` (`feed_unknown`) and never
+/// another vendor's byte. `None` too for a vendor the table does not hold.
 #[must_use]
 pub fn feed_code(feed: Feed) -> Option<u8> {
-    let at = Vendor::ALL.iter().position(|vendor| *vendor == feed)?;
+    let at = feed as usize;
+    if Vendor::ALL.get(at) != Some(&feed) {
+        return None;
+    }
     u8::try_from(at.checked_add(1)?).ok()
 }
 
@@ -1323,6 +1347,32 @@ pub enum VerdictError {
         /// The file.
         path: PathBuf,
     },
+    /// `index_missing`: a year's index is absent while its year directory
+    /// holds a day image (or more than [`ORPHAN_SCAN`] other names, so no
+    /// image could be ruled out). An index is born before its year's first
+    /// image is linked, so this is a LOST index, never a year not yet
+    /// written: a commit does not bear it again empty over committed
+    /// images, and a reader does not answer "never verified". Rebuilding it
+    /// from the images' own day blocks is IA-6's command (RA-303).
+    IndexMissing {
+        /// The absent index.
+        path: PathBuf,
+        /// A day image found in its year directory; `None` when
+        /// [`ORPHAN_SCAN`] names were looked at and none ruled one out.
+        image: Option<PathBuf>,
+        /// The names looked at.
+        seen: u32,
+    },
+    /// `ordinal_past_records`: details were asked for a record ordinal the
+    /// generation does not hold.
+    OrdinalPastRecords {
+        /// The image.
+        path: PathBuf,
+        /// The ordinal asked for.
+        ordinal: u32,
+        /// The records the generation holds.
+        records: u32,
+    },
     /// `image_missing`: the year index commits a generation whose image is
     /// absent.
     ImageMissing {
@@ -1393,6 +1443,8 @@ impl VerdictError {
             Self::Unknown { .. } => "written_by_newer_build",
             Self::IndexShort { .. } => "index_short",
             Self::IndexUnreadable { .. } => "index_unreadable",
+            Self::IndexMissing { .. } => "index_missing",
+            Self::OrdinalPastRecords { .. } => "ordinal_past_records",
             Self::ImageMissing { .. } => "image_missing",
             Self::ImageCorrupt { .. } => "image_corrupt",
             Self::TrailerMismatch { .. } => "trailer_mismatch",
@@ -1401,6 +1453,54 @@ impl VerdictError {
             Self::Io { .. } => "io",
             #[cfg(test)]
             Self::Crashed { .. } => "crashed",
+        }
+    }
+}
+
+impl VerdictError {
+    /// The text of the refusals of a year index and of an ordinal asked
+    /// for: the part of `Display` that names what the caller pointed at.
+    fn fmt_asked(&self, f: &mut fmt::Formatter<'_>, word: &str) -> fmt::Result {
+        match self {
+            Self::IndexShort { path, len } => write!(
+                f,
+                "{word}: {} is {len} bytes, shorter than the {INDEX_LEN} a year index is born with",
+                path.display()
+            ),
+            Self::IndexUnreadable { path } => write!(
+                f,
+                "{word}: neither slot of {} is a valid year-index slot",
+                path.display()
+            ),
+            Self::IndexMissing {
+                path,
+                image: Some(image),
+                seen,
+            } => write!(
+                f,
+                "{word}: {} is absent, but {} is a day image of its year ({seen} name(s) looked at); the year is not born again empty over it",
+                path.display(),
+                image.display()
+            ),
+            Self::IndexMissing {
+                path,
+                image: None,
+                seen,
+            } => write!(
+                f,
+                "{word}: {} is absent and its year directory holds {seen} or more names, none of the first {ORPHAN_SCAN} a day image; no image could be ruled out, so the year is not born again",
+                path.display()
+            ),
+            Self::OrdinalPastRecords {
+                path,
+                ordinal,
+                records,
+            } => write!(
+                f,
+                "{word}: record {ordinal} was asked of {}, which holds {records} record(s)",
+                path.display()
+            ),
+            _ => write!(f, "{word}"),
         }
     }
 }
@@ -1467,16 +1567,10 @@ impl fmt::Display for VerdictError {
                 "{word}: {} holds {what} {value}, which this build does not know",
                 path.display()
             ),
-            Self::IndexShort { path, len } => write!(
-                f,
-                "{word}: {} is {len} bytes, shorter than the {INDEX_LEN} a year index is born with",
-                path.display()
-            ),
-            Self::IndexUnreadable { path } => write!(
-                f,
-                "{word}: neither slot of {} is a valid year-index slot",
-                path.display()
-            ),
+            Self::IndexShort { .. }
+            | Self::IndexUnreadable { .. }
+            | Self::IndexMissing { .. }
+            | Self::OrdinalPastRecords { .. } => self.fmt_asked(f, word),
             Self::ImageMissing { path } => write!(
                 f,
                 "{word}: the year index commits {}, which does not exist",
@@ -2521,9 +2615,10 @@ struct Owned {
     per: Vec<Vec<Detail>>,
 }
 
-/// Reads and checks a whole image file. O(image bytes): [`check_trailer`],
-/// the carry of a partial generation, and the tests read through it; a
-/// lookup never does.
+/// Reads and checks a whole image file. O(image bytes), at most
+/// [`MAX_IMAGE_LEN`]: a longer file is refused `image_corrupt` before a
+/// byte is read or allocated for. [`check_trailer`], the carry of a partial
+/// generation, and the tests read through it; a lookup never does.
 ///
 /// # Errors
 ///
@@ -2535,6 +2630,14 @@ pub fn read_image(path: &Path) -> Result<Image, VerdictError> {
         .metadata()
         .map_err(|why| io_error(path, "stat", why))?
         .len();
+    if len > off(MAX_IMAGE_LEN) {
+        return Err(corrupt(
+            path,
+            format!(
+                "the file is {len} bytes, longer than any day image can be ({MAX_IMAGE_LEN}); not read"
+            ),
+        ));
+    }
     let mut bytes = vec![0u8; usize_of(len)];
     file.read_exact_at(&mut bytes, 0)
         .map_err(|why| io_error(path, "read", why))?;
@@ -2817,6 +2920,12 @@ fn sync_dir(dir: &Path) -> Result<(), VerdictError> {
 /// never opened, so a hard link planted at a temporary's name is refused
 /// `staging_linked` with the file behind it untouched (RA-290). Returns
 /// whether a dead writer's leftover of the same name was cleared first.
+///
+/// A write or a sync the host refuses (a full disk) removes the temporary
+/// this call has just made before it answers, so a refused commit leaves no
+/// partial file and a disk that stays full gains none per attempt; the
+/// refusal is the host's own, and says so when the name could not be
+/// removed either. Only a KILLED writer leaves a temporary (L-IA-42).
 fn write_durable(path: &Path, bytes: &[u8]) -> Result<bool, VerdictError> {
     let staged = staging::create(path).map_err(|why| match why {
         StagingError::Io {
@@ -2830,15 +2939,75 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<bool, VerdictError> {
         },
         other => VerdictError::Staging(other),
     })?;
-    staged
-        .file
-        .write_all_at(bytes, 0)
-        .map_err(|why| io_error(path, "write", why))?;
-    staged
-        .file
-        .sync_all()
-        .map_err(|why| io_error(path, "sync", why))?;
-    Ok(staged.cleared.is_some())
+    let written = staged.file.write_all_at(bytes, 0);
+    // The test seam of a write the host refuses: nothing outside `cfg(test)`.
+    #[cfg(test)]
+    let written = written.and_then(|()| tests::refused_write());
+    let written = written
+        .map_err(|why| ("write", "write (its temporary could not be removed)", why))
+        .and_then(|()| {
+            staged
+                .file
+                .sync_all()
+                .map_err(|why| ("sync", "sync (its temporary could not be removed)", why))
+        });
+    match written {
+        Ok(()) => Ok(staged.cleared.is_some()),
+        Err((action, action_left, why)) => {
+            drop(staged.file);
+            let action = match fs::remove_file(path) {
+                Err(left) if left.kind() != ErrorKind::NotFound => action_left,
+                _ => action,
+            };
+            Err(io_error(path, action, why))
+        }
+    }
+}
+
+/// What an absent year index means, by one look at the year directory:
+/// `Ok` when the directory is absent or holds no day image within
+/// [`ORPHAN_SCAN`] names (a year never written, or one whose first commit
+/// was refused: its index may be born); otherwise the lost index's refusal,
+/// `index_missing`, naming an image found. An index is born before its
+/// year's first image is linked, so an image without an index is never a
+/// year in the making.
+///
+/// Cost: one `opendir` and at most [`ORPHAN_SCAN`] + 1 names read, on the
+/// path of an ABSENT index only (the first commit of a year, and a reader
+/// asking for a year that has none): never on a lookup of a year that has
+/// its index (`crates/store/tests/verdict.rs`,
+/// `a_lost_year_index_is_refused_and_never_born_again_empty`).
+fn lost_index(series: &Series<'_>, year: u16, cost: &mut Cost) -> Result<(), VerdictError> {
+    let dir = series.dir().join(format!("{year:04}"));
+    let names = match fs::read_dir(&dir) {
+        Ok(names) => names,
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(why) => return Err(io_error(&dir, "list", why)),
+    };
+    cost.opens += 1;
+    let mut seen = 0u32;
+    for name in names.take(ORPHAN_SCAN + 1) {
+        let name = name.map_err(|why| io_error(&dir, "list", why))?;
+        seen += 1;
+        if Path::new(&name.file_name())
+            .extension()
+            .is_some_and(|ext| ext == "vdt")
+        {
+            return Err(VerdictError::IndexMissing {
+                path: series.year_index(year),
+                image: Some(name.path()),
+                seen,
+            });
+        }
+    }
+    if usize_of(u64::from(seen)) > ORPHAN_SCAN {
+        return Err(VerdictError::IndexMissing {
+            path: series.year_index(year),
+            image: None,
+            seen,
+        });
+    }
+    Ok(())
 }
 
 /// The writer-unique temporary beside `path`: `<name>.<pid>-<run>.tmp`.
@@ -3126,7 +3295,14 @@ pub fn commit_within(
     let index_path = series.year_index(year);
     let held = match open_existing(&index_path) {
         Ok(file) => Some(file),
-        Err(VerdictError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => None,
+        Err(VerdictError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
+            // Absent: a year never written, or a LOST index. Under the lock
+            // no other writer is bearing it, so a day image in the year
+            // directory means lost: refused before anything is built, and
+            // never born again empty over committed images.
+            lost_index(series, year, &mut Cost::default())?;
+            None
+        }
         Err(other) => return Err(other),
     };
     let current = match &held {
@@ -3651,7 +3827,7 @@ impl Reader {
     ) -> Result<Option<YearIndex>, VerdictError> {
         let mut cost = Cost::default();
         let path = series.year_index(year);
-        let Some((file, len)) = self.handle(&path, &mut cost)? else {
+        let Some((file, len)) = self.index_handle(series, year, &path, &mut cost)? else {
             return Ok(None);
         };
         if len < INDEX_LEN_U64 {
@@ -3719,6 +3895,32 @@ impl Reader {
         })
     }
 
+    /// A year index's handle, or `None` for a year never written. An absent
+    /// index over a year directory that holds a day image is the lost
+    /// index's refusal, `index_missing`, never `None`: "no generation" is
+    /// only ever said of a year with no image. A writer bears the index
+    /// before it links the year's first image, so an image seen beside an
+    /// absent index is looked at once more before it is called lost (the
+    /// index may have been born between the two looks).
+    fn index_handle(
+        &mut self,
+        series: &Series<'_>,
+        year: u16,
+        path: &Path,
+        cost: &mut Cost,
+    ) -> Result<Option<(&File, u64)>, VerdictError> {
+        // A cached handle is the common case and costs one map probe here.
+        if !self.handles.contains_key(path) && self.handle(path, cost)?.is_none() {
+            let Err(lost) = lost_index(series, year, cost) else {
+                return Ok(None);
+            };
+            if self.handle(path, cost)?.is_none() {
+                return Err(lost);
+            }
+        }
+        self.handle(path, cost)
+    }
+
     /// The committed entry of a day, or `None` when it has none.
     fn day_entry(
         &mut self,
@@ -3728,7 +3930,7 @@ impl Reader {
     ) -> Result<Option<DayEntry>, VerdictError> {
         let year = day.year();
         let path = series.year_index(year);
-        let Some((file, len)) = self.handle(&path, cost)? else {
+        let Some((file, len)) = self.index_handle(series, year, &path, cost)? else {
             return Ok(None);
         };
         if len < INDEX_LEN_U64 {
@@ -3828,7 +4030,10 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// As [`Reader::lookup`].
+    /// As [`Reader::lookup`]; [`VerdictError::OrdinalPastRecords`] for an
+    /// ordinal the generation does not hold (never a wrapped owner and
+    /// never an empty answer), and [`VerdictError::ImageCorrupt`] for a
+    /// record whose detail offset is not its own entry.
     pub fn details(
         &mut self,
         series: &Series<'_>,
@@ -3841,13 +4046,29 @@ impl Reader {
         let (header, _, _) = self.prefix(series, day, generation, &path, &mut cost)?;
         let (owner, from) = match record {
             None => (0u32, 0usize),
+            Some((ordinal, _)) if ordinal >= header.records => {
+                return Err(VerdictError::OrdinalPastRecords {
+                    path,
+                    ordinal,
+                    records: header.records,
+                });
+            }
             Some((_, r)) if r.detail_at == 0 => return Ok(Vec::new()),
+            // `ordinal < records <= u32::MAX`, so the owner cannot wrap.
             Some((ordinal, r)) => (ordinal + 1, usize_of(u64::from(r.detail_at - 1))),
         };
+        let section_len = usize_of(u64::from(header.detail_bytes));
+        if record.is_some() && from + DETAIL_HEAD_LEN > section_len {
+            return Err(corrupt(
+                &path,
+                format!(
+                    "a record's detail offset {from} is past the {section_len}-byte detail section"
+                ),
+            ));
+        }
         if header.detail_bytes == 0 {
             return Ok(Vec::new());
         }
-        let section_len = usize_of(u64::from(header.detail_bytes));
         let section_at = u64::from(header.detail_offset);
         let Some((file, _)) = self.handle(&path, &mut cost)? else {
             return Err(VerdictError::ImageMissing { path });
@@ -3877,6 +4098,15 @@ impl Reader {
                 payload,
             });
             at += DETAIL_HEAD_LEN + size;
+        }
+        if out.is_empty() && record.is_some() {
+            return Err(corrupt(
+                &path,
+                format!(
+                    "the detail entry at {from} is not record {}'s own",
+                    owner - 1
+                ),
+            ));
         }
         Ok(out)
     }

@@ -122,3 +122,35 @@ fn a_missing_directory_is_the_hosts_refusal_by_name() {
     );
     assert!(std::error::Error::source(&refusal).is_some());
 }
+
+/// The cost the module states: one host call on a free name and four over a
+/// leftover, whatever the leftover holds (nothing, or 4 MiB) and however
+/// many names share the directory (none, or 2,000). No call is made per
+/// byte or per name.
+#[test]
+fn a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover() {
+    let quiet = dir("calls-quiet");
+    let crowded = dir("calls-crowded");
+    for i in 0..2_000 {
+        fs::write(crowded.join(format!("zz-other-{i:04}")), b"").unwrap();
+    }
+    for within in [&quiet, &crowded] {
+        let free = within.join("zz-free.tmp");
+        let made = create(&free).unwrap();
+        assert_eq!((made.calls, made.cleared), (1, None));
+        for held in [0usize, 4 << 20] {
+            let name = within.join(format!("zz-left-{held}.tmp"));
+            fs::write(&name, vec![0x5A; held]).unwrap();
+            let made = create(&name).unwrap();
+            assert_eq!(
+                (made.calls, made.cleared),
+                (4, Some(u64::try_from(held).unwrap())),
+                "a leftover of {held} bytes in {}",
+                within.display()
+            );
+            assert_eq!(fs::metadata(&name).unwrap().len(), 0);
+        }
+    }
+    let _ = fs::remove_dir_all(&quiet);
+    let _ = fs::remove_dir_all(&crowded);
+}

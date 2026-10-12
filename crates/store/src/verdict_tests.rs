@@ -13,6 +13,7 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,6 +36,23 @@ pub(super) fn crash(at: &'static str) -> Result<(), VerdictError> {
     if ARMED.with(|armed| armed.get() == Some(at)) {
         ARMED.with(|armed| armed.set(None));
         return Err(VerdictError::Crashed { at });
+    }
+    Ok(())
+}
+
+/// The point [`refused_write`] answers at.
+const DISK_FULL: &str = "tmp write refused";
+
+/// The seam `write_durable` calls after its write under `cfg(test)`: when
+/// [`DISK_FULL`] is armed on this thread, it disarms it and answers as a
+/// host with no space left does, so the temporary already holds bytes.
+pub(super) fn refused_write() -> io::Result<()> {
+    if ARMED.with(|armed| armed.get() == Some(DISK_FULL)) {
+        ARMED.with(|armed| armed.set(None));
+        return Err(io::Error::new(
+            ErrorKind::StorageFull,
+            "no space left on device (the test seam)",
+        ));
     }
     Ok(())
 }
@@ -307,4 +325,73 @@ fn a_table_that_cannot_hold_its_keys_is_refused_by_name() {
     let near = vec![9u64 << 32 | 0x03, 9u64 << 32 | 0x13];
     let (capacity, _) = table(&near).unwrap();
     assert_eq!(capacity, 32);
+}
+
+/// The refusal of a write the host has no room for: the action and the kind.
+fn disk_full(refused: &VerdictError) -> (&'static str, ErrorKind) {
+    match refused {
+        VerdictError::Io { action, source, .. } => (*action, source.kind()),
+        other => panic!("expected the host's refusal, got {other}"),
+    }
+}
+
+/// A full disk (the operator's rule 4): a write the host refuses removes
+/// the temporary it had just made, at the year index's temporary and at a
+/// day image's alike, so the refused commit leaves no partial file, the
+/// committed generation still answers, and the next commit (room again)
+/// finds nothing to clear. The refusal comes from the test seam after the
+/// bytes were written, as a host that runs out part-way leaves them; a real
+/// `ENOSPC` is not raised here.
+#[test]
+fn a_write_the_host_refuses_leaves_no_temporary() {
+    let root = Root::new();
+    let series = root.series();
+    let dir = series.dir();
+    let year_dir = dir.join("2031");
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    let one = |run: u64, code: Code| generation(run, vec![entry("NSE-FNO-ZZTEST-A", code)]);
+
+    // The year's first commit: the refused write is the index's temporary.
+    arm(DISK_FULL);
+    let refused = commit(&series, &one(21, Code::Match)).unwrap_err();
+    assert_eq!(refused.word(), "io");
+    assert_eq!(disk_full(&refused), ("write", ErrorKind::StorageFull));
+    assert_eq!(
+        names(&dir),
+        ["2031", "2031.vdi.lock"],
+        "no year index and no temporary of one is left"
+    );
+    assert_eq!(names(&year_dir), Vec::<String>::new());
+    let mut reader = Reader::new();
+    assert_eq!(reader.lookup(&series, day(), &key).unwrap().answer, None);
+
+    let first = commit(&series, &one(22, Code::Match)).unwrap();
+    assert_eq!((first.generation, first.staging_cleared), (1, 0));
+
+    // The next commit: the refused write is the day image's temporary.
+    arm(DISK_FULL);
+    let refused = commit(&series, &one(23, Code::ValueMismatch)).unwrap_err();
+    assert_eq!(disk_full(&refused), ("write", ErrorKind::StorageFull));
+    assert_eq!(
+        names(&year_dir),
+        ["2031-03-04.g0000000001.vdt"],
+        "the committed image alone: no temporary and no second generation"
+    );
+    assert_eq!(names(&dir), ["2031", "2031.vdi", "2031.vdi.lock"]);
+    let held = reader.lookup(&series, day(), &key).unwrap();
+    assert_eq!(held.answer.unwrap().code(), Some(Code::Match));
+
+    let second = commit(&series, &one(24, Code::ValueMismatch)).unwrap();
+    assert_eq!(
+        (
+            second.generation,
+            second.previous,
+            second.stepped_past,
+            second.staging_cleared
+        ),
+        (2, 1, 0, 0),
+        "nothing was left to step past or to clear"
+    );
+    let now = reader.lookup(&series, day(), &key).unwrap();
+    assert_eq!(now.answer.unwrap().code(), Some(Code::ValueMismatch));
 }

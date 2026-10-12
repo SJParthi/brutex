@@ -2864,7 +2864,7 @@ Never opened for writing once linked into place.
 | 0 | 8 | magic `BRUTEXVD` |
 | 8 | 2 | version = 1 |
 | 10 | 2 | record stride = 160 |
-| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL`, for every vendor of that table (`gdfl` 4, `zerodha` 5); a vendor outside it is refused `feed_unknown` |
+| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL`, for every vendor of that table (`gdfl` 4, `zerodha` 5); a vendor outside it is refused `feed_unknown`. The byte is computed without a search: the position is the vendor's own discriminant, read back through one indexed `get` of the table |
 | 13 | 1 | segment (`INDEX` 1, `CASH` 2, `FNO` 3) |
 | 14 | 1 | exchange (`NSE` 1, `BSE` 2) |
 | 15 | 1 | unit of every count: the largest of day, minute and second that divides the timeframe (0 second for `1s`, 1 minute for the minute rungs, 2 day for `1day`) |
@@ -3003,7 +3003,10 @@ counts only, each such record carries `details_capped`, and so does the day.
 A detail of kind 0, or longer than 65,535 bytes, is refused `detail_invalid`.
 A record's details are read entry by entry (its 8-byte head, then its
 payload), so a reader reads its own entries and one more head, never the rest
-of the section.
+of the section. `Reader::details` is asked by record ordinal: an ordinal the
+generation does not hold is refused `ordinal_past_records`, and a record
+whose detail offset is past the section or is not its own entry is refused
+`image_corrupt`; neither is ever answered with an empty list (D-4927).
 
 ### 35.6 Codes, flags and their order
 
@@ -3063,6 +3066,24 @@ slot 0 on a tie; with no valid slot it refuses `index_unreadable`, and a file
 shorter than 32,768 bytes is refused `index_short` (no file this protocol
 links is). `/verify/days.json` reads everything it shows from the `.vdi`.
 
+**A lost index is refused, never born again empty** (D-4926). A `.vdi` is
+born before its year's first image is linked (35.8), so a year directory
+that holds a `.vdt` while `<yyyy>.vdi` is absent has LOST its index; it is
+never a year in the making. A commit refuses it `index_missing` under the
+lock, before it builds, bears or links anything; a reader (`lookup`, `page`,
+`year`) refuses it the same way, where "no generation" would be a wrong
+answer. Both name the absent index and an image found. Only a year whose
+directory is absent, or holds no image, has no generation and may have its
+index born. The look is made only when the index is absent: one directory
+open and at most `ORPHAN_SCAN` + 1 = 1,025 names; a directory with more
+names than that and no image among the first 1,025 is refused `index_missing`
+too (no image named), never listed to its end (L-IA-43). A reader that finds
+an image beside an absent index looks for the index once more before it
+refuses, because a first writer may have borne it between the two looks.
+Rebuilding a lost index from the images' own day blocks is IA-6's command
+(RA-303); until it exists the repair is to put the `.vdi` back, and the
+images are never touched by the refusal.
+
 ### 35.8 Genesis and the commit protocol (D-4865)
 
 **Genesis.** A `.vdi` is born whole: both slots (commit generation 0, every
@@ -3101,7 +3122,10 @@ written:
    publish it with `hard_link` as g' = g + 1; a link that meets an existing
    image (one a crash left linked and uncommitted) removes the temporary and
    tries g' + 1, at most 16 times, then refuses `generation_collision` with
-   nothing committed;
+   nothing committed (L-IA-45); a write or a sync the host refuses (a full
+   disk) removes the temporary just made, the index's or the image's, before
+   the commit answers the host's `io`, so a refused commit leaves no partial
+   file (D-4927; only a KILLED writer leaves one, L-IA-42);
 5. remove the temporary and make the directory durable;
 6. write the next slot of the year index and make it durable.
 
@@ -3153,7 +3177,11 @@ BLAKE3 trailer first, so one byte changed anywhere is refused
 `trailer_mismatch`; then both CRC-32Cs of the header and day block, every
 record's CRC-32C, the (code, key) order, the per-code counts, that the table
 finds every record where a lookup would and holds nothing else, and the
-detail section's shape. A lookup never reads the trailer.
+detail section's shape. A lookup never reads the trailer. A file longer than
+any image can be (`MAX_IMAGE_LEN` = 180,355,672 bytes: the prefix, the
+largest table, a record for each of its 2^20 slots, the 4 MiB detail section
+and the trailer) is refused `image_corrupt` by its length alone, before a
+byte is read or allocated for (D-4927).
 
 ## Dated NSE cash-session cache (D-0519)
 
