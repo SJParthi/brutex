@@ -25,6 +25,26 @@
 //! read and changes nothing, because a bar already held is confirmed and
 //! never written twice (`ingest`'s `AlreadyPresent`).
 //!
+//! # What a run tells of it (repair 1, 12 Oct 2026)
+//!
+//! - A member key's close is the MEMBER's event: "member imported", "member
+//!   incomplete" or "member refused", naming `member=` and its journal
+//!   `key=`. It is never "day imported": that message is the day's, told once
+//!   after the day's last member key, and the import's pace is measured from
+//!   the gaps between its stamps.
+//! - The done days of a run's first month that lie BEFORE its range and owe
+//!   its scope a member are read first, in order, under a request of their
+//!   own, and the run says so at `warn` (`scope_reach_back`). So no member's
+//!   month is made from a later day while an earlier day of it is owed: on
+//!   10 Oct 2026 that made six series from special sessions alone, and every
+//!   later landing in such a month is a new full copy of it. At most 30
+//!   days; a day no run closed owes nothing and is not read.
+//! - `retry_refused` reads again a member key closed done with refusals, as
+//!   it does a base key.
+//! - The run's `run` line is in the journal before an `examined` line names
+//!   the run's id.
+//! - A torn line of this ledger is said at `warn` (`scope_ledger_torn`).
+//!
 //! # Lines and crashes
 //!
 //! Append-only (`CLAUDE.md` §1). Every line ends ` .`: a line without that

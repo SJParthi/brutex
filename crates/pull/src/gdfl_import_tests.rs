@@ -4954,6 +4954,46 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// ═══ The summary events a run tells (D-3317, D-4878) ════════════════════
+
+/// One summary event as [`note_day`] built it: its words, its level and the
+/// text fields it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Summary {
+    pub(super) words: String,
+    pub(super) warn: bool,
+    pub(super) text: BTreeMap<String, String>,
+}
+
+thread_local! {
+    /// Every summary event the runs of THIS thread told, in order. A run
+    /// closes its days on the thread that called it and each test runs on a
+    /// thread of its own, so a test reads only its own runs' events.
+    static SUMMARIES: std::cell::RefCell<Vec<Summary>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps `event` for the test on this thread ([`summaries_taken`]).
+pub(super) fn summary_emitted(event: &telemetry::Event<'_>) {
+    let text = event
+        .fields()
+        .iter()
+        .filter_map(|(name, value)| Some(((*name).to_owned(), value.as_str()?.to_owned())))
+        .collect();
+    SUMMARIES.with_borrow_mut(|kept| {
+        kept.push(Summary {
+            words: event.message().to_owned(),
+            warn: event.level() == telemetry::Level::Warn,
+            text,
+        });
+    });
+}
+
+/// The summary events told on this thread since the last call, in order.
+pub(super) fn summaries_taken() -> Vec<Summary> {
+    SUMMARIES.with_borrow_mut(std::mem::take)
+}
+
 // ═══ WP-16: the day made durable (D-3353) ═══════════════════════════════
 
 /// What a test asks of each flush a day's batch issues under its store: run

@@ -16550,3 +16550,53 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   bound, an alarm at a threshold, or an archive step that moves older epochs
   off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
   of its own (L-WP81-4), cached for 30 s in the operations pool.
+
+## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
+
+- **L-WP12f-1. A scope change lists every done day of the kind once more.**
+  One new member in the stored scope (one new option underlying in the
+  store changes the stocks digest) makes the next run read the listing of
+  every day closed `done` under another digest, once, to find the days that
+  hold a file of a new member; the `examined` line then remembers the day.
+  O(done days of the kind) listing reads, once per scope. What a done day
+  owes when it owes nothing is one compare of digests and two hash probes.
+  NOT MEASURED at the real store's size (about 2,000 days a kind).
+- **L-WP12f-2. A reopened day costs one pass over its listing per member
+  key.** `cm_jobs` scans the day's listing for each member key the day
+  opens: O(members opened x listing entries). 6 members a day for the index
+  tree and 15 to 17 for the stock tree on the operator's archive.
+- **L-WP12f-3. The journal grows by two lines per member key** (`begin` and
+  its close) and by one `run` line per run that examines a day, and it is
+  loaded whole at each run's start: O(journal bytes) per run. The scope
+  ledger grows by one line per digest and one per examined day and is loaded
+  whole too.
+- **L-WP12f-4. The trade-for-trade series are a compiled list of two,
+  UNVERIFIED.** `gdfl_cm::SHARE_SERIES` is `BE` and `BZ`. No charter row
+  names NSE's series codes; the dated security masters that would name a
+  symbol's series start in 2026 and the spells start in 2018. Measured over
+  the vendor's 2,001 stock days (the audit of DB-B06): no day holds both a
+  share's own file and its `.BE` or `.BZ` file. A day that does refuses both
+  by name.
+- **L-WP12f-5. A month already served from repair generations takes one new
+  full copy per landed day.** The months the run of 10 Oct 2026 made from a
+  special session alone (67 on the operator's store) are repaired day by
+  day: each owed day that lands is one more generation, a full copy of the
+  month (D-3350, D-4875), the days after the special session included. For
+  the operator's store that is about 67 x 20 = 1,340 generations and about
+  33 GB written for about 3.2 GB of final data: ARITHMETIC from 22,500 bars
+  of about 105 bytes per series-day, NOT MEASURED at full size. NOT DONE:
+  landing a month's owed days in one repair, one generation a month.
+- **L-WP12f-6. A run reads owed days before its range only inside its first
+  month.** At most 30 days, one hash probe each when nothing is owed. Owed
+  days of EARLIER months are not reached: they stay owed, and land as their
+  own months when a run's range covers them.
+- **L-WP12f-7. A day no run closed is not owed.** A run asked for one later
+  day on a store that never read the earlier days of that month makes each
+  member's month from that day, a special session included; nothing is
+  skipped, so nothing is refused or warned, and the earlier days land later
+  through the versioned repair (L-WP12f-5 then applies to that month).
+- **L-WP12f-8. An options run records no scope**, so an options day is done
+  for whatever its run read. NOT DONE: what a member is for options is open.
+- **L-WP12f-9. Two imports on one store are not kept apart by a run-level
+  lock.** They fail loudly per month and leave duplicate generation files
+  (the second agent's check of 12 Oct 2026). NOT DONE.

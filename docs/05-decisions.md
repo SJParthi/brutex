@@ -67687,3 +67687,68 @@ hand against the earlier head and saw the leftover this removes).
 (IA-VD-20), `a_file_longer_than_any_day_image_is_refused_unread` (IA-VD-21)
 and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
 `a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.
+
+### D-4878 — A GDFL capital-market day is done only for the members its close was asked to read; a wider scope reopens it for the new members alone — 2026-10-12
+
+**Implemented by** WP-12f (`pull`: `gdfl_import.rs`, `gdfl_import_scope.rs`,
+`gdfl_cm.rs`) and its repair round 1. **Findings** DB-B76, and the import
+half of DB-B06, DB-B17, DB-B40 and DB-B61.
+
+**Why.** The import journal's key is `<kind> <day> <filter>` and a `done` key
+was skipped whatever the run's scope had become. On 10 Oct 2026 a run under
+eight indices met 1,985 days closed `done` under two, skipped every one, and
+made six index series from the 12 special sessions alone.
+
+**Decision.**
+
+1. A capital-market run's `done` and `incomplete` lines carry
+   `scope=<digest>`: the first 16 hex digits of the SHA-256 of the run's
+   sorted member list. The list is written once per digest in a new
+   append-only ledger, `<store>/imports/gdfl.scopes`
+   (`scope <digest> <kind> n=<count> <m1>,<m2>,... .`). `scope=` is one more
+   `name=value` stat: no earlier reader refuses it.
+2. A close with no `scope=` (every line written before this) is read as
+   built under the swept surface of its kind.
+3. A day closed `done` under a narrower scope is read again only for the
+   members its close never covered that have a file that day, each under a
+   key of its own, `<filter>+<member>`. The base key is not closed again and
+   the old members' months are not touched. The day is then recorded
+   `examined <key> scope=<digest> run=<id> opened=<n> .` in the scope ledger,
+   so a day with no file of a new member is listed once per scope and not
+   again. The run's `run` line is in the journal before that line names its
+   id.
+4. A member whose month already holds a later day lands through the
+   versioned month repair (D-3350, D-4875), never in place.
+5. A member key's close is told as the member's ("member imported", "member
+   incomplete", "member refused", with `member=` and `key=`). "day imported"
+   is the day's, told once after its last member key, and the day is counted
+   once in `days_imported`: the import's pace is measured from the gaps
+   between "day imported" stamps.
+6. The done days of a run's first month that lie before its range and owe
+   its scope a member are read first, in order, and the run says so at
+   `warn` (`scope_reach_back`). No member's month is made from a later day
+   while an earlier day of it is owed. At most 30 days; a day no run closed
+   owes nothing and is not read.
+7. `retry_refused` reads again a member key closed done with refusals.
+8. A share's `.BE` or `.BZ` day file is the share's own trading day, filed
+   under the share's key; the member is `NSE-CASH-<share>.<series>`. A day
+   holding both a share's own file and a series file refuses both by name.
+   The two series codes are a compiled list, UNVERIFIED against an NSE
+   circular (`docs/06-limits.md`, L-WP12f-4).
+
+**Not done.** An options run records no scope. Landing a sparse month's owed
+days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day
+source digest compared across runs (DB-B77), the official open and close of
+an index file (DB-B18), the six stem hand-overs (DB-B12).
+
+**Proof.** `crates/pull/src/gdfl_scope_tests.rs`:
+`a_wider_scope_reads_a_done_day_again_for_its_new_members_only`,
+`a_close_with_no_scope_is_read_as_the_swept_surface`,
+`a_new_member_holding_only_a_later_day_takes_its_earlier_done_days`,
+`a_day_with_no_file_of_a_new_member_is_examined_once_and_never_listed_again`,
+`a_filtered_key_opens_no_member_its_filter_does_not_name`,
+`a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run`,
+`a_trade_for_trade_spell_is_filed_under_its_shares_key`,
+`a_member_keys_close_is_told_as_the_members_and_the_day_is_told_once`,
+`a_run_starting_past_owed_days_of_its_month_reads_them_first`,
+`retry_refused_reads_again_a_member_key_closed_with_refusals`.

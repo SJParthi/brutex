@@ -205,6 +205,13 @@
 //! - `recounted <key> definition=<n> months=<n> run=<run>`: written by
 //!   `cli census-recount` (D-3316, WP-10), never here; it closes the day.
 //!
+//! A `<key>` is `<kind> <day> <filter>`, or `<kind> <day> <filter>+<member>`
+//! for one member of a day read again for a wider scope (D-4878,
+//! [`scope`]). Each close tells one summary event ([`note_day`]): a day's is
+//! "day imported", "day incomplete" or "day refused", once a day; a member
+//! key's is "member imported", "member incomplete" or "member refused" and
+//! names its member and its key.
+//!
 //! `<stats>` are the D-2822 fields in their order. `<stage>` is one of
 //! [`Stage`]'s words and `<code>` the snake-case name of the refusal variant
 //! that refused ([`Cause`]), of the day's decisive failure: the census's,
@@ -1944,7 +1951,15 @@ pub struct Report {
     pub days_widened: usize,
     /// Member keys this run read on such days, one per member with a file.
     pub members_reopened: usize,
-    /// Days that were imported this run (clean or not).
+    /// How many of `days_widened` lie BEFORE the run's range: done days of
+    /// the range's first month that owed this run's scope a member and were
+    /// read first, so no member's month is made from a later day while an
+    /// earlier one is owed (D-4878, DB-B76).
+    pub days_before_range: usize,
+    /// Days that were imported this run (clean or not): a day read whole,
+    /// and a day read again for a wider scope on which the run closed at
+    /// least one member key (that day is in `days_widened` too). One per
+    /// day, never one per member key.
     pub days_imported: usize,
     /// Days the journal already records as done, skipped unread.
     pub days_skipped: usize,
@@ -2983,7 +2998,7 @@ impl Ctx<'_> {
         if built.is_some_and(|digest| digest == now) {
             return Owed::Nothing;
         }
-        let done = |member: &String| self.journal.done.contains(&format!("{key}+{member}"));
+        let done = |member: &String| self.settled(&format!("{key}+{member}"));
         let ledger = scoped.ledger.borrow();
         if ledger.examined_under(key) == Some(now) {
             let pending: Vec<String> = self
@@ -3038,6 +3053,28 @@ impl Ctx<'_> {
         }
     }
 
+    /// Whether a member key needs no read by this run: closed `done`, and not
+    /// one closed with refusals that the run was asked to read again
+    /// ([`RunOptions::retry_refused`]), as a base key is in [`admit`]. Two
+    /// hash probes.
+    fn settled(&self, member_key: &str) -> bool {
+        let retried = self.options.retry_refused && self.journal.with_refusals.contains(member_key);
+        self.journal.done.contains(member_key) && !retried
+    }
+
+    /// Writes the run's `run` line when no line of this run is in the
+    /// journal yet (D-3317 item 4): before its first other line, and before
+    /// the scope ledger names the run's id (D-4878), so no id is written
+    /// anywhere that the journal does not hold and the next run cannot take.
+    fn announce(&self) -> Result<(), ImportRefusal> {
+        if !self.announced.get() {
+            self.journal
+                .append(&run_line(self.id, self.started, self.options.origin))?;
+            self.announced.set(true);
+        }
+        Ok(())
+    }
+
     /// The `scope=` field a closing line of `key` carries: this run's digest
     /// on a base key's `done` or `incomplete`, after its member list is in
     /// the scope ledger. A member key names its one member and carries none.
@@ -3059,11 +3096,7 @@ impl Ctx<'_> {
     /// Appends `line`, after the run's `run` line when it is the run's first,
     /// and answers its line number in the journal, from 1.
     fn append(&self, line: &str) -> Result<u64, ImportRefusal> {
-        if !self.announced.get() {
-            self.journal
-                .append(&run_line(self.id, self.started, self.options.origin))?;
-            self.announced.set(true);
-        }
+        self.announce()?;
         self.journal.append(line)
     }
 
@@ -4559,30 +4592,89 @@ fn started_event<'a>(
     }
 }
 
-/// The day's one summary event (D-3317): "day imported" at `info` for a day
-/// closed `done`, with or without refusals; "day incomplete" or "day
-/// refused" at `warn` otherwise. A census-refused day never reaches it.
-fn note_day(kind: ImportKind, day: Day, outcome: Outcome, (before, report): (Mark, &Report)) {
+/// Whose close a summary event tells (D-3317, D-4878).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closed<'c> {
+    /// A day read whole, under its base key.
+    Day,
+    /// One member key of a day read again for a wider scope: the member and
+    /// the journal key its closing line is written under.
+    Member { member: &'c str, key: &'c str },
+    /// A day read again for a wider scope, once, after every member key the
+    /// run opened on it is closed: how many those were.
+    Widened { members: usize },
+}
+
+/// The words of a summary event, by whose close it is and how it closed. A
+/// member key's close is never "day imported": that message is the DAY's,
+/// once a day, and the import's pace is measured from the gaps between its
+/// stamps (`api`'s `/imports.json`), so one per member key made a day of six
+/// members read as six days (WP-12f repair 1).
+const fn summary_words(closed: Closed<'_>, outcome: Outcome) -> &'static str {
+    match (closed, outcome) {
+        (Closed::Member { .. }, Outcome::Done | Outcome::DoneWithRefusals) => "member imported",
+        (Closed::Member { .. }, Outcome::Incomplete) => "member incomplete",
+        (Closed::Member { .. }, Outcome::Refused) => "member refused",
+        (_, Outcome::Done | Outcome::DoneWithRefusals) => "day imported",
+        (_, Outcome::Incomplete) => "day incomplete",
+        (_, Outcome::Refused) => "day refused",
+    }
+}
+
+/// One close's summary event (D-3317; D-4878 for a member key and a widened
+/// day). For a DAY, read whole or read again for a wider scope: "day
+/// imported" at `info` for a day closed `done`, with or without refusals;
+/// "day incomplete" or "day refused" at `warn` otherwise; a widened day says
+/// `members=`, how many member keys the run closed on it. For a MEMBER KEY:
+/// "member imported", "member incomplete" or "member refused", each naming
+/// its `member=` and its journal `key=`, so a member's close is found in the
+/// event log by its name. A census-refused day never reaches it.
+fn note_day(
+    kind: ImportKind,
+    day: Day,
+    (outcome, closed): (Outcome, Closed<'_>),
+    (before, report): (Mark, &Report),
+) {
     let day_text = day.to_string();
+    let words = summary_words(closed, outcome);
     let event = match outcome {
-        Outcome::Done | Outcome::DoneWithRefusals => telemetry::Event::info(TARGET, "day imported"),
-        Outcome::Incomplete => telemetry::Event::warn(TARGET, "day incomplete"),
-        Outcome::Refused => telemetry::Event::warn(TARGET, "day refused"),
+        Outcome::Done | Outcome::DoneWithRefusals => telemetry::Event::info(TARGET, words),
+        Outcome::Incomplete | Outcome::Refused => telemetry::Event::warn(TARGET, words),
     };
-    let _dropped_when_filtered = telemetry::emit(
-        &event
-            .with("kind", kind.as_str())
-            .with("day", day_text.as_str())
-            .with("outcome", outcome.as_str())
-            .with("files", report.files - before.files)
-            .with("rows", report.rows - before.rows)
-            .with("seconds", report.seconds - before.seconds)
-            .with(
-                "committed",
-                report.seconds_committed - before.seconds_committed,
-            )
-            .with("failures", report.failures.len() - before.failures),
-    );
+    let event = event
+        .with("kind", kind.as_str())
+        .with("day", day_text.as_str())
+        .with("outcome", outcome.as_str())
+        .with("files", report.files - before.files)
+        .with("rows", report.rows - before.rows)
+        .with("seconds", report.seconds - before.seconds)
+        .with(
+            "committed",
+            report.seconds_committed - before.seconds_committed,
+        )
+        .with("failures", report.failures.len() - before.failures);
+    let event = match closed {
+        Closed::Day => event,
+        Closed::Member { member, key } => event.with("member", member).with("key", key),
+        Closed::Widened { members } => event.with("members", members),
+    };
+    #[cfg(test)]
+    tests::summary_emitted(&event);
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// The worse of two closes of one day's keys, `done` best and `refused`
+/// worst: how a day read again for a wider scope closed as a whole.
+const fn worse(a: Outcome, b: Outcome) -> Outcome {
+    const fn rank(outcome: Outcome) -> u8 {
+        match outcome {
+            Outcome::Done => 0,
+            Outcome::DoneWithRefusals => 1,
+            Outcome::Incomplete => 2,
+            Outcome::Refused => 3,
+        }
+    }
+    if rank(b) > rank(a) { b } else { a }
 }
 
 /// Stops the run at a census refusal (D-3317 item 7; DB-G01, DB-G10). The
@@ -4859,45 +4951,21 @@ where
         scoped,
     };
     note_started(&ctx, &filter);
+    note_torn(&ctx);
     let mut report = Report::default();
+    let state = (&mut report, &mut flags);
+    reach_back(&ctx, &filter, state, &mut *census, &mut read_day)?;
     for day in days(run.from, run.to) {
         let key = format!("{} {day} {filter}", run.kind.as_str());
-        // A DAY DONE UNDER A NARROWER SCOPE IS NOT DONE FOR THE MEMBERS ITS
-        // CLOSE NEVER COVERED (WP-12f, D-4878): each such member with a file
-        // that day is read under a key of its own, `<filter>+<member>`, so
-        // its hole never takes the day's other members out of `done`; the
-        // base key is not read again.
-        let members = match ctx.owed(&key) {
-            Owed::Nothing => None,
-            Owed::Pending(members) => Some((members, false)),
-            Owed::Probe(beyond) => {
-                match probe(
-                    &ctx,
-                    (&key, day),
-                    &request,
-                    &beyond,
-                    &mut report,
-                    &mut read_day,
-                ) {
-                    Some(present) => Some((present, true)),
-                    None => continue,
-                }
-            }
-        };
-        if let Some((members, examined)) = members {
-            report.days_widened += 1;
-            for member in &members {
-                let pass = Pass {
-                    key: &format!("{key}+{member}"),
-                    day,
-                    member: Some(member),
-                };
-                let state = (&mut report, &mut flags);
-                day_pass(&ctx, &request, &pass, state, &mut *census, &mut read_day)?;
-            }
-            if examined {
-                note_examined(&ctx, (&key, day), members.len(), &mut report);
-            }
+        let state = (&mut report, &mut flags);
+        if widen(
+            &ctx,
+            &request,
+            (&key, day),
+            state,
+            &mut *census,
+            &mut read_day,
+        )? {
             continue;
         }
         if !admit(&ctx, &key, day, &mut report) {
@@ -4913,6 +4981,162 @@ where
     }
     note_finished(&ctx, &report);
     Ok(report)
+}
+
+/// The days of `from`'s month before it, in order: none when `from` is the
+/// month's first day. At most 30.
+fn before_range(from: Day) -> Vec<Day> {
+    let first = from.days_from_epoch() - u32::from(from.day().saturating_sub(1));
+    (first..from.days_from_epoch())
+        .filter_map(|n| Day::from_days(n).ok())
+        .collect()
+}
+
+/// THE RUN'S FIRST MONTH FROM ITS FIRST OWED DAY (D-4878, DB-B76): the days
+/// of that month before the range that are closed `done` and owe this run's
+/// scope a member are read for it first, in order, so no member's month is
+/// made from a later day while an earlier one is still owed. A day no run
+/// closed owes nothing and is not read: the run was not asked for it.
+///
+/// THOSE DAYS HAVE A REQUEST OF THEIR OWN: a request's window is its range
+/// check and a row outside it is dropped, so under the run's own request a
+/// day before the range would file nothing and still close `done`.
+///
+/// At most 30 days, each one hash probe when it owes nothing.
+fn reach_back<F>(
+    ctx: &Ctx<'_>,
+    filter: &str,
+    (report, flags): (&mut Report, &mut quality::Ledger),
+    census: &mut dyn Census,
+    read_day: &mut F,
+) -> Result<(), ImportRefusal>
+where
+    F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
+{
+    let run = ctx.run;
+    let early = before_range(run.from);
+    let (Some(&first), Some(&last)) = (early.first(), early.last()) else {
+        return Ok(());
+    };
+    let reach = BarRequest {
+        instrument_id: String::new(),
+        listing: run.kind.listing(),
+        window: Window::new(first, last).map_err(|_| ImportRefusal::RangeBackwards {
+            from: first,
+            to: last,
+        })?,
+        granularity: Granularity::Second1,
+    };
+    for day in early {
+        let key = format!("{} {day} {filter}", run.kind.as_str());
+        if matches!(ctx.owed(&key), Owed::Nothing) {
+            continue;
+        }
+        if report.days_before_range == 0 {
+            note_reach_back(ctx, day);
+        }
+        report.days_before_range += 1;
+        let state = (&mut *report, &mut *flags);
+        widen(ctx, &reach, (&key, day), state, &mut *census, read_day)?;
+    }
+    Ok(())
+}
+
+/// Says, at `warn` and once a run, that the run reads days before its range:
+/// `first` is the earliest day of the range's first month that is closed
+/// `done` and owes this run's scope a member (D-4878, DB-B76). The run was
+/// not asked for those days, so it never reads them unsaid.
+fn note_reach_back(ctx: &Ctx<'_>, first: Day) {
+    let (first, from) = (first.to_string(), ctx.run.from.to_string());
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            TARGET,
+            "done days before the range owe this scope; they are read first",
+        )
+        .with("kind", ctx.run.kind.as_str())
+        .with("run", ctx.id)
+        .with("code", "scope_reach_back")
+        .with("first_owed", first.as_str())
+        .with("range_from", from.as_str()),
+    );
+}
+
+/// Says, at `warn` and once a run, that the scope ledger holds a torn line:
+/// the fragment a killed write left, stepped over by the load and written
+/// again whole by the run that needs it (D-4878).
+fn note_torn(ctx: &Ctx<'_>) {
+    let Some(scoped) = &ctx.scoped else {
+        return;
+    };
+    let torn = scoped.ledger.borrow().torn();
+    if torn > 0 {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                TARGET,
+                "the scope ledger holds a torn line; it is stepped over",
+            )
+            .with("kind", ctx.run.kind.as_str())
+            .with("run", ctx.id)
+            .with("code", "scope_ledger_torn")
+            .with("lines", torn),
+        );
+    }
+}
+
+/// A DAY DONE UNDER A NARROWER SCOPE IS NOT DONE FOR THE MEMBERS ITS CLOSE
+/// NEVER COVERED (WP-12f, D-4878): each such member with a file that day is
+/// read under a key of its own, `<filter>+<member>`, so its hole never takes
+/// the day's other members out of `done`; the base key is not read again.
+/// Answers whether the day was such a day, and so is not read whole.
+///
+/// The day is counted and told ONCE, after its last member key: one "day
+/// imported" (or "day incomplete", "day refused": the worst of its member
+/// keys' closes) and one more in `days_imported`, when the run closed at
+/// least one member key on it. Each member key tells its own close
+/// ([`Closed::Member`]).
+fn widen<F>(
+    ctx: &Ctx<'_>,
+    request: &BarRequest,
+    (key, day): (&str, Day),
+    (report, flags): (&mut Report, &mut quality::Ledger),
+    census: &mut dyn Census,
+    read_day: &mut F,
+) -> Result<bool, ImportRefusal>
+where
+    F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
+{
+    let (members, examined) = match ctx.owed(key) {
+        Owed::Nothing => return Ok(false),
+        Owed::Pending(members) => (members, false),
+        Owed::Probe(beyond) => match probe(ctx, (key, day), request, &beyond, report, read_day) {
+            Some(present) => (present, true),
+            None => return Ok(true),
+        },
+    };
+    report.days_widened += 1;
+    let before = Mark::of(report);
+    let (mut closed, mut worst) = (0_usize, Outcome::Done);
+    for member in &members {
+        let pass = Pass {
+            key: &format!("{key}+{member}"),
+            day,
+            member: Some(member),
+        };
+        let state = (&mut *report, &mut *flags);
+        if let Some(outcome) = day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
+            closed += 1;
+            worst = worse(worst, outcome);
+        }
+    }
+    if examined {
+        note_examined(ctx, (key, day), members.len(), report);
+    }
+    if closed > 0 {
+        report.days_imported += 1;
+        let told = (worst, Closed::Widened { members: closed });
+        note_day(ctx.run.kind, day, told, (before, report));
+    }
+    Ok(true)
 }
 
 /// One key of one day: a base key and every file the run wants, or a member
@@ -4964,7 +5188,7 @@ where
         extras
             .present
             .into_iter()
-            .filter(|member| !ctx.journal.done.contains(&format!("{key}+{member}")))
+            .filter(|member| !ctx.settled(&format!("{key}+{member}")))
             .collect(),
     )
 }
@@ -4979,12 +5203,18 @@ fn note_examined(ctx: &Ctx<'_>, (key, day): (&str, Day), opened: usize, report: 
     };
     report.members_reopened += opened;
     let digest = scoped.record.digest();
-    let written = {
-        let mut ledger = scoped.ledger.borrow_mut();
-        ledger
-            .record(ctx.run.kind.as_str(), scoped.record)
-            .and_then(|()| ledger.examine(key, digest, (ctx.id, opened)))
-    };
+    // The run's `run` line is in the journal before the ledger names its id:
+    // a run that opened no member key wrote no other journal line, and its
+    // id was then one the next run could take as its own.
+    let written = ctx
+        .announce()
+        .map_err(|why| why.to_string())
+        .and_then(|()| {
+            let mut ledger = scoped.ledger.borrow_mut();
+            ledger
+                .record(ctx.run.kind.as_str(), scoped.record)
+                .and_then(|()| ledger.examine(key, digest, (ctx.id, opened)))
+        });
     let day_text = day.to_string();
     match written {
         Ok(()) => {
@@ -5015,13 +5245,20 @@ fn day_pass<F>(
     (report, flags): (&mut Report, &mut quality::Ledger),
     census: &mut dyn Census,
     read_day: &mut F,
-) -> Result<(), ImportRefusal>
+) -> Result<Option<Outcome>, ImportRefusal>
 where
     F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
 {
     let (run, key, day) = (ctx.run, pass.key, pass.day);
+    // A request's window is its range check: a day outside it would have
+    // every row dropped and still close.
+    debug_assert!(
+        request.window.contains(day),
+        "{day} is read under a request that does not hold it"
+    );
     if pass.member.is_some() {
-        name_retried(ctx.journal, run.kind, (key, day, false), report);
+        let retried = ctx.options.retry_refused && ctx.journal.with_refusals.contains(key);
+        name_retried(ctx.journal, run.kind, (key, day, retried), report);
     }
     let before = Mark::of(report);
     let mut files_of_day = DayFiler::of_day(ctx, (key, day), request, report);
@@ -5059,7 +5296,7 @@ where
     take_read((run.kind, day), (read, extras), report, &mut failures);
     if !held_day {
         close_missing(ctx, (key, day), report, failures);
-        return Ok(());
+        return Ok(None);
     }
     // A member key's close never writes the whole-day line of the day
     // ledger: that line is the base close's (D-4878, D-3335).
@@ -5080,12 +5317,18 @@ where
             (why, room),
         ));
     }
-    if pass.member.is_none() {
-        report.days_imported += 1;
-    }
+    // A DAY IS COUNTED ONCE: here for a day read whole, and in [`widen`] for
+    // a day read again for a wider scope, after its last member key.
+    let closed = match pass.member {
+        None => {
+            report.days_imported += 1;
+            Closed::Day
+        }
+        Some(member) => Closed::Member { member, key },
+    };
     let outcome = close_day(ctx, (key, day), (before, report, day_back), &mut failures);
-    record_close(run.kind, (day, outcome), (before, report), failures);
-    Ok(())
+    record_close(run.kind, (day, outcome, closed), (before, report), failures);
+    Ok(Some(outcome))
 }
 
 /// Makes the day's batch durable (WP-16, D-3353), on [`FLUSH_THREADS`], and
@@ -5199,20 +5442,27 @@ fn take_read(
 /// logs its one summary event ([`note_day`]).
 fn record_close(
     kind: ImportKind,
-    (day, outcome): (Day, Outcome),
+    (day, outcome, closed): (Day, Outcome, Closed<'_>),
     (before, report): (Mark, &mut Report),
     failures: Vec<Staged>,
 ) {
+    // A DAY IS NAMED ONCE however many of its member keys closed that way
+    // (D-4878): the days of a run ascend, so the day is the list's last.
+    let named = |days: &mut Vec<Day>| {
+        if days.last() != Some(&day) {
+            days.push(day);
+        }
+    };
     match outcome {
         Outcome::Done => {}
-        Outcome::DoneWithRefusals => report.closed_with_refusals.push(day),
-        Outcome::Incomplete => report.closed_incomplete.push(day),
-        Outcome::Refused => report.closed_refused.push(day),
+        Outcome::DoneWithRefusals => named(&mut report.closed_with_refusals),
+        Outcome::Incomplete => named(&mut report.closed_incomplete),
+        Outcome::Refused => named(&mut report.closed_refused),
     }
     report
         .failures
         .extend(failures.into_iter().map(|one| one.failure));
-    note_day(kind, day, outcome, (before, report));
+    note_day(kind, day, (outcome, closed), (before, report));
 }
 
 /// "run finished", with how its days closed (D-3317).

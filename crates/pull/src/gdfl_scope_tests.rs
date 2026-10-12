@@ -166,8 +166,9 @@ fn a_wider_scope_reads_a_done_day_again_for_its_new_members_only() {
             wide.days_imported,
             wide.files
         ),
-        (3, 3, 0, 0, 3),
-        "each done day is read again for the one new member, and nothing else"
+        (3, 3, 0, 3, 3),
+        "each done day is read again for the one new member, and nothing else; a day so \
+         read is a day imported, counted once"
     );
     let in_order = run_on(&root, ImportKind::Indices, range, &whole, Some(stored())).unwrap();
     assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
@@ -273,13 +274,15 @@ fn a_close_with_no_scope_is_read_as_the_swept_surface() {
 /// days, done under the narrow scope, are read again and land through the
 /// versioned month repair (D-3350), and the month ends holding what an
 /// in-order import holds.
+///
+/// The shape is built later day first: no run of this build makes it from
+/// days already done (`a_run_starting_past_owed_days_of_its_month_reads_them_first`),
+/// but the real store holds it from the run of 10 Oct 2026.
 #[test]
 fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
     let root = scratch("wp12f-sparse");
     world(&root, &[d1(), d2(), d3()]);
     let (store, whole) = (root.join("S"), root.join("whole"));
-    let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
-    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
     let late = run_on(
         &root,
         ImportKind::Indices,
@@ -289,6 +292,8 @@ fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
     )
     .unwrap();
     assert!(late.failures.is_empty(), "{:?}", late.failures);
+    let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
     let only_late = month(&store, "INDEX", "INDIAVIX");
     assert!(!only_late.is_empty(), "the month holds the later day alone");
 
@@ -428,14 +433,35 @@ fn a_filtered_key_opens_no_member_its_filter_does_not_name() {
         (1, 0, 0),
         "the new members are not the filter's"
     );
-    assert_eq!(journal_text(&store), journal, "no member key, no line");
+    // NO MEMBER KEY, NO DAY LINE: the journal gains the run's own `run` line
+    // and nothing else, and the id the scope ledger names is that line's, so
+    // no id is written that the journal does not hold.
+    let now = journal_text(&store);
+    let added: Vec<&str> = now
+        .strip_prefix(journal.as_str())
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(added.len(), 1, "{added:?}");
+    let id = added[0]
+        .strip_prefix("run ")
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap();
     assert!(!held(&store, "INDEX", "INDIAVIX"));
+    let ledger = scopes_text(&store);
     assert!(
-        scopes_text(&store).trim_end().ends_with(" opened=0 ."),
-        "examined, and remembered"
+        ledger
+            .trim_end()
+            .ends_with(&format!(" run={id} opened=0 .")),
+        "examined, remembered, and by a run the journal holds: {ledger}"
     );
     let again = filtered(Some(stored()));
     assert_eq!((again.days_skipped, again.days_widened), (1, 0));
+    assert_eq!(
+        journal_text(&store),
+        now,
+        "a run that examines nothing writes nothing"
+    );
 
     let whole = run_on(
         &root,
@@ -477,7 +503,11 @@ fn a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run() {
     )
     .unwrap();
     assert!(wide.failures.is_empty(), "{:?}", wide.failures);
-    assert_eq!((wide.days_widened, wide.days_imported), (1, 1));
+    assert_eq!(
+        (wide.days_widened, wide.days_imported),
+        (1, 2),
+        "the first day for its new member, the second whole"
+    );
     let reread = scope::Ledger::load(path.clone()).unwrap();
     assert_eq!(reread.torn(), 1, "the fragment stays a fragment");
     assert!(
@@ -510,6 +540,333 @@ fn a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run() {
         assert_eq!(journal_text(&store), journal, "{foreign:?}");
         assert_eq!(tree(&store.join("bars")), bars, "{foreign:?}");
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A MEMBER KEY'S CLOSE IS THE MEMBER'S EVENT, AND THE DAY IS TOLD ONCE
+/// (WP-12f repair 1). The import's pace is measured from the gaps between
+/// "day imported" stamps, so a member key that told its close as "day
+/// imported" made one day of N new members read as N days, and no event said
+/// which member had closed. One day, two new members: two "member imported"
+/// events, each naming its member and its journal key, then ONE "day
+/// imported" for the day, and one day in `days_imported`.
+#[test]
+fn a_member_keys_close_is_told_as_the_members_and_the_day_is_told_once() {
+    let root = scratch("wp12f-told");
+    let on = d1();
+    let file = |stem: &str, base: u32| {
+        (
+            entry_of(Tree::Indices, on, stem),
+            index_file(stem, on, base),
+        )
+    };
+    world_of(
+        &root,
+        &[(
+            on,
+            Tree::Indices,
+            vec![
+                file("NIFTY 50.NSE_IDX", 22_000),
+                file("NIFTY BANK.NSE_IDX", 47_000),
+                file("INDIA VIX.NSE_IDX", 13),
+                file("NIFTY IT.NSE_IDX", 35_000),
+            ],
+        )],
+    );
+    let store = root.join("S");
+    let _earlier = summaries_taken();
+
+    let narrow = run_on(&root, ImportKind::Indices, (on, on), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let told = summaries_taken();
+    assert_eq!(told.len(), 1, "a day read whole tells one event: {told:?}");
+    assert_eq!(told[0].words, "day imported");
+    assert!(!told[0].text.contains_key("member"), "{told:?}");
+
+    let wide = run_on(&root, ImportKind::Indices, (on, on), &store, Some(stored())).unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!(
+        (
+            wide.days_widened,
+            wide.members_reopened,
+            wide.days_imported,
+            wide.files
+        ),
+        (1, 2, 1, 2),
+        "one day, two members: the day is counted once"
+    );
+    let told = summaries_taken();
+    let journal = journal_text(&store);
+    let members: Vec<&Summary> = told
+        .iter()
+        .filter(|event| event.words == "member imported")
+        .collect();
+    assert_eq!(
+        members
+            .iter()
+            .map(|event| event.text["member"].as_str())
+            .collect::<Vec<_>>(),
+        ["NSE-INDEX-INDIAVIX", "NSE-INDEX-NIFTYIT"],
+        "each member key tells its own close, by name: {told:?}"
+    );
+    for event in &members {
+        let key = &event.text["key"];
+        assert_eq!(
+            key,
+            &format!("indices {on} *+{}", event.text["member"]),
+            "the journal key of the member"
+        );
+        assert_eq!(
+            lines_starting(&journal, &format!("done {key} ")),
+            1,
+            "the event's key is the closing line's: {journal}"
+        );
+        assert_eq!(event.text["day"], on.to_string());
+        assert!(!event.warn);
+    }
+    let days: Vec<&Summary> = told
+        .iter()
+        .filter(|event| event.words == "day imported")
+        .collect();
+    assert_eq!(days.len(), 1, "ONE day event for the day: {told:?}");
+    assert!(!days[0].text.contains_key("member"));
+    assert_eq!(
+        told.last().map(|event| event.words.as_str()),
+        Some("day imported"),
+        "after its last member key"
+    );
+    assert_eq!(told.len(), 3, "and nothing else: {told:?}");
+
+    // A re-run tells nothing: nothing closed.
+    let again = run_on(&root, ImportKind::Indices, (on, on), &store, Some(stored())).unwrap();
+    assert_eq!((again.days_skipped, again.days_imported), (1, 0));
+    assert_eq!(summaries_taken(), []);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A NEW MEMBER'S MONTH IS NEVER MADE FROM A LATER DAY WHILE AN EARLIER DAY OF
+/// IT IS OWED (WP-12f repair 1; DB-B76's "a new member is never created from
+/// special days alone"). On 10 Oct 2026 six index series were made from the
+/// 12 special sessions while every regular day before them was closed `done`
+/// for two indices; every later landing in such a month is a new full copy
+/// of it. A run whose range starts past done days of its first month reads
+/// those days first for the members they owe, in order: the month is made
+/// from its first owed day, nothing is repaired, and it holds what an
+/// in-order import holds.
+#[test]
+fn a_run_starting_past_owed_days_of_its_month_reads_them_first() {
+    let root = scratch("wp12f-reach");
+    world(&root, &[d1(), d2(), d3()]);
+    let (store, whole) = (root.join("S"), root.join("whole"));
+    let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let before = month(&store, "INDEX", "NIFTY");
+
+    let late = run_on(
+        &root,
+        ImportKind::Indices,
+        (d3(), d3()),
+        &store,
+        Some(stored()),
+    )
+    .unwrap();
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    assert_eq!(
+        (
+            late.days_before_range,
+            late.days_widened,
+            late.members_reopened,
+            late.days_imported,
+            late.months_repaired
+        ),
+        (2, 2, 2, 3, 0),
+        "the two owed days first, then the day asked for; no month is repaired"
+    );
+    let in_order = run_on(
+        &root,
+        ImportKind::Indices,
+        (d1(), d3()),
+        &whole,
+        Some(stored()),
+    )
+    .unwrap();
+    assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
+    for symbol in ["INDIAVIX", "NIFTY", "BANKNIFTY"] {
+        assert_eq!(
+            month(&store, "INDEX", symbol),
+            month(&whole, "INDEX", symbol),
+            "{symbol}: exactly what an in-order import holds"
+        );
+    }
+    let after = tree(&store.join("bars"));
+    assert!(
+        !after
+            .keys()
+            .any(|path| path.to_string_lossy().contains("bar-revisions")),
+        "no generation of any month: {:?}",
+        after.keys().collect::<Vec<_>>()
+    );
+    let nifty = month(&store, "INDEX", "NIFTY");
+    assert!(
+        nifty.len() > before.len() && nifty.starts_with(&before),
+        "an old member's month is only appended to"
+    );
+    // The owed days' member keys are closed BEFORE the asked day's line.
+    let journal = journal_text(&store);
+    let at = |head: &str| {
+        journal
+            .find(head)
+            .unwrap_or_else(|| panic!("{head}: {journal}"))
+    };
+    let asked = at(&format!("done indices {} * ", d3()));
+    for owed in [d1(), d2()] {
+        assert!(
+            at(&format!("done indices {owed} *+NSE-INDEX-INDIAVIX ")) < asked,
+            "{owed} lands first: {journal}"
+        );
+    }
+    let ledger = scopes_text(&store);
+
+    // A second run reaches back for nothing and writes nothing.
+    let again = run_on(
+        &root,
+        ImportKind::Indices,
+        (d3(), d3()),
+        &store,
+        Some(stored()),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            again.days_before_range,
+            again.days_widened,
+            again.days_skipped,
+            again.files
+        ),
+        (0, 0, 1, 0)
+    );
+    assert_eq!(journal_text(&store), journal);
+    assert_eq!(scopes_text(&store), ledger);
+
+    // A DAY BEFORE THE RANGE THAT NO RUN CLOSED IS NOT THE RUN'S: only a done
+    // day owes anything, so a store that never read the earlier days reads
+    // the asked day alone and writes no line of another.
+    let fresh = root.join("fresh");
+    let alone = run_on(
+        &root,
+        ImportKind::Indices,
+        (d3(), d3()),
+        &fresh,
+        Some(stored()),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            alone.days_before_range,
+            alone.days_widened,
+            alone.days_imported
+        ),
+        (0, 0, 1)
+    );
+    let fresh_journal = journal_text(&fresh);
+    for other in [d1(), d2()] {
+        assert!(
+            !fresh_journal.contains(&format!(" {other} ")),
+            "{other}: {fresh_journal}"
+        );
+    }
+
+    // The reach is the range's own month and never past it: at most 30 days.
+    assert_eq!(before_range(d3()), [d1(), d2()]);
+    assert_eq!(before_range(d1()), []);
+    let march = before_range(Day::new(2024, 3, 31).unwrap());
+    assert_eq!(march.len(), 30);
+    assert_eq!(
+        (march.first().copied(), march.last().copied()),
+        (
+            Some(Day::new(2024, 3, 1).unwrap()),
+            Some(Day::new(2024, 3, 30).unwrap())
+        )
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// `retry_refused` READS AGAIN A MEMBER KEY CLOSED DONE WITH REFUSALS, as it
+/// does a base key (D-3317): without the flag the member key is done and
+/// skipped; with it the member's file is read again, nothing is written
+/// twice, and the key closes again by what the reader says now. The closing
+/// line with refusals is written here as the importer writes one, over a
+/// member key the wide run closed.
+#[test]
+fn retry_refused_reads_again_a_member_key_closed_with_refusals() {
+    let root = scratch("wp12f-retry");
+    world(&root, &[d1()]);
+    let store = root.join("S");
+    let on = (d1(), d1());
+    let narrow = run_on(&root, ImportKind::Indices, on, &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let wide = run_on(&root, ImportKind::Indices, on, &store, Some(stored())).unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    let journal = journal_text(&store);
+    let head = format!("done indices {} *+NSE-INDEX-INDIAVIX ", d1());
+    let clean = journal
+        .lines()
+        .find(|line| line.starts_with(&head))
+        .unwrap();
+    assert!(clean.contains(" failures=0 "), "{clean}");
+    let (stats, run) = clean.rsplit_once(" run=").unwrap();
+    let refusing = format!(
+        "{} vendor_refused=1 reason=price_refused run={run}",
+        stats.replace(" failures=0 ", " failures=1 ")
+    );
+    std::fs::write(journal_path(&store), format!("{journal}{refusing}\n")).unwrap();
+
+    let source = TickStore::new(&root.join("ts")).with_scope(stored());
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: d1(),
+        to: d1(),
+        only: &[],
+        store_root: &store,
+    };
+    let plain = run_cm(&source, &run).unwrap();
+    assert_eq!(
+        (plain.days_skipped, plain.days_widened, plain.files),
+        (1, 0, 0),
+        "done with refusals is done: {:?}",
+        plain.failures
+    );
+    let retry = RunOptions {
+        retry_refused: true,
+        ..RunOptions::default()
+    };
+    let retried = run_cm_from(&source, &run, retry).unwrap();
+    assert!(retried.failures.is_empty(), "{:?}", retried.failures);
+    assert_eq!(
+        (
+            retried.days_widened,
+            retried.files,
+            retried.seconds_committed
+        ),
+        (1, 1, 0),
+        "the member's file is read again and nothing is written twice"
+    );
+    assert_eq!(retried.resumed, vec![d1()]);
+    let last = journal_text(&store);
+    let closes: Vec<&str> = last
+        .lines()
+        .filter(|line| line.starts_with(&head))
+        .collect();
+    assert_eq!(closes.len(), 3, "{last}");
+    assert!(
+        closes[2].contains(" failures=0 ") && !closes[2].contains("vendor_refused"),
+        "the key closes by what the reader says now: {}",
+        closes[2]
+    );
+    // Clean again, the flag has nothing to read.
+    let settled = run_cm_from(&source, &run, retry).unwrap();
+    assert_eq!((settled.days_skipped, settled.files), (1, 0));
+    assert_eq!(journal_text(&store), last);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -559,7 +916,7 @@ fn a_trade_for_trade_spell_is_filed_under_its_shares_key() {
     let wide = run_on(&root, ImportKind::Stocks, (on, on), &store, Some(stored())).unwrap();
     assert_eq!(
         (wide.days_widened, wide.days_imported),
-        (1, 0),
+        (1, 1),
         "{:?}",
         wide.failures
     );
