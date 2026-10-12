@@ -67724,11 +67724,25 @@ made six index series from the 12 special sessions alone.
    is the day's, told once after its last member key, and the day is counted
    once in `days_imported`: the import's pace is measured from the gaps
    between "day imported" stamps.
-6. The done days of a run's first month that lie before its range and owe
-   its scope a member are read first, in order, and the run says so at
-   `warn` (`scope_reach_back`). No member's month is made from a later day
-   while an earlier day of it is owed. At most 30 days; a day no run closed
-   owes nothing and is not read.
+6. The done days of a run's first month that lie before its range are asked
+   what they owe the run, and what they owe is read first, in order. The run
+   says so at `warn` (`scope_reach_back`, with `first_owed=` and the `key=`
+   that owed it), once, when it reads a file of such a day; a day it only
+   lists is told at `info`. WHOSE CLOSE IS ASKED (repair 2, 12 Oct 2026): a
+   day the run's own key closed is that key's; any other day is asked of
+   EVERY key that closed it `done`, whatever its filter, the whole-day key
+   `*` among them. Such a key owes the members its close's scope never
+   covered that its own filter names, and the run reads the ones its own
+   filter wants under that key's member keys (`<that filter>+<member>`).
+   That the key was examined for this run's filter is remembered as
+   `examined <kind> <day> <that filter>/<the run's filter> ...`, never under
+   the key itself, so the key's own run still reads the members this filter
+   did not want. A member two keys owe is read once, and the day is counted
+   and told once. So no member's month is made from a later day while a day
+   of that month closed `done` by ANY run owes it, under a filter
+   (`--stored`, a named symbol) as under none. At most 30 days. A day no run
+   closed owes nothing, and a key closed under names owes nothing it did not
+   name (`docs/06-limits.md`, L-WP12f-7).
 7. `retry_refused` reads again a member key closed done with refusals.
 8. A share's `.BE` or `.BZ` day file is the share's own trading day, filed
    under the share's key; the member is `NSE-CASH-<share>.<series>`. A day
@@ -67751,4 +67765,6 @@ an index file (DB-B18), the six stem hand-overs (DB-B12).
 `a_trade_for_trade_spell_is_filed_under_its_shares_key`,
 `a_member_keys_close_is_told_as_the_members_and_the_day_is_told_once`,
 `a_run_starting_past_owed_days_of_its_month_reads_them_first`,
+`a_filtered_run_reads_first_what_the_whole_day_key_owes_it`,
+`a_key_closed_under_names_owes_only_what_it_named`,
 `retry_refused_reads_again_a_member_key_closed_with_refusals`.

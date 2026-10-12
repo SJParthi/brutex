@@ -494,6 +494,7 @@ fn a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run() {
     std::fs::write(&path, format!("{whole}examined indices 2024-04-0")).unwrap();
     let loaded = scope::Ledger::load(path.clone()).unwrap();
     assert_eq!(loaded.torn(), 1);
+    let _earlier = summaries_taken();
     let wide = run_on(
         &root,
         ImportKind::Indices,
@@ -503,6 +504,13 @@ fn a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run() {
     )
     .unwrap();
     assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    // The fragment is said, once, at `warn`, by the run that met it.
+    let said: Vec<Summary> = summaries_taken()
+        .into_iter()
+        .filter(|one| one.text.get("code").map(String::as_str) == Some("scope_ledger_torn"))
+        .collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].warn);
     assert_eq!(
         (wide.days_widened, wide.days_imported),
         (1, 2),
@@ -787,6 +795,379 @@ fn a_run_starting_past_owed_days_of_its_month_reads_them_first() {
             Some(Day::new(2024, 3, 1).unwrap()),
             Some(Day::new(2024, 3, 30).unwrap())
         )
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Three invented index days of four files each: the two swept indices and
+/// two the stored scope adds.
+fn four_index_days(root: &Path) {
+    let plan: Vec<DayPlan> = [d1(), d2(), d3()]
+        .into_iter()
+        .map(|on| {
+            let file = |stem: &str, base: u32| {
+                (
+                    entry_of(Tree::Indices, on, stem),
+                    index_file(stem, on, base),
+                )
+            };
+            (
+                on,
+                Tree::Indices,
+                vec![
+                    file("NIFTY 50.NSE_IDX", 22_000),
+                    file("NIFTY BANK.NSE_IDX", 47_000),
+                    file("INDIA VIX.NSE_IDX", 13),
+                    file("NIFTY IT.NSE_IDX", 35_000),
+                ],
+            )
+        })
+        .collect();
+    world_of(root, &plan);
+}
+
+/// One indices run under a filter, and how many day listings it asked for.
+fn filtered_on(
+    root: &Path,
+    (from, to): (Day, Day),
+    store: &Path,
+    only: &[String],
+    scope: Option<Arc<CmScope>>,
+) -> (Report, usize) {
+    let source = TickStore::new(&root.join("ts"));
+    let source = match scope {
+        Some(scope) => source.with_scope(scope),
+        None => source,
+    };
+    let counting = Counting {
+        inner: &source,
+        listed: AtomicUsize::new(0),
+    };
+    let run = Run {
+        kind: ImportKind::Indices,
+        from,
+        to,
+        only,
+        store_root: store,
+    };
+    let report = run_cm(&counting, &run).unwrap();
+    (report, counting.listed.load(Ordering::Relaxed))
+}
+
+/// The journal with every `scope=` taken out and no scope ledger: the lines
+/// every build before scopes were recorded wrote.
+fn as_before_scopes(store: &Path) {
+    let mut legacy = String::new();
+    for line in journal_text(store).lines() {
+        let kept: Vec<&str> = line
+            .split(' ')
+            .filter(|field| !field.starts_with("scope="))
+            .collect();
+        legacy.push_str(&kept.join(" "));
+        legacy.push('\n');
+    }
+    std::fs::write(journal_path(store), &legacy).unwrap();
+    std::fs::remove_file(scope::scopes_path(store)).unwrap();
+}
+
+/// The summary events of this thread that carry `code`.
+fn told_with(told: &[Summary], code: &str) -> Vec<Summary> {
+    told.iter()
+        .filter(|one| one.text.get("code").map(String::as_str) == Some(code))
+        .cloned()
+        .collect()
+}
+
+/// A RUN UNDER A FILTER ASKS EVERY KEY THAT CLOSED AN EARLIER DAY, THE
+/// WHOLE-DAY KEY AMONG THEM (WP-12f repair 2; DB-B76 clause 2). Two days are
+/// closed `done` under `*` for the swept surface. A run of the third day
+/// alone under a filter (one named symbol; and the names the stored scope
+/// adds, which is `cli`'s `--stored`) used to ask only its own key, find
+/// nothing closed, and make each new member's month from the third day
+/// alone, with no warning: the 10 Oct shape. It now reads the two owed days
+/// first for the members its filter wants, under the whole-day key's member
+/// keys, says so at `warn`, and repairs nothing. What it remembers is its own
+/// (`*/<filter>`), so the unfiltered run that follows still reads the
+/// members the filter did not name.
+#[test]
+fn a_filtered_run_reads_first_what_the_whole_day_key_owes_it() {
+    for (name, only, legacy) in [
+        ("one", vec!["INDIAVIX".to_owned()], false),
+        (
+            "stored",
+            vec!["INDIAVIX".to_owned(), "NIFTYIT".to_owned()],
+            true,
+        ),
+    ] {
+        let root = scratch(&format!("wp12f-lent-{name}"));
+        four_index_days(&root);
+        let (store, whole) = (root.join("S"), root.join("whole"));
+        let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+        assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+        assert_eq!(narrow.files, 4, "two days of the two swept indices");
+        if legacy {
+            as_before_scopes(&store);
+        }
+        let filter = only.join(",");
+        let wanted = only.len();
+        let _earlier = summaries_taken();
+
+        let (late, _) = filtered_on(&root, (d3(), d3()), &store, &only, Some(stored()));
+        assert!(late.failures.is_empty(), "{name}: {:?}", late.failures);
+        assert_eq!(
+            (
+                late.days_before_range,
+                late.days_widened,
+                late.members_reopened,
+                late.days_imported,
+                late.files,
+                late.months_repaired
+            ),
+            (2, 2, 2 * wanted, 3, 3 * wanted, 0),
+            "{name}: the two owed days first, then the day asked for; nothing repaired"
+        );
+        let told = summaries_taken();
+        let reach = told_with(&told, "scope_reach_back");
+        assert_eq!(reach.len(), 1, "{name}: said once: {told:?}");
+        assert!(reach[0].warn, "{name}");
+        assert_eq!(reach[0].text["first_owed"], d1().to_string(), "{name}");
+        assert_eq!(reach[0].text["key"], format!("indices {} *", d1()));
+        assert_eq!(
+            told.iter()
+                .filter(|one| one.words == "day imported")
+                .count(),
+            3,
+            "{name}: each day told once: {told:?}"
+        );
+
+        // The owed days' members are closed under the WHOLE-DAY key's member
+        // keys, before the asked day's line.
+        let journal = journal_text(&store);
+        let at = |head: &str| {
+            journal
+                .find(head)
+                .unwrap_or_else(|| panic!("{name}: {head}: {journal}"))
+        };
+        let asked = at(&format!("done indices {} {filter} ", d3()));
+        for owed in [d1(), d2()] {
+            assert!(
+                at(&format!("done indices {owed} *+NSE-INDEX-INDIAVIX ")) < asked,
+                "{name}: {owed} lands first: {journal}"
+            );
+            assert!(
+                !journal.contains(&format!("indices {owed} {filter}")),
+                "{name}: no key of the filter's own on a day it was not asked for"
+            );
+        }
+        // What it remembers is its own, never the whole-day key's.
+        let ledger = scopes_text(&store);
+        for owed in [d1(), d2()] {
+            assert_eq!(
+                lines_starting(
+                    &ledger,
+                    &format!("examined indices {owed} */{filter} scope=")
+                ),
+                1,
+                "{name}: {ledger}"
+            );
+            assert_eq!(
+                lines_starting(&ledger, &format!("examined indices {owed} * ")),
+                0,
+                "{name}: {ledger}"
+            );
+        }
+
+        // Exactly what an in-order import holds, and no generation of a month.
+        let in_order = run_on(
+            &root,
+            ImportKind::Indices,
+            (d1(), d3()),
+            &whole,
+            Some(stored()),
+        )
+        .unwrap();
+        assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
+        for symbol in &only {
+            assert_eq!(
+                month(&store, "INDEX", symbol),
+                month(&whole, "INDEX", symbol),
+                "{name}: {symbol}"
+            );
+        }
+        assert!(
+            !tree(&store.join("bars"))
+                .keys()
+                .any(|path| path.to_string_lossy().contains("bar-revisions")),
+            "{name}: no month was repaired"
+        );
+
+        // A second run under the same filter lists no day and writes nothing.
+        let _told = summaries_taken();
+        let (again, listed) = filtered_on(&root, (d3(), d3()), &store, &only, Some(stored()));
+        assert_eq!(
+            (
+                again.days_before_range,
+                again.days_widened,
+                again.days_skipped,
+                again.files,
+                listed
+            ),
+            (0, 0, 1, 0, 0),
+            "{name}"
+        );
+        assert_eq!(journal_text(&store), journal, "{name}");
+        assert_eq!(scopes_text(&store), ledger, "{name}");
+        assert_eq!(summaries_taken(), [], "{name}");
+
+        // THE UNFILTERED RUN THAT FOLLOWS reads what the filter did not name
+        // and nothing the filter read: in order, so nothing is repaired.
+        let rest = run_on(
+            &root,
+            ImportKind::Indices,
+            (d1(), d3()),
+            &store,
+            Some(stored()),
+        )
+        .unwrap();
+        assert!(rest.failures.is_empty(), "{name}: {:?}", rest.failures);
+        assert_eq!(
+            (rest.members_reopened, rest.months_repaired),
+            (2 * (2 - wanted), 0),
+            "{name}: the members the filter left, once each"
+        );
+        for symbol in ["NIFTY", "BANKNIFTY", "INDIAVIX", "NIFTYIT"] {
+            assert_eq!(
+                month(&store, "INDEX", symbol),
+                month(&whole, "INDEX", symbol),
+                "{name}: {symbol} after the unfiltered run"
+            );
+        }
+        let ledger = scopes_text(&store);
+        assert_eq!(
+            lines_starting(&ledger, &format!("examined indices {} * scope=", d1())),
+            1,
+            "{name}: the whole-day key is examined by its own run: {ledger}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A KEY CLOSED UNDER NAMES OWES ONLY WHAT IT NAMED, AND A DAY TWO KEYS
+/// CLOSED IS READ AND TOLD ONCE (WP-12f repair 2). Two days are closed under
+/// the filter `INDIAVIX,NIFTY` while the scope filed NIFTY alone, so that
+/// close owes INDIAVIX and never NIFTYIT, which it did not name:
+///
+/// - a run of the third day under `NIFTYIT` lists the two days once, reads
+///   nothing of them, says nothing at `warn`, and remembers it;
+/// - a run of the third day under `INDIAVIX` reads the two days first, under
+///   that key's member keys;
+/// - with the first day ALSO closed under `*`, both keys owe INDIAVIX: it is
+///   read once, under the first key asked, and the day is told once.
+#[test]
+fn a_key_closed_under_names_owes_only_what_it_named() {
+    let root = scratch("wp12f-named");
+    four_index_days(&root);
+    let lender = ["INDIAVIX".to_owned(), "NIFTY".to_owned()];
+    let close_two = |store: &Path| {
+        let (narrow, _) = filtered_on(&root, (d1(), d2()), store, &lender, None);
+        assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+        assert_eq!(narrow.files, 2, "NIFTY alone: the scope files no INDIAVIX");
+    };
+
+    // NIFTYIT: not named by the key that closed the days, so not owed.
+    let store = root.join("S");
+    close_two(&store);
+    let other = ["NIFTYIT".to_owned()];
+    let _earlier = summaries_taken();
+    let (alone, listed) = filtered_on(&root, (d3(), d3()), &store, &other, Some(stored()));
+    assert!(alone.failures.is_empty(), "{:?}", alone.failures);
+    assert_eq!(
+        (
+            alone.days_before_range,
+            alone.days_widened,
+            alone.members_reopened,
+            alone.days_imported,
+            alone.files,
+            listed
+        ),
+        (0, 2, 0, 1, 1, 3),
+        "two days listed and nothing of them read"
+    );
+    assert_eq!(told_with(&summaries_taken(), "scope_reach_back"), []);
+    let journal = journal_text(&store);
+    assert!(!journal.contains("+NSE-INDEX-NIFTYIT"), "{journal}");
+    let ledger = scopes_text(&store);
+    assert_eq!(
+        lines_starting(
+            &ledger,
+            &format!("examined indices {} INDIAVIX,NIFTY/NIFTYIT scope=", d1())
+        ),
+        1,
+        "{ledger}"
+    );
+    assert!(ledger.trim_end().ends_with(" opened=0 ."), "{ledger}");
+    let (again, listed) = filtered_on(&root, (d3(), d3()), &store, &other, Some(stored()));
+    assert_eq!((again.days_widened, listed), (0, 0), "remembered");
+
+    // INDIAVIX: named and never covered, so owed and read first.
+    let vix = ["INDIAVIX".to_owned()];
+    let (late, _) = filtered_on(&root, (d3(), d3()), &store, &vix, Some(stored()));
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    assert_eq!(
+        (
+            late.days_before_range,
+            late.members_reopened,
+            late.days_imported,
+            late.months_repaired
+        ),
+        (2, 2, 3, 0)
+    );
+    let journal = journal_text(&store);
+    for owed in [d1(), d2()] {
+        assert!(
+            journal.contains(&format!(
+                "done indices {owed} INDIAVIX,NIFTY+NSE-INDEX-INDIAVIX "
+            )),
+            "{owed}: {journal}"
+        );
+    }
+
+    // TWO KEYS CLOSED THE FIRST DAY and both owe INDIAVIX: read once, under
+    // the first key asked (`*` sorts first), and the day is told once.
+    let both = root.join("both");
+    close_two(&both);
+    let star = run_on(&root, ImportKind::Indices, (d1(), d1()), &both, None).unwrap();
+    assert!(star.failures.is_empty(), "{:?}", star.failures);
+    let _earlier = summaries_taken();
+    let (late, _) = filtered_on(&root, (d2(), d2()), &both, &vix, Some(stored()));
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    assert_eq!(
+        (
+            late.days_before_range,
+            late.days_widened,
+            late.members_reopened,
+            late.days_imported,
+            late.files
+        ),
+        (1, 2, 1, 2, 2),
+        "one day before the range, two keys asked, one member read once"
+    );
+    let told = summaries_taken();
+    assert_eq!(
+        told.iter()
+            .filter(|one| one.words == "day imported")
+            .count(),
+        2,
+        "the first day once, the asked day once: {told:?}"
+    );
+    let journal = journal_text(&both);
+    assert!(
+        journal.contains(&format!("done indices {} *+NSE-INDEX-INDIAVIX ", d1())),
+        "{journal}"
+    );
+    assert!(
+        !journal.contains(&format!("indices {} INDIAVIX,NIFTY+", d1())),
+        "not read a second time under the other key: {journal}"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1107,7 +1488,7 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
     for d in &all {
         let key = format!("stocks {d} *");
         let at = std::time::Instant::now();
-        let owed = ctx.owed(&key);
+        let owed = ctx.owed(&key, &key);
         nanos.push(at.elapsed().as_nanos());
         let Owed::Probe(beyond) = owed else {
             panic!("{d}: a close with no scope owes the members beyond the swept surface");
@@ -1154,7 +1535,7 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
     for d in &all {
         let key = format!("stocks {d} *");
         let at = std::time::Instant::now();
-        let owed = ctx.owed(&key);
+        let owed = ctx.owed(&key, &key);
         nanos.push(at.elapsed().as_nanos());
         assert!(matches!(owed, Owed::Nothing), "{d}");
     }

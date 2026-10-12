@@ -16587,16 +16587,49 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   of about 105 bytes per series-day, NOT MEASURED at full size. NOT DONE:
   landing a month's owed days in one repair, one generation a month.
 - **L-WP12f-6. A run reads owed days before its range only inside its first
-  month.** At most 30 days, one hash probe each when nothing is owed. Owed
-  days of EARLIER months are not reached: they stay owed, and land as their
-  own months when a run's range covers them.
-- **L-WP12f-7. A day no run closed is not owed.** A run asked for one later
-  day on a store that never read the earlier days of that month makes each
-  member's month from that day, a special session included; nothing is
-  skipped, so nothing is refused or warned, and the earlier days land later
-  through the versioned repair (L-WP12f-5 then applies to that month).
+  month.** At most 30 days: one hash probe for a day no run closed, and for
+  a closed one what one key's debt costs (one compare of digests and two
+  hash probes when it owes nothing) per key that closed it, so O(filters
+  that closed the day), which is the operator's own few. The journal's load
+  builds that index once, O(done keys). Owed days of EARLIER months are not
+  reached: they stay owed, and land as their own months when a run's range
+  covers them.
+- **L-WP12f-7. A day no run closed is not owed, and a key closed under names
+  owes nothing it did not name.** A run asked for one later day on a store
+  that never read the earlier days of that month makes each member's month
+  from that day, a special session included. The same holds where the
+  earlier days were closed only under a filter that did not name the member
+  (days closed under `NIFTY,BANKNIFTY` owe INDIAVIX nothing). No run was
+  ever asked for those members on those days, so nothing is skipped and
+  nothing is refused or warned; the earlier days land later through the
+  versioned repair (L-WP12f-5 then applies to that month). A day closed
+  `done` under `*`, or under a filter that named the member, IS owed and is
+  read first, whatever the later run's filter (D-4878 item 6).
 - **L-WP12f-8. An options run records no scope**, so an options day is done
   for whatever its run read. NOT DONE: what a member is for options is open.
 - **L-WP12f-9. Two imports on one store are not kept apart by a run-level
   lock.** They fail loudly per month and leave duplicate generation files
-  (the second agent's check of 12 Oct 2026). NOT DONE.
+  (the second agent's check of 12 Oct 2026). Two runs started in the same
+  second take the same run id. NOT DONE.
+- **L-WP12f-10. An owed day the run's source does not hold is a named
+  failure of every run that reaches back to it.** A day closed `done` that
+  owes the run a member and whose listing the source cannot give
+  (`scope_reopen_unreadable`) fails the run (rc 1) and stays unexamined, on
+  every run of that month, until a run from a source that holds the day
+  examines it. After a scope change (L-WP12f-1) an import from a delivery
+  that holds only new days names up to 30 such failures a run. That is the
+  loud outcome, on purpose: the month is then being made without days it is
+  owed. NOT DONE: an outcome the scheduler can tell from a broken source
+  (IA-17, IA-3).
+- **L-WP12f-11. What one filter's run does for another filter's key is
+  remembered per pair, and a day read whole is not credited to another
+  key.** (a) Each distinct filter that reaches back over a key it did not
+  close writes one `examined` line per day per scope
+  (`<that filter>/<its own>`); a `--stored` stocks filter is some 200 names
+  long, so such a line is about 2 KB. (b) While such a key holds a member
+  key that is not `done`, every run under another filter lists that day
+  again (one listing, nothing read unless its filter wants the member).
+  (c) A run under a filter that reads an IN-RANGE day whole, under its own
+  key, does not close the whole-day key's member keys: the unfiltered run
+  reads those members of that day again, finds every bar present and writes
+  none. Bounded by the days such a run was asked for; NOT MEASURED.

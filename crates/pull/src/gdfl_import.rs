@@ -1951,10 +1951,12 @@ pub struct Report {
     pub days_widened: usize,
     /// Member keys this run read on such days, one per member with a file.
     pub members_reopened: usize,
-    /// How many of `days_widened` lie BEFORE the run's range: done days of
-    /// the range's first month that owed this run's scope a member and were
-    /// read first, so no member's month is made from a later day while an
-    /// earlier one is owed (D-4878, DB-B76).
+    /// The days BEFORE the run's range it read a member of: done days of the
+    /// range's first month that owed this run a member the day holds a file
+    /// of, read first, so no member's month is made from a later day while an
+    /// earlier one is owed (D-4878, DB-B76). Each is in `days_widened`, once
+    /// per key that closed it; a day only listed, with no file to read, is
+    /// in `days_widened` alone.
     pub days_before_range: usize,
     /// Days that were imported this run (clean or not): a day read whole,
     /// and a day read again for a wider scope on which the run closed at
@@ -2398,6 +2400,11 @@ struct Journal {
     /// for (`<kind> <day> <filter>+<member>`), whatever closed them: the
     /// members a wider scope reopened that day (D-4878).
     member_keys: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Per `<kind> <day>`, the filters whose base key is closed `done`, in
+    /// order (D-4878): every close a later run may ask what it owes
+    /// ([`reach_back`]). Built once at the load's end, O(done keys); one
+    /// hash probe to read.
+    closed_by: HashMap<String, Vec<String>>,
 }
 
 impl Journal {
@@ -2464,6 +2471,23 @@ impl Journal {
             .iter()
             .filter_map(|key| key.rsplit_once(' ').map(|(day, _only)| day.to_owned()))
             .collect();
+        // Once, O(done keys): which filters closed each day done. A member
+        // key (`<filter>+<member>`) is its base key's and is not one.
+        let mut closed_by: HashMap<String, Vec<String>> = HashMap::new();
+        for key in &journal.done {
+            if let Some((day, only)) = key.rsplit_once(' ')
+                && !only.contains('+')
+            {
+                closed_by
+                    .entry(day.to_owned())
+                    .or_default()
+                    .push(only.to_owned());
+            }
+        }
+        for filters in closed_by.values_mut() {
+            filters.sort_unstable();
+        }
+        journal.closed_by = closed_by;
         Ok(journal)
     }
 
@@ -2985,7 +3009,14 @@ impl Ctx<'_> {
     /// What `key`'s day, closed `done`, owes this run's scope: O(1) for a
     /// day that owes nothing (one compare of digests, two hash probes), and
     /// the members beyond a close's scope are computed once per scope.
-    fn owed(&self, key: &str) -> Owed {
+    ///
+    /// `remembered` is the key the scope ledger holds the examination under:
+    /// `key` itself for the run's own key. For a key another filter closed,
+    /// what it owes is the same, and whether this run's scope has examined
+    /// it for this run's filter is remembered under a key of that pair
+    /// ([`Asked::remembered`]), never under the key itself, whose own
+    /// examination is its own filter's to write.
+    fn owed(&self, key: &str, remembered: &str) -> Owed {
         let Some(scoped) = &self.scoped else {
             return Owed::Nothing;
         };
@@ -3000,7 +3031,7 @@ impl Ctx<'_> {
         }
         let done = |member: &String| self.settled(&format!("{key}+{member}"));
         let ledger = scoped.ledger.borrow();
-        if ledger.examined_under(key) == Some(now) {
+        if ledger.examined_under(remembered) == Some(now) {
             let pending: Vec<String> = self
                 .journal
                 .member_keys
@@ -3318,6 +3349,9 @@ struct DayExtras {
     present: Vec<String>,
 }
 
+/// The symbols a filter names, as a set.
+type Names = std::sync::Arc<HashSet<String>>;
+
 /// Which files of a day a reader is asked for (WP-12f, D-4878).
 #[derive(Debug, Clone, Default)]
 enum Ask {
@@ -3325,8 +3359,10 @@ enum Ask {
     #[default]
     All,
     /// None: only which of these members the day's listing holds a file of,
-    /// answered in [`DayExtras::present`]. Nothing is read or filed.
-    Probe(std::sync::Arc<HashSet<String>>),
+    /// answered in [`DayExtras::present`]. Nothing is read or filed. The
+    /// second is the names of the filter that closed the day, when it is not
+    /// the run's own and names any ([`Asked::names`]).
+    Probe(std::sync::Arc<HashSet<String>>, Option<Names>),
     /// The files of this one member, under the member's own key.
     One(String),
 }
@@ -4958,14 +4994,14 @@ where
     for day in days(run.from, run.to) {
         let key = format!("{} {day} {filter}", run.kind.as_str());
         let state = (&mut report, &mut flags);
-        if widen(
-            &ctx,
-            &request,
-            (&key, day),
-            state,
-            &mut *census,
-            &mut read_day,
-        )? {
+        let asked = Asked {
+            key: &key,
+            day,
+            remembered: &key,
+            names: None,
+            early: false,
+        };
+        if widen(&ctx, &request, &asked, state, &mut *census, &mut read_day)? {
             continue;
         }
         if !admit(&ctx, &key, day, &mut report) {
@@ -4992,17 +5028,63 @@ fn before_range(from: Day) -> Vec<Day> {
         .collect()
 }
 
+/// One key that closed a day `done`, asked what it owes this run (WP-12f,
+/// D-4878).
+#[derive(Clone, Copy)]
+struct Asked<'k> {
+    /// The base key whose close is asked: `<kind> <day> <filter>`.
+    key: &'k str,
+    day: Day,
+    /// The key the scope ledger remembers the examination under: `key` when
+    /// it is the run's own, `<key>/<the run's filter>` when another filter
+    /// closed it. `/` is in no symbol, so in no filter and no member.
+    remembered: &'k str,
+    /// The names of the filter that closed `key`, when it is not the run's
+    /// own and names any: `*` names none, which is every one.
+    names: Option<&'k Names>,
+    /// Whether the day lies before the run's range ([`reach_back`]).
+    early: bool,
+}
+
+impl Asked<'_> {
+    /// Whether the key is the run's own.
+    fn own(&self) -> bool {
+        self.key == self.remembered
+    }
+}
+
+/// The names a journal key's filter part lists: none for `*`, which names
+/// every one.
+fn names_of(filter: &str) -> Option<Names> {
+    (filter != "*").then(|| std::sync::Arc::new(filter.split(',').map(str::to_owned).collect()))
+}
+
 /// THE RUN'S FIRST MONTH FROM ITS FIRST OWED DAY (D-4878, DB-B76): the days
-/// of that month before the range that are closed `done` and owe this run's
-/// scope a member are read for it first, in order, so no member's month is
-/// made from a later day while an earlier one is still owed. A day no run
-/// closed owes nothing and is not read: the run was not asked for it.
+/// of that month before the range that are closed `done` and owe this run a
+/// member are read for it first, in order, so no member's month is made from
+/// a later day while an earlier one is still owed. A day no run closed owes
+/// nothing and is not read: the run was not asked for it.
+///
+/// WHOSE CLOSE IS ASKED (repair 2, 12 Oct 2026). A day the run's own key
+/// closed is that key's. Any other day is asked of EVERY key that closed it
+/// `done`, whatever its filter, the whole-day key `*` among them: such a key
+/// owes the members its close's scope never covered that its own filter
+/// names, and the run reads the ones its own filter wants, each under that
+/// key's member key (`<its filter>+<member>`), so the key's own later run
+/// finds them done. Asking only the run's own key let a run under a filter
+/// (`cli`'s `--stored`, or one named symbol) make each new member's month
+/// from one later day while the earlier days were closed done under `*` for
+/// two indices: the 10 Oct shape, unsaid. That such a key was examined for
+/// this run's filter is remembered under `<key>/<filter>` and never under
+/// the key itself, so its own run still reads the members this filter did
+/// not want.
 ///
 /// THOSE DAYS HAVE A REQUEST OF THEIR OWN: a request's window is its range
 /// check and a row outside it is dropped, so under the run's own request a
 /// day before the range would file nothing and still close `done`.
 ///
-/// At most 30 days, each one hash probe when it owes nothing.
+/// At most 30 days: one hash probe for a day no run closed, and for a closed
+/// one what [`Ctx::owed`] costs per key that closed it.
 fn reach_back<F>(
     ctx: &Ctx<'_>,
     filter: &str,
@@ -5018,6 +5100,9 @@ where
     let (Some(&first), Some(&last)) = (early.first(), early.last()) else {
         return Ok(());
     };
+    if ctx.scoped.is_none() {
+        return Ok(());
+    }
     let reach = BarRequest {
         instrument_id: String::new(),
         listing: run.kind.listing(),
@@ -5027,38 +5112,78 @@ where
         })?,
         granularity: Granularity::Second1,
     };
+    // Each other filter's names, split once a run.
+    let mut lenders: HashMap<&str, Option<Names>> = HashMap::new();
     for day in early {
-        let key = format!("{} {day} {filter}", run.kind.as_str());
-        if matches!(ctx.owed(&key), Owed::Nothing) {
+        let of_day = format!("{} {day}", run.kind.as_str());
+        let Some(closed_by) = ctx.journal.closed_by.get(&of_day) else {
+            continue;
+        };
+        let own = format!("{of_day} {filter}");
+        if ctx.journal.done.contains(&own) {
+            let asked = Asked {
+                key: &own,
+                day,
+                remembered: &own,
+                names: None,
+                early: true,
+            };
+            let state = (&mut *report, &mut *flags);
+            widen(ctx, &reach, &asked, state, &mut *census, read_day)?;
             continue;
         }
-        if report.days_before_range == 0 {
-            note_reach_back(ctx, day);
+        // THE DAY IS COUNTED AND TOLD ONCE, after the last key that closed
+        // it, and a member two of them owe is read once.
+        let mut widened = Widened::default();
+        for lender in closed_by {
+            let key = format!("{of_day} {lender}");
+            let remembered = format!("{key}/{filter}");
+            let names = lenders
+                .entry(lender.as_str())
+                .or_insert_with(|| names_of(lender));
+            let asked = Asked {
+                key: &key,
+                day,
+                remembered: &remembered,
+                names: names.as_ref(),
+                early: true,
+            };
+            let state = (&mut *report, &mut *flags);
+            widen_key(
+                ctx,
+                &reach,
+                &asked,
+                state,
+                &mut *census,
+                read_day,
+                &mut widened,
+            )?;
         }
-        report.days_before_range += 1;
-        let state = (&mut *report, &mut *flags);
-        widen(ctx, &reach, (&key, day), state, &mut *census, read_day)?;
+        widened.tell(ctx, day, report);
     }
     Ok(())
 }
 
 /// Says, at `warn` and once a run, that the run reads days before its range:
-/// `first` is the earliest day of the range's first month that is closed
-/// `done` and owes this run's scope a member (D-4878, DB-B76). The run was
-/// not asked for those days, so it never reads them unsaid.
-fn note_reach_back(ctx: &Ctx<'_>, first: Day) {
-    let (first, from) = (first.to_string(), ctx.run.from.to_string());
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::warn(
-            TARGET,
-            "done days before the range owe this scope; they are read first",
-        )
-        .with("kind", ctx.run.kind.as_str())
-        .with("run", ctx.id)
-        .with("code", "scope_reach_back")
-        .with("first_owed", first.as_str())
-        .with("range_from", from.as_str()),
-    );
+/// `asked` is the earliest key of the range's first month that is closed
+/// `done` and owes this run a member the day holds a file of (D-4878,
+/// DB-B76). The run was not asked for those days, so it never reads them
+/// unsaid; a day it only lists, and reads nothing of, is not one.
+fn note_reach_back(ctx: &Ctx<'_>, asked: &Asked<'_>) {
+    let (first, from) = (asked.day.to_string(), ctx.run.from.to_string());
+    let event = telemetry::Event::warn(
+        TARGET,
+        "done days before the range owe this scope; they are read first",
+    )
+    .with("kind", ctx.run.kind.as_str())
+    .with("run", ctx.id)
+    .with("code", "scope_reach_back")
+    .with("first_owed", first.as_str())
+    .with("key", asked.key)
+    .with("range_from", from.as_str());
+    #[cfg(test)]
+    tests::summary_emitted(&event);
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// Says, at `warn` and once a run, that the scope ledger holds a torn line:
@@ -5070,16 +5195,17 @@ fn note_torn(ctx: &Ctx<'_>) {
     };
     let torn = scoped.ledger.borrow().torn();
     if torn > 0 {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::warn(
-                TARGET,
-                "the scope ledger holds a torn line; it is stepped over",
-            )
-            .with("kind", ctx.run.kind.as_str())
-            .with("run", ctx.id)
-            .with("code", "scope_ledger_torn")
-            .with("lines", torn),
-        );
+        let event = telemetry::Event::warn(
+            TARGET,
+            "the scope ledger holds a torn line; it is stepped over",
+        )
+        .with("kind", ctx.run.kind.as_str())
+        .with("run", ctx.id)
+        .with("code", "scope_ledger_torn")
+        .with("lines", torn);
+        #[cfg(test)]
+        tests::summary_emitted(&event);
+        let _dropped_when_filtered = telemetry::emit(&event);
     }
 }
 
@@ -5094,10 +5220,16 @@ fn note_torn(ctx: &Ctx<'_>) {
 /// keys' closes) and one more in `days_imported`, when the run closed at
 /// least one member key on it. Each member key tells its own close
 /// ([`Closed::Member`]).
+///
+/// A KEY ANOTHER FILTER CLOSED ([`Asked::own`] is false; [`reach_back`]) is
+/// read the same way under its own member keys, for the members this run's
+/// filter wants. Which those are is the day's listing's to say, also for the
+/// member keys that key already has: another run opened them and this run's
+/// filter may want none.
 fn widen<F>(
     ctx: &Ctx<'_>,
     request: &BarRequest,
-    (key, day): (&str, Day),
+    asked: &Asked<'_>,
     (report, flags): (&mut Report, &mut quality::Ledger),
     census: &mut dyn Census,
     read_day: &mut F,
@@ -5105,17 +5237,82 @@ fn widen<F>(
 where
     F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
 {
-    let (members, examined) = match ctx.owed(key) {
+    let mut widened = Widened::default();
+    let state = (&mut *report, &mut *flags);
+    let was = widen_key(ctx, request, asked, state, census, read_day, &mut widened)?;
+    widened.tell(ctx, asked.day, report);
+    Ok(was)
+}
+
+/// What the keys of ONE day read again for a wider scope came to, so the day
+/// is counted and told once however many keys closed it (D-4878).
+#[derive(Default)]
+struct Widened {
+    /// Where the report stood before the day's first member key.
+    before: Option<Mark>,
+    /// The member keys closed, and the worst of their closes.
+    closed: usize,
+    worst: Option<Outcome>,
+    /// The members read this day, under whichever key: a member two keys owe
+    /// is read once.
+    taken: HashSet<String>,
+}
+
+impl Widened {
+    /// One "day imported" (or "day incomplete", "day refused") and one more
+    /// in `days_imported`, when the run closed a member key on the day.
+    fn tell(&self, ctx: &Ctx<'_>, day: Day, report: &mut Report) {
+        if let (Some(before), Some(worst)) = (self.before, self.worst) {
+            report.days_imported += 1;
+            let told = (
+                worst,
+                Closed::Widened {
+                    members: self.closed,
+                },
+            );
+            note_day(ctx.run.kind, day, told, (before, report));
+        }
+    }
+}
+
+/// [`widen`] for one key of the day, its closes gathered in `widened`.
+fn widen_key<F>(
+    ctx: &Ctx<'_>,
+    request: &BarRequest,
+    asked: &Asked<'_>,
+    (report, flags): (&mut Report, &mut quality::Ledger),
+    census: &mut dyn Census,
+    read_day: &mut F,
+    widened: &mut Widened,
+) -> Result<bool, ImportRefusal>
+where
+    F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
+{
+    let (key, day) = (asked.key, asked.day);
+    let (examined, members) = match ctx.owed(key, asked.remembered) {
         Owed::Nothing => return Ok(false),
-        Owed::Pending(members) => (members, false),
-        Owed::Probe(beyond) => match probe(ctx, (key, day), request, &beyond, report, read_day) {
-            Some(present) => (present, true),
-            None => return Ok(true),
-        },
+        Owed::Pending(members) if asked.own() => (false, Some(members)),
+        Owed::Pending(members) => {
+            let pending = std::sync::Arc::new(members.into_iter().collect());
+            let present = probe(ctx, asked, request, &pending, report, read_day);
+            (false, present)
+        }
+        Owed::Probe(beyond) => (true, probe(ctx, asked, request, &beyond, report, read_day)),
     };
+    let Some(mut members) = members else {
+        return Ok(true);
+    };
+    members.retain(|member| !widened.taken.contains(member));
     report.days_widened += 1;
-    let before = Mark::of(report);
-    let (mut closed, mut worst) = (0_usize, Outcome::Done);
+    if asked.early && !members.is_empty() && widened.taken.is_empty() {
+        if report.days_before_range == 0 {
+            note_reach_back(ctx, asked);
+        }
+        report.days_before_range += 1;
+    }
+    if widened.before.is_none() {
+        widened.before = Some(Mark::of(report));
+    }
     for member in &members {
         let pass = Pass {
             key: &format!("{key}+{member}"),
@@ -5124,18 +5321,14 @@ where
         };
         let state = (&mut *report, &mut *flags);
         if let Some(outcome) = day_pass(ctx, request, &pass, state, &mut *census, read_day)? {
-            closed += 1;
-            worst = worse(worst, outcome);
+            widened.closed += 1;
+            widened.worst = Some(widened.worst.map_or(outcome, |worst| worse(worst, outcome)));
         }
     }
     if examined {
-        note_examined(ctx, (key, day), members.len(), report);
+        note_examined(ctx, asked, members.len(), report);
     }
-    if closed > 0 {
-        report.days_imported += 1;
-        let told = (worst, Closed::Widened { members: closed });
-        note_day(ctx.run.kind, day, told, (before, report));
-    }
+    widened.taken.extend(members);
     Ok(true)
 }
 
@@ -5155,7 +5348,7 @@ struct Pass<'p> {
 /// unexamined, so the next run asks again.
 fn probe<F>(
     ctx: &Ctx<'_>,
-    (key, day): (&str, Day),
+    asked: &Asked<'_>,
     request: &BarRequest,
     beyond: &std::sync::Arc<HashSet<String>>,
     report: &mut Report,
@@ -5164,10 +5357,11 @@ fn probe<F>(
 where
     F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
 {
+    let (key, day) = (asked.key, asked.day);
     let (read, extras) = {
-        let mut asked = DayFiler::of_day(ctx, (key, day), request, report);
-        asked.ask = Ask::Probe(std::sync::Arc::clone(beyond));
-        read_day(day, &mut asked)
+        let mut filer = DayFiler::of_day(ctx, (key, day), request, report);
+        filer.ask = Ask::Probe(std::sync::Arc::clone(beyond), asked.names.cloned());
+        read_day(day, &mut filer)
     };
     if !read.held || !read.refused.is_empty() {
         let why = read.refused.first().map_or_else(
@@ -5193,14 +5387,17 @@ where
     )
 }
 
-/// Records that `key`'s day was examined under this run's scope, once every
-/// member key it opened is closed, and says so at `info`. A ledger that will
-/// not take the line is a named failure of the run; the day is then examined
-/// again by the next run, which finds its member keys done and reads no file.
-fn note_examined(ctx: &Ctx<'_>, (key, day): (&str, Day), opened: usize, report: &mut Report) {
+/// Records that `asked`'s key was examined under this run's scope, once
+/// every member key it opened is closed, and says so at `info`: under the key
+/// itself when it is the run's own, under [`Asked::remembered`] when another
+/// filter closed it. A ledger that will not take the line is a named failure
+/// of the run; the day is then examined again by the next run, which finds
+/// its member keys done and reads no file.
+fn note_examined(ctx: &Ctx<'_>, asked: &Asked<'_>, opened: usize, report: &mut Report) {
     let Some(scoped) = &ctx.scoped else {
         return;
     };
+    let (key, day) = (asked.remembered, asked.day);
     report.members_reopened += opened;
     let digest = scoped.record.digest();
     // The run's `run` line is in the journal before the ledger names its id:
@@ -5222,6 +5419,7 @@ fn note_examined(ctx: &Ctx<'_>, (key, day): (&str, Day), opened: usize, report: 
                 &telemetry::Event::info(TARGET, "a done day was read again for a wider scope")
                     .with("kind", ctx.run.kind.as_str())
                     .with("day", day_text.as_str())
+                    .with("key", key)
                     .with("scope", digest)
                     .with("members_reopened", opened),
             );
@@ -5561,9 +5759,9 @@ where
         let member = match &filer.ask {
             Ask::All => None,
             Ask::One(member) => Some(member.clone()),
-            Ask::Probe(wanted) => {
+            Ask::Probe(wanted, lender) => {
                 let (read, mut extras) = listed.close(Vec::new()).0;
-                extras.present = cm_present(run, listing, wanted);
+                extras.present = cm_present((run, lender.as_deref()), listing, wanted);
                 return (read, extras);
             }
         };
@@ -5731,11 +5929,17 @@ fn cm_jobs<'a, L>(
 /// member whose file is filed under a symbol the filter does not name is not
 /// the run's to read, so a filtered key never opens a member key that would
 /// close with no file.
+///
+/// `lender` is the names of the filter that closed the day, when another
+/// filter than the run's did and it names any: that close was asked for
+/// those names alone, so it owes no member filed under another.
 fn cm_present<L>(
-    run: &Run<'_>,
+    (run, lender): (&Run<'_>, Option<&HashSet<String>>),
     listing: &crate::gdfl_cm::DayListing<L>,
     wanted: &HashSet<String>,
 ) -> Vec<String> {
+    let asks =
+        |symbol: &str| run.wants(symbol) && lender.is_none_or(|names| names.contains(symbol));
     let folder = format!("{}/", listing.folder());
     let mut seen = HashSet::new();
     let mut present = Vec::new();
@@ -5754,9 +5958,9 @@ fn cm_present<L>(
             continue;
         }
         let asked = match listing.filing(stem) {
-            Ok(Some(key)) => run.wants(key.underlying.as_str()),
+            Ok(Some(key)) => asks(key.underlying.as_str()),
             Ok(None) => false,
-            Err(why) => why.filed_as().is_none_or(|symbol| run.wants(symbol)),
+            Err(why) => why.filed_as().is_none_or(asks),
         };
         if asked && seen.insert(member.clone()) {
             present.push(member);

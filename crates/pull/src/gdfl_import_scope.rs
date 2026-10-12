@@ -45,6 +45,22 @@
 //!   the run's id.
 //! - A torn line of this ledger is said at `warn` (`scope_ledger_torn`).
 //!
+//! # Whose close a run asks (repair 2, 12 Oct 2026)
+//!
+//! The reach-back above asked only the run's own key, so a run under a
+//! filter (`cli`'s `--stored`, one named symbol) met days closed `done`
+//! under `*`, found its own key closed nowhere, and made each new member's
+//! month from its one later day, unsaid. A day before the range that the
+//! run's own key did not close is now asked of EVERY key that closed it
+//! `done`. Such a key owes the members its close's scope never covered that
+//! its own filter names; the run reads the ones its own filter wants, under
+//! that key's member keys, so the key's own later run finds them done. The
+//! examination is remembered here under `<that filter>/<the run's filter>`
+//! in the `<filter>` place of an `examined` line (`/` is in no symbol), and
+//! never under the key itself: its own run still reads the members this
+//! filter did not want. A member two keys owe is read once and the day is
+//! told once.
+//!
 //! # Lines and crashes
 //!
 //! Append-only (`CLAUDE.md` §1). Every line ends ` .`: a line without that
