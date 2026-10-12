@@ -366,18 +366,31 @@ fn month_answer(
         bars::page_cancellable(&file, begins, ends.saturating_sub(begins), cancel)?;
 
     let segment = brutex_core::instrument::Segment::parse(&asked.segment).ok();
-    let (out, mut withheld) = bars_array_of(&rows, from_micros, to_micros, segment);
-    faults.append(&mut withheld);
+    let (out, withheld) = bars_array_of(&rows, from_micros, to_micros, segment);
+    for one in withheld {
+        faults.push(one);
+    }
 
     // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
     // read and what it could not; dropping the second half would draw a chart
     // with a hole in it and no way to know.
+    //
+    // COALESCED AND CAPPED, NEVER ONE SENTENCE PER RECORD (DB-B75): a month
+    // whose `.crc` was lost answered 188,619,461 bytes here, every record its
+    // own copy of the path. `faulted_records` keeps the whole count.
     if !faults.is_empty() {
+        let records = faults.records();
         return Ok((
             axum::http::StatusCode::PARTIAL_CONTENT,
             format!(
-                r#"{{"bars":{out},"faults":{}}}"#,
-                render::json_string(&faults.join("; "))
+                r#"{{"bars":{out},"faulted_records":{records},"faults":{}}}"#,
+                faults_json(
+                    &faults
+                        .sentences()
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                )
             ),
         ));
     }
@@ -1154,7 +1167,7 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
         }))
     };
     let body = format!(
-        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"sort_index":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faults":{},"bars":{rows}}}"#,
+        r#"{{"total":{},"offset":{},"months_read":{},"months_missing":{},"missing_months":{missing},"months_outside_life":{},"scanned":{scanned},"scan_rows":{},"sort_index":{},"at_index":{},"series_totals":{totals},"superseded_by":{superseded},"supersedes":{copied_in},"extremes":{extremes},"extremes_why":{},"coverage":{coverage},"faulted_records":{},"faults":{},"bars":{rows}}}"#,
         window.total,
         window.offset,
         window.months_read,
@@ -1169,6 +1182,7 @@ pub(super) fn render_window(window: &bars::Window, scanned: bool) -> (String, us
             .extremes_why
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
+        window.faulted_records,
         faults_json(&faults)
     );
     (body, withheld.len(), !window.faults.is_empty())

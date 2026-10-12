@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
-import { createInspectionReader, inspectionState, savedResultsUrl, INITIAL_INSPECTION, INSPECTION_MESSAGE } from '../src/lib/runtime-inspection.js';
+import { createInspectionReader, inspectionState, savedResultsUrl, INITIAL_INSPECTION, INSPECTION_MESSAGE,
+  buildOf, buildLabel, BUILD_HEADER } from '../src/lib/runtime-inspection.js';
 
 const declaration = () => ({ schema: 1, mode: 'read-only-main-app', can_sweep: false,
   can_pull: false, can_write: false, release_cleared: false,
@@ -128,4 +129,25 @@ test('actual Run and Descend functions stop before any sweep state or transport 
   const layout = readFileSync(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
   assert.match(layout, /runtimeInspection.value.why/);
   assert.match(layout, /void loadInspection\(\)/);
+});
+
+test('the build that answered is read from x-brutex-build and named on every page (DB-B71)', async () => {
+  const sha = 'b'.repeat(40);
+  const native = { schema: 2, mode: 'application', can_sweep: true, can_pull: true,
+    can_write: true, release_cleared: false, commit: sha };
+  const reader = createInspectionReader(async () => Response.json(native, { headers: { [BUILD_HEADER]: sha } }), () => {});
+  const state = await reader.load();
+  assert.equal(state.build, sha);
+  assert.equal(buildLabel(state.build), `build ${sha.slice(0, 12)}`);
+  assert.equal(buildOf(new Headers({ [BUILD_HEADER]: 'unstamped' })), 'unstamped');
+  assert.match(buildLabel('unstamped'), /unstamped .*not reproducible/);
+  for (const bad of ['B'.repeat(40), 'abc', '', 'unstamped-x']) {
+    assert.equal(buildOf(new Headers({ [BUILD_HEADER]: bad })), null, `refuse ${JSON.stringify(bad)}`);
+  }
+  assert.equal(buildOf(new Headers()), null);
+  assert.equal(buildLabel(null), 'build not reported by this server');
+  const legacy = await createInspectionReader(async () => new Response(null, { status: 404 }), () => {}).load();
+  assert.equal(legacy.build, null);
+  const layout = readFileSync(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
+  assert.match(layout, /buildLabel\(runtimeInspection\.value\.build\)/);
 });

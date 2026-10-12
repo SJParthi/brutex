@@ -104,6 +104,17 @@ pub(crate) const CENSUS_BEHIND_DAYS_HEADER: &str = "x-brutex-census-behind-days"
 /// The first such day, `YYYY-MM-DD`, or empty. D-3327.
 pub(crate) const CENSUS_BEHIND_FROM_HEADER: &str = "x-brutex-census-behind-from";
 
+/// The sentence naming how a migrated vendor's legacy single file changed
+/// since migration, or empty (DB-B70, WP-81). Non-empty makes the state word
+/// `behind` and leads `x-brutex-census-reason`.
+pub(crate) const CENSUS_LEGACY_DRIFT_HEADER: &str = "x-brutex-census-legacy-drift";
+
+/// Which census format answered: `v4-partitioned` for a migrated vendor,
+/// `v3-single` for one still in its single file, or empty when no census
+/// loaded (DB-B68, WP-81). A reader — or a deploy script comparing two
+/// builds — can tell from one header which census a number came from.
+pub(crate) const CENSUS_FORMAT_HEADER: &str = "x-brutex-census-format";
+
 /// Why the state is `capped` or `behind`, in a sentence; empty when it is
 /// neither.
 ///
@@ -161,7 +172,7 @@ pub(super) fn census_headers_with(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    let behind_days = behind.map_or(0, |behind| behind.days);
+    let behind_days = behind.map_or(0, Behind::state_days);
     headers.insert(
         axum::http::HeaderName::from_static(CENSUS_STATE_HEADER),
         // A feed with no row is `absent`, which is what
@@ -202,6 +213,10 @@ pub(super) fn census_headers_with(
         ),
         (CENSUS_EPOCH_HEADER, census.map_or_else(String::new, epochs)),
         (
+            CENSUS_FORMAT_HEADER,
+            census.map_or_else(String::new, format_word),
+        ),
+        (
             CENSUS_PART_GENERATIONS_HEADER,
             census.map_or_else(String::new, part_generations),
         ),
@@ -213,6 +228,10 @@ pub(super) fn census_headers_with(
         );
     }
     if let Some(behind) = behind {
+        headers.insert(
+            axum::http::HeaderName::from_static(CENSUS_LEGACY_DRIFT_HEADER),
+            note_header(behind.legacy.as_deref().unwrap_or_default()),
+        );
         headers.insert(
             axum::http::HeaderName::from_static(CENSUS_BEHIND_DAYS_HEADER),
             note_header(&if behind.kept {
@@ -227,6 +246,17 @@ pub(super) fn census_headers_with(
         );
     }
     headers
+}
+
+/// [`CENSUS_FORMAT_HEADER`]'s word for a census that loaded, or empty.
+fn format_word(census: &census::VendorCensus) -> String {
+    match census.state {
+        census::Census::Held { ref manifest } if manifest.is_partitioned() => {
+            "v4-partitioned".to_owned()
+        }
+        census::Census::Held { .. } => "v3-single".to_owned(),
+        census::Census::Absent | census::Census::Unreadable { .. } => String::new(),
+    }
 }
 
 /// Each partition's current epoch, as [`CENSUS_EPOCH_HEADER`] spells it.
@@ -281,6 +311,12 @@ fn part_generations(census: &census::VendorCensus) -> String {
 /// journal that could not be read.
 fn reason(room: Option<&census::Room>, behind: Option<&Behind>) -> String {
     let mut parts: Vec<String> = Vec::new();
+    if let Some(legacy) = behind.and_then(|behind| behind.legacy.as_ref()) {
+        parts.push(format!(
+            "legacy drift: {legacy}; `cli census-recount` counts them from the bar files \
+             (DB-B70)"
+        ));
+    }
     if let Some(behind) = behind {
         if behind.days > 0 {
             parts.push(format!(
@@ -318,6 +354,24 @@ pub(crate) struct Behind {
     pub(crate) kept: bool,
     /// Why the journal could not be read, when it could not.
     pub(crate) unread: Option<String>,
+    /// The migrated census's legacy single file has changed since migration
+    /// (DB-B70, WP-81): a writer built before version 4 appended months no
+    /// partition counts. The sentence names the receipt's length and the
+    /// current one; `None` when the vendor is not migrated or nothing moved.
+    pub(crate) legacy: Option<String>,
+}
+
+impl Behind {
+    /// The day count the state word is decided by: a census whose legacy file
+    /// drifted is `behind` even with no journal day behind, because months
+    /// are on disk that it does not count (DB-B70).
+    pub(crate) fn state_days(&self) -> u64 {
+        if self.legacy.is_some() {
+            self.days.max(1)
+        } else {
+            self.days
+        }
+    }
 }
 
 /// What [`behind`] last answered, and the journal and log reads it was
@@ -355,6 +409,22 @@ type BehindKept = (
 /// operator's store) made once per change of either, and kept against them;
 /// a request with neither changed is two pointer comparisons.
 pub(crate) fn behind(site: &Site, feed: Vendor) -> Behind {
+    // A PRE-VERSION-4 WRITER IS VISIBLE HERE, EVERY REQUEST (DB-B70, WP-81).
+    // The legacy single file stays beside a migrated vendor's partitions, and
+    // a binary built before version 4 (an old `cli`, an old api's pull) still
+    // appends to it; the version-4 census never reads it, so those months
+    // were invisible to every page. One small read of the receipt and one
+    // `lstat`, outside the journal cache below because neither read moves
+    // the journal.
+    let legacy = pull::ingest::census_store::legacy_drift(&site.store_root, feed);
+    Behind {
+        legacy,
+        ..journal_behind(site, feed)
+    }
+}
+
+/// [`behind`]'s import-journal half.
+fn journal_behind(site: &Site, feed: Vendor) -> Behind {
     // ONLY GDFL'S IMPORT KEEPS A JOURNAL (`pull::gdfl_import::journal_path`).
     // A broker pull records its runs in the audit journal, which says nothing
     // about a census refusal, so every other feed is not measured here and
@@ -641,7 +711,12 @@ pub(super) async fn store_json(
     use axum::response::IntoResponse as _;
     let head = method == axum::http::Method::HEAD;
     let result =
-        match crate::detail::run(move || store_response(&site, &asked_with, &uri, &method)).await {
+        // THE CENSUS POOL, NOT THE DETAIL POOL (DB-B51): the audit journal of
+        // every audited route takes `detail::run`'s four slots, and ten `/db`
+        // tabs opening at once starved both.
+        match crate::detail::run_census(move || store_response(&site, &asked_with, &uri, &method))
+            .await
+        {
             Ok(response) => response,
             Err(why) => (
                 if matches!(why, crate::detail::RunError::Saturated) {

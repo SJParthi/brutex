@@ -185,14 +185,11 @@ fn process_env(var: &str) -> Option<OsString> {
     std::env::var_os(var)
 }
 
-/// The CLI's store root, proved as every other verb proves it.
-fn cli_store() -> Result<PathBuf, String> {
-    crate::store_root()
-}
-
 /// The verb as dispatched: the process environment and the CLI's store root.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &process_env, &cli_store, out)
+    // AN UNSTAMPED BUILD DOES NOT WRITE THE DAY LEDGER (DB-B71, WP-81).
+    let store = crate::store_write::root_for("gdfl-dayflags", arguments);
+    command_with(arguments, &process_env, &store, out)
 }
 
 #[cfg(test)]

@@ -62,6 +62,8 @@ pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/census/facets.json", DATA),
     ("/chain.json", DATA),
     ("/imports.json", DATA),
+    ("/disk.json", DATA),
+    ("/scrub.json", DATA),
     ("/ingest/refusals.json", DATA),
     ("/dayflags.json", DATA),
     ("/aliases.json", DATA),

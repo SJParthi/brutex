@@ -43,6 +43,7 @@
   import { dirOf, bpsText, basisPoints } from '$lib/bps.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
+  import { fetchAdmitted } from '$lib/admitted-fetch.js';
   import { createPageRequests } from '$lib/page-requests.js';
   import { dayflagsUrl } from '$lib/db/dayflags.js';
   import DbCalendar from './DbCalendar.svelte';
@@ -730,7 +731,10 @@
         const lastClose = async (month) => {
           const q = new URLSearchParams({ feed, exchange: parts[0], segment: parts[1], symbol: o.underlying ?? '', timeframe: o.timeframe, from: month, to: month, dir: 'desc', limit: '1' });
           if (contract) q.set('contract', contract);
-          const r = await ask(`/bars/window.json?${q}`, { cache: 'no-store', signal: ticket.signal });
+          // A BUSY SERVER IS ASKED AGAIN (DB-B51, WP-81): a 429 here used to
+          // read as "no previous close", which is a different fact.
+          const r = await fetchAdmitted(`/bars/window.json?${q}`, { signal: ticket.signal },
+            (target, options) => ask(target, { ...options, cache: 'no-store' }));
           if (!r.ok) return null;
           const b = await r.json();
           const bar = Array.isArray(b?.bars) ? b.bars[0] : null;

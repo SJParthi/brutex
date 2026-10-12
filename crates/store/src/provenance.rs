@@ -1005,6 +1005,81 @@ impl std::error::Error for ProvenanceError {
     }
 }
 
+/// Which month the `.prv` beside a bar file says it was written for (DB-B65,
+/// WP-81).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrittenFor {
+    /// Nothing says: no `.prv`, one never born, one that is not a regular
+    /// file, or one whose header fails its own checksum, magic or version.
+    /// The month's only on-disk identity is then its bar header's symbol
+    /// hash, bar length and stamps.
+    Unrecorded,
+    /// A whole, sealed header that names this month's own store path.
+    ThisMonth,
+    /// A whole, sealed header that names a DIFFERENT month: the files were
+    /// copied or restored under another vendor, instrument, contract, bar
+    /// length or month.
+    Another {
+        /// The sidecar that says so.
+        sidecar: PathBuf,
+        /// The first field that is not this month's: `vendor`, `timeframe`,
+        /// `month` or `store path` (the instrument or the contract).
+        field: &'static str,
+    },
+}
+
+/// Which month the `.prv` beside the bar file `path` names, under `root`
+/// EXACTLY, says it was written for (DB-B65, WP-81).
+///
+/// # The gap this closes
+///
+/// A bar header's identity is the low 32 bits of the FNV-1a of the SYMBOL
+/// text, so the NIFTY index, every NIFTY option contract and both vendors
+/// carry one id (433894009): a month file copied by hand to a sibling strike,
+/// or between the index and a contract, opened cleanly and was served as the
+/// other instrument. The `.prv` header (D-3334) binds itself to the BLAKE3 of
+/// the whole store path — vendor, exchange, segment, symbol, contract, bar
+/// length, month — and [`read`] already refuses one that is not its month's;
+/// but nothing asked it when the BARS were opened. Every bar door now asks
+/// this first.
+///
+/// # What it refuses, and what it cannot
+///
+/// [`WrittenFor::Another`] needs positive evidence: a header that passes its
+/// own CRC-32C, magic and version and still names another month. A damaged,
+/// unborn, foreign-versioned or absent sidecar is [`WrittenFor::Unrecorded`]
+/// and refuses nothing here — [`read`] names that damage to whoever asks for
+/// the provenance. So a month written before D-3334, which has no `.prv`, is
+/// bound by its symbol hash alone until a landing gives it one; that limit is
+/// stated, not hidden.
+///
+/// # Cost
+///
+/// One `open` (never through a final symlink, never blocking) and one
+/// positional read of 64 bytes; for a month with no sidecar, the one `open`
+/// that answers `ENOENT`. `root` is used as given: a caller serving a repair
+/// revision passes that revision's root.
+#[must_use]
+pub fn written_for(root: &Path, path: StorePath<'_>) -> WrittenFor {
+    let at = path.with_file(FileKind::Provenance).to_path_buf(root);
+    let Ok(file) = crate::open_flags::open_read_no_follow(&at) else {
+        return WrittenFor::Unrecorded;
+    };
+    let mut head = [0u8; 64];
+    if !file.metadata().is_ok_and(|meta| meta.is_file())
+        || file.read_exact_at(&mut head, 0).is_err()
+    {
+        return WrittenFor::Unrecorded;
+    }
+    let Ok(header) = Header::decode(&head) else {
+        return WrittenFor::Unrecorded;
+    };
+    match header.differs_from(path) {
+        None => WrittenFor::ThisMonth,
+        Some(field) => WrittenFor::Another { sidecar: at, field },
+    }
+}
+
 /// The sidecar beside the month `path` names, if there is one.
 ///
 /// `path` may name any sibling of the month; the sidecar is its `.prv`, beside

@@ -23,13 +23,16 @@ use brutex_core::vendor::Vendor;
 use store::path::{Timeframe, YearMonth};
 
 use super::{
-    Checked, Location, Mode, Span, Target, close_journal, count_growing, current_epoch, cycle,
-    install_epoch, install_run, legacy_drift, locate, migrate, parse_day, read_epoch, record,
-    staging_dir, target_for, target_for_plan,
+    Checked, FEATURE_CENSUS_V4, Location, MIGRATION_RECEIPT, Mode, REQUIRES_CAP, REQUIRES_FORMAT,
+    REQUIRES_VOID, SEAL_RECEIPT, SEALED_VERSION, Span, Target, V4_READER_SINCE, close_journal,
+    count_growing, current_epoch, cycle, holds_sealed_stub, install_epoch, install_run,
+    legacy_drift, locate, migrate, parse_day, read_epoch, reader_refusal, record, require_feature,
+    requires_path, seal_legacy, sealed_stub, staging_dir, superseded_path, target_for,
+    target_for_plan,
 };
 use crate::manifest::{
-    Closes, Entry, EntryKey, FNO_FLOOR, Held, Manifest, epoch_path, manifest_path, segment_dir,
-    vendor_dir,
+    Closes, Entry, EntryKey, FNO_FLOOR, Held, Layout, Manifest, ManifestError, ManifestHeader,
+    epoch_path, manifest_path, segment_dir, vendor_dir,
 };
 use crate::session::Day;
 
@@ -392,11 +395,27 @@ fn a_migration_refuses_what_it_cannot_carry_and_names_later_drift() {
         "{receipt}"
     );
     assert_eq!(legacy_drift(root, Vendor::Gdfl), None, "unchanged since");
+    // THE SINGLE FILE IS SEALED AS IT IS SUPERSEDED (DB-B68): its bytes kept
+    // under the superseded name, its own name a stub old readers refuse.
+    assert!(
+        done.seal.as_ref().is_some_and(Result::is_ok),
+        "{:?}",
+        done.seal
+    );
+    assert_eq!(
+        std::fs::read(superseded_path(root, Vendor::Gdfl)).expect("kept"),
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(&legacy).expect("stub"),
+        sealed_stub(Vendor::Gdfl)
+    );
+    // A writer that is not this build replaces the stub: named.
     let mut grown = bytes.clone();
     grown.extend_from_slice(&[0u8; 128]);
     std::fs::write(&legacy, &grown).expect("it appended");
     let drift = legacy_drift(root, Vendor::Gdfl).expect("drift is named");
-    assert!(drift.contains("written to it since"), "{drift}");
+    assert!(drift.contains("no longer holds the seal"), "{drift}");
     assert_eq!(legacy_drift(root, Vendor::Zerodha), None, "not migrated");
     let again = migrate(root, Vendor::Gdfl).expect_err("refused");
     assert!(again.contains("already version 4"), "{again}");
@@ -1036,4 +1055,491 @@ fn a_commit_past_the_batch_is_refused_before_a_byte() {
     let why = super::write_batch(&path, &appends, |_| {}).expect_err("refused");
     assert!(why.to_string().contains("nothing was written"), "{why}");
     assert_eq!(std::fs::read(&path).expect("census"), before);
+}
+
+// ═══ The seal (DB-B68, WP-81) ═══════════════════════════════════════════════
+
+/// **THE STUB IS NO GEOMETRY ANY READER KNOWS.** Every reader resolves a
+/// version through `Layout::for_version` and refuses an unknown one by number
+/// — the reader a rollback starts (`tgt/app5`, built at b72371d8) has the same
+/// dispatch — so the stub is refused as `unknown manifest version 65535`, and
+/// a census at its name is never read, as held or as empty.
+#[test]
+fn the_seal_version_is_no_geometry_any_reader_knows() {
+    assert_eq!(
+        Layout::for_version(SEALED_VERSION),
+        Err(ManifestError::UnknownVersion(u16::MAX))
+    );
+    let stub = sealed_stub(Vendor::Gdfl);
+    assert_eq!(stub.len(), 32_768, "one whole header region");
+    assert_eq!(
+        ManifestHeader::decode(&stub[..64]),
+        Err(ManifestError::UnknownVersion(u16::MAX))
+    );
+    assert_eq!(
+        ManifestHeader::decode(&stub[16_384..16_384 + 64]),
+        Err(ManifestError::UnknownVersion(u16::MAX)),
+        "the second slot too, so no generation survives"
+    );
+    let refused = Manifest::open_image(Vendor::Gdfl, &stub).expect_err("refused");
+    assert_eq!(refused.to_string(), "unknown manifest version 65535");
+    let text = String::from_utf8_lossy(&stub);
+    assert!(text.contains("SEALED (DB-B68)") && text.contains(V4_READER_SINCE));
+}
+
+/// A store migrated BEFORE the seal existed — the operator's GDFL census of
+/// 10 Oct 2026 — is put back to that state here: the single file at its name,
+/// no superseded file, no seal receipt.
+fn unsealed(root: &Path) -> Vec<u8> {
+    let legacy = manifest_path(root, Vendor::Gdfl);
+    let kept = superseded_path(root, Vendor::Gdfl);
+    let bytes = std::fs::read(&kept).expect("the superseded census");
+    std::fs::remove_file(&legacy).expect("the stub removed");
+    std::fs::rename(&kept, &legacy).expect("the census back at its name");
+    std::fs::remove_file(vendor_dir(root, Vendor::Gdfl).join(SEAL_RECEIPT)).expect("no receipt");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    bytes
+}
+
+/// **AN ALREADY-MIGRATED VENDOR IS SEALED ONCE, AND A RERUN ONLY CONFIRMS
+/// IT.** The census's bytes are the superseded file's, the name holds the
+/// stub, the receipt names the kept file and the first version-4 reader, and
+/// nothing drifts.
+#[test]
+fn an_already_migrated_vendor_is_sealed_once_and_a_rerun_confirms_it() {
+    let scratch = Scratch::new("SEAL");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    let done = migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert!(done.seal.as_ref().is_some_and(Result::is_ok));
+    let bytes = unsealed(root);
+
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("sealed");
+    assert!(seal.wrote);
+    assert_eq!(seal.legacy_bytes, u64::try_from(bytes.len()).expect("len"));
+    assert_eq!(std::fs::read(&seal.superseded).expect("kept"), bytes);
+    assert!(holds_sealed_stub(&seal.legacy));
+    let receipt = std::fs::read_to_string(vendor_dir(root, Vendor::Gdfl).join(SEAL_RECEIPT))
+        .expect("the seal receipt");
+    assert!(
+        receipt.contains(&format!("superseded_bytes={}", bytes.len())),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("reader_since={V4_READER_SINCE}")),
+        "{receipt}"
+    );
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    // The partitions read as before: the seal touched no epoch.
+    assert!(matches!(
+        locate(root, Vendor::Gdfl),
+        Ok(Location::Partitioned(_))
+    ));
+
+    let again = seal_legacy(root, Vendor::Gdfl).expect("confirmed");
+    assert!(!again.wrote, "nothing written the second time");
+    assert_eq!(std::fs::read(&again.superseded).expect("kept"), bytes);
+}
+
+/// **THE SEAL RECEIPT IS READ, NEVER TRUSTED FOR ITS NAME, AND ITS NAME NEVER
+/// HOLDS HALF OF ONE (DB-B68).** The receipt was created at its final name
+/// and then written; a crash between the two left an empty `SEALED`, and
+/// every later seal run answered "already sealed, nothing was written" over
+/// zero bytes — the file a deploy reads `reader_since` from.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every shape a crash leaves, in one store"
+)]
+fn a_seal_receipt_no_seal_finished_writing_is_kept_aside_and_written_whole() {
+    use super::{SEAL_RECEIPT_FORMAT, SealReceipt, seal_receipt};
+    let scratch = Scratch::new("SEALRECEIPT");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    let done = migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert!(done.seal.as_ref().is_some_and(Result::is_ok));
+    let dir = vendor_dir(root, Vendor::Gdfl);
+    let at = dir.join(SEAL_RECEIPT);
+    let whole = std::fs::read_to_string(&at).expect("the receipt");
+    assert!(
+        whole.starts_with(&format!("{SEAL_RECEIPT_FORMAT}\n")),
+        "{whole}"
+    );
+    assert_eq!(seal_receipt(&at), Ok(SealReceipt::Whole));
+    assert!(
+        !dir.join("SEALED.tmp").exists(),
+        "the staged receipt was renamed, not left"
+    );
+    let names = |dir: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("listed")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("SEALED"))
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&dir), ["SEALED"]);
+
+    // EVERY SHAPE A CRASH MID-WRITE LEAVES: empty; cut inside the first
+    // line; cut before reader_since; cut inside reader_since (no newline);
+    // a reader_since that is no commit.
+    let cut_at = |word: &str| {
+        whole
+            .split_at(whole.find(word).expect("present"))
+            .0
+            .to_owned()
+    };
+    let torn = [
+        String::new(),
+        "format=census-se".to_owned(),
+        cut_at("stub_version="),
+        whole.trim_end_matches('\n').to_owned(),
+        whole.replace(V4_READER_SINCE, "not-a-commit"),
+        whole.replace("superseded_bytes=", "superseded_bytes=x"),
+    ];
+    for (n, bytes) in torn.iter().enumerate() {
+        std::fs::write(&at, bytes).expect("torn");
+        assert!(
+            matches!(seal_receipt(&at), Ok(SealReceipt::Torn(_))),
+            "{bytes:?}: {:?}",
+            seal_receipt(&at)
+        );
+        let seal = seal_legacy(root, Vendor::Gdfl).expect("confirmed and repaired");
+        assert!(seal.wrote, "{bytes:?}: a whole receipt was written");
+        let aside = seal.torn_receipt.expect("the torn bytes are kept");
+        assert_eq!(
+            std::fs::read_to_string(&aside).expect("kept"),
+            *bytes,
+            "byte for byte"
+        );
+        assert_eq!(std::fs::read_to_string(&at).expect("whole"), whole);
+        assert_eq!(seal_receipt(&at), Ok(SealReceipt::Whole));
+        assert_eq!(names(&dir).len(), n + 2, "one kept file per torn receipt");
+        let again = seal_legacy(root, Vendor::Gdfl).expect("confirmed");
+        assert!(!again.wrote && again.torn_receipt.is_none());
+    }
+
+    // A STAGED RECEIPT A CRASH LEFT is not the receipt and does not stop the
+    // next run.
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::write(dir.join("SEALED.tmp"), "format=census-se").expect("staged");
+    assert_eq!(seal_receipt(&at), Ok(SealReceipt::Absent));
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("written");
+    assert!(seal.wrote && seal.torn_receipt.is_none());
+    assert_eq!(std::fs::read_to_string(&at).expect("whole"), whole);
+    assert!(!dir.join("SEALED.tmp").exists());
+
+    // A LATER BUILD'S RECEIPT IS NOT THIS BUILD'S TO REPLACE: refused by
+    // name, left byte for byte.
+    let foreign = whole.replace(SEAL_RECEIPT_FORMAT, "format=census-seal-v2");
+    std::fs::write(&at, &foreign).expect("foreign");
+    assert_eq!(
+        seal_receipt(&at),
+        Ok(SealReceipt::Foreign("census-seal-v2".to_owned()))
+    );
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(
+        why.contains("SEALED")
+            && why.contains("census-seal-v2")
+            && why.contains("nothing was written"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).expect("left"), foreign);
+
+    // A NAME THAT IS NO REGULAR FILE is refused by name, at once.
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::create_dir(&at).expect("a directory");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(
+        why.contains("SEALED") && why.contains("not a regular file"),
+        "{why}"
+    );
+    std::fs::remove_dir(&at).expect("removed");
+    std::os::unix::fs::symlink(dir.join(MIGRATION_RECEIPT), &at).expect("a link");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(why.contains("SEALED"), "{why}");
+}
+
+/// **A SEAL REFUSES WHAT IT WOULD HIDE, AND FINISHES WHAT A CRASH LEFT.**
+/// Months a pre-version-4 writer appended since migration are refused by name,
+/// nothing written; a vendor not migrated has nothing to seal; a seal stopped
+/// between its link and its rename is completed by the next run, and that
+/// halfway state is no drift.
+#[test]
+fn a_seal_refuses_drift_and_an_unmigrated_vendor_and_finishes_an_interrupted_one() {
+    let scratch = Scratch::new("SEAL-REFUSE");
+    let root = scratch.root();
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("not migrated");
+    assert!(why.contains("is not migrated"), "{why}");
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let bytes = unsealed(root);
+    let legacy = manifest_path(root, Vendor::Gdfl);
+    let kept = superseded_path(root, Vendor::Gdfl);
+
+    let mut grown = bytes.clone();
+    grown.extend_from_slice(&[0_u8; 128]);
+    std::fs::write(&legacy, &grown).expect("an old writer appended");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("drift refused");
+    assert!(why.contains("Count those months first"), "{why}");
+    assert!(!kept.exists(), "nothing was written");
+    std::fs::write(&legacy, &bytes).expect("as migrated");
+
+    std::fs::hard_link(&legacy, &kept).expect("a seal stopped after its link");
+    assert_eq!(
+        legacy_drift(root, Vendor::Gdfl),
+        None,
+        "halfway is no write"
+    );
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("finished");
+    assert!(seal.wrote);
+    assert!(holds_sealed_stub(&legacy));
+    assert_eq!(std::fs::read(&kept).expect("kept"), bytes);
+    assert!(
+        vendor_dir(root, Vendor::Gdfl)
+            .join(MIGRATION_RECEIPT)
+            .exists()
+    );
+
+    // A superseded file of the right length that is NOT this census is
+    // refused rather than guessed at.
+    let other = Scratch::new("SEAL-OTHER");
+    let root = other.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let bytes = unsealed(root);
+    std::fs::write(superseded_path(root, Vendor::Gdfl), &bytes).expect("a copy, not a link");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(why.contains("refused rather than guess"), "{why}");
+}
+
+// ═══ What the store requires of its reader (DB-B68, WP-81) ══════════════════
+
+/// **A MIGRATION SAYS WHAT ITS CENSUS REQUIRES, ONCE, AND THIS BUILD HAS IT.**
+/// The requirements file is absent before any format change; the migration's
+/// seal writes the format line and one `census-v4` line for the vendor; a
+/// second seal and a second request write nothing; and the census is located
+/// as before.
+#[test]
+fn a_migration_records_the_reader_feature_its_census_requires() {
+    let scratch = Scratch::new("REQ");
+    let root = scratch.root();
+    let at = requires_path(root);
+    assert_eq!(at, root.join("manifest/REQUIRES"));
+    assert_eq!(reader_refusal(root, Vendor::Gdfl), None, "no file, no rule");
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let text = std::fs::read_to_string(&at).expect("written by the seal");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert_eq!(lines[0], REQUIRES_FORMAT);
+    assert!(
+        lines[1].starts_with(&format!(
+            "requires={FEATURE_CENSUS_V4} vendor=gdfl since={V4_READER_SINCE} at="
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with('\n'));
+    assert_eq!(
+        reader_refusal(root, Vendor::Gdfl),
+        None,
+        "this build has it"
+    );
+    assert!(matches!(
+        locate(root, Vendor::Gdfl),
+        Ok(Location::Partitioned(_))
+    ));
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(false),
+        "already in force"
+    );
+    assert!(!seal_legacy(root, Vendor::Gdfl).expect("confirmed").wrote);
+    assert_eq!(std::fs::read_to_string(&at).expect("unchanged"), text);
+    // Another vendor's requirement is its own line.
+    assert_eq!(
+        require_feature(root, Vendor::Zerodha, FEATURE_CENSUS_V4),
+        Ok(true)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&at).expect("grown").lines().count(),
+        3
+    );
+}
+
+/// **A CENSUS THAT NEEDS WHAT THIS BUILD LACKS IS REFUSED BY NAME, FOR THE
+/// VENDOR IT BINDS AND NO OTHER (DB-B68).** The failure a rollback met: a
+/// build read the shape it knew and served it as held. A line naming a
+/// feature this build does not have refuses `locate` for that vendor, naming
+/// the file, the line and the feature; `vendor=*` binds every vendor; a
+/// vendor the line does not name is located as before.
+#[test]
+fn a_census_requiring_an_unknown_feature_is_refused_for_the_vendor_it_binds() {
+    let scratch = Scratch::new("REQ-UNKNOWN");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let at = requires_path(root);
+    let mut text = std::fs::read_to_string(&at).expect("the seal's lines");
+    text.push_str("requires=census-v5 vendor=gdfl since=ffff at=1\n");
+    std::fs::write(&at, &text).expect("a later migration's line");
+
+    let why = reader_refusal(root, Vendor::Gdfl).expect("refused");
+    assert!(
+        why.contains("manifest/REQUIRES")
+            && why.contains("line 3")
+            && why.contains("\"census-v5\"")
+            && why.contains("this build does not have")
+            && why.contains("DB-B68"),
+        "{why}"
+    );
+    assert_eq!(locate(root, Vendor::Gdfl), Err(why.clone()));
+    assert!(
+        record(root, Vendor::Gdfl, &[row(1, 1)]).is_err(),
+        "and no writer of this build adds to a census it cannot read"
+    );
+    assert_eq!(reader_refusal(root, Vendor::Zerodha), None);
+    assert!(matches!(
+        locate(root, Vendor::Zerodha),
+        Ok(Location::Single(_))
+    ));
+
+    text.push_str("requires=bars-v4 vendor=* since=ffff at=2\n");
+    std::fs::write(&at, &text).expect("a store-wide line");
+    let every = reader_refusal(root, Vendor::Zerodha).expect("every vendor");
+    assert!(
+        every.contains("line 4") && every.contains("\"bars-v4\""),
+        "{every}"
+    );
+}
+
+/// **EVERY EXTREME OF THE FILE.** Empty; only an unfinished tail; a tail a
+/// writer voids and follows with its own line; duplicates; another format; a
+/// line of no known shape; a file too long to be one; and something at the
+/// name that is not a file. What cannot be told is refused, never read as
+/// "requires nothing"; an append that did not finish is never a rule.
+#[test]
+fn the_requirements_file_is_read_exactly_or_refused() {
+    let scratch = Scratch::new("REQ-EDGE");
+    let root = scratch.root();
+    let at = requires_path(root);
+    let say = |text: &str| {
+        std::fs::write(&at, text).expect("written");
+        reader_refusal(root, Vendor::Gdfl)
+    };
+    assert_eq!(say(""), None, "empty");
+    assert_eq!(say("\n\n"), None, "blank lines");
+    assert_eq!(
+        say(&format!(
+            "{REQUIRES_FORMAT}\nrequires=census-v4 vendor=gdfl\nrequires=census-v4 vendor=gdfl\n"
+        )),
+        None,
+        "a duplicate is the same rule twice"
+    );
+
+    // AN APPEND THAT DID NOT FINISH IS NOT A RULE, whatever it would have said.
+    assert_eq!(
+        say(&format!("{REQUIRES_FORMAT}\nrequires=census-v9 vendor=gd")),
+        None,
+        "no newline, not in force"
+    );
+    // THE NEXT WRITER VOIDS IT AND WRITES ITS OWN LINE AFTER, by append alone.
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(true)
+    );
+    let text = std::fs::read_to_string(&at).expect("grown");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[1],
+        format!("requires=census-v9 vendor=gd{REQUIRES_VOID}"),
+        "{text}"
+    );
+    assert!(
+        lines[2].starts_with("requires=census-v4 vendor=gdfl since="),
+        "{text}"
+    );
+    assert_eq!(lines.len(), 3, "the format line was already there: {text}");
+    assert_eq!(reader_refusal(root, Vendor::Gdfl), None);
+
+    let format = say("format=store-requires-v2\n").expect("another format");
+    assert!(
+        format.contains("declares format \"store-requires-v2\""),
+        "{format}"
+    );
+    for shapeless in ["census-v4 gdfl\n", "requires=census-v4\n", "vendor=gdfl\n"] {
+        let why = say(shapeless).expect("no known shape");
+        assert!(
+            why.contains("is no requirement this build can read"),
+            "{why}"
+        );
+    }
+    let long = "\n".repeat(usize::try_from(REQUIRES_CAP).expect("small") + 1);
+    let why = say(&long).expect("too long");
+    assert!(why.contains("is longer than 65536 bytes"), "{why}");
+
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::create_dir(&at).expect("a directory at the name");
+    let why = reader_refusal(root, Vendor::Gdfl).expect("not a file");
+    assert!(why.contains("is not a regular file"), "{why}");
+    assert!(!why.contains("  "), "one sentence, no run of spaces: {why}");
+    assert!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4).is_err(),
+        "and a writer says so too"
+    );
+
+    // A STORE ROOT NO HOST CAN NAME HOLDS NO REQUIREMENTS FILE, so it requires
+    // nothing here: the census's own read then refuses the root in its own
+    // words (`a_census_that_cannot_be_measured_stops_the_run`), which a
+    // "could not be opened" from this file used to pre-empt.
+    assert_eq!(
+        reader_refusal(&root.join("A".repeat(500)), Vendor::Gdfl),
+        None,
+        "a name past the host's limit is no requirements file"
+    );
+    assert_eq!(
+        reader_refusal(&elsewhere_file(root).join("under-a-file"), Vendor::Gdfl),
+        None,
+        "a file where a directory belongs is no requirements file"
+    );
+
+    // A LINK AT THE NAME IS NOT FOLLOWED to a file that requires nothing: the
+    // rule a store states is its own file's, never one a link points at.
+    std::fs::remove_dir(&at).expect("removed");
+    let elsewhere = root.join("elsewhere");
+    std::fs::write(&elsewhere, format!("{REQUIRES_FORMAT}\n")).expect("written");
+    std::os::unix::fs::symlink(&elsewhere, &at).expect("linked");
+    let why = reader_refusal(root, Vendor::Gdfl).expect("a link is refused");
+    assert!(why.contains("could not be opened"), "{why}");
+
+    // A FIFO AT THE NAME IS REFUSED AT ONCE, never waited on: before this the
+    // open blocked until a writer came, and a census load hung with it.
+    // `mkfifo` is the external program, run from a test only.
+    std::fs::remove_file(&at).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&at)
+        .status()
+        .expect("mkfifo ran");
+    assert!(made.success(), "mkfifo made the pipe");
+    let asked = std::time::Instant::now();
+    let why = reader_refusal(root, Vendor::Gdfl).expect("a pipe is refused");
+    assert!(why.contains("is not a regular file"), "{why}");
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(5),
+        "answered without waiting for a writer"
+    );
+}
+
+/// A regular file under `root`, for a path that runs THROUGH a file.
+fn elsewhere_file(root: &Path) -> PathBuf {
+    let at = root.join("a-file-not-a-directory");
+    std::fs::write(&at, b"x").expect("written");
+    at
 }

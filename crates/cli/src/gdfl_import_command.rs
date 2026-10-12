@@ -307,6 +307,20 @@ fn asked(
     ))
 }
 
+pub(crate) use crate::store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+
+/// The data root `var` names, once this binary may write at all: an
+/// unstamped build is refused by [`unstamped_write_refusal`] before any root
+/// is read (DB-B71).
+fn stamped_root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    if let Some(why) =
+        unstamped_write_refusal(crate::commit_stamp(), env(ALLOW_UNSTAMPED_VAR).as_deref())
+    {
+        return Err(why);
+    }
+    root(var, env)
+}
+
 /// The verb, with its environment and store root passed in so every arm is
 /// driven by a test without touching the process environment.
 pub(crate) fn command_with(
@@ -349,7 +363,7 @@ pub(crate) fn command_with(
         );
         return MISUSED;
     }
-    let roots = root(var, env).and_then(|data| Ok((data, store()?)));
+    let roots = stamped_root(var, env).and_then(|data| Ok((data, store()?)));
     let result = roots.and_then(|(data, store)| {
         let (scope, scope_words) = scope_for(kind, &store, stored_only, &mut only)?;
         let run = Run {

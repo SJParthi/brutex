@@ -690,7 +690,11 @@ fn summed(out: &mut String, receipt: &[Line], dry_run: bool) -> u8 {
 
 /// `cli srt-build`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &crate::store_root, out)
+    // AN UNSTAMPED BUILD BUILDS NO INDEX (DB-B71, WP-81): a `.srt` is a file
+    // of the store that `/bars/window.json` serves sorted pages from.
+    // `--dry-run` writes nothing and is not refused.
+    let store = crate::store_write::root_for("srt-build", arguments);
+    command_with(arguments, &store, out)
 }
 
 #[cfg(test)]

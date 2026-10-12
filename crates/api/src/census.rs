@@ -1062,6 +1062,20 @@ enum Located {
 /// refused here is stamped as the fault it is (D-0695). One `lstat`.
 fn locate(root: &Path, vendor: Vendor) -> Located {
     let dir = vendor_dir(root, vendor);
+    // WHAT THE STORE REQUIRES OF ITS READER, ASKED BEFORE EITHER SHAPE IS
+    // READ (DB-B68, WP-81). A build started over a store whose census moved
+    // to a format it does not know used to read the shape it did know and
+    // serve it as `held`: 246,147 of 385,442 GDFL months, without a word. One
+    // small read per census load, never per request.
+    if let Some(reason) = pull::ingest::census_store::reader_refusal(root, vendor) {
+        return Located::Refused(
+            dir,
+            Census::Unreadable {
+                reason,
+                fault: Fault::Refused,
+            },
+        );
+    }
     match std::fs::symlink_metadata(&dir) {
         Ok(found) if found.is_dir() => Located::Partitioned(dir),
         Ok(_) => {
