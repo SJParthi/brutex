@@ -11,15 +11,21 @@
 //! ordinal `n` as it stands now, which is one read of that page and then the
 //! records after it for their acknowledgements (`pull::alerts::page_settled`),
 //! so no alert a newer record acknowledges is listed and its counts agree with
-//! `--older`; `--older` reads the whole queue backwards, `--ack <n>`
+//! `--older`; `--older` reads the whole queue backwards and, like the other
+//! two listings, names every record it could not read (`DAMAGED`) or name
+//! (`UNKNOWN`) and exits non-zero over a damaged one; `--ack <n>`
 //! acknowledges an alert inside or outside the window, `--replace-damaged`
 //! keeps a damaged queue and puts a new one in its place, and `--file <path>`
 //! lists a kept file.
+//!
+//! Each listing is one view of one queue: `--before` and `--older` read
+//! through the one file their first read opened, so a `--replace-damaged`
+//! that lands meanwhile changes nothing in what they print.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use pull::alerts::{self, Alert, Kept, Page, Record, Scope};
+use pull::alerts::{self, Alert, Kept, Older, Page, Record, Scope};
 
 use crate::{FAILED, MISUSED, OK};
 
@@ -51,9 +57,13 @@ enum Step {
 
 /// The arguments as an [`Ask`], or why they are a misuse.
 fn parse<'a>(arguments: &[&'a str]) -> Result<Ask<'a>, String> {
+    // Digits only: the host's parse also takes a leading `+`, which is not an
+    // ordinal anybody was shown.
     let ordinal = |flag: &str, text: &str| {
         text.parse::<u32>()
-            .map_err(|_| format!("{flag} takes an alert's ordinal, not {text:?}"))
+            .ok()
+            .filter(|_| text.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| format!("{flag} takes an alert's ordinal, not {text:?}"))
     };
     match arguments {
         [] => Ok(Ask::Queue(Step::List(None))),
@@ -141,10 +151,16 @@ fn render_page(out: &mut String, store: &Path, before: Option<u32>, page: &Page)
             )
         },
         |n| {
-            (
-                format!("the {} records before #{n}", alerts::WINDOW),
-                "unacknowledged older than this page",
-            )
+            // An ordinal past the end names the newest page, and says so.
+            let which = if u64::from(n) > page.records.saturating_add(1) {
+                format!(
+                    "the newest {} records (#{n} is past the last record)",
+                    alerts::WINDOW
+                )
+            } else {
+                format!("the {} records before #{n}", alerts::WINDOW)
+            };
+            (which, "unacknowledged older than this page")
         },
     );
     let _ = writeln!(
@@ -187,6 +203,58 @@ fn render_page(out: &mut String, store: &Path, before: Option<u32>, page: &Page)
         let _ = writeln!(out, "  the page before: cli alerts --before {}", page.first);
     }
     if page.damaged.is_empty() && page.later_damaged == 0 {
+        OK
+    } else {
+        FAILED
+    }
+}
+
+/// `--older`: every unacknowledged alert older than the newest window, then
+/// every record there that could not be named or read. A damaged record makes
+/// the exit non-zero, as it does for the other two listings.
+fn render_older(out: &mut String, store: &Path, older: &Older) -> u8 {
+    if !older.exists {
+        let queue = alerts::Names::under(store).queue;
+        let _ = writeln!(
+            out,
+            "ALERTS OLDER -- {}: no queue yet, no alert",
+            queue.display()
+        );
+        return OK;
+    }
+    let _ = writeln!(
+        out,
+        "ALERTS OLDER -- {} unacknowledged older than the newest {} records; {} older records \
+         fail their CRC; {} records",
+        older.alerts.len(),
+        alerts::WINDOW,
+        older.damaged.len(),
+        older.records
+    );
+    alert_lines(out, &older.alerts);
+    for (ordinal, kind) in &older.unknown {
+        let _ = writeln!(
+            out,
+            "  #{ordinal}  UNKNOWN record type {kind} (a later build's)"
+        );
+    }
+    for ordinal in &older.damaged {
+        let _ = writeln!(
+            out,
+            "  #{ordinal}  DAMAGED: the record fails its CRC; an open alert here is counted by \
+             cli alerts and cannot be listed, an acknowledgement here is not applied"
+        );
+    }
+    if older.newer_damaged > 0 {
+        let _ = writeln!(
+            out,
+            "  {} of the newest {} records fail their CRC: an acknowledgement among them could \
+             not be applied; cli alerts names them",
+            older.newer_damaged,
+            alerts::WINDOW
+        );
+    }
+    if older.damaged.is_empty() && older.newer_damaged == 0 {
         OK
     } else {
         FAILED
@@ -259,16 +327,7 @@ pub(crate) fn command_with(
                 |n| alerts::page_settled(&store, n),
             )
             .map(|page| render_page(out, &store, before, &page)),
-        Step::Older => alerts::older(&store).map(|older| {
-            let _ = writeln!(
-                out,
-                "ALERTS OLDER -- {} unacknowledged older than the newest {} records",
-                older.len(),
-                alerts::WINDOW
-            );
-            alert_lines(out, &older);
-            OK
-        }),
+        Step::Older => alerts::older(&store).map(|older| render_older(out, &store, &older)),
         Step::Ack(ordinal) => alerts::ack(&store, ordinal, "cli", Scope::Whole).map(|acked| {
             let _ = writeln!(
                 out,
@@ -303,14 +362,16 @@ pub(crate) fn command_with(
     })
 }
 
-/// The CLI's store root, proved as every other verb proves it.
-fn cli_store() -> Result<PathBuf, String> {
-    crate::store_root()
-}
-
-/// The verb as dispatched.
+/// The verb as dispatched. Its store root is the CLI's, proved as every other
+/// verb proves it, and refused to an unstamped build for the two forms that
+/// write the queue (`--ack`, `--replace-damaged`; `cli::store_write`, D-4894):
+/// a listing is never refused for the build's stamp.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &cli_store, out)
+    command_with(
+        arguments,
+        &crate::store_write::root_for("alerts", arguments),
+        out,
+    )
 }
 
 #[cfg(test)]

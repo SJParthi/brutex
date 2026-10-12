@@ -148,6 +148,10 @@ fn garbage_arguments_are_a_misuse_and_a_missing_store_is_refused() {
         &["--ack", "-1"],
         &["--ack", "4294967296"],
         &["--before", "1.5"],
+        &["--before", "+5"],
+        &["--ack", "+4"],
+        &["--ack", ""],
+        &["--before", " 5"],
         &["--file"],
         &["--file", ""],
         &["--older", "extra"],
@@ -326,6 +330,153 @@ fn every_form_of_the_listing_agrees_about_an_acknowledged_alert() {
         out.contains("67 unacknowledged in the 1024 records before #77") && out.contains("  #5  "),
         "{out}"
     );
+    std::fs::remove_dir_all(&store).unwrap();
+}
+
+/// An open alert as a raw queue holds it.
+fn raw_alert(i: u32, open_after: u32) -> alerts::Record {
+    alerts::Record {
+        kind_of_record: alerts::TYPE_ALERT,
+        kind: 6,
+        flags: 0,
+        day: 18_682,
+        run: 77,
+        put_at: NOW,
+        key: alerts::key_hash(&format!("invented:{i}")),
+        acked: 0,
+        open_after,
+        text: format!("invented {i}"),
+    }
+}
+
+/// Writes a queue whole from records, as earlier puts would have left it.
+fn raw_queue(store: &Path, records: &[alerts::Record]) {
+    let names = alerts::Names::under(store);
+    std::fs::create_dir_all(&names.dir).unwrap();
+    let mut bytes = alerts::header(NOW);
+    for record in records {
+        bytes.extend_from_slice(&record.encode());
+    }
+    std::fs::write(&names.queue, bytes).unwrap();
+    std::fs::write(&names.lock, b"").unwrap();
+}
+
+#[test]
+fn the_older_listing_names_what_it_cannot_read_and_exits_non_zero() {
+    // IA-AL-21, the cli's half. No queue: no alert, and nothing is written.
+    let store = scratch("older-named");
+    let (code, out) = run(&store, &["--older"]);
+    assert_eq!(code, OK);
+    assert!(
+        out.contains("ALERTS OLDER -- ") && out.contains("no queue yet, no alert"),
+        "{out}"
+    );
+    assert!(!store.join("audit").exists(), "a listing never writes");
+
+    // 1,200 open alerts, #50 damaged in place: older than the newest window.
+    let open: Vec<alerts::Record> = (1..=1_200).map(|i| raw_alert(i, i)).collect();
+    raw_queue(&store, &open);
+    spoil(&store, 50);
+    let (code, out) = run(&store, &[]);
+    assert_eq!(code, OK, "the window itself is whole: {out}");
+    assert!(
+        out.contains("1024 unacknowledged in the newest 1024 records; 176 older unacknowledged"),
+        "{out}"
+    );
+    let (code, out) = run(&store, &["--older"]);
+    assert_eq!(code, FAILED, "a record nobody can read is not a clean exit");
+    assert!(
+        out.contains(
+            "ALERTS OLDER -- 175 unacknowledged older than the newest 1024 records; 1 older \
+             records fail their CRC; 1200 records"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("  #50  DAMAGED: the record fails its CRC"),
+        "{out}"
+    );
+    assert_eq!(out.matches("  #").count(), 176, "175 alerts and #50");
+    assert!(out.contains("  #176  hole") && out.contains("  #1  hole"));
+    // The page that holds it says the same thing the same way.
+    let (code, page) = run(&store, &["--before", "177"]);
+    assert_eq!(code, FAILED);
+    assert!(
+        page.contains("175 unacknowledged in the 1024 records before #177")
+            && page.contains("  #50  DAMAGED: the record fails its CRC"),
+        "{page}"
+    );
+
+    // A damaged ACKNOWLEDGEMENT older than the window (#62, of #5) beside a
+    // later build's record (#61).
+    let mut records: Vec<alerts::Record> = (1..=60).map(|i| raw_alert(i, i)).collect();
+    let mut later = raw_alert(61, 60);
+    later.kind_of_record = 3;
+    records.push(later);
+    records.push(alerts::Record {
+        kind_of_record: alerts::TYPE_ACK,
+        kind: 0,
+        flags: 0,
+        day: 0,
+        run: 0,
+        put_at: NOW,
+        key: [0; 16],
+        acked: 5,
+        open_after: 59,
+        text: "cli".to_owned(),
+    });
+    records.extend((63..=1_300).map(|i| raw_alert(i, i - 3)));
+    raw_queue(&store, &records);
+    let (code, out) = run(&store, &["--older"]);
+    assert_eq!(code, OK, "a later build's record is named, not a failure");
+    assert!(
+        out.contains("ALERTS OLDER -- 273 unacknowledged")
+            && out.contains("; 0 older records fail their CRC; 1300 records"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  #61  UNKNOWN record type 3 (a later build's)"),
+        "{out}"
+    );
+    assert!(!out.contains("  #5  "), "#5 is acknowledged: {out}");
+    spoil(&store, 62);
+    let (code, out) = run(&store, &["--older"]);
+    assert_eq!(code, FAILED);
+    assert!(
+        out.contains("ALERTS OLDER -- 274 unacknowledged")
+            && out.contains("; 1 older records fail their CRC"),
+        "{out}"
+    );
+    assert!(out.contains("  #5  hole"), "listed again: {out}");
+    assert!(
+        out.contains("  #61  UNKNOWN record type 3 (a later build's)")
+            && out.contains("  #62  DAMAGED: the record fails its CRC"),
+        "{out}"
+    );
+    assert!(out.contains("an acknowledgement here is not applied"));
+
+    // Damage inside the newest window: named by the default listing, counted
+    // by `--older`, whose own alerts may depend on it.
+    spoil(&store, 1_290);
+    let (code, out) = run(&store, &["--older"]);
+    assert_eq!(code, FAILED);
+    assert!(
+        out.contains("  1 of the newest 1024 records fail their CRC"),
+        "{out}"
+    );
+    let (code, out) = run(&store, &[]);
+    assert_eq!(code, FAILED);
+    assert!(out.contains("  #1290  DAMAGED"), "{out}");
+
+    // `--before` past the end is the newest page, and says so; at the end
+    // plus one it is the records before that ordinal.
+    let (_, out) = run(&store, &["--before", "5000"]);
+    assert!(
+        out.contains("in the newest 1024 records (#5000 is past the last record)"),
+        "{out}"
+    );
+    let (_, out) = run(&store, &["--before", "1301"]);
+    assert!(out.contains("in the 1024 records before #1301;"), "{out}");
     std::fs::remove_dir_all(&store).unwrap();
 }
 

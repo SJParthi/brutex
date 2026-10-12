@@ -1,4 +1,4 @@
-//! Tests of the alert queue (IA-AL-01 to IA-AL-16; D-4883, D-4893, D-4895).
+//! Tests of the alert queue (IA-AL-01 to IA-AL-22; D-4883, D-4893, D-4895).
 //!
 //! Every fixture is invented: run ids, days, keys and texts. Every store root
 //! is a scratch directory this file makes and removes.
@@ -500,7 +500,13 @@ fn an_older_unacknowledged_alert_never_leaves_view() {
     assert_eq!(page.alerts[0].record.open_after, 4);
     assert_eq!(page.older_unacknowledged, 1, "open after 4, less 3 listed");
 
-    let listed = older(scratch.root()).unwrap();
+    let walked = older(scratch.root()).unwrap();
+    assert!(walked.exists && walked.damaged.is_empty() && walked.unknown.is_empty());
+    assert_eq!(
+        (walked.first, walked.records, walked.newer_damaged),
+        (81, 1_104, 0)
+    );
+    let listed = walked.alerts;
     assert_eq!(listed.len(), 1);
     assert_eq!(
         (listed[0].ordinal, listed[0].word().as_ref()),
@@ -509,7 +515,7 @@ fn an_older_unacknowledged_alert_never_leaves_view() {
 
     ack_at(scratch.root(), 1, "cli", Scope::Whole, NOW).unwrap();
     assert_eq!(window(scratch.root()).unwrap().older_unacknowledged, 0);
-    assert!(older(scratch.root()).unwrap().is_empty());
+    assert!(older(scratch.root()).unwrap().alerts.is_empty());
 }
 
 // IA-AL-05.
@@ -865,7 +871,8 @@ fn a_first_put_creates_the_queue_and_its_directory() {
     assert!(!names.dir.exists(), "a fresh store has no audit/");
     // Reading a store with no queue is no alert, and creates nothing.
     assert_eq!(window(scratch.root()), Ok(Page::default()));
-    assert!(older(scratch.root()).unwrap().is_empty());
+    assert_eq!(older(scratch.root()), Ok(Older::default()));
+    assert!(!Older::default().exists);
     assert!(!names.dir.exists(), "a read never writes");
 
     let got = put_at(scratch.root(), &alert(2, "store_lost:9", "t"), NOW).unwrap();
@@ -1224,6 +1231,7 @@ fn a_settled_page_never_lists_an_alert_a_later_record_acknowledges() {
     }
     let listed: Vec<u32> = older(scratch.root())
         .unwrap()
+        .alerts
         .iter()
         .map(|a| a.ordinal)
         .collect();
@@ -1303,6 +1311,7 @@ fn an_older_page_is_one_read_at_any_depth() {
     want.reverse();
     let got: Vec<u32> = older(scratch.root())
         .unwrap()
+        .alerts
         .iter()
         .map(|a| a.ordinal)
         .collect();
@@ -1715,6 +1724,279 @@ fn a_long_key_is_hashed_whole_and_cut_in_its_events() {
     assert!(matches!(key_bytes(&long), telemetry::Value::Uint(100_000)));
 }
 
+/// The ordinals of a list of alerts.
+fn ordinals(alerts: &[Alert]) -> Vec<u32> {
+    alerts.iter().map(|a| a.ordinal).collect()
+}
+
+// IA-AL-21: the walk names every record it could not read or name.
+#[test]
+fn the_older_walk_names_every_record_it_cannot_read() {
+    // A damaged OPEN ALERT older than the window: the O(1) count includes it,
+    // the walk cannot list it and says which record it is.
+    let scratch = Scratch::new("older-damaged");
+    raw_queue(&scratch, &open_alerts(1_200));
+    spoil(&scratch, 50);
+    let newest = window(scratch.root()).unwrap();
+    assert_eq!(
+        (newest.alerts.len(), newest.older_unacknowledged),
+        (1_024, 176)
+    );
+    assert!(newest.damaged.is_empty(), "the window itself is whole");
+    let walked = older(scratch.root()).unwrap();
+    assert_eq!(walked.alerts.len(), 175);
+    assert_eq!(walked.damaged, vec![50], "named, not skipped");
+    assert!(walked.alerts.iter().all(|a| a.ordinal != 50));
+    assert_eq!(
+        walked.alerts.len() + walked.damaged.len(),
+        newest.older_unacknowledged as usize,
+        "the count, the list and the damage agree"
+    );
+    assert_eq!(
+        (
+            walked.exists,
+            walked.first,
+            walked.records,
+            walked.newer_damaged
+        ),
+        (true, 177, 1_200, 0)
+    );
+    assert!(walked.unknown.is_empty());
+    // The page that holds it says the same.
+    let page = page_settled(scratch.root(), 177).unwrap();
+    assert_eq!(page.damaged, walked.damaged);
+    assert_eq!(ordinals(&page.alerts), ordinals(&walked.alerts));
+
+    // A damaged ACKNOWLEDGEMENT older than the window, beside a later build's
+    // record: 60 alerts, #61 of a type this build cannot name, #62 the
+    // acknowledgement of #5, then alerts up to #1300.
+    let scratch = Scratch::new("older-ack");
+    let mut records = open_alerts(60);
+    let mut later_type = raw_alert("later", 60);
+    later_type.kind_of_record = 3;
+    records.push(later_type);
+    records.push(raw_ack(5, 59));
+    for i in 63..=1_300_u32 {
+        records.push(raw_alert(&format!("k{i}"), i - 3));
+    }
+    raw_queue(&scratch, &records);
+    let newest = window(scratch.root()).unwrap();
+    assert_eq!((newest.first, newest.older_unacknowledged), (277, 273));
+    let whole = older(scratch.root()).unwrap();
+    assert_eq!(whole.alerts.len(), 273);
+    assert!(whole.alerts.iter().all(|a| a.ordinal != 5), "acknowledged");
+    assert_eq!(whole.unknown, vec![(61, 3)], "a later build's, shown");
+    assert!(whole.damaged.is_empty());
+    spoil(&scratch, 62);
+    let walked = older(scratch.root()).unwrap();
+    assert_eq!(walked.damaged, vec![62]);
+    assert_eq!(walked.unknown, vec![(61, 3)]);
+    assert_eq!(
+        walked.alerts.len(),
+        274,
+        "its alert is listed again, not hidden on the word of a record nobody can read"
+    );
+    assert!(walked.alerts.iter().any(|a| a.ordinal == 5));
+    let page = page_settled(scratch.root(), 277).unwrap();
+    assert_eq!((page.damaged, page.unknown), (vec![62], vec![(61, 3)]));
+    assert_eq!(ordinals(&page.alerts), ordinals(&walked.alerts));
+
+    // Several, in more than one older page: newest first, none lost.
+    let scratch = Scratch::new("older-many");
+    raw_queue(&scratch, &open_alerts(3_100));
+    for k in [1_u64, 2, 52, 1_052, 1_053, 2_076] {
+        spoil(&scratch, k);
+    }
+    let walked = older(scratch.root()).unwrap();
+    assert_eq!(walked.damaged, vec![2_076, 1_053, 1_052, 52, 2, 1]);
+    assert_eq!(walked.alerts.len(), 2_076 - 6);
+    assert_eq!((walked.first, walked.newer_damaged), (2_077, 0));
+
+    // Damage INSIDE the newest window: an acknowledgement of an older alert
+    // there cannot be applied, and the walk says how many such records.
+    let scratch = Scratch::new("older-newer");
+    let mut records = open_alerts(1_100);
+    records.push(raw_ack(3, 1_099));
+    raw_queue(&scratch, &records);
+    let whole = older(scratch.root()).unwrap();
+    assert_eq!((whole.alerts.len(), whole.newer_damaged), (76, 0));
+    assert!(whole.alerts.iter().all(|a| a.ordinal != 3));
+    spoil(&scratch, 1_101);
+    let walked = older(scratch.root()).unwrap();
+    assert_eq!(walked.newer_damaged, 1);
+    assert!(walked.damaged.is_empty(), "nothing older is damaged");
+    assert_eq!(walked.alerts.len(), 77);
+    assert!(walked.alerts.iter().any(|a| a.ordinal == 3));
+    assert_eq!(window(scratch.root()).unwrap().damaged, vec![1_101]);
+
+    // The edges: a header alone, one record, exactly a window, one more.
+    let scratch = Scratch::new("older-edges");
+    raw_queue(&scratch, &[]);
+    let none = older(scratch.root()).unwrap();
+    assert!(none.exists && none.alerts.is_empty() && none.damaged.is_empty());
+    assert_eq!((none.first, none.records), (0, 0));
+    raw_queue(&scratch, &open_alerts(1));
+    assert_eq!(older(scratch.root()).unwrap().first, 1);
+    raw_queue(&scratch, &open_alerts(1_024));
+    spoil(&scratch, 1);
+    let exact = older(scratch.root()).unwrap();
+    assert!(exact.alerts.is_empty() && exact.damaged.is_empty());
+    assert_eq!((exact.first, exact.newer_damaged), (1, 1));
+    raw_queue(&scratch, &open_alerts(1_025));
+    spoil(&scratch, 1);
+    let one_more = older(scratch.root()).unwrap();
+    assert!(one_more.alerts.is_empty());
+    assert_eq!((one_more.damaged, one_more.first), (vec![1], 2));
+
+    // An acknowledgement that names no record the writer could have meant
+    // (ordinal 0, or one that does not exist yet) takes nothing off a count.
+    let scratch = Scratch::new("older-crafted");
+    let mut records = open_alerts(1_030);
+    records.push(raw_ack(0, 1_030));
+    records.push(raw_ack(4_000_000, 1_030));
+    records.push(raw_ack(u32::MAX, 1_030));
+    raw_queue(&scratch, &records);
+    let newest = window(scratch.root()).unwrap();
+    assert!(newest.acked_older.is_empty(), "{:?}", newest.acked_older);
+    assert_eq!(older(scratch.root()).unwrap().alerts.len(), 9);
+    let page = page_settled(scratch.root(), 8).unwrap();
+    assert_eq!((page.alerts.len(), page.older_unacknowledged), (7, 0));
+    let page = page_settled(scratch.root(), 1_031).unwrap();
+    assert_eq!(
+        (page.alerts.len(), page.older_unacknowledged),
+        (1_024, 6),
+        "three crafted acknowledgements lower no older count"
+    );
+    assert!(page.acked_older.is_empty());
+}
+
+/// Arms the walk seam: `step` runs once before this thread's next later read.
+fn between_reads(step: impl FnOnce(&Path) + 'static) {
+    BETWEEN_READS.with(|held| *held.borrow_mut() = Some(Box::new(step)));
+}
+
+fn seam_is_spent() -> bool {
+    BETWEEN_READS.with(|held| held.borrow().is_none())
+}
+
+// IA-AL-22: a walk is one view of one queue, whatever lands between its reads.
+#[test]
+fn a_walk_is_one_queue_across_a_replacement() {
+    // 3,000 open alerts, the last two records bad: the put refuses the queue,
+    // the readers still list it, and the operator may replace it.
+    let build = |tag: &str| {
+        let scratch = Scratch::new(tag);
+        raw_queue(&scratch, &open_alerts(3_000));
+        spoil(&scratch, 2_999);
+        spoil(&scratch, 3_000);
+        scratch
+    };
+
+    // `older`: the replacement lands after the first read and before the
+    // second. The listing is the replaced queue's, whole.
+    let scratch = build("walk-older");
+    let whole = older(scratch.root()).unwrap();
+    assert_eq!((whole.alerts.len(), whole.newer_damaged), (1_976, 2));
+    between_reads(|root| {
+        let done = replace_damaged_at(root, NOW + 1).unwrap();
+        assert_eq!(done.ordinal, 1);
+        // And the new queue fills at once, past where the walk reads next.
+        for i in 0..5 {
+            put_at(root, &alert(6, &format!("after-{i}"), "t"), NOW + 2).unwrap();
+        }
+    });
+    let across = older(scratch.root()).unwrap();
+    assert!(seam_is_spent(), "the replacement ran inside the walk");
+    assert_eq!(across, whole, "one queue: the one the first read opened");
+    assert!(
+        across
+            .alerts
+            .iter()
+            .all(|a| a.record.kind != KIND_QUEUE_REPLACED),
+        "no record of the new queue is in the old one's listing"
+    );
+    // The next call is the new queue's, whole as well.
+    let after = older(scratch.root()).unwrap();
+    assert_eq!((after.records, after.first, after.alerts.len()), (6, 1, 0));
+    let newest = window(scratch.root()).unwrap();
+    assert_eq!(newest.alerts.len(), 6);
+    assert_eq!(
+        newest.alerts.last().unwrap().record.kind,
+        KIND_QUEUE_REPLACED
+    );
+
+    // `page_settled`: the same landing between the page and the records
+    // after it. No refusal and no mixed page.
+    let scratch = build("walk-page");
+    let whole = page_settled(scratch.root(), 101).unwrap();
+    assert_eq!(
+        (whole.alerts.len(), whole.later_damaged, whole.records),
+        (100, 2, 3_000)
+    );
+    between_reads(|root| {
+        replace_damaged_at(root, NOW + 1).unwrap();
+        for i in 0..200 {
+            put_at(root, &alert(6, &format!("after-{i}"), "t"), NOW + 2).unwrap();
+        }
+    });
+    let across = page_settled(scratch.root(), 101).unwrap();
+    assert!(seam_is_spent());
+    assert_eq!(across, whole);
+    let after = page_settled(scratch.root(), 101).unwrap();
+    assert_eq!((after.records, after.alerts.len()), (201, 100));
+    assert_eq!(
+        after.alerts.last().unwrap().record.kind,
+        KIND_QUEUE_REPLACED
+    );
+
+    // A put and an acknowledgement that land mid-walk on a healthy queue:
+    // the answer is the queue as the first read counted it.
+    let scratch = Scratch::new("walk-put");
+    raw_queue(&scratch, &open_alerts(2_500));
+    let whole = older(scratch.root()).unwrap();
+    assert_eq!(whole.alerts.len(), 1_476);
+    between_reads(|root| {
+        put_at(root, &alert(6, "late", "t"), NOW + 1).unwrap();
+        ack_at(root, 7, "cli", Scope::Whole, NOW + 1).unwrap();
+    });
+    assert_eq!(older(scratch.root()).unwrap(), whole);
+    assert!(seam_is_spent());
+    let later = older(scratch.root()).unwrap();
+    assert_eq!((later.records, later.alerts.len()), (2_502, 1_477));
+    assert!(later.alerts.iter().all(|a| a.ordinal != 7));
+    let settled = page_settled(scratch.root(), 101).unwrap();
+    between_reads(|root| {
+        ack_at(root, 9, "cli", Scope::Whole, NOW + 2).unwrap();
+    });
+    assert_eq!(page_settled(scratch.root(), 101).unwrap(), settled);
+    assert_eq!(
+        page_settled(scratch.root(), 101).unwrap().alerts.len(),
+        settled.alerts.len() - 1
+    );
+
+    // The one record that is not append-only: a bad LAST record, which the
+    // next put writes over. A later read meets the bad record or the whole
+    // new one, under the lock, never a half.
+    let scratch = Scratch::new("walk-over");
+    raw_queue(&scratch, &open_alerts(1_500));
+    spoil(&scratch, 1_500);
+    assert_eq!(page_settled(scratch.root(), 101).unwrap().later_damaged, 1);
+    between_reads(|root| {
+        let put = put_at(root, &alert(6, "over", "t"), NOW + 1).unwrap();
+        assert_eq!(written(put), 1_500, "written over the bad last record");
+    });
+    let across = page_settled(scratch.root(), 101).unwrap();
+    assert_eq!((across.later_damaged, across.records), (0, 1_500));
+
+    // One read needs no later read, so the seam stays armed and the page is
+    // the one read's.
+    between_reads(|_| panic!("a single read has no second read"));
+    assert_eq!(window(scratch.root()).unwrap().records, 1_500);
+    assert_eq!(page_of(&scratch, Some(101)).alerts.len(), 100);
+    assert!(!seam_is_spent());
+    BETWEEN_READS.with(|held| held.borrow_mut().take());
+}
+
 /// p50, p99 and max of a set of timings, in microseconds.
 fn spread(mut micros: Vec<u128>) -> (u128, u128, u128) {
     micros.sort_unstable();
@@ -1758,6 +2040,50 @@ fn the_operators_older_steps_timed() {
     let (p50, p99, max) = spread(one_read);
     println!(
         "page (one read) at the same depth: p50 {p50} us, p99 {p99} us, max {max} us (n = 200)"
+    );
+
+    // The whole walk: every page before the newest, one open file, the lock
+    // taken shared for each read.
+    let mut walk = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = std::time::Instant::now();
+        let found = older(scratch.root()).unwrap();
+        walk.push(start.elapsed().as_micros());
+        assert_eq!(found.alerts.len(), 101_376);
+        assert!(found.damaged.is_empty() && found.newer_damaged == 0);
+    }
+    let (p50, p99, max) = spread(walk);
+    println!("older, 102,400 records: p50 {p50} us, p99 {p99} us, max {max} us (n = 200)");
+
+    // A put while walks run back to back on another thread: what a put waits
+    // for is one read, not a walk.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let walker = {
+        let stop = std::sync::Arc::clone(&stop);
+        let root = scratch.root().to_path_buf();
+        std::thread::spawn(move || {
+            let mut walks = 0_u32;
+            while !stop.load(Ordering::Relaxed) {
+                assert!(older(&root).unwrap().alerts.len() >= 101_376);
+                walks += 1;
+            }
+            walks
+        })
+    };
+    let mut puts = Vec::with_capacity(200);
+    for i in 0..200_u32 {
+        let key = format!("timed-put-{i}");
+        let start = std::time::Instant::now();
+        let put = put_at(scratch.root(), &alert(6, &key, "t"), NOW).unwrap();
+        puts.push(start.elapsed().as_micros());
+        assert_eq!(written(put), records + 1 + i);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let walks = walker.join().unwrap();
+    let (p50, p99, max) = spread(puts);
+    println!(
+        "put while {walks} walks of 102,400 records ran: p50 {p50} us, p99 {p99} us, max {max} us \
+         (n = 200)"
     );
 
     // The replacement, on a small and on a long damaged queue.

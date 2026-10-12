@@ -89,6 +89,7 @@
   import { censusFailure } from '$lib/store-census.js';
   import { refusalFrom } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
+  import { RUN_SEGMENTS, facetsUrl, rungMonths } from '$lib/run-rungs.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
@@ -4841,23 +4842,23 @@
   async function loadRungs(run) {
     const seq = ++rungsSeq;
     try {
-      const response = await ask_(`/store.json?feed=${encodeURIComponent(run.feed)}`, {
-        cache: 'no-store',
-        ms: 30_000
-      });
-      if (seq !== rungsSeq) return;
-      if (!response.ok) return;
-      const rows = await response.json();
-      if (seq !== rungsSeq) return;
-      /** @type {Map<string, number>} */
-      const months = new Map();
-      for (const row of rows ?? []) {
-        // The census names an instrument `NSE-INDEX-NIFTY`; the ledger names
-        // it `NIFTY`. The symbol may itself hold a `-` (P3-02-02, D-1769).
-        const leaf = sweptSymbolOf(String(row.instrument ?? ''));
-        if (leaf !== run.underlying) continue;
-        months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
+      // THE UNDERLYING'S FACETS, NOT THE WHOLE CENSUS (DB-B58). This read
+      // `/store.json?feed=` — 108.8 MB for GDFL, uncached, per run opened —
+      // to keep one instrument's rows. The ledger names the underlying
+      // `NIFTY`; facets take it as `underlying` in the segment it lives in.
+      /** @type {any[]} */
+      const answers = [];
+      for (const segment of RUN_SEGMENTS) {
+        const response = await ask_(facetsUrl(String(run.feed), segment, String(run.underlying ?? '')), {
+          cache: 'no-store',
+          ms: 30_000
+        });
+        if (seq !== rungsSeq) return;
+        if (!response.ok) return;
+        answers.push(await response.json());
+        if (seq !== rungsSeq) return;
       }
+      const months = rungMonths(answers);
       // INTRADAY, PLUS THE RUN'S OWN RUNG WHATEVER IT IS.
       //
       // The `min` filter alone was a REGRESSION and it was measured: on a

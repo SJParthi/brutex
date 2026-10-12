@@ -1005,6 +1005,81 @@ impl std::error::Error for ProvenanceError {
     }
 }
 
+/// Which month the `.prv` beside a bar file says it was written for (DB-B65,
+/// WP-81).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrittenFor {
+    /// Nothing says: no `.prv`, one never born, one that is not a regular
+    /// file, or one whose header fails its own checksum, magic or version.
+    /// The month's only on-disk identity is then its bar header's symbol
+    /// hash, bar length and stamps.
+    Unrecorded,
+    /// A whole, sealed header that names this month's own store path.
+    ThisMonth,
+    /// A whole, sealed header that names a DIFFERENT month: the files were
+    /// copied or restored under another vendor, instrument, contract, bar
+    /// length or month.
+    Another {
+        /// The sidecar that says so.
+        sidecar: PathBuf,
+        /// The first field that is not this month's: `vendor`, `timeframe`,
+        /// `month` or `store path` (the instrument or the contract).
+        field: &'static str,
+    },
+}
+
+/// Which month the `.prv` beside the bar file `path` names, under `root`
+/// EXACTLY, says it was written for (DB-B65, WP-81).
+///
+/// # The gap this closes
+///
+/// A bar header's identity is the low 32 bits of the FNV-1a of the SYMBOL
+/// text, so the NIFTY index, every NIFTY option contract and both vendors
+/// carry one id (433894009): a month file copied by hand to a sibling strike,
+/// or between the index and a contract, opened cleanly and was served as the
+/// other instrument. The `.prv` header (D-3334) binds itself to the BLAKE3 of
+/// the whole store path — vendor, exchange, segment, symbol, contract, bar
+/// length, month — and [`read`] already refuses one that is not its month's;
+/// but nothing asked it when the BARS were opened. Every bar door now asks
+/// this first.
+///
+/// # What it refuses, and what it cannot
+///
+/// [`WrittenFor::Another`] needs positive evidence: a header that passes its
+/// own CRC-32C, magic and version and still names another month. A damaged,
+/// unborn, foreign-versioned or absent sidecar is [`WrittenFor::Unrecorded`]
+/// and refuses nothing here — [`read`] names that damage to whoever asks for
+/// the provenance. So a month written before D-3334, which has no `.prv`, is
+/// bound by its symbol hash alone until a landing gives it one; that limit is
+/// stated, not hidden.
+///
+/// # Cost
+///
+/// One `open` (never through a final symlink, never blocking) and one
+/// positional read of 64 bytes; for a month with no sidecar, the one `open`
+/// that answers `ENOENT`. `root` is used as given: a caller serving a repair
+/// revision passes that revision's root.
+#[must_use]
+pub fn written_for(root: &Path, path: StorePath<'_>) -> WrittenFor {
+    let at = path.with_file(FileKind::Provenance).to_path_buf(root);
+    let Ok(file) = crate::open_flags::open_read_no_follow(&at) else {
+        return WrittenFor::Unrecorded;
+    };
+    let mut head = [0u8; 64];
+    if !file.metadata().is_ok_and(|meta| meta.is_file())
+        || file.read_exact_at(&mut head, 0).is_err()
+    {
+        return WrittenFor::Unrecorded;
+    }
+    let Ok(header) = Header::decode(&head) else {
+        return WrittenFor::Unrecorded;
+    };
+    match header.differs_from(path) {
+        None => WrittenFor::ThisMonth,
+        Some(field) => WrittenFor::Another { sidecar: at, field },
+    }
+}
+
 /// The sidecar beside the month `path` names, if there is one.
 ///
 /// `path` may name any sibling of the month; the sidecar is its `.prv`, beside
@@ -1121,7 +1196,10 @@ pub fn record(
 
     let at = path.with_file(FileKind::Provenance).to_path_buf(root);
     refuse_odd(&at)?;
-    let file = opened_rw(&at)?;
+    // Inside a durable batch (WP-16, D-3353) the record is written as every
+    // other write of the batch is, and its flushes are the batch's.
+    let batch = crate::file::DurableBatch::current();
+    let file = opened_rw(&at, batch.as_ref())?;
     let file = Flock::try_lock(file, at.clone()).map_err(|why| match why {
         fs::TryLockError::WouldBlock => ProvenanceError::Locked { path: at.clone() },
         fs::TryLockError::Error(why) => io_error(&at, "lock", why),
@@ -1136,8 +1214,8 @@ pub fn record(
                 0,
                 &Header::of(path, committed.symbol_id).image(),
             )?;
-            file.sync_data().map_err(|why| io_error(&at, "sync", why))?;
-            sync_parent(&at)?;
+            sync_data(&file, &at, batch.as_ref())?;
+            sync_parent(&at, batch.as_ref())?;
             Sidecar {
                 header: Header::of(path, committed.symbol_id),
                 records: Vec::new(),
@@ -1160,7 +1238,7 @@ pub fn record(
         follows(previous, &fresh, &at)?;
     }
     write_fully(&file, &at, offset_of(ordinal), &fresh.image())?;
-    file.sync_data().map_err(|why| io_error(&at, "sync", why))?;
+    sync_data(&file, &at, batch.as_ref())?;
     Ok(Recorded::Written(fresh))
 }
 
@@ -1411,9 +1489,38 @@ fn write_fully(file: &File, at: &Path, offset: u64, bytes: &[u8]) -> Result<(), 
         .map_err(|why| io_error(at, "write", why))
 }
 
-/// Makes a new directory entry durable.
-fn sync_parent(at: &Path) -> Result<(), ProvenanceError> {
+/// Makes what was written to the sidecar durable, or leaves it to `batch`
+/// while the batch is open (WP-16, D-3353).
+fn sync_data(
+    file: &File,
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<(), ProvenanceError> {
+    if let Some(batch) = batch {
+        let deferred = batch
+            .defer_file(file, at)
+            .map_err(|why| ProvenanceError::Io {
+                path: at.to_path_buf(),
+                action: "measure the device of",
+                source: io::Error::other(why.to_string()),
+            })?;
+        if deferred {
+            return Ok(());
+        }
+    }
+    file.sync_data().map_err(|why| io_error(at, "sync", why))
+}
+
+/// Makes a new directory entry durable, or leaves it to `batch` while the
+/// batch is open (WP-16, D-3353).
+fn sync_parent(
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<(), ProvenanceError> {
     let dir = at.parent().unwrap_or(at);
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
     File::open(dir)
         .and_then(|handle| handle.sync_all())
         .map_err(|why| io_error(dir, "sync directory", why))
@@ -1437,20 +1544,18 @@ fn refuse_odd(at: &Path) -> Result<(), ProvenanceError> {
 
 /// Opens for reading and writing, creating but never truncating, and never
 /// through a final symlink on the hosts `crate::open_flags` has a value for.
-fn opened_rw(at: &Path) -> Result<File, ProvenanceError> {
+fn opened_rw(
+    at: &Path,
+    batch: Option<&crate::file::DurableBatch>,
+) -> Result<File, ProvenanceError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = File::options();
     options.read(true).write(true).create(true).truncate(false);
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            any(target_os = "linux", target_os = "android"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(crate::open_flags::O_NOFOLLOW);
-    }
+    // `O_NOFOLLOW` where it is verified, as the bar writer opens; and
+    // `O_SYNC` too inside a batch that writes through (WP-16, D-3353).
+    options.custom_flags(crate::file::writer_flags(
+        batch.is_some_and(crate::file::DurableBatch::writes_through),
+    ));
     options.open(at).map_err(|why| opened(at, why))
 }
 

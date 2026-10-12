@@ -20,12 +20,63 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The environment `pairs` name, and the deliberate allowance a test build
+/// needs: a test binary is often built from a dirty tree, so it carries no
+/// commit stamp, and an import refuses that unless allowed (DB-B71).
 fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> + use<> {
-    let pairs: Vec<(String, OsString)> = pairs
+    let mut pairs: Vec<(String, OsString)> = pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone().into_os_string()))
         .collect();
+    pairs.push((ALLOW_UNSTAMPED_VAR.to_owned(), OsString::from("1")));
     move |var| pairs.iter().find(|(k, _)| k == var).map(|(_, v)| v.clone())
+}
+
+/// **AN UNSTAMPED BUILD DOES NOT WRITE THE STORE UNLESS TOLD TO (DB-B71).**
+/// A dirty-tree import wrote 14 `run ... commit=unstamped` journal lines on a
+/// test shadow and nothing stopped it. Both arms of the rule, as a function of
+/// the stamp and the allowance; and the verb itself, on whatever this test
+/// binary is.
+#[test]
+fn an_unstamped_build_is_refused_a_store_write_unless_allowed() {
+    let stamp = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(unstamped_write_refusal(Some(stamp), None), None);
+    let why = unstamped_write_refusal(None, None).expect("refused");
+    assert!(
+        why.contains(ALLOW_UNSTAMPED_VAR) && why.contains("DB-B71"),
+        "{why}"
+    );
+    assert!(unstamped_write_refusal(None, Some(std::ffi::OsStr::new("0"))).is_some());
+    assert_eq!(
+        unstamped_write_refusal(None, Some(std::ffi::OsStr::new("1"))),
+        None
+    );
+
+    let root = scratch("unstamped");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    std::fs::create_dir_all(&ts).unwrap();
+    let ts_var = ts.into_os_string();
+    let bare = move |var: &str| (var == TICKSTORE_VAR).then(|| ts_var.clone());
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &bare,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    if crate::commit_stamp().is_none() {
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains("GDFL IMPORT REFUSED"), "{out}");
+        assert!(
+            !pull::gdfl_import::journal_path(&store).exists(),
+            "nothing was written"
+        );
+    } else {
+        assert!(!out.contains("GDFL IMPORT REFUSED"), "{out}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -355,6 +406,69 @@ fn the_stored_flag_narrows_a_capital_market_run_to_what_d3333_adds() {
     assert_eq!(code, FAILED);
     assert!(out.contains("\"acc\" is not a share symbol"), "{out}");
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// WP-16: `BRUTEX_GDFL_WORKERS` is optional; when set it is a count from 1 to
+/// the bound, and anything else is refused by name before anything is read.
+#[test]
+fn workers_are_the_default_or_a_count_within_the_bound() {
+    let none = env_of(&[]);
+    assert_eq!(workers_of(&none), Ok(Workers::for_host()));
+    let four = env_of(&[(WORKERS_VAR, PathBuf::from("4"))]);
+    assert_eq!(workers_of(&four).map(Workers::get), Ok(4));
+    for bad in ["0", "13", "x", "-1", ""] {
+        let env = env_of(&[(WORKERS_VAR, PathBuf::from(bad))]);
+        let why = workers_of(&env).expect_err(bad);
+        assert!(why.starts_with(WORKERS_VAR), "{bad}: {why}");
+    }
+    let store = scratch("workers");
+    let env = env_of(&[
+        (WORKERS_VAR, PathBuf::from("0")),
+        (TICKSTORE_VAR, store.clone()),
+    ]);
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.contains(WORKERS_VAR), "{out}");
+    std::fs::remove_dir_all(&store).ok();
+}
+
+/// WP-16 (D-3353): `BRUTEX_GDFL_DURABILITY` is optional; when set it is one
+/// of the three words, and anything else is refused by name before anything
+/// is read. A run says which it used, and its workers.
+#[test]
+fn durability_is_the_default_or_one_of_its_words() {
+    let none = env_of(&[]);
+    assert_eq!(durability_of(&none), Ok(Durability::DEFAULT));
+    for word in ["day", "day-each-file", "each-write"] {
+        let env = env_of(&[(DURABILITY_VAR, PathBuf::from(word))]);
+        assert_eq!(durability_of(&env).map(Durability::as_str), Ok(word));
+    }
+    for bad in ["", "Day", "daily", "each"] {
+        let env = env_of(&[(DURABILITY_VAR, PathBuf::from(bad))]);
+        let why = durability_of(&env).expect_err(bad);
+        assert!(why.starts_with(DURABILITY_VAR), "{bad}: {why}");
+    }
+    let store = scratch("durability");
+    let env = env_of(&[
+        (DURABILITY_VAR, PathBuf::from("weekly")),
+        (TICKSTORE_VAR, store.clone()),
+    ]);
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, MISUSED, "{out}");
+    assert!(out.contains(DURABILITY_VAR), "{out}");
+    std::fs::remove_dir_all(&store).ok();
 }
 
 /// A run that back-filled days inside held months says how many month files

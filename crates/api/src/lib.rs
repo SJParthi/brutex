@@ -70,6 +70,9 @@ pub mod credential_law;
 /// The shared blocking-work, concurrency and byte/row/page bounds for result details.
 pub mod detail;
 pub mod expressionsearchjson;
+/// Unreadable records coalesced into runs and capped, so a damaged month costs
+/// an answer a constant number of bytes (DB-B75, WP-81).
+pub mod fault_log;
 pub mod folder;
 /// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
 /// into figures. `runs.bin` records totals; this records the round trips

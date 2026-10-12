@@ -392,8 +392,9 @@ fn three_writes_and_an_index_month(root: &Path) -> Vec<u8> {
     std::fs::read(manifest_path(root, Vendor::Gdfl)).expect("the single file")
 }
 
-/// A MIGRATION SPLITS BY SEGMENT, COMPACTS, AND LEAVES THE SINGLE FILE ALONE
-/// (D-3316).
+/// A MIGRATION SPLITS BY SEGMENT, COMPACTS, AND LEAVES THE SINGLE FILE'S
+/// BYTES ALONE (D-3316) — kept under the superseded name, its own name sealed
+/// against readers built before version 4 (DB-B68).
 #[test]
 fn a_migration_compacts_into_epochs_and_leaves_the_single_file_untouched() {
     let scratch = Scratch::new("migrate");
@@ -404,10 +405,24 @@ fn a_migration_compacts_into_epochs_and_leaves_the_single_file_untouched() {
     let store = || Ok(root.clone());
     let mut out = String::new();
     assert_eq!(migrate_with(&["gdfl"], &store, &mut out), OK, "{out}");
-    assert!(out.contains("left exactly as it was"), "{out}");
+    assert!(out.contains("its bytes left exactly as they were"), "{out}");
     assert!(out.contains("4 entries, 2 keys, 9 rows"), "{out}");
     assert!(out.contains("000001.man"), "{out}");
-    assert_eq!(std::fs::read(&legacy).expect("still there"), before);
+    // SEALED AS IT IS SUPERSEDED (DB-B68): the bytes kept under the
+    // superseded name, the name a stub every pre-version-4 reader refuses.
+    let superseded = census_store::superseded_path(&root, Vendor::Gdfl);
+    assert_eq!(std::fs::read(&superseded).expect("kept"), before);
+    assert_eq!(
+        std::fs::read(&legacy).expect("the stub"),
+        census_store::sealed_stub(Vendor::Gdfl)
+    );
+    assert!(
+        out.contains(
+            "now refuses every reader built before version 4 (unknown manifest version 65535)"
+        ),
+        "{out}"
+    );
+    assert!(out.contains(census_store::V4_READER_SINCE), "{out}");
 
     let (epoch, fno) = partition(&root, Segment::Fno);
     assert_eq!(
@@ -436,11 +451,33 @@ fn a_migration_compacts_into_epochs_and_leaves_the_single_file_untouched() {
         "no key, no step"
     );
 
-    // Twice is refused, by name, and changes nothing.
+    // Twice is refused, by name, and changes nothing; `--seal` confirms the
+    // seal and writes nothing.
     let mut twice = String::new();
     assert_eq!(migrate_with(&["gdfl"], &store, &mut twice), FAILED);
     assert!(twice.contains("already version 4"), "{twice}");
-    assert_eq!(std::fs::read(&legacy).expect("still there"), before);
+    assert_eq!(std::fs::read(&superseded).expect("kept"), before);
+    let mut sealed = String::new();
+    assert_eq!(
+        migrate_with(&["gdfl", "--seal"], &store, &mut sealed),
+        OK,
+        "{sealed}"
+    );
+    assert!(
+        sealed.contains("CENSUS SEALED") && sealed.contains("already sealed, nothing was written"),
+        "{sealed}"
+    );
+    let mut unmigrated = String::new();
+    assert_eq!(
+        migrate_with(&["zerodha", "--seal"], &store, &mut unmigrated),
+        FAILED
+    );
+    assert!(unmigrated.contains("CENSUS SEAL REFUSED"), "{unmigrated}");
+    let mut misused = String::new();
+    assert_eq!(
+        migrate_with(&["gdfl", "--sealed"], &store, &mut misused),
+        MISUSED
+    );
 }
 
 /// A RECOUNT AFTER THE MIGRATION writes the FNO partition's NEXT epoch whole,
@@ -494,7 +531,10 @@ fn a_recount_after_the_migration_writes_the_next_epoch_never_the_file() {
         first_bytes,
         "kept"
     );
-    assert_eq!(std::fs::read(&legacy).expect("still there"), before);
+    let superseded = census_store::superseded_path(&root, Vendor::Gdfl);
+    let stub = census_store::sealed_stub(Vendor::Gdfl);
+    assert_eq!(std::fs::read(&superseded).expect("kept"), before);
+    assert_eq!(std::fs::read(&legacy).expect("the seal"), stub);
     // A second recount changes nothing, so it installs no epoch.
     let mut again = String::new();
     assert_eq!(
@@ -518,15 +558,16 @@ fn a_recount_after_the_migration_writes_the_next_epoch_never_the_file() {
     );
     let (_, fno) = partition(&root, Segment::Fno);
     assert_eq!(fno.held(&key(nov)).map(|held| held.entry.rows), Some(8));
-    assert_eq!(std::fs::read(&legacy).expect("still there"), before);
-    // A pre-version-4 writer appending to the single file now is named.
+    assert_eq!(std::fs::read(&superseded).expect("kept"), before);
+    assert_eq!(std::fs::read(&legacy).expect("the seal"), stub);
+    // A writer that is not this build replacing the seal is named.
     let mut grown = before.clone();
     grown.extend_from_slice(&[0u8; 128]);
-    std::fs::write(&legacy, &grown).expect("a stale writer appended");
+    std::fs::write(&legacy, &grown).expect("a stale writer wrote");
     let mut warned = String::new();
     let _ = recount_with(&["gdfl", "--from", "2019-12-01"], &store, None, &mut warned);
     assert!(
-        warned.contains("WARNING") && warned.contains("written to it since"),
+        warned.contains("WARNING") && warned.contains("no longer holds the seal"),
         "{warned}"
     );
 }

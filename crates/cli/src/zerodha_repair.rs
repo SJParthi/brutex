@@ -241,7 +241,10 @@ pub(crate) fn command_with(
 
 /// `cli zerodha-repair`: see the module header.
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &crate::store_root, out)
+    // A REPAIR (`--from-store`) BY AN UNSTAMPED BUILD IS REFUSED (DB-B71,
+    // WP-81); a plan writes nothing and is not.
+    let store = crate::store_write::root_for("zerodha-repair", arguments);
+    command_with(arguments, &store, out)
 }
 
 fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {

@@ -3,7 +3,29 @@ import { savedSelection } from '../../saved-backtest/selection.js';
 /** The frontend reports the server's declared mode; it grants no release clearance. */
 export const INSPECTION_MESSAGE = 'Inspection mode: real saved data. Sweep and data-pull controls are disabled while release checks remain unresolved.';
 
-/** @typedef {{phase:'idle'|'reading'|'ready'|'legacy'|'failed',mode:'application'|'read-only-main-app'|'legacy'|null,canSweep:boolean,canPull:boolean,savedResultsUrl:string|null,why:string}} InspectionState */
+/** `build` is the server's `x-brutex-build` header (DB-B71): the 40-hex commit
+ * the API was compiled from, `unstamped`, or null when the server sent none.
+ * @typedef {{phase:'idle'|'reading'|'ready'|'legacy'|'failed',mode:'application'|'read-only-main-app'|'legacy'|null,canSweep:boolean,canPull:boolean,savedResultsUrl:string|null,why:string,build?:string|null}} InspectionState */
+
+/** The header every API response carries naming its build (DB-B71). */
+export const BUILD_HEADER = 'x-brutex-build';
+
+/** The build a response names: a 40-hex commit or `unstamped`; anything else
+ * is not a build and reads as null, never as a guessed identity.
+ * @param {Headers | null | undefined} headers @returns {string|null} */
+export function buildOf(headers) {
+  const raw = headers?.get(BUILD_HEADER) ?? null;
+  return raw !== null && (/^[a-f0-9]{40}$/.test(raw) || raw === 'unstamped') ? raw : null;
+}
+
+/** How the page names a build: the first 12 hex of a commit, `unstamped` said
+ * as a warning, or a statement that the server did not say.
+ * @param {string|null|undefined} build @returns {string} */
+export function buildLabel(build) {
+  if (build === 'unstamped') return 'build unstamped (no commit: not reproducible)';
+  if (typeof build === 'string' && /^[a-f0-9]{40}$/.test(build)) return `build ${build.slice(0, 12)}`;
+  return 'build not reported by this server';
+}
 /** @type {InspectionState} */
 export const INITIAL_INSPECTION = Object.freeze({
   phase: 'idle', mode: null, canSweep: false, canPull: false, savedResultsUrl: null,
@@ -69,15 +91,17 @@ export function createInspectionReader(request, publish) {
     pending = (async () => {
       try {
         const response = await request('/inspection.json', { cache: 'no-store' });
+        const build = buildOf(response.headers);
         if (response.status === 404) {
           settled = { phase: 'legacy', mode: 'legacy', canSweep: true, canPull: true, savedResultsUrl: null,
-            why: 'Legacy server: inspection capabilities are not reported. Existing controls are available; this is not sweep-readiness clearance.' };
+            why: 'Legacy server: inspection capabilities are not reported. Existing controls are available; this is not sweep-readiness clearance.',
+            build };
         } else {
           if (!response.ok) throw new Error(`Inspection-mode check answered HTTP ${response.status}. Sweep controls remain disabled.`);
           if ((response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase() !== 'application/json') {
             throw new Error('Inspection-mode check did not answer JSON. Sweep controls remain disabled.');
           }
-          settled = inspectionState(await response.json());
+          settled = { ...inspectionState(await response.json()), build };
         }
       } catch (error) {
         settled = { phase: 'failed', mode: null, canSweep: false, canPull: false, savedResultsUrl: null,

@@ -1138,10 +1138,21 @@ impl SeriesPlan {
     /// # Errors
     ///
     /// The file would not open, or the record would not read.
-    pub(super) fn read(&mut self, root: &Path, slot: usize, row: u64) -> Result<Bar, String> {
+    pub(super) fn read(
+        &mut self,
+        root: &Path,
+        slot: usize,
+        row: u64,
+    ) -> Result<Bar, crate::fault_log::ReadFault> {
         let file = self.file(root, slot)?;
+        // THE RECORD'S FAULT KEPT AS A VALUE, NOT A SENTENCE (DB-B75), so a
+        // run of them over one file coalesces into one line.
         file.read_record(row)
-            .map_err(|why| format!("{} record {row}: {why}", file.path().display()))
+            .map_err(|why| crate::fault_log::ReadFault::Record {
+                file: file.path().display().to_string(),
+                row,
+                why,
+            })
     }
 
     /// Rows `[start, end)` of `slot`, each handed to `each` with its row
@@ -1191,7 +1202,7 @@ impl SeriesPlan {
             }
         }
         if let Some(why) = first {
-            self.note_unread(slot, missed, why, false);
+            self.note_unread(slot, missed, why.into(), false);
         }
         Ok(missed)
     }
@@ -1218,7 +1229,16 @@ impl SeriesPlan {
 
     /// Empties the unread ledger into `faults` — ONE line a month, saying the
     /// reason and the rows not read — and returns what it held.
-    pub(super) fn take_unread(&mut self, faults: &mut Vec<String>) -> Unread {
+    ///
+    /// The line goes to the request's [`FaultLog`] WITH its count
+    /// ([`FaultLog::counted`]), so `faulted_records` is every refused record
+    /// while the month stays one sentence (DB-B75); `each` sees the line too,
+    /// for a caller that reports the months it could not read.
+    pub(super) fn take_unread(
+        &mut self,
+        faults: &mut crate::fault_log::FaultLog,
+        mut each: impl FnMut(&str),
+    ) -> Unread {
         let mut out = Unread::default();
         for at in std::mem::take(&mut self.unread) {
             out.rows = out.rows.saturating_add(at.rows);
@@ -1227,7 +1247,7 @@ impl SeriesPlan {
                 .slots
                 .get(at.slot)
                 .map_or_else(String::new, |slot| slot.month.to_string());
-            faults.push(if at.unopened {
+            let line = if at.unopened {
                 format!(
                     "{}; the month did not open, so none of its {} kept rows in this window \
                      was read",
@@ -1238,7 +1258,10 @@ impl SeriesPlan {
                     "{}; {} kept rows of {month} in this window would not read, this the first",
                     at.why, at.rows
                 )
-            });
+            };
+            each(&line);
+            // A MONTH THAT DID NOT OPEN REFUSED NO RECORD: none was tried.
+            faults.counted(line, if at.unopened { 0 } else { at.rows });
         }
         out
     }
@@ -1257,7 +1280,7 @@ impl SeriesPlan {
             if let Some(slot) = self.slot_of(month) {
                 let n_valid = self.slots.get(slot).map_or(0, |s| s.held.n_valid);
                 if let Some(last) = n_valid.checked_sub(1) {
-                    return self.read(root, slot, last).map(Some);
+                    return self.read(root, slot, last).map(Some).map_err(String::from);
                 }
             } else {
                 let file =

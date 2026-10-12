@@ -16,7 +16,9 @@
 //! * [`older`], [`page_settled`], [`of_file`] and an [`ack`] with
 //!   [`Scope::Whole`] of an alert older than the window read the records after
 //!   it: O(records), on the operator's command only, never on a route
-//!   (`docs/06-limits.md` L-IA-34).
+//!   (`docs/06-limits.md` L-IA-34). The two walks read through one open file,
+//!   the lock held shared for one read of at most [`WINDOW`] records at a
+//!   time: one view of one queue, and a put never waits for a walk.
 //!
 //! # What it never does
 //!
@@ -1208,37 +1210,123 @@ pub fn window(root: &Path) -> Result<Page, AlertError> {
     page(root, None)
 }
 
-/// One read under `audit/alerts.lock` held shared, so a reader never meets a
-/// put's half-written record: the whole records `pick` chooses (first ordinal,
-/// count) from the number in the file. `None` when there is no queue.
-fn read_span(
-    root: &Path,
-    pick: impl FnOnce(u64) -> (u64, u64),
-) -> Result<Option<(Span, Shape)>, AlertError> {
-    let names = Names::under(root);
-    root_is_dir(&names)?;
-    // The lock first, the queue second: a replacement holds the lock while it
-    // moves the new queue onto the name, so a reader opens the damaged queue
-    // or the new one whole, never a name in between.
-    let lock_file = match open_lock(&names, false) {
-        Ok(file) => file,
-        Err(AlertError::Io {
-            kind: io::ErrorKind::NotFound,
-            ..
-        }) => return Ok(None),
-        Err(other) => return Err(other),
-    };
-    let lock = Flock::lock_shared(lock_file, names.lock.clone())
-        .map_err(|why| AlertError::io("lock shared", &why))?;
-    if !regular(&names.queue)? {
-        return Ok(None);
+/// What the walk seam runs: one step, given the store root.
+#[cfg(test)]
+pub(crate) type BetweenReads = Box<dyn FnOnce(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: run once, with the store root, before the next later read of
+    /// a walk on this thread (no lock is held then), as another process's put
+    /// or replacement would land between two of a walk's reads.
+    pub(crate) static BETWEEN_READS: std::cell::RefCell<Option<BetweenReads>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test seam's step, once.
+#[cfg(test)]
+fn seam_between_reads(root: &Path) {
+    let step = BETWEEN_READS.with(|held| held.borrow_mut().take());
+    if let Some(step) = step {
+        step(root);
     }
-    let file = File::open(&names.queue).map_err(|why| AlertError::io("open the queue", &why))?;
-    let shape = shape(&file)?;
-    let (first, count) = pick(shape.records);
-    let span = span_from(&file, first, count)?;
-    drop(lock);
-    Ok(Some((span, shape)))
+}
+
+/// Outside tests there is no seam: only another process lands between reads.
+#[cfg(not(test))]
+const fn seam_between_reads(_root: &Path) {}
+
+/// One queue held open for every read of one answer.
+///
+/// The open file is the answer's identity. A replacement puts a NEW file on
+/// the name `audit/alerts` and keeps the damaged one under its kept name, so
+/// every read through this one descriptor is of the queue the first read
+/// opened, whatever the name holds by then: a walk of many reads is one view
+/// of one queue, never part of one and part of another. Records are only
+/// appended, so the `records` the first read counted are the same bytes at
+/// every later read; the one exception is a bad LAST record, which the next
+/// put writes over, and a later read takes the lock shared, so it meets the
+/// bad record or the whole new one, never a half.
+struct View {
+    names: Names,
+    lock: File,
+    file: File,
+    /// Whole records and torn bytes as the first read saw them.
+    shape: Shape,
+}
+
+impl View {
+    /// The first read, under `audit/alerts.lock` held shared, so a reader
+    /// never meets a put's half-written record: the whole records `pick`
+    /// chooses (first ordinal, count) from the number in the file. `None`
+    /// when there is no queue.
+    fn open(
+        root: &Path,
+        pick: impl FnOnce(u64) -> (u64, u64),
+    ) -> Result<Option<(Self, Span)>, AlertError> {
+        let names = Names::under(root);
+        root_is_dir(&names)?;
+        // The lock first, the queue second: a replacement holds the lock while
+        // it moves the new queue onto the name, so a reader opens the damaged
+        // queue or the new one whole, never a name in between.
+        let lock = match open_lock(&names, false) {
+            Ok(file) => file,
+            Err(AlertError::Io {
+                kind: io::ErrorKind::NotFound,
+                ..
+            }) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let held = Flock::lock_shared(&lock, names.lock.as_path())
+            .map_err(|why| AlertError::io("lock shared", &why))?;
+        if !regular(&names.queue)? {
+            return Ok(None);
+        }
+        let file =
+            File::open(&names.queue).map_err(|why| AlertError::io("open the queue", &why))?;
+        let shape = shape(&file)?;
+        let (first, count) = pick(shape.records);
+        let span = span_from(&file, first, count)?;
+        drop(held);
+        Ok(Some((
+            Self {
+                names,
+                lock,
+                file,
+                shape,
+            },
+            span,
+        )))
+    }
+
+    /// A later read of the same open file: `count` whole records from ordinal
+    /// `first`, all within the records the first read counted. The lock is
+    /// held shared for this one read only, so a put never waits for a walk.
+    fn read(&self, first: u64, count: u64) -> Result<Span, AlertError> {
+        seam_between_reads(&self.names.root);
+        let held = Flock::lock_shared(&self.lock, self.names.lock.as_path())
+            .map_err(|why| AlertError::io("lock shared", &why))?;
+        let span = span_from(&self.file, first, count)?;
+        drop(held);
+        Ok(span)
+    }
+
+    /// A span of this queue as a page.
+    fn page(&self, span: &Span) -> Page {
+        let mut page = listed(span);
+        page.exists = true;
+        page.records = self.shape.records;
+        page.torn = self.shape.torn;
+        page
+    }
+}
+
+/// The at most [`WINDOW`] records before ordinal `before` (the newest when
+/// `None`) of a queue of `records`: first ordinal and count.
+fn span_before(records: u64, before: Option<u32>) -> (u64, u64) {
+    let end = before.map_or(records, |b| u64::from(b).saturating_sub(1).min(records));
+    let count = end.min(WINDOW);
+    (end - count + 1, count)
 }
 
 /// One read of the at most [`WINDOW`] records before ordinal `before` (the
@@ -1255,18 +1343,8 @@ fn read_span(
 /// `alerts_unavailable` for a root that is no directory; `alerts_damaged`
 /// for a short or failed header; `alerts_version_unknown`; the host's refusal.
 pub fn page(root: &Path, before: Option<u32>) -> Result<Page, AlertError> {
-    let read = read_span(root, |records| {
-        let end = before.map_or(records, |b| u64::from(b).saturating_sub(1).min(records));
-        let count = end.min(WINDOW);
-        (end - count + 1, count)
-    })?;
-    Ok(read.map_or_else(Page::default, |(span, shape)| {
-        let mut page = listed(&span);
-        page.exists = true;
-        page.records = shape.records;
-        page.torn = shape.torn;
-        page
-    }))
+    let read = View::open(root, |records| span_before(records, before))?;
+    Ok(read.map_or_else(Page::default, |(view, span)| view.page(&span)))
 }
 
 /// Applies the acknowledgements of newer records to a page read by [`page`]:
@@ -1282,45 +1360,38 @@ fn settle(page: &mut Page, carried: &mut BTreeSet<u32>) {
     page.older_unacknowledged = page.older_unacknowledged.saturating_sub(older);
 }
 
-/// The page before ordinal `before` as it stands NOW: [`page`]'s one read,
-/// then every record after that page, a window at a time, for the
-/// acknowledgements that name its alerts or older ones. Its list and its
-/// older count therefore agree with [`window`] and [`older`]: no alert a
-/// record acknowledges is shown as unacknowledged. O(records after the page);
-/// the cli's (`docs/06-limits.md` L-IA-34), never a route's.
+/// The page before ordinal `before` as it stood at this call's first read:
+/// [`page`]'s one read, then every record after that page up to the count
+/// that read saw, a window at a time, for the acknowledgements that name its
+/// alerts or older ones. Its list and its older count therefore agree with
+/// [`window`] and [`older`]: no alert a record acknowledges is shown as
+/// unacknowledged. O(records after the page); the cli's
+/// (`docs/06-limits.md` L-IA-34), never a route's.
+///
+/// Every read is of the one file the first read opened, so a replacement
+/// that lands between two of them changes nothing in the answer: it is the
+/// page of the queue that was replaced, whole.
 ///
 /// # Errors
 ///
-/// As [`page`]; and the host's `Interrupted` when the queue was replaced
-/// between two of its reads (ask again).
+/// As [`page`].
 pub fn page_settled(root: &Path, before: u32) -> Result<Page, AlertError> {
-    let mut page = page(root, Some(before))?;
+    let Some((view, span)) = View::open(root, |records| span_before(records, Some(before)))? else {
+        return Ok(Page::default());
+    };
+    let mut page = view.page(&span);
     if page.first == 0 {
         return Ok(page);
     }
-    // Records are only ever appended, so the page and the records after it up
-    // to the count the first read saw are one consistent view.
-    let top = page.records;
+    let top = view.shape.records;
     let last = u64::from(before).saturating_sub(1).min(top);
     let mut carried = BTreeSet::new();
     let mut from = last + 1;
     while from <= top {
         let count = (top - from + 1).min(WINDOW);
-        let read = read_span(root, |records| {
-            (from, count.min(records.saturating_sub(from - 1)))
-        })?;
-        let Some((span, _shape)) =
-            read.filter(|(span, _)| u64::try_from(span.slots.len()).ok() == Some(count))
-        else {
-            return Err(AlertError::Io {
-                op: "read the records after the page",
-                kind: io::ErrorKind::Interrupted,
-                text: "the queue was replaced meanwhile; ask again".to_owned(),
-            });
-        };
         // Every record of this span is newer than the page, so an
         // acknowledgement of anything at or below `last` is "older" to it.
-        let part = listed(&span);
+        let part = listed(&view.read(from, count)?);
         carried.extend(
             part.acked_older
                 .iter()
@@ -1364,7 +1435,15 @@ fn listed(span: &Span) -> Page {
                         *mark = true;
                     }
                 }
-                None => page.acked_older.push(record.acked),
+                // Only a record older than the span is handed on: the writer
+                // never acknowledges ordinal 0 or a record that does not
+                // exist yet, and an acknowledgement that names one (a
+                // crafted record) takes nothing off any older count.
+                None => {
+                    if record.acked >= 1 && u64::from(record.acked) < span.first {
+                        page.acked_older.push(record.acked);
+                    }
+                }
             },
             TYPE_ALERT => {
                 if acked.get(at) == Some(&false) {
@@ -1382,27 +1461,71 @@ fn listed(span: &Span) -> Page {
     page
 }
 
-/// The unacknowledged alerts older than the newest window, newest first:
-/// every page before it, read backwards to the header, carrying the
-/// acknowledged ordinals. O(records in the file); the cli's (L-IA-34).
+/// What [`older`] found: the alerts older than the newest window and every
+/// record there it could not read or name.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Older {
+    /// Whether a queue exists. No queue is no alert, not a failure.
+    pub exists: bool,
+    /// The unacknowledged alerts older than the newest window, newest first.
+    pub alerts: Vec<Alert>,
+    /// Ordinals older than the newest window whose record fails its CRC,
+    /// newest first: named, never skipped. One that was an open alert is
+    /// counted by [`Page::older_unacknowledged`] and cannot be listed; one
+    /// that was an acknowledgement is not applied, so its alert is in
+    /// `alerts` again.
+    pub damaged: Vec<u32>,
+    /// Good records older than the newest window of a type this build cannot
+    /// name (ordinal, type), newest first: a later build's, shown, never
+    /// dropped.
+    pub unknown: Vec<(u32, u8)>,
+    /// Records of the newest window that fail their CRC: an acknowledgement
+    /// among them could not be applied to an older alert. [`window`] names
+    /// them.
+    pub newer_damaged: u32,
+    /// The first ordinal of the newest window (every record below it was
+    /// walked); 0 when the queue holds no record.
+    pub first: u32,
+    /// Whole records in the file at this call's first read.
+    pub records: u64,
+}
+
+/// The unacknowledged alerts older than the newest window, newest first, as
+/// the queue stood at this call's first read: every page before the window,
+/// read backwards to the header, carrying the acknowledged ordinals. A
+/// record that fails its CRC or is of a later build's type is returned by
+/// its ordinal beside the alerts, as [`window`] and [`page_settled`] return
+/// theirs. O(records in the file); the cli's (L-IA-34).
+///
+/// Every read is of the one file the first read opened, so the listing is of
+/// one queue even when a replacement lands in the middle of the walk.
 ///
 /// # Errors
 ///
 /// As [`page`].
-pub fn older(root: &Path) -> Result<Vec<Alert>, AlertError> {
-    let newest = page(root, None)?;
+pub fn older(root: &Path) -> Result<Older, AlertError> {
+    let Some((view, span)) = View::open(root, |records| span_before(records, None))? else {
+        return Ok(Older::default());
+    };
+    let newest = view.page(&span);
     let mut carried: BTreeSet<u32> = newest.acked_older.iter().copied().collect();
-    let mut found = Vec::with_capacity(usize::try_from(newest.older_unacknowledged).unwrap_or(0));
-    let mut before = newest.first;
-    while before > 1 {
-        let mut part = page(root, Some(before))?;
+    let mut found = Older {
+        exists: true,
+        newer_damaged: u32::try_from(newest.damaged.len()).unwrap_or(u32::MAX),
+        first: newest.first,
+        records: newest.records,
+        ..Older::default()
+    };
+    let mut end = span.first.saturating_sub(1);
+    while end > 0 {
+        let count = end.min(WINDOW);
+        let mut part = listed(&view.read(end - count + 1, count)?);
         settle(&mut part, &mut carried);
-        found.append(&mut part.alerts);
+        found.alerts.append(&mut part.alerts);
+        found.damaged.append(&mut part.damaged);
+        found.unknown.append(&mut part.unknown);
         carried.extend(part.acked_older.iter().copied());
-        if part.first == 0 || part.first >= before {
-            break;
-        }
-        before = part.first;
+        end -= count;
     }
     Ok(found)
 }

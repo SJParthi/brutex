@@ -23,13 +23,16 @@ use brutex_core::vendor::Vendor;
 use store::path::{Timeframe, YearMonth};
 
 use super::{
-    Checked, Location, Mode, Span, Target, close_journal, count_growing, current_epoch, cycle,
-    install_epoch, install_run, legacy_drift, locate, migrate, parse_day, read_epoch, record,
-    staging_dir, target_for, target_for_plan,
+    Checked, FEATURE_CENSUS_V4, Location, MIGRATION_RECEIPT, Mode, REQUIRES_CAP, REQUIRES_FORMAT,
+    REQUIRES_VOID, SEAL_RECEIPT, SEALED_VERSION, Span, Target, V4_READER_SINCE, close_journal,
+    count_growing, current_epoch, cycle, holds_sealed_stub, install_epoch, install_run,
+    legacy_drift, locate, migrate, parse_day, read_epoch, reader_refusal, record, require_feature,
+    requires_path, seal_legacy, sealed_stub, staging_dir, superseded_path, target_for,
+    target_for_plan,
 };
 use crate::manifest::{
-    Closes, Entry, EntryKey, FNO_FLOOR, Held, Manifest, epoch_path, manifest_path, segment_dir,
-    vendor_dir,
+    Closes, Entry, EntryKey, FNO_FLOOR, Held, Layout, Manifest, ManifestError, ManifestHeader,
+    epoch_path, manifest_path, segment_dir, vendor_dir,
 };
 use crate::session::Day;
 
@@ -392,11 +395,27 @@ fn a_migration_refuses_what_it_cannot_carry_and_names_later_drift() {
         "{receipt}"
     );
     assert_eq!(legacy_drift(root, Vendor::Gdfl), None, "unchanged since");
+    // THE SINGLE FILE IS SEALED AS IT IS SUPERSEDED (DB-B68): its bytes kept
+    // under the superseded name, its own name a stub old readers refuse.
+    assert!(
+        done.seal.as_ref().is_some_and(Result::is_ok),
+        "{:?}",
+        done.seal
+    );
+    assert_eq!(
+        std::fs::read(superseded_path(root, Vendor::Gdfl)).expect("kept"),
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(&legacy).expect("stub"),
+        sealed_stub(Vendor::Gdfl)
+    );
+    // A writer that is not this build replaces the stub: named.
     let mut grown = bytes.clone();
     grown.extend_from_slice(&[0u8; 128]);
     std::fs::write(&legacy, &grown).expect("it appended");
     let drift = legacy_drift(root, Vendor::Gdfl).expect("drift is named");
-    assert!(drift.contains("written to it since"), "{drift}");
+    assert!(drift.contains("no longer holds the seal"), "{drift}");
     assert_eq!(legacy_drift(root, Vendor::Zerodha), None, "not migrated");
     let again = migrate(root, Vendor::Gdfl).expect_err("refused");
     assert!(again.contains("already version 4"), "{again}");
@@ -691,4 +710,836 @@ fn journal_days_and_spans_read_the_store_s_own_spelling() {
     assert!(!span.contains(Day::new(2019, 11, 13).expect("a day")));
     let open = Span { to: None, ..span };
     assert!(open.holds(ym(2026, 9)) && open.contains(Day::new(2026, 9, 30).expect("a day")));
+}
+
+// ═══ One batch, three flushes (WP-16, DB-N25) ═════════════════════════════
+
+/// `bytes` laid over `image` at `at`, the image grown with zeros to hold them.
+fn lay(image: &mut Vec<u8>, at: u64, bytes: &[u8]) {
+    let at = usize::try_from(at).expect("an offset");
+    if image.len() < at + bytes.len() {
+        image.resize(at + bytes.len(), 0);
+    }
+    image[at..at + bytes.len()].copy_from_slice(bytes);
+}
+
+/// A census file already holding three rows, the appends a day of `new` rows
+/// (fresh keys from 100, and key 1 restated) asks of it, and the census those
+/// are counted into. `both`: the three rows were appended one at a time, so
+/// BOTH header slots are populated, as after any earlier batch; otherwise the
+/// file was written whole as an image (a first import, a recount, a
+/// compaction), so it has ONE.
+fn a_day_on(new: u32, both: bool) -> (Vec<u8>, Vec<crate::manifest::Append>, Manifest) {
+    let mut census = Manifest::open_image(Vendor::Gdfl, &[]).expect("a genesis census");
+    let mut file = Vec::new();
+    for n in 0..3 {
+        let append = census
+            .record_held(row(n, 40 + u64::from(n)))
+            .expect("a held row");
+        if n == 0 || !both {
+            file = census.image();
+        } else {
+            lay(&mut file, append.offset, &append.bytes);
+            lay(&mut file, append.commit.offset, &append.commit.bytes);
+        }
+    }
+    let mut appends = Vec::new();
+    for n in 0..new {
+        let held = if n == 1 { row(1, 99) } else { row(100 + n, 7) };
+        appends.push(census.record_held(held).expect("an append"));
+    }
+    (file, appends, census)
+}
+
+/// [`a_day_on`] a census written whole as an image.
+fn a_day_of(new: u32) -> (Vec<u8>, Vec<crate::manifest::Append>, Manifest) {
+    a_day_on(new, false)
+}
+
+/// Where each header slot starts, and how long a slot write is.
+fn slot_ranges() -> [std::ops::Range<usize>; 2] {
+    let stride = usize::try_from(crate::manifest::HEADER_LEN / crate::manifest::SLOT_COUNT)
+        .expect("a slot stride");
+    [0, stride].map(|at| at..at + crate::manifest::IMAGE_LEN)
+}
+
+/// Which header slots differ between two images of one census file.
+fn slots_changed(was: &[u8], now: &[u8]) -> [bool; 2] {
+    slot_ranges().map(|slot| was[slot.clone()] != now[slot])
+}
+
+/// The header an image of a census file loads at, or why it does not load.
+fn loads(image: &[u8]) -> Result<crate::manifest::ManifestHeader, String> {
+    Manifest::open_image(Vendor::Gdfl, image)
+        .map(|census| census.header())
+        .map_err(|why| why.to_string())
+}
+
+/// The writer this replaced, one entry at a time, each followed by its own
+/// commit — kept here as the reference the batch's bytes are held to.
+fn one_at_a_time(path: &Path, appends: &[crate::manifest::Append]) {
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("the census");
+    for append in appends {
+        file.write_all_at(&append.bytes, append.offset)
+            .expect("the entry");
+        file.write_all_at(&append.commit.bytes, append.commit.offset)
+            .expect("the slot");
+    }
+}
+
+/// A BATCH LANDS THE BYTES ONE ENTRY AT A TIME LEAVES (WP-16, DB-N25): one
+/// entry, one slot; two, seven and forty, both slots; on a census with one
+/// slot populated and with both; and the census each loads is the census the
+/// batch was counted into.
+#[test]
+fn a_batch_lands_the_bytes_one_entry_at_a_time_leaves() {
+    let scratch = Scratch::new("batch-bytes");
+    for both in [false, true] {
+        for new in [1_u32, 2, 7, 40] {
+            let (before, appends, census) = a_day_on(new, both);
+            let reference = scratch.root().join(format!("reference-{both}-{new}.man"));
+            let batched = scratch.root().join(format!("batched-{both}-{new}.man"));
+            std::fs::write(&reference, &before).expect("reference");
+            std::fs::write(&batched, &before).expect("batched");
+            one_at_a_time(&reference, &appends);
+            super::write_batch(&batched, &appends, |_| {}).expect("the batch lands");
+            let (want, got) = (
+                std::fs::read(&reference).expect("reference"),
+                std::fs::read(&batched).expect("batched"),
+            );
+            assert_ne!(want, before, "{both} {new}: the day changed the census");
+            assert_eq!(
+                got, want,
+                "{both} {new}: the batch's bytes are the reference's"
+            );
+            let loaded = Manifest::open_image(Vendor::Gdfl, &got).expect("it loads");
+            assert_eq!(loaded.header(), census.header(), "{both} {new}");
+            assert_eq!(loaded.entries(), 3 + u64::from(new), "{both} {new}");
+        }
+    }
+}
+
+/// A BATCH IS THREE FLUSHES HOWEVER LONG IT IS, AND ONE SLOT WRITE AT A TIME
+/// (repair 2): the entries, with no slot touched; then the slot the batch's
+/// first commit belongs in, which is NOT the slot holding the newest
+/// generation; and only then the other. A batch of one commit has one slot
+/// write, so two flushes. It was two per entry. An empty batch opens nothing.
+#[test]
+fn a_batch_is_three_flushes_and_one_slot_write_at_a_time() {
+    use super::BatchBarrier::{Entries, NewerSlot, OlderSlot};
+    let scratch = Scratch::new("batch-flushes");
+    for both in [false, true] {
+        for new in [1_u32, 2, 7, 40] {
+            let (before, appends, _) = a_day_on(new, both);
+            let newest = loads(&before).expect("the census before the batch");
+            let newest_slot = usize::try_from(newest.generation % 2).expect("0 or 1");
+            let path = scratch.root().join(format!("census-{both}-{new}.man"));
+            std::fs::write(&path, &before).expect("census");
+            let mut seen = Vec::new();
+            let mut landed = 0;
+            super::write_batch_with(&path, &appends, |_| landed += 1, &mut |file, step| {
+                let now = std::fs::read(&path).expect("census");
+                seen.push((step, slots_changed(&before, &now)));
+                file.sync_all()
+            })
+            .expect("the batch lands");
+            let mut older_only = [true, true];
+            older_only[newest_slot] = false;
+            let mut want = vec![(Entries, [false, false]), (OlderSlot, older_only)];
+            if new > 1 {
+                want.push((NewerSlot, [true, true]));
+            }
+            assert_eq!(
+                seen, want,
+                "{both} {new}: the flushes, and the slots each found changed"
+            );
+            assert_eq!(landed, 1, "{both} {new}: seen once, after the last flush");
+        }
+    }
+    let absent = scratch.root().join("never.man");
+    let mut flushed = 0;
+    super::write_batch_with(&absent, &[], |_| {}, &mut |_, _| {
+        flushed += 1;
+        Ok(())
+    })
+    .expect("nothing to write");
+    assert_eq!(flushed, 0);
+    assert!(!absent.exists(), "an empty batch creates nothing");
+}
+
+/// A TORN WRITE INSIDE A BATCH NEVER LEAVES THE CENSUS BEHIND (repair 2; a
+/// power cut, which no kill can emulate). What the drive holds for certain is
+/// the file as each barrier found it; a cut between two barriers may have
+/// landed ANY PART of what was written between them. For batches of 1, 2, 3,
+/// 40 and 41 commits, on a census with both slots populated and on one
+/// written whole as an image, every such tear (a first byte, half, all but
+/// the last byte of each write in flight, alone and together) must load, at
+/// a generation the batch or the census before it committed, and never below
+/// the one the drive held at the barrier before.
+///
+/// Before the repair the batch's last commit went first, onto the slot
+/// holding the newest generation whenever the batch was even, with the other
+/// slot's write in flight beside it: torn, the census loaded one generation
+/// behind, or not at all.
+#[test]
+fn a_torn_write_inside_a_batch_never_leaves_the_census_behind() {
+    let scratch = Scratch::new("batch-torn");
+    let mut behind = Vec::new();
+    let mut together = Vec::new();
+    let mut tears = 0_u32;
+    for both in [true, false] {
+        for new in [1_u32, 2, 3, 40, 41] {
+            let (before, appends, census) = a_day_on(new, both);
+            let path = scratch.root().join(format!("census-{both}-{new}.man"));
+            std::fs::write(&path, &before).expect("census");
+            let mut durable = vec![before.clone()];
+            super::write_batch_with(&path, &appends, |_| {}, &mut |_, _| {
+                durable.push(std::fs::read(&path).expect("census"));
+                Ok(())
+            })
+            .expect("the batch lands");
+            let mut committed = vec![loads(&before).expect("the census before the batch")];
+            committed.extend(appends.iter().map(|append| append.commit.header));
+            let entries =
+                usize::try_from(crate::manifest::HEADER_LEN).expect("a length")..usize::MAX;
+            for pair in durable.windows(2) {
+                let (was, now) = (&pair[0], &pair[1]);
+                let held = loads(was).expect("what a barrier found loads");
+                // The writes in flight between the two barriers.
+                let mut flying: Vec<std::ops::Range<usize>> = slot_ranges()
+                    .into_iter()
+                    .filter(|slot| was[slot.clone()] != now[slot.clone()])
+                    .collect();
+                if flying.len() > 1 {
+                    together.push((both, new, "two slot writes"));
+                }
+                let tail = entries.start..now.len();
+                if was.get(tail.clone()) != now.get(tail.clone()) {
+                    if !flying.is_empty() {
+                        together.push((both, new, "entries and a slot"));
+                    }
+                    flying.push(tail);
+                }
+                assert!(!flying.is_empty(), "{both} {new}: a barrier over no write");
+                // Each write torn alone and, when more than one is in flight,
+                // all of them torn together; cut after its first byte, at its
+                // half and before its last byte.
+                let mut cases: Vec<Vec<std::ops::Range<usize>>> =
+                    flying.iter().cloned().map(|one| vec![one]).collect();
+                if flying.len() > 1 {
+                    cases.push(flying.clone());
+                }
+                for case in &cases {
+                    for cut in ["first byte", "half", "all but the last byte"] {
+                        let mut torn = was.clone();
+                        for write in case {
+                            let part = match cut {
+                                "first byte" => 1,
+                                "half" => write.len() / 2,
+                                _ => write.len() - 1,
+                            };
+                            let at = u64::try_from(write.start).expect("an offset");
+                            lay(&mut torn, at, &now[write.start..write.start + part]);
+                        }
+                        tears += 1;
+                        let ok = loads(&torn).is_ok_and(|header| {
+                            header.generation >= held.generation && committed.contains(&header)
+                        });
+                        if !ok {
+                            let loaded =
+                                loads(&torn).map(|header| (header.n_valid, header.generation));
+                            behind.push((both, new, case.clone(), cut, loaded, held.generation));
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                durable.last().map(|image| loads(image)),
+                Some(Ok(census.header())),
+                "{both} {new}: the last barrier holds the whole batch"
+            );
+        }
+    }
+    let torn_behind: Vec<String> = behind
+        .iter()
+        .map(|(both, new, case, cut, loaded, held)| {
+            format!(
+                "({both}, {new}) {case:?} cut at its {cut}: held generation {held}, loads as \
+                 (entries, generation) {loaded:?}"
+            )
+        })
+        .collect();
+    assert!(
+        together.is_empty() && torn_behind.is_empty(),
+        "by (both slots populated, commits): writes in flight together between two barriers \
+         = {together:?}; and a torn write that left the census behind where the drive held \
+         it, or unreadable = {torn_behind:#?}"
+    );
+    assert_eq!(tears, 84, "every tear was tried");
+}
+
+/// A FLUSH THE HOST REFUSES STOPS THE BATCH AT A WHOLE GENERATION, and the
+/// caller is never told it landed. Refused after the entries: no slot names
+/// one, the census loads as it was. Refused after the first slot: the other
+/// slot is never written, and the census loads at that slot's commit.
+/// Refused after the second: every byte is written, and the refusal is still
+/// the answer.
+#[test]
+fn a_refused_flush_inside_a_batch_stops_it_at_a_whole_generation() {
+    use super::BatchBarrier::{Entries, NewerSlot, OlderSlot};
+    let scratch = Scratch::new("batch-refused");
+    for new in [7_u32, 8] {
+        let (before, appends, census) = a_day_on(new, true);
+        let was = loads(&before).expect("the census before the batch");
+        let whole = census.header();
+        let older = appends[0].commit.offset;
+        let in_older = appends
+            .iter()
+            .rev()
+            .find(|append| append.commit.offset == older)
+            .expect("the first commit's slot")
+            .commit
+            .header;
+        for (at, loaded, slots) in [
+            (Entries, was, [false, false]),
+            (OlderSlot, in_older, [true, false]),
+            (NewerSlot, whole, [true, true]),
+        ] {
+            let path = scratch.root().join(format!("census-{new}-{at:?}.man"));
+            std::fs::write(&path, &before).expect("census");
+            let mut landed = 0;
+            let refused =
+                super::write_batch_with(&path, &appends, |_| landed += 1, &mut |_, step| {
+                    if step == at {
+                        Err(std::io::Error::other("the drive went away"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .expect_err("a flush was refused");
+            assert!(refused.to_string().contains("went away"), "{refused}");
+            assert_eq!(landed, 0, "{new} {at:?}: never reported as landed");
+            let now = std::fs::read(&path).expect("census");
+            assert_eq!(loads(&now), Ok(loaded), "{new} {at:?}");
+            let mut changed = slots_changed(&before, &now);
+            if was.generation.is_multiple_of(2) {
+                changed.reverse();
+            }
+            assert_eq!(
+                changed, slots,
+                "{new} {at:?}: (older slot, newer slot) written"
+            );
+        }
+        // The batch is odd or even; the first slot's commit is its last or
+        // the one before it.
+        let short = whole.generation - in_older.generation;
+        assert_eq!(short, u64::from(new.is_multiple_of(2)), "{new}");
+    }
+}
+
+/// A COMMIT PAST THE BATCH IS REFUSED BEFORE A BYTE IS WRITTEN: a slot may
+/// never name an entry the batch's entries barrier did not cover.
+#[test]
+fn a_commit_past_the_batch_is_refused_before_a_byte() {
+    let scratch = Scratch::new("batch-past");
+    let (before, mut appends, _) = a_day_of(3);
+    let path = scratch.root().join("census.man");
+    std::fs::write(&path, &before).expect("census");
+    if let Some(first) = appends.first_mut() {
+        first.commit.durable_through = u64::MAX;
+    }
+    let why = super::write_batch(&path, &appends, |_| {}).expect_err("refused");
+    assert!(why.to_string().contains("nothing was written"), "{why}");
+    assert_eq!(std::fs::read(&path).expect("census"), before);
+}
+
+// ═══ The seal (DB-B68, WP-81) ═══════════════════════════════════════════════
+
+/// **THE STUB IS NO GEOMETRY ANY READER KNOWS.** Every reader resolves a
+/// version through `Layout::for_version` and refuses an unknown one by number
+/// — the reader a rollback starts (`tgt/app5`, built at b72371d8) has the same
+/// dispatch — so the stub is refused as `unknown manifest version 65535`, and
+/// a census at its name is never read, as held or as empty.
+#[test]
+fn the_seal_version_is_no_geometry_any_reader_knows() {
+    assert_eq!(
+        Layout::for_version(SEALED_VERSION),
+        Err(ManifestError::UnknownVersion(u16::MAX))
+    );
+    let stub = sealed_stub(Vendor::Gdfl);
+    assert_eq!(stub.len(), 32_768, "one whole header region");
+    assert_eq!(
+        ManifestHeader::decode(&stub[..64]),
+        Err(ManifestError::UnknownVersion(u16::MAX))
+    );
+    assert_eq!(
+        ManifestHeader::decode(&stub[16_384..16_384 + 64]),
+        Err(ManifestError::UnknownVersion(u16::MAX)),
+        "the second slot too, so no generation survives"
+    );
+    let refused = Manifest::open_image(Vendor::Gdfl, &stub).expect_err("refused");
+    assert_eq!(refused.to_string(), "unknown manifest version 65535");
+    let text = String::from_utf8_lossy(&stub);
+    assert!(text.contains("SEALED (DB-B68)") && text.contains(V4_READER_SINCE));
+}
+
+/// A store migrated BEFORE the seal existed — the operator's GDFL census of
+/// 10 Oct 2026 — is put back to that state here: the single file at its name,
+/// no superseded file, no seal receipt.
+fn unsealed(root: &Path) -> Vec<u8> {
+    let legacy = manifest_path(root, Vendor::Gdfl);
+    let kept = superseded_path(root, Vendor::Gdfl);
+    let bytes = std::fs::read(&kept).expect("the superseded census");
+    std::fs::remove_file(&legacy).expect("the stub removed");
+    std::fs::rename(&kept, &legacy).expect("the census back at its name");
+    std::fs::remove_file(vendor_dir(root, Vendor::Gdfl).join(SEAL_RECEIPT)).expect("no receipt");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    bytes
+}
+
+/// **AN ALREADY-MIGRATED VENDOR IS SEALED ONCE, AND A RERUN ONLY CONFIRMS
+/// IT.** The census's bytes are the superseded file's, the name holds the
+/// stub, the receipt names the kept file and the first version-4 reader, and
+/// nothing drifts.
+#[test]
+fn an_already_migrated_vendor_is_sealed_once_and_a_rerun_confirms_it() {
+    let scratch = Scratch::new("SEAL");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    let done = migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert!(done.seal.as_ref().is_some_and(Result::is_ok));
+    let bytes = unsealed(root);
+
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("sealed");
+    assert!(seal.wrote);
+    assert_eq!(seal.legacy_bytes, u64::try_from(bytes.len()).expect("len"));
+    assert_eq!(std::fs::read(&seal.superseded).expect("kept"), bytes);
+    assert!(holds_sealed_stub(&seal.legacy));
+    let receipt = std::fs::read_to_string(vendor_dir(root, Vendor::Gdfl).join(SEAL_RECEIPT))
+        .expect("the seal receipt");
+    assert!(
+        receipt.contains(&format!("superseded_bytes={}", bytes.len())),
+        "{receipt}"
+    );
+    assert!(
+        receipt.contains(&format!("reader_since={V4_READER_SINCE}")),
+        "{receipt}"
+    );
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    // The partitions read as before: the seal touched no epoch.
+    assert!(matches!(
+        locate(root, Vendor::Gdfl),
+        Ok(Location::Partitioned(_))
+    ));
+
+    let again = seal_legacy(root, Vendor::Gdfl).expect("confirmed");
+    assert!(!again.wrote, "nothing written the second time");
+    assert_eq!(std::fs::read(&again.superseded).expect("kept"), bytes);
+}
+
+/// **THE SEAL RECEIPT IS READ, NEVER TRUSTED FOR ITS NAME, AND ITS NAME NEVER
+/// HOLDS HALF OF ONE (DB-B68).** The receipt was created at its final name
+/// and then written; a crash between the two left an empty `SEALED`, and
+/// every later seal run answered "already sealed, nothing was written" over
+/// zero bytes — the file a deploy reads `reader_since` from.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every shape a crash leaves, in one store"
+)]
+fn a_seal_receipt_no_seal_finished_writing_is_kept_aside_and_written_whole() {
+    use super::{SEAL_RECEIPT_FORMAT, SealReceipt, seal_receipt};
+    let scratch = Scratch::new("SEALRECEIPT");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    let done = migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert!(done.seal.as_ref().is_some_and(Result::is_ok));
+    let dir = vendor_dir(root, Vendor::Gdfl);
+    let at = dir.join(SEAL_RECEIPT);
+    let whole = std::fs::read_to_string(&at).expect("the receipt");
+    assert!(
+        whole.starts_with(&format!("{SEAL_RECEIPT_FORMAT}\n")),
+        "{whole}"
+    );
+    assert_eq!(seal_receipt(&at), Ok(SealReceipt::Whole));
+    assert!(
+        !dir.join("SEALED.tmp").exists(),
+        "the staged receipt was renamed, not left"
+    );
+    let names = |dir: &Path| {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("listed")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("SEALED"))
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&dir), ["SEALED"]);
+
+    // EVERY SHAPE A CRASH MID-WRITE LEAVES: empty; cut inside the first
+    // line; cut before reader_since; cut inside reader_since (no newline);
+    // a reader_since that is no commit.
+    let cut_at = |word: &str| {
+        whole
+            .split_at(whole.find(word).expect("present"))
+            .0
+            .to_owned()
+    };
+    let torn = [
+        String::new(),
+        "format=census-se".to_owned(),
+        cut_at("stub_version="),
+        whole.trim_end_matches('\n').to_owned(),
+        whole.replace(V4_READER_SINCE, "not-a-commit"),
+        whole.replace("superseded_bytes=", "superseded_bytes=x"),
+    ];
+    for (n, bytes) in torn.iter().enumerate() {
+        std::fs::write(&at, bytes).expect("torn");
+        assert!(
+            matches!(seal_receipt(&at), Ok(SealReceipt::Torn(_))),
+            "{bytes:?}: {:?}",
+            seal_receipt(&at)
+        );
+        let seal = seal_legacy(root, Vendor::Gdfl).expect("confirmed and repaired");
+        assert!(seal.wrote, "{bytes:?}: a whole receipt was written");
+        let aside = seal.torn_receipt.expect("the torn bytes are kept");
+        assert_eq!(
+            std::fs::read_to_string(&aside).expect("kept"),
+            *bytes,
+            "byte for byte"
+        );
+        assert_eq!(std::fs::read_to_string(&at).expect("whole"), whole);
+        assert_eq!(seal_receipt(&at), Ok(SealReceipt::Whole));
+        assert_eq!(names(&dir).len(), n + 2, "one kept file per torn receipt");
+        let again = seal_legacy(root, Vendor::Gdfl).expect("confirmed");
+        assert!(!again.wrote && again.torn_receipt.is_none());
+    }
+
+    // A STAGED RECEIPT A CRASH LEFT is not the receipt and does not stop the
+    // next run.
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::write(dir.join("SEALED.tmp"), "format=census-se").expect("staged");
+    assert_eq!(seal_receipt(&at), Ok(SealReceipt::Absent));
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("written");
+    assert!(seal.wrote && seal.torn_receipt.is_none());
+    assert_eq!(std::fs::read_to_string(&at).expect("whole"), whole);
+    assert!(!dir.join("SEALED.tmp").exists());
+
+    // A LATER BUILD'S RECEIPT IS NOT THIS BUILD'S TO REPLACE: refused by
+    // name, left byte for byte.
+    let foreign = whole.replace(SEAL_RECEIPT_FORMAT, "format=census-seal-v2");
+    std::fs::write(&at, &foreign).expect("foreign");
+    assert_eq!(
+        seal_receipt(&at),
+        Ok(SealReceipt::Foreign("census-seal-v2".to_owned()))
+    );
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(
+        why.contains("SEALED")
+            && why.contains("census-seal-v2")
+            && why.contains("nothing was written"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read_to_string(&at).expect("left"), foreign);
+
+    // A NAME THAT IS NO REGULAR FILE is refused by name, at once.
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::create_dir(&at).expect("a directory");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(
+        why.contains("SEALED") && why.contains("not a regular file"),
+        "{why}"
+    );
+    std::fs::remove_dir(&at).expect("removed");
+    std::os::unix::fs::symlink(dir.join(MIGRATION_RECEIPT), &at).expect("a link");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(why.contains("SEALED"), "{why}");
+}
+
+/// **A SEAL REFUSES WHAT IT WOULD HIDE, AND FINISHES WHAT A CRASH LEFT.**
+/// Months a pre-version-4 writer appended since migration are refused by name,
+/// nothing written; a vendor not migrated has nothing to seal; a seal stopped
+/// between its link and its rename is completed by the next run, and that
+/// halfway state is no drift.
+#[test]
+fn a_seal_refuses_drift_and_an_unmigrated_vendor_and_finishes_an_interrupted_one() {
+    let scratch = Scratch::new("SEAL-REFUSE");
+    let root = scratch.root();
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("not migrated");
+    assert!(why.contains("is not migrated"), "{why}");
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let bytes = unsealed(root);
+    let legacy = manifest_path(root, Vendor::Gdfl);
+    let kept = superseded_path(root, Vendor::Gdfl);
+
+    let mut grown = bytes.clone();
+    grown.extend_from_slice(&[0_u8; 128]);
+    std::fs::write(&legacy, &grown).expect("an old writer appended");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("drift refused");
+    assert!(why.contains("Count those months first"), "{why}");
+    assert!(!kept.exists(), "nothing was written");
+    std::fs::write(&legacy, &bytes).expect("as migrated");
+
+    std::fs::hard_link(&legacy, &kept).expect("a seal stopped after its link");
+    assert_eq!(
+        legacy_drift(root, Vendor::Gdfl),
+        None,
+        "halfway is no write"
+    );
+    let seal = seal_legacy(root, Vendor::Gdfl).expect("finished");
+    assert!(seal.wrote);
+    assert!(holds_sealed_stub(&legacy));
+    assert_eq!(std::fs::read(&kept).expect("kept"), bytes);
+    assert!(
+        vendor_dir(root, Vendor::Gdfl)
+            .join(MIGRATION_RECEIPT)
+            .exists()
+    );
+
+    // A superseded file of the right length that is NOT this census is
+    // refused rather than guessed at.
+    let other = Scratch::new("SEAL-OTHER");
+    let root = other.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let bytes = unsealed(root);
+    std::fs::write(superseded_path(root, Vendor::Gdfl), &bytes).expect("a copy, not a link");
+    let why = seal_legacy(root, Vendor::Gdfl).expect_err("refused");
+    assert!(why.contains("refused rather than guess"), "{why}");
+}
+
+// ═══ What the store requires of its reader (DB-B68, WP-81) ══════════════════
+
+/// **A MIGRATION SAYS WHAT ITS CENSUS REQUIRES, ONCE, AND THIS BUILD HAS IT.**
+/// The requirements file is absent before any format change; the migration's
+/// seal writes the format line and one `census-v4` line for the vendor; a
+/// second seal and a second request write nothing; and the census is located
+/// as before.
+#[test]
+fn a_migration_records_the_reader_feature_its_census_requires() {
+    let scratch = Scratch::new("REQ");
+    let root = scratch.root();
+    let at = requires_path(root);
+    assert_eq!(at, root.join("manifest/REQUIRES"));
+    assert_eq!(reader_refusal(root, Vendor::Gdfl), None, "no file, no rule");
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let text = std::fs::read_to_string(&at).expect("written by the seal");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert_eq!(lines[0], REQUIRES_FORMAT);
+    assert!(
+        lines[1].starts_with(&format!(
+            "requires={FEATURE_CENSUS_V4} vendor=gdfl since={V4_READER_SINCE} at="
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with('\n'));
+    assert_eq!(
+        reader_refusal(root, Vendor::Gdfl),
+        None,
+        "this build has it"
+    );
+    assert!(matches!(
+        locate(root, Vendor::Gdfl),
+        Ok(Location::Partitioned(_))
+    ));
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(false),
+        "already in force"
+    );
+    assert!(!seal_legacy(root, Vendor::Gdfl).expect("confirmed").wrote);
+    assert_eq!(std::fs::read_to_string(&at).expect("unchanged"), text);
+    // Another vendor's requirement is its own line.
+    assert_eq!(
+        require_feature(root, Vendor::Zerodha, FEATURE_CENSUS_V4),
+        Ok(true)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&at).expect("grown").lines().count(),
+        3
+    );
+}
+
+/// **A CENSUS THAT NEEDS WHAT THIS BUILD LACKS IS REFUSED BY NAME, FOR THE
+/// VENDOR IT BINDS AND NO OTHER (DB-B68).** The failure a rollback met: a
+/// build read the shape it knew and served it as held. A line naming a
+/// feature this build does not have refuses `locate` for that vendor, naming
+/// the file, the line and the feature; `vendor=*` binds every vendor; a
+/// vendor the line does not name is located as before.
+#[test]
+fn a_census_requiring_an_unknown_feature_is_refused_for_the_vendor_it_binds() {
+    let scratch = Scratch::new("REQ-UNKNOWN");
+    let root = scratch.root();
+    assert!(record(root, Vendor::Gdfl, &[row(0, 1)]).is_ok());
+    assert!(migrate(root, Vendor::Gdfl).is_ok());
+    let at = requires_path(root);
+    let mut text = std::fs::read_to_string(&at).expect("the seal's lines");
+    text.push_str("requires=census-v5 vendor=gdfl since=ffff at=1\n");
+    std::fs::write(&at, &text).expect("a later migration's line");
+
+    let why = reader_refusal(root, Vendor::Gdfl).expect("refused");
+    assert!(
+        why.contains("manifest/REQUIRES")
+            && why.contains("line 3")
+            && why.contains("\"census-v5\"")
+            && why.contains("this build does not have")
+            && why.contains("DB-B68"),
+        "{why}"
+    );
+    assert_eq!(locate(root, Vendor::Gdfl), Err(why.clone()));
+    assert!(
+        record(root, Vendor::Gdfl, &[row(1, 1)]).is_err(),
+        "and no writer of this build adds to a census it cannot read"
+    );
+    assert_eq!(reader_refusal(root, Vendor::Zerodha), None);
+    assert!(matches!(
+        locate(root, Vendor::Zerodha),
+        Ok(Location::Single(_))
+    ));
+
+    text.push_str("requires=bars-v4 vendor=* since=ffff at=2\n");
+    std::fs::write(&at, &text).expect("a store-wide line");
+    let every = reader_refusal(root, Vendor::Zerodha).expect("every vendor");
+    assert!(
+        every.contains("line 4") && every.contains("\"bars-v4\""),
+        "{every}"
+    );
+}
+
+/// **EVERY EXTREME OF THE FILE.** Empty; only an unfinished tail; a tail a
+/// writer voids and follows with its own line; duplicates; another format; a
+/// line of no known shape; a file too long to be one; and something at the
+/// name that is not a file. What cannot be told is refused, never read as
+/// "requires nothing"; an append that did not finish is never a rule.
+#[test]
+fn the_requirements_file_is_read_exactly_or_refused() {
+    let scratch = Scratch::new("REQ-EDGE");
+    let root = scratch.root();
+    let at = requires_path(root);
+    let say = |text: &str| {
+        std::fs::write(&at, text).expect("written");
+        reader_refusal(root, Vendor::Gdfl)
+    };
+    assert_eq!(say(""), None, "empty");
+    assert_eq!(say("\n\n"), None, "blank lines");
+    assert_eq!(
+        say(&format!(
+            "{REQUIRES_FORMAT}\nrequires=census-v4 vendor=gdfl\nrequires=census-v4 vendor=gdfl\n"
+        )),
+        None,
+        "a duplicate is the same rule twice"
+    );
+
+    // AN APPEND THAT DID NOT FINISH IS NOT A RULE, whatever it would have said.
+    assert_eq!(
+        say(&format!("{REQUIRES_FORMAT}\nrequires=census-v9 vendor=gd")),
+        None,
+        "no newline, not in force"
+    );
+    // THE NEXT WRITER VOIDS IT AND WRITES ITS OWN LINE AFTER, by append alone.
+    assert_eq!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4),
+        Ok(true)
+    );
+    let text = std::fs::read_to_string(&at).expect("grown");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[1],
+        format!("requires=census-v9 vendor=gd{REQUIRES_VOID}"),
+        "{text}"
+    );
+    assert!(
+        lines[2].starts_with("requires=census-v4 vendor=gdfl since="),
+        "{text}"
+    );
+    assert_eq!(lines.len(), 3, "the format line was already there: {text}");
+    assert_eq!(reader_refusal(root, Vendor::Gdfl), None);
+
+    let format = say("format=store-requires-v2\n").expect("another format");
+    assert!(
+        format.contains("declares format \"store-requires-v2\""),
+        "{format}"
+    );
+    for shapeless in ["census-v4 gdfl\n", "requires=census-v4\n", "vendor=gdfl\n"] {
+        let why = say(shapeless).expect("no known shape");
+        assert!(
+            why.contains("is no requirement this build can read"),
+            "{why}"
+        );
+    }
+    let long = "\n".repeat(usize::try_from(REQUIRES_CAP).expect("small") + 1);
+    let why = say(&long).expect("too long");
+    assert!(why.contains("is longer than 65536 bytes"), "{why}");
+
+    std::fs::remove_file(&at).expect("removed");
+    std::fs::create_dir(&at).expect("a directory at the name");
+    let why = reader_refusal(root, Vendor::Gdfl).expect("not a file");
+    assert!(why.contains("is not a regular file"), "{why}");
+    assert!(!why.contains("  "), "one sentence, no run of spaces: {why}");
+    assert!(
+        require_feature(root, Vendor::Gdfl, FEATURE_CENSUS_V4).is_err(),
+        "and a writer says so too"
+    );
+
+    // A STORE ROOT NO HOST CAN NAME HOLDS NO REQUIREMENTS FILE, so it requires
+    // nothing here: the census's own read then refuses the root in its own
+    // words (`a_census_that_cannot_be_measured_stops_the_run`), which a
+    // "could not be opened" from this file used to pre-empt.
+    assert_eq!(
+        reader_refusal(&root.join("A".repeat(500)), Vendor::Gdfl),
+        None,
+        "a name past the host's limit is no requirements file"
+    );
+    assert_eq!(
+        reader_refusal(&elsewhere_file(root).join("under-a-file"), Vendor::Gdfl),
+        None,
+        "a file where a directory belongs is no requirements file"
+    );
+
+    // A LINK AT THE NAME IS NOT FOLLOWED to a file that requires nothing: the
+    // rule a store states is its own file's, never one a link points at.
+    std::fs::remove_dir(&at).expect("removed");
+    let elsewhere = root.join("elsewhere");
+    std::fs::write(&elsewhere, format!("{REQUIRES_FORMAT}\n")).expect("written");
+    std::os::unix::fs::symlink(&elsewhere, &at).expect("linked");
+    let why = reader_refusal(root, Vendor::Gdfl).expect("a link is refused");
+    assert!(why.contains("could not be opened"), "{why}");
+
+    // A FIFO AT THE NAME IS REFUSED AT ONCE, never waited on: before this the
+    // open blocked until a writer came, and a census load hung with it.
+    // `mkfifo` is the external program, run from a test only.
+    std::fs::remove_file(&at).expect("removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&at)
+        .status()
+        .expect("mkfifo ran");
+    assert!(made.success(), "mkfifo made the pipe");
+    let asked = std::time::Instant::now();
+    let why = reader_refusal(root, Vendor::Gdfl).expect("a pipe is refused");
+    assert!(why.contains("is not a regular file"), "{why}");
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(5),
+        "answered without waiting for a writer"
+    );
+}
+
+/// A regular file under `root`, for a path that runs THROUGH a file.
+fn elsewhere_file(root: &Path) -> PathBuf {
+    let at = root.join("a-file-not-a-directory");
+    std::fs::write(&at, b"x").expect("written");
+    at
 }
