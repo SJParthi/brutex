@@ -66935,6 +66935,159 @@ its source comment, not in the `alias` record or in any answer.
 the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
 (ignored; needs the vendor archive).
 
+### D-4875 — A month repair must hold a one-second month and leave it indexed — 2026-10-11
+
+**Implemented by** IA-17, in two parts. This entry lands with the first (the
+row ceiling of (1) and the step of (5), `crates/store/src/repair.rs`). Parts
+(3) and the writer the step of (5) is for are the second part and are NOT
+BUILT; they are named here so that nobody reads this entry as saying they are.
+D-4898, below, records where the first part departs from what the design
+drafted for it.
+
+**What was wrong.** `store::repair` (WP-13c) refused any source or merged
+series past a flat `MAX_ROWS` of 100,000 rows, and a GDFL one-second index
+month holds about 409,000 to 453,000 bars, so no such month could be repaired
+at all. WP-12d raised the constant to 2,678,400 (31 days of seconds) when it
+built the GDFL back-fill (DB-N26). That let every one-second month through and
+left the same number on every other rung: a one-minute month, which holds at
+most 44,640 bars, and a daily one, which holds at most 31, were "bounded" at
+2,678,400, so a request sixty times larger than any one-minute month passed
+the count and was walked bar by bar before something else refused it.
+
+**(1) The row ceiling is the path's.** `repair::row_ceiling(path)` is the
+month's length over the rung's width: the days of the path's month times
+86,400, over the rung's seconds. 2,678,400 for a 31-day one-second month,
+44,640 for its one-minute month, 31 for its daily one; 28 days of the rung for
+a February. All four refusals ask it (`publish`'s merged series, the offered
+bars and the held count in `repair_month_with`, and every header
+`check_header` is shown), and the refusal carries both counts:
+`RepairError::RowLimit { rows, ceiling }`. No valid month is refused for its
+size, at any rung, and no table of rungs or months is kept: the path already
+says both. `MAX_ROWS` stays as the largest value the ceiling takes and is
+compared against nowhere. Memory is `docs/06-limits.md` L-IA-26.
+
+**(2) The revision's `.tix` is its writer's.** A revision is written through
+`BarFile::open_or_create` and `append` on the revision's root, which keep the
+time index as every append does (`crates/store/REPAIR.md`, "Indexed
+siblings"). Nothing was built for it here. Test IA-RP-01 holds it at a full
+month: the `.tix` is present and `time_lookup()` answers `Indexed`.
+
+**(3) One repair per (instrument, month) per run. NOT BUILT.** Each repair
+keeps a whole copy of the month for ever, so a run that repairs a month a day
+at a time keeps one copy per day. A repair-reason run is to gather every day
+of a month it reads and offer them together. That is IA-17's second part
+(the design's D-4899 fixes its stop, crash and full-disk rules); until it
+lands WP-12d's filing path repairs one file at a time, and
+`docs/06-limits.md` L-IA-26 says what that costs.
+
+**(4) GDFL's repair policy** is the GDFL caller's (WP-12d's `repair_rows`),
+not `store`'s, and is neither built nor changed here.
+
+**(5) A revision's other files follow their own owners' rules, and a caller's
+own file follows the generation through one step.** A revision carries no
+`.prv` (WP-13c's rule, `REPAIR.md`, "Provenance"; test IA-RP-01 holds that
+none is written). Its `.srt` runs are the writer's (WP-39). The CASH auction
+file is `pull`'s own, not a store sidecar, and `repair::publish` takes an
+already merged series while the merge, the held-bar check and the basis
+witness exist only inside `repair_month`, which promoted as soon as it
+published. So a caller that wanted to write its file between the two would
+have had to copy the merge: a second repair authority. Instead
+`repair_month_with` takes one step, `before_promote`, called with the
+revision's root after `publish` has returned (`Created` or `Reused`) and
+before `generation::promote`. The revision is then whole and durable and no
+reader is served from it. A step that refuses stops the repair unpromoted;
+the same repair offered again finds the revision (`Published::Reused`), runs
+the step again and promotes. `store` names no type of `pull`'s. **The step is
+built; the CASH writer that will be passed to it is NOT** (IA-17's second
+part, after IA-16), so at this entry's date no caller passes a step and a
+repaired CASH month still has no auction file beside its served bars.
+
+**Proof.** `store/tests/month_repair.rs`: IA-RP-01
+`a_full_1s_month_repairs_with_its_sidecars`, IA-RP-02
+`a_cash_repair_writes_its_auction_file_before_it_is_served`, and the five
+tests beside them; `store::repair::tests::the_row_ceiling_is_the_months_length_over_the_rungs_width`
+and `…::the_flat_maximum_is_the_largest_ceiling_any_path_has`
+(`docs/04-invariants.md` IA-RP-01, IA-RP-02, IA-RP-06 to IA-RP-08). Bench
+C-RP-01 (`crates/store/benches/ratio.rs`).
+
+### D-4898 — The row ceiling is read from the path, `repair_month_with` carries the step, and a revision is written in bounded commits (amends D-4875) — 2026-10-12
+
+**Implemented by** IA-17 (first part). **Amends** D-4875 (1) and (5) in three
+places, each where the code at the head had moved since the design's text was
+written or where the design's sentence could not be built as written.
+
+**1. The ceiling is path-derived, and WP-12d's constant stays.** The design's
+round 6 has IA-17 replace `MAX_ROWS = 100_000`; WP-12d had already replaced it
+with a flat 2,678,400 by the time IA-17 was built. The design's round-7 review
+(IA-17-1) proposed dropping the per-timeframe ceiling as adding nothing, on
+the ground that the month admission (D-0915) bounds every month to its rung's
+grid. That holds for a batch that has been walked; the count is refused
+BEFORE the walk, so under the flat constant a one-minute request of 44,641 to
+2,678,400 rows was surveyed and admitted bar by bar first, and on the daily
+rung the admission's grid is one second, so it bounds a daily month only by
+the month's seconds. The package was asked for the per-timeframe ceiling and
+it is built, as one function of the path (`row_ceiling`), with WP-12d's
+`MAX_ROWS` kept as its maximum (`…::the_flat_maximum_is_the_largest_ceiling_any_path_has`).
+On every intraday rung the ceiling equals the writer's own bound
+(`Admission::slots`), so nothing the writer filled is refused; on the daily
+rung it is the month's days, and more daily bars than days is refused
+`RowLimit` by count.
+
+**2. `repair_month_with`, and a refusal of its own.** The design adds the step
+as one more argument of `repair_month`, which would have changed every caller
+in `pull`, `api` and `cli` in a package that owns none of them (review
+IA-17-2). `repair_month` keeps its signature and passes no step;
+`repair_month_with` takes it. IA-RP-02 holds the two byte-identical with no
+step. The design says a failing step is refused as `RepairError::Io`, "its
+words kept"; `Io` carries an `io::ErrorKind` and a fixed operation name and
+has nowhere to keep words, so the refusal is its own variant,
+`RepairError::BeforePromote { revision_root, why }`, whose text says the
+revision is published and not served and that the same repair runs the step
+again.
+
+**3. A revision is written in commits of at most 524,288 rows.** Bench
+C-RP-01 was added to measure the memory bound D-4875 (1) states (L-IA-26: at
+most 471 MB for a full one-second month, by type sizes). Measured on 11 Oct
+2026 it was 1,160,118,272 bytes of peak resident set: the revision was written
+as one commit of the whole month, and the sort index's writer step (WP-39,
+merged after that sum was written) reads each commit back and orders it six
+ways. `write_revision` now appends the merged series in commits of
+`WRITE_BATCH` rows, so what the writer holds per commit is the commit's
+whatever the month holds. The largest month takes 6 commits, under the 31 at
+which the sort index is rewritten whole
+(`store::repair::tests::a_revision_is_written_in_commits_the_sort_index_never_compacts`).
+The size is a trade measured both ways. Each commit is a round of syncs: at
+131,072 rows the same full month took 21 commits and peaked at 314,916,864
+bytes, and its repair's fastest run went from 3.6 s to 47.7 s on a loaded
+host whose syncs are slow, with a real-sized month (448,317 rows) paying four
+commits where it had paid one. At 524,288 a one-second month of 23 regular
+sessions (517,500 bars) is still one commit, written exactly as before, and
+only a month fuller than any session calendar is cut. A revision of more than
+524,288 rows therefore has more than one commit and more than one sort run,
+as a month an import wrote a day at a time does. A completed retry compares
+records, not bytes, so a revision published by the older code is still found
+`Reused`. A write cut between two commits leaves a well-formed month file
+of the commits that landed, its reservation and no receipt: the missing
+receipt alone says it is unfinished, and it is stepped over, named and kept
+whole like any other unfinished ordinal
+(`store/tests/month_repair.rs::a_revision_cut_between_two_commits_is_stepped_over_and_kept`).
+
+**The measured peak after the change** (12 Oct 2026, one repair in a process
+of its own, macOS, `/usr/bin/time -l`, maximum resident set size):
+537,411,584 bytes for the largest month (2,678,400 rows) and 152,879,104 for
+a month of real size (448,317 rows, one commit). **The largest month is
+therefore over the 471 MB the design summed from type sizes, and this entry
+does not claim that bound.** Writing the 2,592,000 held rows of that month in
+thirty commits of 86,400, with no repair at all, peaked at 159,383,552 bytes
+by the same tool: the store's writer holds something that grows with the
+month it appends to, which is not `store::repair`'s and which a smaller
+`WRITE_BATCH` does not remove. `docs/06-limits.md` L-IA-26 carries the terms,
+and bench C-RP-01 holds the full month's repairs to 640 MiB where the host
+reports a peak.
+
+**Not decided here.** D-4899 (one repair per month per run) is IA-17's second
+part and has no code yet.
+
 ### D-4808 — Verdicts live in an append-only store family: immutable day images under a two-slot year index — 2026-10-10
 
 **Implemented by** IA-5 (`store::verdict`, `docs/02-store-format.md` §35).
@@ -67300,3 +67453,94 @@ of any of its days) were placed; see `docs/06-limits.md` L-IA-33.
 **Proof.** `crates/store/tests/verdict.rs`
 `a_days_keys_fit_whatever_the_keys_are` and
 `a_verdict_is_found_by_one_bounded_probe_at_every_day_size`.
+
+### D-4926 — A lost year index is refused `index_missing`; it is never born again empty — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::VerdictError::IndexMissing`,
+`verdict::ORPHAN_SCAN`, the commit and every reader call that reads a year).
+**Found by** the second agent's check of IA-5 on 12 October 2026 (blocking 3).
+
+**Context.** An absent `<yyyy>.vdi` was read as "this year was never
+written": the commit bore a new, empty index and the reader answered "no
+generation". With the index lost and `<yyyy>/` still holding committed
+images, that was a fallback hiding a failure (CLAUDE.md section 4): a day
+whose image is on disk read as never verified, the next commit of the day
+was published as generation 1 or stepped past the committed image, and a
+carrying generation carried nothing, so committed records dropped out of the
+day with no refusal, no count and no event. A zero-length and a torn index
+were already refused by name; the missing one was not.
+
+**Decision.** The index is born before its year's first image is linked
+(D-4865), so an image without an index is never a year in the making. When
+the index is absent the year directory is looked at: a `.vdt` there refuses
+`index_missing`, naming the absent index and the image found, by the commit
+under its lock before anything is built, born or linked, and by `lookup`,
+`page` and `year` in place of "no generation". Genesis runs only for a year
+with no image. The look is bounded: it stops at the first image and after
+`ORPHAN_SCAN` + 1 = 1,025 names, and a directory with more names than that
+and no image among them is refused too, never listed to its end
+(`docs/06-limits.md` L-IA-43). A reader that sees an image beside an absent
+index looks for the index once more before refusing, since a first writer
+may have borne it in between; that second look has no test (it needs a
+writer between two system calls): NOT PROVED, by reading only.
+
+**Not done.** The rebuild of a lost index from the images' own day blocks is
+IA-6's command (RA-303). Until it exists the repair is to put the `.vdi`
+back; the refusal changes no file.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_lost_year_index_is_refused_and_never_born_again_empty` (IA-VD-18). It
+fails without the commit's look (the year is born again at generation 1),
+without the reader's (the lookup answers "no generation") and with the bound
+read one name short.
+
+### D-4927 — Refusals the second check of the verdict store asked for: a refused write leaves no temporary, an ordinal past the records and an over-long image are named, and stated costs are counted — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::write_durable`, `Reader::details`,
+`verdict::MAX_IMAGE_LEN`, `verdict::feed_code`, `staging::Staged::calls`).
+**Found by** the second agent's check of IA-5 on 12 October 2026 (blocking 1
+and 2; follow-ups 1, 2, 5, 6, 7).
+
+**Decision.**
+
+1. **A write or a sync the host refuses removes the temporary it made.** A
+   full disk used to gain one partial temporary per attempt of a new run. The
+   refusal stays the host's own `io`, and says so when the name could not be
+   removed either. Only a KILLED writer leaves a temporary (L-IA-42).
+2. **`Reader::details` refuses what it cannot answer.** An ordinal the
+   generation does not hold is `ordinal_past_records` (at `u32::MAX` the
+   owner's `ordinal + 1` overflowed: a panic in a debug build, and owner 0,
+   the DAY's, in a build without overflow checks; any other ordinal past the
+   records answered an empty list); a record whose detail offset is past the section or is not its own
+   entry is `image_corrupt`. Neither is an empty list.
+3. **A file longer than any image can be is refused unread**
+   (`MAX_IMAGE_LEN` = 180,355,672 bytes), where `read_image` and
+   `check_trailer` allocated the file's whole length before any check.
+4. **The feed byte is computed, not searched for.** `feed_code` is the
+   vendor's discriminant plus one, read back through one indexed `get` of
+   `Vendor::ALL` (gate 11 rule 6 allows no search in this file, and none is
+   needed: the table is declared in the enum's order and `core` indexes its
+   own arrays the same way).
+5. **`store::staging::create` counts its host calls** (`Staged::calls`: 1 on
+   a free name, 4 over a leftover), so its stated cost names a test (gate
+   12), and its module text says what the helper cannot tell: a dead writer's
+   leftover from a live writer's file. The caller owns the name, by a
+   writer-unique name or a lock (L-IA-44).
+
+**Not done, and where it goes.** The series' identity in the year index's
+slot head, and a refusal of an index with more than one name, are not in
+format version 1 (L-IA-46): the head has 4 spare bytes and the identity
+needs 7, so it changes the slot's size together with RA-172's per-code
+counts, as year-index version 2 in IA-6; and a link-count refusal would turn
+a writer killed inside genesis into a year refused until hand repair. A real
+`ENOSPC` is not raised by a test: the refusal comes from the writer's test
+seam after the bytes are written (the second agent raised a real `EFBIG` by
+hand against the earlier head and saw the leftover this removes).
+
+**Proof.** `crates/store/src/verdict_tests.rs`
+`a_write_the_host_refuses_leaves_no_temporary` (IA-VD-19);
+`crates/store/tests/verdict.rs`
+`the_details_of_an_ordinal_the_day_does_not_hold_are_refused_by_name`
+(IA-VD-20), `a_file_longer_than_any_day_image_is_refused_unread` (IA-VD-21)
+and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
+`a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.

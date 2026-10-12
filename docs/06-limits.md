@@ -16300,7 +16300,7 @@ taken in release on the operator's Mac on 10 Oct 2026, on a machine shared
 with about 12 agents building at once, so the tails (p99, max) carry that
 load; an extrapolation is labelled as one.
 
-### The verdict store (IA-5; D-4808, D-4844, D-4865, D-4922 to D-4925)
+### The verdict store (IA-5; D-4808, D-4844, D-4865, D-4922 to D-4927)
 
 `store::verdict`, `docs/02-store-format.md` §35. A lookup is O(1) and is not
 a limit here: at most 5 positional reads and 2 opens (IA-VD-01, C-VD-01).
@@ -16315,6 +16315,11 @@ rule 4" above (`store/verdict.rs 1`).
 | L-IA-33 | Records per day image (format version 1) | every key must sit within `MAX_PROBE` = 8 slots of home with no repeated tag in a table of at most 2^20 slots, and whether a key set fits depends on its hashes, so the ceiling is a measurement, not a proof | **Measured**: 137,900 synthetic records placed (50x a 2,758-record day) and 275,800 (100x) refused `table_too_large` (IA-VD-01, C-VD-01); all 213,365 real FNO contract keys of the store in one image refused, with nothing written. A simulation of the placement with uniform random hashes (5 seeds each, the tag rule left out) placed 150,000 in 5 of 5, 175,000 in 4 of 5 and 200,000 in 1 of 5. The largest real day, 26,820 records, is 5.1x under the measured 137,900. **The ceiling is a band, not a number** (12 Oct 2026, `a_days_keys_fit_whatever_the_keys_are`: `verdict::table` over uniform random hashes, fixed seeds, the tag rule included): 1,000 of 1,000 random key sets placed at 26,820 records, each with at least one doubling of the table to spare; 1,000 of 1,000 at 68,950; **184 of 200 at 137,900** (so about one key set in twelve is refused there); 16 of 200 at 206,850. A commit of at least `RECORDS_WATCH` = 68,950 records (half of 137,900, 2.6x the largest real day) answers `Committed::near_ceiling()`, from which IA-7 raises its alert while the day still commits (D-4925). **Not run**: the fit of the real key sets of the 20 largest days (a day's key set is the vendor's day listing); the 25 real month contract sets, each a superset of any of its days, were placed. A day over the ceiling is refused by name with nothing written (a whole-day commit makes no directory, lock, index or image; a carrying one leaves only its directories and lock file), the day's journal close stands, and the day reads "verdict pending"; the error event and the `verdict_refused:<run>` alert are IA-7's | IA-5 |
 | L-IA-41 | Waiting for the verdict commit lock | a second writer of the same (feed, exchange, segment, timeframe, year) waits while the first holds `<yyyy>.vdi.lock` across its read, carry, link and commit (L-IA-4's cost) | at most `LOCK_WAIT` = 30 s in 10 ms steps (at most 3,001 `try_lock` calls, counted in the refusal), then refused `lock_stalled` by name with nothing published; never an unbounded wait (D-4924; `a_commit_lock_held_past_the_wait_is_refused_by_name`). Uncontended the lock is one `try_lock`. A reader takes no lock | IA-5 |
 | L-IA-42 | Temporaries a killed verdict writer leaves | a writer killed between writing its temporary and linking it leaves `<final name>.<pid>-<run>.tmp` (at most one image or one 32,768-byte index per kill); no reader opens it and the next writer steps past it (IA-VD-05) | not swept: the name carries the process number and the run, so only a writer with the same pair meets it again, and then `store::staging` clears it and the commit counts it (`staging_cleared`, D-4922). The bytes stay until an operator removes the `.tmp`; at most 30,453,208 B (the largest image measured) per killed writer. A sweep of old `.tmp` names belongs with the pruning of superseded images (the rules audit's NEW-31) | IA-5 |
+| L-IA-43 | Ruling out a day image when a year's index is absent | `<yyyy>.vdi` absent is two different states: a year never written, and a LOST index over committed images. Telling them apart needs the year directory's names, and a listing is O(names), not O(1) | made ONLY when the index is absent (the first commit of a year; a reader asked for a year that has no index), never on a lookup of a year that has one. It stops at the first `.vdt` and after `ORPHAN_SCAN` + 1 = 1,025 names; a directory with more names than that and no image among them is refused `index_missing` out loud (no image named) and is not listed to its end. A year with no directory costs one failed `open` and one failed `opendir`. Measured 12 Oct 2026, release, WD_BLACK, a loaded machine (`tgt/p-IA-5/logs/r3-probe2.log`; source `scratch/fix-IA-5-r3-probe/src/main.rs`): a lookup of a year never written p50 2.0 us, p99 3.3 us, max 25.6 us (n=20,000); a lookup refused `index_missing` over 2 images p50 18.3 us, p99 43.3 us, max 82.4 us, and over 248 images p50 64.4 us, p99 144.3 us, max 224.0 us (n=2,000 each: NOT flat, because the host fills one directory buffer per read; one read is the bound, the first name read was an image every time); a commit refused over 248 images p50 103.6 us, p99 182.0 us, max 224.4 us (n=500); the bound itself, a lookup over 1,024 names none of them an image, p50 433 us, p99 992 us, max 1.69 ms (n=2,000). A lost index is not rebuilt here: that is IA-6's command (RA-303), and until it exists the year answers `index_missing` to every reader and writer (D-4926; IA-VD-18) | IA-5 |
+| L-IA-44 | `store::staging::create`: what a call costs, and what it cannot tell | the helper makes 1 host call on a free name and 4 over a leftover (counted in `Staged::calls`, pinned by RA-287's last test); what each call costs is the host's. It cannot tell a DEAD writer's leftover from a LIVE writer's file: any regular file with one name at the staging name is unlinked | the caller must own the name for the time it uses it: a writer-unique name (`store::verdict`: `<final>.<pid>-<run>.tmp`) or a lock held across create and publish (`store::verdict`: the year's commit lock). Two live writers handed one name with neither each unlink the other's file; IA-2, IA-7, IA-9 and IA-11a must bring one of the two when they move to this helper (the rules audit's RA-287). `staging_contended` (a name that returns after its one removal) has no test: it needs a racing writer, NOT PROVED. Measured 12 Oct 2026, release, WD_BLACK, loaded machine (`tgt/p-IA-5/logs/r3-probe2.log`): a free name p50 53.7 us, p99 307.5 us, max 798.7 us (n=2,000); over a 4,096-byte leftover p50 116.3 us, p99 609.0 us, max 909.6 us (n=2,000); over a 4 MiB leftover p50 157.1 us, p99 1.63 ms, max 3.08 ms (n=200: the host's `unlink` frees the leftover's blocks, so the tail grows with what a dead writer left, at most one image). A quieter run of the same program an hour earlier (`r3-probe.log`): 47.5 / 82.4 / 163.6 us, 103.5 / 165.0 / 459.7 us and 133.5 / 247.1 / 288.0 us; the second agent's own run on 12 Oct: 27.7 / 56.2 / 143.5 us free and 43.6 / 89.5 / 265.7 us over a leftover (n=2,000) | IA-5 |
+| L-IA-45 | Linked-but-uncommitted generations of one day | a writer killed between linking an image and writing the year index's slot leaves that generation linked and uncommitted; it is kept byte for byte and the next writer steps past it (IA-VD-09). A writer steps past at most `MAX_LINK_TRIES` = 16 | with 16 such generations after the committed one, every later commit of that day is refused `generation_collision` by name with nothing published, until an operator removes or moves the uncommitted `.vdt` names by hand (none is ever removed by the store: each may be the only copy of a run's verdicts). It takes 16 writers killed in the same few-millisecond window on the same day with no successful commit between them; no sweep exists (it belongs with the pruning of superseded images, the rules audit's NEW-31) | IA-5 |
+| L-IA-46 | The year index does not say whose it is | a slot's head holds the magic, the version, the year and the commit generation only (docs/02 §35.7): no feed, exchange, segment or timeframe, and 4 reserved bytes are not room for them (the timeframe is 4 bytes of seconds). So a `.vdi` copied or moved into another family's directory reads as that family's calendar with no refusal, and a `.vdi` hard-linked into two families is written through by both | NOT DONE in format version 1. The identity goes into the slot head in year-index version 2, which IA-6 writes with the per-code day counts (RA-172) since both change the slot's size and every number pinned from it; `INDEX_VERSION` exists for that. A link-count refusal alone was not added: genesis itself gives the index two names for the instant between its `hard_link` and the removal of its temporary, so a refusal on a count other than 1 would turn a writer killed in that instant into a year refused until hand repair. Day images are not exposed: each carries its series in its header and a lookup refuses one filed under another family (RA-243) | IA-5, then IA-6 |
+| L-IA-47 | What a `Reader` holds, and what one call may read | a `Reader` caches the `.vdi`'s handle (at most 64 handles), so an index file REPLACED by another file (IA-6's rebuild, RA-303) is not seen by a running reader until it is dropped; slots written in place are seen at once. `Reader::page` reads the slice it is asked for: `page(code, 0, u32::MAX)` reads one code's whole slice, 22 MB at the record ceiling | the rebuild must write through the existing file or tell the server's reader (IA-6, IA-10b); the route must cap a page's `len` (IA-10b). A whole image is read only by `read_image` and `check_trailer`, at most `MAX_IMAGE_LEN` = 180,355,672 bytes, a longer file refused unread (IA-VD-21); a bit flipped in a table slot can make one lookup answer "not in this day's verification" with no error, and only `check_trailer` (WP-81's scrub) names it | IA-5, then IA-6, IA-10b, WP-81 |
 
 **Re-measured on 12 October 2026**, after the exchange level, the staging
 create and the counted lock wait landed (D-4922 to D-4924), same machine
@@ -16350,3 +16355,91 @@ above did not change:
 The design's quoted cold p99 of 74 to 109 µs (its §6.6) was an estimate; the
 figures above and the 10 October ones are the measured ones (RA-097), and
 IA-13 re-measures on a quiet machine.
+## Ingest automation: what a month repair reads, holds and keeps — D-4875, D-4898, 12 October 2026
+
+Row L-IA-26 of the ingest automation design (its §10.2), landed by IA-17's
+first part with the code it bounds (`store::repair`: the row ceiling and the
+step before the promotion). The design's second half of the row, one repair
+per (instrument, month) per run, is IA-17's second part (D-4899) and is NOT
+BUILT; what that costs until it is, is the disk item below.
+
+- **L-IA-26. A month repair is O(held + offered) bars. It is not O(1) and it
+  is on no read path.** `repair::repair_month` and `repair_month_with` read
+  the served month whole, merge the offered bars into it in one ordered walk
+  (nothing is sorted) and write a whole successor as a new revision, which is
+  then promoted. **Bounded, and refused past the bound, never cut:** the
+  offered bars, the held count and the merged series are each at most
+  `repair::row_ceiling(path)`, the month's length over the rung's width
+  (2,678,400 rows for a 31-day one-second month, 2,419,200 for a 28-day one,
+  44,640 for a 31-day one-minute month, 31 for a 31-day daily one). One row
+  more is `RepairError::RowLimit { rows, ceiling }`, before a bar is read and
+  before anything is written. A month has at most 1,024 revisions
+  (`MAX_REVISIONS`); past them `RevisionLimit`, and no page shows how many a
+  month has used (rules audit RA-266; not this package's).
+- **L-IA-26, time, measured.** Bench C-RP-01
+  (`crates/store/benches/ratio.rs`), 12 Oct 2026, the operator's Mac under the
+  load of the other build agents, each repair of a fresh copy of the held
+  month in the host's temporary directory, only `repair_month` inside the
+  clock. A month of real size (448,317 merged rows: 425,817 held, one session
+  of 22,500 offered): n = 15, p50 11.83 s, p99 17.95 s, max 17.95 s. A month
+  filled to its ceiling (2,678,400 merged rows: 30 days of every second held,
+  the 31st offered): n = 5, p50 39.79 s, p99 107.63 s, max 107.63 s. With n
+  under 100 the p99 is the slowest sample. The cost of one merged row at the
+  fastest run was 18,263 ns at the real-sized month and 4,254 ns at the full
+  one (ratio 0.232, held under the gate's 3.0): **the time is the host's
+  syncs, not the rows.** The same two repairs, once each in a process of
+  their own on the store's own volume a few minutes earlier, took 245 ms and
+  1,327 ms (n = 3 each: 236, 239, 245 ms and 1,327, 1,345, 1,349 ms); the
+  whole bench used 7.6 s of user and 17.7 s of system time in 645 s of wall
+  clock. A commit is a round of syncs and a full month is written in 6
+  (`WRITE_BATCH`, 524,288 rows; a month of 23 regular sessions, 517,500
+  bars, is one). A time lookup on the repaired full month cost 273.66 address
+  floors against C-TIX-02's 800: the revision's `.tix` is its writer's own.
+- **L-IA-26, memory, measured, and over the design's sum.** One repair in a
+  process of its own, 12 Oct 2026, macOS, `/usr/bin/time -l`, maximum
+  resident set size: **537,411,584 bytes at the full month, 152,879,104 at
+  the real-sized month.** A private copy of the real GDFL NIFTY one-second
+  month 2019-10 (409,590 held bars, the 3,100 of 27 Oct offered), repaired
+  and compared with the store's own revision bar for bar inside the same
+  process, peaked at 160,628,736, which includes that comparison's two
+  copies of the month. The whole C-RP-01 bench process peaked at 529,072,128.
+  The design summed type sizes to at most 471 MB for the full month, and
+  about 75 MB for a real one; **neither sum is met and neither is claimed.**
+  What is held: the merged series (56 B a row: 150 MB at the ceiling), the
+  caller's offered bars (56 B each), the stamps added (8 B each), and what
+  the store's writer holds per commit, which this module now bounds by
+  writing a revision in commits of at most 524,288 rows (the same full month
+  written as ONE commit peaked at 1,160,118,272 bytes on 11 Oct). **One term
+  is not `store::repair`'s and still grows with the month:** writing the
+  2,592,000 held rows of the full month in thirty commits of 86,400, with no
+  repair at all, peaked at 159,383,552 bytes by the same tool, where one
+  such commit's bars are 4.8 MB. Which part of the writer holds it is NOT
+  PROVED here (the sort index's step runs after every commit and is the
+  likely holder; it is WP-39's). Bench C-RP-01 holds the full month's repairs
+  to 640 MiB where the host reports a peak (Linux `VmHWM`, restarted before
+  them). **NOT MEASURED: that figure on a Linux host.** The bench's memory
+  line read "NOT MEASURED on this host" on every run so far, so the 640 MiB
+  allowance has never been checked by the bench itself, only against
+  `/usr/bin/time -l` on macOS.
+- **L-IA-26, disk: one whole copy of the month per repair, kept for ever.**
+  A revision is a complete month under `bar-revisions-v1/<n>/`, never
+  rewritten and never removed, and there is no rule yet that prunes one
+  (rules audit RA-018, NEW-31). Until the once-per-month gather is built
+  (D-4899), a run that back-fills a month a file at a time writes one copy
+  per file it lands, up to the 1,024 a month allows. On the operator's store
+  on 12 Oct 2026 there were 24 revised months, all one-second GDFL months at
+  revision 1 (`find bar-revisions-v1 -name '*.bin'`).
+- **L-IA-26, the read path is unchanged and O(1).** Opening a month served
+  from a revision checks the revision's and the source's header counts
+  against the same ceiling: two comparisons, no I/O beyond the open it
+  already did. On the daily rung the ceiling is the month's days, where the
+  writer admits any whole second, so a daily revision holding more bars than
+  its month has days would now be refused at open as `RowLimit`, named. None
+  exists: no
+  revision on the operator's store is on any rung but one second, and
+  `publish` refuses to write one.
+- **L-IA-26, the step before the promotion.** `repair_month_with` runs one
+  step of the caller's between publication and promotion, at most once per
+  call. Its cost is the caller's and is not bounded here. No caller passes
+  one yet: the CASH auction-file writer it is for is IA-17's second part, so
+  a repaired CASH month still has no auction file beside its served bars.
