@@ -49,6 +49,29 @@
 //! `max_back_s` is how far a row stepped back from the running maximum), and
 //! what `member_bytes` measured.
 //!
+//! # The halt and the sampled day (D-4928; WP-11c; DB-A04, DB-A07)
+//!
+//! Two more of this writer's additions sit before `max_defer_s`, on every
+//! kind's line: `halt_s`, the in-session seconds the calendar of record
+//! ([`crate::calendar::HALTS`], the kind's own segment) marks halted on the
+//! day -- `0` on a day with no recorded halt -- and `halt_held_s`, the placed
+//! seconds inside them (an index's own; summed over the files of a stocks or
+//! options day). An index line carries two beside them: `flat_max_s` and
+//! `flat_max_at`, the longest run of in-session rows, in file order, that
+//! carry one unchanged value, as its length in seconds (last stamp less first,
+//! plus one) and its first stamp. On 2020-03-13 the vendor repeats the index
+//! value every second of the circuit-breaker halt: the bars are kept as
+//! printed (the operator's answer: flagged only) and these fields are the
+//! label. A halt's window is the calendar's, suspected until a circular is
+//! recorded (D-3320); nothing here decides that a day halted.
+//!
+//! A **minute-sampled** index day needs no new field: [`is_sampled`] reads
+//! D-3335's own `rows` and `ss_distinct` (2019-05-30: one row a minute, all
+//! at second :59, 375 of 22,500 session seconds held), and the import says so
+//! out loud as it files the day ([`DayLedger::sampled`]). A line written
+//! before these fields has none of them, and a reader never takes a missing
+//! one for `0`.
+//!
 //! # How each count is read (this module's reading of D-3335, said once)
 //!
 //! - A file is **traded** when one of its rows has LTQ above zero; its
@@ -101,6 +124,20 @@ pub const SHARED_HOLE_S: u32 = 300;
 /// A shared hole is shared by at least this percentage of the day's traded
 /// share files (D-3335, chosen).
 pub const SHARED_HOLE_PERCENT: u64 = 90;
+
+/// An index day is minute-sampled when its in-session rows use at most this
+/// many distinct seconds of the minute (D-3335's display rule for a degraded
+/// index day, chosen, not sourced; D-4928 item 5 names it, and item 6 reads
+/// the same number as bars a session minute where no line exists).
+pub const SAMPLED_SS_DISTINCT: u64 = 2;
+
+/// Whether an index line reads as a minute-sampled day: it has rows, and they
+/// use at most [`SAMPLED_SS_DISTINCT`] distinct seconds of the minute. The one
+/// rule the import's event and `/dayflags.json` both read (DB-A04).
+#[must_use]
+pub const fn is_sampled(rows: u64, ss_distinct: u64) -> bool {
+    rows > 0 && ss_distinct <= SAMPLED_SS_DISTINCT
+}
 
 /// The seconds of a day.
 const DAY_SECONDS: usize = 86_400;
@@ -158,6 +195,43 @@ pub struct ReaderCounts {
     /// For an options file, its rows whose bid or ask is not zero; `None`
     /// for a capital-market file, which is never judged on quotes.
     pub quoted_rows: Option<u64>,
+}
+
+/// The seconds `kind`'s one-second series spends in the halt the calendar of
+/// record holds for `day`, as `[from, resume)`, or `None` on a day with no
+/// recorded halt. O(1): one walk of the calendar's three-entry table.
+#[must_use]
+pub fn halt_window(kind: ImportKind, day: Day) -> Option<(u32, u32)> {
+    let venue = match kind {
+        ImportKind::Indices => crate::vendor::Venue::NseIndex,
+        ImportKind::Stocks => crate::vendor::Venue::NseCash,
+        ImportKind::Options => crate::vendor::Venue::NseDerivatives,
+    };
+    crate::calendar::halt_on(i64::from(day.days_from_epoch())).map(|halt| {
+        let seconds = halt.seconds(venue);
+        (seconds.from, seconds.resume)
+    })
+}
+
+/// The seconds of `session`'s windows: D-3335's `session_s`.
+#[must_use]
+pub fn session_seconds(session: &Session) -> u64 {
+    windows(session)
+        .iter()
+        .map(|&(from, to)| u64::from(to - from))
+        .sum()
+}
+
+/// The parts of `halt` inside `spans`, each `[from, to)`.
+fn halted_spans(spans: &[(u32, u32)], halt: Option<(u32, u32)>) -> Vec<(u32, u32)> {
+    let Some((from, resume)) = halt else {
+        return Vec::new();
+    };
+    spans
+        .iter()
+        .map(|&(a, b)| (a.max(from), b.min(resume)))
+        .filter(|&(a, b)| a < b)
+        .collect()
 }
 
 /// The seconds `[from, to)` of the day's session windows.
@@ -233,14 +307,59 @@ pub struct FileQuality {
     /// A share file: its in-session gaps of at least [`SHARED_HOLE_S`], as
     /// `(first second, length)`.
     pub share_gaps: Vec<(u32, u32)>,
+    /// The placed seconds inside the day's halt (module doc; WP-11c).
+    pub halt_held_s: u64,
+    /// An index file: the longest run of in-session rows carrying one
+    /// unchanged value, as `(its first stamp, its length in seconds)`.
+    pub flat_max: Option<(u32, u32)>,
+}
+
+/// A run of in-session index rows, in file order, carrying one value.
+#[derive(Debug, Clone, Copy)]
+struct FlatRun {
+    ltp: i64,
+    first: u32,
+    last: u32,
+}
+
+impl FlatRun {
+    /// Takes one in-session row: it extends `open` where its value is that
+    /// run's, and otherwise closes that run into `longest` and opens its own.
+    fn take(open: &mut Option<Self>, tick: &Tick, longest: &mut Option<(u32, u32)>) {
+        match open {
+            Some(run) if run.ltp == tick.ltp => {
+                run.first = run.first.min(tick.sod);
+                run.last = run.last.max(tick.sod);
+            }
+            _ => {
+                if let Some(run) = open.take() {
+                    run.close(longest);
+                }
+                *open = Some(Self {
+                    ltp: tick.ltp,
+                    first: tick.sod,
+                    last: tick.sod,
+                });
+            }
+        }
+    }
+
+    /// Folds this run into `longest`: the first of the longest wins.
+    fn close(self, longest: &mut Option<(u32, u32)>) {
+        let len = self.last - self.first + 1;
+        if longest.is_none_or(|(_, max)| len > max) {
+            *longest = Some((self.first, len));
+        }
+    }
 }
 
 /// One file's quality, from its rows in file order, the second of every bar
-/// it built (ascending), what its placement counted and the reader's counts.
+/// it built (ascending), what its placement counted and the reader's counts,
+/// against the day's session and its halt ([`halt_window`]), if it has one.
 #[must_use]
 pub fn measure_file(
     kind: ImportKind,
-    session: &Session,
+    (session, halt): (&Session, Option<(u32, u32)>),
     ticks: &[Tick],
     bar_seconds: &[u32],
     (placement, deferred): (Placement, Deferred),
@@ -257,13 +376,20 @@ pub fn measure_file(
         reader,
         ..FileQuality::default()
     };
+    for (from, to) in halted_spans(&spans, halt) {
+        let lo = bar_seconds.partition_point(|&s| s < from);
+        let hi = bar_seconds.partition_point(|&s| s < to);
+        quality.halt_held_s += u64::try_from(hi.saturating_sub(lo)).unwrap_or(0);
+    }
     let mut last_traded: Option<i64> = None;
     let mut leading = true;
     let mut minute_seconds: u64 = 0;
+    let mut flat: Option<FlatRun> = None;
     for tick in ticks {
         if kind == ImportKind::Indices {
             if in_session(tick.sod) {
                 minute_seconds |= 1 << (tick.sod % 60);
+                FlatRun::take(&mut flat, tick, &mut quality.flat_max);
             }
             continue;
         }
@@ -287,6 +413,9 @@ pub fn measure_file(
         {
             quality.ltq0_new_ltp_rows += 1;
         }
+    }
+    if let Some(run) = flat {
+        run.close(&mut quality.flat_max);
     }
     match kind {
         ImportKind::Indices => {
@@ -366,6 +495,46 @@ struct IndexLine {
     hole_max: Option<(u32, u32)>,
     dual: DualSpread,
     zero_ltp_rows: u64,
+    halt_held_s: u64,
+    flat_max: Option<(u32, u32)>,
+}
+
+/// An index of a day whose line reads as minute-sampled ([`is_sampled`]),
+/// with the numbers that say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sampled {
+    /// The index's store symbol, the line's scope.
+    pub scope: String,
+    /// The rows the import read.
+    pub rows: u64,
+    /// The session seconds held, of [`Self::session_s`].
+    pub seconds: u64,
+    /// The seconds of the day's session windows.
+    pub session_s: u64,
+    /// The distinct seconds of the minute its rows use.
+    pub ss_distinct: u32,
+}
+
+/// Of `sampled`, the indices whose line is among `news` -- what
+/// [`Ledger::news`] answered and the run appended (D-4928 item 7): a rescan
+/// names a sampled day when it writes the line that says so, and a later
+/// rescan of the same rows, which writes nothing, names nothing again. At
+/// most a day's indices against a day's lines.
+#[must_use]
+pub fn sampled_among(
+    kind: ImportKind,
+    day: Day,
+    sampled: Vec<Sampled>,
+    news: &[String],
+) -> Vec<Sampled> {
+    let written: Vec<String> = news
+        .iter()
+        .filter_map(|line| keyed(line).map(|(key, _)| key))
+        .collect();
+    sampled
+        .into_iter()
+        .filter(|one| written.contains(&format!("{} {day} {}", kind.as_str(), one.scope)))
+        .collect()
 }
 
 /// The day of one kind, as its files are measured: per index, or the whole
@@ -386,6 +555,10 @@ pub struct DayLedger {
     zero_quote_files: u64,
     ltq1_lead_files: u64,
     ltq1_lead_rows: u64,
+    /// The day's halt for this kind's segment ([`halt_window`]).
+    halt: Option<(u32, u32)>,
+    /// A stocks or options day's placed seconds inside it, over its files.
+    halt_held_s: u64,
     /// A stocks day's difference array of files in a long gap, by second.
     shared: Vec<i32>,
 }
@@ -409,6 +582,8 @@ impl DayLedger {
             zero_quote_files: 0,
             ltq1_lead_files: 0,
             ltq1_lead_rows: 0,
+            halt: halt_window(kind, day),
+            halt_held_s: 0,
             shared: if kind == ImportKind::Stocks {
                 vec![0; DAY_SECONDS + 1]
             } else {
@@ -433,6 +608,41 @@ impl DayLedger {
     #[must_use]
     pub const fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The day's halt for this kind's segment, as `[from, resume)` seconds
+    /// of the day: what [`measure_file`] measures a file against.
+    #[must_use]
+    pub const fn halt(&self) -> Option<(u32, u32)> {
+        self.halt
+    }
+
+    /// The in-session seconds of the day's halt: the line's `halt_s`.
+    fn halt_s(&self) -> u64 {
+        halted_spans(&windows(&self.session), self.halt)
+            .iter()
+            .map(|&(from, to)| u64::from(to - from))
+            .sum()
+    }
+
+    /// The day's indices that read as minute-sampled, by scope: what the
+    /// import and the rescan say out loud as they write the day's lines
+    /// (DB-A04). Empty for a stocks or options day, whose files are trades
+    /// and are sparse by nature.
+    #[must_use]
+    pub fn sampled(&self) -> Vec<Sampled> {
+        let session_s = session_seconds(&self.session);
+        self.indices
+            .iter()
+            .filter(|(_, line)| is_sampled(line.rows, u64::from(line.ss_distinct)))
+            .map(|(scope, line)| Sampled {
+                scope: scope.clone(),
+                rows: line.rows,
+                seconds: line.seconds,
+                session_s,
+                ss_distinct: line.ss_distinct,
+            })
+            .collect()
     }
 
     /// Records the day zip's size, where the source read one.
@@ -467,9 +677,16 @@ impl DayLedger {
                 line.dual.max_at = file.reader.dual.max_at;
             }
             line.zero_ltp_rows = line.zero_ltp_rows.saturating_add(file.reader.zero_ltp_rows);
+            line.halt_held_s = line.halt_held_s.saturating_add(file.halt_held_s);
+            if let Some((at, len)) = file.flat_max
+                && line.flat_max.is_none_or(|(_, max)| len > max)
+            {
+                line.flat_max = Some((at, len));
+            }
             return;
         }
         self.every.take(file);
+        self.halt_held_s = self.halt_held_s.saturating_add(file.halt_held_s);
         self.ltq0_new_ltp_rows = self
             .ltq0_new_ltp_rows
             .saturating_add(file.ltq0_new_ltp_rows);
@@ -559,7 +776,8 @@ impl DayLedger {
     }
 
     /// The day's lines, by scope, without `src=`: D-3335's fields in its
-    /// order, then `max_defer_s` and `member_src`. `whole` is false for a run
+    /// order, then the halt's (and an index's flat run), `max_defer_s` and
+    /// `member_src`. `whole` is false for a run
     /// filtered to some instruments: a stocks or options line counts the
     /// WHOLE kind-day, so a filtered run writes none. A day none of whose
     /// files was read clean (its listing refused, or every file) has nothing
@@ -581,10 +799,8 @@ impl DayLedger {
         let (kind, day) = (self.kind, self.day);
         let head = move |scope: &str| format!("flags {} {day} {scope} v=1", kind.as_str());
         let p50 = self.first_trade_p50();
-        let session_s: u64 = windows(&self.session)
-            .iter()
-            .map(|&(a, b)| u64::from(b - a))
-            .sum();
+        let session_s = session_seconds(&self.session);
+        let halt_s = self.halt_s();
         let mut out = Vec::new();
         match self.kind {
             ImportKind::Indices => {
@@ -594,7 +810,8 @@ impl DayLedger {
                         text,
                         " rows={} seconds={} session_s={session_s} ss_distinct={} holes_5s={} \
                          hole_max_s={} hole_max_at={} dual_spread_s={} dual_spread_max_bps={} \
-                         zero_ltp_rows={} max_defer_s={} member_src={}",
+                         zero_ltp_rows={} halt_s={halt_s} halt_held_s={} flat_max_s={} \
+                         flat_max_at={} max_defer_s={} member_src={}",
                         line.rows,
                         line.seconds,
                         line.ss_distinct,
@@ -604,6 +821,9 @@ impl DayLedger {
                         line.dual.seconds,
                         line.dual.max_bps,
                         line.zero_ltp_rows,
+                        line.halt_held_s,
+                        line.flat_max.map_or(0, |(_, len)| len),
+                        clock(line.flat_max.map(|(at, _)| at)),
                         line.every.max_defer_s,
                         src_of(self.member_bytes),
                     );
@@ -617,7 +837,8 @@ impl DayLedger {
                     text,
                     " files={} files_traded={} first_trade_p50={} shared_holes={holes} \
                      shared_hole_max_s={} shared_hole_max_at={} ltq0_new_ltp_rows={} \
-                     auction_prints={} max_defer_s={} member_src={}",
+                     auction_prints={} halt_s={halt_s} halt_held_s={} max_defer_s={} \
+                     member_src={}",
                     self.files,
                     self.files_traded,
                     clock(p50),
@@ -625,6 +846,7 @@ impl DayLedger {
                     clock(longest.map(|(at, _)| at)),
                     self.ltq0_new_ltp_rows,
                     self.auction_prints,
+                    self.halt_held_s,
                     self.every.max_defer_s,
                     src_of(self.member_bytes),
                 );
@@ -635,8 +857,8 @@ impl DayLedger {
                 let _infallible = write!(
                     text,
                     " files={} files_traded={} zero_quote_files={} ltq1_lead_files={} \
-                     ltq1_lead_rows={} ltq0_new_ltp_rows={} first_trade_p50={} max_defer_s={} \
-                     member_src={}",
+                     ltq1_lead_rows={} ltq0_new_ltp_rows={} first_trade_p50={} \
+                     halt_s={halt_s} halt_held_s={} max_defer_s={} member_src={}",
                     self.files,
                     self.files_traded,
                     self.zero_quote_files,
@@ -644,6 +866,7 @@ impl DayLedger {
                     self.ltq1_lead_rows,
                     self.ltq0_new_ltp_rows,
                     clock(p50),
+                    self.halt_held_s,
                     self.every.max_defer_s,
                     src_of(self.member_bytes),
                 );

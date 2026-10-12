@@ -67982,3 +67982,102 @@ hand against the earlier head and saw the leftover this removes).
 (IA-VD-20), `a_file_longer_than_any_day_image_is_refused_unread` (IA-VD-21)
 and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
 `a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.
+
+### D-4928 — The day ledger gains four optional halt and flat-run fields; `/dayflags.json` names a minute-sampled index day and counts the bars inside a halt — 2026-10-12
+
+**Implemented by** WP-11c (`pull::gdfl_import::quality`, `cli gdfl-dayflags`
+through the same function, `api::dayflags`). **Findings** DB-A04, DB-A07.
+**Found missing by** the second agent's check of WP-11c on 12 October 2026
+(blocking 1 and 2).
+
+**What was observed.** GDFL's NIFTY file of 30 May 2019 holds one row a
+minute, every one at second :59: 375 of the session's 22,500 seconds, stored
+as an ordinary complete day. On 13 and 23 March 2020 the index value is
+repeated every second of a circuit-breaker halt, stored as ordinary flat
+seconds. The real day ledger held 91 lines when WP-11c was built, none of
+them for 30 May 2019, so D-3335's index rule, which reads a line, said
+nothing of that day.
+
+**Decision.**
+
+1. **Four fields are added to the `v=1` day-ledger line, as fields a later
+   writer adds** (D-3335's own words for `max_defer_s` and `member_src`).
+   They sit after the kind's own fields and before `max_defer_s`. Every
+   kind's line: `halt_s` and `halt_held_s`. An `indices` line also:
+   `flat_max_s` and `flat_max_at`. A line written before them stays valid. A
+   reader takes a missing one as `null`, never as `0`; a field given twice
+   or malformed is a counted fault of the line, with its reason.
+2. **`halt_s` is the in-session seconds the calendar of record halts for the
+   kind's own segment** (`pull::calendar::HALTS`: the index, cash and F&O
+   seconds differ), `0` on a day with no recorded halt. It counts seconds
+   inside the day's session windows only, so it is `0` on 2021-02-24, whose
+   recorded halt (11:40 to 15:45) lies between that day's two windows.
+   `halt_held_s` is the placed seconds inside them: an index's own, summed
+   over the files of a stocks or options day. Nothing here decides that a
+   day halted: the window is the calendar's, `suspected` until a circular is
+   recorded (D-3320).
+3. **`flat_max_s` is the longest run of in-session rows, in file order, that
+   carry one unchanged value**: its last stamp less its first, plus one, so
+   both ends are counted (13 March 2020 reads 2,693 s from 09:21:09 where
+   the finding counted 2,692). `flat_max_at` is the run's first stamp, `-`
+   where the file has no in-session row. The bars are unchanged: flagged
+   only (the operator's answer 9, D-3335).
+4. **`/dayflags.json` `events.halt.held` counts the feed's bars that open
+   inside the halt's seconds for the instrument's own segment**, from `from`
+   up to `resume`, at the feed's finest rung: two index lookups on a halt
+   day, none on any other. It is `null` where the month is not held, and
+   where the count could not be read, which a note then names. A day whose
+   own lookup fails does not move the count of a later day. The bars are
+   served as printed, labelled, never dropped.
+5. **Every `/dayflags.json` record carries `sampled`.** It names an index
+   series: the instrument itself for an index; for an option the index the
+   sourced alias table gives its symbol (`core::alias::option_underlying`,
+   D-3332), read under that row's store key, so a FINNIFTY option reads
+   `NSE-INDEX-NIFTYFINSERVICE` for its bars and for its ledger line alike.
+   `null` for a share, for an option whose underlying is a share (any symbol
+   the table does not name as an index), for a feed whose finest rung holds
+   no more than the threshold a minute, on a day that is not a session, and
+   for an index with neither a line nor a month the store holds. Where the
+   day ledger holds the index's line the basis is `day_ledger` and the
+   standing `measured`: sampled when the line has rows and `ss_distinct` is
+   at most 2 (D-3335's display rule; one function, `quality::is_sampled`,
+   which the import's warning reads too).
+6. **Where no line exists the store's own count answers, as a suspicion.**
+   Basis `held_bars`, standing `suspected`: the series holds some bars and at
+   most 2 a session minute. This cannot tell a sampled day from one mostly
+   missing and the sentence says so; a line written by the import or by
+   `cli gdfl-dayflags` replaces it. The suspicion is the wider of the two on
+   purpose: it is every day the measured rule could hold on. **The threshold
+   of 2 is chosen, not sourced**: one constant, `SAMPLED_SS_DISTINCT`, which
+   both bases and every sentence read. A sampled day is a `degraded` entry
+   with `flag` `sampled`, which the day band draws.
+7. **The import and the rescan say a sampled index day out loud**, one
+   warning an index, because the day still closes `done`. The import says it
+   of every day it files; a rescan says it only of the lines it wrote, so a
+   rescan that finds nothing new repeats nothing.
+8. **IA-16's `v=2` line carries all four fields** in the same place, and
+   `/dayflags.json` reads them from `v=1` and `v=2` lines alike.
+
+**Not done, and where it goes.** A day the ledger measures as mostly missing
+but not sampled (rows spread over more than 2 seconds of the minute) is not
+`sampled`: on the index's own page its holes are named from the same line
+(`holes_5s`, `hole_max_s`), and on an option's page nothing names it. A
+coverage threshold read from the line's `seconds` and `session_s` is R3-13's
+read-time rule. So is a flat run outside a halt, and an intraday value
+outside the official day range (DB-B20): `flat_max_s` and `flat_max_at` are
+written, nothing yet judges them, and the phrase that prints them is shown
+on a halt day only. No NSE circular is recorded for the two 2020 halts, so
+they stay `suspected` (D-3320).
+
+**Proof.** `crates/pull/src/gdfl_wp11c_tests.rs`
+`a_halt_day_is_imported_as_printed_and_its_line_counts_the_halt`,
+`a_halt_is_measured_by_each_kinds_own_seconds_inside_the_session`,
+`the_flat_run_is_the_longest_stretch_of_one_value_in_file_order`,
+`a_minute_sampled_index_day_is_named_with_its_numbers`,
+`a_rescan_that_writes_no_new_line_names_no_sampled_day_again`;
+`crates/api/src/dayflags.rs`
+`a_sampled_day_without_a_ledger_line_is_suspected_from_the_bars_held`,
+`an_option_reads_the_sampled_day_of_the_index_the_alias_table_names`,
+`the_bars_inside_a_halt_are_counted_by_the_segments_own_seconds`,
+`a_failed_lookup_keeps_each_later_days_halt_count_on_its_own_day`,
+`the_halt_fields_of_a_ledger_line_are_optional_and_never_read_as_zero`.
