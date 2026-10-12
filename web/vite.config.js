@@ -302,7 +302,13 @@ const ROUTES = [
 	// WP-58), and a prefix claiming it would hand that page to Rust in
 	// development only — the `/audit` trap the notes above record.
 	'/provenance.json',
-	'/sources/day.json'
+	'/sources/day.json',
+	// THE /db CHART (WP-57, DB-080): `/sources.json` is the rung table the
+	// chart's rung picker is drawn from, and `/sources/bars.json` the page of
+	// a rung the server folds on request. Both EXACTLY, for the reason above:
+	// `/sources` itself stays the All sources page's.
+	'/sources.json',
+	'/sources/bars.json'
 ];
 
 export default {

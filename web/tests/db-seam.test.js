@@ -31,8 +31,11 @@ const SHELL = '../src/routes/db/+page.svelte';
 // the same change, as the note above asks; it stays mounted exactly once.
 // DbDayFlags and DbCalendar WERE FILLED BY WP-54 (DB-025, DB-012) the same way,
 // and DbProvenance and DbBasisBadge by WP-55 (DB-078, DB-A40, DB-017).
-const PLACEHOLDERS = ['DbChart'];
-const FILLED = ['DbExtremes', 'DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge'];
+// DbChart WAS FILLED BY ITS OWNER, WP-57 (DB-080): the last placeholder; it
+// stays mounted exactly once, and `db-chart.test.js` holds what it must do.
+/** @type {string[]} */
+const PLACEHOLDERS = [];
+const FILLED = ['DbExtremes', 'DbDayFlags', 'DbCalendar', 'DbProvenance', 'DbBasisBadge', 'DbChart'];
 const COMPONENTS = DB_PAGE_FILES.filter((path) => path.endsWith('.svelte'));
 
 /** The number of times `<Name {db} />` is written across the page's components. */
