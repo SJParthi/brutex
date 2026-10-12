@@ -29,6 +29,7 @@
   import { readGreeks, greekCell, greekKey } from '$lib/greeks.js';
   import { dayLabel, barTimeLabel } from '$lib/dates.js';
   import DbBasisBadge from './DbBasisBadge.svelte';
+  import { oneInstrument, sourcesHrefOfDb } from '$lib/sources.js';
 
   /**
    * THE ANCHOR'S READOUTS AND THE EXPORT — the window band's facts and their
@@ -387,6 +388,12 @@
 <script>
   /** @type {{ db: any }} */
   let { db } = $props();
+  /* WP-58, D-3339: the same series, rung and first day on /sources, where the
+     feeds are set side by side. The series is the census key the selection's
+     matched rows carry (`db.picked` is an underlying, a name). `null` (no
+     link) unless the selection is exactly one series — never a link that
+     opens on another one. */
+  const allSources = $derived(sourcesHrefOfDb({ key: oneInstrument(db.matched), tf: db.timeframe, from: db.fromDay }));
 </script>
 
 <!-- ==================================================================
@@ -413,6 +420,9 @@
     {db.picked || db.feedName}
   </h1>
   <DbBasisBadge {db} />
+  {#if allSources}
+    <a class="allsrc" href={allSources} title="Every feed that holds this series, side by side: bar sizes held, one tagged timeline and the day reconciliation. Nothing is merged; this page stays one feed.">All sources →</a>
+  {/if}
 
   <!-- THE COUNT CHIP AND THE "% change — what these are" HELP LINK ARE GONE.
        Neither is a rung and neither is a column: the first restates a number
@@ -750,6 +760,12 @@
      was already carrying empty. They do NOT stretch: a fact is as wide as its
      figure, and the 787px each was given in the old row is what made two
      readouts look like two unrelated things at opposite ends of the page. */
+  .allsrc {
+    flex: none;
+    font-size: var(--fs-sm);
+    color: var(--info);
+    white-space: nowrap;
+  }
   .afacts {
     margin-left: auto;
     display: flex;

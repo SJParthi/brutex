@@ -302,7 +302,12 @@ const ROUTES = [
 	// WP-58), and a prefix claiming it would hand that page to Rust in
 	// development only — the `/audit` trap the notes above record.
 	'/provenance.json',
-	'/sources/day.json'
+	'/sources/day.json',
+	// THE ALL SOURCES PAGE'S OTHER TWO READS (WP-58, D-3339): the rung table
+	// and the tagged timeline. Each is listed exactly, for the reason above:
+	// `/sources` itself is the page and must stay with the dev server.
+	'/sources.json',
+	'/sources/bars.json'
 ];
 
 export default {
