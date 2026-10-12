@@ -37,9 +37,9 @@ use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
 use super::{
-    Access, Action, BarFile, DurableBatch, StoreError, VerifiedBlock, fault, fsync_dir, lock_fault,
-    no_follow_through, open_read, open_rw, open_rw_through, refuse_link, refuse_links_below,
-    sync_hooked, table_of, time_index_path, write_fully, writer_open,
+    Access, Action, BarFile, StoreError, VerifiedBlock, fault, fsync_dir, lock_fault, no_follow,
+    open_read, open_rw, refuse_link, refuse_links_below, sync_hooked, table_of, time_index_path,
+    write_fully, writer_open,
 };
 use crate::flock::Flock;
 use crate::format::Bar;
@@ -241,15 +241,8 @@ impl BarFile {
     /// may not be whole.
     fn append_sort_run(&self, sidecar: &SortSidecar, from: u64, at: u64) -> Result<(), String> {
         refuse_link(&sidecar.path).map_err(|why| why.to_string())?;
-        // INSIDE A DURABLE BATCH THE INDEX IS THE BATCH'S (WP-16 with WP-39,
-        // D-3353 beside D-3349): opened as the batch's other files are and
-        // flushed with them, once, when the day is made durable.
-        let through = self
-            .batch
-            .as_ref()
-            .is_some_and(DurableBatch::writes_through);
-        let file = writer_open(open_rw_through(&sidecar.path, through), &sidecar.path)
-            .map_err(|why| why.to_string())?;
+        let file =
+            writer_open(open_rw(&sidecar.path), &sidecar.path).map_err(|why| why.to_string())?;
         // NEVER THROUGH A SECOND NAME. An append edits the index's own inode,
         // and an inode that has another name is also whatever that name is
         // taken to be. Asked of the OPEN handle, so no name can change between
@@ -274,7 +267,7 @@ impl BarFile {
         let end = at + run.len() as u64;
         let written = write_fully(&file, &sidecar.path, at, &run)
             .and_then(|()| fault(file.set_len(end), &sidecar.path, Action::Write))
-            .and_then(|()| sync_sort_index(&file, &sidecar.path, self.batch.as_ref()));
+            .and_then(|()| fault(sync_hooked(&file), &sidecar.path, Action::Sync));
         if let Err(why) = written {
             // BEST EFFORT, AND SAID: the failure itself is the warning the
             // caller writes; a cut that also fails leaves a run the next walk
@@ -310,7 +303,7 @@ impl BarFile {
             return Ok(0);
         }
         let run = self.whole_image(sidecar)?.map_err(|why| why.to_string())?;
-        write_image(sidecar, &run, self.batch.as_ref())?;
+        write_image(sidecar, &run)?;
         Ok(1)
     }
 
@@ -357,9 +350,6 @@ impl BarFile {
             path.month(),
             table_of(path.file()),
             Access::Read,
-            // A reader's handle is of no batch (WP-16): this door flushes
-            // what it writes for itself.
-            None,
         )?;
         if let crate::generation::Served::Revision(pointer) = served
             && !pointer.describes(&file.header)
@@ -478,7 +468,7 @@ impl BarFile {
                 });
             }
         };
-        write_image(&sidecar, &run, file.batch.as_ref()).map_err(refused)?;
+        write_image(&sidecar, &run).map_err(refused)?;
         note_sort_index_built(&sidecar.path, &because, n_valid);
         Ok(SortIndexed {
             n_valid,
@@ -500,20 +490,7 @@ impl BarFile {
 /// zero — what this did before — wrote the index THROUGH a hard link into the
 /// file behind it: a bar file linked under the staging name lost its bytes and
 /// became the month's `.srt`.
-///
-/// INSIDE A DURABLE BATCH (WP-16 with WP-39, D-3353 beside D-3349) no flush
-/// is issued here: the file is opened as the batch's other files are, its
-/// flush is held by the batch under the name the rename gives it, and so is
-/// its directory's. A crash inside the open day can then leave an index that
-/// does not walk, which every reader refuses by its own checks and the next
-/// writer's step writes whole again; the index holds nothing the bars do not.
-/// A batch that is sealed holds nothing, and the file is flushed here, after
-/// the rename.
-fn write_image(
-    sidecar: &SortSidecar,
-    run: &[u8],
-    batch: Option<&DurableBatch>,
-) -> Result<(), String> {
+fn write_image(sidecar: &SortSidecar, run: &[u8]) -> Result<(), String> {
     let staging = sidecar.staging();
     let io = |why: StoreError| why.to_string();
     refuse_link(&staging).map_err(io)?;
@@ -521,48 +498,25 @@ fn write_image(
     // A STAGING FILE LEFT BY A WRITER THAT DIED is never the month's index —
     // only a rename makes one — so its name is removed, not trusted.
     clear_staging(sidecar)?;
-    let through = batch.is_some_and(DurableBatch::writes_through);
-    let file = writer_open(open_new(&staging, through), &staging).map_err(io)?;
+    let file = writer_open(open_new(&staging), &staging).map_err(io)?;
     write_fully(&file, &staging, 0, &sidecar.shape.encode()).map_err(io)?;
     write_fully(&file, &staging, HEADER_LEN, run).map_err(io)?;
-    // OUTSIDE A BATCH THE BYTES ARE DURABLE BEFORE THE RENAME NAMES THEM.
-    if batch.is_none() {
-        fault(sync_hooked(&file), &staging, Action::Sync).map_err(io)?;
-    }
+    fault(sync_hooked(&file), &staging, Action::Sync).map_err(io)?;
+    drop(file);
     fault(
         fs::rename(&staging, &sidecar.path),
         &sidecar.path,
         Action::Write,
     )
     .map_err(io)?;
-    if batch.is_some() {
-        sync_sort_index(&file, &sidecar.path, batch).map_err(io)?;
-    }
-    drop(file);
-    fsync_dir(sidecar.path.parent().unwrap_or(&sidecar.path), batch).map_err(io)
-}
-
-/// One flush of a month's sort index, or its deferral to `batch`: inside a
-/// durable batch the `.srt` is made durable with the day, as the bars, the
-/// checksums and the time index are (WP-16 with WP-39).
-fn sync_sort_index(
-    file: &File,
-    path: &Path,
-    batch: Option<&DurableBatch>,
-) -> Result<(), StoreError> {
-    if let Some(batch) = batch
-        && batch.defer_file(file, path)?
-    {
-        return Ok(());
-    }
-    fault(sync_hooked(file), path, Action::Sync)
+    fsync_dir(sidecar.path.parent().unwrap_or(&sidecar.path)).map_err(io)
 }
 
 /// Creates `path` for writing and refuses a name that exists: `O_CREAT |
 /// O_EXCL`, under which the kernel opens nothing that is already there — not
 /// a regular file, not a second name of one, not a link of either kind.
-fn open_new(path: &Path, through: bool) -> io::Result<File> {
-    no_follow_through(File::options().write(true).create_new(true), through).open(path)
+fn open_new(path: &Path) -> io::Result<File> {
+    no_follow(File::options().write(true).create_new(true)).open(path)
 }
 
 /// Why the walked index's bodies are not whole, or `None` when every run's

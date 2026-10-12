@@ -2190,10 +2190,11 @@ pub struct Site {
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
-    /// The pull run a previous process opened in the journal and never
-    /// closed, read once when the site loads (DB-B34). `/pull/run.json`
-    /// carries it until a run is pressed in this process.
-    pub interrupted: Option<crate::pullrun::Interrupted>,
+    /// What the journal said, once, when the site loaded, about the pull run
+    /// before this process (DB-B34): none left open, one opened and never
+    /// closed, or NOT KNOWN. `/pull/run.json` carries it until a run is
+    /// pressed in this process.
+    pub restart: crate::pullrun::Restart,
     /// Active recovery plan for durable STOP routing; normal pulls leave None.
     pub(crate) recovery_active: std::sync::Mutex<Option<[u8; 32]>>,
     /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
@@ -2462,8 +2463,8 @@ impl Site {
             // direction: a report with nothing behind it.
             run: std::sync::Mutex::new(None),
             // READ ONCE, HERE: nothing of this process is in flight yet, so a
-            // run the journal holds open is one a previous process left.
-            interrupted: crate::pullrun::interrupted_run(&audit::Journal::at(&store_root)),
+            // run the journal holds open is not this process's.
+            restart: crate::pullrun::restart_scan(&audit::Journal::at(&store_root)),
             recovery_active: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
@@ -3797,12 +3798,40 @@ fn order_class_fact(code: axum::http::StatusCode) -> Option<(&'static str, Strin
 /// answered and whose minutes have gaps, or one the pull order withheld, will
 /// answer the same again. The receipt carries the count as its
 /// [`crate::pullrun::RETRY_CLASS_FACT`], and the conductor reads that.
+///
+/// # A failure of the STORE is not what the vendor holds
+///
+/// A member that answered can still fail on its LANDING: a store that would
+/// not take the write, or another writer holding the census lock. Those were
+/// counted with "what the vendor holds", so one refused write settled the leg
+/// for the run and the receipt said it "would repeat". They are counted
+/// apart ([`Self::store`]) and keep the leg owed: a store that takes the next
+/// write lands them on the next pass, and one that does not trips
+/// [`STORE_BREAKER`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RetryTally {
-    /// Failures another attempt could change.
+    /// Failures another attempt could change: the vendor did not answer, or
+    /// answered part of a window.
     pub transient: usize,
-    /// Failures another attempt would repeat.
+    /// Failures another attempt would repeat: what the vendor holds, what the
+    /// pull order withholds, where the calendar of record ends.
     pub standing: usize,
+    /// Failures of the store, not of the vendor: a member whose landing the
+    /// store refused ([`store_fault`] said why), or a refusal named for a
+    /// store path (a census that would not open, install or lock). Another
+    /// attempt can change them; they never settle a leg.
+    pub store: usize,
+}
+
+/// Whether `failure` is the store's own and not an instrument's: it is named
+/// for a filesystem path. `pull::ingest::Failure::instrument` documents the
+/// shape: a census that will not open, will not install, or is locked by
+/// another ingest is named by the census path, "because that is the thing an
+/// operator has to go and look at"; an instrument's failure is named by its
+/// symbol, which is never an absolute path. Read from the field that types
+/// it, not from the reason's prose.
+fn names_the_store(failure: &pull::ingest::Failure) -> bool {
+    std::path::Path::new(&failure.instrument).is_absolute()
 }
 
 /// How many instruments in a row may land nothing on a store that will not
@@ -3812,8 +3841,11 @@ pub(crate) struct RetryTally {
 const STORE_BREAKER: u32 = 3;
 
 /// Whether a member that was handed rows committed none and said why: the
-/// one shape a store that will not take a write leaves, and the only time
-/// [`store_fault`] is asked.
+/// shape a store that will not take a write leaves, and the only time
+/// [`store_fault`] is asked. It is also the shape of an instrument pulled
+/// again whose bars are all held already and whose months have a standing
+/// gap, so the probe is paid for those too (`docs/06-limits.md`): the counts
+/// cannot tell the two apart, and the probe is what does.
 const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
     done.rows_read > 0 && done.bars_committed == 0 && !done.failures.is_empty()
 }
@@ -3828,7 +3860,10 @@ const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
 /// The store is asked directly instead: the root must be a directory, and a
 /// 4 KiB file must be created, written and synced under `audit/`. A drive
 /// that was unplugged fails the first; a full or read-only one the second.
-/// The probe file is this process's own and is removed again.
+/// The probe file has ONE name, `audit/.store-probe`, and is removed again:
+/// a process killed between the create and the unlink leaves at most that one
+/// 4 KiB file, and the next probe of any process truncates and removes it. It
+/// was named for the process id, so each kill left a file nothing swept.
 ///
 /// The root is never created: `create_dir` makes `audit/` one level under a
 /// root that exists, so a vanished drive is not answered by an empty folder
@@ -3837,8 +3872,9 @@ const fn landed_nothing(done: &pull::ingest::Ingested) -> bool {
 /// # Cost
 ///
 /// One `stat`, one `mkdir` that usually finds the directory, one create,
-/// one 4 KiB write, one sync and one unlink. Paid only after a member landed
-/// nothing it was handed, never on a healthy member.
+/// one 4 KiB write, one sync and one unlink. Paid once per member that was
+/// handed rows, committed none and reported a failure ([`landed_nothing`]);
+/// a member with no failure, or one that committed a bar, costs nothing.
 fn store_fault(root: &std::path::Path) -> Option<String> {
     use std::io::Write as _;
     match std::fs::metadata(root) {
@@ -3854,7 +3890,7 @@ fn store_fault(root: &std::path::Path) -> Option<String> {
     {
         return Some(format!("{}: {why}", dir.display()));
     }
-    let probe = dir.join(format!(".store-probe-{}", std::process::id()));
+    let probe = dir.join(".store-probe");
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -4151,7 +4187,16 @@ fn before_first_bar_line(instrument: &str, note: Option<&str>) -> Option<String>
 impl BrokerRun {
     /// One reached member's landing, summed, and its before-first-bar note
     /// kept for the receipt. D-3313.
-    fn absorb_member(&mut self, landed: &BrokerWindow, mut landed_one: pull::ingest::Ingested) {
+    ///
+    /// `store_refused` says the store was asked after this member landed
+    /// nothing and would not take a write ([`store_fault`]): every failure of
+    /// the member is then the store's, not the vendor's.
+    fn absorb_member(
+        &mut self,
+        landed: &BrokerWindow,
+        mut landed_one: pull::ingest::Ingested,
+        store_refused: bool,
+    ) {
         // DAYS PAST THE CALENDAR OF RECORD ARE THE RUN'S ONE LINE, not one
         // per instrument and month (DB-B25): the member's findings about
         // them are counted here and said once by `record_past_record`.
@@ -4163,15 +4208,30 @@ impl BrokerRun {
             .past_record
             .saturating_add(before.saturating_sub(landed_one.failures.len()));
         // THE INSTRUMENT ANSWERED, so what it failed on is what the vendor
-        // holds: standing. The one exception is a window the vendor cut
-        // short (`note_short_window` adds exactly one failure for it), which
-        // another attempt can finish.
+        // holds: standing. Two exceptions. A window the vendor cut short
+        // (`note_short_window` adds exactly one failure for it), which
+        // another attempt can finish. And a failure of the STORE: every
+        // failure of a member the store refused, and any failure named for a
+        // store path (`names_the_store`), which say nothing about what the
+        // vendor holds and must not settle the leg (DB-B26, DB-B35).
         let short = usize::from(landed.unfetched.is_some());
+        let rest = landed_one.failures.len().saturating_sub(short);
+        let of_store = if store_refused {
+            rest
+        } else {
+            landed_one
+                .failures
+                .iter()
+                .filter(|failure| names_the_store(failure))
+                .count()
+                .min(rest)
+        };
         self.retry.transient = self.retry.transient.saturating_add(short);
+        self.retry.store = self.retry.store.saturating_add(of_store);
         self.retry.standing = self
             .retry
             .standing
-            .saturating_add(landed_one.failures.len().saturating_sub(short));
+            .saturating_add(rest.saturating_sub(of_store));
         self.total.absorb(landed_one);
         self.before_first_bar.extend(before_first_bar_line(
             &landed.instrument,
@@ -4262,7 +4322,7 @@ impl BrokerRun {
         };
         let streak = store_breaker_next(self.store_fault_streak, fault.is_some());
         self.store_fault_streak = streak;
-        self.absorb_member(landed, landed_one);
+        self.absorb_member(landed, landed_one, fault.is_some());
         if let Some(fault) = fault.filter(|_| streak >= STORE_BREAKER) {
             self.stopped = Some(store_unavailable_sentence(&fault, streak, place.0, place.1));
             self.store_unavailable = Some(fault);
@@ -4361,9 +4421,11 @@ impl BrokerRun {
         if self.total.failures.is_empty() && self.store_unavailable.is_none() {
             return None;
         }
+        // ONLY A LEG WHOSE EVERY FAILURE IS STANDING IS SETTLED: one the
+        // vendor did not answer, or one the store did not take, keeps it owed.
         let class = if self.store_unavailable.is_some() {
             RetryClass::Store
-        } else if self.retry.transient > 0 {
+        } else if self.retry.transient > 0 || self.retry.store > 0 {
             RetryClass::Transient
         } else {
             RetryClass::Standing
@@ -4372,10 +4434,14 @@ impl BrokerRun {
             crate::pullrun::RETRY_CLASS_FACT,
             format!(
                 "{} — {} failure(s) another attempt could change (an instrument that did \
-                 not answer, a window cut short, a stop) and {} it would repeat (from an \
-                 instrument that answered, or one the pull order withheld)",
+                 not answer, a window cut short, a stop), {} of the store and not the vendor \
+                 (a write the store refused, or a census another writer held or that would \
+                 not open), which another attempt can change too, and {} it would repeat \
+                 (what the vendor holds for an instrument that answered, an instrument the \
+                 pull order withheld, the end of the calendar of record)",
                 class.word(),
                 self.retry.transient,
+                self.retry.store,
                 self.retry.standing
             ),
         ))
@@ -4832,8 +4898,11 @@ fn ladder_withheld(
                 run.why.label()
             ));
     }
+    // ONE LINE PER INSTRUMENT: a target named twice is withheld once.
+    let mut distinct = std::collections::HashSet::new();
     let owing: Vec<_> = targets
         .iter()
+        .filter(|key| distinct.insert(**key))
         .filter_map(|key| {
             reasons
                 .get(&(key.exchange, key.segment, key.underlying))
@@ -4853,7 +4922,7 @@ fn ladder_withheld(
                 })
         })
         .collect();
-    if owing.len() == targets.len() {
+    if owing.len() == distinct.len() {
         return Vec::new();
     }
     owing
@@ -9349,12 +9418,12 @@ pub(crate) async fn pull_run_json(
         .map(|now| i64::from(now.day().days_from_epoch()));
     let body = match held.as_ref() {
         Some(progress) => crate::pullrun::status_json(progress, today, None),
-        // NO RUN IN THIS PROCESS: the run a restart cut short, if the journal
-        // holds one, is what there is to say (DB-B34).
+        // NO RUN IN THIS PROCESS: what the journal said about the run before
+        // it is what there is to say (DB-B34).
         None => crate::pullrun::status_json(
             &crate::pullrun::Progress::default(),
             today,
-            site.interrupted.as_ref(),
+            Some(&site.restart),
         ),
     };
     (axum::http::StatusCode::OK, json_headers(), body)
@@ -18861,6 +18930,14 @@ mod tests {
         // singled out, and the whole run is refused as before.
         assert!(ladder_withheld(&asked, &[holed], &censuses).is_empty());
         assert!(ladder_refusal(&asked, &[holed], &censuses).is_some());
+        // A TARGET NAMED TWICE is withheld on one line, and naming the one
+        // owing instrument twice is still "every instrument owes".
+        let twice = ladder_withheld(&asked, &[whole, holed, holed, young], &censuses);
+        assert_eq!(twice.len(), 1, "{twice:?}");
+        assert!(ladder_withheld(&asked, &[holed, holed], &censuses).is_empty());
+        let mut asked_twice = vec![whole, holed, holed, young];
+        let left_out = order_gate(&asked, &mut asked_twice, &censuses).expect("the rest is pulled");
+        assert_eq!((left_out.len(), asked_twice), (1, vec![whole, young]));
         // Nothing held at all, an absent census and a daily ask: nothing to
         // withhold, each for its own reason.
         assert!(ladder_withheld(&asked, &[whole, holed], &[]).is_empty());
@@ -19040,7 +19117,7 @@ mod tests {
         let refused = store_fault(&root);
         std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let refused = refused.expect("a directory that refuses a write is a fault");
-        assert!(refused.contains(".store-probe-"), "{refused}");
+        assert!(refused.contains(".store-probe"), "{refused}");
 
         let file = crate::scratch::path("store-fault-probe-file");
         let _ = std::fs::remove_dir_all(&file);
@@ -19320,13 +19397,21 @@ mod tests {
                 .append_failure(&mut thread, &failure, "a gap")
                 .expect("a failure lands");
         }
-        let found = crate::pullrun::interrupted_run(&journal).expect("the run is open");
-        assert_eq!(found.ordinal, None, "the opening lies before the scan");
-        assert_eq!(found.failures, crate::pullrun::INTERRUPTED_SCAN);
+        let found = crate::pullrun::restart_scan(&journal);
+        let run = found.interrupted().expect("the run is open");
+        assert_eq!(
+            (run.ordinal, run.failures, run.failures_whole),
+            (0, crate::pullrun::INTERRUPTED_SCAN, false),
+            "the opening record lies before the scan and is read through the index"
+        );
         spread(
-            "interrupted_run (8,001-record journal, 800 read)",
+            "restart_scan (8,001-record journal: 800 read, the run record by its index)",
             timed(200, &mut || {
-                assert!(crate::pullrun::interrupted_run(&journal).is_some());
+                assert!(
+                    crate::pullrun::restart_scan(&journal)
+                        .interrupted()
+                        .is_some()
+                );
             }),
         );
         let doc_of = crate::pullrun::Progress::default();
@@ -19344,25 +19429,28 @@ mod tests {
 
     /// What the pull order withholds on a real store, read only (DB-B27).
     /// Ignored: it needs the operator's masters and a shadow of the store,
-    /// named by `BRUTEX_WP62_MASTERS` and `BRUTEX_WP62_STORE`, and prints
-    /// what it finds for the package report. It reads the census and nothing
-    /// else, and opens no socket.
+    /// named by `BRUTEX_WP62_MASTERS` and `BRUTEX_WP62_STORE`, and FAILS
+    /// when run without them: a test that reads nothing proves nothing. It
+    /// reads the census and the journal and nothing else, and opens no
+    /// socket.
+    ///
+    /// What it asserts of each of the operator's two minute legs: the
+    /// whole-run gate of the build before refuses it; the per-instrument
+    /// gate answers; some instruments are withheld and some are pulled; none
+    /// is lost or counted twice; and every withheld one is named with the
+    /// pull order's own leading words.
     #[test]
     #[ignore = "real-store evidence, run by hand against a shadow"]
     fn the_pull_order_on_a_real_census() {
-        let (Ok(masters), Ok(store)) = (
-            std::env::var("BRUTEX_WP62_MASTERS"),
-            std::env::var("BRUTEX_WP62_STORE"),
-        ) else {
-            println!("BRUTEX_WP62_MASTERS and BRUTEX_WP62_STORE are not set: nothing read");
-            return;
-        };
+        let masters = std::env::var("BRUTEX_WP62_MASTERS")
+            .expect("BRUTEX_WP62_MASTERS names the masters directory");
+        let store =
+            std::env::var("BRUTEX_WP62_STORE").expect("BRUTEX_WP62_STORE names a shadow store");
         let site = Site::load(Path::new(&masters), Path::new(&store));
         println!(
-            "interrupted run in the journal: {:?}",
-            site.interrupted
-                .as_ref()
-                .map(crate::pullrun::Interrupted::words)
+            "restart scan of the journal: {} — {}",
+            site.restart.word(),
+            site.restart.words()
         );
         let censuses = census::read_all(&site.store_root);
         for target in ["indices", "fno"] {
@@ -19377,34 +19465,207 @@ mod tests {
             let mut targets = spot_targets(&asked, &site);
             targets.sort_unstable();
             let asked_for = targets.len();
+            assert!(asked_for > 0, "{target}: the masters name no instrument");
             let whole = ladder_refusal(&asked, &targets, &censuses);
             let began = std::time::Instant::now();
             let gate = order_gate(&asked, &mut targets, &censuses);
             let took = began.elapsed();
+            let whole = whole.unwrap_or_else(|| {
+                panic!("{target}: the whole-run gate is open, so this store shows nothing")
+            });
             println!(
                 "{target}: {asked_for} instruments asked; whole-run gate before: {}",
-                whole.map_or_else(|| "open".to_owned(), |why| why.chars().take(160).collect())
+                whole.chars().take(160).collect::<String>()
             );
-            match gate {
-                Ok(withheld) => {
-                    println!(
-                        "{target}: per-instrument gate in {took:?}: {} withheld, {} pulled",
-                        withheld.len(),
-                        targets.len()
-                    );
-                    for (key, why) in withheld {
-                        println!(
-                            "  withheld {}: {}",
-                            key.underlying,
-                            why.chars().take(150).collect::<String>()
-                        );
-                    }
-                }
-                Err(why) => println!(
-                    "{target}: still refused whole in {took:?}: {}",
-                    why.chars().take(300).collect::<String>()
-                ),
+            let withheld = gate
+                .unwrap_or_else(|why| panic!("{target}: still refused whole in {took:?}: {why}"));
+            println!(
+                "{target}: per-instrument gate in {took:?}: {} withheld, {} pulled",
+                withheld.len(),
+                targets.len()
+            );
+            assert!(
+                !withheld.is_empty() && withheld.len() < asked_for,
+                "{target}: {} of {asked_for} withheld",
+                withheld.len()
+            );
+            assert_eq!(
+                targets.len() + withheld.len(),
+                asked_for,
+                "{target}: every instrument asked is pulled or withheld, once"
+            );
+            let mut named: Vec<_> = withheld.iter().map(|(key, _)| *key).collect();
+            named.sort_unstable();
+            named.dedup();
+            assert_eq!(
+                named.len(),
+                withheld.len(),
+                "{target}: one line per instrument"
+            );
+            for (key, why) in withheld {
+                assert!(
+                    why.starts_with(WITHHELD_BY_ORDER) && !targets.contains(&key),
+                    "{}: {why}",
+                    key.underlying
+                );
+                println!(
+                    "  withheld {}: {}",
+                    key.underlying,
+                    why.chars().take(150).collect::<String>()
+                );
             }
+        }
+    }
+
+    /// **A FAILURE OF THE STORE IS NEVER CALLED STANDING** (DB-B26, DB-B35,
+    /// repair 1). `absorb_member` counted every failure of a member that
+    /// answered as "what the vendor holds", but a member's failures include
+    /// what its LANDING could not write. One or two refused writes, below the
+    /// breaker, therefore SETTLED the leg for the run, and the receipt said
+    /// they "would repeat (from an instrument that answered)".
+    ///
+    /// Driven through `absorb_landed` with a store that really refuses a
+    /// write (its `audit/` is read-only), then with the refusal `pull::ingest`
+    /// names for the census path when another ingest holds the census lock.
+    #[test]
+    fn a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing() {
+        use crate::pullrun::RetryClass;
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::scratch::path("store-fault-class");
+        let _ = std::fs::remove_dir_all(&root);
+        let audit = root.join("audit");
+        std::fs::create_dir_all(&audit).expect("mkdir");
+        let landed = answered_window("RELIANCE");
+        let member = |named: &str, why: &str| pull::ingest::Ingested {
+            members: 1,
+            rows_read: 375,
+            failures: vec![pull::ingest::Failure::new(named, why)],
+            ..pull::ingest::Ingested::default()
+        };
+        let class_of = |run: &BrokerRun| {
+            let page = stored_html(
+                "Spot pull",
+                "FAILED",
+                "r",
+                &[run.retry_fact().expect("a fact")],
+            );
+            RetryClass::of_receipt(&page)
+        };
+        let tally = |transient, standing, store| RetryTally {
+            transient,
+            standing,
+            store,
+        };
+
+        // What the vendor holds, on a store that takes a write: standing.
+        let mut vendor = BrokerRun::default();
+        let gap = "2 minutes missing on 2024-10-04";
+        vendor.absorb_landed(&landed, member("RELIANCE", gap), &root, (1, 3));
+        assert_eq!(vendor.retry, tally(0, 1, 0));
+        assert_eq!(class_of(&vendor), Some(RetryClass::Standing));
+
+        // The store refuses the write, twice: below the breaker.
+        let mut run = BrokerRun::default();
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        for place in [(1, 3), (2, 3)] {
+            run.absorb_landed(
+                &landed,
+                member("RELIANCE", "the month file would not open"),
+                &root,
+                place,
+            );
+        }
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(run.store_fault_streak, 2);
+        assert_eq!(run.store_unavailable, None, "the breaker has not tripped");
+        assert_eq!(run.retry, tally(0, 0, 2), "the store's, not the vendor's");
+        let said = run.retry_fact().expect("a fact").1;
+        assert!(
+            said.starts_with("transient — 0 failure(s) another attempt could change")
+                && said.contains("2 of the store and not the vendor")
+                && said.contains("and 0 it would repeat"),
+            "{said}"
+        );
+        assert_eq!(
+            class_of(&run),
+            Some(RetryClass::Transient),
+            "the leg stays owed: a store that takes the next write lands it"
+        );
+        // The store recovers and the next member has a real gap: the streak
+        // resets, the gap is standing, and the leg is STILL owed for the two
+        // writes the store refused.
+        run.absorb_landed(&landed, member("RELIANCE", gap), &root, (3, 3));
+        assert_eq!(run.store_fault_streak, 0);
+        assert_eq!(run.retry, tally(0, 1, 2));
+        assert_eq!(class_of(&run), Some(RetryClass::Transient));
+
+        // Another ingest holds the census lock: the refusal is named for the
+        // census path, the store takes a write, and it is still the store's.
+        let mut locked = BrokerRun::default();
+        let lock = root.join("manifest").join("census.lock");
+        let refused = member(
+            &lock.display().to_string(),
+            "another ingest holds the census lock. Wait for the other run and try again.",
+        );
+        assert!(names_the_store(&refused.failures[0]));
+        assert!(!names_the_store(&pull::ingest::Failure::new("M&M", gap)));
+        assert!(!names_the_store(&pull::ingest::Failure::new(
+            "calendar of record",
+            gap
+        )));
+        locked.absorb_landed(&landed, refused, &root, (1, 3));
+        assert_eq!(locked.store_fault_streak, 0, "the store itself is healthy");
+        assert_eq!(locked.retry, tally(0, 0, 1));
+        assert_eq!(class_of(&locked), Some(RetryClass::Transient));
+
+        // A window the vendor cut short is still the one transient failure
+        // of a member that answered; the rest of its failures keep their own
+        // class.
+        let mut short = answered_window("RELIANCE");
+        short.unfetched = Some("the vendor stopped answering at 2024-10-07".to_owned());
+        let mut cut = member("RELIANCE", gap);
+        cut.bars_committed = 375;
+        cut.failures
+            .push(pull::ingest::Failure::new("RELIANCE", "window cut short"));
+        let mut partial = BrokerRun::default();
+        partial.absorb_landed(&short, cut, &root, (1, 3));
+        assert_eq!(partial.retry, tally(1, 1, 0));
+
+        // A PROBE FILE A KILLED PROCESS LEFT IS SWEPT by the next probe: one
+        // name, truncated and removed, never one file per dead process.
+        std::fs::write(audit.join(".store-probe"), b"left by a killed process").expect("write");
+        assert_eq!(store_fault(&root), None);
+        let left: Vec<_> = std::fs::read_dir(&audit)
+            .expect("audit/")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// A window an instrument answered with no body: the smallest thing
+    /// `BrokerRun::absorb_landed` takes.
+    fn answered_window(instrument: &str) -> BrokerWindow {
+        let pull::vendor::Transport::Http(spec) =
+            pull::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("HTTP descriptor");
+        };
+        let on = day(2024, 10, 4);
+        BrokerWindow {
+            listing: pull::vendor::Listing::Equity,
+            contract: None,
+            unfetched: None,
+            before_first_bar: None,
+            instrument: instrument.to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "CASH",
+            store_vendor: Vendor::Zerodha,
+            window: pull::session::Window::new(on, on).expect("a window"),
+            granularity: pull::vendor::Granularity::Minute1,
+            bodies: Vec::new(),
         }
     }
 
@@ -19413,6 +19674,7 @@ mod tests {
     /// open logs nothing.
     #[test]
     fn a_run_cut_short_by_a_restart_is_logged_when_it_is_found() {
+        use std::os::unix::fs::PermissionsExt as _;
         let root = crate::scratch::path("server-interrupted-run-logged");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
@@ -19422,7 +19684,10 @@ mod tests {
         let source = "wp62-interrupted-fixture";
         let _shared = crate::emitted::sink();
         let from = crate::emitted::mark();
-        assert_eq!(crate::pullrun::interrupted_run(&journal), None);
+        assert_eq!(
+            crate::pullrun::restart_scan(&journal),
+            crate::pullrun::Restart::Clean
+        );
         let logged = |from| {
             crate::emitted::landed(from, "pull.run", "a pull run was interrupted by a restart")
                 .into_iter()
@@ -19451,8 +19716,9 @@ mod tests {
                 .append_failure(&mut thread, &failure, "a gap")
                 .expect("a failure lands");
         }
-        let found = crate::pullrun::interrupted_run(&journal).expect("the run is open");
-        assert_eq!((found.ordinal, found.failures), (Some(0), 3));
+        let found = crate::pullrun::restart_scan(&journal);
+        let run = found.interrupted().expect("the run is open");
+        assert_eq!((run.ordinal, run.failures), (0, 3));
         let lines = logged(from);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(crate::emitted::counts(&lines[0], "failures", 3));
@@ -19461,6 +19727,51 @@ mod tests {
             "reason",
             "INTERRUPTED: a pull run for 2026-08-03..2026-08-05"
         ));
+
+        // AND "COULD NOT TELL" IS LOGGED AS THAT, never as an interruption:
+        // a journal longer than the scan that ends in failures, whose index
+        // is not there and cannot be written.
+        let dark = crate::scratch::path("server-restart-not-known");
+        let _ = std::fs::remove_dir_all(&dark);
+        let path = audit::journal_path(&dark);
+        let audit_dir = path.parent().expect("audit/").to_path_buf();
+        std::fs::create_dir_all(&audit_dir).expect("mkdir");
+        let failure = audit::Record::member_failure(
+            audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            "NIFTY",
+            window,
+            "a gap",
+        );
+        let mut bytes = Vec::new();
+        for _ in 0..=crate::pullrun::INTERRUPTED_SCAN {
+            bytes.extend_from_slice(&failure.image());
+        }
+        std::fs::write(&path, bytes).expect("write");
+        let from = crate::emitted::mark();
+        std::fs::set_permissions(&audit_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod");
+        let found = crate::pullrun::restart_scan(&audit::Journal::at(&dark));
+        std::fs::set_permissions(&audit_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        assert!(
+            matches!(found, crate::pullrun::Restart::NotKnown(_)),
+            "{found:?}"
+        );
+        let said = crate::emitted::landed(
+            from,
+            "pull.run",
+            "whether a pull run was left open is not known",
+        );
+        assert!(
+            said.iter().any(|record| crate::emitted::says(
+                record,
+                "reason",
+                "server-restart-not-known"
+            )),
+            "{said:?}"
+        );
+        assert!(logged(from).is_empty(), "and nothing is called interrupted");
     }
 
     /// A DERIVATIVE WITH NO SPOT BEHIND IT IS REFUSED FOR *THAT*, not the rung.

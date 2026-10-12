@@ -1862,7 +1862,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // and `pull.run a pull run was interrupted by a restart` (DB-B34), whose
     // site is in `pullrun` and is read back by `server::tests::
     // a_run_cut_short_by_a_restart_is_logged_when_it_is_found`.
-    const REACHED_IN_SERVER_TESTS: usize = 26;
+    // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open
+    // is not known` (DB-B34), the scan's third answer, whose site is in
+    // `pullrun` and is read back by the same test.
+    const REACHED_IN_SERVER_TESTS: usize = 27;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2007,9 +2010,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 73 -> 76 at WP-62 (DB-B25, DB-B27, DB-B34): the three sites named above
     // `REACHED_IN_SERVER_TESTS`.
+    //
+    // 76 -> 77 at WP-62 repair 1 (DB-B34): the restart scan's NOT KNOWN
+    // line, named above `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 76,
+        lib_sites, 77,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

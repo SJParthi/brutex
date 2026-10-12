@@ -1,5 +1,4 @@
-//! The one place the raw no-follow, non-blocking and synchronous-write open
-//! flags are written.
+//! The one place the raw no-follow and non-blocking open flags are written.
 //!
 //! The workspace takes no `libc` dependency, so these are written out from the
 //! platform headers. They are per *architecture*, not per OS: `O_NOFOLLOW` is
@@ -70,43 +69,6 @@ pub const O_NOFOLLOW_NONBLOCK: i32 = 0x8800;
 /// `O_NOFOLLOW | O_NONBLOCK` on macOS: `0x100 | 0x4`.
 #[cfg(target_os = "macos")]
 pub const O_NOFOLLOW_NONBLOCK: i32 = 0x0104;
-
-// `O_SYNC`, for the writers inside a durable batch that write through
-// (`crate::file::DurableBatch`, WP-16, D-3353), and its union with
-// `O_NOFOLLOW`, one literal per target for the reason given above:
-// `crate::file`'s `the_writer_flags_are_the_unions_they_name` pins the union
-// to the two constants on the host it runs on.
-
-/// `O_SYNC` on Linux: UAPI `asm-generic/fcntl.h`, `__O_SYNC 04000000 |
-/// O_DSYNC 00010000`, which neither `x86_64` nor arm64 overrides.
-#[cfg(all(
-    any(target_os = "linux", target_os = "android"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub const O_SYNC: i32 = 0o4_010_000;
-
-/// `O_SYNC` on macOS: SDK 27.0 `sys/_types/_o_sync.h:29`, `#define O_SYNC
-/// 0x0080 /* synch I/O file integrity */`.
-#[cfg(target_os = "macos")]
-pub const O_SYNC: i32 = 0x0080;
-
-/// `O_NOFOLLOW | O_SYNC` on `x86_64` Linux: `0x2_0000 | 0x10_1000`.
-#[cfg(all(
-    any(target_os = "linux", target_os = "android"),
-    target_arch = "x86_64"
-))]
-pub const O_NOFOLLOW_SYNC: i32 = 0x0012_1000;
-
-/// `O_NOFOLLOW | O_SYNC` on `aarch64` Linux: `0x8000 | 0x10_1000`.
-#[cfg(all(
-    any(target_os = "linux", target_os = "android"),
-    target_arch = "aarch64"
-))]
-pub const O_NOFOLLOW_SYNC: i32 = 0x0010_9000;
-
-/// `O_NOFOLLOW | O_SYNC` on macOS: `0x100 | 0x80`.
-#[cfg(target_os = "macos")]
-pub const O_NOFOLLOW_SYNC: i32 = 0x0180;
 
 /// Linux UAPI `include/uapi/asm-generic/errno.h`: `ELOOP 40`, the error an
 /// `O_NOFOLLOW` open of a final symlink returns. Shared by `x86_64` and

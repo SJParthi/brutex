@@ -16370,3 +16370,45 @@ BUILT; what that costs until it is, is the disk item below.
   call. Its cost is the caller's and is not bounded here. No caller passes
   one yet: the CASH auction-file writer it is for is IA-17's second part, so
   a repaired CASH month still has no auction file beside its served bars.
+
+### Pull runtime: the restart scan, the store probe, the pull order (WP-62)
+
+- **The restart scan reads a bounded part of the journal, once per process.**
+  `api::pullrun::restart_scan` reads the newest 800 records
+  (`INTERRUPTED_SCAN`), the index's `runs` file (32 bytes per run record ever
+  written; not bounded by a constant) and the 64 newest run records before
+  the scan (`INTERRUPTED_RUNS`). A run opened further back than those and
+  never closed is not reported.
+- **With no usable index and no run record in the newest 800 records the
+  answer is NOT KNOWN**, never a guess: `/pull/run.json` says
+  `restart.state = "not_known"` with the index's reason.
+- **An interrupted run's failure count is a floor past the scan**
+  (`failuresWhole: false`): only the failures inside the newest 800 records
+  are counted.
+- **A closing record does not name its opening record.** A run that reached
+  no instrument is closed under its target's name, so it is paired with the
+  newest open run of its window. A `NotStarted` record of ANOTHER feed or
+  process for the same window, written while a run is open, therefore reads
+  as that run's close if the process then dies. A `Refused` record closes
+  nothing. NOT PROVED on a two-process journal.
+- **A run of another process still in flight when a server starts has no
+  closing record either.** The scan cannot tell it from a run cut short and
+  says so in its sentence; the age of the last record is what a reader has.
+- **The store probe is one 4 KiB synced write per member that was handed
+  rows, committed none and reported a failure.** That is the shape of a
+  refused write and also of an instrument pulled again whose bars are all
+  held and whose months have a standing gap, so those pay it too. Measured
+  on this machine's scratch volume by `server::tests::pull_runtime_costs`;
+  NOT MEASURED on the store's own drive.
+- **A write the store refuses for ONE file while it takes the probe's** (a
+  permission on one directory) is named for its instrument and classed
+  standing: `pull::ingest::Failure` carries no type, only the name and the
+  reason. A failure named for a store path, and every failure of a member
+  the probe found a fault for, are classed as the store's and keep the leg
+  owed.
+- **The pull order walks the ask twice**: once per instrument-month to find
+  who owes (`ladder_withheld`), once more over what is left for the leg rule
+  (`ladder_refusal`). Bounded by twice the instrument-months asked.
+- **A 1day month the vendor answered empty stays owed**, so its instrument
+  is withheld from every 1min pull by name until an empty daily answer is
+  recorded durably (a decision is needed; DB-B27).

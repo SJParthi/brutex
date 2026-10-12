@@ -16,7 +16,7 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
-use store::open_flags::{O_NOFOLLOW, O_NOFOLLOW_NONBLOCK, O_NOFOLLOW_SYNC, O_NONBLOCK, O_SYNC};
+use store::open_flags::{O_NOFOLLOW, O_NOFOLLOW_NONBLOCK, O_NONBLOCK};
 
 /// The x86_64-only no-follow bit, built so this file does not spell it.
 const X86_BIT: u64 = 1 << 17;
@@ -58,12 +58,6 @@ fn the_combined_flag_is_the_disjoint_union_of_the_two() {
     assert_eq!(O_NOFOLLOW & O_NONBLOCK, 0, "the two flags share a bit");
     assert_eq!(O_NOFOLLOW_NONBLOCK, O_NOFOLLOW | O_NONBLOCK);
     assert_eq!(O_NOFOLLOW_NONBLOCK & !(O_NOFOLLOW | O_NONBLOCK), 0);
-    // The writers of a durable batch (WP-16, D-3353): the same rule for
-    // `O_NOFOLLOW | O_SYNC`, and no bit shared with either other flag.
-    assert_eq!(O_NOFOLLOW & O_SYNC, 0);
-    assert_eq!(O_NONBLOCK & O_SYNC, 0);
-    assert_eq!(O_NOFOLLOW_SYNC, O_NOFOLLOW | O_SYNC);
-    assert_eq!(O_NOFOLLOW_SYNC & !(O_NOFOLLOW | O_SYNC), 0);
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

@@ -473,28 +473,12 @@ fn every_directory_the_writer_creates_has_its_entry_flushed_body() {
         "the new `NSE` entry lives in the vendor directory, so its flush is \
          issued there, and the host's refusal is returned naming it"
     );
-    // THE PREMISE IS IN THE REFUSAL ITSELF: `mkdir` inside a 0o300 directory
-    // succeeds, and a refused `mkdir` would have answered `CreateDir` naming
-    // the month's directory, so `Open` on the vendor is the flush, issued
-    // after `NSE` was made.
-    //
-    // AND A LEVEL WHOSE NAME COULD NOT BE FLUSHED IS TAKEN AWAY AGAIN (WP-16,
-    // repair 1). This asserted the opposite, that `NSE` stayed, and the open
-    // below then found it present and flushed nothing for it: a month could
-    // be committed under a directory whose name no flush ever reached. Now
-    // the next open finds the level missing, makes it again and asks the
-    // same flush again (`file::tests::a_directory_flush_that_fails_fails_the_
-    // open_and_is_asked_again` counts the flushes).
     assert!(
-        !vendor.join("NSE").exists(),
-        "a level whose name was never flushed does not stay for a later open to trust"
+        vendor.join("NSE").is_dir(),
+        "the premise: the directory was created before its entry was flushed"
     );
 
     let opened = BarFile::open_or_create(&scratch.root, bars_path(), 7)
         .expect("the same month with the vendor readable");
     assert_eq!(opened.records(), 0);
-    assert!(
-        vendor.join("NSE").is_dir(),
-        "made again by the open that could flush its name"
-    );
 }

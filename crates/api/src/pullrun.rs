@@ -592,72 +592,91 @@ impl Progress {
     }
 }
 
-/// How many of the journal's newest records [`interrupted_run`] reads:
+/// How many of the journal's newest records [`restart_scan`] reads:
 /// **800**, four pages of [`crate::audit::MAX_PAGE_RECORDS`], about 205 KiB.
-/// A bound on the read, not on the run: an opening record further back than
-/// this is still reported, from the records it left behind (DB-B34).
+/// A bound on the read, not on the run: run records further back are read
+/// through the journal's index, [`INTERRUPTED_RUNS`] of them (DB-B34).
 pub const INTERRUPTED_SCAN: u64 = 4 * crate::audit::MAX_PAGE_RECORDS;
+
+/// How many run records before the scan [`restart_scan`] reads through the
+/// journal's index: **64**, one positional read of 256 bytes each. A run
+/// opened further back than these and never closed is not reported, which
+/// `docs/06-limits.md` names.
+pub const INTERRUPTED_RUNS: usize = 64;
 
 /// A pull run the journal opened and never closed (DB-B34).
 ///
 /// A run's opening record is appended before its first instrument and its
-/// closing record only when the run returns. A server that stopped in between
-/// left the opening record and the failures behind it, and nothing read them
-/// as a run cut short: after the restart `/pull/run.json` answered exactly as
-/// a server that had never pulled.
+/// closing record only when the run returns. A process that stopped in
+/// between left the opening record and the failures behind it, and nothing
+/// read them as a run cut short: after the restart `/pull/run.json` answered
+/// exactly as a server that had never pulled.
+///
+/// **Only an opening record that was READ makes one of these.** Member
+/// failures prove nothing about a run being open: every run of the build
+/// before D-3341 wrote its failures BEHIND its closing record, and
+/// `RunLedger::rest` still does when the opening record was refused, so a
+/// journal that ends in 2.4 million failures can be a run that closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Interrupted {
-    /// The opening record's ordinal, or `None` when it lies further back than
-    /// the scan and only the run's later records were read.
-    pub ordinal: Option<u64>,
-    /// When the run was opened, when its opening record was read.
-    pub opened_at_secs: Option<i64>,
-    /// The newest record of the run: the last moment it is known to have
-    /// been alive, which is the nearest thing to when it was interrupted.
+    /// The opening record's ordinal.
+    pub ordinal: u64,
+    /// When the run was opened.
+    pub opened_at_secs: i64,
+    /// The newest record of the run that was read: the last moment it is
+    /// known to have been alive.
     pub last_at_secs: i64,
     /// What it was fetching from, as its opening record names it.
     pub source: String,
     /// The window it asked for, as days since the epoch.
     pub window: Option<(u32, u32)>,
-    /// Member-failure records of the run inside the scan.
+    /// Member-failure records of the run among the records read: all of them
+    /// when [`Self::failures_whole`], else those inside the scan.
     pub failures: u64,
+    /// Whether every record after the opening record was read, so
+    /// [`Self::failures`] is the run's whole count and not a floor.
+    pub failures_whole: bool,
     /// The opening record's note ("opened for N instruments; ...").
     pub note: String,
 }
 
 impl Interrupted {
     /// The run in one sentence, for a page that shows nothing else.
+    ///
+    /// It does not say the SERVER stopped: a `cli` pull or a second server
+    /// writes the same journal, and a run of theirs still in flight has no
+    /// closing record either. What is known is said; which of the two it is,
+    /// the age of the last record tells the reader.
     #[must_use]
     pub fn words(&self) -> String {
         let window = self.window.map_or_else(String::new, |(from, to)| {
             format!(" for {}..{}", day_text(from), day_text(to))
         });
-        let opened = match (self.ordinal, self.opened_at_secs) {
-            (Some(ordinal), Some(at)) => {
-                format!("opened at journal record {ordinal} ({at} s since the epoch)")
-            }
-            _ => format!("opened further back than the journal's last {INTERRUPTED_SCAN} records"),
+        let failures = if self.failures_whole {
+            format!("{} member failure(s)", self.failures)
+        } else {
+            format!(
+                "at least {} member failure(s) (the newest {INTERRUPTED_SCAN} records were counted)",
+                self.failures
+            )
         };
         format!(
-            "INTERRUPTED: a pull run{window} was {opened} and has no closing record; its last \
-             record was written at {} s since the epoch, with {} member failure(s) on record \
-             after it. The server stopped while it ran. Bars it had already written are in the \
-             store; press Pull with the same window to fetch what is left.",
-            self.last_at_secs, self.failures
+            "INTERRUPTED: a pull run{window} was opened at journal record {} ({} s since the \
+             epoch) and has no closing record; the last record of it that was read was written \
+             at {} s since the epoch, with {failures} on record after it. No run of this server \
+             process is in flight, so the process that ran it stopped before closing it, unless \
+             another process (a `cli` pull, a second server) is still running it. Bars it had \
+             already written are in the store; press Pull with the same window to fetch what is \
+             left.",
+            self.ordinal, self.opened_at_secs, self.last_at_secs
         )
     }
 
     fn json(&self, out: &mut String) {
-        let number =
-            |value: Option<i64>| value.map_or_else(|| "null".to_owned(), |v| v.to_string());
         out.push_str("{\"ordinal\":");
-        out.push_str(
-            &self
-                .ordinal
-                .map_or_else(|| "null".to_owned(), |v| v.to_string()),
-        );
+        out.push_str(&self.ordinal.to_string());
         out.push_str(",\"openedAtSecs\":");
-        out.push_str(&number(self.opened_at_secs));
+        out.push_str(&self.opened_at_secs.to_string());
         out.push_str(",\"lastRecordAtSecs\":");
         out.push_str(&self.last_at_secs.to_string());
         out.push_str(",\"source\":");
@@ -673,6 +692,8 @@ impl Interrupted {
         }
         out.push_str(",\"failures\":");
         out.push_str(&self.failures.to_string());
+        out.push_str(",\"failuresWhole\":");
+        out.push_str(if self.failures_whole { "true" } else { "false" });
         out.push_str(",\"note\":");
         out.push_str(&quote_for_json(&self.note));
         out.push_str(",\"words\":");
@@ -681,47 +702,106 @@ impl Interrupted {
     }
 }
 
+/// What the journal says, when a site loads, about the run before this
+/// process (DB-B34): three answers, because "not interrupted" and "could not
+/// tell" are different facts and the second was being served as a third,
+/// false one ("INTERRUPTED ... The server stopped while it ran").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restart {
+    /// Every run record read is closed, or the journal holds none.
+    Clean,
+    /// An opening record was read and no closing record follows it.
+    Interrupted(Interrupted),
+    /// The newest run record could not be read, so whether a run is open is
+    /// NOT KNOWN; the reason, in its own words.
+    NotKnown(String),
+}
+
+impl Restart {
+    /// The run cut short, when one was found.
+    #[must_use]
+    pub const fn interrupted(&self) -> Option<&Interrupted> {
+        match self {
+            Self::Interrupted(run) => Some(run),
+            Self::Clean | Self::NotKnown(_) => None,
+        }
+    }
+
+    /// The state's word on `/pull/run.json`.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Interrupted(_) => "interrupted",
+            Self::NotKnown(_) => "not_known",
+        }
+    }
+
+    /// The state in one sentence.
+    #[must_use]
+    pub fn words(&self) -> String {
+        match self {
+            Self::Clean => "No pull run was left open: every run record the journal's newest \
+                            records hold is closed, or it holds none."
+                .to_owned(),
+            Self::Interrupted(run) => run.words(),
+            Self::NotKnown(why) => format!(
+                "NOT KNOWN whether a pull run was left open: {why}. Nothing is claimed either \
+                 way; `/audit` lists the journal's runs."
+            ),
+        }
+    }
+}
+
 /// A day since the epoch as `YYYY-MM-DD`, or the number when it is no date.
 fn day_text(days: u32) -> String {
     pull::session::Day::from_days(days).map_or_else(|_| days.to_string(), |day| day.to_string())
 }
 
-/// The run the records `tail` leave open, if any. `tail` is the journal's
-/// newest records, oldest first, as `(ordinal, record)`; `from_start` says
-/// the first of them is the journal's first record.
+/// The run the records `read` leave open, if any. `read` is journal records
+/// oldest first, as `(ordinal, record)`: every run record from the oldest of
+/// them on, and whichever member failures were read with them.
 ///
 /// # The walk
 ///
-/// One pass, oldest to newest. An opening record starts a run (a restated
-/// one, "continues the run opened at record N", rejoins the run it names); a
-/// closing run record ends the newest open run of its window; a member
-/// failure belongs to the run record before it. Member failures ahead of any
-/// run record belong to a run opened before the scan began, unless the scan
-/// began at the journal's start. What is still open at the end was never
-/// closed.
+/// One pass, oldest to newest.
 ///
-/// A restatement written AFTER its run closed (a failure whose first append
-/// was refused, offered again behind the closing record) names an opening
-/// ordinal older than that close, and is not a new run.
+/// * An opening record starts a run. A restated one ("continues the run
+///   opened at record N", written when another writer appended in between)
+///   rejoins the run it names; it carries the opening record's own source,
+///   window and time, so it stands for an opening record that lies before
+///   `read`. A restatement written AFTER its run closed (a failure whose first
+///   append was refused, offered again behind the closing record) is not a
+///   new run.
+/// * A closing run record ends the newest open run of its window and source,
+///   else of its window: a run that reached no instrument is closed under its
+///   target's name, not its endpoint's. A record of
+///   [`crate::audit::Outcome::Refused`] closes nothing: it is a request
+///   refused before anything ran, and no run opens with it, so another
+///   request's refusal for the same window does not hide an open run.
+/// * A member failure is counted to the run whose record it follows, and
+///   NEVER opens one. Failures with no opening record before them are a
+///   closed run's (the layout before D-3341, and `RunLedger::rest`'s when
+///   the opening record was refused) or another run's; either way they are
+///   no evidence that a run is open.
+///
+/// What is still open at the end was never closed.
 ///
 /// # Cost
 ///
-/// O(records read), at most [`INTERRUPTED_SCAN`]; the open list is bounded by
-/// the runs in flight at once, which the feed seats bound.
+/// O(records read); the open list is bounded by the runs in flight at once,
+/// which the feed seats bound.
 #[must_use]
-pub fn interrupted_in(
-    tail: &[(u64, crate::audit::Record)],
-    from_start: bool,
-) -> Option<Interrupted> {
+pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupted> {
     use crate::audit::{Kind, Outcome};
     let mut open: Vec<Interrupted> = Vec::new();
     // Opening ordinals of the runs a closing record ended, and the closing
-    // records that ended a run opened before the scan: a head restated after
-    // either is not a new run.
+    // records that ended no run that was read: a head restated after either
+    // is not a new run.
     let mut closed: Vec<u64> = Vec::new();
     let mut closed_unseen: Vec<(Option<(u32, u32)>, String)> = Vec::new();
-    let mut current: Option<usize> = None;
-    for (ordinal, record) in tail {
+    let mut current: Option<u64> = None;
+    for (ordinal, record) in read {
         let window = (record.from_days != 0 || record.to_days != 0)
             .then_some((record.from_days, record.to_days));
         match (record.kind, record.outcome) {
@@ -740,93 +820,124 @@ pub fn interrupted_in(
                     current = None;
                     continue;
                 }
-                let found = open.iter().position(|run| run.ordinal == Some(first));
-                current = Some(found.unwrap_or_else(|| {
+                if !open.iter().any(|run| run.ordinal == first) {
                     open.push(Interrupted {
-                        ordinal: Some(first),
-                        opened_at_secs: Some(record.at_unix_secs),
+                        ordinal: first,
+                        opened_at_secs: record.at_unix_secs,
                         last_at_secs: record.at_unix_secs,
                         source: record.source.clone(),
                         window,
                         failures: 0,
+                        failures_whole: restated.is_none(),
                         note: if restated.is_some() {
                             String::new()
                         } else {
                             record.note.clone()
                         },
                     });
-                    open.len().saturating_sub(1)
-                }));
+                }
+                current = Some(first);
             }
+            (Kind::Run, Outcome::Refused) => current = None,
             (Kind::Run, _) => {
-                // The run this closes: the newest open one of its window and
-                // source, else of its window (a refusal's closing record names
-                // its target, not its endpoint), else one opened before the
-                // scan, which carries neither.
                 let ended = open
                     .iter()
                     .rposition(|run| run.window == window && run.source == record.source)
-                    .or_else(|| open.iter().rposition(|run| run.window == window))
-                    .or_else(|| open.iter().rposition(|run| run.window.is_none()));
-                match ended.map(|at| open.remove(at)) {
-                    Some(Interrupted {
-                        ordinal: Some(first),
-                        ..
-                    }) => closed.push(first),
-                    Some(_) => {}
+                    .or_else(|| open.iter().rposition(|run| run.window == window));
+                match ended {
+                    Some(at) => closed.push(open.remove(at).ordinal),
                     None => closed_unseen.push((window, record.source.clone())),
                 }
                 current = None;
             }
             (Kind::MemberFailure, _) => {
-                if current.is_none()
-                    && open.is_empty()
-                    && closed.is_empty()
-                    && closed_unseen.is_empty()
-                    && !from_start
+                if let Some(run) =
+                    current.and_then(|first| open.iter_mut().find(|run| run.ordinal == first))
                 {
-                    // Failures ahead of any run record: their run was opened
-                    // before the scan began.
-                    open.push(Interrupted {
-                        ordinal: None,
-                        opened_at_secs: None,
-                        last_at_secs: record.at_unix_secs,
-                        source: String::new(),
-                        window: None,
-                        failures: 0,
-                        note: String::new(),
-                    });
-                    current = Some(0);
-                }
-                if let Some(run) = current.and_then(|at| open.get_mut(at)) {
                     run.failures = run.failures.saturating_add(1);
                     run.last_at_secs = run.last_at_secs.max(record.at_unix_secs);
                 }
             }
         }
     }
-    // The newest still-open run is the one a restart cut short.
+    // The newest still-open run is the one that was cut short.
     open.pop()
 }
 
-/// The pull run `journal` holds open, read from its newest
-/// [`INTERRUPTED_SCAN`] records. Asked ONCE, when the site loads: nothing of
-/// this process is in flight then, so an open run is one a previous process
-/// did not close (DB-B34). A journal that is absent, empty or unreadable
-/// answers `None`; the unreadable case is already said by the journal's own
-/// health line.
+/// What `journal` says about the run before this process (DB-B34). Asked
+/// ONCE, when the site loads: nothing of this process is in flight then.
+///
+/// # What is read
+///
+/// 1. The journal's newest [`INTERRUPTED_SCAN`] records.
+/// 2. When the journal is longer than that, the [`INTERRUPTED_RUNS`] newest
+///    run records before them, each by its ordinal from the journal's own
+///    index (`pull.journal.idx/runs`, one 32-byte entry per run record,
+///    [`crate::audit::Journal::read_index`]). So a run whose opening record
+///    lies two million failures back is still found with its true ordinal,
+///    window and source, and a closing record that far back is still seen to
+///    be one.
+///
+/// # An index that is absent or stale is built here, once
+///
+/// When the index is absent, of another file (a journal copied or restored
+/// has a new inode) or short of the scan, the run records before the scan
+/// cannot be named without walking the journal. The index is then built
+/// where it is needed ([`crate::audit::Journal::build_index`]: one pass over
+/// the journal under its append lock, the pass `api serve` starts in the
+/// background anyway), so the answer is exact on the first start and not
+/// only on the second. A lock another writer holds is waited for, briefly
+/// ([`INDEX_WAITS`]).
+///
+/// # NOT KNOWN is an answer
+///
+/// If the index still cannot be read (the store will not take the write,
+/// the lock stayed held) and the scan itself holds no run record that
+/// settles it (an opening record, or a closing one), the answer is
+/// [`Restart::NotKnown`] with both reasons. It was "INTERRUPTED ... The
+/// server stopped while it ran", on a journal whose newest run record was a
+/// closing one.
+///
+/// # Cost
+///
+/// One `stat`, at most four page reads (800 records), one read of the
+/// index's `runs` file and at most 64 positional reads: bounded whatever the
+/// journal's length, except the `runs` file itself, which is 32 bytes per
+/// run record ever written. When the index has to be built: one pass over
+/// the whole journal, once per journal file, not per start.
 #[must_use]
-pub(crate) fn interrupted_run(journal: &crate::audit::Journal) -> Option<Interrupted> {
-    let records = journal.look().records();
+pub(crate) fn restart_scan(journal: &crate::audit::Journal) -> Restart {
+    restart_scan_waiting(journal, INDEX_WAITS)
+}
+
+/// How many times [`restart_scan`] asks again for an index another writer
+/// is building, [`INDEX_WAIT`] apart: **100**, ten seconds in all. The
+/// journal's lock is held for one append, or for one index build (1.33 s
+/// per GiB when it was measured, WP-33c), so this is a bound on a stuck
+/// writer, not a wait anybody is expected to see.
+const INDEX_WAITS: u32 = 100;
+
+/// The pause between two of those.
+const INDEX_WAIT: core::time::Duration = core::time::Duration::from_millis(100);
+
+/// [`restart_scan`], waiting at most `waits` pauses for a held lock.
+fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart {
+    use crate::audit::{Kind, Log, Outcome};
+    let log = journal.look();
+    if let Log::Unreadable { reason } = &log {
+        return not_known(format!("the pull journal cannot be read ({reason})"));
+    }
+    let records = log.records();
     if records == 0 {
-        return None;
+        return Restart::Clean;
     }
     let mut tail: Vec<(u64, crate::audit::Record)> = Vec::new();
     let mut skip = 0_u64;
     while skip < INTERRUPTED_SCAN.min(records) {
-        let page = journal
-            .page(records, skip, crate::audit::MAX_PAGE_RECORDS)
-            .ok()?;
+        let page = match journal.page(records, skip, crate::audit::MAX_PAGE_RECORDS) {
+            Ok(page) => page,
+            Err(why) => return not_known(format!("the pull journal's newest records: {why}")),
+        };
         if page.is_empty() {
             break;
         }
@@ -838,31 +949,155 @@ pub(crate) fn interrupted_run(journal: &crate::audit::Journal) -> Option<Interru
     }
     // `page` is newest first; the walk is oldest first.
     tail.reverse();
-    let found = interrupted_in(&tail, records <= INTERRUPTED_SCAN);
-    if let Some(run) = found.as_ref() {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("pull.run", "a pull run was interrupted by a restart")
-                .with("failures", telemetry::Value::Uint(run.failures))
-                .with("source", telemetry::Value::Str(&run.source))
-                .with("reason", telemetry::Value::Str(&run.words())),
-        );
+    let scan_first = records.saturating_sub(INTERRUPTED_SCAN);
+    // THE RUN RECORDS BEFORE THE SCAN, through the index; `unread` is why
+    // they could not be read, when they could not.
+    let mut read: Vec<(u64, crate::audit::Record)> = Vec::new();
+    let mut unread: Option<String> = None;
+    if scan_first > 0 {
+        match older_runs_built(journal, records, scan_first, waits) {
+            Ok(older) => read = older,
+            Err(why) => unread = Some(why),
+        }
     }
-    found
+    read.extend(tail);
+    // A run record that settles the question was read: an opening record, or
+    // a closing one. A refusal settles nothing.
+    let settled = read
+        .iter()
+        .any(|(_, record)| record.kind == Kind::Run && record.outcome != Outcome::Refused);
+    match interrupted_in(&read) {
+        Some(mut run) => {
+            // The count is the run's whole count only when every record
+            // after its opening record was read.
+            run.failures_whole = run.failures_whole && run.ordinal >= scan_first;
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error("pull.run", "a pull run was interrupted by a restart")
+                    .with("ordinal", telemetry::Value::Uint(run.ordinal))
+                    .with("failures", telemetry::Value::Uint(run.failures))
+                    .with("source", telemetry::Value::Str(&run.source))
+                    .with("reason", telemetry::Value::Str(&run.words())),
+            );
+            Restart::Interrupted(run)
+        }
+        None => match unread {
+            Some(why) if !settled => not_known(format!(
+                "the journal's newest {INTERRUPTED_SCAN} of {records} records hold no run \
+                 record, and the run records before them could not be read through its index \
+                 ({why})"
+            )),
+            _ => Restart::Clean,
+        },
+    }
+}
+
+/// [`Restart::NotKnown`] for `why`, logged where an operator reads it.
+fn not_known(why: String) -> Restart {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.run",
+            "whether a pull run was left open is not known",
+        )
+        .with("reason", telemetry::Value::Str(&why)),
+    );
+    Restart::NotKnown(why)
+}
+
+/// [`older_runs`], building the journal's index first when it cannot be read
+/// as it is. See [`restart_scan`].
+///
+/// # Errors
+///
+/// Why the index could not be read, and why it could not be built here:
+/// the build failed, or another writer held the journal's lock for `waits`
+/// pauses.
+fn older_runs_built(
+    journal: &crate::audit::Journal,
+    records: u64,
+    scan_first: u64,
+    waits: u32,
+) -> Result<Vec<(u64, crate::audit::Record)>, String> {
+    let first = match older_runs(journal, records, scan_first) {
+        Ok(read) => return Ok(read),
+        Err(why) => why,
+    };
+    let mut waited = 0_u32;
+    loop {
+        match journal.build_index() {
+            Ok(built) if !built.busy => break,
+            // ANOTHER WRITER HOLDS THE LOCK: an append, or the index build
+            // `api serve` started. Either leaves the index readable.
+            Ok(_) if waited < waits => {
+                waited = waited.saturating_add(1);
+                std::thread::sleep(INDEX_WAIT);
+                if let Ok(read) = older_runs(journal, records, scan_first) {
+                    return Ok(read);
+                }
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "{first}; it was not built here because another writer held the journal's \
+                     lock through {waited} wait(s) of {} ms",
+                    INDEX_WAIT.as_millis()
+                ));
+            }
+            Err(why) => return Err(format!("{first}; and it could not be built here: {why}")),
+        }
+    }
+    older_runs(journal, records, scan_first)
+        .map_err(|why| format!("{first}; it was rebuilt, and then: {why}"))
+}
+
+/// The [`INTERRUPTED_RUNS`] newest run records of `journal` below record
+/// `scan_first`, oldest first, read through its index.
+///
+/// # Errors
+///
+/// The index is absent, of another file, ahead of the journal, or covers
+/// fewer than `scan_first` records (run records between its cover and the
+/// scan would be missed), or a record it names cannot be read: by name.
+fn older_runs(
+    journal: &crate::audit::Journal,
+    records: u64,
+    scan_first: u64,
+) -> Result<Vec<(u64, crate::audit::Record)>, String> {
+    let index = journal.read_index(records)?;
+    if index.covered < scan_first {
+        return Err(format!(
+            "the index covers the first {} records and the scan begins at record {scan_first}",
+            index.covered
+        ));
+    }
+    let below = index
+        .runs
+        .partition_point(|(ordinal, _)| *ordinal < scan_first);
+    let ordinals: Vec<u64> = index
+        .runs
+        .get(below.saturating_sub(INTERRUPTED_RUNS)..below)
+        .unwrap_or_default()
+        .iter()
+        .map(|(ordinal, _)| *ordinal)
+        .collect();
+    Ok(journal
+        .records_at(&ordinals)?
+        .into_iter()
+        .filter_map(|(ordinal, decoded)| decoded.ok().map(|record| (ordinal, record)))
+        .collect())
 }
 
 /// `/pull/run.json`: the run's document, the calendar of record's horizon
-/// seen from `today` (days since the epoch; DB-B25, DB-B41) and the run a
-/// restart cut short, if one was found when the site loaded (DB-B34).
+/// seen from `today` (days since the epoch; DB-B25, DB-B41) and what the
+/// journal said about the run before this process when the site loaded
+/// (DB-B34): `interrupted` is that run or `null`, and `restart` says which of
+/// clean, interrupted and not known it is, so a `null` is never read as
+/// "clean" when the scan could not tell.
 ///
 /// The horizon is on this document because a pull is what the record's end
 /// breaks: a page that polls the run can warn "the calendar is known until
 /// <date>" before the first pull fails, with no second request.
 #[must_use]
-pub fn status_json(
-    progress: &Progress,
-    today: Option<i64>,
-    interrupted: Option<&Interrupted>,
-) -> String {
+pub fn status_json(progress: &Progress, today: Option<i64>, restart: Option<&Restart>) -> String {
     let mut out = progress.json();
     let _brace = out.pop();
     out.push_str(",\"calendar\":");
@@ -884,8 +1119,21 @@ pub fn status_json(
         None => out.push_str("null"),
     }
     out.push_str(",\"interrupted\":");
-    match interrupted {
+    match restart.and_then(Restart::interrupted) {
         Some(run) => run.json(&mut out),
+        None => out.push_str("null"),
+    }
+    // THE THIRD STATE (DB-B34): `interrupted: null` alone could not tell "no
+    // run was left open" from "could not tell".
+    out.push_str(",\"restart\":");
+    match restart {
+        Some(state) => {
+            out.push_str("{\"state\":");
+            out.push_str(&quote_for_json(state.word()));
+            out.push_str(",\"words\":");
+            out.push_str(&quote_for_json(&state.words()));
+            out.push('}');
+        }
         None => out.push_str("null"),
     }
     out.push('}');
@@ -1535,10 +1783,11 @@ fn note_leg_failure(
             asked and not written is asked again then."
         }
         LegOutcome::Standing => {
-            "FINISHED WITH STANDING FAILURES: every instrument that could answer did, \
-            and the failures left are about what the vendor holds. Asking again in this \
-            run returns the same answer, so this leg is not asked again. Each failure is \
-            named in the audit journal."
+            "FINISHED WITH STANDING FAILURES: every failure left is one another attempt \
+            in this run would repeat (what the vendor holds for an instrument that \
+            answered, an instrument the pull order withheld, or the end of the calendar \
+            of record). So this leg is not asked again in this run. Each failure is named \
+            in the audit journal."
         }
         _ => {
             "its receipt did not read clean. The reason is in the audit journal; \
@@ -1897,7 +2146,11 @@ where
     let current_rows = rows_of(&site, &own);
     with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
-        progress.stop = Some(stop_of(progress, &outcomes));
+        progress.stop = Some(stop_of(
+            progress,
+            &outcomes,
+            clean_empty >= CLEAN_EMPTY_PASSES,
+        ));
         progress.finished = Some(run_summary(
             progress,
             &outcomes,
@@ -1912,7 +2165,7 @@ where
 /// operator's stop, a store that would not take a write, a halted feed, the
 /// pass ceiling, legs that finished with standing failures, and otherwise the
 /// idle stop. DB-B26, DB-B35.
-fn stop_of(progress: &Progress, outcomes: &[PassOutcome]) -> Stop {
+fn stop_of(progress: &Progress, outcomes: &[PassOutcome], idle: bool) -> Stop {
     if progress.stopping {
         Stop::Operator
     } else if progress.feeds.iter().any(|feed| feed.store_unavailable) {
@@ -1921,7 +2174,9 @@ fn stop_of(progress: &Progress, outcomes: &[PassOutcome]) -> Stop {
         || progress.feeds.iter().any(|feed| feed.credential_dead)
     {
         Stop::Halted
-    } else if progress.passes >= MAX_PASSES {
+    } else if progress.passes >= MAX_PASSES && !idle {
+        // A run that went idle ON its last allowed pass stopped because it
+        // was idle; the ceiling is the stop only of a run still owing.
         Stop::Ceiling
     } else if progress.feeds.iter().any(|feed| feed.standing > 0) {
         Stop::Standing
@@ -4238,7 +4493,7 @@ mod tests {
             store_unavailable,
             ..FeedReport::default()
         };
-        let of = |passes, stopping, feeds: Vec<FeedReport>, outcomes: &[PassOutcome]| {
+        let of_idle = |passes, stopping, feeds: Vec<FeedReport>, outcomes: &[PassOutcome], idle| {
             stop_of(
                 &Progress {
                     passes,
@@ -4247,7 +4502,11 @@ mod tests {
                     ..Progress::default()
                 },
                 outcomes,
+                idle,
             )
+        };
+        let of = |passes, stopping, feeds: Vec<FeedReport>, outcomes: &[PassOutcome]| {
+            of_idle(passes, stopping, feeds, outcomes, passes < MAX_PASSES)
         };
         let clean = [PassOutcome::Clean];
         assert_eq!(
@@ -4261,6 +4520,15 @@ mod tests {
         assert_eq!(
             of(MAX_PASSES, false, vec![feed(2, false, false)], &clean),
             Stop::Ceiling
+        );
+        // Idle on exactly the last allowed pass is idle, not the ceiling.
+        assert_eq!(
+            of_idle(MAX_PASSES, false, vec![feed(0, false, false)], &clean, true),
+            Stop::Idle
+        );
+        assert_eq!(
+            of_idle(MAX_PASSES, false, vec![feed(2, false, false)], &clean, true),
+            Stop::Standing
         );
         assert_eq!(
             of(MAX_PASSES, false, vec![feed(0, false, true)], &clean),
@@ -4333,11 +4601,10 @@ mod tests {
 
     /// **AN OPENING RECORD WITH NO CLOSING RECORD IS A RUN CUT SHORT**
     /// (DB-B34), in every shape the journal can hold it: empty, closed,
-    /// open, restated after another writer, restated after its own close,
-    /// two runs, and a tail that begins inside a run.
+    /// open, and two runs.
     #[test]
     fn a_run_the_journal_never_closed_is_found_and_a_closed_one_is_not() {
-        assert_eq!(interrupted_in(&[], true), None, "an empty journal");
+        assert_eq!(interrupted_in(&[]), None, "an empty journal");
         let closed = numbered(
             vec![
                 opened_at(100, "kite", 20_000, 20_010),
@@ -4346,7 +4613,7 @@ mod tests {
             ],
             0,
         );
-        assert_eq!(interrupted_in(&closed, true), None, "a closed run");
+        assert_eq!(interrupted_in(&closed), None, "a closed run");
 
         let open = numbered(
             vec![
@@ -4356,15 +4623,16 @@ mod tests {
             ],
             40,
         );
-        let found = interrupted_in(&open, false).expect("an open run");
+        let found = interrupted_in(&open).expect("an open run");
         assert_eq!(
             (
                 found.ordinal,
                 found.opened_at_secs,
                 found.last_at_secs,
-                found.failures
+                found.failures,
+                found.failures_whole
             ),
-            (Some(40), Some(100), 130, 2)
+            (40, 100, 130, 2, true)
         );
         assert_eq!(found.window, Some((20_000, 20_010)));
         assert_eq!(found.source, "kite");
@@ -4377,17 +4645,59 @@ mod tests {
         assert!(
             words.starts_with(
                 "INTERRUPTED: a pull run for 2024-10-04..2024-10-14 was opened at journal record 40"
-            ) && words.contains("2 member failure(s)"),
+            ) && words.contains("with 2 member failure(s) on record"),
+            "{words}"
+        );
+        // It does not claim to know WHICH process stopped: a `cli` pull still
+        // in flight has no closing record either.
+        assert!(
+            !words.contains("The server stopped while it ran")
+                && words.contains("unless another process"),
             "{words}"
         );
     }
 
-    /// The same walk over the shapes two writers and a bounded read leave: a
-    /// head restated after another feed's records, a failure offered again
-    /// behind the run's own close, a tail that begins inside a run, and two
-    /// runs of which only the second is open (DB-B34).
+    /// **MEMBER FAILURES ARE NO EVIDENCE OF AN OPEN RUN** (DB-B34, repair 1).
+    /// A run's failures can lie BEHIND its closing record: every run written
+    /// before D-3341 is laid out so, and `RunLedger::rest` still writes that
+    /// layout when the opening record was refused. The walk read failures
+    /// with no run record before them as "a run opened further back and
+    /// never closed", and said INTERRUPTED of a journal no run was open in.
     #[test]
-    fn interleaved_restated_and_headless_runs_are_told_apart() {
+    fn failures_behind_a_closing_record_or_ahead_of_any_run_record_open_no_run() {
+        // The operator's own layout: [closed][failures ...].
+        let mut behind = vec![closed_at(120, "kite", 20_000, 20_010)];
+        behind.extend((0..850).map(|at| failure_at(121 + at)));
+        assert_eq!(interrupted_in(&numbered(behind, 1_804_099)), None);
+        // Only failures: whose they are is not in the records read.
+        let headless = numbered(vec![failure_at(500), failure_at(510)], 5_000);
+        assert_eq!(
+            interrupted_in(&headless),
+            None,
+            "failures alone never make a run"
+        );
+        // ... and an OPENED record with as many failures behind it is found,
+        // with its own window and source.
+        let mut open = vec![opened_at(100, "kite", 20_000, 20_010)];
+        open.extend((0..850).map(|at| failure_at(121 + at)));
+        let found = interrupted_in(&numbered(open, 7)).expect("the run is open");
+        assert_eq!(
+            (
+                found.ordinal,
+                found.failures,
+                found.window,
+                found.source.as_str()
+            ),
+            (7, 850, Some((20_000, 20_010)), "kite")
+        );
+    }
+
+    /// The same walk over the shapes two writers leave: a head restated after
+    /// another feed's records, a failure offered again behind the run's own
+    /// close, a refusal of another request for the same window, and two runs
+    /// of which only the second is open (DB-B34).
+    #[test]
+    fn interleaved_restated_and_refused_records_are_told_apart() {
         // A second feed appended in between, so the first restated its head.
         let mut again = opened_at(100, "kite", 20_000, 20_010);
         again.note = "continues the run opened at record 0".to_owned();
@@ -4402,7 +4712,7 @@ mod tests {
             ],
             0,
         );
-        let found = interrupted_in(&interleaved, true).expect("the first feed's run is open");
+        let found = interrupted_in(&interleaved).expect("the first feed's run is open");
         assert_eq!(
             (
                 found.ordinal,
@@ -4410,7 +4720,7 @@ mod tests {
                 found.last_at_secs,
                 found.source.as_str()
             ),
-            (Some(0), 2, 140, "kite"),
+            (0, 2, 140, "kite"),
             "the other feed's close ended the other feed's run"
         );
 
@@ -4425,8 +4735,8 @@ mod tests {
             ],
             0,
         );
-        assert_eq!(interrupted_in(&after_close, true), None);
-        // The same, with the opening and closing records before the scan.
+        assert_eq!(interrupted_in(&after_close), None);
+        // The same, with the opening record before the records read.
         let unseen = numbered(
             vec![
                 closed_at(120, "kite", 20_000, 20_010),
@@ -4435,35 +4745,52 @@ mod tests {
             ],
             900,
         );
-        assert_eq!(interrupted_in(&unseen, false), None);
-
-        // A tail that begins inside a run: its opening lies further back.
-        let inside = numbered(vec![failure_at(500), failure_at(510)], 5_000);
-        let found = interrupted_in(&inside, false).expect("a headless run");
+        assert_eq!(interrupted_in(&unseen), None);
+        // A restated head with NO close before it stands for its opening
+        // record, which lies before the records read: the run is open, with
+        // the opening record's own ordinal, window and source.
+        let restated_only = numbered(vec![again.clone(), failure_at(141)], 900);
+        let found = interrupted_in(&restated_only).expect("the restated run is open");
         assert_eq!(
             (
                 found.ordinal,
-                found.opened_at_secs,
                 found.failures,
-                found.last_at_secs
+                found.failures_whole,
+                found.window
             ),
-            (None, None, 2, 510)
+            (0, 1, false, Some((20_000, 20_010)))
         );
-        assert!(
-            found.words().contains(&format!(
-                "further back than the journal's last {INTERRUPTED_SCAN} records"
-            )),
-            "{}",
-            found.words()
+
+        // ANOTHER REQUEST'S REFUSAL FOR THE SAME WINDOW closes nothing: a
+        // request refused before anything ran never opened a run.
+        let mut refusal = closed_at(115, "fno", 20_000, 20_010);
+        refusal.outcome = crate::audit::Outcome::Refused;
+        let refused_beside = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                refusal,
+                failure_at(116),
+            ],
+            0,
         );
+        let found = interrupted_in(&refused_beside).expect("the run is still open");
         assert_eq!(
-            interrupted_in(&inside, true),
-            None,
-            "at the journal's own start there is no earlier run to belong to"
+            (found.ordinal, found.failures),
+            (0, 1),
+            "the failure behind the refusal is the refusal's, not the run's"
         );
-        let mut closed_later = inside.clone();
-        closed_later.push((5_002, closed_at(520, "kite", 20_000, 20_010)));
-        assert_eq!(interrupted_in(&closed_later, false), None);
+        // A run that reached nobody is closed under its TARGET's name
+        // (NotStarted), not its endpoint's: the window alone pairs them.
+        let mut reached_nobody = closed_at(118, "fno", 20_000, 20_010);
+        reached_nobody.outcome = crate::audit::Outcome::NotStarted;
+        assert_eq!(
+            interrupted_in(&numbered(
+                vec![opened_at(100, "kite", 20_000, 20_010), reached_nobody],
+                0
+            )),
+            None
+        );
 
         // Two runs: the first closed, the second cut short.
         let two = numbered(
@@ -4476,9 +4803,249 @@ mod tests {
             0,
         );
         assert_eq!(
-            interrupted_in(&two, true).map(|run| (run.ordinal, run.failures)),
-            Some((Some(2), 1))
+            interrupted_in(&two).map(|run| (run.ordinal, run.failures)),
+            Some((2, 1))
         );
+    }
+
+    /// **THE SCAN ON DISK, PAST ITS 800 RECORDS** (DB-B34, repair 1): the
+    /// run record that settles the question is read through the journal's
+    /// own index, however many failures follow it.
+    ///
+    /// * `[closed][850 failures]`, the operator's journal in small: CLEAN.
+    ///   It was INTERRUPTED "opened further back than the last 800 records".
+    /// * `[opened][850 failures]`: INTERRUPTED, with the opening record's
+    ///   true ordinal, window and source. They were all `null`.
+    /// * `[opened][closed][850 failures]`: CLEAN, both read by ordinal.
+    #[test]
+    fn the_restart_scan_reads_the_newest_run_record_through_the_index() {
+        let over = INTERRUPTED_SCAN + 50;
+        let with_failures = |head: crate::audit::Record, failures: u64| {
+            let mut records = vec![head];
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+
+        // The closed run with its failures behind it.
+        let closed = journal_of(
+            "pullrun-scan-closed-behind",
+            &with_failures(closed_at(120, "kite", 20_000, 20_010), over),
+        );
+        assert_eq!(restart_scan(&closed), Restart::Clean);
+        // ... and it stays clean one short of the scan, where the whole
+        // journal is read, and exactly at it, where the run record is the
+        // one record before the scan.
+        for failures in [INTERRUPTED_SCAN - 1, INTERRUPTED_SCAN] {
+            let journal = journal_of(
+                "pullrun-scan-closed-edge",
+                &with_failures(closed_at(120, "kite", 20_000, 20_010), failures),
+            );
+            assert_eq!(
+                restart_scan(&journal),
+                Restart::Clean,
+                "{failures} failures"
+            );
+        }
+
+        // The open run with as many failures behind it.
+        let open = journal_of(
+            "pullrun-scan-open-behind",
+            &with_failures(opened_at(100, "kite", 20_000, 20_010), over),
+        );
+        let found = restart_scan(&open);
+        let run = found.interrupted().expect("the run is open");
+        assert_eq!(
+            (
+                run.ordinal,
+                run.opened_at_secs,
+                run.window,
+                run.source.as_str(),
+                run.failures,
+                run.failures_whole
+            ),
+            (
+                0,
+                100,
+                Some((20_000, 20_010)),
+                "kite",
+                INTERRUPTED_SCAN,
+                false
+            ),
+            "the opening record is read by its ordinal; the failures counted are the scan's"
+        );
+        assert!(
+            run.words()
+                .contains(&format!("at least {INTERRUPTED_SCAN} member failure(s)")),
+            "{}",
+            run.words()
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), None, Some(&found)))
+                .expect("valid JSON");
+        assert_eq!(doc["restart"]["state"], "interrupted");
+        assert_eq!(doc["interrupted"]["ordinal"], 0);
+        assert_eq!(doc["interrupted"]["from"], "2024-10-04");
+        assert_eq!(doc["interrupted"]["failuresWhole"], false);
+
+        // A closing record AFTER the opening one, both before the scan.
+        let mut both = with_failures(opened_at(100, "kite", 20_000, 20_010), 2);
+        both.push(closed_at(130, "kite", 20_000, 20_010));
+        both.extend((0..over).map(|at| failure_at(300 + at)));
+        assert_eq!(
+            restart_scan(&journal_of("pullrun-scan-open-then-closed", &both)),
+            Restart::Clean
+        );
+    }
+
+    /// **AN INDEX THAT IS NOT THERE IS BUILT WHERE IT IS NEEDED** (DB-B34,
+    /// repair 1), so the answer is the same exact one on the first start
+    /// over a copied journal; and where it cannot be built, NOT KNOWN is
+    /// said, with both reasons, never a guess either way.
+    #[test]
+    fn an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let over = INTERRUPTED_SCAN + 50;
+        let with_failures = |head: crate::audit::Record, failures: u64| {
+            let mut records = vec![head];
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+        let closed = journal_of(
+            "pullrun-scan-absent-closed",
+            &with_failures(closed_at(120, "kite", 20_000, 20_010), over),
+        );
+        let open = journal_of(
+            "pullrun-scan-absent-open",
+            &with_failures(opened_at(100, "kite", 20_000, 20_010), over),
+        );
+        for (journal, clean) in [(&closed, true), (&open, false)] {
+            let index = journal.index_dir();
+            let aside = index.with_extension("aside");
+            std::fs::rename(&index, &aside).expect("the index is moved aside");
+            let found = restart_scan(journal);
+            assert_eq!(found == Restart::Clean, clean, "{found:?}");
+            assert_eq!(
+                found.interrupted().map(|run| (run.ordinal, run.window)),
+                (!clean).then_some((0, Some((20_000, 20_010))))
+            );
+            assert!(index.join("cover").is_file(), "the index was built");
+        }
+
+        // WHERE IT CANNOT BE BUILT, NOT KNOWN IS SAID, for both journals and
+        // for both reasons: another writer holds the journal's lock, and a
+        // store that will not take the write.
+        for (journal, name) in [
+            (&closed, "pullrun-scan-absent-closed"),
+            (&open, "pullrun-scan-absent-open"),
+        ] {
+            let index = journal.index_dir();
+            let path = crate::audit::journal_path(&crate::scratch::path(name));
+            std::fs::rename(&index, index.with_extension("aside2")).expect("moved aside");
+            let squatter = store::flock::Flock::try_lock(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .expect("the journal handle"),
+                path.clone(),
+            )
+            .expect("nothing else holds it");
+            let held = restart_scan_waiting(journal, 2);
+            drop(squatter);
+            let Restart::NotKnown(why) = &held else {
+                panic!("with the lock held nothing is known: {held:?}");
+            };
+            assert!(
+                why.contains("no index at")
+                    && why.contains("another writer held the journal's lock through 2 wait(s)"),
+                "{why}"
+            );
+            let doc: serde_json::Value =
+                serde_json::from_str(&status_json(&Progress::default(), None, Some(&held)))
+                    .expect("valid JSON");
+            assert_eq!(doc["restart"]["state"], "not_known");
+            assert_eq!(doc["interrupted"], serde_json::Value::Null);
+            let words = doc["restart"]["words"].as_str().expect("words");
+            assert!(
+                words.starts_with("NOT KNOWN whether a pull run was left open")
+                    && !words.contains("INTERRUPTED"),
+                "{words}"
+            );
+
+            let audit = path.parent().expect("audit/").to_path_buf();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555))
+                .expect("chmod");
+            let refused = restart_scan(journal);
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let Restart::NotKnown(why) = &refused else {
+                panic!("an index that cannot be written leaves nothing known: {refused:?}");
+            };
+            assert!(why.contains("could not be built here"), "{why}");
+        }
+
+        // With no index, a run record INSIDE the scan settles it either way:
+        // a restated head stands for its opening record, and a closing
+        // record after it closes the run.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        open.append(&again).expect("the restated head lands");
+        assert_eq!(
+            restart_scan(&open).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        open.append(&closed_at(2_000, "kite", 20_000, 20_010))
+            .expect("the closing record lands");
+        assert_eq!(restart_scan(&open), Restart::Clean);
+    }
+
+    /// **A FALSE "INTERRUPTED" DOES NOT OUTLIVE THE RUNS AFTER IT** and a
+    /// true one is not hidden by them: later runs that open and close leave
+    /// an older open run open, and a journal whose every run closed clean.
+    #[test]
+    fn later_closed_runs_neither_invent_nor_hide_an_open_run() {
+        let mut records = vec![closed_at(120, "kite", 20_000, 20_010)];
+        records.extend((0..INTERRUPTED_SCAN + 50).map(|at| failure_at(200 + at)));
+        let journal = journal_of("pullrun-scan-later-runs", &records);
+        for later in 0..10_u64 {
+            let at = 5_000 + later * 10;
+            let _thread = journal
+                .open_run(&opened_at(at, "kite", 20_020, 20_030))
+                .expect("opened");
+            journal
+                .append(&closed_at(at + 5, "kite", 20_020, 20_030))
+                .expect("closed");
+            assert_eq!(restart_scan(&journal), Restart::Clean, "after {later} runs");
+        }
+        // One more opens and is not closed: found, though ten closed after
+        // the journal's first.
+        let _thread = journal
+            .open_run(&opened_at(9_000, "kite", 20_040, 20_050))
+            .expect("opened");
+        let found = restart_scan(&journal);
+        assert_eq!(
+            found.interrupted().map(|run| run.window),
+            Some(Some((20_040, 20_050)))
+        );
+    }
+
+    /// A journal of exactly `records`, written in one write and indexed in
+    /// one pass, so a test over the scan's bound does not pay 850 synced
+    /// appends.
+    fn journal_of(name: &str, records: &[crate::audit::Record]) -> crate::audit::Journal {
+        let root = crate::scratch::path(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::audit::journal_path(&root);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        let mut bytes = Vec::with_capacity(records.len() * crate::audit::RECORD_LEN);
+        for record in records {
+            bytes.extend_from_slice(&record.image());
+        }
+        std::fs::write(&path, bytes).expect("write");
+        let journal = crate::audit::Journal::at(&root);
+        let built = journal.build_index().expect("the index builds");
+        assert_eq!(built.records, records.len() as u64);
+        journal
     }
 
     /// The same through a journal on disk, and onto `/pull/run.json`: the
@@ -4490,7 +5057,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
         let journal = crate::audit::Journal::at(&root);
-        assert_eq!(interrupted_run(&journal), None, "no journal, no run");
+        assert_eq!(restart_scan(&journal), Restart::Clean, "no journal, no run");
         let mut thread = journal
             .open_run(&opened_at(100, "kite", 20_000, 20_010))
             .expect("the opening record lands");
@@ -4499,10 +5066,16 @@ mod tests {
                 .append_failure(&mut thread, &failure_at(at), "a gap")
                 .expect("a failure lands");
         }
-        let found = interrupted_run(&journal).expect("the run is open");
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("the run is open");
         assert_eq!(
-            (found.ordinal, found.failures, found.last_at_secs),
-            (Some(0), 2, 115)
+            (
+                run.ordinal,
+                run.failures,
+                run.failures_whole,
+                run.last_at_secs
+            ),
+            (0, 2, true, 115)
         );
 
         // 2026-12-02 is 29 days before the record's last day.
@@ -4510,8 +5083,10 @@ mod tests {
         let doc = status_json(&Progress::default(), Some(today), Some(&found));
         let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
         assert_eq!(parsed["running"], false);
+        assert_eq!(parsed["restart"]["state"], "interrupted");
         assert_eq!(parsed["interrupted"]["ordinal"], 0);
         assert_eq!(parsed["interrupted"]["failures"], 2);
+        assert_eq!(parsed["interrupted"]["failuresWhole"], true);
         assert_eq!(parsed["interrupted"]["from"], "2024-10-04");
         assert_eq!(parsed["interrupted"]["to"], "2024-10-14");
         assert_eq!(parsed["interrupted"]["lastRecordAtSecs"], 115);
@@ -4532,11 +5107,17 @@ mod tests {
         journal
             .append(&closed_at(130, "kite", 20_000, 20_010))
             .expect("the closing record lands");
-        assert_eq!(interrupted_run(&journal), None);
-        let doc = status_json(&Progress::default(), None, None);
+        let after = restart_scan(&journal);
+        assert_eq!(after, Restart::Clean);
+        let doc = status_json(&Progress::default(), None, Some(&after));
         let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
         assert_eq!(parsed["interrupted"], serde_json::Value::Null);
+        assert_eq!(parsed["restart"]["state"], "clean");
         assert_eq!(parsed["calendar"], serde_json::Value::Null);
+        // A run of this process is shown: the scan is not this document's.
+        let doc = status_json(&Progress::default(), None, None);
+        let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+        assert_eq!(parsed["restart"], serde_json::Value::Null);
     }
 
     /// **AFTER A RESTART MID-PULL, `/pull/run.json` IS NOT "NEVER RAN"**
@@ -4561,10 +5142,11 @@ mod tests {
 
         // A fresh store: nothing interrupted.
         let fresh = Loaded::new(Site::load(&masters, &store));
-        assert_eq!(fresh.interrupted, None);
+        assert_eq!(fresh.restart, Restart::Clean);
         let (_, _, body) = crate::server::pull_run_json(axum::extract::State(fresh)).await;
         let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(doc["interrupted"], serde_json::Value::Null);
+        assert_eq!(doc["restart"]["state"], "clean");
         assert_eq!(doc["calendar"]["recordTo"], "2026-12-31");
 
         // The previous process opened a run and died before closing it.
@@ -4576,7 +5158,7 @@ mod tests {
             .append_failure(&mut thread, &failure_at(1_791_000_050), "a gap")
             .expect("a failure lands");
         let restarted = Loaded::new(Site::load(&masters, &store));
-        assert!(restarted.interrupted.is_some());
+        assert!(restarted.restart.interrupted().is_some());
         let (status, _, body) =
             crate::server::pull_run_json(axum::extract::State(Loaded::clone(&restarted))).await;
         assert_eq!(status, axum::http::StatusCode::OK);
@@ -4586,6 +5168,7 @@ mod tests {
         assert_eq!(doc["interrupted"]["lastRecordAtSecs"], 1_791_000_050_i64);
         assert_eq!(doc["interrupted"]["failures"], 1);
         assert_eq!(doc["interrupted"]["source"], "kite");
+        assert_eq!(doc["restart"]["state"], "interrupted");
 
         // Once a run is pressed in this process, the document is that run's.
         claim(&restarted);
