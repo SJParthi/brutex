@@ -894,8 +894,11 @@ fn the_audit_scale_census_migrates_and_compacts_with_equal_totals() {
     let started = std::time::Instant::now();
     let done = census_store::migrate(root, Vendor::Gdfl).expect("it migrates");
     let migrated = started.elapsed();
+    // ITS BYTES KEPT UNDER THE SUPERSEDED NAME, the name itself sealed
+    // (DB-B68): not one byte of the census's history is rewritten.
+    assert!(done.seal.as_ref().is_some_and(Result::is_ok), "sealed");
     assert_eq!(
-        std::fs::read(&legacy).expect("bytes"),
+        std::fs::read(census_store::superseded_path(root, Vendor::Gdfl)).expect("bytes"),
         legacy_bytes,
         "untouched"
     );

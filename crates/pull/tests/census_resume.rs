@@ -210,10 +210,17 @@ fn a_census_refused_day_recounted_after_the_migration_is_done_for_the_resumed_im
     };
     assert_eq!(rows_three, 3 * rows_one, "day three went to the partition");
 
-    // The frozen single file took no write after the migration.
+    // The frozen single file took no write after the migration: its bytes
+    // are kept under the superseded name, and its own name is sealed against
+    // a reader built before version 4 (DB-B68).
     assert_eq!(
-        std::fs::read(&single).expect("the single file"),
+        std::fs::read(census_store::superseded_path(root, Vendor::Gdfl))
+            .expect("the superseded file"),
         single_bytes
+    );
+    assert_eq!(
+        std::fs::read(&single).expect("the sealed name"),
+        census_store::sealed_stub(Vendor::Gdfl)
     );
     assert_eq!(census_store::legacy_drift(root, Vendor::Gdfl), None);
 

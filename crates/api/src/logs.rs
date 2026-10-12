@@ -2022,6 +2022,24 @@ pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
 /// The process's failed-request rations, one per origin class.
 static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
 
+/// Opens a fresh window on both rations, for a test that asserts on ONE
+/// failed-request line.
+///
+/// The rations are the PROCESS's, and a test binary is one process: every test
+/// that sends a request which fails draws on the same
+/// [`LOCAL_FAILED_LINES_PER_WINDOW`] lines a minute. The api suite sent 267
+/// such requests a run on 2026-10-11 (counted in its sink: 227 `Warn`, 40
+/// `Error`), so a run quick enough to fit one window held back the line of
+/// whichever test came late — correctly, and with no summary, because no
+/// later window opened to carry one. A test about its own line opens its own
+/// window first; a test about the ration itself builds its own [`Rations`].
+#[cfg(test)]
+pub(crate) fn fresh_failed_line_window() {
+    *FAILED_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Rations::new();
+}
+
 /// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
 #[derive(Debug)]
 pub(crate) struct Rations {

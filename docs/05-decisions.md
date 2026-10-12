@@ -66935,6 +66935,149 @@ its source comment, not in the `alias` record or in any answer.
 the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
 (ignored; needs the vendor archive).
 
+### D-3381 — A migrated vendor's single census file is sealed against older readers, and a store names what it requires of its reader — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B68, DB-B70.
+
+**What is decided.** (1) Once a vendor's census is version 4, its single file
+`manifest/<vendor>.man` is kept byte for byte by hard link as
+`<vendor>.man.v3-superseded`, and the name holds a 32,768-byte stub whose
+header version is 65535 — reserved, never a geometry — so every reader built
+before version 4 refuses it by number instead of serving the superseded census
+as the whole of it. (2) The seal leaves `manifest/v4/<vendor>/SEALED`, format
+`census-seal-v1`: `superseded=`, `superseded_bytes=`, `stub_version=`,
+`reader_since=<commit>`. It is staged, flushed and renamed, so the name never
+holds half a receipt; a re-run reads it, keeps a receipt no seal finished
+writing as `SEALED.torn-<unix>`, and refuses another `format=` by name.
+(3) `manifest/REQUIRES` (append-only, first line `format=store-requires-v1`)
+carries one `requires=<feature> vendor=<v> since=<commit> at=<unix>` line per
+requirement; a build that lacks a named feature, or cannot read the file,
+answers that vendor's census `unreadable` by file, line and feature. A torn
+tail is ended as a ` #void` line before a line is appended. (4) A single file
+longer than its migration receipt recorded is `legacy drift`, named on every
+census answer.
+
+**Why.** Rolling the API back one build served 246,147 of 385,442 GDFL
+instrument-months as "held", with `/health` saying `ok`.
+
+**Proof.** `pull` `census_store::tests` (the seal, the requirements file, the
+receipt's torn shapes); `api` `ops_safety_tests`; `docs/36-ops-runbook.md` §2.
+
+### D-3382 — Every answer names its build, and a build with no commit stamp writes nothing unless told to — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B71, DB-B79.
+
+**What is decided.** Every response carries `x-brutex-build` (the 40-hex commit
+or `unstamped`); `/health`, the start banner and every page show it. A build
+with no commit stamp refuses every store write: each `cli` store-writing verb
+(`census-migrate`, `census-recount`, `gdfl-dayflags`, `gdfl-import`,
+`gdfl-rekey --apply`, `scrub-blocks`, `srt-build` and `tix-rebuild` without
+`--dry-run`, `zerodha-repair --from-store`; a verb added to `COMMANDS` fails
+the classification test until it is put on one side), and in the API every
+request that is not a GET or a HEAD, with the autopilot kept on the ground
+and — the one write no request starts — a spot recovery left in flight NOT
+resumed at start (`recovery::at_start`: nothing claimed, no journal opened
+for append, the plan named on the banner and in one `api.recovery` event).
+`BRUTEX_ALLOW_UNSTAMPED_WRITE=1` lifts it on purpose; the lines written still
+say `unstamped`. The API's gate is
+armed by the binary's `main`, not read where it is used, so a test build of a
+dirty tree behaves as a clean one does. `BRUTEX_READ_ONLY=1` (exactly `1`)
+refuses the same requests, grounds the same autopilot and leaves the same
+recovery alone, for a server that must not write at all. Such a server still
+writes its own `serve.lock`, log, invocation journal and pull-journal read
+index under its root, and one root is served by one api, read-only or not
+(`docs/36-ops-runbook.md` §3 step 4, §7). `web/` is outside the stamp's
+proof, so the front-end build never costs the stamp.
+
+**Why.** A shadow's import journal held 14 `commit=unstamped` runs; nothing
+could say which code wrote those bars, and nothing stopped the same on the
+operator's store.
+
+**Proof.** `cli` `store_write::tests`; `api`
+`ops_safety_tests::the_production_layers_refuse_a_write_to_a_read_only_or_unstamped_server`
+and `recovery::tests::a_start_that_refuses_writes_names_the_plan_in_flight_and_claims_nothing`.
+The unstamped release `cli` and `api` were run (WP-81 reports, 11 and 12 Oct);
+the API's 403 is proved by test only: no POST was sent to any server.
+
+### D-3383 — A read waits a bounded time for admission, every 429 says when to retry, and fault text is capped — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B51, DB-B75, DB-B58.
+
+**What is decided.** A request to a bounded read pool queues at most 250 ms
+among at most 32 waiters before it is refused; the census answer has its own
+pool of 4, and `/scrub.json` and `/disk.json` theirs of 4, apart from the
+store-read pool every bar seek takes; any 429 leaves with `Retry-After: 1`.
+ONE fault design for the bar routes (this decision and D-3349's
+one-fault-a-month readers, merged): every reader notes what it could not read
+in the request's `FaultLog` — consecutive records refused for one reason are
+one run and one sentence, a month a stretch read names once is one sentence
+carrying its count, a month that would not open is said once — the log names
+at most 16 faults of 480 bytes and counts the rest, `faulted_records` is every
+refused record, and the route's `faults` field is bounded once more for the
+whole list (64 reasons of 512 bytes, then a count). These are choices, not
+vendor or exchange facts; the measurements behind them are in the WP-81
+reports.
+
+**Why.** Ten tabs exhausted four census slots with bare 429s, and one lost
+sidecar turned `/bars.json` into 192.8 MB of per-record sentences.
+
+**Proof.** `api` `detail::tests` (`an_ops_read_and_a_bar_seek_never_wait_on_each_other`
+among them), `fault_log::tests`, `bars_route::tests::the_faults_field_is_bounded_whatever_went_wrong`,
+`ops_safety_tests`.
+
+### D-3384 — The full-block scrub keeps two append-only files per vendor, read strictly, and the backup receipt is one whole line — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B74, DB-B65, DB-B73, DB-B59.
+
+**What is decided.** `cli scrub-blocks VENDOR` reads every committed block of
+every census month and keeps `audit/scrub-blocks.<vendor>.log` (`run`, `bad`,
+`unverifiable`, `misfiled`, `busy`, `missing`, `torn` lines) and
+`audit/scrub-blocks.<vendor>.cursor` (`progress` / `done` lines: `run=`,
+`pass=`, eight totals in a fixed order, and `cursor=` on `progress`). A line
+counts once its newline is written; a tail no newline ends is ended as
+`<fragment> #void` before anything is appended, and no reader reads a void
+line. A cursor line is read by one strict parser shared by the CLI and the
+API: exactly those words in that order. A run's id is the clock's second, or
+the next after the newest id on file. Both files, and `ops/backups.log`, are
+opened without following a link or waiting on a FIFO and must be regular
+files. A vendor whose census names no month is refused before either file
+is created, and a census entry that names no store path is counted and named
+on the run's output. A finding stands until a later complete pass reads its
+month without finding it; the API indexes the whole ledger incrementally by
+byte offset, IN PLACE under the vendor's lock, keeping each finding in the
+map of the pass that last found it and each map in (series, month, block,
+kind) order, so a series' first findings, its count and the vendor's first
+names are a seek and a merge of a few heads and never a walk, a copy or a
+sort of what is indexed. A `busy` line means NOT READ: the index files what
+stood in that month when the pass began under the busy pass, unchanged but
+for the pass and run that kept it (`kept_pass`, `kept_run`), names the month
+in its series' `busy` list and counts it in `standing_busy`; `/db` and the
+`/ingest` tile say both, so a complete pass with a busy month is never shown
+as a clean one. The scrub does not re-append kept findings: the index holds
+them, and re-reading the ledger at each run would be the work an index
+exists to remember. A backup is recorded only by a whole line of
+`ops/backups.log` of at most 1,024 bytes carrying `copied=<YYYY-MM-DDTHH:MM[:SS]Z>`
+and `dest=`. A month whose `.prv` names another store
+path is refused at every bar door (`Misfiled`); a month with no `.prv` opens
+as before and is counted `unbound`. Nothing is pruned: every census epoch and
+superseded file is kept, and `/disk.json` says what that costs.
+
+**Why.** A flipped byte in the middle of a month was found only by a read of
+that block; and a killed run's fragment, joined to the next line, was served
+as a pass's totals and moved the resume point past months no run had read.
+And a `busy` line that the index skipped read a month nobody had read as
+"read again, and clean": a known-bad block left every page when a writer
+held its month for the moment a pass went by (second agent, 12 October).
+
+**Proof.** `cli` `scrub_blocks::tests`
+(`a_month_met_busy_is_a_busy_line_and_the_verb_says_the_pass_did_not_read_it`
+among them); `api` `scrub_route::tests`
+(`the_ordered_index_answers_what_a_walk_and_a_sort_of_every_finding_answers`,
+`a_month_a_pass_met_busy_keeps_its_findings_and_is_named_as_not_read`,
+`the_index_keeps_what_a_walk_of_every_finding_at_each_busy_line_keeps`,
+`the_edges_of_a_busy_line`), `disk_route::tests`; `store`
+`tests/misfiled.rs`; `web/tests/scrub.test.js`, `web/tests/disk.test.js`.
+
 ### D-4875 — A month repair must hold a one-second month and leave it indexed — 2026-10-11
 
 **Implemented by** IA-17, in two parts. This entry lands with the first (the

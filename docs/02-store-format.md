@@ -1158,6 +1158,7 @@ manifest/v4/<vendor>/FNO/000001.man     option and future contracts
 manifest/v4/<vendor>/FNO/000002.man     the FNO census's next epoch, after a compaction
 manifest/v4/<vendor>/FNO/000003.man.tmp an epoch being written: never read
 manifest/v4/<vendor>/MIGRATED           the migration receipt (§11.9)
+manifest/v4/<vendor>/SEALED             the seal receipt (§11.9, DB-B68)
 ```
 
 **A vendor is version 4 exactly when `manifest/v4/<vendor>/` is a directory.**
@@ -1273,7 +1274,7 @@ directory to `manifest/v4/<vendor>/`, and flushes `manifest/v4/`. Each
 partition's `generation` continues the single file's — the single file's
 generation plus the partition's keys — so no reader keyed on a generation sees
 the vendor's census go backwards across the migration. **The single
-file is not touched.** The receipt is `key=value` lines —
+file's bytes are not touched** (its name is sealed; see below). The receipt is `key=value` lines —
 `format=census-migration-v1`, `legacy=`, `legacy_version=`,
 `legacy_generation=`, `legacy_entries=`, `legacy_bytes=`, then one
 `partition=<SEGMENT> epoch=000001.man keys= rows= capacity=` line each — so a
@@ -1283,6 +1284,59 @@ the single file since (`pull::ingest::census_store::legacy_drift`).
 Run it only after the API serving the store reads version 4 (WP-30): a reader
 built before version 4 reads the single file and nothing else. Until a vendor is
 migrated its single file is read and written exactly as before.
+
+**The seal (DB-B68, WP-81).** Once the partitions are in place, the migration
+seals the single file (`census_store::seal_legacy`; `cli census-migrate VENDOR
+--seal` for a vendor migrated before the seal existed). Under the single file's
+lock it writes a stub to `manifest/<vendor>.man.seal.tmp`, hard-links the single
+file to `manifest/<vendor>.man.v3-superseded` — the same inode, so its bytes are
+the history they were and none is copied or rewritten — and renames the stub
+over `manifest/<vendor>.man`, so the name is never absent (an absent census
+reads as an empty one). The stub is exactly one header region, 32,768 bytes:
+each of the two slots begins `BRUTEXMS` and carries format version `65535`
+(`census_store::SEALED_VERSION`, reserved, never a geometry) at byte 8,
+followed at byte 64 by a sentence naming the version-4 directory, the
+superseded file and the first version-4 reader; every other byte is zero. Every
+reader resolves a version through `Layout::for_version`, so a reader built
+before version 4 refuses the stub as `unknown manifest version 65535` instead of
+serving the superseded census as the whole of it. The seal then writes
+`manifest/v4/<vendor>/SEALED`: `format=census-seal-v1`, `superseded=`,
+`superseded_bytes=` (the receipt's `legacy_bytes`), `stub_version=65535`,
+`reader_since=<commit>`. The receipt is written to `SEALED.tmp`, flushed and
+renamed to its name, and the directory flushed: the name never holds half a
+receipt. A re-run reads it (`census_store::seal_receipt`): whole, it is left;
+absent, it is written; bytes no seal finished writing are renamed to
+`SEALED.torn-<unix seconds>` and a whole receipt written; a whole `format=`
+line of another format is refused by name. A sealed vendor's `legacy_drift`
+checks the superseded file's length against the receipt and that the name
+still holds the stub.
+
+**`manifest/REQUIRES` — what a store requires of its reader (DB-B68).** The
+stub refuses the readers that already exist; this file refuses every reader
+from here on. It is append-only text of `\n`-terminated lines, the first
+`format=store-requires-v1`, then one per format change:
+`requires=<feature> vendor=<vendor|*> since=<40-hex commit> at=<unix seconds>`.
+A line is in force once its newline is written; bytes after the last newline
+are an append that did not finish and are not read, and the next writer ends
+them with ` #void` and a newline (a line ending in that word is skipped).
+`census_store::reader_refusal` is asked before a census is located, by the API
+and by every CLI census reader: the file is opened without following a final
+link and without blocking, must be a regular file of at most 65,536 bytes,
+and every line binding the vendor must name a feature in
+`census_store::READER_FEATURES` (today `census-v4`). Otherwise the vendor's
+census is refused by name — the file, the line, the feature — and is never
+read in the shape the build happens to know. An absent file requires nothing.
+`seal_legacy` and `migrate` append the vendor's `census-v4` line once.
+
+**A bar month is opened only as the month its `.prv` names (DB-B65).** The
+bar header's cross-check is the symbol hash and the bar length, which an
+index, each of its option contracts and both vendors share. Before a bar door
+validates a month it reads the 64-byte header of the `.prv` beside it
+(`provenance::written_for`): a header that passes its own checksum, magic and
+version and names another store path refuses the open as
+`StoreError::Misfiled`. A month with no `.prv`, or one whose header fails its
+own checks, is `Unrecorded` and opens as before; `cli scrub-blocks` counts
+those months as `unbound`.
 
 **`cli census-recount VENDOR --from DAY [--to DAY]`** rebuilds census rows
 from the bar files' own headers — `n_valid`, the first and last stamp — and

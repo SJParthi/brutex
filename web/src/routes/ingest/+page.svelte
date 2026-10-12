@@ -41,6 +41,7 @@
   import { cashIdentityFor, DEFAULT_ZERODHA_CASH_IDENTITY } from '$lib/cash-identity.js';
   import { singleMemberBody } from '$lib/row-pull.js';
   import Picker from '$lib/Picker.svelte';
+  import DiskTile from '$lib/DiskTile.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
@@ -7844,6 +7845,9 @@
          The run status and the link to /audit stay: neither is a restatement,
          and the status is the only thing on the page that says a pull is on the
          wire while you are looking somewhere else. -->
+    <!-- FREE SPACE, STORE SIZE, CENSUS KEPT, AND WHETHER A COPY EXISTS
+         (DB-B73, DB-B59): one drive held everything and no page said so. -->
+    <DiskTile />
     <span class="spacer"></span>
     {#if phase === 'running'}
       <span class="status busy" aria-live="polite">

@@ -124,6 +124,12 @@ pub enum Location {
 /// The path and the host's words, for anything at that name that is not a
 /// directory, or that cannot be measured.
 pub fn locate(root: &Path, vendor: Vendor) -> Result<Location, String> {
+    // WHAT THE STORE REQUIRES OF ITS READER, ASKED FIRST (DB-B68, WP-81): a
+    // census this build cannot read whole is refused by name, never guessed
+    // at from whichever older shape is still on disk.
+    if let Some(refusal) = reader_refusal(root, vendor) {
+        return Err(refusal);
+    }
     let dir = vendor_dir(root, vendor);
     match fs::symlink_metadata(&dir) {
         Ok(found) if found.is_dir() => Ok(Location::Partitioned(dir)),
@@ -1455,6 +1461,10 @@ pub struct Migration {
     pub dir: PathBuf,
     /// Every partition written, one per segment.
     pub partitions: Vec<Written>,
+    /// The seal of the single file ([`seal_legacy`]), when there was one to
+    /// seal: `None` for a vendor that had no single file, `Some(Err)` naming
+    /// why the seal refused while the migration itself stands (DB-B68).
+    pub seal: Option<Result<Seal, String>>,
 }
 
 /// Moves `vendor`'s single-file census to version-4 partitions, epoch `000001`
@@ -1477,9 +1487,13 @@ pub struct Migration {
 ///    through [`read_epoch`] and checks its counters, then renames the staging
 ///    directory to `manifest/v4/<vendor>/` and flushes `manifest/v4/`.
 ///
-/// **The single file is never touched.** It stays where it was, byte for byte,
-/// as the history it is; a reader built before version 4 keeps reading it,
-/// which is why the version-4-aware API must be live first (WP-80 step 1).
+/// **The single file's bytes are never touched.** They stay byte for byte as
+/// the history they are. Once the partitions are in place the file is SEALED
+/// ([`seal_legacy`]): its inode is kept as `<vendor>.man`[`SUPERSEDED_SUFFIX`]
+/// and a stub that every reader built before version 4 refuses takes its name,
+/// so a rollback to such a reader fails loudly instead of serving the
+/// superseded census as the whole of it (DB-B68). That is why the
+/// version-4-aware API must be live first (WP-80 step 1).
 ///
 /// # Errors
 ///
@@ -1555,6 +1569,21 @@ pub fn migrate(root: &Path, vendor: Vendor) -> Result<Migration, String> {
     })?;
     sync_dir(&v4_root(root))?;
     drop(lock);
+    // THE SINGLE FILE IS SEALED THE MOMENT IT IS SUPERSEDED (DB-B68, WP-81):
+    // a reader built before version 4 would otherwise go on serving it as the
+    // whole census. Its bytes are kept under the superseded name, not
+    // rewritten. The lock is retaken by the seal, which refuses if a writer
+    // got in between.
+    let seal = if legacy_meta.is_some() {
+        Some(seal_legacy(root, vendor))
+    } else {
+        // NO SINGLE FILE TO SEAL, and the store still says what this census
+        // requires of its reader. A refusal here is carried like a seal's:
+        // the migration stands and the receipt says what did not follow it.
+        require_feature(root, vendor, FEATURE_CENSUS_V4)
+            .err()
+            .map(Err)
+    };
     let partitions: Vec<Written> = written
         .into_iter()
         .map(|mut part| {
@@ -1575,6 +1604,7 @@ pub fn migrate(root: &Path, vendor: Vendor) -> Result<Migration, String> {
         legacy_bytes,
         dir,
         partitions,
+        seal,
     };
     note_migrated(vendor, &done);
     Ok(done)
@@ -1698,6 +1728,14 @@ fn write_receipt(
 /// still appending to a file no version-4 reader consults, so those months are
 /// in the census nobody reads (DB-G08's other half). One `stat` and one small
 /// read.
+///
+/// # Once sealed (DB-B68, WP-81)
+///
+/// [`seal_legacy`] keeps the single file's bytes under
+/// `<vendor>.man`[`SUPERSEDED_SUFFIX`] and puts a refusing stub at its name.
+/// Then the superseded file must still be the receipt's length, and the name
+/// must still hold the stub: anything else is a write this build did not make,
+/// and is named. Two `lstat`s and one 16-byte read.
 #[must_use]
 pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
     let receipt = vendor_dir(root, vendor).join(MIGRATION_RECEIPT);
@@ -1707,6 +1745,40 @@ pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
         .find_map(|line| line.strip_prefix("legacy_bytes="))
         .and_then(|value| value.parse().ok())?;
     let legacy = manifest_path(root, vendor);
+    let superseded = superseded_path(root, vendor);
+    if let Ok(kept) = fs::symlink_metadata(&superseded) {
+        if kept.len() != recorded {
+            return Some(format!(
+                "{} is {} bytes; it was {recorded} when {} was migrated and sealed, so \
+                 the superseded census was written after the seal",
+                superseded.display(),
+                kept.len(),
+                vendor.as_str()
+            ));
+        }
+        // A SEAL INTERRUPTED between its link and its rename: both names are
+        // one inode of the recorded length, which is no write at all.
+        if same_inode(&legacy, &kept) || holds_sealed_stub(&legacy) {
+            return None;
+        }
+        let held = fs::symlink_metadata(&legacy).map_or(0, |meta| meta.len());
+        return Some(if held == recorded {
+            format!(
+                "{} and {} are two different files of the {recorded} bytes the migration \
+                 recorded; refused rather than guess which is the superseded census",
+                legacy.display(),
+                superseded.display()
+            )
+        } else {
+            format!(
+                "{} no longer holds the seal that refuses a reader built before version 4 \
+                 ({} keeps the {recorded}-byte census it replaced); a writer that is not \
+                 this build replaced it, so months it wrote are in no partition",
+                legacy.display(),
+                superseded.display()
+            )
+        });
+    }
     let now = fs::symlink_metadata(&legacy).map_or(0, |meta| meta.len());
     (now != recorded).then(|| {
         format!(
@@ -1717,6 +1789,706 @@ pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
             vendor.as_str()
         )
     })
+}
+
+// ═══ What the store requires of its reader (DB-B68, WP-81) ══════════════════
+
+/// The name, under `manifest/`, of the file that says what a build must be
+/// able to do to read this store's censuses.
+///
+/// # Why it exists
+///
+/// Moving GDFL's census to version 4 left a store that an older build read
+/// WRONGLY and silently: it knew nothing of `manifest/v4/`, opened the
+/// superseded single file and served 246,147 of 385,442 months as `held`.
+/// [`seal_legacy`] closes that for the builds that already exist, by making
+/// the single file's name unreadable to them. This file closes it for every
+/// build from here on: the next format change appends a line naming the
+/// feature a reader needs, and a build that does not have it refuses the
+/// census by name ([`reader_refusal`]) instead of reading the shape it knows.
+///
+/// # The bytes
+///
+/// Append-only text, one `\n`-terminated line each:
+///
+/// ```text
+/// format=store-requires-v1
+/// requires=census-v4 vendor=gdfl since=<40-hex commit> at=<unix seconds>
+/// ```
+///
+/// `vendor` is a vendor's own spelling or `*` for every vendor. A line is in
+/// force once its newline is written; bytes after the last newline are an
+/// append that did not finish and are not read. The next writer ends such a
+/// tail with [`REQUIRES_VOID`] and a newline — an append, like every other
+/// write here — and a line ending in that word is skipped.
+pub const REQUIRES: &str = "REQUIRES";
+
+/// The word that ends a line no reader is to act on: an append that did not
+/// finish, closed by the writer that found it.
+pub const REQUIRES_VOID: &str = " #void";
+
+/// The first line of [`REQUIRES`].
+pub const REQUIRES_FORMAT: &str = "format=store-requires-v1";
+
+/// The feature a version-4 (partitioned) census requires of its reader.
+pub const FEATURE_CENSUS_V4: &str = "census-v4";
+
+/// Every reader feature this build has. A [`REQUIRES`] line naming anything
+/// else refuses the vendor's census.
+pub const READER_FEATURES: &[&str] = &[FEATURE_CENSUS_V4];
+
+/// The most bytes of [`REQUIRES`] read. A line is under 120 bytes and one is
+/// written per format change per vendor, so this is thousands of changes; a
+/// longer file is refused by name rather than read in part.
+const REQUIRES_CAP: u64 = 64 * 1024;
+
+/// `manifest/REQUIRES` under `root`.
+#[must_use]
+pub fn requires_path(root: &Path) -> PathBuf {
+    let mut at = v4_root(root);
+    at.pop();
+    at.push(REQUIRES);
+    at
+}
+
+/// Why this build must not read `vendor`'s census, or `None` when it may
+/// (DB-B68, WP-81).
+///
+/// `None` when [`REQUIRES`] is absent — a store no format change has stamped —
+/// or when every line that binds `vendor` names a feature in
+/// [`READER_FEATURES`]. Otherwise the sentence names the file, the line and
+/// the feature. A file that cannot be read, is longer than a requirements
+/// file can be, declares another format, or holds a line of no known shape
+/// is refused too: what it requires cannot be told, and guessing "nothing" is
+/// the silent loss this exists to end.
+///
+/// One `open` and one bounded read; called where a census is located, never
+/// per record.
+#[must_use]
+pub fn reader_refusal(root: &Path, vendor: Vendor) -> Option<String> {
+    let at = requires_path(root);
+    // NEVER THROUGH A FINAL SYMLINK AND NEVER BLOCKING: a FIFO or a link at
+    // this name is refused by name below, not waited on while a census load
+    // hangs.
+    let file = match store::open_flags::open_read_no_follow(&at) {
+        Ok(file) => file,
+        // NOTHING IS THERE, OR NOTHING CAN BE: no file, a file where a
+        // directory of the path belongs, or a name past the host's limit. A
+        // requirements file that cannot exist requires nothing, and the
+        // census's own read fails on the same cause a moment later in the
+        // words an operator needs (`locate` keeps the same three kinds for
+        // the same reason), so this does not pre-empt it with a worse one.
+        Err(why)
+            if matches!(
+                why.kind(),
+                ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::InvalidFilename
+            ) =>
+        {
+            return None;
+        }
+        Err(why) => {
+            return Some(format!(
+                "{} could not be opened ({why}), so what this store requires of its \
+                 reader cannot be told; {}'s census is refused rather than guessed at \
+                 (DB-B68)",
+                at.display(),
+                vendor.as_str()
+            ));
+        }
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Some(format!(
+            "{} is not a regular file, so what this store requires of its reader \
+             cannot be told; {}'s census is refused rather than guessed at (DB-B68)",
+            at.display(),
+            vendor.as_str()
+        ));
+    }
+    let mut bytes = Vec::new();
+    if let Err(why) = file.take(REQUIRES_CAP + 1).read_to_end(&mut bytes) {
+        return Some(format!(
+            "{} could not be read ({why}); {}'s census is refused rather than guessed \
+             at (DB-B68)",
+            at.display(),
+            vendor.as_str()
+        ));
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > REQUIRES_CAP {
+        return Some(format!(
+            "{} is longer than {REQUIRES_CAP} bytes, which no requirements file is; \
+             {}'s census is refused rather than read against part of it (DB-B68)",
+            at.display(),
+            vendor.as_str()
+        ));
+    }
+    requirement_refusal(&String::from_utf8_lossy(&bytes), vendor)
+        .map(|why| format!("{}: {why} (DB-B68)", at.display()))
+}
+
+/// [`reader_refusal`] over the file's text: the first line in force that this
+/// build cannot honour for `vendor`.
+fn requirement_refusal(text: &str, vendor: Vendor) -> Option<String> {
+    // ONLY LINES WHOSE NEWLINE WAS WRITTEN ARE IN FORCE: what follows the
+    // last newline is an append that did not finish.
+    let whole = text
+        .rfind('\n')
+        .map_or("", |end| text.get(..end).unwrap_or(""));
+    for (index, line) in whole.split('\n').enumerate() {
+        let number = index + 1;
+        if line.is_empty() || line.ends_with(REQUIRES_VOID) {
+            continue;
+        }
+        if let Some(format) = line.strip_prefix("format=") {
+            if line != REQUIRES_FORMAT {
+                return Some(format!(
+                    "line {number} declares format {format:?}, and this build reads \
+                     {REQUIRES_FORMAT:?}; what the store requires cannot be told, so {}'s \
+                     census is refused",
+                    vendor.as_str()
+                ));
+            }
+            continue;
+        }
+        let mut words = line.split(' ');
+        let feature = words.next().and_then(|word| word.strip_prefix("requires="));
+        let bound = words.find_map(|word| word.strip_prefix("vendor="));
+        let (Some(feature), Some(bound)) = (feature, bound) else {
+            return Some(format!(
+                "line {number} ({line:?}) is no requirement this build can read, so {}'s \
+                 census is refused rather than served against a rule it cannot follow",
+                vendor.as_str()
+            ));
+        };
+        if (bound == "*" || bound == vendor.as_str()) && !READER_FEATURES.contains(&feature) {
+            return Some(format!(
+                "line {number} says {}'s census requires reader feature {feature:?}, which \
+                 this build does not have (it has {READER_FEATURES:?}); refused rather than \
+                 serve a census this build cannot read whole — start a build that has it",
+                vendor.as_str()
+            ));
+        }
+    }
+    None
+}
+
+/// Records that `vendor`'s census requires `feature` of its reader, once.
+///
+/// Appends [`REQUIRES_FORMAT`] to a file that does not exist yet, then the
+/// requirement's line unless a line in force already names this `feature` for
+/// this `vendor`; flushes the file and its directory. Returns whether a line
+/// was written. The caller holds the census lock the change was made under.
+///
+/// # Errors
+///
+/// The path and the host's words. Nothing is truncated or rewritten: the file
+/// is opened for append only.
+pub fn require_feature(root: &Path, vendor: Vendor, feature: &str) -> Result<bool, String> {
+    let at = requires_path(root);
+    let held = match fs::read_to_string(&at) {
+        Ok(text) => text,
+        Err(why) if why.kind() == ErrorKind::NotFound => String::new(),
+        Err(why) => return Err(format!("{}: {why}", at.display())),
+    };
+    let wanted = format!("requires={feature} vendor={} ", vendor.as_str());
+    let in_force = held
+        .rfind('\n')
+        .map_or("", |end| held.get(..=end).unwrap_or(""));
+    if in_force.split('\n').any(|line| line.starts_with(&wanted)) {
+        return Ok(false);
+    }
+    let mut lines = String::new();
+    // A TORN TAIL IS ENDED FIRST, AS A VOID LINE, so the new line starts at
+    // a line's start and the unfinished bytes neither join it nor become a
+    // requirement nobody wrote.
+    if held.len() > in_force.len() {
+        lines.push_str(REQUIRES_VOID);
+        lines.push('\n');
+    }
+    if !in_force.split('\n').any(|line| line == REQUIRES_FORMAT) {
+        lines.push_str(REQUIRES_FORMAT);
+        lines.push('\n');
+    }
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let _ = writeln!(lines, "{wanted}since={V4_READER_SINCE} at={at_unix}");
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&at)
+        .and_then(|mut file| {
+            file.write_all(lines.as_bytes())?;
+            file.sync_all()
+        })
+        .map_err(|why| format!("{}: {why}", at.display()))?;
+    at.parent().map_or(Ok(()), sync_dir)?;
+    Ok(true)
+}
+
+// ═══ The seal: a migrated vendor's single file refuses an old reader ════════
+
+/// The suffix the single file's bytes keep once a migrated vendor is sealed:
+/// `manifest/<vendor>.man.v3-superseded` (DB-B68, WP-81).
+pub const SUPERSEDED_SUFFIX: &str = ".v3-superseded";
+
+/// The receipt a seal leaves inside `manifest/v4/<vendor>/`.
+pub const SEAL_RECEIPT: &str = "SEALED";
+
+/// The format version the seal's stub declares, in both header slots.
+///
+/// **Reserved, never a geometry.** Every reader built so far resolves a
+/// version through `Layout::for_version` and refuses one it does not know BY
+/// NUMBER, so a reader built before version 4 — the one a rollback would start
+/// — answers `unknown manifest version 65535` for the stub instead of serving
+/// the superseded census as held. The test
+/// `the_seal_version_is_no_geometry_any_reader_knows` keeps it unminted.
+pub const SEALED_VERSION: u16 = u16::MAX;
+
+/// The first commit whose API reads a version-4 census
+/// (`git log -S'Located::Partitioned' -- crates/api/src/census.rs`, WP-30,
+/// D-3327). A deploy may start a build only if this commit is its ancestor;
+/// the seal receipt names it so a deploy script can check that without this
+/// crate (DB-B68).
+pub const V4_READER_SINCE: &str = "bd6b6f5a441aedc492ec19f75ad9d294de413fb4";
+
+/// The stub's length: one whole header region, so a reader splits it exactly
+/// where it splits a census and refuses its header, never its length.
+const STUB_LEN: usize = 32_768;
+
+/// Byte offset of the version field in a header slot (`manifest.rs` `H_VERSION`).
+const STUB_VERSION_AT: usize = 8;
+
+/// Where `vendor`'s superseded single file is kept once sealed.
+#[must_use]
+pub fn superseded_path(root: &Path, vendor: Vendor) -> PathBuf {
+    let mut name = manifest_path(root, vendor).into_os_string();
+    name.push(SUPERSEDED_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// The stub a seal puts at `manifest/<vendor>.man`: both header slots carry
+/// the manifest magic family and [`SEALED_VERSION`]; the rest is a sentence a
+/// person opening the file reads.
+#[must_use]
+pub fn sealed_stub(vendor: Vendor) -> Vec<u8> {
+    let mut image = vec![0_u8; STUB_LEN];
+    let note = format!(
+        "\nSEALED (DB-B68): {vendor}'s census is version 4, under manifest/v4/{vendor}/. \
+         This name refuses every reader built before version 4; the census it held is \
+         kept, byte for byte, as manifest/{vendor}.man{SUPERSEDED_SUFFIX}. A reader must \
+         descend from commit {V4_READER_SINCE}.\n",
+        vendor = vendor.as_str()
+    );
+    for slot in [0, SLOT_SPACING] {
+        let header = slot..slot + 8;
+        if let Some(magic) = image.get_mut(header) {
+            magic.copy_from_slice(b"BRUTEXMS");
+        }
+        if let Some(version) = image.get_mut(slot + STUB_VERSION_AT..slot + STUB_VERSION_AT + 2) {
+            version.copy_from_slice(&SEALED_VERSION.to_le_bytes());
+        }
+        if let Some(text) = image.get_mut(slot + 64..slot + 64 + note.len()) {
+            text.copy_from_slice(note.as_bytes());
+        }
+    }
+    image
+}
+
+/// Whether `path` holds a seal's stub: [`STUB_LEN`] bytes whose first slot
+/// carries the magic family and [`SEALED_VERSION`]. One `lstat` and one
+/// 16-byte read.
+fn holds_sealed_stub(path: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != STUB_LEN as u64 {
+        return false;
+    }
+    let mut head = [0_u8; 16];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut head))
+        .is_ok()
+        && head.starts_with(b"BRUTEXM")
+        && head.get(STUB_VERSION_AT..STUB_VERSION_AT + 2) == Some(&SEALED_VERSION.to_le_bytes())
+}
+
+/// Whether `path` is the inode `kept` describes.
+fn same_inode(path: &Path, kept: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    fs::symlink_metadata(path)
+        .is_ok_and(|held| held.dev() == kept.dev() && held.ino() == kept.ino())
+}
+
+/// What a seal did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seal {
+    /// The name that now holds the stub.
+    pub legacy: PathBuf,
+    /// Where the census it held is kept.
+    pub superseded: PathBuf,
+    /// The kept census's length, equal to the migration receipt's.
+    pub legacy_bytes: u64,
+    /// Whether this call wrote anything: `false` when it found the vendor
+    /// already sealed and only confirmed it.
+    pub wrote: bool,
+    /// Where a receipt no seal finished writing was moved, when this call
+    /// found one under the receipt's name and wrote a whole one in its place.
+    pub torn_receipt: Option<PathBuf>,
+}
+
+/// Seals a migrated vendor's single file so a reader built before version 4
+/// REFUSES it instead of serving it as the whole census (DB-B68, WP-81).
+///
+/// # The failure, reproduced on clones of the real store
+///
+/// After `census-migrate gdfl`, rolling the API back to the build before it
+/// (`tgt/app5`) answered `/store.json?feed=gdfl` with state `held`, 246,147
+/// months and an empty degraded header — the superseded single file — while the
+/// version-4 census holds 385,442: 139,295 instrument-months and 368,855,733
+/// rows gone without a word, and `/health` said `ok`.
+///
+/// # What it does, in order
+///
+/// 1. Refuses unless `manifest/v4/<vendor>/` and its migration receipt exist,
+///    and refuses when [`legacy_drift`] names a write since migration: those
+///    months must be counted (`cli census-recount`) before the file is sealed.
+/// 2. Takes the single file's lock, the one every pre-version-4 writer takes,
+///    and checks the length again under it.
+/// 3. Writes the stub ([`sealed_stub`]) to `<vendor>.man.seal.tmp` and flushes
+///    it.
+/// 4. Hard-links the single file to `<vendor>.man`[`SUPERSEDED_SUFFIX`]: the
+///    same inode, so not one byte of the census's history is copied or
+///    rewritten (`CLAUDE.md` §3 rule 8).
+/// 5. Renames the stub over `<vendor>.man`, so the name is never absent — an
+///    absent census reads as an EMPTY one to every reader, the silent loss
+///    again — and flushes the directory.
+/// 6. Writes [`SEAL_RECEIPT`] beside the migration receipt, naming the kept
+///    file, its length and [`V4_READER_SINCE`] — staged as `SEALED.tmp`,
+///    flushed, renamed to its name, the directory flushed, so the name never
+///    holds a half-written receipt ([`settle_seal_receipt`]).
+///
+/// A crash after step 4 leaves the hard link and the unsealed name; a second
+/// run sees the two names on one inode and finishes. A run on a sealed vendor
+/// confirms it and READS the receipt rather than trusting that a file of that
+/// name exists: a whole one is left alone (`wrote: false`), a missing one is
+/// written, one no seal finished writing (empty, cut short — what a build
+/// that created the name and then wrote it left after a crash) is moved aside
+/// by name and a whole one written, and one of a format this build does not
+/// know is refused by name.
+///
+/// # Errors
+///
+/// Each refusal above, naming the path; and any I/O failure, after which the
+/// name still holds either the census or the stub, never nothing.
+pub fn seal_legacy(root: &Path, vendor: Vendor) -> Result<Seal, String> {
+    let dir = vendor_dir(root, vendor);
+    let receipt = dir.join(MIGRATION_RECEIPT);
+    let recorded: u64 = fs::read_to_string(&receipt)
+        .map_err(|why| {
+            format!(
+                "{} cannot be read ({why}): {} is not migrated, so there is nothing to \
+                 seal. Nothing was written",
+                receipt.display(),
+                vendor.as_str()
+            )
+        })?
+        .lines()
+        .find_map(|line| line.strip_prefix("legacy_bytes="))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "{} names no legacy_bytes; nothing was written",
+                receipt.display()
+            )
+        })?;
+    if let Some(drift) = legacy_drift(root, vendor) {
+        return Err(format!(
+            "{drift}. Count those months first (`cli census-recount`); sealing now would \
+             keep them only in the superseded file. Nothing was written"
+        ));
+    }
+    let legacy = manifest_path(root, vendor);
+    let superseded = superseded_path(root, vendor);
+    let lock = Target::single(root, vendor).lock()?;
+    let sealed_receipt = dir.join(SEAL_RECEIPT);
+    if holds_sealed_stub(&legacy) && fs::symlink_metadata(&superseded).is_ok() {
+        let (receipt_written, torn_receipt) =
+            settle_seal_receipt(&sealed_receipt, &superseded, recorded)?;
+        // A seal made before the requirements file existed gains its line.
+        let wrote = require_feature(root, vendor, FEATURE_CENSUS_V4)? || receipt_written;
+        drop(lock);
+        return Ok(Seal {
+            legacy,
+            superseded,
+            legacy_bytes: recorded,
+            wrote,
+            torn_receipt,
+        });
+    }
+    let held = fs::symlink_metadata(&legacy)
+        .map_err(|why| format!("{}: {why}; nothing was written", legacy.display()))?;
+    if !held.is_file() || held.len() != recorded {
+        return Err(format!(
+            "{} is {} bytes and not a plain file of the {recorded} bytes the migration \
+             recorded; nothing was written",
+            legacy.display(),
+            held.len()
+        ));
+    }
+    // ONE INODE UNDER BOTH NAMES: an interrupted seal already linked it. A
+    // superseded name holding anything else makes the link fail by name.
+    if !same_inode(&superseded, &held) {
+        fs::hard_link(&legacy, &superseded).map_err(|why| {
+            format!(
+                "{} could not be linked to {}: {why}; nothing was written",
+                legacy.display(),
+                superseded.display()
+            )
+        })?;
+    }
+    install_stub(&legacy, vendor)?;
+    let (_written, torn_receipt) = settle_seal_receipt(&sealed_receipt, &superseded, recorded)?;
+    // AND EVERY BUILD FROM HERE ON IS TOLD WHAT THIS CENSUS NEEDS (the stub
+    // only refuses the builds that already exist).
+    require_feature(root, vendor, FEATURE_CENSUS_V4)?;
+    drop(lock);
+    note_sealed(vendor, &superseded, recorded);
+    Ok(Seal {
+        legacy,
+        superseded,
+        legacy_bytes: recorded,
+        wrote: true,
+        torn_receipt,
+    })
+}
+
+/// Steps 3 and 5 of [`seal_legacy`]: the stub written beside `legacy`,
+/// flushed, renamed over it, and the directory flushed. The name holds the
+/// census or the stub at every instant, never nothing.
+fn install_stub(legacy: &Path, vendor: Vendor) -> Result<(), String> {
+    let mut staged = legacy.to_path_buf().into_os_string();
+    staged.push(".seal.tmp");
+    let staged = PathBuf::from(staged);
+    let _ = fs::remove_file(&staged);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| {
+            file.write_all(&sealed_stub(vendor))?;
+            file.sync_all()
+        })
+        .map_err(|why| {
+            format!(
+                "{}: {why}; {} still holds the census",
+                staged.display(),
+                legacy.display()
+            )
+        })?;
+    fs::rename(&staged, legacy).map_err(|why| {
+        format!(
+            "{} could not be renamed over {}: {why}; {} still holds the census",
+            staged.display(),
+            legacy.display(),
+            legacy.display()
+        )
+    })?;
+    legacy.parent().map_or(Ok(()), sync_dir)
+}
+
+/// The first line of a seal receipt this build writes and reads.
+pub const SEAL_RECEIPT_FORMAT: &str = "format=census-seal-v1";
+
+/// The most bytes of a seal receipt read: it is five short lines.
+const SEAL_RECEIPT_MAX: u64 = 16 * 1024;
+
+/// What is under a seal receipt's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealReceipt {
+    /// Nothing.
+    Absent,
+    /// A receipt this build reads whole: its format line, the kept file, its
+    /// length and the reader commit, each a whole line.
+    Whole,
+    /// Bytes no seal finished writing: empty, cut short, or missing a line a
+    /// receipt carries. The sentence says which.
+    Torn(String),
+    /// A whole `format=` line naming a format this build does not know.
+    Foreign(String),
+}
+
+/// Reads what is under `path` as a seal receipt (DB-B68).
+///
+/// The name alone proves nothing: a build that created the receipt at its
+/// final name and then wrote it left, after a crash between the two, an empty
+/// `SEALED` that every later seal run took for the receipt — "it was already
+/// sealed, nothing was written", exit 0, zero bytes — while the deploy
+/// procedure reads `reader_since` from that file.
+///
+/// One bounded read through a no-follow, non-blocking open. Only whole lines
+/// count: the text after the last newline is a line nobody finished.
+///
+/// # Errors
+///
+/// A name that is not a regular file, or cannot be read: by name.
+pub fn seal_receipt(path: &Path) -> Result<SealReceipt, String> {
+    let named = |why: &dyn std::fmt::Display| format!("{}: {why}", path.display());
+    let file = match store::open_flags::open_read_no_follow(path) {
+        Ok(file) => file,
+        Err(why) if why.kind() == ErrorKind::NotFound => return Ok(SealReceipt::Absent),
+        Err(why) => return Err(named(&why)),
+    };
+    if !file.metadata().map_err(|why| named(&why))?.is_file() {
+        return Err(named(&"it is not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    file.take(SEAL_RECEIPT_MAX)
+        .read_to_end(&mut bytes)
+        .map_err(|why| named(&why))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let whole = text
+        .rfind('\n')
+        .map_or("", |end| text.get(..end).unwrap_or(""));
+    let value = |key: &str| {
+        whole
+            .split('\n')
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+    };
+    match value("format") {
+        Some(format) if SEAL_RECEIPT_FORMAT.strip_prefix("format=") != Some(format) => {
+            return Ok(SealReceipt::Foreign(format.to_owned()));
+        }
+        Some(_) => {}
+        None => {
+            return Ok(SealReceipt::Torn(format!(
+                "it holds {} byte(s) and no whole {SEAL_RECEIPT_FORMAT} line",
+                bytes.len()
+            )));
+        }
+    }
+    let commit = |value: &str| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if !value("reader_since").is_some_and(commit) {
+        return Ok(SealReceipt::Torn(
+            "it names no whole reader_since=<commit> line".to_owned(),
+        ));
+    }
+    if value("superseded").is_none_or(str::is_empty)
+        || value("superseded_bytes").is_none_or(|bytes| bytes.parse::<u64>().is_err())
+    {
+        return Ok(SealReceipt::Torn(
+            "it names no whole superseded= and superseded_bytes= line".to_owned(),
+        ));
+    }
+    Ok(SealReceipt::Whole)
+}
+
+/// Leaves a whole seal receipt under `path`: returns whether one was written,
+/// and where a torn one was moved.
+///
+/// - [`SealReceipt::Whole`]: nothing is written.
+/// - [`SealReceipt::Absent`]: one is written ([`write_seal_receipt`]).
+/// - [`SealReceipt::Torn`]: the bytes are kept, renamed to
+///   `SEALED.torn-<unix seconds>` (with `-<n>` when that name is held;
+///   nothing is deleted or overwritten), and a whole receipt is written.
+/// - [`SealReceipt::Foreign`]: refused by name — a later build's receipt is
+///   not this build's to replace.
+fn settle_seal_receipt(
+    path: &Path,
+    superseded: &Path,
+    bytes: u64,
+) -> Result<(bool, Option<PathBuf>), String> {
+    let torn = match seal_receipt(path)? {
+        SealReceipt::Whole => return Ok((false, None)),
+        SealReceipt::Absent => None,
+        SealReceipt::Foreign(format) => {
+            return Err(format!(
+                "{} says format={format}, which this build does not write or read (it \
+                 writes {SEAL_RECEIPT_FORMAT}); it was left as it is and nothing was written",
+                path.display()
+            ));
+        }
+        SealReceipt::Torn(why) => {
+            let at_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            // A NAME NOTHING HOLDS (the caller has the census lock): a second
+            // torn receipt inside one second never replaces the first's bytes.
+            let named = |n: u32| {
+                let mut aside = path.to_path_buf().into_os_string();
+                aside.push(if n == 0 {
+                    format!(".torn-{at_unix}")
+                } else {
+                    format!(".torn-{at_unix}-{n}")
+                });
+                PathBuf::from(aside)
+            };
+            let aside = (0..u32::MAX)
+                .map(named)
+                .find(|candidate| fs::symlink_metadata(candidate).is_err())
+                .ok_or_else(|| format!("{}: no free name to keep it under", path.display()))?;
+            fs::rename(path, &aside).map_err(|failed| {
+                format!(
+                    "{} is no whole seal receipt ({why}) and could not be moved to {}: \
+                     {failed}; nothing was written",
+                    path.display(),
+                    aside.display()
+                )
+            })?;
+            let moved = aside.display().to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::warn(TARGET, "torn seal receipt replaced")
+                    .with("kept_as", telemetry::Value::Str(&moved))
+                    .with("why", telemetry::Value::Str(&why)),
+            );
+            Some(aside)
+        }
+    };
+    write_seal_receipt(path, superseded, bytes)?;
+    Ok((true, torn))
+}
+
+/// Writes the seal receipt so its name never holds a half-written one: the
+/// text goes to `SEALED.tmp`, is flushed, is renamed to `path`, and the
+/// directory is flushed (`CLAUDE.md` §3 rule 8; as [`install_stub`] does for
+/// the stub). A crash before the rename leaves the staged file, which no
+/// reader opens and the next run replaces.
+fn write_seal_receipt(path: &Path, superseded: &Path, bytes: u64) -> Result<(), String> {
+    let text = format!(
+        "{SEAL_RECEIPT_FORMAT}\nsuperseded={}\nsuperseded_bytes={bytes}\n\
+         stub_version={SEALED_VERSION}\nreader_since={V4_READER_SINCE}\n",
+        superseded.display()
+    );
+    let mut staged = path.to_path_buf().into_os_string();
+    staged.push(".tmp");
+    let staged = PathBuf::from(staged);
+    let _ = fs::remove_file(&staged);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .map_err(|why| format!("{}: {why}", staged.display()))?;
+    fs::rename(&staged, path).map_err(|why| {
+        format!(
+            "{} could not be renamed to {}: {why}",
+            staged.display(),
+            path.display()
+        )
+    })?;
+    path.parent().map_or(Ok(()), sync_dir)
+}
+
+fn note_sealed(vendor: Vendor, superseded: &Path, bytes: u64) {
+    let kept = superseded.display().to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(TARGET, "legacy census sealed")
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("superseded", telemetry::Value::Str(&kept))
+            .with("bytes", telemetry::Value::Uint(bytes)),
+    );
 }
 
 fn note_migrated(vendor: Vendor, done: &Migration) {
