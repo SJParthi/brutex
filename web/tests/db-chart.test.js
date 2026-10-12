@@ -10,7 +10,8 @@ import {
   chartSubject, planChoice, rungChoices, sourcesUrl, pageRequest, pageBars, joinBars, keepRefusal, rupees,
   greekPlan, fileGreeks, greekLine, flagSpan, dayBands, holeBands, bandSlots, flagMarkers, tradeDriven, alphaHex,
   costText, CHART_PAGE, FOLD_PAGE, FOLD_PAGE_DAY, CHART_KEEP, CHART_AUTO_ALL, GREEK_REQUESTS, PAN_REQUESTS,
-  OPEN_REQUESTS, BAND_SLOTS, GAP_BANDS, GREEK_CHUNK, DAYFLAGS_PAGE_DAYS, GREEK_LINES
+  OPEN_REQUESTS, BAND_SLOTS, GAP_BANDS, GREEK_CHUNK, DAYFLAGS_PAGE_DAYS, GREEK_LINES,
+  windowChoice, outsideBars, isOutside, spotAges, spotRuleText, spotAgeWord, rungStateText
 } from '../src/lib/db/chart.js';
 import { istInstant, WINDOW_PAGE_MAX } from '../src/lib/db/bars-plan.js';
 import { greekKey } from '../src/lib/greeks.js';
@@ -252,7 +253,7 @@ test('a page of an option asks its greeks in at most four requests of 400 instan
 
 test('a page that crosses months or outgrows its requests asks the newest instants and counts the rest', () => {
   const subject = chartSubject(plan([CE]));
-  // 31 day buckets across three months: three requests, one a month.
+  // 31 day buckets across two months (25 Jan to 24 Feb): two requests, one a month.
   const days = Array.from({ length: 31 }, (_, i) => bar(at('2019-01-25', '09:15:01') + i * 86_400));
   const across = greekPlan(days, subject, '1s');
   assert.deepEqual([across.rows.length, across.requests, across.skipped], [31, 2, 0]);
@@ -484,4 +485,297 @@ test('the panel is closed until asked, reads through the counted request, and lo
   assert.match(panel, /role="img" aria-label=\{summary\}/);
   assert.match(panel, />Load earlier<\/button>/, 'a pan has a button that does the same');
   assert.doesNotMatch(panel, /['"`](gdfl|zerodha)['"`]/i);
+});
+
+// ---------------------------------------------------------------------------
+// REPAIR ROUND 1: the operator's window over every rung (D-3338, answer 6),
+// the spot's age under the opt-in spot rule (D-3328, answer 4), and the
+// follow-ups a second agent named.
+// ---------------------------------------------------------------------------
+
+/** A feed row with an operator window, one with a measured archive only. */
+const WINDOWED = { wire: FEED_B, window: { from: '2018-01-01', to: '2026-09-30' } };
+const ARCHIVED = { wire: FEED_A, archive: { from: '2018-09-19', to: '2019-03-28' } };
+/** @param {string} rung */
+const rungB = (rung) => /** @type {any} */ (rungChoices(TABLE, FEED_B).choices.find((c) => c.rung === rung));
+
+test('a rung held outside the operator\'s window is clipped to the window, and the months held back are said', () => {
+  const day = rungB('1day');
+  assert.equal(day.firstMonth, '2015-01', 'the server\'s table names the months before the window');
+  const off = windowChoice(day, WINDOWED, false);
+  assert.deepEqual(
+    [off.choice?.firstMonth, off.choice?.lastMonth, off.choice?.firstDay, off.choice?.lastDay],
+    ['2018-01', '2026-09', '2018-01-01', '2026-09-30']
+  );
+  assert.equal(off.outside, false, 'nothing outside the window is drawn, so nothing is labelled');
+  assert.match(off.hidden, /2015-01/);
+  assert.match(off.hidden, /outside your window/);
+  assert.match(off.hidden, /not drawn/);
+  // THE REQUEST ITSELF: the page asks the window's months, never the table's.
+  const subject = chartSubject(plan([IDX], '1min', '2018-01', '2026-09'));
+  const asked = new URLSearchParams(pageRequest(FEED_B, subject, /** @type {any} */ (off.choice), {}, null).query);
+  assert.deepEqual([asked.get('timeframe'), asked.get('from'), asked.get('to')], ['1day', '2018-01', '2026-09']);
+  // A rung that lies inside the window is the same object: nothing is rebuilt, nothing is said.
+  const minute = rungB('1min');
+  const same = windowChoice(minute, WINDOWED, false);
+  assert.equal(same.choice, minute);
+  assert.deepEqual([same.hidden, same.outside], ['', false]);
+});
+
+test('with the toggle on a rung keeps its months outside the window, and is marked as reaching outside it', () => {
+  const day = rungB('1day');
+  const on = windowChoice(day, WINDOWED, true);
+  assert.equal(on.choice, day, 'the months outside the window are read');
+  assert.deepEqual([on.outside, on.hidden], [true, '']);
+  const asked = new URLSearchParams(pageRequest(FEED_B, chartSubject(plan([IDX], '1day', '2015-01', '2026-09')), day, {}, null).query);
+  assert.equal(asked.get('from'), '2015-01');
+  // The selection's own rung goes through the same rule: a census plan the toggle widened is marked too.
+  const own = /** @type {any} */ (planChoice(plan([IDX], '1day', '2015-01', '2026-09')));
+  assert.equal(windowChoice(own, WINDOWED, true).outside, true);
+  assert.equal(windowChoice(own, WINDOWED, false).choice?.firstMonth, '2018-01');
+  assert.equal(windowChoice(rungB('1min'), WINDOWED, true).outside, false, 'a rung inside the window is not marked');
+});
+
+test('the window\'s edges: wholly outside, past both ends, a fold\'s day bounds, a window that is not month-aligned, and no window at all', () => {
+  /** @param {object} more */
+  const made = (more) => ({ ...rungB('1day'), ...more });
+  // Wholly before, wholly after: not offered, and said.
+  const before = windowChoice(made({ firstMonth: '2015-01', lastMonth: '2017-12', firstDay: '2015-01-01', lastDay: '2017-12-29' }), WINDOWED, false);
+  assert.equal(before.choice, null);
+  assert.match(before.hidden, /2015-01 to 2017-12/);
+  assert.match(before.hidden, /outside your window/);
+  const after = windowChoice(made({ firstMonth: '2026-10', lastMonth: '2026-12', firstDay: '2026-10-01', lastDay: '2026-12-31' }), WINDOWED, false);
+  assert.equal(after.choice, null);
+  assert.equal(windowChoice(made({ firstMonth: '2015-01', lastMonth: '2017-12' }), WINDOWED, true).outside, true, 'shown whole when asked for');
+  // Past both ends.
+  const both = windowChoice(made({ firstMonth: '2015-01', lastMonth: '2027-03', firstDay: '2015-01-01', lastDay: '2027-03-31' }), WINDOWED, false);
+  assert.deepEqual([both.choice?.firstMonth, both.choice?.lastMonth, both.choice?.firstDay, both.choice?.lastDay], ['2018-01', '2026-09', '2018-01-01', '2026-09-30']);
+  assert.match(both.hidden, /2015-01/);
+  assert.match(both.hidden, /2027-03/);
+  // The grid's rule is by MONTH (selection-model.js outsideWindow), so a window that opens mid-month keeps that whole month,
+  // and a fold's day bounds are the first and last day of the window's own months (a leap February ends on the 29th).
+  const mid = { window: { from: '2018-01-15', to: '2024-02-10' } };
+  const fold = windowChoice(made({ source: 'fold', firstMonth: '2015-01', lastMonth: '2026-09', firstDay: '2015-01-01', lastDay: '2026-09-30' }), mid, false);
+  assert.deepEqual([fold.choice?.firstMonth, fold.choice?.lastMonth, fold.choice?.firstDay, fold.choice?.lastDay], ['2018-01', '2024-02', '2018-01-01', '2024-02-29']);
+  const folded = new URLSearchParams(pageRequest(FEED_B, chartSubject(plan([IDX], '1min', '2018-01', '2024-02')), /** @type {any} */ (fold.choice), {}, null).query);
+  assert.deepEqual([folded.get('from'), folded.get('to')], ['2018-01-01', '2024-02-29']);
+  // A day the rung does not reach is never invented: a held span that ends inside the window keeps its own last day.
+  const short = windowChoice(made({ firstMonth: '2015-01', lastMonth: '2019-03', firstDay: '2015-01-01', lastDay: '2019-03-28' }), WINDOWED, false);
+  assert.deepEqual([short.choice?.firstDay, short.choice?.lastDay], ['2018-01-01', '2019-03-28']);
+  // A row that names no days gains none.
+  const noDays = windowChoice(made({ firstDay: '', lastDay: '' }), WINDOWED, false);
+  assert.deepEqual([noDays.choice?.firstDay, noDays.choice?.lastDay], ['', '']);
+  // A rung whose own months cannot be read is left for the page request to refuse by name.
+  const unread = made({ firstMonth: '', lastMonth: 'soon' });
+  assert.equal(windowChoice(unread, WINDOWED, false).choice, unread);
+  // No window: a measured archive, no feed row, a garbage window, days that are not days, a window that ends
+  // before it opens. Nothing is clipped, whatever the toggle says.
+  const day = rungB('1day');
+  const garbage = [
+    ARCHIVED, null, undefined, {}, { window: null }, { window: { from: 20180101, to: null } }, { window: { from: 'soon', to: 'later' } },
+    { window: { from: '2018-13-45', to: '2026-09-30' } }, { window: { from: '2018-01-01', to: '2026-02-30' } }, { window: { from: '2026-09-30', to: '2018-01-01' } }
+  ];
+  for (const feed of garbage) {
+    for (const oow of [false, true]) {
+      const w = windowChoice(day, /** @type {any} */ (feed), oow);
+      assert.equal(w.choice, day);
+      assert.deepEqual([w.hidden, w.outside], ['', false]);
+    }
+  }
+});
+
+test('the bars drawn outside the window are counted by two probes, and one bar is asked by its own IST month', () => {
+  const bars = [
+    bar(at('2017-12-29', '09:15')),
+    bar(at('2017-12-31', '23:59:59')),
+    bar(at('2018-01-01', '00:00')),
+    bar(at('2022-06-15', '09:15')),
+    bar(at('2026-09-30', '15:29')),
+    bar(at('2026-10-01', '00:00')),
+    bar(at('2026-10-05', '09:15'))
+  ];
+  assert.deepEqual(outsideBars(bars, WINDOWED), { before: 2, after: 2, n: 4 });
+  assert.deepEqual(outsideBars(bars.slice(2, 5), WINDOWED), { before: 0, after: 0, n: 0 });
+  assert.deepEqual(outsideBars([], WINDOWED), { before: 0, after: 0, n: 0 });
+  assert.deepEqual(outsideBars([bars[0]], WINDOWED), { before: 1, after: 0, n: 1 });
+  assert.deepEqual(outsideBars(bars, ARCHIVED), { before: 0, after: 0, n: 0 }, 'a feed with no window has no outside');
+  assert.deepEqual(outsideBars(bars, null), { before: 0, after: 0, n: 0 });
+  assert.deepEqual(bars.map((b) => isOutside(b.t, WINDOWED)), [true, true, false, false, false, true, true]);
+  assert.equal(isOutside(bars[0].t, ARCHIVED), false);
+  assert.equal(isOutside(bars[0].t, { window: { from: 'soon', to: 'later' } }), false, 'a window that names no days has no outside');
+  // The count never walks the bars: 24,000 of them cost the same two probes.
+  let reads = 0;
+  const many = new Proxy(Array.from({ length: CHART_KEEP }, (_, i) => bar(at('2017-12-29', '09:15') + i * 3600)), {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const counted = outsideBars(many, WINDOWED);
+  assert.equal(counted.before, 63, 'the hourly bars before 01 Jan 2018 00:00 IST');
+  assert.ok(reads <= 2 * Math.ceil(Math.log2(CHART_KEEP) + 1), `${reads} bar reads for ${CHART_KEEP} bars`);
+});
+
+test('under the opt-in spot rule the note names the rule, counts the points priced from an earlier spot, and gives the oldest age', () => {
+  const bars = [bar(10), bar(20), bar(30), bar(40), bar(50), bar(60)];
+  const cells = new Map([
+    [10, { iv: 0.2, delta: 0.5, why: null, age: 0 }],
+    [20, { iv: 0.21, delta: 0.5, why: null, age: 1 }],
+    [30, { iv: 0.22, delta: 0.5, why: null, age: 7 }],
+    [40, { iv: null, delta: null, why: 'no_spot_bar', age: null }],
+    [50, { iv: 0.2, delta: 0.5, why: null, age: null }]
+  ]);
+  const ages = spotAges(bars, cells);
+  assert.deepEqual(ages, { priced: 4, earlier: 2, oldest: 7, unsaid: 1 });
+  const said = spotRuleText('prev', ages);
+  assert.match(said, /last at or before t/);
+  assert.match(said, /never a later/);
+  assert.match(said, /2 of the 4 priced point\(s\)/);
+  assert.match(said, /oldest 7 s/);
+  assert.match(said, /1 priced point\(s\) carry no spot age/);
+  // Opted in and nothing aged: the rule is still said, and the count is zero, not silence.
+  const none = spotRuleText('prev', spotAges(bars.slice(0, 1), cells));
+  assert.match(none, /last at or before t/);
+  assert.match(none, /0 of the 1 priced point\(s\)/);
+  assert.doesNotMatch(none, /oldest/);
+  // The default rule is named too; an aged point under it is a fault said out loud, never hidden.
+  assert.match(spotRuleText('exact', spotAges(bars.slice(0, 1), cells)), /exact second/);
+  assert.doesNotMatch(spotRuleText('exact', spotAges(bars.slice(0, 1), cells)), /earlier spot/);
+  assert.match(spotRuleText('exact', ages), /2 point\(s\) were priced from an earlier spot all the same/);
+  // The oldest age is the largest, wherever it stands in the bars.
+  const falling = new Map([[10, { iv: 0.2, why: null, age: 9 }], [20, { iv: 0.2, why: null, age: 2 }]]);
+  assert.deepEqual(spotAges(bars, falling), { priced: 2, earlier: 2, oldest: 9, unsaid: 0 });
+  assert.deepEqual(spotAges([], cells), { priced: 0, earlier: 0, oldest: 0, unsaid: 0 });
+  assert.deepEqual(spotAges(bars, new Map()), { priced: 0, earlier: 0, oldest: 0, unsaid: 0 });
+});
+
+test('the readout prints the hovered bar\'s spot age, and a point priced from an earlier spot is marked on the line', () => {
+  assert.equal(spotAgeWord({ why: null, age: 1 }, 'prev'), 'spot 1 s before this bar', 'one second is an earlier spot');
+  assert.equal(spotAgeWord({ why: null, age: 1 }, 'exact'), 'spot 1 s before this bar');
+  assert.equal(spotAgeWord({ why: null, age: 2 }, 'prev'), 'spot 2 s before this bar');
+  assert.equal(spotAgeWord({ why: null, age: 1250 }, 'prev'), 'spot 1,250 s before this bar');
+  assert.equal(spotAgeWord({ why: null, age: 0 }, 'prev'), 'spot at this bar\'s own second');
+  assert.equal(spotAgeWord({ why: null, age: null }, 'prev'), 'spot age not said by the server');
+  assert.equal(spotAgeWord({ why: null }, 'prev'), 'spot age not said by the server');
+  // The default rule prices at the exact second, so it adds no word — unless a cell is aged all the same.
+  assert.equal(spotAgeWord({ why: null, age: 0 }, 'exact'), '');
+  assert.equal(spotAgeWord({ why: null, age: null }, 'exact'), '');
+  assert.equal(spotAgeWord({ why: null, age: 3 }, 'exact'), 'spot 3 s before this bar');
+  assert.equal(spotAgeWord(null, 'prev'), '');
+  const bars = [bar(10), bar(20), bar(30)];
+  const cells = new Map([
+    [10, { iv: 0.2, delta: 0.25, why: null, age: 0 }],
+    [20, { iv: 0.21, delta: 0.26, why: null, age: 2 }],
+    [30, { iv: 0.22, delta: 0.27, why: null }]
+  ]);
+  assert.deepEqual(greekLine(bars, cells, 'iv').points, [{ time: 10, value: 20 }, { time: 20, value: 21, aged: true }, { time: 30, value: 22 }]);
+  assert.deepEqual(greekLine(bars, cells, 'delta').points[1], { time: 20, value: 0.26, aged: true });
+});
+
+test('a rung that is not whole says its state and names what it misses', () => {
+  const table = {
+    rungs: [
+      { feed: FEED_B, rung: '1min', kind: 'stored', stored: true, first_month: '2018-01', last_month: '2026-09', state: 'held' },
+      {
+        feed: FEED_B, rung: '5min', kind: 'derived', stored: true, derived_from: '1min', first_month: '2018-01', last_month: '2026-09', state: 'partial',
+        behind_source: {
+          months_missing: 0, months_missing_named: [], days_behind: 0, sessions_missing: 4,
+          sessions_missing_named: ['2021-02-24', '2024-03-02', '2024-05-18', '2025-10-21'], sessions_missing_exact: true
+        }
+      },
+      {
+        feed: FEED_B, rung: '15min', kind: 'derived', stored: true, first_month: '2018-01', last_month: '2026-08', state: 'partial',
+        behind_source: { months_missing: 1, months_missing_named: ['2026-09'], days_behind: 30, sessions_missing: 9, sessions_missing_named: ['2026-09-01', '2026-09-02'], sessions_missing_exact: false }
+      },
+      { feed: FEED_B, rung: '30min', kind: 'derived', stored: true, first_month: '2018-01', last_month: '2026-09', state: 'partial' },
+      { feed: FEED_B, rung: '60min', kind: 'derived', stored: true, first_month: '2018-01', last_month: '2026-09', state: 'sessions_unchecked' },
+      { feed: FEED_B, rung: '1day', kind: 'stored', stored: true, first_month: '2018-01', last_month: '2026-09', state: 'uncounted' },
+      { feed: FEED_B, rung: '3min', kind: 'derived', stored: true, first_month: '2018-01', last_month: '2026-09', state: 'something_new' },
+      { feed: FEED_B, rung: '10min', kind: 'fold', stored: false, derived_from: '1min', first_month: '2018-01', last_month: '2026-09', first_day: '2018-01-01', last_day: '2026-09-30', state: 'on_request' }
+    ]
+  };
+  /** @param {string} rung */
+  const text = (rung) => rungStateText(/** @type {any} */ (rungChoices(table, FEED_B).choices.find((c) => c.rung === rung)));
+  assert.equal(text('1min'), '', 'a whole stored rung says nothing');
+  assert.equal(text('10min'), '', 'a fold on request is whole by construction');
+  assert.equal(rungStateText(/** @type {any} */ (planChoice(plan([IDX], '1min')))), '', 'the selection\'s own rung carries no table row');
+  const five = text('5min');
+  assert.match(five, /^5min is partial/);
+  assert.match(five, /4 session\(s\)/);
+  for (const day of ['2021-02-24', '2024-03-02', '2024-05-18', '2025-10-21']) assert.ok(five.includes(day), `${day} is named`);
+  const fifteen = text('15min');
+  assert.match(fifteen, /1 month\(s\) \(2026-09\)/);
+  assert.match(fifteen, /at least 9 session\(s\)/, 'a count the server calls inexact is not printed as exact');
+  assert.match(fifteen, /30 day\(s\) behind/);
+  assert.match(text('30min'), /^30min is partial/, 'a partial rung with no detail still says it is partial');
+  assert.match(text('60min'), /sessions_unchecked/);
+  assert.match(text('1day'), /uncounted/);
+  assert.match(text('3min'), /something_new/, 'a state word this page does not know is printed as it came');
+});
+
+test('a selection that holds no bar asks the day flags for its own day bounds, at most one page of days', () => {
+  assert.deepEqual(flagSpan([], { fromDay: '2024-03-02', toDay: '2024-03-02' }), { from: '2024-03-02', to: '2024-03-02', clipped: false });
+  assert.deepEqual(flagSpan([], { fromDay: '2019-01-01', toDay: '2019-12-31' }), { from: '2019-10-01', to: '2019-12-31', clipped: true });
+  assert.deepEqual(flagSpan([], { toDay: '2019-12-31' }), { from: '2019-10-01', to: '2019-12-31', clipped: true }, 'an open start reads the newest page of days');
+  assert.equal(flagSpan([], { fromDay: '2019-01-01' }), null, 'with no last day there is no newest day to count back from');
+  assert.equal(flagSpan([], {}), null);
+  assert.equal(flagSpan([]), null);
+  assert.equal(flagSpan([], { fromDay: 'yesterday', toDay: 'today' }), null, 'garbage bounds ask nothing');
+  assert.equal(flagSpan([], { fromDay: '2024-03-05', toDay: '2024-03-02' }), null, 'a backwards span asks nothing');
+  for (const bounds of [{ fromDay: '9999-99-99', toDay: '9999-99-99' }, { toDay: '2019-02-30' }, { fromDay: '0000-00-00', toDay: '2019-03-20' }, { toDay: 20190320 }]) {
+    assert.equal(flagSpan([], /** @type {any} */ (bounds)), null, `${JSON.stringify(bounds)} names no real day, so nothing is asked and nothing throws`);
+  }
+  // Bars held outrank the bounds: the span is the page's own days.
+  const held = flagSpan([bar(at('2019-03-20', '09:15'))], { fromDay: '2019-03-01', toDay: '2019-03-28' });
+  assert.deepEqual(held, { from: '2019-03-20', to: '2019-03-20', clipped: false });
+  // And a flagged day of a selection with no bar is listed at its own midnight, so the panel can say it.
+  const cells = dayBands([rec('2024-03-02', 'R', { held: { bars: 0, rung: '1min' } })]).cells;
+  const marks = flagMarkers(cells, [], []);
+  assert.deepEqual(marks.map((m) => [m.day, m.time, m.kind]), [['2024-03-02', at('2024-03-02', '00:00'), 'store_gap']]);
+});
+
+test('an empty band slot sits on the rung\'s own bucket grid, which the held bars carry, not on the UTC grid', () => {
+  // Hour buckets anchored at the session's open: 09:15, 10:15, then nothing until 13:15.
+  const day = '2021-06-01';
+  const bars = [bar(at(day, '09:15')), bar(at(day, '10:15')), bar(at(day, '13:15'))];
+  const band = { kind: /** @type {'gap'} */ ('gap'), from: at(day, '11:15'), to: at(day, '13:15'), day, label: '', detail: '' };
+  assert.deepEqual(bandSlots([band], bars, 3600).map((s) => s.time), [at(day, '11:15'), at(day, '12:15')]);
+  // A band that does not start on a bucket edge still fills buckets of the held grid.
+  const halt = { kind: /** @type {'halt'} */ ('halt'), from: at(day, '11:20'), to: at(day, '13:00'), day, label: '', detail: '' };
+  assert.deepEqual(bandSlots([halt], bars, 3600).map((s) => s.time), [at(day, '12:15')]);
+  // Two-minute and ten-minute buckets anchored at 09:15 are off the UTC grid too.
+  for (const [secs, first, second] of [[120, '09:21', '09:23'], [600, '09:25', '09:35']]) {
+    const held = [bar(at(day, '09:15')), bar(at(day, '09:45'))];
+    const b = { kind: /** @type {'halt'} */ ('halt'), from: at(day, String(first)), to: at(day, String(first)) + 2 * Number(secs), day, label: '', detail: '' };
+    assert.deepEqual(bandSlots([b], held, Number(secs)).map((s) => s.time), [at(day, String(first)), at(day, String(second))], `${secs}s buckets`);
+  }
+});
+
+test('at the day rung the closing auction shades no candle: every session has one, and the halt still shades its day', () => {
+  const t = at('2026-08-03', '09:15');
+  const bars = [bar(t), bar(t + 86_400)];
+  const cas = { kind: /** @type {'cas'} */ ('cas'), from: at('2026-08-03', '15:30'), to: at('2026-08-03', '15:41'), day: '2026-08-03', label: '', detail: '' };
+  assert.deepEqual(bandSlots([cas], bars, 86_400), []);
+  const halt = { kind: /** @type {'halt'} */ ('halt'), from: at('2026-08-03', '10:00'), to: at('2026-08-03', '11:00'), day: '2026-08-03', label: '', detail: '' };
+  assert.deepEqual(bandSlots([cas, halt], bars, 86_400), [{ time: t, kind: 'halt' }]);
+  // On an intraday rung the auction's minutes are shaded as before.
+  const minute = [bar(at('2026-08-03', '15:29')), bar(at('2026-08-03', '15:30')), bar(at('2026-08-03', '15:31'))];
+  assert.deepEqual(bandSlots([cas], minute, 60), [{ time: at('2026-08-03', '15:30'), kind: 'cas' }, { time: at('2026-08-03', '15:31'), kind: 'cas' }]);
+});
+
+test('the panel clips every rung by the operator\'s window, labels what lies outside it, and prints the spot rule and age', () => {
+  const panel = dbSource('../src/routes/db/DbChart.svelte');
+  assert.match(panel, /for \(const c of \[own, \.\.\.others\]\) \{\s+const w = windowChoice\(c, feedRow, oow\);/, 'every rung on offer goes through the window, the selection\'s own included');
+  assert.match(panel, /const choices = \$derived\(offered\.list\);/, 'and only what came through it is offered');
+  assert.doesNotMatch(panel, /return \[base, \.\.\.others\]\.sort/, 'the table\'s rows are never offered as they came');
+  assert.match(panel, /const oow = \$derived\(Boolean\(db\.oow\)\)/);
+  assert.match(panel, /outsideBars\(view\.bars, view\.feedRow\)/);
+  assert.match(panel, /outside your window/);
+  assert.match(panel, /isOutside\(shown\.t, view\.feedRow\)/, 'the readout labels a bar outside the window');
+  assert.match(panel, /spotAgeWord\(shownGreek, view\.asof\)/, 'the readout prints the hovered bar\'s spot age');
+  assert.match(panel, /title=\{spotAgeText\(shownGreek\)\}/, 'in the words the bar grid uses');
+  assert.match(panel, /spotRuleText\(view\.asof, spotAges\(view\.bars, view\.greekAt\)\)/, 'the IV note names the spot rule in force');
+  assert.match(panel, /rungStateText\(choice\)/);
+  assert.match(panel, /flagSpan\(page\.bars, s\.held\.length === 0 \? s\.bounds : undefined\)/);
+  assert.doesNotMatch(panel, /\{:else if subject\.why \|\| view\.why\}/, 'a first page that failed keeps Reload on the page');
 });

@@ -26,6 +26,16 @@
    * `pull::fold`); greeks from `/greeks.json`; halts, auctions and day flags
    * from `/dayflags.json`. The readout prints the paisa integers the routes
    * sent, never a number that has been through the chart library's floats.
+   *
+   * THE OPERATOR'S WINDOW (D-3338). Every rung on offer is clipped to the
+   * reader's window unless the page's 'outside your window' toggle is on;
+   * what is held back is said, and with the toggle on the bars drawn outside
+   * the window are counted and labelled, in the header and in the readout.
+   *
+   * THE SPOT RULE (D-3328). Under the opt-in 'last at or before t' the IV
+   * note names the rule, counts the points priced from an earlier spot and
+   * gives the oldest age; those points are drawn in the warning colour and
+   * the readout prints the hovered bar's own spot age.
    */
   import { untrack } from 'svelte';
   import { ask } from '$lib/ask.js';
@@ -34,6 +44,7 @@
   import { fmt } from '$lib/db/notes-labels.js';
   import { paisaText } from '$lib/db/bars-plan.js';
   import { dayflagsUrl } from '$lib/db/dayflags.js';
+  import { spotAgeText } from '$lib/db/notes-options.js';
   import { readWindowPage } from '$lib/database-pages.js';
   import { readGreeks, ivText, greekText, GREEK_WHY } from '$lib/greeks.js';
   import { dayLabel, monthLabel, barTimeLabel, istMonth } from '$lib/dates.js';
@@ -41,7 +52,8 @@
   import {
     chartSubject, planChoice, rungChoices, sourcesUrl, pageRequest, pageBars, joinBars, keepRefusal, rupees,
     greekPlan, fileGreeks, greekLine, flagSpan, dayBands, holeBands, bandSlots, flagMarkers, tradeDriven, alphaHex,
-    costText, BAND_KINDS, GREEK_LINES, CHART_AUTO_ALL, CHART_KEEP, CHART_PAGE, PAN_REQUESTS, DAYFLAGS_PAGE_DAYS
+    costText, BAND_KINDS, GREEK_LINES, CHART_AUTO_ALL, CHART_KEEP, CHART_PAGE, PAN_REQUESTS, DAYFLAGS_PAGE_DAYS,
+    windowChoice, outsideBars, isOutside, spotAges, spotRuleText, spotAgeWord, rungStateText
   } from '$lib/db/chart.js';
 
   /** Where this browser remembers whether the panel is open. */
@@ -73,7 +85,8 @@
     more: /** @type {number | null} */ (null), total: /** @type {number | null} */ (null), hasOi: false,
     notes: /** @type {string[]} */ ([]), why: '', fit: 0, pages: 0, requests: 0,
     last: /** @type {{requests: number, ms: number, kind: string} | null} */ (null),
-    greeks: { asked: 0, skipped: 0 }, rate: /** @type {any} */ (null), flagsWhy: '', flagDays: 0
+    greeks: { asked: 0, skipped: 0 }, rate: /** @type {any} */ (null), flagsWhy: '', flagDays: 0,
+    asof: 'exact', feedRow: /** @type {any} */ (null)
   });
 </script>
 
@@ -104,13 +117,46 @@
   /** The selection's own rung, from the census plan: charted with no rung table. */
   const base = $derived(subject.key ? planChoice(db.barQueryPlan) : null);
   const tableKey = $derived(subject.key && feed ? `${feed}|${sourcesUrl(subject)}` : '');
-  /** Every rung on offer, finest first: the selection's own, then the server's others. */
-  const choices = $derived.by(() => {
-    if (!base) return [];
-    const others = table.key === tableKey ? table.choices.filter((/** @type {any} */ c) => c.rung !== base.rung) : [];
-    return [base, ...others].sort((a, b) => a.secs - b.secs);
+  /** The active feed's own `/feeds.json` row: where its operator window is written. */
+  const feedRow = $derived(db.activeFeed?.wire === feed ? db.activeFeed : null);
+  /** Whether the page shows months outside the operator's window (D-3338). */
+  const oow = $derived(Boolean(db.oow));
+  /**
+   * EVERY RUNG ON OFFER, finest first: the selection's own, then the server's
+   * others — each bounded by the operator's window unless the reader asked
+   * for what lies outside it. What the window holds back is kept, to be said.
+   */
+  const offered = $derived.by(() => {
+    /** @type {any[]} */
+    const list = [];
+    /** @type {Map<string, string>} */
+    const hidden = new Map();
+    /** @type {string[]} */
+    const unoffered = [];
+    /** @type {Set<string>} */
+    const outside = new Set();
+    if (!base) return { list, hidden, unoffered, outside };
+    const rows = table.key === tableKey ? table.choices : [];
+    const others = rows.filter((/** @type {any} */ c) => c.rung !== base.rung);
+    // THE SELECTION'S OWN RUNG is read from the census plan, and takes how
+    // whole it is from the server's row of the same rung once that is read.
+    const row = rows.find((/** @type {any} */ c) => c.rung === base.rung && c.source === 'window');
+    const own = row ? { ...base, state: row.state, behind: row.behind, derivedFrom: row.derivedFrom } : base;
+    for (const c of [own, ...others]) {
+      const w = windowChoice(c, feedRow, oow);
+      if (!w.choice) {
+        unoffered.push(w.hidden);
+        continue;
+      }
+      list.push(w.choice);
+      if (w.hidden) hidden.set(w.choice.rung, w.hidden);
+      if (w.outside) outside.add(w.choice.rung);
+    }
+    list.sort((a, b) => a.secs - b.secs);
+    return { list, hidden, unoffered, outside };
   });
-  const choice = $derived(choices.find((c) => c.rung === rungPick) ?? base);
+  const choices = $derived(offered.list);
+  const choice = $derived(choices.find((c) => c.rung === rungPick) ?? choices.find((c) => c.rung === base?.rung) ?? null);
   const bounds = $derived(db.barBounds ?? {});
   /** The identity of what the chart reads: series, rung, source, months, bounds, and the grid's own row set. */
   const setKey = $derived(
@@ -135,7 +181,7 @@
       more: /** @type {number | null} */ (null), total: /** @type {number | null} */ (null), notes: /** @type {string[]} */ ([]),
       why: '', fit: 0, pages: 0, requests: 0, last: /** @type {any} */ (null), asked: 0, skipped: 0, rate: /** @type {any} */ (null),
       flagsWhy: '', feed: '', subject: /** @type {any} */ (null), choice: /** @type {any} */ (null), bounds: /** @type {any} */ ({}),
-      asof: 'exact', started: false, busy: false, pageWhy: ''
+      asof: 'exact', feedRow: /** @type {any} */ (null), started: false, busy: false, pageWhy: ''
     };
   }
 
@@ -164,13 +210,16 @@
     const slots = bandSlots(all, s.held, secs);
     const lo = s.held.length ? s.held[0].t : 0;
     const hi = s.held.length ? s.held[s.held.length - 1].t + secs : 0;
+    // A SELECTION THAT HOLDS NO BAR still lists what its days' records say:
+    // there is no bar to clip a band to, so every band of the days asked stays.
+    const none = s.held.length === 0;
     view = {
       key: s.key, bars: s.held, byT: new Map(s.held.map((b) => [b.t, b])), greekAt: s.greekAt, slots,
-      bands: all.filter((b) => b.to > lo && b.from < hi).sort((a, b) => b.from - a.from),
+      bands: all.filter((b) => none || (b.to > lo && b.from < hi)).sort((a, b) => b.from - a.from),
       markers: flagMarkers(cells, s.held, slots), holesMore: holes.more, more: s.more, total: s.total,
       hasOi: s.held.some((b) => b.oi !== null), notes: [...new Set(s.pageWhy ? [s.pageWhy, ...s.notes] : s.notes)], why: s.why, fit: s.fit, pages: s.pages,
       requests: s.requests, last: s.last, greeks: { asked: s.asked, skipped: s.skipped }, rate: s.rate,
-      flagsWhy: s.flagsWhy, flagDays: s.days.size
+      flagsWhy: s.flagsWhy, flagDays: s.days.size, asof: s.asof, feedRow: s.feedRow
     };
   }
 
@@ -246,7 +295,9 @@
       s.asked += plan.rows.length;
       s.skipped += plan.skipped;
 
-      const span = flagSpan(page.bars);
+      // A SELECTION WITH NO BAR asks the day flags for its own day bounds, so
+      // a session the store holds nothing of is named, not passed over.
+      const span = flagSpan(page.bars, s.held.length === 0 ? s.bounds : undefined);
       if (span) {
         try {
           const response = await counted(dayflagsUrl(s.feed, s.subject.key, span.from, span.to), { cache: 'no-store', signal });
@@ -350,6 +401,7 @@
       set.choice = choice;
       set.bounds = { ...bounds };
       set.asof = db.spotAsof === 'prev' ? 'prev' : 'exact';
+      set.feedRow = feedRow;
       view = { ...EMPTY, key };
       void openLoad();
     });
@@ -480,7 +532,7 @@
     built = {
       chart: made, candle, band, oi, iv, greek, marks,
       colours: { halt: alphaHex(c.warn, 0.2), gap: alphaHex(c.down, 0.2), cas: alphaHex(c.info, 0.18) },
-      tones: { bad: c.down, warn: c.warn, info: c.info, quiet: c.faint, ok: c.up }
+      tones: { bad: c.down, warn: c.warn, info: c.info, quiet: c.faint, ok: c.up }, aged: c.warn
     };
     return () => {
       built = null;
@@ -512,12 +564,16 @@
     b.candle.setData(candles);
     b.band.setData(v.slots.map((/** @type {any} */ s) => ({ time: s.time, value: 1, color: b.colours[s.kind] })));
     b.oi?.setData(v.bars.filter((/** @type {any} */ x) => x.oi !== null).map((/** @type {any} */ x) => ({ time: x.t, value: x.oi })));
-    b.iv?.setData(greekLine(v.bars, v.greekAt, 'iv').points);
+    // A POINT PRICED FROM AN EARLIER SPOT is drawn in the warning colour (D-3328).
+    const drawn = (/** @type {{time: number, value: number, aged?: boolean}[]} */ points) =>
+      points.map((p) => (p.aged ? { time: p.time, value: p.value, color: b.aged } : p));
+    b.iv?.setData(drawn(greekLine(v.bars, v.greekAt, 'iv').points));
     if (b.greek) {
-      b.greek.setData(greekLine(v.bars, v.greekAt, field).points);
+      b.greek.setData(drawn(greekLine(v.bars, v.greekAt, field).points));
       b.greek.applyOptions({ title: GREEK_LINES.find((g) => g.field === field)?.label ?? field });
     }
-    b.marks.setMarkers(v.markers.map((/** @type {any} */ m) => ({
+    // A MARK NEEDS A CANDLE OR A SLOT: with no bar held the flagged days are listed under the chart only.
+    b.marks.setMarkers((v.bars.length === 0 ? [] : v.markers).map((/** @type {any} */ m) => ({
       time: m.time, position: 'aboveBar', shape: 'square', color: b.tones[m.tone] ?? b.tones.quiet, text: m.word
     })));
     if (v.fit !== fitSeen && v.bars.length > 0) {
@@ -530,6 +586,16 @@
   /** The bar the readout prints: the one under the crosshair, else the newest held. */
   const shown = $derived((hover !== null ? view.byT.get(hover) : null) ?? view.bars[view.bars.length - 1] ?? null);
   const shownGreek = $derived(shown ? (view.greekAt.get(shown.t) ?? null) : null);
+  /** Where the hovered bar's spot came from, under the spot rule in force. */
+  const shownAge = $derived(spotAgeWord(shownGreek, view.asof));
+  /** The spot rule in force and how many points it aged, for the IV note. */
+  const spotNote = $derived(spotRuleText(view.asof, spotAges(view.bars, view.greekAt)));
+  /** How many of the bars drawn lie outside the operator's window: two probes. */
+  const outsideN = $derived(outsideBars(view.bars, view.feedRow));
+  /** The operator's window as the notes print it. */
+  const windowText = $derived(view.feedRow?.window ? `${view.feedRow.window.from} to ${view.feedRow.window.to}` : '');
+  /** What the chosen rung misses, when the server says it is not whole. */
+  const stateNote = $derived(rungStateText(choice));
   const summary = $derived(
     view.bars.length === 0
       ? `Chart of ${subject.key || 'the selection'}: no bar is drawn`
@@ -540,7 +606,11 @@
   const bandWord = (/** @type {string} */ kind) => BAND_KINDS.find((k) => k.kind === kind)?.word ?? kind;
   /** How a rung reads in the picker: its name, and where its bars come from. @param {any} c */
   const rungText = (c) =>
-    c.source === 'fold' ? `${c.rung} — folded from ${c.from || 'the stored rung'} by the server` : c.rung === base?.rung ? `${c.rung} — this selection` : `${c.rung} — ${c.kind || 'stored'}`;
+    c.source === 'fold'
+      ? `${c.rung} — folded from ${c.from || 'the stored rung'} by the server`
+      : c.rung === base?.rung
+        ? `${c.rung} — this selection`
+        : `${c.rung} — ${c.kind || 'stored'}${rungStateText(c) ? `, ${c.state}` : ''}`;
 </script>
 
 {#if showing}
@@ -549,16 +619,18 @@
       <h3>Chart</h3>
       {#if !open}
         <span class="csub">hidden; nothing is read or drawn while it is</span>
-      {:else if subject.why || view.why}
+      {:else if subject.why || !choice}
         <span class="csub"></span>
       {:else}
         <span class="csub" role="status">
-          {#if view.bars.length === 0}
-            {busy ? 'reading the newest page…' : 'no bar is held for this selection'}
+          {#if view.why}
+            not drawn; choose another rung or press Reload
+          {:else if view.bars.length === 0}
+            {busy ? 'reading the newest page…' : 'no bar is held for this selection'}{#if !busy && view.bands.length + view.markers.length > 0}; what its days' own records say is listed below{/if}
           {:else}
             {fmt(view.bars.length)}{view.total !== null ? ` of ${fmt(view.total)}` : ''}
             {choice?.source === 'fold' ? 'folded bucket(s)' : 'bar(s)'} drawn,
-            {when(view.bars[0].t)} to {when(view.bars[view.bars.length - 1].t)} IST{#if busy} · reading…{/if}
+            {when(view.bars[0].t)} to {when(view.bars[view.bars.length - 1].t)} IST{#if outsideN.n > 0}{' · '}<b class="cwarn">{fmt(outsideN.n)} outside your window</b>{/if}{#if busy} · reading…{/if}
           {/if}
         </span>
         <label class="cpick">
@@ -591,10 +663,15 @@
     {#if open}
       {#if subject.why}
         <p class="cwhy" role="status">The chart is not drawn: {subject.why}.</p>
+      {:else if !choice}
+        <p class="cwhy" role="status">
+          The chart is not drawn: {offered.unoffered[0] ?? `the rung ${db.barQueryPlan?.timeframe ?? ''} has no length this page knows, so there is nothing to place on a time axis`}.
+        </p>
       {:else if libWhy}
         <p class="cwhy" role="status">The chart is not drawn: the chart library did not load ({libWhy}).</p>
       {:else if view.why}
         <p class="cwhy" role="status">The chart is not drawn: {view.why}</p>
+        {#if offered.hidden.get(choice.rung)}<p class="cwhy">{offered.hidden.get(choice.rung)}.</p>{/if}
       {:else}
         <div class="chost" bind:this={host} style:height="{hostH}px" role="img" aria-label={summary}></div>
         {#if shown}
@@ -605,9 +682,11 @@
             {#if shown.oi !== null}<span>OI {fmt(shown.oi)}</span>{/if}
             {#if shown.seconds !== null}<span title="How many stored bars this bucket folds.">{fmt(shown.seconds)} stored bar(s)</span>{/if}
             {#if shown.phase && shown.phase !== 'continuous'}<span class="cphase">{shown.phase}</span>{/if}
+            {#if isOutside(shown.t, view.feedRow)}<span class="cwarn" title="This bar's month lies outside your window ({windowText}); it is drawn because ‘outside your window’ is on.">outside your window</span>{/if}
             {#if subject.option}
               {#if shownGreek && shownGreek.why === null}
                 <span>IV {ivText(shownGreek.iv)}%</span>
+                {#if shownAge}<span class:cwarn={(shownGreek.age ?? 0) > 0} title={spotAgeText(shownGreek)}>{shownAge}</span>{/if}
                 {#each GREEK_LINES as g (g.field)}<span>{g.label} {greekText(shownGreek[g.field], g.digits)}</span>{/each}
               {:else if shownGreek}
                 <span class="cphase" title={whyText(shownGreek.why)}>IV and greeks: {shownGreek.why}</span>
@@ -628,6 +707,21 @@
           {#if view.more !== null}
             <li>Earlier bars are not read yet: pan to the left edge or press Load earlier for one more page.</li>
           {/if}
+          {#if outsideN.n > 0}
+            <li class="cwarn">
+              {fmt(outsideN.n)} of the {fmt(view.bars.length)} bar(s) drawn are outside your window ({windowText}):
+              {fmt(outsideN.before)} before it opens, {fmt(outsideN.after)} after it closes. They are drawn because
+              ‘outside your window’ is on; the readout labels each one.
+            </li>
+          {:else if offered.outside.has(choice.rung)}
+            <li>
+              {choice.rung} holds months outside your window ({windowText}) and ‘outside your window’ is on: none of the
+              bars drawn so far lie there; an earlier page may, and will be labelled.
+            </li>
+          {/if}
+          {#if offered.hidden.get(choice.rung)}<li>{offered.hidden.get(choice.rung)}.</li>{/if}
+          {#each offered.unoffered as said (said)}<li>{said}.</li>{/each}
+          {#if stateNote}<li class="cwarn">{stateNote}</li>{/if}
           {#if choice?.source === 'fold'}
             <li>
               {choice.rung} is folded by the server from {choice.from || 'the stored rung'} on request (open first, high max,
@@ -642,6 +736,7 @@
                 <span title={whyText(why)}>{`${fmt(n)} not priced: ${why}. `}</span>
               {/each}
               {#if view.greeks.skipped > 0}{fmt(view.greeks.skipped)} instant(s) were not asked: a page asks at most what its requests hold.{/if}
+              <span class:cwarn={view.asof === 'prev'}>{spotNote}</span>
               {#if view.rate?.state && view.rate.state !== 'loaded'}The risk-free rate table is {view.rate.state}: {view.rate.error ?? ''}{/if}
             </li>
           {/if}

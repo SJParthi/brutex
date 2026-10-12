@@ -21,6 +21,17 @@
  * holds. The chart keeps at most [`CHART_KEEP`] bars and refuses the page that
  * would pass it, by name. Joining a page is O(bars kept), bounded by that
  * ceiling; the hover readout is one Map probe.
+ *
+ * THE OPERATOR'S WINDOW BOUNDS EVERY RUNG (D-3338). The rung table names the
+ * months a rung holds, inside the reader's window or not. [`windowChoice`]
+ * clips every rung on offer to the window by the bar grid's own rule
+ * (`outsideWindow`), unless the reader turned 'outside your window' on — and
+ * then the bars drawn outside it are counted ([`outsideBars`]) and labelled.
+ *
+ * THE SPOT RULE IS SAID (D-3328). Under the opt-in 'last at or before t' a
+ * point may be priced from an earlier spot: [`spotAges`] counts those points
+ * and finds the oldest, [`spotRuleText`] is the sentence the panel prints,
+ * and [`spotAgeWord`] is the hovered bar's own age.
  */
 import { TF_SECS, fmt } from './notes-labels.js';
 import { windowQuery, istInstant, istDayKey, monthSpan, MAX_WINDOW_MONTHS, WINDOW_PAGE_MAX } from './bars-plan.js';
@@ -28,6 +39,7 @@ import { cellOf, DAYFLAGS_PAGE_DAYS } from './dayflags.js';
 import { parseKey } from '../instrument.js';
 import { GREEK_CHUNK, greekKey } from '../greeks.js';
 import { ownMonth } from '../moneyness.js';
+import { outsideWindow } from './selection-model.js';
 
 /** Stored bars one page asks for: the window route's own maximum. */
 export const CHART_PAGE = WINDOW_PAGE_MAX;
@@ -136,6 +148,16 @@ export const sourcesUrl = (subject) => `/sources.json?${instrumentQuery(subject)
  * @property {string} firstMonth @property {string} lastMonth
  * @property {string} firstDay @property {string} lastDay
  * @property {string} state the server's word for how whole the rung is
+ * @property {string} [derivedFrom] the rung a derived or folded rung is made from
+ * @property {RungBehind | null} [behind] what a rung that is not whole misses
+ */
+
+/**
+ * @typedef {object} RungBehind what the server's `behind_source` names
+ * @property {number} months @property {string[]} monthsNamed
+ * @property {number} sessions @property {string[]} sessionsNamed
+ * @property {boolean} exact `false` where the server calls its session count a floor
+ * @property {number} daysBehind
  */
 
 /**
@@ -150,7 +172,7 @@ export function planChoice(plan) {
   if (!plan || !secs) return null;
   return {
     rung: plan.timeframe, secs, source: 'window', kind: 'stored', tag: '', from: '',
-    firstMonth: plan.from, lastMonth: plan.to, firstDay: '', lastDay: '', state: ''
+    firstMonth: plan.from, lastMonth: plan.to, firstDay: '', lastDay: '', state: '', derivedFrom: '', behind: null
   };
 }
 
@@ -188,11 +210,190 @@ export function rungChoices(body, feed) {
       from: fold ? String(r.derived_from ?? '') : '',
       firstMonth: month(r.first_month), lastMonth: month(r.last_month),
       firstDay: typeof r.first_day === 'string' ? r.first_day : '', lastDay: typeof r.last_day === 'string' ? r.last_day : '',
-      state: String(r.state ?? '')
+      state: String(r.state ?? ''), derivedFrom: typeof r.derived_from === 'string' ? r.derived_from : '', behind: behindOf(r.behind_source)
     });
   }
   return { choices: [...by.values()].sort((a, b) => a.secs - b.secs), skipped };
 }
+
+/** A count the server sent, or 0. @param {unknown} v */
+const count = (v) => (typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : 0);
+/** The strings of a list the server sent. @param {unknown} v @returns {string[]} */
+const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+
+/** What a rung row's `behind_source` names, or `null` when the row has none. @param {any} b @returns {RungBehind | null} */
+function behindOf(b) {
+  if (!b || typeof b !== 'object') return null;
+  return {
+    months: count(b.months_missing), monthsNamed: strings(b.months_missing_named),
+    sessions: count(b.sessions_missing), sessionsNamed: strings(b.sessions_missing_named),
+    exact: b.sessions_missing_exact !== false, daysBehind: count(b.days_behind)
+  };
+}
+
+/** The states in which a rung is whole: what the feed holds, or folds on request. */
+const WHOLE_STATES = new Set(['', 'held', 'on_request']);
+/** What a state word the server uses means, for the words this page knows. */
+const STATE_SAYS = new Map([
+  ['uncounted', 'not every month of it is counted in the census'],
+  ['sessions_unchecked', 'its sessions could not be set against those of the rung it is made from'],
+  ['unexpected', 'this feed is not expected to hold it at all']
+]);
+
+/** A named list and how many more there are. @param {string[]} named @param {number} n */
+const namedList = (named, n) =>
+  named.length === 0 ? '' : ` (${named.join(', ')}${n > named.length ? `, and ${fmt(n - named.length)} more` : ''})`;
+
+/**
+ * WHAT A RUNG THAT IS NOT WHOLE SAYS: the server's own state word, and the
+ * months and sessions its `behind_source` names as missing. `''` for a rung
+ * the feed holds whole or folds on request. A word this page does not know is
+ * printed as it came, never dropped.
+ *
+ * @param {RungChoice | null | undefined} choice
+ */
+export function rungStateText(choice) {
+  const state = choice?.state ?? '';
+  if (!choice || WHOLE_STATES.has(state)) return '';
+  const b = choice.behind ?? null;
+  /** @type {string[]} */
+  const misses = [];
+  if (b && b.months > 0) misses.push(`${fmt(b.months)} month(s)${namedList(b.monthsNamed, b.months)}`);
+  if (b && b.sessions > 0) misses.push(`${b.exact ? '' : 'at least '}${fmt(b.sessions)} session(s)${namedList(b.sessionsNamed, b.sessions)}`);
+  const source = choice.derivedFrom || 'the rung it is made from';
+  const said = [
+    ...(STATE_SAYS.has(state) ? [/** @type {string} */ (STATE_SAYS.get(state))] : []),
+    ...(misses.length ? [`it misses ${misses.join(' and ')} that ${source} holds`] : []),
+    ...(b && b.daysBehind > 0 ? [`it is ${fmt(b.daysBehind)} day(s) behind ${source}`] : [])
+  ];
+  return `${choice.rung} is ${state}${said.length ? `: ${said.join('; ')}` : ''}. The chart draws the bars held; where one is missing it draws none.`;
+}
+
+/**
+ * A real `YYYY-MM-DD` calendar day, or `''`: a string of the right shape that
+ * names no day (a thirteenth month, the 30th of February) is not one, so no
+ * garbage bound ever reaches date arithmetic.
+ * @param {unknown} day
+ */
+function dayOf(day) {
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return '';
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === day ? day : '';
+}
+/** The month of a real `YYYY-MM-DD` day, or `''`. @param {unknown} day */
+const monthOfDay = (day) => dayOf(day).slice(0, 7);
+/** Whether a string is a `YYYY-MM` month. @param {unknown} month */
+const isMonth = (month) => typeof month === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
+/** The last day of a `YYYY-MM` month. @param {string} month */
+const lastDayOf = (month) => new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
+/** The month after a `YYYY-MM` month. @param {string} month */
+const monthAfter = (month) => new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 1)).toISOString().slice(0, 7);
+
+/**
+ * The first and last month of a feed's operator window, or `null` where the
+ * feed row carries none (a measured archive is not a window, D-3338).
+ * @param {any} feedRow a `/feeds.json` row
+ */
+function windowMonths(feedRow) {
+  const lo = monthOfDay(feedRow?.window?.from);
+  const hi = monthOfDay(feedRow?.window?.to);
+  return lo && hi && lo <= hi ? { lo, hi } : null;
+}
+
+/**
+ * THE OPERATOR'S WINDOW OVER ONE RUNG (D-3338, operator answer 6).
+ *
+ * The server's rung table names every month a rung holds, including months
+ * filed before the reader's window. Those are hidden by default and shown
+ * only by the page's 'outside your window' toggle (`oow`), so every rung the
+ * chart offers goes through here — the selection's own included, one path.
+ *
+ * - No window on the feed row (or one whose days are not real days): the rung as it came.
+ * - Wholly inside the window: the same object, nothing said.
+ * - Reaching outside with the toggle OFF: clipped to the window's months by
+ *   the bar grid's own rule (`outsideWindow`, by month), and `hidden` says
+ *   which months are held back. A rung wholly outside is not offered (`null`).
+ * - Reaching outside with the toggle ON: read whole, and `outside` is true so
+ *   the panel labels what it draws there.
+ *
+ * @param {RungChoice} choice
+ * @param {any} feedRow the active feed's `/feeds.json` row, or nothing
+ * @param {boolean} oow whether months outside the window are shown
+ * @returns {{choice: RungChoice | null, hidden: string, outside: boolean}}
+ */
+export function windowChoice(choice, feedRow, oow) {
+  const w = windowMonths(feedRow);
+  // A RUNG WHOSE OWN MONTHS CANNOT BE READ is not clipped to anything: the
+  // page request refuses it by name, which is the louder answer.
+  if (!w || !isMonth(choice.firstMonth) || !isMonth(choice.lastMonth)) return { choice, hidden: '', outside: false };
+  const before = outsideWindow(choice.firstMonth, feedRow) && choice.firstMonth < w.lo;
+  const after = outsideWindow(choice.lastMonth, feedRow) && choice.lastMonth > w.hi;
+  if (!before && !after) return { choice, hidden: '', outside: false };
+  if (oow) return { choice, hidden: '', outside: true };
+  const span = `${feedRow.window.from} to ${feedRow.window.to}`;
+  const firstMonth = before ? w.lo : choice.firstMonth;
+  const lastMonth = after ? w.hi : choice.lastMonth;
+  if (firstMonth > lastMonth) {
+    return {
+      choice: null, outside: false,
+      hidden: `${choice.rung} is held only for ${choice.firstMonth} to ${choice.lastMonth}, outside your window (${span}), so it is not offered: turn on 'outside your window' to chart it`
+    };
+  }
+  const held = [
+    ...(before ? [`from ${choice.firstMonth}, before it opens`] : []),
+    ...(after ? [`to ${choice.lastMonth}, after it closes`] : [])
+  ].join(' and ');
+  // A DAY BOUND IS NEVER INVENTED: a row that names no day gains none, and a
+  // held span that ends inside the window keeps its own end.
+  const floor = `${w.lo}-01`;
+  const ceil = lastDayOf(w.hi);
+  return {
+    choice: {
+      ...choice, firstMonth, lastMonth,
+      firstDay: choice.firstDay && choice.firstDay < floor ? floor : choice.firstDay,
+      lastDay: choice.lastDay && choice.lastDay > ceil ? ceil : choice.lastDay
+    },
+    outside: false,
+    hidden: `${choice.rung} is also held ${held} — outside your window (${span}). Those months are not drawn: turn on 'outside your window' to see them, labelled`
+  };
+}
+
+/** How many of `bars` (ascending) are stamped before `t`. O(log n). @param {{t: number}[]} bars @param {number} t */
+function barsBefore(bars, t) {
+  let lo = 0;
+  let hi = bars.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (bars[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * HOW MANY OF THE BARS HELD LIE OUTSIDE THE OPERATOR'S WINDOW, by the same
+ * month rule: before the window's first month, or after its last (IST). Two
+ * binary probes over bars that are already in order, whatever is held.
+ *
+ * @param {{t: number}[]} bars oldest first
+ * @param {any} feedRow
+ * @returns {{before: number, after: number, n: number}}
+ */
+export function outsideBars(bars, feedRow) {
+  const w = windowMonths(feedRow);
+  const opens = w ? istInstant(`${w.lo}-01`, '00:00') : null;
+  const closes = w ? istInstant(`${monthAfter(w.hi)}-01`, '00:00') : null;
+  if (opens === null || closes === null || bars.length === 0) return { before: 0, after: 0, n: 0 };
+  const before = barsBefore(bars, opens);
+  const after = bars.length - barsBefore(bars, closes);
+  return { before, after, n: before + after };
+}
+
+/**
+ * Whether one bar lies outside the operator's window: its IST month, asked of
+ * the bar grid's own rule. @param {number} t unix seconds @param {any} feedRow
+ */
+export const isOutside = (t, feedRow) => windowMonths(feedRow) !== null && outsideWindow(istDayKey(t * 1000).slice(0, 7), feedRow);
 
 /**
  * @typedef {{fromDay?: string, toDay?: string, fromTime?: string, toTime?: string}} Bounds
@@ -438,7 +639,7 @@ export function fileGreeks(rows, cells, at) {
  * @param {string} field `iv` or a greek's field
  */
 export function greekLine(bars, at, field) {
-  /** @type {{time: number, value: number}[]} */
+  /** @type {{time: number, value: number, aged?: boolean}[]} */
   const points = [];
   /** @type {Map<string, number>} */
   const whys = new Map();
@@ -451,7 +652,9 @@ export function greekLine(bars, at, field) {
     }
     const v = cell[field];
     if (cell.why === null && typeof v === 'number' && Number.isFinite(v)) {
-      points.push({ time: b.t, value: field === 'iv' ? v * 100 : v });
+      const point = { time: b.t, value: field === 'iv' ? v * 100 : v };
+      // A POINT PRICED FROM AN EARLIER SPOT IS MARKED, so the line can draw it apart (D-3328).
+      points.push(typeof cell.age === 'number' && cell.age > 0 ? { ...point, aged: true } : point);
     } else {
       const why = String(cell.why ?? 'no_figure');
       whys.set(why, (whys.get(why) ?? 0) + 1);
@@ -461,17 +664,91 @@ export function greekLine(bars, at, field) {
 }
 
 /**
+ * THE SPOT AGES OF THE POINTS DRAWN (D-3328): how many bars are priced, how
+ * many of those from a spot EARLIER than the bar (`earlier`), the largest
+ * such age in seconds (`oldest`), and how many priced cells carry no age at
+ * all (`unsaid`). O(bars held), bounded by [`CHART_KEEP`].
+ *
+ * @param {ChartBar[]} bars
+ * @param {Map<number, any>} at
+ */
+export function spotAges(bars, at) {
+  let priced = 0;
+  let earlier = 0;
+  let oldest = 0;
+  let unsaid = 0;
+  for (const b of bars) {
+    const cell = at.get(b.t);
+    if (!cell || cell.why !== null) continue;
+    priced += 1;
+    if (typeof cell.age !== 'number' || !Number.isFinite(cell.age)) unsaid += 1;
+    else if (cell.age > 0) {
+      earlier += 1;
+      if (cell.age > oldest) oldest = cell.age;
+    }
+  }
+  return { priced, earlier, oldest, unsaid };
+}
+
+/**
+ * THE SPOT RULE IN FORCE, as the IV note says it. Under the opt-in rule the
+ * count of points priced from an earlier spot is always printed, zero
+ * included, with the oldest age. Under the default rule an aged point is a
+ * fault, and is said as one.
+ *
+ * @param {string} asof `prev` for 'last at or before t', else the exact second
+ * @param {ReturnType<typeof spotAges>} ages
+ */
+export function spotRuleText(asof, ages) {
+  const oldest = ages.earlier > 0 ? `, the oldest ${fmt(ages.oldest)} s before its bar` : '';
+  if (asof === 'prev') {
+    return `Spot rule: last at or before t (opted in; never a later spot). ${fmt(ages.earlier)} of the ${fmt(ages.priced)} priced point(s) drawn were priced from an earlier spot${oldest}; they are drawn in the warning colour, and the readout prints each bar's own spot age.${ages.unsaid > 0 ? ` ${fmt(ages.unsaid)} priced point(s) carry no spot age.` : ''}`;
+  }
+  return `Spot rule: exact second (a bar with no spot at its own second is not priced).${ages.earlier > 0 ? ` ${fmt(ages.earlier)} point(s) were priced from an earlier spot all the same${oldest}: the answer does not follow the rule asked for.` : ''}`;
+}
+
+/**
+ * THE HOVERED BAR'S OWN SPOT AGE, for the readout beside its IV. Under the
+ * opt-in rule every priced bar says where its spot came from; under the
+ * default rule only a bar that was aged all the same does.
+ *
+ * @param {{why?: string | null, age?: number | null} | null | undefined} cell
+ * @param {string} asof
+ */
+export function spotAgeWord(cell, asof) {
+  if (!cell) return '';
+  const age = typeof cell.age === 'number' && Number.isFinite(cell.age) ? cell.age : null;
+  if (age !== null && age > 0) return `spot ${fmt(age)} s before this bar`;
+  if (asof !== 'prev') return '';
+  return age === 0 ? "spot at this bar's own second" : 'spot age not said by the server';
+}
+
+/**
  * The newest [`DAYFLAGS_PAGE_DAYS`] days of a page of bars, as the day-flag
  * request spans them. `clipped` says the page reaches further back than one
  * day-flag page reads.
  *
+ * A PAGE THAT HOLDS NO BAR has no days of its own, so the selection's own day
+ * bounds are asked instead (`bounds`): a session the store holds nothing of
+ * is then named by its day record, not passed over as "no bar". With no last
+ * day there is no newest day to count back from, and nothing is asked.
+ *
  * @param {ChartBar[]} bars oldest first
+ * @param {Bounds} [bounds] the selection's bounds, given only when no bar is held
  */
-export function flagSpan(bars) {
-  if (bars.length === 0) return null;
+export function flagSpan(bars, bounds) {
+  const floorOf = (/** @type {string} */ to) =>
+    new Date(Date.parse(`${to}T00:00:00Z`) - (DAYFLAGS_PAGE_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
+  if (bars.length === 0) {
+    const to = dayOf(bounds?.toDay);
+    const from = dayOf(bounds?.fromDay);
+    if (!to || (bounds?.fromDay && !from) || (from && from > to)) return null;
+    const floor = floorOf(to);
+    return !from || from < floor ? { from: floor, to, clipped: true } : { from, to, clipped: false };
+  }
   const to = istDayKey(bars[bars.length - 1].t * 1000);
   const first = istDayKey(bars[0].t * 1000);
-  const floor = new Date(Date.parse(`${to}T00:00:00Z`) - (DAYFLAGS_PAGE_DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
+  const floor = floorOf(to);
   return first < floor ? { from: floor, to, clipped: true } : { from: first, to, clipped: false };
 }
 
@@ -632,7 +909,14 @@ export function bandSlots(bands, bars, secs) {
     const kind = b.phase ? PHASE_BAND.get(b.phase) : undefined;
     if (kind) put(b.t, kind);
   }
+  // THE RUNG'S OWN BUCKET GRID is the one its held bars stand on: buckets are
+  // anchored at the session's open, which is not a multiple of every rung
+  // from the epoch (a two-, ten-, thirty- or sixty-minute bucket is off it).
+  const phase = ((lo % secs) + secs) % secs;
   for (const band of bands) {
+    // AT A DAY RUNG THE CLOSING AUCTION SHADES NOTHING: it is part of every
+    // session from its start date, so shading it would shade every candle.
+    if (secs >= 86_400 && band.kind === 'cas') continue;
     const from = Math.max(band.from, lo);
     const to = Math.min(band.to, hi);
     if (!(to > from)) continue;
@@ -650,7 +934,7 @@ export function bandSlots(bands, bars, secs) {
     // A day bucket is stamped at its own open, not on a UTC grid, so an
     // empty day slot sits at the band's own start.
     const step = Math.max(secs, Math.ceil((to - from) / BAND_SLOTS / secs) * secs);
-    const start = secs >= 86_400 ? from : Math.ceil(from / secs) * secs;
+    const start = secs >= 86_400 ? from : Math.ceil((from - phase) / secs) * secs + phase;
     for (let cursor = start; cursor < to; cursor += step) {
       const i = lowerBound(times, cursor - secs + 1);
       if (!(i < times.length && times[i] < Math.min(cursor + step, to))) put(cursor, band.kind);
@@ -661,7 +945,8 @@ export function bandSlots(bands, bars, secs) {
 
 /**
  * ONE MARKER PER FLAGGED DAY, on the day's first held bar, or on its first
- * band slot when the day holds no bar. A day whose only flag is the closing
+ * band slot when the day holds no bar (or, when the selection holds no bar at
+ * all, at the day's own midnight: a list entry, not a mark on a candle). A day whose only flag is the closing
  * auction is not marked — every session has one from its start date, and its
  * band already says so. Ascending, one per stamp.
  *
@@ -687,7 +972,9 @@ export function flagMarkers(cells, bars, slots) {
     if (!c.flagged) continue;
     const real = c.kinds.filter((k) => k !== 'cas' && k !== 'session');
     if (real.length === 0) continue;
-    const time = firstBar.get(c.day) ?? first.get(c.day);
+    // WITH NO BAR HELD AT ALL the day is listed at its own midnight, so the
+    // panel can still say what the day record says of it.
+    const time = firstBar.get(c.day) ?? first.get(c.day) ?? (bars.length === 0 ? (istInstant(c.day, '00:00') ?? undefined) : undefined);
     if (time === undefined) continue;
     out.push({ time, day: c.day, kind: c.kind, tone: c.tone, word: c.word, says: c.says });
   }
