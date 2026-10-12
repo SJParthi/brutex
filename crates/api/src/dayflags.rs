@@ -24,6 +24,8 @@
 //! | `calendar`, `events` | `pull::calendar::record_of` and `phases_of`, the calendar of record | both |
 //! | `import` | the import journal, read by `/imports.json`'s own reader with the importer's logged refusals | gdfl |
 //! | `quality`, `degraded` | `<store>/imports/gdfl.dayflags` (D-3335 §1) | gdfl |
+//! | `sampled` | whether the index (the instrument's own, or an option's underlying) is a minute-sampled day: the day ledger's line where one exists, else the bars held, said as a suspicion (WP-11c, DB-A04) | gdfl |
+//! | `events.halt.held` | the feed's bars inside the calendar's halt seconds for the instrument's segment (WP-11c, DB-A07) | both |
 //! | `gaps`, `refused_front` | `<store>/audit/zerodha.gaps` (D-3335 §2): always the Zerodha line | both |
 //! | `pull`, `refused_front` | `<store>/audit/pull.journal`: Zerodha's member failures that refused a window before append (D-3315) or a dated day's rows (D-3344), and where the series' `1day` bars start | zerodha spot |
 //! | `junk`, `day_bar` | the day's stored Zerodha `1day` bar, and the bar counts | zerodha |
@@ -53,7 +55,9 @@
 //! - the bars: per feed, one open per month the page touches and one
 //!   `first_at_or_after` per day boundary: through the month's `.tix` at most
 //!   one entry and one bar read, by the D-1434 bisection O(log n) reads (the
-//!   store logs which);
+//!   store logs which); two more on a day the calendar halts (three days in
+//!   all), and for an option on a one-second feed the same again for its
+//!   underlying index's month (WP-11c);
 //! - Zerodha's `1day` months: at most [`MAX_DAY_BARS`] records a month, and
 //!   for the page's first day the last bar before it, at most
 //!   [`LOOKBACK_MONTHS`] month opens back; where none is found, at most
@@ -501,10 +505,9 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     // for a minute nobody traded is held but not traded. An index has no
     // volume at all (D-3322), and GDFL holds no bar for a second with no trade.
     let fills = asked.feed == Vendor::Zerodha && inst.segment == Segment::Cash;
-    let own = counts(root, asked.feed, inst, finest(asked.feed), &days, fills);
-    let peer = counts(root, peer_feed, inst, finest(peer_feed), &days, false);
-    notes.extend(own.notes.iter().cloned());
-    notes.extend(peer.notes.iter().cloned());
+    let underlying = sampled_series(asked.feed, inst);
+    let held = PageHeld::count(root, asked, &days, (fills, underlying.as_ref()));
+    notes.extend(held.notes());
     let day_bars = (asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno)
         .then(|| day_bars(root, inst, &days));
     if let Some(bars) = &day_bars {
@@ -533,6 +536,7 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     });
     let ctx = Context {
         asked,
+        sampled_of: underlying.as_ref(),
         journal: journal.as_ref().and_then(|j| j.as_ref().ok()),
         quality: quality.as_ref().and_then(|q| q.as_ref().ok()),
         gaps: gaps.as_ref().ok(),
@@ -544,13 +548,7 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         .enumerate()
         .map(|(at, day)| {
             let bar = day_bars.as_ref().map(|bars| bars.at(at));
-            ctx.record(
-                *day,
-                own.per_day.get(at).unwrap_or(&Held::NoFile),
-                own.fills.get(at).copied().flatten(),
-                peer.per_day.get(at).unwrap_or(&Held::NoFile),
-                bar,
-            )
+            ctx.record(*day, &held.day(at), bar)
         })
         .collect();
     if asked.newest_first {
@@ -1417,6 +1415,27 @@ const OPTIONS_FIELDS: [(&str, Shape); 7] = [
     ("first_trade_p50", Shape::Clock),
 ];
 
+/// The fields a later writer added to every kind's line (WP-11c): the
+/// in-session seconds the calendar of record halts for the kind's segment,
+/// and the placed seconds inside them. **Optional**: a line written before
+/// them stays valid, and a missing one is `null`, never `0`.
+const LATER_EVERY: [(&str, Shape); 2] = [("halt_s", Shape::Count), ("halt_held_s", Shape::Count)];
+
+/// An index line's later fields (WP-11c): the longest run of in-session rows
+/// carrying one unchanged value, and its first stamp. Optional, as above.
+const LATER_INDICES: [(&str, Shape); 2] =
+    [("flat_max_s", Shape::Count), ("flat_max_at", Shape::Clock)];
+
+/// A kind's later, optional fields.
+fn later_fields(kind: ImportKind) -> Vec<(&'static str, Shape)> {
+    let own: &[(&str, Shape)] = if kind == ImportKind::Indices {
+        &LATER_INDICES
+    } else {
+        &[]
+    };
+    LATER_EVERY.iter().chain(own).copied().collect()
+}
+
 /// A kind's own fields.
 const fn own_fields(kind: ImportKind) -> &'static [(&'static str, Shape)] {
     match kind {
@@ -1464,22 +1483,34 @@ struct QualityLine {
     /// Every field of the kind, the five every kind carries first, in
     /// D-3335's order.
     fields: Vec<(&'static str, FieldValue)>,
+    /// The kind's later fields ([`later_fields`]), `None` where the line was
+    /// written before them.
+    later: Vec<(&'static str, Option<FieldValue>)>,
     line: u64,
 }
 
 impl QualityLine {
-    /// A count field's value.
+    /// Every field the line carries, the later ones it has among them.
+    fn carried(&self) -> impl Iterator<Item = (&'static str, FieldValue)> + '_ {
+        self.fields.iter().copied().chain(
+            self.later
+                .iter()
+                .filter_map(|(name, value)| value.map(|value| (*name, value))),
+        )
+    }
+
+    /// A count field's value; `None` for a later field the line lacks.
     fn count(&self, name: &str) -> Option<u64> {
-        self.fields.iter().find_map(|(field, value)| match value {
-            FieldValue::Count(n) if *field == name => Some(*n),
+        self.carried().find_map(|(field, value)| match value {
+            FieldValue::Count(n) if field == name => Some(n),
             _ => None,
         })
     }
 
     /// A clock field's value: seconds of the day, `None` for `-` or absent.
     fn clock(&self, name: &str) -> Option<u32> {
-        self.fields.iter().find_map(|(field, value)| match value {
-            FieldValue::Clock(at) if *field == name => *at,
+        self.carried().find_map(|(field, value)| match value {
+            FieldValue::Clock(at) if field == name => at,
             _ => None,
         })
     }
@@ -1492,6 +1523,14 @@ impl QualityLine {
         fields.insert("line".to_owned(), Value::from(self.line));
         for (name, value) in &self.fields {
             fields.insert((*name).to_owned(), value.json());
+        }
+        // A LATER FIELD THE LINE LACKS IS `null`, never 0: the key is always
+        // there, and a line written before the field says nothing about it.
+        for (name, value) in &self.later {
+            fields.insert(
+                (*name).to_owned(),
+                value.map_or(Value::Null, FieldValue::json),
+            );
         }
         Value::Object(fields)
     }
@@ -1556,6 +1595,8 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
     let spec: Vec<(&'static str, Shape)> =
         EVERY_KIND.iter().chain(own_fields(kind)).copied().collect();
     let mut found: Vec<Option<FieldValue>> = vec![None; spec.len()];
+    let later_spec = later_fields(kind);
+    let mut later: Vec<Option<FieldValue>> = vec![None; later_spec.len()];
     let (mut version, mut src, mut definition) = (None, None, None);
     for word in words {
         let (name, value) = word
@@ -1571,7 +1612,8 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
                 );
             }
             _ => {
-                for (at, (field, shape)) in spec.iter().enumerate() {
+                let slots = found.iter_mut().chain(later.iter_mut());
+                for ((field, shape), slot) in spec.iter().chain(&later_spec).zip(slots) {
                     if *field != name {
                         continue;
                     }
@@ -1580,7 +1622,6 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
                         Shape::Clock => clock(value, true).ok().map(FieldValue::Clock),
                     }
                     .ok_or_else(|| format!("{name}={value:?} is not a {shape:?}"))?;
-                    let slot = found.get_mut(at).ok_or("field slot")?;
                     if slot.replace(read).is_some() {
                         return Err(format!("{name} appears twice"));
                     }
@@ -1612,6 +1653,11 @@ fn parse_quality(number: u64, text: &str) -> Result<QualityLine, String> {
         src: src.to_owned(),
         definition,
         fields,
+        later: later_spec
+            .iter()
+            .map(|(name, _)| *name)
+            .zip(later)
+            .collect(),
         line: number,
     })
 }
@@ -2845,6 +2891,11 @@ struct Counts {
     /// minute with no trade in it (DB-B16) — where counted: a Zerodha share's
     /// one-minute bars only, `None` elsewhere.
     fills: Vec<Option<u64>>,
+    /// Per day, how many of the held bars open inside the halt the calendar
+    /// of record holds for the day and the instrument's segment (WP-11c,
+    /// DB-A07): `None` on a day with no recorded halt, or where the day's
+    /// bars were not counted.
+    halted: Vec<Option<u64>>,
     notes: Vec<String>,
 }
 
@@ -2949,13 +3000,16 @@ fn counts(
 ) -> Counts {
     let mut per_day = Vec::with_capacity(days.len());
     let mut zero = Vec::with_capacity(days.len());
+    let mut halted = Vec::with_capacity(days.len());
     let mut notes = Vec::new();
     if inst.segment == Segment::Fno && inst.contract.is_none() {
         per_day.extend(days.iter().map(|_| Held::NoContract));
         zero.extend(days.iter().map(|_| None));
+        halted.extend(days.iter().map(|_| None));
         return Counts {
             per_day,
             fills: zero,
+            halted,
             notes,
         };
     }
@@ -2992,6 +3046,7 @@ fn counts(
                         Ok((lo, hi)) => {
                             let held = hi.saturating_sub(lo);
                             per_day.push(Held::Bars(held));
+                            halted.push(halted_of(&file, (feed, inst, rung), *day, &mut notes));
                             zero.push(
                                 (fills && held <= MAX_FILL_SCAN)
                                     .then(|| {
@@ -3031,13 +3086,53 @@ fn counts(
             }
         }
         zero.resize(per_day.len(), None);
+        halted.resize(per_day.len(), None);
         at = at.saturating_add(run);
     }
     Counts {
         per_day,
         fills: zero,
+        halted,
         notes,
     }
+}
+
+/// [`bars_in_halt`] for one day of `inst`, a failed lookup named in `notes`
+/// and answered `None`: never a count the store did not give.
+fn halted_of(
+    file: &BarFile,
+    (feed, inst, rung): (Vendor, &Instrument, Timeframe),
+    day: Day,
+    notes: &mut Vec<String>,
+) -> Option<u64> {
+    match bars_in_halt(file, inst.venue(), day)? {
+        Ok(inside) => Some(inside),
+        Err(why) => {
+            notes.push(format!(
+                "{} {} {} {day}: the bars inside the halt could not be counted: {why}",
+                feed.as_str(),
+                inst.key(),
+                rung.as_str()
+            ));
+            None
+        }
+    }
+}
+
+/// The bars of `file` that open inside the halt the calendar of record holds
+/// for `day` and `venue` -- the segment's own seconds, `from` up to `resume`
+/// -- or `None` on a day with no recorded halt (WP-11c, DB-A07). Two
+/// `first_at_or_after` lookups on a halt day, none on any other: the
+/// calendar's halts are three days, so a page pays for at most three.
+fn bars_in_halt(file: &BarFile, venue: Venue, day: Day) -> Option<Result<u64, StoreError>> {
+    let halt = pull::calendar::halt_on(i64::from(day.days_from_epoch()))?;
+    let seconds = halt.seconds(venue);
+    let at = |sod: u32| {
+        file.first_at_or_after(
+            ist_midnight_micros(day).saturating_add(i64::from(sod).saturating_mul(1_000_000)),
+        )
+    };
+    Some(at(seconds.from).and_then(|lo| Ok(at(seconds.resume)?.saturating_sub(lo))))
 }
 
 /// One Zerodha `1day` bar's values, paisa and shares.
@@ -3209,6 +3304,9 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
 /// What every record of one answer reads from.
 struct Context<'a> {
     asked: &'a Asked,
+    /// The index whose sampling a record names ([`sampled_series`]): the
+    /// instrument itself, an option's underlying, or none.
+    sampled_of: Option<&'a Instrument>,
     journal: Option<&'a JournalRows>,
     quality: Option<&'a LedgerRead<QualityLedger>>,
     gaps: Option<&'a LedgerRead<GapLedger>>,
@@ -3216,6 +3314,185 @@ struct Context<'a> {
     pull: Option<&'a PullRead>,
     /// Where the Zerodha `1day` series starts, for a Zerodha spot page.
     start: Option<SeriesStart>,
+}
+
+/// What the store holds of a page's days: this feed's bars, the other
+/// feed's, and the sampled series' where that is another series.
+struct PageHeld {
+    own: Counts,
+    peer: Counts,
+    /// AN OPTION'S UNDERLYING INDEX, COUNTED BESIDE IT (WP-11c, DB-A04): a
+    /// contract's spot-derived cells are only as dense as the index it
+    /// reads, so the day says when that index is minute-sampled. Asked of
+    /// the store, never of a list: an underlying that is a share holds no
+    /// index month and answers `not_held`. One open a month and one lookup a
+    /// day boundary, only where the rung can show sampling at all.
+    under: Option<Counts>,
+}
+
+impl PageHeld {
+    /// Counts `days` for `asked`; `fills` also counts the zero-volume bars,
+    /// and `series` is the page's sampled series ([`sampled_series`]).
+    fn count(
+        root: &Path,
+        asked: &Asked,
+        days: &[Day],
+        (fills, series): (bool, Option<&Instrument>),
+    ) -> Self {
+        let (inst, rung) = (&asked.instrument, finest(asked.feed));
+        let peer_feed = peer_of(asked.feed);
+        Self {
+            own: counts(root, asked.feed, inst, rung, days, fills),
+            peer: counts(root, peer_feed, inst, finest(peer_feed), days, false),
+            under: series
+                .filter(|index| index.segment != inst.segment)
+                .map(|index| counts(root, asked.feed, index, rung, days, false)),
+        }
+    }
+
+    /// What could not be read, of all three.
+    fn notes(&self) -> impl Iterator<Item = String> + '_ {
+        [Some(&self.own), Some(&self.peer), self.under.as_ref()]
+            .into_iter()
+            .flatten()
+            .flat_map(|counts| counts.notes.iter().cloned())
+    }
+
+    /// The page's day `at`.
+    fn day(&self, at: usize) -> DayHeld {
+        let held = |counts: &Counts| counts.per_day.get(at).copied().unwrap_or(Held::NoFile);
+        DayHeld {
+            own: held(&self.own),
+            fills: self.own.fills.get(at).copied().flatten(),
+            halted: self.own.halted.get(at).copied().flatten(),
+            peer: held(&self.peer),
+            series: held(self.under.as_ref().unwrap_or(&self.own)),
+        }
+    }
+}
+
+/// What the store holds of one day, counted before its record is made.
+#[derive(Debug, Clone, Copy)]
+struct DayHeld {
+    /// This feed's bars at its finest rung.
+    own: Held,
+    /// Of them, the zero-volume ones, where counted (DB-B16).
+    fills: Option<u64>,
+    /// Of them, those inside the day's halt, on a halt day (DB-A07).
+    halted: Option<u64>,
+    /// The other feed's bars at its finest rung.
+    peer: Held,
+    /// The bars of the series whose sampling the record names
+    /// ([`sampled_series`]): `own` for an index, the underlying's for an
+    /// option.
+    series: Held,
+}
+
+/// The index series whose sampling a record of `inst` names (WP-11c,
+/// DB-A04), or `None` where the feed's finest rung cannot show sampling or
+/// the instrument is a share.
+///
+/// An index names itself; an option names the index of its own symbol,
+/// which the store either holds or does not (a share's options answer
+/// `not_held` and the record says nothing). A share's own seconds are trades
+/// and are sparse by nature, so a share names none. The rung must hold more
+/// than [`SAMPLED_SS_DISTINCT`] bars a minute, or every series would read as
+/// sampled: a one-minute feed is never asked.
+///
+/// [`SAMPLED_SS_DISTINCT`]: pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
+fn sampled_series(feed: Vendor, inst: &Instrument) -> Option<Instrument> {
+    let secs = u64::from(finest(feed).secs());
+    if secs == 0 || 60 / secs <= pull::gdfl_import::quality::SAMPLED_SS_DISTINCT {
+        return None;
+    }
+    match inst.segment {
+        Segment::Index => Some(inst.clone()),
+        Segment::Fno => Some(Instrument {
+            exchange: inst.exchange,
+            segment: Segment::Index,
+            symbol: inst.symbol.clone(),
+            contract: None,
+        }),
+        Segment::Cash => None,
+    }
+}
+
+/// `held` of `of` as a percentage to one decimal, half up; `None` of nothing.
+fn percent(held: u64, of: u64) -> Option<String> {
+    let tenths = held
+        .saturating_mul(1_000)
+        .saturating_add(of / 2)
+        .checked_div(of)?;
+    Some(format!("{}.{}", tenths / 10, tenths % 10))
+}
+
+/// The record's `sampled` (WP-11c, DB-A04): whether `series` is a
+/// minute-sampled day, with the numbers that say so and where they are from.
+///
+/// **THE DAY LEDGER'S LINE IS THE AUTHORITY** (D-3335): where the
+/// import or a rescan measured the vendor's rows, the rule is the ledger's
+/// own (`pull::gdfl_import::quality::is_sampled`: rows on at most two
+/// distinct seconds of the minute) and the standing is `measured`.
+///
+/// **WHERE NO LINE EXISTS THE STORE'S OWN BARS ANSWER, AND SAY THEY ARE A
+/// SUSPICION.** Most stored days were imported before the ledger was written
+/// (2019-05-30 among them): a series whose rows use at most two seconds of
+/// the minute holds at most two bars a minute, so a day holding no more than
+/// that is `suspected` -- it cannot be told from a day mostly missing until
+/// `cli gdfl-dayflags` measures its rows. Never silent, never claimed as
+/// measured. O(1): the counts the record already holds.
+///
+/// `null` where no series is named, the day is not a session, or neither
+/// source can say.
+fn sampled_json(
+    own: &Instrument,
+    series: Option<&Instrument>,
+    line: Option<&QualityLine>,
+    held: Held,
+    day: Day,
+) -> Value {
+    use pull::gdfl_import::quality;
+    let Some(series) = series else {
+        return Value::Null;
+    };
+    let of = if series.segment == own.segment {
+        "own"
+    } else {
+        "underlying"
+    };
+    if let Some(line) = line {
+        let (rows, distinct) = (
+            line.count("rows").unwrap_or(0),
+            line.count("ss_distinct").unwrap_or(0),
+        );
+        return json!({
+            "is": quality::is_sampled(rows, distinct),
+            "of": of,
+            "series": series.key(),
+            "basis": "day_ledger",
+            "standing": "measured",
+            "held_s": line.count("seconds"),
+            "session_s": line.count("session_s"),
+            "ss_distinct": distinct,
+            "line": line.line,
+        });
+    }
+    let (Some(bars), Ok(session)) = (held.bars(), pull::gdfl_cm::session_of(day)) else {
+        return Value::Null;
+    };
+    let session_s = quality::session_seconds(&session);
+    let most = quality::SAMPLED_SS_DISTINCT.saturating_mul(session_s / 60);
+    json!({
+        "is": bars > 0 && bars <= most,
+        "of": of,
+        "series": series.key(),
+        "basis": "held_bars",
+        "standing": "suspected",
+        "held_s": bars,
+        "session_s": session_s,
+        "ss_distinct": null,
+        "line": null,
+    })
 }
 
 /// D-3336's day code, and the day's kind as a word.
@@ -3270,8 +3547,13 @@ const fn phase_word(phase: Phase) -> &'static str {
     }
 }
 
-/// The record's `calendar` and `events`.
-fn calendar_json(record: &DayRecord, venue: Venue) -> (Value, Value) {
+/// The record's `calendar` and `events`; `halted` is the feed's bars inside
+/// the day's halt, where counted (`events.halt.held`).
+fn calendar_json(
+    record: &DayRecord,
+    venue: Venue,
+    (feed, halted): (Vendor, Option<u64>),
+) -> (Value, Value) {
     let (code, kind) = day_code(record.day);
     let phases = pull::calendar::phases_of(venue, record.day, CasEligibility::Unknown);
     let open = matches!(record.kind, DayKind::Open(_));
@@ -3308,6 +3590,15 @@ fn calendar_json(record: &DayRecord, venue: Venue) -> (Value, Value) {
             "halted": { "from": hm(u32::from(halt.halted.from)), "to": hm(u32::from(halt.halted.to)) },
             "reopening": halt.reopening.map(|w| json!({ "from": hm(u32::from(w.from)), "to": hm(u32::from(w.to)) })),
             "seconds": { "from": hms(seconds.from), "resume": hms(seconds.resume) },
+            // THE BARS HELD INSIDE IT (WP-11c, DB-A07): kept as the vendor
+            // printed them and counted here, so a flat run of an index's
+            // repeated value is a labelled halt and not an ordinary hour.
+            "held": halted.map(|bars| json!({
+                "feed": feed.as_str(),
+                "rung": finest(feed).as_str(),
+                "bars": bars,
+                "of_s": seconds.resume.saturating_sub(seconds.from),
+            })),
             "evidence": halt.evidence.text(),
         })
     });
@@ -3325,10 +3616,59 @@ fn calendar_json(record: &DayRecord, venue: Venue) -> (Value, Value) {
     (calendar, json!({ "halt": halt, "phases": bands }))
 }
 
+/// The sentence of a `sampled` that is one, or `None`.
+fn sampled_says(sampled: &Value) -> Option<String> {
+    if sampled.get("is") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let text = |key: &str| sampled.get(key).and_then(Value::as_str).unwrap_or_default();
+    let count = |key: &str| sampled.get(key).and_then(Value::as_u64);
+    let who = if text("of") == "underlying" {
+        format!("underlying index {}", text("series"))
+    } else {
+        "index".to_owned()
+    };
+    let held = match (count("held_s"), count("session_s")) {
+        (Some(held), Some(of)) => percent(held, of).map_or_else(String::new, |p| {
+            format!(", {held} of {of} session second(s) held ({p}%)")
+        }),
+        _ => String::new(),
+    };
+    Some(if text("basis") == "day_ledger" {
+        format!(
+            "{who}: minute-sampled{held}, its rows on {} distinct second(s) of the minute",
+            count("ss_distinct").unwrap_or(0)
+        )
+    } else {
+        format!(
+            "{who}: minute-sampled or mostly missing (suspected){held}, at most 2 a minute; \
+             no day-ledger line measures its rows yet"
+        )
+    })
+}
+
+/// The rule a `sampled` reads from the day ledger (D-3335's display rule).
+const SAMPLED_RULE: &str = "ss_distinct is 2 or less, on a day with rows";
+
+/// The rule a `sampled` reads from the held bars, where no line exists.
+const SAMPLED_RULE_HELD: &str = "no day-ledger line, and the series holds at most 2 bars a \
+                                 session minute at a rung of more than 2 a minute";
+
 /// The record's `degraded`: D-3335's display rules over the day's ledger
-/// lines, each with the numbers it read.
-fn degraded_json(lines: &[(ImportKind, Option<&QualityLine>)]) -> Vec<Value> {
+/// lines, each with the numbers it read. An index's rule is `sampled`'s
+/// (WP-11c): the day ledger's line where there is one, the held bars where
+/// there is none, for the instrument's own series or its underlying's.
+fn degraded_json(lines: &[(ImportKind, Option<&QualityLine>)], sampled: &Value) -> Vec<Value> {
     let mut out = Vec::new();
+    if let Some(says) = sampled_says(sampled) {
+        let ledger = sampled.get("basis").and_then(Value::as_str) == Some("day_ledger");
+        out.push(json!({
+            "kind": ImportKind::Indices.as_str(),
+            "flag": "sampled",
+            "rule": if ledger { SAMPLED_RULE } else { SAMPLED_RULE_HELD },
+            "says": says,
+        }));
+    }
     for (kind, line) in lines {
         let Some(line) = line else { continue };
         let count = |name: &str| line.count(name).unwrap_or(0);
@@ -3347,16 +3687,8 @@ fn degraded_json(lines: &[(ImportKind, Option<&QualityLine>)]) -> Vec<Value> {
                     }));
                 }
             }
-            ImportKind::Indices => {
-                let distinct = count("ss_distinct");
-                if count("rows") > 0 && distinct <= 2 {
-                    out.push(json!({
-                        "kind": kind.as_str(),
-                        "rule": "ss_distinct is 2 or less",
-                        "says": format!("index: its rows use {distinct} distinct second(s) of the minute, not a second-by-second series"),
-                    }));
-                }
-            }
+            // AN INDEX DAY IS `sampled`'S, pushed above.
+            ImportKind::Indices => {}
             ImportKind::Stocks => {
                 if let Some(at) = line.clock("first_trade_p50")
                     && at >= 10 * 3_600 + 15 * 60
@@ -3493,22 +3825,25 @@ impl<'a> Context<'a> {
 }
 
 impl Context<'_> {
-    /// One day's record.
-    fn record(
-        &self,
-        day: Day,
-        own: &Held,
-        fills: Option<u64>,
-        peer: &Held,
-        bar: Option<(DayBarAt, Option<i64>)>,
-    ) -> Value {
-        let asked = self.asked;
-        let inst = &asked.instrument;
-        let record = pull::calendar::record_of(i64::from(day.days_from_epoch()));
-        let (calendar, events) = calendar_json(&record, inst.venue());
-        let import = self.journal.map(|rows| import_json(rows, inst, day));
-        let quality_lines: Vec<(ImportKind, Option<&QualityLine>)> = self
-            .quality
+    /// One day's `sampled` ([`sampled_json`]), from the sampled series' own
+    /// line: the index's, which for an option is its underlying's and is
+    /// read for this alone -- `quality.indices` stays the instrument's own.
+    /// A closed day is not sampled: `session_of` refuses it, and a line
+    /// exists only for an imported day.
+    fn sampled(&self, day: Day, series: Held) -> Value {
+        let line = self.quality.zip(self.sampled_of).and_then(|(q, index)| {
+            q.parsed
+                .get(day, ImportKind::Indices, index.symbol.as_str())
+        });
+        sampled_json(&self.asked.instrument, self.sampled_of, line, series, day)
+    }
+
+    /// The day ledger's lines `day`'s record reads, by kind: the index's own
+    /// for an index, and the whole kind-day's for stocks and options. Empty
+    /// where the ledger was not read.
+    fn quality_lines(&self, day: Day) -> Vec<(ImportKind, Option<&QualityLine>)> {
+        let inst = &self.asked.instrument;
+        self.quality
             .map(|q| {
                 let symbol_scope = if inst.segment == Segment::Index {
                     Some(inst.symbol.as_str())
@@ -3530,7 +3865,18 @@ impl Context<'_> {
                     ),
                 ]
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// One day's record.
+    fn record(&self, day: Day, held: &DayHeld, bar: Option<(DayBarAt, Option<i64>)>) -> Value {
+        let (own, fills, peer) = (&held.own, held.fills, &held.peer);
+        let asked = self.asked;
+        let inst = &asked.instrument;
+        let record = pull::calendar::record_of(i64::from(day.days_from_epoch()));
+        let (calendar, events) = calendar_json(&record, inst.venue(), (asked.feed, held.halted));
+        let import = self.journal.map(|rows| import_json(rows, inst, day));
+        let quality_lines = self.quality_lines(day);
         let quality = self.quality.map(|_| {
             let line = |kind: ImportKind| {
                 quality_lines
@@ -3545,7 +3891,8 @@ impl Context<'_> {
                 "options": line(ImportKind::Options),
             })
         });
-        let degraded = degraded_json(&quality_lines);
+        let sampled = self.sampled(day, held.series);
+        let degraded = degraded_json(&quality_lines, &sampled);
         let gap = self.gaps.and_then(|g| g.parsed.get(&inst.key(), day));
         let front = self.front(day, gap);
         let (junk, day_bar) = match bar {
@@ -3571,6 +3918,7 @@ impl Context<'_> {
             segment: inst.segment,
             own: *own,
             fills,
+            halted: held.halted,
             peer: *peer,
             feed: asked.feed,
         }
@@ -3591,6 +3939,7 @@ impl Context<'_> {
             "import": import,
             "quality": quality,
             "degraded": degraded,
+            "sampled": sampled,
             "gaps": gap.map(GapLine::json),
             "junk": junk,
             "day_bar": day_bar,
@@ -3637,6 +3986,8 @@ struct Says<'a> {
     own: Held,
     /// The own feed's zero-volume bars that day, where counted (DB-B16).
     fills: Option<u64>,
+    /// The own feed's bars inside the day's halt, where counted (DB-A07).
+    halted: Option<u64>,
     peer: Held,
     feed: Vendor,
 }
@@ -3733,6 +4084,61 @@ impl Says<'_> {
                 "halt ({standing}) {}-{}",
                 hm(u32::from(halt.halted.from)),
                 hm(u32::from(halt.halted.to))
+            ));
+            self.halt_phrases(halt, out);
+        }
+    }
+
+    /// What is held inside the day's halt (WP-11c, DB-A07): the feed's bars
+    /// in this segment's own halt seconds, and what the import measured of
+    /// the vendor's rows there. The bars are kept as printed; this labels
+    /// them.
+    fn halt_phrases(&self, halt: pull::calendar::Halt, out: &mut Vec<String>) {
+        let venue = match self.segment {
+            Segment::Index => Venue::NseIndex,
+            Segment::Cash => Venue::NseCash,
+            Segment::Fno => Venue::NseDerivatives,
+        };
+        let seconds = halt.seconds(venue);
+        let window = format!("{} until {}", hms(seconds.from), hms(seconds.resume));
+        if let Some(bars) = self.halted {
+            let rung = finest(self.feed).as_str();
+            out.push(if bars == 0 {
+                format!("no {rung} bar held inside the halt, {window}")
+            } else {
+                format!(
+                    "{bars} {rung} bar(s) held inside the halt, {window}: kept as printed, \
+                     labelled, never dropped"
+                )
+            });
+        }
+        // THE IMPORT'S OWN MEASURE, from the line of this instrument's kind.
+        let own_kind = match self.segment {
+            Segment::Index => ImportKind::Indices,
+            Segment::Cash => ImportKind::Stocks,
+            Segment::Fno => ImportKind::Options,
+        };
+        let Some(line) = self.line(own_kind) else {
+            return;
+        };
+        if let (Some(halt_s), Some(held_s)) = (line.count("halt_s"), line.count("halt_held_s"))
+            && halt_s > 0
+        {
+            out.push(if own_kind == ImportKind::Indices {
+                format!("the import placed {held_s} of the halt's {halt_s} session second(s)")
+            } else {
+                format!(
+                    "{}: the day's files hold {held_s} second(s) inside the halt's {halt_s}",
+                    own_kind.as_str()
+                )
+            });
+        }
+        if own_kind == ImportKind::Indices
+            && let (Some(flat_s), Some(at)) = (line.count("flat_max_s"), line.clock("flat_max_at"))
+        {
+            out.push(format!(
+                "the index value stood unchanged for {flat_s} s from {}",
+                hms(at)
             ));
         }
     }
@@ -4219,10 +4625,19 @@ fn rules_json() -> Value {
     json!({
         "degraded": {
             "options": "zero_quote_files or ltq1_lead_files is at least half of files_traded",
-            "indices": "ss_distinct is 2 or less, on a day with rows",
+            "indices": "the record's `sampled` is one (see `sampled`)",
             "stocks": "first_trade_p50 is 10:15:00 or later",
             "source": "D-3335: display rules, chosen, not sourced",
         },
+        "sampled": {
+            "day_ledger": SAMPLED_RULE,
+            "held_bars": SAMPLED_RULE_HELD,
+            "of": "own: the instrument is the index; underlying: the instrument is an option and the index is the one of its symbol",
+            "standing": "measured from the vendor's rows by the import or `cli gdfl-dayflags`; suspected from the bars held, which cannot tell a sampled day from one mostly missing",
+            "null": "a share, a feed whose finest rung holds at most 2 bars a minute, a day that is not a session, or an index the store does not hold",
+            "source": "D-3335's index rule, named by WP-11c (DB-A04); chosen, not sourced",
+        },
+        "halt_held": "events.halt.held counts the feed's bars that open inside the halt's seconds for the instrument's own segment (from, up to resume); bars are kept as printed (WP-11c, DB-A07)",
         "junk": {
             "zero_price": "the day's Zerodha 1day bar has an open, high, low or close at or below zero",
             "off_calendar": "Zerodha holds a bar on a day the calendar of record says was closed",
@@ -5175,7 +5590,12 @@ mod tests {
         let mut ledger = index_flags(
             "2019-05-30",
             "NIFTY",
-            &[("rows", "1500"), ("ss_distinct", "1")],
+            &[
+                ("rows", "376"),
+                ("seconds", "375"),
+                ("session_s", "22500"),
+                ("ss_distinct", "1"),
+            ],
         );
         ledger.push_str(&flags_line(
             "options",
@@ -5241,7 +5661,17 @@ mod tests {
         assert_eq!(kinds, ["indices", "stocks", "options"], "{degraded:#}");
         says_has(
             degraded,
-            "degraded vendor day -- index: its rows use 1 distinct second(s) of the minute, not a second-by-second series",
+            "degraded vendor day -- index: minute-sampled, 375 of 22500 session second(s) held \
+             (1.7%), its rows on 1 distinct second(s) of the minute",
+        );
+        assert_eq!(degraded["degraded"][0]["flag"], "sampled");
+        assert_eq!(
+            degraded["sampled"],
+            json!({
+                "is": true, "of": "own", "series": "NSE-INDEX-NIFTY",
+                "basis": "day_ledger", "standing": "measured",
+                "held_s": 375, "session_s": 22500, "ss_distinct": 1, "line": 1,
+            })
         );
         says_has(
             degraded,
@@ -5267,6 +5697,8 @@ mod tests {
         );
         let dual = record(&got, "2019-03-28");
         assert_eq!(dual["degraded"], json!([]));
+        assert_eq!(dual["sampled"]["is"], false, "sixty seconds of the minute");
+        assert_eq!(dual["sampled"]["basis"], "day_ledger");
         says_has(
             dual,
             "3 second(s) holding two values at least 10 bps apart, up to 20 bps",
@@ -6331,5 +6763,467 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(body.contains("instrument"), "{body}");
+    }
+
+    // ── WP-11c: the sampled day and the bars inside a halt (DB-A04, DB-A07) ─
+
+    /// `n` one-second bars on `on`, one a minute at second :59 from 09:15.
+    fn minute_stamped(on: &str, n: i64) -> Vec<Bar> {
+        (0..n)
+            .map(|m| bar(on, 9 * 3_600 + 15 * 60 + m * 60 + 59, [700 + m; 4], 0))
+            .collect()
+    }
+
+    /// **A SAMPLED DAY WITH NO LEDGER LINE IS STILL NAMED, AS A SUSPICION**
+    /// (DB-A04): 30 May 2019 was imported before the day ledger existed, so
+    /// the store's own count answers -- 375 one-second bars against a
+    /// 22,500-second session is at most two a minute -- and says it cannot
+    /// tell a sampled day from one mostly missing. The edge is two bars a
+    /// session minute; an ordinary day, a closed day, a share, an index the
+    /// store does not hold and a one-minute feed are each not named.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture and every assertion about it, read top to bottom"
+    )]
+    fn a_sampled_day_without_a_ledger_line_is_suspected_from_the_bars_held() {
+        let root = root_of("sampled-held");
+        let mut bars = minute_stamped("2019-05-30", 375);
+        // 2019-05-29 holds 750 (the edge: two a minute), 2019-05-28 holds 751.
+        for (on, n) in [("2019-05-29", 750_i64), ("2019-05-28", 751)] {
+            bars.extend((0..n).map(|s| bar(on, 9 * 3_600 + 15 * 60 + s, [600; 4], 0)));
+        }
+        file_bars(
+            &root,
+            Vendor::Gdfl,
+            "NSE-INDEX-NIFTY",
+            Timeframe::SECOND_1,
+            bars,
+        );
+        file_bars(
+            &root,
+            Vendor::Zerodha,
+            "NSE-INDEX-NIFTY",
+            Timeframe::MINUTE_1,
+            minutes("2019-05-30", 375),
+        );
+        let page = |feed: &str, instrument: &str| {
+            answer(
+                &root,
+                &ask(&format!(
+                    "feed={feed}&instrument={instrument}&from=2019-05-25&to=2019-05-31"
+                )),
+            )
+        };
+        let got = page("gdfl", "NSE-INDEX-NIFTY");
+        let sampled = record(&got, "2019-05-30");
+        assert_eq!(
+            sampled["sampled"],
+            json!({
+                "is": true, "of": "own", "series": "NSE-INDEX-NIFTY",
+                "basis": "held_bars", "standing": "suspected",
+                "held_s": 375, "session_s": 22500, "ss_distinct": null, "line": null,
+            })
+        );
+        assert_eq!(sampled["degraded"][0]["flag"], "sampled");
+        assert_eq!(sampled["degraded"][0]["rule"], SAMPLED_RULE_HELD);
+        says_has(
+            sampled,
+            "degraded vendor day -- index: minute-sampled or mostly missing (suspected), 375 of \
+             22500 session second(s) held (1.7%), at most 2 a minute; no day-ledger line measures \
+             its rows yet",
+        );
+        let edge = record(&got, "2019-05-29");
+        assert_eq!(edge["sampled"]["is"], true, "750 is two a session minute");
+        let over = record(&got, "2019-05-28");
+        assert_eq!(
+            over["sampled"]["is"], false,
+            "751 is more than two a minute"
+        );
+        assert_eq!(over["sampled"]["held_s"], 751);
+        assert_eq!(over["degraded"], json!([]));
+        // A SESSION HOLDING NOTHING is "no GDFL bar", not a sampled day.
+        let empty = record(&got, "2019-05-27");
+        assert_eq!(empty["sampled"]["is"], false);
+        assert_eq!(empty["sampled"]["held_s"], 0);
+        assert_eq!(empty["degraded"], json!([]));
+        // A CLOSED DAY has no session to be sampled in.
+        assert_eq!(record(&got, "2019-05-25")["sampled"], Value::Null);
+        // A ONE-MINUTE FEED cannot show it and is never asked.
+        let zerodha = page("zerodha", "NSE-INDEX-NIFTY");
+        assert_eq!(record(&zerodha, "2019-05-30")["sampled"], Value::Null);
+        assert_eq!(record(&zerodha, "2019-05-30")["degraded"], json!([]));
+        // A SHARE'S OWN SECONDS ARE TRADES: none is named.
+        let share = page("gdfl", "NSE-CASH-RELIANCE");
+        assert_eq!(record(&share, "2019-05-30")["sampled"], Value::Null);
+        // AN OPTION NAMES ITS UNDERLYING INDEX, a contract and the kind alike.
+        for instrument in ["NSE-FNO-NIFTY-2019-05-30-1190000-CE", "NSE-FNO-NIFTY"] {
+            let option = page("gdfl", instrument);
+            let rec = record(&option, "2019-05-30");
+            assert_eq!(rec["sampled"]["is"], true, "{instrument}");
+            assert_eq!(rec["sampled"]["of"], "underlying");
+            assert_eq!(rec["sampled"]["series"], "NSE-INDEX-NIFTY");
+            assert_eq!(rec["sampled"]["held_s"], 375);
+            assert_eq!(rec["quality"]["indices"], Value::Null, "its own lines only");
+            says_has(
+                rec,
+                "degraded vendor day -- underlying index NSE-INDEX-NIFTY: minute-sampled or \
+                 mostly missing (suspected), 375 of 22500 session second(s) held (1.7%), at most \
+                 2 a minute; no day-ledger line measures its rows yet",
+            );
+            assert_eq!(record(&option, "2019-05-28")["sampled"]["is"], false);
+        }
+        // AN UNDERLYING THAT IS A SHARE holds no index month: nothing is said.
+        let stock_option = page("gdfl", "NSE-FNO-RELIANCE-2019-05-30-130000-CE");
+        assert_eq!(record(&stock_option, "2019-05-30")["sampled"], Value::Null);
+        assert_eq!(record(&stock_option, "2019-05-30")["degraded"], json!([]));
+        // THE LEDGER'S LINE, ONCE WRITTEN, IS THE AUTHORITY: measured, for
+        // the index and for the option that reads it.
+        write(
+            &quality_path(&root),
+            &index_flags(
+                "2019-05-30",
+                "NIFTY",
+                &[
+                    ("rows", "376"),
+                    ("seconds", "375"),
+                    ("session_s", "22500"),
+                    ("ss_distinct", "1"),
+                ],
+            ),
+        );
+        for (instrument, of) in [
+            ("NSE-INDEX-NIFTY", "own"),
+            ("NSE-FNO-NIFTY-2019-05-30-1190000-CE", "underlying"),
+        ] {
+            let got = page("gdfl", instrument);
+            let rec = record(&got, "2019-05-30");
+            assert_eq!(rec["sampled"]["basis"], "day_ledger", "{instrument}");
+            assert_eq!(rec["sampled"]["standing"], "measured");
+            assert_eq!(rec["sampled"]["of"], of);
+            assert_eq!(rec["sampled"]["ss_distinct"], 1);
+            assert_eq!(rec["degraded"][0]["rule"], SAMPLED_RULE);
+            // A day the ledger has no line for is still the store's to say.
+            assert_eq!(record(&got, "2019-05-29")["sampled"]["basis"], "held_bars");
+        }
+        assert_eq!(got["rules"]["sampled"]["day_ledger"], SAMPLED_RULE);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE BARS INSIDE A HALT ARE COUNTED AND LABELLED, NEVER DROPPED**
+    /// (DB-A07): each segment by its own halt seconds on 2020-03-13 (the
+    /// index from 09:21:10 up to 10:21:01, the shares from 09:21:09, the
+    /// index options from 09:21:45, both up to 10:21:00), a one-minute feed
+    /// by its minute opens, a halt day holding nothing inside it, a halt day
+    /// with no month, and a day with no halt.
+    #[test]
+    fn the_bars_inside_a_halt_are_counted_by_the_segments_own_seconds() {
+        let root = root_of("halt-held");
+        let at = |h: i64, m: i64, s: i64| h * 3_600 + m * 60 + s;
+        let on = "2020-03-13";
+        let seconds =
+            |list: &[i64]| -> Vec<Bar> { list.iter().map(|&s| bar(on, s, [900; 4], 0)).collect() };
+        let edges = [
+            at(9, 21, 8),
+            at(9, 21, 9),
+            at(9, 21, 10),
+            at(9, 21, 44),
+            at(9, 21, 45),
+            at(10, 20, 59),
+            at(10, 21, 0),
+            at(10, 21, 1),
+        ];
+        let option = "NSE-FNO-NIFTY-2020-03-19-950000-PE";
+        for key in ["NSE-INDEX-NIFTY", "NSE-CASH-RELIANCE", option] {
+            file_bars(
+                &root,
+                Vendor::Gdfl,
+                key,
+                Timeframe::SECOND_1,
+                seconds(&edges),
+            );
+        }
+        // BANKNIFTY holds the day and nothing inside the halt.
+        file_bars(
+            &root,
+            Vendor::Gdfl,
+            "NSE-INDEX-BANKNIFTY",
+            Timeframe::SECOND_1,
+            seconds(&[at(9, 15, 0), at(15, 29, 59)]),
+        );
+        // Zerodha's minutes: 09:21 opens before the index's halt, 09:22 inside.
+        file_bars(
+            &root,
+            Vendor::Zerodha,
+            "NSE-INDEX-NIFTY",
+            Timeframe::MINUTE_1,
+            seconds(&[at(9, 21, 0), at(9, 22, 0), at(10, 21, 0), at(10, 22, 0)]),
+        );
+        let get = |feed: &str, instrument: &str, day: &str| {
+            let got = answer(
+                &root,
+                &ask(&format!("feed={feed}&instrument={instrument}&from={day}")),
+            );
+            record(&got, day).clone()
+        };
+        for (instrument, inside, window) in [
+            ("NSE-INDEX-NIFTY", 5, "09:21:10 until 10:21:01"),
+            ("NSE-CASH-RELIANCE", 5, "09:21:09 until 10:21:00"),
+            (option, 2, "09:21:45 until 10:21:00"),
+        ] {
+            let rec = get("gdfl", instrument, on);
+            assert_eq!(rec["held"]["bars"], 8, "{instrument}: nothing is dropped");
+            assert_eq!(
+                rec["events"]["halt"]["held"]["bars"], inside,
+                "{instrument}"
+            );
+            assert_eq!(rec["events"]["halt"]["held"]["feed"], "gdfl");
+            assert_eq!(rec["events"]["halt"]["held"]["rung"], "1s");
+            says_has(
+                &rec,
+                &format!(
+                    "{inside} 1s bar(s) held inside the halt, {window}: kept as printed, \
+                     labelled, never dropped"
+                ),
+            );
+        }
+        let index = get("gdfl", "NSE-INDEX-NIFTY", on);
+        assert_eq!(index["events"]["halt"]["held"]["of_s"], 3_591);
+        let none = get("gdfl", "NSE-INDEX-BANKNIFTY", on);
+        assert_eq!(none["events"]["halt"]["held"]["bars"], 0);
+        says_has(
+            &none,
+            "no 1s bar held inside the halt, 09:21:10 until 10:21:01",
+        );
+        let minutes = get("zerodha", "NSE-INDEX-NIFTY", on);
+        assert_eq!(
+            minutes["events"]["halt"]["held"]["bars"], 2,
+            "09:22 and 10:21"
+        );
+        assert_eq!(minutes["events"]["halt"]["held"]["rung"], "1min");
+        // A HALT DAY WHOSE MONTH IS NOT HELD: the halt is named, the count is
+        // null and no phrase claims one.
+        let absent = get("gdfl", "NSE-INDEX-NIFTYIT", on);
+        assert_eq!(absent["events"]["halt"]["standing"], "suspected");
+        assert_eq!(absent["events"]["halt"]["held"], Value::Null);
+        assert!(
+            says(&absent).iter().all(|s| !s.contains("inside the halt")),
+            "{absent:#}"
+        );
+        // A DAY WITH NO HALT has none to count in.
+        let quiet = get("gdfl", "NSE-INDEX-NIFTY", "2020-03-12");
+        assert_eq!(quiet["events"]["halt"], Value::Null);
+        assert!(
+            says(&quiet).iter().all(|s| !s.contains("halt")),
+            "{quiet:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE IMPORT'S HALT AND FLAT-RUN FIELDS ARE READ WHERE A LINE HAS
+    /// THEM, AND ARE `null` WHERE IT DOES NOT** (WP-11c): a line written
+    /// before the fields stays valid and never reads as zero; one that
+    /// carries them is said; one that carries a field twice, or malformed,
+    /// is counted as a fault with its reason.
+    #[test]
+    fn the_halt_fields_of_a_ledger_line_are_optional_and_never_read_as_zero() {
+        let root = root_of("halt-fields");
+        let later = |line: String, more: &str| format!("{} {more}\n", line.trim_end());
+        let mut ledger = index_flags("2020-03-13", "BANKNIFTY", &[("rows", "9")]);
+        ledger.push_str(&later(
+            index_flags(
+                "2020-03-13",
+                "NIFTY",
+                &[("rows", "22501"), ("ss_distinct", "60")],
+            ),
+            "halt_s=3591 halt_held_s=3591 flat_max_s=2692 flat_max_at=09:21:09",
+        ));
+        ledger.push_str(&later(
+            flags_line(
+                "stocks",
+                "2020-03-13",
+                "*",
+                &STOCKS_FIELDS,
+                &[("files", "3")],
+            ),
+            "halt_s=3591 halt_held_s=13",
+        ));
+        ledger.push_str(&later(
+            index_flags("2020-03-23", "NIFTY", &[("rows", "5")]),
+            "halt_s=3532 halt_s=3532",
+        ));
+        ledger.push_str(&later(
+            index_flags("2020-03-23", "BANKNIFTY", &[("rows", "5")]),
+            "flat_max_at=25:00:00",
+        ));
+        write(&quality_path(&root), &ledger);
+        let get = |instrument: &str, day: &str| {
+            let got = answer(
+                &root,
+                &ask(&format!("feed=gdfl&instrument={instrument}&from={day}")),
+            );
+            (record(&got, day).clone(), got)
+        };
+        let (with, _) = get("NSE-INDEX-NIFTY", "2020-03-13");
+        assert_eq!(with["quality"]["indices"]["halt_s"], 3_591);
+        assert_eq!(with["quality"]["indices"]["halt_held_s"], 3_591);
+        assert_eq!(with["quality"]["indices"]["flat_max_s"], 2_692);
+        assert_eq!(with["quality"]["indices"]["flat_max_at"], "09:21:09");
+        says_has(
+            &with,
+            "the import placed 3591 of the halt's 3591 session second(s)",
+        );
+        says_has(
+            &with,
+            "the index value stood unchanged for 2692 s from 09:21:09",
+        );
+        assert_eq!(with["quality"]["stocks"]["halt_held_s"], 13);
+        assert_eq!(
+            with["quality"]["stocks"]["flat_max_s"],
+            Value::Null,
+            "an index's field, not a share day's: the key is not there"
+        );
+        let (before, _) = get("NSE-INDEX-BANKNIFTY", "2020-03-13");
+        assert_eq!(before["quality"]["indices"]["rows"], 9, "the line is read");
+        for name in ["halt_s", "halt_held_s", "flat_max_s", "flat_max_at"] {
+            assert!(
+                before["quality"]["indices"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(name),
+                "{name} is a key of every index line"
+            );
+            assert_eq!(before["quality"]["indices"][name], Value::Null, "{name}");
+        }
+        assert!(
+            says(&before)
+                .iter()
+                .all(|s| !s.starts_with("the import placed")
+                    && !s.starts_with("the index value stood")),
+            "{before:#}"
+        );
+        let (share, _) = get("NSE-CASH-RELIANCE", "2020-03-13");
+        says_has(
+            &share,
+            "stocks: the day's files hold 13 second(s) inside the halt's 3591",
+        );
+        let (twice, got) = get("NSE-INDEX-NIFTY", "2020-03-23");
+        assert_eq!(
+            twice["quality"]["indices"],
+            Value::Null,
+            "the line is refused"
+        );
+        let faults = got["sources"]["quality"]["faults"].to_string();
+        assert!(faults.contains("halt_s appears twice"), "{faults}");
+        assert!(faults.contains("flat_max_at="), "{faults}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE REAL DAYS, AND THE ANSWER'S COST** (WP-11c; DB-A04, DB-A07): over
+    /// a store root named by `BRUTEX_DAYFLAGS_STORE` (a shadow of the real
+    /// store; read-only), 2019-05-30 is labelled sampled and the two March
+    /// 2020 halts count the bars held inside them, on NIFTY, BANKNIFTY, a
+    /// share and option contracts; then one 92-day page is answered 200 times
+    /// for an index, a share and an option and the p50, p99 and max are
+    /// printed. Run with `-- --ignored --nocapture`.
+    #[test]
+    #[ignore = "requires BRUTEX_DAYFLAGS_STORE (a store root holding the GDFL days); read-only"]
+    #[allow(
+        clippy::print_stdout,
+        clippy::too_many_lines,
+        reason = "a probe prints what it read, and reads top to bottom"
+    )]
+    fn the_real_days_are_labelled_and_the_answer_is_timed() {
+        let root = PathBuf::from(
+            std::env::var_os("BRUTEX_DAYFLAGS_STORE")
+                .expect("BRUTEX_DAYFLAGS_STORE names a store root"),
+        );
+        let get = |instrument: &str, on: &str| -> Value {
+            let got = answer(
+                &root,
+                &ask(&format!(
+                    "feed=gdfl&instrument={instrument}&from={on}&to={on}"
+                )),
+            );
+            let rec = record(&got, on).clone();
+            println!(
+                "{instrument} {on}: held={} code={} sampled={} halt_held={} degraded={} says={}",
+                rec["held"]["bars"],
+                rec["calendar"]["code"],
+                rec["sampled"],
+                rec["events"]["halt"]["held"],
+                rec["degraded"],
+                rec["says"]
+            );
+            rec
+        };
+        let sampled_day = [
+            "NSE-INDEX-NIFTY",
+            "NSE-INDEX-BANKNIFTY",
+            "NSE-FNO-NIFTY-2019-05-30-1190000-CE",
+            "NSE-FNO-NIFTY-2019-05-30-1300000-PE",
+            "NSE-CASH-RELIANCE",
+        ]
+        .map(|instrument| get(instrument, "2019-05-30"));
+        let ordinary = get("NSE-INDEX-NIFTY", "2019-05-29");
+        let halts = [
+            ("NSE-INDEX-NIFTY", "2020-03-13"),
+            ("NSE-INDEX-NIFTY", "2020-03-23"),
+            ("NSE-INDEX-BANKNIFTY", "2020-03-13"),
+            ("NSE-FNO-NIFTY-2020-03-19-950000-PE", "2020-03-13"),
+            ("NSE-FNO-NIFTY-2020-03-26-1250000-CE", "2020-03-23"),
+            ("NSE-FNO-BANKNIFTY-2020-03-19-2500000-PE", "2020-03-13"),
+            ("NSE-CASH-RELIANCE", "2020-03-13"),
+        ]
+        .map(|(instrument, on)| get(instrument, on));
+        for query in [
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2020-01-01&to=2020-03-31",
+            "feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2020-01-01&to=2020-03-31",
+            "feed=gdfl&instrument=NSE-FNO-NIFTY-2020-03-26-950000-PE&from=2020-01-01&to=2020-03-31",
+            "feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2020-01-01&to=2020-03-31",
+        ] {
+            let asked = ask(query);
+            let _warm = answer(&root, &asked);
+            let mut micros: Vec<u128> = (0..200)
+                .map(|_| {
+                    let at = std::time::Instant::now();
+                    let got = answer(&root, &asked);
+                    let took = at.elapsed().as_micros();
+                    assert_eq!(got["days"].as_array().map(Vec::len), Some(91), "{query}");
+                    took
+                })
+                .collect();
+            micros.sort_unstable();
+            println!(
+                "TIMED n=200 {query}: p50={} us p99={} us max={} us",
+                micros[99], micros[197], micros[199]
+            );
+        }
+        // THE SAMPLED DAY: both indices, and each NIFTY option through its
+        // underlying; the share's own series is not an index and says nothing.
+        for rec in &sampled_day[..2] {
+            assert_eq!(rec["sampled"]["is"], true, "{rec:#}");
+            assert_eq!(rec["sampled"]["of"], "own", "{rec:#}");
+            assert!(
+                says(rec).iter().any(|s| s.contains("minute-sampled")),
+                "{rec:#}"
+            );
+            assert!(!rec["degraded"].as_array().unwrap().is_empty(), "{rec:#}");
+        }
+        for rec in &sampled_day[2..4] {
+            assert_eq!(rec["sampled"]["is"], true, "{rec:#}");
+            assert_eq!(rec["sampled"]["of"], "underlying", "{rec:#}");
+        }
+        assert_eq!(sampled_day[4]["sampled"], Value::Null);
+        assert_eq!(ordinary["sampled"]["is"], false, "{ordinary:#}");
+        // THE HALTS: every series counts the bars it holds inside its own
+        // segment's halt seconds.
+        for rec in &halts {
+            assert!(rec["events"]["halt"]["held"]["bars"].is_u64(), "{rec:#}");
+            assert!(
+                says(rec).iter().any(|s| s.contains("inside the halt")),
+                "{rec:#}"
+            );
+        }
     }
 }
