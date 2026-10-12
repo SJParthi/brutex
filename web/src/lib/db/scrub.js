@@ -79,7 +79,7 @@ export function findingText(key, f) {
  * held them when the pass reached them — and DID NOT READ, as one sentence;
  * `''` when there is none. A pass does not vouch for a month it did not read,
  * and what earlier passes found there is kept (the server's `Index::keep`).
- * @param {any[]} series the answer's `series` @returns {{count: number, text: string}}
+ * @param {any[] | null | undefined} series the answer's `series` @returns {{count: number, text: string}}
  */
 export function busyText(series) {
   /** @type {string[]} */

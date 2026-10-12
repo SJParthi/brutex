@@ -77,7 +77,16 @@
   const OI_H = 84;
   const LINE_H = 104;
 
-  /** What the panel shows before a row set answers. */
+  /**
+   * What the panel draws from. Written out so a field keeps its own type:
+   * `Object.freeze` on a literal types `key` as `''` and `asof` as `'exact'`.
+   * @typedef {{key: string, bars: any[], byT: Map<number, any>, greekAt: Map<number, any>, slots: any[],
+   *   bands: any[], markers: any[], holesMore: number, more: number | null, total: number | null,
+   *   hasOi: boolean, notes: string[], why: string, fit: number, pages: number, requests: number,
+   *   last: {requests: number, ms: number, kind: string} | null, greeks: {asked: number, skipped: number},
+   *   rate: any, flagsWhy: string, flagDays: number, asof: 'exact' | 'prev', feedRow: any}} ChartView
+   */
+  /** What the panel shows before a row set answers. @type {Readonly<ChartView>} */
   const EMPTY = Object.freeze({
     key: '', bars: /** @type {any[]} */ ([]), byT: /** @type {Map<number, any>} */ (new Map()),
     greekAt: /** @type {Map<number, any>} */ (new Map()), slots: /** @type {any[]} */ ([]),
@@ -181,7 +190,7 @@
       more: /** @type {number | null} */ (null), total: /** @type {number | null} */ (null), notes: /** @type {string[]} */ ([]),
       why: '', fit: 0, pages: 0, requests: 0, last: /** @type {any} */ (null), asked: 0, skipped: 0, rate: /** @type {any} */ (null),
       flagsWhy: '', feed: '', subject: /** @type {any} */ (null), choice: /** @type {any} */ (null), bounds: /** @type {any} */ ({}),
-      asof: 'exact', feedRow: /** @type {any} */ (null), started: false, busy: false, pageWhy: ''
+      asof: /** @type {'exact' | 'prev'} */ ('exact'), feedRow: /** @type {any} */ (null), started: false, busy: false, pageWhy: ''
     };
   }
 

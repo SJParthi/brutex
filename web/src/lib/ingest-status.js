@@ -327,7 +327,7 @@ export function busyNotice(pilot, run, feed, nameOf = (wire) => wire) {
   const flight = flightOf(pilot?.inFlight);
   const running = run?.running === true;
   const runFeeds = running
-    ? [...new Set([...(run?.asked ?? []), ...(run?.feeds ?? [])].map((f) => f?.vendor).filter((v) => typeof v === 'string' && v !== ''))]
+    ? /** @type {string[]} */ ([...new Set([...(run?.asked ?? []), ...(run?.feeds ?? [])].map((f) => f?.vendor).filter((v) => typeof v === 'string' && v !== ''))])
     : [];
   if (!flight && !running) return null;
   const pace = flightPace(flight);

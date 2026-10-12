@@ -4695,7 +4695,9 @@
    *   surveyed: boolean | null,
    *   blockedBy: string | null,
    *   error: string | null,
-   *   busy: boolean
+   *   busy: boolean,
+   *   seat: string | null,
+   *   paused: boolean | null
    * }}
    */
   let pilot = $state(emptyPilot());
@@ -6964,7 +6966,7 @@
           `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
         phase = 'done';
         finishedAt = Date.now();
-        releaseWatch?.();
+        /** @type {(() => void) | null} */ (releaseWatch)?.();
         releaseWatch = null;
         /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
            must show it, not a finished card with Stop gone: pick it up exactly
@@ -7338,7 +7340,7 @@
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
-    releaseWatch?.();
+    /** @type {(() => void) | null} */ (releaseWatch)?.();
     releaseWatch = null;
 
     // THE AFTER READING. Taken even when the request failed — a run that
