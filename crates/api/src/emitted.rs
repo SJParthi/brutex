@@ -1439,7 +1439,7 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 
     let (rows, faults) = crate::bars::page(&reader, 0, 1);
     assert!(rows.is_empty(), "a record that will not read is not a row");
-    assert_eq!(faults.len(), 1, "and the page names the gap");
+    assert_eq!(faults.records(), 1, "and the page names the gap");
 }
 
 /// **EVERY EMIT SITE THIS BINARY CAN REACH PUTS A RECORD IN THE FILE.**
@@ -1455,6 +1455,12 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 /// defect this whole module exists to remove.
 #[test]
 fn every_reachable_emit_site_puts_a_record_in_the_file() {
+    // APART FROM THE TESTS THAT HOLD EVERY ADMISSION SLOT. Several rows below
+    // drive an audited route and assert its own answer (a 400, a 200); a test
+    // that saturates the process-wide pool at that instant turned the answer
+    // into the pool's refusal — `left: 503, right: 400`, one run of the suite
+    // in five on 2026-10-11. Those tests take this guard; so does this one.
+    let _apart = crate::detail::apart_from_slot_owners_blocking();
     let sink = sink();
     assert_eq!(
         sink.health().dropped,
@@ -1871,7 +1877,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // 2 -> 3 at WP-81 repair 2 (DB-B79, DB-B71): `api.recovery recovery not
+    // resumed` of a start that writes nothing, driven through
+    // `server::recovery_at_start` and read back by recovery::tests::
+    // a_start_that_refuses_writes_names_the_plan_in_flight_and_claims_nothing.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -2015,9 +2025,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 76 -> 77 at WP-62 repair 1 (DB-B34): the restart scan's NOT KNOWN
     // line, named above `REACHED_IN_SERVER_TESTS`.
+    //
+    // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
+    // `api.recovery recovery not resumed`, reached in recovery tests. (That
+    // branch counted 73 -> 74; the two packages' sites are added here.)
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 77,
+        lib_sites, 78,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

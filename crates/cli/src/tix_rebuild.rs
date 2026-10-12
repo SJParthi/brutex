@@ -447,7 +447,10 @@ pub(crate) fn command_with(
 
 /// `cli tix-rebuild`, against the CLI's store root (`BRUTEX_STORE`).
 pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
-    command_with(arguments, &crate::store_root, out)
+    // AN UNSTAMPED BUILD BUILDS NO INDEX (DB-B71, WP-81); `--dry-run` writes
+    // nothing and is not refused.
+    let store = crate::store_write::root_for("tix-rebuild", arguments);
+    command_with(arguments, &store, out)
 }
 
 #[cfg(test)]

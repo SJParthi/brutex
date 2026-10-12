@@ -81,6 +81,7 @@ use super::{
     Behind, Cancel, Extreme, Extremes, MAX_SCAN_BARS, MAX_SORT_DEPTH, SortKey, WindowBar,
     WindowQuery, behind_of, change, window_bar,
 };
+use crate::fault_log::FaultLog;
 
 /// The column a value sort orders on, or `None` for time and time of day.
 #[must_use]
@@ -403,6 +404,7 @@ fn view(
             |row| {
                 plan.read(root, slot, row)
                     .map(|bar| bar.ts_micros)
+                    .map_err(String::from)
                     .inspect_err(|_| bar_refused = true)
             },
         )?;
@@ -1744,13 +1746,13 @@ pub(super) fn page(
     rules: &[change::Rules],
     query: &WindowQuery,
     (offset, limit): (usize, usize),
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
     cancel: &Cancel,
 ) -> Result<Sorted, String> {
     let mut set_aside = Vec::new();
     let mut aside = Aside::new();
     for _ in 0..=MAX_BROKEN {
-        let mut tried = Vec::new();
+        let mut tried = FaultLog::default();
         match page_once(
             root,
             plans,
@@ -1761,7 +1763,7 @@ pub(super) fn page(
             (cancel, &aside),
         ) {
             Ok(sorted) => {
-                faults.append(&mut tried);
+                faults.absorb(tried);
                 return Ok(sorted);
             }
             Err(Attempt::Refused(why)) => return Err(why),
@@ -1823,7 +1825,7 @@ fn page_once(
     rules: &[change::Rules],
     query: &WindowQuery,
     (offset, limit): (usize, usize),
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
     (cancel, aside): (&Cancel, &Aside),
 ) -> Result<Sorted, Attempt> {
     let Some(column) = column_of(query.sort) else {
@@ -2345,7 +2347,7 @@ fn page_once(
                 match plan.read(root, slot, row) {
                     Ok(bar) => (series, run, row, bar),
                     Err(why) => {
-                        push_once(faults, why);
+                        faults.push_once(why);
                         continue;
                     }
                 }
@@ -2372,14 +2374,14 @@ fn page_once(
                 let row = match plan.locate(root, slot, ts) {
                     Ok(row) => row,
                     Err(why) => {
-                        push_once(faults, why);
+                        faults.push_once(why);
                         continue;
                     }
                 };
                 let bar = match plan.read(root, slot, row) {
                     Ok(bar) => bar,
                     Err(why) => {
-                        push_once(faults, why);
+                        faults.push_once(why);
                         continue;
                     }
                 };
@@ -2447,7 +2449,7 @@ pub(super) fn extremes_of(
     plans: &mut [SeriesPlan],
     rules: &[change::Rules],
     query: &WindowQuery,
-    faults: &mut Vec<String>,
+    faults: &mut FaultLog,
     cancel: &Cancel,
 ) -> Result<(Extremes, u64), String> {
     for plan in plans.iter_mut() {
@@ -2563,27 +2565,20 @@ pub(super) fn extremes_of(
 /// What a request's stretch reads left unread, drained from every plan: one
 /// fault a month into `faults`, the first [`MAX_NAMED`] months and the counts
 /// into `report`.
-fn unread_of(
-    plans: &mut [SeriesPlan],
-    faults: &mut Vec<String>,
-    report: &mut SortReport,
-) -> Unread {
+fn unread_of(plans: &mut [SeriesPlan], faults: &mut FaultLog, report: &mut SortReport) -> Unread {
     let mut out = Unread::default();
     for plan in plans.iter_mut() {
-        let before = faults.len();
-        let left = plan.take_unread(faults);
-        out.rows = out.rows.saturating_add(left.rows);
-        out.months += left.months;
-        for line in faults.get(before..).unwrap_or_default() {
+        let key = plan.key.text();
+        let left = plan.take_unread(faults, |line| {
             if out.first.is_none() {
-                out.first = Some(line.clone());
+                out.first = Some(line.to_owned());
             }
             if report.unread_why.len() < MAX_NAMED {
-                report
-                    .unread_why
-                    .push(format!("{} {line}", plan.key.text()));
+                report.unread_why.push(format!("{key} {line}"));
             }
-        }
+        });
+        out.rows = out.rows.saturating_add(left.rows);
+        out.months += left.months;
     }
     report.unread_rows = out.rows;
     report.unread_months = out.months;
@@ -2610,14 +2605,6 @@ impl Unread {
                 self.first.as_deref().unwrap_or("")
             )
         })
-    }
-}
-
-/// Adds `why` to `faults` unless it is the fault just added: a month that
-/// will not open answers every row of a page in the same words, once.
-fn push_once(faults: &mut Vec<String>, why: String) {
-    if faults.last() != Some(&why) {
-        faults.push(why);
     }
 }
 

@@ -835,6 +835,24 @@ pub enum StoreError {
         /// The revision every reader opens instead.
         ordinal: u32,
     },
+    /// The month's provenance sidecar was written for ANOTHER month: the files
+    /// were copied or restored under a different vendor, instrument, contract,
+    /// bar length or month. DB-B65, WP-81.
+    ///
+    /// The bar header's own cross-check is the symbol's hash, which the index,
+    /// every option contract of that underlying and both vendors share, so a
+    /// month copied to a sibling strike opened cleanly and was served as the
+    /// other instrument. The `.prv` header binds itself to the whole store
+    /// path ([`crate::provenance::written_for`]), and every bar door asks it.
+    Misfiled {
+        /// The bar file that was asked for.
+        path: PathBuf,
+        /// The sidecar beside it that names another month.
+        sidecar: PathBuf,
+        /// What is not this month's: `vendor`, `timeframe`, `month` or
+        /// `store path`.
+        field: &'static str,
+    },
 }
 
 /// How an offered overlap disagrees with the records a month holds.
@@ -1095,22 +1113,14 @@ impl fmt::Display for StoreError {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
             Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
-            Self::DiskFull { path, action } => write!(f, "disk full {action} {}", path.display()),
-            Self::Denied { path, action } => {
-                write!(f, "permission denied {action} {}", path.display())
-            }
-            Self::ReadOnly { path, action } => {
-                write!(f, "read-only filesystem {action} {}", path.display())
-            }
-            Self::IsADirectory { path, action } => {
-                write!(f, "{} is a directory, {action} it", path.display())
-            }
+            Self::DiskFull { path, action } => write_host(f, "disk full", action, path),
+            Self::Denied { path, action } => write_host(f, "permission denied", action, path),
+            Self::ReadOnly { path, action } => write_host(f, "read-only filesystem", action, path),
+            Self::IsADirectory { path, action } => write_state(f, path, "is a directory", action),
             Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
             Self::NotARegularFile { path, action } => write_not_regular(f, path, *action),
             Self::Symlinked { path } => write_symlinked(f, path),
-            Self::Missing { path, action } => {
-                write!(f, "{} does not exist, {action} it", path.display())
-            }
+            Self::Missing { path, action } => write_state(f, path, "does not exist", action),
             Self::BarrierFailed { path } => write_barrier_failed(f, path),
             Self::Io {
                 path,
@@ -1191,6 +1201,11 @@ impl fmt::Display for StoreError {
             } => write_overlap(f, path, *at, *ts_micros, *conflict),
             Self::Generation { path, reason } => write_generation(f, path, reason),
             Self::Superseded { path, ordinal } => write_superseded(f, path, *ordinal),
+            Self::Misfiled {
+                path,
+                sidecar,
+                field,
+            } => write_misfiled(f, path, sidecar, field),
         }
     }
 }
@@ -1756,6 +1771,10 @@ impl BarFile {
         // a fallback that hides a failure — it reads as safe and refuses
         // nothing. The duplicate is gone and the sentence is now true by
         // construction rather than by inspection.
+        //
+        // A MONTH FILED UNDER ANOTHER NAME IS NOT APPENDED TO (DB-B65): the
+        // landing's own record would be refused after its bars were committed.
+        refuse_misfiled(root, path, &bars_path)?;
         Self::validated(
             bars,
             bars_path,
@@ -1907,6 +1926,10 @@ impl BarFile {
         };
 
         let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        // WHICH MONTH THESE FILES WERE WRITTEN FOR, asked before a record is
+        // served (DB-B65): the header's symbol hash cannot tell a contract
+        // from its sibling strike, and the `.prv` header can.
+        refuse_misfiled(root, path, &bars_path)?;
         Self::validated(
             bars,
             bars_path,
@@ -2008,6 +2031,7 @@ impl BarFile {
         // MEASURED UNDER THE LOCK, so no append can move the length between
         // the measurement and the header it is checked against.
         let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        refuse_misfiled(root, path, &bars_path)?;
         let mut file = Self::validated(
             bars,
             bars_path,
@@ -2071,6 +2095,7 @@ impl BarFile {
         let bars =
             crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
         let len = bars.metadata().map_err(|why| why.to_string())?.len();
+        refuse_misfiled(root, path, &bars_path).map_err(|why| why.to_string())?;
         let file = Self::validated(
             bars,
             bars_path,
@@ -5483,6 +5508,66 @@ fn write_superseded(f: &mut fmt::Formatter<'_>, path: &Path, ordinal: u32) -> fm
         "{} is served from repair revision {ordinal} (bar-revisions-v1/{ordinal}); an append to the original would land where no reader looks, so the writer refuses it. Add to this month with a further versioned repair (D-3350)",
         path.display()
     )
+}
+
+/// The host's refusal of one action on one path: `<what> <action> <path>`.
+fn write_host(
+    f: &mut fmt::Formatter<'_>,
+    what: &str,
+    action: &dyn fmt::Display,
+    path: &Path,
+) -> fmt::Result {
+    write!(f, "{what} {action} {}", path.display())
+}
+
+/// What a path turned out to be when one action met it:
+/// `<path> <state>, <action> it`.
+fn write_state(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    state: &str,
+    action: &dyn fmt::Display,
+) -> fmt::Result {
+    write!(f, "{} {state}, {action} it", path.display())
+}
+
+/// [`StoreError::Misfiled`]'s sentence.
+fn write_misfiled(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    sidecar: &Path,
+    field: &str,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} is not the month its provenance sidecar {} was written for: its {field} is not this month's. The files were copied or restored under another name; refused rather than served as another instrument (DB-B65)",
+        path.display(),
+        sidecar.display()
+    )
+}
+
+/// Refuses a bar month whose `.prv` names another month, before a byte of its
+/// bars is read (DB-B65, WP-81). `root` is the root the month's files are
+/// under exactly — a repair revision's own, for a revision.
+///
+/// One `open` and one 64-byte read ([`crate::provenance::written_for`]); a
+/// month with no sidecar costs the one `open` that answers `ENOENT` and is
+/// served as before. Overlay and greeks files have no provenance sidecar and
+/// are not asked.
+fn refuse_misfiled(root: &Path, path: StorePath<'_>, bars_path: &Path) -> Result<(), StoreError> {
+    if path.file() != FileKind::Bars {
+        return Ok(());
+    }
+    match crate::provenance::written_for(root, path) {
+        crate::provenance::WrittenFor::Another { sidecar, field } => Err(StoreError::Misfiled {
+            path: bars_path.to_path_buf(),
+            sidecar,
+            field,
+        }),
+        crate::provenance::WrittenFor::ThisMonth | crate::provenance::WrittenFor::Unrecorded => {
+            Ok(())
+        }
+    }
 }
 
 /// [`StoreError::Symlinked`]'s sentence.

@@ -52,6 +52,8 @@
   import { watchVisible } from '$lib/page-requests.js';
   import { firstCheck, apiTitle } from '$lib/api-status.js';
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
+  import { buildLabel } from '$lib/runtime-inspection.js';
+  import CopyAlert from '$lib/CopyAlert.svelte';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
    *
@@ -1104,10 +1106,18 @@
   <main class="main" id="main" tabindex="-1">
     <div class="inspection-banner" role="status">
       <span>{runtimeInspection.value.why}</span>
+      <!-- WHICH BUILD ANSWERED (DB-B71): the commit the API was compiled from,
+           so a number on any page can be traced to the code that produced it,
+           and a rollback is visible. -->
+      <span class="build" class:unstamped={runtimeInspection.value.build === 'unstamped'}
+        title={runtimeInspection.value.build ?? 'This server did not send x-brutex-build'}
+        >{buildLabel(runtimeInspection.value.build)}</span>
       {#if runtimeInspection.value.phase === 'failed'}
         <button class="btn ghost" onclick={() => { void loadInspection(); }}>Recheck server mode</button>
       {/if}
     </div>
+    <!-- NO COPY OF THIS STORE IS SAID ON EVERY PAGE (rules audit RA-163). -->
+    <CopyAlert />
     <!-- AN ADDRESS NAMING A FEED THAT DOES NOT EXIST IS SAID ON EVERY PAGE
          (WP-61 repair): `?feed=nosuch` opened the saved or default feed with no
          word. In <main>, not in the picker's list, because the picker is closed
@@ -1137,6 +1147,13 @@
     line-height: 1.5;
   }
   .inspection-banner button { flex-shrink: 0; }
+  .inspection-banner .build {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink-3, var(--ink-2));
+  }
+  .inspection-banner .build.unstamped { color: var(--bad, var(--ink-2)); }
 
   /* A narrow window gives navigation its own full-width row. Keeping it in
      the desktop flex row can squeeze its hit area beneath the status buttons.

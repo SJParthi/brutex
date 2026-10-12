@@ -685,9 +685,127 @@ async fn activate_durable(
     Ok(())
 }
 
+/// What a start did about the recovery this store records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AtStart {
+    /// No activated plan is in flight: nothing to resume.
+    Nothing,
+    /// The in-flight plan was claimed and its driver started.
+    Driving,
+    /// This server writes nothing, so nothing was claimed or driven. `plan` is
+    /// the in-flight plan it would otherwise have resumed, by its identity;
+    /// `None` when none is in flight.
+    Grounded {
+        /// The plan left in flight, in hex.
+        plan: Option<String>,
+    },
+}
+
+/// The one decision a start makes about a recorded recovery (DB-B79, DB-B71,
+/// WP-81).
+///
+/// # The failure
+///
+/// The write gate refused every request that is not a GET or a HEAD and
+/// grounded the autopilot — and the start then called [`resume`] with no gate
+/// at all. A plan left `InFlight` by the last process (`active.bin` plus a
+/// plan whose control row is `InFlight` and not stopped) was claimed and
+/// driven: vendor requests and store writes, started by no request, on a
+/// server whose banner said `READ-ONLY: every write is refused`, and equally
+/// on a build with no commit stamp. `audit/` is among the directories a
+/// shadow store clones, so a shadow taken while a recovery was in flight
+/// resumed it on every test server started over it, through the linked bars.
+///
+/// # The rule
+///
+/// `grounded` (the process's `WriteGate::refuses_writes`) means: nothing
+/// is claimed, no journal is opened for append, no driver is started. What is
+/// in flight is READ — through `recovery_journal::snapshot`, a shared lock on
+/// a read-only handle, no create and no sync — so the start can name the plan
+/// it left alone.
+///
+/// # Errors
+///
+/// What [`resume`] refuses; when grounded, an activation history or a plan
+/// that cannot be read (said, never treated as "nothing in flight").
+pub(crate) fn at_start(site: &Loaded, grounded: bool) -> Result<AtStart, String> {
+    at_start_with(site, grounded, |site, id, prepared| {
+        let _task = tokio::spawn(drive(site, id, prepared, false));
+    })
+}
+
+/// [`at_start`] with the driver named, so a test proves the ungated arm does
+/// claim and hand the plan over without starting a vendor-owning worker.
+fn at_start_with(
+    site: &Loaded,
+    grounded: bool,
+    driver: impl FnOnce(Loaded, [u8; 32], Result<Journal, String>),
+) -> Result<AtStart, String> {
+    if grounded {
+        return in_flight_unopened(site).map(|plan| AtStart::Grounded {
+            plan: plan.map(hex),
+        });
+    }
+    resume_with(Loaded::clone(site), driver).map(|driving| {
+        if driving {
+            AtStart::Driving
+        } else {
+            AtStart::Nothing
+        }
+    })
+}
+
+/// The plan a start would resume, found without opening anything for write.
+///
+/// The same questions [`resume`] asks, in the same order, each answered from
+/// a snapshot. `Ok(None)`: no activation, a stopped plan, or a control row
+/// that is not `InFlight`.
+fn in_flight_unopened(site: &Site) -> Result<Option<[u8; 32]>, String> {
+    if !active_path(site).try_exists().map_err(failure)? {
+        return Ok(None);
+    }
+    let active = active_history(site)?;
+    let Some(pointer) = active.latest.values().max_by_key(|record| record.attempts) else {
+        return Ok(None);
+    };
+    let id = pointer_identity(&pointer.body)?;
+    if pointer.key != id {
+        return Err("active recovery identity mismatch".to_owned());
+    }
+    if crate::recovery_control::is_stopped_unopened(site, id)? {
+        return Ok(None);
+    }
+    let plan = crate::recovery_journal::snapshot(&plan_path(site, id)).map_err(|why| {
+        if why.kind() == std::io::ErrorKind::NotFound {
+            missing_plan(id)
+        } else {
+            failure(why)
+        }
+    })?;
+    validate_seal(&plan.latest, id)?;
+    Ok(plan
+        .latest
+        .get(&CONTROL)
+        .is_some_and(|row| row.status == Status::InFlight)
+        .then_some(id))
+}
+
 /// Only an already-seeded, explicitly activated plan may resume at boot.
 /// Closed/blocked/stopped plans never restart themselves or reset budgets.
+///
+/// NOT the start's entry: a server calls [`at_start`], which asks the write
+/// gate first.
+#[cfg(test)]
 pub(crate) fn resume(site: Loaded) -> Result<bool, String> {
+    resume_with(site, |site, id, prepared| {
+        let _task = tokio::spawn(drive(site, id, prepared, false));
+    })
+}
+
+fn resume_with(
+    site: Loaded,
+    driver: impl FnOnce(Loaded, [u8; 32], Result<Journal, String>),
+) -> Result<bool, String> {
     if !active_path(&site).try_exists().map_err(failure)? {
         return Ok(false);
     }
@@ -721,7 +839,7 @@ pub(crate) fn resume(site: Loaded) -> Result<bool, String> {
     drop(active);
     claim(&site, Some((id, false)))?;
     let prepared = seeded(&site, id, None);
-    let _task = tokio::spawn(drive(site, id, prepared, false));
+    driver(site, id, prepared);
     Ok(true)
 }
 
@@ -2252,6 +2370,154 @@ mod tests {
         let restarted = Loaded::new(Site::load(&root.join("missing-masters"), &root));
         assert!(!resume(restarted).unwrap());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A SERVER THAT REFUSES WRITES RESUMES NO RECOVERY AT ITS START
+    /// (DB-B79, DB-B71).** A plan is durably activated and left `InFlight`,
+    /// as a killed process leaves it. A start that is grounded names the plan
+    /// and claims nothing: the run slot and the active plan stay empty, the
+    /// driver is never called, and not a byte under `audit/recovery-v1`
+    /// changes — however often it starts. The SAME store started ungated
+    /// claims the plan and hands it to the driver, so what the first half
+    /// proves is the gate and not a fixture nothing would have resumed. (The
+    /// start called `resume` with no gate: read-only and unstamped servers
+    /// drove the plan.)
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one in-flight plan met by every kind of start, in order"
+    )]
+    async fn a_start_that_refuses_writes_names_the_plan_in_flight_and_claims_nothing() {
+        let root = crate::scratch::path("recovery-grounded-start");
+        std::fs::create_dir_all(&root).unwrap();
+        let load = || Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let units = plan(
+            vec![leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        // DURABLE ACTIVATION ONLY, never the vendor-owning worker.
+        drop(seeded(&load(), id, Some(units)).unwrap());
+        let before = history_bytes(&load());
+        assert!(before.contains_key(std::ffi::OsStr::new("active.bin")));
+
+        let driven = std::cell::Cell::new(0_u32);
+        for _start in 0..3 {
+            let site = load();
+            let did = at_start_with(&site, true, |_, _, _| driven.set(driven.get() + 1));
+            assert_eq!(
+                did,
+                Ok(AtStart::Grounded {
+                    plan: Some(hex(id))
+                })
+            );
+            assert!(site.run.lock().unwrap().is_none(), "no run slot is claimed");
+            assert!(
+                site.recovery_active.lock().unwrap().is_none(),
+                "no plan is made the active one"
+            );
+            assert_eq!(history_bytes(&site), before, "no journal byte moved");
+        }
+        assert_eq!(driven.get(), 0, "a grounded start drives nothing");
+
+        // THE START'S OWN FUNCTION, under each reason a server writes nothing:
+        // one sentence naming the reason and the plan, and still nothing
+        // claimed. (Its driver is the real one; it must never be reached.)
+        for (gate, word) in [
+            (
+                server::WriteGate {
+                    read_only: true,
+                    unstamped: None,
+                },
+                "read-only (BRUTEX_READ_ONLY=1)",
+            ),
+            (
+                server::WriteGate {
+                    read_only: false,
+                    unstamped: Some("no commit stamp"),
+                },
+                "unstamped",
+            ),
+        ] {
+            let site = load();
+            let from = crate::emitted::mark();
+            let server::RecoveryStart::Grounded(line) = server::recovery_at_start(&site, gate)
+            else {
+                panic!("a server that refuses writes resumed, or said nothing");
+            };
+            // ONE EVENT, read back from the installed sink, naming the plan.
+            let events = crate::emitted::landed(from, "api.recovery", "recovery not resumed");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| crate::emitted::says(event, "plan", &hex(id))
+                        && crate::emitted::says(event, "why", &line)),
+                "the grounded start wrote no event naming plan {}",
+                hex(id)
+            );
+            assert!(
+                line.starts_with(&format!("recovery not resumed: {word}"))
+                    && line.contains(&format!("plan {} is IN FLIGHT", hex(id))),
+                "{line}"
+            );
+            assert!(site.run.lock().unwrap().is_none());
+            assert!(site.recovery_active.lock().unwrap().is_none());
+            assert_eq!(history_bytes(&site), before);
+        }
+
+        // THE SAME STORE, UNGATED: claimed and handed to the driver.
+        let site = load();
+        let mut handed = None;
+        let did = at_start_with(&site, false, |_, plan, prepared| {
+            handed = Some((plan, prepared.is_ok()));
+        });
+        assert_eq!(did, Ok(AtStart::Driving));
+        assert_eq!(handed, Some((id, true)));
+        assert!(
+            site.run.lock().unwrap().is_some(),
+            "the run slot is claimed"
+        );
+        assert_eq!(*site.recovery_active.lock().unwrap(), Some(id));
+
+        // A STOPPED PLAN IS IN FLIGHT FOR NOBODY: the grounded start says so
+        // from the STOP record, read and not opened.
+        let (status, _, _) = server::pull_run_stop(State(Loaded::clone(&site))).await;
+        assert_eq!(status, StatusCode::OK);
+        let stopped = history_bytes(&site);
+        let again = load();
+        assert_eq!(
+            at_start_with(&again, true, |_, _, _| driven.set(driven.get() + 1)),
+            Ok(AtStart::Grounded { plan: None })
+        );
+        assert_eq!(history_bytes(&again), stopped);
+        assert_eq!(driven.get(), 0);
+
+        // NO RECOVERY DIRECTORY AT ALL: nothing, and nothing created.
+        let empty = crate::scratch::path("recovery-grounded-start-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let site = Loaded::new(Site::load(&empty.join("missing-masters"), &empty));
+        assert_eq!(
+            at_start_with(&site, true, |_, _, _| driven.set(driven.get() + 1)),
+            Ok(AtStart::Grounded { plan: None })
+        );
+        assert!(!empty.join("audit").exists());
+
+        // A GARBAGE ACTIVATION HISTORY IS SAID, never read as "nothing".
+        std::fs::create_dir_all(empty.join("audit/recovery-v1")).unwrap();
+        std::fs::write(empty.join("audit/recovery-v1/active.bin"), [0x5a_u8; 256]).unwrap();
+        let why = at_start_with(&site, true, |_, _, _| driven.set(driven.get() + 1)).unwrap_err();
+        assert!(
+            why.contains("trailing bytes") || why.contains("recovery"),
+            "{why}"
+        );
+        assert_eq!(
+            std::fs::read(empty.join("audit/recovery-v1/active.bin")).unwrap(),
+            [0x5a_u8; 256]
+        );
+        assert_eq!(driven.get(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(empty).unwrap();
     }
 
     #[tokio::test]

@@ -1589,6 +1589,10 @@ mod bars_route;
 mod calendar_route;
 #[path = "census_cache.rs"]
 mod census_cache;
+/// `/disk.json`: free space, store size, census retention and the backup
+/// receipt (DB-B73, DB-B59; WP-81).
+#[path = "disk_route.rs"]
+mod disk_route;
 #[path = "feeds_route.rs"]
 mod feeds_route;
 #[path = "gaps_route.rs"]
@@ -1597,6 +1601,10 @@ mod gaps_route;
 mod instruments_route;
 #[path = "month_change.rs"]
 mod month_change;
+/// `/scrub.json`: what the full-block scrub found in the series a page shows
+/// (DB-B74, DB-B65; WP-81).
+#[path = "scrub_route.rs"]
+mod scrub_route;
 // `/pull/repair.json` and the plan behind `POST /pull/repair` (D-3350, WP-13c).
 #[path = "repair_route.rs"]
 mod repair_route;
@@ -1655,6 +1663,10 @@ mod optiongreeks_route_tests;
 #[cfg(test)]
 #[path = "serve_edge_tests.rs"]
 mod serve_edge_tests;
+
+#[cfg(test)]
+#[path = "ops_safety_tests.rs"]
+mod ops_safety_tests;
 
 /// The longest a stamped note may be.
 ///
@@ -1909,12 +1921,20 @@ async fn verify_json(
 async fn health(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> (axum::http::StatusCode, String) {
-    let (body, clean) = report_from(&site.universe().read);
+    let (mut body, clean) = report_from(&site.universe().read);
     let code = if clean {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     };
+    // THE BUILD, IN THE BODY TOO (DB-B71): a monitor that keeps only the body
+    // still records which binary said `ok`. The first line is unchanged.
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str("build ");
+    body.push_str(build_label());
+    body.push('\n');
     (code, body)
 }
 
@@ -5605,6 +5625,74 @@ fn note_recovery_not_resumed(why: &str) {
         &telemetry::Event::error("api.recovery", "recovery not resumed")
             .with("why", telemetry::Value::Str(why)),
     );
+}
+
+/// What the start has to say about the recovery it did or did not resume.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryStart {
+    /// Nothing was in flight, or the plan in flight is being driven: the
+    /// recovery page says which.
+    Silent,
+    /// This server writes nothing, so it resumed nothing: the banner's line.
+    Grounded(String),
+    /// A server that may write could not resume: the refusal.
+    Refused(String),
+}
+
+/// The start's decision about a recorded recovery, with its one event.
+///
+/// The gate is the process's ([`WriteGate`]); the decision and its proof are
+/// [`crate::recovery::at_start`]'s. A grounded start emits ONE event, a
+/// warning when a plan is left in flight and information when none is, and
+/// returns the sentence the banner prints.
+pub(crate) fn recovery_at_start(site: &Loaded, gate: WriteGate) -> RecoveryStart {
+    use crate::recovery::AtStart;
+    match (
+        crate::recovery::at_start(site, gate.refuses_writes()),
+        gate.grounds(),
+    ) {
+        (Ok(AtStart::Grounded { plan }), grounds) => {
+            let line = recovery_grounded_line(grounds.unwrap_or("no writes"), Ok(plan.as_deref()));
+            let event = if plan.is_some() {
+                telemetry::Event::warn("api.recovery", "recovery not resumed")
+            } else {
+                telemetry::Event::info("api.recovery", "recovery not resumed")
+            };
+            let _noted = telemetry::emit(&event.with("why", telemetry::Value::Str(&line)).with(
+                "plan",
+                telemetry::Value::Str(plan.as_deref().unwrap_or("none in flight")),
+            ));
+            RecoveryStart::Grounded(line)
+        }
+        (Err(why), Some(grounds)) => {
+            let line = recovery_grounded_line(grounds, Err(&why));
+            note_recovery_not_resumed(&line);
+            RecoveryStart::Grounded(line)
+        }
+        (Err(why), None) => {
+            note_recovery_not_resumed(&why);
+            RecoveryStart::Refused(why)
+        }
+        (Ok(AtStart::Nothing | AtStart::Driving), _) => RecoveryStart::Silent,
+    }
+}
+
+/// The sentence of a start that resumed no recovery because it writes
+/// nothing: why, and the plan left in flight — or that none is, or that what
+/// is in flight could not be read.
+fn recovery_grounded_line(grounds: &str, in_flight: Result<Option<&str>, &str>) -> String {
+    match in_flight {
+        Ok(None) => format!("recovery not resumed: {grounds}; no plan is in flight"),
+        Ok(Some(plan)) => format!(
+            "recovery not resumed: {grounds}; plan {plan} is IN FLIGHT and was left exactly \
+             as it is — nothing claimed, nothing asked of a vendor, nothing written. A \
+             server that may write resumes it at its start"
+        ),
+        Err(why) => format!(
+            "recovery not resumed: {grounds}; what is in flight could NOT be read ({why}) — \
+             nothing was claimed or written"
+        ),
+    }
 }
 
 /// Both wire fields come from one catalogue snapshot. Recheck at the fetch
@@ -14666,7 +14754,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
             let page = page.min(last_page);
             let (rows, faults) =
                 bars::page(&file, page.saturating_mul(bars::PAGE_BARS), bars::PAGE_BARS);
-            let trouble = (!faults.is_empty()).then(|| faults.join(" · "));
+            let trouble = (!faults.is_empty()).then(|| faults.sentences().join(" · "));
             (
                 axum::http::StatusCode::OK,
                 render::bars_page(&render::BarsView {
@@ -14825,6 +14913,19 @@ pub fn router_serving(
 /// 4. [`never_framed`] — outermost, so no answer leaves without its headers:
 ///    not the `403`, not an audit `503`, not the fallback.
 fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -> axum::Router {
+    admitted_gated(table, site, local_addr, WriteGate::of_process())
+}
+
+/// [`admitted`] with the write gate named, so a test can prove the gate is
+/// among these layers: with the gate inside `admitted` alone, deleting its
+/// layer failed no test (the only test mounted the middleware on a router of
+/// its own).
+fn admitted_gated(
+    table: axum::Router<Loaded>,
+    site: Loaded,
+    local_addr: SocketAddr,
+    gate: WriteGate,
+) -> axum::Router {
     table
         // THE REQUEST'S OWN SIZE AND SHAPE, DECIDED ONCE. Innermost, so the
         // origin check below still answers first and the log above still sees
@@ -14842,6 +14943,20 @@ fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -
         // it does not.
         .layer(axum::middleware::from_fn(move |request, next| {
             same_origin_writes_only(local_addr, request, next)
+        }))
+        // A READ-ONLY SERVER REFUSES EVERY WRITE (DB-B79, WP-81). Inside
+        // `note_request`, so the log sees the refusal.
+        .layer(axum::middleware::from_fn(move |request, next| {
+            refuse_writes(gate.read_only, request, next)
+        }))
+        // AND SO DOES A BUILD NOBODY CAN NAME (DB-B71): every write a
+        // REQUEST can start — a Zerodha pull, an import queued from /ingest,
+        // a repair, a masters refresh, a sweep's run record — starts with one
+        // that is not a GET or a HEAD. The two writes NO request starts are
+        // gated where they start: the autopilot (`autopilot::fly`) and the
+        // resume of a recovery left in flight (`recovery::at_start`).
+        .layer(axum::middleware::from_fn(move |request, next| {
+            refuse_unstamped_writes(gate.unstamped, request, next)
         }))
         .layer(axum::middleware::from_fn(crate::logs::note_request))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
@@ -14878,8 +14993,12 @@ pub const MAX_WINDOW_TARGET_BYTES: usize = 60 * 1024;
 
 /// The query fields one route reads as a LIST, with [`params`]: repeating
 /// them is the request, not an ambiguity. `/bars/window.json`'s `key` (D-3326,
-/// WP-31). Any other route, and any other field, still refuses a repeat.
-const MULTI_VALUED_QUERY_FIELDS: [(&str, &str); 1] = [("/bars/window.json", "key")];
+/// WP-31), and `/scrub.json`'s `key` — the series of the same selection, at
+/// most `scrub_route::MAX_KEYS` of them, which fit the ordinary target cap
+/// (DB-B74, WP-81). Any other route, and any other field, still refuses a
+/// repeat.
+const MULTI_VALUED_QUERY_FIELDS: [(&str, &str); 2] =
+    [("/bars/window.json", "key"), ("/scrub.json", "key")];
 
 /// The most header bytes (every name plus every value) this server reads.
 ///
@@ -15206,7 +15325,18 @@ fn repeated_query_key(query: &str) -> Option<&str> {
 /// handler sets any of the three today.
 async fn never_framed(mut response: axum::response::Response) -> axum::response::Response {
     use axum::http::{HeaderValue, header};
+    let busy = response.status() == axum::http::StatusCode::TOO_MANY_REQUESTS;
     let headers = response.headers_mut();
+    // EVERY REFUSAL SAYS WHEN TO RETRY (DB-B51, WP-81). `/store.json` and
+    // `/census/facets.json` sent `Retry-After: 1`; a full seek, scan, imports
+    // or folder pool answered 429 with none, so a client had nothing to wait
+    // on. A route's own value is kept; one second is the default, the time a
+    // queued read has had four times over to find a slot.
+    if busy && !headers.contains_key(header::RETRY_AFTER) {
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    // WHICH BUILD ANSWERED (DB-B71, WP-81). See [`BUILD_HEADER`].
+    headers.insert(BUILD_HEADER, build_header_value());
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.append(
         header::CONTENT_SECURITY_POLICY,
@@ -15217,6 +15347,31 @@ async fn never_framed(mut response: axum::response::Response) -> axum::response:
         HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+/// The build that answered, on EVERY response (DB-B71, WP-81).
+///
+/// The 40-hex commit this binary was compiled from (`cli::commit_stamp`, the
+/// same stamp a run's identity records), or `unstamped` for a build that
+/// carries none — a dirty tree or a tarball. Before this only
+/// `/inspection.json` named the build, and no page read it: after a rollback
+/// the operator could not tell which code produced a number on `/db` or
+/// `/ingest`, and `/health` said `ok` with no commit at all.
+pub const BUILD_HEADER: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("x-brutex-build");
+
+/// What [`BUILD_HEADER`] carries: the commit, or `unstamped`.
+#[must_use]
+pub fn build_label() -> &'static str {
+    cli::commit_stamp().unwrap_or("unstamped")
+}
+
+/// [`build_label`] as a header value. The stamp is forty lowercase hex
+/// characters or the word `unstamped`, both legal header text; the fallback
+/// arm keeps the conversion total without a panic.
+fn build_header_value() -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(build_label())
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("unstamped"))
 }
 
 /// The route table itself: every path this build serves and the fallback,
@@ -15284,6 +15439,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         )
         .route("/chain.json", axum::routing::get(chain::chain_json))
         .route("/imports.json", axum::routing::get(imports::imports_json))
+        // FREE SPACE, STORE SIZE, WHAT THE CENSUS KEEPS AND WHETHER A COPY IS
+        // RECORDED: nothing said any of it while one drive held everything
+        // (DB-B73, DB-B59; WP-81).
+        .route("/disk.json", axum::routing::get(disk_route::disk_json))
+        // WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES A PAGE SHOWS (DB-B74).
+        .route("/scrub.json", axum::routing::get(scrub_route::scrub_json))
         // EACH ROW'S PULL REFUSALS, so /ingest says a month was requested and
         // refused rather than never pulled (WP-61, DB-G23).
         .route(
@@ -15752,6 +15913,206 @@ async fn same_origin_writes_only(
         why,
     )
         .into_response()
+}
+
+/// The variable that makes this server refuse every HTTP write and keep the
+/// autopilot on the ground (DB-B79, WP-81). `1` and nothing else.
+///
+/// For test and shadow servers. A shadow store LINKS the operator's real bar
+/// tree (`state/fix/shadow.sh`), so a test server that could take a `POST`
+/// could start a pull that writes through the link; the store writer's
+/// refusal of a linked component (`store::file`, `refuse_links_below`) was the
+/// only protection. With this set:
+///
+/// * a request that is not a GET or a HEAD never reaches a handler (403);
+/// * the autopilot does not fly;
+/// * a spot recovery left in flight is NOT resumed at start
+///   ([`crate::recovery::at_start`]) — the one write path no request starts,
+///   and until WP-81's second repair the one this variable did not cover.
+///
+/// WHAT A READ-ONLY SERVER STILL WRITES, all under its own store root and
+/// none of it a bar, a sidecar, a census or a vendor journal: `serve.lock`
+/// (the one-server-a-store claim), `telemetry/` (its log), the invocation
+/// journal `audit/invocations-v1` recording audited reads (D-1445), and the
+/// pull journal's read index `audit/pull.journal.idx`, rebuilt beside the
+/// old one when stale. On a shadow those are the shadow's own cloned
+/// directories.
+pub const READ_ONLY_ENV: &str = "BRUTEX_READ_ONLY";
+
+static READ_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether `value` turns read-only mode on: exactly `1`.
+#[must_use]
+pub fn read_only_from(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "1")
+}
+
+/// Whether this process serves read-only, read once from [`READ_ONLY_ENV`].
+#[must_use]
+pub fn read_only() -> bool {
+    *READ_ONLY.get_or_init(|| read_only_from(std::env::var_os(READ_ONLY_ENV).as_deref()))
+}
+
+/// Why `method` is refused by a server that is `read_only`, or `None`.
+#[must_use]
+pub fn read_only_refusal(method: &axum::http::Method, read_only: bool) -> Option<String> {
+    (read_only && !matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)).then(
+        || {
+            format!(
+                "REFUSED — this server runs read-only ({READ_ONLY_ENV}=1): a {method} \
+                 request could write, and none is served (DB-B79)"
+            )
+        },
+    )
+}
+
+/// Applies [`read_only_refusal`]; holds no logic of its own.
+async fn refuse_writes(
+    read_only: bool,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    match read_only_refusal(request.method(), read_only) {
+        None => next.run(request).await,
+        Some(why) => (
+            axum::http::StatusCode::FORBIDDEN,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            why,
+        )
+            .into_response(),
+    }
+}
+
+/// Why this process serves no write: what [`admitted`]'s two write layers
+/// are given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteGate {
+    /// [`READ_ONLY_ENV`] is `1`.
+    pub read_only: bool,
+    /// The refusal of a build with no commit stamp and no allowance
+    /// ([`arm_unstamped_gate`]), or `None`.
+    pub unstamped: Option<&'static str>,
+}
+
+impl WriteGate {
+    /// This process's gate: its environment's read-only word, and the
+    /// unstamped refusal the binary armed at its start.
+    #[must_use]
+    pub fn of_process() -> Self {
+        Self {
+            read_only: read_only(),
+            unstamped: unstamped_gate(),
+        }
+    }
+
+    /// Whether any write is refused: what grounds the autopilot and the
+    /// start's recovery resume.
+    #[must_use]
+    pub const fn refuses_writes(self) -> bool {
+        self.read_only || self.unstamped.is_some()
+    }
+
+    /// Why no write is made, in the words a banner and an event carry, or
+    /// `None` for a server that may write. Read-only is said first: it is the
+    /// operator's own word, where `unstamped` is the build's.
+    #[must_use]
+    pub const fn grounds(self) -> Option<&'static str> {
+        if self.read_only {
+            Some("read-only (BRUTEX_READ_ONLY=1)")
+        } else if self.unstamped.is_some() {
+            Some("unstamped (this build carries no commit stamp)")
+        } else {
+            None
+        }
+    }
+}
+
+static UNSTAMPED_GATE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Arms the unstamped-build gate for this process, once, and returns the
+/// refusal when it is in force (DB-B71, WP-81).
+///
+/// # The failure
+///
+/// `cli` refused its store-writing verbs to a build with no commit stamp;
+/// the API did not. An unstamped API named itself `unstamped` on every
+/// answer and still pulled, repaired and imported: bars in the store that no
+/// commit can answer for. The reason given for leaving it was that a deploy
+/// running `npm run build` before `cargo build` is unstamped — which is
+/// false: `web/` is outside the stamp's proof (`cli/build_provenance.rs`,
+/// `front_end`), and a build over 59 dirty `web/build` paths carried its
+/// commit.
+///
+/// # The rule
+///
+/// One question, the one `cli` asks ([`cli::unstamped_write_refusal`]): no
+/// commit stamp and no `BRUTEX_ALLOW_UNSTAMPED_WRITE=1` is a refusal. With it
+/// in force every request that is not a GET or a HEAD is answered 403 with
+/// the sentence, before any handler, and the autopilot stays on the ground —
+/// exactly what [`READ_ONLY_ENV`] does, for the other reason.
+///
+/// # Why it is ARMED by the binary and not read where it is used
+///
+/// A test build of a tree being worked on is unstamped. Were the layer to
+/// ask `cli::commit_stamp()` itself, every test that sends a POST through
+/// [`admitted`] would pass on a clean tree and fail on a dirty one — the two
+/// arms `sweeprun::run_with` takes its stamp as a parameter to avoid. The
+/// binary's `main` arms it; a router built by a test is not gated unless the
+/// test names a gate ([`admitted_gated`]).
+pub fn arm_unstamped_gate() -> Option<&'static str> {
+    UNSTAMPED_GATE
+        .get_or_init(|| {
+            cli::unstamped_write_refusal(
+                cli::commit_stamp(),
+                std::env::var_os(cli::ALLOW_UNSTAMPED_VAR).as_deref(),
+            )
+        })
+        .as_deref()
+}
+
+/// The armed refusal, or `None` when the gate was never armed or the build
+/// may write.
+#[must_use]
+pub fn unstamped_gate() -> Option<&'static str> {
+    UNSTAMPED_GATE.get().and_then(|armed| armed.as_deref())
+}
+
+/// Why `method` is refused by a build that may not write (`why` is the
+/// armed refusal), or `None`.
+#[must_use]
+pub fn unstamped_refusal(method: &axum::http::Method, why: Option<&str>) -> Option<String> {
+    let why = why?;
+    (!matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)).then(|| {
+        format!(
+            "REFUSED — {why}. A {method} request could write the store or a run record, \
+             and this build serves none"
+        )
+    })
+}
+
+/// Applies [`unstamped_refusal`]; holds no logic of its own.
+async fn refuse_unstamped_writes(
+    why: Option<&'static str>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    match unstamped_refusal(request.method(), why) {
+        None => next.run(request).await,
+        Some(why) => (
+            axum::http::StatusCode::FORBIDDEN,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            why,
+        )
+            .into_response(),
+    }
 }
 
 /// Why a request is refused as cross-origin, or `None` when it may proceed.
@@ -18280,6 +18641,8 @@ async fn run_in_over(
                     ..asked
                 });
                 say!("brutex api listening on http://{addr}/");
+                // THE BUILD, ON THE BANNER AND IN THE FIRST EVENT (DB-B71).
+                say!("  build:   {}", build_label());
                 say!("  masters: {}", dir.display());
                 say!("  store:   {}", store_root.display());
                 announce_log(logging.as_ref(), &level_note);
@@ -18333,7 +18696,21 @@ async fn run_in_over(
                 // for a run that is going to happen. `CLAUDE.md` §4 bans a
                 // fallback that hides a failure; announcing work that will not
                 // start is the same defect wearing the opposite sign.
-                let flying_on_start = autopilot::flies_on_startup();
+                // A READ-ONLY SERVER NEVER FLIES (DB-B79), whatever
+                // `BRUTEX_AUTOPILOT` says: a pull is a write.
+                let gate = WriteGate::of_process();
+                let flying_on_start = autopilot::flies_on_startup() && !gate.refuses_writes();
+                if gate.read_only {
+                    say!(
+                        "  READ-ONLY: every write request is refused, the autopilot is \
+                         grounded and no recovery is resumed ({READ_ONLY_ENV}=1); only this \
+                         server's own lock, log, invocation journal and pull-journal read \
+                         index are written"
+                    );
+                }
+                if let Some(why) = gate.unstamped {
+                    say!("  NO WRITES: {why}");
+                }
                 if flying_on_start {
                     say!(
                         "  autopilot: starting in {}s — http://{addr}/autopilot.json",
@@ -18365,6 +18742,7 @@ async fn run_in_over(
                 let first = telemetry::emit(
                     &telemetry::Event::info("api.serve", "listening")
                         .with("addr", telemetry::Value::Str(&addr.to_string()))
+                        .with("build", telemetry::Value::Str(build_label()))
                         .with(
                             "store",
                             telemetry::Value::Str(&store_root.display().to_string()),
@@ -18420,9 +18798,13 @@ async fn run_in_over(
                 if let Err(why) = calendar_route::warm_at_start(&site) {
                     warn_line!("Calendars NOT warmed at start: {why}");
                 }
-                if let Err(why) = crate::recovery::resume(Loaded::clone(&site)) {
-                    note_recovery_not_resumed(&why);
-                    warn_line!("Recovery NOT resumed: {why}");
+                // THE ONE WRITE PATH NO REQUEST STARTS, BEHIND THE SAME GATE
+                // (DB-B79, DB-B71): a plan left in flight is resumed only by
+                // a server that may write. See `recovery::at_start`.
+                match recovery_at_start(&site, gate) {
+                    RecoveryStart::Silent => {}
+                    RecoveryStart::Grounded(line) => say!("  {line}"),
+                    RecoveryStart::Refused(why) => warn_line!("Recovery NOT resumed: {why}"),
                 }
                 let code = stopped_over(
                     serve(
@@ -31872,7 +32254,13 @@ mod tests {
         // 200 — the arm the DEFAULT floor would have swallowed.
         let shell = get(addr, "/emit-request-probe").await;
         assert!(shell.contains("200 OK"), "{shell}");
-        // A path that names a file is a 404, which is the `Warn` arm.
+        // A path that names a file is a 404, which is the `Warn` arm. ITS
+        // LINE IS RATIONED PROCESS-WIDE, and this process is the whole test
+        // binary: a run quick enough to send the suite's failed requests
+        // (267 on 2026-10-11) inside one window held this line back, and the
+        // test failed for a line the ration had correctly withheld. A fresh
+        // window, opened just before the one request this test is about.
+        crate::logs::fresh_failed_line_window();
         let missing = get(addr, "/emit-request-probe.js").await;
         assert!(missing.contains("404 Not Found"), "{missing}");
 

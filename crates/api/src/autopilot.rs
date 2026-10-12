@@ -2356,7 +2356,10 @@ impl Control {
     #[must_use]
     pub fn serving() -> Self {
         let control = Self::new();
-        if !flies_on_startup() {
+        // A SERVER THAT REFUSES WRITES STAYS ON THE GROUND: read-only
+        // (DB-B79), or a build with no commit stamp (DB-B71). A pull is a
+        // write (WP-81).
+        if !flies_on_startup() || crate::server::WriteGate::of_process().refuses_writes() {
             control.pause();
         }
         control

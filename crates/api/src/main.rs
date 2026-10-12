@@ -47,6 +47,9 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(api::server::FAILED);
         }
     };
+    // A BUILD NOBODY CAN NAME SERVES NO WRITE (DB-B71): armed here, by the
+    // binary, before a router exists. See `api::server::arm_unstamped_gate`.
+    let _refusal = api::server::arm_unstamped_gate();
     let code = runtime.block_on(async {
         match text_args(raw) {
             Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,

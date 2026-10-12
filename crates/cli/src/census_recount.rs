@@ -1,15 +1,17 @@
 //! `cli census-recount` and `cli census-migrate` — the census verbs (D-3316,
 //! WP-10).
 //!
-//! # `census-migrate VENDOR`
+//! # `census-migrate VENDOR [--seal]`
 //!
 //! Moves a vendor's single-file census (`manifest/<vendor>.man`, versions 1 to
 //! 3) to version 4: epoch `000001` of one directory per segment under
 //! `manifest/v4/<vendor>/`, each compacted to one row per key and carrying its
-//! own capacity. The single file is left byte for byte as it was. Run it ONLY
-//! once the API that serves the census reads version 4 (WP-30): an older reader
-//! keeps reading the single file and would not see a month written after the
-//! move (DB-G08). That ordering is WP-80 step 1 and the operator's to approve.
+//! own capacity. The single file's bytes are kept byte for byte, under
+//! `<vendor>.man.v3-superseded`, and its name is SEALED: a stub every reader
+//! built before version 4 refuses (DB-B68, WP-81). Run it ONLY once the API that
+//! serves the census reads version 4 (WP-30). That ordering is WP-80 step 1
+//! and the operator's to approve. `--seal` seals a vendor migrated before the
+//! seal existed, and nothing else.
 //!
 //! # `census-recount VENDOR --from DAY [--to DAY]`
 //!
@@ -148,7 +150,9 @@ pub(crate) fn recount_with(
 /// `census-recount` against the CLI's store root, stamped with the build's
 /// commit.
 pub(crate) fn recount(arguments: &[&str], out: &mut String) -> u8 {
-    recount_with(arguments, &crate::store_root, crate::commit_stamp(), out)
+    // AN UNSTAMPED BUILD DOES NOT WRITE THE CENSUS (DB-B71, WP-81).
+    let store = crate::store_write::root_for("census-recount", arguments);
+    recount_with(arguments, &store, crate::commit_stamp(), out)
 }
 
 /// `census-migrate`, with the store root passed in.
@@ -157,9 +161,16 @@ pub(crate) fn migrate_with(
     store: &dyn Fn() -> Result<PathBuf, String>,
     out: &mut String,
 ) -> u8 {
-    let [feed] = arguments else {
-        let _ = writeln!(out, "refused: census-migrate takes exactly VENDOR");
-        return MISUSED;
+    let (feed, seal_only) = match arguments {
+        [feed] => (feed, false),
+        [feed, "--seal"] => (feed, true),
+        _ => {
+            let _ = writeln!(
+                out,
+                "refused: census-migrate takes exactly VENDOR, or VENDOR --seal"
+            );
+            return MISUSED;
+        }
     };
     let vendor = match vendor(feed) {
         Ok(vendor) => vendor,
@@ -168,6 +179,9 @@ pub(crate) fn migrate_with(
             return MISUSED;
         }
     };
+    if seal_only {
+        return seal_with(vendor, store, out);
+    }
     match store().and_then(|root| census_store::migrate(&root, vendor)) {
         Ok(done) => {
             render_migration(out, vendor, &done);
@@ -182,7 +196,9 @@ pub(crate) fn migrate_with(
 
 /// `census-migrate` against the CLI's store root.
 pub(crate) fn migrate(arguments: &[&str], out: &mut String) -> u8 {
-    migrate_with(arguments, &crate::store_root, out)
+    // AN UNSTAMPED BUILD DOES NOT MIGRATE OR SEAL A CENSUS (DB-B71, WP-81).
+    let store = crate::store_write::root_for("census-migrate", arguments);
+    migrate_with(arguments, &store, out)
 }
 
 /// The recount's receipt.
@@ -358,7 +374,8 @@ fn render_migration(out: &mut String, vendor: Vendor, done: &Migration) {
         let _ = writeln!(
             out,
             "  single file         {}: version {version}, generation {generation}, \
-             {entries} entries, {keys} keys, {rows} rows, {} bytes -- left exactly as it was",
+             {entries} entries, {keys} keys, {rows} rows, {} bytes -- its bytes left exactly \
+             as they were",
             done.legacy.display(),
             done.legacy_bytes
         );
@@ -382,11 +399,72 @@ fn render_migration(out: &mut String, vendor: Vendor, done: &Migration) {
             part.path.display()
         );
     }
+    match &done.seal {
+        Some(Ok(seal)) => render_seal(out, seal),
+        Some(Err(why)) => {
+            let _ = writeln!(
+                out,
+                "  SEAL REFUSED        {why}\n  readers             a reader built before \
+                 version 4 still reads the single file AS THE WHOLE CENSUS; run \
+                 `cli census-migrate {} --seal` once the refusal is cleared (DB-B68)",
+                vendor.as_str()
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  readers             there was no single file, so nothing to seal"
+            );
+        }
+    }
+}
+
+/// The seal's lines of a receipt (DB-B68).
+fn render_seal(out: &mut String, seal: &census_store::Seal) {
     let _ = writeln!(
         out,
-        "  readers             a census reader built before version 4 reads only \
-         the single file; serve the store with a version-4-aware build (WP-30)"
+        "  sealed              {} now refuses every reader built before version 4 \
+         (unknown manifest version {}); its {} bytes are kept as {}{}",
+        seal.legacy.display(),
+        census_store::SEALED_VERSION,
+        seal.legacy_bytes,
+        seal.superseded.display(),
+        if seal.wrote {
+            ""
+        } else {
+            " -- it was already sealed, nothing was written"
+        }
     );
+    if let Some(aside) = &seal.torn_receipt {
+        let _ = writeln!(
+            out,
+            "  receipt             the file under the receipt's name was no whole receipt (a \
+             seal that stopped while writing it); it is kept as {} and a whole one was written",
+            aside.display()
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  readers             a build must descend from {} to read this store",
+        census_store::V4_READER_SINCE
+    );
+}
+
+/// `census-migrate VENDOR --seal`: seals an ALREADY-migrated vendor's single
+/// file (DB-B68, WP-81). For the GDFL census migrated on 2026-10-10 before the
+/// seal existed.
+fn seal_with(vendor: Vendor, store: &dyn Fn() -> Result<PathBuf, String>, out: &mut String) -> u8 {
+    match store().and_then(|root| census_store::seal_legacy(&root, vendor)) {
+        Ok(seal) => {
+            let _ = writeln!(out, "CENSUS SEALED -- {} (DB-B68)", vendor.as_str());
+            render_seal(out, &seal);
+            OK
+        }
+        Err(why) => {
+            let _ = writeln!(out, "CENSUS SEAL REFUSED: {why}");
+            FAILED
+        }
+    }
 }
 
 #[cfg(test)]

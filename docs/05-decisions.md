@@ -66935,6 +66935,149 @@ its source comment, not in the `alias` record or in any answer.
 the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
 (ignored; needs the vendor archive).
 
+### D-3381 — A migrated vendor's single census file is sealed against older readers, and a store names what it requires of its reader — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B68, DB-B70.
+
+**What is decided.** (1) Once a vendor's census is version 4, its single file
+`manifest/<vendor>.man` is kept byte for byte by hard link as
+`<vendor>.man.v3-superseded`, and the name holds a 32,768-byte stub whose
+header version is 65535 — reserved, never a geometry — so every reader built
+before version 4 refuses it by number instead of serving the superseded census
+as the whole of it. (2) The seal leaves `manifest/v4/<vendor>/SEALED`, format
+`census-seal-v1`: `superseded=`, `superseded_bytes=`, `stub_version=`,
+`reader_since=<commit>`. It is staged, flushed and renamed, so the name never
+holds half a receipt; a re-run reads it, keeps a receipt no seal finished
+writing as `SEALED.torn-<unix>`, and refuses another `format=` by name.
+(3) `manifest/REQUIRES` (append-only, first line `format=store-requires-v1`)
+carries one `requires=<feature> vendor=<v> since=<commit> at=<unix>` line per
+requirement; a build that lacks a named feature, or cannot read the file,
+answers that vendor's census `unreadable` by file, line and feature. A torn
+tail is ended as a ` #void` line before a line is appended. (4) A single file
+longer than its migration receipt recorded is `legacy drift`, named on every
+census answer.
+
+**Why.** Rolling the API back one build served 246,147 of 385,442 GDFL
+instrument-months as "held", with `/health` saying `ok`.
+
+**Proof.** `pull` `census_store::tests` (the seal, the requirements file, the
+receipt's torn shapes); `api` `ops_safety_tests`; `docs/36-ops-runbook.md` §2.
+
+### D-3382 — Every answer names its build, and a build with no commit stamp writes nothing unless told to — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B71, DB-B79.
+
+**What is decided.** Every response carries `x-brutex-build` (the 40-hex commit
+or `unstamped`); `/health`, the start banner and every page show it. A build
+with no commit stamp refuses every store write: each `cli` store-writing verb
+(`census-migrate`, `census-recount`, `gdfl-dayflags`, `gdfl-import`,
+`gdfl-rekey --apply`, `scrub-blocks`, `srt-build` and `tix-rebuild` without
+`--dry-run`, `zerodha-repair --from-store`; a verb added to `COMMANDS` fails
+the classification test until it is put on one side), and in the API every
+request that is not a GET or a HEAD, with the autopilot kept on the ground
+and — the one write no request starts — a spot recovery left in flight NOT
+resumed at start (`recovery::at_start`: nothing claimed, no journal opened
+for append, the plan named on the banner and in one `api.recovery` event).
+`BRUTEX_ALLOW_UNSTAMPED_WRITE=1` lifts it on purpose; the lines written still
+say `unstamped`. The API's gate is
+armed by the binary's `main`, not read where it is used, so a test build of a
+dirty tree behaves as a clean one does. `BRUTEX_READ_ONLY=1` (exactly `1`)
+refuses the same requests, grounds the same autopilot and leaves the same
+recovery alone, for a server that must not write at all. Such a server still
+writes its own `serve.lock`, log, invocation journal and pull-journal read
+index under its root, and one root is served by one api, read-only or not
+(`docs/36-ops-runbook.md` §3 step 4, §7). `web/` is outside the stamp's
+proof, so the front-end build never costs the stamp.
+
+**Why.** A shadow's import journal held 14 `commit=unstamped` runs; nothing
+could say which code wrote those bars, and nothing stopped the same on the
+operator's store.
+
+**Proof.** `cli` `store_write::tests`; `api`
+`ops_safety_tests::the_production_layers_refuse_a_write_to_a_read_only_or_unstamped_server`
+and `recovery::tests::a_start_that_refuses_writes_names_the_plan_in_flight_and_claims_nothing`.
+The unstamped release `cli` and `api` were run (WP-81 reports, 11 and 12 Oct);
+the API's 403 is proved by test only: no POST was sent to any server.
+
+### D-3383 — A read waits a bounded time for admission, every 429 says when to retry, and fault text is capped — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B51, DB-B75, DB-B58.
+
+**What is decided.** A request to a bounded read pool queues at most 250 ms
+among at most 32 waiters before it is refused; the census answer has its own
+pool of 4, and `/scrub.json` and `/disk.json` theirs of 4, apart from the
+store-read pool every bar seek takes; any 429 leaves with `Retry-After: 1`.
+ONE fault design for the bar routes (this decision and D-3349's
+one-fault-a-month readers, merged): every reader notes what it could not read
+in the request's `FaultLog` — consecutive records refused for one reason are
+one run and one sentence, a month a stretch read names once is one sentence
+carrying its count, a month that would not open is said once — the log names
+at most 16 faults of 480 bytes and counts the rest, `faulted_records` is every
+refused record, and the route's `faults` field is bounded once more for the
+whole list (64 reasons of 512 bytes, then a count). These are choices, not
+vendor or exchange facts; the measurements behind them are in the WP-81
+reports.
+
+**Why.** Ten tabs exhausted four census slots with bare 429s, and one lost
+sidecar turned `/bars.json` into 192.8 MB of per-record sentences.
+
+**Proof.** `api` `detail::tests` (`an_ops_read_and_a_bar_seek_never_wait_on_each_other`
+among them), `fault_log::tests`, `bars_route::tests::the_faults_field_is_bounded_whatever_went_wrong`,
+`ops_safety_tests`.
+
+### D-3384 — The full-block scrub keeps two append-only files per vendor, read strictly, and the backup receipt is one whole line — 2026-10-11, repaired 2026-10-12
+
+**Implemented by** WP-81. **Findings** DB-B74, DB-B65, DB-B73, DB-B59.
+
+**What is decided.** `cli scrub-blocks VENDOR` reads every committed block of
+every census month and keeps `audit/scrub-blocks.<vendor>.log` (`run`, `bad`,
+`unverifiable`, `misfiled`, `busy`, `missing`, `torn` lines) and
+`audit/scrub-blocks.<vendor>.cursor` (`progress` / `done` lines: `run=`,
+`pass=`, eight totals in a fixed order, and `cursor=` on `progress`). A line
+counts once its newline is written; a tail no newline ends is ended as
+`<fragment> #void` before anything is appended, and no reader reads a void
+line. A cursor line is read by one strict parser shared by the CLI and the
+API: exactly those words in that order. A run's id is the clock's second, or
+the next after the newest id on file. Both files, and `ops/backups.log`, are
+opened without following a link or waiting on a FIFO and must be regular
+files. A vendor whose census names no month is refused before either file
+is created, and a census entry that names no store path is counted and named
+on the run's output. A finding stands until a later complete pass reads its
+month without finding it; the API indexes the whole ledger incrementally by
+byte offset, IN PLACE under the vendor's lock, keeping each finding in the
+map of the pass that last found it and each map in (series, month, block,
+kind) order, so a series' first findings, its count and the vendor's first
+names are a seek and a merge of a few heads and never a walk, a copy or a
+sort of what is indexed. A `busy` line means NOT READ: the index files what
+stood in that month when the pass began under the busy pass, unchanged but
+for the pass and run that kept it (`kept_pass`, `kept_run`), names the month
+in its series' `busy` list and counts it in `standing_busy`; `/db` and the
+`/ingest` tile say both, so a complete pass with a busy month is never shown
+as a clean one. The scrub does not re-append kept findings: the index holds
+them, and re-reading the ledger at each run would be the work an index
+exists to remember. A backup is recorded only by a whole line of
+`ops/backups.log` of at most 1,024 bytes carrying `copied=<YYYY-MM-DDTHH:MM[:SS]Z>`
+and `dest=`. A month whose `.prv` names another store
+path is refused at every bar door (`Misfiled`); a month with no `.prv` opens
+as before and is counted `unbound`. Nothing is pruned: every census epoch and
+superseded file is kept, and `/disk.json` says what that costs.
+
+**Why.** A flipped byte in the middle of a month was found only by a read of
+that block; and a killed run's fragment, joined to the next line, was served
+as a pass's totals and moved the resume point past months no run had read.
+And a `busy` line that the index skipped read a month nobody had read as
+"read again, and clean": a known-bad block left every page when a writer
+held its month for the moment a pass went by (second agent, 12 October).
+
+**Proof.** `cli` `scrub_blocks::tests`
+(`a_month_met_busy_is_a_busy_line_and_the_verb_says_the_pass_did_not_read_it`
+among them); `api` `scrub_route::tests`
+(`the_ordered_index_answers_what_a_walk_and_a_sort_of_every_finding_answers`,
+`a_month_a_pass_met_busy_keeps_its_findings_and_is_named_as_not_read`,
+`the_index_keeps_what_a_walk_of_every_finding_at_each_busy_line_keeps`,
+`the_edges_of_a_busy_line`), `disk_route::tests`; `store`
+`tests/misfiled.rs`; `web/tests/scrub.test.js`, `web/tests/disk.test.js`.
+
 ### D-4875 — A month repair must hold a one-second month and leave it indexed — 2026-10-11
 
 **Implemented by** IA-17, in two parts. This entry lands with the first (the
@@ -67087,3 +67230,460 @@ reports a peak.
 
 **Not decided here.** D-4899 (one repair per month per run) is IA-17's second
 part and has no code yet.
+
+### D-4808 — Verdicts live in an append-only store family: immutable day images under a two-slot year index — 2026-10-10
+
+**Implemented by** IA-5 (`store::verdict`, `docs/02-store-format.md` §35).
+The writers (IA-6, IA-7, IA-9) and readers (IA-10b) are later packages.
+**Design** `ingest-automation.md` §6.5 (rounds 1 to 5), O1-01, VERIFY-12,
+ATTACK-10.
+
+**Decision.**
+
+1. What verification finds is kept per (feed, instrument, day, timeframe) as
+   one fixed 160-byte record, in an immutable **day image** per (feed,
+   exchange, segment, timeframe, day, generation) at
+   `<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt`
+   (the exchange level is D-4923's),
+   under a **year index** `<yyyy>.vdi` that commits through two slots, the bar
+   file's own rule. A separate tree, because per-instrument sidecars would add
+   a 32 KiB header region to each of about 20,000 option contract-months a day.
+2. **One generation per (feed, exchange, segment, timeframe, day) per run.** A run that
+   verified only some keys of a day (a Zerodha window, a filtered GDFL run)
+   carries every other key of the committed generation whole, each keeping its
+   own run, flags and details; a whole-day run carries nothing. The commit
+   lock is held across reading the slot, carrying, linking the image and
+   committing the slot (D-4865), so two writers on one day never both carry
+   from one generation.
+3. Every image ever linked is kept; re-verification is a new generation and
+   the year index points at it. No record is mutated (`CLAUDE.md` §3 rule 8).
+4. Nothing in this family is an input to a bar reader, writer or bar-serving
+   route (D-4807).
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`a_reverified_day_is_a_new_generation_and_the_old_is_kept`,
+`two_writers_on_one_day_never_lose_a_record`,
+`a_partial_run_carries_the_others_whole`.
+
+### D-4809 — Verdict codes, flags, detail kinds and reasons are numbered append-only; `store` holds the reason and detail kinds as opaque numbers — 2026-10-10
+
+**Implemented by** IA-5 (codes, flags, the store's byte values and the one
+detail kind it writes); IA-6 (`pull::gdfl_verify::REASONS` and `DETAILS`, and
+the test that every cause code has a number). **Design** §6.4, VERIFY-09,
+CODE-14.
+
+**Decision.**
+
+1. The verdict codes are 1 to 18 with the words and the severity order of
+   `docs/02-store-format.md` §35.6 (code 18 `owed`, D-4879); code 0 is unset
+   and never written. Round 1's code 7 (two opposite facts) and code 3 (a
+   vendor gap) are split there.
+2. The flags are bits 0 to 21 of a u64, verification facts only (D-4841
+   withdrew the per-day quality bits before any was minted); bit 20 is
+   `lineage_unchecked` and bit 21 `source_crc_unrecorded`.
+3. The reason table and the detail-kind table live in `pull`, where the
+   causes are defined; `store` cannot name `pull` (`CLAUDE.md` §5), so a
+   record's reason and a detail's kind are opaque u16s to it. **One
+   exception:** `store` itself writes detail kind 1 (`name`) when it cuts a
+   stem longer than the key field (D-4844), so `pull`'s `DETAILS` must number
+   `name` 1.
+4. Once format version 1 is written, a code, a flag bit, a detail kind and a
+   reason number are never renamed or reused; a later one is appended. A
+   reader that meets a code, a version or an enumeration byte it does not
+   know refuses it (`written_by_newer_build`). A flag bit is the exception,
+   in both directions (D-4844): a writer refuses a bit it does not name, and
+   a reader keeps one and names it `flag_<n>`.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`the_codes_and_their_severity_are_the_designs`,
+`format_v1_holds_every_fact_it_names`.
+
+### D-4844 — Verdict format version 1: a 512-byte header and day block, a tagged table, 160-byte records, a detail section, 24-byte year entries — 2026-10-10
+
+**Implemented by** IA-5. **Design** §6.4, §6.5, §6.6, VERIFY-19, ATTACK-20;
+the critics' N-1 and N-2 (round 2), SF-14 and SF-15 (round 3), B1 and SF-13
+(round 4), and N-3.
+
+**Decision.** The bytes are `docs/02-store-format.md` §35, packed
+little-endian with explicit offsets. In short:
+
+1. **Image**: magic `BRUTEXVD`, a 256-byte header (CRC-32C), a 256-byte day
+   block (CRC-32C), a table of c + 7 tagged 8-byte slots, n records of 160
+   bytes sorted by (code, key text, key hash), a detail section of at most
+   4 MiB (`details_capped` past it), and a 32-byte BLAKE3 trailer. An image's
+   file name carries its generation zero-padded to 10 digits, the width of
+   `u32::MAX`, so every generation has one name and one day's names sort in
+   generation order (N-3: six digits ran out past 999,999).
+2. **Codes 0 to 18** with the severity order of §35.6, `owed` (18) at 9
+   (D-4879). **Flags 0 to 21.** `flags::ALL` names those 22 bits and `KNOWN`
+   is `(1 << 22) - 1`. **A writer refuses any bit it does not name**
+   (`flag_unknown`, nothing written), so no build writes a fact it cannot
+   name; **a reader keeps an unnamed bit and names it `flag_<n>`**, never
+   dropping or refusing it, and a carry copies it whole, so a later build's
+   appended bit stays readable by an older reader.
+3. **Table**: `MAX_PROBE` = 8 with 7 overflow slots, so a probe window never
+   wraps; c starts at max(16, the power of two ≥ 2n) and doubles until every
+   key sits within its window with no repeated tag; past c = 2^20 the day is
+   refused `table_too_large`. **The record ceiling per image is a named,
+   measured limit, not a proof (L-IA-33):** the rule needs c of about 3n to
+   10n (measured), so 137,900 synthetic records placed and 275,800 (100x a
+   2,758-record day) are refused, and so are all 213,365 real FNO contract
+   keys of the store in one image; the largest real day, 26,820, is 5.1x
+   under it. A day over the ceiling is refused by name, never cut, with
+   nothing written, and reads "verdict pending". The images are larger than
+   the design first extrapolated: an average options day (10,428 records) is
+   2,193,368 bytes and the largest (26,820) 6,388,952 (L-IA-7).
+4. **Keys**: an instrument key over 64 bytes is refused `key_too_long`, never
+   cut; a stem over 64 bytes is cut at a character boundary with `name_cut`,
+   and its whole name is kept in the detail section. The key hash is BLAKE3
+   of the whole text, so a lookup matches the hash and the kept text. A run
+   id past `u32::MAX` is refused `run_id_overflow`.
+5. **Year index**: magic `BRUTEXVI`, two 8,812-byte slots at 0 and 16,384,
+   each 366 entries of 24 bytes; a reader takes the valid slot with the
+   highest commit generation.
+6. **Lookup**: at most 5 positional reads and 2 opens, through a 64-handle
+   cache, least recently used out. **A key with no record answers by the day
+   block's state** (`day_partial`, `source_lacks_day`, `owed (not_imported)`,
+   `not_compared (verify_off)`, or the lookup answer `no_record`), never with
+   the day's worst code, so a share absent from the source never shows
+   another share's mismatch on `/db` (SF-15).
+7. **The month answer a staleness probe hands a lookup** (`MonthNow`) is
+   not probed, no `.tix`, **busy** (a writer holds the month: `stale: unknown
+   (month busy)`, never fresh, never waited on), or read (generation, the
+   day's first row and row count, compared with the record's offsets 124 to
+   135). The staleness rule and the probe are IA-6's, and its decision lands
+   with it; this format holds what the rule compares.
+8. **N-1 (round 2).** "Every mismatch of a day is one contiguous slice" was
+   false under the (code, key) order: code 6 sits between 5 and 7, so the
+   mismatches are two slices (codes 2..5 and 7..9). Each code's slice is
+   located from the header's counts; paging stays O(page).
+9. **N-2 (round 2).** The BLAKE3 trailer has one named reader,
+   `store::verdict::check_trailer`, which checks the trailer first (one byte
+   changed anywhere is refused `trailer_mismatch`) and then every structure
+   of the image; a lookup never reads it.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`,
+`a_long_key_is_refused_and_a_long_stem_is_kept_whole`,
+`one_codes_records_are_one_contiguous_slice`,
+`every_detail_survives_and_the_cap_is_named`,
+`format_v1_holds_every_fact_it_names`,
+`a_verdict_whose_store_or_verifier_changed_reads_stale`,
+`a_day_images_trailer_names_any_changed_byte`,
+`a_key_without_a_record_never_shows_another_keys_code`,
+`the_bytes_sit_at_the_offsets_section_35_states`,
+`the_series_bytes_are_pinned`, `the_handle_cache_is_bounded`; bench C-VD-01,
+C-VD-02, C-VD-04.
+
+### D-4861 — The CI rows land with each package — 2026-10-10
+
+**Implemented by** every ingest-automation package for its own rows; IA-5
+lands the decision with its own. **Design** §16.3, the round-4 critic's B1(c).
+
+**Decision.** Each package adds, in the same change as its code, its
+`docs/04-invariants.md` rows (one per named test; a matrix row as
+`IA-MX-<row>`), its `docs/06-limits.md` rows and gate 11 reasons, its
+`.github/gates_ledger.rs` allowlist counts, and any gate 21 or gate 23
+declaration its file surface needs. The ledger documents and the gate ledger
+are shared append-only files: a package appends under its own heading and
+never edits another's rows. No row is "owed to the ledger close".
+
+**Proof.** IA-5's own rows: `docs/04-invariants.md` "Verdict store (IA-5)"
+(IA-VD-01 to -07, -09 to -14, -16, and C-VD-01, C-VD-02, C-VD-04),
+`docs/06-limits.md` "Ingest automation, D-4800 to D-4887" (L-IA-4, L-IA-7,
+L-IA-22, L-IA-33), the gate 11 rule 4 reason for
+`crates/store/src/verdict.rs` beside its `ALLOW_SORT` count in
+`.github/gates_ledger.rs`, and gate 14's store row in
+`.github/workflows/ci.yml` (its 18 measurement points and C-VD-01, C-VD-02,
+C-VD-04); gate 10 checks the rows' tests exist and gate 14 that each C-VD
+row is printed by the bench.
+
+### D-4865 — Crash consistency outside the bar files: link, never rename over; born whole; repaired by the next writer — 2026-10-10
+
+**Implemented by** IA-5 (verdict images and the year index); IA-16 (the
+`.auc` sidecar rule); IA-8 (kept-answer bodies and receipts). **Design**
+§6.5, ATTACK-09b, ATTACK-09c, VERIFY-11.
+
+**Decision.**
+
+1. **Verdict images** are written to a writer-unique temporary
+   (`<name>.<pid>-<run>.tmp`), made durable, and published with
+   `std::fs::hard_link`, which fails rather than replace a file. A link that
+   meets an existing image (one a crash left linked and uncommitted) steps to
+   the next generation, at most 16 times, then refuses
+   `generation_collision` with nothing committed. An image left that way is
+   kept, never overwritten. No reader opens a `.tmp`.
+2. **A `.vdi` is born whole** by the same temporary and link; a loser of the
+   creation race reads the winner's file; nothing opens a `.vdi` with create,
+   and one shorter than 32,768 bytes, or with no valid slot, is refused by
+   name.
+3. **The `.auc` sidecar**: bytes past the last whole record are an
+   interrupted append, overwritten by the next under the sidecar's lock; a
+   file shorter than its header or all zero is unborn and written again (the
+   `provenance.rs` and D-1520 rules). IA-16.
+4. **Kept-answer bodies and receipts** follow D-4859's order (body, then
+   receipt, each made durable) and readers trust receipts only. IA-8.
+
+**Proof.** For the verdict half, `crates/store/tests/verdict.rs`
+(`a_crash_between_link_and_commit_never_overwrites_an_image`,
+`a_temporary_day_image_is_never_read`, `a_year_index_is_born_whole`) and the
+crash-seam unit tests in `crates/store/src/verdict_tests.rs`, which stop a
+writer after its temporary, after its link and before its slot.
+
+### D-4879 — Verdict code 18 `owed`: a unit the source holds and today's scope owes that no import has landed yet — 2026-10-10
+
+**Implemented by** IA-5 (the code, its word and its severity in
+`store::verdict`); IA-6 and IA-9 write it. **Design** §6.4 (round 3), the
+round-3 critic's split of `missing_in_store`.
+
+**Decision.** A unit the source holds and today's scope owes, which no import
+has landed yet, is `owed` (code 18), with a reason from `pull`'s `REASONS`
+(`not_imported`, `scope_widened`, the hole reasons `needs_month_generation`,
+`month_superseded`, `repair_refused`, `repair_impossible` and
+`bars_differ_held`, `predicted_generation`, and Zerodha's `refused_day` and
+`refused_front`). Its severity is 9: after `day_partial` (8), before
+`source_refused` (10). It is not a store defect and never green.
+`missing_in_store` (code 3) keeps only the unexplained absence: a unit a close
+in scope says was imported, or a Zerodha minute a covering gap ledger does not
+explain. A key with no record on a day not imported answers `owed
+(not_imported)` (D-4844). Code 18 is part of format version 1.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`the_codes_and_their_severity_are_the_designs`,
+`format_v1_holds_every_fact_it_names`,
+`a_key_without_a_record_never_shows_another_keys_code`.
+
+### D-4922 — A writer's temporary is born `O_EXCL` by one shared helper, `store::staging`: a name that exists is never opened, truncated or written through — 2026-10-12
+
+**Implemented by** IA-5 (`store::staging::create`, and `store::verdict`'s two
+temporaries through it). IA-2, IA-7, IA-9 and IA-11a use the same helper for
+the stop file, the alert queue's birth, the request file and the deferred
+marker when they land (the rules audit's NEW-22). **Findings** the rules audit
+of 11 October 2026, RA-290 (led by IA-5) and RA-287.
+
+**Context.** `store::verdict` opened its temporaries "create, truncate, no
+symbolic link". `O_NOFOLLOW` does not stop a hard link: a second name of
+another file, planted or left at `<final name>.<pid>-<run>.tmp`, was cut to
+zero and written through. The sort index's second check lost a bar file to the
+same open (verify-WP-39), and five more temporaries are designed.
+
+**Decision.** `store::staging::create(path)` opens with `O_CREAT | O_EXCL`.
+When the name exists it is looked at with `lstat`: a regular file with exactly
+one name is a dead writer's leftover, so the NAME is removed (`unlink`, which
+changes no byte) and the create is tried once more, and the caller is told how
+many bytes it held (`Staged::cleared`; `Committed::staging_cleared` for a
+verdict commit); a file with more than one name is refused `staging_linked`; a
+symbolic link, a directory or a special file is refused `staging_not_regular`;
+a name that exists again after its one removal is refused `staging_contended`.
+No path truncates, and nothing is removed but a name whose file has no other.
+The helper does not log (the `store` crate proves each of its emit sites, and
+a shared helper has no caller context): the caller reports the cleared count
+and every refusal in its own event.
+
+**Rejected.** *Remove the name whatever its link count, as the sort index
+does* (`sort_index_writer::clear_staging`): safe for the file behind it, but a
+planted link then disappears with only a warning; a verdict commit is refused
+instead, so the operator sees the name. *`O_TRUNC` after a link-count check*:
+the check and the open are two steps, and the file can be swapped between them.
+
+**Proof.** `crates/store/src/staging_tests.rs` (every row of the module's
+table: `a_free_name_is_created_empty_and_nothing_is_cleared`,
+`a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`,
+`a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`,
+`a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left`,
+`a_missing_directory_is_the_hosts_refusal_by_name`) and, through
+`verdict::commit`, `crates/store/tests/verdict.rs`
+`a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`.
+With the open put back to create-and-truncate both hard-link tests fail (the
+file behind the link is cut), with the link-count refusal removed the unit
+test fails, and with the lock file opened truncating step 5 of the commit
+test fails: mutations run on 12 October 2026.
+
+### D-4923 — A verdict family is (feed, exchange, segment, timeframe): the exchange is a directory level and a header byte, the feed is the vendor table's own, and a timeframe is its seconds — 2026-10-12
+
+**Implemented by** IA-5, before `store::verdict` merges, so it is part of
+format version 1 and not a second version. Continues D-4808 (the paths) and
+D-4844 (the header). **Findings** the rules audit of 11 October 2026: RA-243
+(led by IA-5), and IA-5's part of RA-253 and RA-255.
+
+**Context.** The round-5 format filed verdicts under
+`verify/<feed>/<SEGMENT>/<tf>/` with no exchange, knew two feeds through its
+own enum and ten timeframes through its own table of bytes. A second exchange
+would have shared one day record with NSE although its holidays differ, so
+"open or closed, complete or not" would have been wrong for one of them; a
+third feed or an eleventh timeframe was a format change, and nothing failed if
+one of the three lists was missed.
+
+**Decision.**
+
+1. The path is `verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/…`, the bar store's
+   own four levels in its order, and `Series` carries the exchange.
+2. Header offset 14 is the exchange (`NSE` 1, `BSE` 2), by an exhaustive match
+   on `core::instrument::Exchange`: a new exchange does not compile until it
+   has a byte. A lookup refuses an image whose header names another exchange
+   than the series asked for.
+3. `verdict::Feed` is `core::vendor::Vendor` itself. Its byte (offset 12) is
+   one more than the vendor's position in `Vendor::ALL`, computed from the
+   table, for every vendor in it (`gdfl` stays 4 and `zerodha` 5, frozen by a
+   test). A third feed is a row appended to `Vendor::ALL`.
+4. The timeframe is its own length in seconds, a u32 at offset 184 (taken from
+   the reserved bytes), read back through `Timeframe::from_secs`; the typed
+   table of ten bytes is removed. The unit of the counts is the largest of
+   day, minute and second that divides it. A value the running build's
+   `Timeframe::KNOWN` does not hold is refused `written_by_newer_build`.
+
+**Not done here.** `core` has no exchange table and `store::path` no feed
+capability table (the rules audit's NEW-36): the verdict store now reads
+whatever those tables hold, and adding a timeframe is still one row in
+`Timeframe::KNOWN`, which is `store::path`'s.
+
+**Proof.** `crates/store/tests/verdict.rs`:
+`two_exchanges_on_one_day_are_two_day_records`,
+`every_feed_and_timeframe_the_store_knows_files_a_verdict`,
+`the_series_bytes_are_pinned`,
+`the_bytes_sit_at_the_offsets_section_35_states`.
+
+### D-4924 — The verdict commit lock is waited for at most 30 seconds, then refused `lock_stalled` — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::LOCK_WAIT`, `verdict::commit_within`).
+Adopts, for this one lock, the critic's round-7 resolution IA-2-2 (its D-4906,
+which lands with IA-2 for the journal, runs-ledger, audit-ledger and alert
+locks); the critic's "IA-5's commit lock adopts it in IA-6's change if IA-5
+has merged" does not apply because IA-5 had not merged. **Findings** RA-051
+(the lock half).
+
+**Decision.** `commit` takes `<yyyy>.vdi.lock` with `try_lock` in a counted
+loop of 10 ms steps for at most `LOCK_WAIT` = 30 s. Past it the commit is
+refused `lock_stalled`, naming the lock file and the wait, with nothing
+published: the day reads "verdict pending" and the caller raises the event and
+the alert. A holder that dies frees the lock at once, so only a holder that
+hangs (a write stuck on a stalled drive) reaches the refusal. `commit_within`
+takes another wait; zero tries once.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_commit_lock_held_past_the_wait_is_refused_by_name`; IA-VD-07
+(`two_writers_on_one_day_never_lose_a_record`) still holds through the
+counted wait.
+
+### D-4925 — The record ceiling is a band, and a commit says when a day reaches half of it — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::RECORDS_PLACED`, `verdict::RECORDS_WATCH`,
+`Committed::near_ceiling`). The alert is IA-7's, raised from that answer.
+**Findings** RA-261.
+
+**Context.** L-IA-33 quoted "137,900 records placed, 275,800 refused" from one
+made-up key set per size. Whether a key set fits depends on its hashes.
+
+**Measured** (12 October 2026, `verdict::table` over uniform random 64-bit
+hashes, fixed seeds, pinned in the test below): at 26,820 records (the largest
+real day) 1,000 of 1,000 key sets are placed with at least one doubling to
+spare; at 68,950 records 1,000 of 1,000; at 137,900 records **184 of 200**;
+at 206,850 records 16 of 200. So 137,900 is not a number the format
+guarantees: about one random key set in twelve is refused there.
+
+**Decision.** `RECORDS_WATCH` is 68,950, half of the 137,900 once placed and a
+count at which every measured key set fits. A commit of at least that many
+records answers `near_ceiling()`, while the day still commits. Before a real
+day reaches it (2.6 times today's largest), format version 2 splits a day's
+image by underlying or widens the table. A day that does not fit is still
+refused `table_too_large` whole, by name, with nothing written.
+
+**Not done.** The fit of the real key sets of the 20 largest days was not
+run: a day's key set is the vendor's day listing, which this package does not
+read. The 25 real month contract sets (8,582 to 19,000 keys, each a superset
+of any of its days) were placed; see `docs/06-limits.md` L-IA-33.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_days_keys_fit_whatever_the_keys_are` and
+`a_verdict_is_found_by_one_bounded_probe_at_every_day_size`.
+
+### D-4926 — A lost year index is refused `index_missing`; it is never born again empty — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::VerdictError::IndexMissing`,
+`verdict::ORPHAN_SCAN`, the commit and every reader call that reads a year).
+**Found by** the second agent's check of IA-5 on 12 October 2026 (blocking 3).
+
+**Context.** An absent `<yyyy>.vdi` was read as "this year was never
+written": the commit bore a new, empty index and the reader answered "no
+generation". With the index lost and `<yyyy>/` still holding committed
+images, that was a fallback hiding a failure (CLAUDE.md section 4): a day
+whose image is on disk read as never verified, the next commit of the day
+was published as generation 1 or stepped past the committed image, and a
+carrying generation carried nothing, so committed records dropped out of the
+day with no refusal, no count and no event. A zero-length and a torn index
+were already refused by name; the missing one was not.
+
+**Decision.** The index is born before its year's first image is linked
+(D-4865), so an image without an index is never a year in the making. When
+the index is absent the year directory is looked at: a `.vdt` there refuses
+`index_missing`, naming the absent index and the image found, by the commit
+under its lock before anything is built, born or linked, and by `lookup`,
+`page` and `year` in place of "no generation". Genesis runs only for a year
+with no image. The look is bounded: it stops at the first image and after
+`ORPHAN_SCAN` + 1 = 1,025 names, and a directory with more names than that
+and no image among them is refused too, never listed to its end
+(`docs/06-limits.md` L-IA-43). A reader that sees an image beside an absent
+index looks for the index once more before refusing, since a first writer
+may have borne it in between; that second look has no test (it needs a
+writer between two system calls): NOT PROVED, by reading only.
+
+**Not done.** The rebuild of a lost index from the images' own day blocks is
+IA-6's command (RA-303). Until it exists the repair is to put the `.vdi`
+back; the refusal changes no file.
+
+**Proof.** `crates/store/tests/verdict.rs`
+`a_lost_year_index_is_refused_and_never_born_again_empty` (IA-VD-18). It
+fails without the commit's look (the year is born again at generation 1),
+without the reader's (the lookup answers "no generation") and with the bound
+read one name short.
+
+### D-4927 — Refusals the second check of the verdict store asked for: a refused write leaves no temporary, an ordinal past the records and an over-long image are named, and stated costs are counted — 2026-10-12
+
+**Implemented by** IA-5 (`verdict::write_durable`, `Reader::details`,
+`verdict::MAX_IMAGE_LEN`, `verdict::feed_code`, `staging::Staged::calls`).
+**Found by** the second agent's check of IA-5 on 12 October 2026 (blocking 1
+and 2; follow-ups 1, 2, 5, 6, 7).
+
+**Decision.**
+
+1. **A write or a sync the host refuses removes the temporary it made.** A
+   full disk used to gain one partial temporary per attempt of a new run. The
+   refusal stays the host's own `io`, and says so when the name could not be
+   removed either. Only a KILLED writer leaves a temporary (L-IA-42).
+2. **`Reader::details` refuses what it cannot answer.** An ordinal the
+   generation does not hold is `ordinal_past_records` (at `u32::MAX` the
+   owner's `ordinal + 1` overflowed: a panic in a debug build, and owner 0,
+   the DAY's, in a build without overflow checks; any other ordinal past the
+   records answered an empty list); a record whose detail offset is past the section or is not its own
+   entry is `image_corrupt`. Neither is an empty list.
+3. **A file longer than any image can be is refused unread**
+   (`MAX_IMAGE_LEN` = 180,355,672 bytes), where `read_image` and
+   `check_trailer` allocated the file's whole length before any check.
+4. **The feed byte is computed, not searched for.** `feed_code` is the
+   vendor's discriminant plus one, read back through one indexed `get` of
+   `Vendor::ALL` (gate 11 rule 6 allows no search in this file, and none is
+   needed: the table is declared in the enum's order and `core` indexes its
+   own arrays the same way).
+5. **`store::staging::create` counts its host calls** (`Staged::calls`: 1 on
+   a free name, 4 over a leftover), so its stated cost names a test (gate
+   12), and its module text says what the helper cannot tell: a dead writer's
+   leftover from a live writer's file. The caller owns the name, by a
+   writer-unique name or a lock (L-IA-44).
+
+**Not done, and where it goes.** The series' identity in the year index's
+slot head, and a refusal of an index with more than one name, are not in
+format version 1 (L-IA-46): the head has 4 spare bytes and the identity
+needs 7, so it changes the slot's size together with RA-172's per-code
+counts, as year-index version 2 in IA-6; and a link-count refusal would turn
+a writer killed inside genesis into a year refused until hand repair. A real
+`ENOSPC` is not raised by a test: the refusal comes from the writer's test
+seam after the bytes are written (the second agent raised a real `EFBIG` by
+hand against the earlier head and saw the leftover this removes).
+
+**Proof.** `crates/store/src/verdict_tests.rs`
+`a_write_the_host_refuses_leaves_no_temporary` (IA-VD-19);
+`crates/store/tests/verdict.rs`
+`the_details_of_an_ordinal_the_day_does_not_hold_are_refused_by_name`
+(IA-VD-20), `a_file_longer_than_any_day_image_is_refused_unread` (IA-VD-21)
+and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
+`a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.

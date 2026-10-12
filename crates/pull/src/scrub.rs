@@ -347,12 +347,108 @@ impl Tally {
     }
 }
 
+// ═══ The full-block pass (DB-B74, WP-81) ═════════════════════════════════════
+
+/// One damaged block, found by reading it whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadBlock {
+    /// The block's index in the file.
+    pub block: u64,
+    /// The first record it holds.
+    pub first: u64,
+    /// The last committed record it holds.
+    pub last: u64,
+    /// The store's own refusal.
+    pub why: String,
+}
+
+/// What one pass over a span of a month's blocks found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockPass {
+    /// Blocks the month's committed records span.
+    pub blocks: u64,
+    /// Blocks read whole in this pass.
+    pub checked: u64,
+    /// Where the next pass resumes, or `None` when the month is finished.
+    pub next: Option<u64>,
+    /// Every block that would not verify, in order.
+    pub bad: Vec<BadBlock>,
+    /// Why the month cannot be verified at all, when it cannot: born without
+    /// block checksums, or its `.crc` is gone.
+    pub unverifiable: Option<String>,
+}
+
+/// Reads blocks `from .. from + limit` of `file` WHOLE and checks each against
+/// its stored checksum (DB-B74, WP-81).
+///
+/// # The gap this closes
+///
+/// [`one`] reads a month's first and last record: O(1), and blind to the
+/// middle. One flipped byte in block 19 of a 3,503-bar GDFL index month left
+/// [`one`] answering `Agrees`, the census at 3,503 and coverage unchanged; 73
+/// bars were refused only to the reader who asked for that exact block. This
+/// reads every committed block — through [`BarFile::read_record`] of each
+/// block's first record, which verifies the block's whole covered range
+/// against the `.crc` before serving anything — so a rotted block is found by
+/// a pass, not by chance.
+///
+/// # Cost
+///
+/// O(blocks read): one covered range of at most 4,088 bytes and one 4-byte
+/// sidecar read per block. `limit` bounds a pass so a caller can rate-limit
+/// and resume at [`BlockPass::next`]. Nothing is written.
+#[must_use]
+pub fn blocks(file: &BarFile, from: u64, limit: u64) -> BlockPass {
+    let held = file.records();
+    let per = file.layout().records_per_block().max(1);
+    let blocks = held.div_ceil(per);
+    let mut pass = BlockPass {
+        blocks,
+        ..BlockPass::default()
+    };
+    if !file.header().checksums_present() {
+        pass.unverifiable = Some(format!(
+            "{} was written without block checksums, so there is nothing to verify its \
+             records against",
+            file.path().display()
+        ));
+        return pass;
+    }
+    let end = from.saturating_add(limit).min(blocks);
+    for block in from..end {
+        let first = block.saturating_mul(per);
+        let last = first.saturating_add(per).min(held).saturating_sub(1);
+        match file.read_record(first) {
+            Ok(_) => pass.checked += 1,
+            Err(why @ StoreError::ChecksumsMissing { .. }) => {
+                pass.unverifiable = Some(why.to_string());
+                return pass;
+            }
+            Err(why) => {
+                pass.checked += 1;
+                pass.bad.push(BadBlock {
+                    block,
+                    first,
+                    last,
+                    why: why.to_string(),
+                });
+            }
+        }
+    }
+    pass.next = (end < blocks).then_some(end);
+    pass
+}
+
 /// A contract's own bars are addressed the same way; this exists so a caller
 /// need not reach into [`Entry`] to discover that.
 #[must_use]
 pub const fn contract_of(entry: &Entry) -> Option<Contract> {
     entry.key.contract
 }
+
+#[cfg(test)]
+#[path = "scrub_blocks_tests.rs"]
+mod blocks_tests;
 
 #[cfg(test)]
 mod tests {

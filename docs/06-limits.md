@@ -14148,6 +14148,16 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     doubles only while the dedup rejects rows, so what is ordered is the
     written page plus what was rejected to fill it, never the
     unselected rest of the K retained rows.
+  store/verdict.rs 1 -- D-4844, IA-5 (D-4861: the reason lands with the
+    code). `build` sorts one verdict day image's records once, by (code,
+    key text, key hash), so one code's records are one contiguous slice
+    a page reads in one positional read, and the image's bytes do not
+    depend on the order the entries arrived in. O(n log n) per image
+    WRITTEN, n at most 27,000 on the largest real day and at most the
+    format's record ceiling (L-IA-33); one image per (feed, segment,
+    timeframe, day) per run (L-IA-4). Never on a lookup, a page or any
+    request path: a lookup is at most 5 reads (IA-VD-01). The detail
+    section is written in record order and needs no sort of its own.
 ~~~~
 
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
@@ -16282,6 +16292,69 @@ None of this is on a read path: it is the options import's, once per day.
 - **`TATAGLOBAL/TATACONSUM` and `KPIT/BSOFT` options stay two keys** until
   NSE's symbol-change file has a row for each (D-3354 item 3).
 
+## Ingest automation, D-4800 to D-4887
+
+Each ingest-automation package appends its own rows here, in the same change
+as its code (D-4861), and never edits another's. Every measurement below was
+taken in release on the operator's Mac on 10 Oct 2026, on a machine shared
+with about 12 agents building at once, so the tails (p99, max) carry that
+load; an extrapolation is labelled as one.
+
+### The verdict store (IA-5; D-4808, D-4844, D-4865, D-4922 to D-4927)
+
+`store::verdict`, `docs/02-store-format.md` §35. A lookup is O(1) and is not
+a limit here: at most 5 positional reads and 2 opens (IA-VD-01, C-VD-01).
+The sort a day image's build makes has its gate 11 reason under "Gate 11 —
+rule 4" above (`store/verdict.rs 1`).
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-IA-4 | Building and committing a day image | one sort of the day's records by (code, key) and a table built by doubling, then three `sync_all`s (`F_FULLFSYNC` on macOS): the image's temporary, its directory after the link, and the year index's slot | O(n log n) per image, n at most 26,820 on the largest real options day and at most the record ceiling (L-IA-33); one image per (feed, exchange, segment, timeframe, day) per run. Never on a lookup. **Measured, C-VD-04, the commit alone** (p50 / p99 / max), temporary files on WD_BLACK: 343 records 11.6 / 14.5 / 34.0 ms; 3,430 17.7 / 22.5 / 24.4 ms; 10,428 28.2 / 32.7 / 36.9 ms; 26,820 61.3 / 71.8 / 83.4 ms; on the internal disk 25.4 / 45.5 / 86.9, 28.0 / 43.5 / 45.0, 39.7 / 54.2 / 55.9 and 76.8 / 87.5 / 94.4 ms. The cost per record at 10x (27,580) was 0.288x that at 1x (2,758). Over the real store's 25 FNO months, one image of each month's contract set (8,582 to 19,000 real keys) committed in 24 to 143 ms on WD_BLACK | IA-5 |
+| L-IA-7 | Verdict images on disk | one immutable image per (feed, exchange, segment, timeframe, day) per run, never overwritten; the table needs about 3n to 10n slots under the 8-slot window with no repeated tag | **Measured** (C-VD-01, C-VD-04, synthetic keys): 343 records c = 1,024, 63,672 B; 2,758 c = 8,192, 507,416 B; 3,430 c = 16,384, 680,472 B; 10,428 (the average options day) c = 65,536, **2,193,368 B**; 26,820 (the largest) c = 262,144, **6,388,952 B**; 27,580 c = 262,144, 6,510,552 B; 137,900 c = 2^20, 30,453,208 B. On the real store's FNO keys, each month's contract set took c = 3.8n to 9.4n, images of 1,635,864 to 4,089,176 B. One full pass over the 1,997 options days is about 1,997 × 2.19 MB ≈ **4.4 GB** (an extrapolation from the measured average day). **Every re-verification, deferred pass or filtered run that touches a day adds a full copy of that day's image.** Zerodha: 186 B a record at 343 instruments and 198 B at 3,430 (measured), so a full backfill of about 5.0M records is about 0.9 to 1.0 GB (an extrapolation at those rates) | IA-5 |
+| L-IA-22 | Detail section | per-record parameters and refusal texts of any length up to 65,535 bytes | at most 4 MiB per image; past it the day and each owner that did not fit carry `details_capped` and keep their counts only (IA-VD-12). Reading one record's details is two positional reads per entry it owns and one more head, so at most its own entries' bytes and never the rest of the section; `/verify/day.json` only | IA-5 |
+| L-IA-33 | Records per day image (format version 1) | every key must sit within `MAX_PROBE` = 8 slots of home with no repeated tag in a table of at most 2^20 slots, and whether a key set fits depends on its hashes, so the ceiling is a measurement, not a proof | **Measured**: 137,900 synthetic records placed (50x a 2,758-record day) and 275,800 (100x) refused `table_too_large` (IA-VD-01, C-VD-01); all 213,365 real FNO contract keys of the store in one image refused, with nothing written. A simulation of the placement with uniform random hashes (5 seeds each, the tag rule left out) placed 150,000 in 5 of 5, 175,000 in 4 of 5 and 200,000 in 1 of 5. The largest real day, 26,820 records, is 5.1x under the measured 137,900. **The ceiling is a band, not a number** (12 Oct 2026, `a_days_keys_fit_whatever_the_keys_are`: `verdict::table` over uniform random hashes, fixed seeds, the tag rule included): 1,000 of 1,000 random key sets placed at 26,820 records, each with at least one doubling of the table to spare; 1,000 of 1,000 at 68,950; **184 of 200 at 137,900** (so about one key set in twelve is refused there); 16 of 200 at 206,850. A commit of at least `RECORDS_WATCH` = 68,950 records (half of 137,900, 2.6x the largest real day) answers `Committed::near_ceiling()`, from which IA-7 raises its alert while the day still commits (D-4925). **Not run**: the fit of the real key sets of the 20 largest days (a day's key set is the vendor's day listing); the 25 real month contract sets, each a superset of any of its days, were placed. A day over the ceiling is refused by name with nothing written (a whole-day commit makes no directory, lock, index or image; a carrying one leaves only its directories and lock file), the day's journal close stands, and the day reads "verdict pending"; the error event and the `verdict_refused:<run>` alert are IA-7's | IA-5 |
+| L-IA-41 | Waiting for the verdict commit lock | a second writer of the same (feed, exchange, segment, timeframe, year) waits while the first holds `<yyyy>.vdi.lock` across its read, carry, link and commit (L-IA-4's cost) | at most `LOCK_WAIT` = 30 s in 10 ms steps (at most 3,001 `try_lock` calls, counted in the refusal), then refused `lock_stalled` by name with nothing published; never an unbounded wait (D-4924; `a_commit_lock_held_past_the_wait_is_refused_by_name`). Uncontended the lock is one `try_lock`. A reader takes no lock | IA-5 |
+| L-IA-42 | Temporaries a killed verdict writer leaves | a writer killed between writing its temporary and linking it leaves `<final name>.<pid>-<run>.tmp` (at most one image or one 32,768-byte index per kill); no reader opens it and the next writer steps past it (IA-VD-05) | not swept: the name carries the process number and the run, so only a writer with the same pair meets it again, and then `store::staging` clears it and the commit counts it (`staging_cleared`, D-4922). The bytes stay until an operator removes the `.tmp`; at most 30,453,208 B (the largest image measured) per killed writer. A sweep of old `.tmp` names belongs with the pruning of superseded images (the rules audit's NEW-31) | IA-5 |
+| L-IA-43 | Ruling out a day image when a year's index is absent | `<yyyy>.vdi` absent is two different states: a year never written, and a LOST index over committed images. Telling them apart needs the year directory's names, and a listing is O(names), not O(1) | made ONLY when the index is absent (the first commit of a year; a reader asked for a year that has no index), never on a lookup of a year that has one. It stops at the first `.vdt` and after `ORPHAN_SCAN` + 1 = 1,025 names; a directory with more names than that and no image among them is refused `index_missing` out loud (no image named) and is not listed to its end. A year with no directory costs one failed `open` and one failed `opendir`. Measured 12 Oct 2026, release, WD_BLACK, a loaded machine (`tgt/p-IA-5/logs/r3-probe2.log`; source `scratch/fix-IA-5-r3-probe/src/main.rs`): a lookup of a year never written p50 2.0 us, p99 3.3 us, max 25.6 us (n=20,000); a lookup refused `index_missing` over 2 images p50 18.3 us, p99 43.3 us, max 82.4 us, and over 248 images p50 64.4 us, p99 144.3 us, max 224.0 us (n=2,000 each: NOT flat, because the host fills one directory buffer per read; one read is the bound, the first name read was an image every time); a commit refused over 248 images p50 103.6 us, p99 182.0 us, max 224.4 us (n=500); the bound itself, a lookup over 1,024 names none of them an image, p50 433 us, p99 992 us, max 1.69 ms (n=2,000). A lost index is not rebuilt here: that is IA-6's command (RA-303), and until it exists the year answers `index_missing` to every reader and writer (D-4926; IA-VD-18) | IA-5 |
+| L-IA-44 | `store::staging::create`: what a call costs, and what it cannot tell | the helper makes 1 host call on a free name and 4 over a leftover (counted in `Staged::calls`, pinned by RA-287's last test); what each call costs is the host's. It cannot tell a DEAD writer's leftover from a LIVE writer's file: any regular file with one name at the staging name is unlinked | the caller must own the name for the time it uses it: a writer-unique name (`store::verdict`: `<final>.<pid>-<run>.tmp`) or a lock held across create and publish (`store::verdict`: the year's commit lock). Two live writers handed one name with neither each unlink the other's file; IA-2, IA-7, IA-9 and IA-11a must bring one of the two when they move to this helper (the rules audit's RA-287). `staging_contended` (a name that returns after its one removal) has no test: it needs a racing writer, NOT PROVED. Measured 12 Oct 2026, release, WD_BLACK, loaded machine (`tgt/p-IA-5/logs/r3-probe2.log`): a free name p50 53.7 us, p99 307.5 us, max 798.7 us (n=2,000); over a 4,096-byte leftover p50 116.3 us, p99 609.0 us, max 909.6 us (n=2,000); over a 4 MiB leftover p50 157.1 us, p99 1.63 ms, max 3.08 ms (n=200: the host's `unlink` frees the leftover's blocks, so the tail grows with what a dead writer left, at most one image). A quieter run of the same program an hour earlier (`r3-probe.log`): 47.5 / 82.4 / 163.6 us, 103.5 / 165.0 / 459.7 us and 133.5 / 247.1 / 288.0 us; the second agent's own run on 12 Oct: 27.7 / 56.2 / 143.5 us free and 43.6 / 89.5 / 265.7 us over a leftover (n=2,000) | IA-5 |
+| L-IA-45 | Linked-but-uncommitted generations of one day | a writer killed between linking an image and writing the year index's slot leaves that generation linked and uncommitted; it is kept byte for byte and the next writer steps past it (IA-VD-09). A writer steps past at most `MAX_LINK_TRIES` = 16 | with 16 such generations after the committed one, every later commit of that day is refused `generation_collision` by name with nothing published, until an operator removes or moves the uncommitted `.vdt` names by hand (none is ever removed by the store: each may be the only copy of a run's verdicts). It takes 16 writers killed in the same few-millisecond window on the same day with no successful commit between them; no sweep exists (it belongs with the pruning of superseded images, the rules audit's NEW-31) | IA-5 |
+| L-IA-46 | The year index does not say whose it is | a slot's head holds the magic, the version, the year and the commit generation only (docs/02 §35.7): no feed, exchange, segment or timeframe, and 4 reserved bytes are not room for them (the timeframe is 4 bytes of seconds). So a `.vdi` copied or moved into another family's directory reads as that family's calendar with no refusal, and a `.vdi` hard-linked into two families is written through by both | NOT DONE in format version 1. The identity goes into the slot head in year-index version 2, which IA-6 writes with the per-code day counts (RA-172) since both change the slot's size and every number pinned from it; `INDEX_VERSION` exists for that. A link-count refusal alone was not added: genesis itself gives the index two names for the instant between its `hard_link` and the removal of its temporary, so a refusal on a count other than 1 would turn a writer killed in that instant into a year refused until hand repair. Day images are not exposed: each carries its series in its header and a lookup refuses one filed under another family (RA-243) | IA-5, then IA-6 |
+| L-IA-47 | What a `Reader` holds, and what one call may read | a `Reader` caches the `.vdi`'s handle (at most 64 handles), so an index file REPLACED by another file (IA-6's rebuild, RA-303) is not seen by a running reader until it is dropped; slots written in place are seen at once. `Reader::page` reads the slice it is asked for: `page(code, 0, u32::MAX)` reads one code's whole slice, 22 MB at the record ceiling | the rebuild must write through the existing file or tell the server's reader (IA-6, IA-10b); the route must cap a page's `len` (IA-10b). A whole image is read only by `read_image` and `check_trailer`, at most `MAX_IMAGE_LEN` = 180,355,672 bytes, a longer file refused unread (IA-VD-21); a bit flipped in a table slot can make one lookup answer "not in this day's verification" with no error, and only `check_trailer` (WP-81's scrub) names it | IA-5, then IA-6, IA-10b, WP-81 |
+
+**Re-measured on 12 October 2026**, after the exchange level, the staging
+create and the counted lock wait landed (D-4922 to D-4924), same machine
+(shared with other agents building), release, `cargo bench -p store --bench
+ratio` with its temporary files on WD_BLACK; the image sizes and capacities
+above did not change:
+
+- **C-VD-01, lookup** (2,000 cold and 20,000 warm calls per row, at 2,758,
+  27,580 and 137,900 records, spread and colliding keys): cold p50 40.2 to
+  41.1 µs, p99 113 to 156 µs, max 215 to 464 µs; warm p50 12.3 to 12.4 µs,
+  p99 35.7 to 39.1 µs, max 155 to 514 µs. Ratios against 1x: cold 1.044x
+  (10x) and 1.045x (50x), warm 1.000x and 0.992x, colliding keys 0.989x. Over
+  a year (248 days of 2,758 records, one 64-handle reader, n = 20,000): p50
+  34.2 µs, p99 97.6 µs, max 283 µs.
+- **C-VD-02, year index read**: 1.026x (248 days against 1); warm p50 9.8 µs,
+  p99 23.7 µs, max 238 µs (n = 20,000).
+- **C-VD-04, the commit alone** (p50 / p99 / max): 343 records 8.5 / 11.3 /
+  19.9 ms (n = 21); 3,430 12.9 / 15.3 / 15.4 ms (n = 21); 10,428 22.1 / 24.7 /
+  26.5 ms (n = 10); 26,820 46.2 / 47.2 / 49.0 ms (n = 10). Per record at 10x:
+  0.347x of 1x.
+- **Real keys** (a scratch program outside the repository, over a read-only
+  listing of the real store's 367,189 GDFL FNO instrument-months, written to
+  a scratch root, never the store): each of the 25 months' contract sets
+  (8,582 to 19,000 keys) is placed at a capacity of at most 9.4n; all 213,365
+  keys in one image are refused `table_too_large` with nothing written;
+  367,189 lookups all found in at most 5 reads and 2 opens, cold p50 49.1 µs,
+  p99 164 µs, max 511 µs (n = 18,369), warm p50 13.8 µs, p99 47.9 µs, max
+  584 µs (n = 367,189). NIFTY's own contracts by month (453 to 1,578 a month,
+  22,983 lookups): cold p50 47.5 µs, p99 143 µs, max 290 µs; warm p50 13.6 µs,
+  p99 45.3 µs, max 481 µs; commit p50 15.0 ms, p99 20.1 ms, max 34.6 ms
+  (n = 25).
+
+The design's quoted cold p99 of 74 to 109 µs (its §6.6) was an estimate; the
+figures above and the 10 October ones are the measured ones (RA-097), and
+IA-13 re-measures on a quiet machine.
 ## Ingest automation: what a month repair reads, holds and keeps — D-4875, D-4898, 12 October 2026
 
 Row L-IA-26 of the ingest automation design (its §10.2), landed by IA-17's
@@ -16451,3 +16524,110 @@ BUILT; what that costs until it is, is the disk item below.
 - **A 1day month the vendor answered empty stays owed**, so its instrument
   is withheld from every 1min pull by name until an empty daily answer is
   recorded durably (a decision is needed; DB-B27).
+
+## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
+
+Rows landed by WP-81 with the code they bound. Every figure is a closed-loop
+measurement of a release build of this package's branch (the report names
+the build each figure is of) over a scratch store
+(`bars/` a real directory of copy-on-write clones; the census is the
+operator's 385,442 GDFL months, nearly all of them `missing` there, which is
+what makes the ledger large): python threads, one connection a client, GET
+only, on a machine also running other builds. Latencies are p50 / p99 / max.
+
+- **L-WP81-1. The first findings index after a start is O(ledger), at most
+  16 MiB a request.** `/scrub.json` and `/disk.json` index the scrub ledger
+  from its start once per process (`scrub_route::INDEX_STEP_BYTES`). Measured
+  on a 160.7 MB ledger (five passes of 385,440 findings): 10 requests of
+  95–160 ms each, every one answering `truncated: true` — and a
+  `standing_findings` of only what was indexed so far, 0 until the newest
+  passes are reached — before the eleventh answered in 0.8 ms. The requests
+  behind an indexing one wait in the operations pool (4 slots, 250 ms, then
+  429 with `Retry-After`), never in the bar seeks' pool. NOT bounded by
+  anything but the ledger's length: see L-WP81-2.
+- **L-WP81-2. The ledger is append-only for ever, and each pass re-appends
+  every standing finding.** 32.1 MB a pass at 385,440 findings; nine passes
+  were 257 MB. Nothing compacts it (append-only law); the index holds one
+  entry per distinct finding the ledger ever named, and one per month, pass
+  and series a pass met busy, for the life of the process. A store whose
+  findings are few — the expected case: the operator's
+  store has never been scrubbed, and a healthy pass writes one `run` line —
+  never meets this row.
+- **L-WP81-3. After the first index every answer is bounded, whatever the
+  ledger holds.** Unchanged 32 MB ledger: `/scrub.json` 1 client, n=200,
+  0.11 / 0.21 / 1.74 ms; 20 clients, n=800, 0.90 / 4.11 / 10.41 ms (a second
+  run on the 160 MB ledger with a test suite compiling beside it: 0.76 /
+  34.14 / 37.86 ms). WHILE `cli scrub-blocks` appended three passes (17 s,
+  160 MB to 257 MB): `/scrub.json` 20 clients, n=240,000, all 200, 1.26 /
+  4.18 / 11.81 ms; `/bars/window.json` seeks 16 clients at the same time,
+  n=192,000, all 200, 1.17 / 3.78 / 9.86 ms (16 x 60 with nothing else
+  running: 0.79 / 3.18 / 4.23 ms); `/disk.json` 2 clients, n=12,000, all
+  200, 0.25 / 3.13 / 8.29 ms. Before the repair the same load refused 205 of
+  800 `/scrub.json` answers and 283 of 960 seeks (second agent, 12 Oct), and
+  with the copy removed but the ledger still measured outside the lock,
+  1,055 of 80,000 with waits of up to 869 ms. A request that finds the
+  ledger longer reads and indexes the bytes appended since the last request
+  under the vendor's lock: O(appended), at most 16 MiB.
+- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One `df -Pk`,
+  a stat of each census file, each feed's scrub state. Its uncached
+  measurement at 385,440 standing findings: 3.1–4.5 ms (it was 84–92 ms: a
+  walk and a sort of every finding for 16 names); cached, n=200, 0.06 / 0.17
+  / 1.79 ms.
+- **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
+  O(blocks of that month) in TIME; its answer is constant-size.** Every block
+  is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar
+  moved aside: 206, 524 bytes (it was 188.6 MB), n=100, 178.84 / 201.59 /
+  201.59 ms. The newest 50 of that month by `/bars/window.json`: 206, 844
+  bytes, n=200, 0.18 / 0.34 / 1.85 ms; sorted by close with no sort index:
+  206, 1,753 bytes, one sentence for the month and `faulted_records`
+  517,292. Remembering a month's refusal by its file stamp, so the second
+  read costs nothing, is NOT DONE.
+- **L-WP81-6. A scrub pass is O(store), and each run re-reads and sorts the
+  whole census.** 385,442 entries read and sorted per run; a run over the
+  scratch store (19,605 blocks on disk, the rest `missing`) took 6.2 s. Over
+  the operator's ~437 GB a pass is hours at the default 64 MiB/s —
+  extrapolated from the rate, NOT MEASURED. Months an import adds behind the
+  cursor during a pass are the next pass's (`docs/36-ops-runbook.md` §6).
+- **L-WP81-7. A start that writes nothing reads what recovery is in flight:
+  O(records of the activation history and of one plan), once a start.**
+  `recovery::at_start` under `BRUTEX_READ_ONLY=1` or an unstamped build; a
+  shared lock on read-only handles. A store with no `audit/recovery-v1`
+  (the operator's, today) costs one `stat`.
+- **L-WP81-8. A full admission queue refuses.** Every bounded read pool
+  queues a request at most 250 ms among at most 32 waiters, then answers 429
+  with `Retry-After: 1`. Measured on a shadow of the operator's store
+  (bars linked, read-only): `/bars/window.json` NIFTY 1s 2020-07 limit 50 —
+  16 x 30, n=480, 0.92 / 4.85 / 5.84 ms; 64 x 16, n=1,024, 1.57 / 6.07 /
+  8.75; 256 x 8, n=2,048, 1.03 / 4.46 / 7.80 — all 200.
+  `/census/facets.json` NIFTY: all 200 at the same three shapes (p99 4.22,
+  6.78, 5.48 ms). A value sort of a month with no sort index goes to the
+  scan pool of 2 (D-3349's row): 16 x 5 answered 70 x 429, every one with
+  `Retry-After`, and 10 x 200; 16 x 30 seeks straight after: 480 of 480.
+- **L-WP81-9. A month a pass met `busy` is not read by that pass, and its
+  findings stand one pass longer than a clean re-read would keep them.** The
+  scrub never waits for a month a writer holds (`busy`, counted and named).
+  The findings index keeps what stood in that month under the busy pass
+  (`kept_pass`), and `/scrub.json`, `/db` and the `/ingest` tile name the
+  month as not read. Two things stay conservative, by name: (a) a month met
+  busy by a run that was then killed, and read CLEAN by the run that resumed
+  the same pass, still shows busy and keeps its findings until the next pass
+  completes — a pass writes a line only for what it found, so a clean
+  re-read cannot be told from no read; (b) a `busy` line of a run whose
+  `run` line was never indexed cannot be dated, and what it keeps stands
+  until a dated pass finds it again. Each `busy` line costs one ordered seek
+  in one pass's map plus the findings of that one month: O(log findings +
+  findings of the month), measured as part of the index step in L-WP81-1.
+  A month that is busy at EVERY pass (a writer that never lets go) is never
+  read by the scrub; the page says so at each pass and nothing forces the
+  read: NOT DONE.
+- **L-WP81-10. The census keeps every epoch and every superseded file for
+  ever, and nothing enforces a budget for them (DB-B59).** Compaction writes
+  a new epoch and deletes nothing (append-only law). `/disk.json` reports
+  what that costs as `census_kept_bytes`, with each census file's role and
+  size, and the `/ingest` tile prints it beside the free space: 297,641,984
+  bytes for GDFL on the operator's store on 12 October 2026 (one `lstat` per
+  census file: O(epochs), a handful today). It grows by one census epoch per
+  compaction — about the size of the live census each time. NOT DONE: a
+  bound, an alarm at a threshold, or an archive step that moves older epochs
+  off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
+  of its own (L-WP81-4), cached for 30 s in the operations pool.
