@@ -52,6 +52,8 @@ compile_error!(
     "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
 );
 
+/// `cli alerts`: the alert queue from a terminal (D-4883).
+mod alerts_command;
 /// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
 mod append_rollback;
 #[cfg(test)]
@@ -488,6 +490,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    dirty minute month yields coarse bars built out
                                    of gaps that no other check can see. Exits
                                    non-zero on any disagreement. Reads only.
+       cli alerts [--ack N | --older | --before N | --replace-damaged | --file PATH]
+                                   The alert queue (<store>/audit/alerts): with no
+                                   flag, the unacknowledged alerts among the newest
+                                   1,024 records and the count of older ones, in one
+                                   read. --ack acknowledges one; --older lists the
+                                   older ones; --replace-damaged keeps a damaged
+                                   queue and starts a new one; --file lists a kept one.
        cli gdfl-import KIND SOURCE FROM TO [SYMBOL ...]
                                    GDFL one-second bars (indices, stocks, option
                                    contracts) into the store, from the tick store
@@ -2688,6 +2697,7 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["fold-audit", v, u, fy, fm, ty, tm] => fold_audit_arm(out, v, u, (fy, fm), (ty, tm)),
+        ["alerts", arguments @ ..] => alerts_command::command(arguments, out),
         ["gdfl-import", arguments @ ..] if arguments.len() >= 4 => {
             gdfl_import_command::command(arguments, out)
         }
@@ -2783,7 +2793,8 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 46] = [
+const COMMANDS: [&str; 47] = [
+    "alerts",
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -29576,7 +29587,11 @@ mod tests {
             // something the dispatch can be asked, and a command that grows a
             // required argument must fail HERE rather than silently leaving the
             // exemption behind.
-            if matches!(word, "results" | "top") {
+            //
+            // AND A THIRD (D-4883, IA-11a): `alerts` alone prints the
+            // unacknowledged alerts of the newest window, one read of the
+            // store's queue. Its misuses are its own module's tests.
+            if matches!(word, "alerts" | "results" | "top") {
                 continue;
             }
 

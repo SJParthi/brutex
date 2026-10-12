@@ -109,6 +109,7 @@ pub fn ensure_tls_provider() {
     });
 }
 
+pub mod alerts;
 pub mod archive;
 /// The NSE trading calendar, MEASURED from days that actually traded -- because
 /// `session` holds none, and without one every stored series reads SHORT for

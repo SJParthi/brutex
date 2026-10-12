@@ -3681,3 +3681,120 @@ month availability, disagreement between repeated references to the same minute,
 foreign extents, tails and insufficient whole-publication admission refuse.
 The independent reference pins never become a source/run,
 search, qualification or ranking identity.
+
+## §38 — The alert queue, format v1 (D-4883, D-4893, D-4895)
+
+`<store>/audit/alerts`. One file, append-only, little-endian, packed (no field
+relies on alignment). Written and read by `pull::alerts` and by nothing else.
+Format v1 is written once: a change is a new version in the header, never a
+new meaning for a byte below.
+
+**Header, 64 bytes at offset 0.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXAL` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | record stride = 128 |
+| 12 | 2 | header length = 64 |
+| 14 | 2 | reserved, zero |
+| 16 | 8 | created at (unix seconds) |
+| 24 | 36 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes 0..60 |
+
+**Record, 128 bytes.** Ordinal k ≥ 1 sits at 64 + 128 × (k − 1); the file's
+length alone says how many whole records it holds.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | type: 1 alert, 2 acknowledgement |
+| 1 | 1 | kind (the table below; 0 for an acknowledgement) |
+| 2 | 1 | flags: bit 0 `text_cut`; bits 1–7 zero |
+| 3 | 1 | reserved, zero |
+| 4 | 4 | day (days since 1970-01-01; 0 = none) |
+| 8 | 8 | run id (0 = none) |
+| 16 | 8 | put at (unix seconds) |
+| 24 | 16 | the first 16 bytes of the BLAKE3 of the de-duplication key (zero for an acknowledgement) |
+| 40 | 4 | the acknowledged ordinal (type 2; 0 for an alert) |
+| 44 | 4 | **open after**: the count of unacknowledged alerts in the file once this record is counted |
+| 48 | 1 | text length in bytes (≤ 75) |
+| 49 | 75 | text, UTF-8, whole characters, zero-padded. An alert's text says what happened; an acknowledgement's says who acknowledged (`cli`, `api`) |
+| 124 | 4 | CRC-32C over bytes 0..124 |
+
+**Kinds** (append-only; a number is never renamed or reused). 1 to 12 are the
+ingest design's; 13 to 20 were added before the format was first written, for
+the conditions the rules audit of 11 October 2026 found unalerted. The writer
+refuses a kind outside this table (`alert_kind_unknown`); a reader shows a
+number it cannot name as `kind_<n>` and a record type it cannot name as
+"unknown", never dropping either.
+
+| Kind | Word | | Kind | Word |
+|---|---|---|---|---|
+| 1 | `interrupted_twice` | | 11 | `verdict_refused` |
+| 2 | `store_lost` | | 12 | `queue_replaced` |
+| 3 | `build_skew` | | 13 | `run_ended_early` |
+| 4 | `calendar_horizon` | | 14 | `interrupted` |
+| 5 | `disk_full` | | 15 | `stalled` |
+| 6 | `hole` | | 16 | `autopilot_stalled` |
+| 7 | `store_damaged` | | 17 | `disk_low` |
+| 8 | `runs_ledger_damaged` | | 18 | `file_shrank` |
+| 9 | `mismatch` | | 19 | `month_damaged` |
+| 10 | `spool_damaged` | | 20 | `index_refused` |
+
+**Sibling names in `<store>/audit/`.**
+
+| Name | What it is |
+|---|---|
+| `alerts.lock` | The lock file. Writers hold it exclusive, readers shared, for one operation. It holds no data |
+| `alerts.<pid>.tmp` | A new queue before it has its name. Genesis: the header is written here, synced, hard-linked to `alerts` (the link fails if a queue exists) and removed. A replacement: the header and the first record are written here, synced, and the name is renamed over `alerts`. One left by a killed process is never read; the same process id removes it before writing its own |
+| `alerts.reserve` | 65,536 written zero bytes (512 records' worth). A put that meets a full disk deletes it and tries once more, so `disk_full`'s own alert has room; the next put that finds room writes it again |
+| `alerts.damaged-<unix_s>` (`.2`, `.3`, … for a second replacement in one second) | A damaged queue kept by `cli alerts --replace-damaged`. Never edited, never deleted, never written over |
+
+**Rules.**
+
+- *Born whole.* A file shorter than 64 bytes, or whose header fails its CRC,
+  magic, stride or header length, cannot come from genesis and is refused
+  `alerts_damaged{offset: 0}`. A header that passes its CRC with another
+  version is refused `alerts_version_unknown`, never replaced.
+- *The tail rule is length-based and checks only the last whole record.* Bytes
+  past the last whole record are a torn append and the next append writes over
+  them. A last whole record that fails its CRC is an append whose sync never
+  finished: the next append writes over it, takes "open after" from the record
+  before it, and an error event names the offset. Two failing records at the
+  tail refuse every write, `alerts_damaged{offset}`. No record whose CRC
+  passes is ever written over.
+- *De-duplication.* A put whose key hash equals that of an **unacknowledged**
+  alert among the newest 1,024 records writes nothing. An acknowledged key, or
+  one older than the window, is put again.
+- *An acknowledgement* is appended only for an alert that no later
+  acknowledgement names, so "open after" never goes below zero.
+- *Readers* take one read of at most 1,024 records under the lock held shared
+  and list the alerts in it that no acknowledgement in it names, newest first;
+  a record that fails its CRC is listed as damaged. The count of older
+  unacknowledged alerts is the newest good record's "open after" less the
+  alerts listed. For the newest page that is exact. A page before the newest
+  is exact only once the records after it are read too, because an
+  acknowledgement is always a later record: `alerts::page_settled` (`cli
+  alerts --before <n>`) reads them, drops every alert one of them names and
+  takes one off the older count for each that names an alert older than the
+  page (D-4895, `docs/06-limits.md` L-IA-34). A reader that takes more than
+  one read (`page_settled`, `older`) takes them all through the one file its
+  first read opened, so its answer is one queue's even when a replacement
+  puts a new file on the name meanwhile, and it returns every record it
+  could not read (by ordinal) beside the alerts.
+- *A damaged queue is replaced, never repaired, and the replacement is all or
+  nothing.* Under the lock held exclusive, each step durable before the next:
+  (1) the file is given its kept name `alerts.damaged-<unix_s>` by a hard link
+  (which fails rather than write over an earlier kept file) and the directory
+  is synced; (2) the new queue, header **and** first record, is written whole
+  to `alerts.<pid>.tmp` and synced; (3) that name is renamed over `alerts`,
+  which the host does atomically, and the directory is synced; (4) the
+  reserve is made. The first record is a `queue_replaced` alert naming the
+  kept file and the open count it held (its newest good record's "open
+  after"; `unknown` only when no record of its window passes its CRC, so a
+  failed header alone does not make it unknown). At every moment, and after a
+  kill at any step, `alerts` is the damaged queue or the new queue already
+  holding that record: there is never no queue, nor a queue that does not say
+  what it replaced. A replacement stopped before step 3 leaves the damaged
+  queue with two names; the next one finds the kept name by device and inode
+  and uses it, so one damaged file is kept once (D-4883).
