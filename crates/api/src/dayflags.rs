@@ -1415,14 +1415,15 @@ const OPTIONS_FIELDS: [(&str, Shape); 7] = [
     ("first_trade_p50", Shape::Clock),
 ];
 
-/// The fields a later writer added to every kind's line (WP-11c): the
+/// The fields a later writer added to every kind's line (D-4928; WP-11c): the
 /// in-session seconds the calendar of record halts for the kind's segment,
 /// and the placed seconds inside them. **Optional**: a line written before
 /// them stays valid, and a missing one is `null`, never `0`.
 const LATER_EVERY: [(&str, Shape); 2] = [("halt_s", Shape::Count), ("halt_held_s", Shape::Count)];
 
-/// An index line's later fields (WP-11c): the longest run of in-session rows
-/// carrying one unchanged value, and its first stamp. Optional, as above.
+/// An index line's later fields (D-4928; WP-11c): the longest run of
+/// in-session rows carrying one unchanged value, and its first stamp.
+/// Optional, as above.
 const LATER_INDICES: [(&str, Shape); 2] =
     [("flat_max_s", Shape::Count), ("flat_max_at", Shape::Clock)];
 
@@ -3077,8 +3078,11 @@ fn counts(
                                 inst.key(),
                                 rung.as_str()
                             ));
+                            // ALL THREE ANSWERS, or every later day of the
+                            // month reads the next day's halt count.
                             per_day.push(Held::Unreadable);
                             zero.push(None);
+                            halted.push(None);
                             lower = None;
                         }
                     }
@@ -3388,16 +3392,20 @@ struct DayHeld {
     series: Held,
 }
 
-/// The index series whose sampling a record of `inst` names (WP-11c,
+/// The index series whose sampling a record of `inst` names (D-4928; WP-11c,
 /// DB-A04), or `None` where the feed's finest rung cannot show sampling or
 /// the instrument is a share.
 ///
-/// An index names itself; an option names the index of its own symbol,
-/// which the store either holds or does not (a share's options answer
-/// `not_held` and the record says nothing). A share's own seconds are trades
-/// and are sparse by nature, so a share names none. The rung must hold more
-/// than [`SAMPLED_SS_DISTINCT`] bars a minute, or every series would read as
-/// sampled: a one-minute feed is never asked.
+/// An index names itself. **An option names the index the sourced alias
+/// table gives its symbol** (`brutex_core::alias::option_underlying`, D-3332;
+/// D-4928 item 5) -- the one answer `/spot.json` and the bar routes read, so
+/// a FINNIFTY option reads `NSE-INDEX-NIFTYFINSERVICE`, the key its index
+/// bars and its day-ledger line are filed under, never an index of the
+/// option's own symbol. Where the table says the underlying is a share, the
+/// option names none and no month is opened for it: a share's own seconds
+/// are trades and are sparse by nature, so a share names none either. The
+/// rung must hold more than [`SAMPLED_SS_DISTINCT`] bars a minute, or every
+/// series would read as sampled: a one-minute feed is never asked.
 ///
 /// [`SAMPLED_SS_DISTINCT`]: pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
 fn sampled_series(feed: Vendor, inst: &Instrument) -> Option<Instrument> {
@@ -3407,12 +3415,15 @@ fn sampled_series(feed: Vendor, inst: &Instrument) -> Option<Instrument> {
     }
     match inst.segment {
         Segment::Index => Some(inst.clone()),
-        Segment::Fno => Some(Instrument {
-            exchange: inst.exchange,
-            segment: Segment::Index,
-            symbol: inst.symbol.clone(),
-            contract: None,
-        }),
+        Segment::Fno => {
+            let underlying = brutex_core::alias::option_underlying(&inst.symbol);
+            (underlying.segment == Segment::Index).then(|| Instrument {
+                exchange: inst.exchange,
+                segment: Segment::Index,
+                symbol: underlying.key.to_owned(),
+                contract: None,
+            })
+        }
         Segment::Cash => None,
     }
 }
@@ -3426,7 +3437,7 @@ fn percent(held: u64, of: u64) -> Option<String> {
     Some(format!("{}.{}", tenths / 10, tenths % 10))
 }
 
-/// The record's `sampled` (WP-11c, DB-A04): whether `series` is a
+/// The record's `sampled` (D-4928; WP-11c, DB-A04): whether `series` is a
 /// minute-sampled day, with the numbers that say so and where they are from.
 ///
 /// **THE DAY LEDGER'S LINE IS THE AUTHORITY** (D-3335): where the
@@ -3590,7 +3601,7 @@ fn calendar_json(
             "halted": { "from": hm(u32::from(halt.halted.from)), "to": hm(u32::from(halt.halted.to)) },
             "reopening": halt.reopening.map(|w| json!({ "from": hm(u32::from(w.from)), "to": hm(u32::from(w.to)) })),
             "seconds": { "from": hms(seconds.from), "resume": hms(seconds.resume) },
-            // THE BARS HELD INSIDE IT (WP-11c, DB-A07): kept as the vendor
+            // THE BARS HELD INSIDE IT (D-4928; WP-11c, DB-A07): kept as the vendor
             // printed them and counted here, so a flat run of an index's
             // repeated value is a labelled halt and not an ordinary hour.
             "held": halted.map(|bars| json!({
@@ -3641,18 +3652,31 @@ fn sampled_says(sampled: &Value) -> Option<String> {
         )
     } else {
         format!(
-            "{who}: minute-sampled or mostly missing (suspected){held}, at most 2 a minute; \
-             no day-ledger line measures its rows yet"
+            "{who}: minute-sampled or mostly missing (suspected){held}, at most {} a minute; \
+             no day-ledger line measures its rows yet",
+            pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
         )
     })
 }
 
-/// The rule a `sampled` reads from the day ledger (D-3335's display rule).
-const SAMPLED_RULE: &str = "ss_distinct is 2 or less, on a day with rows";
+/// The rule a `sampled` reads from the day ledger (D-3335's display rule;
+/// D-4928 item 5), worded from the one threshold the import also reads.
+fn sampled_rule() -> String {
+    format!(
+        "ss_distinct is {} or less, on a day with rows",
+        pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
+    )
+}
 
-/// The rule a `sampled` reads from the held bars, where no line exists.
-const SAMPLED_RULE_HELD: &str = "no day-ledger line, and the series holds at most 2 bars a \
-                                 session minute at a rung of more than 2 a minute";
+/// The rule a `sampled` reads from the held bars, where no line exists
+/// (D-4928 item 6).
+fn sampled_rule_held() -> String {
+    let most = pull::gdfl_import::quality::SAMPLED_SS_DISTINCT;
+    format!(
+        "no day-ledger line, and the series holds at most {most} bars a session minute at a rung \
+         of more than {most} a minute"
+    )
+}
 
 /// The record's `degraded`: D-3335's display rules over the day's ledger
 /// lines, each with the numbers it read. An index's rule is `sampled`'s
@@ -3665,7 +3689,7 @@ fn degraded_json(lines: &[(ImportKind, Option<&QualityLine>)], sampled: &Value) 
         out.push(json!({
             "kind": ImportKind::Indices.as_str(),
             "flag": "sampled",
-            "rule": if ledger { SAMPLED_RULE } else { SAMPLED_RULE_HELD },
+            "rule": if ledger { sampled_rule() } else { sampled_rule_held() },
             "says": says,
         }));
     }
@@ -4630,14 +4654,17 @@ fn rules_json() -> Value {
             "source": "D-3335: display rules, chosen, not sourced",
         },
         "sampled": {
-            "day_ledger": SAMPLED_RULE,
-            "held_bars": SAMPLED_RULE_HELD,
-            "of": "own: the instrument is the index; underlying: the instrument is an option and the index is the one of its symbol",
+            "day_ledger": sampled_rule(),
+            "held_bars": sampled_rule_held(),
+            "of": "own: the instrument is the index; underlying: the instrument is an option and the index is the one the alias table gives its symbol (D-3332: NSE-INDEX-NIFTYFINSERVICE for a FINNIFTY option), read under that store key",
             "standing": "measured from the vendor's rows by the import or `cli gdfl-dayflags`; suspected from the bars held, which cannot tell a sampled day from one mostly missing",
-            "null": "a share, a feed whose finest rung holds at most 2 bars a minute, a day that is not a session, or an index the store does not hold",
-            "source": "D-3335's index rule, named by WP-11c (DB-A04); chosen, not sourced",
+            "null": format!(
+                "a share, an option whose underlying is a share (any symbol the alias table does not name as an index), a feed whose finest rung holds at most {} bars a minute, a day that is not a session, or an index with neither a day-ledger line nor a month the store holds",
+                pull::gdfl_import::quality::SAMPLED_SS_DISTINCT
+            ),
+            "source": "D-3335's index rule, named by D-4928 (WP-11c, DB-A04); chosen, not sourced",
         },
-        "halt_held": "events.halt.held counts the feed's bars that open inside the halt's seconds for the instrument's own segment (from, up to resume); bars are kept as printed (WP-11c, DB-A07)",
+        "halt_held": "events.halt.held counts the feed's bars that open inside the halt's seconds for the instrument's own segment (from, up to resume); bars are kept as printed; null where the month is not held, or where the count could not be read and a note says why (D-4928; WP-11c, DB-A07)",
         "junk": {
             "zero_price": "the day's Zerodha 1day bar has an open, high, low or close at or below zero",
             "off_calendar": "Zerodha holds a bar on a day the calendar of record says was closed",
@@ -6826,7 +6853,7 @@ mod tests {
             })
         );
         assert_eq!(sampled["degraded"][0]["flag"], "sampled");
-        assert_eq!(sampled["degraded"][0]["rule"], SAMPLED_RULE_HELD);
+        assert_eq!(sampled["degraded"][0]["rule"], sampled_rule_held());
         says_has(
             sampled,
             "degraded vendor day -- index: minute-sampled or mostly missing (suspected), 375 of \
@@ -6902,11 +6929,11 @@ mod tests {
             assert_eq!(rec["sampled"]["standing"], "measured");
             assert_eq!(rec["sampled"]["of"], of);
             assert_eq!(rec["sampled"]["ss_distinct"], 1);
-            assert_eq!(rec["degraded"][0]["rule"], SAMPLED_RULE);
+            assert_eq!(rec["degraded"][0]["rule"], sampled_rule());
             // A day the ledger has no line for is still the store's to say.
             assert_eq!(record(&got, "2019-05-29")["sampled"]["basis"], "held_bars");
         }
-        assert_eq!(got["rules"]["sampled"]["day_ledger"], SAMPLED_RULE);
+        assert_eq!(got["rules"]["sampled"]["day_ledger"], sampled_rule());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7016,6 +7043,291 @@ mod tests {
         assert!(
             says(&quiet).iter().all(|s| !s.contains("halt")),
             "{quiet:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN OPTION'S UNDERLYING INDEX IS THE ALIAS TABLE'S, NOT THE OPTION'S
+    /// OWN SYMBOL** (WP-11c repair 1; D-3332, D-4928 item 5): a FINNIFTY
+    /// option's index is filed under `NIFTYFINSERVICE`, and so is its
+    /// day-ledger line. Every index the table files under a key other than
+    /// its F&O symbol is asked, from the table itself, as a contract and as
+    /// the kind, by the bars held and by the ledger's line; a share's option
+    /// -- renamed or not -- names no index and opens none.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture and every assertion about it, read top to bottom"
+    )]
+    fn an_option_reads_the_sampled_day_of_the_index_the_alias_table_names() {
+        let root = root_of("sampled-alias");
+        let (on, before) = ("2022-03-07", "2022-03-04");
+        let renamed: Vec<(&str, &str)> = brutex_core::alias::INDEX_ROWS
+            .iter()
+            .filter_map(|row| Some((row.fno?, row.store_key)))
+            .filter(|(fno, key)| fno != key)
+            .collect();
+        assert!(
+            renamed.contains(&("FINNIFTY", "NIFTYFINSERVICE")),
+            "the table files FINNIFTY's index under another key: {renamed:?}"
+        );
+        for (_, key) in &renamed {
+            let mut bars = minute_stamped(on, 375);
+            bars.extend((0..751).map(|s| bar(before, 9 * 3_600 + 15 * 60 + s, [600; 4], 0)));
+            file_bars(
+                &root,
+                Vendor::Gdfl,
+                &format!("NSE-INDEX-{key}"),
+                Timeframe::SECOND_1,
+                bars,
+            );
+        }
+        let page = |instrument: &str| {
+            answer(
+                &root,
+                &ask(&format!(
+                    "feed=gdfl&instrument={instrument}&from={before}&to={on}"
+                )),
+            )
+        };
+        for (fno, key) in &renamed {
+            let series = format!("NSE-INDEX-{key}");
+            for instrument in [
+                format!("NSE-FNO-{fno}-2022-03-08-1700000-CE"),
+                format!("NSE-FNO-{fno}"),
+            ] {
+                let got = page(&instrument);
+                let rec = record(&got, on);
+                assert_eq!(
+                    rec["sampled"],
+                    json!({
+                        "is": true, "of": "underlying", "series": series,
+                        "basis": "held_bars", "standing": "suspected",
+                        "held_s": 375, "session_s": 22500, "ss_distinct": null, "line": null,
+                    }),
+                    "{instrument}"
+                );
+                assert_eq!(rec["degraded"][0]["flag"], "sampled", "{instrument}");
+                says_has(
+                    rec,
+                    &format!(
+                        "degraded vendor day -- underlying index {series}: minute-sampled or \
+                         mostly missing (suspected), 375 of 22500 session second(s) held (1.7%), \
+                         at most 2 a minute; no day-ledger line measures its rows yet"
+                    ),
+                );
+                let full = record(&got, before);
+                assert_eq!(full["sampled"]["is"], false, "{instrument}");
+                assert_eq!(full["sampled"]["held_s"], 751);
+                assert_eq!(full["degraded"], json!([]));
+            }
+            // THE INDEX ITSELF, asked under its store key, is its own series.
+            let own = page(&series);
+            assert_eq!(record(&own, on)["sampled"]["of"], "own", "{series}");
+            assert_eq!(record(&own, on)["sampled"]["series"], series.as_str());
+        }
+        // A SHARE'S OPTION NAMES NO INDEX, under its own symbol or one a dated
+        // change renamed: null, nothing degraded, and no month looked for.
+        for instrument in [
+            "NSE-FNO-RELIANCE-2022-03-31-240000-CE",
+            "NSE-FNO-TATAMOTORS-2022-03-31-45000-CE",
+        ] {
+            let got = page(instrument);
+            assert_eq!(record(&got, on)["sampled"], Value::Null, "{instrument}");
+            assert_eq!(record(&got, on)["degraded"], json!([]), "{instrument}");
+        }
+        // THE LEDGER'S LINE IS FILED UNDER THE STORE KEY TOO, and is read there.
+        let lines: String = renamed
+            .iter()
+            .map(|(_, key)| {
+                index_flags(
+                    on,
+                    key,
+                    &[
+                        ("rows", "376"),
+                        ("seconds", "375"),
+                        ("session_s", "22500"),
+                        ("ss_distinct", "1"),
+                    ],
+                )
+            })
+            .collect();
+        write(&quality_path(&root), &lines);
+        for (at, (fno, key)) in renamed.iter().enumerate() {
+            let got = page(&format!("NSE-FNO-{fno}-2022-03-08-1700000-CE"));
+            let rec = record(&got, on);
+            assert_eq!(
+                rec["sampled"],
+                json!({
+                    "is": true, "of": "underlying", "series": format!("NSE-INDEX-{key}"),
+                    "basis": "day_ledger", "standing": "measured",
+                    "held_s": 375, "session_s": 22500, "ss_distinct": 1, "line": at + 1,
+                }),
+                "{fno}"
+            );
+            assert_eq!(rec["degraded"][0]["rule"], sampled_rule());
+            says_has(
+                rec,
+                &format!(
+                    "degraded vendor day -- underlying index NSE-INDEX-{key}: minute-sampled, \
+                     375 of 22500 session second(s) held (1.7%), its rows on 1 distinct \
+                     second(s) of the minute"
+                ),
+            );
+            assert_eq!(
+                record(&got, before)["sampled"]["basis"],
+                "held_bars",
+                "a day with no line is still the store's to say"
+            );
+            let rules = &got["rules"]["sampled"];
+            assert!(
+                rules["of"].as_str().unwrap().contains("D-3332"),
+                "{rules:#}"
+            );
+            assert!(
+                rules["null"]
+                    .as_str()
+                    .unwrap()
+                    .contains("an option whose underlying is a share"),
+                "{rules:#}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The path of `key`'s month file of `kind` holding `on`.
+    fn month_file(
+        root: &Path,
+        (feed, key, rung): (Vendor, &str, Timeframe),
+        on: &str,
+        kind: FileKind,
+    ) -> PathBuf {
+        let inst = instrument_of(key, "").expect("a key");
+        StorePath::new(PathParts {
+            vendor: feed,
+            exchange: inst.exchange.as_str(),
+            segment: inst.segment.as_str(),
+            symbol: &inst.symbol,
+            contract: inst.contract,
+            timeframe: rung,
+            month: day(on).year_month().unwrap(),
+            file: kind,
+        })
+        .expect("a legal path")
+        .to_path_buf(root)
+    }
+
+    /// Spoils record `row` of a sealed month file, so every read of its
+    /// checksum block is refused, and takes the month's time index away, so
+    /// each lookup is the plain bisection whose probes the tests below count.
+    fn spoil_block_of(root: &Path, series: (Vendor, &str, Timeframe), on: &str, row: u64) {
+        std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex))
+            .expect("the month's time index");
+        let path = month_file(root, series, on, FileKind::Bars);
+        let mut bytes = std::fs::read(&path).expect("the month's bars");
+        let at = usize::try_from(store::format::HEADER_LEN + row * store::format::RECORD_STRIDE)
+            .expect("an offset");
+        for byte in &mut bytes[at + 8..at + 40] {
+            *byte ^= 0xA5;
+        }
+        std::fs::write(&path, bytes).expect("the spoiled bars");
+    }
+
+    /// **A DAY WHOSE LOOKUP FAILS DOES NOT SHIFT THE HALT COUNTS OF THE DAYS
+    /// AFTER IT** (WP-11c repair 1): the three per-day answers are pushed
+    /// together. The month holds 584 one-second bars (eight checksum blocks
+    /// of 73): 100 on the 10th, 192 on the 11th, 292 on the halt day. Block 1
+    /// (records 73..146) is spoiled. Bisecting for the 11th's opening probes
+    /// 292, 146, then 73 -- refused; the lookups for the 12th, the 13th and
+    /// the halt's two edges probe blocks 2 to 7 only. Before the repair the
+    /// 13th read the 14th's count: `held` null, with no reason.
+    ///
+    /// **AND A HALT WHOSE OWN COUNT FAILS SAYS SO**: BANKNIFTY's day holds
+    /// 1,168 bars, the halt opens at record 400 and block 5 (365..438) is
+    /// spoiled; the day's two edges probe blocks 0, 1, 2, 4, 8 and 12 to 15.
+    #[test]
+    fn a_failed_lookup_keeps_each_later_days_halt_count_on_its_own_day() {
+        let root = root_of("halt-failed-lookup");
+        let at = |h: i64, m: i64, s: i64| h * 3_600 + m * 60 + s;
+        let run = |on: &str, from: i64, n: i64| -> Vec<Bar> {
+            (0..n).map(|i| bar(on, from + i, [900; 4], 0)).collect()
+        };
+        let nifty = (Vendor::Gdfl, "NSE-INDEX-NIFTY", Timeframe::SECOND_1);
+        let mut bars = run("2020-03-10", at(9, 15, 0), 100);
+        bars.extend(run("2020-03-11", at(9, 15, 0), 192));
+        // 09:20:00 to 09:24:51: the index's halt opens at 09:21:10, 70 in.
+        bars.extend(run("2020-03-13", at(9, 20, 0), 292));
+        file_bars(&root, nifty.0, nifty.1, nifty.2, bars);
+        spoil_block_of(&root, nifty, "2020-03-13", 100);
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2020-03-11&to=2020-03-13"),
+        );
+        let notes: Vec<&str> = got["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(record(&got, "2020-03-11")["held"]["why"], "unreadable");
+        assert_eq!(record(&got, "2020-03-11")["held"]["bars"], Value::Null);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("gdfl NSE-INDEX-NIFTY 1s 2020-03-11: a lookup failed: ")),
+            "{notes:#?}"
+        );
+        assert_eq!(record(&got, "2020-03-12")["held"]["bars"], 0);
+        assert_eq!(record(&got, "2020-03-12")["events"]["halt"], Value::Null);
+        let halt = record(&got, "2020-03-13");
+        assert_eq!(halt["held"]["bars"], 292);
+        assert_eq!(
+            halt["events"]["halt"]["held"],
+            json!({ "feed": "gdfl", "rung": "1s", "bars": 222, "of_s": 3_591 }),
+            "the halt day's own count, not the day after's: {notes:#?}"
+        );
+        says_has(
+            halt,
+            "222 1s bar(s) held inside the halt, 09:21:10 until 10:21:01: kept as printed, \
+             labelled, never dropped",
+        );
+
+        let bank = (Vendor::Gdfl, "NSE-INDEX-BANKNIFTY", Timeframe::SECOND_1);
+        let mut bars = run("2020-03-13", at(9, 10, 0), 400);
+        bars.extend(run("2020-03-13", at(9, 21, 10), 500));
+        bars.extend(run("2020-03-13", at(10, 30, 0), 268));
+        file_bars(&root, bank.0, bank.1, bank.2, bars);
+        spoil_block_of(&root, bank, "2020-03-13", 400);
+        let got = answer(
+            &root,
+            &ask("feed=gdfl&instrument=NSE-INDEX-BANKNIFTY&from=2020-03-13&to=2020-03-13"),
+        );
+        let rec = record(&got, "2020-03-13");
+        assert_eq!(rec["held"]["bars"], 1_168, "the day itself is counted");
+        assert_eq!(rec["events"]["halt"]["standing"], "suspected");
+        assert_eq!(
+            rec["events"]["halt"]["held"],
+            Value::Null,
+            "never a count the store did not give"
+        );
+        assert!(
+            says(rec).iter().all(|s| !s.contains("inside the halt")),
+            "{rec:#}"
+        );
+        let said: Vec<&str> = got["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|n| n.contains("inside the halt"))
+            .collect();
+        assert_eq!(said.len(), 1, "{:#}", got["notes"]);
+        assert!(
+            said[0].starts_with(
+                "gdfl NSE-INDEX-BANKNIFTY 1s 2020-03-13: the bars inside the halt could not be \
+                 counted: "
+            ),
+            "{said:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

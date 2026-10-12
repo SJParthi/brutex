@@ -379,3 +379,79 @@ fn a_minute_sampled_index_day_is_named_with_its_numbers() {
         assert!(ledger.sampled().is_empty(), "{kind:?}");
     }
 }
+
+/// **A RESCAN NAMES A SAMPLED DAY WHEN IT WRITES THE LINE, AND NOT AGAIN**
+/// (WP-11c repair 1; D-4928 item 7): the first run over the day appends two
+/// lines and names NIFTY; a second run over the same rows appends none and
+/// names none (every run used to repeat the warning); a run that measures
+/// the day differently writes the changed line and names it again. A line
+/// of another kind, another day or another index names nothing.
+#[test]
+fn a_rescan_that_writes_no_new_line_names_no_sampled_day_again() {
+    let on = day(2019, 5, 30);
+    let session = crate::gdfl_cm::session_of(on).unwrap();
+    let minute = |n: u32| -> Vec<Tick> {
+        (0..n)
+            .map(|m| tick(NINE_FIFTEEN + m * 60 + 59, 400 + i64::from(m)))
+            .collect()
+    };
+    let dense: Vec<Tick> = (0..22_500)
+        .map(|s| tick(NINE_FIFTEEN + s, 400 + i64::from(s % 7)))
+        .collect();
+    let root = scratch("wp11c-rescan-once");
+    let path = quality::dayflags_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let rescan = |nifty: &[Tick]| -> (usize, Vec<String>) {
+        let mut flags = quality::Ledger::load(path.clone()).unwrap();
+        let mut ledger = quality::DayLedger::new(ImportKind::Indices, on, session);
+        ledger.take("NIFTY", &measured(ImportKind::Indices, on, nifty));
+        ledger.take("BANKNIFTY", &measured(ImportKind::Indices, on, &dense));
+        let sampled = ledger.sampled();
+        assert_eq!(sampled.len(), 1, "NIFTY is sampled on every run");
+        let news = flags.news(ledger.lines(true), quality::Src::Rescan);
+        flags.append(&news).unwrap();
+        let named = quality::sampled_among(ledger.kind(), ledger.day(), sampled, &news)
+            .into_iter()
+            .map(|one| one.scope)
+            .collect();
+        (news.len(), named)
+    };
+    assert_eq!(rescan(&minute(375)), (2, vec!["NIFTY".to_owned()]));
+    assert_eq!(
+        rescan(&minute(375)),
+        (0, Vec::new()),
+        "nothing new, no word"
+    );
+    assert_eq!(
+        rescan(&minute(374)),
+        (1, vec!["NIFTY".to_owned()]),
+        "a changed line is written and named"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap().lines().count(),
+        3,
+        "append-only: three lines over three runs"
+    );
+    // WHAT A LINE NAMES IS ITS OWN KEY: kind, day and index.
+    let nifty = |scope: &str| quality::Sampled {
+        scope: scope.to_owned(),
+        rows: 375,
+        seconds: 375,
+        session_s: 22_500,
+        ss_distinct: 1,
+    };
+    let line = |head: &str| vec![quality::render(head, quality::Src::Rescan, "rows=375")];
+    let among = |kind: ImportKind, on: Day, news: &[String]| {
+        quality::sampled_among(kind, on, vec![nifty("NIFTY"), nifty("NIFTYIT")], news)
+    };
+    let written = line("flags indices 2019-05-30 NIFTYIT v=1");
+    assert_eq!(
+        among(ImportKind::Indices, on, &written),
+        [nifty("NIFTYIT")],
+        "the index whose line was written, and no other"
+    );
+    assert!(among(ImportKind::Indices, day(2019, 5, 29), &written).is_empty());
+    assert!(among(ImportKind::Stocks, on, &written).is_empty());
+    assert!(among(ImportKind::Indices, on, &[]).is_empty());
+    assert!(among(ImportKind::Indices, on, &["not a flags line".to_owned()]).is_empty());
+}

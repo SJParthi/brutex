@@ -4590,12 +4590,13 @@ where
 /// (the operator's answer: flagged only), so the log is where the import
 /// itself names it; the day ledger's own `rows`, `seconds`, `session_s` and
 /// `ss_distinct` carry it to `/dayflags.json`. One warning an index, at most
-/// the day's indices.
-fn note_sampled(ledger: &quality::DayLedger, src: quality::Src) {
-    let day = ledger.day().to_string();
-    for sampled in ledger.sampled() {
-        let _dropped_when_filtered =
-            telemetry::emit(&sampled_event(ledger.kind(), &day, &sampled, src));
+/// the day's indices. The import says it of every day it files; a rescan
+/// says it only of the lines it wrote ([`quality::sampled_among`]), so a
+/// rescan that finds nothing new repeats nothing (D-4928 item 7).
+fn note_sampled(kind: ImportKind, day: Day, sampled: &[quality::Sampled], src: quality::Src) {
+    let day = day.to_string();
+    for sampled in sampled {
+        let _dropped_when_filtered = telemetry::emit(&sampled_event(kind, &day, sampled, src));
     }
 }
 
@@ -4632,7 +4633,12 @@ fn write_flags(
         return;
     };
     ledger.set_member_bytes(member_bytes);
-    note_sampled(&ledger, quality::Src::Import);
+    note_sampled(
+        ledger.kind(),
+        ledger.day(),
+        &ledger.sampled(),
+        quality::Src::Import,
+    );
     let fresh = ledger.lines(run.only.is_empty());
     let news = flags.news(fresh, quality::Src::Import);
     match flags.append(&news) {
@@ -5968,12 +5974,18 @@ fn rescan_flags(
     done: &mut Rescan,
     failures: &mut Vec<Failure>,
 ) -> usize {
-    note_sampled(&ledger, quality::Src::Rescan);
+    let sampled = ledger.sampled();
     let fresh = ledger.lines(true);
     let offered = fresh.len();
     let news = flags.news(fresh, quality::Src::Rescan);
     match flags.append(&news) {
         Ok(()) => {
+            note_sampled(
+                ledger.kind(),
+                ledger.day(),
+                &quality::sampled_among(ledger.kind(), ledger.day(), sampled, &news),
+                quality::Src::Rescan,
+            );
             done.flags_lines += news.len();
             done.flags_unchanged += offered - news.len();
             news.len()

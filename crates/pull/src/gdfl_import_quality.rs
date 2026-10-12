@@ -49,7 +49,7 @@
 //! `max_back_s` is how far a row stepped back from the running maximum), and
 //! what `member_bytes` measured.
 //!
-//! # The halt and the sampled day (WP-11c; DB-A04, DB-A07)
+//! # The halt and the sampled day (D-4928; WP-11c; DB-A04, DB-A07)
 //!
 //! Two more of this writer's additions sit before `max_defer_s`, on every
 //! kind's line: `halt_s`, the in-session seconds the calendar of record
@@ -127,7 +127,8 @@ pub const SHARED_HOLE_PERCENT: u64 = 90;
 
 /// An index day is minute-sampled when its in-session rows use at most this
 /// many distinct seconds of the minute (D-3335's display rule for a degraded
-/// index day, chosen, not sourced; WP-11c names it).
+/// index day, chosen, not sourced; D-4928 item 5 names it, and item 6 reads
+/// the same number as bars a session minute where no line exists).
 pub const SAMPLED_SS_DISTINCT: u64 = 2;
 
 /// Whether an index line reads as a minute-sampled day: it has rows, and they
@@ -512,6 +513,28 @@ pub struct Sampled {
     pub session_s: u64,
     /// The distinct seconds of the minute its rows use.
     pub ss_distinct: u32,
+}
+
+/// Of `sampled`, the indices whose line is among `news` -- what
+/// [`Ledger::news`] answered and the run appended (D-4928 item 7): a rescan
+/// names a sampled day when it writes the line that says so, and a later
+/// rescan of the same rows, which writes nothing, names nothing again. At
+/// most a day's indices against a day's lines.
+#[must_use]
+pub fn sampled_among(
+    kind: ImportKind,
+    day: Day,
+    sampled: Vec<Sampled>,
+    news: &[String],
+) -> Vec<Sampled> {
+    let written: Vec<String> = news
+        .iter()
+        .filter_map(|line| keyed(line).map(|(key, _)| key))
+        .collect();
+    sampled
+        .into_iter()
+        .filter(|one| written.contains(&format!("{} {day} {}", kind.as_str(), one.scope)))
+        .collect()
 }
 
 /// The day of one kind, as its files are measured: per index, or the whole
