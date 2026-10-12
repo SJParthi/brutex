@@ -66934,3 +66934,156 @@ its source comment, not in the `alias` record or in any answer.
 **Proof.** `pull::expiry_alias::tests::a_text_that_stopped_before_its_rename_day_is_the_contract_its_successor_names`;
 the real-archive test `the_real_archive_settles_every_name_and_refuses_only_the_impossible_strikes`
 (ignored; needs the vendor archive).
+
+### D-4875 — A month repair must hold a one-second month and leave it indexed — 2026-10-11
+
+**Implemented by** IA-17, in two parts. This entry lands with the first (the
+row ceiling of (1) and the step of (5), `crates/store/src/repair.rs`). Parts
+(3) and the writer the step of (5) is for are the second part and are NOT
+BUILT; they are named here so that nobody reads this entry as saying they are.
+D-4898, below, records where the first part departs from what the design
+drafted for it.
+
+**What was wrong.** `store::repair` (WP-13c) refused any source or merged
+series past a flat `MAX_ROWS` of 100,000 rows, and a GDFL one-second index
+month holds about 409,000 to 453,000 bars, so no such month could be repaired
+at all. WP-12d raised the constant to 2,678,400 (31 days of seconds) when it
+built the GDFL back-fill (DB-N26). That let every one-second month through and
+left the same number on every other rung: a one-minute month, which holds at
+most 44,640 bars, and a daily one, which holds at most 31, were "bounded" at
+2,678,400, so a request sixty times larger than any one-minute month passed
+the count and was walked bar by bar before something else refused it.
+
+**(1) The row ceiling is the path's.** `repair::row_ceiling(path)` is the
+month's length over the rung's width: the days of the path's month times
+86,400, over the rung's seconds. 2,678,400 for a 31-day one-second month,
+44,640 for its one-minute month, 31 for its daily one; 28 days of the rung for
+a February. All four refusals ask it (`publish`'s merged series, the offered
+bars and the held count in `repair_month_with`, and every header
+`check_header` is shown), and the refusal carries both counts:
+`RepairError::RowLimit { rows, ceiling }`. No valid month is refused for its
+size, at any rung, and no table of rungs or months is kept: the path already
+says both. `MAX_ROWS` stays as the largest value the ceiling takes and is
+compared against nowhere. Memory is `docs/06-limits.md` L-IA-26.
+
+**(2) The revision's `.tix` is its writer's.** A revision is written through
+`BarFile::open_or_create` and `append` on the revision's root, which keep the
+time index as every append does (`crates/store/REPAIR.md`, "Indexed
+siblings"). Nothing was built for it here. Test IA-RP-01 holds it at a full
+month: the `.tix` is present and `time_lookup()` answers `Indexed`.
+
+**(3) One repair per (instrument, month) per run. NOT BUILT.** Each repair
+keeps a whole copy of the month for ever, so a run that repairs a month a day
+at a time keeps one copy per day. A repair-reason run is to gather every day
+of a month it reads and offer them together. That is IA-17's second part
+(the design's D-4899 fixes its stop, crash and full-disk rules); until it
+lands WP-12d's filing path repairs one file at a time, and
+`docs/06-limits.md` L-IA-26 says what that costs.
+
+**(4) GDFL's repair policy** is the GDFL caller's (WP-12d's `repair_rows`),
+not `store`'s, and is neither built nor changed here.
+
+**(5) A revision's other files follow their own owners' rules, and a caller's
+own file follows the generation through one step.** A revision carries no
+`.prv` (WP-13c's rule, `REPAIR.md`, "Provenance"; test IA-RP-01 holds that
+none is written). Its `.srt` runs are the writer's (WP-39). The CASH auction
+file is `pull`'s own, not a store sidecar, and `repair::publish` takes an
+already merged series while the merge, the held-bar check and the basis
+witness exist only inside `repair_month`, which promoted as soon as it
+published. So a caller that wanted to write its file between the two would
+have had to copy the merge: a second repair authority. Instead
+`repair_month_with` takes one step, `before_promote`, called with the
+revision's root after `publish` has returned (`Created` or `Reused`) and
+before `generation::promote`. The revision is then whole and durable and no
+reader is served from it. A step that refuses stops the repair unpromoted;
+the same repair offered again finds the revision (`Published::Reused`), runs
+the step again and promotes. `store` names no type of `pull`'s. **The step is
+built; the CASH writer that will be passed to it is NOT** (IA-17's second
+part, after IA-16), so at this entry's date no caller passes a step and a
+repaired CASH month still has no auction file beside its served bars.
+
+**Proof.** `store/tests/month_repair.rs`: IA-RP-01
+`a_full_1s_month_repairs_with_its_sidecars`, IA-RP-02
+`a_cash_repair_writes_its_auction_file_before_it_is_served`, and the five
+tests beside them; `store::repair::tests::the_row_ceiling_is_the_months_length_over_the_rungs_width`
+and `…::the_flat_maximum_is_the_largest_ceiling_any_path_has`
+(`docs/04-invariants.md` IA-RP-01, IA-RP-02, IA-RP-06 to IA-RP-08). Bench
+C-RP-01 (`crates/store/benches/ratio.rs`).
+
+### D-4898 — The row ceiling is read from the path, `repair_month_with` carries the step, and a revision is written in bounded commits (amends D-4875) — 2026-10-12
+
+**Implemented by** IA-17 (first part). **Amends** D-4875 (1) and (5) in three
+places, each where the code at the head had moved since the design's text was
+written or where the design's sentence could not be built as written.
+
+**1. The ceiling is path-derived, and WP-12d's constant stays.** The design's
+round 6 has IA-17 replace `MAX_ROWS = 100_000`; WP-12d had already replaced it
+with a flat 2,678,400 by the time IA-17 was built. The design's round-7 review
+(IA-17-1) proposed dropping the per-timeframe ceiling as adding nothing, on
+the ground that the month admission (D-0915) bounds every month to its rung's
+grid. That holds for a batch that has been walked; the count is refused
+BEFORE the walk, so under the flat constant a one-minute request of 44,641 to
+2,678,400 rows was surveyed and admitted bar by bar first, and on the daily
+rung the admission's grid is one second, so it bounds a daily month only by
+the month's seconds. The package was asked for the per-timeframe ceiling and
+it is built, as one function of the path (`row_ceiling`), with WP-12d's
+`MAX_ROWS` kept as its maximum (`…::the_flat_maximum_is_the_largest_ceiling_any_path_has`).
+On every intraday rung the ceiling equals the writer's own bound
+(`Admission::slots`), so nothing the writer filled is refused; on the daily
+rung it is the month's days, and more daily bars than days is refused
+`RowLimit` by count.
+
+**2. `repair_month_with`, and a refusal of its own.** The design adds the step
+as one more argument of `repair_month`, which would have changed every caller
+in `pull`, `api` and `cli` in a package that owns none of them (review
+IA-17-2). `repair_month` keeps its signature and passes no step;
+`repair_month_with` takes it. IA-RP-02 holds the two byte-identical with no
+step. The design says a failing step is refused as `RepairError::Io`, "its
+words kept"; `Io` carries an `io::ErrorKind` and a fixed operation name and
+has nowhere to keep words, so the refusal is its own variant,
+`RepairError::BeforePromote { revision_root, why }`, whose text says the
+revision is published and not served and that the same repair runs the step
+again.
+
+**3. A revision is written in commits of at most 524,288 rows.** Bench
+C-RP-01 was added to measure the memory bound D-4875 (1) states (L-IA-26: at
+most 471 MB for a full one-second month, by type sizes). Measured on 11 Oct
+2026 it was 1,160,118,272 bytes of peak resident set: the revision was written
+as one commit of the whole month, and the sort index's writer step (WP-39,
+merged after that sum was written) reads each commit back and orders it six
+ways. `write_revision` now appends the merged series in commits of
+`WRITE_BATCH` rows, so what the writer holds per commit is the commit's
+whatever the month holds. The largest month takes 6 commits, under the 31 at
+which the sort index is rewritten whole
+(`store::repair::tests::a_revision_is_written_in_commits_the_sort_index_never_compacts`).
+The size is a trade measured both ways. Each commit is a round of syncs: at
+131,072 rows the same full month took 21 commits and peaked at 314,916,864
+bytes, and its repair's fastest run went from 3.6 s to 47.7 s on a loaded
+host whose syncs are slow, with a real-sized month (448,317 rows) paying four
+commits where it had paid one. At 524,288 a one-second month of 23 regular
+sessions (517,500 bars) is still one commit, written exactly as before, and
+only a month fuller than any session calendar is cut. A revision of more than
+524,288 rows therefore has more than one commit and more than one sort run,
+as a month an import wrote a day at a time does. A completed retry compares
+records, not bytes, so a revision published by the older code is still found
+`Reused`. A write cut between two commits leaves a well-formed month file
+of the commits that landed, its reservation and no receipt: the missing
+receipt alone says it is unfinished, and it is stepped over, named and kept
+whole like any other unfinished ordinal
+(`store/tests/month_repair.rs::a_revision_cut_between_two_commits_is_stepped_over_and_kept`).
+
+**The measured peak after the change** (12 Oct 2026, one repair in a process
+of its own, macOS, `/usr/bin/time -l`, maximum resident set size):
+537,411,584 bytes for the largest month (2,678,400 rows) and 152,879,104 for
+a month of real size (448,317 rows, one commit). **The largest month is
+therefore over the 471 MB the design summed from type sizes, and this entry
+does not claim that bound.** Writing the 2,592,000 held rows of that month in
+thirty commits of 86,400, with no repair at all, peaked at 159,383,552 bytes
+by the same tool: the store's writer holds something that grows with the
+month it appends to, which is not `store::repair`'s and which a smaller
+`WRITE_BATCH` does not remove. `docs/06-limits.md` L-IA-26 carries the terms,
+and bench C-RP-01 holds the full month's repairs to 640 MiB where the host
+reports a peak.
+
+**Not decided here.** D-4899 (one repair per month per run) is IA-17's second
+part and has no code yet.

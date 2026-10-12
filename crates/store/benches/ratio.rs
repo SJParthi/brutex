@@ -38,6 +38,14 @@
 //! time index: flat at 1x, 10x and 100x the file, and within the warm record
 //! read's budget (D-2329).
 //!
+//! C-RP-01 times `repair::repair_month`, which is NOT O(1) and says so: one
+//! repair reads the served month whole and writes a whole successor. It is
+//! timed at a month the size of a real one-second month and at a month filled
+//! to its grid ceiling, the cost of one merged bar is held flat between the
+//! two, the repaired full month's time lookups are held to C-TIX-02's budget,
+//! and the process's peak resident set is read where the host keeps one
+//! (D-4875 (1), D-4898; `docs/06-limits.md` L-IA-26).
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 
@@ -53,6 +61,7 @@ use store::format::{BLOCK_LEN, FLAG_CHECKSUMS, HEADER_LEN, SLOT_LEN};
 use store::header::Header;
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+use store::repair::{self, MonthRepair};
 
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
 ///
@@ -628,6 +637,330 @@ fn checksum_beats_the_bit_loop() -> bool {
     ok
 }
 
+/// 2024-07-01 00:00 IST in epoch microseconds: June's start and June's 30
+/// days. July, because C-RP-01 fills a month to the most any month holds and
+/// that takes 31 days.
+const JULY_2024_IST_START: i64 = JUNE_2024_IST_START + 30 * 86_400 * 1_000_000;
+
+/// The month C-RP-01 repairs: an invented index's one-second July.
+fn repair_path() -> StorePath<'static> {
+    match StorePath::new(PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "FIXTUREIDX",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: match YearMonth::new(2024, 7) {
+            Ok(m) => m,
+            Err(_) => refuse("July 2024 is a real month"),
+        },
+        file: FileKind::Bars,
+    }) {
+        Ok(p) => p,
+        Err(_) => refuse("the repair bench path is a legal one"),
+    }
+}
+
+/// `count` invented one-second bars from `first` seconds into July.
+fn july_seconds(first: i64, count: i64) -> Vec<Bar> {
+    (first..first.saturating_add(count))
+        .map(|second| {
+            let price = 123_400 + second % 97;
+            Bar {
+                ts_micros: JULY_2024_IST_START.saturating_add(second.saturating_mul(1_000_000)),
+                open: price,
+                high: price + 4,
+                low: price - 4,
+                close: price + 1,
+                volume: 0,
+                open_interest: store::format::OI_NULL,
+            }
+        })
+        .collect()
+}
+
+/// One month C-RP-01 repairs: the runs of seconds it holds, each `(first
+/// second of July, count)`, and the one run it lacks.
+struct RepairShape {
+    name: &'static str,
+    held: Vec<(i64, i64)>,
+    offered: (i64, i64),
+}
+
+impl RepairShape {
+    /// A month the size of a real one-second index month: 19 sessions, 18 of
+    /// the regular 22,500 seconds and one cut to 20,817, which is 425,817
+    /// held bars (the design's figure for one NIFTY month), and the session
+    /// of the tenth day, which it lacks.
+    fn session_month() -> Self {
+        const OPEN: i64 = 555 * 60;
+        let held = (0..20)
+            .filter(|day| *day != 9)
+            .map(|day| (day * 86_400 + OPEN, if day == 19 { 20_817 } else { 22_500 }))
+            .collect();
+        Self {
+            name: "session-month",
+            held,
+            offered: (9 * 86_400 + OPEN, 22_500),
+        }
+    }
+
+    /// A month filled to its grid ceiling: every second of 30 of July's 31
+    /// days held, and every second of the day it lacks offered. 2,678,400
+    /// merged rows, the most `repair::row_ceiling` allows any path.
+    fn full_month() -> Self {
+        Self {
+            name: "full-month",
+            held: (0..31)
+                .filter(|day| *day != 17)
+                .map(|day| (day * 86_400, 86_400))
+                .collect(),
+            offered: (17 * 86_400, 86_400),
+        }
+    }
+
+    fn merged(&self) -> u128 {
+        let held: i64 = self.held.iter().map(|run| run.1).sum();
+        u128::try_from(held.saturating_add(self.offered.1)).unwrap_or(0)
+    }
+
+    /// Writes the held month once, into a store of its own that every trial
+    /// then copies. A run at a time, so that nothing the setup holds is as
+    /// large as what the repair holds: the peak resident set this process
+    /// reaches is the repair's.
+    fn template(&self) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-bench-repair-{}-template-{}",
+            self.name,
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            refuse(&format!("the repair bench root would not create: {e}"));
+        }
+        let mut writer = match BarFile::open_or_create(&root, repair_path(), 7) {
+            Ok(f) => f,
+            Err(e) => refuse(&format!("the repair bench month would not open: {e}")),
+        };
+        for (first, count) in &self.held {
+            if let Err(e) = writer.append(&july_seconds(*first, *count)) {
+                refuse(&format!("the repair bench month would not fill: {e}"));
+            }
+        }
+        root
+    }
+
+    /// Copies the held month into a fresh store, repairs it once, and returns
+    /// the repair's own time in nanoseconds with the store's root. Only
+    /// `repair_month` is inside the clock. A fresh store each time, because a
+    /// repair is a write and cannot be repeated on the month it repaired.
+    fn repair_once(&self, template: &std::path::Path) -> (u128, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-bench-repair-{}-{}",
+            self.name,
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        if let Err(e) = copy_tree(template, &root) {
+            refuse(&format!("the held month would not copy: {e}"));
+        }
+        let path = repair_path();
+        let offered = july_seconds(self.offered.0, self.offered.1);
+        let policy = repair::Policy {
+            open_interest_applies: false,
+            basis_witness: false,
+        };
+        let start = Instant::now();
+        let outcome = black_box(repair::repair_month(&root, path, 7, &offered, policy));
+        let nanos = start.elapsed().as_nanos();
+        match outcome {
+            Ok(MonthRepair::Repaired { held, added, .. })
+                if u128::from(held.saturating_add(added)) == self.merged()
+                    && u128::from(added) == u128::try_from(self.offered.1).unwrap_or(0) => {}
+            other => refuse(&format!(
+                "the {} repair did not add its day: {other:?}",
+                self.name
+            )),
+        }
+        (nanos, root)
+    }
+
+    /// `trials` repairs, each of a fresh store. Prints n, p50, p99 and max,
+    /// and returns the fastest, in picoseconds a merged bar, with the last
+    /// trial's store left on disk for the caller to read and remove.
+    ///
+    /// The p99 of n samples is the sample at rank `ceil(0.99 n)`, which is
+    /// the slowest for any n under 100: the line prints n so that is read.
+    fn measure(&self, trials: usize) -> (u128, std::path::PathBuf) {
+        let template = self.template();
+        let mut nanos = Vec::with_capacity(trials);
+        let mut last = std::path::PathBuf::new();
+        for trial in 0..trials {
+            let (took, root) = self.repair_once(&template);
+            nanos.push(took);
+            if trial + 1 == trials {
+                last = root;
+            } else {
+                let _ignored = std::fs::remove_dir_all(&root);
+            }
+        }
+        let _ignored = std::fs::remove_dir_all(&template);
+        nanos.sort_unstable();
+        let at = |rank: usize| nanos.get(rank.saturating_sub(1)).copied().unwrap_or(0);
+        let (fastest, p50, p99, max) = (
+            at(1),
+            at(trials.div_ceil(2)),
+            at((trials * 99).div_ceil(100)),
+            at(trials),
+        );
+        let merged = self.merged().max(1);
+        println!(
+            "  C-RP-01 repair_month, {:<13} {:>9} merged rows  n={trials} p50 {} us  p99 {} us  max {} us  ({} ns a row at the fastest)",
+            self.name,
+            merged,
+            p50 / 1_000,
+            p99 / 1_000,
+            max / 1_000,
+            fastest / merged,
+        );
+        (fastest.saturating_mul(1_000) / merged, last)
+    }
+}
+
+/// Copies every file beneath `from` to the same place beneath `to`.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The most this process's resident set has been, in bytes, where the host
+/// keeps that figure: Linux's `VmHWM` line of `/proc/self/status`. `None`
+/// anywhere else. Read with `std` alone: this workspace takes no `libc`, and
+/// `getrusage` is a foreign call (`unsafe`, which gate 5 counts).
+fn peak_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find_map(|l| l.strip_prefix("VmHWM:"))?;
+    let kib: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kib.saturating_mul(1_024))
+}
+
+/// Asks the host to forget the peak it has recorded and start again from what
+/// this process holds now, so that the figure [`peak_resident_bytes`] reads
+/// afterwards is the peak of what ran in between and not of an earlier row of
+/// this bench. Linux: `5` written to `/proc/self/clear_refs` resets `VmHWM`
+/// to the current resident set. `false` where there is no such file or the
+/// host refuses the write; the peak read then is the whole process's, and the
+/// line that prints it says so.
+fn restart_peak_resident() -> bool {
+    std::fs::write("/proc/self/clear_refs", "5").is_ok()
+}
+
+/// What five repairs of a one-second month filled to its grid ceiling may
+/// hold at their peak: 640 MiB. `docs/06-limits.md` L-IA-26.
+///
+/// Measured, not summed from type sizes. One such repair in a process of its
+/// own peaked at 537,411,584 bytes (12 Oct 2026, macOS, `/usr/bin/time -l`,
+/// the revision written in commits of 524,288 rows), against 1,160,118,272
+/// when the revision was one commit of the whole month (11 Oct 2026, this
+/// bench under the same tool). The allowance sits between the two, about a
+/// fifth above the first, so a writer that goes back to one commit of the
+/// month fails this row, and an allocator that keeps a little more than
+/// macOS's does not.
+const FULL_MONTH_PEAK_ALLOWED: u64 = 640 << 20;
+
+/// C-RP-01 — a month repair costs the same per merged bar at a month filled
+/// to its grid ceiling as at a month of real size, and the month it leaves is
+/// indexed. D-4875 (1), D-4898; `docs/06-limits.md` L-IA-26.
+///
+/// `repair::repair_month` is O(held + offered) and claims nothing less: it
+/// reads the served month whole and writes a whole successor. What this row
+/// holds is that it is no WORSE than linear (the cost of one merged bar at
+/// 2,678,400 rows against the same at 448,317, within the gate's ceiling),
+/// that a time lookup on the repaired full month costs what C-TIX-02 allows
+/// any month (its `.tix` is the revision's own), and, where the host reports
+/// it, that the peak resident set of the five full-month repairs stays inside
+/// [`FULL_MONTH_PEAK_ALLOWED`], which is a MEASURED allowance and not a sum of
+/// type sizes: L-IA-26 says what the terms are and which of them are the
+/// writer's and its sort index's, not the repair's.
+///
+/// Five full-month repairs and fifteen session-month repairs, each of a
+/// fresh copy of the held month.
+fn month_repair_is_linear_and_leaves_the_month_indexed() -> bool {
+    /// C-TIX-02's allowance, for the same lookup on a repaired month.
+    const ALLOWED_TIX: u128 = 800;
+    let session = RepairShape::session_month();
+    let full = RepairShape::full_month();
+    let (base, session_root) = session.measure(15);
+    let _ignored = std::fs::remove_dir_all(&session_root);
+    // FROM HERE THE PEAK IS THE FULL MONTH'S, where the host can restart it.
+    let own_peak = restart_peak_resident();
+    let (at, full_root) = full.measure(5);
+    let peak = peak_resident_bytes();
+    let mut ok = ratio("C-RP-01 repair_month a merged row, full month", base, at);
+
+    // THE MONTH IT LEFT: served from the revision, full, and indexed.
+    let served = match BarFile::open_existing(&full_root, repair_path(), 7) {
+        Ok(f) => f,
+        Err(e) => refuse(&format!("the repaired month would not open: {e}")),
+    };
+    if u128::from(served.header().n_valid) != full.merged()
+        || served.header().n_valid != repair::row_ceiling(repair_path())
+    {
+        refuse("the repaired month is not full to its ceiling");
+    }
+    if served.time_lookup() != store::file::TimeLookup::Indexed {
+        refuse("the repaired month has no ready time index; the row would time the bisection");
+    }
+    let stamps: Vec<i64> = (0..14i64)
+        .map(|step| JULY_2024_IST_START.saturating_add((step * 206_030).saturating_mul(1_000_000)))
+        .collect();
+    let mut next = 0usize;
+    let lookup = cost_ps(280, || {
+        let ts = stamps.get(next % stamps.len()).copied().unwrap_or(0);
+        next = next.wrapping_add(1);
+        served.first_at_or_after(black_box(ts))
+    });
+    ok &= budget(
+        "C-RP-01 first_at_or_after, repaired full month",
+        floor_ps(served.layout()),
+        lookup,
+        ALLOWED_TIX,
+    );
+    drop(served);
+    let _ignored = std::fs::remove_dir_all(&full_root);
+
+    let allowed = FULL_MONTH_PEAK_ALLOWED;
+    match peak {
+        Some(peak) => {
+            let held = peak <= allowed;
+            println!(
+                "  C-RP-01 peak resident set, full month         {peak} B against {allowed} B allowed ({})   {}",
+                if own_peak {
+                    "the five full-month repairs' own"
+                } else {
+                    "the whole process's: the host would not restart its peak"
+                },
+                if held { "ok" } else { "OVER BUDGET" }
+            );
+            ok &= held;
+        }
+        None => println!(
+            "  C-RP-01 peak resident set, full month         NOT MEASURED on this host (no /proc/self/status); {allowed} B allowed where it is"
+        ),
+    }
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/store, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -640,6 +973,7 @@ fn main() {
     ok &= cold_record_read_stays_within_its_budget();
     ok &= time_lookup_is_flat_in_the_file();
     ok &= time_lookup_stays_within_its_budget();
+    ok &= month_repair_is_linear_and_leaves_the_month_indexed();
     if ok {
         println!("all ratios within the ceiling");
     } else {
