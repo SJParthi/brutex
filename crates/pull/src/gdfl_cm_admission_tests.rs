@@ -710,7 +710,8 @@ fn old_names_are_filed_under_the_newest_symbol_before_each_change() {
     for stem in [
         "NIFTYIT.NSE",
         "NIFTY.NSE",
-        "HDFC.BE.NSE",
+        "HDFC.SM.NSE",
+        "ACC.BE.NSE",
         "ACC.NSE",
         "hdfc.NSE",
     ] {
@@ -796,11 +797,35 @@ fn a_stored_listing_files_stored_stems_and_counts_the_rest() {
         "TATAMOTORS.NSE.CSV",
         "RELIANCE.NSE.csv",
         "ACC.NSE.csv",
-        "HDFC.BE.NSE.csv",
+        "ACC.BE.NSE.csv",
+        "HDFC.SM.NSE.csv",
+        "SUZLON.BE.NSE.csv",
     ] {
         listing.push(&format!("{folder}/{name}"), 0, 0, ());
     }
-    assert_eq!(listing.unresolved(), 2, "ACC and a series file");
+    assert_eq!(
+        listing.unresolved(),
+        3,
+        "ACC, its series file, and a series that is no trade-for-trade one"
+    );
+    // A trade-for-trade spell's file sits in its share's slot (WP-12f,
+    // DB-B06) and is filed under the share's key.
+    assert_eq!(
+        listing
+            .locate("SUZLON.NSE")
+            .map(|f| f.map(|(file, _)| file.name().to_owned())),
+        Ok(Some("SUZLON.BE.NSE.csv".to_owned()))
+    );
+    assert_eq!(
+        listing.filing("SUZLON.BE.NSE"),
+        listing.filing("SUZLON.NSE")
+    );
+    assert!(listing.filing("SUZLON.BE.NSE").unwrap().is_some());
+    assert_eq!(listing.filing("HDFC.SM.NSE"), Ok(None));
+    assert_eq!(
+        listing.member("SUZLON.BE.NSE").as_deref(),
+        Some("NSE-CASH-SUZLON.BE")
+    );
     assert_eq!(
         listing
             .locate("HDFC.NSE")

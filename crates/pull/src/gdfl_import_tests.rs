@@ -1156,22 +1156,46 @@ fn a_days_close_follows_its_failures() {
          max_back_s=4"
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Done, &counts),
+        closing_line("k 1 *", Close::Done, &counts, ""),
         format!("done k 1 * {stats}")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::WithRefusals("price_refused"), &counts),
+        closing_line("k 1 *", Close::WithRefusals("price_refused"), &counts, ""),
         format!("done k 1 * {stats} vendor_refused=1 reason=price_refused")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Incomplete(copy.cause), &counts),
+        closing_line("k 1 *", Close::Incomplete(copy.cause), &counts, ""),
         format!("incomplete k 1 * {stats} stage=vendor reason=source_crc_mismatch")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Refused(calendar.cause), &counts),
+        closing_line("k 1 *", Close::Refused(calendar.cause), &counts, ""),
         format!(
             "refused k 1 * definition={BAR_DEFINITION} stage=calendar reason=expiry_passed failures=1"
         )
+    );
+    // A RECORDED RUN'S SCOPE FOLLOWS THE COUNTS (WP-12f, D-4878), so the
+    // `stage=`, `reason=` and `run=` every reader knows keep their places.
+    assert_eq!(
+        closing_line("k 1 *", Close::Done, &counts, " scope=ab12"),
+        format!("done k 1 * {stats} scope=ab12")
+    );
+    assert_eq!(
+        closing_line(
+            "k 1 *",
+            Close::WithRefusals("price_refused"),
+            &counts,
+            " scope=ab12"
+        ),
+        format!("done k 1 * {stats} scope=ab12 vendor_refused=1 reason=price_refused")
+    );
+    assert_eq!(
+        closing_line(
+            "k 1 *",
+            Close::Incomplete(copy.cause),
+            &counts,
+            " scope=ab12"
+        ),
+        format!("incomplete k 1 * {stats} scope=ab12 stage=vendor reason=source_crc_mismatch")
     );
 }
 
@@ -5695,3 +5719,8 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
 
 #[path = "gdfl_backfill_tests.rs"]
 mod backfill;
+
+/// The scope a close records and the days a wider scope reads again
+/// (WP-12f, D-4878), over this module's invented worlds.
+#[path = "gdfl_scope_tests.rs"]
+mod scope_reopen;

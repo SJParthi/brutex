@@ -1,0 +1,812 @@
+//! A DAY IS DONE ONLY FOR THE MEMBERS ITS CLOSE WAS ASKED TO READ (WP-12f,
+//! D-4878; DB-B06, DB-B17, DB-B40, DB-B61, DB-B76).
+//!
+//! On 10 Oct 2026 a run under a scope of eight indices met 1,985 days closed
+//! `done` under a scope of two and skipped every one; six index series were
+//! left holding 12 special sessions each. These tests build that shape from
+//! invented files: a store imported under the swept surface, then the same
+//! days under the stored scope, and read back the bars, the journal's member
+//! keys and the scope ledger beside a store that imported the wide scope in
+//! order. They also hold the trade-for-trade spell (a day whose only file of
+//! a share is its `.BE` file) to the share's own key.
+//!
+//! Every value is invented at run time; no vendor row is quoted
+//! (`gdfl_cm::tests::fixtures_are_built_not_pasted` walks this file too).
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail"
+)]
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use super::*;
+use crate::gdfl_cm::{CmScope, DayListing, ListedFile};
+use crate::gdfl_fixtures::scratch;
+
+/// The stored scope of D-3333, no option underlying named.
+fn stored() -> Arc<CmScope> {
+    Arc::new(CmScope::stored(std::iter::empty::<&str>()).unwrap())
+}
+
+/// One capital-market run over the tick store under `root`, under the swept
+/// surface or under `scope`.
+fn run_on(
+    root: &Path,
+    kind: ImportKind,
+    (from, to): (Day, Day),
+    store: &Path,
+    scope: Option<Arc<CmScope>>,
+) -> Result<Report, ImportRefusal> {
+    let source = TickStore::new(&root.join("ts"));
+    let source = match scope {
+        Some(scope) => source.with_scope(scope),
+        None => source,
+    };
+    let run = Run {
+        kind,
+        from,
+        to,
+        only: &[],
+        store_root: store,
+    };
+    run_cm(&source, &run)
+}
+
+/// Whether the store holds the April 2024 one-second month of `symbol`,
+/// the month every day of these worlds lies in.
+fn held(store: &Path, segment: &str, symbol: &str) -> bool {
+    store
+        .join("bars/gdfl/NSE")
+        .join(segment)
+        .join(symbol)
+        .join("1s/2024-04.bin")
+        .exists()
+}
+
+/// The April 2024 one-second month of `symbol`, every bar of it.
+fn month(store: &Path, segment: &str, symbol: &str) -> Vec<Bar> {
+    bars_on(store, (segment, symbol, None), d1())
+}
+
+fn journal_text(store: &Path) -> String {
+    std::fs::read_to_string(journal_path(store)).unwrap()
+}
+
+fn scopes_text(store: &Path) -> String {
+    std::fs::read_to_string(scope::scopes_path(store)).unwrap_or_default()
+}
+
+/// How many lines of `text` start with `head`.
+fn lines_starting(text: &str, head: &str) -> usize {
+    text.lines().filter(|line| line.starts_with(head)).count()
+}
+
+/// A source that counts the day listings it is asked for.
+struct Counting<'a> {
+    inner: &'a TickStore,
+    listed: AtomicUsize,
+}
+
+impl CmSource for Counting<'_> {
+    type Locator = <TickStore as CmSource>::Locator;
+
+    fn day(&self, kind: CmKind, day: Day) -> Result<Option<DayListing<Self::Locator>>, CmRefusal> {
+        self.listed.fetch_add(1, Ordering::Relaxed);
+        self.inner.day(kind, day)
+    }
+
+    fn scope(&self) -> Arc<CmScope> {
+        self.inner.scope()
+    }
+
+    fn fetch(
+        &self,
+        listing: &DayListing<Self::Locator>,
+        file: &ListedFile<Self::Locator>,
+    ) -> Result<Vec<u8>, CmRefusal> {
+        self.inner.fetch(listing, file)
+    }
+}
+
+/// THE 10 OCT SHAPE, IN ORDER. Three days closed `done` under the swept
+/// surface (two indices) are read again under the stored scope for the one
+/// new member whose file they hold, each under a key of its own; the two old
+/// members' months are not touched, the base keys are not closed again, and a
+/// third run writes nothing.
+#[test]
+fn a_wider_scope_reads_a_done_day_again_for_its_new_members_only() {
+    let root = scratch("wp12f-widen");
+    world(&root, &[d1(), d2(), d3()]);
+    let (store, whole) = (root.join("S"), root.join("whole"));
+    let range = (d1(), d3());
+
+    let narrow = run_on(&root, ImportKind::Indices, range, &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    assert_eq!((narrow.days_imported, narrow.days_widened), (3, 0));
+    let swept = scope::Record::of(CmScope::swept().members(CmKind::Indices));
+    assert_eq!(
+        swept.members(),
+        ["NSE-INDEX-BANKNIFTY", "NSE-INDEX-NIFTY"],
+        "the swept surface of the index tree"
+    );
+    let first = journal_text(&store);
+    assert_eq!(
+        lines_starting(&first, "done indices "),
+        3,
+        "three closes: {first}"
+    );
+    for line in first.lines().filter(|line| line.starts_with("done ")) {
+        assert!(
+            line.contains(&format!(" scope={} run=", swept.digest())),
+            "every close names its scope: {line}"
+        );
+    }
+    assert_eq!(
+        scopes_text(&store),
+        format!(
+            "scope {} indices n=2 NSE-INDEX-BANKNIFTY,NSE-INDEX-NIFTY .\n",
+            swept.digest()
+        )
+    );
+    assert!(!held(&store, "INDEX", "INDIAVIX"));
+    let before = tree(&store.join("bars"));
+
+    let wide = run_on(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!(
+        (
+            wide.days_widened,
+            wide.members_reopened,
+            wide.days_skipped,
+            wide.days_imported,
+            wide.files
+        ),
+        (3, 3, 0, 0, 3),
+        "each done day is read again for the one new member, and nothing else"
+    );
+    let in_order = run_on(&root, ImportKind::Indices, range, &whole, Some(stored())).unwrap();
+    assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
+    let landed = month(&store, "INDEX", "INDIAVIX");
+    assert!(!landed.is_empty(), "the new member's days landed");
+    assert_eq!(
+        landed,
+        month(&whole, "INDEX", "INDIAVIX"),
+        "exactly what an in-order wide import holds"
+    );
+    let after = tree(&store.join("bars"));
+    for (path, bytes) in &before {
+        assert_eq!(
+            after.get(path),
+            Some(bytes),
+            "{}: an old member's file is not touched",
+            path.display()
+        );
+    }
+    let second = journal_text(&store);
+    assert!(second.starts_with(&first), "the journal is appended to");
+    assert_eq!(
+        lines_starting(&second, "done indices "),
+        6,
+        "three member closes beside the three base closes: {second}"
+    );
+    for on in ["2024-04-01", "2024-04-02", "2024-04-03"] {
+        assert_eq!(
+            lines_starting(
+                &second,
+                &format!("done indices {on} *+NSE-INDEX-INDIAVIX definition=")
+            ),
+            1,
+            "{on}: {second}"
+        );
+        assert_eq!(
+            lines_starting(&second, &format!("done indices {on} * ")),
+            1,
+            "{on}: the base key is not closed again"
+        );
+    }
+    let ledger = scopes_text(&store);
+    assert_eq!(
+        lines_starting(&ledger, "examined indices "),
+        3,
+        "each day examined once: {ledger}"
+    );
+
+    let again = run_on(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
+    assert!(again.failures.is_empty(), "{:?}", again.failures);
+    assert_eq!(
+        (again.days_skipped, again.days_widened, again.files),
+        (3, 0, 0)
+    );
+    assert_eq!(journal_text(&store), second, "a re-run writes no line");
+    assert_eq!(scopes_text(&store), ledger, "nor a ledger line");
+    assert_eq!(tree(&store.join("bars")), after, "nor a byte of a bar");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A JOURNAL FROM BEFORE SCOPES WERE RECORDED, as the real one is: its
+/// `done` lines carry no `scope=` and no scope ledger exists. Each is read as
+/// built under the swept surface, so the new member is read and the two old
+/// ones are not; the old lines stay byte for byte.
+#[test]
+fn a_close_with_no_scope_is_read_as_the_swept_surface() {
+    let root = scratch("wp12f-legacy");
+    world(&root, &[d1(), d2()]);
+    let store = root.join("S");
+    let range = (d1(), d2());
+    let narrow = run_on(&root, ImportKind::Indices, range, &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let mut legacy = String::new();
+    for line in journal_text(&store).lines() {
+        let kept: Vec<&str> = line
+            .split(' ')
+            .filter(|field| !field.starts_with("scope="))
+            .collect();
+        legacy.push_str(&kept.join(" "));
+        legacy.push('\n');
+    }
+    assert!(!legacy.contains("scope="));
+    std::fs::write(journal_path(&store), &legacy).unwrap();
+    std::fs::remove_file(scope::scopes_path(&store)).unwrap();
+
+    let wide = run_on(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!(
+        (wide.days_widened, wide.members_reopened, wide.files),
+        (2, 2, 2),
+        "one file a day: the new member's, never NIFTY's or BANKNIFTY's again"
+    );
+    assert!(!month(&store, "INDEX", "INDIAVIX").is_empty());
+    assert!(
+        journal_text(&store).starts_with(&legacy),
+        "the old lines are not rewritten"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// THE DAMAGE ITSELF: the new member's month holds only a LATER day, as the
+/// six alias indices hold only a special session in 67 months. The earlier
+/// days, done under the narrow scope, are read again and land through the
+/// versioned month repair (D-3350), and the month ends holding what an
+/// in-order import holds.
+#[test]
+fn a_new_member_holding_only_a_later_day_takes_its_earlier_done_days() {
+    let root = scratch("wp12f-sparse");
+    world(&root, &[d1(), d2(), d3()]);
+    let (store, whole) = (root.join("S"), root.join("whole"));
+    let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let late = run_on(
+        &root,
+        ImportKind::Indices,
+        (d3(), d3()),
+        &store,
+        Some(stored()),
+    )
+    .unwrap();
+    assert!(late.failures.is_empty(), "{:?}", late.failures);
+    let only_late = month(&store, "INDEX", "INDIAVIX");
+    assert!(!only_late.is_empty(), "the month holds the later day alone");
+
+    let range = (d1(), d3());
+    let wide = run_on(&root, ImportKind::Indices, range, &store, Some(stored())).unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!(
+        (wide.days_widened, wide.members_reopened, wide.days_skipped),
+        (2, 2, 1),
+        "the two narrow days are read again; the wide day is done"
+    );
+    assert_eq!(
+        wide.months_repaired, 2,
+        "each landed as a generation of the month"
+    );
+    let in_order = run_on(&root, ImportKind::Indices, range, &whole, Some(stored())).unwrap();
+    assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
+    let full = month(&whole, "INDEX", "INDIAVIX");
+    assert_eq!(month(&store, "INDEX", "INDIAVIX"), full);
+    assert_eq!(
+        full.len(),
+        only_late.len() * 3,
+        "three like days, where the month held one"
+    );
+    assert!(
+        full.ends_with(&only_late),
+        "the later day is still the last"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A DONE DAY WITH NO FILE OF ANY NEW MEMBER is examined once and
+/// remembered: the next run asks the source for no listing of it.
+#[test]
+fn a_day_with_no_file_of_a_new_member_is_examined_once_and_never_listed_again() {
+    let root = scratch("wp12f-examined");
+    let on = d1();
+    let two = |d: Day| {
+        vec![
+            (
+                entry_of(Tree::Indices, d, "NIFTY 50.NSE_IDX"),
+                index_file("NIFTY 50.NSE_IDX", d, 22_000),
+            ),
+            (
+                entry_of(Tree::Indices, d, "NIFTY BANK.NSE_IDX"),
+                index_file("NIFTY BANK.NSE_IDX", d, 47_000),
+            ),
+        ]
+    };
+    world_of(&root, &[(on, Tree::Indices, two(on))]);
+    let store = root.join("S");
+    let narrow = run_on(&root, ImportKind::Indices, (on, on), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+
+    let inner = TickStore::new(&root.join("ts")).with_scope(stored());
+    let run = Run {
+        kind: ImportKind::Indices,
+        from: on,
+        to: on,
+        only: &[],
+        store_root: &store,
+    };
+    let counting = Counting {
+        inner: &inner,
+        listed: AtomicUsize::new(0),
+    };
+    let first = run_cm(&counting, &run).unwrap();
+    assert!(first.failures.is_empty(), "{:?}", first.failures);
+    assert_eq!(
+        (first.days_widened, first.members_reopened, first.files),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        counting.listed.load(Ordering::Relaxed),
+        1,
+        "listed once to look"
+    );
+    let ledger = scopes_text(&store);
+    assert_eq!(
+        lines_starting(&ledger, &format!("examined indices {on} * scope=")),
+        1,
+        "{ledger}"
+    );
+    assert!(
+        ledger.trim_end().ends_with(" opened=0 ."),
+        "no member key was opened: {ledger}"
+    );
+    let journal = journal_text(&store);
+
+    let second = run_cm(&counting, &run).unwrap();
+    assert_eq!((second.days_skipped, second.days_widened), (1, 0));
+    assert_eq!(
+        counting.listed.load(Ordering::Relaxed),
+        1,
+        "the examined day is not listed again"
+    );
+    assert_eq!(scopes_text(&store), ledger);
+    assert_eq!(journal_text(&store), journal);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A FILTERED KEY READS AGAIN ONLY WHAT ITS FILTER NAMES. A day done for
+/// `NIFTY` alone under the swept surface owes the stored scope's new members
+/// nothing its filter asks for: no member key is opened, no file is read, the
+/// day is examined once, and the unfiltered key of the same day is another
+/// key, imported whole.
+#[test]
+fn a_filtered_key_opens_no_member_its_filter_does_not_name() {
+    let root = scratch("wp12f-filtered");
+    world(&root, &[d1()]);
+    let store = root.join("S");
+    let only = ["NIFTY".to_owned()];
+    let filtered = |scope: Option<Arc<CmScope>>| {
+        let source = TickStore::new(&root.join("ts"));
+        let source = match scope {
+            Some(scope) => source.with_scope(scope),
+            None => source,
+        };
+        let run = Run {
+            kind: ImportKind::Indices,
+            from: d1(),
+            to: d1(),
+            only: &only,
+            store_root: &store,
+        };
+        run_cm(&source, &run).unwrap()
+    };
+    let narrow = filtered(None);
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    assert_eq!(narrow.files, 1);
+    let journal = journal_text(&store);
+
+    let wide = filtered(Some(stored()));
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!(
+        (wide.days_widened, wide.members_reopened, wide.files),
+        (1, 0, 0),
+        "the new members are not the filter's"
+    );
+    assert_eq!(journal_text(&store), journal, "no member key, no line");
+    assert!(!held(&store, "INDEX", "INDIAVIX"));
+    assert!(
+        scopes_text(&store).trim_end().ends_with(" opened=0 ."),
+        "examined, and remembered"
+    );
+    let again = filtered(Some(stored()));
+    assert_eq!((again.days_skipped, again.days_widened), (1, 0));
+
+    let whole = run_on(
+        &root,
+        ImportKind::Indices,
+        (d1(), d1()),
+        &store,
+        Some(stored()),
+    )
+    .unwrap();
+    assert!(whole.failures.is_empty(), "{:?}", whole.failures);
+    assert_eq!((whole.days_imported, whole.files), (1, 3));
+    assert!(held(&store, "INDEX", "INDIAVIX"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// THE LEDGER KILLED MID-WRITE, AND A FOREIGN ONE. A fragment with no line
+/// end is stepped over and the run goes on; a whole line this module does not
+/// write, or a member list that is not the one its digest names, refuses the
+/// run by name before a byte is written.
+#[test]
+fn a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run() {
+    let root = scratch("wp12f-torn");
+    world(&root, &[d1(), d2()]);
+    let store = root.join("S");
+    let narrow = run_on(&root, ImportKind::Indices, (d1(), d1()), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    let path = scope::scopes_path(&store);
+    let whole = scopes_text(&store);
+
+    std::fs::write(&path, format!("{whole}examined indices 2024-04-0")).unwrap();
+    let loaded = scope::Ledger::load(path.clone()).unwrap();
+    assert_eq!(loaded.torn(), 1);
+    let wide = run_on(
+        &root,
+        ImportKind::Indices,
+        (d1(), d2()),
+        &store,
+        Some(stored()),
+    )
+    .unwrap();
+    assert!(wide.failures.is_empty(), "{:?}", wide.failures);
+    assert_eq!((wide.days_widened, wide.days_imported), (1, 1));
+    let reread = scope::Ledger::load(path.clone()).unwrap();
+    assert_eq!(reread.torn(), 1, "the fragment stays a fragment");
+    assert!(
+        reread
+            .examined_under(&format!("indices {} *", d1()))
+            .is_some()
+    );
+
+    let (journal, bars) = (journal_text(&store), tree(&store.join("bars")));
+    let good = scopes_text(&store);
+    for foreign in [
+        "hello world .\n".to_owned(),
+        "scope 0123456789abcdef indices n=1 NSE-INDEX-NIFTY .\n".to_owned(),
+        "examined indices 2024-04-01 * scope=abc run=one opened=0 .\n".to_owned(),
+    ] {
+        std::fs::write(&path, format!("{good}{foreign}")).unwrap();
+        let refused = run_on(
+            &root,
+            ImportKind::Indices,
+            (d1(), d2()),
+            &store,
+            Some(stored()),
+        )
+        .unwrap_err();
+        let said = refused.to_string();
+        assert!(
+            said.contains("gdfl.scopes") && said.contains("not a scope ledger line"),
+            "{foreign:?}: {said}"
+        );
+        assert_eq!(journal_text(&store), journal, "{foreign:?}");
+        assert_eq!(tree(&store.join("bars")), bars, "{foreign:?}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// One invented stocks day: RELIANCE's own file, a share whose only file is
+/// its trade-for-trade one, and a share holding both.
+fn spell_day(d: Day) -> DayPlan {
+    let file = |stem: &str| (entry_of(Tree::Stocks, d, stem), stock_file(stem, d));
+    (
+        d,
+        Tree::Stocks,
+        vec![
+            file("RELIANCE.NSE"),
+            file("ADANIPOWER.BE.NSE"),
+            file("CGPOWER.BZ.NSE"),
+            file("SUZLON.NSE"),
+            file("SUZLON.BE.NSE"),
+            file("RELIANCE.SM.NSE"),
+        ],
+    )
+}
+
+/// A TRADE-FOR-TRADE SPELL IS THE SHARE'S OWN DAY (DB-B06). Under the stored
+/// scope a `.BE` or `.BZ` file is filed under its share's key; the swept
+/// surface keeps skipping it; a day closed done under the swept surface is
+/// read again for the spell alone; a share with both its own file and a
+/// series file that day has both refused by name and nothing filed; and any
+/// other series (`.SM`) stays a skip.
+#[test]
+fn a_trade_for_trade_spell_is_filed_under_its_shares_key() {
+    let root = scratch("wp12f-series");
+    let on = d1();
+    world_of(&root, &[spell_day(on)]);
+    let (store, whole) = (root.join("S"), root.join("whole"));
+
+    let narrow = run_on(&root, ImportKind::Stocks, (on, on), &store, None).unwrap();
+    assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+    assert_eq!(narrow.files, 2, "RELIANCE and SUZLON, their own files");
+    for share in ["ADANIPOWER", "CGPOWER"] {
+        assert!(
+            !held(&store, "CASH", share),
+            "{share}: the swept surface files no series file"
+        );
+    }
+    let suzlon = month(&store, "CASH", "SUZLON");
+    assert!(!suzlon.is_empty());
+
+    let wide = run_on(&root, ImportKind::Stocks, (on, on), &store, Some(stored())).unwrap();
+    assert_eq!(
+        (wide.days_widened, wide.days_imported),
+        (1, 0),
+        "{:?}",
+        wide.failures
+    );
+    let journal = journal_text(&store);
+    for (share, member) in [
+        ("ADANIPOWER", "NSE-CASH-ADANIPOWER.BE"),
+        ("CGPOWER", "NSE-CASH-CGPOWER.BZ"),
+    ] {
+        assert!(
+            !month(&store, "CASH", share).is_empty(),
+            "{share}: the spell's day is the share's own"
+        );
+        assert_eq!(
+            lines_starting(
+                &journal,
+                &format!("done stocks {on} *+{member} definition=")
+            ),
+            1,
+            "{member}: {journal}"
+        );
+    }
+    // The share with both: its series member is refused by name as a twin,
+    // and the bars its own file gave under the narrow scope are untouched.
+    let twins: Vec<&Failure> = wide
+        .failures
+        .iter()
+        .filter(|failure| failure.instrument.contains("SUZLON"))
+        .collect();
+    assert_eq!(twins.len(), 1, "{:?}", wide.failures);
+    assert_eq!(wide.failures.len(), 1, "{:?}", wide.failures);
+    assert_eq!(month(&store, "CASH", "SUZLON"), suzlon);
+
+    // In order under the stored scope: the same bars for the spells, and the
+    // twins refused, never one of them picked.
+    let in_order = run_on(&root, ImportKind::Stocks, (on, on), &whole, Some(stored())).unwrap();
+    assert_eq!(in_order.failures.len(), 1, "{:?}", in_order.failures);
+    assert!(
+        in_order.failures[0].instrument.contains("SUZLON"),
+        "{:?}",
+        in_order.failures
+    );
+    assert!(!held(&whole, "CASH", "SUZLON"));
+    for share in ["ADANIPOWER", "CGPOWER", "RELIANCE"] {
+        assert_eq!(
+            month(&store, "CASH", share),
+            month(&whole, "CASH", share),
+            "{share}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A member is the vendor's stem, by its exact bytes: no prefix and no
+/// look-alike is another's member (DB-B12's two name traps), a series is its
+/// own member, and the member list is sorted, without repeats, and one
+/// journal field.
+#[test]
+fn a_member_is_named_by_its_stem_and_never_by_a_look_alike() {
+    let scope = CmScope::stored(["RUCHI", "KPIT"]).unwrap();
+    let of = |stem: &str| scope.member_of(CmKind::Stocks, stem);
+    assert_eq!(of("KPIT.NSE").as_deref(), Some("NSE-CASH-KPIT"));
+    assert_eq!(of("KPITTECH.NSE").as_deref(), Some("NSE-CASH-KPITTECH"));
+    assert_eq!(of("RUCHI.BE.NSE").as_deref(), Some("NSE-CASH-RUCHI.BE"));
+    assert_eq!(of("RUCHINFRA.NSE"), None);
+    assert_eq!(of("RUCHIRA.NSE"), None);
+    assert_eq!(of("RUCHI.SM.NSE"), None, "no other series is a member");
+    assert_eq!(of("RUCHI.NSE_IDX"), None, "another tree's suffix");
+    assert_eq!(
+        scope
+            .member_of(CmKind::Indices, "NIFTY IT.NSE_IDX")
+            .as_deref(),
+        Some("NSE-INDEX-NIFTYIT")
+    );
+    assert_eq!(
+        CmScope::swept().member_of(CmKind::Indices, "NIFTY IT.NSE_IDX"),
+        None
+    );
+    assert_eq!(CmScope::swept().member_of(CmKind::Stocks, "KPIT.NSE"), None);
+    assert_eq!(
+        CmScope::swept().member_of(CmKind::Stocks, "SUZLON.BE.NSE"),
+        None,
+        "the swept surface files no series"
+    );
+
+    let members = scope.members(CmKind::Stocks);
+    let mut sorted = members.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(members, sorted);
+    for member in ["NSE-CASH-KPIT", "NSE-CASH-KPIT.BZ", "NSE-CASH-SUZLON.BE"] {
+        assert!(members.iter().any(|one| one == member), "{member}");
+    }
+    assert!(
+        members
+            .iter()
+            .all(|member| !member.contains([' ', '+', ','])),
+        "each is one field of a key and one item of a list"
+    );
+    let swept = CmScope::swept().members(CmKind::Stocks);
+    assert!(swept.iter().all(|member| !member.contains('.')));
+    assert!(swept.len() < members.len());
+
+    // The digest names the list, however it was handed over.
+    let mut shuffled = members.clone();
+    shuffled.reverse();
+    shuffled.push(members[0].clone());
+    assert_eq!(scope::Record::of(shuffled), scope::Record::of(members));
+    assert_ne!(
+        scope::Record::of(swept).digest(),
+        scope::Record::of(scope.members(CmKind::Stocks)).digest()
+    );
+    assert_eq!(
+        crate::gdfl_cm::series_file("ADANIPOWER.BE.NSE.csv"),
+        Some("BE")
+    );
+    assert_eq!(crate::gdfl_cm::series_file("ADANIPOWER.NSE.csv"), None);
+    assert_eq!(crate::gdfl_cm::series_file("ADANIPOWER.SM.NSE.csv"), None);
+}
+
+/// The context of a stocks run over `store` under `record`, as `drive_core`
+/// builds it.
+fn ctx_of<'a>(
+    run: &'a Run<'a>,
+    journal: &'a Journal,
+    (record, swept): (&'a scope::Record, &scope::Record),
+) -> Ctx<'a> {
+    Ctx {
+        run,
+        journal,
+        options: RunOptions::default(),
+        id: 2,
+        started: 0,
+        announced: std::cell::Cell::new(false),
+        scoped: Some(Scoped {
+            record,
+            swept: Arc::clone(swept.set()),
+            ledger: std::cell::RefCell::new(
+                scope::Ledger::load(scope::scopes_path(run.store_root)).unwrap(),
+            ),
+            beyond: std::cell::RefCell::new(HashMap::new()),
+        }),
+    }
+}
+
+/// The 50th and 99th centile and the largest of `nanos`, sorted here.
+fn spread(nanos: &mut [u128]) -> (u128, u128, u128) {
+    nanos.sort_unstable();
+    let at = |per_mille: usize| nanos[(nanos.len() - 1) * per_mille / 1_000];
+    (at(500), at(990), nanos[nanos.len() - 1])
+}
+
+/// WHAT A DONE DAY OWES IS DECIDED IN O(1) A DAY, over a journal the size of
+/// the real one's span (every calendar day 2018-01-01..2026-09-30 closed
+/// `done` with no scope, as the real stocks days are): the members beyond a
+/// close's scope are computed ONCE a run and shared by every day (one set,
+/// by address), a day already examined under this scope is two hash probes,
+/// and neither walks the journal or the scope's 600-odd members again. The
+/// timings are printed for the record (`--nocapture`), never asserted.
+#[test]
+fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_again() {
+    let root = scratch("wp12f-owed-cost");
+    let store = root.join("S");
+    let all = days(day(2018, 1, 1), day(2026, 9, 30));
+    let mut text = String::new();
+    for d in &all {
+        let _infallible = writeln!(
+            text,
+            "done stocks {d} * definition={BAR_DEFINITION} files=1 seconds=1 failures=0 late=0 \
+             late_unresolved=0 max_back_s=0 run=1"
+        );
+    }
+    put(&store, "imports/gdfl.journal", text.as_bytes());
+    let journal = Journal::load(journal_path(&store)).unwrap();
+    let scope = CmScope::stored(std::iter::empty::<&str>()).unwrap();
+    let record = scope::Record::of(scope.members(CmKind::Stocks));
+    let swept = scope::Record::of(CmScope::swept().members(CmKind::Stocks));
+    let run = Run {
+        kind: ImportKind::Stocks,
+        from: all[0],
+        to: all[all.len() - 1],
+        only: &[],
+        store_root: &store,
+    };
+
+    let ctx = ctx_of(&run, &journal, (&record, &swept));
+    let mut nanos = Vec::with_capacity(all.len());
+    let mut shared: Option<Arc<HashSet<String>>> = None;
+    for d in &all {
+        let key = format!("stocks {d} *");
+        let at = std::time::Instant::now();
+        let owed = ctx.owed(&key);
+        nanos.push(at.elapsed().as_nanos());
+        let Owed::Probe(beyond) = owed else {
+            panic!("{d}: a close with no scope owes the members beyond the swept surface");
+        };
+        match &shared {
+            Some(first) => assert!(Arc::ptr_eq(first, &beyond), "{d}: computed again"),
+            None => shared = Some(beyond),
+        }
+    }
+    let beyond = shared.unwrap();
+    assert_eq!(
+        ctx.scoped.as_ref().unwrap().beyond.borrow().len(),
+        1,
+        "one set for the one scope the journal's closes name"
+    );
+    assert_eq!(beyond.len(), record.members().len() - swept.members().len());
+    assert!(beyond.contains("NSE-CASH-SUZLON.BE") && !beyond.contains("NSE-CASH-SUZLON"));
+    let (p50, p99, max) = spread(&mut nanos);
+    println!(
+        "WP-12f Ctx::owed, a close with no scope: n={} p50={p50}ns p99={p99}ns max={max}ns \
+         ({} members, {} beyond)",
+        all.len(),
+        record.members().len(),
+        beyond.len()
+    );
+
+    // Every day examined under this scope, none with a member key: nothing
+    // is owed, and no set is built at all.
+    let mut ledger = scope::Ledger::load(scope::scopes_path(&store)).unwrap();
+    ledger.record("stocks", &record).unwrap();
+    // The lines `Ledger::examine` writes, in one write: a flush a line is
+    // the ledger's cost, not this measurement's.
+    let mut examined = scopes_text(&store);
+    for d in &all {
+        let _infallible = writeln!(
+            examined,
+            "examined stocks {d} * scope={} run=2 opened=0 .",
+            record.digest()
+        );
+    }
+    std::fs::write(scope::scopes_path(&store), examined).unwrap();
+    let ctx = ctx_of(&run, &journal, (&record, &swept));
+    let mut nanos = Vec::with_capacity(all.len());
+    for d in &all {
+        let key = format!("stocks {d} *");
+        let at = std::time::Instant::now();
+        let owed = ctx.owed(&key);
+        nanos.push(at.elapsed().as_nanos());
+        assert!(matches!(owed, Owed::Nothing), "{d}");
+    }
+    assert!(ctx.scoped.as_ref().unwrap().beyond.borrow().is_empty());
+    let (p50, p99, max) = spread(&mut nanos);
+    println!(
+        "WP-12f Ctx::owed, a day examined under this scope: n={} p50={p50}ns p99={p99}ns \
+         max={max}ns",
+        all.len()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

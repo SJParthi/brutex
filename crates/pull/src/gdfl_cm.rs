@@ -777,6 +777,9 @@ pub enum PriceRule {
 pub struct CmScope {
     /// Whether anything beyond the swept surface is filed.
     stored: bool,
+    /// Whether a share's trade-for-trade series file ([`SHARE_SERIES`]) is
+    /// filed under the share's own key (WP-12f, DB-B06).
+    series: bool,
     /// The applied index rows beyond NIFTY and BANKNIFTY, in table order.
     indices: Vec<&'static IndexRow>,
     /// The stored share symbols beyond the F&O list, in the order given.
@@ -799,6 +802,7 @@ impl CmScope {
     pub fn swept() -> Self {
         Self {
             stored: false,
+            series: false,
             indices: Vec::new(),
             shares: Vec::new(),
             share_at: HashMap::new(),
@@ -830,6 +834,7 @@ impl CmScope {
     {
         let mut scope = Self {
             stored: true,
+            series: true,
             indices: Vec::new(),
             ..Self::swept()
         };
@@ -983,6 +988,12 @@ impl CmScope {
                     .and_then(|(_, row)| InstrumentKey::index(Exchange::Nse, row.store_key).ok())
             })),
             CmKind::Stocks => {
+                // A trade-for-trade spell's file is the share's own day
+                // (WP-12f, DB-B06): filed under the key its share is.
+                let name = match series_of(name) {
+                    Some((share, _)) if self.series => share,
+                    _ => name,
+                };
                 if name.len() > SYMBOL_CAPACITY || !self.files_share(name) {
                     return Ok(None);
                 }
@@ -1028,6 +1039,96 @@ impl CmScope {
         }
     }
 
+    /// Whether a share's trade-for-trade series file is filed under the
+    /// share's key (WP-12f, DB-B06): the stored scope does, the swept one
+    /// keeps skipping it.
+    #[must_use]
+    pub const fn files_series(&self) -> bool {
+        self.series
+    }
+
+    /// The stem of the share a series stem of tree `kind` belongs to
+    /// (`ADANIPOWER.BE.NSE` is `ADANIPOWER.NSE`), when this scope files the
+    /// series; `None` for every other stem. One split of the name and a
+    /// compare against [`SHARE_SERIES`]' two entries.
+    #[must_use]
+    pub fn series_base(&self, kind: CmKind, stem: &str) -> Option<String> {
+        if kind != CmKind::Stocks || !self.series {
+            return None;
+        }
+        let suffix = STOCKS.stem_suffix;
+        let (share, _) = series_of(stem.strip_suffix(suffix)?)?;
+        Some(format!("{share}{suffix}"))
+    }
+
+    /// THE MEMBER a stem of tree `kind` is to this scope (WP-12f, D-4878),
+    /// `None` for a stem the scope files nothing of: `NSE-INDEX-<store key>`
+    /// for an index, `NSE-CASH-<the stem's own symbol>` for a share, its
+    /// series kept (`NSE-CASH-ADANIPOWER.BE`). A member is named by the
+    /// vendor's STEM, not by the key the stem is filed under: an old symbol
+    /// (`TATAMOTORS`) and a trade-for-trade spell (`ADANIPOWER.BE`) are each
+    /// their own member, because each is a file a narrower scope never read.
+    /// Never holds a space or a `+`, so it is one field of a journal key.
+    ///
+    /// Bounded as [`CmScope::filing`] is: one resolve, then for an index a
+    /// walk of the alias table's rows, for a share one hash probe.
+    #[must_use]
+    pub fn member_of(&self, kind: CmKind, stem: &str) -> Option<String> {
+        let name = stem.strip_suffix(kind.descriptor().stem_suffix)?;
+        match kind {
+            CmKind::Indices => match resolve(kind, stem) {
+                Resolution::Swept(key) => Some(index_member(key.underlying.as_str())),
+                _ if self.stored => self
+                    .index_row(name)
+                    .map(|(_, row)| index_member(row.store_key)),
+                _ => None,
+            },
+            CmKind::Stocks => {
+                let share = match series_of(name) {
+                    Some((share, _)) if self.series => share,
+                    _ => name,
+                };
+                (share.len() <= SYMBOL_CAPACITY && self.files_share(share))
+                    .then(|| share_member(name))
+            }
+        }
+    }
+
+    /// EVERY MEMBER this scope files of tree `kind` (WP-12f, D-4878), sorted
+    /// and without repeats: what a run under it is asked to read, recorded
+    /// with each close so a later, wider scope knows which members a done day
+    /// never covered. Built once per run, O(the F&O list + the scope's own
+    /// names), each share once per series the scope files.
+    #[must_use]
+    pub fn members(&self, kind: CmKind) -> Vec<String> {
+        let mut out = std::collections::BTreeSet::new();
+        match kind {
+            CmKind::Indices => {
+                for (_, symbol) in InstrumentKey::SWEPT {
+                    out.insert(index_member(symbol));
+                }
+                for row in &self.indices {
+                    out.insert(index_member(row.store_key));
+                }
+            }
+            CmKind::Stocks => {
+                let swept = brutex_core::universe::FNO_UNDERLYINGS
+                    .iter()
+                    .copied()
+                    .filter(|name| self.files_share(name));
+                for name in swept.chain(self.shares.iter().map(|name| &**name)) {
+                    out.insert(share_member(name));
+                    if self.series {
+                        for series in SHARE_SERIES {
+                            out.insert(share_member(&format!("{name}.{series}")));
+                        }
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// How `key`'s LTPs become paisa: [`PriceRule::HalfUp`] for a reference
     /// only index row of the stored scope, [`PriceRule::Exact`] for every
     /// other series.
@@ -1049,6 +1150,53 @@ impl CmScope {
     pub fn masters(&self) -> Option<&std::path::Path> {
         self.masters.as_deref()
     }
+}
+
+/// The equity series, beside a share's own, whose day file is the share's
+/// own trading day (WP-12f, DB-B06): `BE` and `BZ`, the exchange's
+/// trade-for-trade series. UNVERIFIED against an NSE circular: no charter row
+/// names the series codes. What is measured (the audit of DB-B06, over the
+/// vendor's 2,001 stock days): no day holds both a share's own file and its
+/// `.BE` or `.BZ` file, and the price across each switch stays inside the
+/// day's band. Should a day ever hold both, both are refused by name
+/// ([`CmRefusal::AmbiguousCaseTwins`]) and neither is filed. A compiled list
+/// of two, because the dated security masters that name a symbol's series
+/// start in 2026 and the spells start in 2018 (`docs/06-limits.md`).
+pub const SHARE_SERIES: [&str; 2] = ["BE", "BZ"];
+
+/// A share name split into the share and its trade-for-trade series
+/// (`ADANIPOWER.BE` is `ADANIPOWER`, `BE`); `None` for a name with no such
+/// series. One split and at most two compares.
+fn series_of(name: &str) -> Option<(&str, &'static str)> {
+    let (share, series) = name.rsplit_once('.')?;
+    for one in SHARE_SERIES {
+        if one == series {
+            return Some((share, one));
+        }
+    }
+    None
+}
+
+/// The trade-for-trade series a day file named `name` is of (`BE` for
+/// `ADANIPOWER.BE.NSE.csv`), `None` for a share's own file and for every
+/// other name. What the import says beside a file it files under the share's
+/// key, so the day's series is never silent (DB-B06).
+#[must_use]
+pub fn series_file(name: &str) -> Option<&'static str> {
+    let (stem, _) = split_name(name).ok()?;
+    series_of(stem.strip_suffix(STOCKS.stem_suffix)?).map(|(_, series)| series)
+}
+
+/// An index member's name (D-4878): its store key behind the instrument id's
+/// own prefix.
+fn index_member(store_key: &str) -> String {
+    format!("NSE-INDEX-{store_key}")
+}
+
+/// A share member's name (D-4878): the stem's own symbol, series and all,
+/// behind the instrument id's own prefix.
+fn share_member(name: &str) -> String {
+    format!("NSE-CASH-{name}")
 }
 
 /// `day` as `core::alias` dates a symbol change.
@@ -1126,10 +1274,20 @@ impl<T> SlotTable<T> {
     /// The slot a stem takes: its swept slot, or [`TICKER_SLOTS`] plus its
     /// scope's extra slot.
     fn slot_of(&self, stem: &str) -> Option<usize> {
-        stem_slot(self.kind, stem).or_else(|| {
+        let own = |stem: &str| {
+            stem_slot(self.kind, stem).or_else(|| {
+                self.scope
+                    .extra_slot(self.kind, stem)
+                    .map(|at| at + TICKER_SLOTS)
+            })
+        };
+        // A trade-for-trade series file takes its share's slot (WP-12f,
+        // DB-B06): on a day that holds both, the two are twins and both are
+        // refused by name, never mixed.
+        own(stem).or_else(|| {
             self.scope
-                .extra_slot(self.kind, stem)
-                .map(|at| at + TICKER_SLOTS)
+                .series_base(self.kind, stem)
+                .and_then(|share| own(&share))
         })
     }
 
@@ -1472,6 +1630,12 @@ impl<L> DayListing<L> {
         self.scope.filing(self.kind(), stem, self.day)
     }
 
+    /// The member `stem` is to this listing's scope ([`CmScope::member_of`]).
+    #[must_use]
+    pub fn member(&self, stem: &str) -> Option<String> {
+        self.scope.member_of(self.kind(), stem)
+    }
+
     /// The file holding `stem`, if the day has one: one slot index.
     ///
     /// # Errors
@@ -1523,6 +1687,14 @@ pub trait CmSource {
     /// The source's own refusals: it cannot be read, or what it holds is not
     /// what it must be.
     fn day(&self, kind: CmKind, day: Day) -> Result<Option<DayListing<Self::Locator>>, CmRefusal>;
+
+    /// The scope this source's day listings are built under (D-3333): the
+    /// swept surface unless the source was given another. An import records
+    /// it with every close (WP-12f, D-4878), so it must be the scope
+    /// [`CmSource::day`]'s listings carry.
+    fn scope(&self) -> Arc<CmScope> {
+        CmScope::swept_shared()
+    }
 
     /// The bytes of `file`, one of `listing`'s entries, unverified: the
     /// caller checks them against `file.len` and `file.crc32`. A source may
@@ -2538,11 +2710,16 @@ pub fn read_listed<S: CmSource>(
         price: listing.scope().price_rule(key),
         auction: listing.auction_for(key),
     };
+    // The rows carry the HELD file's own stem: a trade-for-trade spell's file
+    // (`<share>.BE.NSE`) sits in its share's slot and names itself in every
+    // row (WP-12f, DB-B06). Only the share's own stem or one of its series
+    // stems reaches that slot, by exact bytes (`SlotTable::slot_of`).
+    let held = split_name(file.name()).map_or(stem.as_str(), |(own, _)| own);
     let decoded = decode_with(
         &bytes,
         &Expect {
             kind,
-            stem: &stem,
+            stem: held,
             day: listing.day(),
         },
         &rules,
