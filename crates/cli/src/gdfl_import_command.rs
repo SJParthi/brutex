@@ -60,7 +60,8 @@ use std::sync::Arc;
 use pull::gdfl_archive::Archive;
 use pull::gdfl_cm::CmScope;
 use pull::gdfl_import::{
-    ImportKind, Origin, Report, Run, RunOptions, SourceKind, run_cm_from, run_nfo_from,
+    Durability, ImportKind, Origin, Report, Run, RunOptions, SourceKind, Workers, run_cm_from,
+    run_nfo_from,
 };
 use pull::gdfl_nfo::{NfoTickStore, NfoZips};
 use pull::gdfl_tickstore::TickStore;
@@ -78,6 +79,15 @@ pub(crate) const NFO_ARCHIVES_VAR: &str = "BRUTEX_GDFL_NFO_ARCHIVES";
 pub(crate) const RETRY_REFUSED: &str = "--retry-refused";
 /// The flag that narrows a capital-market run to what D-3333 adds.
 pub(crate) const STORED: &str = "--stored";
+/// How many workers read and file one day's files (WP-16): optional, 1 to
+/// `pull::gdfl_import::Workers::MAX`; absent is the import's default for
+/// this host's cores (`Workers::for_host`). The bytes a run leaves do not
+/// depend on it.
+pub(crate) const WORKERS_VAR: &str = "BRUTEX_GDFL_WORKERS";
+/// When a day's writes are made durable (WP-16, D-3353): optional, `day`
+/// (the measured default), `day-each-file` or `each-write`. The bytes a run
+/// leaves do not depend on it.
+pub(crate) const DURABILITY_VAR: &str = "BRUTEX_GDFL_DURABILITY";
 
 /// The store's GDFL options tree, whose underlyings a share run files.
 fn options_tree(store: &Path) -> PathBuf {
@@ -217,6 +227,56 @@ pub(crate) fn day(text: &str) -> Result<Day, String> {
     Day::new(y, m, d).map_err(|why| format!("{text:?}: {why}"))
 }
 
+/// The workers `BRUTEX_GDFL_WORKERS` asks for, or the import's default when
+/// it is not set; a value that is not a count from 1 to the bound is refused
+/// by name, never read as the default.
+pub(crate) fn workers_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Workers, String> {
+    let Some(value) = env(WORKERS_VAR) else {
+        return Ok(Workers::for_host());
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<usize>().ok())
+        .ok_or_else(|| {
+            format!(
+                "{WORKERS_VAR}={} is not a count of workers",
+                value.display()
+            )
+        })
+        .and_then(Workers::new)
+        .map_err(|why| format!("{WORKERS_VAR}: {why}"))
+}
+
+/// The durability `BRUTEX_GDFL_DURABILITY` names, or the import's default
+/// when it is not set; any other word is refused by name, never read as the
+/// default (WP-16, D-3353).
+pub(crate) fn durability_of(env: &dyn Fn(&str) -> Option<OsString>) -> Result<Durability, String> {
+    let Some(value) = env(DURABILITY_VAR) else {
+        return Ok(Durability::DEFAULT);
+    };
+    value
+        .to_str()
+        .ok_or_else(|| format!("{} is not text", value.display()))
+        .and_then(Durability::parse)
+        .map_err(|why| format!("{DURABILITY_VAR}: {why}"))
+}
+
+/// The run's options: the origin it measured, whether it reads again the
+/// days done with refusals, its workers and when a day is made durable
+/// (WP-16).
+const fn options_of(
+    origin: &Origin,
+    retry_refused: bool,
+    (workers, durability): (Workers, Durability),
+) -> RunOptions<'_> {
+    RunOptions {
+        origin: Some(origin),
+        retry_refused,
+        workers,
+        durability,
+    }
+}
+
 /// The root a variable names, or the refusal naming the variable.
 pub(crate) fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
     match env(var) {
@@ -225,6 +285,26 @@ pub(crate) fn root(var: &str, env: &dyn Fn(&str) -> Option<OsString>) -> Result<
             "{var} is not set; it names where the GDFL data is read from and has no default"
         )),
     }
+}
+
+/// What the verb's first words and the environment ask for: the kind, the
+/// first and last day, and how the run files its days (WP-16).
+///
+/// # Errors
+///
+/// The words a refusal shows, for a kind, a day, a worker count or a
+/// durability that is not one.
+fn asked(
+    (kind, from, to): (&str, &str, &str),
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<(ImportKind, Day, Day, (Workers, Durability)), String> {
+    let kind = ImportKind::parse(kind).map_err(|why| why.to_string())?;
+    Ok((
+        kind,
+        day(from)?,
+        day(to)?,
+        (workers_of(env)?, durability_of(env)?),
+    ))
 }
 
 /// The verb, with its environment and store root passed in so every arm is
@@ -242,11 +322,8 @@ pub(crate) fn command_with(
         );
         return MISUSED;
     };
-    let parsed = ImportKind::parse(kind)
-        .map_err(|why| why.to_string())
-        .and_then(|kind| Ok((kind, day(from)?, day(to)?)));
-    let (kind, from, to) = match parsed {
-        Ok(three) => three,
+    let (kind, from, to, workers) = match asked((kind, from, to), env) {
+        Ok(four) => four,
         Err(why) => {
             let _ = writeln!(out, "refused: {why}");
             return MISUSED;
@@ -291,10 +368,7 @@ pub(crate) fn command_with(
             SourceKind::Zip
         };
         let origin = Origin::measure(origin_kind, &data, crate::commit_stamp());
-        let options = RunOptions {
-            origin: Some(&origin),
-            retry_refused,
-        };
+        let options = options_of(&origin, retry_refused, workers);
         let report = match (*source, kind) {
             ("tickstore", ImportKind::Options) => {
                 run_nfo_from(&NfoTickStore::new(&data), &run, options)
@@ -317,6 +391,7 @@ pub(crate) fn command_with(
     match result {
         Ok((Ok(report), store, scope_words)) => {
             render(out, kind, source, &store, &report);
+            render_how(out, workers);
             if let Some(words) = scope_words {
                 let _ = writeln!(out, "  scope               {words}");
             }
@@ -331,6 +406,7 @@ pub(crate) fn command_with(
             // it did before the refused day is on disk, so it is printed too.
             if let Some(done) = refusal.report() {
                 render(out, kind, source, &store, done);
+                render_how(out, workers);
             }
             let _ = writeln!(out, "GDFL IMPORT REFUSED: {refusal}");
             FAILED
@@ -340,6 +416,22 @@ pub(crate) fn command_with(
             FAILED
         }
     }
+}
+
+/// How the run filed its days (WP-16): its workers and when each day was
+/// made durable, each with the variable that sets it.
+fn render_how(out: &mut String, (workers, durability): (Workers, Durability)) {
+    let _ = writeln!(
+        out,
+        "  workers             {} ({WORKERS_VAR}, 1 to {})",
+        workers.get(),
+        Workers::MAX
+    );
+    let _ = writeln!(
+        out,
+        "  durability          {} ({DURABILITY_VAR}; D-3353)",
+        durability.as_str()
+    );
 }
 
 /// The process environment, read at the edge.

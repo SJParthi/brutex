@@ -38,6 +38,13 @@
 //! time index: flat at 1x, 10x and 100x the file, and within the warm record
 //! read's budget (D-2329).
 //!
+//! C-VD-01, C-VD-02 and C-VD-04 time the verdict store (D-4808, D-4844): a
+//! lookup cold and warm at 1x, 10x and 50x a day's records, on colliding
+//! keys and over a year of days, with the 100x day's `table_too_large`
+//! refusal pinned (L-IA-33); the year index read; and the commit alone, on
+//! Zerodha-sized and options-sized days, each with p50, p99 and max printed
+//! beside its ratio and never gated.
+//!
 //! C-RP-01 times `repair::repair_month`, which is NOT O(1) and says so: one
 //! repair reads the served month whole and writes a whole successor. It is
 //! timed at a month the size of a real one-second month and at a month filled
@@ -61,7 +68,9 @@ use store::format::{BLOCK_LEN, FLAG_CHECKSUMS, HEADER_LEN, SLOT_LEN};
 use store::header::Header;
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+use store::provenance::Day;
 use store::repair::{self, MonthRepair};
+use store::verdict;
 
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
 ///
@@ -637,6 +646,478 @@ fn checksum_beats_the_bit_loop() -> bool {
     ok
 }
 
+// ══ The verdict store (D-4808, D-4844; IA-5): C-VD-01, C-VD-02, C-VD-04 ═════
+//
+// Every key here is a synthetic `ZZ` name no exchange lists, and every
+// verdict is invented. The files live under the temporary directory, so the
+// numbers are that disk's: run with TMPDIR on the store's volume to measure
+// the store's disk.
+
+/// Single-operation latencies, nanoseconds: p50, p99 and max over `n` calls.
+/// Printed beside each ratio, never gated: a cold lookup opens two files and
+/// one slow open is the scheduler's, which the ratio's minimum discards and
+/// these do not.
+fn spread(label: &str, n: u32, mut op: impl FnMut()) {
+    spread_prepared(label, n, || (), |()| op());
+}
+
+/// As [`spread`], but each call's input is made by `prepare` outside the
+/// timer, so only `op` is timed (C-VD-04 times the commit alone, never the
+/// building of the generation it is handed).
+fn spread_prepared<T>(label: &str, n: u32, mut prepare: impl FnMut() -> T, mut op: impl FnMut(T)) {
+    let mut ns: Vec<u128> = (0..n)
+        .map(|_| {
+            let input = prepare();
+            let start = Instant::now();
+            op(input);
+            start.elapsed().as_nanos()
+        })
+        .collect();
+    ns.sort_unstable();
+    let at = |q: usize| {
+        ns.get(ns.len().saturating_sub(1) * q / 100)
+            .copied()
+            .unwrap_or(0)
+    };
+    println!(
+        "  {label:<56} p50 {:>9} ns  p99 {:>9} ns  max {:>10} ns  n={n}",
+        at(50),
+        at(99),
+        ns.last().copied().unwrap_or(0)
+    );
+}
+
+/// A fresh store root for one verdict bench, removed first.
+fn vd_root(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("brutex-bench-vd-{name}-{}", std::process::id()));
+    let _ignored = std::fs::remove_dir_all(&root);
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        refuse(&format!("the verdict bench root would not create: {e}"));
+    }
+    root
+}
+
+/// The bench's series: GDFL options, one-second rung.
+fn vd_series(root: &std::path::Path) -> verdict::Series<'_> {
+    verdict::Series {
+        root,
+        feed: verdict::Feed::Gdfl,
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Fno,
+        timeframe: Timeframe::SECOND_1,
+    }
+}
+
+/// A Zerodha series: cash shares, one-minute rung.
+fn vd_zerodha(root: &std::path::Path) -> verdict::Series<'_> {
+    verdict::Series {
+        root,
+        feed: verdict::Feed::Zerodha,
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Cash,
+        timeframe: Timeframe::MINUTE_1,
+    }
+}
+
+/// A synthetic instrument key about as long as a real option key.
+fn vd_name(i: usize) -> String {
+    format!("NSE-FNO-ZZSYN{:02}-{:07}-CE-{:09}", i % 37, i, i * 7 + 3)
+}
+
+fn vd_key(i: usize) -> verdict::Key {
+    verdict::Key::instrument(&vd_name(i)).unwrap_or_else(|_| refuse("a synthetic key fits"))
+}
+
+/// The `i`-th element of a non-empty slice, cycling.
+fn nth<T>(xs: &[T], i: usize) -> &T {
+    xs.get(i % xs.len().max(1))
+        .unwrap_or_else(|| refuse("a bench cycles over an empty list"))
+}
+
+/// A day: 2031-01-01 plus `offset` days, within 2031.
+fn vd_day(offset: u16) -> Day {
+    let (mut month, mut day) = (1u8, offset + 1);
+    let lengths = [31u16, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for len in lengths {
+        if day <= len {
+            break;
+        }
+        day -= len;
+        month += 1;
+    }
+    Day::new(2031, month, u8::try_from(day).unwrap_or(1)).unwrap_or_else(|| refuse("a real day"))
+}
+
+/// One generation of `n` synthetic records, most `match`, every tenth
+/// another code.
+fn vd_generation(n: usize, day: Day, run: u64) -> verdict::Generation {
+    let entries = (0..n)
+        .map(|i| {
+            let code = if i % 10 == 0 {
+                *nth(&verdict::Code::ALL, i / 10)
+            } else {
+                verdict::Code::Match
+            };
+            let mut facts = verdict::Facts::of(code);
+            facts.source_units = u32::try_from(i).unwrap_or(0);
+            verdict::Entry {
+                key: vd_key(i),
+                facts,
+                details: Vec::new(),
+            }
+        })
+        .collect();
+    verdict::Generation {
+        day,
+        run,
+        written_at: 1_900_000_000,
+        verifier: 1,
+        mode: verdict::Mode::Cold,
+        rule_set: 0,
+        origin: [0; 16],
+        day_block: verdict::DayBlock::of(verdict::Code::Match),
+        day_details: Vec::new(),
+        entries,
+        carry: verdict::Carry::WholeDay,
+    }
+}
+
+/// Commits one day of `n` records.
+fn vd_commit(root: &std::path::Path, n: usize, day: Day, run: u64) -> verdict::Committed {
+    match verdict::commit(&vd_series(root), &vd_generation(n, day, run)) {
+        Ok(done) => done,
+        Err(e) => refuse(&format!("a verdict day of {n} would not commit: {e}")),
+    }
+}
+
+/// An image's table capacity and its bytes on disk.
+fn vd_size(done: &verdict::Committed) -> (u32, u64) {
+    let bytes = std::fs::metadata(&done.path).map_or(0, |m| m.len());
+    let capacity = verdict::read_image(&done.path).map_or(0, |img| img.header.capacity);
+    (capacity, bytes)
+}
+
+/// The keys a lookup row cycles through: present keys spread over the day,
+/// so successive lookups land on different table windows and records.
+fn vd_keys(n: usize) -> Vec<verdict::Key> {
+    (0..64usize).map(|i| vd_key(i * (n - 1) / 63)).collect()
+}
+
+/// Keys of a day of `n` records that share a home slot with at least two
+/// others at `capacity`: the colliding-key fixture.
+fn vd_colliding(n: usize, capacity: u32) -> Vec<verdict::Key> {
+    let mask = u64::from(capacity.saturating_sub(1));
+    let mut by_home: std::collections::HashMap<u64, Vec<usize>> =
+        std::collections::HashMap::with_capacity(n);
+    for i in 0..n {
+        by_home
+            .entry(verdict::key_hash(vd_name(i).as_bytes()) & mask)
+            .or_default()
+            .push(i);
+    }
+    let mut out: Vec<usize> = by_home
+        .into_values()
+        .filter(|group| group.len() >= 3)
+        .flatten()
+        .collect();
+    out.sort_unstable();
+    out.truncate(64);
+    if out.is_empty() {
+        refuse("the colliding-key fixture found no crowded home slot");
+    }
+    out.into_iter().map(vd_key).collect()
+}
+
+/// One lookup of `key`, refusing a miss: a row that timed a miss would be
+/// timing the no-record arm while claiming the record arm.
+fn vd_lookup(
+    reader: &mut verdict::Reader,
+    root: &std::path::Path,
+    day: Day,
+    key: &verdict::Key,
+) -> u32 {
+    match reader.lookup(&vd_series(root), day, key) {
+        Ok(found)
+            if matches!(
+                found.answer.as_ref().map(|a| &a.found),
+                Some(verdict::Found::Record { .. })
+            ) && found.cost.reads <= 5
+                && found.cost.opens <= 2 =>
+        {
+            found.cost.reads
+        }
+        Ok(found) if found.cost.reads > 5 || found.cost.opens > 2 => {
+            refuse("a lookup exceeded 5 reads or 2 opens")
+        }
+        Ok(_) => refuse("a present key was not found"),
+        Err(e) => refuse(&format!("a lookup was refused: {e}")),
+    }
+}
+
+/// C-VD-01, the ceiling — a day of 275,800 records (100x 2,758) is past
+/// format version 1's record ceiling (L-IA-33): it is refused
+/// `table_too_large` by name with nothing written, not even a directory.
+fn verdict_ceiling_is_refused_whole() -> bool {
+    let refused_root = vd_root("refused");
+    let refused = verdict::commit(
+        &vd_series(&refused_root),
+        &vd_generation(275_800, vd_day(62), 40),
+    );
+    let nothing = std::fs::read_dir(&refused_root).map_or(0, Iterator::count) == 0;
+    let ok = match refused {
+        Err(verdict::VerdictError::TableTooLarge { records }) if records == 275_800 && nothing => {
+            println!(
+                "  C-VD-01 day of  275800 records (100x): refused table_too_large, nothing written"
+            );
+            true
+        }
+        other => {
+            println!(
+                "  C-VD-01 100x day: expected table_too_large with nothing written, got {other:?}"
+            );
+            false
+        }
+    };
+    let _ignored = std::fs::remove_dir_all(&refused_root);
+    ok
+}
+
+/// C-VD-01 — one verdict lookup costs the same whatever the day holds: cold
+/// (a new reader, so both files are opened) and warm (cached handles), at
+/// 1x (2,758 records), 10x and 50x, and on keys that share a home slot.
+/// 100x is past the format (`verdict_ceiling_is_refused_whole`).
+fn verdict_lookup_is_flat_in_the_day() -> bool {
+    let mut ok = true;
+    let sizes = [2_758usize, 27_580, 137_900];
+    let day = vd_day(62);
+    let mut roots = Vec::with_capacity(sizes.len());
+    for (i, n) in sizes.iter().enumerate() {
+        let root = vd_root(&format!("lookup-{i}"));
+        let done = vd_commit(&root, *n, day, 41);
+        let (capacity, bytes) = vd_size(&done);
+        println!(
+            "  C-VD-01 day of {n:>7} records: table capacity {capacity:>8}, image {bytes:>10} bytes"
+        );
+        roots.push((root, *n, capacity));
+    }
+    let cold = |root: &std::path::Path, keys: &[verdict::Key]| {
+        let mut next = 0usize;
+        cost_ps(40, || {
+            let key = nth(keys, next);
+            next = next.wrapping_add(1);
+            vd_lookup(&mut verdict::Reader::new(), root, day, key)
+        })
+    };
+    let warm = |root: &std::path::Path, keys: &[verdict::Key]| {
+        let mut reader = verdict::Reader::new();
+        let mut next = 0usize;
+        cost_ps(400, || {
+            let key = nth(keys, next);
+            next = next.wrapping_add(1);
+            vd_lookup(&mut reader, root, day, key)
+        })
+    };
+    let (base_root, base_n, base_capacity) = nth(&roots, 0);
+    let base_keys = vd_keys(*base_n);
+    let base_cold = cold(base_root, &base_keys);
+    let base_warm = warm(base_root, &base_keys);
+    for (root, n, _) in roots.iter().skip(1) {
+        let x = n / base_n;
+        let keys = vd_keys(*n);
+        ok &= ratio(
+            &format!("C-VD-01 cold lookup, {x}x day"),
+            base_cold,
+            cold(root, &keys),
+        );
+        ok &= ratio(
+            &format!("C-VD-01 warm lookup, {x}x day"),
+            base_warm,
+            warm(root, &keys),
+        );
+    }
+    let colliding = vd_colliding(*base_n, *base_capacity);
+    ok &= ratio(
+        "C-VD-01 warm lookup, colliding keys at 1x",
+        base_warm,
+        warm(base_root, &colliding),
+    );
+    for (root, n, capacity) in &roots {
+        for (what, keys) in [
+            ("spread", vd_keys(*n)),
+            ("colliding", vd_colliding(*n, *capacity)),
+        ] {
+            let mut next = 0usize;
+            spread(
+                &format!("C-VD-01 cold lookup, {n} records, {what} keys"),
+                2_000,
+                || {
+                    let key = nth(&keys, next);
+                    next = next.wrapping_add(1);
+                    black_box(vd_lookup(&mut verdict::Reader::new(), root, day, key));
+                },
+            );
+            let mut reader = verdict::Reader::new();
+            spread(
+                &format!("C-VD-01 warm lookup, {n} records, {what} keys"),
+                20_000,
+                || {
+                    let key = nth(&keys, next);
+                    next = next.wrapping_add(1);
+                    black_box(vd_lookup(&mut reader, root, day, key));
+                },
+            );
+        }
+    }
+
+    for (root, _, _) in roots {
+        let _ignored = std::fs::remove_dir_all(root);
+    }
+    ok
+}
+
+/// C-VD-01 over a year: 248 days of 2,758 records, looked up in a scattered
+/// order through one reader whose 64 handles cannot hold the year, so most
+/// lookups open both files. p50, p99 and max only; a lookup past 5 reads
+/// or 2 opens, or one that misses its record, stops the bench (`refuse`).
+fn verdict_lookup_over_a_year() {
+    let year = vd_root("year");
+    for d in 0..248u16 {
+        vd_commit(&year, 2_758, vd_day(d), 1_000 + u64::from(d));
+    }
+    let keys = vd_keys(2_758);
+    let mut reader = verdict::Reader::new();
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    spread(
+        "C-VD-01 lookups over a year (248 days x 2,758)",
+        20_000,
+        || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let d = u16::try_from((state >> 33) % 248).unwrap_or(0);
+            let key = nth(&keys, usize::try_from((state >> 13) % 64).unwrap_or(0));
+            black_box(vd_lookup(&mut reader, &year, vd_day(d), key));
+        },
+    );
+    let _ignored = std::fs::remove_dir_all(&year);
+}
+
+/// C-VD-02 — reading a year index costs the same whatever the year holds:
+/// one committed day against 248. The `.vdi` is fixed-size, so a cost that
+/// grew would mean the read had started walking the images.
+fn year_index_read_is_flat() -> bool {
+    let one = vd_root("vdi-one");
+    vd_commit(&one, 4, vd_day(0), 7);
+    let full = vd_root("vdi-full");
+    for d in 0..248u16 {
+        vd_commit(&full, 4, vd_day(d), 7 + u64::from(d));
+    }
+    let time = |root: &std::path::Path| {
+        let mut reader = verdict::Reader::new();
+        cost_ps(400, || match reader.year(&vd_series(root), 2031) {
+            Ok(Some(index)) => index.commit,
+            _ => refuse("the year index would not read"),
+        })
+    };
+    let ok = ratio(
+        "C-VD-02 year index read, 248 days vs 1",
+        time(&one),
+        time(&full),
+    );
+    let mut reader = verdict::Reader::new();
+    spread("C-VD-02 year index read (warm handle)", 20_000, || {
+        black_box(reader.year(&vd_series(&full), 2031).is_ok());
+    });
+    let _ignored = std::fs::remove_dir_all(one);
+    let _ignored = std::fs::remove_dir_all(full);
+    ok
+}
+
+/// C-VD-04 — the commit alone (each generation is built before the timer
+/// starts): O(n log n) for the sort plus three `sync_all`s (L-IA-4), so its
+/// cost grows with the day and only its cost per record is gated: at 10x it
+/// stays within the ceiling of the cost per record at 1x, which an O(n²)
+/// build would break. Then p50, p99 and max of the commit on synthetic
+/// images the size of one Zerodha month's days (21 days of 343 instruments,
+/// 1x, and of 3,430, 10x) and of the average (10,428) and largest (26,820)
+/// options days, each with its table capacity and image bytes (L-IA-7).
+fn generation_write_stays_n_log_n() -> bool {
+    let root = vd_root("write");
+    let mut run = 1u64;
+    let mut per_record = |n: usize, reps: u32| {
+        let mut best = u128::MAX;
+        for _ in 0..reps {
+            run += 1;
+            let generation = vd_generation(n, vd_day(10), run);
+            let start = Instant::now();
+            if let Err(e) = verdict::commit(&vd_series(&root), &generation) {
+                refuse(&format!("a generation would not commit: {e}"));
+            }
+            let ps = start.elapsed().as_nanos() * 1_000 / u128::try_from(n).unwrap_or(1);
+            best = best.min(ps);
+        }
+        best
+    };
+    let base = per_record(2_758, 12);
+    let ok = ratio(
+        "C-VD-04 commit per record, 10x day",
+        base,
+        per_record(27_580, 4),
+    );
+
+    // One Zerodha month's days: 21 trading days, one image each, at 343
+    // instruments and at 10x. Each day is committed once, as a merge would.
+    let zerodha = vd_root("write-zerodha");
+    for (n, label) in [(343usize, "1x"), (3_430, "10x")] {
+        let mut d = 0u16;
+        let mut sizes = (0u32, 0u64);
+        spread_prepared(
+            &format!("C-VD-04 commit, Zerodha day of {n} instruments ({label})"),
+            21,
+            || {
+                d += 1;
+                vd_generation(
+                    n,
+                    vd_day(d + if n > 343 { 100 } else { 0 }),
+                    500 + u64::from(d),
+                )
+            },
+            |generation| match verdict::commit(&vd_zerodha(&zerodha), &generation) {
+                Ok(done) => sizes = vd_size(&done),
+                Err(e) => refuse(&format!("a Zerodha-sized day would not commit: {e}")),
+            },
+        );
+        println!(
+            "  C-VD-04 Zerodha day of {n:>6} records: table capacity {:>7}, image {:>9} bytes",
+            sizes.0, sizes.1
+        );
+    }
+    let _ignored = std::fs::remove_dir_all(zerodha);
+
+    let mut next = 100_000u64;
+    for (n, offset, reps) in [(10_428usize, 20u16, 10u32), (26_820, 21, 10)] {
+        let mut sizes = (0u32, 0u64);
+        spread_prepared(
+            &format!("C-VD-04 commit, options day of {n} records"),
+            reps,
+            || {
+                next += 1;
+                vd_generation(n, vd_day(offset), next)
+            },
+            |generation| match verdict::commit(&vd_series(&root), &generation) {
+                Ok(done) => sizes = vd_size(&done),
+                Err(e) => refuse(&format!("an options-sized day would not commit: {e}")),
+            },
+        );
+        println!(
+            "  C-VD-04 options day of {n:>6} records: table capacity {:>7}, image {:>9} bytes",
+            sizes.0, sizes.1
+        );
+    }
+    let _ignored = std::fs::remove_dir_all(root);
+    ok
+}
+
 /// 2024-07-01 00:00 IST in epoch microseconds: June's start and June's 30
 /// days. July, because C-RP-01 fills a month to the most any month holds and
 /// that takes 31 days.
@@ -973,6 +1454,11 @@ fn main() {
     ok &= cold_record_read_stays_within_its_budget();
     ok &= time_lookup_is_flat_in_the_file();
     ok &= time_lookup_stays_within_its_budget();
+    ok &= verdict_ceiling_is_refused_whole();
+    ok &= verdict_lookup_is_flat_in_the_day();
+    verdict_lookup_over_a_year();
+    ok &= year_index_read_is_flat();
+    ok &= generation_write_stays_n_log_n();
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
     if ok {
         println!("all ratios within the ceiling");

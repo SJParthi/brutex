@@ -143,6 +143,7 @@ fn a_census_refusal_is_one_error_line_and_every_closed_day_says_how_it_closed() 
     let options = RunOptions {
         origin: Some(&origin),
         retry_refused: false,
+        ..RunOptions::default()
     };
     let report = drive_from(&run, options, |on, sink| {
         if on == day(1) {
