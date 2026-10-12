@@ -27,12 +27,16 @@
  * - It never hides a code it does not know. A flag, state or reason this file
  *   has no word for is shown verbatim, toned as a warning, never dropped.
  * - It never keeps a list the data already knows: feeds, rungs, tags, spans
- *   and links into /db all come from the answers.
+ *   and links into /db all come from the answers. A link's feed, key and rung
+ *   are the server's; its segment is left for /db to derive from the key,
+ *   because the server writes the store's segment name and /db has its own
+ *   (`dbLinkOf`).
  */
 
 import { parseKey } from './instrument.js';
 import { rupee, exact } from './money.js';
 import { decodeDb, dbHref } from './urlstate.js';
+import { SEGMENT_KEYS } from './db/selection-model.js';
 
 // ══ The selection and its address ════════════════════════════════════════════
 
@@ -260,30 +264,67 @@ export function rungsUrl(key) {
   return q ? `/sources.json?${q}` : null;
 }
 
-/** Whether a rung is the day rung: its timeline page is a month, not a day. @param {string} rung */
-export const isDayRung = (rung) => /day$/.test(String(rung ?? ''));
+/** One day in seconds: the length of the day rung. */
+const DAY_SECONDS = 86_400;
+
+/**
+ * What the timeline does at one rung:
+ *
+ * - `'day'`  the rung is the day rung THE RUNG TABLE NAMES (one day long, and
+ *   spelled exactly as a row of the table spells it): the timeline is the day
+ *   table, and `/sources/bars.json` is asked nothing.
+ * - `'ask'`  every other rung is asked of the server, whose answer or refusal
+ *   is drawn. That includes a rung that only LOOKS like a day rung: `2day`,
+ *   `999day`, `0day` and `01day` are not rungs the store has, the server
+ *   refuses each by name, and the page draws that refusal. It used to match
+ *   `/day$/`, ask nothing, and print "At 2day the timeline is the day table
+ *   below" over the 1day table: a garbage parameter coerced into an answer.
+ * - `'wait'` the rung is one day long and the rung table has not answered
+ *   yet, so whether the table names it is not known. Nothing is asked until
+ *   it is; a table that fails or is refused ends the wait as `'ask'`.
+ *
+ * WHY THE DAY RUNG IS NOT ASKED OF `/sources/bars.json`. A page of day
+ * buckets folds a month of seconds on every request and the route keeps none
+ * of it. Measured twice on the operator's store, 12 Oct 2026, 200 distinct
+ * months of three instruments each time: a first read took p50 196 and 260 ms,
+ * p99 272 and 827 ms; the same months again took p50 34 and 289 ms, so what a
+ * second read costs is the operating system's file cache and the machine's
+ * load, not anything kept. `/sources/day.json` holds the same days, tagged the
+ * same way, and IS kept per day by the server (p50 2.5 ms, p99 3.2 ms once
+ * kept).
+ *
+ * @param {unknown} rung the address's rung
+ * @param {{rows: Array<{rung: string}>} | null | undefined} table the rung table, once it has answered
+ * @param {boolean} [answered] whether the rung table's request has ended at all (an answer, a refusal or a failure)
+ * @returns {'day' | 'ask' | 'wait'}
+ */
+export function timelineMode(rung, table, answered = Boolean(table)) {
+  if (rungSeconds(rung) !== DAY_SECONDS) return 'ask';
+  if (table) return table.rows.some((r) => r.rung === String(rung)) ? 'day' : 'ask';
+  return answered ? 'ask' : 'wait';
+}
+
+/**
+ * Whether a rung is the day rung the rung table names. Never true of a
+ * spelling the table does not hold, and never true without a table.
+ *
+ * @param {unknown} rung
+ * @param {{rows: Array<{rung: string}>} | null | undefined} table
+ */
+export const isDayRung = (rung, table) => timelineMode(rung, table, true) === 'day';
 
 /**
  * `/sources/bars.json` for one page of the timeline, or `null` with nothing
- * to ask. The page is ONE IST DAY of an intraday rung, so a fold reads at
- * most that day's seconds whatever the rung.
- *
- * THE DAY RUNG IS NEVER ASKED HERE. A page of day buckets folds a month of
- * seconds on every request and the route keeps none of it. Measured twice on
- * the operator's store, 12 Oct 2026, 200 distinct months of three instruments
- * each time: a first read took p50 196 and 260 ms, p99 272 and 827 ms; the
- * same months again took p50 34 and 289 ms, so what a second read costs is the
- * operating system's file cache and the machine's load, not anything kept.
- * `/sources/day.json` holds the same days, tagged the same way, and IS kept
- * per day by the server (p50 2.5 ms, p99 3.2 ms once kept). So at the day rung
- * the page draws the day table and asks this route nothing; `null` is that
- * decision, not a hole.
+ * to ask. The page is ONE IST DAY, so a fold reads at most that day's seconds
+ * whatever the rung. Whether to ask at all is `timelineMode`'s decision; this
+ * only spells the request, for any rung, so a rung the store does not have
+ * reaches the server and is refused there by name.
  *
  * @param {SourcesSelection} sel `key`, `rung` and `day` are required
  */
 export function barsUrl(sel) {
   const q = instrumentQuery(instrumentOf(sel?.key ?? ''));
-  if (!q || !sel?.rung || !sel?.day || !DAY.test(sel.day) || isDayRung(sel.rung)) return null;
+  if (!q || !sel?.rung || !sel?.day || !DAY.test(sel.day)) return null;
   q.set('rung', sel.rung);
   q.set('from', sel.day);
   q.set('to', sel.day);
@@ -315,7 +356,8 @@ export function dayUrl(key, month) {
 export function shiftMonth(month, step) {
   if (!MONTH.test(String(month ?? ''))) return '';
   const at = Number(month.slice(0, 4)) * 12 + (Number(month.slice(5, 7)) - 1) + step;
-  if (at < 0) return '';
+  // Outside 0000-01..9999-12 there is no month this page's own address accepts.
+  if (at < 0 || at > 9999 * 12 + 11) return '';
   return `${String(Math.floor(at / 12)).padStart(4, '0')}-${String((at % 12) + 1).padStart(2, '0')}`;
 }
 
@@ -471,18 +513,57 @@ export function basisOf(basis) {
 }
 
 /**
- * A stored rung's own /db link, narrowed to one day: the server's link for
- * the rung (its feed, segment, key and rung are the server's), with that day
- * as both bounds. `null` when the rung row carries no link.
+ * One of the server's links into /db, as an address /db ITSELF shows rows on.
  *
- * @param {unknown} db the rung row's `db`
- * @param {string} [day] `YYYY-MM-DD`
+ * THE SEGMENT IS /db's TO NAME, NOT THE STORE'S. The server's link carries the
+ * store's segment (`seg=INDEX`, `seg=CASH`, `seg=FNO`), and /db's `seg` is its
+ * own segment key (`spot`, `options`, `options-cut`, …: `SEGMENT_KEYS`). /db
+ * takes `seg` as given and matches census rows against it, so every link this
+ * page passed on unchanged opened an EMPTY grid ("No instrument-month matches
+ * this query") although the rows are stored. With `key` in the link and no
+ * `seg`, /db derives the segment from the key, today's day and the feed's
+ * archive end — which is also the only way a contract that settled after the
+ * archive ended lands on its own segment. So the link is read through /db's
+ * codec and written back without the store's segment; a `seg` is kept only
+ * when it is one of /db's own keys and no `key` is there to derive it from.
+ *
+ * `day` narrows the link to one day (both bounds). `oow` asks /db to show
+ * months outside the operator's window, which it hides by default (D-3338):
+ * without it a day out there would open an empty grid too.
+ *
+ * @param {unknown} link the server's `db`
+ * @param {{day?: string, oow?: boolean}} [change]
+ * @returns {string | null} `null` when the row carries no link into /db
  */
-export function dbDayHref(db, day) {
-  if (typeof db !== 'string' || !db.startsWith('/db')) return null;
-  if (!day || !DAY.test(day)) return db;
-  const { sel } = decodeDb(db.slice(db.indexOf('?') + 1));
-  return dbHref({ ...sel, from: day, to: day });
+export function dbLinkOf(link, change = {}) {
+  if (typeof link !== 'string' || !/^\/db(\?|$)/.test(link)) return null;
+  const at = link.indexOf('?');
+  const { sel } = decodeDb(at < 0 ? '' : link.slice(at + 1));
+  const { seg, ...rest } = sel;
+  /** @type {Record<string, any>} */
+  const out = { ...rest };
+  if (seg && !rest.key && SEGMENT_KEYS.includes(seg)) out.seg = seg;
+  if (change.day && DAY.test(change.day)) {
+    out.from = change.day;
+    out.to = change.day;
+  }
+  if (change.oow) out.oow = true;
+  return dbHref(out);
+}
+
+/**
+ * The words for a day that lies outside a feed's window (the operator's,
+ * D-3338), or `''` inside it or where the feed has no window. The window and
+ * its label are the rung table's; nothing is spelled here but the fallback.
+ *
+ * @param {{feeds: Array<{feed: string, window: {from: string, to: string, label: string} | null}>} | null | undefined} table
+ * @param {string} feed
+ * @param {string} day `YYYY-MM-DD`
+ */
+export function outsideWindow(table, feed, day) {
+  const w = table?.feeds.find((f) => f.feed === feed)?.window;
+  if (!w || !DAY.test(String(day ?? ''))) return '';
+  return day < w.from || day > w.to ? w.label : '';
 }
 
 // ══ The rung table (/sources.json) ═══════════════════════════════════════════
@@ -586,7 +667,7 @@ function rungRow(row, feed, key) {
           to: String(out.last ?? ''),
           months: typeof out.months === 'number' ? out.months : null,
           label: String(out.label ?? 'outside your window'),
-          db: typeof out.db === 'string' ? out.db : null
+          db: dbLinkOf(out.db)
         }
       : null,
     /** Where the in-window span starts: the window's first day when the rung starts before it. */
@@ -607,7 +688,7 @@ function rungRow(row, feed, key) {
       : { code: stateCode, word: stateCode ? stateCode.replaceAll('_', ' ') : 'state not sent', tone: /** @type {Tone} */ ('warn'), why },
     basis: basisOf(row?.basis),
     rows: census && typeof census.rows === 'number' ? census.rows : null,
-    db: typeof row?.db === 'string' ? row.db : null,
+    db: dbLinkOf(row?.db),
     timeline: sourcesHref({ key, rung: String(row?.rung ?? '') })
   };
 }
@@ -657,12 +738,14 @@ export function rungTable(body) {
   const feeds = feedsIn.map((/** @type {any} */ f) => {
     const census = f?.census && typeof f.census === 'object' ? f.census : {};
     const span = (/** @type {any} */ s) => (s && typeof s === 'object' && s.from && s.to ? { from: String(s.from), to: String(s.to), source: String(s.source ?? '') } : null);
+    const window = span(f?.window);
     return {
       feed: String(f?.feed ?? ''),
       name: String(f?.display ?? f?.feed ?? ''),
       rungsHeld: typeof f?.rungs_held === 'number' ? f.rungs_held : null,
       archive: span(f?.archive),
-      window: span(f?.window),
+      /** The operator's window on this feed, with the server's label for what lies outside it (D-3338). */
+      window: window ? { ...window, label: String(f.window.label_outside ?? 'outside your window') } : null,
       census: {
         state: String(census.state ?? 'not sent'),
         tone: /** @type {Tone} */ (census.state === 'held' && !census.degraded ? 'ok' : 'warn'),
@@ -791,18 +874,35 @@ export function factorCell(factor, of, marks = {}) {
 // ══ The combined timeline (/sources/bars.json) ═══════════════════════════════
 
 /**
+ * Unix seconds as an IST wall-clock instant, `YYYY-MM-DD HH:MM:SS`, or `''`
+ * outside the years a day can be written in. IST is UTC+05:30 with no
+ * daylight saving, so this is integer arithmetic on the seconds.
+ *
+ * @param {number} seconds
+ */
+export function istOfUnix(seconds) {
+  if (!Number.isSafeInteger(seconds)) return '';
+  const ms = (seconds + 19_800) * 1000;
+  if (ms < Date.UTC(0, 0, 1) || ms > Date.UTC(9999, 11, 31, 23, 59, 59)) return '';
+  const at = new Date(ms);
+  if (at.getUTCFullYear() < 1000) return '';
+  return at.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+/**
  * One feed's cell of one bucket as a source row.
  *
  * @param {any} cell the server's cell, or `null` where the feed holds no bar
  * @param {any} source the answer's `sources` entry for the feed
  * @param {string} rung
- * @param {string|null} db the feed's own stored rows of the bucket's day on /db
+ * @param {string|null} db the feed's own stored rows of the bucket's day on /db;
+ *   dropped where the feed holds no bar, so no link promises rows that are not there
  */
 function timelineRow(cell, source, rung, db) {
   const feed = String(source?.feed ?? '');
   const tag = tagWord({ feed, kind: source?.kind, rung, from: source?.read_rung });
   if (!cell || typeof cell !== 'object') {
-    return { feed, tag, db, absent: 'no bar in this bucket', close: '', o: '', h: '', l: '', c: '', v: '', oi: '', from: '', count: '' };
+    return { feed, tag, db: null, absent: 'no bar in this bucket', close: '', o: '', h: '', l: '', c: '', v: '', oi: '', from: '', count: '' };
   }
   return {
     feed,
@@ -836,6 +936,24 @@ export function timeline(body, rungs = null) {
   const links = sources.map(
     (/** @type {any} */ s) => rungs?.rows.find((/** @type {any} */ r) => r.stored && r.feed === String(s?.feed) && r.rung === String(s?.read_rung))?.db ?? null
   );
+  /**
+   * A source's own rows of one day on /db. A page is one IST day, so this is
+   * one link built per source and remembered, not one per row; a day outside
+   * the feed's window asks /db to show it (D-3338).
+   *
+   * @type {Map<string, string | null>}
+   */
+  const built = new Map();
+  /** @param {number} i @param {string} feed @param {string} day */
+  const linkOn = (i, feed, day) => {
+    const id = `${i} ${day}`;
+    let href = built.get(id);
+    if (href === undefined) {
+      href = dbLinkOf(links[i], { day, oow: outsideWindow(rungs, feed, day) !== '' });
+      built.set(id, href);
+    }
+    return href;
+  };
   const bases = new Set(sources.map((/** @type {any} */ s) => String(s?.basis?.price ?? '')));
   let anyFactor = bases.size > 1;
   const groups = (Array.isArray(body?.rows) ? body.rows : []).map((/** @type {any} */ row) => {
@@ -848,7 +966,7 @@ export function timeline(body, rungs = null) {
       id: String(row?.t ?? row?.ist ?? ''),
       label: String(row?.ist ?? ''),
       rows: sources.map((/** @type {any} */ s, /** @type {number} */ i) =>
-        timelineRow(cells[String(s?.feed)], s, rung, dbDayHref(links[i], String(row?.ist ?? '').slice(0, 10)))
+        timelineRow(cells[String(s?.feed)], s, rung, linkOn(i, String(s?.feed), String(row?.ist ?? '').slice(0, 10)))
       ),
       only: row?.only ? String(row.only) : '',
       cmp: cmp
@@ -865,6 +983,9 @@ export function timeline(body, rungs = null) {
       flags: (Array.isArray(row?.flags) ? row.flags : []).map(flagOf)
     };
   });
+  /** The cursor the server says it started from (unix seconds), or `null` on a first page. */
+  const at = typeof body?.cursor === 'number' && Number.isFinite(body.cursor) ? body.cursor : null;
+  const where = `${body?.range?.from ?? 'this range'}${body?.range?.to && body.range.to !== body.range.from ? ` to ${body.range.to}` : ''}`;
   const s = body?.summary && typeof body.summary === 'object' ? body.summary : null;
   const eq = s?.exactly_equal && typeof s.exactly_equal === 'object' ? s.exactly_equal : null;
   /** @type {string[]} */
@@ -900,7 +1021,14 @@ export function timeline(body, rungs = null) {
     nextCursor: typeof body?.next_cursor === 'number' ? String(body.next_cursor) : '',
     complete: body?.complete === true,
     recordsRead: typeof body?.records_read === 'number' ? body.records_read : null,
-    empty: groups.length === 0 ? `No source holds a ${rung || 'bar'} bucket of ${key || 'this instrument'} in ${body?.range?.from ?? 'this range'}${body?.range?.to && body.range.to !== body.range.from ? ` to ${body.range.to}` : ''}.` : ''
+    /** The page was reached with a cursor and holds nothing: the cursor is past the end, which says nothing about the day. */
+    beyondCursor: groups.length === 0 && at !== null,
+    empty:
+      groups.length > 0
+        ? ''
+        : at !== null
+          ? `Nothing lies ${body?.dir === 'asc' ? 'after' : 'before'} this address's cursor (${at}${istOfUnix(at) ? `, which is ${istOfUnix(at)} IST` : ''}) among the ${rung || 'bar'} buckets of ${key || 'this instrument'} in ${where}: the cursor is past the end of that range. That says nothing about what the sources hold there; the first page shows it.`
+          : `No source holds a ${rung || 'bar'} bucket of ${key || 'this instrument'} in ${where}.`
   };
 }
 
@@ -932,13 +1060,15 @@ export function marksOf(marks) {
 /**
  * One source's fold of one day as a row, or the reason it holds none.
  *
- * @param {{feed: string, tag: string, close: string, db: string|null}} src
+ * @param {{feed: string, tag: string, close: string, db: string|null, outside: string}} src
+ *   `outside` is the label of a day outside the feed's window, or `''`
  * @param {any} fold `{o,h,l,c,v,first_at?,last_at?,minutes?,seconds?}` or `null`
  * @param {unknown} absent the day's `absent` reason for this source
  */
 function dayRow(src, fold, absent) {
   if (!fold || typeof fold !== 'object') {
-    return { ...src, absent: absent ? whyOf(absent) : 'no record of this day', o: '', h: '', l: '', c: '', v: '', from: '', to: '', count: '' };
+    // A source that holds nothing of the day carries no /db link: it would open on no rows.
+    return { ...src, db: null, outside: '', absent: absent ? whyOf(absent) : 'no record of this day', o: '', h: '', l: '', c: '', v: '', from: '', to: '', count: '' };
   }
   return {
     ...src,
@@ -967,7 +1097,7 @@ function foldRows(rows) {
   const byWhy = new Map();
   for (const r of rows) byWhy.set(r.absent, [...(byWhy.get(r.absent) ?? []), r.tag]);
   const absent = byWhy.size === 1 ? `no source holds this day: ${rows[0].absent}` : [...byWhy].map(([why, tags]) => `${tags.join(', ')}: ${why}`).join('; ');
-  return [{ ...rows[0], feed: '', tag: 'every source', close: '', db: null, absent }];
+  return [{ ...rows[0], feed: '', tag: 'every source', close: '', db: null, outside: '', absent }];
 }
 
 /**
@@ -993,6 +1123,17 @@ export function dayTable(body, rungs = null) {
       close: basisOf(s?.basis).close,
       link
     };
+  };
+  /**
+   * One source on one day: its tag, its own stored rows of that day on /db,
+   * and the label of a day outside its feed's window (D-3338, the operator's
+   * answer 6). /db hides such a month by default, so the link asks for it.
+   *
+   * @param {ReturnType<typeof describe>} one @param {string} day
+   */
+  const sourceOn = (one, day) => {
+    const outside = outsideWindow(rungs, one.feed, day);
+    return { feed: one.feed, tag: one.tag, close: one.close, db: dbLinkOf(one.link, { day, oow: outside !== '' }), outside };
   };
   const zd = describe(src.zerodha_day, false);
   const zm = describe(src.zerodha_minutes, true);
@@ -1023,9 +1164,9 @@ export function dayTable(body, rungs = null) {
       label: day,
       sub: typeof cal?.weekday === 'string' ? cal.weekday : '',
       rows: foldRows([
-        dayRow({ feed: zd.feed, tag: zd.tag, close: zd.close, db: dbDayHref(zd.link, day) }, d?.zerodha_day, absent.zerodha_day),
-        dayRow({ feed: zm.feed, tag: zm.tag, close: zm.close, db: dbDayHref(zm.link, day) }, d?.zerodha_minutes_fold, absent.zerodha_minutes),
-        dayRow({ feed: gs.feed, tag: gs.tag, close: gs.close, db: dbDayHref(gs.link, day) }, d?.gdfl_seconds_fold, absent.gdfl_seconds)
+        dayRow(sourceOn(zd, day), d?.zerodha_day, absent.zerodha_day),
+        dayRow(sourceOn(zm, day), d?.zerodha_minutes_fold, absent.zerodha_minutes),
+        dayRow(sourceOn(gs, day), d?.gdfl_seconds_fold, absent.gdfl_seconds)
       ]),
       cmps: [
         {

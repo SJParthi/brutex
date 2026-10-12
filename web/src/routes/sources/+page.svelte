@@ -48,7 +48,7 @@
     rungsUrl,
     barsUrl,
     dayUrl,
-    isDayRung,
+    timelineMode,
     shiftMonth,
     outcomeOf,
     rungTable,
@@ -158,11 +158,18 @@
   const month = $derived(decoded.sel.month ?? (day ? day.slice(0, 7) : ''));
 
   /* AT THE DAY RUNG THE TIMELINE IS THE DAY TABLE. `/sources/bars.json` at
-     `1day` folds a month of seconds on every request and keeps none of it;
-     the day table holds the same days, tagged the same way, kept per day by
-     the server. So the day rung asks nothing here (`barsUrl` is `null`). */
-  const dayRung = $derived(isDayRung(rung));
-  const barsAsk = $derived(instrument.ok && day ? barsUrl({ key, rung, day, dir, cursor }) : null);
+     the day rung folds a month of seconds on every request and keeps none of
+     it; the day table holds the same days, tagged the same way, kept per day
+     by the server. So the day rung asks nothing here.
+
+     THE DAY RUNG IS THE ONE THE RUNG TABLE NAMES, never any spelling that
+     ends in "day": `rung=2day` or `999day` is asked of the server like any
+     other rung and its refusal is drawn (`timelineMode`). While the rung
+     table has not answered, a one-day-long rung waits for it. */
+  const rungsAnswered = $derived(rungsRead.url === rungsAsk && (rungsRead.phase === 'ok' || rungsRead.phase === 'refused' || rungsRead.phase === 'failed'));
+  const mode = $derived(timelineMode(rung, rungs, rungsAnswered));
+  const dayRung = $derived(mode === 'day');
+  const barsAsk = $derived(instrument.ok && day && mode === 'ask' ? barsUrl({ key, rung, day, dir, cursor }) : null);
   $effect(() => {
     const url = barsAsk;
     untrack(() => read(owners.bars, url, (r) => (barsRead = r)));
@@ -367,7 +374,7 @@
           {#each rungChoices as choice, i (i)}<option value={choice}>{choice}</option>{/each}
         </select>
       </label>
-      {#if !dayRung}
+      {#if mode === 'ask'}
         <label class="f">
           <span class="fk">Day</span>
           <input type="date" value={day} onchange={(e) => e.currentTarget.value && go({ day: e.currentTarget.value })} />
@@ -388,14 +395,22 @@
         At {rung} the timeline is the <a href="#h-days">day table below</a>: every day of the month, one tagged row per source. The server
         keeps each day's fold, so a month of seconds is not folded again on every visit.
       </p>
-    {:else if !day && rungsRead.phase !== 'loading' && instrument.ok}
-      <p class="state">No day to show: the address names none and no feed holds a stored bar of {key}.</p>
+    {:else if !day && instrument.ok && rungs}
+      <p class="state" data-no-day="none-held">No day to show: the address names none and no feed holds a stored bar of {key}.</p>
+    {:else if !day && instrument.ok && rungsAnswered}
+      <p class="state refusal" data-no-day="table-unread">
+        No day to show: the address names none, and the rung table that would name the newest day every feed holds was not read (its
+        reason is above). That is not a statement about what the feeds hold.
+      </p>
     {/if}
     {@render status(barsRead, 'the timeline')}
     {#if bars}
       {#each bars.summary as line, i (i)}<p class="sum">{line}</p>{/each}
       {#if bars.empty}
-        <p class="state refusal">{bars.empty}</p>
+        <p class="state refusal" data-empty={bars.beyondCursor ? 'beyond-cursor' : 'none-held'}>
+          {bars.empty}
+          {#if bars.beyondCursor}<a href={hrefWith({})}>First page</a>{/if}
+        </p>
       {:else}
         <div class="scroll">
           <table class="s-grid lines">
@@ -472,8 +487,8 @@
         <input type="month" value={month} onchange={(e) => e.currentTarget.value && go({ month: e.currentTarget.value, cursor })} />
       </label>
       {#if month}
-        <a class="go" href={hrefWith({ month: shiftMonth(month, -1), cursor })}>← {shiftMonth(month, -1)}</a>
-        <a class="go" href={hrefWith({ month: shiftMonth(month, 1), cursor })}>{shiftMonth(month, 1)} →</a>
+        {#if shiftMonth(month, -1)}<a class="go" href={hrefWith({ month: shiftMonth(month, -1), cursor })}>← {shiftMonth(month, -1)}</a>{/if}
+        {#if shiftMonth(month, 1)}<a class="go" href={hrefWith({ month: shiftMonth(month, 1), cursor })}>{shiftMonth(month, 1)} →</a>{/if}
       {/if}
     </div>
     {@render status(daysRead, 'the day table')}
@@ -513,6 +528,7 @@
                     <th scope="row" class="src">
                       {#if r.db}<a class="s-tag" href={r.db} title="this feed's stored rows for this day on DB">{r.tag}</a>{:else}<span class="s-tag">{r.tag}</span>{/if}
                       {#if r.close}<i>{r.close}</i>{/if}
+                      {#if r.outside}<i class="oow-day" title="held on disk, hidden on DB by default, never deleted (D-3338); the link asks DB to show it">{r.outside}</i>{/if}
                     </th>
                     {#if r.absent}
                       <td class="none" colspan="6">{r.absent}</td>
@@ -815,6 +831,17 @@
     border-radius: var(--r1);
     padding: var(--s1, 4px) var(--s2);
     margin-bottom: var(--s1, 4px);
+    color: var(--n9);
+  }
+  /* A DAY OUTSIDE THE WINDOW carries the same label on its own source row in
+     the day table, in the same hatching, so it is never read as an ordinary
+     day of the window (the operator's answer 6). */
+  .src i.oow-day {
+    display: inline-block;
+    background: repeating-linear-gradient(135deg, var(--n4), var(--n4) 6px, var(--n0) 6px, var(--n0) 12px);
+    border: 1px dashed var(--n7);
+    border-radius: var(--r1);
+    padding: 0 var(--s1, 4px);
     color: var(--n9);
   }
   .basis span {

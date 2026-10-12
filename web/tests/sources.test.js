@@ -35,6 +35,7 @@ import {
   barsUrl,
   dayUrl,
   isDayRung,
+  timelineMode,
   shiftMonth,
   outcomeOf,
   flagOf,
@@ -43,7 +44,9 @@ import {
   priceText,
   countText,
   basisOf,
-  dbDayHref,
+  dbLinkOf,
+  outsideWindow,
+  istOfUnix,
   rungSeconds,
   namedList,
   commonLastDay,
@@ -55,10 +58,16 @@ import {
   dayTable,
   toleranceLine
 } from '../src/lib/sources.js';
+// /db's OWN reader of an address and its own rule for which segment a stored
+// row is filed under: a link from /sources is proved against these, not
+// against a string.
+import { decodeDb } from '../src/lib/urlstate.js';
+import { SEGMENT_KEYS, linkOfKey, segmentOf } from '../src/lib/db/selection-model.js';
 
 const read = (/** @type {string} */ path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const PAGE = read('../src/routes/sources/+page.svelte');
 const SERVER = read('../../crates/api/src/sources.rs');
+const DB_STORE = read('../src/lib/db/selection.svelte.js');
 
 // ══ Fixtures (invented) ══════════════════════════════════════════════════════
 
@@ -232,7 +241,10 @@ test('/db links to the same instrument, rung and first day, or draws no link at 
   // a rung or day /db spells wrongly is dropped, not passed on
   assert.equal(sourcesHrefOfDb({ key: 'NSE-INDEX-NIFTY', tf: 'weekly', from: '2019-02-30' }), '/sources?key=NSE-INDEX-NIFTY');
   const summary = read('../src/routes/db/DbSummary.svelte');
-  assert.match(summary, /sourcesHrefOfDb\(\{ key: oneInstrument\(db\.matched\), tf: db\.timeframe, from: db\.fromDay \}\)/);
+  // the day is carried only when the reader narrowed to one, by /db's own rule for its own address:
+  // unnarrowed, fromDay is the seed (the FIRST day held) and /sources opened on the oldest day
+  assert.match(summary, /sourcesHrefOfDb\(\{ key: oneInstrument\(db\.matched\), tf: db\.timeframe, from: db\.dayNarrowing \? db\.fromDay : '' \}\)/);
+  assert.match(DB_STORE, /from: db\.dayNarrowing \? db\.fromDay : '',/);
   // the series is the census key of the selection's matched rows: exactly one, or no link
   const month = (/** @type {string} */ instrument, /** @type {string} */ m) => ({ instrument, month: m, timeframe: '1s', rows: 10 });
   assert.equal(oneInstrument([month('NSE-INDEX-NIFTY', '2019-03'), month('NSE-INDEX-NIFTY', '2019-04')]), 'NSE-INDEX-NIFTY');
@@ -270,21 +282,62 @@ test('each request is bounded by its page: one day of minutes, one month of days
   assert.equal(barsUrl({ key: 'NSE-INDEX-NIFTY', rung: '1min', day: '24 Sep' }), null);
   assert.equal(dayUrl('NSE-INDEX-NIFTY', '2019-3'), null);
   assert.equal(dayUrl('', '2019-03'), null);
-  assert.equal(isDayRung('1day'), true);
-  assert.equal(isDayRung('60min'), false);
+  assert.equal(isDayRung('1day', rungTable(rungsBody())), true);
+  assert.equal(isDayRung('60min', rungTable(rungsBody())), false);
 });
 
-test('at the day rung the page reads the kept day table and never asks for a month of seconds to be folded', () => {
-  // measured on the operator's store: /sources/bars.json?rung=1day folds a month of seconds per request, unkept
-  for (const rung of ['1day', '2day']) assert.equal(barsUrl({ key: 'NSE-INDEX-NIFTY', rung, day: '2019-03-29' }), null, rung);
+test('at the day rung the rung table names, the page reads the kept day table and asks the timeline route nothing', () => {
+  const table = rungTable(rungsBody());
+  // measured on the operator's store: /sources/bars.json at the day rung folds a month of seconds per request, unkept
+  assert.equal(timelineMode('1day', table), 'day');
+  assert.equal(isDayRung('1day', table), true);
   assert.equal(dayUrl('NSE-INDEX-NIFTY', '2019-03'), '/sources/day.json?exchange=NSE&segment=INDEX&symbol=NIFTY&from=2019-03');
-  assert.match(PAGE, /const dayRung = \$derived\(isDayRung\(rung\)\);/);
+  assert.match(PAGE, /const mode = \$derived\(timelineMode\(rung, rungs, rungsAnswered\)\);/);
+  assert.match(PAGE, /const dayRung = \$derived\(mode === 'day'\);/);
+  assert.match(PAGE, /const barsAsk = \$derived\(instrument\.ok && day && mode === 'ask' \? barsUrl\(\{ key, rung, day, dir, cursor \}\) : null\);/);
   assert.match(PAGE, /\{#if dayRung\}\s*<p class="state" data-day-rung>/);
   // every intraday page is one IST day: a fold reads at most that day's seconds, whatever the rung
   for (const rung of ['1s', '1min', '5min', '60min']) {
+    assert.equal(timelineMode(rung, table), 'ask', rung);
+    assert.equal(timelineMode(rung, null, false), 'ask', `${rung} never waits for the rung table`);
     const q = new URLSearchParams(String(barsUrl({ key: 'NSE-INDEX-NIFTY', rung, day: '2019-03-29' })).split('?')[1]);
     assert.deepEqual([q.get('from'), q.get('to'), q.get('limit')], ['2019-03-29', '2019-03-29', '50'], rung);
   }
+});
+
+test('a rung that only looks like a day rung is asked of the server, never drawn as the 1day table', () => {
+  // BEFORE: isDayRung was /day$/, so rung=2day asked nothing and the page said "At 2day the timeline is the day
+  // table below" over the 1day table, while the server refuses 2day by name (400). A garbage parameter coerced.
+  const table = rungTable(rungsBody());
+  for (const rung of ['2day', '999day', '0day', '01day', '7day']) {
+    assert.equal(isDayRung(rung, table), false, rung);
+    assert.equal(timelineMode(rung, table), 'ask', rung);
+    // the request names the rung as typed, so the server's own refusal of it is what the page draws
+    const url = String(barsUrl({ key: 'NSE-INDEX-NIFTY', rung, day: '2019-03-29' }));
+    assert.equal(new URLSearchParams(url.split('?')[1]).get('rung'), rung);
+  }
+  // the day rung is the one the TABLE names: a table without it has no day rung at all
+  const noDay = rungsBody();
+  noDay.rungs = noDay.rungs.filter((/** @type {any} */ r) => r.rung !== '1day');
+  assert.equal(timelineMode('1day', rungTable(noDay)), 'ask');
+  assert.equal(isDayRung('1day', rungTable(noDay)), false);
+  for (const none of [null, undefined]) assert.equal(isDayRung('1day', none), false);
+  // a one-day-long rung waits for the rung table, and a table that failed or was refused ends the wait by asking
+  assert.equal(timelineMode('1day', null, false), 'wait');
+  assert.equal(timelineMode('1day', null, true), 'ask');
+  assert.equal(timelineMode('1day', null), 'wait');
+  // only a rung exactly one day long waits: 2day is asked at once, table or no table
+  for (const rung of ['2day', '999day', '0day']) assert.equal(timelineMode(rung, null, false), 'ask', rung);
+  // a rung the address could not carry at all is still named there, not here
+  assert.deepEqual(decodeSources('rung=day').refused.map((r) => r.key), ['rung']);
+  // the sentence is drawn only in the day mode, and the refusal has its own place
+  assert.match(PAGE, /\{#if dayRung\}\s*<p class="state" data-day-rung>\s*At \{rung\} the timeline is the/);
+  assert.match(PAGE, /\{@render status\(barsRead, 'the timeline'\)\}/);
+  // the day and order controls belong to a timeline that is asked: drawn in that mode only, so they do not flash
+  // while a one-day-long rung waits for the rung table
+  assert.match(PAGE, /\{#if mode === 'ask'\}\s*<label class="f">\s*<span class="fk">Day<\/span>/);
+  // the server refuses a rung it does not have by name: that sentence is what reaches the page
+  assert.match(SERVER, /is not a rung this store has/);
 });
 
 test('months step across a year end and refuse garbage', () => {
@@ -293,6 +346,12 @@ test('months step across a year end and refuse garbage', () => {
   assert.equal(shiftMonth('2019-12', 1), '2020-01');
   assert.equal(shiftMonth('2019-12', 13), '2021-01');
   assert.equal(shiftMonth('0000-01', -1), '');
+  // past 9999-12 there is no month this page's own address accepts: no link, never '10000-01'
+  assert.equal(shiftMonth('9999-12', 1), '');
+  assert.equal(shiftMonth('9999-11', 1), '9999-12');
+  assert.equal(decodeSources(`month=${shiftMonth('9999-11', 1)}`).refused.length, 0);
+  assert.match(PAGE, /\{#if shiftMonth\(month, 1\)\}<a class="go"/);
+  assert.match(PAGE, /\{#if shiftMonth\(month, -1\)\}<a class="go"/);
   assert.equal(shiftMonth('2019-3', 1), '');
   assert.equal(shiftMonth('', 1), '');
 });
@@ -390,13 +449,15 @@ test('the rung table lists every feed and rung, stored first and finest first, w
   assert.deepEqual(table.feeds[0].archive, { from: '2020-01-01', to: '2020-03-20', source: 'invented' });
   assert.equal(table.feeds[0].window, null);
   assert.equal(table.empty, '');
-  // every stored row links to its own feed's rows on /db, in the server's words; a fold has none
+  // every stored row links to its own feed's rows on /db: the server's feed, key and rung, WITHOUT the store's
+  // segment name, which is not a segment /db knows (see the /db tests below); a fold has none
   assert.deepEqual(table.rows.map((/** @type {any} */ r) => r.db), [
-    '/db?feed=gdfl&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s', null,
-    '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min',
-    '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=5min',
-    '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day'
+    '/db?feed=gdfl&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s', null,
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min',
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=5min',
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day'
   ]);
+  assert.deepEqual(table.feeds[1].window, { from: '2020-01-01', to: '2020-03-31', source: 'invented', label: 'outside your window' });
   assert.equal(table.rows[1].timeline, '/sources?key=NSE-INDEX-TESTIDX&rung=5min');
   assert.deepEqual(table.notes, ['a note', 'a note']); // a repeated note is kept, not deduplicated away
 });
@@ -462,7 +523,7 @@ test('a derived rung behind its minutes is partial and says exactly what it lack
 
 test('months outside the operator’s window are shaded and labelled, never dropped', () => {
   const day = rungTable(rungsBody()).rows[4];
-  assert.deepEqual(day.outside, { from: '2017-01', to: '2019-12', months: 36, label: 'outside your window', db: '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day&oow=1' });
+  assert.deepEqual(day.outside, { from: '2017-01', to: '2019-12', months: 36, label: 'outside your window', db: '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day&oow=1' });
   assert.equal(day.first, '2017-01-02'); // the true first day is still on the row
   assert.equal(day.insideFrom, '2020-01-01'); // and the in-window span starts at the window
   assert.equal(day.basis.close, 'official close');
@@ -553,6 +614,29 @@ test('where the bases differ a factor stands in place of a disagreement', () => 
 
 // ══ The timeline ═════════════════════════════════════════════════════════════
 
+test('the factor column follows the sources’ bases, and an equal is the server’s to call', () => {
+  // two feeds on different price bases and NOT ONE bucket compared: the column is still drawn, because the
+  // bases differ (a mutant that dropped this rule survived the first round's tests)
+  const apart = barsBody();
+  apart.sources[0].basis = RAW;
+  apart.sources[1].basis = ADJUSTED;
+  apart.rows = [apart.rows[1]]; // the bucket only one feed holds: cmp is null
+  assert.equal(apart.rows[0].cmp, null);
+  assert.equal(timeline(apart).showFactor, true);
+  const together = barsBody();
+  together.rows = [together.rows[1]];
+  assert.equal(timeline(together).showFactor, false);
+
+  // the server's own `equal` decides, whatever the two values read here would say
+  assert.equal(cmpCell({ bps: 0.0, equal: false, flag: false }, 1000000, 1000000).text, '0.00 bps');
+  assert.notEqual(cmpCell({ bps: 0.0, equal: false, flag: false }, 1000000, 1000000).tone, 'ok');
+  assert.deepEqual([cmpCell({ bps: 0.4, equal: true, flag: false }, 1000000, 1000040).text, cmpCell({ bps: 0.4, equal: true, flag: false }, 1000000, 1000040).tone], ['=', 'ok']);
+  // without one, the two paisa values decide; without those, a difference of exactly nothing
+  assert.equal(cmpCell({ bps: 0.0, flag: false }, 1000000, 1000040).text, '0.00 bps');
+  assert.equal(cmpCell({ bps: 0.0, flag: false }, 1000000, 1000000).text, '=');
+  assert.equal(cmpCell({ bps: 0.0, flag: false }).text, '=');
+});
+
 test('every bucket of the timeline has one row per feed, and every row is tagged by its source', () => {
   const view = timeline(barsBody(), rungTable(rungsBody()));
   assert.equal(view.groups.length, 3);
@@ -568,8 +652,13 @@ test('every bucket of the timeline has one row per feed, and every row is tagged
   assert.equal(first.rows[0].oi, 'not a derivative');
   assert.deepEqual([first.cmp?.label, first.cmp?.c.text, first.cmp?.v.text], ['gdfl against zerodha', '=', 'an index has no volume']);
   // each source row links to ITS feed's stored rows of that day on /db: the seconds for the fold, the minutes for Zerodha
-  assert.equal(first.rows[0].db, '/db?feed=gdfl&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2020-03-20&to=2020-03-20');
-  assert.equal(first.rows[1].db, '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2020-03-20&to=2020-03-20');
+  assert.equal(first.rows[0].db, '/db?feed=gdfl&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2020-03-20&to=2020-03-20');
+  assert.equal(first.rows[1].db, '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2020-03-20&to=2020-03-20');
+  // a feed that holds no bar in a bucket carries no link there: it would open on rows that are not stored
+  assert.deepEqual(view.groups[1].rows.map((/** @type {any} */ r) => [r.absent, r.db]), [
+    ['no bar in this bucket', null],
+    ['', '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2020-03-20&to=2020-03-20']
+  ]);
   // without a rung table there is no link, and nothing else changes
   assert.equal(timeline(barsBody()).groups[0].rows[0].db, null);
 });
@@ -623,7 +712,44 @@ test('an empty page, a duplicated bucket, out-of-order rows and a maximum page a
   const none = timeline(empty);
   assert.equal(none.empty, 'No source holds a 1min bucket of NSE-INDEX-TESTIDX in 2020-03-20.');
   assert.deepEqual([none.nextCursor, none.complete], ['', true]);
+  assert.equal(none.beyondCursor, false);
   for (const garbage of [null, undefined, {}, { rows: 'x', sources: 3 }]) assert.match(timeline(garbage).empty, /No source holds a/);
+
+  // AN EMPTY PAGE REACHED WITH A CURSOR SAYS THE CURSOR IS PAST THE END, never that no source holds the day.
+  // BEFORE: a stale cursor in the address made the page say "No source holds a 1min bucket ... in <day>"
+  // of a day both feeds hold 375 buckets of.
+  for (const [dir, word] of [['desc', 'before'], ['asc', 'after']]) {
+    const past = barsBody();
+    past.rows = [];
+    past.dir = dir;
+    past.cursor = /** @type {any} */ (1553855340);
+    past.next_cursor = /** @type {any} */ (null);
+    past.complete = true;
+    const beyond = timeline(past);
+    assert.equal(beyond.beyondCursor, true);
+    assert.doesNotMatch(beyond.empty, /No source holds/);
+    assert.equal(
+      beyond.empty,
+      `Nothing lies ${word} this address's cursor (1553855340, which is 2019-03-29 15:59:00 IST) among the 1min buckets of NSE-INDEX-TESTIDX in 2020-03-20: the cursor is past the end of that range. That says nothing about what the sources hold there; the first page shows it.`
+    );
+  }
+  // the cursor's instant is IST by integer arithmetic; one no day can be written for is shown as the number alone
+  assert.equal(istOfUnix(1584698340), '2020-03-20 15:29:00');
+  assert.equal(istOfUnix(0), '1970-01-01 05:30:00');
+  for (const none of [999999999999, -999999999999, 1.5, Number.NaN]) assert.equal(istOfUnix(none), '', String(none));
+  const far = barsBody();
+  far.rows = [];
+  far.cursor = /** @type {any} */ (999999999999);
+  assert.match(timeline(far).empty, /^Nothing lies before this address's cursor \(999999999999\) among/);
+  // a page WITH rows that was reached by a cursor is an ordinary page
+  const paged = barsBody();
+  paged.cursor = /** @type {any} */ (1584698400);
+  assert.deepEqual([timeline(paged).empty, timeline(paged).beyondCursor], ['', false]);
+  // the page draws the sentence with its own way out, and marks which of the two empties it is
+  assert.match(PAGE, /data-empty=\{bars\.beyondCursor \? 'beyond-cursor' : 'none-held'\}/);
+  assert.match(PAGE, /\{#if bars\.beyondCursor\}<a href=\{hrefWith\(\{\}\)\}>First page<\/a>\{\/if\}/);
+  // the cursor is the server's own echo of what it started from
+  assert.match(SERVER, /"cursor": asked\.cursor\.map\(\|at\| at\.div_euclid\(MICROS\)\),/);
 
   // a bucket the server sent twice is drawn twice; rows keep the server's order, never re-sorted here
   const dup = barsBody();
@@ -659,10 +785,12 @@ test('each day shows the official bar, the minutes folded and the seconds folded
   assert.deepEqual([differs.rows[2].from, differs.rows[2].to], ['09:15:00', '15:29:59']);
   // each row links to its own feed's stored rows of THAT day on /db
   assert.deepEqual(differs.rows.map((/** @type {any} */ r) => r.db), [
-    '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day&from=2020-03-19&to=2020-03-19',
-    '/db?feed=zerodha&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2020-03-19&to=2020-03-19',
-    '/db?feed=gdfl&seg=INDEX&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2020-03-19&to=2020-03-19'
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day&from=2020-03-19&to=2020-03-19',
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2020-03-19&to=2020-03-19',
+    '/db?feed=gdfl&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2020-03-19&to=2020-03-19'
   ]);
+  // a day inside the feed's window carries no label
+  assert.deepEqual(differs.rows.map((/** @type {any} */ r) => r.outside), ['', '', '']);
   assert.equal(differs.timeline, '/sources?key=NSE-INDEX-TESTIDX&day=2020-03-19');
   assert.deepEqual([differs.label, differs.sub], ['2020-03-19', 'Fri']);
   // an index's volume is not compared, and the row says why instead of showing a blank
@@ -773,11 +901,184 @@ test('a day a source does not hold names the reason: closed, after the archive, 
   ]);
 });
 
-test('a /db link is narrowed to one day through /db’s own address codec', () => {
-  assert.equal(dbDayHref('/db?feed=gdfl&seg=INDEX&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s', '2019-03-29'), '/db?feed=gdfl&seg=INDEX&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s&from=2019-03-29&to=2019-03-29');
-  assert.equal(dbDayHref('/db?feed=gdfl&tf=1s', ''), '/db?feed=gdfl&tf=1s');
-  assert.equal(dbDayHref('/db?feed=gdfl&tf=1s', 'not a day'), '/db?feed=gdfl&tf=1s');
-  for (const none of [null, undefined, 7, 'https://elsewhere.example/db', 'javascript:alert(1)']) assert.equal(dbDayHref(none, '2019-03-29'), null);
+/**
+ * WHAT /db DOES WITH A LINK, by its own code: `decodeDb` reads the address,
+ * `seg` (when the address carries one) is taken AS GIVEN for the segment,
+ * else the segment is derived from `key` by `linkOfKey` and `segmentOf`; then
+ * a census row is shown exactly when `segmentOf(row) === segment` and its
+ * underlying is the link's. The three source lines this mirrors are asserted
+ * to still be in /db's store, so a change there fails here.
+ *
+ * @param {string} href @param {{today: string, archiveTo: string|null}} clock
+ */
+function dbReads(href, clock) {
+  const { sel, refused } = decodeDb(href.slice(href.indexOf('?') + 1));
+  const link = sel.key ? linkOfKey(sel.key) : null;
+  const segment = sel.seg
+    ? sel.seg
+    : link
+      ? link.contract === 'spot'
+        ? 'spot'
+        : segmentOf({ expiry: link.expiry, instrument: String(sel.key) }, clock.today, clock.archiveTo)
+      : '';
+  return { sel, refused, sym: sel.sym ?? link?.sym ?? '', segment };
+}
+
+/** The census rows /db would show for a link: one feed's rows of one underlying, filed under the link's segment. */
+function dbShows(/** @type {string} */ href, /** @type {any[]} */ census, /** @type {{today: string, archiveTo: string|null}} */ clock) {
+  const read = dbReads(href, clock);
+  return census.filter((row) => row.feed === read.sel.feed && row.underlying === read.sym && row.timeframe === read.sel.tf && segmentOf(row, clock.today, clock.archiveTo) === read.segment);
+}
+
+test('every link from /sources into /db lands on rows: the segment is one /db itself files the row under', () => {
+  // the three lines of /db's link reader and row match that `dbReads` and `dbShows` mirror
+  assert.match(DB_STORE, /if \(sel\.seg\) db\.kind = sel\.seg;/);
+  assert.match(DB_STORE, /link\.contract === 'spot'\s*\? 'spot'\s*: segmentOf\(/);
+  assert.match(DB_STORE, /instrumentMatched\.filter\(\(\/\*\* @type \{any\} \*\/ r\) => segOf\(r\) === kind\)/);
+  // and the server still writes the STORE's segment name into its link: the reason this page must not pass it on
+  assert.match(SERVER, /"\/db\?feed=\{\}&seg=\{\}&sym=\{\}&key=\{\}&tf=\{\}"/);
+
+  const clock = { today: '2026-10-12', archiveTo: '2026-09-24' };
+  // an invented census: one row per (feed, series, rung), as /store.json decorates them
+  const row = (/** @type {string} */ feed, /** @type {string} */ instrument, /** @type {string} */ underlying, /** @type {string} */ timeframe, /** @type {string|null} */ expiry = null) => ({ feed, instrument, underlying, timeframe, expiry });
+  const census = [
+    row('gdfl', 'NSE-INDEX-TESTIDX', 'TESTIDX', '1s'),
+    row('zerodha', 'NSE-INDEX-TESTIDX', 'TESTIDX', '1min'),
+    row('zerodha', 'NSE-INDEX-TESTIDX', 'TESTIDX', '5min'),
+    row('zerodha', 'NSE-INDEX-TESTIDX', 'TESTIDX', '1day'),
+    row('zerodha', 'NSE-CASH-TESTCO', 'TESTCO', '1min'),
+    row('zerodha', 'NSE-CASH-M&M', 'M&M', '1min'),
+    row('gdfl', 'NSE-FNO-TESTIDX-2020-03-26-1000000-CE', 'TESTIDX', '1s', '2020-03-26'),
+    // settled AFTER the feed's archive ended: /db files it under its own segment, which no fixed name would reach
+    row('gdfl', 'NSE-FNO-TESTIDX-2026-09-29-1000000-PE', 'TESTIDX', '1s', '2026-09-29'),
+    // not yet expired
+    row('gdfl', 'NSE-FNO-TESTIDX-2026-10-29-1000000-CE', 'TESTIDX', '1s', '2026-10-29')
+  ];
+  // the server's links, spelled as `db_link` spells them (store segment names, the symbol percent-encoded)
+  const server = (/** @type {string} */ feed, /** @type {string} */ seg, /** @type {string} */ sym, /** @type {string} */ key, /** @type {string} */ tf) =>
+    `/db?feed=${feed}&seg=${seg}&sym=${encodeURIComponent(sym)}&key=${encodeURIComponent(key)}&tf=${tf}`;
+  const cases = [
+    { link: server('gdfl', 'INDEX', 'TESTIDX', 'NSE-INDEX-TESTIDX', '1s'), segment: 'spot', shows: 'NSE-INDEX-TESTIDX' },
+    { link: server('zerodha', 'INDEX', 'TESTIDX', 'NSE-INDEX-TESTIDX', '1day'), segment: 'spot', shows: 'NSE-INDEX-TESTIDX' },
+    { link: server('zerodha', 'CASH', 'TESTCO', 'NSE-CASH-TESTCO', '1min'), segment: 'spot', shows: 'NSE-CASH-TESTCO' },
+    { link: server('zerodha', 'CASH', 'M&M', 'NSE-CASH-M&M', '1min'), segment: 'spot', shows: 'NSE-CASH-M&M' },
+    { link: server('gdfl', 'FNO', 'TESTIDX', 'NSE-FNO-TESTIDX-2020-03-26-1000000-CE', '1s'), segment: 'options', shows: 'NSE-FNO-TESTIDX-2020-03-26-1000000-CE' },
+    { link: server('gdfl', 'FNO', 'TESTIDX', 'NSE-FNO-TESTIDX-2026-09-29-1000000-PE', '1s'), segment: 'options-cut', shows: 'NSE-FNO-TESTIDX-2026-09-29-1000000-PE' },
+    { link: server('gdfl', 'FNO', 'TESTIDX', 'NSE-FNO-TESTIDX-2026-10-29-1000000-CE', '1s'), segment: 'options-live', shows: 'NSE-FNO-TESTIDX-2026-10-29-1000000-CE' }
+  ];
+  for (const c of cases) {
+    // THE DEFECT, pinned: the server's link as sent names a segment /db has no rows under, so /db shows nothing
+    const raw = dbReads(c.link, clock);
+    assert.equal(SEGMENT_KEYS.includes(raw.segment), false, `${c.link}: the store's segment name is not one of /db's`);
+    assert.deepEqual(dbShows(c.link, census, clock), [], `${c.link}: passed on unchanged, /db matches no row`);
+
+    // THE FIX: each of the three shapes this page draws (the rung's rows, one day of them, outside the window)
+    for (const change of [{}, { day: '2020-03-19' }, { day: '2017-06-01', oow: true }, { oow: true }]) {
+      const href = String(dbLinkOf(c.link, change));
+      const read = dbReads(href, clock);
+      assert.deepEqual(read.refused, [], href);
+      assert.equal(read.segment, c.segment, href);
+      assert.ok(SEGMENT_KEYS.includes(read.segment), href);
+      const shown = dbShows(href, census, clock).map((r) => r.instrument);
+      // an option link shows its own contract (one underlying holds several; the key's expiry, strike and side pick it)
+      assert.ok(shown.includes(c.shows), `${href} shows ${JSON.stringify(shown)}`);
+      const contract = linkOfKey(String(read.sel.key));
+      assert.equal(contract?.sym, read.sym, href);
+      // the feed, the key and the rung are the server's, unchanged
+      const before = decodeDb(c.link.slice(c.link.indexOf('?') + 1)).sel;
+      assert.deepEqual([read.sel.feed, read.sel.key, read.sel.tf, read.sel.sym], [before.feed, before.key, before.tf, before.sym], href);
+      assert.deepEqual([read.sel.from ?? '', read.sel.to ?? '', read.sel.oow === true], [change.day ?? '', change.day ?? '', change.oow === true], href);
+    }
+  }
+
+  // what the page actually puts on its rows goes through the same door: the rung table, the timeline and the day table
+  const table = rungTable(rungsBody());
+  const drawn = [
+    ...table.rows.map((/** @type {any} */ r) => r.db),
+    ...table.rows.map((/** @type {any} */ r) => r.outside?.db ?? null),
+    ...timeline(barsBody(), table).groups.flatMap((/** @type {any} */ g) => g.rows.map((/** @type {any} */ r) => r.db)),
+    ...dayTable(daysBody([indexDay('2020-03-19', 1000500, 1000400), indexDay('2017-06-01', 1000500, 1000400)]), table).days.flatMap((/** @type {any} */ d) => d.rows.map((/** @type {any} */ r) => r.db))
+  ].filter((href) => href !== null);
+  assert.equal(drawn.length, 4 + 1 + 5 + 6);
+  for (const href of drawn) {
+    assert.doesNotMatch(href, /[?&]seg=/, href);
+    assert.equal(dbShows(href, census, clock).length, 1, href);
+  }
+  // and the page draws those and nothing of its own making
+  for (const use of ['href={r.db}', 'href={r.outside.db}']) assert.ok(PAGE.includes(use), use);
+  assert.doesNotMatch(PAGE, /href=\{[^}]*\/db\?/);
+});
+
+test('a /db link is read and written through /db’s own address codec, and only a link into /db is one', () => {
+  assert.equal(dbLinkOf('/db?feed=gdfl&seg=INDEX&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s', { day: '2019-03-29' }), '/db?feed=gdfl&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s&from=2019-03-29&to=2019-03-29');
+  assert.equal(dbLinkOf('/db?feed=gdfl&seg=INDEX&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s'), '/db?feed=gdfl&sym=NIFTY&key=NSE-INDEX-NIFTY&tf=1s');
+  // idempotent: a link already translated is unchanged, so the day tables can narrow the rung table's links
+  const once = String(dbLinkOf('/db?feed=zerodha&seg=CASH&sym=M%26M&key=NSE-CASH-M%26M&tf=1min&oow=1', { day: '2019-05-30' }));
+  assert.equal(once, '/db?feed=zerodha&sym=M%26M&key=NSE-CASH-M%26M&tf=1min&from=2019-05-30&to=2019-05-30&oow=1');
+  assert.equal(dbLinkOf(once, { day: '2019-05-30' }), once);
+  // a segment that IS one of /db's own is kept when there is no key to derive it from; the store's name never is
+  assert.equal(dbLinkOf('/db?feed=gdfl&seg=options&sym=NIFTY&tf=1s'), '/db?feed=gdfl&seg=options&sym=NIFTY&tf=1s');
+  assert.equal(dbLinkOf('/db?feed=gdfl&seg=FNO&sym=NIFTY&tf=1s'), '/db?feed=gdfl&sym=NIFTY&tf=1s');
+  assert.equal(dbLinkOf('/db?feed=gdfl&seg=options&sym=NIFTY&key=NSE-FNO-NIFTY-2019-03-28-1150000-CE&tf=1s'), '/db?feed=gdfl&sym=NIFTY&key=NSE-FNO-NIFTY-2019-03-28-1150000-CE&tf=1s');
+  // a day that is not one narrows nothing
+  assert.equal(dbLinkOf('/db?feed=gdfl&tf=1s', { day: '' }), '/db?feed=gdfl&tf=1s');
+  assert.equal(dbLinkOf('/db?feed=gdfl&tf=1s', { day: 'not a day' }), '/db?feed=gdfl&tf=1s');
+  assert.equal(dbLinkOf('/db'), '/db');
+  for (const none of [null, undefined, 7, '', '/dbx?feed=gdfl', '/database', 'https://elsewhere.example/db', '//elsewhere.example/db', 'javascript:alert(1)']) assert.equal(dbLinkOf(none, { day: '2019-03-29' }), null, String(none));
+});
+
+test('a day outside the operator’s window is labelled on its own source row, and its /db link asks /db to show it', () => {
+  // BEFORE: a 2015-2017 day was drawn in the day table like any other, and its link opened /db on a month /db hides
+  const table = rungTable(rungsBody()); // zerodha's window is 2020-01-01..2020-03-31; gdfl has none
+  assert.equal(outsideWindow(table, 'zerodha', '2019-12-31'), 'outside your window');
+  assert.equal(outsideWindow(table, 'zerodha', '2020-04-01'), 'outside your window');
+  for (const inside of ['2020-01-01', '2020-02-14', '2020-03-31']) assert.equal(outsideWindow(table, 'zerodha', inside), '', inside);
+  assert.equal(outsideWindow(table, 'gdfl', '2017-06-01'), '', 'a feed with no window has no outside');
+  for (const none of [null, undefined]) assert.equal(outsideWindow(none, 'zerodha', '2017-06-01'), '');
+  assert.equal(outsideWindow(table, 'zerodha', 'garbage'), '');
+  assert.equal(outsideWindow(table, 'a feed from the future', '2017-06-01'), '');
+  // the label is the server's own word for it
+  const worded = rungsBody();
+  worded.feeds[1].window.label_outside = 'beyond the window (invented wording)';
+  assert.equal(outsideWindow(rungTable(worded), 'zerodha', '2017-06-01'), 'beyond the window (invented wording)');
+
+  const old = indexDay('2017-06-01', 1000500, 1000400);
+  old.zerodha_minutes_fold = /** @type {any} */ (null);
+  old.absent = { zerodha_minutes: 'outside_window' };
+  const [day] = dayTable(daysBody([old]), table).days;
+  assert.deepEqual(day.rows.map((/** @type {any} */ r) => [r.tag, r.outside, r.db]), [
+    ['zerodha 1day stored', 'outside your window', '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1day&from=2017-06-01&to=2017-06-01&oow=1'],
+    // the minutes are not held out there: the reason is said, and there is no label and no link on a row with no bar
+    ['zerodha 1min→1day fold', '', null],
+    ['gdfl 1s→1day fold', '', '/db?feed=gdfl&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2017-06-01&to=2017-06-01']
+  ]);
+  assert.notEqual(day.rows[1].absent, '');
+  // the timeline's links follow the same rule
+  const bars = barsBody();
+  bars.range = { from: '2017-06-01', to: '2017-06-01' };
+  for (const r of bars.rows) r.ist = r.ist.replace('2020-03-20', '2017-06-01');
+  const [bucket] = timeline(bars, table).groups;
+  assert.deepEqual(bucket.rows.map((/** @type {any} */ r) => r.db), [
+    '/db?feed=gdfl&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1s&from=2017-06-01&to=2017-06-01',
+    '/db?feed=zerodha&sym=TESTIDX&key=NSE-INDEX-TESTIDX&tf=1min&from=2017-06-01&to=2017-06-01&oow=1'
+  ]);
+  assert.match(PAGE, /\{#if r\.outside\}<i class="oow-day"[^>]*>\{r\.outside\}<\/i>\{\/if\}/);
+});
+
+test('a source that holds nothing of a day carries no /db link for it', () => {
+  // BEFORE: GDFL after its archive ends still linked to /db for that day, where there is nothing to show
+  const after = indexDay('2020-03-23', 1000000, 1000000);
+  after.absent = { gdfl_seconds: 'after_archive' };
+  after.gdfl_seconds_fold = /** @type {any} */ (null);
+  const [day] = dayTable(daysBody([after]), rungTable(rungsBody())).days;
+  assert.deepEqual(day.rows.map((/** @type {any} */ r) => [r.absent === '', r.db === null]), [[true, false], [true, false], [false, true]]);
+});
+
+test('with no day and no rung table the page says the table was not read, never that no feed holds a bar', () => {
+  // BEFORE: "No day to show ... no feed holds a stored bar" was also printed when the rung table failed or was refused
+  assert.match(PAGE, /\{:else if !day && instrument\.ok && rungs\}\s*<p class="state" data-no-day="none-held">/);
+  assert.match(PAGE, /\{:else if !day && instrument\.ok && rungsAnswered\}\s*<p class="state refusal" data-no-day="table-unread">/);
+  assert.match(PAGE, /const rungsAnswered = \$derived\(rungsRead\.url === rungsAsk && \(rungsRead\.phase === 'ok' \|\| rungsRead\.phase === 'refused' \|\| rungsRead\.phase === 'failed'\)\);/);
 });
 
 test('the tolerances are the server’s and are said to be chosen, not sourced', () => {

@@ -392,8 +392,14 @@
      feeds are set side by side. The series is the census key the selection's
      matched rows carry (`db.picked` is an underlying, a name). `null` (no
      link) unless the selection is exactly one series — never a link that
-     opens on another one. */
-  const allSources = $derived(sourcesHrefOfDb({ key: oneInstrument(db.matched), tf: db.timeframe, from: db.fromDay }));
+     opens on another one.
+
+     THE DAY IS CARRIED ONLY WHEN THE READER NARROWED TO ONE (`dayNarrowing`,
+     the same rule this page's own address follows). Unnarrowed, `fromDay` is
+     the seed — the first day held — and carrying it opened /sources on the
+     OLDEST day while this page shows the newest first; with no day /sources
+     opens on the newest day every feed holds. */
+  const allSources = $derived(sourcesHrefOfDb({ key: oneInstrument(db.matched), tf: db.timeframe, from: db.dayNarrowing ? db.fromDay : '' }));
 </script>
 
 <!-- ==================================================================
