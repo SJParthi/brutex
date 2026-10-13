@@ -16757,8 +16757,12 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   builds that index once, O(done keys). Owed days of EARLIER months are not
   reached: they stay owed, and land as their own months when a run's range
   covers them.
-- **L-WP12f-7. A day no run closed is not owed, and a key closed under names
-  owes nothing it did not name.** A run asked for one later day on a store
+- **L-WP12f-7. A day not closed `done` is not owed, and a key closed under
+  names owes nothing it did not name.** A day whose keys are absent, open,
+  `incomplete` or restated (a `done` line from an older definition, or one
+  with no `definition=`) is not closed `done` and is passed over unsaid by a
+  later run under any filter; a run without a filter whose range covers it
+  reads it whole. A run asked for one later day on a store
   that never read the earlier days of that month makes each member's month
   from that day, a special session included. The same holds where the
   earlier days were closed only under a filter that did not name the member
@@ -16796,6 +16800,20 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   key, does not close the whole-day key's member keys: the unfiltered run
   reads those members of that day again, finds every bar present and writes
   none. Bounded by the days such a run was asked for; NOT MEASURED.
+- **L-WP12f-12. An owed day whose member read fails does not stop the run.**
+  When a member key read for a day before the range closes `incomplete`
+  (another writer holds the month's lock) or `refused` (the store or the
+  vendor refuses the file), the failure is named and the run ends rc 1, but
+  the run goes on to its range: the member's later days are written, so its
+  month is made without the failed day, which lands later, when a run reads
+  it again, through the versioned repair (L-WP12f-5). Seen by the second
+  agent's check 3 (three filtered writers at once: one named lock failure,
+  rc 1, later days written; one more run of each converged with months
+  repaired 0 there; NOT MEASURED where a later day of the member's month was
+  written first).
+  Holding the member back for the rest of the run would need a close that
+  records a member it did not read, a new close shape; NOT DONE. A day the
+  source does not hold is L-WP12f-10.
 
 ## Cost claims of the /db fix round that name no proof — 12 October 2026
 

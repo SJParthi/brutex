@@ -1251,6 +1251,142 @@ fn retry_refused_reads_again_a_member_key_closed_with_refusals() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The journal of `store` with the LAST `done` of `key` restated as one that
+/// closed with a refusal, the way the importer writes one: the same stats,
+/// `failures=1`, and the vendor's refusal named before the run.
+fn close_with_refusal(store: &Path, key: &str) {
+    let journal = journal_text(store);
+    let head = format!("done {key} ");
+    let clean = journal
+        .lines()
+        .rfind(|line| line.starts_with(&head))
+        .unwrap_or_else(|| panic!("{key}: {journal}"));
+    assert!(clean.contains(" failures=0 "), "{clean}");
+    let (stats, run) = clean.rsplit_once(" run=").unwrap();
+    let refusing = format!(
+        "{} vendor_refused=1 reason=header_unknown run={run}",
+        stats.replace(" failures=0 ", " failures=1 ")
+    );
+    std::fs::write(journal_path(store), format!("{journal}{refusing}\n")).unwrap();
+}
+
+/// `retry_refused` NEVER CANCELS WHAT A DONE DAY BEFORE THE RANGE OWES
+/// (WP-12f check 3, D-4878 item 6). The flag reads again, whole, a key of the
+/// run's own range that closed done with refusals; a day before the range is
+/// never read whole, so a close there that has refusals still owes the
+/// members its scope never covered. Two days are closed `done` under `*` for
+/// the swept surface, the second one with a refusal. A run of the third day
+/// alone under the stored scope WITH the flag (under one named symbol, and
+/// under no filter, where the earlier key is the run's own) used to treat
+/// the second day as one it would read again, skip it unsaid, and make each
+/// new member's month from the first and third days: the later repair then
+/// landed the second day as a new generation. It now reads both owed days
+/// first, in order, under the whole-day key's member keys, and repairs
+/// nothing; the base close with its refusal is not read again or rewritten.
+#[test]
+fn retry_refused_never_cancels_what_a_done_day_before_the_range_owes() {
+    for (name, only) in [("one", vec!["INDIAVIX".to_owned()]), ("none", Vec::new())] {
+        let root = scratch(&format!("wp12f-retry-early-{name}"));
+        four_index_days(&root);
+        let (store, whole) = (root.join("S"), root.join("whole"));
+        let narrow = run_on(&root, ImportKind::Indices, (d1(), d2()), &store, None).unwrap();
+        assert!(narrow.failures.is_empty(), "{:?}", narrow.failures);
+        close_with_refusal(&store, &format!("indices {} *", d2()));
+        let wanted = if only.is_empty() { 2 } else { only.len() };
+        let _earlier = summaries_taken();
+
+        let source = TickStore::new(&root.join("ts")).with_scope(stored());
+        let run = Run {
+            kind: ImportKind::Indices,
+            from: d3(),
+            to: d3(),
+            only: &only,
+            store_root: &store,
+        };
+        let retry = RunOptions {
+            retry_refused: true,
+            ..RunOptions::default()
+        };
+        let late = run_cm_from(&source, &run, retry).unwrap();
+        assert!(late.failures.is_empty(), "{name}: {:?}", late.failures);
+        assert_eq!(
+            (
+                late.days_before_range,
+                late.days_widened,
+                late.members_reopened,
+                late.days_imported,
+                late.months_repaired
+            ),
+            (2, 2, 2 * wanted, 3, 0),
+            "{name}: both owed days first, the one closed with a refusal among them"
+        );
+        let told = summaries_taken();
+        let reach = told_with(&told, "scope_reach_back");
+        assert_eq!(reach.len(), 1, "{name}: said once: {told:?}");
+        assert_eq!(reach[0].text["first_owed"], d1().to_string(), "{name}");
+
+        let journal = journal_text(&store);
+        let filter = if only.is_empty() {
+            "*".to_owned()
+        } else {
+            only.join(",")
+        };
+        let asked = journal
+            .find(&format!("done indices {} {filter} ", d3()))
+            .unwrap_or_else(|| panic!("{name}: {journal}"));
+        for owed in [d1(), d2()] {
+            let member = journal
+                .find(&format!("done indices {owed} *+NSE-INDEX-INDIAVIX "))
+                .unwrap_or_else(|| panic!("{name}: {owed} owed and not read: {journal}"));
+            assert!(member < asked, "{name}: {owed} lands first: {journal}");
+        }
+        assert_eq!(
+            lines_starting(&journal, &format!("done indices {} * ", d2())),
+            2,
+            "{name}: the base close with its refusal is not read again: {journal}"
+        );
+
+        let in_order = run_on(
+            &root,
+            ImportKind::Indices,
+            (d1(), d3()),
+            &whole,
+            Some(stored()),
+        )
+        .unwrap();
+        assert!(in_order.failures.is_empty(), "{:?}", in_order.failures);
+        let members: &[&str] = if only.is_empty() {
+            &["INDIAVIX", "NIFTYIT"]
+        } else {
+            &["INDIAVIX"]
+        };
+        for symbol in members {
+            assert_eq!(
+                month(&store, "INDEX", symbol),
+                month(&whole, "INDEX", symbol),
+                "{name}: {symbol} holds the day closed with a refusal, in order"
+            );
+        }
+        assert!(
+            !tree(&store.join("bars"))
+                .keys()
+                .any(|path| path.to_string_lossy().contains("bar-revisions")),
+            "{name}: no month was repaired"
+        );
+
+        // Again with the flag: nothing is owed any more and nothing is read.
+        let _told = summaries_taken();
+        let again = run_cm_from(&source, &run, retry).unwrap();
+        assert_eq!(
+            (again.days_before_range, again.files, again.months_repaired),
+            (0, 0, 0),
+            "{name}"
+        );
+        assert_eq!(journal_text(&store), journal, "{name}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// One invented stocks day: RELIANCE's own file, a share whose only file is
 /// its trade-for-trade one, and a share holding both.
 fn spell_day(d: Day) -> DayPlan {
@@ -1487,8 +1623,15 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
     let mut shared: Option<Arc<HashSet<String>>> = None;
     for d in &all {
         let key = format!("stocks {d} *");
+        let asked = Asked {
+            key: &key,
+            day: *d,
+            remembered: &key,
+            names: None,
+            early: false,
+        };
         let at = std::time::Instant::now();
-        let owed = ctx.owed(&key, &key);
+        let owed = ctx.owed(&asked);
         nanos.push(at.elapsed().as_nanos());
         let Owed::Probe(beyond) = owed else {
             panic!("{d}: a close with no scope owes the members beyond the swept surface");
@@ -1534,8 +1677,15 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
     let mut nanos = Vec::with_capacity(all.len());
     for d in &all {
         let key = format!("stocks {d} *");
+        let asked = Asked {
+            key: &key,
+            day: *d,
+            remembered: &key,
+            names: None,
+            early: false,
+        };
         let at = std::time::Instant::now();
-        let owed = ctx.owed(&key, &key);
+        let owed = ctx.owed(&asked);
         nanos.push(at.elapsed().as_nanos());
         assert!(matches!(owed, Owed::Nothing), "{d}");
     }

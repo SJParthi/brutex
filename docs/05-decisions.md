@@ -68035,10 +68035,22 @@ made six index series from the 12 special sessions alone.
    did not want. A member two keys owe is read once, and the day is counted
    and told once. So no member's month is made from a later day while a day
    of that month closed `done` by ANY run owes it, under a filter
-   (`--stored`, a named symbol) as under none. At most 30 days. A day no run
-   closed owes nothing, and a key closed under names owes nothing it did not
-   name (`docs/06-limits.md`, L-WP12f-7).
-7. `retry_refused` reads again a member key closed done with refusals.
+   (`--stored`, a named symbol) as under none, with `retry_refused` as
+   without it (check 3: a close with refusals before the range is asked like
+   any other, see item 7). At most 30 days. A day not closed `done` owes
+   nothing, and a key closed under names owes nothing it did not name
+   (`docs/06-limits.md`, L-WP12f-7). The one way a later day still lands
+   first: the owed day's own member read fails (a held month lock, a store
+   refusal, a file the vendor refuses). That failure is named and the run
+   ends rc 1, but it does not stop the run; the member's later days of the
+   range are written and the failed day lands later through the versioned
+   repair (L-WP12f-12).
+7. `retry_refused` reads again a member key closed done with refusals. A
+   BASE key closed done with refusals is read again whole only inside the
+   run's range (`admit`); before the range the flag changes nothing about
+   what that day owes, which is asked as for any other done day (check 3 of
+   WP-12f, 12 Oct 2026; before this, the flag made such a day owe nothing
+   and the month was made from the later days, unsaid).
 8. A share's `.BE` or `.BZ` day file is the share's own trading day, filed
    under the share's key; the member is `NSE-CASH-<share>.<series>`. A day
    holding both a share's own file and a series file refuses both by name.
@@ -68062,7 +68074,8 @@ an index file (DB-B18), the six stem hand-overs (DB-B12).
 `a_run_starting_past_owed_days_of_its_month_reads_them_first`,
 `a_filtered_run_reads_first_what_the_whole_day_key_owes_it`,
 `a_key_closed_under_names_owes_only_what_it_named`,
-`retry_refused_reads_again_a_member_key_closed_with_refusals`.
+`retry_refused_reads_again_a_member_key_closed_with_refusals`,
+`retry_refused_never_cancels_what_a_done_day_before_the_range_owes`.
 
 ### D-4928 — The day ledger gains four optional halt and flat-run fields; `/dayflags.json` names a minute-sampled index day and counts the bars inside a halt — 2026-10-12
 

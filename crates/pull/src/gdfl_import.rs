@@ -3016,11 +3016,23 @@ impl Ctx<'_> {
     /// it for this run's filter is remembered under a key of that pair
     /// ([`Asked::remembered`]), never under the key itself, whose own
     /// examination is its own filter's to write.
-    fn owed(&self, key: &str, remembered: &str) -> Owed {
+    ///
+    /// A KEY CLOSED DONE WITH REFUSALS UNDER `retry_refused` OWES NOTHING
+    /// ONLY WHERE THE RUN READS ITS DAY AGAIN WHOLE: the run's own key inside
+    /// its range, which [`admit`] reads again under the run's scope. A day
+    /// before the range is never read whole (the run was not asked for it),
+    /// so there its close still owes what its scope never covered and is
+    /// asked like any other done day. Answering `Nothing` there let a run
+    /// with the flag make each new member's month from the later days while
+    /// that day still owed it, unsaid (check 3 of WP-12f, D-4878 item 6).
+    fn owed(&self, asked: &Asked<'_>) -> Owed {
+        let (key, remembered) = (asked.key, asked.remembered);
         let Some(scoped) = &self.scoped else {
             return Owed::Nothing;
         };
-        let retried = self.options.retry_refused && self.journal.with_refusals.contains(key);
+        let read_whole = !asked.early && asked.own();
+        let retried =
+            read_whole && self.options.retry_refused && self.journal.with_refusals.contains(key);
         if !self.journal.done.contains(key) || retried {
             return Owed::Nothing;
         }
@@ -5329,7 +5341,7 @@ where
     F: FnMut(Day, &mut DayFiler<'_>) -> (DayRead, DayExtras),
 {
     let (key, day) = (asked.key, asked.day);
-    let (examined, members) = match ctx.owed(key, asked.remembered) {
+    let (examined, members) = match ctx.owed(asked) {
         Owed::Nothing => return Ok(false),
         Owed::Pending(members) if asked.own() => (false, Some(members)),
         Owed::Pending(members) => {
