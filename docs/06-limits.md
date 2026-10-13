@@ -16630,28 +16630,80 @@ BUILT; what that costs until it is, is the disk item below.
   answers NOT KNOWN. Paid once per journal file, not per start: the next
   start reads the index.
 - **A record the scan reads and cannot decode makes the answer NOT KNOWN**
-  unless it lies before the opening record of the run the readable records
-  leave open (it can then be neither that run's close nor a newer run). So
+  unless it lies STRICTLY before the opening record of the run the readable
+  records leave open (it can then not be that run's close, so that run is
+  open; damage AT that opening record is NOT KNOWN, repair 3). Those before
+  it are named on the run's document (`undecodableBefore`, `undecodable`)
+  and its ERROR line. Such a record may still be the opening record that a
+  LATER closing record belongs to where the walk paired that close by its
+  window alone or with no run it read; the run the walk closed with it may
+  then be open and newer than the one named, and the document says so
+  (`newerMayBeOpen: true`, repair 4): which run is the newest open one is
+  then not known, and the one named is open either way. So
   one damaged record among the newest 800 keeps the answer NOT KNOWN until
   800 newer records are written, and one damaged run record until 64 newer
   run records are: nothing is inferred about what a damaged record was.
 - **An index entry that cannot be read makes the run records before the
-  scan unknown** (a run record may be missing from the index). The scan does
+  scan unknown** (a run record may be missing from the index), and so does an
+  index that cannot be read or built: the answer is then never "clean"
+  (repair 3). With no run left open in the newest 800 records it is NOT
+  KNOWN, whatever run records they hold; a run they read opened and unclosed
+  is reported with the reason (`olderUnread`), since an OLDER open run would
+  not be seen; a run known only through a restated head is NOT KNOWN. So a
+  store whose `audit/` takes no write and has no index answers NOT KNOWN at
+  every start once its journal is longer than 800 records. The scan does
   NOT detect an index whose `runs` file lost WHOLE entries: the cover holds
   no count of them, so such an index reads as a whole one and a run opened
   behind the newest 800 records is then not seen (WP-33c's file format).
 - **The restart answer is the state at site load.** It is not refreshed
   while the process lives: a run another process opens afterwards is not on
   `/pull/run.json` until the next start.
-- **Only a spot-route run writes an opening record** (`RunLedger::open`). A
-  `/pull/fno` leg cut short by a restart leaves no opening record and reads
-  "clean"; NOT DONE in WP-62.
-- **With no usable index and no run record in the newest 800 records the
-  answer is NOT KNOWN**, never a guess: `/pull/run.json` says
+- **Both pull routes write an opening record** (repair 5): the spot route
+  since D-3341 (`RunLedger::open`), and the expired-F&O walk now first
+  (`server::fno_opened`; source the underlying, the walk's window), closed
+  by the outcome record every arm of the walk writes, none of which is
+  `Refused`. A walk cut short by a restart reads INTERRUPTED naming its
+  underlying and window. It writes no member-failure records, so its count
+  of failures is always 0; the outcome record, when it lands, carries them.
+  Walks before this build wrote their outcome record alone: such a record
+  is a close with no opening record, paired by its window alone (below). A
+  request refused before the walk (a malformed form, a seat another pull
+  holds) opens nothing.
+- **With no usable index and no run left open in the newest 800 records
+  the answer is NOT KNOWN**, never a guess: `/pull/run.json` says
   `restart.state = "not_known"` with the index's reason.
+- **A later run of the same window and source that closes supersedes an
+  interrupted one** (repair 3): the journal is append-only and nothing
+  writes a closing record for the run cut short; the walk reads the later
+  closing record as covering it, because the same pull was made again and
+  finished. A run left open whose window or source no later closed run
+  shares stays INTERRUPTED until its opening record lies behind the scan
+  and the 64 run records before it. A close paired by its window alone
+  supersedes nothing, and neither does a close NOT STARTED (repair 5: it
+  asked the vendor for nothing). A FAILED close does supersede: that run
+  asked the vendor for the same window, and what it could not land is on its
+  own record (its failures, or the halt that stopped it), so what is still
+  owed is what IT says, not the older run. An expired-F&O walk's source is its
+  underlying, not its feed, so a walk of the same underlying and window on
+  another HTTP feed that closes supersedes one cut short.
+- **A closing record is paired with its run by window and source, not by
+  ordinal**: it does not name its opening record (its note holds the run's
+  first failure, and the 256-byte record has no field that could hold it). Two
+  runs of the same window and source in flight at once (a server run and a
+  `cli` pull) cannot be told apart: a close is paired with the newer one and
+  the supersede rule then reads both as closed, so a run of that pair cut
+  short is not reported. Before the supersede rule the same pairing named the
+  wrong run of the two. Exact pairing needs the closing record to carry its
+  opening ordinal, which is a change to the record format (`audit.rs`).
 - **An interrupted run's failure count is a floor past the scan**
-  (`failuresWhole: false`): only the failures inside the newest 800 records
-  are counted.
+  (`failuresWhole: false`): the failures among the records read are
+  counted, the newest 800 and any filed fault read again through the index
+  that now decodes.
+- **The index's `faults` file is read whole** (8 bytes per filed fault, in
+  `audit::Indexed::fault_ordinals`), and every filed fault inside the walk's
+  span is held once more as one ordinal and a borrowed sentence (32 bytes, no
+  allocation). Bounded by the journal's filed faults, not by a constant; a
+  healthy journal files none (the operator's index has no `faults` file).
 - **A closing record does not name its opening record.** A run that reached
   no instrument is closed under its target's name, so it is paired with the
   newest open run of its window. A `NotStarted` record of ANOTHER feed or
@@ -16666,15 +16718,25 @@ BUILT; what that costs until it is, is the disk item below.
   refused write and also of an instrument pulled again whose bars are all
   held and whose months have a standing gap, so those pay it too. Measured
   on this machine's scratch volume by `server::tests::pull_runtime_costs`;
-  NOT MEASURED on the store's own drive. The probe's name is unlinked and
-  then opened with `O_NOFOLLOW`; a DIRECTORY at `audit/.store-probe` cannot
-  be unlinked and reads as a store fault, by name.
+  Measured on the store's own drive by the third check (p50 1.78 ms, p99
+  8.92 ms, max 16.09 ms, n=200, debug). The probe's name is unlinked and then
+  opened with `O_NOFOLLOW`; an unlink that fails for any reason but "nothing
+  there" (a DIRECTORY at `audit/.store-probe`, a read-only `audit/` holding a
+  stale probe file) reads as a store fault, by name (repair 3). A member
+  refused whole at a store path is probed too, handed rows or not.
 - **A store path that refuses every member whole stops the run after eight
-  in a row** (`STORE_REFUSED_BREAKER`), not three: `pull::ingest::Failure`
+  refusals with no bar landed between them** (`STORE_REFUSED_BREAKER`), not
+  three: `pull::ingest::Failure`
   carries no type, so a census that will not open cannot be told from one
   another ingest holds for a moment, and the count is what separates them.
   Eight is this build's policy, NOT MEASURED against a contended run; up to
   seven members' requests (and the lanes fetched ahead) are spent first.
+  Both store streaks are reset ONLY by a member that committed a bar
+  (repair 3): a member handed no rows, one with an instrument's failure
+  beside the store's, an empty answer, or one the other streak counts holds
+  them, so members that land nothing between the refusals cannot keep the
+  run going past either breaker. The stop sentence therefore says "with no
+  instrument writing a bar since the first of them", not "in a row".
 - **A write the store refuses for ONE file while it takes the probe's** (a
   permission on one directory) is named for its instrument and classed
   standing: `pull::ingest::Failure` carries no type, only the name and the

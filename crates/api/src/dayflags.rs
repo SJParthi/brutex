@@ -3602,6 +3602,15 @@ fn calendar_json(
         "owed_minutes": open.then(|| phases.minutes(Phase::Continuous)),
         "halted_minutes": phases.minutes(Phase::Halted).saturating_add(phases.minutes(Phase::ReopeningAuction)),
         "unverified_minutes": open.then(|| phases.minutes(Phase::Unverified)),
+        // A MEASURED, UNEXPLAINED SHORT DAY (WP-62 repair 3; DB-G47): the
+        // vendors' own answers lack minutes the session owes. It classifies
+        // nothing -- `owed_minutes` is unchanged -- and says what was read.
+        "short_day": record.short.map(|short| json!({
+            "standing": "measured; cause UNVERIFIED; the minutes stay owed",
+            "nifty_absent": { "from": hm(u32::from(short.nifty_absent.from)), "to": hm(u32::from(short.nifty_absent.to)) },
+            "gdfl_checked": short.gdfl_checked,
+            "evidence": short.evidence,
+        })),
     });
     let halt = record.halt.map(|halt| {
         let seconds = halt.seconds(venue);
@@ -4715,6 +4724,38 @@ mod tests {
     // EVERY FIXTURE BELOW IS INVENTED. Prices are a few rupees, volumes are
     // small round numbers, and no row is a vendor's: the shapes are the
     // findings', the numbers are not the market's.
+
+    /// **A MEASURED SHORT DAY IS SAID, AND STILL OWES ITS MINUTES** (WP-62
+    /// repair 3; DB-G47): 2019-08-02 and 2022-03-07 read as plain sessions
+    /// with no word. The day's calendar object now carries the calendar of
+    /// record's entry and its evidence; `owed_minutes` is the full session's.
+    #[test]
+    fn a_measured_short_day_is_on_the_calendar_object_and_still_owes_its_minutes() {
+        let day = |y, m, d| i64::from(Day::new(y, m, d).expect("a day").days_from_epoch());
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2019, 8, 2)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"]["nifty_absent"]["from"], "13:59");
+        assert_eq!(calendar["short_day"]["gdfl_checked"], true);
+        assert_eq!(calendar["owed_minutes"], 375);
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2022, 3, 7)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"]["nifty_absent"]["to"], "10:24");
+        assert_eq!(calendar["short_day"]["gdfl_checked"], true);
+        assert_eq!(calendar["short_day"]["nifty_absent"]["from"], "10:22");
+        assert_eq!(calendar["owed_minutes"], 375);
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2022, 3, 8)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"], Value::Null);
+    }
 
     /// A store root of its own.
     fn root_of(name: &str) -> PathBuf {

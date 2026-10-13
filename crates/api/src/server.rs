@@ -3779,12 +3779,14 @@ pub(crate) struct BrokerRun {
     pub store_unavailable: Option<String>,
     /// Instruments the pull order left out of this run by name (DB-B27).
     pub withheld: usize,
-    /// The store breaker's streak (DB-B35): instruments in a row that landed
-    /// nothing on a store that would not take a write.
+    /// The store breaker's streak (DB-B35): instruments that landed nothing
+    /// on a store that would not take a write, since the last instrument that
+    /// wrote a bar ([`store_streak_next`]).
     store_fault_streak: u32,
-    /// The second store streak: instruments in a row the store refused whole
-    /// at a path of its own while its probe write succeeded
-    /// ([`refused_at_store_path`]).
+    /// The second store streak: instruments the store refused whole at a
+    /// path of its own while its probe write succeeded
+    /// ([`refused_at_store_path`]), since the last instrument that wrote a
+    /// bar.
     store_refused_streak: u32,
     /// How many member findings about days past the calendar of record were
     /// folded into the run's one line (DB-B25).
@@ -3862,15 +3864,17 @@ fn names_the_store(failure: &pull::ingest::Failure) -> bool {
     std::path::Path::new(&failure.instrument).is_absolute()
 }
 
-/// How many instruments in a row may land nothing on a store that will not
-/// take a write before the run stops asking the vendor: **3**, the vendor
+/// How many instruments may land nothing on a store that will not take a
+/// write, with no instrument writing a bar between them ([`store_streak_next`]),
+/// before the run stops asking the vendor: **3**, the vendor
 /// breaker's own count ([`breaker_trips`]). With [`BROKER_LANES`] fetched
 /// ahead, the requests spent past the fault are bounded by it (DB-B35).
 const STORE_BREAKER: u32 = 3;
 
-/// How many instruments in a row the store may refuse WHOLE at a path of its
-/// own, while its probe write succeeds, before the run stops asking the
-/// vendor: **8**.
+/// How many instruments the store may refuse WHOLE at a path of its own,
+/// while its probe write succeeds and with no instrument writing a bar between
+/// them ([`store_streak_next`]), before the run stops asking the vendor:
+/// **8**.
 ///
 /// `pull::ingest` refuses a whole member under the census's path for four
 /// reasons that need not clear by themselves (a census that cannot be
@@ -3878,18 +3882,18 @@ const STORE_BREAKER: u32 = 3;
 /// that moved, one that will not load) and for one that does (another
 /// ingest holds the lock, and lets go between its own members). The failure
 /// carries no type to tell them apart, so the count is what does: a held
-/// lock is expected to interleave, and eight members in a row refused at
-/// one path is taken as a path that will not clear. The count is this
+/// lock is expected to interleave, and eight members refused at a store
+/// path with none landing a bar between them is taken as a path that will
+/// not clear. The count is this
 /// build's policy; it is NOT MEASURED against a contended run. Without it
 /// such a leg was asked again on every pass to the ceiling (208 members in a
 /// row and no stop, measured by a second agent on the build before).
 const STORE_REFUSED_BREAKER: u32 = 8;
 
 /// The store path `done` was refused whole at, with the store's reason:
-/// `Some` only for a member that was handed rows, committed none, and whose
-/// every failure is named for a store path ([`names_the_store`]).
+/// `Some` only for a member refused whole at the store ([`refused_whole`]).
 fn refused_at_store_path(done: &pull::ingest::Ingested) -> Option<String> {
-    if !landed_nothing(done) || !done.failures.iter().all(names_the_store) {
+    if !refused_whole(done) {
         return None;
     }
     done.failures
@@ -3901,13 +3905,25 @@ fn refused_at_store_path(done: &pull::ingest::Ingested) -> Option<String> {
 /// reason, and that the drive itself took a write.
 fn store_refused_sentence(refusal: &str, streak: u32, done: usize, total: usize) -> String {
     format!(
-        "STORE UNAVAILABLE — {streak} instruments in a row were answered by the vendor and the \
-         store refused each whole, the last at {refusal}. The store's own probe write succeeded, \
+        "STORE UNAVAILABLE — {streak} instruments were answered by the vendor and the store \
+         refused each whole, with no instrument writing a bar since the first of them; the last \
+         was refused at {refusal}. The store's own probe write succeeded, \
          so the drive is there and has room: what refuses is that path. The run stopped after \
          {done} of {total} instruments rather than spend requests on answers it cannot keep. \
          Nothing already in the store is affected; if another import holds that census, pull \
          again when it has finished, otherwise the path named is what to look at."
     )
+}
+
+/// Whether `done` committed no bar and EVERY failure it reports is named for
+/// a store path ([`names_the_store`]): refused whole by the store, whether or
+/// not the vendor handed it rows. A member handed no rows and refused by the
+/// same census is the same refusal (repair 3): it was read as "not
+/// answered" and reset the streak [`STORE_REFUSED_BREAKER`] counts.
+fn refused_whole(done: &pull::ingest::Ingested) -> bool {
+    done.bars_committed == 0
+        && !done.failures.is_empty()
+        && done.failures.iter().all(names_the_store)
 }
 
 /// Whether a member that was handed rows committed none and said why: the
@@ -3971,7 +3987,22 @@ fn store_fault(root: &std::path::Path) -> Option<String> {
     // unlinks the name (a link's target is untouched) and `O_NOFOLLOW`
     // refuses a link put there in between; a directory at the name cannot be
     // unlinked and is answered as the fault it is, by name.
-    let _stale = std::fs::remove_file(&probe);
+    //
+    // AN UNLINK THAT FAILS IS THE FAULT, BY NAME (repair 3). It was ignored,
+    // and in a read-only `audit/` that still held a stale probe file the open
+    // below truncated and rewrote THAT file and answered "healthy", although
+    // the directory takes no new file. Only "nothing was there" is fine.
+    match std::fs::remove_file(&probe) {
+        Ok(()) => {}
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+        Err(why) => {
+            return Some(format!(
+                "{}: {why} (what holds the probe's name could not be unlinked, so no new file \
+                 was proved to be taken)",
+                probe.display()
+            ));
+        }
+    }
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -3988,19 +4019,34 @@ fn store_fault(root: &std::path::Path) -> Option<String> {
         .map(|why| format!("{}: {why}", probe.display()))
 }
 
-/// The store breaker's streak after one more landed member: one longer when
-/// the member landed nothing and the store would not take a write, and back
-/// to zero otherwise, for the reason [`breaker_next`] resets.
-const fn store_breaker_next(streak: u32, fault: bool) -> u32 {
-    if fault { streak.saturating_add(1) } else { 0 }
+/// A store streak after one more landed member: one longer when the member
+/// is one the streak counts (`hit`), back to zero ONLY when the member
+/// committed a bar (`committed`), and unchanged otherwise (repair 3).
+///
+/// It was "zero otherwise", so anything that was not a hit reset it: a
+/// member handed no rows, one with an instrument's failure beside the
+/// store's, and -- the two streaks being asked in turn -- a member the OTHER
+/// streak counts. A drive that failed the probe on every other member while
+/// the census path refused the rest tripped neither breaker. What proves the
+/// store takes a write is a member that landed, so that, and only that,
+/// starts the count again.
+const fn store_streak_next(streak: u32, hit: bool, committed: bool) -> u32 {
+    if hit {
+        streak.saturating_add(1)
+    } else if committed {
+        0
+    } else {
+        streak
+    }
 }
 
 /// The stop a tripped store breaker records, naming what the probe found and
 /// how much of the run was not asked for.
 fn store_unavailable_sentence(fault: &str, streak: u32, done: usize, total: usize) -> String {
     format!(
-        "STORE UNAVAILABLE — {streak} instruments in a row were answered by the vendor and \
-         none of their bars could be written: {fault}. The run stopped after {done} of {total} \
+        "STORE UNAVAILABLE — {streak} instruments were answered by the vendor and none of their \
+         bars could be written, with no instrument writing a bar since the first of them: \
+         {fault}. The run stopped after {done} of {total} \
          instruments rather than spend requests on answers it cannot keep. Nothing already in \
          the store is affected; check that the store's drive is mounted and has room, then pull \
          again."
@@ -4397,12 +4443,16 @@ impl BrokerRun {
         store_root: &std::path::Path,
         place: (usize, usize),
     ) {
-        let fault = if landed_nothing(&landed_one) {
+        // A member refused whole at a store path is probed too, handed rows
+        // or not, so "the probe write succeeded" is said only of a probe that
+        // ran (repair 3).
+        let fault = if landed_nothing(&landed_one) || refused_whole(&landed_one) {
             store_fault(store_root)
         } else {
             None
         };
-        let streak = store_breaker_next(self.store_fault_streak, fault.is_some());
+        let committed = landed_one.bars_committed > 0;
+        let streak = store_streak_next(self.store_fault_streak, fault.is_some(), committed);
         self.store_fault_streak = streak;
         // THE STORE TOOK THE PROBE'S WRITE AND STILL REFUSED THIS MEMBER
         // WHOLE at a path of its own: counted on a streak of its own, so a
@@ -4412,7 +4462,8 @@ impl BrokerRun {
             .is_none()
             .then(|| refused_at_store_path(&landed_one))
             .flatten();
-        let refused_streak = store_breaker_next(self.store_refused_streak, refused.is_some());
+        let refused_streak =
+            store_streak_next(self.store_refused_streak, refused.is_some(), committed);
         self.store_refused_streak = refused_streak;
         self.absorb_member(landed, landed_one, fault.is_some());
         if let Some(fault) = fault.filter(|_| streak >= STORE_BREAKER) {
@@ -6497,11 +6548,18 @@ fn settled_today(
                  ends cannot be established; it is askable from tomorrow",
             ));
         }
+        // OUTSIDE THE RECORD, IN EITHER DIRECTION (repair 5): `exchange_kind_of`
+        // answers this before the record's first day as well as after its
+        // last, and the sentence said "past the end" of both. A day before it
+        // is today only on a clock that is years wrong, which is exactly when
+        // the sentence must not mislead.
         DayKind::Unmeasured => {
-            return Err(String::from(
-                "it is past the end of the calendar of record, so whether a session is \
-                 still to run today (an evening Muhurat on a weekday holiday is one) \
-                 cannot be established; it is askable from tomorrow",
+            return Err(format!(
+                "it is outside the calendar of record, which runs {}..{}, so whether a \
+                 session is still to run today (an evening Muhurat on a weekday holiday is \
+                 one) cannot be established; it is askable from tomorrow",
+                record_day_text(pull::calendar::SOURCED_FIRST_DAY),
+                record_day_text(pull::calendar::SOURCED_LAST_DAY),
             ));
         }
         DayKind::Open(session) if session == Session::full() => match venue_close {
@@ -6537,6 +6595,15 @@ fn settled_today(
             minute % 60,
         ))
     }
+}
+
+/// A calendar-of-record bound (days since the epoch) as `YYYY-MM-DD`, or as
+/// its number when it is no date.
+fn record_day_text(days: i64) -> String {
+    u32::try_from(days)
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .map_or_else(|| days.to_string(), |day| day.to_string())
 }
 
 /// A [`pull::chain::Discovery`] that charges the rate governor before EVERY
@@ -11021,6 +11088,60 @@ fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, Strin
     facts
 }
 
+/// The note of an expired-F&O walk's opening record: it fits the record's
+/// note field whole, so it is never cut.
+const FNO_OPENED_NOTE: &str = "expired F&O walk opened; its outcome record closes it";
+
+/// Opens an expired-F&O walk in `journal` (DB-B34, repair 5): an
+/// [`audit::Outcome::Opened`] record of the walk's own scope, source (the
+/// underlying) and window, which the outcome record every arm of
+/// [`fno_walk`] writes ([`FnoPage::say_counted`]) closes, paired by the same
+/// window and source (`pullrun::interrupted_in`). Answers the receipt's fact.
+///
+/// # Why
+///
+/// The walk wrote ONE record, at its end. A walk cut short by a restart --
+/// a month of discovery and a cross product of bar requests, held on the
+/// feed's seat for its whole length -- left nothing in the journal, so the
+/// restart scan answered "clean" of it. The spot run has written its
+/// opening record first since D-3341 (`RunLedger::open`); the walk now does
+/// the same. Every arm of the walk closes with an outcome that closes a run
+/// (`NotStarted`, `Failed`, `Empty`, `Stored`): none of them is `Refused`,
+/// the one outcome the scan does not read as a close (a request refused
+/// before any run began).
+///
+/// # A journal that refuses it
+///
+/// The walk still runs and the receipt says the restart scan would not see
+/// it cut short; [`audit::Journal::append`] logs the refusal (it always has),
+/// and the outcome record is attempted as before.
+fn fno_opened(
+    journal: &audit::Journal,
+    asked: &ingest::FnoRequest,
+    now: std::time::SystemTime,
+) -> (&'static str, String) {
+    let head = audit::Record::refused(
+        audit::Scope::Fno,
+        audit::Outcome::Opened,
+        now,
+        asked.underlying.as_str(),
+        FNO_OPENED_NOTE,
+    )
+    .with_window(asked.window);
+    match journal.append(&head) {
+        Ok(()) => (
+            "Opened in the journal",
+            "yes — its outcome record (Recorded) closes it, so a restart during the walk is \
+             seen at the next start"
+                .to_owned(),
+        ),
+        Err(why) => (
+            "Opened in the journal",
+            format!("NO — a restart during this walk would not be seen at the next start. {why}"),
+        ),
+    }
+}
+
 async fn fno_walk(
     asked: &ingest::FnoRequest,
     today: Day,
@@ -11037,6 +11158,9 @@ async fn fno_walk(
         broker,
     };
     let mut facts = fno_facts(asked, today);
+    // THE WALK IS OPENED IN THE JOURNAL BEFORE ANY ARM (DB-B34, repair 5), so
+    // every arm's outcome record closes it and a walk cut short is seen.
+    facts.push(fno_opened(journal, asked, now));
 
     // THE TRANSPORT DECIDES THE PATH, AND IT IS ASKED FIRST.
     //
@@ -19540,10 +19664,24 @@ mod tests {
         );
         let beyond = settled_today(DayKind::Unmeasured, Some(close), 23 * 60 + 59)
             .expect_err("past the record");
+        // Outside the record in either direction, and its bounds named: a day
+        // BEFORE it was called "past the end" (repair 5).
         assert!(
-            beyond.contains("past the end of the calendar of record"),
+            beyond.contains("outside the calendar of record, which runs 2018-01-01..2026-12-31"),
             "{beyond}"
         );
+        assert!(!beyond.contains("past the end"), "{beyond}");
+        assert_eq!(
+            exchange_kind_of(pull::calendar::SOURCED_FIRST_DAY - 1),
+            DayKind::Unmeasured,
+            "the day before the record is outside it too"
+        );
+        assert_eq!(
+            exchange_kind_of(pull::calendar::SOURCED_LAST_DAY + 1),
+            DayKind::Unmeasured
+        );
+        // A bound that is no date is said as its number, never a panic.
+        assert_eq!(record_day_text(-1), "-1");
     }
 
     /// **THE STORE IS ASKED DIRECTLY WHETHER IT TAKES A WRITE** (DB-B35): a
@@ -19607,15 +19745,20 @@ mod tests {
         );
         let mut streak = 0;
         for _ in 0..STORE_BREAKER - 1 {
-            streak = store_breaker_next(streak, true);
+            streak = store_streak_next(streak, true, false);
             assert!(streak < STORE_BREAKER);
         }
         assert_eq!(
-            store_breaker_next(streak, false),
+            store_streak_next(streak, false, true),
             0,
             "one good landing resets it"
         );
-        assert_eq!(store_breaker_next(streak, true), STORE_BREAKER);
+        assert_eq!(
+            store_streak_next(streak, false, false),
+            streak,
+            "a member that landed nothing and is no hit holds it (repair 3)"
+        );
+        assert_eq!(store_streak_next(streak, true, false), STORE_BREAKER);
         let said = store_unavailable_sentence("disk full", 3, 9, 208);
         assert!(
             said.starts_with("STORE UNAVAILABLE") && said.contains("after 9 of 208"),
@@ -19770,9 +19913,10 @@ mod tests {
             .1;
         let absorb = &absorb[..absorb.find("\n    }\n").expect("it has an end")];
         for needle in [
-            "if landed_nothing(&landed_one)",
+            "if landed_nothing(&landed_one) || refused_whole(&landed_one)",
             "store_fault(store_root)",
-            "store_breaker_next(self.store_fault_streak, fault.is_some())",
+            "store_streak_next(self.store_fault_streak, fault.is_some(), committed)",
+            "store_streak_next(self.store_refused_streak, refused.is_some(), committed)",
             "streak >= STORE_BREAKER",
             "self.store_unavailable = Some(fault)",
         ] {
@@ -20053,11 +20197,13 @@ mod tests {
             Some(RetryClass::Transient),
             "the leg stays owed: a store that takes the next write lands it"
         );
-        // The store recovers and the next member has a real gap: the streak
-        // resets, the gap is standing, and the leg is STILL owed for the two
-        // writes the store refused.
+        // The store recovers and the next member has a real gap: the gap is
+        // standing, and the leg is STILL owed for the two writes the store
+        // refused. The streak HOLDS (repair 3): that member committed no
+        // bar, and only a member that landed proves the store takes its
+        // writes (a_store_streak_is_reset_only_by_a_member_that_landed).
         run.absorb_landed(&landed, member("RELIANCE", gap), &root, (3, 3));
-        assert_eq!(run.store_fault_streak, 0);
+        assert_eq!(run.store_fault_streak, 2);
         assert_eq!(run.retry, tally(0, 1, 2));
         assert_eq!(class_of(&run), Some(RetryClass::Transient));
 
@@ -20144,10 +20290,10 @@ mod tests {
     /// whole while the probe's own write succeeded, so the first breaker's
     /// streak went back to zero every time, the failures were the store's,
     /// the leg stayed owed, and it was asked again to the pass ceiling: 208
-    /// members in a row and no stop. Eight in a row now stop it, naming the
-    /// path and the reason; seven do not, a member that lands in between
-    /// starts the count again, and a refusal that also names an instrument
-    /// is not one of these.
+    /// members in a row and no stop. Eight now stop it, naming the path and
+    /// the reason; seven do not, a member that lands a bar in between starts
+    /// the count again, and a refusal that also names an instrument is not
+    /// one of these.
     #[test]
     fn a_store_path_that_refuses_every_member_stops_the_run_naming_the_path() {
         let root = crate::scratch::path("wp62-store-path-refused");
@@ -20176,7 +20322,7 @@ mod tests {
             run.absorb_landed(&landed, refused(), &root, (at as usize, 208));
             assert_eq!(run.store_refused_streak, at);
             assert_eq!(run.store_fault_streak, 0, "the probe's write is taken");
-            assert_eq!(run.store_unavailable, None, "{at} in a row do not stop it");
+            assert_eq!(run.store_unavailable, None, "{at} refusals do not stop it");
         }
         // A MEMBER THAT LANDS starts the count again.
         let mut landed_one = refused();
@@ -20191,10 +20337,11 @@ mod tests {
             .failures
             .push(pull::ingest::Failure::new("RELIANCE", "a gap"));
         assert_eq!(refused_at_store_path(&mixed), None);
-        // A member that was handed no rows was not answered by the vendor.
+        // A member handed no rows and refused by the same census is the
+        // same refusal (repair 3; it was None, and reset the count).
         let mut unanswered = refused();
         unanswered.rows_read = 0;
-        assert_eq!(refused_at_store_path(&unanswered), None);
+        assert!(refused_at_store_path(&unanswered).is_some());
 
         for at in 1..=STORE_REFUSED_BREAKER {
             assert_eq!(run.store_unavailable, None);
@@ -20203,7 +20350,14 @@ mod tests {
         let fault = run.store_unavailable.clone().expect("the run is stopped");
         assert!(fault.contains("census.bin"), "{fault}");
         let said = run.stopped.clone().expect("a stop sentence");
-        assert!(said.starts_with("STORE UNAVAILABLE — 8 instruments in a row"));
+        assert!(said.starts_with("STORE UNAVAILABLE — 8 instruments were answered"));
+        // "In a row" was not true once a member that writes nothing and is no
+        // refusal holds the count: the sentence says what the count is.
+        assert!(!said.contains("in a row"), "{said}");
+        assert!(
+            said.contains("with no instrument writing a bar since the first of them"),
+            "{said}"
+        );
         assert!(
             said.contains("the census lock is not a regular file"),
             "{said}"
@@ -20213,6 +20367,115 @@ mod tests {
         // Every one of them was the store's, never "what the vendor holds".
         assert_eq!(run.retry.standing, 0);
         assert_eq!(run.retry.store, 15);
+    }
+
+    /// **ONLY A MEMBER THAT LANDED RESETS A STORE STREAK, AND THE TWO DO NOT
+    /// RESET EACH OTHER** (DB-B26, DB-B35, repair 3; the third check's
+    /// follow-ups 3 and 4). A member handed no rows and refused at the same
+    /// census, one with an instrument's failure beside the store's, an empty
+    /// answer, and a member the OTHER streak counts each reset the count, so
+    /// a drive that failed the probe on every other member while the census
+    /// path refused the rest tripped neither breaker.
+    #[test]
+    fn a_store_streak_is_reset_only_by_a_member_that_landed() {
+        let root = crate::scratch::path("wp62-r3-store-streaks");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("audit")).expect("mkdir");
+        let gone = root.join("unplugged-drive");
+        let census = root.join("zerodha").join("census.bin");
+        let landed = answered_window("RELIANCE");
+        let at_path = |rows_read: usize| pull::ingest::Ingested {
+            members: 1,
+            rows_read,
+            failures: vec![pull::ingest::Failure::new(
+                census.display().to_string(),
+                "the census lock is not a regular file",
+            )],
+            ..pull::ingest::Ingested::default()
+        };
+        let mut run = BrokerRun::default();
+        run.absorb_landed(&landed, at_path(375), &root, (1, 208));
+        run.absorb_landed(&landed, at_path(0), &root, (2, 208));
+        assert_eq!(
+            run.store_refused_streak, 2,
+            "a no-row refusal at the path counts"
+        );
+        let mut mixed = at_path(375);
+        mixed
+            .failures
+            .push(pull::ingest::Failure::new("RELIANCE", "a gap"));
+        run.absorb_landed(&landed, mixed, &root, (3, 208));
+        run.absorb_landed(&landed, pull::ingest::Ingested::default(), &root, (4, 208));
+        assert_eq!(
+            run.store_refused_streak, 2,
+            "a mixed refusal and an empty answer hold the count"
+        );
+        // A probe fault starts the other streak and holds this one, so the
+        // landed member below must reset BOTH (the assertion the store
+        // failure test carried before it was split here).
+        let mut probed = at_path(375);
+        probed.failures = vec![pull::ingest::Failure::new("RELIANCE", "write failed")];
+        run.absorb_landed(&landed, probed, &gone, (5, 208));
+        assert_eq!((run.store_refused_streak, run.store_fault_streak), (2, 1));
+        assert_eq!(run.store_unavailable, None);
+        let mut good = at_path(375);
+        good.failures.clear();
+        good.bars_committed = 375;
+        run.absorb_landed(&landed, good, &root, (6, 208));
+        assert_eq!((run.store_refused_streak, run.store_fault_streak), (0, 0));
+
+        // A DRIVE THAT FAILS THE PROBE ON EVERY OTHER MEMBER while the census
+        // path refuses the rest: the first breaker trips at its third fault.
+        let lost = || {
+            let mut member = at_path(375);
+            member.failures = vec![pull::ingest::Failure::new("RELIANCE", "write failed")];
+            member
+        };
+        let mut flaky = BrokerRun::default();
+        flaky.absorb_landed(&landed, lost(), &gone, (1, 208));
+        flaky.absorb_landed(&landed, at_path(375), &root, (2, 208));
+        flaky.absorb_landed(&landed, lost(), &gone, (3, 208));
+        flaky.absorb_landed(&landed, at_path(375), &root, (4, 208));
+        assert_eq!(
+            (flaky.store_fault_streak, flaky.store_refused_streak),
+            (2, 2)
+        );
+        assert_eq!(flaky.store_unavailable, None);
+        flaky.absorb_landed(&landed, lost(), &gone, (5, 208));
+        let fault = flaky.store_unavailable.clone().expect("the run is stopped");
+        assert!(fault.contains("unplugged-drive"), "{fault}");
+        assert!(
+            flaky
+                .stopped
+                .as_deref()
+                .is_some_and(|said| said.starts_with("STORE UNAVAILABLE — 3 instruments")),
+            "{:?}",
+            flaky.stopped
+        );
+    }
+
+    /// **A PROBE NAME THAT CANNOT BE UNLINKED IS THE FAULT, BY NAME**
+    /// (DB-B35, repair 3; the third check's follow-up 5). In a read-only
+    /// `audit/` holding a stale probe file the first unlink failed in
+    /// silence, the open truncated and rewrote that file, and the answer was
+    /// "healthy" although the directory takes no new file.
+    #[test]
+    fn a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::scratch::path("wp62-r3-probe-readonly");
+        let _ = std::fs::remove_dir_all(&root);
+        let audit = root.join("audit");
+        std::fs::create_dir_all(&audit).expect("mkdir");
+        assert_eq!(store_fault(&root), None, "a writable audit/ is healthy");
+        std::fs::write(audit.join(".store-probe"), b"left by a killed process").expect("write");
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let answer = store_fault(&root);
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let fault = answer.expect("a read-only audit/ takes no new file");
+        assert!(
+            fault.contains(".store-probe") && fault.contains("could not be unlinked"),
+            "{fault}"
+        );
     }
 
     /// A window an instrument answered with no body: the smallest thing
@@ -26328,14 +26591,16 @@ mod tests {
         // BOTH went into the journal — the refusal as well as the acceptance.
         // An operator debugging a form that never starts anything needs the
         // refusals more than the successes, and a log that keeps only the
-        // successes is the one that cannot answer them.
+        // successes is the one that cannot answer them. The acceptance is two
+        // records, the walk's opening record and its outcome (DB-B34, repair
+        // 5); the refusal opened no walk and is one.
         let log = journal.look();
         assert_eq!(
             log.records(),
-            2,
-            "one record per request, refusals included"
+            3,
+            "the accepted walk's opening and outcome records, and the refusal's one"
         );
-        let rows = journal.page(2, 0, 2).expect("a page");
+        let rows = journal.page(3, 0, 3).expect("a page");
         let newest = rows[0].decoded.clone().expect("decodes");
         assert_eq!(newest.outcome, audit::Outcome::Refused);
         assert_eq!(newest.scope, audit::Scope::Fno);
@@ -26352,6 +26617,101 @@ mod tests {
         let older = rows[1].decoded.clone().expect("decodes");
         assert_eq!(older.outcome, audit::Outcome::NotStarted);
         assert_eq!(older.source, "NIFTY");
+        let opening = rows[2].decoded.clone().expect("decodes");
+        assert_eq!(
+            (opening.outcome, opening.scope, opening.source.as_str()),
+            (audit::Outcome::Opened, audit::Scope::Fno, "NIFTY")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **AN EXPIRED-F&O WALK CUT SHORT IS SEEN AT THE NEXT START** (DB-B34,
+    /// repair 5; the second check's follow-up 6 of round 2, listed NOT DONE
+    /// since). The walk wrote ONE record, at its end, so a walk killed by a
+    /// restart left nothing in the journal and the restart scan read "clean".
+    /// It now opens its run first, and its outcome record closes it by the
+    /// same window and source: whole, the scan reads clean; cut between the
+    /// two, it reads INTERRUPTED naming the underlying and the window. A
+    /// journal that refuses the opening record is said on the receipt.
+    #[tokio::test]
+    async fn an_expired_fno_walk_cut_short_is_seen_at_the_next_start() {
+        let root = store_root("fno-opened");
+        let journal = audit::Journal::at(&root);
+        let site = Site::new(universe(&root), census::read_all(&root), root.clone());
+        let press = || {
+            fno_answer(
+                "underlying=NIFTY&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30\
+                 &vendor=truedata",
+                day(2026, 8, 7),
+                moment(),
+                &journal,
+                Broker::Refused,
+                &site,
+            )
+        };
+        let (code, page) = press().await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            page.contains("<th>Opened in the journal</th><td>yes"),
+            "{page}"
+        );
+        // Whole: opened, then closed by its outcome.
+        assert_eq!(journal.look().records(), 2);
+        assert_eq!(
+            crate::pullrun::restart_scan(&journal),
+            crate::pullrun::Restart::Clean
+        );
+        let rows = journal.page(2, 0, 2).expect("a page");
+        let closing = rows[0].decoded.clone().expect("decodes");
+        let opening = rows[1].decoded.clone().expect("decodes");
+        assert_eq!(
+            (opening.kind, opening.outcome, opening.scope),
+            (audit::Kind::Run, audit::Outcome::Opened, audit::Scope::Fno)
+        );
+        assert_eq!(opening.note, FNO_OPENED_NOTE);
+        assert!(!opening.note_was_cut(), "the note fits its field whole");
+        assert_eq!(
+            (opening.source.as_str(), opening.from_days, opening.to_days),
+            (closing.source.as_str(), closing.from_days, closing.to_days),
+            "the outcome record pairs with the opening record exactly"
+        );
+        assert_ne!(opening.from_days, 0, "the window is on the opening record");
+
+        // KILLED BETWEEN THE TWO: the journal as a restart mid-walk leaves it.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal.path)
+            .expect("the journal opens")
+            .set_len(audit::RECORD_LEN_U64)
+            .expect("cut after the opening record");
+        let found = crate::pullrun::restart_scan(&journal);
+        let run = found.interrupted().expect("the walk cut short is seen");
+        assert_eq!((run.ordinal, run.source.as_str()), (0, "NIFTY"));
+        assert_eq!(run.window, Some((opening.from_days, opening.to_days)));
+        assert_eq!(run.note, FNO_OPENED_NOTE);
+
+        // A JOURNAL THAT REFUSES THE OPENING RECORD: the walk still answers,
+        // and the receipt says a restart during it would not be seen.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o444))
+                .expect("chmod");
+        }
+        let (code, page) = press().await;
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+        }
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            page.contains(
+                "<th>Opened in the journal</th><td>NO — a restart during this walk would not \
+                 be seen at the next start."
+            ),
+            "{page}"
+        );
+        assert_eq!(journal.look().records(), 1, "nothing was appended");
         let _ = std::fs::remove_dir_all(&root);
     }
 

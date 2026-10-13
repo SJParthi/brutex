@@ -93,6 +93,16 @@
 //! windows are recorded now (D-3319) and a versioned repair adds them
 //! (D-3350).
 //!
+//! **The count is stale as well, and is kept beside its correction (WP-62,
+//! repair 3).** 1,666 was 1,671 less those five Muhurats. Re-measured on
+//! 2026-10-11 (`/calendar.json` for Zerodha NIFTY 1min and the bar files
+//! themselves, read-only): in 2019-12-02..2026-08-21 the calendar has 1,671
+//! sessions and NIFTY holds a minute bar on **1,631** of them. The 40 it does
+//! not hold are the five Muhurats and 35 days of last-month holes the landing
+//! refused (the first 2020-12-01; DB-A12). Every one of the 1,671 holds a
+//! daily bar. 1,631 is what the store holds until those days are pulled again;
+//! it is a measurement of the store, not of what NSE traded.
+//!
 //! They get their own answer, [`DayKind::OpenLengthUnmeasured`], because both
 //! neighbours are wrong: a full session would claim 375 owed bars each and
 //! report 1,875 losses that were never offered, and a closed day would deny a
@@ -372,8 +382,10 @@ const MUHURAT_1815: Session = one_window(1_095, 1_154);
 
 /// Days with a `1day` bar and **no minute bar anywhere in the store**.
 ///
-/// Measured, not chosen: the store holds 1,671 days of daily bars and 1,666
-/// days of minute bars, and this is the difference. Every one is a Diwali
+/// Measured, not chosen: the store held 1,671 days of daily bars and 1,666
+/// days of minute bars, and this is the difference (re-measured 2026-10-11:
+/// 1,631 minute days, these five and 35 hole days short; see the module
+/// note). Every one is a Diwali
 /// Muhurat session, and the only Muhurat that IS in the minute series is
 /// 2025-10-21 — which is in [`IRREGULAR`] with its measured hour instead.
 ///
@@ -1137,7 +1149,8 @@ const fn halt_seconds(from: (u32, u32, u32), resume: (u32, u32, u32)) -> HaltSec
 /// times, but the charter holds no NSE circular for either. The 2021-02-24
 /// outage is sourced from SEBI, on every segment. 2022-03-07's scattered
 /// minute holes are not a halt and are not here (DB-G47 asks for them to be
-/// investigated, not classified).
+/// investigated, not classified): they are in [`SHORT_DAYS`], with
+/// 2019-08-02, as measured and unexplained.
 pub const HALTS: [Halt; 3] = [
     Halt {
         day: 18_334, // 2020-03-13 Fri
@@ -1188,6 +1201,85 @@ pub const HALTS: [Halt; 3] = [
         ),
     },
 ];
+
+/// A session day on which minutes the session owes are absent and the
+/// absence was measured in the vendors' own answers, with no cause recorded
+/// (WP-62, repair 3; DB-G47, DB-A12).
+///
+/// **It classifies nothing.** The minutes stay OWED: no NSE circular is
+/// recorded for either day and the cause is UNVERIFIED, so neither is a
+/// halt ([`HALTS`] takes only a window with a source; a pattern seen across
+/// many instruments is not one by itself). What the entry records is that
+/// the hole was looked for in the vendors' answers and is not a landing
+/// failure of this store, so a reader can say "the vendor's answer lacks
+/// it" instead of "a landing failure", with the evidence. A new day is a
+/// new measurement with its source, appended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortDay {
+    /// Days since the epoch.
+    pub day: i64,
+    /// NIFTY 50's absent minutes as measured, first and last inclusive. Other
+    /// instruments may lack other minutes; the evidence says which were
+    /// counted.
+    pub nifty_absent: Window,
+    /// Whether GDFL's own NIFTY 50 file for the day was read. `false`: GDFL
+    /// is NOT CHECKED for NIFTY that day, and "both vendors" is not claimed
+    /// for it; the evidence names what was checked for other instruments.
+    pub gdfl_checked: bool,
+    /// The measurement and its sources, in words.
+    pub evidence: &'static str,
+}
+
+/// Every [`ShortDay`] recorded, oldest first.
+pub const SHORT_DAYS: [ShortDay; 2] = [
+    ShortDay {
+        day: 18_110, // 2019-08-02 Fri
+        nifty_absent: Window { from: 839, to: 839 },
+        gdfl_checked: true,
+        evidence: "MEASURED 2026-10-07..13, cause UNVERIFIED: Kite's NIFTY 1min answer for the \
+                   day lacks 13:59 (audit/pull.journal record 1421286, '2019-08-02: \
+                   13:59-14:00'), and the GDFL NIFTY day file has no print in 13:59 (prints in \
+                   13:56, 13:57, 13:58 and 14:00; state/gdfl-board/zerodha-holes.md; the store's \
+                   GDFL NIFTY 1s, read 2026-10-13: 47, 55, 48 and 33 seconds, none in 13:59); \
+                   Zerodha NIFTY, BANKNIFTY and RELIANCE each hold 374 of 375 minutes that \
+                   day, 13:59 absent, and GDFL's BANKNIFTY 1s has no second in 13:59 either \
+                   (bar files read 2026-10-13). The /db audit's holes scan (DB-G47; 47 \
+                   stocks scanned) found 13:59 absent from Zerodha in at least 90% of the stocks \
+                   held that day, and from GDFL in the two it folded from 1s (AXISBANK, \
+                   BAJFINANCE). No NSE circular recorded; the minute stays owed",
+    },
+    ShortDay {
+        day: 19_058, // 2022-03-07 Mon
+        nifty_absent: Window { from: 622, to: 624 },
+        gdfl_checked: true,
+        evidence: "MEASURED 2026-10-07..13, cause UNVERIFIED: Kite's NIFTY 1min answer for the \
+                   day lacks 10:22-10:24 (audit/pull.journal record 1421400, '2022-03-07: \
+                   10:22-10:25'), and Zerodha NIFTY holds 372 of 375 minutes. GDFL's NIFTY 1s \
+                   for the day (its first import was refused, logs/cli/events.ndjson lines 873 \
+                   and 1490; imported again 2026-10-11 as bar-revisions-v1 generation 1, 22,220 \
+                   seconds) holds no second in 10:22-10:24 (55 in 10:21, 19 in 10:25; read \
+                   2026-10-13). BANKNIFTY lacks more, the same minutes in both vendors: \
+                   Zerodha holds 325 of 375 and GDFL's BANKNIFTY 1s (generation 1, 19,326 \
+                   seconds) has a second in the same 325, both lacking 09:54-09:57 and \
+                   10:10-10:55 (read 2026-10-13). Stocks lack other minutes: Zerodha RELIANCE \
+                   holds 360 of 375, 15 absent between 09:18 and 09:37, and GDFL's RELIANCE 1s \
+                   holds no second in 09:17-09:38 (both read 2026-10-13); the /db audit's holes \
+                   scan (DB-G47; 47 stocks scanned) found 09:23-09:38 absent, scattered (11 or \
+                   more minutes), from Zerodha in at least 90% of the stocks held that day, and \
+                   from GDFL in the two it folded from 1s (AXISBANK, BAJFINANCE). No NSE \
+                   circular recorded; the minutes stay owed",
+    },
+];
+
+/// The [`ShortDay`] on `epoch_day`, if one was recorded. A walk of the
+/// two-entry [`SHORT_DAYS`]: O(1), no allocation.
+#[must_use]
+pub fn short_day_on(epoch_day: i64) -> Option<ShortDay> {
+    SHORT_DAYS
+        .iter()
+        .find(|short| short.day == epoch_day)
+        .copied()
+}
 
 /// The halt on `epoch_day`, if one was recorded. A walk of the three-entry
 /// [`HALTS`]: O(1), no allocation. Timed inside [`record_of`] by
@@ -2000,6 +2092,9 @@ pub struct DayRecord {
     pub special: Option<SpecialSession>,
     /// The halt, if one was recorded.
     pub halt: Option<Halt>,
+    /// The measured, unexplained short day, if one was recorded
+    /// ([`SHORT_DAYS`]); its minutes are still owed.
+    pub short: Option<ShortDay>,
     /// The circular's holiday note, if the day is a sourced holiday.
     pub holiday: Option<HolidayNote>,
     /// Whether a contract can expire on it.
@@ -2018,6 +2113,7 @@ pub fn record_of(epoch_day: i64) -> DayRecord {
         kind: exchange_kind_of(epoch_day),
         special: special_session(epoch_day),
         halt: halt_on(epoch_day),
+        short: short_day_on(epoch_day),
         holiday: holiday_note(epoch_day),
         expiry: expiry_day(epoch_day),
     }
@@ -2027,6 +2123,62 @@ pub fn record_of(epoch_day: i64) -> DayRecord {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// **THE TWO MEASURED SHORT DAYS ARE IN THE CALENDAR OF RECORD** (WP-62,
+    /// repair 3; DB-G47): 2019-08-02 and 2022-03-07 were plain sessions with
+    /// no word, although the vendors' answers had been read for them. They
+    /// are recorded with their sources and classify nothing: each is still a
+    /// regular session that owes its whole day, and neither is a halt. Both
+    /// say GDFL was read for NIFTY: 2022-03-07's entry said "NOT CHECKED"
+    /// from before that day's GDFL indices were imported again (2026-10-11),
+    /// and the re-imported seconds lack the same three minutes.
+    #[test]
+    fn the_measured_short_days_are_recorded_and_still_owe_their_minutes() {
+        let at = |y, m, d| {
+            i64::from(
+                crate::session::Day::new(y, m, d)
+                    .expect("a real day")
+                    .days_from_epoch(),
+            )
+        };
+        let august = short_day_on(at(2019, 8, 2)).expect("2019-08-02 is recorded");
+        assert_eq!(august.nifty_absent, Window { from: 839, to: 839 }, "13:59");
+        assert!(august.gdfl_checked);
+        assert!(august.evidence.contains("1421286") && august.evidence.contains("UNVERIFIED"));
+        let march = short_day_on(at(2022, 3, 7)).expect("2022-03-07 is recorded");
+        assert_eq!(
+            march.nifty_absent,
+            Window { from: 622, to: 624 },
+            "10:22-10:24"
+        );
+        // GDFL's NIFTY day was re-imported on 2026-10-11 and read for these
+        // minutes; the entry said "NOT CHECKED" from before that import.
+        assert!(march.gdfl_checked, "GDFL's NIFTY 1s for the day was read");
+        assert!(march.evidence.contains("1421400") && march.evidence.contains("generation 1"));
+        assert!(!march.evidence.contains("NOT CHECKED"));
+        // NIFTY's window is the field; another index's, measured the same
+        // way in both vendors, is in the words (BANKNIFTY lacks 50 minutes).
+        assert!(march.evidence.contains("09:54-09:57 and 10:10-10:55"));
+        assert!(august.evidence.contains("BANKNIFTY"));
+        for day in [august.day, march.day] {
+            let record = record_of(day);
+            assert_eq!(record.short.map(|short| short.day), Some(day));
+            assert_eq!(record.halt, None, "not a halt");
+            assert!(
+                matches!(record.kind, DayKind::Open(session) if session.bars() == 375),
+                "a regular session that owes 375 minutes: {:?}",
+                record.kind
+            );
+        }
+        assert_eq!(short_day_on(at(2019, 8, 1)), None);
+        assert_eq!(record_of(at(2022, 3, 8)).short, None);
+        assert!(
+            SHORT_DAYS
+                .windows(2)
+                .all(|pair| matches!(pair, [older, newer] if older.day < newer.day)),
+            "oldest first"
+        );
+    }
 
     /// D-2805: the circular-sourced spans either side of the measured window.
     #[test]
@@ -2535,9 +2687,10 @@ mod tests {
     ///
     /// Found by an audit that had already reported "28 minutes missing" and was
     /// wrong: the scan grouped by days that HAD minute bars, so a day with none
-    /// at all was invisible to it. The store holds 1,671 days of daily bars and
+    /// at all was invisible to it. The store held 1,671 days of daily bars and
     /// **1,666** of minute bars, and this is the difference — every Diwali
-    /// Muhurat before 2025.
+    /// Muhurat before 2025. (Re-measured 2026-10-11: **1,631** minute days,
+    /// because 35 days of landing holes are short as well; the module note.)
     ///
     /// Getting this wrong in either direction is expensive. As [`DayKind::Open`]
     /// with a full session they would claim 375 owed bars each and report 1,875
