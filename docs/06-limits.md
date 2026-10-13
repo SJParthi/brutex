@@ -16766,3 +16766,91 @@ unchanged price (a halt's seconds, a fixture's bars, an index's run); they
 were reworded and state no cost. The three `crates/api/benches/ratio/`
 module headers now name the bench that runs them,
 `crates/api/benches/ratio.rs`.
+
+## The small-month rule: a month under 1,024 bars bisects and orders on demand — D-4933, 13 October 2026
+
+**L-SC-13. A time lookup on a raw month under 1,024 bars bisects.** Such a
+month has no `.tix` by the rule, so `BarFile::first_at_or_after` is the
+D-1434 bisection: at most `ceil(log2(1_024)) = 10` bar reads, a bound asserted
+tight at 1,023 bars by
+`store::file::small_month_tests::the_bisection_of_the_largest_small_month_reads_ten_bars`.
+Bounded, not constant: it grows with `log2(n_valid)` up to ten reads and no
+further, because at 1,024 bars the month is indexed. The design's judge
+measured 6.3 µs p50, 10.7 µs p99, 57.1 µs max at 554 bars (12 October); this
+package's own figures are below.
+
+**L-SC-3 (its raw-month half). A sorted page over a month under 1,024 bars
+orders its rows itself**, at most 1,023 of them, through the reader's path
+for rows no run covers. A series whose every month is small orders at most
+1,023 rows a month.
+
+**The commit that reaches the threshold is O(the month), once per month.** It
+reads every committed bar — fewer than 1,024, through the verified path —
+builds the `.tix` whole and writes the `.srt` whole as one run (D-3349's
+whole-month write). Every earlier commit of the month writes no index, and
+every later one is the ordinary append. Bounded by the threshold, not by the
+month.
+
+MEASURED (SC-0, `store/tests/tix_latency.rs::small_month_rule_latency`,
+a release build of the store crate as SC-0 lands it, one thread, an `Instant` pair around each call, on
+a shared Apple M4 Pro under other agents' builds, the scratch months on the
+internal disk, 13 October 2026 12:51 IST; a shared host's numbers are not a
+gate, C-TIX-01 and C-TIX-02 are):
+
+| Operation | n | p50 | p99 | max |
+|---|---:|---:|---:|---:|
+| Time lookup, 1,023-bar one-second month, no `.tix` (`Bisection(BelowThreshold)`), random microseconds over its span, fresh handle | 200,000 | 12.0 µs | 20.4 µs | 183.5 µs |
+| The same lookups on a 1,024-bar month, which has its `.tix` (`Indexed`) | 200,000 | 0.29 µs | 0.42 µs | 18.9 µs |
+| One-bar commit under the threshold (500 held): no index written | 300 | 25.0 ms | 35.9 ms | 41.9 ms |
+| One-bar commit that reaches it (1,023 held): `.tix` and `.srt` written whole | 300 | 100.0 ms | 145.0 ms | 154.8 ms |
+| One-bar commit past it (1,099 held): one `.tix` entry and one `.srt` run | 300 | 59.0 ms | 92.1 ms | 121.0 ms |
+
+The commits are durable one by one (a plain writer, no `DurableBatch`), so
+their wall time is the host's `fsync`, not the bars: a commit under the
+threshold syncs no index and is the cheapest of the three; the commit that
+reaches it pays the two whole writes once in the month's life, about 1.7× an
+ordinary indexed commit. An import commits inside a `DurableBatch` and pays
+its syncs once a day (D-3353). The bisection's p50 is about twice the
+judge's 6.3 µs at 554 bars: twice the bars is one more read (ten, not nine)
+and this host was loaded; it stays bounded by the ten-read ceiling at every
+month size, because at 1,024 bars the month is indexed.
+
+On real data (SC-0's check, not a gate): NIFTY and BANKNIFTY spot and
+options for 1 and 5 March 2019, RELIANCE shares for the same days, and
+NIFTY spot and options for the 27 October 2019 Muhurat session, imported by
+`cli gdfl-import ... tickstore` through this writer into a private store
+built from nothing — 759 bar months, of which 579 hold 1 to 1,022 bars and
+carry neither index and 180 hold 1,033 to 42,608 bars and carry both, with
+no exception. The 516 March months were compared with the real store's same
+months (whose first rows are those two days): timestamps, prices and volume
+are byte for byte equal in all 516, open interest differs in 296 (the
+importer's later bar-close rule for open interest), and each of the 162
+`.tix` files is entry for entry a prefix of the real store's index. 63 of
+those months crossed the threshold on their second day, so their index was
+written whole by that day's commit and still matches. The October months had
+no counterpart: the real store holds no bar of that Muhurat session (known
+findings DB-A20, DB-N26).
+
+The same import was repeated from nothing on 13 October 2026 13:3x IST (round
+2, same release build of the writer) with the same counts: 759 months, 205 MB,
+3,396 files; 579 months of 1 to 1,022 bars with neither index, 180 of 1,033
+to 42,608 bars with both. That store was then served by this build's `api`
+and every route the /db page calls for one month was checked against the bar
+file read directly — oldest and newest first, the second page, a page sorted
+by close, Go to the middle bar, a time-of-day window, extremes — on NIFTY
+options of 1,022 bars (no index) and 1,033 bars (crossed on its second day),
+NIFTY spot, a BANKNIFTY option of 1,000 bars, RELIANCE shares, and a NIFTY
+strike of ONE bar from the Muhurat session: every answer equal to the file,
+the sorted page of each small month naming the small-month rule with no
+command offered. Route time, n = 200 sequential GETs each, `urllib` on the
+same host, ms (MEASURED, not a gate):
+
+| Route on `/bars/window.json` | 1,022-bar month, no `.tix`, no `.srt`: p50 / p99 / max | 1,033-bar month, both: p50 / p99 / max |
+|---|---|---|
+| newest first, 100 rows | 0.41 / 0.62 / 0.71 | 0.41 / 0.66 / 0.83 |
+| sorted by close, 100 rows | 0.50 / 0.73 / 0.79 | 0.49 / 0.82 / 0.96 |
+| Go to the middle bar (`at=`), 100 rows | 0.41 / 0.62 / 1.24 | 0.42 / 0.67 / 0.83 |
+
+The rule is invisible at the route: the bisection's ten reads and the
+on-demand order of at most 1,023 rows are inside the noise of one request.
+

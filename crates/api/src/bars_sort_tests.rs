@@ -132,6 +132,14 @@ fn write(root: &Root) {
             for chunk in rows.chunks(130) {
                 writer.append(chunk).unwrap();
             }
+            // THREE RUNS, as the writer kept them before the small-month rule
+            // (D-4933) gave a month of 360 bars none.
+            crate::scratch::plant_pre_rule_sort_index(
+                &path(key, month, FileKind::Bars).to_path_buf(&root.0),
+                &store::sort_index::Shape::of(month, 60, symbol_id),
+                &rows,
+                130,
+            );
         }
     }
 }
@@ -575,11 +583,18 @@ fn a_month_without_its_index_is_read_named_and_given_its_build_command() {
     let report = answer.sort_index.unwrap();
     assert_eq!(report.scanned_rows, 360 + (360 - 260), "{report:?}");
     assert_eq!(report.scanned_months, 2);
-    assert!(report.scanned_why[0].contains("2031-02") && report.scanned_why[0].contains("no .srt"));
+    // FEBRUARY, 360 bars with no `.srt`, is under the small-month threshold:
+    // read and named for the rule, and given no command (D-4933). MARCH lost
+    // its last run and is rebuilt by one.
+    assert!(
+        report.scanned_why[0].contains("2031-02")
+            && report.scanned_why[0].contains("small-month rule"),
+        "{report:?}"
+    );
     assert!(report.scanned_why[1].contains("2031-03") && report.scanned_why[1].contains("0..260"));
     assert_eq!(
         report.build,
-        ["cli srt-build gdfl NSE/FNO/NIFTY/2031-03-27-1000000-CE 1min 2031-02 2031-03"]
+        ["cli srt-build gdfl NSE/FNO/NIFTY/2031-03-27-1000000-CE 1min 2031-03 2031-03"]
     );
 }
 
@@ -1091,8 +1106,22 @@ fn edge_key() -> SeriesKey {
 }
 
 /// Writes `rows` as one month of the edge contract, one append per chunk of
-/// `chunk` rows.
+/// `chunk` rows, and plants the runs the writer kept before the small-month
+/// rule (D-4933) when it kept none.
 fn write_edge(root: &Root, month: YearMonth, rows: &[Bar], chunk: usize) {
+    let (bars, symbol_id) = write_edge_bare(root, month, rows, chunk);
+    crate::scratch::plant_pre_rule_sort_index(
+        &bars,
+        &store::sort_index::Shape::of(month, 1, symbol_id),
+        rows,
+        chunk,
+    );
+}
+
+/// [`write_edge`] as the writer alone leaves the month — a month under the
+/// small-month threshold with no `.srt` (D-4933) — naming its bar file and
+/// the symbol id it was written under.
+fn write_edge_bare(root: &Root, month: YearMonth, rows: &[Bar], chunk: usize) -> (PathBuf, u32) {
     let key = edge_key();
     let address = StorePath::new(PathParts {
         vendor: Vendor::Gdfl,
@@ -1111,6 +1140,77 @@ fn write_edge(root: &Root, month: YearMonth, rows: &[Bar], chunk: usize) {
     for batch in rows.chunks(chunk.max(1)) {
         writer.append(batch).unwrap();
     }
+    (address.to_path_buf(&root.0), symbol_id)
+}
+
+/// **A MONTH WITHOUT ITS `.srt`, ON BOTH SIDES OF THE SMALL-MONTH THRESHOLD
+/// (D-4933).** May holds 1,023 bars and the writer gave it no `.srt`: it is
+/// read for the rule and given no command, because `cli srt-build` would
+/// answer `small`. June holds 1,024, and the `.srt` the commit that reached
+/// the threshold wrote whole is then taken away: it is read because its
+/// index is ABSENT — a finding — and given the command that writes it. The
+/// page is the brute force's.
+#[test]
+fn a_month_without_its_srt_is_the_rule_below_the_threshold_and_a_finding_at_it() {
+    let root = Root::new("srt-threshold");
+    let (may, june) = (
+        YearMonth::new(2031, 5).unwrap(),
+        YearMonth::new(2031, 6).unwrap(),
+    );
+    let mut all = Vec::new();
+    for (month, n) in [(may, 1_023_i64), (june, 1_024)] {
+        let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * MICROS;
+        let rows: Vec<Bar> = (0..n)
+            .map(|i| Bar {
+                ts_micros: open + i * MICROS,
+                open: 4_440_500,
+                high: 4_441_000,
+                low: 4_440_000,
+                close: 4_440_000 + (i * 7_919) % 1_000,
+                volume: 75,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let (bars, _) = write_edge_bare(&root, month, &rows, rows.len());
+        let srt = bars.with_extension("srt");
+        assert_eq!(
+            srt.exists(),
+            n >= 1_024,
+            "the writer's own index at {n} bars"
+        );
+        if n >= 1_024 {
+            std::fs::remove_file(&srt).unwrap();
+        }
+        all.extend(rows);
+    }
+    let answer = window(
+        &root.0,
+        &edge_query((may, june), Column::Close, true, 0, 50),
+    )
+    .unwrap();
+    let placed: Vec<(u32, Bar)> = all.iter().map(|bar| (0, *bar)).collect();
+    let truth = brute(&placed, &[0], Column::Close, true);
+    assert_eq!(
+        served(&answer),
+        truth.into_iter().take(50).collect::<Vec<_>>()
+    );
+    let report = answer.sort_index.unwrap();
+    assert_eq!(report.scanned_rows, 2_047, "{report:?}");
+    assert!(
+        report.scanned_why[0].contains("2031-05")
+            && report.scanned_why[0].contains("small-month rule"),
+        "{report:?}"
+    );
+    assert!(
+        report.scanned_why[1].contains("2031-06")
+            && report.scanned_why[1].contains("the month has no .srt sort index")
+            && !report.scanned_why[1].contains("small-month rule"),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.build,
+        ["cli srt-build gdfl NSE/FNO/EDGECASE/2031-06-26-1234500-CE 1s 2031-06 2031-06"]
+    );
 }
 
 fn edge_query(

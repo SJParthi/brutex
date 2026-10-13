@@ -184,12 +184,11 @@ fn the_bar_files_are_byte_identical_after_a_record() {
     let path = june();
     let mut file = root.writer(path);
     let first = file.append(&bars(3, 0, 40)).unwrap();
-    let siblings = [
-        FileKind::Bars,
-        FileKind::Checksums,
-        FileKind::TimeIndex,
-        FileKind::Lock,
-    ];
+    // Forty bars are under the small-month threshold: the month has no
+    // `.tix` to compare (D-4933), and recording a landing must not make one.
+    let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root.0);
+    assert!(!tix.exists());
+    let siblings = [FileKind::Bars, FileKind::Checksums, FileKind::Lock];
     let before: Vec<_> = siblings
         .iter()
         .map(|&kind| digest(&path.with_file(kind).to_path_buf(&root.0)))
@@ -209,6 +208,7 @@ fn the_bar_files_are_byte_identical_after_a_record() {
         .map(|&kind| digest(&path.with_file(kind).to_path_buf(&root.0)))
         .collect();
     assert_eq!(before, after, "recording a landing touched a bar sibling");
+    assert!(!tix.exists(), "recording a landing made no index");
 
     let second = file.append(&bars(4, 0, 25)).unwrap();
     let before: Vec<_> = siblings

@@ -3,7 +3,9 @@
 //!
 //! The bars are committed before the step runs, so nothing here may refuse
 //! them, lose them, or leave bytes a reader could take for a run. Every bar
-//! is invented: one-second stamps in 2031-05 at prices no index printed.
+//! is invented: one-second stamps in 2031-05 at prices no index printed, and
+//! every month is past the small-month threshold (D-4933), so it has an index
+//! for the disk to refuse.
 
 #![allow(
     clippy::unwrap_used,
@@ -107,11 +109,11 @@ fn an_appended_run_whose_sync_fails_is_cut_and_written_again() {
     let root = Root::new("append-sync");
     let mut writer = BarFile::open_or_create(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
     assert!(matches!(
-        writer.append(&bars(0, 600)),
+        writer.append(&bars(0, 1_100)),
         Ok(Appended::Committed { .. })
     ));
     assert!(matches!(
-        writer.append(&bars(600, 900)),
+        writer.append(&bars(1_100, 1_400)),
         Ok(Appended::Committed { .. })
     ));
     let whole = fs::read(root.file(FileKind::SortIndex)).unwrap();
@@ -139,16 +141,16 @@ fn an_appended_run_whose_sync_fails_is_cut_and_written_again() {
         "the unsynced run is cut off, not left for a reader"
     );
     let index = root.index().unwrap();
-    assert_eq!(index.coverage(), 600, "rows 600..900 are not claimed");
+    assert_eq!(index.coverage(), 1_100, "rows 1100..1400 are not claimed");
     assert!(index.torn().is_none(), "and no torn bytes are left");
     drop(index);
-    assert_eq!(writer.header().n_valid, 900, "the bars stay committed");
+    assert_eq!(writer.header().n_valid, 1_400, "the bars stay committed");
     assert_eq!(fs::read(root.file(FileKind::Bars)).unwrap(), bars_before);
 
     // THE NEXT STEP WRITES THE RUN AGAIN, byte for byte what it was.
     writer.keep_sort_index();
     assert_eq!(fs::read(root.file(FileKind::SortIndex)).unwrap(), whole);
-    assert_eq!(root.index().unwrap().coverage(), 900);
+    assert_eq!(root.index().unwrap().coverage(), 1_400);
 }
 
 /// **A WHOLE IMAGE WHOSE SYNC FAILS IS NEVER RENAMED INTO PLACE.** The month
@@ -162,7 +164,7 @@ fn a_whole_image_whose_sync_fails_is_never_renamed_into_place() {
     let root = Root::new("whole-sync");
     let mut writer = BarFile::open_or_create(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
     assert!(matches!(
-        writer.append(&bars(0, 500)),
+        writer.append(&bars(0, 1_100)),
         Ok(Appended::Committed { .. })
     ));
     let whole = fs::read(root.file(FileKind::SortIndex)).unwrap();
@@ -185,5 +187,5 @@ fn a_whole_image_whose_sync_fails_is_never_renamed_into_place() {
     let index = root.index().unwrap();
     assert_eq!(index.runs().len(), 1);
     assert_eq!(index.runs()[0].kind, RunKind::Whole);
-    assert_eq!(index.coverage(), 500);
+    assert_eq!(index.coverage(), 1_100);
 }

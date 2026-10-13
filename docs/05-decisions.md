@@ -68081,3 +68081,95 @@ they stay `suspected` (D-3320).
 `the_bars_inside_a_halt_are_counted_by_the_segments_own_seconds`,
 `a_failed_lookup_keeps_each_later_days_halt_count_on_its_own_day`,
 `the_halt_fields_of_a_ledger_line_are_optional_and_never_read_as_zero`.
+
+### D-4933 — The small-month rule for raw months: no `.tix` and no `.srt` run under 1,024 bars, both written whole by the commit that reaches it, and a month without them is not a finding — 2026-10-13
+
+**Implemented by** SC-0 (`store::time_index::INDEX_MIN_ROWS`,
+`store::file::BarFile` `index_on_open`, `index_batch`, `index_at_threshold`,
+the reader's index decision, `store::file::sort_writer`'s writer step and
+`sort_index_existing`, `cli tix-rebuild`, `cli srt-build`, `pull::scrub`).
+**Specified by** the store-compression design of 12 October 2026, §7.1 and
+§9 (SC-0). That design numbered its decisions from D-4928; D-4928 was taken
+the same day by the day ledger's halt fields, so its D-4928 to D-4932 and
+D-4934 to D-4938 must be renumbered by the packages that land them. D-4933
+was free and is this entry.
+
+**What was observed** (the design's census, 12 October 2026; not re-measured
+here). 552,686 of the store's 852,757 months hold fewer than 1,024 bars, 1.3%
+of the bars, and 206.89 GiB of `.tix` and 1.35 GiB of `.srt` sit beside them:
+a `.tix` is sized by its month's SLOTS, not its bars, so a one-second month of
+ten bars carries an index for 2,678,400 slots' buckets up to its last bar. The
+324,349 months of stock and other index options carry 170.8 GiB of `.tix`
+beside 21.9 GiB of bars, and the stock options and shares still to import
+would arrive in the same shape.
+
+**Decision.**
+
+1. **`INDEX_MIN_ROWS` = 1,024.** A month whose committed bars are fewer is
+   given no `.tix` and no `.srt` run by the writer: an open creates no `.tix`
+   (until D-4933 every new month got a header-only one), an append computes no
+   entries, and the sort step writes no run.
+2. **The commit that brings a month to 1,024 bars or more writes both WHOLE.**
+   The `.tix` is built from every committed bar (fewer than 1,024 reads
+   through the verified path) and the batch, into a NEW inode (`O_EXCL`), its
+   entries and then its header synced, all before the records are written —
+   the position D-2329 gave an append's entries — so no header slot ever
+   commits a bar the index lacks. A threshold write the host refuses takes
+   back the file it made and refuses the append before any bar is written; the
+   next commit begins again. The `.srt` is written whole as one run after the
+   commit, by the step that already writes a month with no index whole
+   (D-3349).
+3. **Only a name that is not there qualifies.** A small month with something
+   at its `.tix` or `.srt` name — a file that is not an index, a damaged
+   index, a link, a directory — goes down the paths it always did: refused by
+   name, rebuilt, or bisected with the `store.tix` warning.
+4. **An index already beside a small month is kept in step, never
+   abandoned.** A `.tix` left unmaintained would stop describing the bars and
+   every reader would warn that it is stale; the writer keeps it, and a
+   rebuild door rebuilds it, as before. Removing those files is a deletion of
+   a rebuildable index and waits for D-4931. Nothing in this decision deletes
+   or rewrites a bar file.
+5. **Not a finding.** A reader of a small month with no `.tix` answers by the
+   D-1434 bisection — at most ten bar reads — and names the reason
+   `time_index::Why::BelowThreshold` through `BarFile::time_lookup`, and the
+   `store.tix` warning is NOT written for it (D-3340's warning is for a fault;
+   this is the rule). A sorted page orders the at most 1,023 rows itself, the
+   path that already exists for rows no run covers. `cli tix-rebuild` and
+   `cli srt-build` report such a month `small`, write nothing, and count it as
+   clean (`Reindexed::BelowThreshold`, `Resorted::BelowThreshold`). `pull::scrub`
+   never asked for either sidecar and still does not.
+6. **Every commit says what it did to the index.** The `store.append`
+   `committed` line (Debug) carries `time_index`: kept in step, written whole
+   at the threshold, none under the threshold, or none with a warning. No new
+   emit site.
+
+**What it changes.** D-2329's "every month the writer opens has a `.tix`" and
+D-3349's "one run after every commit" now hold for months of 1,024 bars or
+more. D-2330's second daily bar is unchanged for a daily month that has a
+`.tix`; a daily month never reaches the threshold, so one written after this
+decision has none, and its second bar on one IST day is no finding.
+
+**Cost.** A small month: the bisection, 6.3 µs p50, 10.7 µs p99, 57.1 µs max
+at 554 bars (the design's judge, 12 October), and 12.0 µs p50, 20.4 µs p99,
+183.5 µs max at 1,023 bars, the largest small month (SC-0, 13 October,
+n = 200,000, release, a loaded shared host), and the read count is asserted:
+`store::file::small_month_tests::the_bisection_of_the_largest_small_month_reads_ten_bars`.
+The threshold commit pays, once per month, fewer than 1,024 record reads and
+one write of the entries; every later commit is the ordinary append.
+`docs/06-limits.md` L-SC-13 holds the measured figures.
+
+**Proof.** `crates/store/tests/tix_small_month.rs` (every boundary 1, 1,023,
+1,024, 1,025 in one commit; crossing by landing on, passing and splitting the
+threshold; a writer reopened below it; a minute month crossing on its third
+session; a daily month; an index already beside a small month; a sort index
+already beside one; a directory and a link at the name; a torn `.tix`; a month
+at the threshold without its `.tix`; the rebuild doors; both durable-batch
+modes; a bar the crossing commit cannot hold; a re-offer that is no crossing and an overlap that crosses by its new bars),
+`crates/store/src/small_month_tests.rs` (the ten-read bound; a full disk at the
+threshold write leaves no index and no bar, and the same handle crosses on its
+next commit), `store::tix::a_small_month_bisects_without_a_warning`,
+`crates/store/tests/tix_warn_once.rs` (a small month is never named, and the
+commit lines say what each commit did), `pull::scrub::tests::a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold`,
+`cli::tix_rebuilder::tests::a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean`,
+`cli::srt_builder::tests::a_small_month_is_small_in_the_receipt_and_writes_nothing`,
+`api::bars::sort::tests::a_month_without_its_srt_is_the_rule_below_the_threshold_and_a_finding_at_it`.

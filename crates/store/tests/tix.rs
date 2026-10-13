@@ -150,7 +150,7 @@ fn the_index_answers_every_timestamp_exactly_as_the_bisection_does() {
     for (timeframe, bars, batch) in [
         (Timeframe::MINUTE_1, month_of(20, 375, 60), 101),
         (Timeframe::SECOND_1, month_of(2, 22_500, 1), 4_999),
-        (Timeframe::MINUTE_5, month_of(10, 75, 300), 7),
+        (Timeframe::MINUTE_5, month_of(20, 75, 300), 7),
     ] {
         let root = Root::new();
         write(&root, timeframe, &bars, batch);
@@ -217,11 +217,15 @@ fn the_index_file_is_the_documented_bytes() {
     let root = Root::new();
     let tf = Timeframe::MINUTE_1;
     // Day 2 09:15 is minute 2,880 + 555 = 3,435 of the month: bucket 53, bit 43.
-    let bars = vec![bar(at(2, 0)), bar(at(2, 60)), bar(at(2, 21 * 60))];
+    // Then 1,021 bars from day 3 09:15 on, so the month reaches the
+    // small-month threshold (D-4933) and carries an index at all.
+    let mut bars = vec![bar(at(2, 0)), bar(at(2, 60)), bar(at(2, 21 * 60))];
+    bars.extend((0..1_021).map(|k| bar(at(3, k * 60))));
     write(&root, tf, &bars, 3);
     let raw = fs::read(root.tix(tf)).unwrap();
-    // Minute 3,435 + 21 = 3,456 = bucket 54, bit 0.
-    assert_eq!(raw.len(), 64 + 55 * 16);
+    // Minute 3,435 + 21 = 3,456 = bucket 54, bit 0. The last bar is minute
+    // 3 * 1,440 + 555 + 1,020 = 5,895: bucket 92, so 93 entries.
+    assert_eq!(raw.len(), 64 + 93 * 16);
     assert_eq!(&raw[..8], b"BRUTEXT1");
     let entry = |b: usize| {
         let e = &raw[64 + b * 16..64 + b * 16 + 16];
@@ -235,10 +239,10 @@ fn the_index_file_is_the_documented_bytes() {
     assert_eq!(entry(53), ((1 << 43) | (1 << 44), 0));
     assert_eq!(entry(54), (1, 2));
 
-    // An empty month is the header alone.
+    // An empty month is under the threshold and has no index at all.
     let empty = Root::new();
     drop(empty.writer(tf));
-    assert_eq!(fs::read(empty.tix(tf)).unwrap().len(), 64);
+    assert!(!empty.tix(tf).exists());
 }
 
 #[test]
@@ -247,11 +251,26 @@ fn a_second_daily_bar_on_one_ist_day_is_admitted_and_the_month_stops_being_index
     // holds one bar per slot. The append is admitted exactly as before D-2329;
     // the `.tix` is removed before any byte moves, and lookups bisect, saying
     // why — across a commit and within one batch.
+    //
+    // No daily month reaches the small-month threshold, so since D-4933 the
+    // writer gives none an index; the months written before it carry one,
+    // and that is the case proved here, with the index PLANTED as they have
+    // it. A daily month that never had one is the rule's, and is silent.
     let tf = Timeframe::DAY_1;
     let root = Root::new();
     let mut writer = root.writer(tf);
     assert!(writer.append(&[bar(at(3, 0))]).is_ok());
-    assert!(root.tix(tf).exists());
+    assert!(
+        !root.tix(tf).exists(),
+        "a daily month is under the threshold"
+    );
+    assert_eq!(
+        writer.time_lookup(),
+        TimeLookup::Bisection(Why::BelowThreshold)
+    );
+    drop(writer);
+    planted(&root, tf, &[at(3, 0)]);
+    let mut writer = root.writer(tf);
     assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
     assert!(writer.append(&[bar(at(3, 3_600))]).is_ok(), "admitted");
     assert!(
@@ -280,20 +299,30 @@ fn a_second_daily_bar_on_one_ist_day_is_admitted_and_the_month_stops_being_index
         assert_eq!(writer.first_at_or_after(ts), Ok(row), "writer, ts {ts}");
     }
     drop(writer);
-    // A writer open tries the rebuild, meets the same bar, and says so again.
+    // The retired month is now a small month with no index: the rule's,
+    // silent, and no rebuild is tried.
     let reopened = root.writer(tf);
     assert!(!root.tix(tf).exists());
-    assert_eq!(reopened.time_lookup(), TimeLookup::Bisection(shared));
+    assert_eq!(
+        reopened.time_lookup(),
+        TimeLookup::Bisection(Why::BelowThreshold)
+    );
     drop(reopened);
     let reader = root.reader(tf);
-    assert_eq!(reader.time_lookup(), TimeLookup::Bisection(Why::Absent));
+    assert_eq!(
+        reader.time_lookup(),
+        TimeLookup::Bisection(Why::BelowThreshold)
+    );
     for (ts, row) in expected {
         assert_eq!(reader.first_at_or_after(ts), Ok(row), "reader, ts {ts}");
     }
 
-    // Within one batch, on a fresh month.
+    // Within one batch, on a month whose (empty) index was planted.
     let root = Root::new();
+    drop(root.writer(tf));
+    planted(&root, tf, &[]);
     let mut writer = root.writer(tf);
+    assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
     assert!(writer.append(&[bar(at(4, 0)), bar(at(4, 60))]).is_ok());
     assert!(!root.tix(tf).exists());
     assert_eq!(
@@ -306,6 +335,8 @@ fn a_second_daily_bar_on_one_ist_day_is_admitted_and_the_month_stops_being_index
     // One bar per IST day keeps its index: a bar at the next day's midnight
     // is a new slot.
     let root = Root::new();
+    drop(root.writer(tf));
+    planted(&root, tf, &[]);
     let mut writer = root.writer(tf);
     assert!(writer.append(&[bar(at(3, 0))]).is_ok());
     assert!(writer.append(&[bar(at(4, -555 * 60))]).is_ok());
@@ -322,7 +353,7 @@ fn an_index_left_ahead_of_the_commit_is_masked_and_then_overwritten() {
     // for bars that never committed. Built here by keeping a longer month's
     // index beside a shorter month's bars: the committed prefix is identical.
     let tf = Timeframe::MINUTE_1;
-    let all = month_of(2, 375, 60);
+    let all = month_of(3, 375, 60);
     let committed = &all[..200];
     let longer = Root::new();
     write(&longer, tf, &all, 1_000);
@@ -361,11 +392,17 @@ fn every_way_an_index_can_be_wrong_is_named_and_the_answer_still_comes_back() {
     let probe = bars[600].ts_micros + 1;
 
     // Stale: the month grew without its index, by one bar in the same
-    // bucket — the entry is there and does not hold the last bar.
+    // bucket — the entry is there and does not hold the last bar. Past the
+    // small-month threshold, so there is an index to go stale (D-4933).
+    let geometry = store::time_index::Geometry::new(YearMonth::new(2024, 6).unwrap(), 60, 7);
+    let bucket = |bar: &Bar| store::time_index::split(geometry.slot_of(bar.ts_micros).unwrap()).0;
+    let n = (1_024..bars.len())
+        .find(|&n| bucket(&bars[n - 1]) == bucket(&bars[n]))
+        .unwrap();
     let small = Root::new();
-    write(&small, tf, &bars[..2], 2);
+    write(&small, tf, &bars[..n], n);
     let old = fs::read(small.tix(tf)).unwrap();
-    write(&small, tf, &bars[2..3], 1);
+    write(&small, tf, &bars[n..=n], 1);
     fs::write(small.tix(tf), &old).unwrap();
     let reader = small.reader(tf);
     assert_eq!(reader.time_lookup(), TimeLookup::Bisection(Why::Stale));
@@ -375,9 +412,9 @@ fn every_way_an_index_can_be_wrong_is_named_and_the_answer_still_comes_back() {
     // Grown past the index's last entry: the entry for the last bar is
     // missing altogether.
     let root = Root::new();
-    write(&root, tf, &bars[..500], 500);
+    write(&root, tf, &bars[..1_024], 1_024);
     let old = fs::read(root.tix(tf)).unwrap();
-    write(&root, tf, &bars[500..], 500);
+    write(&root, tf, &bars[1_024..], 500);
     fs::write(root.tix(tf), &old).unwrap();
     let reader = root.reader(tf);
     assert!(matches!(
@@ -419,6 +456,32 @@ fn every_way_an_index_can_be_wrong_is_named_and_the_answer_still_comes_back() {
     assert_eq!(reader.first_at_or_after(probe), Ok(601));
 }
 
+/// Plants the `.tix` a month holding `stamps` would carry, by hand — the
+/// shape a month written before D-4933 has, which no writer makes for a
+/// small month any more. The header is the month's geometry; each entry
+/// counts the bars before it.
+fn planted(root: &Root, tf: Timeframe, stamps: &[i64]) {
+    use store::time_index::{Entry, Geometry, split};
+    let geometry = Geometry::new(YearMonth::new(2024, 6).unwrap(), tf.secs(), 7);
+    let mut entries: Vec<Entry> = Vec::new();
+    for (total, &ts) in (0u32..).zip(stamps) {
+        let (bucket, bit) = split(geometry.slot_of(ts).unwrap());
+        let bucket = usize::try_from(bucket).unwrap();
+        while entries.len() <= bucket {
+            entries.push(Entry {
+                occupancy: 0,
+                before: total,
+            });
+        }
+        entries[bucket].occupancy |= 1 << bit;
+    }
+    let mut bytes = geometry.encode().to_vec();
+    for (bucket, entry) in (0u64..).zip(&entries) {
+        bytes.extend_from_slice(&entry.encode(bucket));
+    }
+    fs::write(root.tix(tf), bytes).unwrap();
+}
+
 /// Overwrites `path` without replacing its inode, so an open handle sees it.
 fn write_in_place(path: &Path, bytes: &[u8]) {
     use std::os::unix::fs::FileExt as _;
@@ -434,8 +497,8 @@ fn a_month_whose_bars_cannot_be_read_keeps_no_index_and_still_opens() {
     // could not read, and bisects, saying why.
     let root = Root::new();
     let tf = Timeframe::MINUTE_1;
-    let bars = month_of(1, 375, 60);
-    write(&root, tf, &bars, 375);
+    let bars = month_of(3, 375, 60);
+    write(&root, tf, &bars, 1_095);
     fs::remove_file(root.tix(tf)).unwrap();
     let bin = path(tf).to_path_buf(&root.0);
     let mut raw = fs::read(&bin).unwrap();
@@ -449,7 +512,7 @@ fn a_month_whose_bars_cannot_be_read_keeps_no_index_and_still_opens() {
     ));
     assert!(!root.tix(tf).exists());
     // A lookup whose bisection never reaches the damaged block is answered.
-    assert_eq!(writer.first_at_or_after(i64::MAX), Ok(365));
+    assert_eq!(writer.first_at_or_after(i64::MAX), Ok(1_095));
 }
 
 #[test]
@@ -458,7 +521,7 @@ fn a_rerun_of_the_same_month_leaves_the_index_byte_identical() {
     // neither the bars nor the index move; the same month written twice from
     // nothing is the same index.
     let tf = Timeframe::MINUTE_1;
-    let bars = month_of(2, 375, 60);
+    let bars = month_of(3, 375, 60);
     let first = Root::new();
     write(&first, tf, &bars, 97);
     let index = fs::read(first.tix(tf)).unwrap();
@@ -497,4 +560,52 @@ fn only_a_bar_file_carries_a_time_index() {
             found: FileKind::TimeIndex
         })
     ));
+}
+
+/// A month under the small-month threshold has no `.tix` by rule (D-4933):
+/// every handle bisects, names the rule as its reason, answers every probe as
+/// the bars do, and the log holds no `store.tix` line about it — the only
+/// sink this test binary installs is this test's.
+#[test]
+fn a_small_month_bisects_without_a_warning() {
+    let log = std::env::temp_dir().join(format!("brutex-tix-small-log-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&log);
+    fs::create_dir_all(&log).unwrap();
+    let sink =
+        telemetry::install(&telemetry::Config::new(&log).with_min_level(telemetry::Level::Trace))
+            .expect("nothing else in this test binary installs a sink");
+    let root = Root::new();
+    let bars = month_of(2, 375, 60);
+    assert!(bars.len() < 1_024, "two sessions are under the threshold");
+    write(&root, Timeframe::MINUTE_1, &bars, 100);
+    assert!(!root.tix(Timeframe::MINUTE_1).exists());
+    for _ in 0..4 {
+        let reader = root.reader(Timeframe::MINUTE_1);
+        assert_eq!(
+            reader.time_lookup(),
+            TimeLookup::Bisection(Why::BelowThreshold)
+        );
+        for ts in probes(&bars) {
+            let want = u64::try_from(bars.partition_point(|bar| bar.ts_micros < ts)).unwrap();
+            assert_eq!(reader.first_at_or_after(ts), Ok(want), "ts={ts}");
+        }
+    }
+    let ours = root.0.display().to_string();
+    let found = telemetry::tail(
+        &log,
+        sink.keep_files(),
+        &telemetry::Query::last(4_096).from_target("store.tix"),
+    );
+    let about_it: Vec<_> = found
+        .records
+        .iter()
+        .filter(|line| {
+            line.fields.iter().any(|(key, value)| {
+                key == "file"
+                    && matches!(value, telemetry::OwnedValue::Str(file) if file.starts_with(&ours))
+            })
+        })
+        .collect();
+    assert!(about_it.is_empty(), "{about_it:?}");
+    let _ = fs::remove_dir_all(&log);
 }

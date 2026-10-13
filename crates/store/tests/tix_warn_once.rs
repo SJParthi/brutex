@@ -45,20 +45,30 @@ fn path(month: YearMonth) -> StorePath<'static> {
     .unwrap()
 }
 
-/// One session of invented one-minute bars from 09:15 IST on the 4th.
-fn session(month: YearMonth) -> Vec<Bar> {
-    let open = month.ist_bounds_micros().0 + (3 * 86_400 + 555 * 60) * MICROS;
-    (0..375)
-        .map(|k| Bar {
-            ts_micros: open + k * 60 * MICROS,
-            open: 5_100_000,
-            high: 5_100_100,
-            low: 5_099_900,
-            close: 5_100_050,
-            volume: 0,
-            open_interest: OI_NULL,
+/// `days` sessions of invented one-minute bars from 09:15 IST on the 4th and
+/// the days after it: three sessions (1,125 bars) are past the small-month
+/// threshold and carry a `.tix`; one (375) is under it and carries none
+/// (D-4933).
+fn sessions(month: YearMonth, days: i64) -> Vec<Bar> {
+    (0..days)
+        .flat_map(|day| {
+            let open = month.ist_bounds_micros().0 + ((3 + day) * 86_400 + 555 * 60) * MICROS;
+            (0..375).map(move |k| Bar {
+                ts_micros: open + k * 60 * MICROS,
+                open: 5_100_000,
+                high: 5_100_100,
+                low: 5_099_900,
+                close: 5_100_050,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
         })
         .collect()
+}
+
+/// A month past the small-month threshold.
+fn session(month: YearMonth) -> Vec<Bar> {
+    sessions(month, 3)
 }
 
 fn text(value: &OwnedValue) -> String {
@@ -122,6 +132,55 @@ fn read_back(log: &Path, keep_files: u8) -> (BTreeMap<(String, String), usize>, 
     (warned, rebuilt)
 }
 
+/// Month `c` holds ONE session, under the small-month threshold: it is given
+/// no `.tix` by rule, and five handles bisect for that reason — which the
+/// caller then proves the log never names (D-4933).
+fn small_month_handles(root: &Path, c: YearMonth) {
+    {
+        let mut writer = BarFile::open_or_create(root, path(c), SYMBOL).unwrap();
+        assert!(matches!(
+            writer.append(&sessions(c, 1)),
+            Ok(Appended::Committed { .. })
+        ));
+    }
+    let tix = path(c).with_file(FileKind::TimeIndex).to_path_buf(root);
+    assert!(!tix.exists(), "a small month is given no .tix");
+    let probe = session(c)[200].ts_micros + 1;
+    for _ in 0..5 {
+        let reader = BarFile::open_existing(root, path(c), SYMBOL).unwrap();
+        assert_eq!(reader.first_at_or_after(probe), Ok(201));
+        assert_eq!(
+            reader.time_lookup(),
+            TimeLookup::Bisection(Why::BelowThreshold)
+        );
+    }
+}
+
+/// What each commit said it did to its month's time index, on its own
+/// `store.append` line at `Debug` (D-4933): `(bar file name, time_index)`,
+/// sorted.
+fn commit_lines(log: &Path, keep_files: u8) -> Vec<(String, String)> {
+    let appended = telemetry::tail(
+        log,
+        keep_files,
+        &Query::last(256).from_target("store.append"),
+    );
+    let mut said: Vec<(String, String)> = appended
+        .records
+        .iter()
+        .map(|line| {
+            let file = field(&line.fields, "file");
+            let name = Path::new(&file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(file);
+            (name, field(&line.fields, "time_index"))
+        })
+        .collect();
+    said.sort();
+    said
+}
+
 #[test]
 fn a_month_that_bisects_is_named_once_per_kind_of_reason_however_many_handles_ask() {
     let log = scratch("log");
@@ -168,6 +227,7 @@ fn a_month_that_bisects_is_named_once_per_kind_of_reason_however_many_handles_as
         assert_eq!(reader.time_lookup(), TimeLookup::Bisection(shorter.clone()));
         assert_eq!(reader.first_at_or_after(probe(a)), Ok(201));
     }
+    small_month_handles(&root, YearMonth::new(2019, 5).unwrap());
     // Month B gets its index; then an entry is damaged under a handle that
     // already confirmed it, and three lookups meet it.
     assert_eq!(
@@ -202,9 +262,22 @@ fn a_month_that_bisects_is_named_once_per_kind_of_reason_however_many_handles_as
     .collect();
     assert_eq!(
         warned, expected,
-        "twelve handles and three failed lookups, four facts: each named once"
+        "seventeen handles and three failed lookups, four facts: each named once, and the \
+         small month not at all"
     );
     assert_eq!(rebuilt, 1, "the one index built says so once");
+    // A and B reached the threshold in their first commit; C never did.
+    let whole =
+        "written whole: this commit brought the month to the small-month threshold (D-4933)";
+    let under = "none: the month is under the small-month threshold (D-4933)";
+    assert_eq!(
+        commit_lines(&log, sink.keep_files()),
+        [
+            ("2019-03.bin".to_owned(), whole.to_owned()),
+            ("2019-04.bin".to_owned(), whole.to_owned()),
+            ("2019-05.bin".to_owned(), under.to_owned()),
+        ]
+    );
 
     let _ = fs::remove_dir_all(&log);
     let _ = fs::remove_dir_all(&root);

@@ -231,7 +231,7 @@ use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath, YearMonth};
-use crate::time_index::{Entry, Fault, Geometry, Held, Why};
+use crate::time_index::{Entry, Fault, Geometry, Held, Why, below_threshold};
 
 /// The largest header region the format family can declare, as a length.
 ///
@@ -1461,6 +1461,12 @@ pub enum Reindexed {
     /// No index can describe these bars, for the reason named. No `.tix` is
     /// left claiming them; every lookup bisects and the log says why.
     Unindexable(Why),
+    /// The month holds fewer than [`crate::time_index::INDEX_MIN_ROWS`] bars
+    /// and has no `.tix`, and the small-month rule gives it none: nothing was
+    /// written, and its lookups bisect in at most ten bar reads, which is not
+    /// a finding (D-4933). The commit that brings it to the threshold writes
+    /// its index whole.
+    BelowThreshold,
 }
 
 /// One month through [`BarFile::index_existing`].
@@ -2861,6 +2867,11 @@ impl BarFile {
         // after the records landed would leave an index claiming bars it does
         // not hold.
         // In memory, plus one entry read. D-2329.
+        //
+        // A month under the small-month threshold with no index writes it
+        // WHOLE here when this commit reaches the threshold (D-4933); whether
+        // it was is told on this commit's `store.append` line below.
+        let was_below = self.below_threshold_unindexed();
         let indexed = self.index_batch(batch)?;
 
         // THE OLD TAIL BLOCK IS PROVED BEFORE ANYTHING IS WRITTEN. D-0910.
@@ -2955,6 +2966,7 @@ impl BarFile {
             "first_index" => telemetry::Value::Uint(first_index),
             "n_valid" => telemetry::Value::Uint(self.header.n_valid),
             "generation" => telemetry::Value::Uint(self.header.generation),
+            "time_index" => telemetry::Value::Str(self.index_note(was_below)),
         );
         Ok(Appended::Committed {
             first_index,
@@ -3105,6 +3117,12 @@ impl BarFile {
         tix.state.get_or_init(|| {
             let index = match open_read(&tix.path) {
                 Ok(index) => index,
+                // A SMALL MONTH WITH NO INDEX IS THE RULE, NOT A FAULT
+                // (D-4933): it bisects in at most ten bar reads, and the
+                // warning a missing index earns is not written for it.
+                Err(why) if why.is_absent() && below_threshold(self.header.n_valid) => {
+                    return bisecting(&tix.path, Why::BelowThreshold);
+                }
                 Err(why) if why.is_absent() => return bisecting(&tix.path, Why::Absent),
                 Err(why) => {
                     return bisecting(&tix.path, Why::Unreadable(why.refusal(&tix.path)));
@@ -3152,7 +3170,20 @@ impl BarFile {
         let Some(tix) = self.tix.as_ref() else {
             return Ok(Reindexed::Unindexable(Why::NotBars));
         };
-        let existed = matches!(fs::symlink_metadata(&tix.path), Ok(meta) if meta.is_file());
+        let named = fs::symlink_metadata(&tix.path);
+        // THE SMALL-MONTH RULE (D-4933): a month under the threshold with NO
+        // `.tix` is given none — not created, not built, nothing written. Only
+        // a name that is not there at all qualifies: a link, a directory or
+        // anything else at the name goes down the path below, which refuses
+        // it by name, so the rule can never hide what sits there. An index
+        // already beside a small month is kept in step as before.
+        if below_threshold(self.header.n_valid)
+            && matches!(&named, Err(why) if why.kind() == ErrorKind::NotFound)
+        {
+            self.set_tix_state(TixState::Bisecting(Why::BelowThreshold));
+            return Ok(Reindexed::BelowThreshold);
+        }
+        let existed = matches!(named, Ok(meta) if meta.is_file());
         let batch = self.batch.as_ref();
         let through = batch.is_some_and(DurableBatch::writes_through);
         let index = fault(open_rw_through(&tix.path, through), &tix.path, Action::Open)?;
@@ -3277,6 +3308,11 @@ impl BarFile {
                         read_entry(index, &tix.path, bucket)
                     })
                 }
+                Some(TixState::Bisecting(Why::BelowThreshold))
+                    if !below_threshold(held.n_valid.saturating_add(len_u64(batch.len()))) =>
+                {
+                    return self.index_at_threshold(batch);
+                }
                 _ => return Ok(None),
             },
             None => return Ok(None),
@@ -3323,6 +3359,146 @@ impl BarFile {
             }),
             Err(other) => Err(index_refused(&tix.path, &other)),
         }
+    }
+
+    /// Whether this handle keeps no index because its month is under the
+    /// small-month threshold (D-4933) — asked by `append` before
+    /// [`Self::index_batch`], so the commit line can say that this commit
+    /// wrote the index whole.
+    fn below_threshold_unindexed(&self) -> bool {
+        matches!(
+            self.tix.as_ref().and_then(|tix| tix.state.get()),
+            Some(TixState::Bisecting(Why::BelowThreshold))
+        )
+    }
+
+    /// What a commit left the month's time index as, for its `store.append`
+    /// line: `was_below` is [`Self::below_threshold_unindexed`] before it.
+    /// Static words, so the line costs nothing it did not cost before.
+    fn index_note(&self, was_below: bool) -> &'static str {
+        match self.tix.as_ref().and_then(|tix| tix.state.get()) {
+            None => "none: only bar files carry a time index",
+            Some(TixState::Ready(_)) if was_below => {
+                "written whole: this commit brought the month to the small-month threshold (D-4933)"
+            }
+            Some(TixState::Ready(_)) => "kept in step",
+            Some(TixState::Bisecting(Why::BelowThreshold)) => {
+                "none: the month is under the small-month threshold (D-4933)"
+            }
+            Some(TixState::Bisecting(_)) => {
+                "none: lookups bisect, and a store.tix warning says why"
+            }
+        }
+    }
+
+    /// The commit that brings a small month to
+    /// [`crate::time_index::INDEX_MIN_ROWS`] bars writes its `.tix` WHOLE
+    /// (D-4933): every committed bar and every bar of `batch`, written and
+    /// synced before the records are, so the header slot that commits them
+    /// never names a bar the index lacks.
+    ///
+    /// # Cost
+    ///
+    /// Once per month: the committed bars — fewer than
+    /// [`crate::time_index::INDEX_MIN_ROWS`], so at most 1,023 record reads
+    /// through the verified path — and one pass over the batch, then one
+    /// write of the entries and the header. From the next commit on the month
+    /// is an ordinary indexed one: one entry read per append.
+    ///
+    /// # A crash anywhere in it
+    ///
+    /// The entries are written and synced before the header (`write_index`),
+    /// so an index whose header checks never covers half old, half new
+    /// entries. A crash after the index and before the bars' commit leaves
+    /// entries AHEAD of the commit, exactly the state every append's crash
+    /// leaves, which `time_index::resume` masks off and the next append
+    /// overwrites; a reader confirms the committed bars against it and goes
+    /// through it. A crash before the header leaves a `.tix` whose header does
+    /// not check: a reader bisects and says so, and the next writer open
+    /// rebuilds it.
+    ///
+    /// # When the bars cannot be indexed
+    ///
+    /// A committed bar that would not read, or two bars in one slot, leaves no
+    /// file: the month bisects from now on and the `store.tix` warning names
+    /// why, as a rebuild that met the same bars would (D-2330). A bar of the
+    /// BATCH off its rung's grid or outside the month is refused as
+    /// [`Self::index_batch`] refuses it, before any byte is written.
+    fn index_at_threshold<R: Row>(
+        &mut self,
+        batch: &[R],
+    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+        let held = Held::of(&self.header);
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(None);
+        };
+        let committed =
+            (0..held.n_valid).map(|row| self.read_row::<R>(row).map(|found| found.stamp()));
+        let mut entries =
+            match crate::time_index::extend(&tix.geometry, 0, Entry::EMPTY, 0, committed) {
+                Ok(entries) => entries,
+                Err(cannot) => {
+                    let path = tix.path.clone();
+                    self.set_tix_state(bisecting(&path, cannot));
+                    return Ok(None);
+                }
+            };
+        // `extend` always yields the entry it ended in, so the committed
+        // prefix's last entry is where the batch continues from.
+        let start = entries.pop().unwrap_or(Entry::EMPTY);
+        let bucket = len_u64(entries.len());
+        let stamps = batch.iter().map(|row| Ok(row.stamp()));
+        match crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps) {
+            Ok(tail) => entries.extend(tail),
+            Err(why @ Why::SharedSlot { .. }) => {
+                let path = tix.path.clone();
+                self.set_tix_state(bisecting(&path, why));
+                return Ok(None);
+            }
+            Err(Why::OffGrid { index, ts_micros }) => {
+                return Err(StoreError::OffGrid {
+                    at: index.saturating_sub(held.n_valid),
+                    ts_micros,
+                    timeframe_secs: self.header.timeframe_secs,
+                });
+            }
+            Err(Why::Outside { index, ts_micros }) => {
+                return Err(StoreError::OutsideMonth {
+                    at: index.saturating_sub(held.n_valid),
+                    ts_micros,
+                    month: self.admission.month,
+                });
+            }
+            Err(other) => return Err(index_refused(&tix.path, &other)),
+        }
+        let batched = self.batch.as_ref();
+        let through = batched.is_some_and(DurableBatch::writes_through);
+        // A NEW INODE OR NOTHING: the name was not there when this writer
+        // opened, and `create_new` refuses whatever appeared at it since — a
+        // file, a link, a directory — rather than write through it.
+        let index = fault(
+            open_new_through(&tix.path, through),
+            &tix.path,
+            Action::Open,
+        )?;
+        let written = fsync_dir(tix.path.parent().unwrap_or(&tix.path), batched)
+            .and_then(|()| write_threshold_index(&index, tix, &entries, batched));
+        if let Err(refusal) = written {
+            // THE FILE THIS CALL MADE, AND NOTHING ELSE, is taken back, so the
+            // next commit on this handle begins again from no name at all
+            // rather than meeting its own half-written file at `create_new`.
+            // The refusal returned is the write's, and no bar was written. A
+            // removal that is refused as well leaves a `.tix` whose header or
+            // entries do not check: readers bisect and say so, the next
+            // commit here is refused by name at its create, and the next
+            // writer open rebuilds it.
+            drop(index);
+            let _taken_back = remove_index(&tix.path, batched);
+            return Err(refusal);
+        }
+        self.set_tix_state(TixState::Ready(index));
+        // Written whole above: the append's own entry step has nothing left.
+        Ok(None)
     }
 
     /// Stops indexing this month, because `why`: the handle bisects from now
@@ -4264,7 +4440,9 @@ fn first_warning(path: &Path, why: &Why) -> bool {
 /// handle decided it or a lookup's entry failed after that. Each handle
 /// still answers [`BarFile::time_lookup`] with the reason, every time.
 fn note_lookup_bisects(path: &Path, why: &Why) {
-    if !first_warning(path, why) {
+    // THE SMALL-MONTH RULE IS NOT A FAULT (D-4933): such a month has no index
+    // by design and is named only by `BarFile::time_lookup`.
+    if matches!(why, Why::BelowThreshold) || !first_warning(path, why) {
         return;
     }
     let _dropped_when_filtered = telemetry::emit(
@@ -5224,6 +5402,43 @@ fn open_rw(path: &Path) -> io::Result<File> {
     open_rw_through(path, false)
 }
 
+/// [`open_rw_through`] for a name that must not exist: `O_CREAT | O_EXCL`, so
+/// the kernel opens nothing already there — a file, a second name of one, a
+/// link — and the index of a month that reached the small-month threshold is
+/// always a new inode (D-4933).
+fn open_new_through(path: &Path, through: bool) -> io::Result<File> {
+    no_follow_through(
+        File::options().read(true).write(true).create_new(true),
+        through,
+    )
+    .open(path)
+}
+
+/// [`write_index`] for the index a month is given at the small-month
+/// threshold ([`BarFile::index_at_threshold`], D-4933), through the
+/// thread-local test fault injector: after the new `.tix` is created and its
+/// name flushed, and before a byte of it is written — a full disk, or a host
+/// that refuses the write.
+///
+/// The injector is compiled out of production and ADDS a branch under test
+/// rather than replacing one, so the `write_index` line that ships is the
+/// line every test runs — the shape of [`sync_hooked`].
+fn write_threshold_index(
+    index: &File,
+    tix: &Tix,
+    entries: &[Entry],
+    batch: Option<&DurableBatch>,
+) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if tests::threshold_fault_fires() {
+        return Err(StoreError::DiskFull {
+            path: tix.path.clone(),
+            action: Action::Write,
+        });
+    }
+    write_index(index, tix, entries, batch)
+}
+
 /// [`open_rw`], and `O_SYNC` as well when `through` (a writer inside a
 /// [`DurableBatch`] that [`DurableBatch::writes_through`]).
 fn open_rw_through(path: &Path, through: bool) -> io::Result<File> {
@@ -5691,6 +5906,22 @@ mod tests {
         static NAME_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
     }
 
+    thread_local! {
+        /// Whether the next threshold write on this thread is refused
+        /// (D-4933).
+        static THRESHOLD_FAULT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arms the threshold write's fault for the next one on this thread.
+    pub(super) fn arm_threshold_fault() {
+        THRESHOLD_FAULT.with(|armed| armed.set(true));
+    }
+
+    /// Whether the armed threshold fault fires now; it fires once.
+    pub(super) fn threshold_fault_fires() -> bool {
+        THRESHOLD_FAULT.with(|armed| armed.replace(false))
+    }
+
     /// Whether the armed name fault fires now; it fires once.
     pub(super) fn name_fault_fires() -> bool {
         NAME_FAULT.with(|armed| match armed.get() {
@@ -5763,16 +5994,18 @@ mod tests {
         let flushed = directory_flushes();
         assert_eq!(
             index_flushes(),
-            1,
-            "an empty month's time index is its header: one flush, not two"
+            0,
+            "a new month is under the small-month threshold and gets no time index (D-4933)"
         );
-        for name in ["crc", "tix"] {
-            assert!(bars.with_extension(name).exists(), "{name} was created");
-        }
+        assert!(bars.with_extension("crc").exists(), "crc was created");
+        assert!(
+            !bars.with_extension("tix").exists(),
+            "no tix under the threshold"
+        );
         assert_eq!(
             flushed.iter().filter(|one| **one == dir).count(),
             1,
-            "three names, one flush of their directory: {flushed:?}"
+            "two names, one flush of their directory: {flushed:?}"
         );
         let mut distinct = flushed.clone();
         distinct.dedup();
@@ -5791,18 +6024,7 @@ mod tests {
             );
         }
         assert_eq!(flushed.len(), created.len() + 1, "{flushed:?}");
-        let batch: Vec<Bar> = (0..3).map(bar).collect();
-        assert!(matches!(
-            writer.append(&batch),
-            Ok(Appended::Committed { .. })
-        ));
-        assert_eq!(index_flushes(), 1, "an append still flushes its index once");
-        assert!(bars.with_extension("srt").exists(), "srt was created");
-        assert_eq!(
-            directory_flushes(),
-            vec![dir.clone()],
-            "a month's first commit names its sort index (D-3349): one flush"
-        );
+        commits_across_the_threshold(&mut writer, &bars, &dir);
         drop(writer);
 
         let again = BarFile::open_or_create(&root, month, SYMBOL).expect("it reopens");
@@ -5825,6 +6047,51 @@ mod tests {
             "issued at once, never gathered"
         );
         let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// The commits of [`a_new_month_flushes_each_directory_once`] on its new
+    /// month `bars` in `dir`: one under the small-month threshold, which
+    /// flushes no index and names nothing, then the one that reaches 1,024
+    /// bars, which writes the time index whole — its entries, then its
+    /// header, a flush each — and the sort index whole by rename, and names
+    /// both (D-4933, D-3349).
+    fn commits_across_the_threshold(writer: &mut BarFile, bars: &Path, dir: &Path) {
+        let batch: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&batch),
+            Ok(Appended::Committed { .. })
+        ));
+        assert_eq!(
+            index_flushes(),
+            0,
+            "a commit under the threshold flushes no index"
+        );
+        assert!(
+            !bars.with_extension("srt").exists(),
+            "no srt under the threshold"
+        );
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "a commit under the threshold names nothing"
+        );
+        let crossing: Vec<Bar> = (3..1_024).map(bar).collect();
+        assert!(matches!(
+            writer.append(&crossing),
+            Ok(Appended::Committed { n_valid: 1_024, .. })
+        ));
+        assert_eq!(
+            index_flushes(),
+            2,
+            "the threshold's index: entries, then header"
+        );
+        assert!(bars.with_extension("tix").exists(), "tix was created");
+        assert!(bars.with_extension("srt").exists(), "srt was created");
+        assert_eq!(
+            directory_flushes(),
+            vec![dir.to_path_buf(), dir.to_path_buf()],
+            "the threshold names the time index and the sort index: one flush each"
+        );
     }
 
     /// A month of its own under a root of its own, nothing below the root
@@ -6074,12 +6341,13 @@ mod tests {
     }
 
     /// Opens NIFTY's month under `root`, appends two batches and drops it,
-    /// on this thread.
+    /// on this thread. The second brings the month past the small-month
+    /// threshold (D-4933), so it holds every sidecar a month can.
     fn two_appends(root: &Path) {
         let mut writer =
             BarFile::open_or_create(root, second_month("NIFTY"), SYMBOL).expect("the month opens");
         let first: Vec<Bar> = (0..3).map(bar).collect();
-        let second: Vec<Bar> = (3..80).map(bar).collect();
+        let second: Vec<Bar> = (3..1_100).map(bar).collect();
         for batch in [&first, &second] {
             assert!(matches!(
                 writer.append(batch),
@@ -6253,7 +6521,11 @@ mod tests {
             !directory_flushes().is_empty(),
             "its new names were flushed by the open itself"
         );
-        assert!(index_flushes() > 0, "and its index");
+        assert_eq!(
+            index_flushes(),
+            0,
+            "and no index: a new month is under the small-month threshold (D-4933)"
+        );
         drop(other);
         let _ignored = std::fs::remove_dir_all(&root);
     }
@@ -9527,3 +9799,7 @@ pub use sort_writer::{Resorted, SortIndexed};
 #[cfg(test)]
 #[path = "sidecar_checksum_tests.rs"]
 mod sidecar_checksum_tests;
+
+#[cfg(test)]
+#[path = "small_month_tests.rs"]
+mod small_month_tests;
