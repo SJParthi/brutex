@@ -68140,14 +68140,48 @@ would arrive in the same shape.
    never asked for either sidecar and still does not.
 6. **Every commit says what it did to the index.** The `store.append`
    `committed` line (Debug) carries `time_index`: kept in step, written whole
-   at the threshold, none under the threshold, or none with a warning. No new
-   emit site.
+   at the threshold, none under the threshold, or none with a warning.
+7. **The crossing is told once, at `Info`.** The `Debug` line above is
+   filtered at the operator's `Info` floor, so the one state change the rule
+   adds — a month gaining its index — would have been invisible in `/logs`.
+   The commit that crosses writes one `store.tix` line, "time index written
+   whole at the small-month threshold" (`file`, `n_valid`, `threshold`,
+   `decision`), as the commit returns, after its records, index and header
+   slot are written, and never before (a refused commit writes no line; a plain
+   writer's commit is durable by then, and one inside a `DurableBatch` when
+   the batch's `make_durable` returns); a month
+   crosses once in its life, so an import writes at most one such line per
+   month it brings past the threshold, never one per commit. A month that
+   loses its index past the threshold is rebuilt and says so on the existing
+   rebuild line, not this one. (Added in SC-0's repair round, 13 October,
+   after the second agent's follow-up; the crate's other `store.tix` lines are
+   unchanged.)
+8. **Every size a gate-8 row times is an indexed month.** A bench month under
+   the threshold times the bisection or the in-memory sort, not the index the
+   row is about: C-TIX-01's 1,000-bar month made `tix_ps` refuse and stopped
+   the store bench (the second agent's finding), and the api bench's 1,000-bar
+   months made every window, sort, spot and sources ratio compare a bisection
+   with an index read and pass whatever the index cost. C-TIX-01 now starts at
+   `INDEX_MIN_ROWS` and grows by 10x and 100x of it; the api bench's
+   `MONTH_SIZES` are 1,024, 10,240 and 102,400; and each refuses, by name, a
+   grown month that is not indexed.
 
 **What it changes.** D-2329's "every month the writer opens has a `.tix`" and
 D-3349's "one run after every commit" now hold for months of 1,024 bars or
 more. D-2330's second daily bar is unchanged for a daily month that has a
 `.tix`; a daily month never reaches the threshold, so one written after this
 decision has none, and its second bar on one IST day is no finding.
+
+**What it binds a later package to (IA-6).** `store::verdict::MonthNow::NoTix`
+makes a verdict `stale: unknown (no .tix)`, never fresh. Under this rule a
+month of fewer than 1,024 bars has no `.tix` by design, so a staleness probe
+that answered `NoTix` for every month without one would leave every small
+month's verdict stale for ever. IA-6's probe must therefore read a small
+month's day by the bisection (at most ten bar reads, SM-02) and answer
+`MonthNow::Read`, keeping `NoTix` for a month of 1,024 bars or more whose
+`.tix` is missing, which is still a finding. No production code constructs a
+`MonthNow` yet: only `crates/store/tests/verdict.rs` does (the second agent's
+follow-up on SC-0, 13 October, checked again in SC-0's repair round).
 
 **Cost.** A small month: the bisection, 6.3 µs p50, 10.7 µs p99, 57.1 µs max
 at 554 bars (the design's judge, 12 October), and 12.0 µs p50, 20.4 µs p99,
@@ -68168,8 +68202,10 @@ modes; a bar the crossing commit cannot hold; a re-offer that is no crossing and
 `crates/store/src/small_month_tests.rs` (the ten-read bound; a full disk at the
 threshold write leaves no index and no bar, and the same handle crosses on its
 next commit), `store::tix::a_small_month_bisects_without_a_warning`,
-`crates/store/tests/tix_warn_once.rs` (a small month is never named, and the
-commit lines say what each commit did), `pull::scrub::tests::a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold`,
+`crates/store/tests/tix_warn_once.rs` (a small month is never named, the
+commit lines say what each commit did, and one `Info` line is written per
+month that crosses, by the commit that crosses: first commit or later),
+`crates/store/tests/provenance.rs::an_indexed_months_time_index_is_byte_identical_after_a_record`, `pull::scrub::tests::a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold`,
 `cli::tix_rebuilder::tests::a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean`,
 `cli::srt_builder::tests::a_small_month_is_small_in_the_receipt_and_writes_nothing`,
 `api::bars::sort::tests::a_month_without_its_srt_is_the_rule_below_the_threshold_and_a_finding_at_it`.

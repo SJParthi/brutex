@@ -686,8 +686,11 @@ An append that answered `AlreadyPresent` wrote nothing and is not a landing.
 
 **Bar files are never touched.** Writing a record opens the `.prv` and nothing
 else; the `.bin`, `.crc`, `.tix` and `.lock` are byte-identical before and after
-(`store::provenance::the_bar_files_are_byte_identical_after_a_record`, in
-`crates/store/tests/provenance.rs`).
+(`the_bar_files_are_byte_identical_after_a_record` for a month under the
+small-month threshold, which has no `.tix` and is given none by a record, and
+`an_indexed_months_time_index_is_byte_identical_after_a_record` for a month
+past it, whose `.tix` is compared; both in
+`crates/store/tests/provenance.rs`, D-4933).
 
 **Commit order: the bars first, the record after.** `provenance::record` takes
 the writer's open `BarFile` and the `Appended::Committed` its last append

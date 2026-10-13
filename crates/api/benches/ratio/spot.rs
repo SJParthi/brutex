@@ -5,8 +5,9 @@
 //! `/greeks.json` and `/chain.json` make it too. Timed on an instant that
 //! holds a bar, on one between two bars, and -- under D-3328's `asof=prev` --
 //! on an on-grid second with no bar of its own, answered with the bar before
-//! it, over one one-second month of 1,000, 10,000 and 100,000 bars on disk,
-//! opened once.
+//! it, over one one-second month of 1,024, 10,240 and 102,400 bars on disk
+//! (`MONTH_SIZES`: the smallest month the store gives a `.tix`, D-4933, and
+//! 10x and 100x of it), opened once.
 //!
 //! The shared fixture month (`month_file`) holds every second from its start,
 //! so it has no on-grid second without a bar in its middle; the as-of row is
@@ -81,6 +82,13 @@ fn gapped_month_file(n: usize, gap: usize) -> (store::file::BarFile, std::path::
         .collect();
     if let Err(why) = file.append(&batch) {
         refuse(&format!("the bench month would not fill: {why}"));
+    }
+    // THE INDEXED PATH AT EVERY SIZE (D-4933), as `month_file` holds it.
+    let lookup = file.time_lookup();
+    if lookup != store::file::TimeLookup::Indexed {
+        refuse(&format!(
+            "a {n}-bar gapped bench month with its .tix (found {lookup:?})"
+        ));
     }
     (file, root)
 }

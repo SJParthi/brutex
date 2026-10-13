@@ -2968,6 +2968,18 @@ impl BarFile {
             "generation" => telemetry::Value::Uint(self.header.generation),
             "time_index" => telemetry::Value::Str(self.index_note(was_below)),
         );
+        // THE CROSSING IS A STATE CHANGE THE OPERATOR SEES (D-4933): the
+        // commit that brought a small month to the threshold wrote its `.tix`
+        // whole, once in the month's life, and says so at `Info`, where the
+        // per-commit line above is filtered. Written as the commit returns,
+        // after its records, index and header slot are written, and never
+        // before, so a refused commit leaves no line claiming an index. A plain
+        // writer's commit is durable by then; inside a `DurableBatch` it is
+        // durable when the batch's `make_durable` returns, as is every other
+        // line that batch's commits write.
+        if let Some(tix) = self.crossed_threshold(was_below) {
+            note_index_at_threshold(tix, self.header.n_valid);
+        }
         Ok(Appended::Committed {
             first_index,
             n_valid: self.header.n_valid,
@@ -3370,6 +3382,16 @@ impl BarFile {
             self.tix.as_ref().and_then(|tix| tix.state.get()),
             Some(TixState::Bisecting(Why::BelowThreshold))
         )
+    }
+
+    /// The `.tix` this commit wrote whole because it brought a month under
+    /// the small-month threshold to it (D-4933), or `None`: `was_below` is
+    /// [`Self::below_threshold_unindexed`] before the commit, and the index
+    /// is ready after it only when the threshold write succeeded.
+    fn crossed_threshold(&self, was_below: bool) -> Option<&Path> {
+        let tix = self.tix.as_ref()?;
+        (was_below && matches!(tix.state.get(), Some(TixState::Ready(_))))
+            .then_some(tix.path.as_path())
     }
 
     /// What a commit left the month's time index as, for its `store.append`
@@ -4455,6 +4477,28 @@ fn note_lookup_bisects(path: &Path, why: &Why) {
                     "not logged again for this file and kind of reason in this process (D-3340)",
                 ),
             ),
+    );
+}
+
+/// `store.tix`, INFO: the commit that brought a month to
+/// [`crate::time_index::INDEX_MIN_ROWS`] bars wrote its time index whole
+/// (D-4933). Once in a month file's life — a month never shrinks, and one that
+/// loses its index past the threshold is rebuilt and says so on the line
+/// below — so an import writes at most one such line per month it brings
+/// past the threshold, never one per commit.
+fn note_index_at_threshold(path: &Path, n_valid: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(
+            "store.tix",
+            "time index written whole at the small-month threshold",
+        )
+        .with("file", telemetry::Value::Str(&path.display().to_string()))
+        .with("n_valid", telemetry::Value::Uint(n_valid))
+        .with(
+            "threshold",
+            telemetry::Value::Uint(crate::time_index::INDEX_MIN_ROWS),
+        )
+        .with("decision", telemetry::Value::Str("D-4933")),
     );
 }
 

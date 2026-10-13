@@ -175,9 +175,11 @@ fn landed_month(root: &Root, path: StorePath<'_>, batches: &[Vec<Bar>]) -> BarFi
     file
 }
 
-/// **The bars are untouched.** The `.bin`, `.crc`, `.tix` and `.lock` have the
-/// same digest before and after two records are written beside them, and the
-/// sidecar reads back the two landings exactly.
+/// **The bars are untouched.** The `.bin`, `.crc` and `.lock` have the same
+/// digest before and after two records are written beside them, no `.tix`
+/// appears beside a month under the small-month threshold (D-4933), and the
+/// sidecar reads back the two landings exactly. The `.tix` of an indexed month
+/// is held by [`an_indexed_months_time_index_is_byte_identical_after_a_record`].
 #[test]
 fn the_bar_files_are_byte_identical_after_a_record() {
     let root = Root::new();
@@ -265,6 +267,96 @@ fn the_bar_files_are_byte_identical_after_a_record() {
     assert_eq!(one.journal_ordinal, 11);
     assert_eq!(one.commit_hex().as_deref(), Some(COMMIT));
     assert_eq!(one.landed_at_micros, LANDED);
+}
+
+/// **An indexed month's `.tix` is untouched by a record too.** The month above
+/// is under the small-month threshold and has no `.tix` to compare (D-4933),
+/// so this one is filled past
+/// [`store::time_index::INDEX_MIN_ROWS`]: its first commit writes the `.tix`
+/// whole, and a record after it, and after a second commit that keeps the
+/// index in step, leaves the `.tix` byte-identical beside the `.bin`, `.crc`
+/// and `.lock`.
+#[test]
+fn an_indexed_months_time_index_is_byte_identical_after_a_record() {
+    let root = Root::new();
+    let path = june();
+    let mut file = root.writer(path);
+    // Three sessions of 375 minutes: 1,125 bars, past the threshold in one
+    // commit.
+    let sessions: Vec<Bar> = (3..6).flat_map(|d| bars(d, 0, 375)).collect();
+    let held = u64::try_from(sessions.len()).unwrap();
+    assert!(held >= store::time_index::INDEX_MIN_ROWS, "the premise");
+    let first = file.append(&sessions).unwrap();
+    let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root.0);
+    assert!(
+        tix.is_file(),
+        "the commit that reached the threshold wrote the index"
+    );
+    assert_eq!(file.time_lookup(), store::file::TimeLookup::Indexed);
+    let siblings = [
+        FileKind::Bars,
+        FileKind::Checksums,
+        FileKind::TimeIndex,
+        FileKind::Lock,
+    ];
+    let digests = || -> Vec<[u8; 32]> {
+        siblings
+            .iter()
+            .map(|&kind| digest(&path.with_file(kind).to_path_buf(&root.0)))
+            .collect()
+    };
+
+    let before = digests();
+    let one = written(
+        root.record(
+            &file,
+            path,
+            first,
+            &landing("2024.zip!D05.zip!NIFTY.csv", 5, 21),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        before,
+        digests(),
+        "recording a landing touched an indexed month's sibling"
+    );
+
+    // A second commit extends the index; a record after it touches nothing.
+    let second = file.append(&bars(6, 0, 375)).unwrap();
+    let extended = digests();
+    assert_ne!(
+        extended.get(2),
+        before.get(2),
+        "the premise: the second commit kept the index in step"
+    );
+    let two = written(
+        root.record(
+            &file,
+            path,
+            second,
+            &landing("2024.zip!D06.zip!NIFTY.csv", 6, 22),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        extended,
+        digests(),
+        "the second record touched an indexed month's sibling"
+    );
+
+    assert_eq!((one.ordinal, one.first_index, one.n_bars), (0, 0, 1_125));
+    assert_eq!((two.ordinal, two.first_index, two.n_bars), (1, 1_125, 375));
+    assert_eq!(root.present(path).records(), &[one, two]);
+    // The writer's lock goes first: a reader is refused while it is held.
+    drop(file);
+    assert_eq!(
+        BarFile::open_existing(&root.0, path, SYMBOL)
+            .unwrap()
+            .time_lookup(),
+        store::file::TimeLookup::Indexed,
+        "a reader goes through the index the records left alone"
+    );
 }
 
 /// **A re-offer that wrote nothing records nothing and opens nothing.**
