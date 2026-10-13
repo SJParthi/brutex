@@ -2207,31 +2207,88 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
 /// of traded rows only; 2 is D-2812, which takes it over every row; 3 is
 /// D-3342 (the operator's answer, 7 Oct 2026): an option bar's open interest
 /// is the OI of the LAST row placed in its second, traded or not
-/// (`fold::fold_seconds_with_last_oi`), where 2 took the last traded row's.
-pub const BAR_DEFINITION: u32 = 3;
+/// (`fold::fold_seconds_with_last_oi`), where 2 took the last traded row's;
+/// 4 is the closing auction's band through order matching and its booked
+/// match (SC-CLOSE-5, SC-CLOSE-6; D-3320, D-4878 item 10): from 2026-08-03 an
+/// eligible share's file leaves the rows of `[15:28:00, 15:35:00)` at one
+/// price, booked or not, and the zero-book rows of `[15:30:00, 15:35:00)`, to
+/// the `.auc` sidecar instead of the fold, so one such file builds different
+/// bars under 4 than under 3 or 2 (`gdfl_cm::AUCTION_BAND_END`,
+/// `gdfl_cm::AUCTION_MATCH_FROM`).
+pub const BAR_DEFINITION: u32 = 4;
 
 /// The definition D-3342 replaced.
 const D3342_PREVIOUS: u32 = 2;
 
+/// The definition the closing auction's band through matching replaced
+/// (SC-CLOSE-5, SC-CLOSE-6).
+const AUCTION_PREVIOUS: u32 = 3;
+
 /// Whether a day of `kind` built under `definition` holds the bars this
-/// build would build (D-2822, D-3342): [`BAR_DEFINITION`], or for an index
-/// or a share also 2. Definition 3 changed only the open interest of a
-/// second, and the capital-market trees carry none (`OI_NULL`, D-3322), so
-/// their bars under 2 and 3 are the same bars, byte for byte; reading those
-/// days again would change nothing and is not asked of them. An option day
-/// built under 2 is restated: its open interest may differ.
+/// build would build (D-2822, D-3342, D-4878 item 10): [`BAR_DEFINITION`]
+/// always; 3 for every day but a share's from 2026-08-03; and 2 for an index,
+/// and for a share before 2026-08-03.
+///
+/// Definition 3 changed only the open interest of a second, and the
+/// capital-market trees carry none (`OI_NULL`, D-3322), so an index's or a
+/// share's bars under 2 and 3 are the same bars, byte for byte. Definition 4
+/// changed only what an eligible share's file folds from 2026-08-03, the one
+/// rule [`crate::vendor::cash_auction_eligibility_required`] answers, so an
+/// index's, an option's and a share's earlier day hold under 3 the bars 4
+/// builds. Reading those days again would change nothing and is not asked of
+/// them. A share's day from 2026-08-03 under 2 or 3 is restated, eligible or
+/// not (the journal's key names no share's flag, and the store judges what a
+/// second reading offers: `AlreadyPresent` for the same bars, a refusal by
+/// name for different ones); so is an option day under 2, whose open
+/// interest may differ (CMP-07: before this, a share day under 2 passed as
+/// current whichever rule set had built it).
 #[must_use]
-pub fn definition_is_current(kind: ImportKind, definition: u64) -> bool {
-    definition == u64::from(BAR_DEFINITION)
+pub fn definition_is_current(kind: ImportKind, day: Day, definition: u64) -> bool {
+    current_under(
+        kind,
+        crate::vendor::cash_auction_eligibility_required(day),
+        definition,
+    )
+}
+
+/// [`definition_is_current`] once the day is reduced to the one question
+/// definition 4 asks of it: whether it is in the closing auction's era.
+fn current_under(kind: ImportKind, auction_era: bool, definition: u64) -> bool {
+    if definition == u64::from(BAR_DEFINITION) {
+        return true;
+    }
+    if kind == ImportKind::Stocks && auction_era {
+        return false;
+    }
+    definition == u64::from(AUCTION_PREVIOUS)
         || (definition == u64::from(D3342_PREVIOUS) && kind != ImportKind::Options)
 }
 
-/// [`definition_is_current`] for a journal key's kind word; a word that is
-/// no kind is current only under [`BAR_DEFINITION`].
-fn current_for(kind: &str, definition: u32) -> bool {
-    ImportKind::parse(kind).map_or(definition == BAR_DEFINITION, |kind| {
-        definition_is_current(kind, u64::from(definition))
-    })
+/// [`definition_is_current`] for a journal key's kind and day words; a word
+/// that is no kind is current only under [`BAR_DEFINITION`], and a day word
+/// that is no `YYYY-MM-DD` day is taken to be in the auction's era, so a
+/// share's key that cannot say when it was is read again, never passed.
+fn current_for(kind: &str, day: &str, definition: u32) -> bool {
+    let Ok(kind) = ImportKind::parse(kind) else {
+        return definition == BAR_DEFINITION;
+    };
+    let auction_era = journal_day(day).is_none_or(crate::vendor::cash_auction_eligibility_required);
+    current_under(kind, auction_era, u64::from(definition))
+}
+
+/// A journal key's day word as a day: exactly `YYYY-MM-DD`, a real date.
+fn journal_day(text: &str) -> Option<Day> {
+    let mut parts = text.split('-');
+    let (Some(y), Some(m), Some(d), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    let day = Day::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?).ok()?;
+    (day.to_string() == text).then_some(day)
 }
 
 /// The definition the code of D-2811 and D-2812 built under. Both landed in
@@ -2538,8 +2595,9 @@ impl Journal {
                 self.open.remove(&key);
                 self.incomplete.remove(&key);
                 // The LAST `done` of a key says which definition built what
-                // the store holds (D-2822); a capital-market day built under
-                // 2 holds the bars 3 builds (D-3342, [`definition_is_current`]).
+                // the store holds (D-2822); an index day built under 2 or 3,
+                // and a share's before 2026-08-03, holds the bars 4 builds
+                // (D-3342, D-4878 item 10, [`definition_is_current`]).
                 // The LAST `done` of a key also says which members it was
                 // asked to read (D-4878); one that says nothing is a close
                 // from before scopes were recorded.
@@ -2547,7 +2605,7 @@ impl Journal {
                     Some(digest) => self.scope_done.insert(key.clone(), digest.to_owned()),
                     None => self.scope_done.remove(&key),
                 };
-                if definition.is_some_and(|definition| current_for(kind, definition)) {
+                if definition.is_some_and(|definition| current_for(kind, day, definition)) {
                     self.restated.remove(&key);
                     if refused > 0 {
                         self.with_refusals.insert(key.clone());
@@ -2600,7 +2658,7 @@ impl Journal {
                 self.open.remove(&key);
                 self.incomplete.remove(&key);
                 self.with_refusals.remove(&key);
-                if definition.is_some_and(|definition| current_for(kind, definition)) {
+                if definition.is_some_and(|definition| current_for(kind, day, definition)) {
                     self.restated.remove(&key);
                     self.done.insert(key);
                 } else {
@@ -4498,8 +4556,56 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
             return false;
         }
     }
+    if restated_past_append(ctx.journal, ctx.run.kind, key, day) {
+        report.days_refused += 1;
+        let cause = Cause::open(Stage::File, RESTATED_AUCTION_BAND);
+        let why = "restated by bar definition 4 (the closing auction's band through matching, \
+                   D-4878 item 10): this month is made again as a new generation (D-3320 item 4, \
+                   WP-80); an append cannot land it, since a reading that builds fewer bars than \
+                   the month holds is answered AlreadyPresent";
+        let mut failures = vec![Staged {
+            cause,
+            failure: note_failure(ctx.run.kind, day, "store", why, cause),
+        }];
+        let counts = Counts {
+            failures: 1,
+            ..Counts::default()
+        };
+        let _refused = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
+        report
+            .failures
+            .extend(failures.into_iter().map(|one| one.failure));
+        return false;
+    }
     name_retried(ctx.journal, ctx.run.kind, (key, day, retried), report);
     true
+}
+
+/// The `reason=` of a share's day of the closing auction's era that
+/// definition 4 restated (D-4878 item 10).
+const RESTATED_AUCTION_BAND: &str = "restated_auction_band";
+
+/// Whether `key` is a share's day of the closing auction's era whose last
+/// `done` was built under a definition before 4 (D-4878 item 10, CMP-07). Such
+/// a day is refused by name at admission, every run, until a `done` under 4
+/// closes it, and is never read through the append door: definition 4 takes
+/// the auction's print OUT of the bars, so the second reading is often the
+/// held day less its last bar, which the append-only month answers
+/// `AlreadyPresent` (it compares the bars offered, never the held bar after
+/// them), and the day would close `done` under 4 with the print still a bar,
+/// unsaid. The journal keeps a key restated through its later `refused`
+/// lines, so the refusal holds without another record. A key under a names
+/// filter is refused too when the day's whole-tree key is restated: the
+/// months it would append to were made by that key, and the second reading
+/// of its shares meets the same held print. O(1): two set probes and a date
+/// compare.
+fn restated_past_append(journal: &Journal, kind: ImportKind, key: &str, day: Day) -> bool {
+    kind == ImportKind::Stocks
+        && crate::vendor::cash_auction_eligibility_required(day)
+        && (journal.restated.contains(key)
+            || journal
+                .restated
+                .contains(&format!("{} {day} *", kind.as_str())))
 }
 
 /// Names `day` in `resumed` when the journal sends it back, whatever closed
@@ -6043,6 +6149,29 @@ fn note_series(day: Day, symbol: &str, name: &str) {
     );
 }
 
+/// Names a file whose match band traded at two prices or more, so its booked
+/// rows there stayed ordinary rows of phase `cas` (SC-CLOSE-6): never a
+/// silent choice. Nothing to say for any other file.
+fn note_unattributed(day: Day, symbol: &str, name: &str, booked: u32) {
+    if booked == 0 {
+        return;
+    }
+    let day_text = day.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn(
+            TARGET,
+            "the auction's match band traded at two prices or more: its booked rows stay \
+             ordinary rows of phase cas, none is called the auction's",
+        )
+        .with("kind", ImportKind::Stocks.as_str())
+        .with("day", day_text.as_str())
+        .with("symbol", symbol)
+        .with("file", name)
+        .with("booked_rows", u64::from(booked))
+        .with("code", "auction_band_unattributed"),
+    );
+}
+
 /// Reads one wanted capital-market file: fetched, checked and decoded, and
 /// handed on with its member and its reader's counts. A key resolved from the
 /// listing always has its file there, so a `None` is refused by name rather
@@ -6073,6 +6202,12 @@ fn cm_read<S: CmSource>(
     let day_file = read_file.map_err(|why| Refused::cm(job.file.name(), &why))?;
     if mode == Mode::Import {
         note_series(day, &job.symbol, &day_file.name);
+        note_unattributed(
+            day,
+            &job.symbol,
+            &day_file.name,
+            day_file.file.auction_band_unattributed,
+        );
     }
     let decoded = &day_file.file;
     let reader = quality::ReaderCounts {

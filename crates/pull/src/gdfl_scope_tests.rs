@@ -21,6 +21,7 @@
     reason = "a test that cannot panic cannot fail"
 )]
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1695,6 +1696,173 @@ fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_agai
         "WP-12f Ctx::owed, a day examined under this scope: n={} p50={p50}ns p99={p99}ns \
          max={max}ns",
         all.len()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// CMP-07, D-4878 item 10: definition 4 is the closing auction's band through
+/// matching (SC-CLOSE-5, SC-CLOSE-6), which changed only what an eligible
+/// share's file folds from 2026-08-03. So a share's day from 2026-08-03
+/// closed `done` under 2 or 3 is restated, no longer done (before, every
+/// share day under 2 passed as current whichever rule set had built it, and
+/// the auction's print stayed a bar; admission then refuses it by name,
+/// `a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`);
+/// the same definitions stay current for
+/// a share's day before it, for an index day, and under 3 for an option day
+/// (an option day under 2 is restated, D-3342). A share key whose day word is
+/// no date is read again, never passed. The rule asks one predicate, the
+/// vendor's own `cash_auction_eligibility_required`, for every kind.
+#[test]
+fn a_share_day_of_the_auction_era_under_an_older_definition_is_restated() {
+    let lines = [
+        ("stocks 2026-07-31 *", 3, true),
+        ("stocks 2026-07-31 NSE-CASH-RELIANCE", 2, true),
+        ("stocks 2026-08-03 *", 2, false),
+        ("stocks 2026-08-04 *", 3, false),
+        ("stocks 2026-08-05 *", 4, true),
+        ("stocks 2026-08-06 *", 1, false),
+        ("stocks 2026-8-7 *", 3, false),
+        ("stocks 2026-8-7 *+NSE-CASH-INFY", 4, true),
+        ("indices 2026-08-04 *", 2, true),
+        ("indices 2026-08-05 *", 3, true),
+        ("options 2026-08-04 *", 3, true),
+        ("options 2026-08-05 *", 2, false),
+        ("options 2019-02-01 *", 4, true),
+    ];
+    let root = scratch("wp12f-definition4");
+    let mut text = String::new();
+    for (key, definition, _) in &lines {
+        let _ = writeln!(text, "begin {key}");
+        let _ = writeln!(
+            text,
+            "done {key} definition={definition} files=1 seconds=1 failures=0"
+        );
+    }
+    std::fs::create_dir_all(root.join("imports")).unwrap();
+    std::fs::write(journal_path(&root), text).unwrap();
+    let journal = Journal::load(journal_path(&root)).unwrap();
+    for (key, definition, current) in lines {
+        assert_eq!(
+            (journal.done.contains(key), journal.restated.contains(key)),
+            (current, !current),
+            "{key} under {definition}"
+        );
+    }
+    let on = |y, m, d| Day::new(y, m, d).unwrap();
+    assert!(definition_is_current(ImportKind::Stocks, on(2026, 8, 2), 3));
+    assert!(!definition_is_current(
+        ImportKind::Stocks,
+        on(2026, 8, 3),
+        3
+    ));
+    assert!(definition_is_current(
+        ImportKind::Stocks,
+        on(2026, 8, 3),
+        u64::from(BAR_DEFINITION)
+    ));
+    assert_eq!(BAR_DEFINITION, 4);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// D-4878 item 10 (CMP-07): a share's day of the closing auction's era that
+/// definition 4 restated is refused by name at admission, every run, and no
+/// file of it is read or appended: the second reading takes the print out of
+/// the bars, the held day less its last bar is answered `AlreadyPresent`, and
+/// the day would close `done` under 4 with the print still a bar. A names
+/// filter on such a day is refused too (its months were made by the restated
+/// whole-tree key); a share's day before 2026-08-03 under 3 stays done. The
+/// day's key stays restated through its `refused` line, so the next run
+/// refuses it again and names it in its failures (the journal keeps the one
+/// identical close); a `done` under 4 (WP-80's new generation) ends it.
+#[test]
+fn a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended() {
+    let root = scratch("wp12f-restated-auction");
+    let (before, era) = (
+        Day::new(2026, 7, 31).unwrap(),
+        Day::new(2026, 8, 4).unwrap(),
+    );
+    let plan = |d: Day| -> DayPlan {
+        (
+            d,
+            Tree::Stocks,
+            vec![(
+                entry_of(Tree::Stocks, d, "RELIANCE.NSE"),
+                stock_file("RELIANCE.NSE", d),
+            )],
+        )
+    };
+    world_of(&root, &[plan(before), plan(era)]);
+    let store = root.join("S");
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    let mut legacy = String::new();
+    for d in [before, era] {
+        let _ = writeln!(legacy, "begin stocks {d} *");
+        let _ = writeln!(
+            legacy,
+            "done stocks {d} * definition=3 files=1 seconds=1 failures=0"
+        );
+    }
+    std::fs::write(journal_path(&store), legacy).unwrap();
+    let run = |d: Day, only: &[String]| {
+        let source = TickStore::new(&root.join("ts"));
+        run_cm(
+            &source,
+            &Run {
+                kind: ImportKind::Stocks,
+                from: d,
+                to: d,
+                only,
+                store_root: &store,
+            },
+        )
+        .unwrap()
+    };
+    let kept = run(before, &[]);
+    assert_eq!(
+        (kept.days_skipped, kept.days_refused, kept.files),
+        (1, 0, 0),
+        "{:?}",
+        kept.failures
+    );
+    let names = ["RELIANCE".to_owned()];
+    for only in [&[][..], &names[..], &[][..]] {
+        let refused = run(era, only);
+        assert_eq!(
+            (refused.days_refused, refused.days_imported, refused.files),
+            (1, 0, 0),
+            "{only:?}: {:?}",
+            refused.failures
+        );
+        assert!(
+            refused
+                .failures
+                .iter()
+                .any(|f| f.why.contains("restated by bar definition 4")),
+            "{:?}",
+            refused.failures
+        );
+    }
+    let journal = journal_text(&store);
+    assert_eq!(
+        lines_starting(
+            &journal,
+            "refused stocks 2026-08-04 * definition=4 stage=file reason=restated_auction_band"
+        ),
+        1,
+        "the third run names the same refusal in its failures and does not write an \
+         identical close twice: {journal}"
+    );
+    assert_eq!(
+        lines_starting(
+            &journal,
+            "refused stocks 2026-08-04 RELIANCE definition=4 stage=file reason=restated_auction_band"
+        ),
+        1,
+        "{journal}"
+    );
+    assert!(
+        !store.join("bars").exists(),
+        "no file of the restated day was read or appended"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

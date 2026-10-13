@@ -16814,6 +16814,23 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   Holding the member back for the rest of the run would need a close that
   records a member it did not read, a new close shape; NOT DONE. A day the
   source does not hold is L-WP12f-10.
+- **L-WP12f-13. A reading that builds fewer bars than a month holds is
+  answered `AlreadyPresent`.** The append-only month compares the bars a
+  batch offers against the held records from the batch's first stamp on and
+  never looks at the held record after the batch's last one, so a day read
+  again under a definition that builds a SUBSET of what was held (the held
+  day less its last bar) passes as present and its key could close `done`
+  with the extra bar still held. Measured 13 Oct 2026 on a private copy of
+  the real GDFL RELIANCE 2026-08 month with the build before this repair: a
+  filtered re-read of 2026-08-24 offered 6,685 seconds, wrote 0, failed 0,
+  closed `done ... definition=3`, and the month kept its 15:29:06 auction
+  print as a bar while the `.auc` sidecar filed the same print (month sha256
+  unchanged). D-4878 item 10 closes the one case this repository has (a
+  share's day of the closing auction's era restated by definition 4 is
+  refused by name at admission); the general check, one held record read
+  after an `AlreadyPresent` batch and refused when it is stamped on the
+  batch's own day, belongs to the shared landing (`ingest::from_rows`, owner
+  WP-13c / store) and is NOT DONE.
 
 ## Cost claims of the /db fix round that name no proof — 12 October 2026
 

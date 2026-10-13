@@ -1215,6 +1215,424 @@ fn an_eligible_shares_auction_rows_are_prints_never_trades() {
     assert_eq!((file.rows.len(), file.auction.len()), (0, 1));
 }
 
+/// SC-CLOSE-5: the auction's band runs through its order-matching phase,
+/// `[15:15:00, 15:35:00)` (charter §9, the phases of the dated notice §7
+/// cites), not to 15:30:00. A zero-book traded row of an eligible share at
+/// 15:30:00..15:34:59 is a print (the vendor stamped 9 of 145 measured closing
+/// prints 15:30:00..15:30:02, and they were lost); 15:35:00 and the
+/// post-close session's zero-book rows (15:50 on) stay rows, never prints; a
+/// row with a book in the band stays a row; an ineligible share keeps every
+/// row; an unknown eligibility refuses a file whose only candidate is at
+/// 15:30:01. Every price is invented.
+#[test]
+fn the_auction_band_runs_through_order_matching_and_stops_before_post_close() {
+    let d = day(2026, 8, 20);
+    let stem = "RELIANCE.NSE";
+    let zero = ("0", "0.00");
+    let mut rows: Vec<String> = (0..6)
+        .map(|i| {
+            quoted(
+                stem,
+                d,
+                at(15, 5, 0) + i * 60,
+                "4444.15",
+                ("4444.10", "4444.20"),
+                3,
+            )
+        })
+        .collect();
+    rows.push(quoted(stem, d, at(15, 29, 6), "4446.65", zero, 101));
+    rows.push(quoted(stem, d, at(15, 30, 0), "4446.65", zero, 102));
+    rows.push(quoted(stem, d, at(15, 30, 1), "4446.65", zero, 103));
+    rows.push(quoted(
+        stem,
+        d,
+        at(15, 30, 5),
+        "4446.60",
+        ("4446.55", "4446.70"),
+        9,
+    ));
+    rows.push(quoted(stem, d, at(15, 31, 46), "4446.65", zero, 104));
+    rows.push(quoted(stem, d, at(15, 34, 59), "4446.65", zero, 105));
+    rows.push(quoted(stem, d, at(15, 35, 0), "4446.65", zero, 106));
+    rows.push(quoted(stem, d, at(15, 58, 42), "4446.65", zero, 107));
+    let bytes = csv(&rows);
+    let expect = expect_of(CmKind::Stocks, stem, d);
+    let with = |auction: Auction, bytes: &[u8]| {
+        decode_with(
+            bytes,
+            &expect,
+            &Rules {
+                auction,
+                ..Rules::regular()
+            },
+        )
+    };
+    let eligible = with(Auction::Eligible, &bytes).unwrap();
+    let prints: Vec<(u32, u64)> = eligible
+        .auction
+        .iter()
+        .map(|p| (p.sod, p.quantity))
+        .collect();
+    assert_eq!(
+        prints,
+        vec![
+            (at(15, 29, 6), 101),
+            (at(15, 30, 0), 102),
+            (at(15, 30, 1), 103),
+            (at(15, 31, 46), 104),
+            (at(15, 34, 59), 105),
+        ],
+        "every zero-book traded row in [15:15:00, 15:35:00) is a print"
+    );
+    let kept: Vec<u32> = eligible.rows.iter().map(|r| r.sod).collect();
+    for sod in [at(15, 30, 5), at(15, 35, 0), at(15, 58, 42)] {
+        assert!(kept.contains(&sod), "{sod} stays a row, never a print");
+    }
+    assert_eq!(eligible.rows.len() + eligible.auction.len(), rows.len());
+    for auction in [Auction::NotEligible, Auction::NotAsked] {
+        let file = with(auction, &bytes).unwrap();
+        assert_eq!((file.rows.len(), file.auction.len()), (rows.len(), 0));
+    }
+    let late_only = csv(&[
+        quoted(stem, d, at(15, 5, 0), "4444.15", ("4444.10", "4444.20"), 3),
+        quoted(stem, d, at(15, 30, 1), "4446.65", zero, 103),
+    ]);
+    assert_eq!(
+        with(Auction::Unknown("no master".to_owned()), &late_only),
+        Err(CmRefusal::AuctionEligibilityUnknown {
+            why: "no master".to_owned()
+        }),
+        "a candidate at 15:30:01 asks the eligibility like any other"
+    );
+    let post_only = csv(&[
+        quoted(stem, d, at(15, 5, 0), "4444.15", ("4444.10", "4444.20"), 3),
+        quoted(stem, d, at(15, 35, 0), "4446.65", zero, 106),
+    ]);
+    assert!(
+        with(Auction::Unknown("no master".to_owned()), &post_only).is_ok(),
+        "a zero-book row from 15:35:00 is no candidate and asks nothing"
+    );
+}
+
+/// The day, stem and quotes of the SC-CLOSE-6 shapes. Every price is invented.
+const BAND_STEM: &str = "HDFCBANK.NSE";
+const BAND_ZERO: (&str, &str) = ("0", "0.00");
+const BAND_BOOK: (&str, &str) = ("4446.60", "4446.70");
+
+fn band_day() -> Day {
+    day(2026, 9, 24)
+}
+
+/// Lines 2..=7 of every shape: six continuous trades before 15:15.
+fn band_base() -> Vec<String> {
+    (0..6)
+        .map(|i| {
+            quoted(
+                BAND_STEM,
+                band_day(),
+                at(15, 5, 0) + i * 60,
+                "4444.15",
+                ("4444.10", "4444.20"),
+                3,
+            )
+        })
+        .collect()
+}
+
+/// One row of each `(second, price, quotes, quantity)` after the base.
+fn band_file(tail: &[(u32, &str, (&str, &str), u64)]) -> Vec<u8> {
+    let mut rows = band_base();
+    for &(sod, ltp, quotes, ltq) in tail {
+        rows.push(quoted(BAND_STEM, band_day(), sod, ltp, quotes, ltq));
+    }
+    csv(&rows)
+}
+
+fn band_decode(bytes: &[u8], auction: Auction) -> Result<CmFile, CmRefusal> {
+    decode_with(
+        bytes,
+        &expect_of(CmKind::Stocks, BAND_STEM, band_day()),
+        &Rules {
+            auction,
+            ..Rules::regular()
+        },
+    )
+}
+
+/// `(second, price, quantity, rows, line)` of each print.
+fn band_prints(file: &CmFile) -> Vec<(u32, i64, u64, u32, u32)> {
+    file.auction
+        .iter()
+        .map(|p| (p.sod, p.price, p.quantity, p.rows, p.line))
+        .collect()
+}
+
+/// A booked match alone, between a 15:15 straggler and a post-close row
+/// (40 of 133 measured share-sessions had no zero-book row in the band).
+fn booked_alone() -> Vec<u8> {
+    band_file(&[
+        (at(15, 15, 2), "4444.25", BAND_BOOK, 4),
+        (at(15, 29, 5), "4446.65", BAND_BOOK, 703),
+        (at(15, 52, 0), "4446.65", BAND_BOOK, 9),
+    ])
+}
+
+/// One match stated booked, then zero-book twice, then booked after 15:30,
+/// then a booked row at 15:35:00 (HDFCBANK 2026-09-24's shape, widened).
+fn booked_stated() -> Vec<u8> {
+    band_file(&[
+        (at(15, 28, 3), "4446.65", BAND_BOOK, 383),
+        (at(15, 28, 7), "4446.65", BAND_ZERO, 383),
+        (at(15, 28, 7), "4446.65", BAND_ZERO, 383),
+        (at(15, 31, 46), "4446.65", BAND_BOOK, 383),
+        (at(15, 35, 0), "4446.65", BAND_BOOK, 5),
+    ])
+}
+
+/// SC-CLOSE-6: the auction's match is stamped in `[15:28:00, 15:35:00)` at
+/// one price (charter §9: a random close from 15:28, one equilibrium price,
+/// matching to 15:35), and the vendor states it with a book beside it as
+/// often as without. When an eligible file's match band trades at one price,
+/// its booked rows are prints too, merged with the zero-book ones in file
+/// order (identical consecutive rows merged, never summed), and the row
+/// counts follow them out; 15:35:00 and the post-close session stay rows.
+#[test]
+fn a_booked_match_at_the_one_band_price_is_a_print() {
+    let file = band_decode(&booked_alone(), Auction::Eligible).unwrap();
+    assert_eq!(
+        band_prints(&file),
+        vec![(at(15, 29, 5), 444_665, 703, 1, 9)]
+    );
+    assert_eq!(file.rows.len(), 8, "nine rows, one of them the print");
+    assert!(file.rows.iter().all(|r| r.sod != at(15, 29, 5)));
+    assert_eq!((file.rows_in_session, file.rows_post), (7, 1));
+    assert_eq!(file.max_sod, at(15, 52, 0));
+    assert_eq!(file.auction_band_unattributed, 0);
+    let file = band_decode(&booked_alone(), Auction::NotEligible).unwrap();
+    assert_eq!((file.rows.len(), file.auction.len()), (9, 0));
+    assert_eq!((file.rows_in_session, file.rows_post), (8, 1));
+
+    let file = band_decode(&booked_stated(), Auction::Eligible).unwrap();
+    assert_eq!(
+        band_prints(&file),
+        vec![
+            (at(15, 28, 3), 444_665, 383, 1, 8),
+            (at(15, 28, 7), 444_665, 383, 2, 9),
+            (at(15, 31, 46), 444_665, 383, 1, 11),
+        ]
+    );
+    let kept: Vec<u32> = file.rows.iter().map(|r| r.sod).collect();
+    assert_eq!(kept.len(), 7);
+    assert_eq!(kept.last(), Some(&at(15, 35, 0)), "15:35:00 stays a row");
+    assert_eq!((file.rows_in_session, file.rows_post), (6, 1));
+}
+
+/// SC-CLOSE-6, the other shapes: a band at two prices (RELIANCE
+/// 2026-08-31's) claims no booked row and counts them, its zero-book row
+/// still a print (D-3320 item 3); a file whose one trade is a booked match
+/// after 15:30 is one print for an eligible share and has no session row
+/// otherwise; before 2026-08-03 nothing is asked; and an unknown eligibility
+/// is asked only by a zero-book candidate, as before.
+#[test]
+fn two_band_prices_claim_no_booked_row_and_the_edges_hold() {
+    let two = band_file(&[
+        (at(15, 20, 7), "4445.00", BAND_BOOK, 2),
+        (at(15, 28, 45), "4445.50", BAND_BOOK, 3),
+        (at(15, 29, 52), "4446.65", BAND_BOOK, 900),
+        (at(15, 29, 53), "4446.65", BAND_ZERO, 900),
+    ]);
+    let file = band_decode(&two, Auction::Eligible).unwrap();
+    assert_eq!(
+        band_prints(&file),
+        vec![(at(15, 29, 53), 444_665, 900, 1, 11)]
+    );
+    assert_eq!(file.auction_band_unattributed, 2);
+    for sod in [at(15, 20, 7), at(15, 28, 45), at(15, 29, 52)] {
+        assert!(file.rows.iter().any(|r| r.sod == sod), "{sod} stays a row");
+    }
+    assert_eq!(file.rows.len(), 9);
+
+    let late = csv(&[quoted(
+        BAND_STEM,
+        band_day(),
+        at(15, 31, 0),
+        "4446.65",
+        BAND_BOOK,
+        77,
+    )]);
+    let file = band_decode(&late, Auction::Eligible).unwrap();
+    assert_eq!(band_prints(&file), vec![(at(15, 31, 0), 444_665, 77, 1, 2)]);
+    assert_eq!((file.rows.len(), file.rows_post), (0, 0));
+    assert_eq!(
+        band_decode(&late, Auction::NotEligible),
+        Err(CmRefusal::NoSessionRows)
+    );
+
+    let file = band_decode(&booked_stated(), Auction::NotAsked).unwrap();
+    assert_eq!((file.rows.len(), file.auction.len()), (11, 0));
+}
+
+/// SC-CLOSE-6 under an unknown eligibility: a booked match at one band price
+/// is the auction's print if the share is eligible and a trade if not, so the
+/// file is refused by name, never folded on a guess (it was kept, its print
+/// a trade, before); a zero-book candidate refuses as before; a band at two
+/// prices keeps its booked rows as rows whatever the flag, so nothing is
+/// guessed and the file is kept; a file with no traded row in the band, or
+/// none in it at all, asks nothing.
+#[test]
+fn an_unknown_eligibility_refuses_a_one_price_booked_match_and_keeps_two_prices() {
+    let unknown = || Auction::Unknown("no master".to_owned());
+    let refused = Err(CmRefusal::AuctionEligibilityUnknown {
+        why: "no master".to_owned(),
+    });
+    assert_eq!(band_decode(&booked_alone(), unknown()), refused);
+    assert_eq!(band_decode(&booked_stated(), unknown()), refused);
+    let two_booked = band_file(&[
+        (at(15, 28, 45), "4445.50", BAND_BOOK, 3),
+        (at(15, 29, 52), "4446.65", BAND_BOOK, 900),
+    ]);
+    let file = band_decode(&two_booked, unknown()).unwrap();
+    assert_eq!((file.rows.len(), file.auction.len()), (8, 0));
+    assert_eq!(file.auction_band_unattributed, 0);
+    let file = band_decode(&two_booked, Auction::Eligible).unwrap();
+    assert_eq!((file.rows.len(), file.auction.len()), (8, 0));
+    assert_eq!(file.auction_band_unattributed, 2);
+    let before_band = band_file(&[(at(15, 27, 59), "4446.65", BAND_BOOK, 9)]);
+    let file = band_decode(&before_band, unknown()).unwrap();
+    assert_eq!((file.rows.len(), file.auction.len()), (7, 0));
+    let quote_only = band_file(&[(at(15, 29, 0), "4446.65", BAND_BOOK, 0)]);
+    assert!(band_decode(&quote_only, unknown()).is_ok());
+}
+
+/// A booked print leaves the count its row was put in, by the one rule that
+/// put it there: on a session whose only window opens after the match band
+/// (a special session, invented), the band's row was counted before the
+/// session, so the print takes it out of `rows_pre`, never out of
+/// `rows_post` (which it never entered), and counts as usable.
+#[test]
+fn a_booked_print_leaves_the_count_its_row_was_put_in() {
+    let late_session = crate::calendar::Session {
+        windows: [
+            crate::calendar::Window {
+                from: 18 * 60,
+                to: 18 * 60 + 59,
+            },
+            crate::calendar::Window { from: 0, to: 0 },
+        ],
+        count: 1,
+    };
+    let rules = |auction: Auction| Rules {
+        session: late_session,
+        auction,
+        ..Rules::regular()
+    };
+    let bytes = csv(&[
+        quoted(
+            BAND_STEM,
+            band_day(),
+            at(15, 29, 5),
+            "4446.65",
+            BAND_BOOK,
+            7,
+        ),
+        quoted(BAND_STEM, band_day(), at(18, 5, 0), "4450.05", BAND_BOOK, 2),
+        quoted(
+            BAND_STEM,
+            band_day(),
+            at(19, 30, 0),
+            "4450.05",
+            BAND_BOOK,
+            1,
+        ),
+    ]);
+    let expect = expect_of(CmKind::Stocks, BAND_STEM, band_day());
+    let file = decode_with(&bytes, &expect, &rules(Auction::NotEligible)).unwrap();
+    assert_eq!(
+        (file.rows_pre, file.rows_in_session, file.rows_post),
+        (1, 1, 1)
+    );
+    let file = decode_with(&bytes, &expect, &rules(Auction::Eligible)).unwrap();
+    assert_eq!(band_prints(&file), vec![(at(15, 29, 5), 444_665, 7, 1, 2)]);
+    assert_eq!(
+        (file.rows_pre, file.rows_in_session, file.rows_post),
+        (0, 1, 1),
+        "the print leaves rows_pre, where its row was counted"
+    );
+    assert_eq!(file.rows.len(), 2);
+    assert_eq!(file.max_sod, at(19, 30, 0));
+}
+
+/// The match band costs O(1) a row and one pass a file (SC-CLOSE-6),
+/// measured: a 30,000-row eligible share-day with a booked match decoded 200
+/// times as eligible and 200 times as ineligible, interleaved; p50, p99 and
+/// max of each printed, and the eligible decode's median held within twice
+/// the ineligible one's plus a millisecond. A timing, so run on demand:
+/// `cargo test -p pull --lib -- --ignored the_match_band_costs --nocapture`.
+#[test]
+#[ignore = "timing; run on demand with --ignored"]
+fn the_match_band_costs_one_pass_a_file() {
+    let mut rows: Vec<String> = (0..30_000_u32)
+        .map(|i| {
+            quoted(
+                BAND_STEM,
+                band_day(),
+                at(9, 15, 0) + i * 21_599 / 30_000,
+                "4444.15",
+                ("4444.10", "4444.20"),
+                3,
+            )
+        })
+        .collect();
+    for (sod, quotes) in [
+        (at(15, 28, 3), BAND_BOOK),
+        (at(15, 28, 7), BAND_ZERO),
+        (at(15, 30, 1), BAND_BOOK),
+    ] {
+        rows.push(quoted(BAND_STEM, band_day(), sod, "4446.65", quotes, 383));
+    }
+    rows.push(quoted(
+        BAND_STEM,
+        band_day(),
+        at(15, 52, 0),
+        "4446.65",
+        BAND_BOOK,
+        9,
+    ));
+    let bytes = csv(&rows);
+    let mut eligible = Vec::with_capacity(200);
+    let mut ineligible = Vec::with_capacity(200);
+    for _ in 0..200 {
+        let start = std::time::Instant::now();
+        let file = band_decode(&bytes, Auction::Eligible).unwrap();
+        eligible.push(start.elapsed());
+        assert_eq!(file.auction.len(), 3);
+        let start = std::time::Instant::now();
+        let file = band_decode(&bytes, Auction::NotEligible).unwrap();
+        ineligible.push(start.elapsed());
+        assert_eq!(file.rows.len(), rows.len());
+    }
+    let stats = |runs: &mut [std::time::Duration]| {
+        runs.sort_unstable();
+        (
+            runs[runs.len() / 2],
+            runs[runs.len() * 99 / 100],
+            runs[runs.len() - 1],
+        )
+    };
+    let (e50, e99, emax) = stats(&mut eligible);
+    let (n50, n99, nmax) = stats(&mut ineligible);
+    println!(
+        "decode of {} rows, n=200 each: eligible p50={e50:?} p99={e99:?} max={emax:?}; \
+         ineligible p50={n50:?} p99={n99:?} max={nmax:?}",
+        rows.len()
+    );
+    assert!(
+        e50 <= n50 * 2 + std::time::Duration::from_millis(1),
+        "the band's settling is one pass: {e50:?} against {n50:?}"
+    );
+}
+
 /// The `.auc` sidecar's bytes, its append-only and idempotent rules, and its
 /// refusals, on a scratch store.
 #[test]

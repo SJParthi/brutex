@@ -3,11 +3,15 @@
 //! # What is an auction print
 //!
 //! From 2026-08-03 a closing-auction-eligible share's continuous trading
-//! ends at 15:15 and the closing auction runs to 15:30 (charter §7 and §9,
-//! NSE/CMTR/73845, NSE/CMTR/74466). In the GDFL capital-market files such a
+//! ends at 15:15 and the closing auction runs through its order-matching
+//! phase to 15:35 (charter §7 and §9, NSE/CMTR/73845, NSE/CMTR/74466; the
+//! phases, [`super::AUCTION_BAND_END`]). In the GDFL capital-market files such a
 //! share carries, in that band, a row whose bid and ask are both zero and
 //! whose LTQ is positive: the auction's print (measured on 7 Oct 2026; its
-//! price equals Zerodha's day close, D-3320). The reader
+//! price equals Zerodha's day close, D-3320). The match itself is stamped
+//! from 15:28 at one price, and is often stated with a book beside it: when
+//! every traded row of the match band is at one price, the booked ones are
+//! prints too (SC-CLOSE-6, [`super::AUCTION_MATCH_FROM`]). The reader
 //! ([`super::decode_with`]) diverts every such row of an eligible share out
 //! of the rows the fold sees and into [`super::CmFile::auction`]; this module
 //! files them. A print is never folded into a one-second bar, and none is

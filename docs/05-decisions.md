@@ -68056,6 +68056,41 @@ made six index series from the 12 special sessions alone.
    holding both a share's own file and a series file refuses both by name.
    The two series codes are a compiled list, UNVERIFIED against an NSE
    circular (`docs/06-limits.md`, L-WP12f-4).
+9. **The closing auction's band runs through order matching, and its match
+   is kept apart booked or not** (SC-CLOSE-5, SC-CLOSE-6; refines D-3320
+   item 3; charter §9, "The auction's phases and where its band ends" and
+   "Which booked row is the auction's", whose timings rest on a broker's
+   dated notice and are UNVERIFIED against an NSE page). For a share the
+   day's security master flags eligible, from 2026-08-03: a zero-bid,
+   zero-ask traded row in `[15:15:00, 15:35:00)` is a print (the band ended
+   at 15:30 and lost the 9 of 145 measured prints stamped 15:30:00 to
+   15:30:02); and when every traded row in the match band `[15:28:00,
+   15:35:00)` is at one price, the booked ones are prints too (40 of 133
+   measured share-sessions had no zero-book row there). At two prices or
+   more no booked row is claimed: they stay rows of phase `cas`, counted in
+   `CmFile::auction_band_unattributed` and named by the import at warn
+   (`auction_band_unattributed`). A share whose eligibility is unknown is
+   refused by name when its band traded at one price with a booked row, as
+   a zero-book candidate refuses it: eligible, that row is the print, and
+   nothing says which. A print leaves the row count its row was put in, by
+   the one rule that put it there.
+10. **Definition 4 records item 9** (CMP-07). `BAR_DEFINITION` is 4. A
+   share's day from 2026-08-03 closed `done` under 2 or 3 is restated and
+   imported again; under 2 or 3 an index day, and a share's day before
+   2026-08-03, stay current, and so does an option day under 3 (D-3342 still
+   restates one under 2). The day question is
+   `vendor::cash_auction_eligibility_required`, the rule that asks for the
+   flag, and `/imports.json` asks the same function with the key's day.
+   **Such a day is refused by name at admission, every run, and never read
+   through the append door** (`reason=restated_auction_band`, stage `file`),
+   and so is a names-filter key of a day whose whole-tree key is restated:
+   definition 4 takes the print OUT of the bars, the second reading is often
+   the held day less its last bar, and the append-only month answers that
+   `AlreadyPresent` (it compares the bars offered, never the held bar after
+   them), so the day would close `done` under 4 with the print still a bar,
+   unsaid. The months GDFL CASH 2026-08 and 2026-09 are made again as new
+   generations by WP-80 (D-3320 item 4), whose `done` under 4 ends the
+   refusal.
 
 **Not done.** An options run records no scope. Landing a sparse month's owed
 days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day
@@ -68075,7 +68110,18 @@ an index file (DB-B18), the six stem hand-overs (DB-B12).
 `a_filtered_run_reads_first_what_the_whole_day_key_owes_it`,
 `a_key_closed_under_names_owes_only_what_it_named`,
 `retry_refused_reads_again_a_member_key_closed_with_refusals`,
-`retry_refused_never_cancels_what_a_done_day_before_the_range_owes`.
+`retry_refused_never_cancels_what_a_done_day_before_the_range_owes`,
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`,
+`a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`;
+`crates/pull/src/gdfl_cm_admission_tests.rs`:
+`the_auction_band_runs_through_order_matching_and_stops_before_post_close`,
+`a_booked_match_at_the_one_band_price_is_a_print`,
+`two_band_prices_claim_no_booked_row_and_the_edges_hold`,
+`an_unknown_eligibility_refuses_a_one_price_booked_match_and_keeps_two_prices`,
+`a_booked_print_leaves_the_count_its_row_was_put_in`, and the timing
+`the_match_band_costs_one_pass_a_file` (ignored, on demand);
+`crates/api/src/import_journal.rs`:
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`.
 
 ### D-4928 — The day ledger gains four optional halt and flat-run fields; `/dayflags.json` names a minute-sampled index day and counts the bars inside a halt — 2026-10-12
 

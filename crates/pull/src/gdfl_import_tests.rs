@@ -169,8 +169,9 @@ fn an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not() {
     .unwrap();
     assert_eq!(spot.seconds[0].open_interest, OI_NULL);
     assert_eq!(
-        BAR_DEFINITION, 3,
-        "D-3342 changed the bars an option file builds"
+        BAR_DEFINITION, 4,
+        "D-3342 changed the bars an option file builds (3), and the closing \
+         auction's band an eligible share's from 2026-08-03 (4, D-4878 item 10)"
     );
 }
 
@@ -901,7 +902,7 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     assert_eq!(unmeasured.days_refused, 1);
     assert_eq!(
         without_run(&line_of(&store, "stocks", "2011-01-03")),
-        "refused stocks 2011-01-03 * definition=3 stage=calendar reason=calendar_unmeasured \
+        "refused stocks 2011-01-03 * definition=4 stage=calendar reason=calendar_unmeasured \
          failures=1"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -3226,12 +3227,12 @@ fn index_shapes(on: Day) -> Vec<(String, Vec<u8>)> {
 
 /// The two index lines [`index_shapes`] makes, from the tick store.
 const INDEX_SHAPE_LINES: [&str; 2] = [
-    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=3 member_bytes=0 late=12 \
+    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=4 member_bytes=0 late=12 \
      max_back_s=19799 deferred_s=1 rows_refused=1 rows=22468 seconds=22454 session_s=22500 \
      ss_distinct=60 holes_5s=2 hole_max_s=34 hole_max_at=12:21:40 dual_spread_s=1 \
      dual_spread_max_bps=20 zero_ltp_rows=1 halt_s=0 halt_held_s=0 flat_max_s=1 \
      flat_max_at=09:15:00 max_defer_s=19812 member_src=none",
-    "flags indices 2019-05-30 NIFTY v=1 src=import definition=3 member_bytes=0 late=0 \
+    "flags indices 2019-05-30 NIFTY v=1 src=import definition=4 member_bytes=0 late=0 \
      max_back_s=0 deferred_s=0 rows_refused=0 rows=376 seconds=375 session_s=22500 \
      ss_distinct=1 holes_5s=375 hole_max_s=59 hole_max_at=09:15:00 dual_spread_s=0 \
      dual_spread_max_bps=0 zero_ltp_rows=0 halt_s=0 halt_held_s=0 flat_max_s=1 \
@@ -3425,12 +3426,12 @@ fn the_day_ledger_counts_late_first_trades_shared_holes_and_new_untraded_prices(
     assert_eq!(
         flags_lines(&store),
         [
-            "flags stocks 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+            "flags stocks 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=10 files_traded=10 \
              first_trade_p50=11:57:48 shared_holes=1 shared_hole_max_s=9768 \
              shared_hole_max_at=09:15:00 ltq0_new_ltp_rows=10 auction_prints=0 halt_s=0 \
              halt_held_s=0 max_defer_s=0 member_src=none",
-            "flags stocks 2022-03-07 * v=1 src=import definition=3 member_bytes=0 late=0 \
+            "flags stocks 2022-03-07 * v=1 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=11 files_traded=11 \
              first_trade_p50=09:15:00 shared_holes=1 shared_hole_max_s=1359 \
              shared_hole_max_at=09:16:44 ltq0_new_ltp_rows=0 auction_prints=0 halt_s=0 \
@@ -3542,7 +3543,7 @@ fn the_day_ledger_counts_zero_quote_files_and_leading_marker_rows() {
         false,
     );
     assert!(got.failures.is_empty(), "{:?}", got.failures);
-    let want = "flags options 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+    let want = "flags options 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
                 max_back_s=0 deferred_s=0 rows_refused=0 files=5 files_traded=4 \
                 zero_quote_files=3 ltq1_lead_files=3 ltq1_lead_rows=6 ltq0_new_ltp_rows=1 \
                 first_trade_p50=09:15:30 halt_s=0 halt_held_s=0 max_defer_s=0 \
