@@ -288,39 +288,93 @@ export function dayCode(cal, iso) {
 export const SESSION_OPEN_MINUTE = 9 * 60 + 15;
 export const SESSION_CLOSE_MINUTE = 15 * 60 + 30;
 
+/**
+ * THE DATED CLOSE OF 03 AUG 2026 (SC-CLOSE-18; R3-01). `docs/00-charter.md`
+ * §7 (NSE's closing-auction session rules, and Zerodha's dated notice):
+ * derivatives trade continuously to 15:40 from 2026-08-03, so a contract's
+ * one-minute bars open up to 15:39; a CAS-eligible share's continuous trading
+ * ends 15:15 and 15:15–15:29 is its closing auction; an index and a share that
+ * is not eligible keep 15:30. The same dated table is `pull::vendor`'s
+ * derivatives schedule and `pull::calendar`'s cash rows (D-2831, D-3320).
+ * The grid listed 09:15–15:29 for every instrument on every day, and called
+ * an option's 15:30–15:39 minutes "such as a closing-auction print".
+ */
+export const CLOSE_CHANGE_DAY = '2026-08-03';
+export const DERIVATIVES_CLOSE_MINUTE = 15 * 60 + 40;
+export const CAS_AUCTION_MINUTE = 15 * 60 + 15;
+
 /** @param {number} m minutes since IST midnight */
 export const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+/**
+ * @typedef {object} SessionContext
+ * @property {'index' | 'cash' | 'derivative'} [venue] what the series is:
+ *   an index level, a share's cash series, or a futures/options contract
+ * @property {string} [lo] first ISO day of the selection's span
+ * @property {string} [hi] last ISO day of the selection's span
+ */
 
 /**
  * The minutes a bar of this rung can open on, regular session first, plus any
  * held minute outside it.
  *
+ * With a `venue` and a span, the dated close above is applied: a contract
+ * span reaching 2026-08-03 lists 15:30–15:39 as regular minutes (said to be
+ * so only from that day when the span starts earlier), and a share's
+ * 15:15–15:29 are marked as the closing auction for an eligible share. Without
+ * them the grid is the charter's 09:15 to 15:30, as before.
+ *
  * @param {number | undefined} rungSecs the rung's length (`TF_SECS`)
  * @param {Iterable<string>} [held] `HH:MM` minutes the loaded rows hold
+ * @param {SessionContext} [ctx]
  * @returns {Array<{key: string, name: string, detail: string, why?: string}>}
  */
-export function sessionGrid(rungSecs, held = []) {
+export function sessionGrid(rungSecs, held = [], ctx = {}) {
   if (!Number.isFinite(rungSecs) || /** @type {number} */ (rungSecs) <= 0 || /** @type {number} */ (rungSecs) >= 86_400) return [];
   const step = Math.max(1, Math.round(Math.max(/** @type {number} */ (rungSecs), 60) / 60));
+  const reaches = Boolean(ctx.hi) && /** @type {string} */ (ctx.hi) >= CLOSE_CHANGE_DAY;
+  const wholly = Boolean(ctx.lo) && /** @type {string} */ (ctx.lo) >= CLOSE_CHANGE_DAY;
+  const derivative = ctx.venue === 'derivative' && reaches;
+  const close = derivative ? DERIVATIVES_CLOSE_MINUTE : SESSION_CLOSE_MINUTE;
+  const closeText = hhmm(close);
   /** @type {Map<string, {key: string, name: string, detail: string, why?: string}>} */
   const out = new Map();
-  for (let m = SESSION_OPEN_MINUTE; m < SESSION_CLOSE_MINUTE; m += step) {
+  for (let m = SESSION_OPEN_MINUTE; m < close; m += step) {
     const t = hhmm(m);
-    out.set(t, { key: t, name: t, detail: 'regular session' });
+    if (m >= SESSION_CLOSE_MINUTE) {
+      out.set(t, {
+        key: t,
+        name: t,
+        detail: wholly ? 'regular session' : 'regular from 03 Aug 2026',
+        why: wholly
+          ? 'Derivatives trade continuously to 15:40 from 03 Aug 2026 (charter §7).'
+          : 'Derivatives trade continuously to 15:40 from 03 Aug 2026 (charter §7); a day before that ends at 15:29, so this minute holds bars only from 03 Aug 2026.'
+      });
+    } else if (ctx.venue === 'cash' && reaches && m >= CAS_AUCTION_MINUTE) {
+      out.set(t, {
+        key: t,
+        name: t,
+        detail: wholly ? 'closing auction (CAS share)' : 'auction from 03 Aug 2026 (CAS share)',
+        why: 'From 03 Aug 2026 a CAS-eligible share trades continuously to 15:15 and 15:15–15:29 is its closing auction; a share that is not eligible trades to 15:30 (charter §7, §9). Whether this share is eligible is not stated on this page.'
+      });
+    } else out.set(t, { key: t, name: t, detail: 'regular session' });
   }
   for (const t of held) {
     if (!/^\d{2}:\d{2}$/.test(t) || out.has(t)) continue;
     const m = Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
     const before = m < SESSION_OPEN_MINUTE;
-    const after = m >= SESSION_CLOSE_MINUTE;
+    const after = m >= close;
+    const rule = derivative
+      ? 'charter §7: 09:15 to 15:40 for derivatives from 03 Aug 2026'
+      : 'charter §3: 09:15 to 15:30';
     out.set(t, {
       key: t,
       name: t,
-      detail: before ? 'before 09:15' : after ? 'after 15:30' : 'held',
+      detail: before ? 'before 09:15' : after ? `after ${closeText}` : 'held',
       why: before
-        ? 'Outside the regular session (charter §3: 09:15 to 15:30); listed because a loaded bar opens here, such as a pre-open print.'
+        ? `Outside the regular session (${rule}); listed because a loaded bar opens here, such as a pre-open print.`
         : after
-          ? 'Outside the regular session (charter §3: 09:15 to 15:30); listed because a loaded bar opens here, such as a closing-auction print.'
+          ? `Outside the regular session (${rule}); listed because a loaded bar opens here${derivative ? '' : ', such as a closing-auction print'}.`
           : 'Off this rung’s grid; listed because a loaded bar opens here.'
     });
   }

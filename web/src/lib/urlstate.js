@@ -52,6 +52,8 @@
  * `seg=` with nothing after it means "the operator ticked none".
  */
 
+import { checkText, checkDay, checkTime, checkWhole, checkWord, windowWhy, timeWindowWhy, quote, MAX_PAGE } from './db/input-check.js';
+
 /** The keys this module reads and writes, in the order `encode` emits them. */
 export const KEYS = ['feed', 'universe', 'member', 'seg', 'tf', 'from', 'to'];
 
@@ -211,9 +213,16 @@ function encodeAgain(search) {
    instrument, nothing could be bookmarked or shared, and no log, audit or gap
    row could open the series it names. The names are D-3337's, in its order:
 
-     feed  seg  sym  key  tf  exp  k (repeatable, a strike in paisa)  side
+     feed  seg  sym  key  tf  exp  k (strikes in paisa, ONE comma field)  side
      from  to (YYYY-MM-DD)  tfrom  tto (HH:MM or HH:MM:SS)
      sort  dir  page  view  oow (D-3338)
+
+   and, from R3-01, every other choice the page offers, so a reload, a
+   bookmark, a shared link, Back and Forward restore all of it:
+
+     universe (a membership universe key)  mny (moneyness rungs, one comma
+     field)  spot (`prev` = last spot at or before t, D-3328)  rows (rows per
+     page when not Fit)
 
    `sym` is the exact underlying the Instrument rung picked. `key` is an
    instrument key (`NSE-FNO-NIFTY-2019-03-28-1150000-CE`, `NSE-INDEX-NIFTY`)
@@ -229,35 +238,43 @@ function encodeAgain(search) {
    well-formed value exists in this feed's store is the page's question.
    ====================================================================== */
 
-/** /db's query keys, in the order `encodeDb` writes them. */
+/** /db's query keys, in the order `encodeDb` writes them (D-3337 item 4, extended by R3-01). */
 export const DB_KEYS = [
-  'feed', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'side', 'from', 'to',
-  'tfrom', 'tto', 'sort', 'dir', 'page', 'view', 'oow'
+  'feed', 'universe', 'seg', 'sym', 'key', 'tf', 'exp', 'k', 'mny', 'side', 'spot',
+  'from', 'to', 'tfrom', 'tto', 'sort', 'dir', 'rows', 'page', 'view', 'oow'
 ];
 
-/** The values `encodeDb` leaves out because the page opens on them. */
-export const DB_DEFAULTS = { sort: 'ts', dir: 'desc', page: 1, view: 'bars', oow: false };
+/**
+ * The values `encodeDb` leaves out because the page opens on them: page 1,
+ * the Bars view, newest first, the window applied, the exact-second spot
+ * (D-2807) and rows sized to fit the window.
+ */
+export const DB_DEFAULTS = { sort: 'ts', dir: 'desc', page: 1, view: 'bars', oow: false, spot: 'exact', rows: 'fit' };
 
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
-const TIME = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 const PAISA = /^\d{1,15}$/;
+/** A moneyness rung: ATM, ITM, OTM, or a numbered rung such as ITM-1 / OTM+2. */
+const RUNG = /^(ATM|ITM|OTM)([+-]\d{1,3})?$/;
 
 /**
  * @typedef {object} DbSelection
  * @property {string} [feed]
+ * @property {string} [universe] a membership universe key (`n50`, `fno`, …); '' is Everything
  * @property {string} [seg]   a segment key (`spot`, `options`, `options-live`, …)
  * @property {string} [sym]   the exact underlying
  * @property {string} [key]   an instrument key, for a link from elsewhere
  * @property {string} [tf]    the store's rung spelling (`1s`, `1min`, `1day`)
  * @property {string} [exp]   `YYYY-MM-DD`
  * @property {Iterable<string|number>} [k] strikes in paisa
+ * @property {Iterable<string>} [mny] moneyness rungs (`ATM`, `ITM-1`, …)
  * @property {string} [side]  `CE` or `PE`
+ * @property {string} [spot]  `exact` (default) or `prev` (last spot at or before t, D-3328)
  * @property {string} [from]  `YYYY-MM-DD`
  * @property {string} [to]    `YYYY-MM-DD`
  * @property {string} [tfrom] `HH:MM` or `HH:MM:SS`
  * @property {string} [tto]   `HH:MM` or `HH:MM:SS`
  * @property {string} [sort]  a bar column key
  * @property {'asc'|'desc'} [dir]
+ * @property {number | string} [rows] rows per page when fixed; '' or `fit` is Fit
  * @property {number} [page]
  * @property {string} [view]  `bars` or `census`
  * @property {boolean} [oow]  show months outside the operator's window
@@ -266,7 +283,17 @@ const PAISA = /^\d{1,15}$/;
 /**
  * A /db selection as a query string, no leading `?`. Idempotent: one
  * selection is one address, byte for byte — strikes are sorted numerically
- * and deduplicated, and keys are written in `DB_KEYS` order.
+ * and deduplicated, moneyness rungs sorted, and keys written in `DB_KEYS`
+ * order.
+ *
+ * STRIKES ARE ONE FIELD, `k=1160000,1200000` (R3-01). They were one `k=` per
+ * strike, and the server refuses any query that names a field twice on every
+ * route but two (`crates/api/src/server.rs` `request_bounds_refusal`,
+ * probeapi-5) — so the address this page wrote while two strikes were ticked
+ * answered 400 on reload and on a shared link. One field cannot be repeated.
+ * The comma is written as itself, not `%2C`: it is legal in a query, every
+ * reader (`URLSearchParams`) decodes both alike, and the address stays
+ * readable.
  *
  * @param {DbSelection} sel
  * @returns {string}
@@ -276,9 +303,10 @@ export function encodeDb(sel) {
   /** @param {string} k @param {unknown} v */
   const put = (k, v) => {
     const s = v === null || v === undefined ? '' : String(v).trim();
-    if (s) p.append(k, s);
+    if (s) p.set(k, s);
   };
   put('feed', sel?.feed);
+  put('universe', sel?.universe);
   put('seg', sel?.seg);
   put('sym', sel?.sym);
   put('key', sel?.key);
@@ -286,8 +314,11 @@ export function encodeDb(sel) {
   put('exp', sel?.exp);
   const strikes = [...new Set([...(sel?.k ?? [])].map((x) => String(x).trim()).filter((x) => PAISA.test(x)))]
     .sort((a, b) => Number(a) - Number(b));
-  for (const k of strikes) p.append('k', k);
+  put('k', strikes.join(','));
+  const rungs = [...new Set([...(sel?.mny ?? [])].map((x) => String(x).trim()).filter((x) => RUNG.test(x)))].sort();
+  put('mny', rungs.join(','));
   put('side', sel?.side);
+  if (sel?.spot && sel.spot !== DB_DEFAULTS.spot) put('spot', sel.spot);
   put('from', sel?.from);
   put('to', sel?.to);
   put('tfrom', sel?.tfrom);
@@ -298,19 +329,30 @@ export function encodeDb(sel) {
     put('sort', sort);
     put('dir', dir);
   }
+  if (sel?.rows !== undefined && sel.rows !== null && sel.rows !== '' && String(sel.rows) !== DB_DEFAULTS.rows) put('rows', sel.rows);
   if (Number.isSafeInteger(sel?.page) && /** @type {number} */ (sel?.page) > 1) put('page', sel?.page);
   if (sel?.view && sel.view !== DB_DEFAULTS.view) put('view', sel.view);
   if (sel?.oow) put('oow', '1');
-  return p.toString();
+  return p.toString().replace(/%2C/g, ',');
 }
 
 /**
  * A query string back to a /db selection, plus every field it could not read.
  * Absent fields are absent (the page keeps its default); a malformed one is
- * left out of `sel` and named in `refused`.
+ * left out of `sel` and named in `refused`, in the SAME sentence the box on
+ * the page says for the same value (`db/input-check.js`).
+ *
+ * What is checked here is SHAPE: a calendar day, a time, a whole number, a
+ * word from a closed set, a length. Whether a well-formed value exists — a
+ * strike this expiry lists, a day this series holds, a universe or a sort
+ * this build knows — is the page's question, asked once the census has
+ * answered (`input-check.js` `vetAddress`, the link reader).
+ *
+ * Strikes are read from one comma-joined `k` (what `encodeDb` writes) and,
+ * for a link written before R3-01, from repeated `k` fields alike.
  *
  * @param {string | null | undefined} search
- * @returns {{sel: DbSelection & {k?: string[]}, refused: Array<{key: string, value: string, why: string}>}}
+ * @returns {{sel: DbSelection & {k?: string[], mny?: string[]}, refused: Array<{key: string, value: string, why: string}>}}
  */
 export function decodeDb(search) {
   const p = new URLSearchParams(String(search ?? '').replace(/^\?/, ''));
@@ -318,56 +360,110 @@ export function decodeDb(search) {
   const sel = {};
   /** @type {Array<{key: string, value: string, why: string}>} */
   const refused = [];
+  /** @param {string} key @param {string} value @param {string} why */
+  const refuse = (key, value, why) => refused.push({ key, value: value.length > 64 ? `${value.slice(0, 64)}…` : value, why });
   /** @param {string} k */
-  const text = (k) => (p.has(k) ? String(p.get(k)).trim() : '');
-  for (const k of ['feed', 'seg', 'sym', 'key', 'tf', 'sort', 'view']) {
-    const v = text(k);
-    if (v) sel[k] = v;
+  const raw = (k) => (p.has(k) ? String(p.get(k)) : '');
+  for (const k of ['feed', 'universe', 'seg', 'sym', 'key', 'tf', 'sort', 'view']) {
+    const v = raw(k);
+    if (!v.trim()) continue;
+    const r = checkText(v, { label: k });
+    if (r.ok) sel[k] = r.value;
+    else refuse(k, v, r.why);
   }
   if (sel.sym) sel.sym = sel.sym.toUpperCase();
   for (const k of ['exp', 'from', 'to']) {
-    const v = text(k);
+    const v = raw(k).trim();
     if (!v) continue;
-    if (DAY.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v) sel[k] = v;
-    else refused.push({ key: k, value: v, why: 'not a calendar day in YYYY-MM-DD form' });
+    const r = checkDay(v, { label: k });
+    if (r.ok) sel[k] = r.value;
+    else refuse(k, v, r.why);
+  }
+  const days = windowWhy(sel.from ?? '', sel.to ?? '');
+  if (days) {
+    refuse('from', `${sel.from}..${sel.to}`, days);
+    delete sel.from;
+    delete sel.to;
   }
   for (const k of ['tfrom', 'tto']) {
-    const v = text(k);
+    const v = raw(k).trim();
     if (!v) continue;
-    if (TIME.test(v)) sel[k] = v;
-    else refused.push({ key: k, value: v, why: 'not a time in HH:MM or HH:MM:SS form' });
+    const r = checkTime(v, { label: k });
+    if (r.ok) sel[k] = r.value;
+    else refuse(k, v, r.why);
+  }
+  const times = timeWindowWhy(sel.tfrom ?? '', sel.tto ?? '');
+  if (times) {
+    refuse('tfrom', `${sel.tfrom}..${sel.tto}`, times);
+    delete sel.tfrom;
+    delete sel.tto;
   }
   const strikes = [];
-  for (const raw of p.getAll('k')) {
-    const v = String(raw).trim();
-    if (!v) continue;
-    if (PAISA.test(v)) strikes.push(v);
-    else refused.push({ key: 'k', value: v, why: 'not a strike in whole paisa' });
+  for (const field of p.getAll('k')) {
+    if (field.length > 16 * 64) {
+      refuse('k', field, `k is ${field.length.toLocaleString('en-IN')} characters long, and /db reads at most ${16 * 64}`);
+      continue;
+    }
+    for (const part of field.split(',')) {
+      const v = part.trim();
+      if (!v) continue;
+      if (PAISA.test(v)) strikes.push(v);
+      else refuse('k', v, `k ${quote(v)} is not a strike in whole paisa (11,600.00 is 1160000)`);
+    }
   }
   if (strikes.length) sel.k = [...new Set(strikes)].sort((a, b) => Number(a) - Number(b));
-  const side = text('side').toUpperCase();
-  if (side) {
-    if (side === 'CE' || side === 'PE') sel.side = side;
-    else refused.push({ key: 'side', value: side, why: 'a side is CE or PE' });
+  const mny = [];
+  for (const part of raw('mny').split(',')) {
+    const v = part.trim();
+    if (!v) continue;
+    if (RUNG.test(v)) mny.push(v);
+    else refuse('mny', v, `mny ${quote(v)} is not a moneyness rung (ATM, ITM, OTM, ITM-1, OTM+2, …)`);
   }
-  const dir = text('dir');
-  if (dir) {
-    if (dir === 'asc' || dir === 'desc') sel.dir = dir;
-    else refused.push({ key: 'dir', value: dir, why: 'a direction is asc or desc' });
-  }
-  const page = text('page');
+  if (mny.length) sel.mny = [...new Set(mny)].sort();
+  /** @param {string} key @param {string[]} allowed @param {(v: string) => string} [fold] */
+  const word = (key, allowed, fold = (v) => v) => {
+    const v = raw(key).trim();
+    if (!v) return;
+    const r = checkWord(fold(v), allowed, { label: key });
+    if (r.ok) sel[key] = r.value;
+    else refuse(key, v, r.why);
+  };
+  word('side', ['CE', 'PE'], (v) => v.toUpperCase());
+  word('dir', ['asc', 'desc']);
+  word('spot', ['exact', 'prev']);
+  const page = raw('page').trim();
   if (page) {
-    if (/^\d{1,9}$/.test(page) && Number(page) >= 1) sel.page = Number(page);
-    else refused.push({ key: 'page', value: page, why: 'a page is a whole number from 1' });
+    const r = checkWhole(page, { label: 'page', min: 1, max: MAX_PAGE });
+    if (r.ok) sel.page = r.value;
+    else refuse('page', page, r.why);
   }
-  const oow = text('oow');
+  const rows = raw('rows').trim();
+  if (rows) {
+    if (rows === 'fit') sel.rows = 'fit';
+    else {
+      const r = checkWhole(rows, { label: 'rows', min: 1, max: MAX_PAGE });
+      if (r.ok) sel.rows = r.value;
+      else refuse('rows', rows, r.why);
+    }
+  }
+  const oow = raw('oow').trim();
   if (oow) {
     if (oow === '1' || oow === '0') sel.oow = oow === '1';
-    else refused.push({ key: 'oow', value: oow, why: 'oow is 1 or 0' });
+    else refuse('oow', oow, `oow ${quote(oow)} is 1 (show months outside the window) or 0`);
   }
-  if (sel.view && sel.view !== 'bars' && sel.view !== 'census') {
-    refused.push({ key: 'view', value: sel.view, why: 'a view is bars or census' });
-    delete sel.view;
+  if (sel.view) {
+    const r = checkWord(sel.view, ['bars', 'census'], { label: 'view' });
+    if (!r.ok) {
+      refuse('view', sel.view, r.why);
+      delete sel.view;
+    }
+  }
+  /* A FIELD THIS PAGE DOES NOT READ IS NAMED, not ignored in silence: a
+     misspelt `strike=` would otherwise open every strike while the address
+     reads as if it asked for one. */
+  const known = new Set(DB_KEYS);
+  for (const k of new Set(p.keys())) {
+    if (!known.has(k)) refuse(k, raw(k), `${quote(k)} is not a field of a /db address (it reads ${DB_KEYS.join(', ')})`);
   }
   return { sel, refused };
 }
@@ -381,4 +477,107 @@ export function decodeDb(search) {
 export function dbHref(sel) {
   const q = encodeDb(sel);
   return q ? `/db?${q}` : '/db';
+}
+
+/* ======================================================================
+   BACK AND FORWARD (R3-01; DB-077)
+   ----------------------------------------------------------------------
+   The address was written with `replaceState` only, so a session of
+   selections was ONE history entry: Back left /db altogether, and Back from
+   the next page returned to /db's first address, not the last selection.
+
+   Worse, SvelteKit's shallow entries record the URL the PAGE was loaded with
+   (`PAGE_URL_KEY`, kit `client.js` `pushState`/`replaceState`), and a
+   popstate navigation back onto /db hands the page that URL as `page.url` —
+   so a reader of `page.url.search` re-opened the address /db was ENTERED
+   with (a bare `/db` from the top bar) while the address bar showed the
+   selection. The browser's own `location.search` is the address on screen,
+   and `addressNow` is what every reader asks.
+
+   `dbHistory` decides, for each settled selection, whether its address is a
+   NEW entry or a correction of the current one:
+
+     - the first write after the page opens completes the address it opened
+       with (defaults filled in): a correction, never an entry, or Back would
+       step from `/db?feed=…&sym=NIFTY…` to a bare `/db` that opens the same;
+     - a write after Back or Forward restored an entry is a correction too:
+       pushing there would erase every Forward entry;
+     - a write with no press or key since the last one (a seed filling a
+       rung, the pager clamping past the end) is a correction;
+     - otherwise — the operator pressed or typed something and the selection
+       moved — it is a new entry. One press is one entry however many
+       settled states it passes through: the press is spent by the first.
+   ====================================================================== */
+
+/** How long a press or key stays the cause of the next write, ms. */
+export const GESTURE_MS = 30_000;
+
+/**
+ * The address on screen, without `?`: the browser's `location.search` where
+ * there is one (see above), else `fallback`.
+ *
+ * @param {string} [fallback]
+ */
+export function addressNow(fallback = '') {
+  const s = typeof location !== 'undefined' && location ? location.search : fallback;
+  return String(s ?? '').replace(/^\?/, '');
+}
+
+/**
+ * @typedef {object} HistoryIo
+ * @property {() => string} search the address on screen (`addressNow`)
+ * @property {(kind: 'push' | 'replace', q: string) => void} write
+ * @property {(search: string) => void} apply restore the selection an entry names
+ * @property {() => number} [clock] ms
+ */
+
+/**
+ * The history rule above, with no runes and no DOM, so
+ * `web/tests/db-history.test.js` drives the same object the page holds.
+ *
+ * @param {HistoryIo} io
+ */
+export function dbHistory(io) {
+  const clock = io.clock ?? (() => Date.now());
+  let armed = false;
+  let restoring = false;
+  let pressedAt = -Infinity;
+  return {
+    /** A press or a key on the page. */
+    gesture() {
+      pressedAt = clock();
+    },
+    /**
+     * Back or Forward landed on another entry of this page: restore what it
+     * names. `current` is the selection on screen, encoded.
+     * @param {string} current
+     */
+    popped(current) {
+      const there = io.search();
+      if (encodeDb(decodeDb(there).sel) === current) return false;
+      restoring = true;
+      io.apply(there);
+      return true;
+    },
+    /**
+     * The selection settled on `q` (an `encodeDb` string). Writes the address
+     * when it differs and says how.
+     * @param {string} q
+     * @returns {'none' | 'push' | 'replace'}
+     */
+    settled(q) {
+      const now = io.search();
+      const pressed = clock() - pressedAt <= GESTURE_MS;
+      /** @type {'none' | 'push' | 'replace'} */
+      const kind = now === q ? 'none' : armed && !restoring && pressed ? 'push' : 'replace';
+      if (kind !== 'none') io.write(kind, q);
+      armed = true;
+      if (kind !== 'none' || now === q) restoring = false;
+      if (kind === 'push' || kind === 'replace') pressedAt = -Infinity;
+      return kind;
+    },
+    get state() {
+      return { armed, restoring, pressed: clock() - pressedAt <= GESTURE_MS };
+    }
+  };
 }

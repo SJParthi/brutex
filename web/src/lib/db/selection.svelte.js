@@ -37,12 +37,16 @@ import { fmt, txt, tfCmp, TF_SECS } from './notes-labels.js';
 import { parseKey } from '../instrument.js';
 import { monthLabel, dayLabel, istDay, timeLabel } from '../dates.js';
 import { strikeText } from './decoration.js';
-import { replaceState } from '$app/navigation';
+import { replaceState, pushState } from '$app/navigation';
 import { page } from '$app/state';
 import { ask } from '../ask.js';
 import { askCalendar } from '../calendar-owed.js';
 import { createPageRequests } from '../page-requests.js';
-import { encodeDb, decodeDb } from '../urlstate.js';
+import { encodeDb, decodeDb, addressNow, dbHistory } from '../urlstate.js';
+import { vetAddress, vetDayWindow, pageWhy, quote, dayText } from './input-check.js';
+import { BAR_COLS } from './notes-bars.js';
+import { COLS } from './notes-coverage.js';
+import { PAGE_SIZES } from './bars-plan.js';
 import {
   segmentOf,
   contractRungsOf,
@@ -109,6 +113,32 @@ import {
  * and name the reason.
  */
 import { untrack } from 'svelte';
+
+/**
+ * What the day boxes say bounds them before the census has counted anything:
+ * the feed's era (GDFL's archive, Zerodha's window). One sentence for the
+ * boxes (`dayReason`) and for a linked day refused against the era (R3-01).
+ *
+ * @param {{from: string, to: string, label: string}} era
+ */
+function eraBoundsReason(era) {
+  return era.from
+    ? `Nothing in this selection is counted yet, so the fields are bounded by ${era.label}, ${dayLabel(era.from)} to ${dayLabel(era.to)}.`
+    : 'Nothing in this selection is counted yet, so there is no held range to bound these fields with.';
+}
+
+/**
+ * WHAT AN ADDRESS MAY NAME, read off the modules that define each vocabulary
+ * (R3-01): the universes the Universe rung lists, the Rows box's sizes, the
+ * bar columns that sort and the Coverage columns. Never a second copy, so a
+ * column or a universe added there is accepted in a link the same day.
+ */
+const ADDRESS_VOCABULARY = {
+  universes: UNIVERSES.map((u) => u.key).filter(Boolean),
+  rows: PAGE_SIZES,
+  barSorts: BAR_COLS.filter((c) => c.key && !c.nosort).map((c) => c.key),
+  censusSorts: COLS.filter((c) => c.key).map((c) => c.key)
+};
 
 
 /**
@@ -1064,6 +1094,24 @@ export function selectionState(db) {
        SEGMENT, which the sentence never mentioned. A refusal that names the
        wrong rung sends a reader to a control that will not fix it, which is
        worse than one that says only "nothing matched". */
+    /* WHILE THE PAGE OPENS IT IS A WAIT, NOT A FINDING (R3-01). Before the
+       instrument and segment seeds have run, or while only one instrument's
+       census rows are on screen, "none of them survives" was drawn for a
+       moment over a store that holds the selection. */
+    const opening = `the instrument and segment are still being chosen from ${feedDisplay(feeds.active)}'s census, so no rung is named yet`;
+    if (filter === '' || db.censusScope) return opening;
+    /* THE INSTRUMENT MATCHES NOTHING: say so, and blame neither the universe
+       nor the segment (R3-01). `sym=ZZZZ` read "none of them is stored under
+       Spot … it is the segment above", which sends the reader to a rung that
+       cannot fix it. Whether the name is held at all is asked of the whole
+       census only on this refusal path, once per change, with an early exit. */
+    if (instrumentMatched.length === 0) {
+      const held = universe !== '' && db.deco.some((/** @type {any} */ r) => r.underlying === filter);
+      return held
+        ? `${filter} is held by ${feedDisplay(feeds.active)} but is not in ${chosenUniverse.label}, so there is no row here to read a rung off — the Universe rung is what narrows it out; choose Everything or another universe`
+        : `${feedDisplay(feeds.active)} holds no instrument-month for ${filter.length > 40 ? `${filter.slice(0, 24)}… (${fmt(filter.length)} characters)` : filter}, so there is no row here to read a rung off — the Instrument box matches nothing; choose another instrument`;
+    }
+    if (kind === '') return opening;
     const wideOpen = universe === '';
     const segName = kind ? (SEG_VIEW.find((s) => s.key === kind)?.name ?? kind) : null;
     if (wideOpen && segName) {
@@ -1482,6 +1530,25 @@ export function selectionState(db) {
    * `db.page` is unchanged.
    */
   let pages = $state({ census: 1, bars: 1 });
+  /**
+   * THE PAGE SHOWN — AN ADDRESS'S PAGE HOLDS UNTIL IT IS TAKEN (R3-01,
+   * DB-077). A page number in a link counts pages of the size the page will
+   * show, and in Fit that size is not known until the grid box is measured.
+   * The Fit then re-sizes the page from its 50-row default and keeps the
+   * reader's PLACE (`setPageSize`): before any answer that place is row one,
+   * so `…&page=2` opened on page 1 — measured on the shadow, 13 Oct. While
+   * an address's page is pending (`linkPending`, from `selectionSeeds`) the
+   * page shown IS that page, whatever a re-size or a seed writes underneath;
+   * when it is taken the same number is written to `pages`, so a `$derived`
+   * that compares by value hands every reader one page and the bar read asks
+   * once.
+   */
+  const pageShown = $derived.by(() => {
+    const v = /** @type {'census' | 'bars'} */ (view);
+    const held = /** @type {{view: string, page: number} | null | undefined} */ (db.linkPending?.page);
+    if (held && (held.view === 'census' ? 'census' : 'bars') === v) return held.page;
+    return pages[v] ?? 1;
+  });
 
   /* ======================================================================
      THE DAYS — held span, era, closed days (DB-044, DB-045, DB-N04)
@@ -1543,9 +1610,7 @@ export function selectionState(db) {
     const held = heldDays.lo && heldDays.hi;
     const span = held
       ? `This selection holds ${dayLabel(heldDays.lo)} to ${dayLabel(heldDays.hi)} (the census's first and last bar); days outside it are struck through because there is no bar there to show.`
-      : era.from
-        ? `Nothing in this selection is counted yet, so the fields are bounded by ${era.label}, ${dayLabel(era.from)} to ${dayLabel(era.to)}.`
-        : 'Nothing in this selection is counted yet, so there is no held range to bound these fields with.';
+      : eraBoundsReason(era);
     const shut = calendar
       ? ` Days the exchange calendar of record marks closed (weekends and holidays, /calendar.json) are struck too and can still be picked.`
       : calWhy
@@ -1611,7 +1676,16 @@ export function selectionState(db) {
       const t = timeLabel(b.ts);
       if (t !== '—') held.add(t);
     }
-    return sessionGrid(rungSecs, held);
+    /* THE DATED CLOSE (SC-CLOSE-18): a contract's grid runs to 15:39 on a
+       span reaching 03 Aug 2026, a share's 15:15–15:29 is marked as the
+       closing auction there; an index keeps 15:30. What the series is comes
+       from its own key (`NSE-CASH-…`), never from a list of names. */
+    const venue = contractRungsOf(kind).expiry
+      ? 'derivative'
+      : matched.length > 0 && /^[A-Z]+-CASH-/.test(String(matched[0]?.instrument ?? ''))
+        ? 'cash'
+        : 'index';
+    return sessionGrid(rungSecs, held, { venue, lo: fromDay || heldDays.lo, hi: toDay || heldDays.hi });
   });
 
   /**
@@ -2098,7 +2172,7 @@ export function selectionState(db) {
     pageSize: { get: () => pageSize, set: (v) => (pageSize = v) },
     /* THE CURRENT VIEW'S PAGE (DB-021): every reader and writer of `db.page`
        is unchanged, and each view keeps its own. */
-    page: { get: () => pages[/** @type {'census' | 'bars'} */ (view)] ?? 1, set: (v) => (pages[/** @type {'census' | 'bars'} */ (view)] = v) },
+    page: { get: () => pageShown, set: (v) => (pages[/** @type {'census' | 'bars'} */ (view)] = v) },
     pages: { get: () => pages, set: (v) => (pages = v) },
     instrument: { get: () => filter, set: (v) => (filter = v) },
     query: { get: () => query, set: (v) => (query = v) },
@@ -2161,84 +2235,245 @@ export function selectionState(db) {
 export function selectionSeeds(db) {
   /** A feed change the link reader made itself, which is not pruned. */
   let quietFeed = /** @type {string | null} */ (null);
-  /** A sort and a page a link carried, applied once the selection settles. */
+  /** A sort and a page a link carried, applied once the selection settles.
+      `$state.raw`, so a Back or Forward that changes only the page (the
+      selection stays settled throughout) still re-runs the effect that
+      applies it. */
   /** @type {{sort: string, desc: boolean} | null} */
-  let linkSort = null;
+  let linkSort = $state.raw(null);
   /** @type {{view: string, page: number} | null} */
-  let linkPage = null;
+  let linkPage = $state.raw(null);
+  /** The page number an address asked for, until an answer says whether it
+      exists (`pageWhy`). */
+  /** @type {{view: string, page: number} | null} */
+  let linkAsked = $state.raw(null);
+  /** A linked day window whose bounds are not checked yet; `refused` names
+      a side the feed's era refused already, which opens on the span's edge. */
+  /** @type {{from: string, to: string, refused?: {from: boolean, to: boolean}} | null} */
+  let linkDays = $state.raw(null);
+  /**
+   * ONE ADDRESS, APPLIED (R3-01). `entry` is false for the address the page
+   * opened on (a reload, a bookmark, a shared link, a fresh mount after Back
+   * from another page) and true for a history entry Back or Forward landed
+   * on inside /db. On opening, a field the address leaves out keeps the
+   * page's default; on an entry it RETURNS to that default, because the
+   * entry names everything the operator had chosen and nothing else.
+   *
+   * @param {string} search
+   * @param {boolean} entry
+   */
+  function applyAddress(search, entry) {
+    const { sel, refused } = decodeDb(search);
+    /** @type {string[]} */
+    const notes = refused.map((r) => r.why);
+    notes.push(...vetAddress(sel, ADDRESS_VOCABULARY));
+    if (sel.feed) {
+      const f = feeds.all.find((x) => x.wire === sel.feed);
+      if (!f) notes.push(`feed=${quote(sel.feed)} is not a feed this server lists`);
+      else if (/** @type {any} */ (f).offered === false)
+        notes.push(`feed=${sel.feed} is excluded by the operator (D-3338) and is not offered; nothing was read from it`);
+      else if (feeds.active !== sel.feed) {
+        quietFeed = sel.feed;
+        selectFeed(sel.feed);
+      }
+    }
+    const link = sel.key ? linkOfKey(sel.key) : null;
+    if (sel.key && link === null) notes.push(`key=${quote(sel.key)} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`);
+    const sym = sel.sym ?? link?.sym;
+    if (sym) db.filter = sym;
+    else if (entry) db.filter = '';
+    if (sel.universe !== undefined) db.universe = sel.universe;
+    else if (entry) db.universe = '';
+    const exp = sel.exp ?? link?.expiry;
+    const strikes = sel.k ?? (link?.strike ? [link.strike] : []);
+    const side = sel.side ?? link?.side;
+    if (sel.seg) db.kind = sel.seg;
+    else if (!link && exp) {
+      /* A contract named without a segment is read as one: an option when
+         a strike or side is named, else a future, filed by its expiry. */
+      const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
+      db.kind = segmentOf(
+        { expiry: exp, instrument: strikes.length || side ? 'contract-CE' : 'contract-FUT' },
+        db.today,
+        /** @type {any} */ (f)?.archive?.to ?? null
+      );
+    } else if (link) {
+      const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
+      db.kind =
+        link.contract === 'spot'
+          ? 'spot'
+          : segmentOf(
+              { expiry: link.expiry, instrument: /** @type {string} */ (sel.key) },
+              db.today,
+              /** @type {any} */ (f)?.archive?.to ?? null
+            );
+    } else if (entry) db.kind = '';
+    if (sel.tf) db.timeframe = sel.tf;
+    else if (entry) db.timeframe = '';
+    if (exp) db.expiry = exp;
+    else if (entry) db.expiry = '';
+    if (strikes.length) db.strikePick = new Set(strikes);
+    else if (entry && db.strikePick.size) db.strikePick = new Set();
+    if (sel.mny?.length) db.mnyPick = new Set(sel.mny);
+    else if (entry && db.mnyPick.size) db.mnyPick = new Set();
+    if (side) db.side = side;
+    else if (entry) db.side = '';
+    /* THE SPOT RULE (D-3328) lives in the chain state; a page without it
+       (the seam fixture) has nothing to restore. */
+    if ('spotAsof' in db) {
+      if (sel.spot) db.spotAsof = sel.spot;
+      else if (entry) db.spotAsof = 'exact';
+    }
+    /* A LINKED DAY OUTSIDE THE FEED'S ERA IS REFUSED NOW, before anything
+       reads it (R3-01): `from=1969-01-01` reached `/bars/window.json` and
+       `/dayflags.json`, both answered 400 ("year 1969 is not 1970..=9999"),
+       and nothing on the page said why — measured on the shadow, 13 Oct. The
+       era is the bound the day boxes take before the census has counted
+       anything (`dayBounds2`), in the boxes' own sentence. */
+    const eraFeed = feeds.all.find((x) => x.wire === feeds.active) ?? null;
+    const era = eraOf(eraFeed, sel.oow ?? db.oow);
+    const days =
+      sel.from || sel.to
+        ? vetDayWindow({ from: sel.from, to: sel.to }, { lo: era.from, hi: era.to, reason: eraBoundsReason(era) })
+        : { from: '', to: '', notes: [] };
+    notes.push(...days.notes);
+    if (days.from || days.to) {
+      db.fromDay = days.from;
+      db.toDay = days.to;
+      /* A LINKED WINDOW IS THE READER'S, not a seed: it stays when the span
+         arrives, and `dayNarrowing` reports it. Its bounds are checked again
+         once the census has said what this selection holds (`linkDays`), and
+         the page does not settle — so reads nothing — until they are. */
+      db.daySeed = { from: '\u0000', to: '\u0000' };
+      /* A side the era refused opens on the span's edge once it is known. */
+      linkDays = { from: days.from, to: days.to, refused: { from: Boolean(sel.from && !days.from), to: Boolean(sel.to && !days.to) } };
+    } else if (entry) {
+      /* AN ENTRY THAT NAMES NO WINDOW RETURNS TO THE SPAN — touching the days
+         only when a window is applied now (R3-01). It re-seeded every time,
+         and a re-seed un-settles the page for a moment: the Fit re-measured
+         with the previous answer's note line still under the grid, and Back
+         to page 3 came back at 8 rows a page where it had been 9 — other
+         rows under the same address (shadow, 13 Oct). */
+      const seed = db.daySeed;
+      const seeded = seed.from !== '' && seed.from !== '\u0000';
+      if (seeded) {
+        if (db.dayNarrowing) {
+          db.fromDay = seed.from;
+          db.toDay = seed.to;
+        }
+      } else if (seed.from === '\u0000' || db.fromDay || db.toDay) {
+        db.fromDay = '';
+        db.toDay = '';
+        db.daySeed = { from: '', to: '' };
+      }
+    } else if (days.notes.length) {
+      db.fromDay = '';
+      db.toDay = '';
+      db.daySeed = { from: '', to: '' };
+    }
+    if (sel.tfrom) db.fromTime = sel.tfrom;
+    else if (entry) db.fromTime = '';
+    if (sel.tto) db.toTime = sel.tto;
+    else if (entry) db.toTime = '';
+    if (sel.oow !== undefined) db.oow = sel.oow;
+    else if (entry) db.oow = false;
+    const view = sel.view ?? (entry ? 'bars' : db.view);
+    db.view = view;
+    /* ROWS PER PAGE BEFORE THE PAGE: a page number counts pages of this
+       size. Fit is the opening mode; a number is the Rows box's fixed size. */
+    if ('sizeMode' in db) {
+      if (typeof sel.rows === 'number') {
+        db.sizeMode = 'fixed';
+        db.pageSize = sel.rows;
+      } else if (sel.rows === 'fit' || entry) db.sizeMode = 'fit';
+    }
+    /* THE SORT AND THE PAGE ARE APPLIED NOW, so the first bar read asks for
+       the page shown (one /bars/window.json per opened address), and are
+       held as PENDING until the selection settles: the resets a seed would
+       trigger (a narrowing returns to page one) do not run while they are. */
+    const census = view === 'census';
+    if (sel.sort || sel.dir || entry) {
+      const s = { sort: sel.sort ?? (census ? 'instrument' : 'ts'), desc: (sel.dir ?? (census ? 'asc' : 'desc')) === 'desc' };
+      linkSort = s;
+      if (census && 'sortKey' in db) {
+        db.sortKey = s.sort;
+        db.desc = s.desc;
+      } else if (!census && 'barSortKey' in db) {
+        db.barSortKey = s.sort;
+        db.barDesc = s.desc;
+      }
+    }
+    if ((sel.page && sel.page > 1) || entry) {
+      const p = { view, page: sel.page ?? 1 };
+      linkPage = p;
+      linkAsked = sel.page && sel.page > 1 ? p : null;
+      db.pages = { ...db.pages, [census ? 'census' : 'bars']: p.page };
+    }
+    /* AN ENTRY IS A SELECTION THE PAGE ITSELF SETTLED AND WROTE, so it is the
+       reconciliation's new baseline, not an instrument or segment the
+       operator just moved: pruning its expiry and strikes against a census
+       that may still hold only the previous instrument's rows would restore
+       a different selection from the one the entry names. */
+    if (entry) {
+      if (db.filter !== '') lastInstrument = db.filter;
+      if (db.kind !== '') lastKind = db.kind;
+      pending = null;
+    }
+    db.linkNotes = notes;
+  }
+
   /* ======================================================================
-     THE SELECTION FROM THE ADDRESS BAR (DB-077; D-3337 item 4)
+     THE SELECTION FROM THE ADDRESS BAR (DB-077; D-3337 item 4; R3-01)
      ----------------------------------------------------------------------
      Read ONCE, when the feed list has answered (a link's `feed` must be one
-     the server offers). Every rung the link names is set before the census
-     arrives, so the seeds fill only what it left empty. A value the page
-     cannot honour is NAMED in `linkNotes` — never dropped in silence — and a
-     rung the store turns out not to hold is named by `stranded` with its
-     Clear button, exactly as a rung the reader stranded would be.
+     the server offers), from the address ON SCREEN (`addressNow`), never
+     from `page.url`: after Back from another page SvelteKit hands the page
+     the URL /db was entered with, not the entry Back landed on. Every rung
+     the link names is set before the census arrives, so the seeds fill only
+     what it left empty. A value the page cannot honour is NAMED in
+     `linkNotes` — never dropped in silence — and a rung the store turns out
+     not to hold is named by `stranded` with its Clear button.
      ====================================================================== */
   let linkRead = false;
   $effect(() => {
     if (linkRead || feeds.all.length === 0) return;
     linkRead = true;
+    untrack(() => applyAddress(addressNow(page.url.search), false));
+  });
+
+  /* A LINKED DAY WINDOW IS CHECKED AGAINST WHAT THE SELECTION HOLDS, with the
+     sentence the day box says for the same day (`input-check.js`), once the
+     census has stated the span. A day outside it is refused in words and the
+     window opens on the span, never kept silently.
+
+     NOT GATED ON THE WHOLE CENSUS (R3-01). This waited for `censusScope` to
+     clear, and on first paint only the linked instrument's census rows are
+     read (WP-56b) — which is all this check needs — so it never ran: on the
+     shadow, 13 Oct, `from=1969-01-01&to=2099-12-31` said nothing and its
+     reads answered 400. `scopeMissing` is the honest gate: the rows read do
+     not hold the selection. With no bound known at all the window is kept
+     as linked. */
+  $effect(() => {
+    const want = linkDays;
+    if (want === null || !db.deco.length || db.reconciling || db.scopeMissing) return;
+    const lo = db.dayBounds2.lo;
+    const hi = db.dayBounds2.hi;
+    const reason = db.dayReason;
     untrack(() => {
-      const { sel, refused } = decodeDb(page.url.search);
-      /** @type {string[]} */
-      const notes = refused.map((r) => `${r.key}=${r.value} was not read: ${r.why}`);
-      if (sel.feed) {
-        const f = feeds.all.find((x) => x.wire === sel.feed);
-        if (!f) notes.push(`feed=${sel.feed} is not a feed this server lists`);
-        else if (/** @type {any} */ (f).offered === false) notes.push(`feed=${sel.feed} is excluded by the operator (D-3338) and is not offered`);
-        else if (feeds.active !== sel.feed) {
-          quietFeed = sel.feed;
-          selectFeed(sel.feed);
-        }
-      }
-      const link = sel.key ? linkOfKey(sel.key) : null;
-      if (sel.key && link === null) notes.push(`key=${sel.key} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`);
-      const sym = sel.sym ?? link?.sym;
-      if (sym) db.filter = sym;
-      const exp = sel.exp ?? link?.expiry;
-      const strikes = sel.k ?? (link?.strike ? [link.strike] : []);
-      const side = sel.side ?? link?.side;
-      if (sel.seg) db.kind = sel.seg;
-      else if (!link && exp) {
-        /* A contract named without a segment is read as one: an option when
-           a strike or side is named, else a future, filed by its expiry. */
-        const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
-        db.kind = segmentOf(
-          { expiry: exp, instrument: strikes.length || side ? 'contract-CE' : 'contract-FUT' },
-          db.today,
-          /** @type {any} */ (f)?.archive?.to ?? null
-        );
-      } else if (link) {
-        const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
-        db.kind =
-          link.contract === 'spot'
-            ? 'spot'
-            : segmentOf(
-                { expiry: link.expiry, instrument: /** @type {string} */ (sel.key) },
-                db.today,
-                /** @type {any} */ (f)?.archive?.to ?? null
-              );
-      }
-      if (sel.tf) db.timeframe = sel.tf;
-      if (exp) db.expiry = exp;
-      if (strikes.length) db.strikePick = new Set(strikes);
-      if (side) db.side = side;
-      if (sel.from || sel.to) {
-        db.fromDay = sel.from ?? '';
-        db.toDay = sel.to ?? '';
-        /* A LINKED WINDOW IS THE READER'S, not a seed: it stays when the span
-           arrives, and `dayNarrowing` reports it. */
-        db.daySeed = { from: '\u0000', to: '\u0000' };
-      }
-      if (sel.tfrom) db.fromTime = sel.tfrom;
-      if (sel.tto) db.toTime = sel.tto;
-      if (sel.oow) db.oow = true;
-      if (sel.view) db.view = sel.view;
-      if (sel.sort || sel.dir) linkSort = { sort: sel.sort ?? 'ts', desc: (sel.dir ?? 'desc') === 'desc' };
-      if (sel.page && sel.page > 1) linkPage = { view: sel.view ?? 'bars', page: sel.page };
-      db.linkNotes = notes;
+      linkDays = null;
+      /* THE BOX'S OWN BOUNDS AND REASON (`DbControls` passes the day boxes
+         `dayBounds2` and `${dayReason} Only bars on or after this day.`), so
+         a linked day and a typed day are refused in one sentence. */
+      const r = vetDayWindow(want, { lo, hi, reason, opens: { from: lo ? dayText(lo) : '', to: hi ? dayText(hi) : '' } });
+      /* A side refused opens on the span's own edge — the value the box
+         would hold had nothing been linked; a side the link left out stays
+         out. */
+      const from = r.from || (want.from || want.refused?.from ? lo : '');
+      const to = r.to || (want.to || want.refused?.to ? hi : '');
+      if (from !== db.fromDay) db.fromDay = from;
+      if (to !== db.toDay) db.toDay = to;
+      if (lo && hi && from === lo && to === hi) db.daySeed = { from: lo, to: hi };
+      if (r.notes.length) db.linkNotes = [...db.linkNotes, ...r.notes];
     });
   });
 
@@ -2332,6 +2567,11 @@ export function selectionSeeds(db) {
     const feed = feeds.active;
     const rung = db.timeframe;
     if (!feed || !rung) return;
+    /* ONLY A RUNG THE STORE HOLDS IS ASKED FOR (R3-01). `tf=7s` in a link
+       asked `/calendar.json?rung=7s` and drew a 400 ("not a rung this store
+       has a directory for") before the census had listed a rung; `stranded`
+       names such a rung with its Clear button instead. */
+    if (!db.tfAll.some((/** @type {[string, number]} */ [t]) => t === rung)) return;
     const want = `${feed}|${rung}`;
     if (untrack(() => db.calFor) === want) return;
     db.calFor = want;
@@ -2506,6 +2746,9 @@ export function selectionSeeds(db) {
   }
   Object.defineProperties(db, {
     linkPending: { get: () => ({ sort: linkSort, page: linkPage }) },
+    linkDaysPending: { get: () => linkDays !== null },
+    linkAsked: { get: () => linkAsked, set: (v) => (linkAsked = v) },
+    applyAddress: { get: () => applyAddress },
     takeLinkSort: { get: () => takeLinkSort },
     takeLinkPage: { get: () => takeLinkPage },
     reconciling: { get: () => pending !== null }
@@ -2524,9 +2767,17 @@ export function selectionPaging(db) {
      expiry, the side, the day and time windows, the feed and the window
      toggle were missing, so a page number survived them and landed mid-list.
      Each view keeps its own page; this returns BOTH to one, because both
-     views read the same selection. */
-  $effect(() => {
-    void [
+     views read the same selection.
+
+     KEYED ON THE SELECTION'S VALUE, NOT ON EACH ASSIGNMENT (R3-01). It read
+     the rungs themselves, so a seed re-assigning a rung to the value it
+     already held — a fresh `Set` of the same strikes, the census moving from
+     one instrument's rows to the whole — returned the reader to page one
+     after a link's page had been applied: `page=2` opened on page 1. A
+     string compares by value, so this runs only when the rows really
+     change, and never while an address's own page is pending. */
+  const narrowing = $derived(
+    JSON.stringify([
       feeds.active,
       db.filter,
       db.kind,
@@ -2538,8 +2789,8 @@ export function selectionPaging(db) {
       db.toMonth,
       db.expiry,
       db.side,
-      db.strikePick,
-      db.mnyPick,
+      [...db.strikePick].sort(),
+      [...db.mnyPick].sort(),
       db.fromDay,
       db.toDay,
       db.fromTime,
@@ -2548,8 +2799,12 @@ export function selectionPaging(db) {
       /* AND THE READ BUDGET, because it changes which FILES were opened and
          therefore which bars exist at all. */
       db.readBudget
-    ];
+    ])
+  );
+  $effect(() => {
+    void narrowing;
     untrack(() => {
+      if (db.linkPending.page) return;
       db.restartAtTop();
       db.pages = { census: 1, bars: 1 };
     });
@@ -2582,14 +2837,22 @@ export function selectionPaging(db) {
       db.kind !== '' &&
       db.timeframe !== '' &&
       !db.reconciling &&
+      /* NOT WHILE A LINKED DAY WINDOW IS UNCHECKED (R3-01): the Fit, and so
+         the bar read, waits for it, so the one read asks for the window the
+         page will keep rather than the one the link carried. */
+      !db.linkDaysPending &&
       (db.daySeed.from !== '' || db.matched.length === 0)
   );
 
-  /* A LINKED SORT AND PAGE ARE APPLIED ONCE THE SELECTION HAS SETTLED, after
-     the resets above have run for the seeds, so the link's page is the page
-     shown rather than the first thing the seeds reset. */
+  /* A LINKED SORT AND PAGE ARE CONFIRMED ONCE THE SELECTION HAS SETTLED,
+     after the resets above have run for the seeds, so the link's page is the
+     page shown rather than the first thing the seeds reset. They were set
+     already when the address was read (`applyAddress`), so the first read
+     asks for them; this re-applies them in case a seed moved them, and ends
+     the pending state. Both read `linkPending`, which is `$state.raw`: a
+     Back that changes only the page re-runs them. */
   $effect(() => {
-    if (!settled) return;
+    if (!settled || !db.linkPending.sort) return;
     untrack(() => {
       const s = db.takeLinkSort();
       if (s) {
@@ -2604,7 +2867,13 @@ export function selectionPaging(db) {
     });
   });
   $effect(() => {
-    if (!settled) return;
+    if (!settled || !db.linkPending.page) return;
+    /* NOT BEFORE THE FIT HAS SIZED THE PAGE (R3-01): the Fit's re-size keeps
+       the reader's place, and before an answer that place is row one, so a
+       page taken earlier was re-sized back to page 1. The bar read waits for
+       the same condition (`DbBarsGrid` `ready`), so the page it asks for is
+       the held one. */
+    if (db.view !== 'census' && 'fitLatched' in db && db.sizeMode === 'fit' && !(db.fitLatched && db.pageSize === db.rowsThatFit)) return;
     void [db.barSortKey, db.barDesc, db.sortKey, db.desc];
     untrack(() => {
       const p = db.takeLinkPage();
@@ -2612,12 +2881,33 @@ export function selectionPaging(db) {
     });
   });
 
+  /* A LINKED PAGE IS HONOURED, OR REFUSED IN WORDS (R3-01). The bar grid
+     moves a page past the end of an answer to its last page, which is right
+     for a narrowing and silent for a link: `page=999999999` opened the last
+     page with nothing on screen saying the page asked for does not exist.
+     Once the answer for the linked page is in, a page past its count is
+     named; a page inside it needs no word. */
+  $effect(() => {
+    const asked = db.linkAsked;
+    if (!asked || !settled || db.linkPending.page) return;
+    const state = db.view === 'census' ? null : db.barState;
+    if (db.view !== 'census' && (!state || state.loading || !state.answer)) return;
+    const count = db.pageCount;
+    untrack(() => {
+      db.linkAsked = null;
+      const why = pageWhy(asked.page, count);
+      if (why) db.linkNotes = [...db.linkNotes, why];
+    });
+  });
+
   /**
-   * THE ADDRESS BAR, MIRRORED (DB-077). Written with SvelteKit's own
-   * `replaceState` once the selection has settled, and only when the
-   * encoded selection differs from the address — idempotent, so one
-   * selection is one URL and a reload, a bookmark or a shared link restores
-   * it. A failure is named in `urlWhy`, never swallowed.
+   * THE ADDRESS BAR, MIRRORED (DB-077), AND BACK AND FORWARD (R3-01).
+   * Written with SvelteKit's own `pushState`/`replaceState` once the
+   * selection has settled, and only when the encoded selection differs from
+   * the address — idempotent, so one selection is one URL and a reload, a
+   * bookmark or a shared link restores it. Whether a write is a new history
+   * entry or a correction of the current one is `dbHistory`'s rule
+   * (`urlstate.js`). A failure is named in `urlWhy`, never swallowed.
    */
   const sortOpening = $derived(
     db.view === 'census' ? db.sortKey === 'instrument' && !db.desc : db.barSortKey === 'ts' && db.barDesc
@@ -2625,12 +2915,15 @@ export function selectionPaging(db) {
   const encoded = $derived(
     encodeDb({
       feed: feeds.active ?? '',
+      universe: db.universe,
       seg: db.kind,
       sym: db.filter,
       tf: db.timeframe,
       exp: db.expiry,
       k: db.strikePick,
+      mny: db.mnyPick,
       side: db.side,
+      spot: db.spotAsof,
       from: db.dayNarrowing ? db.fromDay : '',
       to: db.dayNarrowing ? db.toDay : '',
       tfrom: db.fromTime,
@@ -2639,27 +2932,55 @@ export function selectionPaging(db) {
          Coverage by instrument ascending. */
       sort: sortOpening ? '' : db.view === 'census' ? db.sortKey : db.barSortKey,
       dir: sortOpening ? undefined : (db.view === 'census' ? db.desc : db.barDesc) ? 'desc' : 'asc',
+      rows: db.sizeMode === 'fixed' ? db.pageSize : '',
       page: db.page,
       view: db.view,
       oow: db.oow
     })
   );
+  const history = dbHistory({
+    search: () => addressNow(),
+    write: (kind, q) => (kind === 'push' ? pushState : replaceState)(q ? `?${q}` : location.pathname, {}),
+    apply: (search) => db.applyAddress(search, true)
+  });
   $effect(() => {
     const q = encoded;
     if (!settled || typeof location === 'undefined') return;
+    /* NOT WHILE AN ADDRESS IS STILL BEING APPLIED: its page and sort are
+       pending, and writing now would record a page-one address over the
+       entry being restored. */
+    if (db.linkPending.page || db.linkPending.sort) return;
     untrack(() => {
-      const now = location.search.replace(/^\?/, '');
-      if (now === q) return;
       try {
-        replaceState(q ? `?${q}` : location.pathname, {});
+        history.settled(q);
         db.urlWhy = '';
       } catch (why) {
         db.urlWhy = `the address bar could not be updated: ${String(/** @type {any} */ (why)?.message ?? why)}`;
       }
     });
   });
+  /* A PRESS OR A KEY IS WHAT MAKES THE NEXT ADDRESS A NEW ENTRY, and Back or
+     Forward onto another entry of /db restores the selection it names. The
+     popstate of a navigation AWAY from /db (another path) is the router's. */
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const press = () => history.gesture();
+    const pop = () => {
+      if (location.pathname !== page.url.pathname) return;
+      untrack(() => history.popped(encoded));
+    };
+    window.addEventListener('pointerdown', press, true);
+    window.addEventListener('keydown', press, true);
+    window.addEventListener('popstate', pop);
+    return () => {
+      window.removeEventListener('pointerdown', press, true);
+      window.removeEventListener('keydown', press, true);
+      window.removeEventListener('popstate', pop);
+    };
+  });
   Object.defineProperties(db, {
     settled: { get: () => settled },
-    encoded: { get: () => encoded }
+    encoded: { get: () => encoded },
+    history: { get: () => history }
   });
 }

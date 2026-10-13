@@ -1,0 +1,464 @@
+// /db's ADDRESS (R3-01; DB-077, DB-G98, DB-051): every choice is in the link,
+// a link the page wrote opens, and what a link cannot honour is said in the
+// same sentence a box says for the same value.
+//
+// Every value below is INVENTED: names follow the store's key grammar and the
+// strikes are round paisa figures; nothing here is a vendor row.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { encodeDb, decodeDb, DB_KEYS, DB_DEFAULTS, dbHref } from '../src/lib/urlstate.js';
+import {
+  checkDay,
+  parseDay,
+  dayBoundWhy,
+  reasonTail,
+  checkTime,
+  checkWhole,
+  checkText,
+  checkWord,
+  windowWhy,
+  timeWindowWhy,
+  vetAddress,
+  vetDayWindow,
+  pageWhy,
+  dayText,
+  quote,
+  MAX_TEXT,
+  MAX_PAGE
+} from '../src/lib/db/input-check.js';
+import { UNIVERSES } from '../src/lib/db/notes-controls.js';
+import { PAGE_SIZES } from '../src/lib/db/bars-plan.js';
+import { BAR_COLS } from '../src/lib/db/notes-bars.js';
+import { COLS } from '../src/lib/db/notes-coverage.js';
+import { createFeedStartup } from '../src/lib/feed-startup.js';
+import { sessionGrid, CLOSE_CHANGE_DAY } from '../src/lib/db/selection-model.js';
+import { dbSource } from './database-page-fixture.js';
+
+const VOCAB = {
+  universes: UNIVERSES.map((u) => u.key).filter(Boolean),
+  rows: PAGE_SIZES,
+  barSorts: BAR_COLS.filter((c) => c.key && !c.nosort).map((c) => c.key),
+  censusSorts: COLS.filter((c) => c.key).map((c) => c.key)
+};
+
+/** The server's own rule (`crates/api/src/server.rs` `request_bounds_refusal`):
+ *  a /db query that names any field twice is answered 400. */
+const repeatedKey = (/** @type {string} */ q) => {
+  const seen = new Set();
+  for (const pair of q.split('&')) {
+    if (!pair) continue;
+    const key = pair.split('=')[0];
+    if (seen.has(key)) return key;
+    seen.add(key);
+  }
+  return null;
+};
+
+/* ---- every choice, one row per key -------------------------------------- */
+
+/** Every /db address field with a NON-default value and what it decodes to. */
+const EVERY_KEY = [
+  ['feed', { feed: 'gdfl' }, 'feed=gdfl'],
+  ['universe', { universe: 'n50' }, 'universe=n50'],
+  ['seg', { seg: 'options' }, 'seg=options'],
+  ['sym', { sym: 'NIFTY' }, 'sym=NIFTY'],
+  ['key', { key: 'NSE-FNO-NIFTY-2019-03-28-1150000-CE' }, 'key=NSE-FNO-NIFTY-2019-03-28-1150000-CE'],
+  ['tf', { tf: '1s' }, 'tf=1s'],
+  ['exp', { exp: '2019-03-28' }, 'exp=2019-03-28'],
+  ['k', { k: ['1160000', '1200000'] }, 'k=1160000,1200000'],
+  ['mny', { mny: ['ATM', 'OTM+1'] }, 'mny=ATM,OTM%2B1'],
+  ['side', { side: 'CE' }, 'side=CE'],
+  ['spot', { spot: 'prev' }, 'spot=prev'],
+  ['from', { from: '2019-03-15' }, 'from=2019-03-15'],
+  ['to', { to: '2019-03-15' }, 'to=2019-03-15'],
+  ['tfrom', { tfrom: '10:00:00' }, 'tfrom=10%3A00%3A00'],
+  ['tto', { tto: '10:04:59' }, 'tto=10%3A04%3A59'],
+  ['sort', { sort: 'c', dir: 'desc' }, 'sort=c&dir=desc'],
+  ['dir', { dir: 'asc' }, 'sort=ts&dir=asc'],
+  ['rows', { rows: 25 }, 'rows=25'],
+  ['page', { page: 2 }, 'page=2'],
+  ['view', { view: 'census' }, 'view=census'],
+  ['oow', { oow: true }, 'oow=1']
+];
+
+test('every_db_choice_round_trips_through_the_address', () => {
+  // The table covers every key the codec writes, no more and no fewer.
+  assert.deepEqual(new Set(EVERY_KEY.map(([k]) => k)), new Set(DB_KEYS));
+  for (const [key, sel, written] of EVERY_KEY) {
+    const q = encodeDb(/** @type {any} */ (sel));
+    assert.equal(q, written, `${key} is written as ${written}`);
+    const { sel: back, refused } = decodeDb(q);
+    assert.deepEqual(refused, [], `${key} decodes cleanly`);
+    const want = key === 'dir' ? { sort: 'ts', dir: 'asc' } : sel;
+    assert.deepEqual(back, want, `${key} comes back as it went in`);
+    // And it is the same address again: one selection, one URL.
+    assert.equal(encodeDb(back), q, `${key} is idempotent`);
+  }
+  // All of them at once, in DB_KEYS order, every field read back.
+  const all = Object.assign({}, ...EVERY_KEY.filter(([k]) => k !== 'dir').map(([, s]) => s), { dir: 'asc' });
+  const q = encodeDb(all);
+  assert.deepEqual([...new URLSearchParams(q).keys()], DB_KEYS);
+  assert.equal(repeatedKey(q), null, 'no field is named twice');
+  const { sel: back, refused } = decodeDb(q);
+  assert.deepEqual(refused, []);
+  assert.deepEqual(back, all);
+  // The page's own selection object: every rung the page offers is encoded
+  // (the mirror names universe, mny, spot and rows — the four DB-077 left out).
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  const mirror = source.slice(source.indexOf('const encoded = $derived('), source.indexOf('const history = dbHistory('));
+  for (const key of DB_KEYS.filter((k) => k !== 'key')) assert.match(mirror, new RegExp(`\\b${key}:`), `the address mirror writes ${key}`);
+  // The opening values are not written.
+  assert.equal(encodeDb(/** @type {any} */ ({ ...DB_DEFAULTS, rows: '', feed: 'gdfl' })), 'feed=gdfl');
+});
+
+test('an_address_with_two_strikes_reloads', () => {
+  // The address the page wrote while 11,600 and 12,000 CE were ticked used to be
+  // `...&k=1160000&k=1200000&side=CE`: refused 400 by the server on reload.
+  const sel = { feed: 'gdfl', seg: 'options', sym: 'NIFTY', tf: '1s', exp: '2020-03-26', k: new Set(['1200000', '1160000']), side: 'CE' };
+  const q = encodeDb(sel);
+  assert.equal(q, 'feed=gdfl&seg=options&sym=NIFTY&tf=1s&exp=2020-03-26&k=1160000,1200000&side=CE');
+  assert.equal(repeatedKey(q), null, 'the server reads every field once and refuses a repeat');
+  assert.deepEqual(decodeDb(q).sel.k, ['1160000', '1200000']);
+  // Three strikes, a duplicate and an order: still one field, numeric order.
+  assert.equal(encodeDb({ k: ['1220000', '850000', '1220000', '1150000'] }), 'k=850000,1150000,1220000');
+  // A link written before R3-01 (repeated k) still reads, if anything sends one.
+  assert.deepEqual(decodeDb('k=1160000&k=1200000').sel.k, ['1160000', '1200000']);
+  // %2C (a link copied through an encoder) is the same field.
+  assert.deepEqual(decodeDb('k=1160000%2C1200000').sel.k, ['1160000', '1200000']);
+  // A bad strike among good ones is named and the good ones are kept.
+  const mixed = decodeDb('k=1160000,abc,-1');
+  assert.deepEqual(mixed.sel.k, ['1160000']);
+  assert.deepEqual(mixed.refused.map((r) => r.value), ['abc', '-1']);
+  for (const r of mixed.refused) assert.match(r.why, /not a strike in whole paisa/);
+  // 6,000 digits are refused by length, quoted short.
+  const huge = decodeDb(`k=${'9'.repeat(6000)}`);
+  assert.equal(huge.sel.k, undefined);
+  assert.equal(huge.refused.length, 1);
+  assert.ok(huge.refused[0].why.length < 200 && huge.refused[0].value.length <= 65);
+});
+
+test('a_linked_page_number_is_honoured_or_refused', () => {
+  assert.equal(decodeDb('page=2').sel.page, 2);
+  assert.equal(decodeDb('page=4890333').sel.page, 4890333);
+  assert.equal(decodeDb('page=999999999').sel.page, 999_999_999);
+  for (const bad of ['0', '-1', 'abc', '1.5', '1000000000']) {
+    const { sel, refused } = decodeDb(`page=${bad}`);
+    assert.equal(sel.page, undefined, `page=${bad} is not a page`);
+    assert.equal(refused.length, 1, `page=${bad} is named`);
+    assert.equal(refused[0].key, 'page');
+    assert.match(refused[0].why, /^page "/, 'the sentence names the field and quotes the value');
+  }
+  // Past the end of the answer: refused IN WORDS, with the page shown named.
+  assert.equal(pageWhy(2, 17012), null, 'a page that exists needs no word');
+  assert.equal(pageWhy(17012, 17012), null);
+  const why = pageWhy(999_999_999, 4_890_333);
+  assert.match(String(why), /page 99,99,99,999 does not exist: this selection has 48,90,333 page\(s\).*page 48,90,333, is shown/);
+  // The page reads the linked page and says when it does not exist.
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  assert.match(source, /const why = pageWhy\(asked\.page, count\);\n\s+if \(why\) db\.linkNotes = \[\.\.\.db\.linkNotes, why\];/);
+  // The linked page is applied the moment the address is read, so the first
+  // bar read asks for it, and a seed cannot reset it while it is pending.
+  assert.match(source, /db\.pages = \{ \.\.\.db\.pages, \[census \? 'census' : 'bars'\]: p\.page \};/);
+  assert.match(source, /void narrowing;\n\s+untrack\(\(\) => \{\n\s+if \(db\.linkPending\.page\) return;/);
+  assert.equal(MAX_PAGE, 999_999_999);
+});
+
+test('an_excluded_feed_in_a_link_is_refused_by_name', async () => {
+  const listed = [
+    { wire: 'zerodha', ready: true, offered: true },
+    { wire: 'gdfl', ready: true, offered: true },
+    { wire: 'dhan', ready: true, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06', excluded_because: 'not a feed the operator uses' },
+    { wire: 'groww', ready: true, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06', excluded_because: 'not a feed the operator uses' },
+    { wire: 'truedata', ready: false, offered: false, excluded_by: 'operator', excluded_on: '2026-10-06', excluded_because: 'not a feed the operator uses' }
+  ];
+  for (const wire of ['dhan', 'groww', 'truedata']) {
+    /** @type {any} */
+    const state = { all: [], active: null, error: null, notice: null };
+    /** @type {string[]} */
+    const asked = [];
+    const values = new Map([['brutex.feed.v1', '"gdfl"']]);
+    await createFeedStartup(
+      state,
+      async (url) => {
+        asked.push(url);
+        return Response.json(listed);
+      },
+      () => ({ getItem: (k) => values.get(k) ?? null, setItem: (k, v) => values.set(k, v) }),
+      () => wire
+    ).load();
+    assert.equal(state.active, 'gdfl', `${wire} is not chosen`);
+    assert.deepEqual(asked, ['/feeds.json'], `nothing of ${wire} is probed`);
+    assert.match(state.notice, new RegExp(`names feed "${wire}", which was excluded by operator on 2026-10-06: not a feed the operator uses\\. It is not offered, so nothing was read from it\\. Showing gdfl instead`));
+    assert.equal(values.get('brutex.feed.v1'), '"gdfl"', 'nothing was saved');
+  }
+  // A SAVED preference for an excluded feed is not chosen either (first paint
+  // would probe it): with no other preference, the default survey runs over
+  // the offered feeds only.
+  /** @type {any} */
+  const state = { all: [], active: null, error: null, notice: null };
+  /** @type {string[]} */
+  const asked = [];
+  await createFeedStartup(
+    state,
+    async (url) => {
+      asked.push(url);
+      if (url === '/feeds.json') return Response.json(listed);
+      return new Response(null, { status: 200, headers: { 'x-brutex-census-bars': '1', 'x-brutex-census-rows': '1' } });
+    },
+    () => ({ getItem: () => '"dhan"', setItem: () => {} }),
+    () => null
+  ).load();
+  assert.ok(!asked.some((u) => /dhan|groww|truedata/.test(u)), `no excluded feed is probed: ${asked.join(' ')}`);
+  assert.notEqual(state.active, 'dhan');
+});
+
+/* ---- the one checker: same sentence typed or linked --------------------- */
+
+test('a linked page survives the Fit re-size: the page shown is the held page until it is taken', () => {
+  // Measured on the shadow, 13 Oct: `…&page=2` with rows at Fit opened on
+  // page 1, because the Fit re-sized the page from its 50-row default and
+  // kept the reader's place, which before any answer is row one. The page
+  // shown is now the address's page while it is pending, and it is taken
+  // only once the Fit has sized the page, which is when the bar read asks.
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  assert.match(source, /page: \{ get: \(\) => pageShown, set: \(v\) => \(pages\[/);
+  const shown = source.slice(source.indexOf('const pageShown = $derived.by(() => {'), source.indexOf('const pageShown = $derived.by(() => {') + 500);
+  assert.match(shown, /const held = .*db\.linkPending\?\.page/);
+  assert.match(shown, /if \(held && \(held\.view === 'census' \? 'census' : 'bars'\) === v\) return held\.page;/);
+  assert.match(shown, /return pages\[v\] \?\? 1;/);
+  const take = source.slice(source.indexOf('if (!settled || !db.linkPending.page) return;'), source.indexOf('const p = db.takeLinkPage();'));
+  assert.match(take, /db\.sizeMode === 'fit' && !\(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\) return;/);
+  // The bar read waits for the same condition, so it asks for the held page once.
+  const grid = dbSource('../src/routes/db/DbBarsGrid.svelte');
+  assert.match(grid, /const ready = db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\);/);
+  assert.match(grid, /const page = Math\.max\(1, Math\.trunc\(Number\(db\.page\)\) \|\| 1\);/);
+});
+
+test('a day, a window, a time and a length get one sentence wherever they came from', () => {
+  // Shape, in the codec: 2019-02-31, 02-Mar-2020, 6,000 characters.
+  assert.match(String(/** @type {any} */ (checkDay('2019-02-31')).why), /"2019-02-31" is not a date this field can read — it takes dd Mon yyyy or YYYY-MM-DD/);
+  // A link reads a day as the day box reads typed text (`parseDay`): one
+  // parser, so `from=02-Mar-2020` is the day typed "02 Mar 2020" would be.
+  assert.deepEqual(checkDay('02-Mar-2020'), { ok: true, value: '2020-03-02' });
+  for (const [typed, iso] of [['01 Jul 2026', '2026-07-01'], ['1 jul 2026', '2026-07-01'], ['1/7/2026', '2026-07-01'], ['2026-7-1', '2026-07-01'], ['29 Feb 2024', '2024-02-29']]) {
+    assert.equal(parseDay(typed), iso, typed);
+  }
+  for (const bad of ['29 Feb 2023', '31/04/2026', '1899-12-31', '3000-01-01', 'Mar 2020', '15 mar 19', '', 'x'.repeat(6000)]) {
+    assert.equal(parseDay(bad), '', bad);
+  }
+  const long = checkText('A'.repeat(6000), { label: 'sym' });
+  assert.equal(long.ok, false);
+  assert.equal(/** @type {any} */ (long).why, `sym is 6,000 characters long, and /db reads at most ${MAX_TEXT}`);
+  const { sel, refused } = decodeDb(`sym=${'A'.repeat(6000)}`);
+  assert.equal(sel.sym, undefined);
+  assert.equal(refused[0].why, /** @type {any} */ (long).why, 'the link says what the checker says');
+  // Bounds, from the held span: 1969 and 2099, the same words both ways.
+  // The bound sentence is the day box's own ("Outside … to … — reason."),
+  // its reason cut to the first sentence and punctuated once.
+  const held = { lo: '2018-09-03', hi: '2026-09-30', reason: 'This selection holds 03 Sep 2018 to 30 Sep 2026. Days outside it are struck.' };
+  assert.equal(dayBoundWhy('1969-01-01', held), 'Outside 03 Sep 2018 to 30 Sep 2026 — This selection holds 03 Sep 2018 to 30 Sep 2026.');
+  assert.equal(/** @type {any} */ (checkDay('1969-01-01', { label: 'from', ...held })).why, `from 01 Jan 1969: ${dayBoundWhy('1969-01-01', held)}`);
+  assert.equal(/** @type {any} */ (checkDay('2099-12-31', { label: 'to', ...held })).why, `to 31 Dec 2099: ${dayBoundWhy('2099-12-31', held)}`);
+  assert.equal(checkDay('2019-03-15', held).ok, true);
+  assert.equal(dayBoundWhy('2019-03-15', held), null);
+  assert.match(String(/** @type {any} */ (checkDay('2010-01-01', { lo: '2018-09-03' })).why), /: Earlier than 03 Sep 2018\.$/);
+  assert.match(String(/** @type {any} */ (checkDay('2030-01-01', { hi: '2026-09-30' })).why), /: Later than 30 Sep 2026\.$/);
+  assert.equal(reasonTail(''), '.');
+  assert.equal(reasonTail('Its expiry.;  '), ' — Its expiry.');
+  // From after To: refused as a window, both bounds dropped, one sentence.
+  assert.equal(windowWhy('2024-06-10', '2024-06-03'), 'From 10 Jun 2024 is after To 03 Jun 2024, so the window holds no day — swap them or move one');
+  assert.equal(windowWhy('2024-06-03', '2024-06-03'), null);
+  const back = decodeDb('from=2024-06-10&to=2024-06-03');
+  assert.equal(back.sel.from, undefined);
+  assert.equal(back.sel.to, undefined);
+  assert.equal(back.refused[0].why, windowWhy('2024-06-10', '2024-06-03'));
+  // Times: 25:00, 25:99:00 refused; reversed times refused as a window.
+  assert.match(String(/** @type {any} */ (checkTime('25:00')).why), /not a time of day in HH:MM or HH:MM:SS form/);
+  assert.equal(checkTime('10:04:59').ok, true);
+  assert.equal(timeWindowWhy('10:04:59', '10:00:00'), 'From time 10:04:59 is after To time 10:00:00, so no bar of a day falls between them');
+  assert.equal(timeWindowWhy('10:04', '10:04:30'), null, 'a minute bound covers its own seconds');
+  const rev = decodeDb('tfrom=10:04:59&tto=10:00:00');
+  assert.equal(rev.sel.tfrom, undefined);
+  assert.equal(rev.refused[0].why, timeWindowWhy('10:04:59', '10:00:00'));
+  // Whole numbers and words.
+  assert.equal(checkWhole('17012', { min: 1 }).ok, true);
+  assert.match(String(/** @type {any} */ (checkWhole('abc', { label: 'k', min: 1 })).why), /^k "abc" is not a whole number from 1/);
+  assert.match(String(/** @type {any} */ (checkWord('sideways', ['asc', 'desc'], { label: 'dir' })).why), /^dir "sideways" is not one this page knows \(it reads asc, desc\)/);
+  assert.equal(dayText('2019-03-28'), '28 Mar 2019');
+  assert.equal(quote('x'.repeat(41)).length < 60, true);
+});
+
+test('a linked day outside the bounds is refused before anything reads it, in the day box\'s own sentence', () => {
+  // The era the boxes take before the census has counted anything (GDFL's
+  // archive), then the held span: the same function, the same sentence.
+  const reason = "Nothing in this selection is counted yet, so the fields are bounded by Global Datafeeds's archive, 03 Sep 2018 to 24 Sep 2026.";
+  const era = { lo: '2018-09-03', hi: '2026-09-24', reason };
+  const fromBox = (/** @type {string} */ iso, /** @type {string} */ hi = era.hi) =>
+    dayBoundWhy(iso, { lo: era.lo, hi, reason: `${reason} Only bars on or after this day.` });
+  const toBox = (/** @type {string} */ iso, /** @type {string} */ lo = era.lo) =>
+    dayBoundWhy(iso, { lo, hi: era.hi, reason: `${reason} Only bars on or before this day.` });
+  // 1969 to 2099: both sides refused, neither kept — the server answers 400
+  // to a year before 1970, and the page must never be the one that asks.
+  const wide = vetDayWindow({ from: '1969-01-01', to: '2099-12-31' }, era);
+  assert.deepEqual([wide.from, wide.to], ['', '']);
+  assert.deepEqual(wide.notes, [
+    `from (From date) 01 Jan 1969: ${fromBox('1969-01-01')} The From date opens on the first day held instead`,
+    `to (To date) 31 Dec 2099: ${toBox('2099-12-31')} The To date opens on the last day held instead`
+  ]);
+  assert.match(wide.notes[0], /^from \(From date\) 01 Jan 1969: Outside 03 Sep 2018 to 24 Sep 2026 — Nothing in this selection is counted yet/);
+  // A whole year in 1969, and a whole year in 2099.
+  assert.deepEqual(vetDayWindow({ from: '1969-01-01', to: '1969-12-31' }, era).notes.length, 2);
+  assert.deepEqual(vetDayWindow({ from: '2099-01-01', to: '2099-12-31' }, era).notes.length, 2);
+  // One side out: only that side is refused, and the From box's upper bound
+  // is the kept To, exactly as DbControls bounds it.
+  const half = vetDayWindow({ from: '1969-12-31', to: '2019-03-15' }, era);
+  assert.deepEqual([half.from, half.to], ['', '2019-03-15']);
+  assert.deepEqual(half.notes, [`from (From date) 31 Dec 1969: ${fromBox('1969-12-31', '2019-03-15')} The From date opens on the first day held instead`]);
+  const late = vetDayWindow({ from: '2019-03-15', to: '2099-12-31' }, era);
+  assert.deepEqual([late.from, late.to], ['2019-03-15', '']);
+  assert.equal(late.notes[0], `to (To date) 31 Dec 2099: ${toBox('2099-12-31', '2019-03-15')} The To date opens on the last day held instead`);
+  // Inside: kept, nothing said. The first and the last day held are inside.
+  assert.deepEqual(vetDayWindow({ from: '2018-09-03', to: '2026-09-24' }, era), { from: '2018-09-03', to: '2026-09-24', notes: [] });
+  assert.deepEqual(vetDayWindow({ to: '2020-03-31' }, era), { from: '', to: '2020-03-31', notes: [] });
+  // No bound known (a window toggle that shows every month): kept, silent.
+  assert.deepEqual(vetDayWindow({ from: '1969-01-01', to: '2099-12-31' }, {}), { from: '1969-01-01', to: '2099-12-31', notes: [] });
+  // The span check names the day the box opens on instead.
+  const span = vetDayWindow({ from: '2019-01-01' }, { lo: '2019-01-25', hi: '2019-03-28', reason: 'This selection holds 25 Jan 2019 to 28 Mar 2019.', opens: { from: '25 Jan 2019', to: '28 Mar 2019' } });
+  assert.match(span.notes[0], /^from \(From date\) 01 Jan 2019: Outside 25 Jan 2019 to 28 Mar 2019 — This selection holds 25 Jan 2019 to 28 Mar 2019\. The From date opens on 25 Jan 2019 instead$/);
+
+  // WIRED: the link reader vets against the era BEFORE a day reaches the
+  // page's state; the span check runs on the instrument's own census rows
+  // (never waiting for the whole census, which first paint does not read);
+  // and nothing settles — so nothing is read — while a linked window is
+  // unchecked.
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  const read = source.slice(source.indexOf('function applyAddress(search, entry) {'), source.indexOf('THE SELECTION FROM THE ADDRESS BAR'));
+  assert.ok(read.indexOf('vetDayWindow({ from: sel.from, to: sel.to }') > 0, 'the era check is in the link reader');
+  assert.ok(read.indexOf('vetDayWindow({ from: sel.from, to: sel.to }') < read.indexOf('db.fromDay = days.from;'), 'and runs before the day is applied');
+  assert.doesNotMatch(read, /db\.fromDay = sel\.from/, 'a linked day is never applied unchecked');
+  assert.match(source, /if \(want === null \|\| !db\.deco\.length \|\| db\.reconciling \|\| db\.scopeMissing\) return;/);
+  assert.doesNotMatch(source, /db\.reconciling \|\| db\.censusScope\) return;/);
+  const settledAt = source.indexOf('const settled = $derived(');
+  assert.match(source.slice(settledAt, source.indexOf(');', settledAt)), /!db\.linkDaysPending &&/);
+  assert.match(source, /linkDaysPending: \{ get: \(\) => linkDays !== null \}/);
+});
+
+test('a rung the store does not hold is never asked of /calendar.json', () => {
+  // `tf=7s` in a link asked /calendar.json?rung=7s and drew a 400 before the
+  // census had listed a rung (shadow, 13 Oct); the rung is named by
+  // `stranded` with its Clear button instead.
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  const cal = source.slice(source.indexOf('const calReads = createPageRequests();'), source.indexOf('$effect(() => () => calReads.dispose());'));
+  const gate = cal.indexOf('if (!db.tfAll.some(');
+  assert.ok(gate > 0, 'the calendar read is gated on a held rung');
+  assert.ok(gate < cal.indexOf('askCalendar('), 'before it asks');
+  assert.match(source, /if \(timeframe && !tfAll\.some\(\(\[t\]\) => t === timeframe\)\) \{\n\s+\/\* RE-SEEDS/, 'stranded still names it');
+});
+
+test('an unknown sort, direction, side, view, universe, rows or field is named, never dropped', () => {
+  const { sel, refused } = decodeDb('?sort=bogus&dir=sideways&side=XX&view=nonsense&universe=n42&rows=33&spot=later&mny=deep&strike=1160000&oow=yes');
+  const named = refused.map((r) => r.key).sort();
+  assert.deepEqual(named, ['dir', 'mny', 'oow', 'side', 'spot', 'strike', 'view']);
+  const notes = vetAddress(sel, VOCAB);
+  assert.equal(sel.sort, undefined, 'sort=bogus is not kept');
+  assert.equal(sel.universe, undefined);
+  assert.equal(sel.rows, undefined);
+  assert.equal(notes.length, 3);
+  assert.match(notes.join(' | '), /universe "n42" is not one this page knows.*Everything/);
+  assert.match(notes.join(' | '), /rows "33" is not one this page knows \(it reads 25, 50, 100, 250, 1000\); rows per page stays at Fit/);
+  assert.match(notes.join(' | '), /sort \(Bars\) "bogus" is not one this page knows.*newest first/);
+  // A known one passes untouched.
+  const good = decodeDb('sort=c&dir=asc&universe=n50&rows=100').sel;
+  assert.deepEqual(vetAddress(good, VOCAB), []);
+  assert.deepEqual(good, { sort: 'c', dir: 'asc', universe: 'n50', rows: 100 });
+  // A Coverage sort is checked against the Coverage columns.
+  const census = decodeDb('view=census&sort=rows&dir=desc').sel;
+  assert.deepEqual(vetAddress(census, VOCAB), []);
+  const wrong = decodeDb('view=census&sort=c').sel;
+  assert.match(vetAddress(wrong, VOCAB)[0], /sort \(Coverage\) "c"/);
+  // The link reader shows every one of them (refused and vetted).
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  assert.match(source, /const notes = refused\.map\(\(r\) => r\.why\);\n\s+notes\.push\(\.\.\.vetAddress\(sel, ADDRESS_VOCABULARY\)\);/);
+  assert.match(source, /db\.linkNotes = notes;/);
+});
+
+test('the link reader reads the address on screen, never the URL the page was entered with', () => {
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  assert.match(source, /untrack\(\(\) => applyAddress\(addressNow\(page\.url\.search\), false\)\);/);
+  assert.doesNotMatch(source, /decodeDb\(page\.url\.search\)/);
+  const banner = dbSource('../src/routes/db/DbCensusBanner.svelte');
+  assert.doesNotMatch(banner, /decodeDb\(page\.url\.search\)/);
+});
+
+test('when the instrument matches nothing the Timeframe box says so, and blames no other rung', () => {
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  const body = source.slice(source.indexOf('const tfRefusal = $derived.by(() => {'), source.indexOf('/** Every month in the chosen universe AT THE CHOSEN RUNG'));
+  // The instrument is asked first, before the universe and the segment.
+  const atInstrument = body.indexOf('if (instrumentMatched.length === 0)');
+  const atSegment = body.indexOf('it is the segment above that is narrowing this to nothing.`');
+  assert.ok(atInstrument > 0 && atInstrument < atSegment);
+  assert.match(body, /the Instrument box matches nothing; choose another instrument/);
+  // While the page opens (no instrument yet, or one instrument's census rows)
+  // it is a wait, never a finding.
+  assert.match(body, /if \(filter === '' \|\| db\.censusScope\) return opening;/);
+});
+
+test('SC-CLOSE-18: a contract grid runs to 15:39 from 03 Aug 2026, a CAS share marks 15:15-15:29', () => {
+  assert.equal(CLOSE_CHANGE_DAY, '2026-08-03');
+  const before = sessionGrid(60, [], { venue: 'derivative', lo: '2019-03-01', hi: '2019-03-28' });
+  assert.equal(before.at(-1)?.key, '15:29', 'a 2019 contract ends 15:29');
+  assert.equal(before.length, 375);
+  const after = sessionGrid(60, [], { venue: 'derivative', lo: '2026-08-03', hi: '2026-09-24' });
+  assert.equal(after.at(-1)?.key, '15:39');
+  assert.equal(after.length, 385);
+  assert.equal(after.find((r) => r.key === '15:35')?.detail, 'regular session');
+  const across = sessionGrid(60, [], { venue: 'derivative', lo: '2026-07-01', hi: '2026-09-24' });
+  assert.equal(across.find((r) => r.key === '15:35')?.detail, 'regular from 03 Aug 2026');
+  assert.doesNotMatch(String(across.find((r) => r.key === '15:35')?.why), /closing-auction/);
+  // A held 15:45 print on a contract is "after 15:40", never an auction.
+  const held = sessionGrid(60, ['15:45'], { venue: 'derivative', lo: '2026-08-03', hi: '2026-09-24' });
+  assert.equal(held.find((r) => r.key === '15:45')?.detail, 'after 15:40');
+  assert.doesNotMatch(String(held.find((r) => r.key === '15:45')?.why), /closing-auction/);
+  // A share from 03 Aug 2026: 15:15-15:29 marked as the closing auction.
+  const cas = sessionGrid(60, [], { venue: 'cash', lo: '2026-08-03', hi: '2026-09-24' });
+  assert.equal(cas.at(-1)?.key, '15:29');
+  assert.equal(cas.find((r) => r.key === '15:15')?.detail, 'closing auction (CAS share)');
+  assert.equal(cas.find((r) => r.key === '15:14')?.detail, 'regular session');
+  // An index keeps 09:15-15:29 on every day, and so does no context at all.
+  assert.equal(sessionGrid(60, [], { venue: 'index', lo: '2026-08-03', hi: '2026-09-24' }).at(-1)?.key, '15:29');
+  assert.equal(sessionGrid(60).length, 375);
+  // The page hands the grid the series' own venue and span.
+  const source = dbSource('../src/lib/db/selection.svelte.js');
+  assert.match(source, /return sessionGrid\(rungSecs, held, \{ venue, lo: fromDay \|\| heldDays\.lo, hi: toDay \|\| heldDays\.hi \}\);/);
+});
+
+test('encode plus decode stays under 1 ms at p99 (n = 1,000)', () => {
+  const sel = {
+    feed: 'gdfl', universe: 'fno', seg: 'options', sym: 'NIFTY', tf: '1s', exp: '2019-03-28',
+    k: ['1150000', '1160000', '1200000'], mny: ['ATM'], side: 'CE', spot: 'prev', from: '2019-03-15', to: '2019-03-15',
+    tfrom: '10:00:00', tto: '10:04:59', sort: 'c', dir: /** @type {'asc'} */ ('asc'), rows: 100, page: 17012, view: 'bars', oow: true
+  };
+  for (let i = 0; i < 200; i += 1) decodeDb(encodeDb(sel)); // warm the JIT
+  /** @type {number[]} */
+  const ms = [];
+  for (let i = 0; i < 1000; i += 1) {
+    const t0 = performance.now();
+    const back = decodeDb(encodeDb(sel));
+    ms.push(performance.now() - t0);
+    if (back.refused.length) throw new Error('refused');
+  }
+  ms.sort((a, b) => a - b);
+  const at = (/** @type {number} */ p) => ms[Math.min(ms.length - 1, Math.floor(p * ms.length))];
+  const line = `encode+decode n=${ms.length} p50=${at(0.5).toFixed(4)} ms p99=${at(0.99).toFixed(4)} ms max=${ms.at(-1)?.toFixed(4)} ms`;
+  console.log(line);
+  assert.ok(at(0.99) < 1, line);
+  // A 6,000-character value costs no more than a short one: it is refused by
+  // length before anything compares it.
+  const t0 = performance.now();
+  for (let i = 0; i < 1000; i += 1) decodeDb(`sym=${'A'.repeat(6000)}&k=${'9'.repeat(6000)}`);
+  const per = (performance.now() - t0) / 1000;
+  assert.ok(per < 1, `an absurd address decodes in ${per.toFixed(4)} ms`);
+  assert.equal(dbHref({ feed: 'gdfl', k: ['1', '2'] }), '/db?feed=gdfl&k=1,2');
+});
