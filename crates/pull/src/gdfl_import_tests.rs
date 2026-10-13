@@ -1984,7 +1984,9 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
     }
     // The import files through the store's one writer, so every one-second
     // month it lands carries the `.tix` time index that writer keeps on each
-    // append (D-2329): no side door leaves a month the index does not cover.
+    // append (D-2329) — exactly when it holds 1,024 bars or more, the
+    // small-month rule (D-4933): no side door leaves a month the index does
+    // not cover, and none gives a small month one.
     let months: Vec<_> = files
         .keys()
         .filter(|p| p.starts_with("bars") && p.to_string_lossy().ends_with(".bin"))
@@ -1992,9 +1994,14 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
     assert!(!months.is_empty(), "the import landed no bar month");
     for bin in months {
         let tix = bin.with_extension("tix");
-        assert!(
+        let records = files.get(bin).map_or(0, |bytes| {
+            (u64::try_from(bytes.len()).unwrap() - store::format::HEADER_LEN)
+                / store::format::RECORD_STRIDE
+        });
+        assert_eq!(
             files.get(&tix).is_some_and(|bytes| !bytes.is_empty()),
-            "{} has no time index beside it",
+            !store::time_index::below_threshold(records),
+            "{} holds {records} bars",
             bin.display()
         );
     }

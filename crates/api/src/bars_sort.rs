@@ -187,6 +187,15 @@ pub(super) struct Sorted {
     pub(super) report: SortReport,
 }
 
+/// Why a month under the small-month threshold with no `.srt` is read: the
+/// rule's, not a fault, and no rebuild would index it (D-4933).
+const SMALL_MONTH: &str = "it holds fewer than 1,024 bars, so by the small-month rule it has \
+                           no .srt and its rows are ordered here (D-4933)";
+
+// The sentence above names the store's threshold in words; a change to the
+// threshold must change the sentence, so the build refuses the two drifting.
+const _: () = assert!(store::time_index::INDEX_MIN_ROWS == 1_024);
+
 /// Why rows are read rather than served by an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Unindexed {
@@ -230,11 +239,16 @@ impl Unindexed {
     }
 
     /// Whether `cli srt-build` would index these rows: every reason but a
-    /// time-of-day bound, which no index run is cut to. A cut run that would
-    /// not serve failed a checksum or disagrees with its bars, and a rebuild
-    /// writes it again.
-    const fn buildable(&self) -> bool {
-        !matches!(self, Self::TimeOfDay)
+    /// time-of-day bound, which no index run is cut to, and a month under the
+    /// small-month threshold, which the rule gives no `.srt` (D-4933). A cut
+    /// run that would not serve failed a checksum or disagrees with its bars,
+    /// and a rebuild writes it again.
+    fn buildable(&self) -> bool {
+        match self {
+            Self::TimeOfDay => false,
+            Self::NoIndex(why) => why != SMALL_MONTH,
+            Self::PastIndex { .. } | Self::CutUnserved(_) => true,
+        }
     }
 }
 
@@ -358,6 +372,15 @@ fn view(
     // as this month's whenever that file passed the bind.
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
+        // THE SMALL-MONTH RULE (D-4933): a month under 1,024 bars is given no
+        // `.srt`, so its rows are ordered here and no command is offered for
+        // it — `cli srt-build` would answer `small` and write nothing.
+        Err(why)
+            if why.kind() == std::io::ErrorKind::NotFound
+                && store::time_index::below_threshold(held.n_valid) =>
+        {
+            return Err(SMALL_MONTH.to_owned());
+        }
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
             return Err(Why::Absent.to_string());
         }

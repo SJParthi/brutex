@@ -261,7 +261,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
     // its index, 2019-03 never held.
     month_of(&root, tf, ym(2019, 1), 22_500, 1, false);
     month_of(&root, tf, ym(2019, 2), 3_000, 7, false);
-    month_of(&root, tf, ym(2019, 4), 500, 1, true);
+    month_of(&root, tf, ym(2019, 4), 1_500, 1, true);
     let held_tix = fs::read(root.tix(tf, ym(2019, 4))).unwrap();
     let before = tree(&root.0);
 
@@ -275,8 +275,8 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
          \x20 2019-01  would build       22500 bars  a reader bisects: {absent}\n\
          \x20 2019-02  would build        3000 bars  a reader bisects: {absent}\n\
          \x20 2019-03  NOT HELD      no such month; nothing was created\n\
-         \x20 2019-04  indexed             500 bars\n\
-         Indexed 1, would build 2, not held 1, refused 0. Nothing was written.\n",
+         \x20 2019-04  indexed            1500 bars\n\
+         Indexed 1, would build 2, small 0, not held 1, refused 0. Nothing was written.\n",
         root.0.display()
     );
     assert_eq!(out, expected);
@@ -290,8 +290,8 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
          \x20 2019-01  built             22500 bars  because {absent}; a reader now goes through the index\n\
          \x20 2019-02  built              3000 bars  because {absent}; a reader now goes through the index\n\
          \x20 2019-03  NOT HELD      no such month; nothing was created\n\
-         \x20 2019-04  kept                500 bars  already indexed; nothing written\n\
-         Built 2, kept 1, unindexable 0, not indexed 0, not held 1, refused 0: NOT every month in the \
+         \x20 2019-04  kept               1500 bars  already indexed; nothing written\n\
+         Built 2, kept 1, small 0, unindexable 0, not indexed 0, not held 1, refused 0: NOT every month in the \
          span is indexed; rerun once the cause is gone (a rerun keeps what is built)\n",
         root.0.display()
     );
@@ -323,7 +323,7 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
     assert!(out.contains("  2019-02  kept "), "{out}");
     assert!(
         out.ends_with(
-            "Built 0, kept 2, unindexable 0, not indexed 0, not held 0, refused 0: every month in \
+            "Built 0, kept 2, small 0, unindexable 0, not indexed 0, not held 0, refused 0: every month in \
              the span is indexed\n"
         ),
         "{out}"
@@ -338,18 +338,18 @@ fn the_named_months_are_built_kept_or_named_and_the_exit_says_whether_every_one_
         "--dry-run",
     ]);
     assert_eq!(code, OK, "{out}");
-    assert!(
-        out.ends_with("Indexed 2, would build 0, not held 0, refused 0. Nothing was written.\n")
-    );
+    assert!(out.ends_with(
+        "Indexed 2, would build 0, small 0, not held 0, refused 0. Nothing was written.\n"
+    ));
 }
 
 #[test]
 fn a_month_another_process_holds_is_refused_and_the_rest_are_built() {
-    let tf = Timeframe::MINUTE_1;
+    let tf = Timeframe::SECOND_1;
     let root = Root::new();
-    month_of(&root, tf, ym(2019, 1), 375, 60, false);
-    month_of(&root, tf, ym(2019, 2), 375, 60, false);
-    let span = ["gdfl", "NSE/INDEX/NIFTY", "1min", "2019-01", "2019-02"];
+    month_of(&root, tf, ym(2019, 1), 1_100, 1, false);
+    month_of(&root, tf, ym(2019, 2), 1_100, 1, false);
+    let span = ["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-01", "2019-02"];
 
     // A reader mid-request holds February shared.
     let held = reader(&root, tf, ym(2019, 2));
@@ -379,27 +379,91 @@ fn a_month_another_process_holds_is_refused_and_the_rest_are_built() {
 
 #[test]
 fn a_month_no_index_can_describe_fails_the_run_and_keeps_no_index() {
-    // Two daily bars on one IST day (D-2330): named, left without a `.tix`.
-    let tf = Timeframe::DAY_1;
+    // A month past the small-month threshold whose first block fails its
+    // checksum: the rebuild cannot read its bars, names why, and leaves no
+    // `.tix` claiming them.
+    let tf = Timeframe::SECOND_1;
     let root = Root::new();
     let month = ym(2019, 1);
-    let mut writer = BarFile::open_or_create(&root.0, path(tf, month), nifty_id()).unwrap();
-    assert!(writer.append(&[bar(at(month, 2, 0))]).is_ok());
-    assert!(writer.append(&[bar(at(month, 2, 3_600))]).is_ok());
-    drop(writer);
-    let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1day", "2019-01", "2019-01"]);
+    month_of(&root, tf, month, 1_100, 1, false);
+    let bin = path(tf, month).to_path_buf(&root.0);
+    let mut raw = fs::read(&bin).unwrap();
+    raw[32_768 + 8] ^= 1;
+    fs::write(&bin, &raw).unwrap();
+    let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-01", "2019-01"]);
     assert_eq!(code, FAILED, "{out}");
-    let shared = Why::SharedSlot {
-        index: 1,
-        ts_micros: at(month, 2, 3_600),
-    };
     assert!(
-        out.contains(&format!(
-            "  2019-01  UNINDEXABLE           2 bars  no .tix is kept and lookups bisect: {shared}\n"
-        )),
+        out.contains(
+            "  2019-01  UNINDEXABLE        1100 bars  no .tix is kept and lookups bisect: "
+        ),
         "{out}"
     );
     assert!(!root.tix(tf, month).exists());
+}
+
+#[test]
+fn a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean() {
+    // D-4933: a month under 1,024 bars with no `.tix` — a one-minute
+    // session, and a daily month whose 5th holds two bars, which no `.tix`
+    // could hold (D-2330) and which the rule leaves unindexed without a
+    // finding — is `small`, dry or not (a month past the threshold that lost
+    // its `.tix` is still built: the test above).
+    let root = Root::new();
+    let minute = Timeframe::MINUTE_1;
+    month_of(&root, minute, ym(2019, 6), 375, 60, true);
+    let daily = Timeframe::DAY_1;
+    let mut writer =
+        BarFile::open_or_create(&root.0, path(daily, ym(2019, 6)), nifty_id()).unwrap();
+    assert!(writer.append(&[bar(at(ym(2019, 6), 2, 0))]).is_ok());
+    assert!(writer.append(&[bar(at(ym(2019, 6), 2, 3_600))]).is_ok());
+    drop(writer);
+    assert!(!root.tix(minute, ym(2019, 6)).exists());
+    let before = tree(&root.0);
+
+    let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1day", "2019-06", "2019-06"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains(
+            "  2019-06  small                 2 bars  under 1024 bars: no .tix by the small-month \
+             rule (D-4933); a reader bisects in at most ten reads; nothing written\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(
+            "Built 0, kept 0, small 1, unindexable 0, not indexed 0, not held 0, refused 0: every \
+             month in the span is indexed, or holds too few bars to need an index (D-4933)\n"
+        ),
+        "{out}"
+    );
+    let (code, out) = root.run(&[
+        "gdfl",
+        "NSE/INDEX/NIFTY",
+        "1min",
+        "2019-06",
+        "2019-06",
+        "--dry-run",
+    ]);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("  2019-06  small               375 bars  "),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(
+            "Indexed 0, would build 0, small 1, not held 0, refused 0. Nothing was written.\n"
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        tree(&root.0),
+        before,
+        "nothing is written for a small month"
+    );
+    assert_eq!(
+        reader(&root, minute, ym(2019, 6)).time_lookup(),
+        TimeLookup::Bisection(Why::BelowThreshold)
+    );
 }
 
 #[test]
@@ -456,10 +520,15 @@ fn the_cm_index_writer_seals_a_tix_on_every_new_month() {
         2,
         "one new month each side of the boundary: {bins:?}"
     );
+    // EVERY ONE-SECOND MONTH holds 3,214 bars and carries its `.tix`; every
+    // coarser rung holds one session of at most 375 bars, under the
+    // small-month threshold, and carries none (D-4933).
     for bin in &bins {
-        assert!(
+        let one_second = bin.parent().is_some_and(|dir| dir.ends_with("1s"));
+        assert_eq!(
             bin.with_extension("tix").is_file(),
-            "{} was written without its .tix",
+            one_second,
+            "{}: a .tix exactly when the month holds 1,024 bars or more",
             bin.display()
         );
     }

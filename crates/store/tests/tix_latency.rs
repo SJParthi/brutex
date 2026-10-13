@@ -189,3 +189,73 @@ fn time_and_row_lookup_latency() {
     measure("1min", Timeframe::MINUTE_1, &month(31, 375, 60, false));
     measure("1s", Timeframe::SECOND_1, &month(23, 22_500, 1, true));
 }
+
+/// The small-month rule's costs (D-4933, `docs/06-limits.md` L-SC-13), in
+/// the same harness and on the same terms: a measurement run on purpose, in
+/// release, that asserts nothing about time.
+///
+/// ```text
+/// cargo test -p store --release --test tix_latency -- --ignored --nocapture small_month
+/// ```
+///
+/// * a time lookup on a 1,023-bar one-second month, which has no `.tix` by
+///   the rule and bisects, against the same lookups on a 1,024-bar month,
+///   which has one — `LOOKUPS` each, on a fresh handle;
+/// * a one-bar commit under the threshold, the one-bar commit that reaches
+///   it (and writes the `.tix` and the `.srt` whole), and a one-bar commit to
+///   a month past it — `COMMITS` each, every one on a month of its own.
+#[test]
+#[ignore = "a measurement, run on purpose in release: see the doc"]
+fn small_month_rule_latency() {
+    const COMMITS: usize = 300;
+    let root: PathBuf =
+        std::env::temp_dir().join(format!("brutex-tix-latency-small-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let all = month(1, 1_100, 1, true);
+    for (name, n) in [
+        ("1s, 1023 bars, below", 1_023_usize),
+        ("1s, 1024 bars, at", 1_024),
+    ] {
+        let at = root.join(name.replace([' ', ','], "-"));
+        fs::create_dir_all(&at).unwrap();
+        BarFile::open_or_create(&at, path(Timeframe::SECOND_1), 7)
+            .unwrap()
+            .append(&all[..n])
+            .unwrap();
+        let tix = path(Timeframe::SECOND_1)
+            .to_path_buf(&at)
+            .with_extension("tix");
+        assert_eq!(tix.exists(), n >= 1_024, "{name}");
+        let (first, last) = (all[0].ts_micros, all[n - 1].ts_micros);
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let anywhere: Vec<i64> = (0..LOOKUPS)
+            .map(|_| first + (rng.next() % (last - first + 1) as u64) as i64)
+            .collect();
+        let file = BarFile::open_existing(&at, path(Timeframe::SECOND_1), 7).unwrap();
+        report(
+            &format!("{name}: by time, random us [{:?}]", file.time_lookup()),
+            time(&anywhere, |ts| file.first_at_or_after(ts).unwrap()),
+        );
+    }
+    for (name, held) in [
+        ("commit of 1 bar under the threshold (500 held)", 500_usize),
+        ("commit of 1 bar reaching the threshold (1023 held)", 1_023),
+        ("commit of 1 bar past the threshold (1099 held)", 1_099),
+    ] {
+        let mut ns = Vec::with_capacity(COMMITS);
+        for k in 0..COMMITS {
+            let at = root.join(format!("commit-{held}-{k}"));
+            fs::create_dir_all(&at).unwrap();
+            let mut writer = BarFile::open_or_create(&at, path(Timeframe::SECOND_1), 7).unwrap();
+            writer.append(&all[..held]).unwrap();
+            let start = Instant::now();
+            black_box(writer.append(black_box(&all[held..=held])).unwrap());
+            ns.push(start.elapsed().as_nanos() as u64);
+            drop(writer);
+            let _ = fs::remove_dir_all(&at);
+        }
+        report(&format!("{name}, n={COMMITS}"), ns);
+    }
+    let _ = fs::remove_dir_all(&root);
+}

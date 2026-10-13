@@ -72,6 +72,42 @@ pub const SLOTS_PER_ENTRY: u64 = 64;
 /// Microseconds in a second.
 const MICROS: i64 = 1_000_000;
 
+/// THE SMALL-MONTH RULE (D-4933): the fewest committed bars a month must hold
+/// before the writer gives it a `.tix` time index or a `.srt` sort-index run.
+///
+/// Below it the writer creates neither, and the commit that brings the month
+/// to this many bars or more writes both WHOLE: the `.tix` before that
+/// commit's header slot, so no committed bar is ever missing from it, and the
+/// `.srt` as one run after it (`docs/02-store-format.md` §8.1).
+///
+/// # Why a month this small needs neither
+///
+/// A time lookup without the index is the D-1434 bisection: at most
+/// `ceil(log2(1_024)) = 10` record reads, measured 6.3 µs p50, 10.7 µs p99,
+/// 57.1 µs max at 554 bars (the store-compression judge, 12 Oct; L-SC-13), and
+/// `store::tix_small_month::the_bisection_of_the_largest_small_month_reads_ten_bars`
+/// counts the reads. A sorted page orders at most 1,023 rows itself. Meanwhile
+/// the index of such a month is sized by the month's SLOTS, not its bars:
+/// 552,686 months under 1,024 bars carried 206.89 GiB of `.tix` and 1.35 GiB
+/// of `.srt` on 12 Oct (census, the design's §7.1).
+///
+/// # What it does not do
+///
+/// It removes nothing. A `.tix` or `.srt` already beside a small month stays,
+/// and the writer keeps it in step exactly as before: a `.tix` left behind
+/// would stop describing the bars and every reader would warn that it is
+/// stale. Removing those is a deletion of a rebuildable index and waits for
+/// D-4931. A reader needs no number: it uses the index that is there, and a
+/// small month with none is [`Why::BelowThreshold`], which is not a finding.
+pub const INDEX_MIN_ROWS: u64 = 1_024;
+
+/// Whether a month of `n_valid` committed bars is under [`INDEX_MIN_ROWS`],
+/// so it is given no index of its own (D-4933).
+#[must_use]
+pub const fn below_threshold(n_valid: u64) -> bool {
+    n_valid < INDEX_MIN_ROWS
+}
+
 /// Where the slots of one month at one rung lie.
 ///
 /// Derived from the path's month, the header's timeframe and the header's
@@ -331,7 +367,10 @@ impl Entry {
 /// the D-1434 bisection, and the process writes one `store.tix` warning naming
 /// this reason (`CLAUDE.md` §4: degrade loudly and name the reason) — once
 /// per month and variant, not once per handle, so a month every request opens
-/// does not flood the log (D-3340).
+/// does not flood the log (D-3340). The one exception is
+/// [`Why::BelowThreshold`]: a month the small-month rule exempts is answered
+/// the same way and is not a finding, so it writes no warning (D-4933) — and
+/// [`crate::file::BarFile::time_lookup`] still names it on every handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Why {
@@ -376,6 +415,11 @@ pub enum Why {
     Unreadable(StoreError),
     /// A file of another record kind; only bars are indexed.
     NotBars,
+    /// The month holds fewer than [`INDEX_MIN_ROWS`] bars and has no `.tix`:
+    /// the small-month rule gives it none (D-4933). Its lookups bisect in at
+    /// most ten record reads, and this is NOT a finding: no warning is
+    /// written for it.
+    BelowThreshold,
 }
 
 impl fmt::Display for Why {
@@ -401,6 +445,11 @@ impl fmt::Display for Why {
             ),
             Self::Unreadable(why) => write!(f, "the .tix time index could not be used: {why}"),
             Self::NotBars => f.write_str("only bar files carry a time index"),
+            Self::BelowThreshold => write!(
+                f,
+                "the month holds fewer than {INDEX_MIN_ROWS} bars, so by the small-month rule it \
+                 keeps no .tix time index and a lookup bisects in at most ten bar reads (D-4933)"
+            ),
         }
     }
 }

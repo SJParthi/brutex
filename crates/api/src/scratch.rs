@@ -43,6 +43,83 @@ pub(crate) fn path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("brutex-{}-{name}", std::process::id()))
 }
 
+/// Plants beside `bars` the `.srt` sort index the store's writer kept before
+/// the small-month rule (D-4933), for a month written from empty in appends
+/// of `chunk` rows: one whole run over the first append's rows and one
+/// appended run per later append — byte for byte what that writer left, and
+/// the shape of every month the real store holds from before the rule.
+///
+/// Since D-4933 the writer gives a month under 1,024 bars no `.srt`, and a
+/// sorted page over one orders its rows itself; the tests that call this are
+/// about months that HAVE their runs. A month whose writer already kept a
+/// `.srt` (one of 1,024 bars or more, or one this already planted and a later
+/// append extended) is left as it is.
+#[allow(
+    clippy::expect_used,
+    reason = "a fixture that cannot be planted is a test that cannot run, and says why"
+)]
+pub(crate) fn plant_pre_rule_sort_index(
+    bars: &std::path::Path,
+    shape: &store::sort_index::Shape,
+    rows: &[store::format::Bar],
+    chunk: usize,
+) {
+    use store::sort_index::{RunKind, build_run_as};
+    let srt = bars.with_extension("srt");
+    if srt.exists() || rows.is_empty() {
+        return;
+    }
+    let mut image = shape.encode().to_vec();
+    let mut start = 0_u64;
+    for (k, piece) in rows.chunks(chunk.max(1)).enumerate() {
+        let kind = if k == 0 {
+            RunKind::Whole
+        } else {
+            RunKind::Appended
+        };
+        image.extend(build_run_as(shape, start, piece, kind).expect("a run over invented rows"));
+        start += u64::try_from(piece.len()).expect("a test month fits u64");
+    }
+    std::fs::write(&srt, image).expect("the planted sort index");
+}
+
+/// Plants beside the month `path` names the `.tix` time index the store's
+/// writer kept before the small-month rule (D-4933): every month it opened
+/// had one, so every month the real store holds from before the rule does.
+///
+/// Since D-4933 a month under 1,024 bars is given none, and its time lookups
+/// bisect the bars; a test about a month that HAS its index — a pre-rule
+/// month, the commonest month on disk — calls this. The index is built by the
+/// store's own rebuild door from the committed bars, so its bytes are the
+/// ones a writer keeping it in step would have left: an empty file is put at
+/// the name first, and the door rebuilds what is there rather than excusing
+/// it. A month that already has an index is left as it is. The month's
+/// writer must be closed: the door takes the month's lock.
+#[allow(
+    clippy::expect_used,
+    reason = "a fixture that cannot be planted is a test that cannot run, and says why"
+)]
+pub(crate) fn plant_pre_rule_time_index(
+    root: &std::path::Path,
+    path: store::path::StorePath<'_>,
+    symbol_id: u32,
+) {
+    let tix = path
+        .with_file(store::path::FileKind::TimeIndex)
+        .to_path_buf(root);
+    if tix.exists() {
+        return;
+    }
+    std::fs::write(&tix, []).expect("an empty file at the index's name");
+    let outcome = store::file::BarFile::index_existing(root, path, symbol_id)
+        .expect("the rebuild door opens the month")
+        .outcome;
+    assert!(
+        matches!(outcome, store::file::Reindexed::Built(_)),
+        "the planted time index was not built: {outcome:?}"
+    );
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
