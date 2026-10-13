@@ -1587,17 +1587,17 @@ mod tests {
         std::fs::write(
             &journal,
             "\
-begin options 2019-11-13 *
-done options 2019-11-13 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-15 *
-incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000
-begin options 2019-11-18 *
-done options 2019-11-18 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-19 *
-incomplete options 2019-11-19 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000
-begin indices 2022-03-07 *
-refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000
-",
+                begin options 2019-11-13 *\n\
+                done options 2019-11-13 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+                begin options 2019-11-15 *\n\
+                incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+                begin options 2019-11-18 *\n\
+                done options 2019-11-18 * definition=2 files=4 seconds=40 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+                begin options 2019-11-19 *\n\
+                incomplete options 2019-11-19 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+                begin indices 2022-03-07 *\n\
+                refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000\n\
+            ",
         )
         .expect("a journal");
 

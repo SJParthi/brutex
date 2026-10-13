@@ -147,7 +147,9 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
     for word in super::COMMANDS {
         let non_sweep = matches!(
             word,
-            "census-migrate"
+            // The alert queue (D-4883, IA-11a): a store verb, never a sweep.
+            "alerts"
+                | "census-migrate"
                 | "census-recount"
                 | "checksum-audit-stored"
                 | "fold-audit"
@@ -1094,4 +1096,50 @@ fn the_unadmitted_commit_takes_both_locks_and_the_directory_barrier_in_order() {
         at(".release()"),
     ];
     assert!(order.is_sorted(), "persistence order {order:?}");
+}
+
+/// **A BARE INDEX VERB IS THE CLI'S USAGE, AND ONE WITH AN ARGUMENT IS ITS
+/// COMMAND'S.** `tix-rebuild` and `srt-build` are dispatched behind a guard
+/// on their arguments. Alone, the verb is a misuse the cli answers with its
+/// whole usage and never hands to the command; with an argument the command
+/// itself answers, here by refusing a word that is not a series under its own
+/// usage line. A guard read as always true fails the first half, and one read
+/// as always false, or without its `!`, fails the second: the full-gate run of
+/// 12 October 2026 found all six of those mutants alive.
+#[test]
+fn a_bare_index_verb_is_the_clis_usage_and_an_argument_reaches_its_command() {
+    for (verb, own) in [
+        ("tix-rebuild", super::tix_rebuilder::USAGE),
+        ("srt-build", super::srt_builder::USAGE),
+    ] {
+        let own_line = format!("usage: {own}");
+
+        let mut bare = String::new();
+        let status = super::run(&[verb.to_owned()], &mut bare);
+        assert_eq!(status, super::MISUSED, "{verb} alone is a misuse:\n{bare}");
+        assert!(
+            bare.contains(super::USAGE),
+            "{verb} alone prints the cli's usage:\n{bare}"
+        );
+        assert!(
+            !bare.contains(&own_line),
+            "{verb} alone never reaches its command:\n{bare}"
+        );
+
+        let mut asked = String::new();
+        let status = super::run(&[verb.to_owned(), "not-a-series".to_owned()], &mut asked);
+        assert_eq!(
+            status,
+            super::MISUSED,
+            "{verb} refuses a word that is not a series:\n{asked}"
+        );
+        assert!(
+            asked.contains(&own_line),
+            "{verb} with an argument is answered by its command:\n{asked}"
+        );
+        assert!(
+            !asked.contains(super::USAGE),
+            "and the cli's usage is not what answers it:\n{asked}"
+        );
+    }
 }

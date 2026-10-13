@@ -26,6 +26,8 @@
 //! **Printed, not asserted:** the first, uncached read of the day, which folds
 //! the day's 1,000 seconds and 375 minutes. It is bounded by the day (at most
 //! one session of seconds), not by the month, and the line shows it.
+//!
+//! Run by `crates/api/benches/ratio.rs`'s `main`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

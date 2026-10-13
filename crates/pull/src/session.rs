@@ -1337,6 +1337,9 @@ pub fn on_unclassified_day(epoch_secs: i64) -> bool {
 ///
 /// Only for an unsized or unmeasured answer, one walk of the fifteen-entry
 /// `SPECIAL_SESSIONS`, a compile-time constant. O(1), no allocation.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn with_recorded_window(day: i64, kind: crate::calendar::DayKind) -> crate::calendar::DayKind {
     use crate::calendar::DayKind;

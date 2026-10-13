@@ -309,10 +309,12 @@ const ROUTES = [
 	// development only — the `/audit` trap the notes above record.
 	'/provenance.json',
 	'/sources/day.json',
-	// THE /db CHART (WP-57, DB-080): `/sources.json` is the rung table the
-	// chart's rung picker is drawn from, and `/sources/bars.json` the page of
-	// a rung the server folds on request. Both EXACTLY, for the reason above:
-	// `/sources` itself stays the All sources page's.
+	// THE ALL SOURCES PAGE'S OTHER TWO READS (WP-58, D-3339) AND THE /db CHART'S
+	// (WP-57, DB-080): `/sources.json` is the rung table, drawn by the All
+	// sources page and read by the chart's rung picker; `/sources/bars.json` is
+	// the tagged timeline and the page of a rung the server folds on request.
+	// Both EXACTLY, for the reason above: `/sources` itself is the All sources
+	// page and must stay with the dev server.
 	'/sources.json',
 	'/sources/bars.json'
 ];

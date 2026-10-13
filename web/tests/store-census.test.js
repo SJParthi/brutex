@@ -488,7 +488,7 @@ function fixtureApi(lines, shape = {}) {
     /** The census was read whole again (a restart): no appends are held. */
     restart() { floor = generation; },
     newEpoch() { epoch = 'INDEX=000001,CASH=none,FNO=000003'; },
-    /** @param {(url: string) => Response | null} with */
+    /** @param {(url: string) => Response | null} with_ */
     answerWith(with_) { override = with_; },
     /** @type {typeof import('../src/lib/ask.js').ask} */
     request: async (url, options = {}) => {

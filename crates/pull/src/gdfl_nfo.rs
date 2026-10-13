@@ -173,6 +173,9 @@ pub fn lower_median(strikes: &mut [i64]) -> Option<i64> {
 /// day's `median` (D-3331 decision 2): the one comparison behind every
 /// [`NfoRefusal::StrikeImplausible`], at import and at re-key. Exactly `k`
 /// times the median is admitted; one paisa more is not. O(1).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub const fn strike_implausible(strike: i64, median: i64) -> bool {
     strike > median.saturating_mul(STRIKE_PLAUSIBLE_MULTIPLE)

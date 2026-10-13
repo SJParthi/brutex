@@ -711,6 +711,9 @@ impl Flood {
     /// with `limit` lines a window. O(1): one hash of the pair and one probe;
     /// at most once per [`FLOOD_PAIRS`] new pairs, one pass that drops the
     /// pairs with nothing to report.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     fn admit(&mut self, limit: u32, target: &str, message: &str, at: i64) -> Rationed {
         use std::hash::{Hash as _, Hasher as _};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2581,6 +2584,9 @@ pub enum AuditLine {
 /// The line `pointer` names: one positional read, decoded and checked against
 /// the pointer's `seq`. A roll that raced the read moved the line one file
 /// older, and that file is tried too. O(1): at most two reads of one line.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn audit_read(dir: &Path, current_serial: u64, pointer: &AuditPointer) -> AuditLine {
     for serial_now in [current_serial, current_serial.saturating_add(1)] {

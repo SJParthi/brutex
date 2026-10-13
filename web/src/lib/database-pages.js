@@ -150,10 +150,10 @@ export function sortIndexNote(answer) {
   }
   const read = count(report.scanned_rows);
   if (read === 0) return null;
-  const why = Array.isArray(report.scanned_why) ? report.scanned_why.filter((w) => typeof w === 'string') : [];
+  const why = Array.isArray(report.scanned_why) ? report.scanned_why.filter((/** @type {unknown} */ w) => typeof w === 'string') : [];
   const months = Math.max(count(report.scanned_months), why.length);
   const more = months > why.length ? `; and ${text(months - why.length)} more month(s)` : '';
-  const build = Array.isArray(report.build) ? report.build.filter((b) => typeof b === 'string') : [];
+  const build = Array.isArray(report.build) ? report.build.filter((/** @type {unknown} */ b) => typeof b === 'string') : [];
   const column = typeof report.column === 'string' ? report.column : 'this column';
   return `Ordered by ${column}: ${text(count(report.indexed_rows))} row(s) came from sort indexes and ` +
     `${text(read)} row(s) in ${text(months)} month(s) were read instead${why.length ? ` — ${why.join('; ')}${more}` : ''}.` +

@@ -327,7 +327,9 @@ const empty = () => ({
  *   how: import('$lib/store-census.js').CensusHow | null,
  *   scope: import('$lib/store-census.js').CensusScope | null,
  *   observed: import('$lib/store-census.js').Observed | null,
- *   scopeWhy: string | null
+ *   scopeWhy: string | null,
+ *   refreshes: import('./store-census.js').RefreshEntry[],
+ *   refreshFault: string | null
  * }} StoreReading
  */
 
@@ -640,6 +642,9 @@ export async function foldCensus(rows, signal) {
  * @param {string} feed the wire name of the feed to read. Never null: the one
  *        caller that can hold a null feed, `syncStore`, returns before here.
  * @param {number} generation the shared clock's value at the call.
+ * @param {import('$lib/store-census.js').ScopeWanted | null} [first] the one
+ *        instrument a scoped first read asks for, or null for the whole feed.
+ * @param {boolean} [keep] true when the whole store is read behind a scope.
  * @returns {Promise<void>} the SHARED request — the same promise every other
  *        caller of this (feed, generation) is given.
  */
@@ -800,6 +805,8 @@ function read(feed, generation, first = null, keep = false) {
  *        null feed is not an error here: it is "nothing to ask about yet", and
  *        it is recorded in `wanted` so a later Refresh knows there is nothing
  *        to re-read either.
+ * @param {import('$lib/store-census.js').ScopeWanted | null} [first] the one
+ *        instrument the page shows first, so the first read can be scoped to it.
  */
 export function syncStore(feed, first = null) {
   const generation = store.generation; // TRACKED — this is the shared clock

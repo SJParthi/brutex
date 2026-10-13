@@ -1353,6 +1353,9 @@ pub fn phase_at(
 /// series only: a minute bar is labelled by [`phase_at`], whose whole halted
 /// minutes `each_halt_names_its_seconds_and_whole_minutes` binds to these
 /// seconds. O(1): one walk of the three-entry [`HALTS`].
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn phase_at_second(
     venue: crate::vendor::Venue,

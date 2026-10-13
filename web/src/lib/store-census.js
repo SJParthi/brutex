@@ -533,7 +533,7 @@ export const SCOPE_MS = 3_000;
 export const SCOPE_RETRY_MAX_MS = 1_500;
 
 /**
- * @typedef {{feed: string, segment: string, underlying?: string | null,
+ * @typedef {{feed: string, segment?: string | null, underlying?: string | null,
  *   exchange?: string | null, expiry?: string | null}} FacetQuery
  * @typedef {{underlyings: number, months: number, expiries: number, strikes: number, futures: number}} FacetCounts
  * @typedef {{ok: boolean, status: number, key: string, query: FacetQuery, body: any | null,
@@ -557,10 +557,6 @@ export function facetsUrl(query, since = null) {
 export const facetKey = (query) => JSON.stringify([query.feed, query.segment, query.underlying ?? null,
   query.exchange ?? null, query.expiry ?? null]);
 
-/**
- * Whether a body is a facets answer for this query; the sentence if not.
- * @param {any} body @param {FacetQuery} query @returns {string | null}
- */
 /**
  * Why a body is not the ROOT answer for `feed` (`/census/facets.json?feed=`:
  * the segments the feed holds, in the census's order, and that order), or
@@ -586,6 +582,10 @@ export function rootFault(body, feed) {
   return null;
 }
 
+/**
+ * Whether a body is a facets answer for this query; the sentence if not.
+ * @param {any} body @param {FacetQuery} query @returns {string | null}
+ */
 export function facetsFault(body, query) {
   if (!body || typeof body !== 'object' || body.schema !== 1) return 'it is not a schema-1 facets answer';
   if (body.feed !== query.feed || body.segment !== query.segment) return `it answers ${body.feed}/${body.segment}, not ${query.feed}/${query.segment}`;
@@ -888,7 +888,9 @@ export function rowsFault(body, query) {
  * @param {typeof ask} request
  * @param {string} feed
  * @param {ScopeWanted} wanted
- * @param {{ms?: number, now?: () => number, signal?: AbortSignal}} [options]
+ * @param {{ms?: number, now?: () => number, signal?: AbortSignal,
+ *   pause?: (waitMs: number) => Promise<unknown>}} [options] `pause` is the wait before the one
+ *   retry of a saturated answer; a test passes its own.
  * @returns {Promise<ScopeAnswer>}
  */
 export async function readScope(request, feed, wanted, { ms = SCOPE_MS, now = Date.now, signal = new AbortController().signal,
@@ -1350,7 +1352,8 @@ export function movedLines(moved, head, readAt, underlying, answers) {
   /** @type {string[]} */
   const changed = [];
   for (const answer of answers) {
-    const segment = answer.query.segment;
+    // A delta is asked of one segment, never of the root, so the query names it.
+    const segment = /** @type {string} */ (answer.query.segment);
     if (!answer.ok) {
       const why = answer.status === 410
         ? 'the server no longer holds the changes since this snapshot'

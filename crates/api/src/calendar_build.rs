@@ -44,6 +44,9 @@
 //! (`429`). A finished answer is handed to a later request only within
 //! [`PARKED_FOR`] and only while the feed's stamp is the one the build began
 //! under, so a refusal is never served over a census that has moved.
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

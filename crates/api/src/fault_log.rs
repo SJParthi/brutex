@@ -45,6 +45,9 @@
 //! most [`MAX_NAMED_FAULTS`] of those are kept. The size of what this hands a
 //! response is bounded by `MAX_NAMED_FAULTS × MAX_FAULT_CHARS` plus one summary
 //! sentence, whatever the month holds.
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use store::file::StoreError;
 
