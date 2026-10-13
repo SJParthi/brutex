@@ -197,7 +197,17 @@ fn a_day_a_held_month_lacks_lands_as_a_new_generation_every_reader_opens() {
         "no held bar dropped or changed"
     );
     let file = BarFile::open_existing(&holed, nifty_april(), id_of("NIFTY")).unwrap();
-    assert_eq!(file.time_lookup(), store::file::TimeLookup::Indexed);
+    // THE NEW GENERATION CARRIES A `.tix` EXACTLY WHEN IT REACHES THE
+    // SMALL-MONTH THRESHOLD (D-4933); under it, it is bisected by rule.
+    let small = store::time_index::below_threshold(file.header().n_valid);
+    assert_eq!(
+        file.time_lookup(),
+        if small {
+            store::file::TimeLookup::Bisection(store::time_index::Why::BelowThreshold)
+        } else {
+            store::file::TimeLookup::Indexed
+        }
+    );
     let first_added = added.first().unwrap().ts_micros;
     let last_added = added.last().unwrap().ts_micros;
     let at = file.first_at_or_after(first_added).unwrap();
@@ -209,7 +219,7 @@ fn a_day_a_held_month_lacks_lands_as_a_new_generation_every_reader_opens() {
                 &holed,
                 store::repair::Revision::new(1).unwrap(),
             ));
-    assert!(revision_tix.exists(), "{}", revision_tix.display());
+    assert_eq!(revision_tix.exists(), !small, "{}", revision_tix.display());
 
     // THE CENSUS ROW IS THE SERVED GENERATION'S.
     let row = census_row(&holed);

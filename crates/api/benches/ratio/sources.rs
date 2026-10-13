@@ -11,8 +11,12 @@
 //!
 //! So each fixture month holds a FIXED last day — 2024-06-30: 1,000 GDFL
 //! seconds from 09:15, 375 Zerodha minutes and one Zerodha day — and grows
-//! only by the GDFL seconds it holds on earlier days: 0, 9,000 and 99,000
-//! more, making months of 1,000, 10,000 and 100,000 seconds (`MONTH_SIZES`).
+//! only by the GDFL seconds it holds on earlier days: 24, 9,240 and 101,400
+//! more, making months of 1,024, 10,240 and 102,400 seconds (`MONTH_SIZES`).
+//! The GDFL month is indexed at every size: 1,024 is the smallest month the
+//! store gives a `.tix` (D-4933), and the setup refuses one without it.
+//! Zerodha's two fixed months are under that threshold at every size, so
+//! their lookups bisect alike at 1x, 10x and 100x.
 //! Every figure below reads only the last day, and a ratio past the ceiling
 //! is a page or a day whose cost tracks the month.
 //!
@@ -34,6 +38,7 @@ use std::time::Instant;
 
 use api::server::sources::{DayAsk, TimelineAsk, day_table, timeline};
 use brutex_core::vendor::Vendor;
+use store::file::TimeLookup;
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe};
 
@@ -62,8 +67,9 @@ fn flat_bar(ts_micros: i64, i: usize) -> Bar {
     }
 }
 
-/// Appends `bars` to one NIFTY INDEX month of `vendor` at `rung`.
-fn write(root: &Path, vendor: Vendor, rung: Timeframe, bars: &[Bar]) {
+/// Appends `bars` to one NIFTY INDEX month of `vendor` at `rung`, and says how
+/// the month's time lookups are served.
+fn write(root: &Path, vendor: Vendor, rung: Timeframe, bars: &[Bar]) -> TimeLookup {
     let Ok(path) = StorePath::new(PathParts {
         vendor,
         exchange: "NSE",
@@ -86,6 +92,7 @@ fn write(root: &Path, vendor: Vendor, rung: Timeframe, bars: &[Bar]) {
     if let Err(why) = file.append(bars) {
         refuse(&format!("the sources bench month would not fill: {why}"));
     }
+    file.time_lookup()
 }
 
 /// A store whose GDFL month holds `n` seconds — `n − 1,000` from the month's
@@ -105,7 +112,14 @@ fn store_of(n: usize) -> PathBuf {
         .map(|i| flat_bar(second(i), i))
         .chain((0..LAST_DAY_SECONDS).map(|i| flat_bar(second(LAST_DAY_OFFSET + OPEN + i), i)))
         .collect();
-    write(&root, Vendor::Gdfl, Timeframe::SECOND_1, &seconds);
+    // THE MONTH THAT GROWS IS INDEXED AT EVERY SIZE (D-4933), or the 1x
+    // figure would time a bisection the 10x and 100x figures do not.
+    let lookup = write(&root, Vendor::Gdfl, Timeframe::SECOND_1, &seconds);
+    if lookup != TimeLookup::Indexed {
+        refuse(&format!(
+            "a {n}-second GDFL bench month with its .tix (found {lookup:?})"
+        ));
+    }
     let minutes: Vec<Bar> = (0..375)
         .map(|i| flat_bar(second(LAST_DAY_OFFSET + OPEN + 60 * i), i))
         .collect();

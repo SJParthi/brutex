@@ -3,9 +3,11 @@
 //! over two, and for the global index of an instant (`at=`). D-3326.
 //!
 //! `api::bars::window` is the function the route calls. Timed newest first at
-//! offset 0 and at the last page, over one-second months of 1,000, 10,000 and
-//! 100,000 bars on disk, reading 50 bars a page: the `stat`s, the `.tix` seek
-//! and the page read are all in the figure, as they are on the route.
+//! offset 0 and at the last page, over one-second months of 1,024, 10,240 and
+//! 102,400 bars on disk (`MONTH_SIZES`: the smallest month the store indexes,
+//! D-4933, and 10x and 100x of it), reading 50 bars a page: the `stat`s, the
+//! `.tix` seek and the page read are all in the figure, as they are on the
+//! route.
 //!
 //! **A value sort is here since D-3349 (WP-39).** It was a stream of every
 //! kept row; it is served from the month's `.srt` sort index, which the

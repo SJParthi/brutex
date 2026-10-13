@@ -18,6 +18,7 @@ use brutex_core::vendor::Vendor;
 use store::file::BarFile;
 use store::format::{Bar, OI_NULL};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+use store::sort_index::{Shape, SortIndex};
 
 use super::{USAGE, command_with};
 use crate::{FAILED, MISUSED, OK};
@@ -49,16 +50,31 @@ impl Root {
         path(contract, month, kind).to_path_buf(&self.0)
     }
 
-    /// Writes an invented month in `appends` appends, then removes its
-    /// `.srt` when `bare` — a month written before D-3349.
+    /// Writes an invented month of 1,200 bars in `appends` appends, then
+    /// removes its `.srt` when `bare` — a month written before D-3349. Past
+    /// the small-month threshold (D-4933): the first append brings it to
+    /// 1,024 bars and writes the index whole, and each later one adds a run.
     fn month(&self, contract: Option<&str>, month: YearMonth, appends: usize, bare: bool) {
+        self.month_of(contract, month, 1_200, appends, bare);
+    }
+
+    /// [`Self::month`] with `count` bars; under 1,024 the month is given no
+    /// `.srt` at all.
+    fn month_of(
+        &self,
+        contract: Option<&str>,
+        month: YearMonth,
+        count: i64,
+        appends: usize,
+        bare: bool,
+    ) {
         let symbol_id =
             u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
         let mut writer =
             BarFile::open_or_create(&self.0, path(contract, month, FileKind::Bars), symbol_id)
                 .unwrap();
         let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
-        let rows: Vec<Bar> = (0..300_i64)
+        let rows: Vec<Bar> = (0..count)
             .map(|k| Bar {
                 ts_micros: open + k * 1_000_000,
                 open: 3_210_000 + k % 17,
@@ -73,8 +89,17 @@ impl Root {
                 },
             })
             .collect();
-        for chunk in rows.chunks(300 / appends) {
-            writer.append(chunk).unwrap();
+        let first = if appends == 1 {
+            rows.len()
+        } else {
+            rows.len().min(1_024)
+        };
+        writer.append(&rows[..first]).unwrap();
+        let rest = &rows[first..];
+        if appends > 1 && !rest.is_empty() {
+            for chunk in rest.chunks(rest.len().div_ceil(appends - 1)) {
+                writer.append(chunk).unwrap();
+            }
         }
         drop(writer);
         if bare {
@@ -455,14 +480,14 @@ fn a_repaired_month_is_indexed_in_its_served_generation() {
     let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2032-08", "2032-08"]);
     assert_eq!(code, OK, "{out}");
     assert!(
-        out.contains("2032-08  kept") && out.contains("340 bars"),
-        "the served generation's 340 rows, one run: {out}"
+        out.contains("2032-08  kept") && out.contains("1240 bars"),
+        "the served generation's 1,240 rows, one run: {out}"
     );
     fs::remove_file(&revision).unwrap();
     let (code, out) = root.run(&["gdfl", "NSE/INDEX/NIFTY", "1s", "2032-08", "2032-08"]);
     assert_eq!(code, OK, "{out}");
     assert!(
-        out.contains("2032-08  built") && out.contains("340 bars"),
+        out.contains("2032-08  built") && out.contains("1240 bars"),
         "{out}"
     );
     assert!(revision.is_file(), "rebuilt where the revision lives");
@@ -529,7 +554,7 @@ fn a_run_killed_partway_resumes_and_never_rewrites_a_bar_file() {
     assert_eq!(code, OK, "{out}");
     assert!(
         out.contains(
-            "Indexed 2, would build 2, empty 0, not held 0, refused 0. Nothing was written."
+            "Indexed 2, would build 2, empty 0, small 0, not held 0, refused 0. Nothing was written."
         ),
         "{out}"
     );
@@ -548,7 +573,7 @@ fn a_run_killed_partway_resumes_and_never_rewrites_a_bar_file() {
     );
     assert!(
         out.contains(
-            "Built 2, kept 2, empty 0, unsortable 0, not indexed 0, not held 0, refused 0"
+            "Built 2, kept 2, empty 0, small 0, unsortable 0, not indexed 0, not held 0, refused 0"
         ),
         "{out}"
     );
@@ -718,4 +743,59 @@ fn a_hard_link_at_the_staging_name_costs_no_bar_file_a_byte() {
         meta.ino()
     );
     assert!(!staging.exists());
+}
+
+/// D-4933: a month under 1,024 bars with no `.srt` is `small`, dry or not;
+/// nothing is written for it and the run is clean. A damaged `.srt` beside a
+/// small month is not excused: it is built again, as any other.
+#[test]
+fn a_small_month_is_small_in_the_receipt_and_writes_nothing() {
+    let root = Root::new();
+    let month = ym(2034, 1);
+    root.month_of(None, month, 500, 1, false);
+    let srt = root.file(None, month, FileKind::SortIndex);
+    assert!(!srt.exists(), "the writer gives a small month no .srt");
+    let span = ["gdfl", "NSE/INDEX/NIFTY", "1s", "2034-01", "2034-01"];
+
+    let (code, out) = root.run(&[&span[..], &["--dry-run"]].concat());
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains(
+            "2034-01  small               500 bars  under 1024 bars: no .srt by the small-month \
+             rule (D-4933); a sort orders these rows itself; nothing written\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("Indexed 0, would build 0, empty 0, small 1, not held 0, refused 0."),
+        "{out}"
+    );
+    let (code, out) = root.run(&span);
+    assert_eq!(code, OK, "{out}");
+    assert!(
+        out.contains("2034-01  small               500 bars"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with(
+            "Built 0, kept 0, empty 0, small 1, unsortable 0, not indexed 0, not held 0, \
+             refused 0: every month in the span is indexed, or holds too few bars to need an \
+             index (D-4933)\n"
+        ),
+        "{out}"
+    );
+    assert!(!srt.exists(), "nothing was written");
+
+    // DAMAGED, NOT ABSENT: the rule excuses only a name that is not there.
+    fs::write(&srt, [0x3C_u8; 100]).unwrap();
+    let (code, out) = root.run(&[&span[..], &["--dry-run"]].concat());
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2034-01  would build"), "{out}");
+    let (code, out) = root.run(&span);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("2034-01  built"), "{out}");
+    let symbol_id =
+        u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
+    let index = SortIndex::open(&srt, &Shape::of(month, 1, symbol_id)).unwrap();
+    assert_eq!((index.runs().len(), index.coverage()), (1, 500));
 }
