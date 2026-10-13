@@ -7275,8 +7275,13 @@ mod tests {
     /// checksum block is refused, and takes the month's time index away, so
     /// each lookup is the plain bisection whose probes the tests below count.
     fn spoil_block_of(root: &Path, series: (Vendor, &str, Timeframe), on: &str, row: u64) {
-        std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex))
-            .expect("the month's time index");
+        // A month under the small-month threshold has none to take away
+        // (D-4933); one past it does.
+        match std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex)) {
+            Ok(()) => {}
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => {}
+            Err(other) => panic!("the month's time index: {other}"),
+        }
         let path = month_file(root, series, on, FileKind::Bars);
         let mut bytes = std::fs::read(&path).expect("the month's bars");
         let at = usize::try_from(store::format::HEADER_LEN + row * store::format::RECORD_STRIDE)

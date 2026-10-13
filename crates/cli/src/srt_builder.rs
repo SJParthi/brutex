@@ -36,6 +36,16 @@
 //! * each month built is then reopened through the READ side and checked to
 //!   cover every committed row in one run.
 //!
+//! # The small-month rule (D-4933)
+//!
+//! A month that holds fewer than 1,024 bars
+//! (`store::time_index::INDEX_MIN_ROWS`) and has no `.srt` is given none, by
+//! the verb as by the writer: it is reported `small`, nothing is written, and
+//! it counts as clean, because a sorted page orders its at most 1,023 rows
+//! itself. The commit that brings such a month to the threshold writes its
+//! index whole. A `.srt` already beside a small month is kept or rebuilt as
+//! any other.
+//!
 //! `--dry-run` opens every month read-only, says which are indexed and which
 //! would be built, and writes nothing.
 //!
@@ -69,6 +79,7 @@ use brutex_core::vendor::Vendor;
 use store::file::{BarFile, Resorted, StoreError};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 use store::sort_index::{Shape, SortIndex};
+use store::time_index::{INDEX_MIN_ROWS, below_threshold};
 
 use crate::{FAILED, MISUSED, OK};
 
@@ -357,6 +368,9 @@ enum Line {
     Indexed { n_valid: u64 },
     /// `--dry-run`: it would be built, for this reason.
     WouldBuild { n_valid: u64, why: String },
+    /// Under the small-month threshold with no `.srt`: none is made, nothing
+    /// was written, and a sorted page orders its rows itself (D-4933).
+    Small { n_valid: u64 },
 }
 
 impl Line {
@@ -369,6 +383,7 @@ impl Line {
                 | Self::Empty
                 | Self::Indexed { .. }
                 | Self::WouldBuild { .. }
+                | Self::Small { .. }
         )
     }
 }
@@ -460,6 +475,10 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         Resorted::Built(because) => Line::Built { n_valid, because },
         Resorted::Empty => return Line::Empty,
         Resorted::Unsortable(why) => return Line::Unsortable { n_valid, why },
+        // THE STORE'S DOOR FOUND NO `.srt` AND MADE NONE, under the month's
+        // lock; there is nothing for a reader to find, so nothing to read
+        // back (D-4933).
+        Resorted::BelowThreshold => return Line::Small { n_valid },
         other => {
             return Line::Refused {
                 why: format!("the store reported an outcome this build does not know: {other:?}"),
@@ -500,8 +519,16 @@ fn inspect(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         Ok((n_valid, verdict, srt)) => {
             let refused =
                 name_refused(&srt).or_else(|| name_refused(&srt.with_extension("new.srt")));
+            // SMALL ONLY WHEN THE NAME IS NOT THERE AT ALL, as the store's
+            // door decides it: a damaged `.srt` beside a small month is still
+            // built again (D-4933).
+            let absent = matches!(
+                std::fs::symlink_metadata(&srt),
+                Err(why) if why.kind() == std::io::ErrorKind::NotFound
+            );
             match (refused, verdict) {
                 (Some(why), _) => Line::Refused { why },
+                (None, Some(_)) if absent && below_threshold(n_valid) => Line::Small { n_valid },
                 (None, None) => Line::Indexed { n_valid },
                 (None, Some(why)) => Line::WouldBuild { n_valid, why },
             }
@@ -545,6 +572,10 @@ fn render_line(out: &mut String, label: &str, line: &Line) {
         Line::WouldBuild { n_valid, why } => {
             writeln!(out, "  {label}  would build   {n_valid:>9} bars  {why}")
         }
+        Line::Small { n_valid } => writeln!(
+            out,
+            "  {label}  small         {n_valid:>9} bars  under {INDEX_MIN_ROWS} bars: no .srt by the small-month rule (D-4933); a sort orders these rows itself; nothing written"
+        ),
     };
 }
 
@@ -660,25 +691,29 @@ fn summed(out: &mut String, receipt: &[Line], dry_run: bool) -> u8 {
     if dry_run {
         let _ = writeln!(
             out,
-            "Indexed {}, would build {}, empty {}, not held {}, refused {}. Nothing was written.",
+            "Indexed {}, would build {}, empty {}, small {}, not held {}, refused {}. Nothing was written.",
             count(|line| matches!(line, Line::Indexed { .. })),
             count(|line| matches!(line, Line::WouldBuild { .. })),
             count(|line| matches!(line, Line::Empty)),
+            count(|line| matches!(line, Line::Small { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
         );
     } else {
         let _ = writeln!(
             out,
-            "Built {}, kept {}, empty {}, unsortable {}, not indexed {}, not held {}, refused {}: {}",
+            "Built {}, kept {}, empty {}, small {}, unsortable {}, not indexed {}, not held {}, refused {}: {}",
             count(|line| matches!(line, Line::Built { .. })),
             count(|line| matches!(line, Line::Kept { .. })),
             count(|line| matches!(line, Line::Empty)),
+            count(|line| matches!(line, Line::Small { .. })),
             count(|line| matches!(line, Line::Unsortable { .. })),
             count(|line| matches!(line, Line::NotIndexed { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
-            if clean {
+            if clean && count(|line| matches!(line, Line::Small { .. })) > 0 {
+                "every month in the span is indexed, or holds too few bars to need an index (D-4933)"
+            } else if clean {
                 "every month in the span is indexed"
             } else {
                 "NOT every month in the span is indexed; rerun once the cause is gone (a rerun keeps what is built)"

@@ -296,7 +296,7 @@ fn a_month_that_is_not_there_is_refused_and_nothing_is_created() {
 fn a_month_another_holder_has_is_refused_and_not_written() {
     let tf = Timeframe::MINUTE_1;
     let root = Root::new();
-    let bars = sessions(2, 375, 60);
+    let bars = sessions(3, 375, 60);
     write(&root, tf, &bars, 500);
     fs::remove_file(root.tix(tf)).unwrap();
     let locked = Err(StoreError::Locked {
@@ -328,8 +328,11 @@ fn a_month_another_holder_has_is_refused_and_not_written() {
 
 #[test]
 fn a_month_no_index_can_describe_is_named_and_left_without_one() {
-    // D-2330: two daily bars on one IST day share a slot. The door says so,
-    // leaves no `.tix` claiming them, and the month still answers by the
+    // D-2330: two daily bars on one IST day share a slot. A daily month is
+    // under the small-month threshold, so with no `.tix` the door gives it
+    // none and writes nothing (D-4933); with one left beside it — a month
+    // written before the rule — the door says why no index can describe it,
+    // leaves no `.tix` claiming the bars, and the month still answers by the
     // bisection.
     let tf = Timeframe::DAY_1;
     let root = Root::new();
@@ -337,8 +340,18 @@ fn a_month_no_index_can_describe_is_named_and_left_without_one() {
     assert!(writer.append(&[bar(at(3, 0))]).is_ok());
     assert!(writer.append(&[bar(at(3, 3_600))]).is_ok());
     drop(writer);
-    assert!(!root.tix(tf).exists(), "the writer retired it");
+    assert!(!root.tix(tf).exists(), "a daily month is given no index");
     let bin = fs::read(root.file(tf, FileKind::Bars)).unwrap();
+    assert_eq!(
+        root.index(tf).unwrap(),
+        IndexedMonth {
+            n_valid: 2,
+            outcome: Reindexed::BelowThreshold,
+        }
+    );
+    assert!(!root.tix(tf).exists(), "nothing written under the rule");
+    let geometry = store::time_index::Geometry::new(month(), 86_400, SYMBOL);
+    fs::write(root.tix(tf), geometry.encode()).unwrap();
 
     let shared = Why::SharedSlot {
         index: 1,
@@ -357,7 +370,10 @@ fn a_month_no_index_can_describe_is_named_and_left_without_one() {
     );
     assert_eq!(fs::read(root.file(tf, FileKind::Bars)).unwrap(), bin);
     let reader = root.reader(tf);
-    assert_eq!(reader.time_lookup(), TimeLookup::Bisection(Why::Absent));
+    assert_eq!(
+        reader.time_lookup(),
+        TimeLookup::Bisection(Why::BelowThreshold)
+    );
     assert_eq!(reader.first_at_or_after(at(3, 1)), Ok(1));
     assert_eq!(reader.first_at_or_after(at(3, 3_601)), Ok(2));
 }
@@ -367,9 +383,11 @@ fn a_stale_or_damaged_index_is_rebuilt_and_says_why() {
     let tf = Timeframe::MINUTE_1;
     let bars = sessions(3, 375, 60);
     let root = Root::new();
-    write(&root, tf, &bars[..2], 2);
+    // Past the small-month threshold, so the month carries an index to go
+    // wrong (D-4933).
+    write(&root, tf, &bars[..1_024], 1_024);
     let old = fs::read(root.tix(tf)).unwrap();
-    write(&root, tf, &bars[2..], 1_000);
+    write(&root, tf, &bars[1_024..], 1_000);
     let right = fs::read(root.tix(tf)).unwrap();
 
     // The month grew past an index that was then put back: the entry is
@@ -409,10 +427,14 @@ fn a_stale_or_damaged_index_is_rebuilt_and_says_why() {
     }
 
     // Stale: the month grew by one bar inside the same bucket.
+    let bucket = |bar: &Bar| store::time_index::split(geometry.slot_of(bar.ts_micros).unwrap()).0;
+    let n = (1_024..bars.len())
+        .find(|&n| bucket(&bars[n - 1]) == bucket(&bars[n]))
+        .unwrap();
     let small = Root::new();
-    write(&small, tf, &bars[..2], 2);
+    write(&small, tf, &bars[..n], n);
     let old = fs::read(small.tix(tf)).unwrap();
-    write(&small, tf, &bars[2..3], 1);
+    write(&small, tf, &bars[n..=n], 1);
     let right = fs::read(small.tix(tf)).unwrap();
     fs::write(small.tix(tf), &old).unwrap();
     assert_eq!(
@@ -427,19 +449,21 @@ fn an_empty_month_keeps_or_gets_its_header_only_index() {
     let tf = Timeframe::SECOND_1;
     let root = Root::new();
     drop(root.writer(tf));
-    let header_only = fs::read(root.tix(tf)).unwrap();
-    assert_eq!(header_only.len(), 64);
     let empty = |outcome| IndexedMonth {
         n_valid: 0,
         outcome,
     };
-    assert_eq!(root.index(tf).unwrap(), empty(Reindexed::Kept));
+    // A NEW MONTH IS GIVEN NO INDEX (D-4933), and the door makes none.
+    assert!(!root.tix(tf).exists());
+    assert_eq!(root.index(tf).unwrap(), empty(Reindexed::BelowThreshold));
+    assert!(!root.tix(tf).exists());
 
-    fs::remove_file(root.tix(tf)).unwrap();
-    assert_eq!(
-        root.index(tf).unwrap(),
-        empty(Reindexed::Built(Why::Absent))
-    );
+    // One left beside it by an earlier build is its header alone, and kept.
+    let header_only = store::time_index::Geometry::new(month(), 1, SYMBOL)
+        .encode()
+        .to_vec();
+    fs::write(root.tix(tf), &header_only).unwrap();
+    assert_eq!(root.index(tf).unwrap(), empty(Reindexed::Kept));
     assert_eq!(fs::read(root.tix(tf)).unwrap(), header_only);
 
     // Entries past the header describe bars that never committed.
@@ -463,7 +487,7 @@ fn an_empty_month_keeps_or_gets_its_header_only_index() {
 fn a_sidecar_path_a_link_below_the_root_and_a_wrong_symbol_are_refused_before_any_write() {
     let tf = Timeframe::MINUTE_1;
     let root = Root::new();
-    write(&root, tf, &sessions(1, 375, 60), 375);
+    write(&root, tf, &sessions(3, 375, 60), 1_095);
     fs::remove_file(root.tix(tf)).unwrap();
 
     let overlay = path_at(tf, month(), FileKind::Overlay);

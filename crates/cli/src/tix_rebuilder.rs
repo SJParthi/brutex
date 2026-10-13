@@ -36,6 +36,16 @@
 //! `--dry-run` opens every month read-only, says which are indexed and which
 //! would be built, and writes nothing.
 //!
+//! # The small-month rule (D-4933)
+//!
+//! A month that holds fewer than 1,024 bars (`store::time_index::INDEX_MIN_ROWS`)
+//! and has no `.tix` is given none, by the verb as by the writer: it is
+//! reported `small`, nothing is written for it, and it counts as clean,
+//! because its lookups bisect in at most ten bar reads and that is not a
+//! finding. The commit that brings such a month to the threshold writes its
+//! index whole. A `.tix` already beside a small month is kept or rebuilt as
+//! any other.
+//!
 //! # Cost
 //!
 //! Building one month reads every committed bar once through the verified
@@ -59,6 +69,7 @@ use std::path::{Path, PathBuf};
 use brutex_core::vendor::Vendor;
 use store::file::{BarFile, Reindexed, StoreError, TimeLookup};
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+use store::time_index::{INDEX_MIN_ROWS, Why};
 
 use crate::{FAILED, MISUSED, OK};
 
@@ -220,6 +231,9 @@ enum Line {
     Indexed { n_valid: u64 },
     /// `--dry-run`: a reader bisects, for this reason.
     WouldBuild { n_valid: u64, why: String },
+    /// Under the small-month threshold with no `.tix`: none is made, nothing
+    /// was written, and a reader bisects by rule (D-4933).
+    Small { n_valid: u64 },
 }
 
 impl Line {
@@ -227,7 +241,11 @@ impl Line {
     const fn clean(&self) -> bool {
         matches!(
             self,
-            Self::Kept { .. } | Self::Built { .. } | Self::Indexed { .. } | Self::WouldBuild { .. }
+            Self::Kept { .. }
+                | Self::Built { .. }
+                | Self::Indexed { .. }
+                | Self::WouldBuild { .. }
+                | Self::Small { .. }
         )
     }
 }
@@ -278,6 +296,7 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
                 why: why.to_string(),
             };
         }
+        Reindexed::BelowThreshold => Line::Small { n_valid },
         // `Reindexed` is non-exhaustive: an outcome this build does not know
         // is not a month it can call indexed.
         other => {
@@ -287,7 +306,14 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
         }
     };
     match reader_view(root, path, symbol_id) {
-        Ok((_, TimeLookup::Indexed)) => line,
+        // A SMALL MONTH IS READ BACK TOO: a reader must give the rule as its
+        // reason, so the receipt's `small` is what a reader sees.
+        Ok((_, TimeLookup::Bisection(Why::BelowThreshold)))
+            if matches!(line, Line::Small { .. }) =>
+        {
+            line
+        }
+        Ok((_, TimeLookup::Indexed)) if !matches!(line, Line::Small { .. }) => line,
         Ok((_, reader)) => Line::NotIndexed {
             n_valid,
             reader: format!("{reader:?}"),
@@ -302,6 +328,7 @@ fn rebuild(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
 fn inspect(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
     match reader_view(root, path, symbol_id) {
         Ok((n_valid, TimeLookup::Indexed)) => Line::Indexed { n_valid },
+        Ok((n_valid, TimeLookup::Bisection(Why::BelowThreshold))) => Line::Small { n_valid },
         Ok((n_valid, TimeLookup::Bisection(why))) => Line::WouldBuild {
             n_valid,
             why: why.to_string(),
@@ -348,6 +375,10 @@ fn render_line(out: &mut String, month: YearMonth, line: &Line) {
         Line::WouldBuild { n_valid, why } => writeln!(
             out,
             "  {month}  would build   {n_valid:>9} bars  a reader bisects: {why}"
+        ),
+        Line::Small { n_valid } => writeln!(
+            out,
+            "  {month}  small         {n_valid:>9} bars  under {INDEX_MIN_ROWS} bars: no .tix by the small-month rule (D-4933); a reader bisects in at most ten reads; nothing written"
         ),
     };
 }
@@ -419,23 +450,27 @@ pub(crate) fn command_with(
     if ask.dry_run {
         let _ = writeln!(
             out,
-            "Indexed {}, would build {}, not held {}, refused {}. Nothing was written.",
+            "Indexed {}, would build {}, small {}, not held {}, refused {}. Nothing was written.",
             count(|line| matches!(line, Line::Indexed { .. })),
             count(|line| matches!(line, Line::WouldBuild { .. })),
+            count(|line| matches!(line, Line::Small { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
         );
     } else {
         let _ = writeln!(
             out,
-            "Built {}, kept {}, unindexable {}, not indexed {}, not held {}, refused {}: {}",
+            "Built {}, kept {}, small {}, unindexable {}, not indexed {}, not held {}, refused {}: {}",
             count(|line| matches!(line, Line::Built { .. })),
             count(|line| matches!(line, Line::Kept { .. })),
+            count(|line| matches!(line, Line::Small { .. })),
             count(|line| matches!(line, Line::Unindexable { .. })),
             count(|line| matches!(line, Line::NotIndexed { .. })),
             count(|line| matches!(line, Line::NotHeld)),
             count(|line| matches!(line, Line::Refused { .. })),
-            if clean {
+            if clean && count(|line| matches!(line, Line::Small { .. })) > 0 {
+                "every month in the span is indexed, or holds too few bars to need an index (D-4933)"
+            } else if clean {
                 "every month in the span is indexed"
             } else {
                 "NOT every month in the span is indexed; rerun once the cause is gone (a rerun keeps what is built)"

@@ -482,22 +482,27 @@ fn drive_flock_unlock_refused(root: &Path) -> Handed {
     Handed::Nothing
 }
 
-/// A month with no `.tix`, asked how it looks a timestamp up: the
+/// A month whose `.tix` is not one, asked how it looks a timestamp up: the
 /// `store.tix` warning in `crate::file`'s `bisecting`. D-2329.
 ///
 /// Empty, so nothing commits and `store.append` stays silent: the writer door
-/// makes the month and its index, the index is taken away, and a READ handle
-/// is asked. `time_lookup` hands back the reason — working data, and the line
-/// is the only other trace of it.
+/// makes the month and — under the small-month threshold (D-4933) — no index,
+/// ten bytes that are not an index are put at its name, and a READ handle is
+/// asked. A small month with NO `.tix` would be silent by the rule; one whose
+/// `.tix` is short is not. `time_lookup` hands back the reason — working
+/// data, and the line is the only other trace of it.
 fn drive_tix_absent(root: &Path) -> Handed {
     let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
     drop(made);
-    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
-        .expect("the writer door made the index");
+    let tix = bars_path().with_file(FileKind::TimeIndex).to_path_buf(root);
+    assert!(!tix.exists(), "a new month is given no index (D-4933)");
+    std::fs::write(&tix, [0u8; 10]).expect("ten bytes at the index's name");
     let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("the month reads");
     assert_eq!(
         reader.time_lookup(),
-        crate::file::TimeLookup::Bisection(crate::time_index::Why::Absent)
+        crate::file::TimeLookup::Bisection(crate::time_index::Why::Header(
+            "it is shorter than its header"
+        ))
     );
     Handed::Data
 }
@@ -507,9 +512,12 @@ fn drive_tix_absent(root: &Path) -> Handed {
 ///
 /// The two bars are committed by hand — records, block checksum, header slot,
 /// exactly the bytes `BarFile::append` writes — because an append would fire
-/// `store.append`, a second line for a site this table drives once. Then the
-/// index is taken away and the writer door opens the month: it rebuilds the
-/// index from the bars and the lookup is served by it.
+/// `store.append`, a second line for a site this table drives once. Then ten
+/// bytes that are not an index are put at the index's name — a month this
+/// small with NO `.tix` is given none by the small-month rule (D-4933), but
+/// one whose `.tix` does not describe its bars is rebuilt — and the writer
+/// door opens the month: it rebuilds the index from the bars and the lookup
+/// is served by it.
 fn drive_tix_rebuilt(root: &Path) -> Handed {
     let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
     let (layout, header) = (made.layout(), made.header());
@@ -531,8 +539,9 @@ fn drive_tix_rebuilt(root: &Path) -> Handed {
     std::os::unix::fs::FileExt::write_all_at(&file, &image, HEADER_LEN).expect("records");
     std::os::unix::fs::FileExt::write_all_at(&file, &commit.bytes, commit.offset).expect("slot");
     std::fs::write(bars.with_extension("crc"), sum.to_le_bytes()).expect("the block sum");
-    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
-        .expect("the writer door made the index");
+    let tix = bars_path().with_file(FileKind::TimeIndex).to_path_buf(root);
+    assert!(!tix.exists(), "a new month is given no index (D-4933)");
+    std::fs::write(&tix, [0u8; 10]).expect("ten bytes at the index's name");
 
     let writer = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("the month opens");
     assert_eq!(writer.records(), 2, "the premise: two committed bars");

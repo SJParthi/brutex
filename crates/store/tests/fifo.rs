@@ -308,11 +308,10 @@ fn the_catalog_counts_a_fifo_month_and_does_not_hold_it() {
     assert_eq!(out.census.not_regular, 1, "the FIFO");
     assert_eq!(out.census.linked, 1, "the link to it");
     assert_eq!(out.census.spot, 1);
-    // The writer keeps a `.srt` sort index beside the bars since D-3349.
-    assert_eq!(
-        out.census.other_kind, 4,
-        "the real .lock, .crc, .tix and .srt"
-    );
-    assert_eq!(out.census.seen, 7);
+    // The writer keeps a `.srt` sort index beside the bars since D-3349, and
+    // neither it nor a `.tix` beside a month under the small-month threshold
+    // (D-4933), which this one-bar month is.
+    assert_eq!(out.census.other_kind, 2, "the real .lock and .crc");
+    assert_eq!(out.census.seen, 5);
     assert!(out.census.reconciles());
 }
