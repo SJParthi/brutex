@@ -16766,3 +16766,22 @@ unchanged price (a halt's seconds, a fixture's bars, an index's run); they
 were reworded and state no cost. The three `crates/api/benches/ratio/`
 module headers now name the bench that runs them,
 `crates/api/benches/ratio.rs`.
+
+## Sealed months: codec 1, one frame — D-4939, 13 October 2026
+
+`store::sealed_codec` (SC-1). It reads and writes no file: SC-2 places frames
+in a `.sbar` month, and SC-11 gates the benches C-SEAL-01 to C-SEAL-03. The
+figures below are its own, from `crates/store/tests/sealed_codec_samples.rs`
+(release build, frames held in memory so no read is timed, `Instant` around
+each call, n = 1,280 to 2,000 calls a month), in two runs on 13 October 2026:
+a quiet one, log `state/fix/round2/sc1-acceptance-20261013.log`, and one
+under load, log `state/fix/round2/sc1-acceptance-20261013-r5.log`, taken while
+three `cargo mutants` shards and other agents' builds held all six of the
+machine's build slots. Each range below is the least and the greatest of the
+months' own p50, p99 or max.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-SC-1 | One row costs one frame | the frame is the unit of decoding: serving one row decodes the frame's rows, and its CRC-32C reads every byte of it | at most `block_rows` = 256 rows and `MAX_FRAME_LEN` = 14,508 bytes, whatever the month holds. **Measured, quiet** (the 15 timed months of 554 to 493,998 bars): one frame decoded with its checksum p50 5.0 to 6.0 µs, p99 5.8 to 7.3 µs, max 17 to 98 µs; a 100-row page at a random offset (the one or two frames it spans) p50 5.2 to 6.4 µs, p99 10.8 to 13.6 µs, max 19 to 76 µs; the stamps alone p50 0.9 to 1.4 µs, p99 1.1 to 1.9 µs; a month under 256 bars is one short frame, p50 0.1 to 3.8 µs. Flat in the month: the 472,445-bar NIFTY month decodes a frame at 6.0 / 7.3 µs (p50 / p99), the 554-bar option month at 5.6 / 6.2 µs. **Measured, under load** (25 timed months of 273 to 493,998 bars): decode p50 5.8 to 9.7 µs, p99 6.5 to 57.9 µs, max 7.5 µs to 22.7 ms; page p50 6.0 to 10.4 µs, p99 12.8 to 251 µs, max 16 µs to 14.2 ms. The milliseconds are the loaded host's scheduler, not the frame: month for month (the 15 months timed in both runs, decode and page) p50 rose 1.1 to 1.8 times, p99 up to 21 times, and the max reached milliseconds. SC-11's C-SEAL benches gate the tail on a quiet host | SC-1 |
+| L-SC-12 | Incompressible bars are not compressed | a frame of random fields has nothing to predict | at most 57 bytes a bar, 1 more than raw: 400 frames of random fields all between 50 × 256 and 57 × 256 bytes (`no_frame_exceeds_the_bound`), and never above `MAX_FRAME_LEN` | SC-1 |
+| L-SC-15 | Encoding a frame tries every width | the encoder measures each mode a column has at every width from 0 to its widest value, 65 lengths a stream at most, from a histogram of the residuals' bit lengths | O(rows) a column, once, when a month is sealed (L-SC-5 is the seal's). **Measured, quiet** (the same 15 months): a frame encoded p50 12.7 to 19.3 µs, p99 15.0 to 35.8 µs, max 18 to 100 µs; the 472,445-bar NIFTY month is 1,846 frames at p50 17.8 µs, about 33 ms in all. **Under load**: p50 14.5 to 51.6 µs, p99 16.8 µs to 17.1 ms, max 19 µs to 21.3 ms | SC-1 |
