@@ -623,6 +623,60 @@ fn owed_below<F>(held: &F, first: Timeframe, wanted: &[Wanted]) -> Option<Gate>
 where
     F: Fn(&EntryKey) -> bool,
 {
+    let (missing, run_count, owed) = owed_runs(held, first, wanted, OWED_NAMED);
+    (missing > 0).then_some(Gate::RungFirst {
+        needs: first,
+        missing,
+        of: wanted.len(),
+        owed,
+        runs: run_count,
+    })
+}
+
+/// Every run of months `wanted` owes at the rung below `rung`, uncapped, so a
+/// caller can tell WHICH instruments owe and pull the rest (DB-B27).
+///
+/// # Why this exists beside [`gate`]
+///
+/// The gate answers for the whole ask: one instrument with a hole in its
+/// daily months closed the minute pass for every instrument beside it. On the
+/// operator's store two of 208 shares (MAZDOCK, FORCEMOT) had such holes, so
+/// the whole 1min stock leg answered 409 until both were left out by hand.
+/// The rule is per instrument — a minute month needs ITS OWN daily month —
+/// and this is the same arithmetic answered per instrument.
+///
+/// Empty for an ungated feed, a rung with nothing below it, or an ask that
+/// owes nothing.
+///
+/// # Cost
+///
+/// [`owed_runs`]: two probes per instrument-month of the ask, and one `Owed`
+/// per run of owed months. Bounded by the ask, never by the store.
+#[must_use]
+pub fn owing<F>(held: F, feed: Feed, rung: Timeframe, wanted: &[Wanted]) -> Vec<Owed>
+where
+    F: Fn(&EntryKey) -> bool,
+{
+    if !is_gated(feed) {
+        return Vec::new();
+    }
+    let Some(first) = precedes(rung) else {
+        return Vec::new();
+    };
+    owed_runs(&held, first, wanted, usize::MAX).2
+}
+
+/// [`owed_below`]'s arithmetic: the owed instrument-months, the runs they
+/// fold into, and the first `named` of those runs.
+fn owed_runs<F>(
+    held: &F,
+    first: Timeframe,
+    wanted: &[Wanted],
+    named: usize,
+) -> (usize, usize, Vec<Owed>)
+where
+    F: Fn(&EntryKey) -> bool,
+{
     let mut span: std::collections::HashMap<(Exchange, Segment, Symbol), (YearMonth, YearMonth)> =
         std::collections::HashMap::new();
     for w in wanted {
@@ -641,7 +695,7 @@ where
     }
     let mut missing = 0_usize;
     let mut run_count = 0_usize;
-    let mut owed: Vec<Owed> = Vec::with_capacity(OWED_NAMED);
+    let mut owed: Vec<Owed> = Vec::with_capacity(named.min(OWED_NAMED));
     let mut open: Option<Owed> = None;
     for w in wanted {
         let why = match span.get(&(w.exchange, w.segment, w.symbol)) {
@@ -666,7 +720,7 @@ where
             continue;
         }
         if let Some(done) = open.take()
-            && owed.len() < OWED_NAMED
+            && owed.len() < named
         {
             owed.push(done);
         }
@@ -682,17 +736,11 @@ where
         });
     }
     if let Some(done) = open
-        && owed.len() < OWED_NAMED
+        && owed.len() < named
     {
         owed.push(done);
     }
-    (missing > 0).then_some(Gate::RungFirst {
-        needs: first,
-        missing,
-        of: wanted.len(),
-        owed,
-        runs: run_count,
-    })
+    (missing, run_count, owed)
 }
 
 /// The one instrument-month a probe asks about, at `(segment, rung)`.

@@ -3837,17 +3837,37 @@ async fn tick(
     )
     .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let source = format!("autopilot {} {}", state.feed.display(), unit.month);
+    // THE TICK'S OWN SOURCE: the run's, as its opening record names it
+    // (`server::run_source`, which marks the autopilot's runs `autopilot`
+    // inside the text), so the restart scan pairs this close with this tick's
+    // run and no other (DB-B34, repair 6). It was `autopilot <feed> <month>`,
+    // which no opening record carried: the scan could pair it only by its
+    // window, and by the window a refusal that opened no run closed a run cut
+    // short. A tick refused before its run opened keeps that text.
+    let refused_source = format!("autopilot {} {}", state.feed.display(), unit.month);
+    let source = run
+        .ledger
+        .source()
+        .map_or_else(|| refused_source.clone(), ToOwned::to_owned);
 
     // ONE JOURNAL RECORD PER TICK, through the same constructors the HTTP
     // receipt uses — so `/audit` cannot tell an autopilot run from a hand-made
     // one except by its source, which is the point.
-    let record = if run.reached == 0 {
+    let record = if let Some(blocked) = run.blocked.as_ref() {
+        // REFUSED: no run opened, so this record closes none (repair 6).
+        audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::Refused,
+            now,
+            &refused_source,
+            &blocked.why,
+        )
+        .with_window(unit.window)
+    } else if run.reached == 0 {
         let why = run
-            .blocked
-            .as_ref()
-            .map(|b| b.why.clone())
-            .or_else(|| run.refused.first().cloned())
+            .refused
+            .first()
+            .cloned()
             .unwrap_or_else(|| "no instrument in the universe could be reached".to_owned());
         audit::Record::refused(
             audit::Scope::Spot,
@@ -3875,7 +3895,11 @@ async fn tick(
     // written down, and that is a defect in the journal, not in this page".
     // It was a defect in this line. `CLAUDE.md` §4.
     let journal = site.journal();
-    let mut journal_error = journal.append(&record).err();
+    let mut journal_error = if run.blocked.is_some() {
+        journal.append(&record).err()
+    } else {
+        run.ledger.close(&journal, &record).err()
+    };
     // THE RUN'S FAILURES WERE APPENDED AS EACH MEMBER LANDED, behind its
     // opening record (D-3341, DB-055) — this tick wrote none before. Only when
     // that opening record was refused are they appended here, after this

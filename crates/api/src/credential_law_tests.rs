@@ -238,6 +238,61 @@ async fn a_rejected_token_whose_re_read_rotated_continues_with_the_new_value() {
     );
 }
 
+/// **THE OPERATOR'S REFRESH: after a halt on the same dead value, the token
+/// is refreshed where it is minted, and the NEXT run reads and sends it.**
+///
+/// [`CREDENTIAL_FACT`] tells the operator *"refresh it where it is minted
+/// and the next pull reads the new value"*, and the pull run's credential
+/// line says *"start a new pull"*. Nothing proved it: every test above drives
+/// one run. Here the first run is rejected, re-reads the same dead value and
+/// halts with one request on the wire; the value in the store of record then
+/// changes (the script's next answer), and a second run over the same site
+/// reads it on its first instrument, sends only it, and ends with no
+/// credential stop. Nothing is latched for the process: the halt belonged to
+/// the first run's [`crate::credential_law::Watch`], which died with it, and
+/// no token is minted (`CLAUDE.md` §8). The law is per feed and vendor-
+/// agnostic, so this is the path a Zerodha spot pull takes too (WP-62: once
+/// the token is refreshed where it is minted, the next pull reads it).
+#[tokio::test]
+async fn after_a_same_value_halt_the_next_run_reads_and_sends_the_refreshed_token() {
+    let vendor = FakeVendor::rejecting_all_but(Some("fresh")).await;
+    let script = scripted(
+        &vendor,
+        vec![token("stale"), token("stale"), token("fresh")],
+    );
+    let (site, asked) = spot_site("refreshed-next-run", &script);
+
+    let first = broker_run(&asked, &site, &[]).await;
+    assert_eq!(first.credential_stop, Some(CredentialStop::SameValue));
+    assert!(first.credential_dead, "{first:?}");
+    assert_eq!(vendor.seen().len(), 1, "{:?}", vendor.seen());
+    assert_eq!(script.reads(), 2, "one read and ONE re-read");
+
+    let second = broker_run(&asked, &site, &[]).await;
+    assert_eq!(
+        second.credential_stop, None,
+        "the next run is not halted by the first run's verdict: {second:?}"
+    );
+    assert!(!second.credential_dead, "{second:?}");
+    let seen = vendor.seen();
+    assert_eq!(
+        seen.len(),
+        3,
+        "the second run asked both instruments, each once: {seen:?}"
+    );
+    assert!(
+        seen[1..]
+            .iter()
+            .all(|carried| carried.contains("fresh") && !carried.contains("stale")),
+        "the second run sent only the refreshed token: {seen:?}"
+    );
+    assert_eq!(
+        script.reads(),
+        4,
+        "the second run read the store of record afresh for each instrument"
+    );
+}
+
 /// **A rotation that is undone is caught before the socket.**
 ///
 /// The vendor rejected `stale` and the re-read returned `fresh`. If the next
