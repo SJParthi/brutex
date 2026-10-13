@@ -1569,6 +1569,8 @@ fn a_booked_print_leaves_the_count_its_row_was_put_in() {
 /// max of each printed, and the eligible decode's median held within twice
 /// the ineligible one's plus a millisecond. A timing, so run on demand:
 /// `cargo test -p pull --lib -- --ignored the_match_band_costs --nocapture`.
+/// This test is the proof of the claim it states:
+/// `pull::gdfl_cm::admission_tests::the_match_band_costs_one_pass_a_file`.
 #[test]
 #[ignore = "timing; run on demand with --ignored"]
 fn the_match_band_costs_one_pass_a_file() {

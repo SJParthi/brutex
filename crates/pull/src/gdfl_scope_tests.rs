@@ -1592,7 +1592,10 @@ fn spread(nanos: &mut [u128]) -> (u128, u128, u128) {
 /// close's scope are computed ONCE a run and shared by every day (one set,
 /// by address), a day already examined under this scope is two hash probes,
 /// and neither walks the journal or the scope's 600-odd members again. The
-/// timings are printed for the record (`--nocapture`), never asserted.
+/// timings are printed for the record (`--nocapture`), never asserted: the
+/// proof is the sharing and the absence asserted here, and this test,
+/// `pull::gdfl_import::tests::scope_reopen::what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_again`,
+/// is the one `Ctx::owed`'s doc names.
 #[test]
 fn what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_again() {
     let root = scratch("wp12f-owed-cost");
@@ -1863,6 +1866,121 @@ fn a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended() {
     assert!(
         !store.join("bars").exists(),
         "no file of the restated day was read or appended"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// THE AUCTION ERA'S ADMISSION CHECK COSTS THE SAME AT ANY JOURNAL SIZE
+/// (D-4878 item 10, CMP-07): `restated_past_append` is two hash probes of the
+/// journal's restated set and a date compare, never a walk of the journal.
+/// Two journals a hundredfold apart (every day of the era restated under one
+/// filter, then under a hundred) answer the same keys in the same per-call
+/// time: 200 batches of 1,000 calls each, the two journals interleaved batch
+/// by batch so the machine's load falls on both alike; p50, p99 and max of
+/// the per-call nanoseconds printed, and the larger journal's p50 held within
+/// three times the smaller's (a walk of the larger set would be hundreds of
+/// times slower). Its answers are asserted first: a restated key, a key
+/// under a names filter whose whole-tree key is restated, a day before the
+/// era and an index day.
+#[test]
+fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
+    let root = scratch("wp12f-admit-cost");
+    let era: Vec<Day> = days(day(2026, 8, 3), day(2026, 9, 30));
+    let journal_of = |filters: usize, at: &str| -> Journal {
+        let store = root.join(at);
+        let mut text = String::new();
+        for d in &era {
+            for n in 0..filters {
+                let only = if n == 0 {
+                    "*".to_owned()
+                } else {
+                    format!("SYM{n:03}")
+                };
+                let _ = writeln!(text, "begin stocks {d} {only}");
+                let _ = writeln!(
+                    text,
+                    "done stocks {d} {only} definition=3 files=1 seconds=1 failures=0"
+                );
+            }
+        }
+        std::fs::create_dir_all(store.join("imports")).unwrap();
+        std::fs::write(journal_path(&store), text).unwrap();
+        Journal::load(journal_path(&store)).unwrap()
+    };
+    let (small, large) = (journal_of(1, "small"), journal_of(100, "large"));
+    assert_eq!(
+        (small.restated.len(), large.restated.len()),
+        (era.len(), era.len() * 100)
+    );
+    // What it answers, on both.
+    let probe = era[era.len() / 2];
+    let (whole, named) = (format!("stocks {probe} *"), format!("stocks {probe} INFY"));
+    for journal in [&small, &large] {
+        assert!(restated_past_append(
+            journal,
+            ImportKind::Stocks,
+            &whole,
+            probe
+        ));
+        assert!(
+            restated_past_append(journal, ImportKind::Stocks, &named, probe),
+            "a names filter on a day whose whole-tree key is restated"
+        );
+        assert!(!restated_past_append(
+            journal,
+            ImportKind::Indices,
+            &whole,
+            probe
+        ));
+        let before = day(2026, 7, 31);
+        assert!(!restated_past_append(
+            journal,
+            ImportKind::Stocks,
+            &format!("stocks {before} *"),
+            before
+        ));
+    }
+    // The same keys asked of both journals, half of them restated.
+    let asked: Vec<(String, Day)> = era
+        .iter()
+        .flat_map(|d| {
+            [
+                (format!("stocks {d} *"), *d),
+                (format!("stocks {d} ACC"), *d),
+            ]
+        })
+        .collect();
+    let batch = |journal: &Journal| -> u128 {
+        let at = std::time::Instant::now();
+        let mut hits = 0_usize;
+        for n in 0..1_000 {
+            let (key, d) = &asked[n % asked.len()];
+            hits += usize::from(std::hint::black_box(restated_past_append(
+                journal,
+                ImportKind::Stocks,
+                key,
+                *d,
+            )));
+        }
+        assert_eq!(hits, 1_000, "every day of the era is restated in both");
+        at.elapsed().as_nanos() / 1_000
+    };
+    let (mut at_small, mut at_large) = (Vec::with_capacity(200), Vec::with_capacity(200));
+    for _ in 0..200 {
+        at_small.push(batch(&small));
+        at_large.push(batch(&large));
+    }
+    let (s50, s99, smax) = spread(&mut at_small);
+    let (l50, l99, lmax) = spread(&mut at_large);
+    println!(
+        "WP-12f restated_past_append, ns a call (200 batches of 1,000): {} restated keys \
+         p50={s50} p99={s99} max={smax}; {} restated keys p50={l50} p99={l99} max={lmax}",
+        small.restated.len(),
+        large.restated.len()
+    );
+    assert!(
+        l50 <= 3 * s50.max(1),
+        "a hundredfold journal costs the check {l50} ns against {s50} ns: it walks"
     );
     std::fs::remove_dir_all(root).unwrap();
 }

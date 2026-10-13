@@ -2459,9 +2459,11 @@ struct Journal {
     member_keys: HashMap<String, std::collections::BTreeSet<String>>,
     /// Per `<kind> <day>`, the filters whose base key is closed `done`, in
     /// order (D-4878): every close a later run may ask what it owes
-    /// ([`reach_back`]). Built once at the load's end, O(done keys); one
-    /// hash probe to read.
-    closed_by: HashMap<String, Vec<String>>,
+    /// ([`reach_back`]). Built once at the load's end, O(done keys), each
+    /// day's filters an ordered set (a day holds the operator's few, so an
+    /// insert is a few compares and the order needs no sort); one hash probe
+    /// to read.
+    closed_by: HashMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Journal {
@@ -2528,9 +2530,12 @@ impl Journal {
             .iter()
             .filter_map(|key| key.rsplit_once(' ').map(|(day, _only)| day.to_owned()))
             .collect();
-        // Once, O(done keys): which filters closed each day done. A member
-        // key (`<filter>+<member>`) is its base key's and is not one.
-        let mut closed_by: HashMap<String, Vec<String>> = HashMap::new();
+        // Once, O(done keys): which filters closed each day done, in order
+        // whatever order the set hands them in. A member key
+        // (`<filter>+<member>`) is its base key's and is not one. Pre-sized:
+        // a done key names at most one day.
+        let mut closed_by: HashMap<String, std::collections::BTreeSet<String>> =
+            HashMap::with_capacity(journal.done.len());
         for key in &journal.done {
             if let Some((day, only)) = key.rsplit_once(' ')
                 && !only.contains('+')
@@ -2538,11 +2543,8 @@ impl Journal {
                 closed_by
                     .entry(day.to_owned())
                     .or_default()
-                    .push(only.to_owned());
+                    .insert(only.to_owned());
             }
-        }
-        for filters in closed_by.values_mut() {
-            filters.sort_unstable();
         }
         journal.closed_by = closed_by;
         Ok(journal)
@@ -2835,7 +2837,13 @@ struct Staged {
 
 /// A day's failure about `about`, refused by `refusal` (an import refusal
 /// that names its own code), at `stage`, logged.
-fn staged(run: &Run<'_>, day: Day, about: &str, stage: Stage, refusal: &ImportRefusal) -> Staged {
+fn note_staged(
+    run: &Run<'_>,
+    day: Day,
+    about: &str,
+    stage: Stage,
+    refusal: &ImportRefusal,
+) -> Staged {
     let cause = Cause::open(stage, refusal.code());
     Staged {
         cause,
@@ -3037,6 +3045,11 @@ struct Ctx<'a> {
     scoped: Option<Scoped<'a>>,
 }
 
+/// How many distinct scopes, and distinct other filters, a run's maps are
+/// sized for before they grow: the operator's few (the whole tree, `--stored`
+/// and a named symbol or two). A run that meets more grows them amortised.
+const SCOPES_HINT: usize = 8;
+
 /// A run's recorded scope beside the scope ledger (WP-12f, D-4878).
 struct Scoped<'a> {
     /// What this run is asked to read.
@@ -3066,7 +3079,10 @@ enum Owed {
 impl Ctx<'_> {
     /// What `key`'s day, closed `done`, owes this run's scope: O(1) for a
     /// day that owes nothing (one compare of digests, two hash probes), and
-    /// the members beyond a close's scope are computed once per scope.
+    /// the members beyond a close's scope are computed once per scope; both
+    /// are asserted over a journal of every calendar day 2018..2026 by
+    /// `pull::gdfl_import::tests::scope_reopen::what_a_done_day_owes_is_decided_without_walking_the_journal_or_the_scope_again`
+    /// (one shared set by address, none built for an examined day).
     ///
     /// `remembered` is the key the scope ledger holds the examination under:
     /// `key` itself for the run's own key. For a key another filter closed,
@@ -3224,7 +3240,13 @@ impl Ctx<'_> {
         let scope = match self.scope_field(key, close) {
             Ok(scope) => scope,
             Err(why) => {
-                failures.push(staged(self.run, day, "scope ledger", Stage::Journal, &why));
+                failures.push(note_staged(
+                    self.run,
+                    day,
+                    "scope ledger",
+                    Stage::Journal,
+                    &why,
+                ));
                 return Outcome::Incomplete;
             }
         };
@@ -3236,7 +3258,7 @@ impl Ctx<'_> {
         match self.append(&format!("{unrun} run={}", self.id)) {
             Ok(_) => close.outcome(),
             Err(why) => {
-                failures.push(staged(self.run, day, "journal", Stage::Journal, &why));
+                failures.push(note_staged(self.run, day, "journal", Stage::Journal, &why));
                 Outcome::Incomplete
             }
         }
@@ -4005,7 +4027,7 @@ impl Filing<'_> {
                 filed.refused = true;
                 filed
                     .failures
-                    .push(staged(run, self.day, &file.name, Stage::File, &why));
+                    .push(note_staged(run, self.day, &file.name, Stage::File, &why));
                 return (filed, false);
             }
         };
@@ -4023,7 +4045,7 @@ impl Filing<'_> {
             Err(why) => {
                 filed
                     .failures
-                    .push(staged(run, self.day, "journal", Stage::Journal, &why));
+                    .push(note_staged(run, self.day, "journal", Stage::Journal, &why));
                 return (filed, false);
             }
         };
@@ -4071,18 +4093,26 @@ impl Filing<'_> {
                 Ok(confirmed) => filed.confirmed = confirmed,
                 Err(why) => {
                     let refusal = ImportRefusal::Filing { why };
-                    filed
-                        .failures
-                        .push(staged(run, self.day, &file.name, Stage::File, &refusal));
+                    filed.failures.push(note_staged(
+                        run,
+                        self.day,
+                        &file.name,
+                        Stage::File,
+                        &refusal,
+                    ));
                 }
             }
         }
         filed.held = done.pending;
         for failure in done.failures {
             let refusal = ImportRefusal::Filing { why: failure.why };
-            filed
-                .failures
-                .push(staged(run, self.day, &file.name, Stage::File, &refusal));
+            filed.failures.push(note_staged(
+                run,
+                self.day,
+                &file.name,
+                Stage::File,
+                &refusal,
+            ));
         }
         let _dropped_when_filtered = telemetry::emit(
             &telemetry::Event::debug(TARGET, "filed")
@@ -4185,7 +4215,7 @@ impl Filing<'_> {
         });
         recorded.map_err(|why| {
             let refusal = ImportRefusal::Provenance { why };
-            staged(run, self.day, &handed.file.name, Stage::File, &refusal)
+            note_staged(run, self.day, &handed.file.name, Stage::File, &refusal)
         })
     }
 
@@ -4597,15 +4627,16 @@ const RESTATED_AUCTION_BAND: &str = "restated_auction_band";
 /// lines, so the refusal holds without another record. A key under a names
 /// filter is refused too when the day's whole-tree key is restated: the
 /// months it would append to were made by that key, and the second reading
-/// of its shares meets the same held print. O(1): two set probes and a date
-/// compare.
+/// of its shares meets the same held print. O(1) whatever the journal holds:
+/// two hash probes of the restated set and a date compare, timed at two
+/// journal sizes a hundredfold apart by
+/// `pull::gdfl_import::tests::scope_reopen::the_auction_era_admission_check_costs_the_same_at_any_journal_size`.
 fn restated_past_append(journal: &Journal, kind: ImportKind, key: &str, day: Day) -> bool {
-    kind == ImportKind::Stocks
-        && crate::vendor::cash_auction_eligibility_required(day)
-        && (journal.restated.contains(key)
-            || journal
-                .restated
-                .contains(&format!("{} {day} *", kind.as_str())))
+    if kind != ImportKind::Stocks || !crate::vendor::cash_auction_eligibility_required(day) {
+        return false;
+    }
+    let whole = format!("{} {day} *", kind.as_str());
+    journal.restated.contains(key) || journal.restated.contains(whole.as_str())
 }
 
 /// Names `day` in `resumed` when the journal sends it back, whatever closed
@@ -5069,7 +5100,7 @@ fn write_flags(
     let news = flags.news(fresh, quality::Src::Import);
     match flags.append(&news) {
         Ok(()) => report.flags_lines += news.len(),
-        Err(why) => failures.push(staged(
+        Err(why) => failures.push(note_staged(
             run,
             day,
             "day ledger",
@@ -5127,7 +5158,7 @@ where
                 scope::Ledger::load(scope::scopes_path(run.store_root))
                     .map_err(|why| ImportRefusal::Journal { why })?,
             ),
-            beyond: std::cell::RefCell::new(HashMap::new()),
+            beyond: std::cell::RefCell::new(HashMap::with_capacity(SCOPES_HINT)),
         }),
         None => None,
     };
@@ -5271,14 +5302,14 @@ where
         granularity: Granularity::Second1,
     };
     // Each other filter's names, split once a run.
-    let mut lenders: HashMap<&str, Option<Names>> = HashMap::new();
+    let mut lenders: HashMap<&str, Option<Names>> = HashMap::with_capacity(SCOPES_HINT);
     for day in early {
         let of_day = format!("{} {day}", run.kind.as_str());
         let Some(closed_by) = ctx.journal.closed_by.get(&of_day) else {
             continue;
         };
         let own = format!("{of_day} {filter}");
-        if ctx.journal.done.contains(&own) {
+        if ctx.journal.done.contains(own.as_str()) {
             let asked = Asked {
                 key: &own,
                 day,
@@ -6099,7 +6130,7 @@ fn cm_present<L>(
     let asks =
         |symbol: &str| run.wants(symbol) && lender.is_none_or(|names| names.contains(symbol));
     let folder = format!("{}/", listing.folder());
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(wanted.len());
     let mut present = Vec::new();
     for file in listing.entries() {
         let stem = file
@@ -6112,7 +6143,7 @@ fn cm_present<L>(
         else {
             continue;
         };
-        if !wanted.contains(&member) {
+        if !wanted.contains(member.as_str()) {
             continue;
         }
         let asked = match listing.filing(stem) {
@@ -6526,7 +6557,7 @@ fn fold_lineage<S: NfoSource>(
         reread_oi(source, listing, index)
     }) {
         Ok(written) => extras.lineage.absorb(written),
-        Err(why) => extras.failures.push(staged(
+        Err(why) => extras.failures.push(note_staged(
             run,
             day,
             "lineage",

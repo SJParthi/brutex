@@ -16777,7 +16777,11 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
 - **L-WP12f-9. Two imports on one store are not kept apart by a run-level
   lock.** They fail loudly per month and leave duplicate generation files
   (the second agent's check of 12 Oct 2026). Two runs started in the same
-  second take the same run id. NOT DONE.
+  second take the same run id. NOT DONE here: the ingest automation's design
+  gives the run locks (`imports/gdfl.lock`, one per kind on census v4), the
+  journal lock and run ids taken from the runs ledger to IA-2 (D-4847;
+  `state/design/ingest-automation.md` finding F2), so this package adds no
+  second lock of its own.
 - **L-WP12f-10. An owed day the run's source does not hold is a named
   failure of every run that reaches back to it.** A day closed `done` that
   owes the run a member and whose listing the source cannot give
@@ -16812,8 +16816,11 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   repaired 0 there; NOT MEASURED where a later day of the member's month was
   written first).
   Holding the member back for the rest of the run would need a close that
-  records a member it did not read, a new close shape; NOT DONE. A day the
-  source does not hold is L-WP12f-10.
+  records a member it did not read, a new close shape; NOT DONE. It could
+  only ever apply to a passing failure (a held lock): a file the vendor
+  refuses is refused on every read, so holding its member back would stop
+  that member's later days for good, the outcome `CLAUDE.md` section 4 bans
+  as surely as a silent one. A day the source does not hold is L-WP12f-10.
 - **L-WP12f-13. A reading that builds fewer bars than a month holds is
   answered `AlreadyPresent`.** The append-only month compares the bars a
   batch offers against the held records from the batch's first stamp on and

@@ -2480,8 +2480,31 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
      wp16-order wp16-order-durable wp16-torn-open wp16-workers x019-03-28 years zero-padded \
      zero_ltp zip";
 
+// WP-12f, THE GDFL CAPITAL-MARKET SCOPE (D-4878; 14 Oct 2026). The package's
+// rounds added literals under crates/pull and ran no CI gate; its fifth round
+// ran gate 1d and declares them here, each read before it was listed. Four
+// kinds. (1) Event fields and codes of the import's scope ledger and its
+// reach-back: `examined`, `first_owed`, `members_reopened`, `range_from`,
+// `remembered`, `scope_ledger`, `scope_ledger_torn`, `scope_reach_back`,
+// `scope_reopen_unreadable`, `scope_unrecorded`, `member`, `stored`. (2) The
+// trade-for-trade spell's event field and code: `series`, `series_filed`.
+// (3) The closing auction's refusal and warning codes and their field:
+// `restated_auction_band`, `auction_band_unattributed`, `booked_rows`.
+// (4) Test words: scratch-directory tags (every `wp12f-*`, `both`,
+// `large`) and the generation directory a test looks for, `bar-revisions`
+// (the store's `bar-revisions-v1`, already declared, matched by its stem).
+// None names an account, an environment, a vendor credential or a field of a
+// parameter path.
+const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows both examined \
+     first_owed large member members_reopened range_from remembered restated_auction_band \
+     scope_ledger scope_ledger_torn scope_reach_back scope_reopen_unreadable \
+     scope_unrecorded series series_filed stored wp12f-admit-cost wp12f-definition4 \
+     wp12f-examined wp12f-filtered wp12f-legacy wp12f-named wp12f-owed-cost wp12f-reach \
+     wp12f-restated-auction wp12f-retry wp12f-series wp12f-sparse wp12f-told wp12f-torn \
+     wp12f-widen";
+
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 60] = [
+const DECLARED: [&str; 61] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2542,6 +2565,7 @@ const DECLARED: [&str; 60] = [
     GDFL_JOINED_PIECE,
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
+    WP12F_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
