@@ -3605,8 +3605,13 @@ fn calendar_json(
         // A MEASURED, UNEXPLAINED SHORT DAY (WP-62 repair 3; DB-G47): the
         // vendors' own answers lack minutes the session owes. It classifies
         // nothing -- `owed_minutes` is unchanged -- and says what was read.
+        // THE OBSERVATION IS THE MARKET'S, NOT THIS INSTRUMENT'S (the fourth
+        // check's follow-up): the minutes were found missing from NIFTY's
+        // answers, and the same object is on every instrument's day, a stock's
+        // and an option's too. `observed_on` says whose minutes they were.
         "short_day": record.short.map(|short| json!({
             "standing": "measured; cause UNVERIFIED; the minutes stay owed",
+            "observed_on": "market-wide: NIFTY's minutes (NSE-INDEX-NIFTY), not this instrument's own",
             "nifty_absent": { "from": hm(u32::from(short.nifty_absent.from)), "to": hm(u32::from(short.nifty_absent.to)) },
             "gdfl_checked": short.gdfl_checked,
             "evidence": short.evidence,
@@ -4740,6 +4745,13 @@ mod tests {
         assert_eq!(calendar["short_day"]["nifty_absent"]["from"], "13:59");
         assert_eq!(calendar["short_day"]["gdfl_checked"], true);
         assert_eq!(calendar["owed_minutes"], 375);
+        // Whose minutes they were, on any instrument's day.
+        assert!(
+            calendar["short_day"]["observed_on"]
+                .as_str()
+                .is_some_and(|said| said.starts_with("market-wide: NIFTY's minutes")),
+            "{calendar}"
+        );
         let (calendar, _) = calendar_json(
             &pull::calendar::record_of(day(2022, 3, 7)),
             Venue::NseIndex,

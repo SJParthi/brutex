@@ -16635,11 +16635,12 @@ BUILT; what that costs until it is, is the disk item below.
   open; damage AT that opening record is NOT KNOWN, repair 3). Those before
   it are named on the run's document (`undecodableBefore`, `undecodable`)
   and its ERROR line. Such a record may still be the opening record that a
-  LATER closing record belongs to where the walk paired that close by its
-  window alone or with no run it read; the run the walk closed with it may
-  then be open and newer than the one named, and the document says so
-  (`newerMayBeOpen: true`, repair 4): which run is the newest open one is
-  then not known, and the one named is open either way. So
+  LATER closing record belongs to where the walk paired that close with the
+  newest open run of its scope, window and source rather than with a run it
+  directly follows; the run the walk closed with it may then be open and
+  newer than the one named, and the document says so (`newerMayBeOpen:
+  true`, repairs 4 and 6): which run is the newest open one is then not
+  known, and the one named is open either way. So
   one damaged record among the newest 800 keeps the answer NOT KNOWN until
   800 newer records are written, and one damaged run record until 64 newer
   run records are: nothing is inferred about what a damaged record was.
@@ -16666,35 +16667,49 @@ BUILT; what that costs until it is, is the disk item below.
   underlying and window. It writes no member-failure records, so its count
   of failures is always 0; the outcome record, when it lands, carries them.
   Walks before this build wrote their outcome record alone: such a record
-  is a close with no opening record, paired by its window alone (below). A
-  request refused before the walk (a malformed form, a seat another pull
-  holds) opens nothing.
+  is a close with no opening record, and it closes nothing (repair 6: no
+  close is paired by its window alone). A request refused before the walk (a
+  malformed form, a seat another pull holds) opens nothing and is `Refused`.
 - **With no usable index and no run left open in the newest 800 records
   the answer is NOT KNOWN**, never a guess: `/pull/run.json` says
   `restart.state = "not_known"` with the index's reason.
-- **A later run of the same window and source that closes supersedes an
-  interrupted one** (repair 3): the journal is append-only and nothing
+- **Only a later run of the same ASK that closes supersedes an interrupted
+  one** (repairs 3 and 6, D-4950): the journal is append-only and nothing
   writes a closing record for the run cut short; the walk reads the later
-  closing record as covering it, because the same pull was made again and
-  finished. A run left open whose window or source no later closed run
-  shares stays INTERRUPTED until its opening record lies behind the scan
-  and the 64 run records before it. A close paired by its window alone
-  supersedes nothing, and neither does a close NOT STARTED (repair 5: it
-  asked the vendor for nothing). A FAILED close does supersede: that run
-  asked the vendor for the same window, and what it could not land is on its
-  own record (its failures, or the halt that stopped it), so what is still
-  owed is what IT says, not the older run. An expired-F&O walk's source is its
-  underlying, not its feed, so a walk of the same underlying and window on
-  another HTTP feed that closes supersedes one cut short.
-- **A closing record is paired with its run by window and source, not by
-  ordinal**: it does not name its opening record (its note holds the run's
-  first failure, and the 256-byte record has no field that could hold it). Two
-  runs of the same window and source in flight at once (a server run and a
-  `cli` pull) cannot be told apart: a close is paired with the newer one and
-  the supersede rule then reads both as closed, so a run of that pair cut
-  short is not reported. Before the supersede rule the same pairing named the
-  wrong run of the two. Exact pairing needs the closing record to carry its
-  opening ordinal, which is a change to the record format (`audit.rs`).
+  closing record as covering it when both opening records name the same ask
+  (`; ask ` and a 64-bit FNV-1a digest of the feed, identity policy, target,
+  instruments named and rung; for an F&O walk the feed, series, expiry and
+  rung) over the same scope, window and source. The source alone was taken as
+  that evidence and is not: every Zerodha spot run of a window carries one
+  (`zerodha_nse_checked NOT vendor-ISIN; NSE file same day; https://`, cut to
+  64 bytes), so a 1day pull of the indices superseded a cut-short 1min pull
+  of the stocks. A run whose opening record names no ask (every run before
+  D-4950, and one known only through a restatement) is never superseded and
+  supersedes nothing, so it stays INTERRUPTED until its opening record lies
+  behind the scan and the 64 run records before it; the same holds for a
+  later pull of a WIDER ask (more instruments, a longer window), which is not
+  matched to the narrower one it covers. A close NOT STARTED supersedes
+  nothing (repair 5: it asked the vendor for nothing). A FAILED close does
+  supersede: that run asked the vendor for the same pull, and what it could
+  not land is on its own record (its failures, or the halt that stopped it),
+  so what is still owed is what IT says, not the older run. Two different
+  asks share a digest with a chance of about one in 2^64; a digest a later
+  build spells differently only keeps a run reported.
+- **A closing record is paired with a run of its own scope, window and
+  source, first the run it directly follows** (repair 6, D-4950). It does not
+  name its opening record (its note holds the run's first failure, and the
+  256-byte record has no field that could hold an ordinal). Every close this
+  build writes for a run that opened goes through the run's thread
+  (`audit::Journal::close_run`), directly behind a record of that run,
+  restating the opening record first when another writer appended since, so
+  two runs of one window and source in flight at once (a server run and a
+  `cli` pull) are told apart by position. A run whose opening record was
+  refused at the start closes behind it written late (`; late`,
+  `audit::Journal::close_unopened`). A close written before D-4950 that does
+  not follow a record of its run still takes the newest open run of its
+  scope, window and source; of two such runs in flight at once the older's
+  close then names the newer, and the newer reads closed while the older is
+  reported, until the newer's own close arrives.
 - **An interrupted run's failure count is a floor past the scan**
   (`failuresWhole: false`): the failures among the records read are
   counted, the newest 800 and any filed fault read again through the index
@@ -16704,12 +16719,21 @@ BUILT; what that costs until it is, is the disk item below.
   span is held once more as one ordinal and a borrowed sentence (32 bytes, no
   allocation). Bounded by the journal's filed faults, not by a constant; a
   healthy journal files none (the operator's index has no `faults` file).
-- **A closing record does not name its opening record.** A run that reached
-  no instrument is closed under its target's name, so it is paired with the
-  newest open run of its window. A `NotStarted` record of ANOTHER feed or
-  process for the same window, written while a run is open, therefore reads
-  as that run's close if the process then dies. A `Refused` record closes
-  nothing. NOT PROVED on a two-process journal.
+- **No close is paired by its window alone** (repair 6, D-4950). A press
+  refused before its run opened (the pull order, a mapping refusal, a refused
+  broker) is written `Refused` on the spot route, the recovery unit and the
+  autopilot's tick, and closes nothing; a `NotStarted` or any other closing
+  record whose scope, window and source match no open run closes nothing.
+  Before this, such a record of the same window (written by any press, feed
+  or process, before the run was cut short or after the restart) closed the
+  run cut short, and the next start answered "clean". The cost, said: a run
+  opened before D-4950 that reached no instrument was closed under its
+  TARGET's label, and an autopilot tick under `autopilot <feed> <month>`;
+  neither matches its opening record's source, so such a run in the scan now
+  reads INTERRUPTED until it lies behind the scan. Measured on a clone of the
+  operator's journal on 14 October 2026 (4,217,222 records): the scan answers
+  `clean` under this rule as it did before it, so none is in the scan. NOT
+  PROVED on a two-process journal.
 - **A run of another process still in flight when a server starts has no
   closing record either.** The scan cannot tell it from a run cut short and
   says so in its sentence; the age of the last record is what a reader has.

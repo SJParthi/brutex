@@ -1465,6 +1465,7 @@ fn an_opened_run_is_paired_with_its_close_and_an_unclosed_one_is_listed() {
                 KITE,
                 window(),
                 3,
+                0,
             ))
             .unwrap();
         journal
@@ -1493,6 +1494,7 @@ fn an_opened_run_is_paired_with_its_close_and_an_unclosed_one_is_listed() {
             KITE,
             window(),
             3,
+            0,
         ))
         .unwrap();
     zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
@@ -1518,6 +1520,7 @@ fn an_opened_run_is_paired_with_its_close_and_an_unclosed_one_is_listed() {
             KITE,
             window(),
             3,
+            0,
         ))
         .unwrap();
     zerodha_days(&root, "2015-01", &["2015-01-01"], 1, T0 + 700);
@@ -1541,6 +1544,7 @@ fn an_opening_record_written_again_is_the_same_run() {
         KITE,
         window("2015-01-01", "2020-12-31"),
         3,
+        0,
     );
     let mut thread = journal.open_run(&head).unwrap();
     // Another writer appends between this run's records.

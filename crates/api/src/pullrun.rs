@@ -649,6 +649,17 @@ pub struct Interrupted {
     pub last_at_secs: i64,
     /// What it was fetching from, as its opening record names it.
     pub source: String,
+    /// Which pull it was: the spot route's run, or an expired-F&O walk. The
+    /// two are re-run from two different places (`/pull/spot`, `/pull/fno`),
+    /// and a closing record of one scope never closes a run of the other.
+    pub scope: crate::audit::Scope,
+    /// What it asked the vendor for beyond its window and source, as its
+    /// opening record names it ([`crate::audit::ask_of`]): the feed, the
+    /// identity policy, the target, the instruments and the rung (an F&O
+    /// walk: the feed, the series, the expiry and the rung). `None` when the
+    /// opening record names none (written before D-4950) or only a
+    /// restatement of it was read: such a run is never read as superseded.
+    pub ask: Option<u64>,
     /// The window it asked for, as days since the epoch.
     pub window: Option<(u32, u32)>,
     /// Member-failure records of the run among the records read: all of them
@@ -669,11 +680,13 @@ pub struct Interrupted {
     pub undecodable: String,
     /// Whether a run NEWER than this one may also have been left open: one
     /// of the [`Self::undecodable_before`] records lies before a closing
-    /// record the walk paired by its window alone, or with no run it read,
-    /// so that undecodable record may be the opening record the close truly
-    /// belongs to, and the run the walk closed with it would then be open
-    /// (DB-B34, repair 4; the third check's probe `v62r3_p2`). This run is
-    /// open either way; which run is the newest one open is then not known.
+    /// record the walk could not pair by position (it does not directly
+    /// follow a record of the run it closed, so the walk took the newest
+    /// open run of its scope, window and source), so that undecodable record
+    /// may be the opening record the close truly belongs to, and the run the
+    /// walk closed with it would then be open (DB-B34, repairs 4 and 6; the
+    /// third check's probe `v62r3_p2`). This run is open either way; which
+    /// run is the newest one open is then not known.
     pub newer_may_be_open: bool,
     /// Why the run records before the scan could not be read through the
     /// journal's index, when they could not: the run is still the newest one
@@ -720,9 +733,9 @@ impl Interrupted {
         if self.newer_may_be_open {
             doubt.push_str(
                 " One of them may be the opening record that a later closing record belongs to \
-                 (the walk paired that closing record by its window alone, or with no run it \
-                 read), so a run newer than this one may also have been left open; which run is \
-                 the newest one open is not known, and this one is open either way.",
+                 (that closing record does not directly follow a record of the run the walk \
+                 closed with it), so a run newer than this one may also have been left open; \
+                 which run is the newest one open is not known, and this one is open either way.",
             );
         }
         if let Some(why) = &self.older_unread {
@@ -733,14 +746,45 @@ impl Interrupted {
                  index ({why}), so an older run left open would not have been seen."
             );
         }
+        // WHERE IT IS RUN AGAIN, AND WHAT COUNTS AS AGAIN (DB-B34, repair 6).
+        // The sentence told every reader to "press Pull", the spot route's
+        // button, also of an expired-F&O walk (re-run from /pull/fno); and it
+        // said "a later run of the same window and source" supersedes it, when
+        // every Zerodha spot run of a window carries one source whatever its
+        // target or rung. It is superseded only by a run whose opening record
+        // names the same ask.
+        let (what, again) = match self.scope {
+            crate::audit::Scope::Spot => (
+                "a pull run",
+                "run the same pull again from /pull/spot (the same feed, target, instruments, \
+                 rung and window)",
+            ),
+            crate::audit::Scope::Fno => (
+                "an expired-F&O walk",
+                "run the same walk again from /pull/fno (the same feed, underlying, series, \
+                 expiry, rung and window)",
+            ),
+        };
+        let superseded = match self.ask {
+            Some(ask) => format!(
+                "its opening record names its ask ({ask:016x}), and a later run of the same \
+                 window and source whose opening record names the same ask, once it closes \
+                 having asked the vendor (any close but NOT STARTED), supersedes this one"
+            ),
+            None => format!(
+                "its opening record names no ask (it was written before this build, or only \
+                 a restatement of it was read), so no later run can be shown to have made the \
+                 same pull: it is reported until it lies behind the scan's newest \
+                 {INTERRUPTED_SCAN} records and {INTERRUPTED_RUNS} run records"
+            ),
+        };
         format!(
-            "INTERRUPTED: a pull run{window} was opened at journal record {} ({} s since the \
+            "INTERRUPTED: {what}{window} was opened at journal record {} ({} s since the \
              epoch) and has no closing record; the last record of it that was read was written \
              at {} s since the epoch, with {failures} on record after it. No run of this server \
              process is in flight, so the process that ran it stopped before closing it, unless \
              another process (a `cli` pull, a second server) is still running it. Bars it had \
-             already written are in the store; press Pull with the same window to fetch what is \
-             left: a later run of the same window and source that closes supersedes this one.\
+             already written are in the store; {again} to fetch what is left: {superseded}.\
              {doubt}",
             self.ordinal, self.opened_at_secs, self.last_at_secs
         )
@@ -755,6 +799,16 @@ impl Interrupted {
         out.push_str(&self.last_at_secs.to_string());
         out.push_str(",\"source\":");
         out.push_str(&quote_for_json(&self.source));
+        out.push_str(",\"scope\":");
+        out.push_str(match self.scope {
+            crate::audit::Scope::Spot => "\"spot\"",
+            crate::audit::Scope::Fno => "\"fno\"",
+        });
+        out.push_str(",\"ask\":");
+        match self.ask {
+            Some(ask) => out.push_str(&quote_for_json(&format!("{ask:016x}"))),
+            None => out.push_str("null"),
+        }
         out.push_str(",\"from\":");
         match self.window {
             Some((from, to)) => {
@@ -832,14 +886,20 @@ impl Restart {
     #[must_use]
     pub fn words(&self) -> String {
         match self {
+            // NOT "a later run of the same window and source closed (that run
+            // asked the vendor for the same days again)" (DB-B34, repair 6):
+            // every Zerodha spot run of a window carries one source, and a
+            // refusal that asked for nothing closed runs it never touched.
             Self::Clean => format!(
                 "No pull run was left open as far as the scan looked: every run record it read \
                  is closed, or it read none, and every record it read could be decoded. A run \
-                 that was cut short counts as closed once a later run of the same window and \
-                 source closed (that run asked the vendor for the same days again). It \
-                 reads the journal's newest {INTERRUPTED_SCAN} records and, where the journal's \
-                 index can be read, the {INTERRUPTED_RUNS} newest run records before them; a \
-                 run left open further back than that is not reported."
+                 that was cut short counts as closed only once a later run of the same scope, \
+                 window and source, whose opening record names the same ask (the feed, the \
+                 identity policy, the target, the instruments and the rung), closed having \
+                 asked the vendor (any close but NOT STARTED); a refusal that opened no run \
+                 closes nothing. It reads the journal's newest {INTERRUPTED_SCAN} records and, \
+                 where the journal's index can be read, the {INTERRUPTED_RUNS} newest run \
+                 records before them; a run left open further back than that is not reported."
             ),
             Self::Interrupted(run) => run.words(),
             Self::NotKnown(why) => format!(
@@ -872,22 +932,34 @@ fn day_text(days: u32) -> String {
 ///   new run. A restatement of a run that IS open rejoins it whatever closed
 ///   before it: an earlier run's closing record of the same window and
 ///   source says nothing about this one.
-/// * A closing run record ends the newest open run of its window and source,
-///   else of its window: a run that reached no instrument is closed under its
-///   target's name, not its endpoint's. A record of
-///   [`crate::audit::Outcome::Refused`] closes nothing: it is a request
-///   refused before anything ran, and no run opens with it, so another
-///   request's refusal for the same window does not hide an open run.
-/// * A closing record that ends a run of its own window AND source also
-///   SUPERSEDES every older run of that window and source still open: the
-///   same pull was made again and finished, so the older run's work is done
-///   (DB-B34, repair 3). One paired by its window alone supersedes nothing,
-///   and neither does one that closed NOT STARTED, which asked the vendor
-///   for nothing (repair 5).
-///   The pairing is by window and source because a closing record does not
-///   name its opening record: two runs of the same window and source in
-///   flight at once (a server run and a `cli` pull) cannot be told apart,
-///   and both then read as closed (`docs/06-limits.md`).
+/// * A closing run record ends a run of its own scope, window AND source,
+///   and no other (DB-B34, repair 6; D-4950): the run whose record it
+///   directly follows (the ordinal before it), when that run is one, since
+///   a close written through its run's thread always follows a record of
+///   that run (`audit::Journal::close_run`); else the newest open run of its
+///   scope, window and source (a close written before D-4950). A close that
+///   matches no open run closes NOTHING. It was paired by its window alone
+///   too, and a press refused before its run opened (the pull order, a
+///   mapping refusal, a refused broker) wrote a NOT STARTED record under its
+///   target's label with the window it asked for: that record closed the
+///   run cut short, of any scope, and the next start answered "clean". A
+///   record of [`crate::audit::Outcome::Refused`] closes nothing either: it
+///   is a request refused before anything ran, which is how such a press is
+///   written now.
+/// * A closing record that ends a run SUPERSEDES every older run still open
+///   of the same scope, window and source whose opening record names the
+///   SAME ASK as the run it ended ([`crate::audit::ask_of`]): the same pull
+///   (the feed, the identity policy, the target, the instruments, the rung)
+///   was made again and finished, so the older run's work is done (DB-B34,
+///   repairs 3 and 6). The source alone is not that evidence: it is the
+///   policy and the endpoint TEMPLATE, the same for every target and rung,
+///   cut to 64 bytes, so a 1day pull of the indices superseded a 1min pull
+///   of the stocks over the same window. A run whose opening record names
+///   no ask is never superseded and supersedes nothing, and a close NOT
+///   STARTED supersedes nothing: it asked the vendor for nothing (repair 5).
+///   Two runs of one pull in flight at once (a server run and a `cli` pull)
+///   whose closes were written before D-4950 still cannot be told apart
+///   (`docs/06-limits.md`).
 /// * A member failure is counted to the run whose record it follows, and
 ///   NEVER opens one. Failures with no opening record before them are a
 ///   closed run's (the layout before D-3341, and `RunLedger::rest`'s when
@@ -909,125 +981,38 @@ pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupte
 struct Walk {
     /// The newest run left open, if any.
     open: Option<Interrupted>,
-    /// The ordinal of the newest closing record the walk could NOT pair
-    /// exactly: paired by its window alone, or with no run it read. A record
-    /// before it that would not decode may be the opening record it truly
-    /// belongs to ([`Interrupted::newer_may_be_open`]); an exact pairing is
-    /// not moved by such a record, since an older exact match is superseded
-    /// all the same.
+    /// The ordinal of the newest closing record the walk paired with a run
+    /// it does NOT directly follow: the newest open run of its scope, window
+    /// and source. A record before it that would not decode may be the
+    /// opening record of another run of that window and source that the
+    /// close truly belongs to, and the run the walk closed would then be open
+    /// ([`Interrupted::newer_may_be_open`]). A close that directly follows a
+    /// record of its run cannot be moved by such a record (nothing lies
+    /// between them), and one that closed nothing hides no run.
     weak_close: Option<u64>,
 }
 
 /// [`interrupted_in`]'s walk, with the newest closing record it could not
-/// pair exactly.
+/// pair by position ([`Walk::weak_close`]).
 fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
     use crate::audit::{Kind, Outcome};
-    let mut weak_close: Option<u64> = None;
-    let mut open: Vec<Interrupted> = Vec::new();
-    // Opening ordinals of the runs a closing record ended, and the closing
-    // records that ended no run that was read: a head restated after either
-    // is not a new run.
-    let mut closed: Vec<u64> = Vec::new();
-    let mut closed_unseen: Vec<(Option<(u32, u32)>, String)> = Vec::new();
-    let mut current: Option<u64> = None;
+    let mut walker = Walker::default();
+    // The ordinal of the record read just before this one: a close written
+    // through its run's thread directly follows a record of that run.
+    let mut previous: Option<u64> = None;
     for (ordinal, record) in read {
         let window = (record.from_days != 0 || record.to_days != 0)
             .then_some((record.from_days, record.to_days));
+        let follows = previous.and_then(|before| before.checked_add(1)) == Some(*ordinal);
+        previous = Some(*ordinal);
         match (record.kind, record.outcome) {
-            (Kind::Run, Outcome::Opened) => {
-                let restated = record
-                    .note
-                    .strip_prefix("continues the run opened at record ")
-                    .and_then(|rest| rest.trim().parse::<u64>().ok());
-                let first = restated.unwrap_or(*ordinal);
-                if restated.is_some()
-                    && !open.iter().any(|run| run.ordinal == first)
-                    && (closed.contains(&first)
-                        || closed_unseen
-                            .iter()
-                            .any(|(held, source)| *held == window && *source == record.source))
-                {
-                    current = None;
-                    continue;
-                }
-                if !open.iter().any(|run| run.ordinal == first) {
-                    open.push(Interrupted {
-                        ordinal: first,
-                        opened_at_secs: record.at_unix_secs,
-                        last_at_secs: record.at_unix_secs,
-                        source: record.source.clone(),
-                        window,
-                        failures: 0,
-                        failures_whole: restated.is_none(),
-                        note: if restated.is_some() {
-                            String::new()
-                        } else {
-                            record.note.clone()
-                        },
-                        undecodable_before: 0,
-                        undecodable: String::new(),
-                        newer_may_be_open: false,
-                        older_unread: None,
-                    });
-                }
-                current = Some(first);
-            }
-            (Kind::Run, Outcome::Refused) => current = None,
-            (Kind::Run, _) => {
-                let exact = open
-                    .iter()
-                    .rposition(|run| run.window == window && run.source == record.source);
-                if exact.is_none() {
-                    weak_close = Some(*ordinal);
-                }
-                let ended = exact.or_else(|| open.iter().rposition(|run| run.window == window));
-                match ended {
-                    Some(at) => {
-                        let run = open.remove(at);
-                        // A RUN OF THE SAME WINDOW AND SOURCE THAT CLOSES
-                        // SUPERSEDES AN OLDER ONE LEFT OPEN (DB-B34, repair
-                        // 3). Nothing ever closed an interrupted run's opening
-                        // record, so after the operator pulled the same window
-                        // again and that run closed, every later start still
-                        // answered INTERRUPTED and asked for the pull that had
-                        // just been made. The closing run asked the vendor for
-                        // the same window from the same source, and a pull
-                        // fetches what the store does not hold, so the older
-                        // run's work is done. Only an exact pairing supersedes:
-                        // a close paired by its window alone (a run that
-                        // reached no instrument) says nothing of another
-                        // source's run. Append-only: nothing is written; the
-                        // walk reads it so.
-                        //
-                        // A NOT STARTED CLOSE SUPERSEDES NOTHING (repair 5): it
-                        // asked the vendor for nothing (no credential, no
-                        // budget, an archive feed), so it is no evidence that
-                        // the older run's days were fetched. It still closes
-                        // its own run. Since the F&O walk opens its run first
-                        // (`server::fno_opened`), its NOT STARTED arms are
-                        // exact pairings, and one of them read every older
-                        // walk of that underlying and window as done.
-                        if run.window == window
-                            && run.source == record.source
-                            && record.outcome != Outcome::NotStarted
-                        {
-                            open.retain(|older| {
-                                let same = older.window == window && older.source == record.source;
-                                if same {
-                                    closed.push(older.ordinal);
-                                }
-                                !same
-                            });
-                        }
-                        closed.push(run.ordinal);
-                    }
-                    None => closed_unseen.push((window, record.source.clone())),
-                }
-                current = None;
-            }
+            (Kind::Run, Outcome::Opened) => walker.opened(*ordinal, record, window),
+            (Kind::Run, Outcome::Refused) => walker.current = None,
+            (Kind::Run, _) => walker.closed(*ordinal, record, window, follows),
             (Kind::MemberFailure, _) => {
-                if let Some(run) =
-                    current.and_then(|first| open.iter_mut().find(|run| run.ordinal == first))
+                if let Some(run) = walker
+                    .current
+                    .and_then(|first| walker.open.iter_mut().find(|run| run.ordinal == first))
                 {
                     run.failures = run.failures.saturating_add(1);
                     run.last_at_secs = run.last_at_secs.max(record.at_unix_secs);
@@ -1037,8 +1022,145 @@ fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
     }
     // The newest still-open run is the one that was cut short.
     Walk {
-        open: open.pop(),
-        weak_close,
+        open: walker.open.pop(),
+        weak_close: walker.weak_close,
+    }
+}
+
+/// A closing record that ended no run that was read: its scope, window and
+/// source, so a head restated after it is not read as a new run.
+type Unseen = (crate::audit::Scope, Option<(u32, u32)>, String);
+
+/// [`walk`]'s state between two records.
+#[derive(Default)]
+struct Walker {
+    /// The runs opened and not yet closed, oldest first.
+    open: Vec<Interrupted>,
+    /// Opening ordinals of the runs a closing record ended, and the closing
+    /// records that ended no run that was read: a head restated after either
+    /// is not a new run.
+    closed: Vec<u64>,
+    unseen: Vec<Unseen>,
+    /// The run whose record was read last, while a member failure or a close
+    /// may still follow it.
+    current: Option<u64>,
+    /// [`Walk::weak_close`].
+    weak_close: Option<u64>,
+}
+
+impl Walker {
+    /// An opening record at `ordinal`, or a restatement of one.
+    fn opened(&mut self, ordinal: u64, record: &crate::audit::Record, window: Option<(u32, u32)>) {
+        let restated = record
+            .note
+            .strip_prefix("continues the run opened at record ")
+            .and_then(|rest| rest.trim().parse::<u64>().ok());
+        let first = restated.unwrap_or(ordinal);
+        let known = self.open.iter().any(|run| run.ordinal == first);
+        if restated.is_some()
+            && !known
+            && (self.closed.contains(&first)
+                || self.unseen.iter().any(|(scope, held, source)| {
+                    *scope == record.scope && *held == window && *source == record.source
+                }))
+        {
+            self.current = None;
+            return;
+        }
+        if !known {
+            self.open.push(Interrupted {
+                ordinal: first,
+                opened_at_secs: record.at_unix_secs,
+                last_at_secs: record.at_unix_secs,
+                source: record.source.clone(),
+                scope: record.scope,
+                // A restatement's note names the run it continues, not the
+                // run's ask: the ask is the opening record's, and is not known
+                // from a restatement.
+                ask: if restated.is_some() {
+                    None
+                } else {
+                    crate::audit::ask_of(&record.note)
+                },
+                window,
+                failures: 0,
+                failures_whole: restated.is_none(),
+                note: if restated.is_some() {
+                    String::new()
+                } else {
+                    record.note.clone()
+                },
+                undecodable_before: 0,
+                undecodable: String::new(),
+                newer_may_be_open: false,
+                older_unread: None,
+            });
+        }
+        self.current = Some(first);
+    }
+
+    /// A closing record at `ordinal`; `follows` when the record read just
+    /// before it is the one at the ordinal before it.
+    fn closed(
+        &mut self,
+        ordinal: u64,
+        record: &crate::audit::Record,
+        window: Option<(u32, u32)>,
+        follows: bool,
+    ) {
+        // ITS OWN SCOPE, WINDOW AND SOURCE, AND NOTHING ELSE (DB-B34, repair
+        // 6). A close with no run of all three open closed the newest run of
+        // its WINDOW: a press refused before its run opened (NOT STARTED
+        // under its target's label) closed the run cut short, of either scope.
+        let mine = |run: &Interrupted| {
+            run.scope == record.scope && run.window == window && run.source == record.source
+        };
+        // THE RUN IT DIRECTLY FOLLOWS FIRST: a close written through its run's
+        // thread always follows a record of that run, so it is never handed to
+        // another run of the same pull.
+        let beside = self
+            .current
+            .filter(|_| follows)
+            .and_then(|first| self.open.iter().position(|run| run.ordinal == first))
+            .filter(|&at| self.open.get(at).is_some_and(&mine));
+        let ended = beside.or_else(|| self.open.iter().rposition(&mine));
+        if beside.is_none() && ended.is_some() {
+            self.weak_close = Some(ordinal);
+        }
+        self.current = None;
+        let Some(at) = ended else {
+            self.unseen
+                .push((record.scope, window, record.source.clone()));
+            return;
+        };
+        let run = self.open.remove(at);
+        // A LATER RUN OF THE SAME ASK THAT CLOSES SUPERSEDES AN OLDER ONE LEFT
+        // OPEN (DB-B34, repairs 3 and 6). Nothing closes an interrupted run's
+        // opening record, so after the operator made the same pull again and
+        // it closed, every later start still answered INTERRUPTED. The closing
+        // run asked the vendor for the same instruments at the same rung over
+        // the same window -- its opening record names the same ask -- and a
+        // pull fetches what the store does not hold, so the older run's work
+        // is done. Append-only: nothing is written; the walk reads it so. The
+        // window and source alone are no such evidence: every Zerodha spot run
+        // of a window carries one source, whatever its target or rung.
+        //
+        // A NOT STARTED CLOSE SUPERSEDES NOTHING (repair 5): it asked the
+        // vendor for nothing (no credential, no budget, an archive feed), so
+        // it is no evidence that the older run's days were fetched. It still
+        // closes its own run.
+        let not_started = record.outcome == crate::audit::Outcome::NotStarted;
+        if let Some(ask) = run.ask.filter(|_| !not_started) {
+            let closed = &mut self.closed;
+            self.open.retain(|older| {
+                let same = mine(older) && older.ask == Some(ask);
+                if same {
+                    closed.push(older.ordinal);
+                }
+                !same
+            });
+        }
+        self.closed.push(run.ordinal);
     }
 }
 
@@ -1094,7 +1216,7 @@ fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
 /// the opening record of the run the readable records leave open; that run
 /// is still reported, and the damage is named on its log line and its
 /// document ([`Interrupted::undecodable_before`]). Such a record can still
-/// move a LATER pairing made by window alone, so when one follows it the
+/// move a LATER pairing not made by position, so when one follows it the
 /// document says a newer run may be open as well
 /// ([`Interrupted::newer_may_be_open`]).
 ///
@@ -1191,13 +1313,14 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     // opening), so that run IS open and the answer stands; the damage is
     // named on its log line and on the document. It may still be the
     // opening record a LATER close belongs to, where the walk paired that
-    // close by its window alone or with no run: the run the walk closed with
-    // it, possibly newer than the one reported, would then be open, and the
-    // document says so ([`Interrupted::newer_may_be_open`], repair 4). Anywhere
-    // else -- AT that opening record (a run known only
-    // through a restated head whose own first record is the damaged one may
-    // have been closed under its target's name, a pairing that needs the
-    // opening record: repair 3 made this `<`, it was `<=`), after it, or
+    // close with the newest run of its scope, window and source rather than
+    // with a run it directly follows: the run the walk closed with it,
+    // possibly newer than the one reported, would then be open, and the
+    // document says so ([`Interrupted::newer_may_be_open`], repairs 4 and 6).
+    // Anywhere else -- AT that opening record (a run known only through a
+    // restated head whose own first record is the damaged one: what that
+    // opening record named, its ask among it, is not known; repair 3 made
+    // this `<`, it was `<=`), after it, or
     // anywhere at all when the readable records leave no run open -- it may
     // be the record that decides, and the answer is NOT KNOWN.
     let opened = found.as_ref().map(|run| run.ordinal);
@@ -1223,7 +1346,7 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
 /// How much of the journal [`restart_scan`] read: its length, the first
 /// record of the scan, whether the records read hold a run record (an
 /// opening or a closing one), and the newest closing record the walk could
-/// not pair exactly ([`Walk::weak_close`]).
+/// not pair by position ([`Walk::weak_close`]).
 #[derive(Clone, Copy)]
 struct Span {
     records: u64,
@@ -1268,7 +1391,7 @@ fn verdict(
             run.undecodable_before = before.len() as u64;
             run.undecodable = damaged_list(before);
             // A record before it that would not decode, and a closing record
-            // after that one the walk could not pair exactly: the close may
+            // after that one the walk could not pair by position: the close may
             // belong to the damaged record, and the run the walk closed with
             // it may be open and newer (the third check's `v62r3_p2`).
             run.newer_may_be_open = before
@@ -5237,7 +5360,22 @@ mod tests {
         assert!(Progress::default().json().contains("\"stopReason\":null"));
     }
 
+    /// The ask [`opened_at`] names: one pull, made by every run of these
+    /// tests that does not say otherwise.
+    const ASK: u64 = 0x00a5_c0de_0000_0001;
+
     fn opened_at(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
+        opened_asking(secs, source, from, to, ASK)
+    }
+
+    /// An opening record naming `ask`.
+    fn opened_asking(
+        secs: u64,
+        source: &str,
+        from: u32,
+        to: u32,
+        ask: u64,
+    ) -> crate::audit::Record {
         let day = |at| pull::session::Day::from_days(at).expect("a day");
         crate::audit::Record::opened(
             crate::audit::Scope::Spot,
@@ -5245,7 +5383,31 @@ mod tests {
             source,
             pull::session::Window::new(day(from), day(to)).expect("a window"),
             7,
+            ask,
         )
+    }
+
+    /// An opening record as every build before D-4950 wrote it: no ask.
+    fn opened_unasked(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
+        let mut head = opened_at(secs, source, from, to);
+        head.note = "opened for 7 instruments; failures follow as they land".to_owned();
+        head.note_bytes = u16::try_from(head.note.len()).expect("a short note");
+        head
+    }
+
+    /// A record of `scope` and `outcome` for the window, as a press writes it.
+    fn record_of(
+        scope: crate::audit::Scope,
+        outcome: crate::audit::Outcome,
+        secs: u64,
+        source: &str,
+        from: u32,
+        to: u32,
+    ) -> crate::audit::Record {
+        let mut record = closed_at(secs, source, from, to);
+        record.scope = scope;
+        record.outcome = outcome;
+        record
     }
 
     fn closed_at(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
@@ -5463,18 +5625,6 @@ mod tests {
             (0, 1),
             "the failure behind the refusal is the refusal's, not the run's"
         );
-        // A run that reached nobody is closed under its TARGET's name
-        // (NotStarted), not its endpoint's: the window alone pairs them.
-        let mut reached_nobody = closed_at(118, "fno", 20_000, 20_010);
-        reached_nobody.outcome = crate::audit::Outcome::NotStarted;
-        assert_eq!(
-            interrupted_in(&numbered(
-                vec![opened_at(100, "kite", 20_000, 20_010), reached_nobody],
-                0
-            )),
-            None
-        );
-
         // Two runs: the first closed, the second cut short.
         let two = numbered(
             vec![
@@ -5488,6 +5638,206 @@ mod tests {
         assert_eq!(
             interrupted_in(&two).map(|run| (run.ordinal, run.failures)),
             Some((2, 1))
+        );
+    }
+
+    /// **A RUN THAT REACHED NO INSTRUMENT CLOSES UNDER ITS OWN SOURCE, AND A
+    /// RECORD UNDER A TARGET'S LABEL CLOSES NOTHING** (DB-B34, repair 6).
+    #[test]
+    fn a_close_under_its_own_source_ends_its_run_and_a_target_label_does_not() {
+        // A run that reached nobody is closed NOT STARTED under its OWN
+        // source, and that closes it (DB-B34, repair 6) ...
+        let reached_nobody = record_of(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::NotStarted,
+            118,
+            "kite",
+            20_000,
+            20_010,
+        );
+        assert_eq!(
+            interrupted_in(&numbered(
+                vec![opened_at(100, "kite", 20_000, 20_010), reached_nobody],
+                0
+            )),
+            None
+        );
+        // ... and a NOT STARTED record under a source no open run carries
+        // (the TARGET's label, as a press refused before its run opened wrote
+        // it, and as the arm above wrote its close before this repair)
+        // closes NOTHING: the window alone paired them, and a refusal that
+        // asked the vendor for nothing read the run cut short as closed.
+        let target_label = record_of(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::NotStarted,
+            118,
+            "fno",
+            20_000,
+            20_010,
+        );
+        assert_eq!(
+            interrupted_in(&numbered(
+                vec![opened_at(100, "kite", 20_000, 20_010), target_label],
+                0
+            ))
+            .map(|run| run.ordinal),
+            Some(0)
+        );
+    }
+
+    /// **A PRESS REFUSED BEFORE ITS RUN OPENED CLOSES NO RUN, OF EITHER
+    /// SCOPE** (DB-B34, repair 6; the fourth check's blocking issue 1 and its
+    /// blobs S1..S4 and T1, T2). The pull order's "the 1day pass comes
+    /// first", a mapping refusal or a refused broker wrote ONE record, NOT
+    /// STARTED under the target's label with the window it asked for, and no
+    /// opening record. The walk read it as the close of the newest open run
+    /// of that window, so the run cut short read as closed and the next start
+    /// answered "clean". The operator's own journal holds four such records
+    /// (ordinals 32, 33, 223935, 4217091).
+    #[test]
+    fn a_refusal_that_opened_no_run_closes_no_run_of_either_scope() {
+        use crate::audit::{Outcome, Scope};
+        // [Opened A][failures][orphan NOT STARTED, same window]: A is open.
+        let mut journal = vec![opened_at(100, "endpoint A", 17_532, 20_726)];
+        journal.extend((0..5).map(|at| failure_at(110 + at)));
+        journal.push(record_of(
+            Scope::Spot,
+            Outcome::NotStarted,
+            200,
+            "zerodha_nse_checked NOT vendor-ISIN; NSE file same day; Reference indices",
+            17_532,
+            20_726,
+        ));
+        assert_eq!(
+            interrupted_in(&numbered(journal.clone(), 0)).map(|run| (run.ordinal, run.failures)),
+            Some((0, 5)),
+            "a refusal that opened no run asked the vendor for nothing"
+        );
+        // The fourth check's S1 -> S4: another run of another window opened
+        // and closed between, failures after it, then the orphan.
+        let mut s4 = vec![opened_at(100, "endpoint A", 17_532, 20_726)];
+        s4.extend((0..5).map(|at| failure_at(110 + at)));
+        s4.push(opened_at(150, "endpoint A", 17_897, 17_927));
+        s4.push(closed_at(160, "endpoint A", 17_897, 17_927));
+        s4.extend((0..3).map(|at| failure_at(170 + at)));
+        s4.push(journal.last().cloned().expect("the orphan"));
+        assert_eq!(
+            interrupted_in(&numbered(s4, 4_217_222)).map(|run| run.ordinal),
+            Some(4_217_222)
+        );
+        // The same press written as this build writes it, REFUSED: closes
+        // nothing either, whatever its source.
+        let refused = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                record_of(Scope::Spot, Outcome::Refused, 120, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(interrupted_in(&refused).map(|run| run.ordinal), Some(0));
+
+        // CROSS-SCOPE (T1 -> T2): an expired-F&O walk cut short is not closed
+        // by a SPOT record of the same window, even one naming the same
+        // source; its own F&O close does close it.
+        let mut walk = opened_at(100, "NIFTY", 18_262, 18_292);
+        walk.scope = Scope::Fno;
+        for spot in [
+            record_of(
+                Scope::Spot,
+                Outcome::NotStarted,
+                120,
+                "NIFTY",
+                18_262,
+                18_292,
+            ),
+            record_of(Scope::Spot, Outcome::Stored, 120, "NIFTY", 18_262, 18_292),
+        ] {
+            let found = interrupted_in(&numbered(vec![walk.clone(), spot], 4_217_222))
+                .expect("the walk is open");
+            assert_eq!(
+                (found.ordinal, found.scope, found.source.as_str()),
+                (4_217_222, Scope::Fno, "NIFTY")
+            );
+        }
+        let own = record_of(
+            Scope::Fno,
+            Outcome::NotStarted,
+            120,
+            "NIFTY",
+            18_262,
+            18_292,
+        );
+        assert_eq!(interrupted_in(&numbered(vec![walk, own], 0)), None);
+    }
+
+    /// **A CLOSE PAIRS WITH THE RUN IT DIRECTLY FOLLOWS** (DB-B34, repair 6;
+    /// D-4950). Two runs of one window and source in flight at once (a
+    /// server run and a `cli` pull): the close of the OLDER, written through
+    /// its own thread, directly follows a record of it (here its restated
+    /// head), and closes it, not the newer one. A close that follows no
+    /// record of a run of its own (written before D-4950) still takes the
+    /// newest open run of its scope, window and source.
+    #[test]
+    fn a_close_pairs_with_the_run_it_directly_follows() {
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let beside = numbered(
+            vec![
+                opened_asking(100, "kite", 20_000, 20_010, ASK),
+                opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2),
+                again,
+                closed_at(130, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&beside).map(|run| (run.ordinal, run.ask)),
+            Some((1, Some(ASK ^ 2))),
+            "the older run closed; the newer one is open"
+        );
+        // Behind its own member failure, too.
+        let behind_failure = numbered(
+            vec![
+                opened_asking(100, "kite", 20_000, 20_010, ASK),
+                opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2),
+                {
+                    let mut again = opened_at(100, "kite", 20_000, 20_010);
+                    again.note = "continues the run opened at record 0".to_owned();
+                    again
+                },
+                failure_at(125),
+                closed_at(130, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&behind_failure).map(|run| run.ordinal),
+            Some(1)
+        );
+        // A close with a gap before it (another writer's record lies between,
+        // or one that would not decode) is not by position: the newest open
+        // run of its scope, window and source.
+        let gap = vec![
+            (0, opened_asking(100, "kite", 20_000, 20_010, ASK)),
+            (1, opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2)),
+            (5, closed_at(130, "kite", 20_000, 20_010)),
+        ];
+        assert_eq!(interrupted_in(&gap).map(|run| run.ordinal), Some(0));
+        // A run whose opening record was refused and is written LATE, in one
+        // write with its close (`audit::Journal::close_unopened`), closes
+        // itself and leaves a cut-short run of another ask over the same
+        // window open.
+        let mut late = opened_asking(150, "kite", 20_000, 20_010, ASK ^ 4);
+        late.note.push_str("; late");
+        assert_eq!(crate::audit::ask_of(&late.note), Some(ASK ^ 4));
+        let mut read = vec![opened_at(100, "kite", 20_000, 20_010)];
+        read.extend((0..3).map(|at| failure_at(110 + at)));
+        read.push(late);
+        read.push(closed_at(160, "kite", 20_000, 20_010));
+        assert_eq!(
+            interrupted_in(&numbered(read, 0)).map(|run| run.ordinal),
+            Some(0)
         );
     }
 
@@ -6159,15 +6509,16 @@ mod tests {
             Some(0),
             "another window's run says nothing of this one"
         );
-        // A close paired by its window alone (it names a target, not the
-        // endpoint) closes the newest run of that window and supersedes
-        // nothing: the older run stays open.
+        // A close under a source no open run carries (a target's label)
+        // closes NOTHING (repair 6): it was paired by its window alone with
+        // the newest run of that window. Both runs stay open; the newest is
+        // reported.
         assert_eq!(
             interrupted_then(vec![
                 opened_at(500, "probe", 20_000, 20_010),
                 closed_at(520, "target", 20_000, 20_010),
             ]),
-            Some(0)
+            Some(3)
         );
         // A newer run of the same window and source that is itself still
         // open is the one reported, and nothing is superseded by it.
@@ -6205,14 +6556,95 @@ mod tests {
         records.push(closed_at(9_010, "kite", 20_000, 20_010));
         let journal = journal_of("pullrun-r3-superseded", &records);
         assert_eq!(restart_scan(&journal), Restart::Clean);
-        // The clean answer says that a run cut short counts as closed once a
-        // later run of its window and source closed, so "every run record it
-        // read is closed" is not read as "no run was ever cut short".
+        // The clean answer says what counts as the same pull made again, so
+        // "every run record it read is closed" is not read as "no run was ever
+        // cut short", and no longer claims a re-pull from the window and
+        // source alone (repair 6).
         let words = Restart::Clean.words();
         assert!(
-            words
-                .contains("counts as closed once a later run of the same window and source closed"),
+            words.contains("whose opening record names the same ask")
+                && words.contains("a refusal that opened no run closes nothing"),
             "{words}"
+        );
+        assert!(
+            !words.contains("asked the vendor for the same days again"),
+            "{words}"
+        );
+    }
+
+    /// **ANOTHER ASK OVER THE SAME WINDOW AND SOURCE SUPERSEDES NOTHING, AND
+    /// A RUN WITH NO ASK IS NEVER SUPERSEDED** (DB-B34, repair 6; the fourth
+    /// check's blocking issue 2 and its blobs U1..U3).
+    #[test]
+    fn another_ask_over_the_same_window_and_source_supersedes_nothing() {
+        let interrupted_then = |later: Vec<crate::audit::Record>| {
+            let mut read = vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                failure_at(111),
+            ];
+            read.extend(later);
+            interrupted_in(&numbered(read, 0)).map(|run| run.ordinal)
+        };
+        // THE SAME WINDOW AND SOURCE, ANOTHER ASK (repair 6; the fourth
+        // check's probe `v62r4_p2`): every Zerodha spot run of a window
+        // carries one source, so a later 1day pull of the indices closing
+        // over the window of a cut-short 1min pull of the stocks superseded
+        // it. The ask on the two opening records differs: nothing is
+        // superseded, whatever the close (STORED, EMPTY or FAILED).
+        for outcome in [
+            crate::audit::Outcome::Stored,
+            crate::audit::Outcome::Empty,
+            crate::audit::Outcome::Failed,
+        ] {
+            let mut close = closed_at(520, "kite", 20_000, 20_010);
+            close.outcome = outcome;
+            assert_eq!(
+                interrupted_then(vec![
+                    opened_asking(500, "kite", 20_000, 20_010, ASK ^ 1),
+                    close,
+                ]),
+                Some(0),
+                "another ask over the same window and source: {outcome:?}"
+            );
+        }
+        // A run whose opening record names no ask (every run before D-4950)
+        // is never superseded, and a later run that names none supersedes
+        // nothing.
+        let legacy_then = |later: Vec<crate::audit::Record>| {
+            let mut read = vec![opened_unasked(100, "kite", 20_000, 20_010), failure_at(110)];
+            read.extend(later);
+            interrupted_in(&numbered(read, 0)).map(|run| (run.ordinal, run.ask))
+        };
+        assert_eq!(
+            legacy_then(vec![
+                opened_at(500, "kite", 20_000, 20_010),
+                closed_at(520, "kite", 20_000, 20_010),
+            ]),
+            Some((0, None)),
+            "an older run with no ask is not shown to be the same pull"
+        );
+        assert_eq!(
+            interrupted_then(vec![
+                opened_unasked(500, "kite", 20_000, 20_010),
+                closed_at(520, "kite", 20_000, 20_010),
+            ]),
+            Some(0),
+            "a later run with no ask is not shown to be the same pull"
+        );
+        // Of two older runs of the same window and source, the one of the
+        // same ask is superseded and the other is still reported.
+        let read = vec![
+            opened_asking(100, "kite", 20_000, 20_010, ASK ^ 1),
+            failure_at(110),
+            opened_at(200, "kite", 20_000, 20_010),
+            failure_at(210),
+            opened_at(300, "kite", 20_000, 20_010),
+            closed_at(320, "kite", 20_000, 20_010),
+        ];
+        assert_eq!(
+            interrupted_in(&numbered(read, 0)).map(|run| (run.ordinal, run.ask)),
+            Some((0, Some(ASK ^ 1)))
         );
     }
 
@@ -6264,34 +6696,42 @@ mod tests {
     }
 
     /// **DAMAGE BEFORE THE REPORTED RUN CAN HIDE A NEWER OPEN ONE, AND THE
-    /// ANSWER SAYS SO** (DB-B34, repair 4; the third check's probe
-    /// `v62r3_p2`). `[opened s1 W1][opened s2 W2][opened s3 W1][closed s1
-    /// W1]`: whole, the close pairs exactly with s1 and s3 is the newest run
-    /// open. With record 0 undecodable the walk pairs that close with s3 by
-    /// its window alone and reports s2: s2 IS open (nothing before it can be
-    /// its close), but the newest open run is s3. The answer was a plain
-    /// INTERRUPTED at record 1; it now says a newer run may also be open.
-    /// A weak pairing BEFORE the damaged record, or only exact pairings
-    /// after it, leave the answer without that doubt.
+    /// ANSWER SAYS SO** (DB-B34, repairs 4 and 6; the third check's probe
+    /// `v62r3_p2`). A close that does not directly follow a record of the run
+    /// it closes is paired with the newest open run of its scope, window and
+    /// source; a record before it that would not decode may be the opening
+    /// record of another run of that window and source that the close truly
+    /// belongs to, and the run the walk closed would then be open.
+    ///
+    /// `[opened B s W1 (damaged)][opened Q t W2][opened R s W1][opened Y y W4]
+    /// [closed y W4][closed s W1]`: whole, the last close pairs with R (the
+    /// newest open run of `s W1`), R supersedes B (the same ask), and Q is
+    /// reported. With record 0 undecodable the answer is the same run, Q, but
+    /// the last close may be B's, and then R, newer than Q, is open: the
+    /// answer says so. A
+    /// pairing by position after the damage, or one before it, leaves no
+    /// doubt; and a close that pairs with no run hides none.
     #[test]
     fn damage_before_the_reported_run_that_a_later_window_pairing_may_need_is_said() {
         let records = vec![
-            opened_at(100, "s1", 20_000, 20_010),
-            opened_at(110, "s2", 20_020, 20_030),
-            opened_at(120, "s3", 20_000, 20_010),
-            closed_at(130, "s1", 20_000, 20_010),
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(110, "t", 20_020, 20_030),
+            opened_at(120, "s", 20_000, 20_010),
+            opened_at(130, "y", 20_040, 20_050),
+            closed_at(140, "y", 20_040, 20_050),
+            closed_at(150, "s", 20_000, 20_010),
         ];
-        let whole = journal_of("pullrun-r4-p2-whole", &records);
+        let whole = journal_of("pullrun-r6-weak-whole", &records);
         let found = restart_scan(&whole);
-        let run = found.interrupted().expect("s3 is open");
-        assert_eq!((run.ordinal, run.newer_may_be_open), (2, false));
+        let run = found.interrupted().expect("Q is open");
+        assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
 
-        let journal = journal_of("pullrun-r4-p2-damaged", &records);
+        let journal = journal_of("pullrun-r6-weak-damaged", &records);
         damage(&journal, 0);
         let found = restart_scan(&journal);
         let run = found
             .interrupted()
-            .expect("s2 is open whatever record 0 was");
+            .expect("Q is open whatever record 0 was");
         assert_eq!((run.ordinal, run.undecodable_before), (1, 1));
         assert!(run.newer_may_be_open, "{run:?}");
         let words = run.words();
@@ -6305,36 +6745,53 @@ mod tests {
                 .expect("valid JSON");
         assert_eq!(doc["interrupted"]["newerMayBeOpen"], true);
 
-        // A pairing by window alone that comes BEFORE the damaged record
-        // cannot belong to it: no doubt about the newest run.
-        let records = vec![
-            opened_at(100, "probe", 20_000, 20_010),
-            closed_at(110, "target", 20_000, 20_010),
-            failure_at(120),
-            opened_at(130, "kite", 20_020, 20_030),
-        ];
-        let journal = journal_of("pullrun-r4-weak-before-damage", &records);
-        damage(&journal, 2);
-        let found = restart_scan(&journal);
-        let run = found.interrupted().expect("the kite run is open");
-        assert_eq!((run.ordinal, run.undecodable_before), (3, 1));
-        assert!(!run.newer_may_be_open, "{run:?}");
-        assert!(!run.words().contains("may also have been left open"));
-
-        // Only an exact pairing after the damaged record: an older exact
-        // match is superseded all the same, so no doubt either.
+        // A close by position after the damaged record: nothing lies between
+        // it and its run, so no doubt.
         let records = vec![
             opened_at(100, "kite", 20_000, 20_010),
             opened_at(110, "probe", 20_020, 20_030),
             opened_at(120, "kite", 20_000, 20_010),
             closed_at(130, "kite", 20_000, 20_010),
         ];
-        let journal = journal_of("pullrun-r4-exact-after-damage", &records);
+        let journal = journal_of("pullrun-r6-beside-after-damage", &records);
         damage(&journal, 0);
         let run = restart_scan(&journal)
             .interrupted()
             .cloned()
             .expect("the probe run is open");
+        assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
+
+        // A pairing not by position that comes BEFORE the damaged record
+        // cannot belong to it: no doubt about the newest run.
+        let records = vec![
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(105, "z", 20_090, 20_099),
+            closed_at(110, "s", 20_000, 20_010),
+            failure_at(120),
+            opened_at(130, "kite", 20_020, 20_030),
+        ];
+        let journal = journal_of("pullrun-r6-weak-before-damage", &records);
+        damage(&journal, 3);
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("the kite run is open");
+        assert_eq!((run.ordinal, run.undecodable_before), (4, 1));
+        assert!(!run.newer_may_be_open, "{run:?}");
+        assert!(!run.words().contains("may also have been left open"));
+
+        // A close that pairs with no run read (its run is the damaged record,
+        // or no run at all) closes nothing, so it hides no run: no doubt.
+        let records = vec![
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(110, "t", 20_020, 20_030),
+            failure_at(120),
+            closed_at(130, "s", 20_000, 20_010),
+        ];
+        let journal = journal_of("pullrun-r6-unpaired-after-damage", &records);
+        damage(&journal, 0);
+        let run = restart_scan(&journal)
+            .interrupted()
+            .cloned()
+            .expect("t is open");
         assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
     }
 
@@ -6399,10 +6856,21 @@ mod tests {
         assert_eq!(parsed["interrupted"]["from"], "2024-10-04");
         assert_eq!(parsed["interrupted"]["to"], "2024-10-14");
         assert_eq!(parsed["interrupted"]["lastRecordAtSecs"], 115);
+        // Its scope and its ask (DB-B34, repair 6): where it is run again, and
+        // what a later run must name to supersede it.
+        assert_eq!(parsed["interrupted"]["scope"], "spot");
+        assert_eq!(
+            parsed["interrupted"]["ask"],
+            run.ask
+                .map_or_else(String::new, |ask| format!("{ask:016x}"))
+        );
+        assert!(run.ask.is_some(), "{run:?}");
         assert!(
             parsed["interrupted"]["words"]
                 .as_str()
-                .is_some_and(|words| words.starts_with("INTERRUPTED: a pull run")),
+                .is_some_and(|words| words.starts_with("INTERRUPTED: a pull run")
+                    && words.contains("run the same pull again from /pull/spot")
+                    && words.contains("names the same ask")),
             "{doc}"
         );
         assert_eq!(parsed["calendar"]["recordTo"], "2026-12-31");

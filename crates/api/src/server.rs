@@ -3502,28 +3502,6 @@ async fn broker_answer(
     // call that is about to open sockets is free in the only units that matter.
     let mut run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
 
-    // A refusal, recorded and rendered, with the reason it carries.
-    let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
-        let record = audit::Record::refused(
-            audit::Scope::Spot,
-            audit::Outcome::NotStarted,
-            now,
-            &spot_audit_origin(asked.cash_identity, asked.target.label()),
-            why,
-        )
-        .with_window(asked.window);
-        let mut facts = facts;
-        facts.push(("Refused because", why.to_owned()));
-        facts.push(recorded_fact(journal, &record));
-        // NOT `refused_html`, and the difference is load-bearing on a
-        // non-serving process: this closure's headline is `halt_for`, whose
-        // `Broker::Refused` text states that NO VENDOR IS CONTACTED from here.
-        // That assurance is the answer to a question the specific reason does
-        // not address, and `a_valid_window_is_echoed_with_the_wire_date_and_        // still_starts_nothing` reads it back. Giving this site a specific
-        // headline as well means carrying that assurance into the facts first.
-        (code, accepted_html("Spot pull", facts, site.broker))
-    };
-
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and
     // how it was found. `broker_run` is the one that checks it, so an internal
     // caller is guarded by the same line rather than by a second copy of it.
@@ -3534,9 +3512,17 @@ async fn broker_answer(
         // the second: an out-of-sequence request would have been reported as a
         // broker outage, with a 503 to match. `autopilot::tick` already read the
         // reason this way; only the receipt did not.
+        //
+        // REFUSED, NOT NOT STARTED (DB-B34, repair 6): no run opened, so this
+        // record must close none. Written NOT STARTED with the window it asked
+        // for, the restart scan read it as the close of the run cut short of
+        // that window -- the pull order's "the 1day pass comes first", a
+        // mapping refusal or a refused broker, pressed after a restart, turned
+        // INTERRUPTED into "clean" -- and `Refused` is the outcome the scan
+        // reads as no close: a request refused before anything ran.
         let record = audit::Record::refused(
             audit::Scope::Spot,
-            audit::Outcome::NotStarted,
+            audit::Outcome::Refused,
             now,
             &spot_audit_origin(asked.cash_identity, asked.target.label()),
             &blocked.why,
@@ -3634,12 +3620,10 @@ async fn broker_answer(
     }
 
     if run.reached == 0 {
-        let first = run
-            .refused
-            .first()
-            .map_or("no instrument in the universe could be reached", |w| {
-                w.as_str()
-            });
+        let first = run.refused.first().map_or_else(
+            || "no instrument in the universe could be reached".to_owned(),
+            Clone::clone,
+        );
         // 502 SAID THE VENDOR FAILED WHEN THE VENDOR WAS NEVER ASKED.
         //
         // `BAD_GATEWAY` means an upstream answered badly. Measured on a real
@@ -3664,7 +3648,19 @@ async fn broker_answer(
         } else {
             axum::http::StatusCode::BAD_REQUEST
         };
-        return refuse(facts, first, status);
+        // THE RUN OPENED: its close is written under its own source, through
+        // its own thread (DB-B34, repair 6; `close_reaching_none`).
+        let recorded = close_reaching_none(&mut run, &asked, now, journal, &first);
+        facts.push(("Refused because", first));
+        facts.push(recorded);
+        // NOT `refused_html`, and the difference is load-bearing on a
+        // non-serving process: this arm's headline is `halt_for`, whose
+        // `Broker::Refused` text states that NO VENDOR IS CONTACTED from here.
+        // That assurance is the answer to a question the specific reason does
+        // not address, and `a_valid_window_is_echoed_with_the_wire_date_and_
+        // still_starts_nothing` reads it back. Giving this site a specific
+        // headline as well means carrying that assurance into the facts first.
+        return (status, accepted_html("Spot pull", facts, site.broker));
     }
     let origin = spot_audit_origin(asked.cash_identity, &run.origin);
     landed_answer(
@@ -3677,6 +3673,34 @@ async fn broker_answer(
         run.took,
         Some(&mut run.ledger),
     )
+}
+
+/// The closing record of a spot run that OPENED and reached no instrument,
+/// appended, as the receipt's line (DB-B34, repair 6): `NotStarted`, under
+/// the run's own source and through its own thread ([`RunLedger::close`]).
+/// It was written under the TARGET's label, which no opening record carries,
+/// so the restart scan could pair it only by its window, and by the window a
+/// refusal that opened no run closed a run cut short.
+fn close_reaching_none(
+    run: &mut BrokerRun,
+    asked: &ingest::SpotRequest,
+    now: std::time::SystemTime,
+    journal: &audit::Journal,
+    why: &str,
+) -> (&'static str, String) {
+    let source = run.ledger.source().map_or_else(
+        || spot_audit_origin(asked.cash_identity, asked.target.label()),
+        ToOwned::to_owned,
+    );
+    let record = audit::Record::refused(
+        audit::Scope::Spot,
+        audit::Outcome::NotStarted,
+        now,
+        &source,
+        why,
+    )
+    .with_window(asked.window);
+    recorded_fact_of(run.ledger.close(journal, &record), journal)
 }
 
 /// What one sweep over the tracked universe did.
@@ -4094,24 +4118,45 @@ pub(crate) struct RunLedger {
     /// The days the run asked for, the window a failure about no day or month
     /// is filed under.
     window: Option<pull::session::Window>,
+    /// The run's source, whole, as its opening record was built with it
+    /// ([`run_source`]): every closing record of the run is written under it,
+    /// so the restart scan pairs the close with this run and no other
+    /// (DB-B34, repair 6). `None` for a run that never opened.
+    source: Option<String>,
+    /// The run's opening record as it was built, kept so that a run whose
+    /// opening record the journal refused still closes behind it
+    /// ([`audit::Journal::close_unopened`]).
+    head: Option<audit::Record>,
 }
 
 impl RunLedger {
-    /// Opens `asked`'s run over `of` instruments in `journal`.
+    /// Opens `asked`'s run over `of` instruments in `journal`, for `driver`.
     ///
     /// The source is the feed's own endpoint, carried through the cash-identity
-    /// policy exactly as the closing record's is ([`spot_audit_origin`]), so
-    /// `/audit.json` names this run's vendor from its first record.
-    fn open(journal: &audit::Journal, asked: &ingest::SpotRequest, of: usize) -> Self {
+    /// policy ([`run_source`]), so `/audit.json` names this run's vendor from
+    /// its first record; every closing record of the run is written under the
+    /// same text ([`Self::source`]). The note names the run's ask
+    /// ([`spot_ask`]): what it asks the vendor for beyond its window and
+    /// source (DB-B34, repair 6; D-4950).
+    fn open(
+        journal: &audit::Journal,
+        asked: &ingest::SpotRequest,
+        of: usize,
+        driver: crate::autopilot::Driver,
+    ) -> Self {
+        let source = run_source(asked, driver);
         let head = audit::Record::opened(
             audit::Scope::Spot,
             std::time::SystemTime::now(),
-            &spot_audit_origin(asked.cash_identity, &planned_origin(asked)),
+            &source,
             asked.window,
             of,
+            spot_ask(asked),
         );
         let mut ledger = Self {
             window: Some(asked.window),
+            source: Some(source),
+            head: Some(head.clone()),
             ..Self::default()
         };
         match journal.open_run(&head) {
@@ -4119,6 +4164,38 @@ impl RunLedger {
             Err(why) => ledger.opened_refused = Some(why),
         }
         ledger
+    }
+
+    /// The run's source, whole: what every closing record of this run is
+    /// written under. `None` for a run that never opened (a request refused
+    /// before it), whose refusal opens nothing and closes nothing.
+    #[must_use]
+    pub(crate) fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Appends the run's closing record `record` so that the restart scan
+    /// pairs it with THIS run (DB-B34, repair 6; D-4950): through the run's
+    /// thread, directly behind a record of the run
+    /// ([`audit::Journal::close_run`]); behind its opening record written
+    /// late when the journal refused that record at the start
+    /// ([`audit::Journal::close_unopened`]); and as a plain append for a run
+    /// that never opened.
+    ///
+    /// # Errors
+    ///
+    /// As [`audit::Journal::append`]: the closing record did not reach the
+    /// journal.
+    pub(crate) fn close(
+        &mut self,
+        journal: &audit::Journal,
+        record: &audit::Record,
+    ) -> Result<(), String> {
+        match (self.thread.as_mut(), self.head.as_ref()) {
+            (Some(thread), _) => journal.close_run(thread, record),
+            (None, Some(head)) => journal.close_unopened(head, record),
+            (None, None) => journal.append(record),
+        }
     }
 
     /// Appends every failure of `failures` not yet on disk, each as its own
@@ -4234,6 +4311,90 @@ impl RunLedger {
             },
         )
     }
+}
+
+/// What every record of a broker run of `asked` names as its source: the
+/// endpoint it fetches from ([`planned_origin`]) through the cash-identity
+/// policy ([`spot_audit_origin`]), and for the autopilot's own runs that
+/// endpoint marked `autopilot` (DB-B34, repair 6).
+///
+/// # One function, because the restart scan pairs by it
+///
+/// The opening record took its source from `planned_origin` and the closing
+/// record from the endpoint the run reported, the `refuse` arm's close named
+/// the TARGET, and the autopilot's close named `autopilot <feed> <month>`:
+/// four spellings of one run, which the scan could pair only by the window,
+/// and by the window a press refused before it ran closed a run cut short.
+/// Every close of an opened run is now written under its opening record's
+/// text ([`RunLedger::source`]). The autopilot keeps its mark inside the
+/// text, after the policy, so `/audit.json` still names the vendor
+/// (`audit_json::vendor_of_source`) and still tells its runs apart.
+fn run_source(asked: &ingest::SpotRequest, driver: crate::autopilot::Driver) -> String {
+    let endpoint = planned_origin(asked);
+    match driver {
+        crate::autopilot::Driver::Autopilot => {
+            spot_audit_origin(asked.cash_identity, &format!("autopilot {endpoint}"))
+        }
+        crate::autopilot::Driver::Hand | crate::autopilot::Driver::Recovery => {
+            spot_audit_origin(asked.cash_identity, &endpoint)
+        }
+    }
+}
+
+/// The ask of a broker run of `asked` ([`audit::ask_digest`]): the feed, the
+/// identity policy, the target, the rung, whether it is a versioned repair,
+/// and the instruments named, sorted (none for the target's whole set). The
+/// window and the source are compared beside it, not inside it. Written on
+/// the run's opening record; the restart scan reads a later run as having
+/// made a cut-short run's pull again only when the two asks are equal
+/// (DB-B34, repair 6; D-4950).
+///
+/// # Cost
+///
+/// One sort of the named members, once per run: bounded by the request.
+fn spot_ask(asked: &ingest::SpotRequest) -> u64 {
+    let feed = format!("{:?}", asked.feed);
+    let policy = format!("{:?}", asked.cash_identity);
+    let target = format!("{:?}", asked.target);
+    let mut named: Vec<&str> = asked
+        .members
+        .iter()
+        .map(brutex_core::symbol::Symbol::as_str)
+        .collect();
+    named.sort_unstable();
+    let count = named.len().to_string();
+    let mut parts = vec![
+        "spot",
+        feed.as_str(),
+        policy.as_str(),
+        target.as_str(),
+        asked.granularity.dir(),
+        if asked.repair.is_some() {
+            "repair"
+        } else {
+            "pull"
+        },
+        count.as_str(),
+    ];
+    parts.extend(named);
+    audit::ask_digest(&parts)
+}
+
+/// The ask of an expired-F&O walk of `asked`: the feed, the series, the
+/// expiry asked for (none for every expiry the window holds) and the rung.
+/// The underlying is the walk's source and the window is its window, both
+/// compared beside it (DB-B34, repair 6; D-4950).
+fn fno_ask(asked: &ingest::FnoRequest) -> u64 {
+    let feed = format!("{:?}", asked.feed);
+    let series = format!("{:?}", asked.series);
+    let expiry = asked.expiry.map_or_else(String::new, |day| day.to_string());
+    audit::ask_digest(&[
+        "fno",
+        feed.as_str(),
+        series.as_str(),
+        expiry.as_str(),
+        asked.granularity.dir(),
+    ])
 }
 
 /// The endpoint a run of `asked` fetches from, before it has fetched anything:
@@ -4417,11 +4578,12 @@ impl BrokerRun {
         asked: &ingest::SpotRequest,
         of: usize,
         withheld: Vec<(brutex_core::instrument::InstrumentKey, String)>,
+        driver: crate::autopilot::Driver,
     ) -> Self {
         let mut out = Self {
             attempted: of.saturating_add(withheld.len()),
             window: Some(asked.window),
-            ledger: RunLedger::open(journal, asked, of),
+            ledger: RunLedger::open(journal, asked, of, driver),
             ..Self::default()
         };
         for (key, why) in withheld {
@@ -5942,7 +6104,7 @@ pub(crate) async fn broker_run_by(
     // THE RUN IS ON THE JOURNAL BEFORE ITS FIRST INSTRUMENT, and each failure
     // follows as its member lands (`RunLedger`, D-3341, DB-055, DB-G46).
     let journal = site.journal();
-    let mut out = BrokerRun::opened(&journal, asked, targets.len(), withheld);
+    let mut out = BrokerRun::opened(&journal, asked, targets.len(), withheld, driver);
     // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
     // started with, so a stop that arrives after this run began stops it and a
     // stop that happened before it began does not.
@@ -6241,27 +6403,37 @@ pub(crate) async fn recovery_spot(
     )
     .await;
     let journal = site.journal();
-    let origin = spot_audit_origin(asked.cash_identity, &run.origin);
-    let record = if let Some(blocked) = &run.blocked {
-        audit::Record::refused(
+    // A UNIT REFUSED BEFORE ITS RUN OPENED IS `Refused`, and a run that opened
+    // is closed under its opening record's source, through its own thread
+    // (DB-B34, repair 6): the restart scan pairs a close with its own run and
+    // reads a refusal as closing none. The blocked arm was NOT STARTED under
+    // this route's endpoint text, the very source every spot run of the window
+    // opens with, so it closed whichever such run had been cut short.
+    if let Some(blocked) = &run.blocked {
+        let record = audit::Record::refused(
             audit::Scope::Spot,
-            audit::Outcome::NotStarted,
+            audit::Outcome::Refused,
             now,
-            &origin,
+            &spot_audit_origin(asked.cash_identity, asked.target.label()),
             &blocked.why,
         )
-        .with_window(asked.window)
+        .with_window(asked.window);
+        journal.append(&record)?;
     } else {
-        audit::Record::of_run(
+        let origin = run.ledger.source().map_or_else(
+            || spot_audit_origin(asked.cash_identity, &run.origin),
+            ToOwned::to_owned,
+        );
+        let record = audit::Record::of_run(
             audit::Scope::Spot,
             now,
             run.took,
             &origin,
             asked.window,
             &run.total,
-        )
-    };
-    journal.append(&record)?;
+        );
+        run.ledger.close(&journal, &record)?;
+    }
     // THE FAILURES ARE ALREADY ON THE JOURNAL, appended as each member landed
     // behind the run's opening record (D-3341); `rest` writes them here only
     // when that record was refused. A failure that did not land is still a
@@ -9164,11 +9336,19 @@ fn landed_answer(
     for f in done.failures.iter().take(5) {
         facts.push(("Failed", format!("{} — {}", f.instrument, f.why)));
     }
+    // A RUN THAT OPENED IS CLOSED UNDER ITS OPENING RECORD'S OWN SOURCE, and
+    // through its own thread (DB-B34, repair 6): the restart scan pairs the
+    // close with the run it directly follows, of the same scope, window and
+    // source, and with no other.
+    let source = ledger
+        .as_deref()
+        .and_then(RunLedger::source)
+        .unwrap_or(source);
     let record = audit::Record::of_run(audit::Scope::Spot, now, took, source, window, done);
     let verdict = record.outcome.label();
     match ledger {
         Some(ledger) => {
-            facts.push(recorded_fact(journal, &record));
+            facts.push(recorded_fact_of(ledger.close(journal, &record), journal));
             ledger.rest(journal, now, &done.failures);
             if !done.failures.is_empty() {
                 facts.push(ledger.fact(done.failures.len()));
@@ -9285,7 +9465,17 @@ fn render_elapsed(micros: u64) -> String {
 /// hides a failure is banned; this one names it in the same table as the
 /// figures it belongs to.
 fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static str, String) {
-    match journal.append(record) {
+    recorded_fact_of(journal.append(record), journal)
+}
+
+/// [`recorded_fact`]'s line for an append already made: a run's closing
+/// record goes through its own thread ([`RunLedger::close`]), not
+/// [`audit::Journal::append`], and its receipt says the same two things.
+fn recorded_fact_of(
+    appended: Result<(), String>,
+    journal: &audit::Journal,
+) -> (&'static str, String) {
+    match appended {
         Ok(()) => (
             "Recorded",
             format!("yes — appended to {}", journal.path.display()),
@@ -11088,9 +11278,10 @@ fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, Strin
     facts
 }
 
-/// The note of an expired-F&O walk's opening record: it fits the record's
-/// note field whole, so it is never cut.
-const FNO_OPENED_NOTE: &str = "expired F&O walk opened; its outcome record closes it";
+/// How the note of an expired-F&O walk's opening record begins; the walk's
+/// ask follows it ([`audit::ask_note`], [`fno_ask`]). With the ask it is 45
+/// bytes and fits the record's note field whole, so it is never cut.
+const FNO_OPENED_NOTE: &str = "expired F&O walk opened";
 
 /// Opens an expired-F&O walk in `journal` (DB-B34, repair 5): an
 /// [`audit::Outcome::Opened`] record of the walk's own scope, source (the
@@ -11120,12 +11311,15 @@ fn fno_opened(
     asked: &ingest::FnoRequest,
     now: std::time::SystemTime,
 ) -> (&'static str, String) {
+    // THE WALK'S ASK ON ITS OPENING RECORD (DB-B34, repair 6): a later walk
+    // of the same underlying and window supersedes this one, if it is cut
+    // short, only when it asked for the same feed, series, expiry and rung.
     let head = audit::Record::refused(
         audit::Scope::Fno,
         audit::Outcome::Opened,
         now,
         asked.underlying.as_str(),
-        FNO_OPENED_NOTE,
+        &audit::ask_note(FNO_OPENED_NOTE, fno_ask(asked)),
     )
     .with_window(asked.window);
     match journal.append(&head) {
@@ -19881,7 +20075,7 @@ mod tests {
         );
         before(
             "BrokerRun::out_of_order(why)",
-            "BrokerRun::opened(&journal, asked, targets.len(), withheld)",
+            "BrokerRun::opened(&journal, asked, targets.len(), withheld, driver)",
         );
         let gate = src
             .split_once("\nfn order_gate(")
@@ -19989,6 +20183,7 @@ mod tests {
             "kite",
             window,
             208,
+            0,
         );
         let mut thread = journal.open_run(&head).expect("the opening record lands");
         let failure = audit::Record::member_failure(
@@ -20537,6 +20732,7 @@ mod tests {
                 source,
                 window,
                 2,
+                0,
             ))
             .expect("the opening record lands");
         for name in ["NIFTY", "BANKNIFTY", "NIFTYIT"] {
@@ -26668,7 +26864,19 @@ mod tests {
             (opening.kind, opening.outcome, opening.scope),
             (audit::Kind::Run, audit::Outcome::Opened, audit::Scope::Fno)
         );
-        assert_eq!(opening.note, FNO_OPENED_NOTE);
+        // ITS NOTE NAMES THE WALK'S ASK (repair 6), whole.
+        assert!(
+            opening.note.starts_with(FNO_OPENED_NOTE),
+            "{}",
+            opening.note
+        );
+        let asked = ingest::parse_fno(
+            "underlying=NIFTY&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30\
+             &vendor=truedata",
+            day(2026, 8, 7),
+        )
+        .expect("the walk's own request");
+        assert_eq!(audit::ask_of(&opening.note), Some(fno_ask(&asked)));
         assert!(!opening.note_was_cut(), "the note fits its field whole");
         assert_eq!(
             (opening.source.as_str(), opening.from_days, opening.to_days),
@@ -26688,7 +26896,25 @@ mod tests {
         let run = found.interrupted().expect("the walk cut short is seen");
         assert_eq!((run.ordinal, run.source.as_str()), (0, "NIFTY"));
         assert_eq!(run.window, Some((opening.from_days, opening.to_days)));
-        assert_eq!(run.note, FNO_OPENED_NOTE);
+        assert_eq!(run.note, opening.note);
+        // AN F&O WALK, re-run from /pull/fno: not "press Pull", the spot
+        // route's button (the fourth check's follow-up 1).
+        assert_eq!(
+            (run.scope, run.ask),
+            (audit::Scope::Fno, Some(fno_ask(&asked)))
+        );
+        let words = run.words();
+        assert!(
+            words.starts_with("INTERRUPTED: an expired-F&O walk for 2026-07-01..2026-07-30")
+                && words.contains("run the same walk again from /pull/fno")
+                && !words.contains("/pull/spot")
+                && !words.contains("press Pull"),
+            "{words}"
+        );
+        // Another series of the same underlying and window is another ask.
+        let mut options = asked;
+        options.series = ingest::Series::Options;
+        assert_ne!(fno_ask(&options), fno_ask(&asked));
 
         // A JOURNAL THAT REFUSES THE OPENING RECORD: the walk still answers,
         // and the receipt says a restart during it would not be seen.
@@ -32400,7 +32626,7 @@ mod tests {
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
-        let mut ledger = RunLedger::open(&journal, &asked, 2);
+        let mut ledger = RunLedger::open(&journal, &asked, 2, crate::autopilot::Driver::Hand);
         assert!(ledger.opened(), "{ledger:?}");
         let failures = vec![
             pull::ingest::Failure::new("NIFTY", "NIFTY: refused"),
@@ -32445,6 +32671,304 @@ mod tests {
             sources.get(1..),
             Some(&["NIFTY".to_owned(), "BANKNIFTY".to_owned()][..])
         );
+    }
+
+    /// **A PRESS REFUSED BEFORE ITS RUN OPENS HIDES NO RUN CUT SHORT**
+    /// (DB-B34, repair 6; the fourth check's probe `v62r4_p1`). A run is
+    /// opened and cut short; the operator presses Pull with the same window,
+    /// as the INTERRUPTED sentence says; the press is refused before its run
+    /// opens (here the test site's refused broker; in a serving process the
+    /// pull order's `out_of_order` or `spot_mapping_refusal`). It wrote NOT
+    /// STARTED under the target's label with that window, the restart scan
+    /// read it as the close of the run cut short, and the next start
+    /// answered "clean" although nothing asked the vendor again. It is now
+    /// REFUSED, and the run cut short is still reported.
+    #[tokio::test]
+    async fn a_press_refused_before_its_run_opens_hides_no_run_cut_short() {
+        with_server("r6-refused-press", |addr| async move {
+            let root = crate::scratch::path("store-r6-refused-press");
+            let journal = audit::Journal::at(&root);
+            let form = "target=indices&granularity=1day&from=2021-12-30&to=2022-01-02";
+            let asked = ingest::parse_spot(form, day(2026, 10, 13))
+                .expect("a real target and a window in the past");
+            let mut ledger = RunLedger::open(&journal, &asked, 2, crate::autopilot::Driver::Hand);
+            assert!(ledger.opened(), "{ledger:?}");
+            ledger.flush(
+                &journal,
+                &[pull::ingest::Failure::new("NIFTY", "NIFTY: a gap")],
+            );
+            let before = crate::pullrun::restart_scan(&journal);
+            assert_eq!(before.word(), "interrupted", "{}", before.words());
+
+            let over = post(addr, "/pull/spot", form).await;
+            assert!(over.contains("NOT STARTED"), "{over}");
+            let after = crate::pullrun::restart_scan(&journal);
+            assert_eq!(
+                after.interrupted().map(|run| run.ordinal),
+                Some(0),
+                "a press that started nothing fetched nothing: {}",
+                after.words()
+            );
+            // The press IS on the journal: REFUSED, under the target's label.
+            let records = journal.look().records();
+            let newest = journal.page(records, 0, 1).expect("a page")[0]
+                .decoded
+                .clone()
+                .expect("decodes");
+            assert_eq!(
+                (newest.kind, newest.outcome, newest.scope),
+                (
+                    audit::Kind::Run,
+                    audit::Outcome::Refused,
+                    audit::Scope::Spot
+                )
+            );
+            assert_eq!(
+                newest.source,
+                spot_audit_origin(asked.cash_identity, asked.target.label())
+            );
+            assert_ne!(newest.from_days, 0, "with the window it asked for");
+        })
+        .await;
+    }
+
+    /// **ONLY THE SAME PULL MADE AGAIN SUPERSEDES A RUN CUT SHORT** (DB-B34,
+    /// repair 6; the fourth check's probe `v62r4_p2`). A spot run's source is
+    /// the identity policy and the endpoint TEMPLATE, the same for every
+    /// target and rung (and cut to 64 bytes), so a 1day pull of the
+    /// reference indices that closed over the window of a cut-short 1min
+    /// pull of the F&O underlyings read the latter as done. The opening
+    /// records now name each run's ask: another target or rung supersedes
+    /// nothing, however its close is appended; the same pull made again and
+    /// closed does.
+    #[test]
+    fn only_the_same_pull_made_again_supersedes_a_run_cut_short() {
+        let root = store_root("r6-same-pull");
+        let journal = audit::Journal::at(&root);
+        let today = day(2026, 10, 13);
+        let parse = |form: &str| {
+            ingest::parse_spot(
+                &format!("{form}&vendor=zerodha&cash_identity=zerodha_nse_checked"),
+                today,
+            )
+            .expect("a real request")
+        };
+        let stocks = parse("target=fno&granularity=1min&from=2018-01-01&to=2026-09-30");
+        let indices = parse("target=indices&granularity=1day&from=2018-01-01&to=2026-09-30");
+        let hand = crate::autopilot::Driver::Hand;
+        // ONE SOURCE FOR BOTH: why the source is no evidence of the same pull.
+        assert_eq!(run_source(&stocks, hand), run_source(&indices, hand));
+        assert_ne!(spot_ask(&stocks), spot_ask(&indices));
+        let close = |ledger: &mut RunLedger, asked: &ingest::SpotRequest| {
+            let record = audit::Record::of_run(
+                audit::Scope::Spot,
+                std::time::SystemTime::now(),
+                1,
+                ledger.source().expect("the run opened"),
+                asked.window,
+                &pull::ingest::Ingested::default(),
+            );
+            ledger.close(&journal, &record).expect("the close lands");
+        };
+        let interrupted = || {
+            crate::pullrun::restart_scan(&journal)
+                .interrupted()
+                .map(|run| (run.ordinal, run.ask))
+        };
+        // THE STOCKS' 1MIN RUN, cut short.
+        let mut cut = RunLedger::open(&journal, &stocks, 213, hand);
+        cut.flush(
+            &journal,
+            &[pull::ingest::Failure::new("RELIANCE", "RELIANCE: a gap")],
+        );
+        assert_eq!(interrupted(), Some((0, Some(spot_ask(&stocks)))));
+        // THE INDICES' 1DAY RUN over the same window, opened and closed
+        // through its own thread: nothing superseded.
+        let mut other = RunLedger::open(&journal, &indices, 2, hand);
+        close(&mut other, &indices);
+        assert_eq!(interrupted(), Some((0, Some(spot_ask(&stocks)))));
+        // ... nor when its close is appended plainly, as before D-4950.
+        let other = RunLedger::open(&journal, &indices, 2, hand);
+        journal
+            .append(&audit::Record::of_run(
+                audit::Scope::Spot,
+                std::time::SystemTime::now(),
+                1,
+                other.source().expect("the run opened"),
+                indices.window,
+                &pull::ingest::Ingested::default(),
+            ))
+            .expect("the close lands");
+        assert_eq!(interrupted(), Some((0, Some(spot_ask(&stocks)))));
+        // THE SAME PULL MADE AGAIN, and closed (EMPTY: it asked): done.
+        let mut again = RunLedger::open(&journal, &stocks, 213, hand);
+        close(&mut again, &stocks);
+        assert_eq!(
+            crate::pullrun::restart_scan(&journal),
+            crate::pullrun::Restart::Clean
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RUN WHOSE OPENING RECORD WAS REFUSED CLOSES BEHIND IT, WRITTEN
+    /// LATE** (DB-B34, repair 6). The journal's lock was held by another
+    /// writer at the instant the run opened, so its opening record was
+    /// refused; the run still ran and closes. Its close alone was paired with
+    /// the newest open run of its window and source: a run cut short of
+    /// another target over that window read as closed. Behind its own
+    /// opening record, written late in the same write, it closes itself.
+    #[test]
+    fn a_run_whose_opening_record_was_refused_closes_behind_it_written_late() {
+        let root = store_root("r6-late-head");
+        let journal = audit::Journal::at(&root);
+        let today = day(2026, 10, 13);
+        let parse = |form: &str| ingest::parse_spot(form, today).expect("a real request");
+        let swept = parse("target=swept&granularity=1day&from=2021-12-30&to=2022-01-02");
+        let indices = parse("target=indices&granularity=1day&from=2021-12-30&to=2022-01-02");
+        let hand = crate::autopilot::Driver::Hand;
+        let mut cut = RunLedger::open(&journal, &swept, 2, hand);
+        cut.flush(
+            &journal,
+            &[pull::ingest::Failure::new("NIFTY", "NIFTY: a gap")],
+        );
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&journal.path)
+            .expect("the journal exists");
+        held.try_lock().expect("this test holds the append lock");
+        let mut ledger = RunLedger::open(&journal, &indices, 2, hand);
+        held.unlock().expect("released");
+        assert!(
+            !ledger.opened() && ledger.opened_refused.is_some(),
+            "{ledger:?}"
+        );
+
+        let record = audit::Record::of_run(
+            audit::Scope::Spot,
+            std::time::SystemTime::now(),
+            1,
+            ledger
+                .source()
+                .expect("the run was opened, if not on the journal"),
+            indices.window,
+            &pull::ingest::Ingested::default(),
+        );
+        ledger
+            .close(&journal, &record)
+            .expect("the late head and the close");
+        let records = journal.look().records();
+        let page = journal.page(records, 0, 2).expect("a page");
+        let late = page[1].decoded.clone().expect("decodes");
+        assert_eq!(late.outcome, audit::Outcome::Opened);
+        assert!(late.note.ends_with("; late"), "{}", late.note);
+        assert_eq!(audit::ask_of(&late.note), Some(spot_ask(&indices)));
+        assert_eq!(
+            crate::pullrun::restart_scan(&journal)
+                .interrupted()
+                .map(|run| run.ordinal),
+            Some(0),
+            "the swept run cut short is still the one open"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **EVERY RECORD OF A RUN NAMES ONE SOURCE, AND THE AUTOPILOT'S STILL
+    /// SAYS SO** (DB-B34, repair 6). The opening record, the close of a run
+    /// that reached no instrument, the recovery unit's close and the
+    /// autopilot's close are all written under [`RunLedger::source`]; the
+    /// autopilot's text keeps its mark after the identity policy, so
+    /// `/audit.json` still names the vendor. A refusal before the run opened
+    /// is REFUSED on all three routes.
+    #[test]
+    fn every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none() {
+        let asked = ingest::parse_spot(
+            "target=indices&granularity=1day&from=2021-12-30&to=2022-01-02&vendor=zerodha\
+             &cash_identity=zerodha_nse_checked",
+            day(2026, 10, 13),
+        )
+        .expect("a real request");
+        let hand = run_source(&asked, crate::autopilot::Driver::Hand);
+        let recovery = run_source(&asked, crate::autopilot::Driver::Recovery);
+        let autopilot = run_source(&asked, crate::autopilot::Driver::Autopilot);
+        assert_eq!(
+            hand,
+            spot_audit_origin(asked.cash_identity, &planned_origin(&asked))
+        );
+        assert_eq!(hand, recovery);
+        assert!(autopilot.contains("autopilot "), "{autopilot}");
+        assert_ne!(hand, autopilot);
+        for source in [&hand, &autopilot] {
+            let kept = audit::Record::refused(
+                audit::Scope::Spot,
+                audit::Outcome::Stored,
+                std::time::SystemTime::now(),
+                source,
+                "x",
+            );
+            assert_eq!(
+                crate::audit_json::vendor_of_source(&kept.source),
+                Some(brutex_core::vendor::Vendor::Zerodha),
+                "{source}"
+            );
+        }
+
+        let src = include_str!("server.rs");
+        let body_of = |head: &str| {
+            let at = src.split_once(head).expect(head).1;
+            at[..at.find("\n}\n").expect("it has an end")].to_owned()
+        };
+        // The spot route: a refusal before the run is REFUSED; the close of a
+        // run that reached no instrument is written under the run's source,
+        // through its thread; so is the close of a run that landed.
+        let route = body_of("async fn broker_answer(");
+        let blocked = &route[route
+            .find("if let Some(blocked) = run.blocked.as_ref()")
+            .expect("the blocked arm")..];
+        assert!(
+            blocked[..blocked
+                .find("return (blocked.code, refused_html(")
+                .expect("it returns")]
+                .contains("audit::Outcome::Refused"),
+            "the spot route's refusal before its run opened is REFUSED"
+        );
+        let none = &route[route
+            .find("if run.reached == 0 {")
+            .expect("the no-instrument arm")..];
+        let none = &none[..none
+            .find("return (status, accepted_html(")
+            .expect("it returns")];
+        assert!(
+            none.contains("close_reaching_none(&mut run, &asked, now, journal, &first)"),
+            "{none}"
+        );
+        let reaching_none = body_of("fn close_reaching_none(");
+        assert!(
+            reaching_none.contains("let source = run.ledger.source().map_or_else("),
+            "{reaching_none}"
+        );
+        assert!(
+            reaching_none.contains("run.ledger.close(journal, &record)"),
+            "{reaching_none}"
+        );
+        let landed = body_of("fn landed_answer(");
+        assert!(landed.contains(".and_then(RunLedger::source)"), "{landed}");
+        assert!(
+            landed.contains("ledger.close(journal, &record)"),
+            "{landed}"
+        );
+        // The recovery unit.
+        let recovery_unit = body_of("pub(crate) async fn recovery_spot(");
+        assert!(recovery_unit.contains("audit::Outcome::Refused"));
+        assert!(recovery_unit.contains("run.ledger.close(&journal, &record)?"));
+        assert!(!recovery_unit.contains("audit::Outcome::NotStarted"));
+        // The autopilot's tick.
+        let tick = include_str!("autopilot.rs");
+        assert!(tick.contains("run.ledger.close(&journal, &record).err()"));
+        assert!(tick.contains(
+            ".source()\n        .map_or_else(|| refused_source.clone(), ToOwned::to_owned)"
+        ));
     }
 
     /// **THE RUN'S OWN EVENTS REACH THE FILE, AND SO DOES EVERY REQUEST'S.**

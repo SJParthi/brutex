@@ -68209,3 +68209,109 @@ month that crosses, by the commit that crosses: first commit or later),
 `cli::tix_rebuilder::tests::a_small_month_is_small_in_the_receipt_writes_nothing_and_is_clean`,
 `cli::srt_builder::tests::a_small_month_is_small_in_the_receipt_and_writes_nothing`,
 `api::bars::sort::tests::a_month_without_its_srt_is_the_rule_below_the_threshold_and_a_finding_at_it`.
+
+### D-4950 — The pull journal's restart scan pairs a closing record only with a run of its own scope, window and source, first the run it directly follows; a refusal before a run opens is `Refused`; and only a later run whose opening record names the same ASK supersedes a run cut short — 2026-10-14
+
+**Implemented by** WP-62 repair 6 (`api::pullrun::walk`, `api::audit::Record::opened`,
+`api::audit::{ask_digest, ask_note, ask_of}`, `api::audit::Journal::{close_run,
+close_unopened}`, `api::server::{RunLedger::source, RunLedger::close, run_source,
+spot_ask, fno_ask}`, the spot route's, the recovery unit's and the autopilot's
+journal records, `server::fno_opened`). **Number** chosen above every number in
+use or reserved on 14 October 2026 (D-4939 in the SC-1 worktree; the
+store-compression design's D-4928 to D-4938), so no package landing beside
+this one meets it.
+
+**What was observed** (the fourth check of WP-62, 13 October 2026, each proved
+on a shadow of the real store and by a failing test through the real
+constructors or the real `/pull/spot` route):
+
+1. A press of Pull refused BEFORE its run opened (the pull order's "the 1day
+   pass comes first", a mapping refusal, a refused broker) appended ONE record,
+   `NotStarted` under the target's label with the window it asked for, and no
+   opening record. The walk paired a close with no run of its window and source
+   by its WINDOW alone, so that record closed the run cut short of that window,
+   of either scope, and the next start answered `restart.state = clean` with a
+   sentence claiming the vendor had been asked again. The operator's journal
+   holds four such records (ordinals 32, 33, 223935 and 4217091).
+2. The rule "a later run of the same window and source that closes supersedes
+   an interrupted one" (repair 3) took the source as naming the pull. It does
+   not: a spot run's source is the identity policy and the endpoint TEMPLATE,
+   the same for every target and rung, cut to 64 bytes, and every spot run
+   record in the operator's journal since D-3341 carries exactly
+   `zerodha_nse_checked NOT vendor-ISIN; NSE file same day; https://`. A 1day
+   pull of the indices that closed FAILED over the window of a cut-short 1min
+   pull of the stocks read the latter as done.
+
+**Decided.**
+
+1. **A close ends a run of its own scope, window and source, and nothing
+   else.** First the run whose record it directly follows (the ordinal before
+   it), when that run is one; else the newest open run of all three. A close
+   that matches no open run closes nothing. Window-only pairing is gone.
+2. **Every close of a run that opened is written under the run's opening
+   record's source, directly behind a record of the run.** One function names
+   a broker run's source (`server::run_source`; the autopilot's runs keep an
+   `autopilot` mark inside it, after the identity policy, so
+   `audit_json::vendor_of_source` still names the vendor); the closing record
+   takes it from the run (`RunLedger::source`) and is appended through the
+   run's thread (`audit::Journal::close_run`), restating the opening record
+   first when another writer appended since, exactly as a member failure
+   already was. A run whose opening record the journal refused at the start
+   closes behind that record written late in one write, its note marked
+   `; late` (`audit::Journal::close_unopened`). Before this the refuse arm
+   closed under the TARGET's label and the autopilot under `autopilot <feed>
+   <month>`, both pairable only by the window.
+3. **A refusal before a run opened is `Refused`** on the spot route, the
+   recovery unit and the autopilot's tick: the outcome the scan already read as
+   no close ("the request was refused before anything ran"). The receipt's own
+   verdict is unchanged (`NOT STARTED`).
+4. **An opening record names its run's ASK**: `; ask ` and sixteen hexadecimal
+   digits of a 64-bit FNV-1a digest (`audit::ask_digest`) of what the run asks
+   the vendor for beyond its window and source: for a spot run the feed, the
+   identity policy, the target, the rung, whether it is a versioned repair, and
+   the instruments named (sorted); for an expired-F&O walk the feed, the
+   series, the expiry and the rung. The note keeps `opened for N instruments`
+   (`expired F&O walk opened`) before it, and with `; late` the widest note is
+   56 of the field's 60 bytes, so it is never cut. The 256-byte record, its
+   stride and its version are unchanged: the ask is text in the note field the
+   record always had.
+5. **Only the same pull made again supersedes.** A close supersedes an older
+   open run only when both opening records name the same ask, the scope,
+   window and source agree, and the close is not `NotStarted`. A run whose
+   opening record names no ask (every run before this decision, and a run
+   known only through a restatement) is never superseded and supersedes
+   nothing: it is reported until it lies behind the scan. A digest that
+   differs because a later build spells a part differently only keeps a run
+   reported, the safe direction.
+
+**Rejected.** (a) Carrying the opening ordinal on the closing record: no
+field of the 256-byte record is free (byte 119 is one byte), so it is a new
+record version at a new stride (§3 rule 8), for every reader of the journal.
+The thread gives the same exactness for every close written from now on. (b)
+Dropping the supersede rule: every start after the same pull was made again
+would still answer INTERRUPTED until 64 newer run records were written. (c) A
+readable ask (target and rung words) instead of a digest: the instruments a
+run names do not fit 60 bytes, and a cut list makes two asks one.
+
+**What remains** (`docs/06-limits.md`, WP-62): closes written before this
+decision that do not follow a record of their run (two runs of one pull in
+flight at once) still take the newest open run of their scope, window and
+source; a run opened before this decision and closed under its target's label
+or `autopilot <feed> <month>` now reads INTERRUPTED until it lies behind the
+scan. Measured on a clone of the operator's journal on 14 October 2026
+(1,079,608,832 bytes, 4,217,222 records): the scan answers `clean` with this
+rule, as it did before it, so none is in the scan.
+
+**Proved by** `api::pullrun::tests::a_refusal_that_opened_no_run_closes_no_run_of_either_scope`,
+`api::pullrun::tests::a_close_pairs_with_the_run_it_directly_follows`,
+`api::pullrun::tests::a_later_run_of_the_same_window_and_source_that_closes_supersedes_an_open_one`,
+`api::pullrun::tests::another_ask_over_the_same_window_and_source_supersedes_nothing`,
+`api::pullrun::tests::a_close_under_its_own_source_ends_its_run_and_a_target_label_does_not`,
+`api::pullrun::tests::damage_before_the_reported_run_that_a_later_window_pairing_may_need_is_said`,
+`api::audit::tests::a_close_lands_behind_a_record_of_its_own_run`,
+`api::audit::tests::an_opening_records_ask_is_written_and_read_back_exactly`,
+`api::server::tests::a_press_refused_before_its_run_opens_hides_no_run_cut_short`,
+`api::server::tests::only_the_same_pull_made_again_supersedes_a_run_cut_short`,
+`api::server::tests::a_run_whose_opening_record_was_refused_closes_behind_it_written_late`,
+`api::server::tests::every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`,
+`api::server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`.

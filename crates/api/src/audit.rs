@@ -977,9 +977,27 @@ impl Record {
     /// member failure belongs to the run record before it, and that run's
     /// source is how `/audit.json` names its vendor. The counters are zero:
     /// nothing has landed yet, and the closing record carries what did.
+    ///
+    /// # The note names the run's ASK (DB-B34, repair 6; D-4950)
+    ///
+    /// `ask` is [`ask_digest`] of what the run asks the vendor for beyond its
+    /// window and source: the feed, the identity policy, the target, the
+    /// instruments named and the rung. The source cannot say it: it is the
+    /// policy and the endpoint TEMPLATE, the same for every target and rung,
+    /// and the 64-byte field keeps `zerodha_nse_checked NOT vendor-ISIN; NSE
+    /// file same day; https://` of every Zerodha run. The restart scan reads a
+    /// later run as having made a cut-short run's pull again only when both
+    /// opening records name the same ask ([`ask_of`]).
     #[must_use]
-    pub fn opened(scope: Scope, at: SystemTime, source: &str, window: Window, of: usize) -> Self {
-        let note = format!("opened for {of} instruments; failures follow as they land");
+    pub fn opened(
+        scope: Scope,
+        at: SystemTime,
+        source: &str,
+        window: Window,
+        of: usize,
+        ask: u64,
+    ) -> Self {
+        let note = ask_note(&format!("opened for {of} instruments"), ask);
         Self::refused(scope, Outcome::Opened, at, source, &note).with_window(window)
     }
 
@@ -1527,6 +1545,78 @@ impl Journal {
         record: &Record,
         whole: &str,
     ) -> Result<(), String> {
+        self.threaded(thread, record, Some(whole))
+    }
+
+    /// Appends the closing record of the run `thread` opened, DIRECTLY behind a
+    /// record of that run: behind its last record when nothing was appended
+    /// since, else behind its opening record written again ("continues ..."),
+    /// in the same write (DB-B34, repair 6; D-4950).
+    ///
+    /// # Why the close goes through the run's thread
+    ///
+    /// A closing record does not name its opening record, and the restart
+    /// scan paired it with the newest open run of its window and source. Every
+    /// Zerodha spot run of a window carries one source (the identity policy
+    /// and the endpoint template, cut to 64 bytes), so two runs of one window
+    /// in flight at once (a server run and a `cli` pull) were told apart by
+    /// nothing, and the close of the older named the newer. Written this way,
+    /// a close always follows a record of its own run, and the scan pairs it
+    /// with that run (`crate::pullrun`), whoever else appended meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`]: nothing of this call is then on disk, and
+    /// `thread` is unchanged.
+    pub fn close_run(&self, thread: &mut Thread, record: &Record) -> Result<(), String> {
+        self.threaded(thread, record, None)
+    }
+
+    /// Appends the closing record of a run whose opening record `head` was
+    /// REFUSED when the run began, behind that opening record, in one write:
+    /// the opening record keeps its own time and gains `; late` in its note
+    /// (DB-B34, repair 6; D-4950).
+    ///
+    /// # Why the opening record is written late rather than not at all
+    ///
+    /// A run whose opening record was refused (the journal's lock taken by
+    /// another writer's append at that instant) still ran and still closes. Its
+    /// close, alone, would be paired by the restart scan with the newest open
+    /// run of its window and source: a run cut short of ANOTHER target or rung
+    /// over that window would read as closed by a run that never asked for its
+    /// instruments. Behind its own opening record the close pairs with its own
+    /// run. Its member failures were not written during the run; the caller
+    /// writes them after this ([`Self::append_member`]), as before D-3341.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`]: neither record is then on disk.
+    pub fn close_unopened(&self, head: &Record, record: &Record) -> Result<(), String> {
+        let mut late = head.clone();
+        let note = format!("{}; late", head.note);
+        late.note = keep(&note, NOTE_CAPACITY);
+        late.note_bytes = saturating_len(&note);
+        self.appended_images(|_ordinal| {
+            let mut out = Vec::with_capacity(2 * RECORD_LEN);
+            out.extend_from_slice(&late.image());
+            out.extend_from_slice(&record.image());
+            out
+        })
+        .map(|_first| ())
+        .inspect_err(|why| note_append_failed(&self.path, record, why))
+    }
+
+    /// [`Self::append_failure`] and [`Self::close_run`]: `record` behind a
+    /// record of `thread`'s run, its opening record written again first when
+    /// another writer appended since the run's last record. `whole` is a
+    /// member failure's whole reason ([`Self::append_member`]); `None` for a
+    /// closing record.
+    fn threaded(
+        &self,
+        thread: &mut Thread,
+        record: &Record,
+        whole: Option<&str>,
+    ) -> Result<(), String> {
         let mut written = 1u64;
         let first = self
             .appended_images(|ordinal| {
@@ -1541,7 +1631,7 @@ impl Journal {
                     at = at.saturating_add(1);
                     written = 2;
                 }
-                out.extend_from_slice(&self.with_whole_note(record, Some(whole), at).image());
+                out.extend_from_slice(&self.with_whole_note(record, whole, at).image());
                 out
             })
             .inspect_err(|why| note_append_failed(&self.path, record, why))?;
@@ -2112,6 +2202,68 @@ fn note_whole_failed(path: &Path, record: &Record, why: &str) {
             )
             .with("why", telemetry::Value::Str(why)),
     );
+}
+
+// ---------------------------------------------------------------------------
+// the run's ask (DB-B34, repair 6; D-4950)
+// ---------------------------------------------------------------------------
+
+/// What an opening record's note carries before its ask: `"; ask "`, then
+/// sixteen lowercase hexadecimal digits ([`ask_note`]).
+pub const ASK_MARK: &str = "; ask ";
+
+/// The digest of what a run asks the vendor for, from `parts` in order:
+/// 64-bit FNV-1a (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`)
+/// over each part's bytes followed by the unit separator `0x1F`, which no
+/// part carries, so two different lists of parts are two different inputs.
+///
+/// # Why a digest and not the words
+///
+/// The note is [`NOTE_CAPACITY`] bytes, and the instruments a run names can
+/// be hundreds of symbols: the words do not fit, and a cut list would make
+/// two different asks read as one. The digest is compared, never read: equal
+/// digests are taken as the same ask (two different asks share one with a
+/// chance of about one in 2^64), and a digest that differs, including one a
+/// later build computes over parts it spells differently, only ever keeps a
+/// run cut short reported (`crate::pullrun`), the safe direction.
+///
+/// # Cost
+///
+/// One multiply and one xor per byte of the parts: bounded by the run's own
+/// request, computed once when the run opens.
+#[must_use]
+pub fn ask_digest(parts: &[&str]) -> u64 {
+    const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    parts.iter().fold(BASIS, |hash, part| {
+        part.bytes()
+            .chain(core::iter::once(0x1f_u8))
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+            })
+    })
+}
+
+/// An opening record's note: `lead`, then [`ASK_MARK`] and `ask` as sixteen
+/// lowercase hexadecimal digits.
+#[must_use]
+pub fn ask_note(lead: &str, ask: u64) -> String {
+    format!("{lead}{ASK_MARK}{ask:016x}")
+}
+
+/// The ask an opening record's note names: the sixteen hexadecimal digits
+/// after [`ASK_MARK`], and no seventeenth. `None` for a note that names none,
+/// which is every opening record written before D-4950 and every restatement
+/// of one ("continues the run opened at record N").
+#[must_use]
+pub fn ask_of(note: &str) -> Option<u64> {
+    let (_, rest) = note.split_once(ASK_MARK)?;
+    let digits = rest.get(..16)?;
+    let whole = digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !rest.as_bytes().get(16).is_some_and(u8::is_ascii_hexdigit);
+    whole
+        .then(|| u64::from_str_radix(digits, 16).ok())
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -3288,7 +3440,14 @@ mod tests {
     fn a_run_opens_before_its_members_and_restates_itself_after_another_writer() {
         let root = scratch("audit-thread");
         let journal = Journal::at(&root);
-        let head = Record::opened(Scope::Spot, at(1), "https://api.kite.trade/x", window(), 2);
+        let head = Record::opened(
+            Scope::Spot,
+            at(1),
+            "https://api.kite.trade/x",
+            window(),
+            2,
+            0,
+        );
         assert_eq!(head.kind, Kind::Run);
         assert_eq!(head.outcome, Outcome::Opened);
         assert!(!head.outcome.is_loud(), "a run beginning is not a verdict");
@@ -3349,6 +3508,137 @@ mod tests {
         );
     }
 
+    /// **A RUN'S CLOSE FOLLOWS A RECORD OF ITS OWN RUN** (DB-B34, repair 6;
+    /// D-4950). Through the run's thread, a close lands straight behind the
+    /// run's last record, or behind its opening record written again when
+    /// another writer appended since; a run whose opening record was refused
+    /// closes behind that record written late, marked `; late`, in one write.
+    /// A refused append writes nothing and leaves the thread where it was.
+    #[test]
+    fn a_close_lands_behind_a_record_of_its_own_run() {
+        let root = scratch("audit-close-run");
+        let journal = Journal::at(&root);
+        let head = Record::opened(Scope::Spot, at(1), "kite", window(), 2, 0xa5);
+        let close = Record::refused(Scope::Spot, Outcome::Stored, at(9), "kite", "done")
+            .with_window(window());
+
+        // Nothing between: straight behind the opening record.
+        let mut thread = journal.open_run(&head).expect("opens");
+        journal.close_run(&mut thread, &close).expect("closes");
+        assert_eq!(thread.last(), 1);
+
+        // Another writer between: the opening record again, then the close.
+        let mut thread = journal.open_run(&head).expect("opens");
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Refused,
+                at(3),
+                "other",
+                "x",
+            ))
+            .expect("another writer");
+        journal.close_run(&mut thread, &close).expect("closes");
+        assert_eq!(thread.last(), 5, "the restated head at 4, the close at 5");
+
+        // Refused at the start, written late with its close.
+        journal
+            .close_unopened(&head, &close)
+            .expect("the late head and the close");
+        let records = journal.look().records();
+        let shape: Vec<(Outcome, String)> = journal
+            .page(records, 0, 16)
+            .expect("a page")
+            .iter()
+            .rev()
+            .map(|entry| {
+                let record = entry.decoded.clone().expect("decodes");
+                (record.outcome, record.note)
+            })
+            .collect();
+        let opened = ask_note("opened for 2 instruments", 0xa5);
+        assert_eq!(
+            shape,
+            [
+                (Outcome::Opened, opened.clone()),
+                (Outcome::Stored, "done".to_owned()),
+                (Outcome::Opened, opened.clone()),
+                (Outcome::Refused, "x".to_owned()),
+                (
+                    Outcome::Opened,
+                    "continues the run opened at record 2".to_owned()
+                ),
+                (Outcome::Stored, "done".to_owned()),
+                (Outcome::Opened, format!("{opened}; late")),
+                (Outcome::Stored, "done".to_owned()),
+            ]
+        );
+
+        // A held lock refuses the close: nothing lands, the thread stays.
+        let mut thread = journal.open_run(&head).expect("opens");
+        let before = (journal.look().records(), thread.last());
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&journal.path)
+            .expect("the journal exists");
+        holder.try_lock().expect("this test holds the append lock");
+        assert!(journal.close_run(&mut thread, &close).is_err());
+        assert!(journal.close_unopened(&head, &close).is_err());
+        assert_eq!((journal.look().records(), thread.last()), before);
+        holder.unlock().expect("released");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE ASK ON AN OPENING RECORD** (DB-B34, repair 6; D-4950): written
+    /// as sixteen hexadecimal digits after `; ask `, read back exactly, and
+    /// read as NONE from every note that does not carry exactly that: an
+    /// opening record before D-4950, a restatement, a digest cut short or run
+    /// on. Two different lists of parts never share an input.
+    #[test]
+    fn an_opening_records_ask_is_written_and_read_back_exactly() {
+        for ask in [0, 1, 0xa5, u64::MAX, ask_digest(&["spot", "Zerodha"])] {
+            let note = ask_note("opened for 213 instruments", ask);
+            assert!(note.len() <= NOTE_CAPACITY, "{note}");
+            assert_eq!(ask_of(&note), Some(ask), "{note}");
+            assert_eq!(ask_of(&format!("{note}; late")), Some(ask), "{note}");
+            let head = Record::opened(Scope::Spot, at(1), "src", window(), 213, ask);
+            let back = Record::decode(&head.image()).expect("decodes");
+            assert!(!back.note_was_cut(), "{}", back.note);
+            assert_eq!(ask_of(&back.note), Some(ask));
+        }
+        // The widest note this build writes still fits whole.
+        let widest = format!(
+            "{}; late",
+            ask_note("opened for 99999 instruments", u64::MAX)
+        );
+        assert!(widest.len() <= NOTE_CAPACITY, "{widest}");
+        assert_eq!(ask_of(&widest), Some(u64::MAX));
+        for none in [
+            "opened for 7 instruments; failures follow as they land",
+            "continues the run opened at record 4217027",
+            "expired F&O walk opened; its outcome record closes it",
+            "opened for 7 instruments; ask 0123456789abcde",
+            "opened for 7 instruments; ask 0123456789abcdef0",
+            "opened for 7 instruments; ask 0123456789abcdeg",
+            "opened for 7 instruments; ask ",
+            "",
+        ] {
+            assert_eq!(ask_of(none), None, "{none:?}");
+        }
+        assert_ne!(ask_digest(&["a", "b"]), ask_digest(&["ab"]));
+        assert_ne!(ask_digest(&["a", "b"]), ask_digest(&["b", "a"]));
+        assert_ne!(ask_digest(&["a"]), ask_digest(&["a", ""]));
+        assert_eq!(ask_digest(&["a", "b"]), ask_digest(&["a", "b"]));
+        // FNV-1a's own published value for the empty input, before the
+        // separator: the basis. One part "" is the basis folded with 0x1F.
+        assert_eq!(ask_digest(&[]), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(
+            ask_digest(&[""]),
+            (0xcbf2_9ce4_8422_2325_u64 ^ 0x1f).wrapping_mul(0x0000_0100_0000_01b3)
+        );
+    }
+
     /// The new outcome round-trips at the code appended for it, and every code
     /// before it still means what it meant.
     #[test]
@@ -3357,7 +3647,7 @@ mod tests {
         assert_eq!(Outcome::of_code(5), Some(Outcome::Opened));
         assert_eq!(Outcome::of_code(4), Some(Outcome::Empty));
         assert_eq!(Outcome::Opened.label(), "OPENED");
-        let head = Record::opened(Scope::Spot, at(1), "src", window(), 7);
+        let head = Record::opened(Scope::Spot, at(1), "src", window(), 7, 0x5eed);
         assert_eq!(Record::decode(&head.image()), Ok(head));
     }
 
