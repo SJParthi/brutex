@@ -123,6 +123,9 @@
 //! (underlying, expiry) at the census generation the answer names. It runs
 //! on the blocking pool behind `crate::detail::run_store_read`'s admission
 //! (DB-066). Measured timings are in WP-32's report, not restated here.
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;

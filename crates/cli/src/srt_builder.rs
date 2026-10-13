@@ -698,5 +698,5 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 }
 
 #[cfg(test)]
-#[path = "srt_build_tests.rs"]
+#[path = "srt_builder_tests.rs"]
 mod tests;

@@ -1002,6 +1002,9 @@ fn put_with(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The newest [`WINDOW`] records only: O(1). A route's.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     Window,
     /// The whole file when the alert is older: O(records after it). The cli's.
     Whole,
@@ -1342,6 +1345,9 @@ fn span_before(records: u64, before: Option<u32>) -> (u64, u64) {
 ///
 /// `alerts_unavailable` for a root that is no directory; `alerts_damaged`
 /// for a short or failed header; `alerts_version_unknown`; the host's refusal.
+///
+/// UNVERIFIED as a bound: `the_operators_older_steps_timed` times this at 102,400
+/// records and asserts no time; it is ignored and run by hand.
 pub fn page(root: &Path, before: Option<u32>) -> Result<Page, AlertError> {
     let read = View::open(root, |records| span_before(records, before))?;
     Ok(read.map_or_else(Page::default, |(view, span)| view.page(&span)))

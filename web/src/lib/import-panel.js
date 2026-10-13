@@ -111,7 +111,8 @@ export function importPanel(summary, store, at) {
       kinds: []
     };
   }
-  const kinds = (Array.isArray(summary.kinds) ? summary.kinds : []).map((k) => kindLine(k, at.now));
+  /** @type {ReturnType<typeof kindLine>[]} */
+  const kinds = (Array.isArray(summary.kinds) ? summary.kinds : []).map((/** @type {any} */ k) => kindLine(k, at.now));
   const active = kinds.filter((k) => k.active);
   const newest = kinds.reduce(
     (best, k) => (k.newestAt !== null && (best === null || k.newestAt > best.newestAt) ? k : best),

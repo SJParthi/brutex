@@ -1196,6 +1196,9 @@ pub(crate) fn retired_refusal(
 /// What the re-key says of one asked series: refused, superseded, or
 /// nothing. O(1): one ledger probe, and for a GDFL option the decoder's
 /// settlement of its stored expiry (bounded walks over compile-time tables).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 fn rekey_status(
     lineage: &change::Lineage,
     vendor: Vendor,

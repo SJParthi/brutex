@@ -45,6 +45,9 @@
 //! phase lookups and this series' lineage events (one or two). The lineage
 //! ledger is read once per change of its stamp; a closing-auction eligibility
 //! master once per day it is asked about (both bounded memos).
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -298,7 +301,7 @@ impl Rules {
     ///
     /// A rung finer than a minute is labelled to the SECOND
     /// (`calendar::phase_at_second`, DB-B43): a halt begins mid-minute
-    /// (09:21:10 for the index on 2020-03-13) and its flat seconds are
+    /// (09:21:10 for the index on 2020-03-13) and its unchanged-price seconds are
     /// halted, never `continuous`.
     fn phase_at(&self, day: i64, ts: i64) -> Option<Phase> {
         let venue = self.venue?;

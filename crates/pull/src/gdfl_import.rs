@@ -3862,7 +3862,7 @@ fn measure(
         .collect();
     quality::measure_file(
         kind,
-        session,
+        (session, quality::halt_window(kind, day)),
         &handed.file.ticks,
         &seconds,
         (converted.placement, deferred),
@@ -4893,6 +4893,40 @@ where
     })
 }
 
+/// Says out loud each index of the day whose file is minute-sampled (WP-11c,
+/// DB-A04): the day still closes `done` and its bars are filed as printed
+/// (the operator's answer: flagged only), so the log is where the import
+/// itself names it; the day ledger's own `rows`, `seconds`, `session_s` and
+/// `ss_distinct` carry it to `/dayflags.json`. One warning an index, at most
+/// the day's indices. The import says it of every day it files; a rescan
+/// says it only of the lines it wrote ([`quality::sampled_among`]), so a
+/// rescan that finds nothing new repeats nothing (D-4928 item 7).
+fn note_sampled(kind: ImportKind, day: Day, sampled: &[quality::Sampled], src: quality::Src) {
+    let day = day.to_string();
+    for sampled in sampled {
+        let _dropped_when_filtered = telemetry::emit(&sampled_event(kind, &day, sampled, src));
+    }
+}
+
+/// The warning [`note_sampled`] emits for one index of a day: who, when, and
+/// the day ledger's own numbers that make it sampled.
+fn sampled_event<'a>(
+    kind: ImportKind,
+    day: &'a str,
+    sampled: &'a quality::Sampled,
+    src: quality::Src,
+) -> telemetry::Event<'a> {
+    telemetry::Event::warn(TARGET, "index day is minute-sampled")
+        .with("kind", kind.as_str())
+        .with("day", day)
+        .with("scope", sampled.scope.as_str())
+        .with("src", src.as_str())
+        .with("rows", sampled.rows)
+        .with("seconds", sampled.seconds)
+        .with("session_s", sampled.session_s)
+        .with("ss_distinct", sampled.ss_distinct)
+}
+
 /// The day's quality lines (D-3335), written before its close: a ledger that
 /// will not take them is a failure of the day, which then closes
 /// `incomplete` and is read again, so its lines are written by the next run.
@@ -4907,6 +4941,12 @@ fn write_flags(
         return;
     };
     ledger.set_member_bytes(member_bytes);
+    note_sampled(
+        ledger.kind(),
+        ledger.day(),
+        &ledger.sampled(),
+        quality::Src::Import,
+    );
     let fresh = ledger.lines(whole);
     let news = flags.news(fresh, quality::Src::Import);
     match flags.append(&news) {
@@ -6846,11 +6886,18 @@ fn rescan_flags(
     done: &mut Rescan,
     failures: &mut Vec<Failure>,
 ) -> usize {
+    let sampled = ledger.sampled();
     let fresh = ledger.lines(true);
     let offered = fresh.len();
     let news = flags.news(fresh, quality::Src::Rescan);
     match flags.append(&news) {
         Ok(()) => {
+            note_sampled(
+                ledger.kind(),
+                ledger.day(),
+                &quality::sampled_among(ledger.kind(), ledger.day(), sampled, &news),
+                quality::Src::Rescan,
+            );
             done.flags_lines += news.len();
             done.flags_unchanged += offered - news.len();
             news.len()

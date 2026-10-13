@@ -83,7 +83,7 @@ import { censusOrder, seriesOrder, rungOrder, columnsOrderFault, columnsOrder, m
   noteCensusMeasure, censusMeasureOf } from '../src/lib/store-census-wire.js';
 
 /** Runs the slices at once: the tests are about what is built, not when. */
-const atOnce = async (/** @type {number} */ n, /** @type {(start: number, end: number) => void} */ work, /** @type {AbortSignal} */ signal) => {
+const atOnce = async (/** @type {number} */ n, /** @type {(start: number, end: number) => void} */ work, /** @type {AbortSignal | undefined} */ signal) => {
   signal?.throwIfAborted();
   for (let start = 0; start < n; start += 3) work(start, Math.min(n, start + 3));
 };

@@ -88,7 +88,7 @@
       <b>Options</b> reach <span class="mono">{panel.options.lastDay ?? '—'}</span>{#if panel.archiveTo}
         of an archive ending <span class="mono">{panel.archiveTo}</span>{/if}.
       {#if panel.optionsLeft !== null}
-        {group(panel.optionsLeft)} archive day(s) after it are journalled for the indices and not yet for options.
+        {group(/** @type {number} */ (panel.optionsLeft))} archive day(s) after it are journalled for the indices and not yet for options.
       {/if}
       {#if panel.eta}<span class="extra">{panel.eta.text}.</span>{/if}
     </p>

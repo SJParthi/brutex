@@ -84,6 +84,9 @@
 //!
 //! Measured p50/p99 are in the commit that built this route and go to
 //! `docs/06-limits.md` with WP-99; none is claimed here.
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

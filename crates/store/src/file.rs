@@ -4241,6 +4241,9 @@ fn index_refused(path: &Path, why: &Why) -> StoreError {
 /// path, never per bisection probe — O(1) expected. Held entries are bounded
 /// by the months this process opened times the variants of [`Why`], and a
 /// month that is later indexed simply stops asking.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 static WARNED: OnceLock<Mutex<HashSet<Warned>>> = OnceLock::new();
 
 /// One month named bisecting, and the kind of reason it was named for.
@@ -4954,6 +4957,9 @@ impl DurableBatch {
     /// # Errors
     ///
     /// The host's refusal to measure a sibling, by path.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     pub fn confirm_month(&self, root: &Path, path: StorePath<'_>) -> Result<bool, StoreError> {
         let mut files = Vec::with_capacity(FileKind::ALL.len());
         for kind in FileKind::ALL {

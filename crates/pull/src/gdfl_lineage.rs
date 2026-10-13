@@ -1034,6 +1034,9 @@ pub const CONTRACT_REFUSED: &str = "contract_refused";
 
 /// Whether `why` is a [`RetiredRecord::refusal`] sentence: it starts with
 /// [`CONTRACT_REFUSED`] and a colon. O(1).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn is_contract_refused(why: &str) -> bool {
     why.strip_prefix(CONTRACT_REFUSED)

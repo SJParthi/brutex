@@ -652,6 +652,9 @@ pub fn day_of(ymd: Ymd) -> Result<Day, SettleRefusal> {
 /// The row that settles `underlying`'s `stated` text, if any: an
 /// underlying's own row before the every-underlying one. O(1): two walks
 /// bounded by [`ALIAS_ROWS`].
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn alias_of(underlying: &str, stated: Day) -> Option<&'static ExpiryAlias> {
     let own = ALIASES

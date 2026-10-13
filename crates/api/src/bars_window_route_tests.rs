@@ -1304,7 +1304,7 @@ fn an_index_change_is_refused_across_holes_halts_and_phases() {
 
 /// **A ONE-SECOND BAR'S PHASE IS ITS SECOND'S, NOT ITS MINUTE'S** (DB-B43,
 /// WP-54). The index is halted from 09:21:10 on 2020-03-13 and resumes at
-/// 10:21:01 (`pull::calendar::HALTS`): the 50 flat seconds after 09:21:09 and
+/// 10:21:01 (`pull::calendar::HALTS`): the 50 unchanged-price seconds after 09:21:09 and
 /// the second 10:21:00 were served as `continuous` at minute resolution.
 #[test]
 fn a_one_second_bar_is_labelled_by_its_own_second_in_a_halt() {

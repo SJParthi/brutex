@@ -37,6 +37,9 @@
 //! Every cache here is bounded and is keyed by the file's own stamp (length,
 //! modification time and inode), so a file the import appends to, or a
 //! generation installed beside it, is read again rather than served stale.
+//!
+//! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+//! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
@@ -80,6 +83,9 @@ pub const MAX_SERIES: usize = 1_024;
 /// (freed after the lock is released). No telemetry line is written from
 /// here: this file emits nothing, by the shape test in `bars.rs`, so a turn
 /// is counted in [`Memo::turns`] instead.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 const MEMO_CAP: usize = 65_536;
 
 /// One series, as the census names it: `NSE-FNO-NIFTY-2019-03-28-1150000-CE`,

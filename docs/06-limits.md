@@ -16614,7 +16614,7 @@ measurement of a release build of this package's branch (the report names
 the build each figure is of) over a scratch store
 (`bars/` a real directory of copy-on-write clones; the census is the
 operator's 385,442 GDFL months, nearly all of them `missing` there, which is
-what makes the ledger large): python threads, one connection a client, GET
+what makes the ledger large): a load script's threads, one connection a client, GET
 only, on a machine also running other builds. Latencies are p50 / p99 / max.
 
 - **L-WP81-1. The first findings index after a start is O(ledger), at most
@@ -16796,3 +16796,56 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   key, does not close the whole-day key's member keys: the unfiltered run
   reads those members of that day again, finds every bar present and writes
   none. Bounded by the days such a run was asked for; NOT MEASURED.
+
+## Cost claims of the /db fix round that name no proof — 12 October 2026
+
+Gate 12 asks every doc block that states a cost to name the test, the
+invariant row or the bench that proves it, or to say `UNVERIFIED`. The /db fix
+round and the ingest automation added 41 such blocks that named nothing,
+and no package of the round ran the gate; the round's base passed it. The
+round's full-gate run did not find a test or a bench that measures them, so
+each now says `UNVERIFIED` in its own doc block and is listed here. This is a
+statement of what is not proved, not a measurement: none of these costs was
+timed by the gate run. Two of them are timed by a test that asserts no time
+(`the_operators_older_steps_timed` for `pull::alerts::page`, and
+`the_real_days_are_labelled_and_the_answer_is_timed` for `/dayflags.json`);
+a timing a test prints and does not bound is not a proof, and they stay on
+this list until a bound is asserted.
+
+NOT DONE: a test or a `ratio` bench for each item below. An item leaves this
+list when its doc block names one.
+
+- `crates/api/src/bars.rs`: `rekey_status`
+- `crates/api/src/bars_change.rs`: the module header
+- `crates/api/src/bars_series.rs`: the module header, `MEMO_CAP`
+- `crates/api/src/calendar_build.rs`: the module header
+- `crates/api/src/calendar_record.rs`: `record_code`, `widen_to_record`, `not_widened`
+- `crates/api/src/census.rs`: `held`, `held_keys`
+- `crates/api/src/chain.rs`: the module header
+- `crates/api/src/dayflags.rs`: the module header, `lineage_json`, `sampled_json`
+- `crates/api/src/detail.rs`: `take`
+- `crates/api/src/fault_log.rs`: the module header
+- `crates/api/src/feeds_route.rs`: `feeds_json`, `readiness`, `held_ready`
+- `crates/api/src/logs.rs`: `AccessWindows`
+- `crates/api/src/provenance.rs`: the module header
+- `crates/pull/src/alerts.rs`: the `WINDOW` reader's block, `page`
+- `crates/pull/src/calendar.rs`: `phase_at_second`
+- `crates/pull/src/expiry_alias.rs`: `alias_of`
+- `crates/pull/src/fetch.rs`: `note`
+- `crates/pull/src/gdfl_cm.rs`: `auction`, `session_of`, `landed`
+- `crates/pull/src/gdfl_import_quality.rs`: `halt_window`
+- `crates/pull/src/gdfl_lineage.rs`: `is_contract_refused`
+- `crates/pull/src/gdfl_nfo.rs`: `strike_implausible`
+- `crates/pull/src/http.rs`: `note`
+- `crates/pull/src/request_minutes.rs`: `Cursor`
+- `crates/pull/src/scrub.rs`: `blocks`
+- `crates/pull/src/series_identity.rs`: `count`
+- `crates/pull/src/session.rs`: `with_recorded_window`
+- `crates/store/src/file.rs`: `WARNED`, `confirm_month`
+- `crates/telemetry/src/sink.rs`: `admit`, `audit_read`
+
+Four more blocks the gate read as cost claims only used the word for an
+unchanged price (a halt's seconds, a fixture's bars, an index's run); they
+were reworded and state no cost. The three `crates/api/benches/ratio/`
+module headers now name the bench that runs them,
+`crates/api/benches/ratio.rs`.

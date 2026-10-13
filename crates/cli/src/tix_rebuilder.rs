@@ -454,5 +454,5 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 }
 
 #[cfg(test)]
-#[path = "tix_rebuild_tests.rs"]
+#[path = "tix_rebuilder_tests.rs"]
 mod tests;

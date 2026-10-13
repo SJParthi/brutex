@@ -164,6 +164,9 @@ fn auction_day(epoch_day: i64) -> bool {
 ///
 /// [`pull::calendar::exchange_kind_of`], one walk of the three-entry halt
 /// table and one of the fifteen-entry special-session table: O(1).
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn record_code(epoch_day: i64) -> Option<u8> {
     match pull::calendar::exchange_kind_of(epoch_day) {
@@ -873,6 +876,9 @@ pub fn answer(
 ///
 /// One parse of the kept answer and one pass over the days added: at most the
 /// record's 3,199 days. O(1) per request in the store's size.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn widen_to_record(body: &str, rung: Option<Timeframe>) -> Option<String> {
     let mut value: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -975,6 +981,9 @@ pub fn widen_to_record(body: &str, rung: Option<Timeframe>) -> Option<String> {
 /// # Cost
 ///
 /// One parse of the kept answer: O(1) per request in the store's size.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
 #[must_use]
 pub fn not_widened(body: &str) -> Option<String> {
     let mut value: serde_json::Value = serde_json::from_str(body).ok()?;

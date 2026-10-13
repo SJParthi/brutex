@@ -739,22 +739,22 @@ pub(crate) mod tests {
     /// The journal's shapes as the importer writes them, before and after
     /// D-3317, in one file. The numbers are invented.
     pub(crate) const MIXED: &str = "\
-begin indices 2022-03-04 *
-done indices 2022-03-04 * files=2 seconds=44891 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-13 *
-done options 2019-11-13 * definition=2 files=11 seconds=222 failures=0 late=0 late_unresolved=0 max_back_s=0
-begin options 2019-11-14 *
-incomplete options 2019-11-14 * definition=2 files=12 seconds=333 failures=1 late=0 late_unresolved=0 max_back_s=0
-run 1791300000 source=zip archive=/tmp/a%20b.zip archive_bytes=7 commit=abc started=1791300000 archive_cd_blake3=00
-begin indices 2022-03-07 *
-refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000
-begin options 2019-11-15 *
-incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000
-begin options 2018-11-06 *
-done options 2018-11-06 * definition=2 files=5 seconds=55 failures=1 late=0 late_unresolved=0 max_back_s=0 vendor_refused=1 reason=price_refused run=1791300000
-recounted options 2019-11-14 * definition=2 months=3 run=1791300001
-begin options 2019-11-18 *
-";
+        begin indices 2022-03-04 *\n\
+        done indices 2022-03-04 * files=2 seconds=44891 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2019-11-13 *\n\
+        done options 2019-11-13 * definition=2 files=11 seconds=222 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+        begin options 2019-11-14 *\n\
+        incomplete options 2019-11-14 * definition=2 files=12 seconds=333 failures=1 late=0 late_unresolved=0 max_back_s=0\n\
+        run 1791300000 source=zip archive=/tmp/a%20b.zip archive_bytes=7 commit=abc started=1791300000 archive_cd_blake3=00\n\
+        begin indices 2022-03-07 *\n\
+        refused indices 2022-03-07 * definition=2 stage=vendor reason=price_refused failures=2 run=1791300000\n\
+        begin options 2019-11-15 *\n\
+        incomplete options 2019-11-15 * definition=2 files=9 seconds=99 failures=1 late=0 late_unresolved=0 max_back_s=0 stage=census reason=too_many_entries run=1791300000\n\
+        begin options 2018-11-06 *\n\
+        done options 2018-11-06 * definition=2 files=5 seconds=55 failures=1 late=0 late_unresolved=0 max_back_s=0 vendor_refused=1 reason=price_refused run=1791300000\n\
+        recounted options 2019-11-14 * definition=2 months=3 run=1791300001\n\
+        begin options 2019-11-18 *\n\
+    ";
 
     /// **EVERY LINE SHAPE D-3317 FIXES, AND THE OLDER ONES, READ BY NAME.**
     /// The last closing line of a key wins, as the importer's loader rules; a

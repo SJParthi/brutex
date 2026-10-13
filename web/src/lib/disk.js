@@ -26,7 +26,7 @@ export function bytesText(bytes) {
 export function diskSummary(body) {
   const fs = body?.filesystem ?? {};
   const feeds = Array.isArray(body?.feeds) ? body.feeds : [];
-  const bars = feeds.reduce((sum, /** @type {any} */ feed) =>
+  const bars = feeds.reduce((/** @type {number} */ sum, /** @type {any} */ feed) =>
     sum + (typeof feed?.bar_bytes_lower_bound === 'number' ? feed.bar_bytes_lower_bound : 0), 0);
   const measured = typeof fs.free_bytes === 'number';
   const recorded = body?.backup?.recorded === true;

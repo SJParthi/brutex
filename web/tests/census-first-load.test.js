@@ -21,22 +21,22 @@ test('underlyings merge in the order the server states, not one this page keeps'
   const turned = { exchanges: ['BSE', 'NSE'], segments: ORDER.segments };
   const base = facets({ order: turned, underlyings: [under('BSE', 'SENSEX'), under('NSE', 'NIFTY')] });
   const merged = mergeFacets(base, facets({ order: turned, generation: 6, underlyings: [under('NSE', 'BANKNIFTY'), under('BSE', 'BANKEX')] }));
-  assert.deepEqual(merged.underlyings.map((u) => `${u.exchange}-${u.symbol}`), ['BSE-BANKEX', 'BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY']);
+  assert.deepEqual(merged.underlyings.map((/** @type {any} */ u) => `${u.exchange}-${u.symbol}`), ['BSE-BANKEX', 'BSE-SENSEX', 'NSE-BANKNIFTY', 'NSE-NIFTY']);
   assert.equal('orderWhy' in merged, false, 'nothing to say when every exchange is named');
   // AN EXCHANGE NO LIST IN THIS REPOSITORY NAMES, stated by the server: placed where it says.
   const wider = { exchanges: ['NSE', 'MCX', 'BSE'], segments: ORDER.segments };
   const withMcx = mergeFacets(facets({ order: wider, underlyings: [under('NSE', 'NIFTY'), under('BSE', 'SENSEX')] }),
     facets({ order: wider, generation: 6, underlyings: [under('MCX', 'COMDEX')] }));
-  assert.deepEqual(withMcx.underlyings.map((u) => u.exchange), ['NSE', 'MCX', 'BSE']);
+  assert.deepEqual(withMcx.underlyings.map((/** @type {any} */ u) => u.exchange), ['NSE', 'MCX', 'BSE']);
   // NOT NAMED by the order: placed after the named ones, and said.
   const unnamed = mergeFacets(facets({ underlyings: [under('NSE', 'NIFTY'), under('BSE', 'SENSEX')] }), facets({ generation: 6, underlyings: [under('MCX', 'COMDEX')] }));
-  assert.deepEqual(unnamed.underlyings.map((u) => u.exchange), ['NSE', 'BSE', 'MCX']);
+  assert.deepEqual(unnamed.underlyings.map((/** @type {any} */ u) => u.exchange), ['NSE', 'BSE', 'MCX']);
   assert.equal(unnamed.orderWhy, 'the order this API states does not name MCX');
   // AN API OLDER THAN THE STATEMENT: by text, and said.
   const { order: _gone, ...old } = facets({ underlyings: [under('NSE', 'NIFTY')] });
   const { order: _gone2, ...oldDelta } = facets({ generation: 6, underlyings: [under('BSE', 'SENSEX')] });
   const older = mergeFacets(old, oldDelta);
-  assert.deepEqual(older.underlyings.map((u) => u.exchange), ['BSE', 'NSE']);
+  assert.deepEqual(older.underlyings.map((/** @type {any} */ u) => u.exchange), ['BSE', 'NSE']);
   assert.match(older.orderWhy, /states no order/);
   assert.deepEqual(facetsOrder({ order: { exchanges: ['NSE', 'NSE'], segments: [] } }),
     { exchanges: [], segments: [], why: 'the order this API states is not two lists of distinct names' });

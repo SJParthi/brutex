@@ -1750,7 +1750,7 @@ jobs:
           cli/src/index_stop_tests.rs:println!:1
           cli/src/operation_audit.rs:eprintln!:2
           pull/src/cash_auction.rs:eprintln!:3
-          pull/src/cash_session_cache.rs:eprintln!:2"
+          pull/src/cash_session_cache.rs:eprintln!:3"
           # TWO MORE, one kind (D-1933): the stderr half of a degraded decode,
           # each written beside a `telemetry::emit` of the same counts.
           # `pull/src/csv.rs` names unreadable and negative volume and open
@@ -1766,6 +1766,35 @@ jobs:
           # reaches them.
           declared="$declared pull/src/gdfl_nfo_attack_tests.rs:eprintln!:6
           pull/src/gdfl_seconds_attack_tests.rs:eprintln!:2"
+          # SEVEN MORE, the same kind as D-2816: test-only measurements and
+          # counts, declared by the /db fix round's full-gate run on 12 Oct
+          # 2026 because the packages that added them ran no CI gate. Every
+          # one is inside a `#[cfg(test)]` module or a `#![cfg(test)]` file, so
+          # no production path reaches it and nothing is wrong when it prints.
+          #
+          #   api/src/dayflags.rs println! 2: the held/sampled/halt census of
+          #     the day ledger and the n=200 p50/p99/max of `/dayflags.json`
+          #     (WP-11c, D-4928).
+          #   pull/src/alerts_tests.rs println! 5: the p50/p99/max of the alert
+          #     queue's page, older and put at 102,400 records (IA-11a).
+          #   pull/src/calendar.rs eprintln! 1: the p50/p99 of a calendar
+          #     lookup, printed beside the assert that bounds the p99.
+          #   pull/src/cash_session_cache.rs eprintln! 2 -> 3 (the line above
+          #     this block): the third is in the offline test of the 25 dated
+          #     masters and names the calendar refusal that test asserts.
+          #   pull/src/gdfl_lineage_tests.rs println! 5, gdfl_wp12e_tests.rs
+          #     println! 3: the rename-lineage counts and the p50/p99/max of
+          #     detect, `LineageRun::load`, `LineageRun::day` and the split
+          #     probe.
+          #   pull/src/gdfl_nfo_tests.rs eprintln! 12: the decoded, stored,
+          #     re-keyed, refused and resettled counts of the GDFL NFO decode
+          #     tests.
+          declared="$declared api/src/dayflags.rs:println!:2
+          pull/src/alerts_tests.rs:println!:5
+          pull/src/calendar.rs:eprintln!:1
+          pull/src/gdfl_lineage_tests.rs:println!:5
+          pull/src/gdfl_nfo_tests.rs:eprintln!:12
+          pull/src/gdfl_wp12e_tests.rs:println!:3"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #

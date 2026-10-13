@@ -202,6 +202,9 @@ impl Pool {
     /// deadline by more than one tick of the pool's clock, so nothing waits
     /// unboundedly. It needs no timer of the runtime it is polled on
     /// ([`Pool::clock`]).
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
     async fn take(&'static self) -> Option<Permit> {
         if let Some(permit) = self.try_take() {
             return Some(permit);
