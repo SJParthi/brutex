@@ -1748,13 +1748,13 @@ mod guard {
     /// seconds and duplicate stamps on the unmeasured days, and with measured
     /// days either side whose own coverage faults must still be named.
     ///
-    /// The days are past the SOURCED calendar's last day (2026-10-04) and
+    /// The days are past the SOURCED calendar's last day (2026-12-31) and
     /// before its first (2018-01-01): since D-3346 the ingest calendar answers
     /// the D-2805 spans, so 2026-09-07..=11 and 2019-11-29, which this used,
     /// are regular sessions to it now.
     #[test]
     fn an_unmeasured_day_is_one_diagnostic_and_not_one_per_bucket() {
-        let after: Vec<Day> = (5..=9).map(|d| Day::new(2026, 10, d).unwrap()).collect();
+        let after: Vec<Day> = (4..=8).map(|d| Day::new(2027, 1, d).unwrap()).collect();
         for day in &after {
             assert_eq!(
                 Runtime::default().kind_of(i64::from(day.days_from_epoch())),
@@ -1837,10 +1837,10 @@ mod guard {
     /// o1api-44, D-1201: the skip is for the unmeasured day only. A whole
     /// session on 2026-09-04, the calendar's last day, still completes, and a
     /// hole in it is still named bucket by bucket, ahead of the next day's one
-    /// sentence. The next day is 2026-10-05, past the sourced span (D-3346).
+    /// sentence. The next day is 2027-01-04, past the sourced span (D-3346).
     #[test]
     fn a_measured_day_beside_an_unmeasured_one_keeps_its_own_lines() {
-        let after = [Day::new(2026, 10, 5).unwrap()];
+        let after = [Day::new(2027, 1, 4).unwrap()];
         let last = Day::new(2026, 9, 4).unwrap();
         assert!(matches!(
             Runtime::default().kind_of(i64::from(last.days_from_epoch())),
@@ -2107,7 +2107,7 @@ mod guard {
         );
         assert!(line.ends_with("; historical gap refill requires a versioned store repair"));
 
-        let after: Vec<Day> = (5..=9).map(|d| Day::new(2026, 10, d).unwrap()).collect();
+        let after: Vec<Day> = (4..=8).map(|d| Day::new(2027, 1, d).unwrap()).collect();
         let mut bars = Vec::new();
         for day in &after {
             bars.extend(at_minutes(*day, 555..930));
@@ -2126,7 +2126,7 @@ mod guard {
         assert_eq!(derived.diagnostics.len(), 1, "{:?}", derived.diagnostics);
         assert!(
             derived.diagnostics[0].starts_with(
-                "days outside the calendar's authority: 375 bucket(s) withheld on 5 day(s), 2026-10-05..2026-10-09"
+                "days outside the calendar's authority: 375 bucket(s) withheld on 5 day(s), 2027-01-04..2027-01-08"
             ),
             "{}",
             derived.diagnostics[0]

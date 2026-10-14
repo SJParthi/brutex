@@ -1124,7 +1124,18 @@ Each circular was fetched from `nsearchives.nseindia.com` and read on
 | [NSE/CMTR/39612](https://nsearchives.nseindia.com/content/circulars/CMTR39612.pdf), Circular Ref. 115/2018 | 7 Dec 2018 | calendar year 2019 | 4 Mar, 21 Mar, 17 Apr, 19 Apr, 1 May, 5 Jun, 12 Aug, 15 Aug, 2 Sep, 10 Sep, 2 Oct, 8 Oct, 28 Oct, 12 Nov, 25 Dec; Muhurat on Sunday 27 Oct |
 | [NSE/CMTR/40536](https://nsearchives.nseindia.com/content/circulars/CMTR40536.pdf), Circular Ref. 30/2019 | 26 Mar 2019 | partial modification of 39612 | 29 Apr 2019, Parliamentary Elections in Mumbai |
 | [NSE/MSD/42319](https://nsearchives.nseindia.com/content/circulars/MSD42319.pdf), Circular Ref. 53/2019 | 7 Oct 2019 | CM, FO and CD segments | 21 Oct 2019, Assembly Elections in Maharashtra |
-| [NSE/CMTR/71775](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf), Circular Ref. 172/2025 | 12 Dec 2025 | calendar year 2026 | 14 Sep (Ganesh Chaturthi), 2 Oct (Mahatma Gandhi Jayanti) in 2026-09-05..2026-10-04 |
+| [NSE/CMTR/71775](https://nsearchives.nseindia.com/content/circulars/CMTR71775.pdf), Circular Ref. 172/2025 | 12 Dec 2025 | calendar year 2026 | 14 Sep (Ganesh Chaturthi), 2 Oct (Mahatma Gandhi Jayanti), 20 Oct (Dussehra), 10 Nov (Diwali-Balipratipada), 24 Nov (Guru Nanak Jayanti), 25 Dec (Christmas) in 2026-09-05..2026-12-31; Muhurat trading on Sunday 8 Nov 2026, timings to be notified subsequently |
+
+The 2026 row was widened from 2026-10-04 to 2026-12-31 on 2026-10-12 (audit
+findings DB-B25 and DB-B41: the calendar of record had ended while this
+circular ran on, and every pull of a newer day failed). Its four holidays
+after 4 October and its Muhurat note were read from the same circular on
+2026-10-10 by the audit's two readers
+(`state/blindspots/time-calendar-edges-r1.md` in the operator's work folder);
+the package that widened the row did not fetch the circular again. No vendor
+day zip corroborates those four days: they had not happened when the row was
+widened. The Muhurat's timings were not notified in that circular, so no
+window is recorded for 2026-11-08.
 
 Cross-check against the vendor's GDFL capital-market day zips (names of the
 outer archive, read with `unzip -Z1`): over 2018-09-03..2019-12-01 every
