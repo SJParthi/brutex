@@ -1030,14 +1030,11 @@ impl NfoSource for NfoTickStore {
     type Locator = StoreLocator;
 
     fn day(&self, day: Day) -> Result<Option<NfoDay<StoreLocator>>, CmRefusal> {
-        let unavailable =
-            |why: std::io::Error| CmRefusal::TickStoreUnavailable { kind: why.kind() };
-        let file = match std::fs::File::open(self.day_path(day)) {
-            Ok(file) => file,
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(why) => return Err(unavailable(why)),
+        // THE STORE'S ONE READING DOOR (R3-16, FM-046): a link, a pipe or a
+        // device at a day's name is refused by name, never read as absent.
+        let Some((file, len)) = crate::gdfl_tickstore::open_day(&self.day_path(day))? else {
+            return Ok(None);
         };
-        let len = file.metadata().map_err(unavailable)?.len();
         let entries = read_index(&file, len)?;
         let file = Arc::new(file);
         let mut listing = NfoDay::new(day, entries.len());
