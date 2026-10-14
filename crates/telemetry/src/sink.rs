@@ -2786,7 +2786,28 @@ struct Audit {
     /// aside. `None` when the thread could not be started, which
     /// [`AuditHealth::last_error`] names; the entries then wait for the next
     /// start. Dropping the stream closes the channel and ends the thread.
-    reaper: Option<std::sync::mpsc::Sender<PathBuf>>,
+    reaper: Option<std::sync::mpsc::Sender<Retired>>,
+}
+
+/// One retired index generation handed to the reaper: its path, and the
+/// identity of the `audit.idx.gone/` it was handed over in (R3-16, RA-294).
+#[derive(Debug)]
+struct Retired {
+    /// `audit.idx.gone/<name>`.
+    path: PathBuf,
+    /// The folder's own identity when the entry was handed over.
+    gone: Held,
+}
+
+/// A directory's identity, `(device, inode)`, read without following a link.
+/// A folder renamed away and another (or a link) put in its place has
+/// another, so the reaper never deletes through a name that changed under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    /// `st_dev`.
+    dev: u64,
+    /// `st_ino`.
+    ino: u64,
 }
 
 /// What a stream's reaper has done, counted where both the stream (under the
@@ -2820,7 +2841,8 @@ impl Reap {
 }
 
 /// Whether `gone` (a sink's `audit.idx.gone`) is there, asked WITHOUT
-/// following a link: `Ok(false)` when nothing has that name.
+/// following a link, and which directory it is: `Ok(None)` when nothing has
+/// that name.
 ///
 /// # Errors
 ///
@@ -2828,17 +2850,49 @@ impl Reap {
 /// link, even one to a directory, or a file), or cannot be asked about: the
 /// sink renames nothing into it and deletes nothing from it. The words are
 /// the reason alone; the caller says what it could not do, and to what.
-fn audit_gone_is_ours(gone: &Path) -> Result<bool, String> {
+fn audit_gone_is_ours(gone: &Path) -> Result<Option<Held>, String> {
+    use std::os::unix::fs::MetadataExt as _;
     match gone.symlink_metadata() {
-        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(meta) if meta.is_dir() => Ok(Some(Held {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })),
         Ok(_) => Err(
             "it is not a directory (a symbolic link or a file is in its place), so no retired \
              index generation is renamed into it and nothing in it is deleted; remove it"
                 .to_owned(),
         ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Why the reaper may not delete `job` now, or `None` when the folder it was
+/// handed over in is still that folder (R3-16, RA-294).
+///
+/// The start's look ([`audit_gone_is_ours`]) refused a link planted BEFORE
+/// the listing; a folder renamed away and a link (or another folder) put in
+/// its place AFTER the hand-over was still deleted through, because a
+/// delete resolves the folder's name again. One `lstat` of the folder per
+/// delete, compared with the identity read at the hand-over. A swap inside
+/// the microseconds between this look and the delete's own open is not
+/// closed: that needs a delete relative to a held directory handle, which
+/// `std` offers only inside `remove_dir_all` and not to a caller
+/// (`docs/06-limits.md`, named by R3-16).
+fn changed_under(job: &Retired) -> Option<String> {
+    let folder = job.path.parent().unwrap_or_else(|| Path::new(""));
+    let now = match audit_gone_is_ours(folder) {
+        Ok(Some(now)) if now == job.gone => return None,
+        Ok(Some(_)) => "another directory has its name now".to_owned(),
+        Ok(None) => "nothing has its name now".to_owned(),
+        Err(why) => why,
+    };
+    Some(format!(
+        "{}: is no longer the folder {} was retired into ({now}); nothing in it is deleted, \
+         and the generation stays for the next start",
+        folder.display(),
+        job.path.display()
+    ))
 }
 
 /// The reaper: deletes each retired index generation it is sent, until the
@@ -2851,10 +2905,16 @@ fn audit_gone_is_ours(gone: &Path) -> Result<bool, String> {
 /// counted with its words and the entry is left where it is for the next
 /// start; it is not tried again in this process, so a tree that cannot be
 /// deleted costs one attempt, never a loop.
-fn reaper(jobs: &std::sync::mpsc::Receiver<PathBuf>, reap: &Reap) {
-    while let Ok(path) = jobs.recv() {
+fn reaper(jobs: &std::sync::mpsc::Receiver<Retired>, reap: &Reap) {
+    while let Ok(job) = jobs.recv() {
         #[cfg(test)]
         let _released_by_the_test = reap.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        // NEVER THROUGH A FOLDER THAT CHANGED UNDER IT (R3-16, RA-294).
+        if let Some(why) = changed_under(&job) {
+            reap.fail(why);
+            continue;
+        }
+        let path = job.path;
         match std::fs::remove_dir_all(&path) {
             Ok(()) => {}
             // GONE ALREADY is done: nothing of it waits.
@@ -2952,11 +3012,11 @@ impl Audit {
     fn start_reaper_with(
         &mut self,
         spawn: impl FnOnce(
-            std::sync::mpsc::Receiver<PathBuf>,
+            std::sync::mpsc::Receiver<Retired>,
             std::sync::Arc<Reap>,
         ) -> std::io::Result<()>,
     ) -> Result<(), String> {
-        let (send, jobs) = std::sync::mpsc::channel::<PathBuf>();
+        let (send, jobs) = std::sync::mpsc::channel::<Retired>();
         let started = spawn(jobs, std::sync::Arc::clone(&self.reap)).map_err(|e| {
             format!(
                 "{}: cannot start the {REAPER_THREAD} thread — {e}; retired index generations \
@@ -3006,18 +3066,18 @@ impl Audit {
     /// [`AuditHealth::last_error`] when the writer has no error of its own.
     fn hand_over_what_waits(&mut self) -> Result<(), String> {
         let gone = self.dir.join(AUDIT_GONE_DIR);
-        let there = audit_gone_is_ours(&gone)
-            .map_err(|why| format!("{}: cannot list — {why}", gone.display()))?;
-        if !there {
+        let Some(held) = audit_gone_is_ours(&gone)
+            .map_err(|why| format!("{}: cannot list — {why}", gone.display()))?
+        else {
             return Ok(());
-        }
+        };
         let cannot_list = |e: std::io::Error| format!("{}: cannot list — {e}", gone.display());
         let mut strays = 0u64;
         let mut first_stray = None;
         for entry in std::fs::read_dir(&gone).map_err(cannot_list)? {
             let entry = entry.map_err(cannot_list)?;
             if entry.file_type().map_err(cannot_list)?.is_dir() {
-                self.hand_over(entry.path());
+                self.hand_over(entry.path(), held);
             } else {
                 strays = strays.saturating_add(1);
                 let _kept = first_stray.get_or_insert_with(|| entry.path());
@@ -3044,12 +3104,12 @@ impl Audit {
     /// Counts one entry of `audit.idx.gone/` as waiting and sends it to the
     /// reaper: one channel send, which never blocks. With no reaper the entry
     /// stays counted and waits for the next start.
-    fn hand_over(&self, path: PathBuf) {
+    fn hand_over(&self, path: PathBuf, gone: Held) {
         let _earlier = self.reap.waiting.fetch_add(1, Ordering::Relaxed);
         // WITH NO THREAD (it could not be started) nothing is deleted on this
         // path instead: the entry stays, and the health counts it.
         if let Some(reaper) = self.reaper.as_ref() {
-            let _waits_for_the_next_start_if_unsent = reaper.send(path);
+            let _waits_for_the_next_start_if_unsent = reaper.send(Retired { path, gone });
         }
     }
 
@@ -3078,13 +3138,23 @@ impl Audit {
             .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?;
         std::fs::create_dir_all(&aside)
             .map_err(|e| format!("{}: cannot create — {e}", aside.display()))?;
+        // WHICH FOLDER the generation is renamed into, asked again now that
+        // it is there: the reaper deletes only inside this one (RA-294).
+        let held = audit_gone_is_ours(&aside)
+            .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?
+            .ok_or_else(|| {
+                format!(
+                    "{}: cannot create — nothing has the name after it was made",
+                    aside.display()
+                )
+            })?;
         let stamped = format!("{gone}.{}.{}", self.health.rotations, now_millis());
         let mut refused = None;
         for name in [gone.to_string(), stamped] {
             let to = aside.join(name);
             match std::fs::rename(&generation, &to) {
                 Ok(()) => {
-                    self.hand_over(to);
+                    self.hand_over(to, held);
                     return Ok(());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -7129,6 +7199,108 @@ mod tests {
             assert!(sink.emit(&Event::error("x", "refused")).is_written());
         }
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINK AT THE LOGS' GONE FOLDER IS REFUSED, AND NOTHING UNDER IT IS
+    /// TOUCHED** (R3-16, RA-294), whenever the link appears. One planted
+    /// before the start is the next test's. Here `audit.idx.gone` is SWAPPED
+    /// after a generation was handed to the reaper and before it deletes:
+    /// the real folder renamed away and, in its place, a link to another
+    /// directory or another directory, each holding an entry of the
+    /// generation's name. The delete resolved the name again, so it emptied
+    /// whatever was there now; it is refused by name instead, the other
+    /// directory and the real generation keep every file, and once the real
+    /// folder is back the next start deletes the generation.
+    #[test]
+    fn a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched() {
+        let _gate = crate::tests::no_fork_in_flight();
+        for swap in ["link", "folder"] {
+            let dir = scratch(&format!("audit-reap-swap-{swap}"));
+            let elsewhere = scratch(&format!("audit-reap-swap-{swap}-elsewhere"));
+            fifteen_rolls_old(&dir, 2);
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            sink.inner
+                .lock()
+                .unwrap()
+                .audit
+                .as_mut()
+                .expect("a stream")
+                .max_file_bytes = 1;
+            let reap = reap_of(&sink);
+            let held = reap.gate.lock().unwrap();
+            for i in 0..4u32 {
+                if !gone_entries(&dir).is_empty() {
+                    break;
+                }
+                assert!(
+                    sink.emit(&Event::error("x", "refused").with("i", i))
+                        .is_written()
+                );
+            }
+            let names = gone_entries(&dir);
+            assert_eq!(names.len(), 1, "one generation handed over: {names:?}");
+            let name = names[0].clone();
+
+            // THE SWAP, while the reaper waits.
+            let gone = dir.join(super::AUDIT_GONE_DIR);
+            let moved_away = dir.join("gone-moved-away");
+            std::fs::rename(&gone, &moved_away).expect("renamed away");
+            let theirs = if swap == "link" {
+                std::os::unix::fs::symlink(&elsewhere, &gone).expect("a link");
+                elsewhere.join(&name)
+            } else {
+                gone.join(&name)
+            };
+            std::fs::create_dir_all(&theirs).expect("a directory");
+            std::fs::write(theirs.join("someone-elses"), b"not this sink's").expect("a file");
+            drop(held);
+
+            let health = reaped(&sink);
+            assert_eq!(
+                (health.reap_failures, health.reaped),
+                (1, 0),
+                "{swap}: {health:?}"
+            );
+            let said = health.reap_error.clone().expect("the refusal");
+            assert!(said.contains("is no longer the folder"), "{said}");
+            assert!(said.contains(super::AUDIT_GONE_DIR), "{said}");
+            assert!(said.contains("nothing in it is deleted"), "{said}");
+            assert_eq!(
+                std::fs::read(theirs.join("someone-elses")).expect("still there"),
+                b"not this sink's",
+                "{swap}: nothing under the new name was deleted"
+            );
+            assert!(
+                files_under(&moved_away.join(&name)) > 0,
+                "{swap}: the real generation is whole, left for the next start"
+            );
+            drop(sink);
+
+            // THE REAL FOLDER BACK: the next start deletes the generation.
+            if swap == "link" {
+                std::fs::remove_file(&gone).expect("the test's link");
+            } else {
+                std::fs::remove_dir_all(&gone).expect("the test's folder");
+            }
+            std::fs::rename(&moved_away, &gone).expect("put back");
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let health = reaped(&sink);
+            assert_eq!(
+                (health.reap_failures, health.reaped),
+                (0, 1),
+                "{swap}: {health:?}"
+            );
+            assert!(gone_entries(&dir).is_empty(), "{swap}");
+            if swap == "link" {
+                assert_eq!(
+                    std::fs::read(theirs.join("someone-elses")).expect("still there"),
+                    b"not this sink's"
+                );
+            }
+            drop(sink);
+            let _ignored = std::fs::remove_dir_all(&dir);
+            let _ignored = std::fs::remove_dir_all(&elsewhere);
+        }
     }
 
     /// **A LINK NAMED `audit.idx.gone` IS REFUSED, AND NOTHING BEHIND IT IS

@@ -152,6 +152,108 @@ fn a_root_variable_that_is_unset_or_empty_is_named_never_defaulted() {
     std::fs::remove_dir_all(store).unwrap();
 }
 
+/// **A WRITING VERB REFUSES A STORE WHOSE BARS FOLDER IS A LINK** (R3-16,
+/// RA-298, FM-198), for the import, which takes its root without
+/// `store_write::root_with`: a test shadow's `bars` linked to the real
+/// store's is refused `linked_store_root` before a day is read, and nothing
+/// is written, neither in the shadow nor through the link.
+#[test]
+fn gdfl_import_refuses_a_store_whose_bars_folder_is_a_link() {
+    let root = scratch("linked-bars");
+    let real = root.join("real");
+    std::fs::create_dir_all(real.join("bars")).unwrap();
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    if std::fs::symlink_metadata(store.join("bars")).is_err() {
+        std::os::unix::fs::symlink(real.join("bars"), store.join("bars")).unwrap();
+    }
+    std::fs::create_dir_all(root.join("ts")).unwrap();
+    let env = env_of(&[(TICKSTORE_VAR, root.join("ts"))]);
+    let mut out = String::new();
+    let code = command_with(
+        &["indices", "tickstore", "2024-04-01", "2024-04-01"],
+        &env,
+        &|| Ok(store.clone()),
+        &mut out,
+    );
+    assert_eq!(code, FAILED, "{out}");
+    assert!(out.contains("linked_store_root"), "{out}");
+    assert!(
+        !pull::gdfl_import::journal_path(&store).exists(),
+        "nothing was written"
+    );
+    assert_eq!(
+        std::fs::read_dir(real.join("bars")).unwrap().count(),
+        0,
+        "nothing was written through the link"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// **FM-046: A DANGLING DAY-FILE LINK ENDS THE RUN FAILED, NEVER A DAY NOT
+/// HELD** (R3-16), end to end through the verb. The tick store's day reader
+/// opened with `File::open`, so a dangling link at a day's name (a year moved
+/// to a drive that is unplugged) was `NotFound`, the day read as absent, and
+/// the run closed `days not in source` with exit 0. Through the store's one
+/// reading door it is refused `tick_store_malformed` naming the link, the
+/// run exits FAILED, and the day is not reported as one the source does not
+/// hold; the NIFTY options reader is refused the same way. A day with no
+/// name at all is still "not in source", exit 0.
+#[test]
+fn a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held() {
+    let root = scratch("dangling-day");
+    let store = root.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let ts = root.join("ts");
+    let day = pull::session::Day::new(2024, 4, 1).unwrap();
+    let tick_store = pull::gdfl_tickstore::TickStore::new(&ts);
+    let options = pull::gdfl_nfo::NfoTickStore::new(&ts);
+    for (kind, at) in [
+        (
+            "indices",
+            tick_store.day_path(pull::gdfl_cm::CmKind::Indices, day),
+        ),
+        ("options", options.day_path(day)),
+    ] {
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        if std::fs::symlink_metadata(&at).is_err() {
+            std::os::unix::fs::symlink(root.join("an-unplugged-drive"), &at).unwrap();
+        }
+        let env = env_of(&[(TICKSTORE_VAR, ts.clone())]);
+        let mut out = String::new();
+        let code = command_with(
+            &[kind, "tickstore", "2024-04-01", "2024-04-01", "NIFTY"],
+            &env,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        assert_eq!(code, FAILED, "{kind}: {out}");
+        assert!(out.contains("symbolic link"), "{kind}: {out}");
+        assert!(
+            !out.contains("days not in source  1 2024-04-01"),
+            "{kind}: a dangling link is not a day the source does not hold: {out}"
+        );
+        assert!(
+            !root.join("an-unplugged-drive").exists(),
+            "{kind}: nothing was made through the link"
+        );
+        std::fs::remove_file(&at).unwrap();
+        let mut out = String::new();
+        let code = command_with(
+            &[kind, "tickstore", "2024-04-01", "2024-04-01", "NIFTY"],
+            &env,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        assert_eq!(code, OK, "{kind}: {out}");
+        assert!(
+            out.contains("days not in source  1 2024-04-01"),
+            "{kind}: {out}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn an_empty_source_reports_every_day_it_does_not_hold() {
     let root = scratch("empty");
