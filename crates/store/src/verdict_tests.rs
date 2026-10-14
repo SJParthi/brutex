@@ -395,3 +395,132 @@ fn a_write_the_host_refuses_leaves_no_temporary() {
     let now = reader.lookup(&series, day(), &key).unwrap();
     assert_eq!(now.answer.unwrap().code(), Some(Code::ValueMismatch));
 }
+
+/// A real FIFO at `at`, made by `mkfifo` (test-only, as `tests/fifo.rs`).
+fn mkfifo(at: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(at)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo made {}", at.display());
+}
+
+/// What `ask` answers on its own thread, with `root` as the series root;
+/// a call still waiting after ten seconds is released by opening `pipe`'s
+/// other end, and the test fails naming it.
+fn within<T: Send + 'static>(
+    root: &Path,
+    pipe: &Path,
+    ask: impl FnOnce(&Series<'_>) -> T + Send + 'static,
+) -> T {
+    let root = root.to_path_buf();
+    let (send, answer) = std::sync::mpsc::channel();
+    let _thread = std::thread::spawn(move || {
+        let series = Series {
+            root: &root,
+            feed: Feed::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        send.send(ask(&series))
+    });
+    let Ok(answered) = answer.recv_timeout(std::time::Duration::from_secs(10)) else {
+        let _release = fs::OpenOptions::new().write(true).open(pipe);
+        panic!("a verdict call waited on the pipe at {}", pipe.display());
+    };
+    answered
+}
+
+/// **A PIPE, A DEVICE OR A LINK AT A VERDICT FILE'S NAME IS REFUSED BY NAME,
+/// AND NOTHING WAITS ON IT** (R3-16, RA-317; verify-IA-5-r2 follow-up 1).
+/// The reader opened the year index and the day image with `O_NOFOLLOW`
+/// alone, so a pipe planted at either name held `Reader::lookup` for ever.
+/// One table over the three names a commit and a lookup open (the year
+/// index, the image, the commit lock) and the kinds a name can hold that is
+/// not a regular file: each is refused by what it is, a link with its own
+/// word, within the wait, and once the real file is back the same reader
+/// answers again.
+#[test]
+fn a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-P").unwrap();
+    let done = commit(
+        &series,
+        &generation(31, vec![entry("NSE-FNO-ZZTEST-P", Code::Match)]),
+    )
+    .unwrap();
+    let names = [
+        ("index", series.year_index(2031)),
+        ("image", done.path.clone()),
+        ("lock", series.lock_path(2031)),
+    ];
+    for (what, name) in names {
+        let aside = name.with_extension("aside");
+        fs::rename(&name, &aside).unwrap();
+        for (kind, word) in [
+            ("pipe", "not_regular"),
+            ("directory", "not_regular"),
+            ("link", "symlinked"),
+            ("device", "not_regular"),
+        ] {
+            match kind {
+                "pipe" => mkfifo(&name),
+                "directory" => fs::create_dir(&name).unwrap(),
+                "link" => std::os::unix::fs::symlink(&aside, &name).unwrap(),
+                _ => std::os::unix::fs::symlink("/dev/null", &name).unwrap(),
+            }
+            // A lookup opens the index and the image, never the lock; a
+            // commit opens the lock and the index, and writes a NEW image,
+            // so it is not asked at the image's name.
+            let mut refused: Vec<VerdictError> = Vec::new();
+            if what != "lock" {
+                let lookup_key = key.clone();
+                let looked = within(&root.0, &name, move |series| {
+                    Reader::new().lookup(series, day(), &lookup_key).map(|_| ())
+                });
+                refused.push(looked.unwrap_err());
+            }
+            if what != "image" {
+                let committed = within(&root.0, &name, |series| {
+                    commit(
+                        series,
+                        &generation(32, vec![entry("NSE-FNO-ZZTEST-P", Code::ValueMismatch)]),
+                    )
+                    .map(|_| ())
+                });
+                refused.push(committed.unwrap_err());
+            }
+            assert!(!refused.is_empty());
+            for why in refused {
+                // A device behind a link is the link: it is never followed.
+                let word = if kind == "device" { "symlinked" } else { word };
+                assert_eq!(why.word(), word, "{what} {kind}: {why}");
+                assert!(
+                    why.to_string().contains(&name.display().to_string()),
+                    "{what} {kind}: {why}"
+                );
+                if let VerdictError::NotRegular { found, .. } = &why {
+                    assert!(why.to_string().contains(found.word()), "{why}");
+                }
+            }
+            if fs::symlink_metadata(&name).unwrap().is_dir() {
+                fs::remove_dir(&name).unwrap();
+            } else {
+                fs::remove_file(&name).unwrap();
+            }
+        }
+        fs::rename(&aside, &name).unwrap();
+        let mut reader = Reader::new();
+        let answer = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
+        assert_eq!(answer.code(), Some(Code::Match), "{what}: answers again");
+    }
+    // Every refusal above wrote nothing: the next commit is generation 2.
+    let next = commit(
+        &series,
+        &generation(33, vec![entry("NSE-FNO-ZZTEST-P", Code::ValueMismatch)]),
+    )
+    .unwrap();
+    assert_eq!((next.generation, next.previous), (2, 1));
+}
