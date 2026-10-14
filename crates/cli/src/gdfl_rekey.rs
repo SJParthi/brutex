@@ -19,6 +19,18 @@
 //! epoch stops listing both. No file of an old key is touched, and a second
 //! `--apply` writes nothing.
 //!
+//! # Done and pending (AG-02)
+//!
+//! The old keys' files are kept for ever, so every run judges them again.
+//! The receipt tells what the ledger already records (`N moved and M retired
+//! already recorded`, each listed `moved`/`retired ... (recorded in the
+//! ledger)`) from what is still to do, and prints `PENDING: P`, the one
+//! number a gate reads: after a complete apply a second `--plan` reads
+//! `PENDING: 0` and a second `--apply` writes 0 month files, appends 0 ledger
+//! lines and installs no epoch. A verdict the ledger contradicts, and a move
+//! into a month that already holds bars, are `LEFT` by name and counted in
+//! it.
+//!
 //! `--underlying` narrows the walk; a day's strike ladder is one
 //! underlying's, so the narrowed plan is the same plan for those
 //! underlyings.
@@ -120,8 +132,18 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
 }
 
 /// The survey's half of the receipt.
-fn render_survey(out: &mut String, root: &Path, found: &Survey, ledger: &Withdrawn) {
-    let (superseded, retired) = ledger.counts();
+///
+/// The ledger totals are the plan's underlyings' when `--underlying` narrows
+/// the walk, and the whole ledger's otherwise (AG-02, finding rekey-3): a
+/// receipt about NIFTY does not count BANKNIFTY's records.
+fn render_survey(
+    out: &mut String,
+    root: &Path,
+    found: &Survey,
+    ledger: &Withdrawn,
+    only: Option<&BTreeSet<Symbol>>,
+) {
+    let (superseded, retired) = ledger.counts_for(only);
     let _ = writeln!(
         out,
         "GDFL RE-KEY -- option keys under {}/bars/gdfl/NSE/FNO, read from their bar files \
@@ -138,10 +160,19 @@ fn render_survey(out: &mut String, root: &Path, found: &Survey, ledger: &Withdra
     for path in &found.strays_named {
         let _ = writeln!(out, "    {}", path.display());
     }
+    let scope = only.map_or_else(
+        || "the whole ledger".to_owned(),
+        |only| {
+            only.iter()
+                .map(Symbol::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        },
+    );
     let _ = writeln!(
         out,
         "  ledger              {superseded} superseded and {retired} retired key(s) already \
-         recorded"
+         recorded ({scope})"
     );
 }
 
@@ -149,9 +180,24 @@ fn render_survey(out: &mut String, root: &Path, found: &Survey, ledger: &Withdra
 fn render_plan(out: &mut String, plan: &Plan) {
     let _ = writeln!(
         out,
-        "  PLAN: {} key(s) judged; {} kept, {} to move, {} to retire, {} unresolved",
+        "  PLAN: {} key(s) judged; {} kept, {} to move, {} to retire, {} unresolved; {} moved \
+         and {} retired already recorded",
         plan.keys,
         plan.kept,
+        plan.moves.len(),
+        plan.retired.len(),
+        plan.unresolved.len(),
+        plan.recorded_moves.len(),
+        plan.recorded_retired.len()
+    );
+    // THE ONE NUMBER A GATE READS (AG-02, finding rekey-3): what is still to
+    // do or to answer. Recorded moves and retirements are done and are not
+    // in it, so a store whose re-key has run reads `pending 0` however long
+    // its old files are kept.
+    let _ = writeln!(
+        out,
+        "  PENDING: {} ({} to move, {} to retire, {} unresolved)",
+        plan.pending(),
         plan.moves.len(),
         plan.retired.len(),
         plan.unresolved.len()
@@ -173,10 +219,33 @@ fn render_plan(out: &mut String, plan: &Plan) {
     for one in plan.unresolved.iter().take(SHOWN) {
         let _ = writeln!(out, "    LEFT    {}: {}", one.key, one.why);
     }
+    for one in plan.recorded_moves.iter().take(SHOWN) {
+        let _ = writeln!(
+            out,
+            "    moved   {} -> {} (recorded in the ledger; {} month(s), {} bar(s))",
+            option_key(one.underlying, one.from),
+            option_key(one.underlying, one.to),
+            one.months.len(),
+            one.bars
+        );
+    }
+    for record in plan.recorded_retired.iter().take(SHOWN) {
+        let _ = writeln!(
+            out,
+            "    retired {} (recorded in the ledger)",
+            option_key(record.underlying, record.key)
+        );
+    }
     let shown = plan.moves.len().min(SHOWN)
         + plan.retired.len().min(SHOWN)
-        + plan.unresolved.len().min(SHOWN);
-    let all = plan.moves.len() + plan.retired.len() + plan.unresolved.len();
+        + plan.unresolved.len().min(SHOWN)
+        + plan.recorded_moves.len().min(SHOWN)
+        + plan.recorded_retired.len().min(SHOWN);
+    let all = plan.moves.len()
+        + plan.retired.len()
+        + plan.unresolved.len()
+        + plan.recorded_moves.len()
+        + plan.recorded_retired.len();
     if shown < all {
         let _ = writeln!(out, "    ... and {} more not printed", all - shown);
     }
@@ -258,7 +327,7 @@ pub(crate) fn command_with(
             return FAILED;
         }
     };
-    render_survey(out, &root, &found, &ledger);
+    render_survey(out, &root, &found, &ledger, asked.only.as_ref());
     let plan = gdfl_rekey::plan(&found, &ledger);
     render_plan(out, &plan);
     let clean = found.unreadable == 0 && plan.unresolved.is_empty();

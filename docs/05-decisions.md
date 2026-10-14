@@ -68463,3 +68463,120 @@ an `api` write gate for a linked store, which needs `api::server::WriteGate`
 `cli::gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`,
 `store::safe_open::tests::a_writer_refuses_a_linked_bars_directory`,
 and gate 28's own tests (`rustc --test .github/gates_tmp_open.rs`).
+
+### D-4952 — The re-key plan tells a recorded move or retirement (done) from a pending one, a key continues under one key and is never superseded and retired, a move into a held month is known before the apply, and a cli invocation's ledger lines can name its run — 2026-10-14
+
+**Implemented by** AG-02 (assurance findings rekey-3, rekey-5, rekey-2 and
+stocks-7, 14 October 2026): `pull::gdfl_rekey::{plan, against_ledger,
+held_months, copied_into, Plan::{recorded_moves, recorded_retired, pending},
+Withdrawn::{parse, counts_for, line_of, superseded_records, retired_records,
+admits}, apply}`, `cli::gdfl_rekey::{render_survey, render_plan}`,
+`cli::operation_audit::{RunClaim, claim_invocation_run}`. **Number** the
+ledger's head + 1 on 14 October 2026 (D-4950); renumbered at landing if
+another package took it first (round 3, amendment A6).
+
+**What was observed.** (1) rekey-3: the old keys' files are kept for ever, so
+every plan judged them again and a second `--plan` after the 14 October apply
+still read `13 to move, 3 to retire`; the pinned test said so on purpose
+("a re-run plans the same move and finds it done", WP-12c). The acceptance in
+R4-21, ING-10 and DATA-REKEY-APPLY (`0 to move, 0 to retire`) could never
+pass, and the ledger totals line counted the whole ledger under
+`--underlying`. (2) rekey-5: `Withdrawn::parse` kept the LAST of two
+`superseded` lines of one key with different targets, silently, and refused a
+key superseded and retired without saying which lines; neither `plan`,
+`named_twice` nor `apply` compared a verdict with the ledger, so a later alias
+table could make the apply append either line (latent: no such line exists).
+(3) rekey-2: the plan was pure and `target_state` ran only in the apply, so
+`0 unresolved` did not predict the 14 October apply's three refusals (NIFTY
+`2023-06-29-{1000000,1050000,1100000}-PE` into held 2020-09 months, 186 bars).
+(4) stocks-7: every pull ledger line stamps `run=` from the telemetry sink's
+run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
+`zerodha.repairs` and 76,476 `zerodha.gaps` lines say `run=0`.
+
+**Decided.**
+
+1. **Recorded is done.** A move whose `(underlying, old) -> new` the ledger
+   records, with the month and bar counts the key holds now, and a
+   retirement the ledger records, are `Plan::recorded_moves` and
+   `Plan::recorded_retired`: out of `moves`, `retired` and `changes()`, and
+   `apply` does not redo them. The receipt prints `N moved and M retired
+   already recorded`, lists each as `(recorded in the ledger)`, and prints
+   `PENDING: P` (moves + retirements + unresolved), the one number a gate
+   reads; the ledger totals follow `--underlying`. This replaces WP-12c's
+   pinned re-plan. **The restated acceptance** for R4-21, ING-10 and
+   DATA-REKEY-APPLY: a second `--plan` reads `PENDING: 0`, and a second
+   `--apply` writes 0 month files, appends 0 ledger lines and installs no
+   epoch. A run cut short is finished by the next: after its lines it is
+   recorded and the next apply installs only the epoch; before them the
+   target holds the copy, the plan reads the move pending (not a second
+   name: same bar count every day, same last stamp each month) and the apply
+   finds those months exactly held.
+2. **One target per key.** `Withdrawn::parse`, the one public reader of the
+   two record kinds, refuses a second `superseded` line of one
+   `(underlying, old)` whose `by=` differs, and a key superseded and retired
+   in either order, each naming both line numbers; the same line again (or a
+   second line to the same target) reads as the first; a second `retired`
+   line keeps the first. A last line with no newline is torn, never a record:
+   the next append marks it `(torn)` and writes its own line whole, so it can
+   never vanish after having been counted. The writer refuses first: the plan
+   names as unresolved, with the ledger line, a verdict that would re-target a
+   superseded key, retire a superseded key, move a retired key, keep a
+   withdrawn key, or move a recorded key that has grown since; a move into a
+   target the ledger withdraws is unresolved; and `apply` refuses, before it
+   writes a byte, a plan whose lines the parser would refuse
+   (`Withdrawn::admits`).
+3. **A move into a held month is known before the apply.** The plan reads the
+   target's month headers the survey already read (no second read): a target
+   month with a bar at or after the first moved one is `target month held:
+   ... needs the repair-door publish (R4-21 item 1)`, and moves into one month
+   whose spans interleave are unresolved; a group is refused whole, as the
+   apply refuses it. The publish itself is R4-21 item 1's.
+4. **A cli invocation's run.** `cli::operation_audit::RunClaim` holds an
+   attempt id as the sink's run for its life: `claim_run` takes only a free
+   key, the guard releases only what it took, zero and no sink claim nothing
+   (D-0088's zero is "no run"). It belongs at the boundary of a process that
+   runs one command, the `cli` binary: the API process runs work beside other
+   runs, which is why `Attempt::enter` does not claim.
+
+**Rejected.** Rewriting the acceptance to a second `--apply` receipt: the
+plan is the gate the one-click ingest reads, and asking "is it done?" must
+not need a write-capable run. Re-verifying each recorded move bar for bar on
+every plan: O(bars) a run for keys whose digest the ledger holds; a pending
+move is still verified exactly by `target_state`. A stat or header read of
+each target month inside the plan: the survey has read every month header
+already, so the plan stays pure. Last-wins for a re-targeted key: one
+contract becomes three series and nothing refuses. Claiming the run inside
+`Attempt::enter`: the API's browser tasks enter attempts beside its own pull
+runs, and a claim there would stamp a pull's events with a sweep's id.
+
+**What remains** (`docs/06-limits.md`, L-AG02-4 to L-AG02-7): the API's own
+ledger reader in `crates/api/src/bars_change.rs` still keeps the last line and
+copies lineage to both targets (AF-03's file); the settled key's window label
+while a predecessor is pending (`months_outside_life`, `prev_chg_why
+no_earlier_month`) needs `bars_change.rs` and `bars_series.rs` (AF-03,
+AF-04); the three refused NIFTY moves need R4-21 item 1's publish; and
+`RunClaim` is not yet held by the cli binary, because the one line that holds
+it is in `crates/cli/src/lib.rs` `run_with_sink`, which R3-18, R3-32 and R4-08
+have in flight: until it lands, cli ledger lines still say `run=0`.
+
+**Proved by** `pull::gdfl_rekey::tests::{a_second_plan_after_a_full_apply_has_nothing_pending,
+a_recorded_move_is_reported_as_recorded_not_to_move,
+the_ledger_totals_follow_the_underlying_filter,
+a_key_superseded_twice_to_different_targets_is_refused_naming_both_lines,
+an_identical_repeated_superseded_line_is_idempotent,
+a_key_superseded_and_retired_is_refused_naming_both_lines,
+the_plan_never_retargets_a_superseded_key,
+the_plan_never_retires_a_superseded_key,
+apply_never_writes_a_line_its_parser_refuses,
+a_move_into_a_held_month_is_unresolved_in_the_plan,
+moves_whose_spans_interleave_in_one_target_month_are_unresolved,
+a_rekey_cut_short_is_reported_truly_and_finished_by_the_next_apply,
+a_ledger_reads_empty_torn_garbage_and_long_exactly,
+every_underlying_reads_done_after_its_apply,
+applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census}`,
+`cli::gdfl_rekey::tests::{the_plan_receipt_prints_recorded_apart_from_pending,
+applying_moves_and_retires_and_a_second_apply_writes_nothing}`,
+`cli::operation_audit::run_tests::{a_cli_written_repair_line_carries_the_invocations_run,
+a_process_with_no_attempt_writes_run_0,
+two_invocations_in_one_process_each_name_their_own_run,
+a_run_claim_takes_only_a_free_key_and_releases_only_its_own}`.

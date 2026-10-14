@@ -230,7 +230,16 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
         OK,
         "{again}"
     );
-    assert!(again.contains("1 already held exactly"), "{again}");
+    // THE MOVE IS RECORDED, SO IT IS NOT REDONE (AG-02, rekey-3): no month
+    // is read or written again.
+    assert!(
+        again.contains("APPLIED: 0 key(s) moved (0 month file(s) written, 0 already held exactly)"),
+        "{again}"
+    );
+    assert!(
+        again.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved)"),
+        "{again}"
+    );
     assert!(again.contains("0 ledger line(s) appended"), "{again}");
     assert!(again.contains("no epoch was installed"), "{again}");
     assert_eq!(
@@ -246,6 +255,94 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
     );
     assert_eq!(code, OK, "{narrowed}");
     assert!(narrowed.contains("PLAN: 0 key(s) judged"), "{narrowed}");
+    assert!(
+        narrowed.contains(
+            "ledger              0 superseded and 0 retired key(s) already recorded (BANKNIFTY)"
+        ),
+        "{narrowed}"
+    );
+    assert!(narrowed.contains("PENDING: 0"), "{narrowed}");
+}
+
+/// rekey-3: AFTER AN APPLY, `--plan` PRINTS WHAT IS RECORDED APART FROM WHAT
+/// IS PENDING: the move and the retirement listed as recorded, nothing to
+/// move or retire, `PENDING: 0`, and the "would change nothing" suffix that
+/// a recorded move used to suppress for ever. Before the apply the same
+/// receipt reads the move and the retirement as pending. The ledger totals
+/// follow `--underlying`.
+#[test]
+fn the_plan_receipt_prints_recorded_apart_from_pending() {
+    let scratch = store("recorded");
+    let root = scratch.0.clone();
+    let mut before = String::new();
+    assert_eq!(
+        command_with(&["--plan"], &|| Ok(root.clone()), &mut before),
+        OK,
+        "{before}"
+    );
+    assert!(
+        before.contains(
+            "1 to move, 1 to retire, 0 unresolved; 0 moved and 0 retired already recorded"
+        ),
+        "{before}"
+    );
+    assert!(
+        before.contains("PENDING: 2 (1 to move, 1 to retire, 0 unresolved)"),
+        "{before}"
+    );
+    let mut out = String::new();
+    assert_eq!(
+        command_with(&["--apply"], &|| Ok(root.clone()), &mut out),
+        OK,
+        "{out}"
+    );
+
+    let mut after = String::new();
+    assert_eq!(
+        command_with(
+            &["--plan", "--underlying", "NIFTY"],
+            &|| Ok(root.clone()),
+            &mut after
+        ),
+        OK,
+        "{after}"
+    );
+    assert!(
+        after.contains(
+            "0 to move, 0 to retire, 0 unresolved; 1 moved and 1 retired already recorded"
+        ),
+        "{after}"
+    );
+    assert!(
+        after.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved)"),
+        "{after}"
+    );
+    assert!(
+        after.contains(&format!(
+            "moved   NSE-FNO-NIFTY-{STATED} -> NSE-FNO-NIFTY-{SETTLED} (recorded in the ledger; 1 month(s), 1 bar(s))"
+        )),
+        "{after}"
+    );
+    assert!(
+        after.contains(&format!(
+            "retired NSE-FNO-NIFTY-{IMPOSSIBLE} (recorded in the ledger)"
+        )),
+        "{after}"
+    );
+    assert!(
+        after.contains(
+            "ledger              1 superseded and 1 retired key(s) already recorded (NIFTY)"
+        ),
+        "{after}"
+    );
+    assert!(after.contains("(and would change nothing)"), "{after}");
+    assert!(!after.contains("    move    "), "{after}");
+    let mut whole = String::new();
+    let _ = command_with(&["--plan"], &|| Ok(root.clone()), &mut whole);
+    assert!(
+        whole.contains("1 superseded and 1 retired key(s) already recorded (the whole ledger)"),
+        "{whole}"
+    );
 }
 
 /// A store root that cannot be had refuses, and nothing is written.
