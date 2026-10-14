@@ -175,10 +175,79 @@ fn every_series_is_counted_in_one_table() {
             .map(|cell| cell.parse::<u64>().unwrap())
             .collect::<Vec<u64>>()
     };
-    assert_eq!(row("AIDX"), [22, 11, 11, 0, 0, 0, 0, 1]);
-    assert_eq!(row("BIDX"), [22, 22, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(row("CIDX"), [22, 11, 0, 0, 0, 0, 11, 0]);
-    assert_eq!(row("TOTAL"), [66, 44, 11, 0, 0, 0, 11]);
+    assert_eq!(row("AIDX"), [22, 11, 11, 0, 0, 0, 0, 0, 0, 1]);
+    assert_eq!(row("BIDX"), [22, 22, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(row("CIDX"), [22, 11, 0, 0, 0, 0, 11, 0, 0, 0]);
+    assert_eq!(row("TOTAL"), [66, 44, 11, 0, 0, 0, 11, 0, 0]);
+}
+
+/// **A SESSION HOLDING A BAR IS LISTED WHEN IT IS SHORT (R3-18, CMP-19).**
+/// Every session of December holds bars, and 2020-12-09 lacks 13:00-13:04:
+/// before R3-18 this plan read the month whole and the series' row counted
+/// nothing. Now the day is listed with its held and owed minutes, the month
+/// needs a repair, and the `ALL` row counts one short session of 5 minutes.
+#[test]
+fn a_short_session_is_listed_and_counted() {
+    let store = Root::new();
+    land(&store.0, "SHORTIDX", day(2020, 11, 27), day(2020, 11, 27));
+    let (from, to) = (day(2020, 12, 1), day(2020, 12, 31));
+    let hole = day(2020, 12, 9).days_from_epoch();
+    let rows: Vec<RawRow> = answer(from, to)
+        .into_iter()
+        .filter(|row| {
+            let local = row.timestamp + IST_OFFSET_SECS;
+            let minute = local.rem_euclid(86_400) / 60;
+            let in_hole =
+                local.div_euclid(86_400) == i64::from(hole) && (780..785).contains(&minute);
+            !in_hole
+        })
+        .collect();
+    let request = pull::fetch::BarRequest {
+        instrument_id: String::new(),
+        listing: pull::vendor::Listing::Index,
+        window: Window::new(from, to).unwrap(),
+        granularity: pull::vendor::Granularity::Minute1,
+    };
+    let done = pull::ingest::from_window(
+        &RawWindow { rows },
+        "SHORTIDX",
+        "fixture",
+        &store.0,
+        pull::ingest::Plan {
+            calendar: pull::calendar::Runtime::default(),
+            cash_schedule: None,
+            columns: pull::csv::Columns::Gdfl,
+            request: &request,
+            encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
+            scale: pull::vendor::PriceScale::Paisa,
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            contract: None,
+        },
+    );
+    assert!(done.bars_committed > 0, "{:#?}", done.failures);
+    let (code, out) = store.run(&["SHORTIDX", "2020-12-01", "2020-12-31"]);
+    assert_eq!(
+        code, FAILED,
+        "a short interior session needs a repair: {out}"
+    );
+    assert!(out.contains("22 of 22 sessions held"), "{out}");
+    assert!(
+        out.contains("2020-12-09  interior      short: 370 of 375 owed minutes held, 5 missing; only a versioned repair fills it"),
+        "{out}"
+    );
+    assert!(out.contains("1 month(s) need a versioned repair"), "{out}");
+    let (_, all) = store.run(&["ALL", "2020-12-01", "2020-12-31"]);
+    let cells: Vec<u64> = all
+        .lines()
+        .find(|line| line.trim_start().starts_with("SHORTIDX"))
+        .unwrap_or_else(|| panic!("{all}"))
+        .split_whitespace()
+        .skip(1)
+        .map(|cell| cell.parse::<u64>().unwrap())
+        .collect();
+    assert_eq!(cells, [22, 22, 0, 0, 0, 0, 0, 1, 5, 1], "{all}");
 }
 
 /// THE REPAIR FROM ANOTHER STORE'S BARS: a new generation, journaled, and a

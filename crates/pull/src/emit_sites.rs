@@ -358,6 +358,28 @@ fn drive_request_minutes(scratch: &Scratch) {
     assert!(!done.balances());
 }
 
+/// The stored-month gap ledger's one event per series written (R3-18).
+fn drive_gap_backfill(scratch: &Scratch) {
+    let day = window().from();
+    let series = crate::ingest::gap_backfill::Series {
+        key: "NSE-INDEX-EMITGAP".to_owned(),
+        lines: vec![format!(
+            "gap NSE-INDEX-EMITGAP {day} v=1 rung=1min owed=375 held=374 missing=1 first_missing=10:00 runs=1 longest=1 longest_at=10:00 why=stored_short run=0 fill=interior source=store"
+        )],
+        days: vec![day],
+        tally: crate::ingest::gap_backfill::Tally::default(),
+    };
+    let mut have = crate::ingest::gap_backfill::Have::default();
+    crate::ingest::gap_backfill::write(
+        &scratch.store(),
+        brutex_core::vendor::Vendor::Zerodha,
+        &series,
+        &mut have,
+    )
+    .expect("the ledger takes the line");
+    assert_eq!(have.len(), 1);
+}
+
 fn drive_bad_candles(scratch: &Scratch, conflict: bool) {
     let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
     let open = i64::from(request.window.from().days_from_epoch()) * 86_400
@@ -529,6 +551,13 @@ static SITES: &[Site] = &[
         message: "request minute coverage incomplete",
         says: ("reason", Says::Holds("375 missing scheduled minutes")),
         drive: drive_request_minutes,
+    },
+    Site {
+        at: "crates/pull/src/gap_backfill.rs — write",
+        target: "pull.gap_backfill",
+        message: "stored-month gap lines written",
+        says: ("instrument", Says::Holds("NSE-INDEX-EMITGAP")),
+        drive: drive_gap_backfill,
     },
     Site {
         at: "crates/pull/src/ingest.rs — from_window duplicate warning",

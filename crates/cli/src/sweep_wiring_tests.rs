@@ -167,6 +167,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 // The Zerodha month-hole plan and versioned repair (D-3350,
                 // WP-13c): a store verb, never a sweep.
                 | "zerodha-repair"
+                // The stored-month gap ledger (R3-18): a store verb.
+                | "zerodha-gaps"
                 // The stored-series identity scan (WP-13d): a store verb.
                 | "series-identity"
         );

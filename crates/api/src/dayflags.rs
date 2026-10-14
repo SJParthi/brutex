@@ -4384,6 +4384,16 @@ impl Says<'_> {
                     gap.longest,
                     gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60))
                 ),
+                // A LINE FOUND FROM THE STORED MONTH, NOT FROM A PULL (R3-18,
+                // `cli zerodha-gaps`): the store was read, the vendor was not,
+                // so no vendor reason is claimed.
+                "stored_short" => format!(
+                    "Zerodha minute gap found in the stored month (no vendor call, R3-18): {} of {} owed minute(s) missing, the longest run {} from {}; a versioned repair or a pull fills it",
+                    gap.missing,
+                    gap.owed,
+                    gap.longest,
+                    gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60))
+                ),
                 "withheld_unmeasured_session" => {
                     "Zerodha withheld the day: a session of unmeasured length".to_owned()
                 }
@@ -5826,6 +5836,31 @@ mod tests {
             record(&got, "2021-05-24"),
             "63 late row(s) deferred to a later second, at most 19800 s back; 19800 s is exactly \
              IST's offset from UTC",
+        );
+    }
+
+    /// **A STORED-MONTH GAP LINE IS A REASON, NOT "ZERODHA LEDGER: <CODE>"**
+    /// (R3-18): `cli zerodha-gaps` writes `why=stored_short` with `fill=` and
+    /// `source=` after D-3335's fields; the day band parses it, ignores the
+    /// two trailing fields by name, and says the store was read, not the
+    /// vendor.
+    #[test]
+    fn a_stored_month_gap_line_is_said_as_a_reason() {
+        let root = root_of("stored-short");
+        write(
+            &gaps_path(&root),
+            "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run=0 fill=interior source=store\n",
+        );
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2019-09-23"),
+        );
+        let gap = record(&got, "2019-09-23");
+        assert_eq!(gap["gaps"]["why"], "stored_short", "{got:#}");
+        assert_eq!(gap["gaps"]["missing"], 14);
+        says_has(
+            gap,
+            "Zerodha minute gap found in the stored month (no vendor call, R3-18): 14 of 375 owed minute(s) missing, the longest run 14 from 15:15; a versioned repair or a pull fills it",
         );
     }
 

@@ -437,3 +437,732 @@ fn a_ledger_that_cannot_be_written_is_named_and_the_bars_still_land() {
         done.failures
     );
 }
+
+// ---------------------------------------------------------------------------
+// R3-18: the repair plan's short sessions and the stored-month gap ledger
+// ---------------------------------------------------------------------------
+
+use pull::ingest::gap_backfill;
+use pull::ingest::repair_plan::{self, Missing, Owes};
+
+/// Every minute `segment` owes from `from` to `to` by the calendar of record
+/// ([`repair_plan::owed`]) that `keep` keeps, as invented candles.
+fn owed_answer(segment: &str, from: Day, to: Day, keep: &dyn Fn(Day, i64) -> bool) -> Vec<RawRow> {
+    let mut rows = Vec::new();
+    for number in from.days_from_epoch()..=to.days_from_epoch() {
+        let day = Day::from_days(number).unwrap();
+        if let Owes::Windows((windows, count)) = repair_plan::owed(segment, number) {
+            for &(open, close) in &windows[..count] {
+                for minute in open..close {
+                    if keep(day, i64::from(minute)) {
+                        rows.push(candle(day, i64::from(minute)));
+                    }
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// The first and the last session of record in `from..=to`.
+fn sessions_of(segment: &str, from: Day, to: Day) -> (Day, Day) {
+    let days: Vec<Day> = (from.days_from_epoch()..=to.days_from_epoch())
+        .filter(|&n| matches!(repair_plan::owed(segment, n), Owes::Windows(_)))
+        .map(|n| Day::from_days(n).unwrap())
+        .collect();
+    (days[0], days[days.len() - 1])
+}
+
+fn day(y: u16, m: u8, d: u8) -> Day {
+    Day::new(y, m, d).unwrap()
+}
+
+fn hm(h: i64, m: i64) -> i64 {
+    h * 60 + m
+}
+
+fn index_parts() -> store::path::PathParts<'static> {
+    store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: store::path::YearMonth::new(2019, 8).unwrap(),
+        file: store::path::FileKind::Bars,
+    }
+}
+
+/// THE DB-A12 SHAPE, on invented candles landed through the real minute path
+/// (`from_window`): NIFTY 1min, three held months, every session holding a
+/// bar, and seven of them short:
+///
+/// - 2019-08 (the series' first month): its first session opens at 09:20
+///   (`before_first`), and 2019-08-02 lacks 13:59 (`interior`);
+/// - 2019-09: its first session lacks 09:15-09:16 (`front`), 2019-09-23 lacks
+///   15:15-15:28 (`interior`), and its last session lacks 15:25-15:29
+///   (`tail`, in a month before the newest);
+/// - 2021-02 (the newest): the outage day 2021-02-24 ends at 10:08
+///   (`interior`), and its last session lacks 15:29 (`tail`, the frontier).
+///
+/// Returns the seven short sessions with their held minutes and fills.
+fn db_a12_fixture(root: &Path) -> Vec<(Day, u32, Missing)> {
+    let (aug_first, _) = sessions_of("INDEX", day(2019, 8, 1), day(2019, 8, 31));
+    let (sep_first, sep_last) = sessions_of("INDEX", day(2019, 9, 1), day(2019, 9, 30));
+    let (_, feb_last) = sessions_of("INDEX", day(2021, 2, 1), day(2021, 2, 28));
+    let outage = day(2021, 2, 24);
+    let holes = move |d: Day, m: i64| {
+        (d == aug_first && m < hm(9, 20))
+            || (d == day(2019, 8, 2) && m == hm(13, 59))
+            || (d == sep_first && m < hm(9, 17))
+            || (d == day(2019, 9, 23) && (hm(15, 15)..=hm(15, 28)).contains(&m))
+            || (d == sep_last && m >= hm(15, 25))
+            || (d == outage && m > hm(10, 8))
+            || (d == feb_last && m == hm(15, 29))
+    };
+    for (from, to) in [
+        (day(2019, 8, 1), day(2019, 8, 31)),
+        (day(2019, 9, 1), day(2019, 9, 30)),
+        (day(2021, 2, 1), day(2021, 2, 28)),
+    ] {
+        let rows = owed_answer("INDEX", from, to, &|d, m| !holes(d, m));
+        let req = request(pull::vendor::Listing::Index, from, to);
+        let done = pull::ingest::from_window(
+            &pull::fetch::RawWindow { rows },
+            "NIFTY",
+            "ZERODHA TEST",
+            root,
+            plan(&req, "INDEX"),
+        );
+        assert!(done.bars_committed > 0, "{:?}", done.failures);
+    }
+    let outage_owed = match repair_plan::owed("INDEX", outage.days_from_epoch()) {
+        Owes::Windows((w, c)) => w[..c].iter().map(|(a, b)| b - a).sum::<u32>(),
+        other => panic!("2021-02-24 is a session of record: {other:?}"),
+    };
+    assert!(
+        outage_owed > 54,
+        "the outage day owes more than 09:15-10:08"
+    );
+    vec![
+        (aug_first, 370, Missing::BeforeFirst),
+        (day(2019, 8, 2), 374, Missing::Interior),
+        (sep_first, 373, Missing::Front),
+        (day(2019, 9, 23), 361, Missing::Interior),
+        (sep_last, 370, Missing::Tail),
+        (outage, 54, Missing::Interior),
+        (feb_last, 374, Missing::Tail),
+    ]
+}
+
+/// **THE REPAIR PLAN LISTS EVERY SESSION SHORT OF ITS OWED MINUTES (R3-18,
+/// DB-A12, CMP-19).** Until R3-18 a session counted as held when it held one
+/// bar: on this fixture every session holds one, so the plan named no hole in
+/// any of the three months and planned no repair — the shape that left 12 of
+/// the 14 months behind NIFTY's 213 missing minutes off the documented store
+/// run. Now each short session is listed with its owed and held minutes and
+/// what fills it, and every month holding an interior or front one is a
+/// repair month.
+#[test]
+fn the_repair_plan_lists_every_session_short_of_its_owed_minutes() {
+    let scratch = Scratch::new("PLAN-SHORT");
+    let expected = db_a12_fixture(&scratch.0);
+    let window = Window::new(day(2019, 8, 1), day(2021, 2, 28)).unwrap();
+    let months = repair_plan::plan(&scratch.0, index_parts(), window);
+    assert_eq!(months.len(), 19, "2019-08 through 2021-02");
+    let held: Vec<&repair_plan::Month> = months.iter().filter(|m| m.bars > 0).collect();
+    assert_eq!(held.len(), 3);
+    for month in &held {
+        assert!(month.refused.is_none(), "{:?}", month.refused);
+        assert_eq!(month.held, month.sessions, "every session holds a bar");
+        assert!(
+            month.missing.is_empty(),
+            "{}: {:?}",
+            month.month,
+            month.missing
+        );
+        assert!(month.length_unjudged.is_empty());
+        assert!(
+            month.needs_repair(),
+            "{} holds a front or interior short",
+            month.month
+        );
+    }
+    let found: Vec<(Day, u32, Missing)> = held
+        .iter()
+        .flat_map(|m| m.short.iter().map(|s| (s.day, s.held, s.fill)))
+        .collect();
+    assert_eq!(found, expected);
+    for short in held.iter().flat_map(|m| m.short.iter()) {
+        assert!(short.owed > short.held && short.missing() == short.owed - short.held);
+        if short.day != day(2021, 2, 24) {
+            assert_eq!(short.owed, 375, "{} is a regular session", short.day);
+        }
+    }
+    // The newest month's last session lacks 15:29: an ordinary pull's.
+    assert!(!Missing::Tail.needs_repair() && !Missing::BeforeFirst.needs_repair());
+    // A month the series does not hold is still an ordinary pull's, never a
+    // repair's.
+    let absent = &months[2];
+    assert_eq!(absent.month.to_string(), "2019-10");
+    assert!(absent.short.is_empty() && !absent.needs_repair());
+    assert!(
+        absent
+            .missing
+            .iter()
+            .all(|(_, why)| *why == Missing::Absent)
+    );
+
+    // A DERIVED RUNG IS JUDGED BY HOLDING A BAR (its short buckets are the
+    // derive ledger's `partial`): the 5min plan lists no short session.
+    let five = repair_plan::plan(
+        &scratch.0,
+        store::path::PathParts {
+            timeframe: Timeframe::MINUTE_5,
+            ..index_parts()
+        },
+        window,
+    );
+    assert!(
+        five.iter()
+            .all(|m| m.short.is_empty() && m.length_unjudged.is_empty())
+    );
+}
+
+/// **A SHARE'S CLOSE IS JUDGED UNDER EVERY ELIGIBILITY, AND A WHOLE DAY IS
+/// NEVER SHORT.** From 2026-08-03 an eligible share's continuous session ends
+/// at 15:15 and an ineligible one's at 15:30 (D-3320); the plan owes the
+/// minutes both owe, so a share holding 09:15-15:14 is whole whichever its
+/// flag, and one missing 11:00 is short. Written straight to a scratch month,
+/// the same reader as the minute path's.
+#[test]
+fn a_shares_auction_close_is_not_a_short_session_and_a_missing_minute_is() {
+    let scratch = Scratch::new("PLAN-CASH");
+    let parts = store::path::PathParts {
+        segment: "CASH",
+        symbol: "INVENTEDSHR",
+        month: store::path::YearMonth::new(2026, 8).unwrap(),
+        ..index_parts()
+    };
+    let (from, to) = (day(2026, 8, 3), day(2026, 8, 7));
+    let Owes::Windows((windows, 1)) = repair_plan::owed("CASH", from.days_from_epoch()) else {
+        panic!("a regular cash session owes one window");
+    };
+    assert_eq!(windows[0], (555, 915), "09:15 to the eligible 15:15 close");
+    assert!(matches!(
+        repair_plan::owed("INDEX", from.days_from_epoch()),
+        Owes::Windows(([(555, 930), _], 1))
+    ));
+    let mut bars = Vec::new();
+    for n in from.days_from_epoch()..=to.days_from_epoch() {
+        let d = Day::from_days(n).unwrap();
+        // 09:15 to 15:29 on the 3rd and 4th, to 15:14 after: whole either way.
+        let close = if n <= day(2026, 8, 4).days_from_epoch() {
+            hm(15, 30)
+        } else {
+            hm(15, 15)
+        };
+        for m in hm(9, 15)..close {
+            if d == day(2026, 8, 6) && m == hm(11, 0) {
+                continue;
+            }
+            let row = candle(d, m);
+            bars.push(store::format::Bar {
+                ts_micros: row.timestamp * 1_000_000,
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close,
+                volume: 1,
+                open_interest: store::format::OI_NULL,
+            });
+        }
+    }
+    let id = repair_plan::symbol_id("INVENTEDSHR");
+    let mut file = store::file::BarFile::open_or_create(
+        &scratch.0,
+        store::path::StorePath::new(parts).unwrap(),
+        id,
+    )
+    .unwrap();
+    file.append(&bars).unwrap();
+    drop(file);
+    let months = repair_plan::plan(&scratch.0, parts, Window::new(from, to).unwrap());
+    assert_eq!(months[0].sessions, 5);
+    assert_eq!(months[0].held, 5);
+    let short: Vec<(Day, u32, u32, Missing)> = months[0]
+        .short
+        .iter()
+        .map(|s| (s.day, s.owed, s.held, s.fill))
+        .collect();
+    assert_eq!(short, [(day(2026, 8, 6), 360, 359, Missing::Interior)]);
+
+    // ITS LEDGER LINE SAYS THE MINUTE MAY BE ONE NOBODY TRADED (D-3321).
+    let series = gap_backfill::series(
+        &scratch.0,
+        parts,
+        Window::new(from, to).unwrap(),
+        &gap_backfill::Have::default(),
+    );
+    assert_eq!(series.key, "NSE-CASH-INVENTEDSHR");
+    assert_eq!(series.lines.len(), 1);
+    assert!(
+        series.lines[0].starts_with("gap NSE-CASH-INVENTEDSHR 2026-08-06 v=1 rung=1min owed=360 held=359 missing=1 first_missing=11:00 ")
+            && series.lines[0].ends_with(" fill=interior source=store absence=may_be_no_trade"),
+        "{}",
+        series.lines[0]
+    );
+}
+
+/// Every file under `dir` with its bytes, sorted: the evidence nothing but
+/// the ledger was written.
+fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in fs::read_dir(&at).unwrap().filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The `name=value` fields of a `gap` line that a vendor's line and a store's
+/// line must agree on for one day.
+fn counted(line: &str) -> Vec<&str> {
+    line.split(' ')
+        .filter(|w| {
+            [
+                "owed=",
+                "held=",
+                "missing=",
+                "first_missing=",
+                "runs=",
+                "longest=",
+                "longest_at=",
+            ]
+            .iter()
+            .any(|p| w.starts_with(p))
+        })
+        .collect()
+}
+
+/// **A GAP LEDGER IS WRITTEN FOR STORED MONTHS WITHOUT A VENDOR CALL (R3-18,
+/// DB-A12, DB-G46).** The fixture's months are landed, then their ledger is
+/// moved aside: the store as it stood before D-3335's ledger existed, every
+/// stored hole reading "no ledger". From the store and the calendar alone:
+///
+/// - one `why=stored_short` line per front, interior or older-month tail
+///   session, counted by the SAME counter the landing's vendor audit used: on
+///   every such day its owed, held, missing, first missing minute, runs and
+///   longest run equal the line the landing wrote;
+/// - no line for the first month's `before_first` session or the newest
+///   month's tail (the pull frontier), each counted;
+/// - a day the ledger already names keeps its line (counted `already`);
+/// - nothing but `audit/zerodha.gaps` changes; a second run writes nothing.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one scenario, read top to bottom")]
+fn a_gap_ledger_is_written_for_stored_months_without_a_vendor_call() {
+    let scratch = Scratch::new("STORED-LEDGER");
+    let expected = db_a12_fixture(&scratch.0);
+    let audit = scratch.0.join("audit");
+    let landed = ledger(&scratch.0);
+    fs::rename(
+        audit.join("zerodha.gaps"),
+        audit.join("zerodha.gaps.landed"),
+    )
+    .unwrap();
+    let vendor_line = landed
+        .lines()
+        .find(|l| l.starts_with("gap NSE-INDEX-NIFTY 2019-08-02 "))
+        .expect("the landing named 2019-08-02's missing minute")
+        .to_owned();
+    fs::write(audit.join("zerodha.gaps"), format!("{vendor_line}\n")).unwrap();
+    let bars_before = tree(&scratch.0.join("bars"));
+
+    let window = Window::new(day(2019, 1, 1), day(2026, 9, 30)).unwrap();
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let mut have = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
+    assert_eq!(have.len(), 1);
+    let series = gap_backfill::series(&scratch.0, index_parts(), window, &have);
+    assert_eq!(series.key, "NSE-INDEX-NIFTY");
+    assert!(
+        series.tally.refused.is_empty(),
+        "{:?}",
+        series.tally.refused
+    );
+    assert_eq!(series.tally.months, 3);
+    assert_eq!(series.tally.short, 7);
+    assert_eq!(
+        (
+            series.tally.already,
+            series.tally.before_first,
+            series.tally.frontier
+        ),
+        (1, 1, 1)
+    );
+    let want: Vec<Day> = expected
+        .iter()
+        .filter(|(d, _, fill)| {
+            *d != day(2019, 8, 2) && matches!(fill, Missing::Front | Missing::Interior)
+                || (*fill == Missing::Tail && d.year() == 2019)
+        })
+        .map(|(d, _, _)| *d)
+        .collect();
+    assert_eq!(series.days, want);
+    assert_eq!(series.lines.len(), 4);
+    let outage_owed = match repair_plan::owed("INDEX", day(2021, 2, 24).days_from_epoch()) {
+        Owes::Windows((w, c)) => u64::from(w[..c].iter().map(|(a, b)| b - a).sum::<u32>()),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(series.tally.minutes, 2 + 14 + 5 + (outage_owed - 54));
+    for (line, d) in series.lines.iter().zip(&series.days) {
+        assert!(
+            line.starts_with(&format!("gap NSE-INDEX-NIFTY {d} v=1 rung=1min ")),
+            "{line}"
+        );
+        assert!(
+            line.contains(" why=stored_short ") && line.ends_with(" source=store"),
+            "{line}"
+        );
+        let vendor = landed
+            .lines()
+            .find(|l| l.starts_with(&format!("gap NSE-INDEX-NIFTY {d} ")))
+            .unwrap_or_else(|| panic!("the landing's line for {d}"));
+        assert_eq!(
+            counted(line),
+            counted(vendor),
+            "{d}: store and vendor audit agree"
+        );
+    }
+    let fills: Vec<&str> = series
+        .lines
+        .iter()
+        .map(|l| l.split(' ').find(|w| w.starts_with("fill=")).unwrap())
+        .collect();
+    assert_eq!(
+        fills,
+        ["fill=front", "fill=interior", "fill=tail", "fill=interior"]
+    );
+    assert!(series.lines[1].starts_with(
+        "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run="
+    ), "{}", series.lines[1]);
+
+    gap_backfill::write(&scratch.0, vendor, &series, &mut have).unwrap();
+    let written = ledger(&scratch.0);
+    assert_eq!(written.lines().count(), 5);
+    assert_eq!(
+        tree(&scratch.0.join("bars")),
+        bars_before,
+        "no bar, census or sidecar byte changed"
+    );
+
+    // IDEMPOTENT: a second run, from a fresh read of the ledger, writes nothing.
+    let again = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
+    assert_eq!(again.len(), 5);
+    let second = gap_backfill::series(&scratch.0, index_parts(), window, &again);
+    assert!(
+        second.lines.is_empty() && second.tally.already == 5,
+        "{:?}",
+        second.tally
+    );
+    gap_backfill::write(&scratch.0, vendor, &second, &mut have.clone()).unwrap();
+    assert_eq!(ledger(&scratch.0), written);
+
+    // A series the store does not hold owes nothing and reads nothing.
+    let none = gap_backfill::series(
+        &scratch.0,
+        store::path::PathParts {
+            symbol: "BANKNIFTY",
+            ..index_parts()
+        },
+        window,
+        &again,
+    );
+    assert_eq!((none.lines.len(), none.tally.months), (0, 0));
+}
+
+/// **A GAP MINUTE SERVED LATER IS NAMED AND REPAIRABLE (FM-166, R3-18).**
+/// 2019-09-23 15:20 is missing when the month lands and its day is a ledger
+/// line. The vendor later serves it: an ordinary re-pull is refused by the
+/// append door (the minute lies inside the held range) and appends nothing in
+/// place, its ledger line names the day again, and the repair plan — which
+/// before R3-18 counted the day held — lists it as an interior short, so the
+/// repair door fills it as a new generation with a `repaired` line.
+#[test]
+fn a_gap_minute_served_later_is_named_and_repairable() {
+    let scratch = Scratch::new("SERVED-LATER");
+    let (from, to) = (day(2019, 9, 1), day(2019, 9, 30));
+    let x = (day(2019, 9, 23), hm(15, 20));
+    let first = owed_answer("INDEX", from, to, &|d, m| (d, m) != x);
+    let req = request(pull::vendor::Listing::Index, from, to);
+    let land = |rows: Vec<RawRow>| {
+        pull::ingest::from_window(
+            &pull::fetch::RawWindow { rows },
+            "NIFTY",
+            "ZERODHA TEST",
+            &scratch.0,
+            plan(&req, "INDEX"),
+        )
+    };
+    let done = land(first);
+    assert!(done.bars_committed > 0);
+    let last_line = |root: &Path| {
+        ledger(root)
+            .lines()
+            .rfind(|l| l.starts_with("gap NSE-INDEX-NIFTY 2019-09-23 "))
+            .map(str::to_owned)
+    };
+    assert!(
+        last_line(&scratch.0)
+            .unwrap()
+            .contains(" missing=1 first_missing=15:20 ")
+    );
+    let parts = store::path::PathParts {
+        month: store::path::YearMonth::new(2019, 9).unwrap(),
+        ..index_parts()
+    };
+    let window = Window::new(from, to).unwrap();
+    let short = |root: &Path| repair_plan::plan(root, parts, window)[0].short.clone();
+    assert_eq!(short(&scratch.0).len(), 1);
+    let held = month_bars(&scratch.0, "INDEX", "NIFTY", Timeframe::MINUTE_1, (2019, 9));
+
+    // The vendor now serves the minute: an ordinary pull appends nothing.
+    let whole = owed_answer("INDEX", from, to, &|_, _| true);
+    let again = land(whole.clone());
+    assert_eq!(again.bars_committed, 0, "{:?}", again.failures);
+    assert_eq!(
+        month_bars(&scratch.0, "INDEX", "NIFTY", Timeframe::MINUTE_1, (2019, 9)),
+        held,
+        "nothing appended in place"
+    );
+    // THE RUN NAMES IT: a new line for the day, last of its key, saying the
+    // vendor's 15:20 was SERVED and refused at the append door (`refused_*`),
+    // not that the vendor sent nothing (`vendor_empty`).
+    let named = last_line(&scratch.0).unwrap();
+    assert!(
+        named.contains(" missing=1 first_missing=15:20 ") && named.contains(" why=refused_"),
+        "the run names the day: {named}"
+    );
+    assert_eq!(
+        ledger(&scratch.0)
+            .lines()
+            .filter(|l| l.starts_with("gap NSE-INDEX-NIFTY 2019-09-23 "))
+            .count(),
+        2,
+        "the landing's line and the re-pull's"
+    );
+    let listed = short(&scratch.0);
+    assert_eq!(
+        listed
+            .iter()
+            .map(|s| (s.day, s.owed, s.held, s.fill))
+            .collect::<Vec<_>>(),
+        [(day(2019, 9, 23), 375, 374, Missing::Interior)]
+    );
+    assert!(repair_plan::plan(&scratch.0, parts, window)[0].needs_repair());
+
+    // The repair door fills it: a new generation, the plan whole, the line
+    // superseded by `repaired`.
+    let repaired = pull::ingest::repair_window(
+        &pull::fetch::RawWindow { rows: whole },
+        "NIFTY",
+        "ZERODHA TEST",
+        &scratch.0,
+        plan(&req, "INDEX"),
+        "FM-166 test: the vendor now serves 2019-09-23 15:20",
+    );
+    assert!(repaired.failures.is_empty(), "{:?}", repaired.failures);
+    let month = &repair_plan::plan(&scratch.0, parts, window)[0];
+    assert!(month.generation > 0 && month.short.is_empty() && !month.needs_repair());
+    assert!(last_line(&scratch.0).unwrap().contains(" why=repaired "));
+}
+
+/// One invented minute bar at `minute` past IST midnight on day `number`.
+fn bar_at(number: u32, minute: u32) -> store::format::Bar {
+    let secs = i64::from(number) * 86_400 - IST_OFFSET_SECS + i64::from(minute) * 60;
+    store::format::Bar {
+        ts_micros: secs * 1_000_000,
+        open: 4_321_000,
+        high: 4_321_500,
+        low: 4_320_500,
+        close: 4_321_100,
+        volume: 0,
+        open_interest: store::format::OI_NULL,
+    }
+}
+
+/// A store holding `held` months of NIFTY 1min: 2019-09 whole but for
+/// 2019-09-23 15:15-15:28 (DB-A12's shape), and the `held - 1` months before
+/// it one bar each, so every one is a held month the rung listing names.
+fn stored_months(root: &Path, held: u16) {
+    let write = |month: store::path::YearMonth, bars: &[store::format::Bar]| {
+        let parts = store::path::PathParts {
+            month,
+            ..index_parts()
+        };
+        let mut file = store::file::BarFile::open_or_create(
+            root,
+            store::path::StorePath::new(parts).unwrap(),
+            repair_plan::symbol_id("NIFTY"),
+        )
+        .unwrap();
+        file.append(bars).unwrap();
+    };
+    let mut bars = Vec::new();
+    for number in day(2019, 9, 1).days_from_epoch()..=day(2019, 9, 30).days_from_epoch() {
+        let Owes::Windows((windows, count)) = repair_plan::owed("INDEX", number) else {
+            continue;
+        };
+        for &(open, close) in &windows[..count] {
+            for minute in open..close {
+                if number == day(2019, 9, 23).days_from_epoch() && (915..929).contains(&minute) {
+                    continue;
+                }
+                bars.push(bar_at(number, minute));
+            }
+        }
+    }
+    write(store::path::YearMonth::new(2019, 9).unwrap(), &bars);
+    // The months before 2019-09, newest first: 2019-08, 2019-07, ...
+    let mut index: u16 = 2019 * 12 + 8 - 1;
+    for _ in 1..held {
+        let (year, month) = (index / 12, u8::try_from(index % 12 + 1).unwrap());
+        let first = Day::new(year, month, 1).unwrap();
+        // 10:00 on the 1st, whatever kind of day it was: a held month.
+        write(
+            store::path::YearMonth::new(year, month).unwrap(),
+            &[bar_at(first.days_from_epoch(), 600)],
+        );
+        index -= 1;
+    }
+}
+
+/// One plan of 2019-09 over `root`, in nanoseconds.
+fn plan_time(root: &Path) -> u128 {
+    let parts = store::path::PathParts {
+        month: store::path::YearMonth::new(2019, 9).unwrap(),
+        ..index_parts()
+    };
+    let window = Window::new(day(2019, 9, 1), day(2019, 9, 30)).unwrap();
+    let at = std::time::Instant::now();
+    let months = std::hint::black_box(repair_plan::plan(root, parts, window));
+    let took = at.elapsed().as_nanos();
+    assert_eq!(
+        months[0].short.len(),
+        1,
+        "the one short session, every time"
+    );
+    took
+}
+
+/// **THE PLAN PER MONTH ASKED IS FLAT IN THE MONTHS STORED (R3-18).** One
+/// month asked of a series holding 1, 10 and 100 months: the plan opens the
+/// asked month alone, and its only per-series step is one listing of the rung
+/// directory (O(months held), named for `docs/06-limits.md`). n = 200 plans
+/// of each, warm (one plan of each first), INTERLEAVED — one of each per
+/// round — so a load spike on a shared host lands on all three alike; p50,
+/// p99 and max printed. The ratio of 10x and 100x to 1x is held under gate
+/// 8's ceiling, 3.0x (`benches/ratio.rs` `CEILING_PERMILLE`), at the median,
+/// the statistic one stall cannot inflate; p99's ratio is printed beside it,
+/// measured, and not asserted on a shared machine.
+#[test]
+fn the_plan_per_month_asked_is_flat_in_months_stored() {
+    const N: usize = 200;
+    const CEILING_PERMILLE: u128 = 3_000;
+    const HELD: [u16; 3] = [1, 10, 100];
+    let stores: Vec<Scratch> = HELD
+        .iter()
+        .map(|&held| {
+            let scratch = Scratch::new(&format!("PLAN-FLAT-{held}"));
+            stored_months(&scratch.0, held);
+            assert_eq!(
+                repair_plan::held_months(&scratch.0, index_parts()).len(),
+                usize::from(held)
+            );
+            let _warm = plan_time(&scratch.0);
+            scratch
+        })
+        .collect();
+    let mut times: Vec<Vec<u128>> = vec![Vec::with_capacity(N); HELD.len()];
+    for _ in 0..N {
+        for (store, out) in stores.iter().zip(times.iter_mut()) {
+            out.push(plan_time(&store.0));
+        }
+    }
+    let mut p50 = Vec::new();
+    let mut p99s = Vec::new();
+    for (held, mut sample) in HELD.iter().zip(times) {
+        sample.sort_unstable();
+        let (median, p99, max) = (sample[N / 2], sample[N * 99 / 100], sample[N - 1]);
+        println!(
+            "repair_plan::plan, one month asked, {held} month(s) stored: n={N} p50={median}ns p99={p99}ns max={max}ns"
+        );
+        p50.push(median);
+        p99s.push(p99);
+    }
+    for (label, at, tail) in [("10x", p50[1], p99s[1]), ("100x", p50[2], p99s[2])] {
+        let permille = at * 1_000 / p50[0].max(1);
+        let tail_permille = tail * 1_000 / p99s[0].max(1);
+        println!(
+            "ratio {label} / 1x: p50 {permille} permille, p99 {tail_permille} permille (printed)"
+        );
+        assert!(
+            permille <= CEILING_PERMILLE,
+            "{label} months stored costs {permille} permille of 1x per month asked"
+        );
+    }
+}
+
+/// **WHAT IS AT THE LEDGER'S NAME DECIDES, NOT WHAT IT POINTS AT (R3-18,
+/// R3-16's read door).** No ledger is no line yet; a symbolic link (even to
+/// a real ledger) and a directory at `audit/zerodha.gaps` are refused by
+/// name, never followed and never read as an empty ledger, so no stored-month
+/// line is offered against a ledger nobody read; a malformed `gap` line is
+/// counted by its line number, never skipped silently.
+#[test]
+fn a_ledger_name_holding_a_link_or_a_directory_is_refused_by_name() {
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let scratch = Scratch::new("LEDGER-NAME");
+    let audit = scratch.0.join("audit");
+    fs::create_dir_all(&audit).unwrap();
+    let have = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
+    assert!(have.is_empty() && have.faults.is_empty(), "no ledger yet");
+
+    let elsewhere = scratch.0.join("elsewhere.gaps");
+    fs::write(
+        &elsewhere,
+        "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=vendor_empty run=0\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&elsewhere, audit.join("zerodha.gaps")).unwrap();
+    let linked = gap_backfill::ledgered(&scratch.0, vendor).unwrap_err();
+    assert!(linked.contains("zerodha.gaps"), "{linked}");
+
+    fs::remove_file(audit.join("zerodha.gaps")).unwrap();
+    fs::create_dir(audit.join("zerodha.gaps")).unwrap();
+    let directory = gap_backfill::ledgered(&scratch.0, vendor).unwrap_err();
+    assert!(directory.contains("zerodha.gaps"), "{directory}");
+
+    fs::remove_dir(audit.join("zerodha.gaps")).unwrap();
+    fs::write(
+        audit.join("zerodha.gaps"),
+        "gap NSE-INDEX-NIFTY 2019-09-23 v=1\ngap NSE-INDEX-NIFTY 23-09-2019 v=1\nderive NSE-INDEX-NIFTY 5min 2019-09 v=1\n",
+    )
+    .unwrap();
+    let parsed = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
+    assert_eq!(parsed.len(), 1, "the well-keyed line");
+    assert!(parsed.holds("NSE-INDEX-NIFTY", day(2019, 9, 23)));
+    assert_eq!(
+        parsed.faults,
+        [2],
+        "the day that is not YYYY-MM-DD, by line"
+    );
+}

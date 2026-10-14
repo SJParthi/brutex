@@ -19,7 +19,9 @@
 //!   a repair would do, READ-ONLY: per month, the generation served, the
 //!   sessions of record, which hold a bar, and each that does not, classed
 //!   `front` / `interior` (only a repair fills it) or `tail` / `absent` (an
-//!   ordinary pull does); the `POST /pull/repair` body that fills them; and the
+//!   ordinary pull does); at the minute rung, each session holding a bar but
+//!   fewer of its owed minutes than the calendar owes (`short`, R3-18), classed
+//!   the same way; the `POST /pull/repair` body that fills them; and the
 //!   repair journal's lines for the series.
 //! - `POST /pull/repair` is `POST /pull/spot`'s form plus `repair_reason`: the
 //!   same credential, budget, chunking and landing, with the repair door at the
@@ -28,8 +30,11 @@
 //!
 //! # Cost
 //!
-//! The plan is O(days asked): one generation probe and one open per month, one
-//! time-indexed lookup per session (`pull::ingest::repair_plan`). The journal
+//! The plan is O(days asked): one generation probe and one open per month, two
+//! time-indexed lookups per session, and at the minute rung two more per
+//! trading window and at most two record reads per short session
+//! (`pull::ingest::repair_plan`, R3-18); one listing of the rung directory per
+//! answer, O(months held). The journal
 //! read is bounded by [`MAX_JOURNAL_BYTES`] from its tail. Measured on a shadow
 //! of the operator's store in the WP-13c report.
 
@@ -202,10 +207,20 @@ fn render(
     let (mut sessions, mut held, mut missing, mut repair_sessions, mut repair_months) =
         (0u32, 0u32, 0usize, 0usize, 0usize);
     let mut before_first = 0usize;
+    // SHORT SESSIONS (R3-18): held, but fewer of their owed minutes than the
+    // calendar owes; a front or interior one only a repair fills.
+    let (mut short, mut short_minutes, mut repair_short) = (0usize, 0u64, 0usize);
     for month in months {
         sessions += month.sessions;
         held += month.held;
         missing += month.missing.len();
+        short += month.short.len();
+        short_minutes += month
+            .short
+            .iter()
+            .map(|s| u64::from(s.missing()))
+            .sum::<u64>();
+        repair_short += month.short.iter().filter(|s| s.fill.needs_repair()).count();
         before_first += month
             .missing
             .iter()
@@ -236,6 +251,12 @@ fn render(
         "from": day_text(window.from()),
         "to": day_text(window.to()),
         "calendar": "pull::calendar::exchange_kind_of, the calendar of record /calendar.json reads (D-3336)",
+        "absence_may_be_no_trade": repair_plan::absence_may_be_no_trade(segment),
+        "short_rule": if repair_plan::absence_may_be_no_trade(segment) {
+            "a short session holds fewer of its owed minutes than the calendar owes (halts excluded, R3-18); for a share a minute without a candle may be a minute nobody traded (D-3321), which the store cannot tell from a hole: a repair lands only what the feed serves"
+        } else {
+            "a short session holds fewer of its owed minutes than the calendar owes (halts excluded, R3-18); an index is computed every minute, so each is a hole"
+        },
         "months": months.iter().map(month_json).collect::<Vec<_>>(),
         "totals": {
             "sessions": sessions,
@@ -244,6 +265,9 @@ fn render(
             "repair_sessions": repair_sessions,
             "repair_months": repair_months,
             "before_first": before_first,
+            "short_sessions": short,
+            "short_minutes": short_minutes,
+            "repair_short_sessions": repair_short,
         },
         "repair": repair_json(&ranges, (vendor, segment, timeframe), instrument),
         "journal": journal_lines(root, vendor, key),
@@ -265,6 +289,15 @@ fn month_json(month: &repair_plan::Month) -> serde_json::Value {
             "fill": why.code(),
             "by": filled_by(*why),
         })).collect::<Vec<_>>(),
+        "short": month.short.iter().map(|s| serde_json::json!({
+            "day": day_text(s.day),
+            "owed": s.owed,
+            "held": s.held,
+            "missing": s.missing(),
+            "fill": s.fill.code(),
+            "by": filled_by(s.fill),
+        })).collect::<Vec<_>>(),
+        "length_unjudged": month.length_unjudged.iter().map(|day| day_text(*day)).collect::<Vec<_>>(),
         "unattested": month.unattested.iter().map(|day| day_text(*day)).collect::<Vec<_>>(),
         "repair_needed": month.needs_repair(),
         "refused": month.refused,
@@ -458,6 +491,18 @@ mod tests {
         assert_eq!(december["missing"][0]["fill"], "front");
         assert_eq!(json["totals"]["repair_sessions"], 11);
         assert_eq!(json["totals"]["before_first"], 0);
+        // SHORT SESSIONS (R3-18): the 16th holds one bar, at 00:00, and none
+        // of the 375 minutes it owes; after the month's last bar, so an
+        // ordinary pull's, and served with its minutes.
+        assert_eq!(december["short"][0]["day"], "2020-12-16");
+        assert_eq!(december["short"][0]["owed"], 375);
+        assert_eq!(december["short"][0]["held"], 0);
+        assert_eq!(december["short"][0]["missing"], 375);
+        assert_eq!(december["short"][0]["fill"], "tail");
+        assert_eq!(json["totals"]["short_sessions"], 1);
+        assert_eq!(json["totals"]["short_minutes"], 375);
+        assert_eq!(json["totals"]["repair_short_sessions"], 0);
+        assert_eq!(december["length_unjudged"], serde_json::json!([]));
         assert_eq!(json["repair"]["ranges"][0]["from"], "2020-12-01");
         assert_eq!(json["repair"]["ranges"][0]["to"], "2020-12-31");
         assert!(

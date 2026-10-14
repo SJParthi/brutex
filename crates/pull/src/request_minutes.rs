@@ -68,6 +68,13 @@ enum Why {
     /// A versioned repair added this day's bars (D-3350): the line supersedes
     /// the day's earlier `refused_*` line, last line of a key winning.
     Repaired,
+    /// The STORE holds fewer of the day's owed minutes than the session owes,
+    /// found from the stored month and the calendar with no vendor call
+    /// (R3-18, `ingest::gap_backfill`): a month landed before this ledger
+    /// existed, or whose answer's line was lost. What the vendor answered is
+    /// not known, so no vendor reason is claimed; the line's `fill=` says what
+    /// can fill it.
+    StoredShort,
 }
 
 impl Why {
@@ -82,6 +89,7 @@ impl Why {
             Self::RefusedDay => "refused_day",
             Self::RefusedFront => "refused_front",
             Self::Repaired => "repaired",
+            Self::StoredShort => "stored_short",
         }
     }
 }
@@ -453,28 +461,13 @@ fn audit_refused(rows: &[RawRow], plan: Plan<'_>, venue: Venue, refusals: &Refus
             &mut sink
         };
         let mut line = DayGaps::new(day, why);
-        for &(open, close) in windows.iter().take(count) {
-            line.owed = line.owed.saturating_add(close.saturating_sub(open));
-            let mut next = base + i128::from(open) * 60;
-            let close = base + i128::from(close) * 60;
-            while stamps.peek().is_some_and(|stamp| *stamp < next) {
-                stamps.next();
-            }
-            while let Some(&stamp) = stamps.peek() {
-                if stamp >= close {
-                    break;
-                }
-                if stamp > next {
-                    missing(found, &mut line, base, next, stamp);
-                }
-                next = stamp + 60;
-                stamps.next();
-            }
-            if next < close {
-                missing(found, &mut line, base, next, close);
-            }
-        }
-        line.held = line.owed.saturating_sub(line.missing);
+        tally(
+            found,
+            &mut line,
+            windows.get(..count.min(MAX_WINDOWS)).unwrap_or(&[]),
+            base,
+            &mut stamps,
+        );
         // A DAY A REPAIR FILLED IS SAID, short or not (D-3350), so its earlier
         // `refused_*` line is superseded rather than left standing.
         while repaired.next_if(|&day| day < number).is_some() {}
@@ -487,6 +480,76 @@ fn audit_refused(rows: &[RawRow], plan: Plan<'_>, venue: Venue, refusals: &Refus
         }
     }
     audit
+}
+
+/// Counts one day's owed `windows` (`[from, to)` minutes past IST midnight)
+/// against `stamps` (IST-local seconds floored to the minute, ascending, from
+/// `base`, the day's IST midnight) into `line`: its owed and held minutes and
+/// its runs of missing ones, each run also a finding in `found`. The one
+/// counter the vendor audit and the stored-month ledger share (R3-18).
+fn tally(
+    found: &mut Vec<Finding>,
+    line: &mut DayGaps,
+    windows: &[(u32, u32)],
+    base: i128,
+    stamps: &mut std::iter::Peekable<impl Iterator<Item = i128>>,
+) {
+    for &(open, close) in windows {
+        line.owed = line.owed.saturating_add(close.saturating_sub(open));
+        let mut next = base + i128::from(open) * 60;
+        let close = base + i128::from(close) * 60;
+        while stamps.peek().is_some_and(|stamp| *stamp < next) {
+            stamps.next();
+        }
+        while let Some(&stamp) = stamps.peek() {
+            if stamp >= close {
+                break;
+            }
+            if stamp > next {
+                missing(found, line, base, next, stamp);
+            }
+            next = stamp + 60;
+            stamps.next();
+        }
+        if next < close {
+            missing(found, line, base, next, close);
+        }
+    }
+    line.held = line.owed.saturating_sub(line.missing);
+}
+
+/// The `gap` line for one day of a STORED month the store holds short, found
+/// with no vendor call (R3-18): `stamps` are the UTC micros of the day's held
+/// minutes, ascending; `windows` what the day owes
+/// (`repair_plan::owed`); `fill` the repair plan's word for what can fill
+/// it, written as `fill=` after D-3335's fields with `source=store`. With
+/// the line, its missing minutes; `None` when the day holds every owed
+/// minute.
+pub(super) fn stored_line(
+    key: &str,
+    day: Day,
+    windows: &[(u32, u32)],
+    stamps: impl Iterator<Item = i64>,
+    fill: &str,
+) -> Option<(String, u32)> {
+    let base = i128::from(day.days_from_epoch()) * 86_400;
+    let mut line = DayGaps::new(day, Why::StoredShort);
+    let mut stamps = stamps
+        .map(|micros| {
+            (i128::from(micros.div_euclid(1_000_000)) + i128::from(IST_OFFSET_SECS)).div_euclid(60)
+                * 60
+        })
+        .peekable();
+    tally(&mut Vec::new(), &mut line, windows, base, &mut stamps);
+    (line.missing > 0).then(|| {
+        (
+            format!(
+                "{} fill={fill} source=store",
+                gap_line(key, &line, run_ordinal())
+            ),
+            line.missing,
+        )
+    })
 }
 
 /// THE DAY IS WITHHELD AND SAID SO, the rest of the answer is audited
@@ -712,7 +775,8 @@ fn aggregate(findings: &[Finding], vendor: brutex_core::vendor::Vendor) -> Vec<G
                 | Why::Unordered
                 | Why::RefusedDay
                 | Why::RefusedFront
-                | Why::Repaired => format!(
+                | Why::Repaired
+                | Why::StoredShort => format!(
                     "request minute coverage UNVERIFIED in {month}: {} finding(s) on {} day(s), {first_day}..{last_day}; the first: {}",
                     open.count, open.days, open.first
                 ),
@@ -774,7 +838,13 @@ fn aggregate(findings: &[Finding], vendor: brutex_core::vendor::Vendor) -> Vec<G
 /// The census's instrument text, `<EXCHANGE>-<SEGMENT>-<SYMBOL>`, the key
 /// every ledger line names (D-3335, the text `/store.json` lists).
 fn instrument_key(plan: Plan<'_>, instrument: &str) -> String {
-    format!("{}-{}-{instrument}", plan.exchange, plan.segment)
+    ledger_key(plan.exchange, plan.segment, instrument)
+}
+
+/// A ledger line's instrument key, `<exchange>-<segment>-<symbol>`: the one
+/// spelling the pull's lines and the stored-month lines share (R3-18).
+pub(super) fn ledger_key(exchange: &str, segment: &str, instrument: &str) -> String {
+    format!("{exchange}-{segment}-{instrument}")
 }
 
 /// The run every ledger line written now belongs to: the telemetry sink's
