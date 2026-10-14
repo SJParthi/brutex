@@ -68210,6 +68210,91 @@ month that crosses, by the commit that crosses: first commit or later),
 `cli::srt_builder::tests::a_small_month_is_small_in_the_receipt_and_writes_nothing`,
 `api::bars::sort::tests::a_month_without_its_srt_is_the_rule_below_the_threshold_and_a_finding_at_it`.
 
+### D-4939 — Codec 1: a sealed month's frame is seven bit-packed column streams after a varint row 0, and it gives back any seven `i64` bit for bit — 2026-10-13
+
+**Implemented by** SC-1 (`store::sealed_codec`, tests in
+`crates/store/src/sealed_codec_tests.rs`, the real-month acceptance in
+`crates/store/tests/sealed_codec_samples.rs`). **Specification** the
+compressed-store design (`state/design/store-compression-20261012.md` §4.2.5,
+§6, §9 SC-1). The design numbered the sealed month D-4928 inside its reserved
+block D-4928 to D-4938; D-4928 went to WP-11c's day ledger on 12 October, so
+the codec, the one part of that decision this package lands, takes the first
+number past the block. The `.sbar` file around the frames (head, directory,
+time table, provenance) is SC-2's and is not decided here.
+
+**Decision.**
+
+1. **A frame holds 1 to `block_rows` bars** (256 for every month the sealer
+   writes; a reader passes what the month's head states, never a constant):
+   byte 0 the codec `1`; byte 1 the flags (bit 0: row 0's stamp is whole
+   seconds after the month's origin, 00:00 IST on the 1st; bit 1: row 0's open
+   interest is `i64::MIN`; any other bit is refused); bytes 2 and 3 the rows,
+   little-endian. Then row 0 as zigzag LEB128 varints in the order
+   `(ts − origin) / unit`, close, open − close, high − close, low − close,
+   volume and, unless flag bit 1, open interest. Then seven streams in the
+   order ts, close, open, high, low, volume, open interest, each holding the
+   `m − 1` residuals of rows 1 onward.
+2. **A stream** is a byte (bit 7 the predictor mode, bits 0 to 6 the width,
+   0 to 64), a varint exception count, the exception width byte when there are
+   exceptions, a varint base, a varint gcd (1 to 2^62 − 1), the packed values
+   least significant bit first, the exception positions (`max(1, bit length of
+   m − 2)` bits each, strictly increasing) and the exception values. A value is
+   the packed value or the exception at its position, plus base, zigzag
+   undone, times gcd, plus the predictor; every step wraps, so `i64::MIN` open
+   interest and a jump from `i64::MAX` to `i64::MIN` come back exactly.
+3. **The predictors**: ts and close the previous row's; open the previous
+   close (mode 0) or this row's close (mode 1); high `max(open, close)`; low
+   `min(open, close)`; volume zero (mode 0) or the previous volume (mode 1);
+   open interest the previous row's (mode 0) or zero (mode 1). Mode 1 on any
+   other column is refused.
+4. **The encoder takes the shortest stream exactly.** For each mode a column
+   has and each width from 0 to its widest value it computes the stream's
+   length in bytes and keeps the least; ties go to mode 0, then to the smaller
+   width. A gcd of 0 (every residual zero) or at least 2^62 is written as 1.
+   Plain packing is a candidate, so a stream is at most 2,062 bytes at 256
+   rows and a frame at most 14,508 (`MAX_FRAME_LEN`, `4 + 70 + 7 × 2,062`);
+   `max_frame_len(block_rows)` states it for any other geometry. The same rows
+   give the same bytes on any host: nothing in a frame is a time, a counter or
+   a build.
+5. **The decoder checks the frame's CRC-32C first** (the caller holds it, from
+   the frame's directory entry), **then refuses each malformed shape by its own
+   name**: `checksum`, `codec`, `flags`, `rows`, `truncated`,
+   `varint_too_long`, `width`, `mode`, `exception_count`, `exception_width`,
+   `gcd`, `exception_position`, `exception_order`, `trailing_bytes`. None is a
+   panic, and on a refusal nothing is appended to the caller's buffer.
+   `decode_stamps` makes every check `decode_frame` makes and unpacks only the
+   ts stream, for a time lookup. **Every check is made before the buffer
+   grows** (FM-284, SC1-09): all seven streams and the trailing bytes are read
+   as slices of the frame first, so a head or a stream that lies under a
+   matching checksum is refused having allocated nothing, and an accepted
+   frame reserves its checked rows once. The proof counts the allocator's
+   bytes, in `crates/pull/tests/allocation.rs`, the one test root Gate 16 lets
+   implement `GlobalAlloc` (D-0724); `pull` already depends on `store`.
+
+**Why the exact choice, not the prototype's.** The blocks prototype chose a
+width by an approximate bit cost (`n·w + exceptions·(p + top) + 16`) and
+scanned from the widest down, so its ties went to the larger width; the design
+states the smallest encoding with ties to the smaller width. On 547 real
+months the exact choice is never longer and saves 501 bytes in 39.3 MB: it is
+what the design says, at no cost.
+
+**Measured** (13 October 2026, `sealed_codec_samples`, release, a shared
+machine; every month round-tripped bit for bit through both decoders). With
+the prototype's width rule, codec 1's streams are byte for byte the prototype's
+measured frames on all 547 months (8 samples and the 539-month manifest), once
+its 56-byte row 0 is replaced by codec 1's varint row 0. Against the design's
+own figure (prototype frames less the judge's estimated row-0 saving) codec 1
+is 0.27% smaller on the eight samples and 0.34% smaller on the manifest: the
+judge's estimate charged a flags byte and an open-interest byte a frame that
+codec 1 keeps in its 4-byte head and its flags. The one-bar month is 45 bytes
+against the estimate's 44: its stamp is counted from the month's origin, not
+from its own first bar. NIFTY spot 1s 2026-08: 472,445 bars, 1,421,874 bytes of
+frames (3.01 bytes a bar against 56 raw).
+
+**What this does not decide.** Where a frame's checksum lives, how frames are
+found and how a month is sealed (SC-2, SC-3, SC-7); the patched alias (SC-12).
+Nothing here writes or reads a store file.
+
 ### D-4950 — The pull journal's restart scan pairs a closing record only with a run of its own scope, window and source, first the run it directly follows; a refusal before a run opens is `Refused`; and only a later run whose opening record names the same ASK supersedes a run cut short — 2026-10-14
 
 **Implemented by** WP-62 repair 6 (`api::pullrun::walk`, `api::audit::Record::opened`,
@@ -68315,88 +68400,3 @@ rule, as it did before it, so none is in the scan.
 `api::server::tests::a_run_whose_opening_record_was_refused_closes_behind_it_written_late`,
 `api::server::tests::every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`,
 `api::server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`.
-
-### D-4939 — Codec 1: a sealed month's frame is seven bit-packed column streams after a varint row 0, and it gives back any seven `i64` bit for bit — 2026-10-13
-
-**Implemented by** SC-1 (`store::sealed_codec`, tests in
-`crates/store/src/sealed_codec_tests.rs`, the real-month acceptance in
-`crates/store/tests/sealed_codec_samples.rs`). **Specification** the
-compressed-store design (`state/design/store-compression-20261012.md` §4.2.5,
-§6, §9 SC-1). The design numbered the sealed month D-4928 inside its reserved
-block D-4928 to D-4938; D-4928 went to WP-11c's day ledger on 12 October, so
-the codec, the one part of that decision this package lands, takes the first
-number past the block. The `.sbar` file around the frames (head, directory,
-time table, provenance) is SC-2's and is not decided here.
-
-**Decision.**
-
-1. **A frame holds 1 to `block_rows` bars** (256 for every month the sealer
-   writes; a reader passes what the month's head states, never a constant):
-   byte 0 the codec `1`; byte 1 the flags (bit 0: row 0's stamp is whole
-   seconds after the month's origin, 00:00 IST on the 1st; bit 1: row 0's open
-   interest is `i64::MIN`; any other bit is refused); bytes 2 and 3 the rows,
-   little-endian. Then row 0 as zigzag LEB128 varints in the order
-   `(ts − origin) / unit`, close, open − close, high − close, low − close,
-   volume and, unless flag bit 1, open interest. Then seven streams in the
-   order ts, close, open, high, low, volume, open interest, each holding the
-   `m − 1` residuals of rows 1 onward.
-2. **A stream** is a byte (bit 7 the predictor mode, bits 0 to 6 the width,
-   0 to 64), a varint exception count, the exception width byte when there are
-   exceptions, a varint base, a varint gcd (1 to 2^62 − 1), the packed values
-   least significant bit first, the exception positions (`max(1, bit length of
-   m − 2)` bits each, strictly increasing) and the exception values. A value is
-   the packed value or the exception at its position, plus base, zigzag
-   undone, times gcd, plus the predictor; every step wraps, so `i64::MIN` open
-   interest and a jump from `i64::MAX` to `i64::MIN` come back exactly.
-3. **The predictors**: ts and close the previous row's; open the previous
-   close (mode 0) or this row's close (mode 1); high `max(open, close)`; low
-   `min(open, close)`; volume zero (mode 0) or the previous volume (mode 1);
-   open interest the previous row's (mode 0) or zero (mode 1). Mode 1 on any
-   other column is refused.
-4. **The encoder takes the shortest stream exactly.** For each mode a column
-   has and each width from 0 to its widest value it computes the stream's
-   length in bytes and keeps the least; ties go to mode 0, then to the smaller
-   width. A gcd of 0 (every residual zero) or at least 2^62 is written as 1.
-   Plain packing is a candidate, so a stream is at most 2,062 bytes at 256
-   rows and a frame at most 14,508 (`MAX_FRAME_LEN`, `4 + 70 + 7 × 2,062`);
-   `max_frame_len(block_rows)` states it for any other geometry. The same rows
-   give the same bytes on any host: nothing in a frame is a time, a counter or
-   a build.
-5. **The decoder checks the frame's CRC-32C first** (the caller holds it, from
-   the frame's directory entry), **then refuses each malformed shape by its own
-   name**: `checksum`, `codec`, `flags`, `rows`, `truncated`,
-   `varint_too_long`, `width`, `mode`, `exception_count`, `exception_width`,
-   `gcd`, `exception_position`, `exception_order`, `trailing_bytes`. None is a
-   panic, and on a refusal nothing is appended to the caller's buffer.
-   `decode_stamps` makes every check `decode_frame` makes and unpacks only the
-   ts stream, for a time lookup. **Every check is made before the buffer
-   grows** (FM-284, SC1-09): all seven streams and the trailing bytes are read
-   as slices of the frame first, so a head or a stream that lies under a
-   matching checksum is refused having allocated nothing, and an accepted
-   frame reserves its checked rows once. The proof counts the allocator's
-   bytes, in `crates/pull/tests/allocation.rs`, the one test root Gate 16 lets
-   implement `GlobalAlloc` (D-0724); `pull` already depends on `store`.
-
-**Why the exact choice, not the prototype's.** The blocks prototype chose a
-width by an approximate bit cost (`n·w + exceptions·(p + top) + 16`) and
-scanned from the widest down, so its ties went to the larger width; the design
-states the smallest encoding with ties to the smaller width. On 547 real
-months the exact choice is never longer and saves 501 bytes in 39.3 MB: it is
-what the design says, at no cost.
-
-**Measured** (13 October 2026, `sealed_codec_samples`, release, a shared
-machine; every month round-tripped bit for bit through both decoders). With
-the prototype's width rule, codec 1's streams are byte for byte the prototype's
-measured frames on all 547 months (8 samples and the 539-month manifest), once
-its 56-byte row 0 is replaced by codec 1's varint row 0. Against the design's
-own figure (prototype frames less the judge's estimated row-0 saving) codec 1
-is 0.27% smaller on the eight samples and 0.34% smaller on the manifest: the
-judge's estimate charged a flags byte and an open-interest byte a frame that
-codec 1 keeps in its 4-byte head and its flags. The one-bar month is 45 bytes
-against the estimate's 44: its stamp is counted from the month's origin, not
-from its own first bar. NIFTY spot 1s 2026-08: 472,445 bars, 1,421,874 bytes of
-frames (3.01 bytes a bar against 56 raw).
-
-**What this does not decide.** Where a frame's checksum lives, how frames are
-found and how a month is sealed (SC-2, SC-3, SC-7); the patched alias (SC-12).
-Nothing here writes or reads a store file.
