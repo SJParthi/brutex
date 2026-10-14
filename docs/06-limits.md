@@ -17104,3 +17104,26 @@ months' own p50, p99 or max.
 | L-SC-12 | Incompressible bars are not compressed | a frame of random fields has nothing to predict | at most 57 bytes a bar, 1 more than raw: 400 frames of random fields all between 50 × 256 and 57 × 256 bytes (`no_frame_exceeds_the_bound`), and never above `MAX_FRAME_LEN` | SC-1 |
 | L-SC-15 | Encoding a frame tries every width | the encoder measures each mode a column has at every width from 0 to its widest value, 65 lengths a stream at most, from a histogram of the residuals' bit lengths | O(rows) a column, once, when a month is sealed (L-SC-5 is the seal's). **Measured, quiet** (the same 15 months): a frame encoded p50 12.7 to 19.3 µs, p99 15.0 to 35.8 µs, max 18 to 100 µs; the 472,445-bar NIFTY month is 1,846 frames at p50 17.8 µs, about 33 ms in all. **Under load**: p50 14.5 to 51.6 µs, p99 16.8 µs to 17.1 ms, max 19 µs to 21.3 ms | SC-1 |
 
+
+## Cash-session masters: shared readers, a named wait, a decode per request — D-4951, 14 October 2026
+
+`pull::cash_session_cache` and `api`'s bars window (AF-03, finding p99-2). A
+reader of a dated NSE cash master takes the day's lock SHARED, reads and
+receipt-checks the bytes, releases, then decodes; an installer holds the day
+alone only to re-check and publish. The figures below were taken on 14 October
+2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
+linked read-only under the kernel lock, session masters cloned) served by two
+release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
+`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`fix/db-AF-03`. GET requests only, timed client-side
+around each whole response (`state/fix/round2/af03-evidence/measure.py`,
+results `before.jsonl` and `after.jsonl` beside it), on a machine shared with
+about twelve agents' builds, so the tails are loaded-host tails.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-CSL-1 | A reader waits for an installer | an installer's exclusive hold covers writing one master (at most `MAX_COMPRESSED` bytes), its receipt and three syncs, and a reader must not read a half-published entry | at most `LOCK_WAIT` = 5 s, attempts paused 1, 2, 4, 8, 16 ms and then 20 ms (about 254 attempts at most), then a refusal that names the lock, "an installer held it exclusively", the bound, the wait, and that the master was not read as absent. The wait sleeps its thread, on an async path too (the pull's `prepare_cash_schedule`, `/gaps.json`'s `block_on`). **Measured**: another process holding a day exclusively for 9 s made one RELIANCE 2026-08 `/gaps.json` answer at 5.002 s with that refusal in `evidence_error`; the next request, after the release, answered `expected 7560` in 1.53 s. Uncontended, a hold is one `flock` attempt | AF-03 |
+| L-CSL-2 | An installer can be held off by readers | `flock` has no queue: a stream of readers whose shared holds overlap keeps the exclusive attempt failing | the same `LOCK_WAIT`, then "readers or another installer held it … nothing was installed". A reader holds only to read and receipt-check, never through the decode. UNMEASURED beyond the test's 60 ms hold (`an_installer_beside_readers_installs_once`): no stream of readers has been timed against a real installer | AF-03 |
+| L-CSL-3 | A `/gaps.json` CASH month decodes every observed day's master on every request | nothing remembers a decoded master between requests (finding p99-1, disputed and not in this run) | O(D), D the month's observed CAS days (at most 23). **Measured, sequential, n = 200 each**: RELIANCE 2026-08 (21 masters) AFTER p50 2,000.8 ms, p99 5,721.2 ms, max 6,477.1 ms; BEFORE p50 2,412.0 ms, p99 4,026.6 ms, max 4,071.0 ms; NIFTY INDEX 2026-08 (no master) AFTER p50 1.8, p99 3.3, max 4.5 ms; BEFORE 2.1 / 4.0 / 5.0 ms. The difference, about 95 ms a master at p50, is the gzip decode and CSV parse; the change moved it out from under the lock, not out of the request | p99-1 |
+| L-CSL-4 | Parallel requests for CASH months decode in parallel | each request decodes its own masters (L-CSL-3), now all at once instead of all but one refusing | **Measured, rounds of requests sent at once**: 4 symbols × 50 rounds, 2026-08 (n = 200): AFTER p50 2,573.1 ms, p99 4,754.5 ms, max 4,766.3 ms, 0 lock refusals, one body per symbol across all rounds; BEFORE p50 3.7 ms, p99 5,306.1 ms, max 5,524.0 ms with 150 of 200 answers `expected 0` naming "would block". 4 identical RELIANCE × 50 (n = 200): AFTER p50 2,697.4, p99 4,137.7, max 4,224.1 ms, 0 refusals, 1 distinct body; BEFORE p50 3.0, p99 5,580.6, max 6,164.6 ms, 150 refusals, 2 distinct bodies. 6 symbols × 34 rounds, 2026-09 (n = 204): AFTER p50 841.4, p99 1,176.9, max 1,207.8 ms, 0 refusals; BEFORE p50 3.0, p99 557.6, max 601.6 ms, 170 refusals. The BEFORE medians are the refusals' speed, not a cost the change added | AF-03 |
+| L-CSL-5 | `/bars.json` reads a refused day's master once per request | a refusal is not remembered past its request, so the next request tries the day again (a loaded master is kept process-wide; it is immutable once receipted) | one read per (request, day, series), O(1) a bar after it. **Measured, sequential, n = 200**: `/bars/window.json` RELIANCE 2026-08, 400 rows, AFTER p50 1.5 ms, p99 5.4 ms, max 14.8 ms; BEFORE 1.8 / 6.3 / 7.9 ms | AF-03 |
