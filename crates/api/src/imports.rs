@@ -783,6 +783,10 @@ fn wanted(
 /// which is D-3317's `refused`; the row says it is read from the log, with
 /// `line: null` and `outcome_from: log`, and carries the importer's own words.
 /// Its `failures` is the distinct refusals (`about`, `why`) the log names.
+///
+/// "No journal line" means no line of that kind and day under ANY filter
+/// (AF-02, ingest-6; [`merged`]): a day closed only under `BANKNIFTY,NIFTY`
+/// or the 277-name key HAS a line, and its refusals are that close's.
 fn logged_only(kind: ImportKind, day: Day, failures: usize) -> DayRow {
     DayRow {
         kind,
@@ -866,6 +870,20 @@ fn walk<'p>(
 /// the importer's log names and the journal does not, in day order, then
 /// kind order. O(rows + logged days in the range), each logged day checked
 /// against the journal by one range probe.
+///
+/// # "The journal does not" means under no filter (AF-02, ingest-6)
+///
+/// The probe used to look for a `*` line only, so a day the journal closed
+/// only under a symbol filter (`BANKNIFTY,NIFTY`, the 277-name key) gained a
+/// made-up `*` row, `refused`, for the very refusals its own close counts as
+/// `vendor_refused=`: the operator's 2026-04-16 and 2025-03-11 read
+/// `refused` on `/imports.json`, were counted twice by `/audit.json`, and
+/// `/dayflags.json` served that row as NIFTY's outcome although NIFTY's
+/// options closed clean. A line of the kind and day under any filter is the
+/// journal naming the day; the refusals stay beside each of its rows as
+/// `logged` evidence. The importer's `refused` event carries no run id and no
+/// filter (`pull::gdfl_import::note_failure`), so it cannot be filed under one
+/// of a day's several closes; it is listed beside each, as before.
 fn merged<'p>(
     parsed: &'p Parsed,
     from: Day,
@@ -883,9 +901,9 @@ fn merged<'p>(
         ) else {
             continue;
         };
-        let journalled = parsed
-            .range(day, day)
-            .any(|row| row.kind == kind && row.filter == "*");
+        // ANY FILTER: one range of the day's keys, at most the filters that
+        // closed that day (three kinds of one day hold a handful of keys).
+        let journalled = parsed.range(day, day).any(|row| row.kind == kind);
         if !journalled {
             // DISTINCT REFUSALS, NOT LOG LINES: a day attempted by two runs
             // logs each refusal twice, and `logged` lists every line.
@@ -987,6 +1005,10 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
             })
         })
         .collect();
+    let looked = lifecycle
+        .records
+        .is_empty()
+        .then(|| where_looked(root, &lifecycle.unread));
     json!({
         "id": run,
         "journal_lines": lines,
@@ -1012,6 +1034,8 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
         "lifecycle": {
             "events": events,
             "events_total": lifecycle.records.len(),
+            "says": looked.as_ref().map(|(says, _)| says.clone()),
+            "not_read": looked.map(|(_, not_read)| not_read).unwrap_or_default(),
             "from": lifecycle.from,
             "unread": lifecycle.unread,
             "capped": lifecycle.capped,
@@ -1026,6 +1050,60 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
             ),
         },
     })
+}
+
+/// The most directories under `<store>/logs` a run's empty lifecycle names
+/// as there and not read.
+const MAX_NOT_READ_NAMED: usize = 32;
+
+/// What a run with no lifecycle event in any directory read owes its reader
+/// (AF-02, ingest-6 part 3): the sentence naming every directory read, and
+/// the directories under `<store>/logs` that are there and that no read
+/// covers, sorted, at most [`MAX_NOT_READ_NAMED`]. A `cli` given
+/// `BRUTEX_LOG_DIR` logs where it was told (`logs/cli-batch` for the
+/// operator's batch script), and a bare `events_total: 0` read as "this run
+/// logged nothing" when it meant "not where this route looks".
+///
+/// One `read_dir` of `<store>/logs`, only for a run asked and found empty.
+fn where_looked(root: &std::path::Path, unread: &[String]) -> (String, Vec<String>) {
+    let read: Vec<String> = crate::logs::import_dirs()
+        .map(|dir| format!("logs/{dir}"))
+        .collect();
+    let covered = |name: &str| {
+        crate::logs::import_dirs().any(|dir| {
+            dir == name
+                || dir
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    };
+    let mut not_read: Vec<String> = std::fs::read_dir(root.join("logs"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !covered(name))
+        .map(|name| format!("logs/{name}"))
+        .collect();
+    not_read.sort();
+    not_read.truncate(MAX_NOT_READ_NAMED);
+    let mut parts = vec![format!("no lifecycle event in {}", read.join(", "))];
+    if !unread.is_empty() {
+        parts.push(format!(
+            "not every one could be read: {}",
+            unread.join("; ")
+        ));
+    }
+    if !not_read.is_empty() {
+        parts.push(format!(
+            "{} {} there and not read by this route: a `cli` given BRUTEX_LOG_DIR logs \
+             where it was told",
+            not_read.join(", "),
+            if not_read.len() == 1 { "is" } else { "are" }
+        ));
+    }
+    (parts.join("; "), not_read)
 }
 
 /// `/dayflags.json`'s body for `query` over the store at `root`: the day
@@ -1309,6 +1387,13 @@ pub(crate) fn body(
         "notes": notes,
     })
 }
+
+/// AF-02 (ingest-6): filtered days, log-only rows and where a run's
+/// lifecycle was looked for. Its own file so the packages that edit this
+/// module's tests merge beside it.
+#[cfg(test)]
+#[path = "imports_filter_tests.rs"]
+mod filter_tests;
 
 #[cfg(test)]
 #[allow(

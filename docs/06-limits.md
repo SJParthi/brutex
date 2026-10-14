@@ -17104,3 +17104,49 @@ months' own p50, p99 or max.
 | L-SC-12 | Incompressible bars are not compressed | a frame of random fields has nothing to predict | at most 57 bytes a bar, 1 more than raw: 400 frames of random fields all between 50 × 256 and 57 × 256 bytes (`no_frame_exceeds_the_bound`), and never above `MAX_FRAME_LEN` | SC-1 |
 | L-SC-15 | Encoding a frame tries every width | the encoder measures each mode a column has at every width from 0 to its widest value, 65 lengths a stream at most, from a histogram of the residuals' bit lengths | O(rows) a column, once, when a month is sealed (L-SC-5 is the seal's). **Measured, quiet** (the same 15 months): a frame encoded p50 12.7 to 19.3 µs, p99 15.0 to 35.8 µs, max 18 to 100 µs; the 472,445-bar NIFTY month is 1,846 frames at p50 17.8 µs, about 33 ms in all. **Under load**: p50 14.5 to 51.6 µs, p99 16.8 µs to 17.1 ms, max 19 µs to 21.3 ms | SC-1 |
 
+
+## Import records on filtered days — D-4955 (AF-02, ingest-6), 14 October 2026
+
+What AF-02 adds to `/imports.json`, `/audit.json` and `/dayflags.json`, and
+what it costs. None of it is a new walk: `/imports.json`'s day rows stay the
+walk of the asked range this file already names (`imports::walk`, O(rows in
+range)), and `/dayflags.json` reads one page of `PAGE_DAYS` days through it.
+
+| Id | Operation | Bound | Measured |
+|---|---|---|---|
+| L-AF2-1 | `imports::merged`: is a logged kind-day named by the journal under ANY filter | one range of that day's keys in the parsed journal, at most the closes of that day (the operator's busiest options day holds three keys: `*`, `BANKNIFTY,NIFTY`, the 277-name key), per logged day in the asked range; the logged days are the ring's, not the journal's | see the table below; `a_month_of_filtered_closes_with_refusals_holds_no_phantom` pins one row per close over 28 days under the 277-name key |
+| L-AF2-2 | `dayflags::Names`: does a row's filter NAME the symbol | the comma split, O(bytes of the filter), once per DISTINCT filter string per request (`the_filter_is_split_once_per_distinct_string_per_request`: 84 rows, 3 splits); every other row is one hash probe of its filter text, O(bytes) of hashing, the same order as the copy of that text the walk already makes for the row. **Not O(1) in the filter's length; bounded by it**: the 277-name key is about 2,200 bytes | the 277-name RELIANCE page costs what the 15-byte NIFTY page costs (table below) |
+| L-AF2-3 | `imports::where_looked`: where a run with no lifecycle event was looked for | one `read_dir` of `<store>/logs`, only for a run asked by `run=` and found with no lifecycle event; O(entries of `<store>/logs`), six on the operator's store; at most 32 names returned (`MAX_NOT_READ_NAMED`) | `run=1791944932` below |
+
+**Measured, 14 October 2026.** Each route asked 200 times of a release build
+of the code before this change (feat/db-fix 72c91a46 with the tests' module
+hooks only) and 200 times of this change, INTERLEAVED (each iteration asks
+both, alternating which goes first) so the shared machine's load falls on
+both alike; each server reads its own fresh shadow of the operator's store
+(bars through the link, GET only); `curl`'s `time_total`; load average 46 to
+51 throughout (log `state/fix/af02/ab/timings.txt` in the work tree; the
+script is `state/fix/af02/ab.sh`). p50 / p99 / max, ms:
+
+| Route | Before | After |
+|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` (the whole journal, 11,500 rows) | 21.34 / 129.72 / 1,101.19 | 17.26 / 103.69 / 128.72 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.40 / 8.88 / 9.46 | 1.35 / 6.63 / 11.70 |
+| `/audit.json?feed=gdfl` | 1.68 / 7.33 / 3,617.92 | 1.62 / 12.62 / 28.75 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (filter `BANKNIFTY,NIFTY`) | 1.78 / 24.05 / 397.88 | 1.68 / 13.00 / 22.54 |
+| the same for NSE-FNO-RELIANCE (the 277-name filter) | 1.53 / 16.40 / 22.45 | 1.69 / 6.32 / 7.00 |
+| NSE-FNO-NIFTY, April 2026 | 3.54 / 27.13 / 51.90 | 3.57 / 18.14 / 56.61 |
+| NSE-FNO-RELIANCE, April 2026 | 3.31 / 16.00 / 21.66 | 3.18 / 11.19 / 15.35 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 26.78 / 186.13 / 196.16 | 25.07 / 150.02 / 171.42 |
+
+The p99 and max columns are the loaded host's scheduler more than the
+routes: the same eight routes asked earlier that evening, one server at a
+time and not interleaved (load not recorded; the 15-minute average was 26
+at 21:20), gave a build of this change that differs only in one sentence
+p50 1.12 to 12.15 ms and p99 2.05 to 35.20 ms, and the before build p50
+0.96 to 12.96 ms and p99 1.92 to 17.39 ms (`state/fix/af02/after` and
+`before-same-shadow`).
+What the table does show is that the change adds nothing measurable at p50,
+and that the page whose rows carry the 2,200-byte filter costs no more than
+the page whose rows carry a 15-byte one. `/imports.json?outcome=refused` is
+the walk of the whole journal (L-AF2-1's probe runs once per logged day
+inside it), unchanged here and already named above as O(rows in range).
