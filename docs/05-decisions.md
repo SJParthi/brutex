@@ -68315,3 +68315,66 @@ rule, as it did before it, so none is in the scan.
 `api::server::tests::a_run_whose_opening_record_was_refused_closes_behind_it_written_late`,
 `api::server::tests::every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`,
 `api::server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`.
+
+### D-4951 — One door to read a file, one to create a temporary, and a store whose `bars` is a link is never written (R3-16) — 2026-10-14
+
+Every reader opened its files its own way, and the ways differed exactly
+where it hurt: the verdict store's reader opened with `O_NOFOLLOW` alone, so
+a pipe at a year index's name held every lookup for ever (verify-IA-5-r2,
+follow-up 1); the GDFL tick store's day readers followed links, so a
+dangling one read as "no such day" and the run closed it `day_not_held` with
+exit 0 (FM-046). The rules audit asked for one reading rule (RA-317), one
+creating rule with a gate (RA-287, RA-290), a gone folder that is never
+deleted through (RA-294) and a writer that refuses a store whose `bars` is a
+link, as every test server's shadow is (RA-298, FM-198).
+
+1. **Reading** is `store::safe_open::open_read` (`open_read_len`,
+   `open_read_write` for an existing file a writer updates in place):
+   `O_NOFOLLOW | O_NONBLOCK`, the kind asked of the HANDLE, a regular file
+   only. Anything else is refused `read_not_regular` naming what it found
+   (`symlink`, `pipe`, `socket`, `char_device`, `block_device`,
+   `directory`); an absent name stays the host's `NotFound`
+   (`ReadRefusal::is_missing`), and a dangling link is not absent. A file
+   with several names is readable: "exactly one name" is a writer's rule.
+   Its users now: `store::verdict` (index, image and lock),
+   `cli::readonly_file::open`, `pull::gdfl_tickstore::open_day` (the
+   capital-market and options day readers).
+2. **Creating** stays `store::staging::create` (D-4922); its
+   `staging_not_regular` now names what it found. Gate 28
+   (`.github/gates_tmp_open.rs`) refuses a crate file that names a
+   temporary and calls the door fewer times than it names one; its LEGACY
+   list of five writers that still open their own may only shrink.
+3. **Writing** asks `store::safe_open::refuse_linked_store_root` once, by
+   name, before it opens anything: `linked_store_root` when `<root>/bars`
+   is a symbolic link (naming where it points), `store_bars_not_a_directory`
+   when it is something else. Every `cli` writing verb asks it
+   (`store_write::root_with`, and `gdfl-import` for its own root); a
+   read-only form never does, because a shadow exists to be read. The month
+   writer's refusal of any link below the root (CE-62, D-2686) stays behind
+   it.
+4. **The logs' gone folder**: the reaper reads the folder's identity again
+   before each delete and refuses, by name, a folder that changed after the
+   hand-over (a link or another directory in its place); nothing in it is
+   deleted and the generation waits for the next start.
+5. **A tick-store day name** holding a link (dangling or not), a pipe, a
+   socket or a device is refused `tick_store_malformed` saying which, never
+   read as absent; a directory stays `tick_store_unavailable`.
+
+Rejected: a per-component `openat` walk, which `std` does not offer without
+`unsafe` (every crate root forbids it), so a link swapped into a DIRECTORY
+above a name stays the limit L-R316-01 names (FM-223); "exactly one name"
+for readers, which would refuse a legitimate read through a second name;
+an `api` write gate for a linked store, which needs `api::server::WriteGate`
+(R4-02's file) and is named NOT DONE in L-R316-05.
+
+**Proved by** `store::safe_open::tests::a_pipe_device_or_link_is_refused_by_name`,
+`store::safe_open::tests::a_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`store::staging::tests::a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`,
+`store::verdict::tests::a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits`,
+`telemetry::sink::tests::a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched`,
+`cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`cli::gdfl_import_command::tests::gdfl_import_refuses_a_store_whose_bars_folder_is_a_link`,
+`pull::gdfl_tickstore::tests::a_dangling_day_file_link_is_refused_by_name_never_a_day_not_held`,
+`cli::gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`,
+`store::safe_open::tests::a_writer_refuses_a_linked_bars_directory`,
+and gate 28's own tests (`rustc --test .github/gates_tmp_open.rs`).
