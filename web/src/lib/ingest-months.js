@@ -666,14 +666,19 @@ export function reasonWords(reason, titleFor = null) {
       word = null;
   }
   let sentence = null;
+  // A REASONS TABLE THAT THROWS IS NAMED IN THE TITLE, never read as "no
+  // sentence served" (R4-01 repair round 1).
+  let failed = null;
   try {
     sentence = typeof titleFor === 'function' ? titleFor(code) : null;
-  } catch {
-    sentence = null;
+  } catch (why) {
+    failed = why instanceof Error ? why.message : String(why);
   }
-  const title = typeof sentence === 'string' && sentence !== ''
-    ? sentence
-    : `${code}: no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it.`;
+  const title = failed !== null
+    ? `${code}: the reasons table failed while looking this code up (${failed}), so the code is shown as the server sent it.`
+    : typeof sentence === 'string' && sentence !== ''
+      ? sentence
+      : `${code}: no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it.`;
   return word === null
     ? { code, word: code, title, known: false }
     : { code, word, title, known: true };

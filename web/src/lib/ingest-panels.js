@@ -114,6 +114,39 @@ export function answerLine(route, status, reason = '') {
   return `${route} answered HTTP ${status}${said}.`;
 }
 
+/**
+ * THE LINE A PANEL THAT FAILED IS SHOWN AS, in place of the panel.
+ *
+ * A panel that throws while it mounts or while it updates is caught by the
+ * page's `<svelte:boundary>` around it (`$lib/IngestPanelSlot.svelte`): it is
+ * replaced by this one visible line naming its file and its error, and every
+ * other panel and the rest of /ingest keep working. Without the boundary one
+ * panel's throw blanked the whole page with no word (R4-01 repair round 1:
+ * `document.body.innerText` was empty at 6 s and 15 s).
+ *
+ * @param {string} file the panel's file name
+ * @param {unknown} error what it threw
+ */
+export function panelFailedLine(file, error) {
+  const what = error instanceof Error ? error.message : String(error);
+  const said = what.trim() === '' ? 'an error with no message' : what.trim();
+  return `/ingest panel ${file} failed and is not shown: ${said}. Every other panel and the rest of /ingest keep working; the browser console holds the stack.`;
+}
+
+/**
+ * Name a failed panel on the console (with the error, so its stack is kept)
+ * and answer its visible line. `log` is the console's by default.
+ *
+ * @param {string} file
+ * @param {unknown} error
+ * @param {(...a: unknown[]) => void} [log]
+ */
+export function reportPanelFailure(file, error, log = console.error) {
+  const line = panelFailedLine(file, error);
+  log(line, error);
+  return line;
+}
+
 /** The fastest a panel may poll, in milliseconds: once a second. */
 export const MIN_POLL_MS = 1000;
 
@@ -124,16 +157,23 @@ export const MIN_POLL_MS = 1000;
  * stacked. While `hidden()` answers true the poll waits without asking;
  * `wake()` (the page's `visibilitychange`) runs one at once when shown again.
  *
+ * A RUN THAT THROWS DOES NOT END THE POLL. It is caught, kept as `failed`
+ * (`{ message, at }`, until a later run succeeds), counted in `failures`,
+ * handed to `onError`, and the next run is scheduled as usual. Before this a
+ * throw escaped the timer as an unhandled rejection and the poll stopped for
+ * good with no word (R4-01 repair round 1).
+ *
  * @param {{
  *   every: number,
  *   run: () => unknown,
  *   hidden?: () => boolean,
  *   setTimer?: (fn: () => void, ms: number) => unknown,
  *   clearTimer?: (id: any) => void,
- *   now?: () => number
+ *   now?: () => number,
+ *   onError?: (error: unknown) => void
  * }} o
  */
-export function createPoller({ every, run, hidden = () => false, setTimer = setTimeout, clearTimer = clearTimeout, now = () => Date.now() }) {
+export function createPoller({ every, run, hidden = () => false, setTimer = setTimeout, clearTimer = clearTimeout, now = () => Date.now(), onError = (e) => console.error('a panel poll failed', e) }) {
   const ms = Math.max(MIN_POLL_MS, Number.isFinite(every) ? every : MIN_POLL_MS);
   /** @type {any} */
   let timer = null;
@@ -141,6 +181,9 @@ export function createPoller({ every, run, hidden = () => false, setTimer = setT
   let busy = false;
   let asked = 0;
   let last = Number.NEGATIVE_INFINITY;
+  let failures = 0;
+  /** @type {{ message: string, at: number } | null} */
+  let failed = null;
   const schedule = () => {
     if (stopped) return;
     timer = setTimer(tick, ms);
@@ -154,6 +197,16 @@ export function createPoller({ every, run, hidden = () => false, setTimer = setT
     last = now();
     try {
       await run();
+      failed = null;
+    } catch (why) {
+      failures += 1;
+      failed = { message: why instanceof Error ? why.message : String(why), at: now() };
+      try {
+        onError(why);
+      } catch {
+        // The reporter itself failing must not end the poll either; `failed`
+        // still holds the run's own error.
+      }
     } finally {
       busy = false;
     }
@@ -164,6 +217,10 @@ export function createPoller({ every, run, hidden = () => false, setTimer = setT
     ms,
     /** How many times `run` was called. */
     get asked() { return asked; },
+    /** How many runs threw. */
+    get failures() { return failures; },
+    /** The last run's error and when, or null once a run succeeds again. */
+    get failed() { return failed; },
     start() {
       if (!stopped) return;
       stopped = false;

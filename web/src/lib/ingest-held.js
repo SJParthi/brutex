@@ -100,12 +100,14 @@ export function rungStored(feed, dir) {
 
 /**
  * @typedef {{ instrument: string, timeframe: string, month: string, rows: number }} Cell
- * @typedef {{ stamp: string | null, by: Map<string, number>, passes: number, ready: boolean, folding: string | null, error: string | null, abort: AbortController | null }} HeldJoin
+ * @typedef {{ stamp: string | null, published: string | null, by: Map<string, number>, passes: number, ready: boolean, folding: string | null, error: string | null, abort: AbortController | null }} HeldJoin
+ *   `published` is the stamp `by` was folded from — the previous census while
+ *   a newer one is walked.
  */
 
 /** A join with nothing folded yet. @returns {HeldJoin} */
 export function createHeldJoin() {
-  return { stamp: null, by: new Map(), passes: 0, ready: false, folding: null, error: null, abort: null };
+  return { stamp: null, published: null, by: new Map(), passes: 0, ready: false, folding: null, error: null, abort: null };
 }
 
 /**
@@ -119,11 +121,29 @@ export function stopFold(join) {
 }
 
 /**
- * The stamp one census reading is known by: a new read, a new generation or
- * another feed is another stamp, and only another stamp is folded again.
- * @param {{ feed: string | null, generation?: number, at?: number | null }} s
+ * The stamp one census reading is known by, and only another stamp is folded
+ * again.
+ *
+ * KEYED ON THE SERVER'S CENSUS, NOT ON THE READ. When the answer carried the
+ * census's own generation (`x-brutex-census-generation`, with its epoch), the
+ * stamp is (feed, epoch, generation): a re-read of an unchanged census is the
+ * SAME stamp and walks nothing. Before this the stamp was this browser's read
+ * counter and read time, so every re-read of an unchanged answer re-walked all
+ * 2.1 M cells (about 35 s on the R4-01 shadow) and put every contract row back
+ * to `census loading` (R4-01 repair round 1). With no server generation the
+ * read itself is the stamp, as before: walked again, never assumed unchanged.
+ *
+ * @param {{ feed: string | null, generation?: number, at?: number | null, server?: number | null, epoch?: string | null }} s
+ *   `generation` and `at` are this browser's read; `server` and `epoch` the
+ *   census's own, from the answer's headers (`store.lag`)
  */
-export const censusStamp = ({ feed, generation = 0, at = null }) => `${feed ?? ''}#${generation}#${at ?? ''}`;
+export const censusStamp = ({ feed, generation = 0, at = null, server = null, epoch = null }) =>
+  Number.isSafeInteger(server) && /** @type {number} */ (server) >= 0
+    ? `${feed ?? ''}#census#${epoch ?? ''}#${server}`
+    : `${feed ?? ''}#${generation}#${at ?? ''}`;
+
+/** The feed a stamp is of. @param {string | null} stamp */
+const feedOfStamp = (stamp) => (stamp === null ? null : stamp.slice(0, stamp.indexOf('#')));
 
 /**
  * FOLD THE CONTRACT SEGMENTS OF ONE CENSUS, ONCE PER STAMP.
@@ -185,6 +205,7 @@ export async function foldDerivatives(join, stamp, cells, how) {
   }
   if (join.stamp !== stamp) return true;
   join.by = by;
+  join.published = stamp;
   join.ready = true;
   join.folding = null;
   if (join.abort === abort) join.abort = null;
@@ -202,17 +223,29 @@ export async function foldDerivatives(join, stamp, cells, how) {
  * @param {string} seg `spot` or a contract segment
  * @param {string} dir the rung
  * @param {string} ym `YYYY-MM`
- * @returns {{ bars: number | null, loading: boolean }} `bars` is null when the
- *   store holds no file for it (which is not zero bars); `loading` is true when
- *   it has not been looked up, so neither a count nor an absence is known.
+ * @returns {{ bars: number | null, loading: boolean, stale: boolean }} `bars`
+ *   is null when the store holds no file for it (which is not zero bars);
+ *   `loading` is true when it has not been looked up, so neither a count nor
+ *   an absence is known; `stale` is true when the count is the PREVIOUS
+ *   census's of the same feed, shown while a newer one is walked — labelled
+ *   so, never passed off as the newer census's.
  */
 export function heldMonth(join, probe, census, m, seg, dir, ym) {
-  if (!census.ready) return { bars: null, loading: true };
+  if (!census.ready) return { bars: null, loading: true, stale: false };
   if (seg === 'spot') {
     const bars = probe(censusKey(m), dir, ym);
-    return { bars: bars === undefined ? null : bars, loading: false };
+    return { bars: bars === undefined ? null : bars, loading: false, stale: false };
   }
-  if (!join.ready) return { bars: null, loading: true };
-  const bars = join.by.get(`${m.symbol}|${seg}|${dir}|${ym}`);
-  return { bars: bars === undefined ? null : bars, loading: false };
+  const key = `${m.symbol}|${seg}|${dir}|${ym}`;
+  if (join.ready) {
+    const bars = join.by.get(key);
+    return { bars: bars === undefined ? null : bars, loading: false, stale: false };
+  }
+  // A NEWER CENSUS OF THE SAME FEED IS BEING WALKED: the previous one's sums
+  // stand, labelled. Another feed's sums, or a walk that failed, never stand.
+  if (join.published !== null && join.error === null && join.folding !== null && feedOfStamp(join.published) === feedOfStamp(join.stamp)) {
+    const bars = join.by.get(key);
+    return { bars: bars === undefined ? null : bars, loading: false, stale: true };
+  }
+  return { bars: null, loading: true, stale: false };
 }

@@ -140,7 +140,7 @@
     holder = `Repair of ${what}, sent from this tab at ${stampLabel(new Date())} IST. The press is held until the server answers.`;
     answer = '';
     seatPoll.start();
-    const done = await gate.press(m.body, reason, what);
+    const done = await gate.press(m.body, reason, what, m.member);
     seatPoll.stop();
     holder = '';
     answer = done.line;
@@ -227,6 +227,7 @@
         <span class="mono" class:bad={reasonBytes > MAX_REASON_BYTES}>{reasonBytes}/{MAX_REASON_BYTES} bytes</span>
       </label>
       {#if reasonWhy}<p class="line bad">{reasonWhy}</p>{/if}
+      {#if plan.plan.bodyFaultLine}<p class="line bad">{plan.plan.bodyFaultLine}</p>{/if}
       {#if holder}<p class="line warn" aria-live="polite">{holder} {seat}</p>{/if}
       {#if answer}<p class="line mono" class:bad={!answerGood} aria-live="polite">{answer}</p>{/if}
       <div class="scroll">
@@ -252,7 +253,11 @@
                 <td class="mono">{m.owed}</td>
                 <td class="mono">{m.generation ?? '—'}</td>
                 <td>
-                  {#if m.repair}
+                  {#if m.repair && m.bodyFault !== null}
+                    <!-- REFUSED BEFORE IT IS PRESSED: the server's template for
+                         this month is not the eight fields for this member. -->
+                    <span class="warn mono" title={m.bodyFault}>refused</span>
+                  {:else if m.repair}
                     <button
                       type="button"
                       disabled={holder !== '' || reason === '' || reasonWhy !== null}

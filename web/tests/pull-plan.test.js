@@ -40,3 +40,14 @@ test('bytes read in binary units, exact below a KiB', () => {
   assert.equal(bytesText(1536 * 1024 * 1024), '1.5 GiB');
   assert.equal(bytesText(2 ** 53 - 1), '8.0 PiB');
 });
+
+// R4-01 repair round 1: free space after a plan BELOW ZERO is the plan not
+// fitting, said with the shortfall — the reading R4-07's route is held to —
+// never a malformed field and never a quiet line.
+test('a plan larger than the free space reads as short by its shortfall', () => {
+  const short = projectionLine({ projection: { bytes: 600 * GiB, free_after: -88 * GiB, floor: 75 * GiB, basis: 'extrapolation', refused: null } });
+  assert.deepEqual(short, { line: 'projected 600.0 GiB (extrapolation); free after none, short by 88.0 GiB; floor 75.0 GiB; the plan does not fit the disk', refused: true, fault: false });
+  const named = projectionLine({ projection: { bytes: 600 * GiB, free_after: -1, floor: 75 * GiB, basis: 'extrapolation', refused: true } });
+  assert.equal(named?.line, 'projected 600.0 GiB (extrapolation); free after none, short by 1 B; floor 75.0 GiB; refused: free space after the plan (none, short by 1 B) would be below the floor (75.0 GiB)');
+  assert.equal(projectionLine({ projection: { bytes: 1, free_after: -1.5, floor: 1 } })?.fault, true, 'a fraction is still malformed');
+});

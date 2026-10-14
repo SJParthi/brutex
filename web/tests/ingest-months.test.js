@@ -468,3 +468,12 @@ test('each_reason_code_reads_its_sentence', () => {
   assert.equal(reasonWords({ code: 'checking' }, () => { throw new Error('table not loaded'); }).word, 'checking',
     'a lookup that throws leaves the code, never a crash');
 });
+
+// R4-01 repair round 1: a reasons table that throws is named in the title,
+// never read as "this build serves no sentence".
+test('a reasons table that throws is named, not swallowed', () => {
+  const r = reasonWords({ code: 'unread' }, () => { throw new Error('PROBE: table broken'); });
+  assert.equal(r.word, 'unread');
+  assert.equal(r.title, 'unread: the reasons table failed while looking this code up (PROBE: table broken), so the code is shown as the server sent it.');
+  assert.match(reasonWords({ code: 'unread' }, () => null).title, /no sentence for this code is served by this build/);
+});

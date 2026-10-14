@@ -75,7 +75,12 @@ export function projectionLine(plan) {
   if (typeof p !== 'object' || Array.isArray(p)) {
     return { line: 'The plan sent a projection that is not an object, so no disk figure is shown.', refused: false, fault: true };
   }
-  const bad = ['bytes', 'free_after', 'floor'].filter((f) => !wholeBytes(p[f]));
+  // `free_after` MAY BE BELOW ZERO: a plan larger than the free space. That is
+  // the plan not fitting, said with the shortfall, never a malformed field
+  // (R4-01 repair round 1; the reading R4-07's route is held to).
+  const bad = ['bytes', 'free_after', 'floor'].filter((f) =>
+    f === 'free_after' ? !(typeof p[f] === 'number' && Number.isSafeInteger(p[f])) : !wholeBytes(p[f])
+  );
   if (bad.length > 0) {
     const refusal = refusalWords(p.refused, '?', '?');
     return {
@@ -85,9 +90,11 @@ export function projectionLine(plan) {
     };
   }
   const basis = typeof p.basis === 'string' && p.basis.trim() !== '' ? p.basis.trim() : 'no basis stated';
-  const freeAfter = bytesText(p.free_after);
+  const short = p.free_after < 0;
+  const freeAfter = short ? `none, short by ${bytesText(-p.free_after)}` : bytesText(p.free_after);
   const floor = bytesText(p.floor);
   const refusal = refusalWords(p.refused, freeAfter, floor);
-  const line = `projected ${bytesText(p.bytes)} (${basis}); free after ${freeAfter}; floor ${floor}${refusal ? `; ${refusal}` : ''}`;
-  return { line, refused: refusal !== null, fault: false };
+  const overrun = short ? 'the plan does not fit the disk' : null;
+  const line = `projected ${bytesText(p.bytes)} (${basis}); free after ${freeAfter}; floor ${floor}${refusal ? `; ${refusal}` : ''}${overrun && !refusal ? `; ${overrun}` : ''}`;
+  return { line, refused: refusal !== null || short, fault: false };
 }

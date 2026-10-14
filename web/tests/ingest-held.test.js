@@ -113,7 +113,7 @@ test('the census not loaded reads "census loading", never 0 and never "never imp
     assert.equal(census.word, 'loading');
     assert.match(census.why, /No month is judged until it lands/);
     const h = heldMonth(join, probe, census, RELIANCE, 'spot', '1s', '2026-09');
-    assert.deepEqual(h, { bars: null, loading: true });
+    assert.deepEqual(h, { bars: null, loading: true, stale: false });
     assert.equal(monthVerdict({ beyond: false, bars: h.bars, expect: null, refused: false, loading: h.loading, countOnly: true }), 'loading');
   }
   const failed = censusReadiness({ feed: 'gdfl', storeFeed: null, state: 'error', error: 'No complete answer from /store.json within 30 s' });
@@ -170,8 +170,8 @@ test('the_held_join_is_one_pass_per_census_stamp', async () => {
   const census = censusReadiness({ feed: 'gdfl', storeFeed: 'gdfl' });
   const probe = () => undefined;
   const opt = heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-09');
-  assert.deepEqual(opt, { bars: 24, loading: false }, 'every contract of the underlying, summed');
-  assert.deepEqual(heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-07'), { bars: null, loading: false });
+  assert.deepEqual(opt, { bars: 24, loading: false, stale: false }, 'every contract of the underlying, summed');
+  assert.deepEqual(heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-07'), { bars: null, loading: false, stale: false });
   // A new reading is a new stamp, and only then a second walk.
   await foldDerivatives(join, censusStamp({ feed: 'gdfl', generation: 8, at: 2_000 }), rows, how);
   assert.equal(join.passes, 2);
@@ -186,7 +186,7 @@ test('a contract fold that fails or is replaced is never published as the store'
   assert.equal(join.ready, false);
   assert.equal(join.error, 'This operation was aborted');
   const census = censusReadiness({ feed: 'gdfl', storeFeed: 'gdfl' });
-  assert.deepEqual(heldMonth(join, () => undefined, census, RELIANCE, 'options', '1s', '2026-09'), { bars: null, loading: true },
+  assert.deepEqual(heldMonth(join, () => undefined, census, RELIANCE, 'options', '1s', '2026-09'), { bars: null, loading: true, stale: false },
     'contract months stay unread, never "never imported"');
   // The same stamp is walked again once asked, and then publishes.
   assert.equal(await foldDerivatives(join, 'gdfl#1#1', cells, { parse: parseKey, segmentOf }), true);
@@ -213,8 +213,8 @@ test('a gdfl row with options but no spot reads its option months and no spot', 
   const join = createHeldJoin();
   await foldDerivatives(join, 's', (await byCellOf()).rows, { parse: parseKey, segmentOf });
   const census = censusReadiness({ feed: 'gdfl', storeFeed: 'gdfl' });
-  assert.deepEqual(heldMonth(join, probe, census, noSpot, 'spot', '1s', '2026-09'), { bars: null, loading: false });
-  assert.deepEqual(heldMonth(join, probe, census, noSpot, 'options', '1s', '2026-09'), { bars: 24, loading: false });
+  assert.deepEqual(heldMonth(join, probe, census, noSpot, 'spot', '1s', '2026-09'), { bars: null, loading: false, stale: false });
+  assert.deepEqual(heldMonth(join, probe, census, noSpot, 'options', '1s', '2026-09'), { bars: 24, loading: false, stale: false });
 });
 
 test('the page reads the census state before it calls a month never imported', () => {
@@ -268,4 +268,60 @@ test('a re-render mid-walk never kills the walk; a newer stamp or leaving the pa
   assert.equal(await again, true);
   assert.equal(join.ready, true);
   assert.equal(join.passes, 3);
+});
+
+// R4-01 repair round 1: the contract fold is keyed on the census's OWN
+// generation, so a re-read of an unchanged census walks nothing, and while a
+// newer census of the same feed is walked the previous sums stand, labelled.
+test('a_reread_of_an_unchanged_census_walks_nothing_and_the_previous_sums_stand_labelled', async () => {
+  const { rows } = await byCellOf();
+  const census = censusReadiness({ feed: 'gdfl', storeFeed: 'gdfl' });
+  const probe = () => undefined;
+  // The same server census read twice — another client read, another time —
+  // is ONE stamp. Before this, every re-read was a new stamp and a new walk.
+  const a = censusStamp({ feed: 'gdfl', generation: 7, at: 1_000, server: 4_242, epoch: 'e1' });
+  const reread = censusStamp({ feed: 'gdfl', generation: 8, at: 9_000, server: 4_242, epoch: 'e1' });
+  assert.equal(a, reread, 'an unchanged census is one stamp, however often it is read');
+  assert.notEqual(a, censusStamp({ feed: 'gdfl', generation: 8, at: 9_000, server: 4_243, epoch: 'e1' }), 'a new census generation is a new stamp');
+  assert.notEqual(a, censusStamp({ feed: 'gdfl', generation: 8, at: 9_000, server: 4_242, epoch: 'e2' }), 'a new epoch (a rebuilt census) is a new stamp');
+  assert.notEqual(a, censusStamp({ feed: 'zerodha', generation: 7, at: 1_000, server: 4_242, epoch: 'e1' }), 'another feed is another stamp');
+  // No server generation: the read itself is the stamp, as before — walked again, never assumed unchanged.
+  assert.notEqual(censusStamp({ feed: 'gdfl', generation: 7, at: 1_000, server: null }), censusStamp({ feed: 'gdfl', generation: 8, at: 9_000, server: null }));
+  assert.equal(censusStamp({ feed: 'gdfl', generation: 7, at: 1_000, server: -1 }), 'gdfl#7#1000', 'a malformed server generation is not trusted');
+  const join = createHeldJoin();
+  let parsed = 0;
+  const how = { parse: (/** @type {string} */ i) => { parsed += 1; return parseKey(i); }, segmentOf };
+  assert.equal(await foldDerivatives(join, a, rows, how), true);
+  assert.equal(await foldDerivatives(join, reread, rows, how), false, 'the re-read walks nothing');
+  assert.equal(parsed, rows.length);
+  assert.equal(join.published, a);
+  // A newer census of the SAME feed is walked; until it lands the previous
+  // sums are answered, flagged stale — never `loading`, never passed as new.
+  /** @type {() => void} */
+  let release = () => {};
+  const gate = new Promise((r) => { release = () => r(undefined); });
+  const newer = censusStamp({ feed: 'gdfl', generation: 9, at: 10_000, server: 4_300, epoch: 'e1' });
+  const walking = foldDerivatives(join, newer, rows, { parse: parseKey, segmentOf, slices: async (n, work) => { await gate; work(0, n); } });
+  assert.deepEqual(heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-09'), { bars: 24, loading: false, stale: true });
+  release();
+  await walking;
+  assert.deepEqual(heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-09'), { bars: 24, loading: false, stale: false });
+  // ANOTHER FEED's walk never shows this feed's sums.
+  /** @type {() => void} */
+  let release2 = () => {};
+  const gate2 = new Promise((r) => { release2 = () => r(undefined); });
+  const other = foldDerivatives(join, censusStamp({ feed: 'zerodha', server: 1, epoch: 'z' }), [], { parse: parseKey, segmentOf, slices: async (n, work) => { await gate2; work(0, n); } });
+  assert.deepEqual(heldMonth(join, probe, census, RELIANCE, 'options', '1s', '2026-09'), { bars: null, loading: true, stale: false });
+  release2();
+  await other;
+  // A walk that FAILED never leaves the previous sums standing either.
+  const failed = createHeldJoin();
+  await foldDerivatives(failed, a, rows, how);
+  await foldDerivatives(failed, newer, rows, { parse: parseKey, segmentOf, slices: async () => { throw new Error('PROBE: walk failed'); } });
+  assert.equal(failed.error, 'PROBE: walk failed');
+  assert.deepEqual(heldMonth(failed, probe, census, RELIANCE, 'options', '1s', '2026-09'), { bars: null, loading: true, stale: false });
+  // The page passes the census's own generation and epoch, and labels stale rows.
+  assert.match(page, /censusStamp\(\{ feed: store\.feed, generation: store\.generation, at: store\.at, server: store\.lag\?\.generation \?\? null, epoch: store\.lag\?\.epoch \?\? null \}\)/);
+  assert.match(page, /if \(held\.stale\) staleCount \+= 1;/);
+  assert.match(page, /\{#if r\.stale > 0\}<span class="dim"[^>]*> · previous census, re-counting<\/span>\{\/if\}/);
 });

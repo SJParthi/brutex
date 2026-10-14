@@ -3,7 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { MIN_POLL_MS, answerLine, createPoller, panelFile, panelRegistry, refusedLine } from '../src/lib/ingest-panels.js';
+import { MIN_POLL_MS, answerLine, createPoller, panelFailedLine, panelFile, panelRegistry, refusedLine, reportPanelFailure } from '../src/lib/ingest-panels.js';
+import { compile } from 'svelte/compiler';
+import { render } from 'svelte/server';
 
 const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
 const panelDir = new URL('../src/routes/ingest/panels/', import.meta.url);
@@ -39,7 +41,11 @@ test('panels_mount_in_order_and_a_bad_panel_is_named', () => {
 
 test('the page mounts every panel file through the registry, with no per-panel edit', () => {
   assert.match(page, /panelRegistry\(import\.meta\.glob\('\.\/panels\/\*\.svelte', \{ eager: true \}\)\)/);
-  assert.match(page, /\{#each panels\.panels as p \(p\.file\)\}\s+\{@const Panel = p\.component\}\s+<Panel ctx=\{panelCtx\} \/>/);
+  // EVERY PANEL THROUGH ITS OWN ERROR BOUNDARY (R4-01 repair round 1): the
+  // bare `<Panel ctx={panelCtx} />` let one panel's throw blank the page.
+  assert.match(page, /\{#each panels\.panels as p \(p\.file\)\}\s+<IngestPanelSlot panel=\{p\} ctx=\{panelCtx\} \/>\s+\{\/each\}/);
+  assert.match(page, /import IngestPanelSlot from '\$lib\/IngestPanelSlot\.svelte';/);
+  assert.doesNotMatch(page, /<Panel ctx=\{panelCtx\} \/>/, 'no panel is mounted outside the boundary');
   assert.match(page, /for \(const r of panels\.refused\) console\.error\(`\/ingest panel \$\{r\.file\}: \$\{r\.why\}`\)/);
   assert.match(page, /\{#if panelsRefused\}<p class="warn mono panels-refused">\{panelsRefused\}<\/p>\{\/if\}/);
   assert.doesNotMatch(page, /import ZerodhaRepair/, 'a panel is a file, never an import of the page');
@@ -135,6 +141,103 @@ test('the repair panel reads its plan on a press, never on every load, and plans
   assert.match(src, /planUrl\(\{ feed, instrument/);
   assert.doesNotMatch(src, /feed: 'zerodha'|feed=zerodha/);
   // One request per press goes through the gate; the poll is the contract's.
-  assert.match(src, /const done = await gate\.press\(m\.body, reason, what\);/);
+  assert.match(src, /const done = await gate\.press\(m\.body, reason, what, m\.member\);/);
+  assert.match(src, /\{#if m\.repair && m\.bodyFault !== null\}[\s\S]{0,200}<span class="warn mono" title=\{m\.bodyFault\}>refused<\/span>/, "a refused template shows no press");
+  assert.match(src, /\{#if plan\.plan\.bodyFaultLine\}<p class="line bad">\{plan\.plan\.bodyFaultLine\}<\/p>\{\/if\}/);
   assert.match(src, /createPoller\(\{\s+every: 1000,/);
+});
+
+/* ─── R4-01 repair round 1: one panel's throw is one named line ───────────
+   The slot the page mounts every panel through is compiled from disk and
+   rendered with a panel that throws while it initialises (the checker's
+   ZzThrows.svelte probe), between two healthy ones. Rendered on the server
+   with `transformError`, which is how Svelte runs a boundary off the browser;
+   in the browser the same `<svelte:boundary>` catches natively (checked in
+   headless Chrome on the R4-01 shadow, see the package report). */
+
+/** Compile Svelte source to a server module whose imports resolve from here. @param {string} src @param {string} name */
+async function serverComponent(src, name) {
+  const code = compile(src, { generate: 'server', filename: name }).js.code
+    .replace(/from '(svelte[^']*)'/g, (_, spec) => `from '${import.meta.resolve(spec)}'`)
+    .replace(/from '\.\/ingest-panels\.js'/g, `from '${new URL('../src/lib/ingest-panels.js', import.meta.url).href}'`);
+  return (await import(`data:text/javascript,${encodeURIComponent(code)}`)).default;
+}
+
+test('a_panel_that_throws_is_one_named_line_and_the_page_keeps_working', async () => {
+  const slotSrc = readFileSync(new URL('../src/lib/IngestPanelSlot.svelte', import.meta.url), 'utf8');
+  assert.match(slotSrc, /<svelte:boundary onerror=\{\(error\) => reportPanelFailure\(panel\.file, error\)\}>/);
+  assert.match(slotSrc, /\{#snippet failed\(error\)\}\s*<p class="warn mono panel-failed" role="alert" data-panel=\{panel\.file\}>\{panelFailedLine\(panel\.file, error\)\}<\/p>/);
+  const Slot = await serverComponent(slotSrc, 'IngestPanelSlot.svelte');
+  const Throws = await serverComponent(
+    "<script module>export const order = 99; export const title = 'Throws';</script><script>let { ctx } = $props(); throw new Error('PROBE: panel init failure');</script><p>never shown</p>",
+    'ZzThrows.svelte'
+  );
+  const Healthy = await serverComponent("<script>let { ctx } = $props();</script><p>healthy panel for {ctx.feed}</p>", 'Healthy.svelte');
+  const Host = await serverComponent(
+    "<script>let { Slot, panels } = $props();</script><section>{#each panels as p (p.file)}<Slot panel={p} ctx={{ feed: 'zerodha' }} />{/each}</section><p>the rest of /ingest</p>",
+    'Host.svelte'
+  );
+  const { panels } = panelRegistry({
+    './panels/A.svelte': { order: 1, title: 'A', default: Healthy },
+    './panels/ZzThrows.svelte': { order: 2, title: 'Throws', default: Throws },
+    './panels/Z.svelte': { order: 3, title: 'Z', default: Healthy }
+  });
+  const html = render(Host, { props: { Slot, panels }, transformError: (e) => e }).body;
+  assert.match(html, /<p class="warn mono panel-failed[^"]*" role="alert" data-panel="ZzThrows\.svelte">\/ingest panel ZzThrows\.svelte failed and is not shown: PROBE: panel init failure\. Every other panel and the rest of \/ingest keep working/);
+  assert.doesNotMatch(html, /never shown/);
+  assert.equal(html.match(/healthy panel for zerodha/g)?.length, 2, 'the panels before and after it still render');
+  assert.match(html, /the rest of \/ingest/);
+  // A panel that does not throw renders as itself, with no failure line.
+  const alone = render(Slot, { props: { panel: panels[0], ctx: { feed: 'gdfl' } }, transformError: (e) => e }).body;
+  assert.match(alone, /healthy panel for gdfl/);
+  assert.doesNotMatch(alone, /panel-failed/);
+});
+
+test('a failed panel is named on the console with its error', () => {
+  /** @type {unknown[][]} */
+  const logged = [];
+  const err = new Error('PROBE: boom');
+  const line = reportPanelFailure('Bad.svelte', err, (...a) => logged.push(a));
+  assert.equal(line, '/ingest panel Bad.svelte failed and is not shown: PROBE: boom. Every other panel and the rest of /ingest keep working; the browser console holds the stack.');
+  assert.deepEqual(logged, [[line, err]], 'once, with the error itself so the stack is kept');
+  assert.match(panelFailedLine('X.svelte', 'a thrown string'), /failed and is not shown: a thrown string\./);
+  assert.match(panelFailedLine('X.svelte', new Error('')), /failed and is not shown: an error with no message\./);
+});
+
+test('a poll whose run throws keeps polling and says what failed', async () => {
+  /** @type {(() => void)[]} */
+  const timers = [];
+  let t = 0;
+  let calls = 0;
+  /** @type {unknown[]} */
+  const reported = [];
+  const poll = createPoller({
+    every: 1000,
+    run: async () => {
+      calls += 1;
+      if (calls <= 2) throw new Error(`PROBE: answer ${calls} failed`);
+    },
+    setTimer: (fn) => { timers.push(fn); return timers.length; },
+    clearTimer: () => {},
+    now: () => t,
+    onError: (e) => {
+      reported.push(e);
+      if (reported.length === 2) throw new Error('the reporter itself failed');
+    }
+  });
+  poll.start();
+  const step = async () => { t += 1000; const fn = timers.shift(); assert.ok(fn, 'a next run is always scheduled'); fn(); await new Promise((r) => setTimeout(r, 0)); };
+  await step();
+  assert.equal(poll.failures, 1);
+  assert.deepEqual(poll.failed, { message: 'PROBE: answer 1 failed', at: 1000 });
+  assert.equal(timers.length, 1, 'the throw did not end the poll');
+  await step();
+  assert.equal(poll.failures, 2);
+  assert.equal(timers.length, 1, 'a reporter that throws does not end it either');
+  await step();
+  assert.equal(calls, 3);
+  assert.equal(poll.failed, null, 'a run that succeeds clears the failure');
+  assert.equal(poll.failures, 2);
+  assert.equal(reported.length, 2);
+  poll.stop();
 });

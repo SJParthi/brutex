@@ -119,6 +119,7 @@
   // THE PANEL REGISTRY (R4-01): every file in ./panels/ mounts below, by its
   // exported `order`, with no edit of this page.
   import { panelRegistry, refusedLine } from '$lib/ingest-panels.js';
+  import IngestPanelSlot from '$lib/IngestPanelSlot.svelte';
   // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14): a feed whose store
   // holds bars is selectable whatever its ingest readiness, and only the
   // operator's feeds are offered (D-3338).
@@ -358,7 +359,7 @@
    *     flight: boolean
    *   }[],
    *   got: number, exp: number, unproved: number, missing: number,
-   *   held: number, loadingWhy: string, loadingWord: string, noSpot: boolean,
+   *   held: number, stale: number, loadingWhy: string, loadingWord: string, noSpot: boolean,
    *   state: Verdict
    * }} CensusRow
    */
@@ -4711,7 +4712,9 @@
   const wantsContracts = $derived(segmentsReached.some((seg) => seg.key !== 'spot'));
   $effect(() => {
     if (!storeMine || !wantsContracts || store.state === 'none') return;
-    const stamp = censusStamp({ feed: store.feed, generation: store.generation, at: store.at });
+    // THE CENSUS'S OWN GENERATION, when the answer named it: a re-read of an
+    // unchanged census is the same stamp and walks nothing (R4-01 round 1).
+    const stamp = censusStamp({ feed: store.feed, generation: store.generation, at: store.at, server: store.lag?.generation ?? null, epoch: store.lag?.epoch ?? null });
     // NO ABORT ON RE-RUN: a newer stamp cancels the walk inside the join, and
     // leaving the page does (`onDestroy` below). See `foldDerivatives`.
     void foldDerivatives(heldJoin, stamp, store.readable, {
@@ -5104,6 +5107,9 @@
           /* MONTHS THAT HOLD BARS, counted for every row (R4-01, V1): at a rung
              with no yardstick it is the only thing a month can be said to be. */
           let heldCount = 0;
+          // Months counted from the PREVIOUS census while a newer one is
+          // walked (`heldMonth` `stale`): shown, and labelled so.
+          let staleCount = 0;
           const seen = emptySeen();
           /* WHY THIS ROW'S MONTHS ARE NOT LOOKED UP, when they are not: the
              census of this feed, or for a contract segment the fold of it. */
@@ -5173,6 +5179,7 @@
             // the same number for every segment in the loop.
             const held = heldBars(m, s.key, r.dir, ym);
             const bars = held.bars;
+            if (held.stale) staleCount += 1;
             // A MONTH THE FEED CANNOT REACH IS NOT A GAP. The floor is the
             // same one the date control refuses a day with.
             // ONE READ, ONE NAME. `feedFloor.at` is `string | null`, and
@@ -5264,6 +5271,7 @@
             unproved,
             missing,
             held: heldCount,
+            stale: staleCount,
             loadingWhy,
             // A READ THAT FAILED IS NOT ONE STILL RUNNING: the word says which.
             loadingWord: censusNow.word === 'failed' || (s.key !== 'spot' && heldJoin.error) ? 'census not read' : 'census loading',
@@ -10202,7 +10210,7 @@
                         {#if r.state === 'loading'}
                           <span class="dim">{r.loadingWord}</span>
                         {:else if r.per === null || r.seg !== 'spot'}
-                          {n(r.held)}/{n(r.months.length)} held{r.unproved > 0 ? ` · ${n(r.unproved)} open` : ''}
+                          {n(r.held)}/{n(r.months.length)} held{r.unproved > 0 ? ` · ${n(r.unproved)} open` : ''}{#if r.stale > 0}<span class="dim" title="These counts are the previous census's of this feed; a newer census is being counted and replaces them when it is done."> · previous census, re-counting</span>{/if}
                         {:else}
                           {n(r.unproved)}/{n(r.months.length)}
                         {/if}
@@ -10466,9 +10474,10 @@
   <!-- THE PANEL REGISTRY (R4-01): ./panels/*.svelte, by exported `order`. -->
   <section class="panels" aria-label="Panels">
     {#if panelsRefused}<p class="warn mono panels-refused">{panelsRefused}</p>{/if}
+    <!-- EACH PANEL IN ITS OWN ERROR BOUNDARY: one that throws is one named
+         line, never a blank page (R4-01 repair round 1). -->
     {#each panels.panels as p (p.file)}
-      {@const Panel = p.component}
-      <Panel ctx={panelCtx} />
+      <IngestPanelSlot panel={p} ctx={panelCtx} />
     {/each}
   </section>
 </div>
