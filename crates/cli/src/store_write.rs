@@ -65,10 +65,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// saying `commit=unstamped` cannot say which. It was listed as a reader while
 /// it wrote those two files.
 ///
+/// `tickstore-write` (R4-08) is one: it writes the tick store's day files and
+/// its log, which the importer reads as the vendor's days, and each log line
+/// names the commit that wrote them.
+///
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 10] = [
+pub(crate) const WRITERS: [&str; 11] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -77,6 +81,7 @@ pub(crate) const WRITERS: [&str; 10] = [
     "gdfl-rekey",
     "scrub-blocks",
     "srt-build",
+    "tickstore-write",
     "tix-rebuild",
     "zerodha-repair",
 ];

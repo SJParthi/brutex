@@ -169,6 +169,8 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "zerodha-repair"
                 // The stored-series identity scan (WP-13d): a store verb.
                 | "series-identity"
+                // The tick-store writer (R4-08, D-4951): a store verb.
+                | "tickstore-write"
         );
         assert_eq!(super::is_sweep_command(word), !non_sweep, "{word}");
     }

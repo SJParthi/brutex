@@ -168,6 +168,9 @@ struct Entry {
     len: u64,
     /// Where its local header starts.
     offset: u64,
+    /// `(date << 16) | time`, the record's DOS date and time (APPNOTE
+    /// 4.4.6), which the tick store keeps per entry (`FORMAT.md` §3).
+    dos_time: u32,
 }
 
 /// The body of the ZIP64 extra block (id 1) in `extra`, or nothing.
@@ -274,6 +277,7 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
         let len = wide(len)?;
         let packed = wide(packed)?;
         let offset = wide(local)?;
+        let dos_time = u32::try_from(field(14, 2)? << 16 | field(12, 2)?).unwrap_or_default();
         entries.push(Entry {
             name: name.to_vec(),
             method,
@@ -281,6 +285,7 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
             packed,
             len,
             offset,
+            dos_time,
         });
         at += 46 + name_len + extra_len + comment_len;
     }
@@ -640,6 +645,11 @@ pub struct ZipEntry {
     pub crc32: u32,
     /// Where [`member_bytes`] reads it.
     pub locator: ZipLocator,
+    /// The name's bytes exactly as the record states them, for a writer that
+    /// must keep them byte for byte (`crate::tickstore_write`, E2E-02).
+    pub raw_name: Vec<u8>,
+    /// `(date << 16) | time` from the record (APPNOTE 4.4.6).
+    pub dos_time: u32,
 }
 
 /// Every central record of the zip that occupies `len` bytes at `base` of
@@ -660,6 +670,7 @@ pub fn zip_entries<B: ReadAt>(source: &B, base: u64, len: u64) -> Result<Vec<Zip
         .into_iter()
         .map(|entry| ZipEntry {
             name: String::from_utf8_lossy(&entry.name).into_owned(),
+            dos_time: entry.dos_time,
             len: entry.len,
             crc32: entry.crc32,
             locator: ZipLocator {
@@ -669,6 +680,7 @@ pub fn zip_entries<B: ReadAt>(source: &B, base: u64, len: u64) -> Result<Vec<Zip
                 method: u16::try_from(entry.method).unwrap_or(u16::MAX),
                 packed: entry.packed,
             },
+            raw_name: entry.name,
         })
         .collect())
 }
