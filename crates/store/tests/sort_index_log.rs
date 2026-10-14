@@ -45,17 +45,21 @@ fn path(month: YearMonth) -> StorePath<'static> {
 }
 
 /// One invented session of one-minute bars from 09:15 IST on the 4th.
+/// Three one-minute sessions, from the 4th: 1,125 bars, past the small-month
+/// threshold, so the writer keeps a `.srt` for them (D-4933).
 fn session(month: YearMonth) -> Vec<Bar> {
-    let open = month.ist_bounds_micros().0 + (3 * 86_400 + 555 * 60) * 1_000_000;
-    (0..375)
-        .map(|k| Bar {
-            ts_micros: open + k * 60_000_000,
-            open: 6_300_000 + k,
-            high: 6_300_100 + k,
-            low: 6_299_900 + k,
-            close: 6_300_050 + k,
-            volume: 0,
-            open_interest: OI_NULL,
+    (0..3)
+        .flat_map(|day| {
+            let open = month.ist_bounds_micros().0 + ((3 + day) * 86_400 + 555 * 60) * 1_000_000;
+            (0..375).map(move |k| Bar {
+                ts_micros: open + k * 60_000_000,
+                open: 6_300_000 + k,
+                high: 6_300_100 + k,
+                low: 6_299_900 + k,
+                close: 6_300_050 + k,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
         })
         .collect()
 }
@@ -164,7 +168,7 @@ fn a_lagging_index_warns_a_rebuild_informs_and_upkeep_is_silent() {
         field(&warn.fields, "reason").contains("not a regular file"),
         "{warn:?}"
     );
-    assert_eq!(field(&warn.fields, "n_valid"), "375");
+    assert_eq!(field(&warn.fields, "n_valid"), "1125");
     let info = found
         .records
         .iter()

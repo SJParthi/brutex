@@ -4601,7 +4601,7 @@ mod tests {
             Err(CmRefusal::CalendarUnmeasured)
         );
         assert_eq!(
-            session_gate(day(2026, 10, 5)),
+            session_gate(day(2027, 1, 4)),
             Err(CmRefusal::CalendarUnmeasured)
         );
     }

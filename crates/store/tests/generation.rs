@@ -112,6 +112,15 @@ fn bar(day: i64, minute: i64) -> Bar {
 
 /// Five-minute "sessions" on each listed day: enough to be a session-shaped
 /// fixture without 375 rows a day.
+/// Whole one-minute sessions of 375 bars on `days`: three of them pass the
+/// small-month threshold (D-4933), so the month and its revision carry a
+/// `.tix`.
+fn full_sessions(days: &[i64]) -> Vec<Bar> {
+    days.iter()
+        .flat_map(|&day| (0..375).map(move |minute| bar(day, minute)))
+        .collect()
+}
+
 fn sessions(days: &[i64]) -> Vec<Bar> {
     days.iter()
         .flat_map(|&day| (0..5).map(move |minute| bar(day, minute)))
@@ -594,8 +603,10 @@ fn a_linked_pointer_directory_is_refused() {
 #[test]
 fn the_time_index_rebuild_indexes_the_served_generation() {
     let store = Store::new();
-    store.hold(&sessions(&[17, 18]));
-    store.repair(&sessions(&[3, 17, 18]), INDEX).unwrap();
+    store.hold(&full_sessions(&[17, 18, 19]));
+    store
+        .repair(&full_sessions(&[3, 17, 18, 19]), INDEX)
+        .unwrap();
     let revision_tix = month()
         .with_file(FileKind::TimeIndex)
         .to_path_buf(&store.0.join("bar-revisions-v1/1"));
@@ -605,13 +616,13 @@ fn the_time_index_rebuild_indexes_the_served_generation() {
 
     // Kept as published: the rebuild reads the revision and writes nothing.
     let kept = BarFile::index_existing(&store.0, month(), SYMBOL).unwrap();
-    assert_eq!(kept.n_valid, 15, "the served generation's bars");
+    assert_eq!(kept.n_valid, 1_500, "the served generation's bars");
     assert_eq!(kept.outcome, store::file::Reindexed::Kept);
 
     // A revision whose index went missing is rebuilt where it lives.
     fs::remove_file(&revision_tix).unwrap();
     let built = BarFile::index_existing(&store.0, month(), SYMBOL).unwrap();
-    assert_eq!(built.n_valid, 15);
+    assert_eq!(built.n_valid, 1_500);
     assert!(
         matches!(built.outcome, store::file::Reindexed::Built(_)),
         "{:?}",
@@ -624,7 +635,7 @@ fn the_time_index_rebuild_indexes_the_served_generation() {
         "never the original's"
     );
     let file = BarFile::open_existing(&store.0, month(), SYMBOL).unwrap();
-    assert_eq!(file.first_at_or_after(bar(17, 0).ts_micros).unwrap(), 5);
+    assert_eq!(file.first_at_or_after(bar(17, 0).ts_micros).unwrap(), 375);
 }
 
 /// A WRITER HOLDING THE ORIGINAL MONTH REFUSES ITS PROMOTION (D-3350). A

@@ -538,6 +538,21 @@ the row from it. The slot-to-row table is therefore this new file at its own
 version and stride; the `.bin`, `.crc` and every existing version are
 untouched (`CLAUDE.md` §3 rule 8, §4).
 
+**The small-month rule (D-4933).** A month whose committed bars are fewer
+than 1,024 (`store::time_index::INDEX_MIN_ROWS`) and that has no `.tix` is
+given none: the writer's open creates no file and an append computes no
+entries. Its lookups are the D-1434 bisection, at most ten bar reads, and a
+reader names the reason `BelowThreshold` without the `store.tix` warning,
+because it is the rule and not a fault. The commit that brings the month to
+1,024 bars or more writes the `.tix` WHOLE — every committed bar and the
+batch, into a new inode, entries then header, each synced — before its
+records are written, the position an append's entries take, so no header
+slot ever commits a bar the index lacks. A threshold write the host refuses
+takes back the file it made and refuses the append before any record is
+written. A `.tix` already beside a small month (every month written before
+D-4933 has one) is kept in step as this section describes; only a name that
+is not there at all is excused, and nothing is deleted.
+
 **Slots.** One slot is one timeframe. Intraday slots start on the grid §5's
 admission uses — `(ts + anchor) mod width == 0`, anchored at 09:15 IST — so
 slot 0 starts at the last grid point at or before 00:00 IST on the 1st (that
@@ -671,8 +686,11 @@ An append that answered `AlreadyPresent` wrote nothing and is not a landing.
 
 **Bar files are never touched.** Writing a record opens the `.prv` and nothing
 else; the `.bin`, `.crc`, `.tix` and `.lock` are byte-identical before and after
-(`store::provenance::the_bar_files_are_byte_identical_after_a_record`, in
-`crates/store/tests/provenance.rs`).
+(`the_bar_files_are_byte_identical_after_a_record` for a month under the
+small-month threshold, which has no `.tix` and is given none by a record, and
+`an_indexed_months_time_index_is_byte_identical_after_a_record` for a month
+past it, whose `.tix` is compared; both in
+`crates/store/tests/provenance.rs`, D-4933).
 
 **Commit order: the bars first, the record after.** `provenance::record` takes
 the writer's open `BarFile` and the `Appended::Committed` its last append
@@ -794,6 +812,13 @@ open interest read every kept row: 43,942,544 bars for one-second NIFTY over
 largest closes" without reading them all. This sibling is that index, one per
 month, written by `store::sort_index` and `store::file`'s writer step, and read
 by `api`'s window.
+
+**Only for months of 1,024 bars or more (D-4933).** A month under
+`store::time_index::INDEX_MIN_ROWS` with no `.srt` is given no run: a sorted
+page orders its at most 1,023 rows itself, by the path that already serves
+rows no run covers. The commit that brings it to the threshold finds no
+index and writes the month whole, as one run. A `.srt` already beside a small
+month is kept in step as below.
 
 ```
 bars/<vendor>/NSE/INDEX/NIFTY/1s/2019-03.srt

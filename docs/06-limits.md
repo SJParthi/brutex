@@ -16607,6 +16607,173 @@ BUILT; what that costs until it is, is the disk item below.
   one yet: the CASH auction-file writer it is for is IA-17's second part, so
   a repaired CASH month still has no auction file beside its served bars.
 
+### Pull runtime: the restart scan, the store probe, the pull order (WP-62)
+
+- **The restart scan reads a bounded part of the journal, once per process.**
+  `api::pullrun::restart_scan` reads the newest 800 records
+  (`INTERRUPTED_SCAN`), the index's `runs` file (32 bytes per run record ever
+  written; not bounded by a constant) and the 64 newest run records before
+  the scan (`INTERRUPTED_RUNS`). A run opened further back than those and
+  never closed is not reported, and the "clean" sentence says how far it
+  looked. Where the index names records that would not decode in that span
+  (its `faults` file), the 64 newest of them are read again: at most 128
+  positional reads of 256 bytes in all.
+- **The restart scan builds the journal's index when it cannot read it, and
+  that build is NOT bounded by a constant.** When the index is absent or of
+  another file (a journal copied or restored has a new inode) the scan calls
+  `audit::Journal::build_index`: one pass over the WHOLE journal under its
+  append lock, at site load, before the server answers its first request.
+  Measured on a clone of the operator's journal (1.08 GB, 4,217,027
+  records): 1.9 to 2.1 s. While it runs, another process's appends to that
+  journal are refused (the lock is held). When another writer holds the lock
+  the scan waits at most 100 x 100 ms (`INDEX_WAITS`, `INDEX_WAIT`) and then
+  answers NOT KNOWN. Paid once per journal file, not per start: the next
+  start reads the index.
+- **A record the scan reads and cannot decode makes the answer NOT KNOWN**
+  unless it lies STRICTLY before the opening record of the run the readable
+  records leave open (it can then not be that run's close, so that run is
+  open; damage AT that opening record is NOT KNOWN, repair 3). Those before
+  it are named on the run's document (`undecodableBefore`, `undecodable`)
+  and its ERROR line. Such a record may still be the opening record that a
+  LATER closing record belongs to where the walk paired that close with the
+  newest open run of its scope, window and source rather than with a run it
+  directly follows; the run the walk closed with it may then be open and
+  newer than the one named, and the document says so (`newerMayBeOpen:
+  true`, repairs 4 and 6): which run is the newest open one is then not
+  known, and the one named is open either way. So
+  one damaged record among the newest 800 keeps the answer NOT KNOWN until
+  800 newer records are written, and one damaged run record until 64 newer
+  run records are: nothing is inferred about what a damaged record was.
+- **An index entry that cannot be read makes the run records before the
+  scan unknown** (a run record may be missing from the index), and so does an
+  index that cannot be read or built: the answer is then never "clean"
+  (repair 3). With no run left open in the newest 800 records it is NOT
+  KNOWN, whatever run records they hold; a run they read opened and unclosed
+  is reported with the reason (`olderUnread`), since an OLDER open run would
+  not be seen; a run known only through a restated head is NOT KNOWN. So a
+  store whose `audit/` takes no write and has no index answers NOT KNOWN at
+  every start once its journal is longer than 800 records. The scan does
+  NOT detect an index whose `runs` file lost WHOLE entries: the cover holds
+  no count of them, so such an index reads as a whole one and a run opened
+  behind the newest 800 records is then not seen (WP-33c's file format).
+- **The restart answer is the state at site load.** It is not refreshed
+  while the process lives: a run another process opens afterwards is not on
+  `/pull/run.json` until the next start.
+- **Both pull routes write an opening record** (repair 5): the spot route
+  since D-3341 (`RunLedger::open`), and the expired-F&O walk now first
+  (`server::fno_opened`; source the underlying, the walk's window), closed
+  by the outcome record every arm of the walk writes, none of which is
+  `Refused`. A walk cut short by a restart reads INTERRUPTED naming its
+  underlying and window. It writes no member-failure records, so its count
+  of failures is always 0; the outcome record, when it lands, carries them.
+  Walks before this build wrote their outcome record alone: such a record
+  is a close with no opening record, and it closes nothing (repair 6: no
+  close is paired by its window alone). A request refused before the walk (a
+  malformed form, a seat another pull holds) opens nothing and is `Refused`.
+- **With no usable index and no run left open in the newest 800 records
+  the answer is NOT KNOWN**, never a guess: `/pull/run.json` says
+  `restart.state = "not_known"` with the index's reason.
+- **Only a later run of the same ASK that closes supersedes an interrupted
+  one** (repairs 3 and 6, D-4950): the journal is append-only and nothing
+  writes a closing record for the run cut short; the walk reads the later
+  closing record as covering it when both opening records name the same ask
+  (`; ask ` and a 64-bit FNV-1a digest of the feed, identity policy, target,
+  instruments named and rung; for an F&O walk the feed, series, expiry and
+  rung) over the same scope, window and source. The source alone was taken as
+  that evidence and is not: every Zerodha spot run of a window carries one
+  (`zerodha_nse_checked NOT vendor-ISIN; NSE file same day; https://`, cut to
+  64 bytes), so a 1day pull of the indices superseded a cut-short 1min pull
+  of the stocks. A run whose opening record names no ask (every run before
+  D-4950, and one known only through a restatement) is never superseded and
+  supersedes nothing, so it stays INTERRUPTED until its opening record lies
+  behind the scan and the 64 run records before it; the same holds for a
+  later pull of a WIDER ask (more instruments, a longer window), which is not
+  matched to the narrower one it covers. A close NOT STARTED supersedes
+  nothing (repair 5: it asked the vendor for nothing). A FAILED close does
+  supersede: that run asked the vendor for the same pull, and what it could
+  not land is on its own record (its failures, or the halt that stopped it),
+  so what is still owed is what IT says, not the older run. Two different
+  asks share a digest with a chance of about one in 2^64; a digest a later
+  build spells differently only keeps a run reported.
+- **A closing record is paired with a run of its own scope, window and
+  source, first the run it directly follows** (repair 6, D-4950). It does not
+  name its opening record (its note holds the run's first failure, and the
+  256-byte record has no field that could hold an ordinal). Every close this
+  build writes for a run that opened goes through the run's thread
+  (`audit::Journal::close_run`), directly behind a record of that run,
+  restating the opening record first when another writer appended since, so
+  two runs of one window and source in flight at once (a server run and a
+  `cli` pull) are told apart by position. A run whose opening record was
+  refused at the start closes behind it written late (`; late`,
+  `audit::Journal::close_unopened`). A close written before D-4950 that does
+  not follow a record of its run still takes the newest open run of its
+  scope, window and source; of two such runs in flight at once the older's
+  close then names the newer, and the newer reads closed while the older is
+  reported, until the newer's own close arrives.
+- **An interrupted run's failure count is a floor past the scan**
+  (`failuresWhole: false`): the failures among the records read are
+  counted, the newest 800 and any filed fault read again through the index
+  that now decodes.
+- **The index's `faults` file is read whole** (8 bytes per filed fault, in
+  `audit::Indexed::fault_ordinals`), and every filed fault inside the walk's
+  span is held once more as one ordinal and a borrowed sentence (32 bytes, no
+  allocation). Bounded by the journal's filed faults, not by a constant; a
+  healthy journal files none (the operator's index has no `faults` file).
+- **No close is paired by its window alone** (repair 6, D-4950). A press
+  refused before its run opened (the pull order, a mapping refusal, a refused
+  broker) is written `Refused` on the spot route, the recovery unit and the
+  autopilot's tick, and closes nothing; a `NotStarted` or any other closing
+  record whose scope, window and source match no open run closes nothing.
+  Before this, such a record of the same window (written by any press, feed
+  or process, before the run was cut short or after the restart) closed the
+  run cut short, and the next start answered "clean". The cost, said: a run
+  opened before D-4950 that reached no instrument was closed under its
+  TARGET's label, and an autopilot tick under `autopilot <feed> <month>`;
+  neither matches its opening record's source, so such a run in the scan now
+  reads INTERRUPTED until it lies behind the scan. Measured on a clone of the
+  operator's journal on 14 October 2026 (4,217,222 records): the scan answers
+  `clean` under this rule as it did before it, so none is in the scan. NOT
+  PROVED on a two-process journal.
+- **A run of another process still in flight when a server starts has no
+  closing record either.** The scan cannot tell it from a run cut short and
+  says so in its sentence; the age of the last record is what a reader has.
+- **The store probe is one 4 KiB synced write per member that was handed
+  rows, committed none and reported a failure.** That is the shape of a
+  refused write and also of an instrument pulled again whose bars are all
+  held and whose months have a standing gap, so those pay it too. Measured
+  on this machine's scratch volume by `server::tests::pull_runtime_costs`;
+  Measured on the store's own drive by the third check (p50 1.78 ms, p99
+  8.92 ms, max 16.09 ms, n=200, debug). The probe's name is unlinked and then
+  opened with `O_NOFOLLOW`; an unlink that fails for any reason but "nothing
+  there" (a DIRECTORY at `audit/.store-probe`, a read-only `audit/` holding a
+  stale probe file) reads as a store fault, by name (repair 3). A member
+  refused whole at a store path is probed too, handed rows or not.
+- **A store path that refuses every member whole stops the run after eight
+  refusals with no bar landed between them** (`STORE_REFUSED_BREAKER`), not
+  three: `pull::ingest::Failure`
+  carries no type, so a census that will not open cannot be told from one
+  another ingest holds for a moment, and the count is what separates them.
+  Eight is this build's policy, NOT MEASURED against a contended run; up to
+  seven members' requests (and the lanes fetched ahead) are spent first.
+  Both store streaks are reset ONLY by a member that committed a bar
+  (repair 3): a member handed no rows, one with an instrument's failure
+  beside the store's, an empty answer, or one the other streak counts holds
+  them, so members that land nothing between the refusals cannot keep the
+  run going past either breaker. The stop sentence therefore says "with no
+  instrument writing a bar since the first of them", not "in a row".
+- **A write the store refuses for ONE file while it takes the probe's** (a
+  permission on one directory) is named for its instrument and classed
+  standing: `pull::ingest::Failure` carries no type, only the name and the
+  reason. A failure named for a store path, and every failure of a member
+  the probe found a fault for, are classed as the store's and keep the leg
+  owed.
+- **The pull order walks the ask twice**: once per instrument-month to find
+  who owes (`ladder_withheld`), once more over what is left for the leg rule
+  (`ladder_refusal`). Bounded by twice the instrument-months asked.
+- **A 1day month the vendor answered empty stays owed**, so its instrument
+  is withheld from every 1min pull by name until an empty daily answer is
+  recorded durably (a decision is needed; DB-B27).
+
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
 Rows landed by WP-81 with the code they bound. Every figure is a closed-loop
@@ -16767,6 +16934,157 @@ were reworded and state no cost. The three `crates/api/benches/ratio/`
 module headers now name the bench that runs them,
 `crates/api/benches/ratio.rs`.
 
+## The small-month rule: a month under 1,024 bars bisects and orders on demand — D-4933, 13 October 2026
+
+**L-SC-13. A time lookup on a raw month under 1,024 bars bisects.** Such a
+month has no `.tix` by the rule, so `BarFile::first_at_or_after` is the
+D-1434 bisection: at most `ceil(log2(1_024)) = 10` bar reads, a bound asserted
+tight at 1,023 bars by
+`store::file::small_month_tests::the_bisection_of_the_largest_small_month_reads_ten_bars`.
+Bounded, not constant: it grows with `log2(n_valid)` up to ten reads and no
+further, because at 1,024 bars the month is indexed. The design's judge
+measured 6.3 µs p50, 10.7 µs p99, 57.1 µs max at 554 bars (12 October); this
+package's own figures are below.
+
+**L-SC-3 (its raw-month half). A sorted page over a month under 1,024 bars
+orders its rows itself**, at most 1,023 of them, through the reader's path
+for rows no run covers. A series whose every month is small orders at most
+1,023 rows a month, so a sorted page over a RANGE of such months orders every
+row of every month in the range: bounded by 1,023 times the months asked for,
+not constant, and it grows with the range. MEASURED at the route by the second
+agent's check of SC-0 (verify-SC-0-r1, 13 October 2026 about 17:10 IST, the
+release `api` of SC-0's first committed tip, before its repair round, over a fresh shadow of the real
+store, `/bars/window.json` for Zerodha NIFTY `1day` from 2018-01 to 2026-09
+sorted by close descending, 105 months of about 21 bars each, no `.srt` on any
+of them, n = 300 sequential GETs on the same host, host load about 70): p50
+11.1 ms, p99 69.3 ms, max 149.7 ms, against p50 1.0 ms, p99 2.6 ms, max 3.5 ms
+for one of those months (2024-03) alone in the same run. The months of that
+range were written before D-4933 and have no `.srt` either way; what the rule
+changes is that a month written under 1,024 bars never gains one.
+
+**The commit that reaches the threshold is O(the month), once per month.** It
+reads every committed bar — fewer than 1,024, through the verified path —
+builds the `.tix` whole and writes the `.srt` whole as one run (D-3349's
+whole-month write). Every earlier commit of the month writes no index, and
+every later one is the ordinary append. Bounded by the threshold, not by the
+month.
+
+MEASURED (SC-0, `store/tests/tix_latency.rs::small_month_rule_latency`,
+a release build of the store crate as SC-0 lands it, one thread, an `Instant` pair around each call, on
+a shared Apple M4 Pro under other agents' builds, the scratch months on the
+internal disk; a shared host's numbers are not a gate, C-TIX-01 and C-TIX-02
+are). RUN 1, 13 October 2026 12:51 IST:
+
+| Operation | n | p50 | p99 | max |
+|---|---:|---:|---:|---:|
+| Time lookup, 1,023-bar one-second month, no `.tix` (`Bisection(BelowThreshold)`), random microseconds over its span, fresh handle | 200,000 | 12.0 µs | 20.4 µs | 183.5 µs |
+| The same lookups on a 1,024-bar month, which has its `.tix` (`Indexed`) | 200,000 | 0.29 µs | 0.42 µs | 18.9 µs |
+| One-bar commit under the threshold (500 held): no index written | 300 | 25.0 ms | 35.9 ms | 41.9 ms |
+| One-bar commit that reaches it (1,023 held): `.tix` and `.srt` written whole | 300 | 100.0 ms | 145.0 ms | 154.8 ms |
+| One-bar commit past it (1,099 held): one `.tix` entry and one `.srt` run | 300 | 59.0 ms | 92.1 ms | 121.0 ms |
+
+RUN 2, the same test on the same build at 13 October 2026 14:2x IST, the
+figures SC-0's first report (`fix-SC-0.json`, `p50_p99`) carries: the
+1,023-bar lookup 10.8 / 19.7 / 82.3 µs and the 1,024-bar lookup 0.29 / 0.38 /
+13.9 µs (p50 / p99 / max, n = 200,000 each); the one-bar commits under,
+reaching and past the threshold 11.0 / 33.9 / 19.0 ms p50, 12.0 / 37.9 /
+26.0 ms p99, 18.1 / 42.8 / 33.6 ms max (n = 300 each). The two runs differ by
+the host's load and agree in shape: the bisection about forty times the
+indexed lookup at p50, and the crossing commit 1.7× (run 1) and 1.8× (run 2)
+an ordinary indexed one.
+
+RUN 3, SC-0's repair round, 13 October 2026 about 23:00 IST, the same test
+on the repaired tree, whose crossing commit also writes the one `Info`
+`store.tix` line (D-4933 item 7), host load about 7: the 1,023-bar lookup
+12.2 / 22.5 / 188.4 µs and the 1,024-bar lookup 0.29 / 0.58 / 81.7 µs (n =
+200,000 each); the one-bar commits under, reaching and past the threshold
+10.1 / 30.0 / 18.0 ms p50, 12.0 / 35.6 / 30.0 ms p99, 22.0 / 37.0 / 32.9 ms
+max (n = 300 each). The test installs no telemetry sink, so the line is
+built and dropped at the level check and its write is not in these figures;
+one `emit` is the constant C-T-01 times, paid once in a month file's life.
+
+The commits are durable one by one (a plain writer, no `DurableBatch`), so
+their wall time is the host's `fsync`, not the bars: a commit under the
+threshold syncs no index and is the cheapest of the three; the commit that
+reaches it pays the two whole writes once in the month's life, about 1.7× an
+ordinary indexed commit. An import commits inside a `DurableBatch` and pays
+its syncs once a day (D-3353). The bisection's p50 is about twice the
+judge's 6.3 µs at 554 bars: twice the bars is one more read (ten, not nine)
+and this host was loaded; it stays bounded by the ten-read ceiling at every
+month size, because at 1,024 bars the month is indexed.
+
+On real data (SC-0's check, not a gate): NIFTY and BANKNIFTY spot and
+options for 1 and 5 March 2019, RELIANCE shares for the same days, and
+NIFTY spot and options for the 27 October 2019 Muhurat session, imported by
+`cli gdfl-import ... tickstore` through this writer into a private store
+built from nothing — 759 bar months, of which 579 hold 1 to 1,022 bars and
+carry neither index and 180 hold 1,033 to 42,608 bars and carry both, with
+no exception. The 516 March months were compared with the real store's same
+months (whose first rows are those two days): timestamps, prices and volume
+are byte for byte equal in all 516, open interest differs in 296 (the
+importer's later bar-close rule for open interest), and each of the 162
+`.tix` files is entry for entry a prefix of the real store's index. 63 of
+those months crossed the threshold on their second day, so their index was
+written whole by that day's commit and still matches. The October months had
+no counterpart: the real store holds no bar of that Muhurat session (known
+findings DB-A20, DB-N26).
+
+The same import was repeated from nothing on 13 October 2026 13:3x IST (round
+2, same release build of the writer) with the same counts: 759 months, 205 MB,
+3,396 files; 579 months of 1 to 1,022 bars with neither index, 180 of 1,033
+to 42,608 bars with both. That store was then served by this build's `api`
+and every route the /db page calls for one month was checked against the bar
+file read directly — oldest and newest first, the second page, a page sorted
+by close, Go to the middle bar, a time-of-day window, extremes — on NIFTY
+options of 1,022 bars (no index) and 1,033 bars (crossed on its second day),
+NIFTY spot, a BANKNIFTY option of 1,000 bars, RELIANCE shares, and a NIFTY
+strike of ONE bar from the Muhurat session: every answer equal to the file,
+the sorted page of each small month naming the small-month rule with no
+command offered. Route time, n = 200 sequential GETs each, `urllib` on the
+same host, ms (MEASURED, not a gate). RUN A, 13 October 2026 13:3x IST, over
+that round-2 store (`shadow/SC-0-r2own`):
+
+| Route on `/bars/window.json` | 1,022-bar month, no `.tix`, no `.srt`: p50 / p99 / max | 1,033-bar month, both: p50 / p99 / max |
+|---|---|---|
+| newest first, 100 rows | 0.41 / 0.62 / 0.71 | 0.41 / 0.66 / 0.83 |
+| sorted by close, 100 rows | 0.50 / 0.73 / 0.79 | 0.49 / 0.82 / 0.96 |
+| Go to the middle bar (`at=`), 100 rows | 0.41 / 0.62 / 1.24 | 0.42 / 0.67 / 0.83 |
+
+RUN B, the figures SC-0's first report carries: the same routes and months
+at 13 October 2026 14:1x IST over the store imported from nothing by the
+committed build (`shadow/SC-0-final-own`), n = 200 each, p50 / p99 / max ms —
+1,022 bars without either index: newest 0.41 / 0.49 / 0.50, sorted 0.50 /
+0.54 / 0.55, Go to 0.42 / 0.47 / 0.48; 1,033 bars with both: 0.41 / 0.43 /
+0.43, 0.48 / 0.52 / 0.54, 0.42 / 0.45 / 0.47; NIFTY spot, 42,318 bars: 0.41 /
+0.45 / 0.47, 0.57 / 0.62 / 0.64, 0.42 / 0.45 / 0.46. RUN C, the second
+agent's check (verify-SC-0-r1, about 17:10 IST, the same build, n = 300 each,
+host load about 70): 1,022 bars newest 1.06 / 3.14 / 8.53, sorted 1.41 /
+3.76 / 4.51, Go to 1.15 / 7.22 / 19.10; 1,033 bars 1.13 / 2.53 / 3.02, 1.39 /
+3.30 / 4.74, 1.13 / 4.15 / 6.61. The runs differ by the host's load, not by
+the month: in each run the small month and the indexed one are within one
+another's spread.
+
+RUN D, SC-0's repair round, 13 October 2026 about 23:07 IST, the release
+`api` of the repaired tree on port 8506 over a store imported from nothing by
+its own `cli` (NIFTY spot and options for 1 and 5 March 2019, each options day
+its own import, then BANKNIFTY options for both days: 514 months, 354 of 1 to
+1,022 bars with neither index, 160 of 1,033 bars or more with both), n = 200
+sequential GETs each, `urllib` on the same host, host load about 7, p50 / p99
+/ max ms: 1,022 bars newest 0.37 / 0.63 / 0.74, sorted 0.54 / 0.79 / 0.82, Go
+to 0.42 / 0.60 / 0.61; 1,033 bars 0.42 / 0.57 / 0.63, 0.53 / 0.74 / 1.02,
+0.42 / 0.59 / 0.61; a month of ONE bar newest 0.31 / 0.52 / 0.67, sorted 0.26
+/ 0.46 / 0.58; NIFTY spot (42,318 bars) newest 0.33 / 0.50 / 0.74, sorted
+0.57 / 0.93 / 2.45; `/logs.json?target=store.tix`, which returned the 160
+crossing lines, 0.74 / 0.98 / 1.04. Over a fresh shadow of the real store in
+the same run (months written before D-4933): NIFTY spot 2019-03 (401,765
+bars) newest 0.36 / 0.59 / 0.69, sorted 0.60 / 0.89 / 1.18; the 11150 CE
+option (7,422 bars, no `.srt`, still named a finding with `cli srt-build`
+offered) sorted 0.96 / 1.21 / 1.28; Zerodha NIFTY `1day` 2024-03 (19 bars)
+sorted 0.35 / 0.76 / 1.22, naming the small-month rule with no command.
+
+The rule is invisible at the route: the bisection's ten reads and the
+on-demand order of at most 1,023 rows are inside the noise of one request.
+
 ## Sealed months: codec 1, one frame — D-4939, 13 October 2026
 
 `store::sealed_codec` (SC-1). It reads and writes no file: SC-2 places frames
@@ -16785,3 +17103,4 @@ months' own p50, p99 or max.
 | L-SC-1 | One row costs one frame | the frame is the unit of decoding: serving one row decodes the frame's rows, and its CRC-32C reads every byte of it | at most `block_rows` = 256 rows and `MAX_FRAME_LEN` = 14,508 bytes, whatever the month holds. **Measured, quiet** (the 15 timed months of 554 to 493,998 bars): one frame decoded with its checksum p50 5.0 to 6.0 µs, p99 5.8 to 7.3 µs, max 17 to 98 µs; a 100-row page at a random offset (the one or two frames it spans) p50 5.2 to 6.4 µs, p99 10.8 to 13.6 µs, max 19 to 76 µs; the stamps alone p50 0.9 to 1.4 µs, p99 1.1 to 1.9 µs; a month under 256 bars is one short frame, p50 0.1 to 3.8 µs. Flat in the month: the 472,445-bar NIFTY month decodes a frame at 6.0 / 7.3 µs (p50 / p99), the 554-bar option month at 5.6 / 6.2 µs. **Measured, under load** (25 timed months of 273 to 493,998 bars): decode p50 5.8 to 9.7 µs, p99 6.5 to 57.9 µs, max 7.5 µs to 22.7 ms; page p50 6.0 to 10.4 µs, p99 12.8 to 251 µs, max 16 µs to 14.2 ms. The milliseconds are the loaded host's scheduler, not the frame: month for month (the 15 months timed in both runs, decode and page) p50 rose 1.1 to 1.8 times, p99 up to 21 times, and the max reached milliseconds. SC-11's C-SEAL benches gate the tail on a quiet host | SC-1 |
 | L-SC-12 | Incompressible bars are not compressed | a frame of random fields has nothing to predict | at most 57 bytes a bar, 1 more than raw: 400 frames of random fields all between 50 × 256 and 57 × 256 bytes (`no_frame_exceeds_the_bound`), and never above `MAX_FRAME_LEN` | SC-1 |
 | L-SC-15 | Encoding a frame tries every width | the encoder measures each mode a column has at every width from 0 to its widest value, 65 lengths a stream at most, from a histogram of the residuals' bit lengths | O(rows) a column, once, when a month is sealed (L-SC-5 is the seal's). **Measured, quiet** (the same 15 months): a frame encoded p50 12.7 to 19.3 µs, p99 15.0 to 35.8 µs, max 18 to 100 µs; the 472,445-bar NIFTY month is 1,846 frames at p50 17.8 µs, about 33 ms in all. **Under load**: p50 14.5 to 51.6 µs, p99 16.8 µs to 17.1 ms, max 19 µs to 21.3 ms | SC-1 |
+

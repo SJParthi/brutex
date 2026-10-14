@@ -21,6 +21,18 @@
 //! written WHOLE as one run, into a new file renamed over the old name
 //! (`Self::write_whole`), so no reader ever sees a file change under it.
 //!
+//! # The small-month rule (D-4933)
+//!
+//! A month that holds fewer than [`INDEX_MIN_ROWS`](crate::time_index::INDEX_MIN_ROWS) bars and has NO `.srt` is
+//! given none: no run is appended and no file is made, and a sorted page
+//! orders its rows itself — at most 1,023 of them, the path that already
+//! exists for rows no run covers. The commit that brings it to the threshold
+//! finds no index and writes the month WHOLE, as one run. A `.srt` already
+//! beside a small month is kept in step as before; removing it waits for
+//! D-4931. [`BarFile::sort_index_existing`] (`cli srt-build`) knows the same
+//! rule and answers [`Resorted::BelowThreshold`] for such a month, writing
+//! nothing.
+//!
 //! # Cost
 //!
 //! An append's run: the batch's rows read back through the verified path and
@@ -45,6 +57,7 @@ use crate::flock::Flock;
 use crate::format::Bar;
 use crate::path::{FileKind, StorePath};
 use crate::sort_index::{self, COMPACT_AT, HEADER_LEN, RunKind, Shape, Walked, Why};
+use crate::time_index::below_threshold;
 
 /// Where a bar file's sort index is and what it must be bound to.
 #[derive(Debug, Clone)]
@@ -95,6 +108,10 @@ pub enum Resorted {
     Unsortable(String),
     /// The month commits no rows: there is nothing to order.
     Empty,
+    /// The month holds fewer than [`INDEX_MIN_ROWS`](crate::time_index::INDEX_MIN_ROWS) bars and has no `.srt`,
+    /// and the small-month rule gives it none: nothing was written, and a
+    /// sorted page orders its rows itself, which is not a finding (D-4933).
+    BelowThreshold,
 }
 
 /// One month through [`BarFile::sort_index_existing`].
@@ -112,6 +129,9 @@ pub struct SortIndexed {
 enum Plan {
     /// The index orders every committed row.
     Kept,
+    /// A month under [`INDEX_MIN_ROWS`](crate::time_index::INDEX_MIN_ROWS) bars with no index: none is made
+    /// (D-4933).
+    BelowThreshold,
     /// Append one run over `[from, n_valid)` at byte `at`.
     Append { from: u64, at: u64 },
     /// Write the month whole: absent, damaged, not these bars, or past
@@ -148,7 +168,7 @@ impl BarFile {
         }
         let kept = self.untouched(|| {
             self.plan_sort_index(sidecar).and_then(|plan| match plan {
-                Plan::Kept => Ok(()),
+                Plan::Kept | Plan::BelowThreshold => Ok(()),
                 Plan::Append { from, at } => self.append_sort_run(sidecar, from, at),
                 // SILENT ON SUCCESS: a month that predates D-3349, or one past
                 // `COMPACT_AT` runs, is the writer's ordinary upkeep, and an
@@ -190,6 +210,10 @@ impl BarFile {
     fn plan_sort_index(&self, sidecar: &SortSidecar) -> Result<Plan, String> {
         let n_valid = self.header.n_valid;
         let walked = match walk_sidecar(sidecar)? {
+            // ONLY A NAME THAT IS NOT THERE AT ALL: a damaged index, or
+            // anything that is not a regular file at the name, goes down the
+            // paths it always did, whatever the month holds.
+            None if below_threshold(n_valid) => return Ok(Plan::BelowThreshold),
             None | Some(Err(_)) => return Ok(Plan::Whole),
             Some(Ok(walked)) => walked,
         };
@@ -428,6 +452,18 @@ impl BarFile {
             });
         }
         let because = match walk_sidecar(&sidecar).map_err(refused)? {
+            // THE SMALL-MONTH RULE (D-4933): no `.srt` is made for a month
+            // under the threshold. Asked after the empty month, so a month of
+            // no rows is still `Empty`; one already beside a small month is
+            // kept or rebuilt below, as before.
+            None if below_threshold(n_valid) => {
+                clear_staging(&sidecar).map_err(refused)?;
+                return Ok(SortIndexed {
+                    n_valid,
+                    runs: 0,
+                    outcome: Resorted::BelowThreshold,
+                });
+            }
             None => Why::Absent.to_string(),
             Some(Err(why)) => why.to_string(),
             Some(Ok(walked)) => match file.bind_sort_index(&walked) {

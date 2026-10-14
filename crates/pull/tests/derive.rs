@@ -537,7 +537,7 @@ fn dated_cash_close_filters_auction_and_derives_the_same_continuous_session() {
 fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved() {
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("cash-unmeasured-calendar");
-    let day = Day::new(2026, 10, 9).unwrap();
+    let day = Day::new(2027, 1, 8).unwrap();
     let mut req = request();
     req.window = Window::new(day, day).unwrap();
     req.listing = pull::vendor::Listing::Equity;
@@ -556,7 +556,11 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
     assert_eq!(done.bars_committed, 360);
     assert_eq!(done.census.total(), 15);
     assert_eq!(done.derived_files, 0);
-    assert!(done.failures.iter().any(|f| f.why.contains("UNVERIFIED")));
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.starts_with(pull::calendar::PAST_RECORD_FINDING))
+    );
     let again = pull::ingest::from_window(&raw, "TEST", "test", &scratch.0, into);
     assert_eq!(again.bars_committed, 0);
     assert_eq!(again.derived_files, 0);
@@ -566,7 +570,7 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
 /// **A WINDOW PAST THE CALENDAR IS ONE CLAUSE PER DAY IN EACH RUNG'S
 /// REFUSAL, NOT ONE PER BUCKET.** o1api-44, D-1201.
 ///
-/// Five weekdays from 2026-10-05, past the sourced calendar (D-3346), a
+/// Five weekdays from 2027-01-04, past the sourced calendar (D-3346), a
 /// whole session each. The minute bars are
 /// stored and no derived rung is. On main each rung's refusal joined one
 /// "incomplete or invalid minute coverage" clause per bucket (900 at two
@@ -576,13 +580,13 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
 fn a_window_past_the_calendar_names_each_day_once_per_rung() {
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("PAST-CALENDAR-WINDOW");
-    let first = Day::new(2026, 10, 5).unwrap();
-    let last = Day::new(2026, 10, 9).unwrap();
+    let first = Day::new(2027, 1, 4).unwrap();
+    let last = Day::new(2027, 1, 8).unwrap();
     let mut req = request();
     req.window = Window::new(first, last).unwrap();
     let mut rows = Vec::new();
-    for d in 5..=9 {
-        let day = Day::new(2026, 10, d).unwrap();
+    for d in 4..=8 {
+        let day = Day::new(2027, 1, d).unwrap();
         let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
         let mut member = session_member();
         for (index, row) in member.rows.iter_mut().enumerate() {
@@ -618,7 +622,7 @@ fn a_window_past_the_calendar_names_each_day_once_per_rung() {
         assert!(
             refusal
                 .why
-                .contains("withheld on 5 day(s), 2026-10-05..2026-10-09"),
+                .contains("withheld on 5 day(s), 2027-01-04..2027-01-08"),
             "{}",
             refusal.why
         );
@@ -640,10 +644,17 @@ fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
                 "request minute coverage gap in 2021-02: 2 run(s) of missing scheduled minutes on 1 day(s), 2021-02-24..2021-02-24, 220 minute(s)",
             ),
         ),
+        // A day BEFORE the record is the plain unverified finding; a day
+        // PAST it is named as that, so a run can say it once (DB-B25).
+        (
+            "request-before-record",
+            Day::new(2017, 12, 29).unwrap(),
+            Some("request minute coverage UNVERIFIED on 2017-12-29"),
+        ),
         (
             "request-unmeasured",
             Day::new(2030, 1, 1).unwrap(),
-            Some("request minute coverage UNVERIFIED"),
+            Some(pull::calendar::PAST_RECORD_FINDING),
         ),
     ] {
         let scratch = Scratch::new(tag);
@@ -683,8 +694,8 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
     use pull::calendar::{Calendar, Observed, Runtime};
     use pull::session::{Day, IST_OFFSET_SECS, Window};
     let scratch = Scratch::new("runtime-unverified");
-    let first = Day::new(2026, 10, 7).unwrap();
-    let last = Day::new(2026, 10, 9).unwrap();
+    let first = Day::new(2027, 1, 6).unwrap();
+    let last = Day::new(2027, 1, 8).unwrap();
     let observed = Calendar::from_observed(&[
         Observed::from_runs(i64::from(first.days_from_epoch()), &[(555, 929)]),
         Observed::from_runs(i64::from(last.days_from_epoch()), &[(555, 929)]),
@@ -721,14 +732,18 @@ fn runtime_observations_cannot_authorize_a_new_session_or_close_an_absent_day() 
     // observed days share a reason and a line, the absent one has its own.
     assert_eq!(audit.len(), 2, "{audit:?}");
     assert!(
-        audit[0].why.starts_with(
-            "request minute coverage UNVERIFIED in 2026-10: 2 finding(s) on 2 day(s), 2026-10-07..2026-10-09"
-        ) && audit[0].why.contains("observed trading does not attest"),
+        audit[0]
+            .why
+            .starts_with(pull::calendar::PAST_RECORD_FINDING)
+            && audit[0]
+                .why
+                .contains("2 day(s) of 2027-01, 2027-01-06..2027-01-08")
+            && audit[0].why.contains("observed trading does not attest"),
         "{}",
         audit[0].why
     );
     assert!(
-        audit[1].why.contains("2026-10-08")
+        audit[1].why.contains("2027-01-07")
             && audit[1]
                 .why
                 .contains("absent observations do not prove closure")

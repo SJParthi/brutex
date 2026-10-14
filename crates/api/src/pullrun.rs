@@ -175,6 +175,81 @@ pub fn ladder_rank(dir: &str) -> usize {
         .unwrap_or(PULL_ORDER.len())
 }
 
+/// The label of the receipt fact that says what another attempt at a leg
+/// could change. The server writes it where each fault is still typed (an
+/// instrument that did not answer, a member that answered with gaps, a store
+/// that will not take a write) and [`leg_outcome`] reads the word back, so
+/// the conductor never classifies a failure from its prose (DB-B26, DB-B35).
+pub const RETRY_CLASS_FACT: &str = "Retry class";
+
+/// What another attempt at a leg could change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryClass {
+    /// Something did not answer: asking again can succeed.
+    Transient,
+    /// Every failure is from an instrument that answered, or is a refusal no
+    /// later pass of this run can lift: asking again returns the same.
+    Standing,
+    /// The store will not take a write: nothing asked can land.
+    Store,
+}
+
+impl RetryClass {
+    /// The word on the receipt, never renamed.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Standing => "standing",
+            Self::Store => "store_unavailable",
+        }
+    }
+
+    /// The class a receipt states, or `None` when it carries no such fact
+    /// (a door refusal, or a receipt from a route that does not class).
+    #[must_use]
+    pub fn of_receipt(html: &str) -> Option<Self> {
+        let said = receipt_fact(html, RETRY_CLASS_FACT)?;
+        let word = said.split_whitespace().next()?;
+        [Self::Transient, Self::Standing, Self::Store]
+            .into_iter()
+            .find(|class| class.word() == word)
+    }
+}
+
+/// Why a run ended, as a code a page can match and a sentence cannot blur
+/// (DB-B26): `/pull/run.json` carries it as `stopReason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// [`CLEAN_EMPTY_PASSES`] passes reported nothing owed and no growth.
+    Idle,
+    /// As `Idle`, with legs that finished with standing failures.
+    Standing,
+    /// [`MAX_PASSES`] passes ran: the runaway stop.
+    Ceiling,
+    /// The operator pressed stop.
+    Operator,
+    /// A feed was halted: a dead credential or a fixed refusal.
+    Halted,
+    /// The store would not take a write (DB-B35).
+    StoreUnavailable,
+}
+
+impl Stop {
+    /// The code, never renamed.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Standing => "standing_failures",
+            Self::Ceiling => "pass_ceiling",
+            Self::Operator => "stopped",
+            Self::Halted => "halted",
+            Self::StoreUnavailable => "store_unavailable",
+        }
+    }
+}
+
 /// What one vendor's chain is doing, for the status document.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeedReport {
@@ -206,6 +281,13 @@ pub struct FeedReport {
     /// Set once, never cleared for the life of the run. It is per FEED, because
     /// a credential is — the same reason the seats and the governors are.
     pub credential_dead: bool,
+    /// Legs that finished with standing failures: the vendor answered and
+    /// what it sent has gaps, or a refusal no later pass can lift. Each is
+    /// settled for the run and not asked again (DB-B26).
+    pub standing: u32,
+    /// The store would not take this feed's writes, so the feed is halted
+    /// (DB-B35).
+    pub store_unavailable: bool,
     /// Legs not attempted this pass because they were already clean in this
     /// retry cycle, or because of a dependency, terminal refusal or stop. An
     /// interrupted in-flight request is neither done nor skipped.
@@ -287,6 +369,23 @@ pub struct Progress {
     pub started_at_ms: Option<u64>,
     /// What each leg asked for, in the order the run was sent (DB-B32).
     pub asked: Vec<AskedLeg>,
+    /// Why the run ended, once it has (DB-B26).
+    pub stop: Option<Stop>,
+    /// The bars this run's OWN legs wrote, summed from each leg's receipt
+    /// ([`bars_written_in`]); `None` once a STORED receipt stated no count
+    /// or the sum did not fit, so the figure is unknown rather than short.
+    ///
+    /// # Why not the census (DB-B33, the third check's follow-up 10)
+    ///
+    /// The growth test and the "bars added" figure read the census of the
+    /// run's own store vendors. Another writer of the SAME vendor (a `cli`
+    /// pull, a second run over another window) moved that count too, so its
+    /// rows kept this run alive, skipped [`RETRY_WAIT`] and were credited to
+    /// it. A leg's receipt counts only what that leg wrote for the keys it
+    /// asked for, so this figure is the run's own and no other writer's. The
+    /// census is still shown (`rowsAtStart`, `rowsNow`) as what the store
+    /// holds, and is no longer read as progress.
+    pub bars_written: Option<u64>,
 }
 
 /// One leg as it was asked: its feed, rung, label and the window and
@@ -423,6 +522,12 @@ impl Progress {
                 .rows_now
                 .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
         );
+        out.push_str(",\"barsWritten\":");
+        out.push_str(
+            &self
+                .bars_written
+                .map_or_else(|| "null".to_owned(), |bars| bars.to_string()),
+        );
         out.push_str(",\"stopping\":");
         out.push_str(if self.stopping { "true" } else { "false" });
         out.push_str(",\"finished\":");
@@ -432,6 +537,15 @@ impl Progress {
         }
         // THE RUN'S OWN START AND ASK (DB-B32): a page that picks this run up
         // after a reload states these, never its own clock and selection.
+        // THE CEILING AND THE TYPED STOP (DB-B26): "pass N of 400" and why the
+        // run ended, as fields a page reads rather than a sentence it parses.
+        out.push_str(",\"passCeiling\":");
+        out.push_str(&MAX_PASSES.to_string());
+        out.push_str(",\"stopReason\":");
+        match self.stop {
+            Some(stop) => out.push_str(&quote_for_json(stop.code())),
+            None => out.push_str("null"),
+        }
         out.push_str(",\"startedAtMs\":");
         out.push_str(
             &self
@@ -479,6 +593,14 @@ impl Progress {
             // read identically on the page.
             out.push_str(",\"skipped\":");
             out.push_str(&feed.skipped.to_string());
+            out.push_str(",\"standing\":");
+            out.push_str(&feed.standing.to_string());
+            out.push_str(",\"storeUnavailable\":");
+            out.push_str(if feed.store_unavailable {
+                "true"
+            } else {
+                "false"
+            });
             out.push_str(",\"lastError\":");
             match &feed.last_error {
                 Some(word) => out.push_str(&quote_for_json(word)),
@@ -489,6 +611,1127 @@ impl Progress {
         out.push_str("]}");
         out
     }
+}
+
+/// How many of the journal's newest records [`restart_scan`] reads:
+/// **800**, four pages of [`crate::audit::MAX_PAGE_RECORDS`], about 205 KiB.
+/// A bound on the read, not on the run: run records further back are read
+/// through the journal's index, [`INTERRUPTED_RUNS`] of them (DB-B34).
+pub const INTERRUPTED_SCAN: u64 = 4 * crate::audit::MAX_PAGE_RECORDS;
+
+/// How many run records before the scan [`restart_scan`] reads through the
+/// journal's index: **64**, one positional read of 256 bytes each. A run
+/// opened further back than these and never closed is not reported, which
+/// `docs/06-limits.md` names.
+pub const INTERRUPTED_RUNS: usize = 64;
+
+/// A pull run the journal opened and never closed (DB-B34).
+///
+/// A run's opening record is appended before its first instrument and its
+/// closing record only when the run returns. A process that stopped in
+/// between left the opening record and the failures behind it, and nothing
+/// read them as a run cut short: after the restart `/pull/run.json` answered
+/// exactly as a server that had never pulled.
+///
+/// **Only an opening record that was READ makes one of these.** Member
+/// failures prove nothing about a run being open: every run of the build
+/// before D-3341 wrote its failures BEHIND its closing record, and
+/// `RunLedger::rest` still does when the opening record was refused, so a
+/// journal that ends in 2.4 million failures can be a run that closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interrupted {
+    /// The opening record's ordinal.
+    pub ordinal: u64,
+    /// When the run was opened.
+    pub opened_at_secs: i64,
+    /// The newest record of the run that was read: the last moment it is
+    /// known to have been alive.
+    pub last_at_secs: i64,
+    /// What it was fetching from, as its opening record names it.
+    pub source: String,
+    /// Which pull it was: the spot route's run, or an expired-F&O walk. The
+    /// two are re-run from two different places (`/pull/spot`, `/pull/fno`),
+    /// and a closing record of one scope never closes a run of the other.
+    pub scope: crate::audit::Scope,
+    /// What it asked the vendor for beyond its window and source, as its
+    /// opening record names it ([`crate::audit::ask_of`]): the feed, the
+    /// identity policy, the target, the instruments and the rung (an F&O
+    /// walk: the feed, the series, the expiry and the rung). `None` when the
+    /// opening record names none (written before D-4950) or only a
+    /// restatement of it was read: such a run is never read as superseded.
+    pub ask: Option<u64>,
+    /// The window it asked for, as days since the epoch.
+    pub window: Option<(u32, u32)>,
+    /// Member-failure records of the run among the records read: all of them
+    /// when [`Self::failures_whole`], else those inside the scan.
+    pub failures: u64,
+    /// Whether every record after the opening record was read, so
+    /// [`Self::failures`] is the run's whole count and not a floor.
+    pub failures_whole: bool,
+    /// The opening record's note ("opened for N instruments; ...").
+    pub note: String,
+    /// How many records the scan could not decode BEFORE the opening record
+    /// (none of them can be this run's close, so it is open whatever they
+    /// were), and those records named ([`damaged_list`], bounded). They were
+    /// on the ERROR line only, so `/pull/run.json` reported the run without
+    /// its doubt (DB-B34, repair 3).
+    pub undecodable_before: u64,
+    /// [`Self::undecodable_before`]'s records, named; empty for none.
+    pub undecodable: String,
+    /// Whether a run NEWER than this one may also have been left open: one
+    /// of the [`Self::undecodable_before`] records lies before a closing
+    /// record the walk could not pair by position (it does not directly
+    /// follow a record of the run it closed, so the walk took the newest
+    /// open run of its scope, window and source), so that undecodable record
+    /// may be the opening record the close truly belongs to, and the run the
+    /// walk closed with it would then be open (DB-B34, repairs 4 and 6; the
+    /// third check's probe `v62r3_p2`). This run is open either way; which
+    /// run is the newest one open is then not known.
+    pub newer_may_be_open: bool,
+    /// Why the run records before the scan could not be read through the
+    /// journal's index, when they could not: the run is still the newest one
+    /// open (its opening record and everything after it were read), but an
+    /// OLDER run left open would not have been seen (DB-B34, repair 3).
+    pub older_unread: Option<String>,
+}
+
+impl Interrupted {
+    /// The run in one sentence, for a page that shows nothing else.
+    ///
+    /// It does not say the SERVER stopped: a `cli` pull or a second server
+    /// writes the same journal, and a run of theirs still in flight has no
+    /// closing record either. What is known is said; which of the two it is,
+    /// the age of the last record tells the reader.
+    #[must_use]
+    pub fn words(&self) -> String {
+        let window = self.window.map_or_else(String::new, |(from, to)| {
+            format!(" for {}..{}", day_text(from), day_text(to))
+        });
+        let failures = if self.failures_whole {
+            format!("{} member failure(s)", self.failures)
+        } else {
+            // NOT "the newest 800 records were counted": a filed fault before
+            // the scan that is read again and decodes is counted too, so the
+            // count could exceed the scan it named (DB-B34, repair 3).
+            format!(
+                "at least {} member failure(s) (counted among the records read: the newest \
+                 {INTERRUPTED_SCAN} and those read through the journal's index; older ones were \
+                 not read)",
+                self.failures
+            )
+        };
+        let mut doubt = String::new();
+        if self.undecodable_before > 0 {
+            use core::fmt::Write as _;
+            let _infallible = write!(
+                doubt,
+                " {} record(s) before its opening record could not be decoded ({}); none of \
+                 them can be its closing record.",
+                self.undecodable_before, self.undecodable
+            );
+        }
+        if self.newer_may_be_open {
+            doubt.push_str(
+                " One of them may be the opening record that a later closing record belongs to \
+                 (that closing record does not directly follow a record of the run the walk \
+                 closed with it), so a run newer than this one may also have been left open; \
+                 which run is the newest one open is not known, and this one is open either way.",
+            );
+        }
+        if let Some(why) = &self.older_unread {
+            use core::fmt::Write as _;
+            let _infallible = write!(
+                doubt,
+                " The run records before the scan could not be read through the journal's \
+                 index ({why}), so an older run left open would not have been seen."
+            );
+        }
+        // WHERE IT IS RUN AGAIN, AND WHAT COUNTS AS AGAIN (DB-B34, repair 6).
+        // The sentence told every reader to "press Pull", the spot route's
+        // button, also of an expired-F&O walk (re-run from /pull/fno); and it
+        // said "a later run of the same window and source" supersedes it, when
+        // every Zerodha spot run of a window carries one source whatever its
+        // target or rung. It is superseded only by a run whose opening record
+        // names the same ask.
+        let (what, again) = match self.scope {
+            crate::audit::Scope::Spot => (
+                "a pull run",
+                "run the same pull again from /pull/spot (the same feed, target, instruments, \
+                 rung and window)",
+            ),
+            crate::audit::Scope::Fno => (
+                "an expired-F&O walk",
+                "run the same walk again from /pull/fno (the same feed, underlying, series, \
+                 expiry, rung and window)",
+            ),
+        };
+        let superseded = match self.ask {
+            Some(ask) => format!(
+                "its opening record names its ask ({ask:016x}), and a later run of the same \
+                 window and source whose opening record names the same ask, once it closes \
+                 having asked the vendor (any close but NOT STARTED), supersedes this one"
+            ),
+            None => format!(
+                "its opening record names no ask (it was written before this build, or only \
+                 a restatement of it was read), so no later run can be shown to have made the \
+                 same pull: it is reported until it lies behind the scan's newest \
+                 {INTERRUPTED_SCAN} records and {INTERRUPTED_RUNS} run records"
+            ),
+        };
+        format!(
+            "INTERRUPTED: {what}{window} was opened at journal record {} ({} s since the \
+             epoch) and has no closing record; the last record of it that was read was written \
+             at {} s since the epoch, with {failures} on record after it. No run of this server \
+             process is in flight, so the process that ran it stopped before closing it, unless \
+             another process (a `cli` pull, a second server) is still running it. Bars it had \
+             already written are in the store; {again} to fetch what is left: {superseded}.\
+             {doubt}",
+            self.ordinal, self.opened_at_secs, self.last_at_secs
+        )
+    }
+
+    fn json(&self, out: &mut String) {
+        out.push_str("{\"ordinal\":");
+        out.push_str(&self.ordinal.to_string());
+        out.push_str(",\"openedAtSecs\":");
+        out.push_str(&self.opened_at_secs.to_string());
+        out.push_str(",\"lastRecordAtSecs\":");
+        out.push_str(&self.last_at_secs.to_string());
+        out.push_str(",\"source\":");
+        out.push_str(&quote_for_json(&self.source));
+        out.push_str(",\"scope\":");
+        out.push_str(match self.scope {
+            crate::audit::Scope::Spot => "\"spot\"",
+            crate::audit::Scope::Fno => "\"fno\"",
+        });
+        out.push_str(",\"ask\":");
+        match self.ask {
+            Some(ask) => out.push_str(&quote_for_json(&format!("{ask:016x}"))),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"from\":");
+        match self.window {
+            Some((from, to)) => {
+                out.push_str(&quote_for_json(&day_text(from)));
+                out.push_str(",\"to\":");
+                out.push_str(&quote_for_json(&day_text(to)));
+            }
+            None => out.push_str("null,\"to\":null"),
+        }
+        out.push_str(",\"failures\":");
+        out.push_str(&self.failures.to_string());
+        out.push_str(",\"failuresWhole\":");
+        out.push_str(if self.failures_whole { "true" } else { "false" });
+        out.push_str(",\"note\":");
+        out.push_str(&quote_for_json(&self.note));
+        out.push_str(",\"undecodableBefore\":");
+        out.push_str(&self.undecodable_before.to_string());
+        out.push_str(",\"undecodable\":");
+        out.push_str(&quote_for_json(&self.undecodable));
+        out.push_str(",\"newerMayBeOpen\":");
+        out.push_str(if self.newer_may_be_open {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"olderUnread\":");
+        match &self.older_unread {
+            Some(why) => out.push_str(&quote_for_json(why)),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"words\":");
+        out.push_str(&quote_for_json(&self.words()));
+        out.push('}');
+    }
+}
+
+/// What the journal says, when a site loads, about the run before this
+/// process (DB-B34): three answers, because "not interrupted" and "could not
+/// tell" are different facts and the second was being served as a third,
+/// false one ("INTERRUPTED ... The server stopped while it ran").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Restart {
+    /// Every run record read is closed, or none was read, AND every record
+    /// read could be decoded. How far the scan reads is in [`Self::words`].
+    Clean,
+    /// An opening record was read and no closing record follows it.
+    Interrupted(Interrupted),
+    /// The newest run record could not be read, or a record that was read
+    /// would not decode and may be a run's opening or closing record, so
+    /// whether a run is open is NOT KNOWN; the reason, in its own words.
+    NotKnown(String),
+}
+
+impl Restart {
+    /// The run cut short, when one was found.
+    #[must_use]
+    pub const fn interrupted(&self) -> Option<&Interrupted> {
+        match self {
+            Self::Interrupted(run) => Some(run),
+            Self::Clean | Self::NotKnown(_) => None,
+        }
+    }
+
+    /// The state's word on `/pull/run.json`.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Interrupted(_) => "interrupted",
+            Self::NotKnown(_) => "not_known",
+        }
+    }
+
+    /// The state in one sentence.
+    #[must_use]
+    pub fn words(&self) -> String {
+        match self {
+            // NOT "a later run of the same window and source closed (that run
+            // asked the vendor for the same days again)" (DB-B34, repair 6):
+            // every Zerodha spot run of a window carries one source, and a
+            // refusal that asked for nothing closed runs it never touched.
+            Self::Clean => format!(
+                "No pull run was left open as far as the scan looked: every run record it read \
+                 is closed, or it read none, and every record it read could be decoded. A run \
+                 that was cut short counts as closed only once a later run of the same scope, \
+                 window and source, whose opening record names the same ask (the feed, the \
+                 identity policy, the target, the instruments and the rung), closed having \
+                 asked the vendor (any close but NOT STARTED); a refusal that opened no run \
+                 closes nothing. It reads the journal's newest {INTERRUPTED_SCAN} records and, \
+                 where the journal's index can be read, the {INTERRUPTED_RUNS} newest run \
+                 records before them; a run left open further back than that is not reported."
+            ),
+            Self::Interrupted(run) => run.words(),
+            Self::NotKnown(why) => format!(
+                "NOT KNOWN whether a pull run was left open: {why}. Nothing is claimed either \
+                 way; `/audit` lists the journal's runs."
+            ),
+        }
+    }
+}
+
+/// A day since the epoch as `YYYY-MM-DD`, or the number when it is no date.
+fn day_text(days: u32) -> String {
+    pull::session::Day::from_days(days).map_or_else(|_| days.to_string(), |day| day.to_string())
+}
+
+/// The run the records `read` leave open, if any. `read` is journal records
+/// oldest first, as `(ordinal, record)`: every run record from the oldest of
+/// them on, and whichever member failures were read with them.
+///
+/// # The walk
+///
+/// One pass, oldest to newest.
+///
+/// * An opening record starts a run. A restated one ("continues the run
+///   opened at record N", written when another writer appended in between)
+///   rejoins the run it names; it carries the opening record's own source,
+///   window and time, so it stands for an opening record that lies before
+///   `read`. A restatement written AFTER its run closed (a failure whose first
+///   append was refused, offered again behind the closing record) is not a
+///   new run. A restatement of a run that IS open rejoins it whatever closed
+///   before it: an earlier run's closing record of the same window and
+///   source says nothing about this one.
+/// * A closing run record ends a run of its own scope, window AND source,
+///   and no other (DB-B34, repair 6; D-4950): the run whose record it
+///   directly follows (the ordinal before it), when that run is one, since
+///   a close written through its run's thread always follows a record of
+///   that run (`audit::Journal::close_run`); else the newest open run of its
+///   scope, window and source (a close written before D-4950). A close that
+///   matches no open run closes NOTHING. It was paired by its window alone
+///   too, and a press refused before its run opened (the pull order, a
+///   mapping refusal, a refused broker) wrote a NOT STARTED record under its
+///   target's label with the window it asked for: that record closed the
+///   run cut short, of any scope, and the next start answered "clean". A
+///   record of [`crate::audit::Outcome::Refused`] closes nothing either: it
+///   is a request refused before anything ran, which is how such a press is
+///   written now.
+/// * A closing record that ends a run SUPERSEDES every older run still open
+///   of the same scope, window and source whose opening record names the
+///   SAME ASK as the run it ended ([`crate::audit::ask_of`]): the same pull
+///   (the feed, the identity policy, the target, the instruments, the rung)
+///   was made again and finished, so the older run's work is done (DB-B34,
+///   repairs 3 and 6). The source alone is not that evidence: it is the
+///   policy and the endpoint TEMPLATE, the same for every target and rung,
+///   cut to 64 bytes, so a 1day pull of the indices superseded a 1min pull
+///   of the stocks over the same window. A run whose opening record names
+///   no ask is never superseded and supersedes nothing, and a close NOT
+///   STARTED supersedes nothing: it asked the vendor for nothing (repair 5).
+///   Two runs of one pull in flight at once (a server run and a `cli` pull)
+///   whose closes were written before D-4950 still cannot be told apart
+///   (`docs/06-limits.md`).
+/// * A member failure is counted to the run whose record it follows, and
+///   NEVER opens one. Failures with no opening record before them are a
+///   closed run's (the layout before D-3341, and `RunLedger::rest`'s when
+///   the opening record was refused) or another run's; either way they are
+///   no evidence that a run is open.
+///
+/// What is still open at the end was never closed.
+///
+/// # Cost
+///
+/// O(records read); the open list is bounded by the runs in flight at once,
+/// which the feed seats bound.
+#[must_use]
+pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupted> {
+    walk(read).open
+}
+
+/// What one walk of [`interrupted_in`] found.
+struct Walk {
+    /// The newest run left open, if any.
+    open: Option<Interrupted>,
+    /// The ordinal of the newest closing record the walk paired with a run
+    /// it does NOT directly follow: the newest open run of its scope, window
+    /// and source. A record before it that would not decode may be the
+    /// opening record of another run of that window and source that the
+    /// close truly belongs to, and the run the walk closed would then be open
+    /// ([`Interrupted::newer_may_be_open`]). A close that directly follows a
+    /// record of its run cannot be moved by such a record (nothing lies
+    /// between them), and one that closed nothing hides no run.
+    weak_close: Option<u64>,
+}
+
+/// [`interrupted_in`]'s walk, with the newest closing record it could not
+/// pair by position ([`Walk::weak_close`]).
+fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
+    use crate::audit::{Kind, Outcome};
+    let mut walker = Walker::default();
+    // The ordinal of the record read just before this one: a close written
+    // through its run's thread directly follows a record of that run.
+    let mut previous: Option<u64> = None;
+    for (ordinal, record) in read {
+        let window = (record.from_days != 0 || record.to_days != 0)
+            .then_some((record.from_days, record.to_days));
+        let follows = previous.and_then(|before| before.checked_add(1)) == Some(*ordinal);
+        previous = Some(*ordinal);
+        match (record.kind, record.outcome) {
+            (Kind::Run, Outcome::Opened) => walker.opened(*ordinal, record, window),
+            (Kind::Run, Outcome::Refused) => walker.current = None,
+            (Kind::Run, _) => walker.closed(*ordinal, record, window, follows),
+            (Kind::MemberFailure, _) => {
+                if let Some(run) = walker
+                    .current
+                    .and_then(|first| walker.open.iter_mut().find(|run| run.ordinal == first))
+                {
+                    run.failures = run.failures.saturating_add(1);
+                    run.last_at_secs = run.last_at_secs.max(record.at_unix_secs);
+                }
+            }
+        }
+    }
+    // The newest still-open run is the one that was cut short.
+    Walk {
+        open: walker.open.pop(),
+        weak_close: walker.weak_close,
+    }
+}
+
+/// A closing record that ended no run that was read: its scope, window and
+/// source, so a head restated after it is not read as a new run.
+type Unseen = (crate::audit::Scope, Option<(u32, u32)>, String);
+
+/// [`walk`]'s state between two records.
+#[derive(Default)]
+struct Walker {
+    /// The runs opened and not yet closed, oldest first.
+    open: Vec<Interrupted>,
+    /// Opening ordinals of the runs a closing record ended, and the closing
+    /// records that ended no run that was read: a head restated after either
+    /// is not a new run.
+    closed: Vec<u64>,
+    unseen: Vec<Unseen>,
+    /// The run whose record was read last, while a member failure or a close
+    /// may still follow it.
+    current: Option<u64>,
+    /// [`Walk::weak_close`].
+    weak_close: Option<u64>,
+}
+
+impl Walker {
+    /// An opening record at `ordinal`, or a restatement of one.
+    fn opened(&mut self, ordinal: u64, record: &crate::audit::Record, window: Option<(u32, u32)>) {
+        let restated = record
+            .note
+            .strip_prefix("continues the run opened at record ")
+            .and_then(|rest| rest.trim().parse::<u64>().ok());
+        let first = restated.unwrap_or(ordinal);
+        let known = self.open.iter().any(|run| run.ordinal == first);
+        if restated.is_some()
+            && !known
+            && (self.closed.contains(&first)
+                || self.unseen.iter().any(|(scope, held, source)| {
+                    *scope == record.scope && *held == window && *source == record.source
+                }))
+        {
+            self.current = None;
+            return;
+        }
+        if !known {
+            self.open.push(Interrupted {
+                ordinal: first,
+                opened_at_secs: record.at_unix_secs,
+                last_at_secs: record.at_unix_secs,
+                source: record.source.clone(),
+                scope: record.scope,
+                // A restatement's note names the run it continues, not the
+                // run's ask: the ask is the opening record's, and is not known
+                // from a restatement.
+                ask: if restated.is_some() {
+                    None
+                } else {
+                    crate::audit::ask_of(&record.note)
+                },
+                window,
+                failures: 0,
+                failures_whole: restated.is_none(),
+                note: if restated.is_some() {
+                    String::new()
+                } else {
+                    record.note.clone()
+                },
+                undecodable_before: 0,
+                undecodable: String::new(),
+                newer_may_be_open: false,
+                older_unread: None,
+            });
+        }
+        self.current = Some(first);
+    }
+
+    /// A closing record at `ordinal`; `follows` when the record read just
+    /// before it is the one at the ordinal before it.
+    fn closed(
+        &mut self,
+        ordinal: u64,
+        record: &crate::audit::Record,
+        window: Option<(u32, u32)>,
+        follows: bool,
+    ) {
+        // ITS OWN SCOPE, WINDOW AND SOURCE, AND NOTHING ELSE (DB-B34, repair
+        // 6). A close with no run of all three open closed the newest run of
+        // its WINDOW: a press refused before its run opened (NOT STARTED
+        // under its target's label) closed the run cut short, of either scope.
+        let mine = |run: &Interrupted| {
+            run.scope == record.scope && run.window == window && run.source == record.source
+        };
+        // THE RUN IT DIRECTLY FOLLOWS FIRST: a close written through its run's
+        // thread always follows a record of that run, so it is never handed to
+        // another run of the same pull.
+        let beside = self
+            .current
+            .filter(|_| follows)
+            .and_then(|first| self.open.iter().position(|run| run.ordinal == first))
+            .filter(|&at| self.open.get(at).is_some_and(&mine));
+        let ended = beside.or_else(|| self.open.iter().rposition(&mine));
+        if beside.is_none() && ended.is_some() {
+            self.weak_close = Some(ordinal);
+        }
+        self.current = None;
+        let Some(at) = ended else {
+            self.unseen
+                .push((record.scope, window, record.source.clone()));
+            return;
+        };
+        let run = self.open.remove(at);
+        // A LATER RUN OF THE SAME ASK THAT CLOSES SUPERSEDES AN OLDER ONE LEFT
+        // OPEN (DB-B34, repairs 3 and 6). Nothing closes an interrupted run's
+        // opening record, so after the operator made the same pull again and
+        // it closed, every later start still answered INTERRUPTED. The closing
+        // run asked the vendor for the same instruments at the same rung over
+        // the same window -- its opening record names the same ask -- and a
+        // pull fetches what the store does not hold, so the older run's work
+        // is done. Append-only: nothing is written; the walk reads it so. The
+        // window and source alone are no such evidence: every Zerodha spot run
+        // of a window carries one source, whatever its target or rung.
+        //
+        // A NOT STARTED CLOSE SUPERSEDES NOTHING (repair 5): it asked the
+        // vendor for nothing (no credential, no budget, an archive feed), so
+        // it is no evidence that the older run's days were fetched. It still
+        // closes its own run.
+        let not_started = record.outcome == crate::audit::Outcome::NotStarted;
+        if let Some(ask) = run.ask.filter(|_| !not_started) {
+            let closed = &mut self.closed;
+            self.open.retain(|older| {
+                let same = mine(older) && older.ask == Some(ask);
+                if same {
+                    closed.push(older.ordinal);
+                }
+                !same
+            });
+        }
+        self.closed.push(run.ordinal);
+    }
+}
+
+/// What `journal` says about the run before this process (DB-B34). Asked
+/// ONCE, when the site loads: nothing of this process is in flight then.
+///
+/// # What is read
+///
+/// 1. The journal's newest [`INTERRUPTED_SCAN`] records.
+/// 2. When the journal is longer than that, the [`INTERRUPTED_RUNS`] newest
+///    run records before them, each by its ordinal from the journal's own
+///    index (`pull.journal.idx/runs`, one 32-byte entry per run record,
+///    [`crate::audit::Journal::read_index`]). So a run whose opening record
+///    lies two million failures back is still found with its true ordinal,
+///    window and source, and a closing record that far back is still seen to
+///    be one.
+///
+/// # An index that is absent or stale is built here, once
+///
+/// When the index is absent, of another file (a journal copied or restored
+/// has a new inode) or short of the scan, the run records before the scan
+/// cannot be named without walking the journal. The index is then built
+/// where it is needed ([`crate::audit::Journal::build_index`]: one pass over
+/// the journal under its append lock, the pass `api serve` starts in the
+/// background anyway), so the answer is exact on the first start and not
+/// only on the second. A lock another writer holds is waited for, briefly
+/// ([`INDEX_WAITS`]).
+///
+/// # NOT KNOWN is an answer
+///
+/// If the index still cannot be read (the store will not take the write,
+/// the lock stayed held, an entry is unreadable) the answer is never a plain
+/// "clean" (repair 3): with no run left open in the scan it is
+/// [`Restart::NotKnown`] with both reasons, whatever run records the scan
+/// holds, since an older run may be open behind them; a run the scan read
+/// opened and unclosed is still reported, the reason on its document
+/// ([`Interrupted::older_unread`]) and its ERROR line; a run known only
+/// through a restated head is NOT KNOWN, since its close may lie before the
+/// scan. It once answered "clean" whenever the scan held any opening or
+/// closing record, and before that "INTERRUPTED ... The server stopped while
+/// it ran" of a journal whose newest run record was a closing one.
+///
+/// # A record that cannot be decoded is never dropped (repair 2)
+///
+/// Every record the scan is handed and cannot decode -- among the newest
+/// [`INTERRUPTED_SCAN`], among the run records the index names, and among
+/// the records the index's `faults` file names in the walk's span
+/// ([`older_runs`]) -- is kept with its ordinal and the decoder's reason. If
+/// one lies anywhere it could decide the answer, the answer is
+/// [`Restart::NotKnown`] naming it: it is never "clean" (the damaged record
+/// may be an opening record) and never "has no closing record" (it may be
+/// that closing record). The one place it cannot decide is strictly before
+/// the opening record of the run the readable records leave open; that run
+/// is still reported, and the damage is named on its log line and its
+/// document ([`Interrupted::undecodable_before`]). Such a record can still
+/// move a LATER pairing not made by position, so when one follows it the
+/// document says a newer run may be open as well
+/// ([`Interrupted::newer_may_be_open`]).
+///
+/// # Cost
+///
+/// One `stat`, at most four page reads (800 records), one read of the
+/// index's `runs` and `faults` files and at most 128 positional reads (64
+/// run records, and the 64 newest filed faults among them): bounded whatever the
+/// journal's length, except the `runs` file itself, which is 32 bytes per
+/// run record ever written. When the index has to be built: one pass over
+/// the whole journal, once per journal file, not per start.
+#[must_use]
+pub(crate) fn restart_scan(journal: &crate::audit::Journal) -> Restart {
+    restart_scan_waiting(journal, INDEX_WAITS)
+}
+
+/// How many times [`restart_scan`] asks again for an index another writer
+/// is building, [`INDEX_WAIT`] apart: **100**, ten seconds in all. The
+/// journal's lock is held for one append, or for one index build (1.33 s
+/// per GiB when it was measured, WP-33c), so this is a bound on a stuck
+/// writer, not a wait anybody is expected to see.
+const INDEX_WAITS: u32 = 100;
+
+/// The pause between two of those.
+const INDEX_WAIT: core::time::Duration = core::time::Duration::from_millis(100);
+
+/// [`restart_scan`], waiting at most `waits` pauses for a held lock.
+fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart {
+    use crate::audit::{Kind, Log, Outcome};
+    let log = journal.look();
+    if let Log::Unreadable { reason } = &log {
+        return not_known(format!("the pull journal cannot be read ({reason})"));
+    }
+    let records = log.records();
+    if records == 0 {
+        return Restart::Clean;
+    }
+    let mut tail: Vec<(u64, crate::audit::Record)> = Vec::new();
+    // EVERY RECORD THE SCAN IS HANDED AND CANNOT DECODE IS KEPT, by ordinal
+    // and reason. They were filtered out, and the scan then answered as if
+    // it had read everything: "clean" of a journal whose opening record was
+    // the damaged one, "has no closing record" of one whose closing record
+    // was (DB-B34, repair 2).
+    let mut damaged: Vec<Damaged> = Vec::new();
+    let mut skip = 0_u64;
+    while skip < INTERRUPTED_SCAN.min(records) {
+        let page = match journal.page(records, skip, crate::audit::MAX_PAGE_RECORDS) {
+            Ok(page) => page,
+            Err(why) => return not_known(format!("the pull journal's newest records: {why}")),
+        };
+        if page.is_empty() {
+            break;
+        }
+        skip = skip.saturating_add(page.len() as u64);
+        for entry in page {
+            match entry.decoded {
+                Ok(record) => tail.push((entry.ordinal, record)),
+                Err(fault) => damaged.push((entry.ordinal, fault.to_string().into())),
+            }
+        }
+    }
+    // `page` is newest first; the walk is oldest first.
+    tail.reverse();
+    let scan_first = records.saturating_sub(INTERRUPTED_SCAN);
+    // THE RUN RECORDS BEFORE THE SCAN, through the index; `unread` is why
+    // they could not be read, when they could not.
+    let mut read: Vec<(u64, crate::audit::Record)> = Vec::new();
+    let mut unread: Option<String> = None;
+    if scan_first > 0 {
+        match older_runs_built(journal, records, scan_first, waits) {
+            Ok(older) => {
+                read = older.read;
+                damaged.extend(older.damaged);
+            }
+            Err(why) => unread = Some(why),
+        }
+    }
+    read.extend(tail);
+    damaged.sort_by_key(|(ordinal, _)| *ordinal);
+    damaged.dedup_by_key(|(ordinal, _)| *ordinal);
+    // A run record was read: an opening record, or a closing one. A refusal
+    // is none. It no longer decides the answer (repair 3); it words it.
+    let settled = read
+        .iter()
+        .any(|(_, record)| record.kind == Kind::Run && record.outcome != Outcome::Refused);
+    let Walk {
+        open: found,
+        weak_close,
+    } = walk(&read);
+    // WHICH OF THE DAMAGED RECORDS PUT THE ANSWER IN DOUBT. A record that
+    // would not decode may be a run's opening record or its closing record.
+    // STRICTLY before the opening record of the run the readable records
+    // leave open it cannot be that run's close (a close follows its
+    // opening), so that run IS open and the answer stands; the damage is
+    // named on its log line and on the document. It may still be the
+    // opening record a LATER close belongs to, where the walk paired that
+    // close with the newest run of its scope, window and source rather than
+    // with a run it directly follows: the run the walk closed with it,
+    // possibly newer than the one reported, would then be open, and the
+    // document says so ([`Interrupted::newer_may_be_open`], repairs 4 and 6).
+    // Anywhere else -- AT that opening record (a run known only through a
+    // restated head whose own first record is the damaged one: what that
+    // opening record named, its ask among it, is not known; repair 3 made
+    // this `<`, it was `<=`), after it, or
+    // anywhere at all when the readable records leave no run open -- it may
+    // be the record that decides, and the answer is NOT KNOWN.
+    let opened = found.as_ref().map(|run| run.ordinal);
+    let (before, doubt): (Vec<Damaged>, Vec<Damaged>) = damaged
+        .into_iter()
+        .partition(|(ordinal, _)| opened.is_some_and(|open| *ordinal < open));
+    if !doubt.is_empty() {
+        return not_known(damaged_words(&doubt, found.as_ref()));
+    }
+    verdict(
+        found,
+        &before,
+        unread,
+        Span {
+            records,
+            scan_first,
+            settled,
+            weak_close,
+        },
+    )
+}
+
+/// How much of the journal [`restart_scan`] read: its length, the first
+/// record of the scan, whether the records read hold a run record (an
+/// opening or a closing one), and the newest closing record the walk could
+/// not pair by position ([`Walk::weak_close`]).
+#[derive(Clone, Copy)]
+struct Span {
+    records: u64,
+    scan_first: u64,
+    settled: bool,
+    weak_close: Option<u64>,
+}
+
+/// [`restart_scan`]'s answer once no damaged record is in doubt: `found` is
+/// the run the readable records leave open, `before` the damaged records
+/// strictly before its opening record, and `unread` why the run records
+/// before the scan could not be read through the index, when they could not.
+fn verdict(
+    found: Option<Interrupted>,
+    before: &[Damaged],
+    unread: Option<String>,
+    span: Span,
+) -> Restart {
+    let Span {
+        records,
+        scan_first,
+        settled,
+        weak_close,
+    } = span;
+    match found {
+        // THE INDEX COULD NOT BE READ AND THE RUN IS KNOWN ONLY THROUGH A
+        // RESTATED HEAD: its opening record lies before the scan, and so may
+        // the closing record that makes the restatement no new run. What the
+        // scan read cannot tell (DB-B34, repair 3).
+        Some(run) if run.ordinal < scan_first && unread.is_some() => not_known(format!(
+            "the journal's newest {INTERRUPTED_SCAN} of {records} records restate a run opened \
+             at record {} that they do not close, and the run records before them could not be \
+             read through its index ({}), so whether that run was closed before them is not \
+             known",
+            run.ordinal,
+            unread.unwrap_or_default()
+        )),
+        Some(mut run) => {
+            // The count is the run's whole count only when every record
+            // after its opening record was read.
+            run.failures_whole = run.failures_whole && run.ordinal >= scan_first;
+            run.undecodable_before = before.len() as u64;
+            run.undecodable = damaged_list(before);
+            // A record before it that would not decode, and a closing record
+            // after that one the walk could not pair by position: the close may
+            // belong to the damaged record, and the run the walk closed with
+            // it may be open and newer (the third check's `v62r3_p2`).
+            run.newer_may_be_open = before
+                .first()
+                .zip(weak_close)
+                .is_some_and(|((oldest, _), weak)| weak > *oldest);
+            // Its opening record and every record after it were read, so it
+            // IS open; what the index would have added is an older open run,
+            // and that it could not is said.
+            run.older_unread = unread;
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error("pull.run", "a pull run has no closing record")
+                    .with("ordinal", telemetry::Value::Uint(run.ordinal))
+                    .with("failures", telemetry::Value::Uint(run.failures))
+                    .with("source", telemetry::Value::Str(&run.source))
+                    .with(
+                        "undecodable_before",
+                        telemetry::Value::Uint(before.len() as u64),
+                    )
+                    .with("undecodable", telemetry::Value::Str(&run.undecodable))
+                    .with(
+                        "newer_may_be_open",
+                        telemetry::Value::Bool(run.newer_may_be_open),
+                    )
+                    .with(
+                        "older_unread",
+                        telemetry::Value::Str(run.older_unread.as_deref().unwrap_or("")),
+                    )
+                    .with("reason", telemetry::Value::Str(&run.words())),
+            );
+            Restart::Interrupted(run)
+        }
+        // THE INDEX COULD NOT BE READ: never a plain "clean" (DB-B34, repair
+        // 3). It answered "clean" whenever the newest 800 records held any
+        // opening or closing run record, dropping why it could not look
+        // further back, on a journal whose older run was open -- the same
+        // journal read "interrupted" with its index whole, and nothing was
+        // logged for that start.
+        None => match unread {
+            Some(why) => not_known(format!(
+                "the journal's newest {INTERRUPTED_SCAN} of {records} records {}, and the run \
+                 records before them could not be read through its index ({why}), so a run \
+                 opened before them and never closed would not be seen",
+                if settled {
+                    "leave no run they open unclosed"
+                } else {
+                    "hold no run record"
+                }
+            )),
+            None => Restart::Clean,
+        },
+    }
+}
+
+/// A record the restart scan was handed, or was told of by the journal's
+/// index, and could not decode: its ordinal, and why in the decoder's words.
+/// A record the index files is one fixed sentence, borrowed, so a journal
+/// with many filed faults costs 32 bytes for each in the walk's span and no
+/// allocation (repair 3; the span's count is bounded by the journal, named
+/// in `docs/06-limits.md`).
+type Damaged = (u64, std::borrow::Cow<'static, str>);
+
+/// How many damaged records a sentence names one by one: **3**. The rest
+/// are counted and the newest of them named, so the sentence is bounded
+/// whatever the damage.
+const DAMAGED_NAMED: usize = 3;
+
+/// `damaged` (ascending) as a list: the first [`DAMAGED_NAMED`] with their
+/// reasons, then how many more and the newest of them. Empty for none.
+fn damaged_list(damaged: &[Damaged]) -> String {
+    let mut out = damaged
+        .iter()
+        .take(DAMAGED_NAMED)
+        .map(|(ordinal, why)| format!("record {ordinal} ({why})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let (Some(more), Some((newest, _))) = (
+        damaged.len().checked_sub(DAMAGED_NAMED).filter(|n| *n > 0),
+        damaged.last(),
+    ) {
+        use core::fmt::Write as _;
+        let _infallible = write!(out, " and {more} more, the newest record {newest}");
+    }
+    out
+}
+
+/// Why the answer is NOT KNOWN when `doubt` would not decode: which records,
+/// why each could decide, and what the records that DID decode say, so the
+/// reader is told the half that is known and not handed it as the answer.
+fn damaged_words(doubt: &[Damaged], found: Option<&Interrupted>) -> String {
+    let readable = found.map_or_else(
+        || "The records that could be decoded leave no run open".to_owned(),
+        |run| {
+            format!(
+                "The records that could be decoded leave the run opened at record {} open, \
+                 and a record after it that cannot be decoded may be its closing record",
+                run.ordinal
+            )
+        },
+    );
+    format!(
+        "{} of the journal records the scan read cannot be decoded -- {} -- and a record \
+         that cannot be decoded may be a run's opening record or its closing record. {readable}",
+        doubt.len(),
+        damaged_list(doubt)
+    )
+}
+
+/// [`Restart::NotKnown`] for `why`, logged where an operator reads it.
+fn not_known(why: String) -> Restart {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.run",
+            "whether a pull run was left open is not known",
+        )
+        .with("reason", telemetry::Value::Str(&why)),
+    );
+    Restart::NotKnown(why)
+}
+
+/// What [`older_runs`] read before the scan.
+struct Older {
+    /// The records that decoded, oldest first.
+    read: Vec<(u64, crate::audit::Record)>,
+    /// The records that did not, or that the index files as undecodable and
+    /// were not read again.
+    damaged: Vec<Damaged>,
+}
+
+/// [`older_runs`], building the journal's index first when it cannot be read
+/// as it is. See [`restart_scan`].
+///
+/// # Errors
+///
+/// Why the index could not be read, and why it could not be built here:
+/// the build failed, or another writer held the journal's lock for `waits`
+/// pauses.
+fn older_runs_built(
+    journal: &crate::audit::Journal,
+    records: u64,
+    scan_first: u64,
+    waits: u32,
+) -> Result<Older, String> {
+    let first = match older_runs(journal, records, scan_first) {
+        Ok(read) => return Ok(read),
+        Err(why) => why,
+    };
+    let mut waited = 0_u32;
+    loop {
+        match journal.build_index() {
+            Ok(built) if !built.busy => break,
+            // ANOTHER WRITER HOLDS THE LOCK: an append, or the index build
+            // `api serve` started. Either leaves the index readable.
+            Ok(_) if waited < waits => {
+                waited = waited.saturating_add(1);
+                std::thread::sleep(INDEX_WAIT);
+                if let Ok(read) = older_runs(journal, records, scan_first) {
+                    return Ok(read);
+                }
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "{first}; it was not built here because another writer held the journal's \
+                     lock through {waited} wait(s) of {} ms",
+                    INDEX_WAIT.as_millis()
+                ));
+            }
+            Err(why) => return Err(format!("{first}; and it could not be built here: {why}")),
+        }
+    }
+    older_runs(journal, records, scan_first)
+        // `build_index` builds an index that is absent and CATCHES UP one
+        // that is behind; it does not rewrite entries it already covers, so
+        // "rebuilt" overstated what was done about an unreadable entry. The
+        // same reason twice is said once.
+        .map_err(|why| {
+            if why == first {
+                format!("{first}; it was built or caught up here, and that still holds")
+            } else {
+                format!("{first}; it was built or caught up here, and then: {why}")
+            }
+        })
+}
+
+/// The [`INTERRUPTED_RUNS`] newest run records of `journal` below record
+/// `scan_first`, oldest first, read through its index -- and every record in
+/// their span that would not decode.
+///
+/// # A record that cannot be decoded is returned, never dropped
+///
+/// Two ways one is met, and both are reported in [`Older::damaged`]:
+///
+/// * the index's `runs` file names a record and the record does not decode
+///   (it was damaged after it was indexed);
+/// * the index's `faults` file names a record between the oldest run record
+///   read and the scan (it was damaged BEFORE the index was built, so `runs`
+///   does not name it and it may be a run record all the same). The newest
+///   [`INTERRUPTED_RUNS`] of those are read again, since a later build may
+///   decode what an earlier one could not; older ones are reported as the
+///   index filed them.
+///
+/// The span begins at the oldest run record read, or at the journal's first
+/// record when every run record below the scan was read: a fault further
+/// back than the walk looks is outside it, as an open run there is.
+///
+/// # Errors
+///
+/// The index is absent, of another file, ahead of the journal, covers fewer
+/// than `scan_first` records (run records between its cover and the scan
+/// would be missed) or holds an entry that cannot be read (a run record may
+/// be missing from it), or the journal cannot be read at a named record: by
+/// name.
+///
+/// # Cost
+///
+/// One read of the index and at most `2 * INTERRUPTED_RUNS` positional
+/// reads, whatever the journal's length.
+fn older_runs(
+    journal: &crate::audit::Journal,
+    records: u64,
+    scan_first: u64,
+) -> Result<Older, String> {
+    let index = journal.read_index(records)?;
+    if index.covered < scan_first {
+        return Err(format!(
+            "the index covers the first {} records and the scan begins at record {scan_first}",
+            index.covered
+        ));
+    }
+    if index.malformed > 0 {
+        return Err(format!(
+            "{} of the index's entries cannot be read, so a run record may be missing from it",
+            index.malformed
+        ));
+    }
+    let below = index
+        .runs
+        .partition_point(|(ordinal, _)| *ordinal < scan_first);
+    let named = index
+        .runs
+        .get(below.saturating_sub(INTERRUPTED_RUNS)..below)
+        .unwrap_or_default();
+    // WHERE THE WALK BEGINS: the oldest run record read, or the journal's
+    // first record when no run record below the scan was left unread.
+    let begins = if below > INTERRUPTED_RUNS {
+        named.first().map_or(0, |(ordinal, _)| *ordinal)
+    } else {
+        0
+    };
+    let filed = index
+        .fault_ordinals
+        .get(
+            index.fault_ordinals.partition_point(|at| *at < begins)
+                ..index.fault_ordinals.partition_point(|at| *at < scan_first),
+        )
+        .unwrap_or_default();
+    let (as_filed, again) = filed.split_at(filed.len().saturating_sub(INTERRUPTED_RUNS));
+    let mut ordinals: Vec<u64> = named
+        .iter()
+        .map(|(ordinal, _)| *ordinal)
+        .chain(again.iter().copied())
+        .collect();
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    let mut out = Older {
+        read: Vec::with_capacity(ordinals.len()),
+        damaged: as_filed
+            .iter()
+            .map(|at| {
+                (
+                    *at,
+                    std::borrow::Cow::Borrowed(
+                        "the journal's index files it as a record that would not decode",
+                    ),
+                )
+            })
+            .collect(),
+    };
+    for (ordinal, decoded) in journal.records_at(&ordinals)? {
+        match decoded {
+            Ok(record) => out.read.push((ordinal, record)),
+            Err(fault) => out.damaged.push((ordinal, fault.to_string().into())),
+        }
+    }
+    Ok(out)
+}
+
+/// `/pull/run.json`: the run's document, the calendar of record's horizon
+/// seen from `today` (days since the epoch; DB-B25, DB-B41) and what the
+/// journal said about the run before this process when the site loaded
+/// (DB-B34): `interrupted` is that run or `null`, and `restart` says which of
+/// clean, interrupted and not known it is, so a `null` is never read as
+/// "clean" when the scan could not tell.
+///
+/// The horizon is on this document because a pull is what the record's end
+/// breaks: a page that polls the run can warn "the calendar is known until
+/// <date>" before the first pull fails, with no second request.
+#[must_use]
+pub fn status_json(progress: &Progress, today: Option<i64>, restart: Option<&Restart>) -> String {
+    let mut out = progress.json();
+    let _brace = out.pop();
+    out.push_str(",\"calendar\":");
+    match today {
+        Some(today) => {
+            let horizon = pull::calendar::record_horizon(today);
+            out.push_str("{\"recordTo\":");
+            out.push_str(&quote_for_json(&day_text(
+                u32::try_from(horizon.last_day).unwrap_or(0),
+            )));
+            out.push_str(",\"daysLeft\":");
+            out.push_str(&horizon.days_left.to_string());
+            out.push_str(",\"endsSoon\":");
+            out.push_str(if horizon.ends_soon { "true" } else { "false" });
+            out.push_str(",\"ended\":");
+            out.push_str(if horizon.ended { "true" } else { "false" });
+            out.push('}');
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"interrupted\":");
+    match restart.and_then(Restart::interrupted) {
+        Some(run) => run.json(&mut out),
+        None => out.push_str("null"),
+    }
+    // THE THIRD STATE (DB-B34): `interrupted: null` alone could not tell "no
+    // run was left open" from "could not tell".
+    out.push_str(",\"restart\":");
+    match restart {
+        Some(state) => {
+            out.push_str("{\"state\":");
+            out.push_str(&quote_for_json(state.word()));
+            out.push_str(",\"words\":");
+            out.push_str(&quote_for_json(&state.words()));
+            out.push('}');
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
 }
 
 /// A JSON string literal, escaping what RFC 8259 requires and nothing else.
@@ -777,6 +2020,55 @@ pub(crate) fn rows_now(site: &Site) -> Option<u64> {
     )
 }
 
+/// The rows the store's census holds for `own`, the store vendors a run's
+/// own feeds write to: what the page shows as the store's count
+/// (`rowsAtStart`, `rowsNow`). It is NOT the run's progress any more (repair
+/// 4): another writer of the same vendor moves it too, so the growth test
+/// and the bars figure read [`Progress::bars_written`], the run's own
+/// receipts.
+///
+/// # Why not [`rows_now`] (DB-B33)
+///
+/// That sums every vendor. A GDFL import writing beside a Zerodha pull moved
+/// the total on every pass, so the run read another writer's rows as its own
+/// progress: it never stopped idle, skipped [`RETRY_WAIT`] on growth that was
+/// not its own, and reported the other feed's bars as "added" by the pull.
+/// A run's growth is measured on the vendors it writes to and no other.
+///
+/// # Cost
+///
+/// As [`rows_now`]: the shared census read, then one comparison per vendor
+/// against a list bounded by the feed count.
+pub(crate) fn rows_of(site: &Site, own: &[brutex_core::vendor::Vendor]) -> Option<u64> {
+    let (censuses, _) = crate::server::census_now(site);
+    rows_total(
+        censuses
+            .iter()
+            .filter(|census| own.contains(&census.vendor))
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows),
+    )
+}
+
+/// The store vendors the feeds of `groups` write to, each once. A feed with
+/// no store vendor of its own contributes none, so its run proves no growth
+/// rather than borrowing another vendor's.
+fn own_vendors(groups: &[(String, Vec<Leg>)]) -> Vec<brutex_core::vendor::Vendor> {
+    let mut own = Vec::with_capacity(groups.len());
+    for (wire, _) in groups {
+        let vendor = pull::vendor::Feed::ALL
+            .iter()
+            .find(|feed| feed.wire() == wire)
+            .and_then(|feed| feed.store_vendor());
+        if let Some(vendor) = vendor
+            && !own.contains(&vendor)
+        {
+            own.push(vendor);
+        }
+    }
+    own
+}
+
 /// The vendors' row counts added, or `None` when the total does not fit.
 ///
 /// A plain `.sum()` here panicked on overflow, and the release profile aborts
@@ -913,14 +2205,26 @@ enum PassOutcome {
 /// cycle. Shared with the conductor so a later request panicking cannot lose
 /// earlier receipts along with the task's return value. Relaxed atomics carry
 /// no other data; the conductor joins every chain before the next pass.
-type Checkpoints = std::sync::Arc<[std::sync::atomic::AtomicBool]>;
+///
+/// THREE STATES, NOT TWO (DB-B26). [`OWED`] and [`CLEAN`] are the receipt
+/// checkpoint above. [`SETTLED`] is a leg that finished with standing
+/// failures: it is never reopened in this run, on a retry cycle or a full
+/// pass, because asking again returns the same answer.
+type Checkpoints = std::sync::Arc<[std::sync::atomic::AtomicU8]>;
+
+/// A leg not yet answered clean in this cycle.
+const OWED: u8 = 0;
+/// A leg whose receipt read clean: reopened on the next full pass.
+const CLEAN: u8 = 1;
+/// A leg that finished with standing failures: never reopened in this run.
+const SETTLED: u8 = 2;
 
 fn checkpoints_for(groups: &[(String, Vec<Leg>)]) -> Vec<Checkpoints> {
     groups
         .iter()
         .map(|(_, legs)| {
             legs.iter()
-                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .map(|_| std::sync::atomic::AtomicU8::new(OWED))
                 .collect()
         })
         .collect()
@@ -932,8 +2236,12 @@ enum LegOutcome {
     Stored,
     Empty,
     Retry,
+    /// The receipt classes every failure as standing ([`RetryClass`]).
+    Standing,
     Permanent,
     Credential,
+    /// The receipt says the store will not take a write (DB-B35).
+    Store,
 }
 
 /// These are statuses of our internal handlers, not raw vendor responses.
@@ -968,9 +2276,18 @@ fn leg_outcome(status: axum::http::StatusCode, html: &str) -> LegOutcome {
     // Some handlers return HTTP 200 with a failed receipt. Its explicit
     // credential verdict must still halt the feed.
     if crate::autopilot::credential_fault_in_page(html) {
-        LegOutcome::Credential
-    } else {
-        LegOutcome::Retry
+        return LegOutcome::Credential;
+    }
+    // THE RECEIPT'S OWN CLASS, WHEN IT STATES ONE (DB-B26, DB-B35). Every
+    // receipt that was not clean used to be Retry, so a leg whose instruments
+    // all answered and whose only failures were gaps in what the vendor holds
+    // was pulled again whole, up to the pass ceiling. The server writes the
+    // class where each fault is typed; a receipt that states none is Retry,
+    // as before.
+    match RetryClass::of_receipt(html) {
+        Some(RetryClass::Store) => LegOutcome::Store,
+        Some(RetryClass::Standing) => LegOutcome::Standing,
+        Some(RetryClass::Transient) | None => LegOutcome::Retry,
     }
 }
 
@@ -1019,15 +2336,20 @@ fn note_leg_failure(
             Some(recorded) => format!("the receipt's Recorded line: {recorded}"),
             None => "no journal record was written for a request refused at the door".to_owned(),
         };
-        let kind = if outcome == LegOutcome::Retry {
-            "this leg remains owed and is eligible for another pass"
-        } else {
-            "this feed is halted for the rest of this run"
+        let kind = match outcome {
+            LegOutcome::Retry => "this leg remains owed and is eligible for another pass",
+            LegOutcome::Standing => {
+                "no later pass of this run can change that, so this leg is not asked again"
+            }
+            _ => "this feed is halted for the rest of this run",
         };
         with_progress(site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 if feed.last_error.is_none()
-                    || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
+                    || matches!(
+                        outcome,
+                        LegOutcome::Credential | LegOutcome::Permanent | LegOutcome::Store
+                    )
                 {
                     feed.last_error = Some(format!(
                         "{} answered HTTP {}: {said} ({kind}; {journal})",
@@ -1036,6 +2358,7 @@ fn note_leg_failure(
                     ));
                 }
                 feed.credential_dead |= outcome == LegOutcome::Credential;
+                feed.store_unavailable |= outcome == LegOutcome::Store;
             }
         });
         return;
@@ -1051,6 +2374,19 @@ fn note_leg_failure(
             for the rest of this run. Correct the request or preflight evidence before \
             starting a new pull. The refusal details are in the audit journal."
         }
+        LegOutcome::Store => {
+            "STORE UNAVAILABLE: the store would not take a write, so the leg stopped \
+            asking the vendor. This feed is halted for the rest of this run. Check that \
+            the store's drive is mounted and has room, then start a new pull; what was \
+            asked and not written is asked again then."
+        }
+        LegOutcome::Standing => {
+            "FINISHED WITH STANDING FAILURES: every failure left is one another attempt \
+            in this run would repeat (what the vendor holds for an instrument that \
+            answered, an instrument the pull order withheld, or the end of the calendar \
+            of record). So this leg is not asked again in this run. Each failure is named \
+            in the audit journal."
+        }
         _ => {
             "its receipt did not read clean. The reason is in the audit journal; \
             this leg remains owed and is eligible for another pass."
@@ -1059,7 +2395,10 @@ fn note_leg_failure(
     with_progress(site, run, |progress| {
         if let Some(feed) = progress.feeds.get_mut(nth) {
             if feed.last_error.is_none()
-                || matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent)
+                || matches!(
+                    outcome,
+                    LegOutcome::Credential | LegOutcome::Permanent | LegOutcome::Store
+                )
             {
                 feed.last_error = Some(format!(
                     "{} answered HTTP {}: {reason}",
@@ -1068,6 +2407,7 @@ fn note_leg_failure(
                 ));
             }
             feed.credential_dead |= outcome == LegOutcome::Credential;
+            feed.store_unavailable |= outcome == LegOutcome::Store;
         }
     });
 }
@@ -1095,6 +2435,46 @@ fn receipt_fact(html: &str, label: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+/// The receipt facts a leg states its written bars under: a spot landing's
+/// (`server::landed_answer`, `bars_committed`) and an F&O walk's
+/// (`Rolled::record_landing` sums `bars_committed` into it). Read in this
+/// order, the first row wins.
+const BARS_WRITTEN_FACTS: [&str; 2] = ["Bars written to the file", "Bars stored"];
+
+/// The bars a leg's receipt says the leg wrote, or `None` when it states no
+/// such count, or one that is not a whole number (DB-B33, repair 4).
+fn bars_written_in(html: &str) -> Option<u64> {
+    let said = BARS_WRITTEN_FACTS
+        .iter()
+        .find_map(|label| receipt_fact(html, label))?;
+    said.split_whitespace().next()?.parse().ok()
+}
+
+/// The run's written-bars figure after one leg: `total` plus what the leg's
+/// receipt stated. A STORED receipt that states no count makes the figure
+/// unknown for the rest of the run, as an overflowing sum does: a figure
+/// that silently skipped a landing would read as a run that wrote less. Any
+/// other receipt that states none (a refusal before the first landing) wrote
+/// nothing this run can count, and leaves it as it was.
+fn add_written(total: Option<u64>, wrote: Option<u64>, stored: bool) -> Option<u64> {
+    match wrote {
+        Some(bars) => total?.checked_add(bars),
+        None if stored => None,
+        None => total,
+    }
+}
+
+/// The written-bars figure of run `run`, or `None` when it is unknown or
+/// the slot holds another run.
+fn written_of(site: &Site, run: u64) -> Option<u64> {
+    site.run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|progress| progress.generation == run)
+        .and_then(|progress| progress.bars_written)
+}
+
 /// Run one feed's legs sequentially. Only a response that actually returned
 /// advances `legs_done`; dependencies and early breaks remain unattempted.
 async fn run_chain<F, Fut>(
@@ -1116,7 +2496,7 @@ where
         if stopping(&site, run) {
             break;
         }
-        if clean.load(std::sync::atomic::Ordering::Relaxed) {
+        if clean.load(std::sync::atomic::Ordering::Relaxed) != OWED {
             continue;
         }
         // A failed daily leg holds back minutes/seconds, and any failed spot
@@ -1134,21 +2514,41 @@ where
         });
         attempted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (status, html) = request(Loaded::clone(&site), leg.clone()).await;
+        let outcome = leg_outcome(status, &html);
+        let wrote = bars_written_in(&html);
         with_progress(&site, run, |progress| {
             if let Some(feed) = progress.feeds.get_mut(nth) {
                 feed.legs_done = feed.legs_done.saturating_add(1);
             }
+            progress.bars_written =
+                add_written(progress.bars_written, wrote, outcome == LegOutcome::Stored);
         });
-        let outcome = leg_outcome(status, &html);
         if matches!(outcome, LegOutcome::Stored | LegOutcome::Empty) {
-            clean.store(true, std::sync::atomic::Ordering::Relaxed);
+            clean.store(CLEAN, std::sync::atomic::Ordering::Relaxed);
             continue;
         }
         note_leg_failure(&site, run, nth, leg, (status, &html), outcome);
+        if outcome == LegOutcome::Standing {
+            // SETTLED FOR THE RUN, AND THE LEGS AFTER IT STILL RUN (DB-B26,
+            // DB-B27). The rung below is judged per instrument by the pull
+            // order's own gate, so a daily leg with gaps no longer holds
+            // back every minute; and nothing is retried, because every
+            // instrument that could answer has.
+            clean.store(SETTLED, std::sync::atomic::Ordering::Relaxed);
+            with_progress(&site, run, |progress| {
+                if let Some(feed) = progress.feeds.get_mut(nth) {
+                    feed.standing = feed.standing.saturating_add(1);
+                }
+            });
+            continue;
+        }
         if leg.route == Route::Spot {
             failed_spot_rank = Some(ladder_rank(&leg.dir));
         }
-        if matches!(outcome, LegOutcome::Credential | LegOutcome::Permanent) {
+        if matches!(
+            outcome,
+            LegOutcome::Credential | LegOutcome::Permanent | LegOutcome::Store
+        ) {
             result = PassOutcome::Halted;
             break;
         }
@@ -1212,7 +2612,13 @@ async fn run_pass<F, Fut>(
         }
         if !retry_cycle {
             for leg in clean.iter() {
-                leg.store(false, std::sync::atomic::Ordering::Relaxed);
+                // Only a clean receipt is reopened; a settled leg stays so.
+                let _was = leg.compare_exchange(
+                    CLEAN,
+                    OWED,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
         }
         let again = *prior == PassOutcome::Retry;
@@ -1276,7 +2682,8 @@ async fn run_pass<F, Fut>(
 /// Server-owned passes outlive the browser, but are not persisted across a
 /// server restart. Feeds run in parallel; each feed's legs run sequentially.
 /// Fixed refusals halt that feed. Transient failures retry up to [`MAX_PASSES`].
-/// Idle termination is an observation about store growth, never full coverage.
+/// Idle termination is an observation about the bars the run's own legs
+/// wrote (DB-B33), never full coverage.
 ///
 /// `run` is the [`Progress::generation`] the caller installed when it claimed
 /// the slot; every edit this run makes is addressed to it. D-2760.
@@ -1296,10 +2703,16 @@ where
         run,
     };
     let groups = by_feed(legs);
-    let started_rows = rows_now(&site);
+    // THE STORE'S COUNT FOR THE RUN'S OWN VENDORS, shown as what the store
+    // holds (`rowsAtStart`, `rowsNow`). Another writer of the same vendor
+    // moves it too, so it is not the run's progress: that is the bars its
+    // own legs' receipts say they wrote, `bars_written` (DB-B33, repair 4).
+    let own = own_vendors(&groups);
+    let started_rows = rows_of(&site, &own);
     with_progress(&site, run, |progress| {
         progress.rows_at_start = started_rows;
         progress.rows_now = started_rows;
+        progress.bars_written = Some(0);
         progress.feeds = groups
             .iter()
             .map(|(vendor, held)| FeedReport {
@@ -1312,10 +2725,11 @@ where
 
     let ticker = {
         let site = Loaded::clone(&site);
+        let own = own.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
-                let seen = rows_now(&site);
+                let seen = rows_of(&site, &own);
                 with_progress(&site, run, |progress| progress.rows_now = seen);
             }
         })
@@ -1329,13 +2743,16 @@ where
             break;
         }
         let repairing = outcomes.contains(&PassOutcome::Retry);
-        let before = rows_now(&site);
+        // GROWTH IS WHAT THIS RUN'S OWN LEGS WROTE (DB-B33, repair 4): the
+        // census of its vendor is moved by any other writer of that vendor.
+        let before = written_of(&site, run);
         run_pass(&site, run, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
-        let after = rows_now(&site);
+        let after = written_of(&site, run);
+        let census = rows_of(&site, &own);
         with_progress(&site, run, |progress| {
             progress.passes = passes;
-            progress.rows_now = after;
+            progress.rows_now = census;
         });
         if stopping(&site, run)
             || outcomes
@@ -1344,8 +2761,9 @@ where
         {
             break;
         }
-        // Growth is proven only by two known counts; an unknown one (CE-74)
-        // proves nothing, so the pass is judged as if nothing landed.
+        // Growth is proven only by two known counts; an unknown one (CE-74,
+        // or a STORED receipt that stated no count) proves nothing, so the
+        // pass is judged as if nothing landed.
         if matches!((before, after), (Some(before), Some(after)) if after > before) {
             clean_empty = 0;
             continue;
@@ -1375,17 +2793,68 @@ where
     // handle returns only once the task has actually stopped. D-2760.
     ticker.abort();
     let _cancelled = ticker.await;
-    let current_rows = rows_now(&site);
+    let current_rows = rows_of(&site, &own);
     with_progress(&site, run, |progress| {
         progress.rows_now = current_rows;
-        progress.finished = Some(run_summary(
+        progress.stop = Some(stop_of(
             progress,
             &outcomes,
-            current_rows
-                .zip(started_rows)
-                .map(|(now, start)| now.saturating_sub(start)),
+            clean_empty >= CLEAN_EMPTY_PASSES,
         ));
+        progress.finished = Some(run_summary(progress, &outcomes, progress.bars_written));
     });
+}
+
+/// Why the run ended, typed. The first that holds, in this order: the
+/// operator's stop, a store that would not take a write, a halted feed, the
+/// pass ceiling, legs that finished with standing failures, and otherwise the
+/// idle stop. DB-B26, DB-B35.
+fn stop_of(progress: &Progress, outcomes: &[PassOutcome], idle: bool) -> Stop {
+    if progress.stopping {
+        Stop::Operator
+    } else if progress.feeds.iter().any(|feed| feed.store_unavailable) {
+        Stop::StoreUnavailable
+    } else if outcomes.contains(&PassOutcome::Halted)
+        || progress.feeds.iter().any(|feed| feed.credential_dead)
+    {
+        Stop::Halted
+    } else if progress.passes >= MAX_PASSES && !idle {
+        // A run that went idle ON its last allowed pass stopped because it
+        // was idle; the ceiling is the stop only of a run still owing.
+        Stop::Ceiling
+    } else if progress.feeds.iter().any(|feed| feed.standing > 0) {
+        Stop::Standing
+    } else {
+        Stop::Idle
+    }
+}
+
+/// The sentence a summary ends with when legs finished with standing
+/// failures, or nothing. It names each such feed and its first reason, so the
+/// stop is never read as a clean window (DB-B26).
+fn standing_note(progress: &Progress) -> String {
+    let named: Vec<String> = progress
+        .feeds
+        .iter()
+        .filter(|feed| feed.standing > 0)
+        .map(|feed| {
+            format!(
+                "{} ({} leg(s)): {}",
+                feed.vendor,
+                feed.standing,
+                feed.last_error.as_deref().unwrap_or("standing failures")
+            )
+        })
+        .collect();
+    if named.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " FINISHED WITH STANDING FAILURES, which were not retried because asking again \
+             returns the same answer: {}",
+            named.join("; ")
+        )
+    }
 }
 
 /// Terminal feeds remain part of the final verdict even while other feeds
@@ -1407,7 +2876,7 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64
         .collect();
     if !halted.is_empty() {
         return format!(
-            "INCOMPLETE after {} pass(es); {landed_said} bar(s) added to the store census. \
+            "INCOMPLETE after {} pass(es); {landed_said} bar(s) written by this run's own legs. \
              {} pass(es) were retried after a failure. Halted feed(s): {} \
              Full basket coverage has not been verified.{}",
             progress.passes,
@@ -1422,7 +2891,9 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64
             }
         );
     }
-    summary_of(progress.passes, progress.retries, landed, progress.stopping)
+    let mut summary = summary_of(progress.passes, progress.retries, landed, progress.stopping);
+    summary.push_str(&standing_note(progress));
+    summary
 }
 
 /// Records that one feed's chain stopped abnormally, on the feed it killed.
@@ -1468,8 +2939,9 @@ fn note_dead_chain(
     });
 }
 
-/// The bars-added figure in words: the number, or `an unknown number of`
-/// when the census total did not fit a `u64` (CE-74, D-1776).
+/// The bars-written figure in words: the number, or `an unknown number of`
+/// when the sum did not fit a `u64` (CE-74, D-1776) or a STORED receipt
+/// stated no count (DB-B33, repair 4).
 fn landed_words(landed: Option<u64>) -> String {
     landed.map_or_else(
         || "an unknown number of".to_owned(),
@@ -1491,20 +2963,20 @@ pub fn summary_of(passes: u32, retries: u32, landed: Option<u64>, stopped: bool)
     };
     if stopped {
         return format!(
-            "Stopped after {passes} pass(es); {landed} bar(s) added to the store census \
+            "Stopped after {passes} pass(es); {landed} bar(s) written by this run's own legs \
              before you pressed stop.{note} Full basket coverage has not been verified."
         );
     }
     if passes >= MAX_PASSES {
         return format!(
-            "Reached the {MAX_PASSES}-pass ceiling with {landed} bar(s) added to the store census.{note} \
+            "Reached the {MAX_PASSES}-pass ceiling with {landed} bar(s) written by this run's own legs.{note} \
              This is a runaway stop and NOT a verdict on the window — press Pull \
              again to continue. Full basket coverage has not been verified."
         );
     }
     format!(
-        "Idle retries stopped after {passes} pass(es); {landed} bar(s) added to the store census.{note} \
-         The last {CLEAN_EMPTY_PASSES} passes reported no retryable failures and no row growth. \
+        "Idle retries stopped after {passes} pass(es); {landed} bar(s) written by this run's own legs.{note} \
+         The last {CLEAN_EMPTY_PASSES} passes reported no retryable failures and wrote no bar. \
          Empty responses or already-present bars can explain this. \
          Full basket coverage has not been verified."
     )
@@ -2116,10 +3588,15 @@ mod tests {
                 finished: false,
                 credential_dead: false,
                 skipped: 0,
+                standing: 0,
+                store_unavailable: false,
             }],
+            stop: None,
+            bars_written: Some(375),
         };
         let doc = progress.json();
         for key in [
+            "\"barsWritten\":375",
             "\"running\":true",
             "\"passes\":7",
             "\"retries\":2",
@@ -2700,7 +4177,22 @@ mod tests {
         );
     }
 
+    /// A synthetic receipt that, as a landing's receipt does, states the
+    /// bars its leg wrote: none.
     fn receipt(status: u16, verdict: &str) -> (axum::http::StatusCode, String) {
+        receipt_wrote(status, verdict, Some(0))
+    }
+
+    /// A synthetic receipt stating `wrote` bars under the spot landing's
+    /// label, or no count at all for `None`.
+    fn receipt_wrote(
+        status: u16,
+        verdict: &str,
+        wrote: Option<u64>,
+    ) -> (axum::http::StatusCode, String) {
+        let facts: Vec<(&'static str, String)> = wrote
+            .map(|bars| vec![(BARS_WRITTEN_FACTS[0], bars.to_string())])
+            .unwrap_or_default();
         (
             axum::http::StatusCode::from_u16(status).expect("HTTP status"),
             crate::render::receipt_page(&crate::render::Receipt {
@@ -2708,7 +4200,7 @@ mod tests {
                 verdict,
                 reason: "synthetic coordinator receipt",
                 good: verdict == "STORED",
-                facts: &[],
+                facts: &facts,
                 footnote: "No vendor was contacted.",
             }),
         )
@@ -3325,7 +4817,7 @@ mod tests {
                 .iter()
                 .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
                 .collect::<Vec<_>>(),
-            [true, true, false]
+            [CLEAN, CLEAN, OWED]
         );
     }
 
@@ -3395,6 +4887,2074 @@ mod tests {
         assert_eq!(observed(&passes.site), progress);
     }
 
+    /// A receipt that states its retry class, as the server writes it.
+    fn classed(status: u16, verdict: &str, class: &str) -> (axum::http::StatusCode, String) {
+        (
+            axum::http::StatusCode::from_u16(status).expect("HTTP status"),
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict,
+                reason: "synthetic coordinator receipt",
+                good: false,
+                facts: &[(
+                    RETRY_CLASS_FACT,
+                    format!("{class} — 0 failure(s) another attempt could change"),
+                )],
+                footnote: "No vendor was contacted.",
+            }),
+        )
+    }
+
+    /// Writes a census of `rows` rows for `vendor` into the site's store.
+    fn write_census(site: &Site, vendor: brutex_core::vendor::Vendor, rows: u64) {
+        use brutex_core::instrument::{Exchange, Segment};
+        use brutex_core::symbol::Symbol;
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        use store::path::{Timeframe, YearMonth};
+
+        let mut census = Manifest::open(vendor, &[], &[]).expect("empty fixture");
+        census
+            .record(Entry {
+                key: EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment: Segment::Index,
+                    symbol: Symbol::new("NIFTY").expect("symbol"),
+                    timeframe: Timeframe::MINUTE_1,
+                    month: YearMonth::new(2025, 7).expect("month"),
+                },
+                rows,
+                first_ts_micros: 1,
+                last_ts_micros: 1,
+            })
+            .expect("record counter");
+        std::fs::write(manifest_path(&site.store_root, vendor), census.image())
+            .expect("write fixture census");
+    }
+
+    /// **ANOTHER WRITER'S ROWS ARE NOT THIS RUN'S PROGRESS** (DB-B33).
+    ///
+    /// A GDFL census grows on every request while a Zerodha run's receipts
+    /// are all clean. The growth test summed every vendor, so each pass read
+    /// as progress and the run never stopped idle (it ran to the pass
+    /// ceiling, and reported the other feed's rows as bars it added). Counted
+    /// on the run's own vendor it stops after the three idle passes with
+    /// nothing added.
+    #[tokio::test]
+    async fn another_vendors_growth_neither_keeps_the_run_alive_nor_counts_as_its_bars() {
+        let grown = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let grow = std::sync::Arc::clone(&grown);
+        let progress = simulated(
+            "foreign-growth",
+            vec![leg("zerodha", "1day")],
+            move |site, _leg| {
+                let rows = grow.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                write_census(&site, brutex_core::vendor::Vendor::Gdfl, rows);
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(
+            grown.load(std::sync::atomic::Ordering::Relaxed),
+            u64::from(CLEAN_EMPTY_PASSES),
+            "one request a pass, and the idle stop after three"
+        );
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES);
+        assert_eq!(
+            (progress.rows_at_start, progress.rows_now),
+            (Some(0), Some(0)),
+            "the other vendor's rows are not on this run's counter"
+        );
+        assert_eq!(progress.stop, Some(Stop::Idle));
+        let summary = progress.finished.expect("summary");
+        assert!(
+            summary.contains("Idle retries stopped")
+                && summary.contains("; 0 bar(s) written by this run's own legs"),
+            "{summary}"
+        );
+    }
+
+    /// The run's own vendor still counts: the same loop, growing Zerodha.
+    #[tokio::test]
+    async fn the_runs_own_vendor_growth_is_still_counted() {
+        let site = site("own-growth");
+        write_census(&site, brutex_core::vendor::Vendor::Gdfl, 9_000);
+        write_census(&site, brutex_core::vendor::Vendor::Zerodha, 5);
+        let own = own_vendors(&by_feed(vec![leg("zerodha", "1day")]));
+        assert_eq!(own, [brutex_core::vendor::Vendor::Zerodha]);
+        assert_eq!(rows_of(&site, &own), Some(5));
+        assert_eq!(
+            rows_now(&site),
+            Some(9_005),
+            "the all-vendor total, for contrast"
+        );
+        assert_eq!(
+            rows_of(&site, &own_vendors(&by_feed(vec![leg("gdfl", "1sec")]))),
+            Some(9_000)
+        );
+        assert_eq!(
+            rows_of(&site, &[]),
+            Some(0),
+            "no vendor of its own proves no growth"
+        );
+    }
+
+    /// **ANOTHER WRITER OF THE SAME VENDOR IS NOT THIS RUN'S PROGRESS**
+    /// (DB-B33, repair 4; the third check's follow-up 10). The Zerodha
+    /// census grows on every request, as a `cli` pull or a second run of
+    /// the same vendor would make it, while this run's receipts say they
+    /// wrote nothing. Counted on the vendor's census the run read that as
+    /// its own progress on every pass (never idle, no retry wait, another
+    /// writer's rows credited to it); counted from its own receipts it stops
+    /// after the three idle passes having written nothing, and the census is
+    /// still shown as what the store holds.
+    #[tokio::test]
+    async fn another_writer_of_the_same_vendor_neither_keeps_the_run_alive_nor_counts_as_its_bars()
+    {
+        let grown = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let grow = std::sync::Arc::clone(&grown);
+        let progress = simulated(
+            "same-vendor-growth",
+            vec![leg("zerodha", "1day")],
+            move |site, _leg| {
+                let rows = grow.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                write_census(&site, brutex_core::vendor::Vendor::Zerodha, rows);
+                std::future::ready(receipt(200, "STORED"))
+            },
+        )
+        .await;
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES, "{progress:?}");
+        assert_eq!(progress.stop, Some(Stop::Idle));
+        assert_eq!(progress.bars_written, Some(0));
+        assert_eq!(
+            (progress.rows_at_start, progress.rows_now),
+            (Some(0), Some(u64::from(CLEAN_EMPTY_PASSES))),
+            "the census is shown as the store's count"
+        );
+        assert!(progress.json().contains("\"barsWritten\":0"));
+        let summary = progress.finished.expect("summary");
+        assert!(
+            summary.contains("; 0 bar(s) written by this run's own legs"),
+            "{summary}"
+        );
+    }
+
+    /// The run's own receipts prove its growth: a leg that wrote bars on the
+    /// first pass keeps the run going, the three idle passes follow, and the
+    /// figure is the receipts' sum. A STORED receipt that states no count
+    /// makes the figure unknown, never a short number, and proves no growth.
+    #[tokio::test]
+    async fn the_runs_own_receipts_prove_its_growth_and_an_unstated_count_is_unknown() {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ask = std::sync::Arc::clone(&asked);
+        let progress = simulated(
+            "own-receipt-growth",
+            vec![leg("zerodha", "1day")],
+            move |_site, _leg| {
+                let nth = ask.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::future::ready(receipt_wrote(
+                    200,
+                    "STORED",
+                    Some(if nth == 0 { 375 } else { 0 }),
+                ))
+            },
+        )
+        .await;
+        assert_eq!(progress.passes, CLEAN_EMPTY_PASSES + 1, "{progress:?}");
+        assert_eq!(progress.bars_written, Some(375));
+        assert!(
+            progress
+                .finished
+                .as_deref()
+                .is_some_and(|said| said.contains("; 375 bar(s) written")),
+            "{:?}",
+            progress.finished
+        );
+
+        let unstated = simulated(
+            "own-receipt-unstated",
+            vec![leg("zerodha", "1day")],
+            |_site, _leg| std::future::ready(receipt_wrote(200, "STORED", None)),
+        )
+        .await;
+        assert_eq!(unstated.passes, CLEAN_EMPTY_PASSES);
+        assert_eq!(unstated.bars_written, None);
+        assert!(
+            unstated
+                .finished
+                .as_deref()
+                .is_some_and(|said| said.contains("an unknown number of bar(s)")),
+            "{:?}",
+            unstated.finished
+        );
+        assert!(unstated.json().contains("\"barsWritten\":null"));
+    }
+
+    /// The written-bars figure, step by step: each label, a count that is
+    /// not a number, an empty refusal, a STORED receipt with no count, and a
+    /// sum that does not fit.
+    #[test]
+    fn the_written_bars_figure_reads_each_receipt_label_and_never_guesses() {
+        let page = |label: &'static str, said: &str| {
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict: "STORED",
+                reason: "synthetic",
+                good: true,
+                facts: &[(label, said.to_owned())],
+                footnote: "No vendor was contacted.",
+            })
+        };
+        assert_eq!(
+            bars_written_in(&page("Bars written to the file", "375")),
+            Some(375)
+        );
+        assert_eq!(bars_written_in(&page("Bars stored", "12")), Some(12));
+        assert_eq!(
+            bars_written_in(&page("Bars written to the file", "many")),
+            None
+        );
+        assert_eq!(
+            bars_written_in(&page("Bars written to the file", "-1")),
+            None
+        );
+        assert_eq!(bars_written_in(&page("Rows read", "9")), None);
+        assert_eq!(add_written(Some(5), Some(7), true), Some(12));
+        assert_eq!(
+            add_written(Some(5), None, false),
+            Some(5),
+            "a refusal wrote nothing"
+        );
+        assert_eq!(
+            add_written(Some(5), None, true),
+            None,
+            "a STORED with no count"
+        );
+        assert_eq!(
+            add_written(None, Some(7), true),
+            None,
+            "unknown stays unknown"
+        );
+        assert_eq!(
+            add_written(Some(u64::MAX), Some(1), true),
+            None,
+            "no overflow"
+        );
+    }
+
+    /// **A LEG WHOSE FAILURES ARE ALL STANDING IS SETTLED, NOT ASKED AGAIN**
+    /// (DB-B26). The minute leg answers HTTP 200 FAILED with every failure
+    /// classed standing: the vendor answered and what it holds has gaps. It
+    /// was Retry, pulled again whole every 20 s up to 400 passes; now it is
+    /// asked once, the daily leg alone is asked on the later idle passes, and
+    /// the run ends naming the standing failures.
+    #[tokio::test]
+    async fn a_leg_with_only_standing_failures_is_asked_once_and_the_run_stops_idle() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "standing-leg",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |_site, leg| {
+                capture.lock().expect("calls").push(leg.dir.clone());
+                std::future::ready(if leg.dir == "1min" {
+                    classed(200, "FAILED", RetryClass::Standing.word())
+                } else {
+                    receipt(200, "STORED")
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            *calls.lock().expect("calls"),
+            ["1day", "1min", "1day", "1day"],
+            "the standing leg is asked exactly once"
+        );
+        assert_eq!((progress.passes, progress.retries), (CLEAN_EMPTY_PASSES, 0));
+        assert_eq!(progress.feeds[0].standing, 1);
+        assert_eq!(progress.stop, Some(Stop::Standing));
+        let summary = progress.finished.expect("summary");
+        assert!(
+            summary.contains("FINISHED WITH STANDING FAILURES")
+                && summary.contains("zerodha (1 leg(s))")
+                && summary.contains("is not asked again"),
+            "{summary}"
+        );
+        let doc = progress_doc(&progress_with(progress.passes, Stop::Standing));
+        assert!(
+            doc.contains("\"stopReason\":\"standing_failures\""),
+            "{doc}"
+        );
+        assert!(
+            doc.contains(&format!("\"passCeiling\":{MAX_PASSES}")),
+            "{doc}"
+        );
+    }
+
+    fn progress_with(passes: u32, stop: Stop) -> Progress {
+        Progress {
+            passes,
+            stop: Some(stop),
+            finished: Some("done".to_owned()),
+            ..Progress::default()
+        }
+    }
+
+    fn progress_doc(progress: &Progress) -> String {
+        progress.json()
+    }
+
+    /// The pull order's whole-run refusal (409 with a standing class) is
+    /// settled too: it was read as a busy seat and asked again 400 times
+    /// (DB-B27). A 409 that states no class is still a busy seat.
+    #[test]
+    fn the_receipts_class_decides_between_retry_settled_and_halted() {
+        let (ok, standing) = classed(200, "FAILED", RetryClass::Standing.word());
+        assert_eq!(leg_outcome(ok, &standing), LegOutcome::Standing);
+        let (conflict, order) = classed(409, "REFUSED", RetryClass::Standing.word());
+        assert_eq!(leg_outcome(conflict, &order), LegOutcome::Standing);
+        let (ok, transient) = classed(200, "FAILED", RetryClass::Transient.word());
+        assert_eq!(leg_outcome(ok, &transient), LegOutcome::Retry);
+        let (ok, store) = classed(200, "FAILED", RetryClass::Store.word());
+        assert_eq!(leg_outcome(ok, &store), LegOutcome::Store);
+        let (conflict, busy) = receipt(409, "REFUSED");
+        assert_eq!(leg_outcome(conflict, &busy), LegOutcome::Retry);
+        let (ok, unclassed) = receipt(200, "PARTIAL");
+        assert_eq!(leg_outcome(ok, &unclassed), LegOutcome::Retry);
+        // A class never outranks a clean badge or a fixed refusal.
+        let (ok, stored) = classed(200, "STORED", RetryClass::Standing.word());
+        assert_eq!(
+            RetryClass::of_receipt(&stored),
+            Some(RetryClass::Standing),
+            "the fact is read off the page"
+        );
+        let (missing, gone) = classed(404, "FAILED", RetryClass::Standing.word());
+        assert_eq!(leg_outcome(missing, &gone), LegOutcome::Permanent);
+        let _ = ok;
+        assert_eq!(RetryClass::of_receipt("<html></html>"), None);
+        assert_eq!(
+            RetryClass::of_receipt("<tr><th>Retry class</th><td>garbage words</td></tr>"),
+            None,
+            "an unknown word is no class"
+        );
+    }
+
+    /// **A STORE THAT WILL NOT TAKE A WRITE HALTS THE FEED** (DB-B35): the
+    /// leg after it is never asked, nothing is retried, and the stop is
+    /// typed.
+    #[tokio::test]
+    async fn a_store_unavailable_receipt_halts_the_feed_and_types_the_stop() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = std::sync::Arc::clone(&calls);
+        let progress = simulated(
+            "store-unavailable",
+            vec![leg("zerodha", "1day"), leg("zerodha", "1min")],
+            move |_site, leg| {
+                capture.lock().expect("calls").push(leg.dir.clone());
+                std::future::ready(classed(200, "FAILED", RetryClass::Store.word()))
+            },
+        )
+        .await;
+        assert_eq!(*calls.lock().expect("calls"), ["1day"]);
+        assert_eq!((progress.passes, progress.retries), (1, 0));
+        assert!(progress.feeds[0].store_unavailable);
+        assert_eq!(progress.stop, Some(Stop::StoreUnavailable));
+        let said = progress.feeds[0].last_error.clone().expect("the reason");
+        assert!(said.contains("STORE UNAVAILABLE"), "{said}");
+        let summary = progress.finished.expect("summary");
+        assert!(
+            summary.starts_with("INCOMPLETE after 1 pass(es)"),
+            "{summary}"
+        );
+    }
+
+    /// Every stop has its own code, and the order of precedence holds.
+    #[test]
+    fn the_stop_reason_is_typed_and_ordered() {
+        let codes: Vec<&str> = [
+            Stop::Idle,
+            Stop::Standing,
+            Stop::Ceiling,
+            Stop::Operator,
+            Stop::Halted,
+            Stop::StoreUnavailable,
+        ]
+        .into_iter()
+        .map(Stop::code)
+        .collect();
+        assert_eq!(
+            codes,
+            [
+                "idle",
+                "standing_failures",
+                "pass_ceiling",
+                "stopped",
+                "halted",
+                "store_unavailable"
+            ]
+        );
+        let feed = |standing, store_unavailable, credential_dead| FeedReport {
+            credential_dead,
+            standing,
+            store_unavailable,
+            ..FeedReport::default()
+        };
+        let of_idle = |passes, stopping, feeds: Vec<FeedReport>, outcomes: &[PassOutcome], idle| {
+            stop_of(
+                &Progress {
+                    passes,
+                    feeds,
+                    stopping,
+                    ..Progress::default()
+                },
+                outcomes,
+                idle,
+            )
+        };
+        let of = |passes, stopping, feeds: Vec<FeedReport>, outcomes: &[PassOutcome]| {
+            of_idle(passes, stopping, feeds, outcomes, passes < MAX_PASSES)
+        };
+        let clean = [PassOutcome::Clean];
+        assert_eq!(
+            of(3, false, vec![feed(0, false, false)], &clean),
+            Stop::Idle
+        );
+        assert_eq!(
+            of(3, false, vec![feed(2, false, false)], &clean),
+            Stop::Standing
+        );
+        assert_eq!(
+            of(MAX_PASSES, false, vec![feed(2, false, false)], &clean),
+            Stop::Ceiling
+        );
+        // Idle on exactly the last allowed pass is idle, not the ceiling.
+        assert_eq!(
+            of_idle(MAX_PASSES, false, vec![feed(0, false, false)], &clean, true),
+            Stop::Idle
+        );
+        assert_eq!(
+            of_idle(MAX_PASSES, false, vec![feed(2, false, false)], &clean, true),
+            Stop::Standing
+        );
+        assert_eq!(
+            of(MAX_PASSES, false, vec![feed(0, false, true)], &clean),
+            Stop::Halted
+        );
+        assert_eq!(
+            of(
+                3,
+                false,
+                vec![feed(0, false, false)],
+                &[PassOutcome::Halted]
+            ),
+            Stop::Halted
+        );
+        assert_eq!(
+            of(3, false, vec![feed(0, true, true)], &[PassOutcome::Halted]),
+            Stop::StoreUnavailable
+        );
+        assert_eq!(
+            of(3, true, vec![feed(0, true, true)], &[PassOutcome::Halted]),
+            Stop::Operator
+        );
+        assert!(Progress::default().json().contains("\"stopReason\":null"));
+    }
+
+    /// The ask [`opened_at`] names: one pull, made by every run of these
+    /// tests that does not say otherwise.
+    const ASK: u64 = 0x00a5_c0de_0000_0001;
+
+    fn opened_at(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
+        opened_asking(secs, source, from, to, ASK)
+    }
+
+    /// An opening record naming `ask`.
+    fn opened_asking(
+        secs: u64,
+        source: &str,
+        from: u32,
+        to: u32,
+        ask: u64,
+    ) -> crate::audit::Record {
+        let day = |at| pull::session::Day::from_days(at).expect("a day");
+        crate::audit::Record::opened(
+            crate::audit::Scope::Spot,
+            std::time::UNIX_EPOCH + core::time::Duration::from_secs(secs),
+            source,
+            pull::session::Window::new(day(from), day(to)).expect("a window"),
+            7,
+            ask,
+        )
+    }
+
+    /// An opening record as every build before D-4950 wrote it: no ask.
+    fn opened_unasked(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
+        let mut head = opened_at(secs, source, from, to);
+        head.note = "opened for 7 instruments; failures follow as they land".to_owned();
+        head.note_bytes = u16::try_from(head.note.len()).expect("a short note");
+        head
+    }
+
+    /// A record of `scope` and `outcome` for the window, as a press writes it.
+    fn record_of(
+        scope: crate::audit::Scope,
+        outcome: crate::audit::Outcome,
+        secs: u64,
+        source: &str,
+        from: u32,
+        to: u32,
+    ) -> crate::audit::Record {
+        let mut record = closed_at(secs, source, from, to);
+        record.scope = scope;
+        record.outcome = outcome;
+        record
+    }
+
+    fn closed_at(secs: u64, source: &str, from: u32, to: u32) -> crate::audit::Record {
+        let day = |at| pull::session::Day::from_days(at).expect("a day");
+        crate::audit::Record::refused(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::Failed,
+            std::time::UNIX_EPOCH + core::time::Duration::from_secs(secs),
+            source,
+            "closed",
+        )
+        .with_window(pull::session::Window::new(day(from), day(to)).expect("a window"))
+    }
+
+    fn failure_at(secs: u64) -> crate::audit::Record {
+        let day = pull::session::Day::from_days(20_000).expect("a day");
+        crate::audit::Record::member_failure(
+            crate::audit::Scope::Spot,
+            std::time::UNIX_EPOCH + core::time::Duration::from_secs(secs),
+            "NIFTY",
+            pull::session::Window::new(day, day).expect("a window"),
+            "a gap",
+        )
+    }
+
+    fn numbered(
+        records: Vec<crate::audit::Record>,
+        first: u64,
+    ) -> Vec<(u64, crate::audit::Record)> {
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(at, record)| (first + at as u64, record))
+            .collect()
+    }
+
+    /// **AN OPENING RECORD WITH NO CLOSING RECORD IS A RUN CUT SHORT**
+    /// (DB-B34), in every shape the journal can hold it: empty, closed,
+    /// open, and two runs.
+    #[test]
+    fn a_run_the_journal_never_closed_is_found_and_a_closed_one_is_not() {
+        assert_eq!(interrupted_in(&[]), None, "an empty journal");
+        let closed = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                closed_at(120, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(interrupted_in(&closed), None, "a closed run");
+
+        let open = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                failure_at(130),
+            ],
+            40,
+        );
+        let found = interrupted_in(&open).expect("an open run");
+        assert_eq!(
+            (
+                found.ordinal,
+                found.opened_at_secs,
+                found.last_at_secs,
+                found.failures,
+                found.failures_whole
+            ),
+            (40, 100, 130, 2, true)
+        );
+        assert_eq!(found.window, Some((20_000, 20_010)));
+        assert_eq!(found.source, "kite");
+        assert!(
+            found.note.starts_with("opened for 7 instruments"),
+            "{}",
+            found.note
+        );
+        let words = found.words();
+        assert!(
+            words.starts_with(
+                "INTERRUPTED: a pull run for 2024-10-04..2024-10-14 was opened at journal record 40"
+            ) && words.contains("with 2 member failure(s) on record"),
+            "{words}"
+        );
+        // It does not claim to know WHICH process stopped: a `cli` pull still
+        // in flight has no closing record either.
+        assert!(
+            !words.contains("The server stopped while it ran")
+                && words.contains("unless another process"),
+            "{words}"
+        );
+    }
+
+    /// **MEMBER FAILURES ARE NO EVIDENCE OF AN OPEN RUN** (DB-B34, repair 1).
+    /// A run's failures can lie BEHIND its closing record: every run written
+    /// before D-3341 is laid out so, and `RunLedger::rest` still writes that
+    /// layout when the opening record was refused. The walk read failures
+    /// with no run record before them as "a run opened further back and
+    /// never closed", and said INTERRUPTED of a journal no run was open in.
+    #[test]
+    fn failures_behind_a_closing_record_or_ahead_of_any_run_record_open_no_run() {
+        // The operator's own layout: [closed][failures ...].
+        let mut behind = vec![closed_at(120, "kite", 20_000, 20_010)];
+        behind.extend((0..850).map(|at| failure_at(121 + at)));
+        assert_eq!(interrupted_in(&numbered(behind, 1_804_099)), None);
+        // Only failures: whose they are is not in the records read.
+        let headless = numbered(vec![failure_at(500), failure_at(510)], 5_000);
+        assert_eq!(
+            interrupted_in(&headless),
+            None,
+            "failures alone never make a run"
+        );
+        // ... and an OPENED record with as many failures behind it is found,
+        // with its own window and source.
+        let mut open = vec![opened_at(100, "kite", 20_000, 20_010)];
+        open.extend((0..850).map(|at| failure_at(121 + at)));
+        let found = interrupted_in(&numbered(open, 7)).expect("the run is open");
+        assert_eq!(
+            (
+                found.ordinal,
+                found.failures,
+                found.window,
+                found.source.as_str()
+            ),
+            (7, 850, Some((20_000, 20_010)), "kite")
+        );
+    }
+
+    /// The same walk over the shapes two writers leave: a head restated after
+    /// another feed's records, a failure offered again behind the run's own
+    /// close, a refusal of another request for the same window, and two runs
+    /// of which only the second is open (DB-B34).
+    #[test]
+    fn interleaved_restated_and_refused_records_are_told_apart() {
+        // A second feed appended in between, so the first restated its head.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let interleaved = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                opened_at(111, "gdfl", 20_000, 20_010),
+                closed_at(112, "gdfl", 20_000, 20_010),
+                again.clone(),
+                failure_at(140),
+            ],
+            0,
+        );
+        let found = interrupted_in(&interleaved).expect("the first feed's run is open");
+        assert_eq!(
+            (
+                found.ordinal,
+                found.failures,
+                found.last_at_secs,
+                found.source.as_str()
+            ),
+            (0, 2, 140, "kite"),
+            "the other feed's close ended the other feed's run"
+        );
+
+        // A failure offered again BEHIND the run's own closing record.
+        let after_close = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                closed_at(120, "kite", 20_000, 20_010),
+                again.clone(),
+                failure_at(121),
+            ],
+            0,
+        );
+        assert_eq!(interrupted_in(&after_close), None);
+        // The same, with the opening record before the records read.
+        let unseen = numbered(
+            vec![
+                closed_at(120, "kite", 20_000, 20_010),
+                again.clone(),
+                failure_at(121),
+            ],
+            900,
+        );
+        assert_eq!(interrupted_in(&unseen), None);
+        // A restated head with NO close before it stands for its opening
+        // record, which lies before the records read: the run is open, with
+        // the opening record's own ordinal, window and source.
+        let restated_only = numbered(vec![again.clone(), failure_at(141)], 900);
+        let found = interrupted_in(&restated_only).expect("the restated run is open");
+        assert_eq!(
+            (
+                found.ordinal,
+                found.failures,
+                found.failures_whole,
+                found.window
+            ),
+            (0, 1, false, Some((20_000, 20_010)))
+        );
+
+        // ANOTHER REQUEST'S REFUSAL FOR THE SAME WINDOW closes nothing: a
+        // request refused before anything ran never opened a run.
+        let mut refusal = closed_at(115, "fno", 20_000, 20_010);
+        refusal.outcome = crate::audit::Outcome::Refused;
+        let refused_beside = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                refusal,
+                failure_at(116),
+            ],
+            0,
+        );
+        let found = interrupted_in(&refused_beside).expect("the run is still open");
+        assert_eq!(
+            (found.ordinal, found.failures),
+            (0, 1),
+            "the failure behind the refusal is the refusal's, not the run's"
+        );
+        // Two runs: the first closed, the second cut short.
+        let two = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                closed_at(120, "kite", 20_000, 20_010),
+                opened_at(200, "kite", 20_000, 20_010),
+                failure_at(210),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&two).map(|run| (run.ordinal, run.failures)),
+            Some((2, 1))
+        );
+    }
+
+    /// **A RUN THAT REACHED NO INSTRUMENT CLOSES UNDER ITS OWN SOURCE, AND A
+    /// RECORD UNDER A TARGET'S LABEL CLOSES NOTHING** (DB-B34, repair 6).
+    #[test]
+    fn a_close_under_its_own_source_ends_its_run_and_a_target_label_does_not() {
+        // A run that reached nobody is closed NOT STARTED under its OWN
+        // source, and that closes it (DB-B34, repair 6) ...
+        let reached_nobody = record_of(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::NotStarted,
+            118,
+            "kite",
+            20_000,
+            20_010,
+        );
+        assert_eq!(
+            interrupted_in(&numbered(
+                vec![opened_at(100, "kite", 20_000, 20_010), reached_nobody],
+                0
+            )),
+            None
+        );
+        // ... and a NOT STARTED record under a source no open run carries
+        // (the TARGET's label, as a press refused before its run opened wrote
+        // it, and as the arm above wrote its close before this repair)
+        // closes NOTHING: the window alone paired them, and a refusal that
+        // asked the vendor for nothing read the run cut short as closed.
+        let target_label = record_of(
+            crate::audit::Scope::Spot,
+            crate::audit::Outcome::NotStarted,
+            118,
+            "fno",
+            20_000,
+            20_010,
+        );
+        assert_eq!(
+            interrupted_in(&numbered(
+                vec![opened_at(100, "kite", 20_000, 20_010), target_label],
+                0
+            ))
+            .map(|run| run.ordinal),
+            Some(0)
+        );
+    }
+
+    /// **A PRESS REFUSED BEFORE ITS RUN OPENED CLOSES NO RUN, OF EITHER
+    /// SCOPE** (DB-B34, repair 6; the fourth check's blocking issue 1 and its
+    /// blobs S1..S4 and T1, T2). The pull order's "the 1day pass comes
+    /// first", a mapping refusal or a refused broker wrote ONE record, NOT
+    /// STARTED under the target's label with the window it asked for, and no
+    /// opening record. The walk read it as the close of the newest open run
+    /// of that window, so the run cut short read as closed and the next start
+    /// answered "clean". The operator's own journal holds four such records
+    /// (ordinals 32, 33, 223935, 4217091).
+    #[test]
+    fn a_refusal_that_opened_no_run_closes_no_run_of_either_scope() {
+        use crate::audit::{Outcome, Scope};
+        // [Opened A][failures][orphan NOT STARTED, same window]: A is open.
+        let mut journal = vec![opened_at(100, "endpoint A", 17_532, 20_726)];
+        journal.extend((0..5).map(|at| failure_at(110 + at)));
+        journal.push(record_of(
+            Scope::Spot,
+            Outcome::NotStarted,
+            200,
+            "zerodha_nse_checked NOT vendor-ISIN; NSE file same day; Reference indices",
+            17_532,
+            20_726,
+        ));
+        assert_eq!(
+            interrupted_in(&numbered(journal.clone(), 0)).map(|run| (run.ordinal, run.failures)),
+            Some((0, 5)),
+            "a refusal that opened no run asked the vendor for nothing"
+        );
+        // The fourth check's S1 -> S4: another run of another window opened
+        // and closed between, failures after it, then the orphan.
+        let mut s4 = vec![opened_at(100, "endpoint A", 17_532, 20_726)];
+        s4.extend((0..5).map(|at| failure_at(110 + at)));
+        s4.push(opened_at(150, "endpoint A", 17_897, 17_927));
+        s4.push(closed_at(160, "endpoint A", 17_897, 17_927));
+        s4.extend((0..3).map(|at| failure_at(170 + at)));
+        s4.push(journal.last().cloned().expect("the orphan"));
+        assert_eq!(
+            interrupted_in(&numbered(s4, 4_217_222)).map(|run| run.ordinal),
+            Some(4_217_222)
+        );
+        // The same press written as this build writes it, REFUSED: closes
+        // nothing either, whatever its source.
+        let refused = numbered(
+            vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                record_of(Scope::Spot, Outcome::Refused, 120, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(interrupted_in(&refused).map(|run| run.ordinal), Some(0));
+
+        // CROSS-SCOPE (T1 -> T2): an expired-F&O walk cut short is not closed
+        // by a SPOT record of the same window, even one naming the same
+        // source; its own F&O close does close it.
+        let mut walk = opened_at(100, "NIFTY", 18_262, 18_292);
+        walk.scope = Scope::Fno;
+        for spot in [
+            record_of(
+                Scope::Spot,
+                Outcome::NotStarted,
+                120,
+                "NIFTY",
+                18_262,
+                18_292,
+            ),
+            record_of(Scope::Spot, Outcome::Stored, 120, "NIFTY", 18_262, 18_292),
+        ] {
+            let found = interrupted_in(&numbered(vec![walk.clone(), spot], 4_217_222))
+                .expect("the walk is open");
+            assert_eq!(
+                (found.ordinal, found.scope, found.source.as_str()),
+                (4_217_222, Scope::Fno, "NIFTY")
+            );
+        }
+        let own = record_of(
+            Scope::Fno,
+            Outcome::NotStarted,
+            120,
+            "NIFTY",
+            18_262,
+            18_292,
+        );
+        assert_eq!(interrupted_in(&numbered(vec![walk, own], 0)), None);
+    }
+
+    /// **A CLOSE PAIRS WITH THE RUN IT DIRECTLY FOLLOWS** (DB-B34, repair 6;
+    /// D-4950). Two runs of one window and source in flight at once (a
+    /// server run and a `cli` pull): the close of the OLDER, written through
+    /// its own thread, directly follows a record of it (here its restated
+    /// head), and closes it, not the newer one. A close that follows no
+    /// record of a run of its own (written before D-4950) still takes the
+    /// newest open run of its scope, window and source.
+    #[test]
+    fn a_close_pairs_with_the_run_it_directly_follows() {
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let beside = numbered(
+            vec![
+                opened_asking(100, "kite", 20_000, 20_010, ASK),
+                opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2),
+                again,
+                closed_at(130, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&beside).map(|run| (run.ordinal, run.ask)),
+            Some((1, Some(ASK ^ 2))),
+            "the older run closed; the newer one is open"
+        );
+        // Behind its own member failure, too.
+        let behind_failure = numbered(
+            vec![
+                opened_asking(100, "kite", 20_000, 20_010, ASK),
+                opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2),
+                {
+                    let mut again = opened_at(100, "kite", 20_000, 20_010);
+                    again.note = "continues the run opened at record 0".to_owned();
+                    again
+                },
+                failure_at(125),
+                closed_at(130, "kite", 20_000, 20_010),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&behind_failure).map(|run| run.ordinal),
+            Some(1)
+        );
+        // A close with a gap before it (another writer's record lies between,
+        // or one that would not decode) is not by position: the newest open
+        // run of its scope, window and source.
+        let gap = vec![
+            (0, opened_asking(100, "kite", 20_000, 20_010, ASK)),
+            (1, opened_asking(110, "kite", 20_000, 20_010, ASK ^ 2)),
+            (5, closed_at(130, "kite", 20_000, 20_010)),
+        ];
+        assert_eq!(interrupted_in(&gap).map(|run| run.ordinal), Some(0));
+        // A run whose opening record was refused and is written LATE, in one
+        // write with its close (`audit::Journal::close_unopened`), closes
+        // itself and leaves a cut-short run of another ask over the same
+        // window open.
+        let mut late = opened_asking(150, "kite", 20_000, 20_010, ASK ^ 4);
+        late.note.push_str("; late");
+        assert_eq!(crate::audit::ask_of(&late.note), Some(ASK ^ 4));
+        let mut read = vec![opened_at(100, "kite", 20_000, 20_010)];
+        read.extend((0..3).map(|at| failure_at(110 + at)));
+        read.push(late);
+        read.push(closed_at(160, "kite", 20_000, 20_010));
+        assert_eq!(
+            interrupted_in(&numbered(read, 0)).map(|run| run.ordinal),
+            Some(0)
+        );
+    }
+
+    /// **THE SCAN ON DISK, PAST ITS 800 RECORDS** (DB-B34, repair 1): the
+    /// run record that settles the question is read through the journal's
+    /// own index, however many failures follow it.
+    ///
+    /// * `[closed][850 failures]`, the operator's journal in small: CLEAN.
+    ///   It was INTERRUPTED "opened further back than the last 800 records".
+    /// * `[opened][850 failures]`: INTERRUPTED, with the opening record's
+    ///   true ordinal, window and source. They were all `null`.
+    /// * `[opened][closed][850 failures]`: CLEAN, both read by ordinal.
+    #[test]
+    fn the_restart_scan_reads_the_newest_run_record_through_the_index() {
+        let over = INTERRUPTED_SCAN + 50;
+        let with_failures = |head: crate::audit::Record, failures: u64| {
+            let mut records = vec![head];
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+
+        // The closed run with its failures behind it.
+        let closed = journal_of(
+            "pullrun-scan-closed-behind",
+            &with_failures(closed_at(120, "kite", 20_000, 20_010), over),
+        );
+        assert_eq!(restart_scan(&closed), Restart::Clean);
+        // ... and it stays clean one short of the scan, where the whole
+        // journal is read, and exactly at it, where the run record is the
+        // one record before the scan.
+        for failures in [INTERRUPTED_SCAN - 1, INTERRUPTED_SCAN] {
+            let journal = journal_of(
+                "pullrun-scan-closed-edge",
+                &with_failures(closed_at(120, "kite", 20_000, 20_010), failures),
+            );
+            assert_eq!(
+                restart_scan(&journal),
+                Restart::Clean,
+                "{failures} failures"
+            );
+        }
+
+        // The open run with as many failures behind it.
+        let open = journal_of(
+            "pullrun-scan-open-behind",
+            &with_failures(opened_at(100, "kite", 20_000, 20_010), over),
+        );
+        let found = restart_scan(&open);
+        let run = found.interrupted().expect("the run is open");
+        assert_eq!(
+            (
+                run.ordinal,
+                run.opened_at_secs,
+                run.window,
+                run.source.as_str(),
+                run.failures,
+                run.failures_whole
+            ),
+            (
+                0,
+                100,
+                Some((20_000, 20_010)),
+                "kite",
+                INTERRUPTED_SCAN,
+                false
+            ),
+            "the opening record is read by its ordinal; the failures counted are the scan's"
+        );
+        assert!(
+            run.words()
+                .contains(&format!("at least {INTERRUPTED_SCAN} member failure(s)")),
+            "{}",
+            run.words()
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), None, Some(&found)))
+                .expect("valid JSON");
+        assert_eq!(doc["restart"]["state"], "interrupted");
+        assert_eq!(doc["interrupted"]["ordinal"], 0);
+        assert_eq!(doc["interrupted"]["from"], "2024-10-04");
+        assert_eq!(doc["interrupted"]["failuresWhole"], false);
+
+        // A closing record AFTER the opening one, both before the scan.
+        let mut both = with_failures(opened_at(100, "kite", 20_000, 20_010), 2);
+        both.push(closed_at(130, "kite", 20_000, 20_010));
+        both.extend((0..over).map(|at| failure_at(300 + at)));
+        assert_eq!(
+            restart_scan(&journal_of("pullrun-scan-open-then-closed", &both)),
+            Restart::Clean
+        );
+    }
+
+    /// **AN INDEX THAT IS NOT THERE IS BUILT WHERE IT IS NEEDED** (DB-B34,
+    /// repair 1), so the answer is the same exact one on the first start
+    /// over a copied journal; and where it cannot be built, NOT KNOWN is
+    /// said, with both reasons, never a guess either way.
+    #[test]
+    fn an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let over = INTERRUPTED_SCAN + 50;
+        let with_failures = |head: crate::audit::Record, failures: u64| {
+            let mut records = vec![head];
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+        let closed = journal_of(
+            "pullrun-scan-absent-closed",
+            &with_failures(closed_at(120, "kite", 20_000, 20_010), over),
+        );
+        let open = journal_of(
+            "pullrun-scan-absent-open",
+            &with_failures(opened_at(100, "kite", 20_000, 20_010), over),
+        );
+        for (journal, clean) in [(&closed, true), (&open, false)] {
+            let index = journal.index_dir();
+            let aside = index.with_extension("aside");
+            std::fs::rename(&index, &aside).expect("the index is moved aside");
+            let found = restart_scan(journal);
+            assert_eq!(found == Restart::Clean, clean, "{found:?}");
+            assert_eq!(
+                found.interrupted().map(|run| (run.ordinal, run.window)),
+                (!clean).then_some((0, Some((20_000, 20_010))))
+            );
+            assert!(index.join("cover").is_file(), "the index was built");
+        }
+
+        // WHERE IT CANNOT BE BUILT, NOT KNOWN IS SAID, for both journals and
+        // for both reasons: another writer holds the journal's lock, and a
+        // store that will not take the write.
+        for (journal, name) in [
+            (&closed, "pullrun-scan-absent-closed"),
+            (&open, "pullrun-scan-absent-open"),
+        ] {
+            let index = journal.index_dir();
+            let path = crate::audit::journal_path(&crate::scratch::path(name));
+            std::fs::rename(&index, index.with_extension("aside2")).expect("moved aside");
+            let squatter = store::flock::Flock::try_lock(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .expect("the journal handle"),
+                path.clone(),
+            )
+            .expect("nothing else holds it");
+            let held = restart_scan_waiting(journal, 2);
+            drop(squatter);
+            let Restart::NotKnown(why) = &held else {
+                panic!("with the lock held nothing is known: {held:?}");
+            };
+            assert!(
+                why.contains("no index at")
+                    && why.contains("another writer held the journal's lock through 2 wait(s)"),
+                "{why}"
+            );
+            let doc: serde_json::Value =
+                serde_json::from_str(&status_json(&Progress::default(), None, Some(&held)))
+                    .expect("valid JSON");
+            assert_eq!(doc["restart"]["state"], "not_known");
+            assert_eq!(doc["interrupted"], serde_json::Value::Null);
+            let words = doc["restart"]["words"].as_str().expect("words");
+            assert!(
+                words.starts_with("NOT KNOWN whether a pull run was left open")
+                    && !words.contains("INTERRUPTED"),
+                "{words}"
+            );
+
+            let audit = path.parent().expect("audit/").to_path_buf();
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555))
+                .expect("chmod");
+            let refused = restart_scan(journal);
+            std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+            let Restart::NotKnown(why) = &refused else {
+                panic!("an index that cannot be written leaves nothing known: {refused:?}");
+            };
+            assert!(why.contains("built here"), "{why}");
+        }
+
+        // With no index, a run record INSIDE the scan settles it either way:
+        // a restated head stands for its opening record, and a closing
+        // record after it closes the run.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        open.append(&again).expect("the restated head lands");
+        assert_eq!(
+            restart_scan(&open).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        open.append(&closed_at(2_000, "kite", 20_000, 20_010))
+            .expect("the closing record lands");
+        assert_eq!(restart_scan(&open), Restart::Clean);
+    }
+
+    /// **A FALSE "INTERRUPTED" DOES NOT OUTLIVE THE RUNS AFTER IT** and a
+    /// true one is not hidden by them: later runs that open and close leave
+    /// an older open run open, and a journal whose every run closed clean.
+    #[test]
+    fn later_closed_runs_neither_invent_nor_hide_an_open_run() {
+        let mut records = vec![closed_at(120, "kite", 20_000, 20_010)];
+        records.extend((0..INTERRUPTED_SCAN + 50).map(|at| failure_at(200 + at)));
+        let journal = journal_of("pullrun-scan-later-runs", &records);
+        for later in 0..10_u64 {
+            let at = 5_000 + later * 10;
+            let _thread = journal
+                .open_run(&opened_at(at, "kite", 20_020, 20_030))
+                .expect("opened");
+            journal
+                .append(&closed_at(at + 5, "kite", 20_020, 20_030))
+                .expect("closed");
+            assert_eq!(restart_scan(&journal), Restart::Clean, "after {later} runs");
+        }
+        // One more opens and is not closed: found, though ten closed after
+        // the journal's first.
+        let _thread = journal
+            .open_run(&opened_at(9_000, "kite", 20_040, 20_050))
+            .expect("opened");
+        let found = restart_scan(&journal);
+        assert_eq!(
+            found.interrupted().map(|run| run.window),
+            Some(Some((20_040, 20_050)))
+        );
+    }
+
+    /// Overwrites record `ordinal` of `journal` with bytes no build decodes,
+    /// leaving the journal's length and its index as they are: a record
+    /// damaged on disk after it was written and indexed.
+    fn damage(journal: &crate::audit::Journal, ordinal: u64) {
+        use std::os::unix::fs::FileExt as _;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(journal.index_dir().with_extension(""))
+            .expect("the journal opens");
+        file.write_all_at(
+            &[0xFF_u8; crate::audit::RECORD_LEN],
+            ordinal * crate::audit::RECORD_LEN as u64,
+        )
+        .expect("the record is overwritten");
+    }
+
+    /// The reason of a NOT KNOWN answer, or a failure naming what was
+    /// answered instead.
+    fn not_known_of(found: &Restart) -> &str {
+        match found {
+            Restart::NotKnown(why) => why,
+            other => panic!("NOT KNOWN was expected, and the scan said {other:?}"),
+        }
+    }
+
+    /// **A RECORD THE SCAN CANNOT DECODE IS NEVER DROPPED IN SILENCE**
+    /// (DB-B34, repair 2). The scan filtered such records out and answered
+    /// as if it had read everything, in three shapes a second agent drove:
+    ///
+    /// * `[opened][5 failures]` with the OPENING record damaged read CLEAN
+    ///   ("No pull run was left open") while a run was open;
+    /// * `[opened][closed][3 failures]` with the CLOSING record damaged read
+    ///   INTERRUPTED ("has no closing record") of a run that was closed;
+    /// * `[opened][850 failures]` with the opening record damaged and the
+    ///   index still naming it as a run record read CLEAN.
+    ///
+    /// Each is NOT KNOWN now, naming the record and the decoder's reason and
+    /// saying what the readable half says; and the answer is logged at Warn.
+    #[test]
+    fn a_record_that_cannot_be_decoded_is_named_and_the_answer_is_not_known() {
+        let with_failures = |mut records: Vec<crate::audit::Record>, failures: u64| {
+            records.extend((0..failures).map(|at| failure_at(200 + at)));
+            records
+        };
+        let opened = || opened_at(100, "kite", 20_000, 20_010);
+        let closed = || closed_at(120, "kite", 20_000, 20_010);
+
+        // (a) The opening record, inside the scan.
+        let journal = journal_of("pullrun-damaged-open", &with_failures(vec![opened()], 5));
+        assert_eq!(
+            restart_scan(&journal)
+                .interrupted()
+                .map(|run| (run.ordinal, run.failures)),
+            Some((0, 5)),
+            "whole, the journal says a run is open"
+        );
+        damage(&journal, 0);
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("1 of the journal records"), "{why}");
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+        assert!(why.contains("leave no run open"), "{why}");
+        assert_eq!(found.word(), "not_known");
+        assert_eq!(found.interrupted(), None);
+
+        // (b) The closing record: the run WAS closed, and "has no closing
+        // record" is never said of it.
+        let journal = journal_of(
+            "pullrun-damaged-close",
+            &with_failures(vec![opened(), closed()], 3),
+        );
+        assert_eq!(restart_scan(&journal), Restart::Clean);
+        damage(&journal, 1);
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("record 1 (not an audit record)"), "{why}");
+        assert!(
+            why.contains("leave the run opened at record 0 open")
+                && why.contains("may be its closing record"),
+            "{why}"
+        );
+        assert!(!found.words().contains("has no closing record"));
+
+        // (c) The opening record behind the scan, reached through the index,
+        // which still names it as a run record.
+        let over = INTERRUPTED_SCAN + 50;
+        let journal = journal_of(
+            "pullrun-damaged-indexed",
+            &with_failures(vec![opened()], over),
+        );
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        damage(&journal, 0);
+        assert_eq!(
+            journal
+                .read_index(over + 1)
+                .expect("the index reads")
+                .runs
+                .iter()
+                .map(|run| run.0)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "the index is untouched and still names record 0 as a run record"
+        );
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+        assert!(why.contains("leave no run open"), "{why}");
+
+        // (d) The same journal with its index REBUILT after the damage: the
+        // record is filed under `faults`, not `runs`, and nobody hands it to
+        // the scan. It is still found and still named.
+        std::fs::rename(
+            journal.index_dir(),
+            journal.index_dir().with_extension("old"),
+        )
+        .expect("the index is moved aside");
+        let found = restart_scan(&journal);
+        let rebuilt = journal.read_index(over + 1).expect("the index was rebuilt");
+        assert_eq!(
+            (rebuilt.runs.len(), rebuilt.fault_ordinals.clone()),
+            (0, vec![0])
+        );
+        let why = not_known_of(&found);
+        assert!(why.contains("record 0 (not an audit record)"), "{why}");
+
+        // (e) A damaged MEMBER FAILURE in the scan is no different: nothing
+        // says it was one.
+        let journal = journal_of(
+            "pullrun-damaged-member",
+            &with_failures(vec![opened(), closed()], 6),
+        );
+        damage(&journal, 5);
+        let why_text = restart_scan(&journal);
+        assert!(not_known_of(&why_text).contains("record 5 (not an audit record)"));
+
+        // (f) MANY: the sentence names three and counts the rest.
+        let journal = journal_of("pullrun-damaged-many", &with_failures(vec![closed()], 9));
+        for ordinal in 2..=8 {
+            damage(&journal, ordinal);
+        }
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.starts_with("7 of the journal records"), "{why}");
+        assert!(
+            why.contains("record 2 (") && why.contains("record 4 (") && !why.contains("record 5 ("),
+            "{why}"
+        );
+        assert!(why.contains("and 4 more, the newest record 8"), "{why}");
+    }
+
+    /// **DAMAGE THAT CANNOT DECIDE THE ANSWER DOES NOT HIDE AN OPEN RUN**
+    /// (DB-B34, repair 2): a record that will not decode BEFORE the opening
+    /// record of the run left open can be neither that run's close nor a
+    /// newer run, so the run is still reported; the same damage AFTER the
+    /// opening record is NOT KNOWN, and so is damage AT it (repair 3: a
+    /// restated opening record whose own first record is the damaged one
+    /// does not name the run, since its close may have paired by window).
+    #[test]
+    fn damage_before_the_open_runs_first_record_leaves_the_run_reported() {
+        let records = vec![
+            opened_at(100, "kite", 20_000, 20_010),
+            closed_at(120, "kite", 20_000, 20_010),
+            failure_at(130),
+            opened_at(200, "kite", 20_020, 20_030),
+            failure_at(210),
+            failure_at(211),
+        ];
+        for before in [0, 1, 2] {
+            let journal = journal_of(&format!("pullrun-damage-before-{before}"), &records);
+            damage(&journal, before);
+            assert_eq!(
+                restart_scan(&journal).interrupted().map(|run| (
+                    run.ordinal,
+                    run.window,
+                    run.failures
+                )),
+                Some((3, Some((20_020, 20_030)), 2)),
+                "record {before} lies before the open run's first record"
+            );
+        }
+        let journal = journal_of("pullrun-damage-after", &records);
+        damage(&journal, 4);
+        let found = restart_scan(&journal);
+        assert!(
+            not_known_of(&found).contains("leave the run opened at record 3 open"),
+            "{found:?}"
+        );
+
+        // The opening record itself is damaged and a restated one names it:
+        // the run is still reported, at its true ordinal.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let journal = journal_of(
+            "pullrun-damage-restated",
+            &[
+                opened_at(100, "kite", 20_000, 20_010),
+                again.clone(),
+                failure_at(140),
+            ],
+        );
+        damage(&journal, 0);
+        // REPAIR 3: damage AT the run's own opening record is NOT KNOWN. It
+        // was reported INTERRUPTED; but a run known only through its
+        // restatement may have been closed under its target's name, a
+        // pairing by window alone that needs the opening record.
+        let found = restart_scan(&journal);
+        assert!(
+            not_known_of(&found).contains("record 0 (not an audit record)"),
+            "{found:?}"
+        );
+        // ... and damage between the two may be the close that makes the
+        // restatement no new run: NOT KNOWN.
+        let journal = journal_of(
+            "pullrun-damage-restated-between",
+            &[
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                again,
+                failure_at(140),
+            ],
+        );
+        damage(&journal, 1);
+        assert_eq!(restart_scan(&journal).word(), "not_known");
+    }
+
+    /// **AN INDEX THAT LOST AN ENTRY IS NOT READ AS A WHOLE ONE** (DB-B34,
+    /// repair 2): a `runs` entry that cannot be read may be the newest run
+    /// record, so the run records before the scan are not known through it,
+    /// and with no run record in the scan the answer is NOT KNOWN. It read
+    /// "clean" of a journal a run was open in.
+    #[test]
+    fn an_index_entry_that_cannot_be_read_is_not_a_run_record_that_is_not_there() {
+        let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
+        records.extend((0..INTERRUPTED_SCAN + 50).map(|at| failure_at(200 + at)));
+        let journal = journal_of("pullrun-index-entry-damaged", &records);
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        assert_eq!(bytes.len(), 32, "one run record, one entry");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(
+            why.contains("1 of the index's entries cannot be read"),
+            "{why}"
+        );
+    }
+
+    /// **A RESTATED HEAD REJOINS ITS OWN OPEN RUN** whatever closed before
+    /// it: an earlier closing record of the same window and source, whose
+    /// opening record was not read, made the restatement "no new run" and
+    /// the failures behind it were counted to nobody.
+    #[test]
+    fn a_restated_head_of_an_open_run_rejoins_it_after_an_older_runs_close() {
+        let mut again = opened_at(300, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 1".to_owned();
+        let read = numbered(
+            vec![
+                closed_at(90, "kite", 20_000, 20_010),
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                again,
+                failure_at(310),
+                failure_at(311),
+            ],
+            0,
+        );
+        assert_eq!(
+            interrupted_in(&read).map(|run| (run.ordinal, run.failures)),
+            Some((1, 3))
+        );
+    }
+
+    /// **AN INDEX THAT CANNOT BE READ NEVER LEAVES THE ANSWER "CLEAN"**
+    /// (DB-B34, repair 3; the third check's blocking issue). The journal
+    /// `[opened A][850 failures][opened B][closed B][10 failures]` has A
+    /// open behind the scan. With its index whole it reads INTERRUPTED at
+    /// record 0. With the index's `runs` entries unreadable, and with the
+    /// index gone and `audit/` taking no write, it read CLEAN with no log
+    /// line, because the scan held B's opening and closing records. Each is
+    /// NOT KNOWN now, naming the index's reason.
+    #[test]
+    fn an_index_that_cannot_be_read_never_leaves_the_answer_clean() {
+        let shaped = |closed_b: bool| {
+            let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
+            records.extend((0..850).map(|at| failure_at(200 + at)));
+            records.push(opened_at(2_000, "kite", 20_020, 20_030));
+            if closed_b {
+                records.push(closed_at(2_010, "kite", 20_020, 20_030));
+            }
+            records.extend((0..10).map(|at| failure_at(2_100 + at)));
+            records
+        };
+        // (1) Whole: A is found through the index.
+        let journal = journal_of("pullrun-r3-index-whole", &shaped(true));
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0),
+            "with its index whole the journal says A is open"
+        );
+        // (2) Every `runs` entry unreadable.
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entries are overwritten");
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(
+            why.contains("of the index's entries cannot be read"),
+            "{why}"
+        );
+        assert!(why.contains("leave no run they open unclosed"), "{why}");
+        assert!(why.contains("would not be seen"), "{why}");
+        assert!(found.words().starts_with("NOT KNOWN"));
+        // A catch-up does not rewrite entries it already covers, so the
+        // reason says what was done and does not claim a rebuild.
+        assert!(why.contains("built or caught up here"), "{why}");
+        assert!(!why.contains("rebuilt"), "{why}");
+        // The same reason before and after the catch-up is said once.
+        assert!(why.contains("and that still holds"), "{why}");
+        assert_eq!(
+            why.matches("of the index's entries cannot be read").count(),
+            1,
+            "{why}"
+        );
+
+        // (3) No index, and `audit/` takes no write: it cannot be built.
+        let journal = journal_of("pullrun-r3-index-readonly", &shaped(true));
+        std::fs::rename(
+            journal.index_dir(),
+            journal.index_dir().with_extension("old"),
+        )
+        .expect("the index is moved aside");
+        let audit = journal.index_dir().parent().expect("audit/").to_path_buf();
+        set_mode(&audit, 0o555);
+        let found = restart_scan_waiting(&journal, 1);
+        set_mode(&audit, 0o755);
+        let why = not_known_of(&found);
+        assert!(why.contains("could not be built here"), "{why}");
+        assert!(why.contains("would not be seen"), "{why}");
+
+        // (4) With B left open the scan itself reads an open run whose
+        // opening record and every record after it it read: B is reported,
+        // and the document says the older run records were not read.
+        let journal = journal_of("pullrun-r3-index-open-b", &shaped(false));
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entries are overwritten");
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("B is open");
+        assert_eq!(
+            (run.ordinal, run.failures, run.failures_whole),
+            (851, 10, true)
+        );
+        let unread = run.older_unread.clone().expect("the reason is kept");
+        assert!(unread.contains("cannot be read"), "{unread}");
+        assert!(
+            run.words()
+                .contains("an older run left open would not have been seen")
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), None, Some(&found)))
+                .expect("valid JSON");
+        assert_eq!(doc["interrupted"]["olderUnread"], unread.as_str());
+        assert_eq!(doc["interrupted"]["undecodableBefore"], 0);
+
+        // (5) A run known only through a restated head inside the scan,
+        // with its opening record behind it and the index unreadable: its
+        // close may lie behind the scan too, so NOT KNOWN.
+        let mut again = opened_at(100, "kite", 20_000, 20_010);
+        again.note = "continues the run opened at record 0".to_owned();
+        let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
+        records.extend((0..850).map(|at| failure_at(200 + at)));
+        records.push(again);
+        records.extend((0..5).map(|at| failure_at(2_100 + at)));
+        let journal = journal_of("pullrun-r3-index-restated", &records);
+        assert_eq!(
+            restart_scan(&journal).interrupted().map(|run| run.ordinal),
+            Some(0)
+        );
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entries are overwritten");
+        let found = restart_scan(&journal);
+        let why = not_known_of(&found);
+        assert!(why.contains("restate a run opened at record 0"), "{why}");
+    }
+
+    /// Sets `dir`'s permission bits.
+    fn set_mode(dir: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    /// **A LATER RUN OF THE SAME WINDOW AND SOURCE THAT CLOSES SUPERSEDES
+    /// AN INTERRUPTED ONE** (DB-B34, repair 3; the third check's follow-up
+    /// 2). Nothing closed an interrupted run's opening record, so after the
+    /// operator pulled the same window again and that run closed, every
+    /// later start still answered INTERRUPTED, logged an ERROR and asked for
+    /// the pull just made. A close of another source, of another window, or
+    /// paired by its window alone supersedes nothing.
+    #[test]
+    fn a_later_run_of_the_same_window_and_source_that_closes_supersedes_an_open_one() {
+        let interrupted_then = |later: Vec<crate::audit::Record>| {
+            let mut read = vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                failure_at(111),
+            ];
+            read.extend(later);
+            interrupted_in(&numbered(read, 0)).map(|run| run.ordinal)
+        };
+        assert_eq!(interrupted_then(Vec::new()), Some(0), "cut short");
+        assert_eq!(
+            interrupted_then(vec![
+                opened_at(500, "kite", 20_000, 20_010),
+                failure_at(510),
+                closed_at(520, "kite", 20_000, 20_010),
+            ]),
+            None,
+            "the same pull made again and closed"
+        );
+        assert_eq!(
+            interrupted_then(vec![
+                opened_at(500, "probe", 20_000, 20_010),
+                closed_at(520, "probe", 20_000, 20_010),
+            ]),
+            Some(0),
+            "another source's run says nothing of this one"
+        );
+        assert_eq!(
+            interrupted_then(vec![
+                opened_at(500, "kite", 20_000, 20_020),
+                closed_at(520, "kite", 20_000, 20_020),
+            ]),
+            Some(0),
+            "another window's run says nothing of this one"
+        );
+        // A close under a source no open run carries (a target's label)
+        // closes NOTHING (repair 6): it was paired by its window alone with
+        // the newest run of that window. Both runs stay open; the newest is
+        // reported.
+        assert_eq!(
+            interrupted_then(vec![
+                opened_at(500, "probe", 20_000, 20_010),
+                closed_at(520, "target", 20_000, 20_010),
+            ]),
+            Some(3)
+        );
+        // A newer run of the same window and source that is itself still
+        // open is the one reported, and nothing is superseded by it.
+        assert_eq!(
+            interrupted_then(vec![opened_at(500, "kite", 20_000, 20_010)]),
+            Some(3)
+        );
+        // A later run of the same window and source that closed NOT STARTED
+        // asked the vendor for nothing: it closes itself and supersedes
+        // nothing (repair 5; it read the older run as done).
+        let mut not_started = closed_at(520, "kite", 20_000, 20_010);
+        not_started.outcome = crate::audit::Outcome::NotStarted;
+        assert_eq!(
+            interrupted_then(vec![opened_at(500, "kite", 20_000, 20_010), not_started]),
+            Some(0),
+            "a press that never started is no re-pull"
+        );
+        // The other closing outcomes did ask: an empty answer and a stored one
+        // supersede as a failed one does.
+        for outcome in [crate::audit::Outcome::Empty, crate::audit::Outcome::Stored] {
+            let mut close = closed_at(520, "kite", 20_000, 20_010);
+            close.outcome = outcome;
+            assert_eq!(
+                interrupted_then(vec![opened_at(500, "kite", 20_000, 20_010), close]),
+                None,
+                "{outcome:?}"
+            );
+        }
+
+        // The same through a journal longer than the scan: the interrupted
+        // run's opening record is read through the index.
+        let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
+        records.extend((0..INTERRUPTED_SCAN + 30).map(|at| failure_at(200 + at)));
+        records.push(opened_at(9_000, "kite", 20_000, 20_010));
+        records.push(closed_at(9_010, "kite", 20_000, 20_010));
+        let journal = journal_of("pullrun-r3-superseded", &records);
+        assert_eq!(restart_scan(&journal), Restart::Clean);
+        // The clean answer says what counts as the same pull made again, so
+        // "every run record it read is closed" is not read as "no run was ever
+        // cut short", and no longer claims a re-pull from the window and
+        // source alone (repair 6).
+        let words = Restart::Clean.words();
+        assert!(
+            words.contains("whose opening record names the same ask")
+                && words.contains("a refusal that opened no run closes nothing"),
+            "{words}"
+        );
+        assert!(
+            !words.contains("asked the vendor for the same days again"),
+            "{words}"
+        );
+    }
+
+    /// **ANOTHER ASK OVER THE SAME WINDOW AND SOURCE SUPERSEDES NOTHING, AND
+    /// A RUN WITH NO ASK IS NEVER SUPERSEDED** (DB-B34, repair 6; the fourth
+    /// check's blocking issue 2 and its blobs U1..U3).
+    #[test]
+    fn another_ask_over_the_same_window_and_source_supersedes_nothing() {
+        let interrupted_then = |later: Vec<crate::audit::Record>| {
+            let mut read = vec![
+                opened_at(100, "kite", 20_000, 20_010),
+                failure_at(110),
+                failure_at(111),
+            ];
+            read.extend(later);
+            interrupted_in(&numbered(read, 0)).map(|run| run.ordinal)
+        };
+        // THE SAME WINDOW AND SOURCE, ANOTHER ASK (repair 6; the fourth
+        // check's probe `v62r4_p2`): every Zerodha spot run of a window
+        // carries one source, so a later 1day pull of the indices closing
+        // over the window of a cut-short 1min pull of the stocks superseded
+        // it. The ask on the two opening records differs: nothing is
+        // superseded, whatever the close (STORED, EMPTY or FAILED).
+        for outcome in [
+            crate::audit::Outcome::Stored,
+            crate::audit::Outcome::Empty,
+            crate::audit::Outcome::Failed,
+        ] {
+            let mut close = closed_at(520, "kite", 20_000, 20_010);
+            close.outcome = outcome;
+            assert_eq!(
+                interrupted_then(vec![
+                    opened_asking(500, "kite", 20_000, 20_010, ASK ^ 1),
+                    close,
+                ]),
+                Some(0),
+                "another ask over the same window and source: {outcome:?}"
+            );
+        }
+        // A run whose opening record names no ask (every run before D-4950)
+        // is never superseded, and a later run that names none supersedes
+        // nothing.
+        let legacy_then = |later: Vec<crate::audit::Record>| {
+            let mut read = vec![opened_unasked(100, "kite", 20_000, 20_010), failure_at(110)];
+            read.extend(later);
+            interrupted_in(&numbered(read, 0)).map(|run| (run.ordinal, run.ask))
+        };
+        assert_eq!(
+            legacy_then(vec![
+                opened_at(500, "kite", 20_000, 20_010),
+                closed_at(520, "kite", 20_000, 20_010),
+            ]),
+            Some((0, None)),
+            "an older run with no ask is not shown to be the same pull"
+        );
+        assert_eq!(
+            interrupted_then(vec![
+                opened_unasked(500, "kite", 20_000, 20_010),
+                closed_at(520, "kite", 20_000, 20_010),
+            ]),
+            Some(0),
+            "a later run with no ask is not shown to be the same pull"
+        );
+        // Of two older runs of the same window and source, the one of the
+        // same ask is superseded and the other is still reported.
+        let read = vec![
+            opened_asking(100, "kite", 20_000, 20_010, ASK ^ 1),
+            failure_at(110),
+            opened_at(200, "kite", 20_000, 20_010),
+            failure_at(210),
+            opened_at(300, "kite", 20_000, 20_010),
+            closed_at(320, "kite", 20_000, 20_010),
+        ];
+        assert_eq!(
+            interrupted_in(&numbered(read, 0)).map(|run| (run.ordinal, run.ask)),
+            Some((0, Some(ASK ^ 1)))
+        );
+    }
+
+    /// **WHAT IS DOUBTED BEFORE THE OPEN RUN IS ON THE DOCUMENT** (DB-B34,
+    /// repair 3; follow-up 7): the records before its opening record that
+    /// would not decode were named on the ERROR line only. And the count's
+    /// words no longer claim only the newest 800 records were counted.
+    #[test]
+    fn the_damage_before_an_open_run_is_on_its_document() {
+        let records = vec![
+            opened_at(100, "kite", 20_000, 20_010),
+            closed_at(120, "kite", 20_000, 20_010),
+            opened_at(200, "kite", 20_020, 20_030),
+            failure_at(210),
+        ];
+        let journal = journal_of("pullrun-r3-doubt-on-document", &records);
+        damage(&journal, 1);
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("the run at record 2 is open");
+        assert_eq!((run.ordinal, run.undecodable_before), (2, 1));
+        assert!(
+            run.undecodable.contains("record 1 (not an audit record)"),
+            "{run:?}"
+        );
+        assert!(
+            run.words()
+                .contains("1 record(s) before its opening record could not be decoded")
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), None, Some(&found)))
+                .expect("valid JSON");
+        assert_eq!(doc["interrupted"]["undecodableBefore"], 1);
+        assert_eq!(doc["interrupted"]["olderUnread"], serde_json::Value::Null);
+        // The damaged record is a close no record after it could belong
+        // to: no closing record follows it that was paired by window alone.
+        assert_eq!(doc["interrupted"]["newerMayBeOpen"], false);
+        assert!(!run.newer_may_be_open);
+        assert!(
+            doc["interrupted"]["undecodable"]
+                .as_str()
+                .is_some_and(|named| named.contains("record 1")),
+            "{doc}"
+        );
+        let mut floor = run.clone();
+        floor.failures_whole = false;
+        let words = floor.words();
+        assert!(!words.contains("records were counted"), "{words}");
+        assert!(words.contains("counted among the records read"), "{words}");
+    }
+
+    /// **DAMAGE BEFORE THE REPORTED RUN CAN HIDE A NEWER OPEN ONE, AND THE
+    /// ANSWER SAYS SO** (DB-B34, repairs 4 and 6; the third check's probe
+    /// `v62r3_p2`). A close that does not directly follow a record of the run
+    /// it closes is paired with the newest open run of its scope, window and
+    /// source; a record before it that would not decode may be the opening
+    /// record of another run of that window and source that the close truly
+    /// belongs to, and the run the walk closed would then be open.
+    ///
+    /// `[opened B s W1 (damaged)][opened Q t W2][opened R s W1][opened Y y W4]
+    /// [closed y W4][closed s W1]`: whole, the last close pairs with R (the
+    /// newest open run of `s W1`), R supersedes B (the same ask), and Q is
+    /// reported. With record 0 undecodable the answer is the same run, Q, but
+    /// the last close may be B's, and then R, newer than Q, is open: the
+    /// answer says so. A
+    /// pairing by position after the damage, or one before it, leaves no
+    /// doubt; and a close that pairs with no run hides none.
+    #[test]
+    fn damage_before_the_reported_run_that_a_later_window_pairing_may_need_is_said() {
+        let records = vec![
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(110, "t", 20_020, 20_030),
+            opened_at(120, "s", 20_000, 20_010),
+            opened_at(130, "y", 20_040, 20_050),
+            closed_at(140, "y", 20_040, 20_050),
+            closed_at(150, "s", 20_000, 20_010),
+        ];
+        let whole = journal_of("pullrun-r6-weak-whole", &records);
+        let found = restart_scan(&whole);
+        let run = found.interrupted().expect("Q is open");
+        assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
+
+        let journal = journal_of("pullrun-r6-weak-damaged", &records);
+        damage(&journal, 0);
+        let found = restart_scan(&journal);
+        let run = found
+            .interrupted()
+            .expect("Q is open whatever record 0 was");
+        assert_eq!((run.ordinal, run.undecodable_before), (1, 1));
+        assert!(run.newer_may_be_open, "{run:?}");
+        let words = run.words();
+        assert!(
+            words.contains("a run newer than this one may also have been left open"),
+            "{words}"
+        );
+        assert!(words.contains("this one is open either way"), "{words}");
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), None, Some(&found)))
+                .expect("valid JSON");
+        assert_eq!(doc["interrupted"]["newerMayBeOpen"], true);
+
+        // A close by position after the damaged record: nothing lies between
+        // it and its run, so no doubt.
+        let records = vec![
+            opened_at(100, "kite", 20_000, 20_010),
+            opened_at(110, "probe", 20_020, 20_030),
+            opened_at(120, "kite", 20_000, 20_010),
+            closed_at(130, "kite", 20_000, 20_010),
+        ];
+        let journal = journal_of("pullrun-r6-beside-after-damage", &records);
+        damage(&journal, 0);
+        let run = restart_scan(&journal)
+            .interrupted()
+            .cloned()
+            .expect("the probe run is open");
+        assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
+
+        // A pairing not by position that comes BEFORE the damaged record
+        // cannot belong to it: no doubt about the newest run.
+        let records = vec![
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(105, "z", 20_090, 20_099),
+            closed_at(110, "s", 20_000, 20_010),
+            failure_at(120),
+            opened_at(130, "kite", 20_020, 20_030),
+        ];
+        let journal = journal_of("pullrun-r6-weak-before-damage", &records);
+        damage(&journal, 3);
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("the kite run is open");
+        assert_eq!((run.ordinal, run.undecodable_before), (4, 1));
+        assert!(!run.newer_may_be_open, "{run:?}");
+        assert!(!run.words().contains("may also have been left open"));
+
+        // A close that pairs with no run read (its run is the damaged record,
+        // or no run at all) closes nothing, so it hides no run: no doubt.
+        let records = vec![
+            opened_at(100, "s", 20_000, 20_010),
+            opened_at(110, "t", 20_020, 20_030),
+            failure_at(120),
+            closed_at(130, "s", 20_000, 20_010),
+        ];
+        let journal = journal_of("pullrun-r6-unpaired-after-damage", &records);
+        damage(&journal, 0);
+        let run = restart_scan(&journal)
+            .interrupted()
+            .cloned()
+            .expect("t is open");
+        assert_eq!((run.ordinal, run.newer_may_be_open), (1, false));
+    }
+
+    /// A journal of exactly `records`, written in one write and indexed in
+    /// one pass, so a test over the scan's bound does not pay 850 synced
+    /// appends.
+    fn journal_of(name: &str, records: &[crate::audit::Record]) -> crate::audit::Journal {
+        let root = crate::scratch::path(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::audit::journal_path(&root);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        let mut bytes = Vec::with_capacity(records.len() * crate::audit::RECORD_LEN);
+        for record in records {
+            bytes.extend_from_slice(&record.image());
+        }
+        std::fs::write(&path, bytes).expect("write");
+        let journal = crate::audit::Journal::at(&root);
+        let built = journal.build_index().expect("the index builds");
+        assert_eq!(built.records, records.len() as u64);
+        journal
+    }
+
+    /// The same through a journal on disk, and onto `/pull/run.json`: the
+    /// document of a server that has not pulled since it started carries the
+    /// run the last process left open, and the calendar's horizon.
+    #[test]
+    fn a_restart_finds_the_open_run_in_the_journal_and_the_status_document_says_so() {
+        let root = crate::scratch::path("pullrun-interrupted");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let journal = crate::audit::Journal::at(&root);
+        assert_eq!(restart_scan(&journal), Restart::Clean, "no journal, no run");
+        let mut thread = journal
+            .open_run(&opened_at(100, "kite", 20_000, 20_010))
+            .expect("the opening record lands");
+        for at in [110, 115] {
+            journal
+                .append_failure(&mut thread, &failure_at(at), "a gap")
+                .expect("a failure lands");
+        }
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("the run is open");
+        assert_eq!(
+            (
+                run.ordinal,
+                run.failures,
+                run.failures_whole,
+                run.last_at_secs
+            ),
+            (0, 2, true, 115)
+        );
+
+        // 2026-12-02 is 29 days before the record's last day.
+        let today = pull::calendar::SOURCED_LAST_DAY - 29;
+        let doc = status_json(&Progress::default(), Some(today), Some(&found));
+        let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+        assert_eq!(parsed["running"], false);
+        assert_eq!(parsed["restart"]["state"], "interrupted");
+        assert_eq!(parsed["interrupted"]["ordinal"], 0);
+        assert_eq!(parsed["interrupted"]["failures"], 2);
+        assert_eq!(parsed["interrupted"]["failuresWhole"], true);
+        assert_eq!(parsed["interrupted"]["from"], "2024-10-04");
+        assert_eq!(parsed["interrupted"]["to"], "2024-10-14");
+        assert_eq!(parsed["interrupted"]["lastRecordAtSecs"], 115);
+        // Its scope and its ask (DB-B34, repair 6): where it is run again, and
+        // what a later run must name to supersede it.
+        assert_eq!(parsed["interrupted"]["scope"], "spot");
+        assert_eq!(
+            parsed["interrupted"]["ask"],
+            run.ask
+                .map_or_else(String::new, |ask| format!("{ask:016x}"))
+        );
+        assert!(run.ask.is_some(), "{run:?}");
+        assert!(
+            parsed["interrupted"]["words"]
+                .as_str()
+                .is_some_and(|words| words.starts_with("INTERRUPTED: a pull run")
+                    && words.contains("run the same pull again from /pull/spot")
+                    && words.contains("names the same ask")),
+            "{doc}"
+        );
+        assert_eq!(parsed["calendar"]["recordTo"], "2026-12-31");
+        assert_eq!(parsed["calendar"]["daysLeft"], 29);
+        assert_eq!(parsed["calendar"]["endsSoon"], true);
+        assert_eq!(parsed["calendar"]["ended"], false);
+        assert_eq!(parsed["passCeiling"], MAX_PASSES);
+        assert_eq!(parsed["stopReason"], serde_json::Value::Null);
+
+        // Once the run is closed, nothing is open.
+        journal
+            .append(&closed_at(130, "kite", 20_000, 20_010))
+            .expect("the closing record lands");
+        let after = restart_scan(&journal);
+        assert_eq!(after, Restart::Clean);
+        let doc = status_json(&Progress::default(), None, Some(&after));
+        let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+        assert_eq!(parsed["interrupted"], serde_json::Value::Null);
+        assert_eq!(parsed["restart"]["state"], "clean");
+        assert_eq!(parsed["calendar"], serde_json::Value::Null);
+        // A run of this process is shown: the scan is not this document's.
+        let doc = status_json(&Progress::default(), None, None);
+        let parsed: serde_json::Value = serde_json::from_str(&doc).expect("valid JSON");
+        assert_eq!(parsed["restart"], serde_json::Value::Null);
+    }
+
+    /// **AFTER A RESTART MID-PULL, `/pull/run.json` IS NOT "NEVER RAN"**
+    /// (DB-B34). The store's journal holds a run opened and never closed; a
+    /// site loaded over it carries that run, and the route's document for a
+    /// process that has not pulled names it. Before, the document was the
+    /// 118-byte default, byte for byte what a fresh store answers.
+    #[tokio::test]
+    async fn the_status_route_of_a_restarted_server_names_the_run_it_interrupted() {
+        let store = crate::scratch::path("pullrun-restart-store");
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir");
+        let masters = crate::scratch::path("pullrun-restart-masters");
+        std::fs::create_dir_all(&masters).expect("mkdir");
+        std::fs::write(
+            masters.join("groww_instruments.csv"),
+            "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+             expiry_date,strike_price,groww_symbol\n\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n",
+        )
+        .expect("write");
+
+        // A fresh store: nothing interrupted.
+        let fresh = Loaded::new(Site::load(&masters, &store));
+        assert_eq!(fresh.restart, Restart::Clean);
+        let (_, _, body) = crate::server::pull_run_json(axum::extract::State(fresh)).await;
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(doc["interrupted"], serde_json::Value::Null);
+        assert_eq!(doc["restart"]["state"], "clean");
+        assert_eq!(doc["calendar"]["recordTo"], "2026-12-31");
+
+        // The previous process opened a run and died before closing it.
+        let journal = crate::audit::Journal::at(&store);
+        let mut thread = journal
+            .open_run(&opened_at(1_791_000_000, "kite", 20_000, 20_010))
+            .expect("the opening record lands");
+        journal
+            .append_failure(&mut thread, &failure_at(1_791_000_050), "a gap")
+            .expect("a failure lands");
+        let restarted = Loaded::new(Site::load(&masters, &store));
+        assert!(restarted.restart.interrupted().is_some());
+        let (status, _, body) =
+            crate::server::pull_run_json(axum::extract::State(Loaded::clone(&restarted))).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(doc["running"], false);
+        assert_eq!(doc["interrupted"]["openedAtSecs"], 1_791_000_000_i64);
+        assert_eq!(doc["interrupted"]["lastRecordAtSecs"], 1_791_000_050_i64);
+        assert_eq!(doc["interrupted"]["failures"], 1);
+        assert_eq!(doc["interrupted"]["source"], "kite");
+        assert_eq!(doc["restart"]["state"], "interrupted");
+
+        // Once a run is pressed in this process, the document is that run's.
+        claim(&restarted);
+        let (_, _, body) = crate::server::pull_run_json(axum::extract::State(restarted)).await;
+        let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(doc["interrupted"], serde_json::Value::Null);
+        assert_eq!(doc["running"], true);
+    }
+
     /// A synthetic census change, not an assertion that market bars exist.
     /// This exercises the real conductor's growth branch without retry sleeps.
     fn grow_synthetic_census(site: &Site) {
@@ -3440,7 +7000,9 @@ mod tests {
                 std::future::ready(if seen.len() == 2 {
                     assert_eq!(leg.dir, "1min");
                     grow_synthetic_census(&site);
-                    receipt(503, "FAILED")
+                    // A failed leg that still wrote a bar: the run's own
+                    // growth is its receipt's count (DB-B33, repair 4).
+                    receipt_wrote(503, "FAILED", Some(1))
                 } else {
                     receipt(200, "STORED")
                 })
@@ -3462,6 +7024,7 @@ mod tests {
             ),
             (5, 1, Some(0), Some(1))
         );
+        assert_eq!(progress.bars_written, Some(1));
         assert_eq!(
             (
                 progress.feeds[0].legs_done,
@@ -3911,6 +7474,8 @@ mod tests {
                     finished: true,
                     credential_dead: true,
                     skipped: 0,
+                    standing: 0,
+                    store_unavailable: false,
                 },
                 FeedReport {
                     vendor: "groww".to_owned(),
@@ -3922,8 +7487,12 @@ mod tests {
                     finished: false,
                     credential_dead: false,
                     skipped: 0,
+                    standing: 0,
+                    store_unavailable: false,
                 },
             ],
+            stop: None,
+            bars_written: None,
         };
         let doc = progress.json();
         assert!(
@@ -4017,9 +7586,9 @@ mod tests {
                             .to_owned(),
                     },
                 ],
-                [false, false]
+                [OWED, OWED]
                     .into_iter()
-                    .map(std::sync::atomic::AtomicBool::new)
+                    .map(std::sync::atomic::AtomicU8::new)
                     .collect(),
                 std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 request_leg,
