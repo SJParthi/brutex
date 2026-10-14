@@ -1584,11 +1584,12 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
         lines[0],
         format!(
             "run 1750000000 source=tickstore archive={} archive_bytes={} commit={COMMIT} \
-             started=1750000000 format_sha256=unmeasured",
+             started=1750000000 format_sha256=unmeasured definition={BAR_DEFINITION}",
             encoded(ts.as_os_str().as_encoded_bytes()),
             origin.archive_bytes
         ),
-        "the world's tick store has no FORMAT.md: unmeasured, named"
+        "the world's tick store has no FORMAT.md: unmeasured, named; the run line ends \
+         with the bar definition its days are built under (D-4878 item 10)"
     );
     assert!(origin.archive_bytes > 0);
     assert!(lines[1].starts_with("begin stocks 2024-04-01 *"));
@@ -1616,7 +1617,10 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
         second.contains(" source=zip ")
             && second.contains(" commit=unstamped ")
             && second.contains(" started=1750000000 ")
-            && second.ends_with(&format!(" archive_cd_blake3={}", zips.digest_hex())),
+            && second.ends_with(&format!(
+                " archive_cd_blake3={} definition={BAR_DEFINITION}",
+                zips.digest_hex()
+            )),
         "{second}"
     );
     assert_eq!(zips.fault, None, "{zips:?}");

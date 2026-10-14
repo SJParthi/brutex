@@ -3,9 +3,11 @@
 //! # What is an auction print
 //!
 //! From 2026-08-03 a closing-auction-eligible share's continuous trading
-//! ends at 15:15 and the closing auction runs through its order-matching
-//! phase to 15:35 (charter §7 and §9, NSE/CMTR/73845, NSE/CMTR/74466; the
-//! phases, [`super::AUCTION_BAND_END`]). In the GDFL capital-market files such a
+//! ends at 15:15 (charter §7, NSE/CMTR/73845, NSE/CMTR/74466). The auction
+//! then runs through its order-matching phase to 15:35: that timing rests on
+//! a broker's dated implementation notice and is UNVERIFIED against an NSE
+//! page or circular (charter §9, "The auction's phases";
+//! [`super::AUCTION_BAND_END`]). In the GDFL capital-market files such a
 //! share carries, in that band, a row whose bid and ask are both zero and
 //! whose LTQ is positive: the auction's print (measured on 7 Oct 2026; its
 //! price equals Zerodha's day close, D-3320). The match itself is stamped

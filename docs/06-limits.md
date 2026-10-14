@@ -16999,9 +16999,19 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   filtered re-read of 2026-08-24 offered 6,685 seconds, wrote 0, failed 0,
   closed `done ... definition=3`, and the month kept its 15:29:06 auction
   print as a bar while the `.auc` sidecar filed the same print (month sha256
-  unchanged). D-4878 item 10 closes the one case this repository has (a
-  share's day of the closing auction's era restated by definition 4 is
-  refused by name at admission); the general check, one held record read
+  unchanged). D-4878 item 10 closes the one case this repository has: a key
+  that would read any share some key of that day, under any filter, built or
+  began under 2 or 3 in the closing auction's era is refused by name at
+  admission, and so is a member key (repair 6, 14 Oct 2026: check 4 read
+  RELIANCE through the append door under a fresh filter while only a names
+  key of another filter stood restated). What it cannot see is a month an
+  earlier definition wrote with no journal line naming it (a store copied
+  without its journal, or a journal line lost), and two runs interleaving
+  their lines in one journal, which would attribute a `begin` to the other
+  run's definition: no lock found in this repository serialises two import
+  runs over one journal (the census lock guards the census, not the
+  journal), so that case is NOT CLOSED. The
+  general check, one held record read
   after an `AlreadyPresent` batch and refused when it is stamped on the
   batch's own day, belongs to the shared landing (`ingest::from_rows`, owner
   WP-13c / store) and is NOT DONE.

@@ -2491,17 +2491,19 @@ const DB_FIX_ROUND_LITERAL: &str = "- 11 123 12500 13500 14000 15000 16200 16800
 // (3) The closing auction's refusal and warning codes and their field:
 // `restated_auction_band`, `auction_band_unattributed`, `booked_rows`.
 // (4) Test words: scratch-directory tags (every `wp12f-*`, `both`,
-// `large`) and the generation directory a test looks for, `bar-revisions`
-// (the store's `bar-revisions-v1`, already declared, matched by its stem).
+// `large`, `names-large`, `names-small`) and the generation directory a
+// test looks for, `bar-revisions` (the store's `bar-revisions-v1`, already
+// declared, matched by its stem).
 // None names an account, an environment, a vendor credential or a field of a
 // parameter path.
 const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows both examined \
-     first_owed large member members_reopened range_from remembered restated_auction_band \
-     scope_ledger scope_ledger_torn scope_reach_back scope_reopen_unreadable \
-     scope_unrecorded series series_filed stored wp12f-admit-cost wp12f-definition4 \
-     wp12f-examined wp12f-filtered wp12f-legacy wp12f-named wp12f-owed-cost wp12f-reach \
-     wp12f-restated-auction wp12f-retry wp12f-series wp12f-sparse wp12f-told wp12f-torn \
-     wp12f-widen";
+     first_owed large member members_reopened names-large names-small range_from remembered \
+     restated_auction_band scope_ledger scope_ledger_torn scope_reach_back \
+     scope_reopen_unreadable scope_unrecorded series series_filed stored wp12f-admit-cost \
+     wp12f-definition4 wp12f-examined wp12f-filtered wp12f-legacy wp12f-named \
+     wp12f-owed-cost wp12f-reach wp12f-restated-auction wp12f-restated-member \
+     wp12f-restated-names wp12f-restated-open wp12f-retry wp12f-series wp12f-sparse \
+     wp12f-told wp12f-torn wp12f-widen";
 
 /// Every declared group, in the order the step joined them.
 const DECLARED: [&str; 61] = [

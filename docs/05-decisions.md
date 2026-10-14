@@ -68082,15 +68082,32 @@ made six index series from the 12 special sessions alone.
    `vendor::cash_auction_eligibility_required`, the rule that asks for the
    flag, and `/imports.json` asks the same function with the key's day.
    **Such a day is refused by name at admission, every run, and never read
-   through the append door** (`reason=restated_auction_band`, stage `file`),
-   and so is a names-filter key of a day whose whole-tree key is restated:
+   through the append door** (`reason=restated_auction_band`, stage `file`):
    definition 4 takes the print OUT of the bars, the second reading is often
    the held day less its last bar, and the append-only month answers that
    `AlreadyPresent` (it compares the bars offered, never the held bar after
    them), so the day would close `done` under 4 with the print still a bar,
-   unsaid. The months GDFL CASH 2026-08 and 2026-09 are made again as new
-   generations by WP-80 (D-3320 item 4), whose `done` under 4 ends the
-   refusal.
+   unsaid. **The question is asked of the SHARES, not of one key** (repair 6,
+   14 Oct 2026, after check 4 read RELIANCE through the append door under a
+   fresh filter while a `HDFCBANK,RELIANCE` key stood closed under 3): a key
+   is refused when it would read any share that ANY key of that day, under
+   any filter, left possibly holding a bar 4 no longer builds — its last
+   `done` or `recounted` under 2 or 3, a close `incomplete` under one, or a
+   `begin` by a run under one never closed — and no later close under 4 of a
+   filter that read that share has ended it. A whole-tree key reads every
+   share; a member key (`<filter>+<member>`) reads its member and asks the
+   same question, since it bypasses its base key's admission. A `refused`
+   close wrote nothing and undoes the early `begin` before it. Which
+   definition a `begin` was written under is its run's: this build's `run`
+   line carries `definition=4`, and a run line without one (every build
+   before 4, which reads any `name=value` field of a run line) is an earlier
+   definition's, so a day this build began and a crash left open is read
+   again to make its months durable (WP-16), never refused. The months GDFL
+   CASH 2026-08 and 2026-09 are made again as new generations by WP-80
+   (D-3320 item 4), whose whole-tree `done` under 4 ends the refusal for
+   every key of the day; a names close under 4 ends only the keys whose
+   shares it read, never a whole-tree key's. O(1) in the journal's size: one
+   hash probe for the day and one a share the asking key names.
 
 **Not done.** An options run records no scope. Landing a sparse month's owed
 days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day
@@ -68112,7 +68129,11 @@ an index file (DB-B18), the six stem hand-overs (DB-B12).
 `retry_refused_reads_again_a_member_key_closed_with_refusals`,
 `retry_refused_never_cancels_what_a_done_day_before_the_range_owes`,
 `a_share_day_of_the_auction_era_under_an_older_definition_is_restated`,
-`a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`;
+`a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`,
+`a_share_another_filter_built_under_an_earlier_definition_is_refused_under_every_filter_naming_it`,
+`a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused`,
+`a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused`,
+`the_auction_era_admission_check_costs_the_same_at_any_journal_size`;
 `crates/pull/src/gdfl_cm_admission_tests.rs`:
 `the_auction_band_runs_through_order_matching_and_stops_before_post_close`,
 `a_booked_match_at_the_one_band_price_is_a_print`,

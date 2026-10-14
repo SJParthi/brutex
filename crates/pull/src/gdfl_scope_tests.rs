@@ -1870,28 +1870,290 @@ fn a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// One invented share file of the auction era whose every row is stamped
+/// before 15:15, so no row is an auction candidate and the file is read
+/// without the day's eligibility: what is asked of these files is whether
+/// they are admitted, not how the band is read.
+fn era_file(stem: &str, d: Day) -> Vec<u8> {
+    let mut rows = Vec::new();
+    for s in (0..21_600).step_by(1_201) {
+        rows.push(row(
+            stem,
+            d,
+            NINE_FIFTEEN + s,
+            &format!("73{}.05", s % 10),
+            u64::from(s % 7 + 1),
+            0,
+        ));
+    }
+    csv(&rows)
+}
+
+/// Share days of the auction era each holding a file of each of `stems`
+/// (invented rows), and a store whose journal is `journal`.
+fn era_world(root: &Path, days: &[Day], stems: &[&str], journal: &str) -> PathBuf {
+    let plans: Vec<DayPlan> = days
+        .iter()
+        .map(|&d| {
+            let files = stems
+                .iter()
+                .map(|stem| (entry_of(Tree::Stocks, d, stem), era_file(stem, d)))
+                .collect();
+            (d, Tree::Stocks, files)
+        })
+        .collect();
+    world_of(root, &plans);
+    let store = root.join("S");
+    std::fs::create_dir_all(store.join("imports")).unwrap();
+    std::fs::write(journal_path(&store), journal).unwrap();
+    store
+}
+
+/// One stocks run over `days` under `only`, through the tick store under
+/// `root`, under `scope` when one is given.
+fn era_run(
+    root: &Path,
+    store: &Path,
+    (from, to): (Day, Day),
+    only: &[String],
+    scope: Option<Arc<CmScope>>,
+) -> Report {
+    let source = TickStore::new(&root.join("ts"));
+    let source = match scope {
+        Some(scope) => source.with_scope(scope),
+        None => source,
+    };
+    run_cm(
+        &source,
+        &Run {
+            kind: ImportKind::Stocks,
+            from,
+            to,
+            only,
+            store_root: store,
+        },
+    )
+    .unwrap()
+}
+
+/// Whether `report` names the restated auction band among its failures.
+fn names_restated(report: &Report) -> bool {
+    report
+        .failures
+        .iter()
+        .any(|failure| failure.why.contains("restated by bar definition 4"))
+}
+
+/// Whether the store holds any one-second month of the share `symbol`.
+fn share_held(store: &Path, symbol: &str) -> bool {
+    store
+        .join("bars/gdfl/NSE/CASH")
+        .join(symbol)
+        .join("1s")
+        .exists()
+}
+
+/// A SHARE ANOTHER FILTER'S KEY BUILT UNDER AN EARLIER DEFINITION IS REFUSED
+/// UNDER EVERY FILTER THAT NAMES IT (D-4878 item 10; check 4 of WP-12f, 14
+/// Oct 2026). A names key closed `done` under 3 on a share day of the auction
+/// era, and no whole-tree key: a run under one of its names, and one under
+/// the whole tree, are refused by name and read nothing; a run under a name
+/// it never read is admitted. A later close under 4 of the whole tree (the
+/// remake's) ends the refusal. Asking only the run's own key and the day's
+/// whole-tree key read RELIANCE through the append door and closed it `done`
+/// under 4 over a month still holding the print as a bar.
+#[test]
+fn a_share_another_filter_built_under_an_earlier_definition_is_refused_under_every_filter_naming_it()
+ {
+    let root = scratch("wp12f-restated-names");
+    let era = day(2026, 8, 4);
+    let store = era_world(
+        &root,
+        &[era],
+        &["HDFCBANK.NSE", "INFY.NSE", "RELIANCE.NSE"],
+        &format!(
+            "begin stocks {era} HDFCBANK,RELIANCE\n\
+             done stocks {era} HDFCBANK,RELIANCE definition=3 files=2 seconds=2 failures=0\n"
+        ),
+    );
+    let (reliance, infy) = (["RELIANCE".to_owned()], ["INFY".to_owned()]);
+    for only in [&reliance[..], &[][..]] {
+        let refused = era_run(&root, &store, (era, era), only, None);
+        assert_eq!(
+            (refused.days_refused, refused.files),
+            (1, 0),
+            "{only:?}: {:?}",
+            refused.failures
+        );
+        assert!(names_restated(&refused), "{only:?}: {:?}", refused.failures);
+    }
+    assert!(!share_held(&store, "RELIANCE") && !share_held(&store, "HDFCBANK"));
+    let journal = journal_text(&store);
+    for filter in ["RELIANCE", "*"] {
+        assert_eq!(
+            lines_starting(
+                &journal,
+                &format!(
+                    "refused stocks {era} {filter} definition=4 stage=file \
+                     reason=restated_auction_band"
+                )
+            ),
+            1,
+            "{journal}"
+        );
+    }
+    // A name the restated key never read is not its to refuse.
+    let admitted = era_run(&root, &store, (era, era), &infy, None);
+    assert!(!names_restated(&admitted), "{:?}", admitted.failures);
+    assert_eq!((admitted.days_refused, admitted.files), (0, 1));
+    assert!(share_held(&store, "INFY") && !share_held(&store, "RELIANCE"));
+    // The remake's whole-tree close under 4 ends every key it covers.
+    let mut remade = journal_text(&store);
+    let _ = writeln!(
+        remade,
+        "done stocks {era} * definition=4 files=3 seconds=3 failures=0"
+    );
+    std::fs::write(journal_path(&store), remade).unwrap();
+    let after = era_run(&root, &store, (era, era), &reliance, None);
+    assert!(!names_restated(&after), "{:?}", after.failures);
+    assert_eq!((after.days_refused, after.files), (0, 1));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A SHARE KEY AN EARLIER DEFINITION LEFT OPEN OR INCOMPLETE IS REFUSED TOO
+/// (D-4878 item 10). On four share days of the auction era: one begun by a
+/// run whose `run` line names no definition (every build before 4) and never
+/// closed, and one closed `incomplete` under 3, may hold the print as a bar
+/// in the months they wrote, and are refused by name; one that earlier run
+/// began and closed `refused` wrote nothing and is read; and one begun under
+/// a run of definition 4 and never closed is this build's own crash, read
+/// again to make its months durable (WP-16), never refused.
+#[test]
+fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
+    let root = scratch("wp12f-restated-open");
+    let days = [
+        day(2026, 8, 4),
+        day(2026, 8, 5),
+        day(2026, 8, 6),
+        day(2026, 8, 7),
+    ];
+    let [open, incomplete, refused, ours] = days;
+    let store = era_world(
+        &root,
+        &days,
+        &["RELIANCE.NSE"],
+        &format!(
+            "run 11 source=zip started=11\n\
+             begin stocks {open} RELIANCE\n\
+             begin stocks {incomplete} RELIANCE\n\
+             incomplete stocks {incomplete} RELIANCE definition=3 files=1 seconds=1 failures=1 \
+             stage=census reason=census_refused\n\
+             begin stocks {refused} RELIANCE\n\
+             refused stocks {refused} RELIANCE definition=3 stage=vendor reason=day_not_held \
+             failures=0\n\
+             run 12 source=zip started=12 definition=4\n\
+             begin stocks {ours} RELIANCE\n"
+        ),
+    );
+    let reliance = ["RELIANCE".to_owned()];
+    let report = era_run(&root, &store, (open, ours), &reliance, None);
+    assert_eq!(
+        (report.days_refused, report.files),
+        (2, 2),
+        "{:?}",
+        report.failures
+    );
+    let journal = journal_text(&store);
+    for (d, expected) in [(open, 1), (incomplete, 1), (refused, 0), (ours, 0)] {
+        assert_eq!(
+            lines_starting(
+                &journal,
+                &format!(
+                    "refused stocks {d} RELIANCE definition=4 stage=file \
+                     reason=restated_auction_band"
+                )
+            ),
+            expected,
+            "{d}: {journal}"
+        );
+    }
+    // This build's run line says its definition.
+    assert!(
+        journal.lines().any(|line| line.starts_with("run ")
+            && line.ends_with(" definition=4")
+            && !line.starts_with("run 12 ")),
+        "{journal}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A MEMBER KEY ASKS THE SAME QUESTION (D-4878 items 4 and 10). A whole-tree
+/// key closed `done` under 4 before scopes were recorded owes the stored
+/// scope's share ZZFOO; a names key closed `done` under 3 after it built
+/// ZZFOO's month that day. The wider run reads ZZFOO under the member key
+/// `*+NSE-CASH-ZZFOO`, which bypasses the base key's admission: it is
+/// refused by name and reads nothing, where it read ZZFOO through the append
+/// door.
+#[test]
+fn a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused() {
+    let root = scratch("wp12f-restated-member");
+    let era = day(2026, 8, 4);
+    let store = era_world(
+        &root,
+        &[era],
+        &["RELIANCE.NSE", "ZZFOO.NSE"],
+        &format!(
+            "begin stocks {era} *\n\
+             done stocks {era} * definition=4 files=1 seconds=1 failures=0\n\
+             begin stocks {era} ZZFOO\n\
+             done stocks {era} ZZFOO definition=3 files=1 seconds=1 failures=0\n"
+        ),
+    );
+    let scope = Arc::new(CmScope::stored(["ZZFOO"]).unwrap());
+    let report = era_run(&root, &store, (era, era), &[], Some(scope));
+    assert!(names_restated(&report), "{:?}", report.failures);
+    assert_eq!(report.files, 0, "{:?}", report.failures);
+    assert!(!share_held(&store, "ZZFOO"));
+    let journal = journal_text(&store);
+    assert_eq!(
+        lines_starting(
+            &journal,
+            &format!(
+                "refused stocks {era} *+NSE-CASH-ZZFOO definition=4 stage=file \
+                 reason=restated_auction_band"
+            )
+        ),
+        1,
+        "{journal}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// THE AUCTION ERA'S ADMISSION CHECK COSTS THE SAME AT ANY JOURNAL SIZE
-/// (D-4878 item 10, CMP-07): `restated_past_append` is two hash probes of the
-/// journal's restated set and a date compare, never a walk of the journal.
-/// Two journals a hundredfold apart (every day of the era restated under one
-/// filter, then under a hundred) answer the same keys in the same per-call
-/// time: 200 batches of 1,000 calls each, the two journals interleaved batch
-/// by batch so the machine's load falls on both alike; p50, p99 and max of
-/// the per-call nanoseconds printed, and the larger journal's p50 held within
-/// three times the smaller's (a walk of the larger set would be hundreds of
-/// times slower). Its answers are asserted first: a restated key, a key
-/// under a names filter whose whole-tree key is restated, a day before the
-/// era and an index day.
+/// (D-4878 item 10, CMP-07): `restated_past_append` is one hash probe of the
+/// day and one a share the asking key names, never a walk of the journal.
+/// Two shapes, each at two journal sizes a hundredfold apart: every day of
+/// the era restated under the whole tree (then under it and 99 names
+/// filters), and every day restated under names filters alone, one then a
+/// hundred, where the asking key's own names are probed. The same keys asked
+/// of each pair: 200 batches of 1,000 calls, the two journals of a pair
+/// interleaved batch by batch so the machine's load falls on both alike; p50,
+/// p99 and max of the per-call nanoseconds printed, and each larger
+/// journal's p50 held within three times its smaller's (a walk of the larger
+/// set would be hundreds of times slower). Its answers are asserted first: a
+/// restated key, a key under a names filter whose whole-tree key is
+/// restated, a share no key of the day read, a day before the era and an
+/// index day.
 #[test]
 fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
     let root = scratch("wp12f-admit-cost");
     let era: Vec<Day> = days(day(2026, 8, 3), day(2026, 9, 30));
-    let journal_of = |filters: usize, at: &str| -> Journal {
+    let journal_of = |filters: usize, whole: bool, at: &str| -> Journal {
         let store = root.join(at);
         let mut text = String::new();
         for d in &era {
             for n in 0..filters {
-                let only = if n == 0 {
+                let only = if n == 0 && whole {
                     "*".to_owned()
                 } else {
                     format!("SYM{n:03}")
@@ -1907,29 +2169,33 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
         std::fs::write(journal_path(&store), text).unwrap();
         Journal::load(journal_path(&store)).unwrap()
     };
-    let (small, large) = (journal_of(1, "small"), journal_of(100, "large"));
+    let (small, large) = (journal_of(1, true, "small"), journal_of(100, true, "large"));
+    let (names_small, names_large) = (
+        journal_of(1, false, "names-small"),
+        journal_of(100, false, "names-large"),
+    );
     assert_eq!(
         (small.restated.len(), large.restated.len()),
         (era.len(), era.len() * 100)
     );
-    // What it answers, on both.
+    // What it answers.
     let probe = era[era.len() / 2];
-    let (whole, named) = (format!("stocks {probe} *"), format!("stocks {probe} INFY"));
+    let asked_of = |filter: &str| format!("stocks {probe} {filter}");
     for journal in [&small, &large] {
         assert!(restated_past_append(
             journal,
             ImportKind::Stocks,
-            &whole,
+            &asked_of("*"),
             probe
         ));
         assert!(
-            restated_past_append(journal, ImportKind::Stocks, &named, probe),
+            restated_past_append(journal, ImportKind::Stocks, &asked_of("INFY"), probe),
             "a names filter on a day whose whole-tree key is restated"
         );
         assert!(!restated_past_append(
             journal,
             ImportKind::Indices,
-            &whole,
+            &asked_of("*"),
             probe
         ));
         let before = day(2026, 7, 31);
@@ -1940,17 +2206,27 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
             before
         ));
     }
-    // The same keys asked of both journals, half of them restated.
-    let asked: Vec<(String, Day)> = era
-        .iter()
-        .flat_map(|d| {
-            [
-                (format!("stocks {d} *"), *d),
-                (format!("stocks {d} ACC"), *d),
-            ]
-        })
-        .collect();
-    let batch = |journal: &Journal| -> u128 {
+    for journal in [&names_small, &names_large] {
+        for (filter, restated) in [
+            ("*", true),
+            ("SYM000", true),
+            ("ACC,SYM000", true),
+            ("*+SYM000", true),
+            ("*+NSE-CASH-SYM000", true),
+            ("*+NSE-CASH-SYM000.BE", true),
+            ("*+NSE-CASH-SYM000.SM", false),
+            ("ACC", false),
+            ("ACC,INFY", false),
+            ("SYM000+ACC", false),
+        ] {
+            assert_eq!(
+                restated_past_append(journal, ImportKind::Stocks, &asked_of(filter), probe),
+                restated,
+                "{filter}"
+            );
+        }
+    }
+    let batch = |journal: &Journal, asked: &[(String, Day)]| -> u128 {
         let at = std::time::Instant::now();
         let mut hits = 0_usize;
         for n in 0..1_000 {
@@ -1962,25 +2238,55 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
                 *d,
             )));
         }
-        assert_eq!(hits, 1_000, "every day of the era is restated in both");
+        assert_eq!(hits, 1_000, "every key asked is restated in both");
         at.elapsed().as_nanos() / 1_000
     };
-    let (mut at_small, mut at_large) = (Vec::with_capacity(200), Vec::with_capacity(200));
+    let keys_on_every_day = |filters: &[&str]| -> Vec<(String, Day)> {
+        era.iter()
+            .flat_map(|d| {
+                filters
+                    .iter()
+                    .map(move |filter| (format!("stocks {d} {filter}"), *d))
+            })
+            .collect()
+    };
+    let whole_asked = keys_on_every_day(&["*", "ACC", "ACC,INFY,TCS", "ACC+INFY"]);
+    let names_asked = keys_on_every_day(&["*", "SYM000", "ACC,INFY,SYM000", "ACC+SYM000"]);
+    let mut at: [Vec<u128>; 4] = std::array::from_fn(|_| Vec::with_capacity(200));
     for _ in 0..200 {
-        at_small.push(batch(&small));
-        at_large.push(batch(&large));
+        at[0].push(batch(&small, &whole_asked));
+        at[1].push(batch(&large, &whole_asked));
+        at[2].push(batch(&names_small, &names_asked));
+        at[3].push(batch(&names_large, &names_asked));
     }
-    let (s50, s99, smax) = spread(&mut at_small);
-    let (l50, l99, lmax) = spread(&mut at_large);
+    let [s, l, ns, nl] = at.map(|mut nanos| spread(&mut nanos));
     println!(
-        "WP-12f restated_past_append, ns a call (200 batches of 1,000): {} restated keys \
-         p50={s50} p99={s99} max={smax}; {} restated keys p50={l50} p99={l99} max={lmax}",
+        "WP-12f restated_past_append, ns a call (200 batches of 1,000): whole tree, \
+         {} restated keys p50={} p99={} max={}; {} restated keys p50={} p99={} max={}; \
+         names only, {} restated keys p50={} p99={} max={}; {} restated keys p50={} p99={} \
+         max={}",
         small.restated.len(),
-        large.restated.len()
+        s.0,
+        s.1,
+        s.2,
+        large.restated.len(),
+        l.0,
+        l.1,
+        l.2,
+        names_small.restated.len(),
+        ns.0,
+        ns.1,
+        ns.2,
+        names_large.restated.len(),
+        nl.0,
+        nl.1,
+        nl.2
     );
-    assert!(
-        l50 <= 3 * s50.max(1),
-        "a hundredfold journal costs the check {l50} ns against {s50} ns: it walks"
-    );
+    for (smaller, larger) in [(s.0, l.0), (ns.0, nl.0)] {
+        assert!(
+            larger <= 3 * smaller.max(1),
+            "a hundredfold journal costs the check {larger} ns against {smaller} ns: it walks"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -2464,6 +2464,85 @@ struct Journal {
     /// insert is a few compares and the order needs no sort); one hash probe
     /// to read.
     closed_by: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Per `stocks <day>` of the closing auction's era, the filters (`*`, a
+    /// names list, or `<filter>+<member>`) of the keys that may have left
+    /// that day's months holding a bar definition 4 no longer builds (WP-12f,
+    /// D-4878 item 10): a key whose last `done` or `recounted` names an
+    /// earlier definition, one closed `incomplete` under one, and one begun
+    /// by a run under one and never closed. Kept in journal order while the
+    /// load reads, so a later close under 4 that covers a key's shares ends
+    /// it ([`Journal::read_line`]); only the load reads it.
+    auction_keys: HashMap<String, HashSet<String>>,
+    /// The keys of [`Journal::auction_keys`] begun by a run under an earlier
+    /// definition and not closed since, each with whether its filter was
+    /// already there before that `begin`: a `refused` close (which writes
+    /// nothing) gives the filter back that state.
+    begun_early: HashMap<String, bool>,
+    /// The `definition=` of the last `run` line read: `None` before one, and
+    /// for a run line that names none, which every build before definition 4
+    /// wrote (WP-12f, D-4878 item 10).
+    run_definition: Option<u32>,
+    /// [`Journal::auction_keys`] folded once at the load's end into the
+    /// shares each day's months may hold such a bar of: what admission asks,
+    /// one hash probe a day and one a name the asking key names
+    /// ([`restated_past_append`]).
+    auction_restated: HashMap<String, AuctionRestated>,
+}
+
+/// The shares of one `stocks <day>` of the closing auction's era whose months
+/// may hold a bar definition 4 no longer builds (WP-12f, D-4878 item 10).
+#[derive(Debug, Default)]
+struct AuctionRestated {
+    /// A whole-tree key (`*`) is among them: every share of the day.
+    every: bool,
+    /// The shares the others name.
+    names: HashSet<String>,
+}
+
+impl AuctionRestated {
+    /// Whether a key under `filter` would read a share this day holds such a
+    /// bar of: always under `*`, since an entry exists only when some share
+    /// does; otherwise one probe a share the filter names.
+    fn meets(&self, filter: &str) -> bool {
+        self.every
+            || match shares_of(filter) {
+                None => true,
+                Some(mut names) => names.any(|name| self.names.contains(name)),
+            }
+    }
+}
+
+/// The shares a journal key's filter part reads: `None` for `*` (every one),
+/// for a member key (`<filter>+<member>`) the one share its member is filed
+/// under ([`crate::gdfl_cm::member_share`]: `NSE-CASH-RELIANCE.BE` reads
+/// RELIANCE's months), else the names.
+fn shares_of(filter: &str) -> Option<impl Iterator<Item = &str>> {
+    let names = match filter.split_once('+') {
+        Some((_base, member)) => crate::gdfl_cm::member_share(member),
+        None if filter == "*" => return None,
+        None => filter,
+    };
+    Some(names.split(','))
+}
+
+/// Whether a close under filter `wide` read every share a key under filter
+/// `narrow` reads (WP-12f, D-4878 item 10).
+fn covers(wide: &str, narrow: &str) -> bool {
+    let Some(wide_names) = shares_of(wide) else {
+        return true;
+    };
+    let Some(mut narrow_names) = shares_of(narrow) else {
+        return false;
+    };
+    let wide_names: Vec<&str> = wide_names.collect();
+    narrow_names.all(|name| wide_names.contains(&name))
+}
+
+/// Whether `kind` and `day`, as a journal line spells them, are a share's day
+/// of the closing auction's era (D-4878 item 10).
+fn auction_share_day(kind: &str, day: &str) -> bool {
+    kind == ImportKind::Stocks.as_str()
+        && journal_day(day).is_some_and(crate::vendor::cash_auction_eligibility_required)
 }
 
 impl Journal {
@@ -2547,7 +2626,96 @@ impl Journal {
             }
         }
         journal.closed_by = closed_by;
+        // Once, O(the era's restated keys): the shares each day's months may
+        // hold a bar definition 4 no longer builds of (D-4878 item 10).
+        let mut auction_restated: HashMap<String, AuctionRestated> =
+            HashMap::with_capacity(journal.auction_keys.len());
+        for (of_day, filters) in std::mem::take(&mut journal.auction_keys) {
+            if filters.is_empty() {
+                continue;
+            }
+            let restated = auction_restated.entry(of_day).or_default();
+            for filter in &filters {
+                match shares_of(filter) {
+                    None => restated.every = true,
+                    Some(names) => restated.names.extend(names.map(str::to_owned)),
+                }
+            }
+        }
+        journal.auction_restated = auction_restated;
         Ok(journal)
+    }
+
+    /// Notes that a key under `only` of a share's day of the auction era may
+    /// have left a bar definition 4 no longer builds in that day's months
+    /// (D-4878 item 10).
+    fn note_auction_key(&mut self, kind: &str, day: &str, only: &str) {
+        self.auction_keys
+            .entry(format!("{kind} {day}"))
+            .or_default()
+            .insert(only.to_owned());
+    }
+
+    /// A close under 4 of `only`: what it read is built as 4 builds it, so
+    /// it ends its own key's entry and every key of the day whose shares it
+    /// read (the remake's whole-tree close ends them all). O(the day's
+    /// entries): a day holds the operator's few filters.
+    fn end_auction_keys(&mut self, kind: &str, day: &str, only: &str) {
+        if let Some(filters) = self.auction_keys.get_mut(&format!("{kind} {day}")) {
+            filters.retain(|filter| !covers(only, filter));
+        }
+    }
+
+    /// What one closing or opening line does to [`Journal::auction_keys`]
+    /// (D-4878 item 10). `built` is the definition the line says built the
+    /// day, `None` for a `begin`, whose run line says it, or a `refused`.
+    fn auction_line(
+        &mut self,
+        verb: &str,
+        (kind, day, only): (&str, &str, &str),
+        built: Option<u32>,
+    ) {
+        if !auction_share_day(kind, day) {
+            return;
+        }
+        let key = format!("{kind} {day} {only}");
+        let current = |definition: Option<u32>| {
+            definition.is_some_and(|definition| current_for(kind, day, definition))
+        };
+        match verb {
+            "begin" => {
+                if !current(self.run_definition) {
+                    let before = self
+                        .auction_keys
+                        .get(&format!("{kind} {day}"))
+                        .is_some_and(|filters| filters.contains(only));
+                    self.begun_early.entry(key).or_insert(before);
+                    self.note_auction_key(kind, day, only);
+                }
+            }
+            "refused" => {
+                // Wrote nothing: an early `begin` before it is undone.
+                if self.begun_early.remove(&key) == Some(false)
+                    && let Some(filters) = self.auction_keys.get_mut(&format!("{kind} {day}"))
+                {
+                    filters.remove(only);
+                }
+            }
+            "incomplete" => {
+                self.begun_early.remove(&key);
+                if !current(built) {
+                    self.note_auction_key(kind, day, only);
+                }
+            }
+            _ => {
+                self.begun_early.remove(&key);
+                if current(built) {
+                    self.end_auction_keys(kind, day, only);
+                } else {
+                    self.note_auction_key(kind, day, only);
+                }
+            }
+        }
     }
 
     /// Whether an earlier run began `day` of `kind`, under any filter, and
@@ -2582,8 +2750,12 @@ impl Journal {
                     return Err(());
                 }
                 self.runs.insert(id);
+                // The definition the run's days are built under, which its
+                // `begin` lines do not say (D-4878 item 10).
+                self.run_definition = definition_of(rest)?;
             }
             ["begin", kind, day, only] => {
+                self.auction_line("begin", (*kind, *day, *only), None);
                 let key = key(kind, day, only);
                 self.refused_close.remove(&key);
                 self.open.insert(key);
@@ -2592,6 +2764,7 @@ impl Journal {
                 let definition = built_under(stats)?;
                 run_of(stats)?;
                 let refused = count_of(stats, "vendor_refused")?.unwrap_or(0);
+                self.auction_line("done", (*kind, *day, *only), definition);
                 let key = key(kind, day, only);
                 self.refused_close.remove(&key);
                 self.open.remove(&key);
@@ -2631,8 +2804,9 @@ impl Journal {
                 only,
                 stats @ ..,
             ] => {
-                definition_of(stats)?;
+                let built = definition_of(stats)?;
                 run_of(stats)?;
+                self.auction_line(verb, (*kind, *day, *only), built);
                 let key = key(kind, day, only);
                 if *verb == "refused" {
                     let unrun: Vec<&str> = fields
@@ -2655,6 +2829,7 @@ impl Journal {
                 let definition = definition_of(stats)?;
                 count_of(stats, "months")?;
                 run_of(stats)?;
+                self.auction_line("recounted", (*kind, *day, *only), definition);
                 let key = key(kind, day, only);
                 self.refused_close.remove(&key);
                 self.open.remove(&key);
@@ -3009,16 +3184,23 @@ fn closing_line(key: &str, close: Close, counts: &Counts, scope: &str) -> String
 }
 
 /// The run's `run` line (D-3317 item 4): its source as the caller measured
-/// it, or `unrecorded` for every part a caller did not hand on.
+/// it, or `unrecorded` for every part a caller did not hand on, and last the
+/// bar definition its days are built under (D-4878 item 10): a `begin` line
+/// does not say it, and a day an earlier definition began and never closed
+/// is told from one this build began only by it. Every build before
+/// definition 4 wrote none, and a load reads a run line that names none as
+/// one of those; each earlier build reads any `name=value` field of a run
+/// line, so the field leaves the journal readable by them.
 fn run_line(id: u64, started: u64, origin: Option<&Origin>) -> String {
     let Some(origin) = origin else {
         return format!(
             "run {id} source=unrecorded archive=unrecorded archive_bytes=unrecorded \
-             commit=unrecorded started={started}"
+             commit=unrecorded started={started} definition={BAR_DEFINITION}"
         );
     };
     format!(
-        "run {id} source={} archive={} archive_bytes={} commit={} started={started} {}={}",
+        "run {id} source={} archive={} archive_bytes={} commit={} started={started} {}={} \
+         definition={BAR_DEFINITION}",
         origin.source.as_str(),
         encoded(origin.path.as_os_str().as_encoded_bytes()),
         origin.archive_bytes,
@@ -4588,55 +4770,78 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
     }
     if restated_past_append(ctx.journal, ctx.run.kind, key, day) {
         report.days_refused += 1;
-        let cause = Cause::open(Stage::File, RESTATED_AUCTION_BAND);
-        let why = "restated by bar definition 4 (the closing auction's band through matching, \
-                   D-4878 item 10): this month is made again as a new generation (D-3320 item 4, \
-                   WP-80); an append cannot land it, since a reading that builds fewer bars than \
-                   the month holds is answered AlreadyPresent";
-        let mut failures = vec![Staged {
-            cause,
-            failure: note_failure(ctx.run.kind, day, "store", why, cause),
-        }];
-        let counts = Counts {
-            failures: 1,
-            ..Counts::default()
-        };
-        let _refused = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
-        report
-            .failures
-            .extend(failures.into_iter().map(|one| one.failure));
+        let _refused = refuse_restated(ctx, (key, day), report);
         return false;
     }
     name_retried(ctx.journal, ctx.run.kind, (key, day, retried), report);
     true
 }
 
+/// Closes `key` `refused` with [`RESTATED_AUCTION_BAND`], named in the
+/// report's failures: a key that would read a share whose months may hold a
+/// bar definition 4 no longer builds ([`restated_past_append`]). Nothing of
+/// the day is read.
+fn refuse_restated(ctx: &Ctx<'_>, (key, day): (&str, Day), report: &mut Report) -> Outcome {
+    let cause = Cause::open(Stage::File, RESTATED_AUCTION_BAND);
+    let why = "restated by bar definition 4 (the closing auction's band through matching, \
+               D-4878 item 10): a key of this day that may have built a share it reads under an \
+               earlier definition is not closed done under 4 by a reading of those shares; the \
+               month is made again as a new generation (D-3320 item 4, WP-80); an append cannot \
+               land it, since a reading that builds fewer bars than the month holds is answered \
+               AlreadyPresent";
+    let mut failures = vec![Staged {
+        cause,
+        failure: note_failure(ctx.run.kind, day, "store", why, cause),
+    }];
+    let counts = Counts {
+        failures: 1,
+        ..Counts::default()
+    };
+    let outcome = ctx.close((key, day), Close::Refused(cause), &counts, &mut failures);
+    report
+        .failures
+        .extend(failures.into_iter().map(|one| one.failure));
+    outcome
+}
+
 /// The `reason=` of a share's day of the closing auction's era that
 /// definition 4 restated (D-4878 item 10).
 const RESTATED_AUCTION_BAND: &str = "restated_auction_band";
 
-/// Whether `key` is a share's day of the closing auction's era whose last
-/// `done` was built under a definition before 4 (D-4878 item 10, CMP-07). Such
-/// a day is refused by name at admission, every run, until a `done` under 4
-/// closes it, and is never read through the append door: definition 4 takes
-/// the auction's print OUT of the bars, so the second reading is often the
-/// held day less its last bar, which the append-only month answers
-/// `AlreadyPresent` (it compares the bars offered, never the held bar after
-/// them), and the day would close `done` under 4 with the print still a bar,
-/// unsaid. The journal keeps a key restated through its later `refused`
-/// lines, so the refusal holds without another record. A key under a names
-/// filter is refused too when the day's whole-tree key is restated: the
-/// months it would append to were made by that key, and the second reading
-/// of its shares meets the same held print. O(1) whatever the journal holds:
-/// two hash probes of the restated set and a date compare, timed at two
+/// Whether a key (`<kind> <day> <filter>`, or a member key
+/// `<kind> <day> <filter>+<member>`) would read a share, on a share's day of
+/// the closing auction's era, whose months may hold a bar definition 4 no
+/// longer builds (D-4878 item 10, CMP-07): a share some key of that day,
+/// UNDER ANY FILTER, closed `done` or `recounted` under 2 or 3, closed
+/// `incomplete` under one, or began under a run of one and never closed, and
+/// no later close under 4 of a filter that read it has ended. Such a key is
+/// refused by name, every run, and never read through the append door:
+/// definition 4 takes the auction's print OUT of the bars, so the second
+/// reading is often the held day less its last bar, which the append-only
+/// month answers `AlreadyPresent` (it compares the bars offered, never the
+/// held bar after them), and the key would close `done` under 4 with the
+/// print still a bar, unsaid. Asking only the key itself and the day's
+/// whole-tree key let a run under one filter read a share another filter's
+/// key had built under 3 (check 4 of WP-12f, 14 Oct 2026). The journal keeps
+/// a key's entry through its later `refused` lines, so the refusal holds
+/// without another record.
+///
+/// O(1) in the journal's size: one hash probe for the day, then one probe a
+/// share the key names (`*` names none; a member key names one), the
+/// asking filter's own few, never a walk of the journal. Timed at two
 /// journal sizes a hundredfold apart by
 /// `pull::gdfl_import::tests::scope_reopen::the_auction_era_admission_check_costs_the_same_at_any_journal_size`.
 fn restated_past_append(journal: &Journal, kind: ImportKind, key: &str, day: Day) -> bool {
     if kind != ImportKind::Stocks || !crate::vendor::cash_auction_eligibility_required(day) {
         return false;
     }
-    let whole = format!("{} {day} *", kind.as_str());
-    journal.restated.contains(key) || journal.restated.contains(whole.as_str())
+    let Some((of_day, filter)) = key.rsplit_once(' ') else {
+        return false;
+    };
+    journal
+        .auction_restated
+        .get(of_day)
+        .is_some_and(|restated| restated.meets(filter))
 }
 
 /// Names `day` in `resumed` when the journal sends it back, whatever closed
@@ -5644,6 +5849,11 @@ where
         "{day} is read under a request that does not hold it"
     );
     if pass.member.is_some() {
+        // A member key reads its one share through the same append door a
+        // base key does, so it is asked the same question (D-4878 item 10).
+        if restated_past_append(ctx.journal, run.kind, key, day) {
+            return Ok(Some(refuse_restated(ctx, (key, day), report)));
+        }
         let retried = ctx.options.retry_refused && ctx.journal.with_refusals.contains(key);
         name_retried(ctx.journal, run.kind, (key, day, retried), report);
     }
