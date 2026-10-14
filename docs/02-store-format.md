@@ -3889,6 +3889,9 @@ caller's rows: `codec`, `flags`, `rows` (0 or above `block_rows`),
 `truncated`, `varint_too_long`, `width`, `mode`, `exception_count`,
 `exception_width`, `gcd`, `exception_position` (at or past `m − 1`),
 `exception_order`, `trailing_bytes`. `decode_stamps` makes every check
-`decode_frame` makes and unpacks only the ts stream. Invariants SC1-01 to
-SC1-08 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
+`decode_frame` makes and unpacks only the ts stream. Every check, the
+trailing bytes included, is made before the caller's buffer grows: a refused
+frame reserves nothing, and an accepted one reserves its head's rows once
+(FM-284). Invariants SC1-01 to
+SC1-09 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
 `docs/06-limits.md`.

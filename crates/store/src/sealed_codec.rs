@@ -588,7 +588,10 @@ pub fn encode_frame(
 /// # Errors
 ///
 /// A [`FrameError`] naming the first malformed part. On an error `out` is
-/// left exactly as it was handed in: never a partial frame.
+/// left exactly as it was handed in: never a partial frame, and nothing
+/// reserved. Every part of the frame is checked before `out` grows, so the
+/// most one call reserves is the checked head's rows times
+/// `size_of::<Bar>()`, at most `block_rows` rows (FM-284).
 pub fn decode_frame(
     frame: &[u8],
     crc: u32,
@@ -598,14 +601,16 @@ pub fn decode_frame(
 ) -> Result<usize, FrameError> {
     let (rows, flags, mut cursor) = open(frame, crc, block_rows)?;
     let first = first_row(&mut cursor, flags, origin_micros)?;
+    let streams = parse_streams(&mut cursor, rows - 1)?;
+    // Every byte of the frame is checked before the first byte of `out` is
+    // reserved: a refused frame allocates nothing, and an accepted one
+    // reserves exactly the rows its checked head states (FM-284).
     let start = out.len();
     out.reserve(rows);
     out.push(first);
     out.resize(start + rows, Bar::default());
-    fill(&mut cursor, rows - 1, &first, out, start)
-        .and_then(|()| finish(&cursor))
-        .map(|()| rows)
-        .inspect_err(|_| out.truncate(start))
+    fill(&streams, &first, out, start);
+    Ok(rows)
 }
 
 /// Decodes only the stamps of one frame and appends them to `out`; returns
@@ -627,34 +632,40 @@ pub fn decode_stamps(
 ) -> Result<usize, FrameError> {
     let (rows, flags, mut cursor) = open(frame, crc, block_rows)?;
     let first = first_row(&mut cursor, flags, origin_micros)?;
-    let start = out.len();
-    stamps(&mut cursor, rows, first.ts_micros, out)
-        .map(|()| rows)
-        .inspect_err(|_| out.truncate(start))
-}
-
-/// Unpacks the ts stream into `out` and walks the other six without
-/// unpacking them.
-fn stamps(
-    cursor: &mut Cursor<'_>,
-    rows: usize,
-    first: i64,
-    out: &mut Vec<i64>,
-) -> Result<(), FrameError> {
-    let residuals = rows - 1;
-    let stream = Stream::parse(cursor, Column::Stamp, residuals)?;
-    let mut values = stream.values();
+    let [stamp, ..] = parse_streams(&mut cursor, rows - 1)?;
+    // As in `decode_frame`: nothing is reserved until the whole frame passed.
+    let mut values = stamp.values();
     out.reserve(rows);
-    out.push(first);
-    let mut last = first;
-    for _ in 0..residuals {
+    out.push(first.ts_micros);
+    let mut last = first.ts_micros;
+    for _ in 1..rows {
         last = last.wrapping_add(values.next_value());
         out.push(last);
     }
-    for column in Column::ORDER.into_iter().skip(1) {
-        Stream::parse(cursor, column, residuals)?;
-    }
-    finish(cursor)
+    Ok(rows)
+}
+
+/// Parses and checks all seven streams in [`Column::ORDER`], then refuses any
+/// byte after the seventh. Nothing is allocated: a stream is three slices of
+/// the frame. Once this returns `Ok`, unpacking cannot fail.
+fn parse_streams<'a>(
+    cursor: &mut Cursor<'a>,
+    residuals: usize,
+) -> Result<[Stream<'a>; COLUMNS], FrameError> {
+    let order = Column::ORDER;
+    // An array expression evaluates its elements left to right: the streams
+    // are read in the order they are written.
+    let streams = [
+        Stream::parse(cursor, order[0], residuals)?,
+        Stream::parse(cursor, order[1], residuals)?,
+        Stream::parse(cursor, order[2], residuals)?,
+        Stream::parse(cursor, order[3], residuals)?,
+        Stream::parse(cursor, order[4], residuals)?,
+        Stream::parse(cursor, order[5], residuals)?,
+        Stream::parse(cursor, order[6], residuals)?,
+    ];
+    finish(cursor)?;
+    Ok(streams)
 }
 
 /// Checks the checksum and the head; returns the rows, the flags and a cursor
@@ -713,17 +724,11 @@ fn first_row(cursor: &mut Cursor<'_>, flags: u8, origin_micros: i64) -> Result<B
     })
 }
 
-/// Decodes the seven streams into rows `start + 1 ..` of `out`, which hold
-/// defaults; row `start` is row 0.
-fn fill(
-    cursor: &mut Cursor<'_>,
-    residuals: usize,
-    first: &Bar,
-    out: &mut [Bar],
-    start: usize,
-) -> Result<(), FrameError> {
-    for column in Column::ORDER {
-        let stream = Stream::parse(cursor, column, residuals)?;
+/// Unpacks the seven checked streams into rows `start + 1 ..` of `out`, which
+/// hold defaults; row `start` is `first`. It cannot fail: [`parse_streams`]
+/// checked every region it reads.
+fn fill(streams: &[Stream<'_>; COLUMNS], first: &Bar, out: &mut [Bar], start: usize) {
+    for (column, stream) in Column::ORDER.into_iter().zip(streams) {
         let mut values = stream.values();
         let rows = out.iter_mut().skip(start + 1);
         match (column, stream.mode) {
@@ -789,7 +794,6 @@ fn fill(
             }
         }
     }
-    Ok(())
 }
 
 /// Refuses bytes after the seventh stream.

@@ -68369,7 +68369,13 @@ time table, provenance) is SC-2's and is not decided here.
    `gcd`, `exception_position`, `exception_order`, `trailing_bytes`. None is a
    panic, and on a refusal nothing is appended to the caller's buffer.
    `decode_stamps` makes every check `decode_frame` makes and unpacks only the
-   ts stream, for a time lookup.
+   ts stream, for a time lookup. **Every check is made before the buffer
+   grows** (FM-284, SC1-09): all seven streams and the trailing bytes are read
+   as slices of the frame first, so a head or a stream that lies under a
+   matching checksum is refused having allocated nothing, and an accepted
+   frame reserves its checked rows once. The proof counts the allocator's
+   bytes, in `crates/pull/tests/allocation.rs`, the one test root Gate 16 lets
+   implement `GlobalAlloc` (D-0724); `pull` already depends on `store`.
 
 **Why the exact choice, not the prototype's.** The blocks prototype chose a
 width by an approximate bit cost (`n·w + exceptions·(p + top) + 16`) and
