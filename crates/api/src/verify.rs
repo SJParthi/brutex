@@ -286,7 +286,11 @@ pub(crate) async fn vendor_off_worker(
     root: PathBuf,
     census: VendorCensus,
 ) -> Result<Report, (axum::http::StatusCode, String)> {
-    crate::detail::run_store_read(move || vendor(&root, &census))
+    // TIMED AS A CHECKING STAGE (R3-14, RA-014): `stage:vendor scrub` on
+    // `/speed.json`; a full pool (429) counts busy, a scrub that could not be
+    // joined (503) failed.
+    let stage = crate::speed::stage_start("vendor scrub");
+    let scrubbed = crate::detail::run_store_read(move || vendor(&root, &census))
         .await
         .map_err(|why| {
             crate::detail::admission_refused(
@@ -294,7 +298,12 @@ pub(crate) async fn vendor_off_worker(
                 crate::detail::MAX_STORE_READ_CONCURRENT,
                 &why,
             )
-        })
+        });
+    stage.finish_now(match &scrubbed {
+        Ok(_) => crate::speed::Outcome::Answered,
+        Err((status, _)) => crate::speed::Outcome::of(status.as_u16(), false),
+    });
+    scrubbed
 }
 
 #[cfg(test)]

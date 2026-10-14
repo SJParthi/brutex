@@ -52,7 +52,9 @@ fn main() -> std::process::ExitCode {
     let _refusal = api::server::arm_unstamped_gate();
     let code = runtime.block_on(async {
         match text_args(raw) {
-            Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+            // CTRL-C OR SIGTERM (R3-14): a `kill -TERM` stops gracefully too,
+            // so the speed table's open minute is written (`api::speed`).
+            Ok(args) => api::server::run(&args, Box::pin(api::speed::stop_asked())).await,
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED

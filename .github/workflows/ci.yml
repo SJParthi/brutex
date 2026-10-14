@@ -3760,6 +3760,39 @@ jobs:
           [ -s "$work/bench-manifests.z" ] || st_k=1
           "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work" "$st_p" "$st_k"
 
+      - name: Gate 28 — every served route has a limits row and a growth bench
+        run: |
+          set -euo pipefail
+          # R3-14 (NEW-02, RA-031, RA-064): `.github/gates_routes.rs`, std
+          # only, proved by its own tests first. It reads the server's route
+          # table, `docs/06-limits.md`'s `## Every route:` section and every
+          # `ROUTES` list of `crates/api/benches/ratio`. RED is a served route
+          # with no limits row or no 1x/10x/100x bench that the tool does not
+          # name as owed with its owner and why, a `/db` read without its
+          # bench, or an owed line gone stale, so the owed lists only shrink.
+          work=$(mktemp -d)
+          rustc --edition=2024 --test -D warnings .github/gates_routes.rs -o "$work/gates-routes-tests"
+          "$work/gates-routes-tests"
+          rustc --edition=2024 -D warnings .github/gates_routes.rs -o "$work/gates-routes"
+          "$work/gates-routes" .
+
+      - name: Gate 28b — the checks list and the owners check prove themselves
+        run: |
+          set -euo pipefail
+          # R3-14 (NEW-02, NEW-37, RA-184, RA-325). `.github/checks_all.rs`
+          # is the list of every check and the verdict over a run of them,
+          # and `checks_all script` prints the loop that runs them locally.
+          # `.github/findings_owner.rs` holds every confirmed finding and
+          # audit row to an owner; the board it reads lives outside the
+          # repository, so CI runs its tests (a synthetic board) and the
+          # local run reads the real one. Both are std only, built by rustc,
+          # and start no program.
+          work=$(mktemp -d)
+          rustc --edition=2024 --test -D warnings .github/checks_all.rs -o "$work/checks-all-tests"
+          "$work/checks-all-tests"
+          rustc --edition=2024 --test -D warnings .github/findings_owner.rs -o "$work/findings-owner-tests"
+          "$work/findings-owner-tests"
+
   build:
     name: Gates 3-6 — fmt, clippy, deny, test
     runs-on: ubuntu-24.04

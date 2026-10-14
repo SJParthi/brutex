@@ -5734,7 +5734,15 @@ async fn land_broker_member(
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
     asked: &ingest::SpotRequest,
 ) -> pull::ingest::Ingested {
+    // TIMED AS A STAGE (R3-14, RA-014): each member's landing, in the buckets
+    // a route has, on `/speed.json` as `stage:zerodha landing`.
+    let stage = crate::speed::stage_start("zerodha landing");
     let mut landed_one = land_spot(landed, instrument, site, dated, asked.repair.as_deref()).await;
+    stage.finish_now(if landed_one.failures.is_empty() {
+        crate::speed::Outcome::Answered
+    } else {
+        crate::speed::Outcome::Failed
+    });
     note_short_window(
         &landed.instrument,
         landed.unfetched.as_deref(),
@@ -16096,6 +16104,17 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             axum::routing::get(crate::operation_audit::audit_json),
         )
         .route("/health", axum::routing::get(health))
+        // THE APP'S OWN SPEED, AND A PAGE'S OWN FAILURE (R3-14, RA-014): p50,
+        // p99 and max per route kept by `crate::speed`, and the one route a
+        // page reports that it broke on, 1 KiB a report, rationed, audited.
+        .route(
+            "/speed.json",
+            axum::routing::get(crate::speed_route::speed_json),
+        )
+        .route(
+            "/page-report",
+            axum::routing::post(crate::page_report_route::page_report),
+        )
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
         // every line above keeps winning and nothing on disk can shadow one.
         .fallback(move |request: axum::extract::Request| {
@@ -17147,14 +17166,26 @@ pub async fn serve_limited(
         limits.body_read_timeout,
         body_deadline,
     ));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // The signal's own error is not actionable: a failed ctrl-c
-            // registration still means stop, and there is nothing else to do
-            // about it here.
-            let _ = shutdown.await;
-        })
-        .await
+    // THE GRACEFUL STOP IS BOUNDED (R3-14): `crate::speed::drain_bound`
+    // waits for requests still open at most `DRAIN_GRACE` past the signal,
+    // then says so, and the stop returns: a slow read cannot hold a
+    // `kill -TERM`.
+    let (stopping, stop_asked) = tokio::sync::oneshot::channel::<()>();
+    let served = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // The signal's own error is not actionable: a failed ctrl-c
+        // registration still means stop, and there is nothing else to do
+        // about it here.
+        let _ = shutdown.await;
+        let _bound_armed = stopping.send(());
+    });
+    let served = tokio::select! {
+        ended = std::future::IntoFuture::into_future(served) => ended,
+        () = crate::speed::drain_bound(stop_asked, crate::speed::DRAIN_GRACE) => Ok(()),
+    };
+    // THE MINUTE STILL OPEN IS WRITTEN, marked partial, so a stop loses no
+    // count (R3-14): `crate::speed::flush_at_shutdown`.
+    let _lines = crate::speed::flush_at_shutdown();
+    served
 }
 
 /// probeapi-1, D-1200: slow, partial, silent, oversized and crowding clients
@@ -18033,6 +18064,23 @@ const SERVE_LOCK: &str = "serve.lock";
 /// a state to degrade through: `CLAUDE.md` §4 — degrade loudly and name the
 /// reason, or refuse.
 fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLock, String> {
+    take_serve_lock_stamping(store_root, addr, stamp_serve_lock)
+}
+
+/// [`take_serve_lock`] with its stamp step passed in: production passes
+/// [`stamp_serve_lock`]. A WRITE-FAILING SEAM, so the refusal of an
+/// unstampable lock is driven end to end on every host (R3-14, RA-184): it was
+/// driven through a lock name resolving to `/dev/full`, which macOS does not
+/// have, so the test failed on the operator's Mac before reaching its point.
+fn take_serve_lock_stamping(
+    store_root: &Path,
+    addr: std::net::SocketAddr,
+    stamp: impl FnOnce(
+        &store::flock::Flock<std::fs::File>,
+        std::net::SocketAddr,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<ServeLock, String> {
     // THE CONFIGURED ROOT MUST ALREADY EXIST. IT IS NEVER STARTUP SCRATCH.
     //
     // Recreating it is unsafe for an external-volume path: after hot unplug,
@@ -18126,7 +18174,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // was taken left the PREVIOUS holder's line in the file, and a refused
     // second instance quoted that dead pid as the one holding the store -- the
     // misattribution R9-api-cx-2 fixed, back through the error path.
-    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
+    if let Err(refusal) = stamp(&file, addr, &path) {
         drop(file);
         release_root(&key);
         return Err(refusal);
@@ -23029,8 +23077,9 @@ mod tests {
     /// stamp's result was dropped, so a full disk left the previous holder's
     /// line for a refused instance to quote. Each arm of the decision is driven
     /// with the error the host gives, and the refusal is driven end to end
-    /// through a lock name that resolves to `/dev/full`, where every write
-    /// fails with ENOSPC and no length can be set.
+    /// through [`take_serve_lock_stamping`] with a stamp whose every write
+    /// fails with ENOSPC and whose length cannot be set -- what `/dev/full`
+    /// did on Linux, and on every host, macOS included (R3-14, RA-184).
     #[test]
     fn a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale() {
         let path = Path::new("/store/serve.lock");
@@ -23089,18 +23138,30 @@ mod tests {
             "{refused}"
         );
 
-        let root = crate::scratch::path("serve-lock-dev-full");
+        let root = crate::scratch::path("serve-lock-write-fails");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("mkdir");
-        let lock_path = root.join(SERVE_LOCK);
-        std::os::unix::fs::symlink("/dev/full", &lock_path).expect("the /dev/full name");
         let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
-        let refused = take_serve_lock(&root, addr).expect_err("an unstampable lock refuses");
+        let mut asked = 0;
+        let refused = take_serve_lock_stamping(&root, addr, |_held, at, path| {
+            asked += 1;
+            assert_eq!(at, addr, "the stamp is handed this instance's address");
+            stamp_outcome(
+                || Err(std::io::Error::from_raw_os_error(28)),
+                || Err(std::io::Error::from_raw_os_error(22)),
+                path,
+            )
+            .map(|_warning| ())
+        })
+        .expect_err("an unstampable lock refuses");
+        assert_eq!(asked, 1, "the stamp step ran once, with the lock held");
         assert!(refused.contains("could not be written"), "{refused}");
-        // The refusal released both the file lock and the in-process key: with
-        // a regular lock file at the name, the same store is taken at once.
-        std::fs::remove_file(&lock_path).expect("unlink");
+        assert!(refused.contains(SERVE_LOCK), "{refused}");
+        // The refusal released both the file lock and the in-process key: the
+        // same store is taken at once, and stamped for real.
         let taken = take_serve_lock(&root, addr).expect("the store is free again");
+        let stamp = std::fs::read_to_string(root.join(SERVE_LOCK)).expect("the stamp");
+        assert_eq!(stamp, format!("addr={addr} pid={}\n", std::process::id()));
         assert!(
             taken.held.is_some(),
             "a real file lock, not the in-process pass"
