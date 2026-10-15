@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import {
   VERDICT_ORDER, VERDICTS, archiveLane, defaultWindow, emptySeen, feedSpan, monthVerdict, outsideSpan,
   refusalBatches, refusalErrorsSentence, refusalIndex, refusalJoin, refusalSentence, refusedMonth,
-  seriesVerdict, unsettledSpans, verdictWords, wholeUnlisted
+  seriesVerdict, unsettledSpans, verdictWords, wholeUnlisted,
+  REASON_CODES, openMonth, reasonWords, settledMonth
 } from '../src/lib/ingest-months.js';
 import { readFileSync } from 'node:fs';
 
@@ -274,7 +275,7 @@ test('the notice names how many instruments are unread and the first few, in the
 test('the page judges a month through the join and draws every unread state', () => {
   const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
   assert.match(page, /const join = isBroker \? refusalJoin\(refusals, feedNow, m\.symbol\) : \{ read: true, why: '' \}/);
-  assert.match(page, /monthVerdict\(\{ beyond, bars, expect, sessions, refused: why !== null, unread: s\.key === 'spot' && unreadWhy !== '' \}\)/);
+  assert.match(page, /monthVerdict\(\{\s+beyond, bars, expect, sessions, refused: why !== null, unread: s\.key === 'spot' && unreadWhy !== '',[\s\S]{0,200}loading: held\.loading,[\s\S]{0,200}countOnly: r\.per === null \|\| !derivable\s+\}\)/);
   assert.match(page, /const unreadWhy = !join\.read\s+\? join\.why\s+: unlisted > 0/);
   assert.match(page, /unread: k === 'unread' \? unreadWhy : ''/);
   // The per-symbol errors are read, and each unread state has its own notice.
@@ -392,4 +393,87 @@ test('an archive’s measured span is its reach on the strip, never "reach not s
   // The folder halt no longer denies the store's rows drawn under it.
   assert.doesNotMatch(page, /nothing below is a census\s+of anything/);
   assert.match(page, /they are the bars the STORE already holds/);
+});
+
+/* ======================================================================
+   R4-01: NOT LOOKED UP IS NOT ABSENT, A SECOND HAS NO YARDSTICK, AND THE
+   REASON CODES LATER PACKAGES SERVE. Every fixture is invented.
+   ====================================================================== */
+
+test('a month the census has not been read for is loading, never never-imported (R4-01, V1)', () => {
+  // Before R4-01 the page probed an empty index and read `bars: null` as "no
+  // file": every month `never`, the series `never imported`, 0 bars.
+  const k = monthVerdict({ beyond: false, bars: null, expect: null, refused: false, loading: true });
+  assert.equal(k, 'loading');
+  assert.equal(monthVerdict({ beyond: true, bars: null, expect: null, refused: false, loading: true }), 'beyond',
+    'out of reach is decided by the feed, not by the census');
+  const seen = { ...emptySeen(), loading: 97 };
+  assert.equal(seriesVerdict({ seen, months: 97, got: 0, inFlight: false, halted: false }), 'loading');
+  assert.equal(seriesVerdict({ seen, months: 97, got: 0, inFlight: false, halted: true }), 'loading',
+    'a halt cannot be called a failure of months nobody looked up');
+  assert.equal(VERDICTS.loading[1], 'census unread');
+  assert.equal(openMonth('loading'), false, 'a pull never asks for a month nobody looked up');
+  assert.equal(settledMonth('loading'), false);
+  assert.deepEqual(unsettledSpans([{ month: '2024-01', k: 'loading' }, { month: '2024-02', k: 'never' }], '2024-01-01', '2024-02-29', lastDay),
+    [{ from: '2024-02-01', to: '2024-02-29', months: 1 }]);
+});
+
+test('a held month at a rung with no yardstick is held: counted, settled, never compared (R4-01, V1)', () => {
+  // Before R4-01: `unknown`, and 97 held months read "97/97 unproved".
+  assert.equal(monthVerdict({ beyond: false, bars: 342_001, expect: null, refused: false, countOnly: true }), 'held');
+  assert.equal(monthVerdict({ beyond: false, bars: 342_001, expect: null, refused: false }), 'unknown',
+    'an unknown denominator for any other reason stays unknown');
+  assert.equal(monthVerdict({ beyond: false, bars: null, expect: null, refused: false, countOnly: true }), 'never',
+    'no file is still no file');
+  assert.equal(monthVerdict({ beyond: false, bars: 0, expect: null, refused: false, countOnly: true }), 'unknown',
+    'a file holding no bar is not held');
+  assert.equal(settledMonth('held'), true);
+  assert.equal(openMonth('held'), false);
+  const all = { ...emptySeen(), held: 97 };
+  assert.equal(seriesVerdict({ seen: all, months: 97, got: 36_000_000, inFlight: false, halted: false }), 'held');
+  const gap = { ...emptySeen(), held: 96, never: 1 };
+  assert.equal(seriesVerdict({ seen: gap, months: 97, got: 36_000_000, inFlight: false, halted: false }), 'partial',
+    'a missing month is still a gap beside held ones');
+  assert.ok(VERDICT_ORDER.indexOf('held') > VERDICT_ORDER.indexOf('unknown'));
+  assert.equal(verdictWords(true).held[1], 'held · no yardstick');
+});
+
+test('each_reason_code_reads_its_sentence', () => {
+  const sentences = new Map([['before_listing', 'The month is before the instrument was listed on NSE.']]);
+  const titleFor = (/** @type {string} */ code) => sentences.get(code) ?? null;
+  const words = Object.fromEntries(REASON_CODES.map((code) => [code, reasonWords({
+    code, symbol: 'FAKESYM', circular: 'NSE/CML/00000', date: '2099-01-02', asked: '2099-01-03', receipt: 'r-0001'
+  }, titleFor)]));
+  assert.equal(words.instrument_inactive.word, 'not owed: NSE withdrew FAKESYM (NSE/CML/00000)');
+  assert.equal(words.before_listing.word, 'before listing');
+  assert.equal(words.after_delisting.word, 'delisted 2099-01-02');
+  assert.equal(words.unread.word, 'unread');
+  assert.equal(words.vendor_publishes_none.word, 'vendor publishes none (asked 2099-01-03, receipt r-0001)');
+  assert.equal(words.complete.word, 'complete 2099-01-02');
+  assert.equal(words.checking.word, 'checking');
+  assert.equal(words.unreachable.word, 'unreachable');
+  for (const code of REASON_CODES) assert.equal(words[code].known, true, code);
+  // THE SENTENCE IS /reasons.json'S; until it is served the code itself is the title.
+  assert.equal(words.before_listing.title, 'The month is before the instrument was listed on NSE.');
+  assert.match(words.checking.title, /^checking: no sentence for this code is served/);
+  // A field the code needs and the reason lacks is said, never filled.
+  assert.equal(reasonWords({ code: 'instrument_inactive', symbol: 'FAKESYM' }).word, 'not owed: NSE withdrew FAKESYM (circular not stated)');
+  assert.equal(reasonWords({ code: 'after_delisting' }).word, 'delisted (date not stated)');
+  // An unknown code is shown verbatim, never dropped; no code is named as such.
+  assert.deepEqual(reasonWords({ code: 'needs_month_generation' }), {
+    code: 'needs_month_generation', word: 'needs_month_generation', known: false,
+    title: 'needs_month_generation: no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it.'
+  });
+  assert.equal(reasonWords(null).word, 'no reason code');
+  assert.equal(reasonWords({ code: 'checking' }, () => { throw new Error('table not loaded'); }).word, 'checking',
+    'a lookup that throws leaves the code, never a crash');
+});
+
+// R4-01 repair round 1: a reasons table that throws is named in the title,
+// never read as "this build serves no sentence".
+test('a reasons table that throws is named, not swallowed', () => {
+  const r = reasonWords({ code: 'unread' }, () => { throw new Error('PROBE: table broken'); });
+  assert.equal(r.word, 'unread');
+  assert.equal(r.title, 'unread: the reasons table failed while looking this code up (PROBE: table broken), so the code is shown as the server sent it.');
+  assert.match(reasonWords({ code: 'unread' }, () => null).title, /no sentence for this code is served by this build/);
 });
