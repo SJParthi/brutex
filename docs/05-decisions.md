@@ -68527,3 +68527,81 @@ while the template carries a stray key (a guess about how the server split it).
 `web/tests/ingest-months.test.js` (`each_reason_code_reads_its_sentence`),
 `web/tests/pull-plan.test.js` (`a_plan_projection_renders_one_line_and_a_refusal_by_name`,
 `a plan larger than the free space reads as short by its shortfall`).
+
+### D-4962 — One month spelling for every route, and the `/bars` page reads `contract=` and never answers a contract with its underlying (AF-04; app-6, app-7) — 2026-10-15
+
+Two findings of the 14 October attack run, each confirmed by two skeptics.
+
+**app-7.** Three copies of the month parser (`server::month_param`,
+`spot::month_param`, the `/bars` page's own closure) split on `-` and handed
+each half to `str::parse`, which takes a leading `+` and any run of leading
+zeros. So `2024-3`, `2024-003`, `2024-0003`, `02024-03`, `%2B2024-03` and
+`2024-%2B3` all answered March 2024 under HTTP 200 on `/bars.json`, `/bars`,
+`/spot.json`, `/greeks.json`, `/gaps.json` (`to`) and `/provenance.json`, while
+the refusal sentence promised `YYYY-MM`. The data served was right; one month
+had several request texts in every access record and bookmark.
+
+1. **`bars::month_of_text` is THE month parser**: exactly seven bytes, four
+   ASCII digits, `-`, two ASCII digits, then `YearMonth::new`'s range. The
+   bytes are checked before any integer parse, so no sign and no padding can
+   reach `from_str`. It was already the strict copy for `bars_series` but
+   checked only the halves' LENGTHS, so `2024-+3` passed it too.
+2. `server::month_param` and `spot::month_param` call it, with the sentence
+   they already used (`"…" is not a YYYY-MM month for "<field>"`). The `/bars`
+   page calls it through `bars_month`, and an ABSENT month keeps its own
+   sentence ("no month was named") while a misspelt one now gets the parser's —
+   before, a misspelt month was told it had not been named. The `/store`
+   filter's `from`/`to` read it too; a misspelt bound narrows nothing and the
+   filter bar shows "All", as for every malformed narrowing there.
+3. **Not in this change**, named so they are not lost: `bars_route.rs`
+   `WindowAsk::parse`'s `month_of` (`/bars/window.json`, AF-05's file, which
+   switches to this parser there); `sources.rs` `month_of_text` and
+   `dayflags.rs` `bound`, each length-checked but still taking `2024-+3`.
+
+**app-6.** `bars_html` read no `contract=` and passed `None` to `bars::open`
+under a comment calling the page spot only, a choice no ledger entry recorded.
+So every contract link — every contract row's link on `/store`, which
+`render.rs` also built without `contract=` — opened the underlying's spot
+path below `FNO/` and answered 404 "…/FNO/NIFTY/1s/2024-03.bin does not
+exist" about a contract whose bars `/bars.json` served. Worse, with `segment=`
+omitted the spot walk placed the name at `INDEX` (or `CASH`) and answered 200
+with NIFTY's own index bars for a NIFTY option, RELIANCE's cash bars for a
+RELIANCE option: a different instrument's bars under a page that never named
+the contract, the fallback `CLAUDE.md` §4 bans.
+
+4. **One contract parse** (`server::contract_param`) for `/bars.json`
+   (`Addressed::parse`) and the `/bars` page. Empty is absent (`contract=` and
+   no `contract` are one request, as `/bars.json` always read it); present and
+   malformed is 400 naming `contract=`, never a fallback to spot. `contract=`
+   given twice stays the boundary's refusal (`request_bounds_refusal`).
+5. **A contract is placed only where contracts are filed.**
+   `server::files_contracts` is an exhaustive `match` over `Segment`: `FNO`
+   files contracts, `INDEX` and `CASH` do not, so a new segment must decide at
+   compile time. `segment=` omitted with a contract is `FNO` — the type's own
+   fact, not a default. A contract under `INDEX`, `CASH` or an unknown segment
+   is 400 naming the contract. `exchange=` given wins with no census read;
+   omitted, the ASKED feed's census is probed once per exchange
+   (`facets::EXCHANGES`) for the whole key — a hash probe each, never the spot
+   walk's census sort, never another feed's census (D-0695). Held on one
+   exchange answers it, on two is the existing ambiguity refusal, on none is
+   404 naming the contract files asked about, never a spot path.
+6. **The page names the contract**: the title and header read
+   `<symbol> <contract>`, the pager's links carry `contract=`, and a 404 from
+   `bars::open` names the contract file it tried.
+7. **`/store` links carry the contract**: a contract row's coverage link adds
+   `contract=`, a spot row's is unchanged.
+
+**Rejected:** keeping the page spot only and refusing `contract=` with a
+sentence — `/store` already linked every contract row here, so the control
+the old comment waited for existed; and resolving a segment-less contract by
+the census's spot walk — that walk skips contract rows by design and is the
+path that answered the underlying.
+
+**Proved by** `api::server::bars_page_tests::every_route_refuses_a_month_not_spelled_yyyy_mm`,
+`…::the_one_month_parser_takes_exactly_four_digits_a_dash_and_two`,
+`…::the_bars_page_shows_the_contract_it_was_asked_for`,
+`…::a_malformed_contract_on_the_bars_page_is_400`,
+`…::the_bars_page_never_answers_a_contract_with_its_underlyings_bars`,
+`…::the_bars_page_contract_extremes_answer_by_name` and
+`…::a_store_contract_row_links_to_its_contract_and_the_link_opens`
+(docs/04 AF4-01..AF4-06); costs in docs/06 L-AF4-01..L-AF4-02.

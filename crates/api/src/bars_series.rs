@@ -425,13 +425,34 @@ fn life_of(key: &SeriesKey, vendor: Vendor, held: &[YearMonth]) -> Option<(YearM
     Some((born, span_end.map_or(died, |to| to.max(died))))
 }
 
-/// `YYYY-MM` as a month, or `None`.
-pub(super) fn month_of_text(text: &str) -> Option<YearMonth> {
-    let (year, month) = text.split_once('-')?;
-    if year.len() != 4 || month.len() != 2 {
+/// `YYYY-MM` as a month, or `None`: THE ONE MONTH SPELLING EVERY ROUTE READS.
+///
+/// Exactly seven bytes — four ASCII year digits, `-`, two ASCII month digits —
+/// and then the range `YearMonth::new` already checks. Nothing else parses.
+///
+/// # Why the bytes are checked before any integer parse (app-7, AF-04)
+///
+/// Three routes split on `-` and handed each half to `str::parse`, and Rust's
+/// integer `from_str` accepts a leading `+` and any number of leading zeros.
+/// So `2024-3`, `2024-003`, `2024-0003`, `02024-03`, `+2024-03` and `2024-+3`
+/// all answered March 2024 under HTTP 200 while the refusal sentence promised
+/// `YYYY-MM`. This function was already the strict one for its own callers but
+/// checked only the LENGTHS of the halves, so `2024-+3` (two bytes after the
+/// dash) still passed it. One spelling of a month means one request text per
+/// month in every access record and every bookmark.
+///
+/// O(1): a fixed seven-byte pattern, six digit tests and two small integers.
+#[must_use]
+pub(crate) fn month_of_text(text: &str) -> Option<YearMonth> {
+    let &[y0, y1, y2, y3, b'-', m0, m1] = text.as_bytes() else {
         return None;
-    }
-    YearMonth::new(year.parse().ok()?, month.parse().ok()?).ok()
+    };
+    let digit = |byte: u8| byte.is_ascii_digit().then(|| byte - b'0');
+    let year = [y0, y1, y2, y3]
+        .into_iter()
+        .try_fold(0u16, |year, byte| Some(year * 10 + u16::from(digit(byte)?)))?;
+    let month = digit(m0)? * 10 + digit(m1)?;
+    YearMonth::new(year, month).ok()
 }
 
 /// What a month file's header says, kept between requests.
