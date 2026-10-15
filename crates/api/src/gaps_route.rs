@@ -2461,15 +2461,19 @@ mod tests {
             "one bar stored against a month the calendar owes 8,250 — the table \
              is independent of the bars, so it can still say that: {three}"
         );
+        // ONE MONTH SPELLING (app-7, AF-04, D-4962). This asserted that
+        // `to=2024-1` answered as January — the lenient parse the refusal
+        // sentence itself denied. `YYYY-MM` is the only spelling every route
+        // reads, so an unpadded month is refused with that sentence.
         let (short_code, _, short) = ask("&to=2024-1").await;
         assert_eq!(
             short_code,
-            axum::http::StatusCode::OK,
-            "an unpadded month is the same month: {short}"
+            axum::http::StatusCode::BAD_REQUEST,
+            "an unpadded month is not a YYYY-MM month: {short}"
         );
         assert!(
-            short.contains(r#""months":1"#),
-            "2024-1 is January, so the range is one month long: {short}"
+            short.contains(r#"\"2024-1\" is not a YYYY-MM month for \"to\""#),
+            "the refusal names the spelling and the field: {short}"
         );
     }
 
