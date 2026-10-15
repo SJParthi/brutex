@@ -68807,3 +68807,91 @@ path that answered the underlying.
 `…::the_bars_page_contract_extremes_answer_by_name` and
 `…::a_store_contract_row_links_to_its_contract_and_the_link_opens`
 (docs/04 AF4-01..AF4-06); costs in docs/06 L-AF4-01..L-AF4-02.
+
+### D-4963 — Readers of a dated NSE cash master share the day's lock and wait a named bound for an installer; a refused master load is kept only by the request that met it — 2026-10-14
+
+**Context** (AF-03, assurance finding p99-2, confirmed by two skeptics on 14
+October 2026). Every reader of `<store>/session-masters` that went through
+`pull::cash_session_cache::prepare_observed_with` or `prepare_with` took the
+installer's lock: exclusive (`Flock::try_lock`), non-blocking, and held through
+the gzip decode of the master (1.8 to 2.2 s for the 21 masters of one
+`/gaps.json` month). Four `/gaps.json` requests for one CASH month in parallel
+gave one right answer (`expected 7560`) and three answers of `expected 0,
+unmeasured 30240` whose month row named "lock acquisition failed because the
+operation would block"; four IDENTICAL RELIANCE requests gave two different
+bodies (CLAUDE.md §3 rule 5). The same exclusive hold refused every shared
+reader beside it — `read_local_lifecycle`, which `/bars.json`, the recovery
+auditor, a GDFL stocks import and `cli` call — and `api`'s bars window kept
+such a refusal as `None` in a process-wide memo commented "loaded once", so
+one collision left that day's closing-auction eligibility `Unknown` until the
+process restarted: the hidden fallback §4 bans. The shipped `/gaps` page sends
+one request per view, so the collision needs two tabs, an agent, the recovery
+auditor or a pull beside a request; it is not the page's own grid.
+
+**Decision.**
+
+1. A READER SHARES THE DAY. `prepare_with`, `prepare_observed_with` and
+   `read_local_lifecycle` take the day's lock shared, read and receipt-check
+   the bytes, release, and only then decode. Any number of readers in any
+   number of processes hold the day at once, so identical requests give
+   byte-identical bodies.
+2. AN INSTALLER HOLDS THE DAY ALONE, and only to re-check the entry under the
+   hold and publish it (payload, receipt last, directory sync). Its decode
+   runs before the hold. A second installer of the same bytes finds the entry
+   on its re-check and writes nothing; different bytes refuse as a conflict.
+3. EITHER SIDE WAITS AT MOST `LOCK_WAIT` (5 s) for the other, retrying with
+   pauses doubling from 1 ms to 20 ms, and then refuses BY NAME: the lock's
+   path, who held it ("an installer held it exclusively" / "readers or another
+   installer held it"), the bound and the wait, and what did not happen ("the
+   master is not read, and not read as absent" / "nothing was installed"). No
+   answer says "would block". A host refusal other than contention is named
+   as the host's.
+4. A lock path that is a symbolic link or a directory is refused by name
+   before and after the open, on every path.
+5. `api`'s bars window keeps a master in the process-wide memo only when it
+   LOADED (immutable once receipted) or when the day needs none (before
+   2026-08-03). A refusal is kept with its reason by the request's `Rules`
+   alone, so the request reads that day once, not once per bar, and the next
+   request reads it again.
+
+**Rejected.** (a) Keeping the exclusive lock for readers and retrying in the
+route: the decode still runs under it, so the wait is the decode's 2 s per
+month, and the shared readers elsewhere still refuse. (b) A blocking
+`lock_shared` with no bound: a stalled installer would hang every request
+behind it with no answer at all. (c) Remembering the refusal process-wide with
+its reason and a timeout: a timeout is a second clock to tune, and the
+request is already the natural unit of a retry. (d) Memoising the decoded
+masters across `/gaps.json` requests (finding p99-1): disputed and not in
+this run; its cost is named in `docs/06-limits.md`.
+
+**What remains** (`docs/06-limits.md`, AF-03): the reader's bounded wait
+sleeps its thread, on an async path too; a stream of readers can hold an
+installer off for the whole bound, after which it refuses by name; a
+`/gaps.json` month still decodes about 21 masters per request (O(D)); a day
+whose master is absent is read once per request per series by `/bars.json`.
+The reason a request kept is not yet on the `/bars.json` wire: the bar's
+phase reads `unverified`, which is visible, and naming the reason in
+`faults` is one line in `crates/api/src/bars.rs`, outside this package.
+
+**Measured** (`docs/06-limits.md` L-CSL-1 to L-CSL-5; GET only, on a private
+shadow of the real store, two release builds on 127.0.0.1:8702, evidence in
+`state/fix/round2/af03-evidence/`). Four identical RELIANCE 2026-08
+`/gaps.json` requests at once, 50 rounds: BEFORE 150 of 200 answers named
+"would block" with `expected 0` and the bodies took 2 distinct values; AFTER
+0 of 200, one body, byte-identical to the request made alone. Six symbols at
+once on 2026-09, 34 rounds: 170 of 204 refused BEFORE, 0 AFTER. Another
+process holding a day's lock shared (as `cli` and a GDFL import do) for the
+whole of 40 parallel requests: BEFORE 40 of 40 refused, AFTER 0 of 40. The
+same process holding it exclusively for 9 s: AFTER the request answered at
+5.002 s with the bound named, and the next one, after the release, answered
+`expected 7560`.
+
+**Proved by** `pull::cash_session_cache::lock_tests::eight_readers_of_one_day_all_get_the_same_answer`,
+`pull::cash_session_cache::lock_tests::a_reader_beside_an_installer_waits_then_answers_or_names_the_wait`,
+`pull::cash_session_cache::lock_tests::an_installer_beside_readers_installs_once`,
+`pull::cash_session_cache::lock_tests::a_shared_reader_never_blocks_the_lifecycle_reader`,
+`pull::cash_session_cache::lock_tests::sixty_four_parallel_readers_all_answer_alike`,
+`pull::cash_session_cache::lock_tests::missing_empty_corrupt_and_nonregular_evidence_refuses_by_name`,
+`pull::cash_session_cache::lock_tests::a_killed_holder_releases_the_day`,
+`pull::cash_session_cache::tests::local_lifecycle_busy_or_nonregular_lock_refuses_without_replacing_evidence`,
+`api::bars::change::tests::a_failed_masters_load_is_not_remembered`.
