@@ -662,3 +662,61 @@ fn a_masters_value_a_save_would_refuse_is_reported_as_the_server_reads_it() {
     let good = effective_from(None, Key::SourceMasters, Some(dir.clone().into_os_string()));
     assert_eq!(good.value.as_deref().map(PathBuf::from), Some(dir));
 }
+
+/// **A HOLE IN THE GENERATION NUMBERS IS SERVED, AND DEGRADES THE ANSWER**
+/// (R3-05 repair 4, the second agent's follow-up 2). Before: `/settings.json`
+/// had no word for a missing number, so a generation planted past one was
+/// invisible to a live reader and a restart put it in force with nothing
+/// said. The listing names the hole beside the damaged generation above it.
+#[test]
+fn a_hole_in_the_generation_numbers_is_served_and_degrades_the_answer() {
+    let root = root("holes");
+    let set = r#"{"expected":0,"changed_by":"a","reason":"b","set":{"open.order":"oldest"}}"#;
+    assert_eq!(change(&root, set).0, StatusCode::OK);
+    std::fs::write(
+        settings::path_of(&root, 3),
+        b"brutex-settings 1\ngeneration 3\n",
+    )
+    .unwrap();
+    // THE LIVE READER STEPS `n + 1` AND CANNOT SEE PAST THE HOLE: the
+    // stated limit (docs/06-limits.md L-R305-6), not agreement.
+    assert_eq!(super::answer(&root, 3)["highest"], 1);
+    // A SAVE LISTS FIRST: it finds 3, is refused stale against it, and the
+    // reader lists again, so 2 never lands in the hole.
+    let newer = r#"{"expected":1,"changed_by":"a","reason":"b","set":{"open.order":"newest"}}"#;
+    let (status, refused) = change(&root, newer);
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        !settings::path_of(&root, 2).exists(),
+        "nothing landed in the hole"
+    );
+    let answer = super::answer(&root, 3);
+    assert_eq!(answer["highest"], 3, "{answer}");
+    assert_eq!(answer["generation"], 1, "{answer}");
+    assert_eq!(answer["degraded"], true, "{answer}");
+    assert!(
+        answer["holes"]
+            .as_str()
+            .is_some_and(|holes| holes.starts_with("1 generation number(s) missing")
+                && holes.contains("(2)")),
+        "{answer}"
+    );
+    // THE HOLE ALONE DEGRADES: no fault and no stop, and `degraded` still
+    // says why.
+    let alone = super::Snapshot {
+        highest: 3,
+        newest: None,
+        faults: Vec::new(),
+        stopped: None,
+        holes: Some("1 generation number(s) missing (2)".to_owned()),
+    };
+    assert_eq!(
+        super::degraded(&alone).as_deref(),
+        Some("1 generation number(s) missing (2)")
+    );
+    let clean = super::Snapshot {
+        holes: None,
+        ..alone
+    };
+    assert_eq!(super::degraded(&clean), None);
+}

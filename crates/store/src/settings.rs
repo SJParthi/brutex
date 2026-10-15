@@ -327,6 +327,80 @@ pub fn path_of(root: &Path, number: u64) -> PathBuf {
     dir(root).join(format!("{number:020}.settings"))
 }
 
+/// Every generation number named in the settings directory of `root`,
+/// ascending; empty when the directory does not exist. O(names in the
+/// directory) plus a sort: run when a reader first lists and by every
+/// [`save`], never by a refresh that only steps (`docs/06-limits.md`
+/// L-R305-6).
+fn list_numbers(root: &Path) -> Result<Vec<u64>, Fault> {
+    let dir = dir(root);
+    let mut numbers: Vec<u64> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_str().and_then(number_of))
+            .collect(),
+        Err(why) if why.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(why) => {
+            return Err(Fault {
+                generation: 0,
+                path: dir,
+                why: why.to_string(),
+            });
+        }
+    };
+    numbers.sort_unstable();
+    Ok(numbers)
+}
+
+/// The numbers missing from `numbers` (ascending, unique) between 1 and the
+/// highest, in words: the first [`MAX_FAULTS`] and the count. `None` when
+/// they run unbroken. O(numbers).
+fn holes_in(numbers: &[u64]) -> Option<String> {
+    let mut first = Vec::new();
+    let mut count = 0_u64;
+    let mut expected = 1_u64;
+    for &number in numbers.iter().filter(|&&number| number > 0) {
+        if number > expected {
+            let missing = number - expected;
+            count = count.saturating_add(missing);
+            let mut at = expected;
+            while first.len() < MAX_FAULTS && at < number {
+                first.push(at.to_string());
+                at += 1;
+            }
+        }
+        // `u64::MAX` HAS NO SUCCESSOR: nothing above it can be missing.
+        let Some(next) = number.checked_add(1) else {
+            break;
+        };
+        expected = next;
+    }
+    (count > 0).then(|| {
+        format!(
+            "{count} generation number(s) missing below the highest on disk ({}{}): a file \
+             was removed, or one was written past the next number; a reader stepping \
+             n + 1 cannot see past a hole, so the generations above it come into force \
+             only when the directory is listed again (a restart, or a save)",
+            first.join(", "),
+            if count > first.len() as u64 {
+                ", ..."
+            } else {
+                ""
+            }
+        )
+    })
+}
+
+/// Why no generation can follow `u64::MAX`.
+fn exhausted_why() -> String {
+    format!(
+        "generation numbers are exhausted: generation {} is on disk and no later \
+         generation can be named, so no save can land; a file was written at that \
+         name outside a save",
+        u64::MAX
+    )
+}
+
 /// The generation a file name spells, or `None` for any other name.
 fn number_of(name: &str) -> Option<u64> {
     let digits = name.strip_suffix(".settings")?;
@@ -356,7 +430,8 @@ fn civil_day(text: &str) -> Result<(u16, u8, u8), String> {
     if !shape {
         return Err(format!("{text:?} is not a day written YYYY-MM-DD"));
     }
-    if !(1990..=2100).contains(&year) {
+    // A RANGE PATTERN, never `.contains(&` (gate 11 rule 7's ambiguous test).
+    if !matches!(year, 1990..=2100) {
         return Err(format!("{text:?}: the year must be 1990 to 2100"));
     }
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
@@ -465,10 +540,14 @@ pub fn check(key: Key, value: &str) -> Result<String, Refusal> {
             }
         }
         Key::AlwaysShown => {
-            let mut seen: Vec<&str> = Vec::new();
+            // ONE HASH PROBE PER NAME, pre-sized to the ceiling the loop
+            // refuses past (gate 11 rules 3 and 7); the list keeps the order.
+            let mut seen: Vec<&str> = Vec::with_capacity(MAX_ALWAYS_SHOWN + 1);
+            let mut named: std::collections::HashSet<&str> =
+                std::collections::HashSet::with_capacity(MAX_ALWAYS_SHOWN + 1);
             for one in value.split(',').map(str::trim) {
                 symbol(one).map_err(invalid)?;
-                if seen.contains(&one) {
+                if !named.insert(one) {
                     return Err(invalid(format!("{one:?} is named twice")));
                 }
                 seen.push(one);
@@ -689,6 +768,7 @@ pub struct Reader {
     faults: Vec<Fault>,
     stopped: Option<String>,
     last_cleared: Option<(PathBuf, u64)>,
+    holes: Option<String>,
 }
 
 impl Reader {
@@ -703,7 +783,22 @@ impl Reader {
             faults: Vec::new(),
             stopped: None,
             last_cleared: None,
+            holes: None,
         }
+    }
+
+    /// The generation numbers missing below the highest one this reader
+    /// listed, in words — the first [`MAX_FAULTS`] and how many in all — or
+    /// `None` when the numbers run unbroken from 1. A hole is a fault, never
+    /// invisible: saves only ever land `n + 1`, so a hole means a file was
+    /// removed, or one was planted past the next number, and a reader
+    /// stepping `n + 1` cannot see past it (R3-05 repair 4, the second
+    /// agent's follow-up 2). Found when the directory is LISTED — on a
+    /// reader's first refresh, and by every [`save`], which lists before it
+    /// lands so that a save never lands in a hole a restart would supersede.
+    #[must_use]
+    pub fn holes(&self) -> Option<&str> {
+        self.holes.as_deref()
     }
 
     /// The temporary name the last [`save`] through this reader found a
@@ -808,24 +903,14 @@ impl Reader {
     pub fn refresh(&mut self) -> Result<(), Fault> {
         self.stopped = None;
         if !self.listed {
-            let dir = dir(&self.root);
-            let mut numbers: Vec<u64> = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| entry.file_name().to_str().and_then(number_of))
-                    .collect(),
-                Err(why) if why.kind() == ErrorKind::NotFound => Vec::new(),
-                Err(why) => {
-                    return Err(Fault {
-                        generation: 0,
-                        path: dir,
-                        why: why.to_string(),
-                    });
-                }
-            };
-            numbers.sort_unstable();
+            let numbers = list_numbers(&self.root)?;
+            // A RE-LIST STARTS FROM NOTHING, as a reader that has never
+            // listed does: what it finds replaces what was kept.
+            self.faults.clear();
+            self.newest = None;
             self.listed = true;
             self.highest = numbers.last().copied().unwrap_or(0);
+            self.holes = holes_in(&numbers);
             // NEWEST FIRST: the first that reads is the one in force; every
             // newer one that did not is a fault on the record.
             for number in numbers.into_iter().rev() {
@@ -861,19 +946,29 @@ impl Reader {
         // (R3-05 repair 3). Whatever is at the name is read, and a name that
         // is not a regular file is a named fault.
         loop {
-            let next = path_of(&self.root, self.highest.saturating_add(1));
+            // CHECKED, NEVER SATURATED: a generation named `u64::MAX` has no
+            // successor. Saturating made `u64::MAX + 1` the name `u64::MAX`
+            // itself, which exists, so every refresh re-read that one file
+            // 4,096 times, reported the false reason "4,096 new generations
+            // read", and every save hard-linked onto an existing name and was
+            // refused as stale for ever (R3-05 repair 4, the second agent's
+            // follow-up 1). The exhaustion is named, and nothing loops.
+            let Some(number) = self.highest.checked_add(1) else {
+                self.stopped = Some(exhausted_why());
+                break;
+            };
+            let next = path_of(&self.root, number);
             match std::fs::symlink_metadata(&next) {
                 Ok(_) => {}
                 Err(why) if why.kind() == ErrorKind::NotFound => break,
                 Err(why) => {
                     let why = why.to_string();
                     self.stopped = Some(format!(
-                        "generation {} cannot be looked for ({}): {why}",
-                        self.highest.saturating_add(1),
+                        "generation {number} cannot be looked for ({}): {why}",
                         next.display()
                     ));
                     return Err(Fault {
-                        generation: self.highest.saturating_add(1),
+                        generation: number,
                         path: next,
                         why,
                     });
@@ -886,8 +981,8 @@ impl Reader {
                 break;
             }
             stepped += 1;
-            self.highest = self.highest.saturating_add(1);
-            match read_one(&self.root, self.highest) {
+            self.highest = number;
+            match read_one(&self.root, number) {
                 Ok(generation) => self.take(generation),
                 Err(fault) => self.fault(fault),
             }
@@ -1028,6 +1123,40 @@ pub fn save(
             newest: reader.highest(),
         });
     }
+    // A SAVE LISTS BEFORE IT LANDS. A generation past a hole is invisible
+    // to a reader stepping `n + 1`, and a save landing in the hole would be
+    // superseded on the next restart, silently (R3-05 repair 4, the second
+    // agent's follow-up 2). Found, the reader lists again — so it agrees
+    // with a restart from now on, the hole named in `holes` — and the save
+    // is refused as stale against the true highest. One listing per save:
+    // O(generations), named in `docs/06-limits.md` L-R305-6.
+    let listed = list_numbers(reader.root()).map_err(|fault| Refusal::Io {
+        path: fault.path,
+        kind: ErrorKind::Other,
+        why: format!("the settings directory cannot be listed: {}", fault.why),
+    })?;
+    if listed.last().is_some_and(|&top| top > reader.highest()) {
+        reader.listed = false;
+        reader.refresh().map_err(|fault| Refusal::Io {
+            path: fault.path,
+            kind: ErrorKind::Other,
+            why: format!("the settings directory cannot be read: {}", fault.why),
+        })?;
+        return Err(Refusal::Stale {
+            expected: change.expected,
+            newest: reader.highest(),
+        });
+    }
+    reader.holes = holes_in(&listed);
+    // NO NUMBER AFTER `u64::MAX`: refused by name, never a hard link onto
+    // the existing name refused as stale for ever.
+    let Some(number) = reader.highest().checked_add(1) else {
+        return Err(Refusal::Io {
+            path: path_of(reader.root(), u64::MAX),
+            kind: ErrorKind::Other,
+            why: exhausted_why(),
+        });
+    };
     let before = reader
         .newest()
         .map(|generation| generation.settings.clone())
@@ -1038,7 +1167,6 @@ pub fn save(
     if changed.is_empty() {
         return Err(Refusal::Unchanged);
     }
-    let number = reader.highest().saturating_add(1);
     let dir = dir(reader.root());
     std::fs::create_dir_all(&dir).map_err(|why| io_refusal(&dir, &why))?;
     let (temp, cleared) = write_temp(
@@ -1067,8 +1195,21 @@ pub fn save(
         }
         Err(why) => return Err(io_refusal(&target, &why)),
     }
-    if let Ok(handle) = std::fs::File::open(&dir) {
-        let _ = handle.sync_all();
+    // THE NEW NAME IS DURABLE ONLY WHEN EVERY DIRECTORY ON ITS PATH IS:
+    // `create_dir_all` may have made `settings/` and `settings/v<N>/` on the
+    // first save, and their own entries live in their parents. Each of the
+    // three directories is synced, newest name first (R3-05 repair 4, the
+    // second agent's follow-up: the first generation's directories were never
+    // synced, so a crash could lose the whole directory a save reported).
+    // A sync the host refuses is tidiness lost, never the save: the
+    // generation's own bytes were synced before it was linked.
+    for synced in [Some(dir.as_path()), dir.parent(), Some(reader.root())]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(handle) = std::fs::File::open(synced) {
+            let _ = handle.sync_all();
+        }
     }
     reader.refresh().map_err(|fault| Refusal::Invalid {
         key: None,

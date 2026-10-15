@@ -69,7 +69,9 @@ pub const MAX_HISTORY: usize = 50;
 /// workers until unrelated routes stopped answering.
 fn readers() -> &'static Mutex<std::collections::HashMap<PathBuf, Reader>> {
     static READERS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Reader>>> = OnceLock::new();
-    READERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    // PRE-SIZED (gate 11 rule 3): one reader per store root this process
+    // serves — one in production, a handful in a test binary.
+    READERS.get_or_init(|| Mutex::new(std::collections::HashMap::with_capacity(4)))
 }
 
 /// The map, its lock taken: a poisoned lock is taken over, since the map
@@ -129,6 +131,9 @@ pub struct Snapshot {
     pub faults: Vec<settings::Fault>,
     /// Why the reader stopped short, or could not list the directory.
     pub stopped: Option<String>,
+    /// The generation numbers missing below the highest listed, in words
+    /// (`store::settings::Reader::holes`), or `None` when they run unbroken.
+    pub holes: Option<String>,
 }
 
 /// [`snapshot`] on the blocking pool, never on an async worker: the route
@@ -144,6 +149,7 @@ pub async fn snapshot_off_worker(root: PathBuf) -> Snapshot {
             newest: None,
             faults: Vec::new(),
             stopped: Some(format!("the settings read did not finish: {why}")),
+            holes: None,
         },
     }
 }
@@ -157,6 +163,7 @@ pub fn snapshot(root: &Path) -> Snapshot {
         newest: reader.newest().cloned(),
         faults: reader.faults().to_vec(),
         stopped: error.or_else(|| reader.stopped().map(str::to_owned)),
+        holes: reader.holes().map(str::to_owned),
     })
 }
 
@@ -220,21 +227,28 @@ fn default_of(key: Key) -> (Option<String>, String) {
 }
 
 /// Why the settings in force under `snapshot` are degraded — the directory
-/// could not be listed or read on, or a generation did not read — or `None`
-/// when every generation on disk read.
+/// could not be listed or read on, a generation did not read, or a number
+/// is missing below the highest listed — or `None` when every generation on
+/// disk read and the numbers run unbroken.
 #[must_use]
 pub fn degraded(snapshot: &Snapshot) -> Option<String> {
     if let Some(stopped) = &snapshot.stopped {
         return Some(stopped.clone());
     }
-    snapshot.faults.first().map(|fault| {
-        format!(
-            "settings generation {} ({}) did not read: {}",
-            fault.generation,
-            fault.path.display(),
-            fault.why
-        )
-    })
+    snapshot
+        .faults
+        .first()
+        .map(|fault| {
+            format!(
+                "settings generation {} ({}) did not read: {}",
+                fault.generation,
+                fault.path.display(),
+                fault.why
+            )
+        })
+        // A HOLE IN THE NUMBERS IS DEGRADED TOO, never invisible (R3-05
+        // repair 4): a generation past it was not seen by a live reader.
+        .or_else(|| snapshot.holes.clone())
 }
 
 /// The value of `key` from `saved` (a whole settings result and the
@@ -467,16 +481,21 @@ fn lists_json() -> serde_json::Value {
             })
         })
         .collect();
-    let mut kinds: Vec<&str> = Vec::new();
-    for feed in pull::vendor::Feed::ALL {
-        let word = match feed.source_kind() {
-            pull::vendor::SourceKind::Rest => "rest",
-            pull::vendor::SourceKind::Folder => "folder",
-        };
-        if !kinds.contains(&word) {
-            kinds.push(word);
-        }
-    }
+    // EACH KIND ONCE, in the kinds' own order, kept when any feed has it:
+    // two compile-time tables, no membership test on a growing list (gate
+    // 11 rule 7).
+    let kinds: Vec<&str> = [
+        (pull::vendor::SourceKind::Rest, "rest"),
+        (pull::vendor::SourceKind::Folder, "folder"),
+    ]
+    .into_iter()
+    .filter(|(kind, _)| {
+        pull::vendor::Feed::ALL
+            .into_iter()
+            .any(|feed| feed.source_kind() == *kind)
+    })
+    .map(|(_, word)| word)
+    .collect();
     serde_json::json!({
         "feeds": feeds,
         "kinds": kinds,
@@ -572,8 +591,9 @@ pub fn answer(root: &Path, history: usize) -> serde_json::Value {
         "directory": settings::dir(root).display().to_string(),
         "generation": snap.newest.as_ref().map_or(0, |g| g.number),
         "highest": snap.highest,
-        "degraded": !snap.faults.is_empty() || snap.stopped.is_some(),
+        "degraded": degraded(&snap).is_some(),
         "degraded_why": degraded(&snap),
+        "holes": snap.holes,
         "faults": snap.faults.iter().map(|f| serde_json::json!({
             "generation": f.generation, "path": f.path.display().to_string(), "why": f.why,
         })).collect::<Vec<_>>(),
@@ -673,7 +693,15 @@ fn server_check(settings: &settings::Settings, change: &Change) -> Result<(), Re
     if let (Some(first), Some(last)) = (&from.value, &to.value)
         && first > last
     {
-        let moved = |key: Key| change.unset.contains(&key);
+        // THE UNSET KEYS BY SLOT: one array probe per question, never a
+        // membership test on the change's list (gate 11 rule 7).
+        let mut unset = [false; Key::ALL.len()];
+        for key in &change.unset {
+            if let Some(slot) = unset.get_mut(key.slot()) {
+                *slot = true;
+            }
+        }
+        let moved = |key: Key| unset.get(key.slot()).copied().unwrap_or(false);
         let set = |key: Key| change.set.iter().any(|(k, _)| *k == key);
         let key = if moved(Key::WindowTo) {
             Key::WindowTo

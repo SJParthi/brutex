@@ -13181,6 +13181,16 @@ here now, verbatim and in the gate's order. Each part names the rule whose
 `allow_*` list it explains; the list itself, and the counts the gate enforces,
 stay in `ci.yml`. A change to a count changes its reason here in the same commit.
 
+### Gate 11 — rule 1. docs/07 layer 4: never `binary_search`.
+
+~~~~text
+  api/feeds_route.rs 1 -- R3-05 repair 4. `ImportReach::not_imported`
+    bisects the days of the asked month whose whole-tree import began
+    and never closed: at most 31 entries (one month's days), ascending
+    as `imported_to` builds them, so O(log 31) per minute run of a
+    `/gaps.json` month. Never a search of a store or of the journal.
+~~~~
+
 ### Gate 11 — rule 2. CLAUDE.md section 7, BOTH HALVES OF IT.
 
 ~~~~text
@@ -14161,6 +14171,15 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     section is written in record order and needs no sort of its own.
 ~~~~
 
+~~~~text
+  store/settings.rs 1 -- R3-05 repair 4. `list_numbers` sorts the
+    generation numbers named in one store's settings directory:
+    O(g log g) for g generations on disk (one per operator save), once
+    when a reader first lists and once per save, so that a save never
+    lands in a hole in the numbers (L-R305-6). Never on a refresh that
+    finds nothing new and never on a GET.
+~~~~
+
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
 
 ~~~~text
@@ -14594,6 +14613,14 @@ remove at a cost worth paying, so none was rewritten.
   pull/cash_auction.rs 2 of 2 -- the five `REQUIRED` probes in
     `Columns::parse`, the same header walk as the lifecycle probes
     above: once per file, never per record.
+~~~~
+
+~~~~text
+  api/feeds_route.rs 1 -- R3-05. `census_row`'s fallback `find` for one
+    feed's row over the per-vendor census read, taken only when the row
+    is not at its vendor's index: bounded by `Vendor::ALL`, as the
+    server.rs, calendar_route.rs, instruments_route.rs, store_route.rs
+    and census_cache.rs entries above.
 ~~~~
 
 ### Gate 11 — rule 7: the ambiguous membership test
@@ -17296,6 +17323,17 @@ keep-alive GETs): `/feeds.json` p50 0.28 ms, p99 1.23 ms, max 1.41 ms;
 (IST) is evidence of nothing: `/feeds.json`'s journal or census span that
 names one sets neither end of `archive`, and `/gaps.json` counts a missing
 minute there as `not_yet_minutes`, out of the loss and of what was owed.
+MEASURED BY THE SECOND AGENT (verify round 4, 15 October 2026, release
+build of this package's round-3 commit on its own shadow of the real store holding 60 settings
+generations, n = 200 sequential GETs,
+`state/fix/round2/logs-verify-R3-05-r4/bench-seq-60gens.txt`):
+`/settings.json` p50 0.14 ms, p99 1.44 ms, max 2.41 ms;
+`/settings.json?history=50` p50 2.28 ms, p99 31.9 ms, max 36.84 ms (51
+files read again: O(N), N at most 50); `/feeds.json` p50 0.67 ms, p99
+6.48 ms, max 10.52 ms. REPAIR 4: the successor of a generation is
+`checked_add(1)`, so a generation named `u64::MAX` makes a refresh step
+once and say `exhausted` (before: 4,096 re-reads of that one file on every
+refresh and a false `stopped` reason).
 
 **L-R305-2. `/feeds.json`'s held and archive spans walk the census once per
 census generation.** `feeds_route::held_spans` folds every key of the
@@ -17324,7 +17362,12 @@ on the first `/feeds.json` after every server start, and again whenever the
 census reader re-reads a part whole (a part that cannot name its appended
 keys), because the memory lives in the process. LATENT, NOT FIXED: the memory
 is keyed by census part path, so it grows by one entry per census epoch file
-and walks a rotated part whole.
+and walks a rotated part whole. REPAIR 4 (15 October 2026): the walk, and the
+census read before it, run on the blocking pool (`feeds_route::feeds_body`
+under `spawn_blocking`), never on a runtime worker, so a cold `/feeds.json`
+no longer stalls unrelated routes while it walks; the walk's own cost is
+unchanged and is still this row. NOT MEASURED after the move: the stall of
+another route during a cold walk (the second agent's follow-up names it).
 
 **L-R305-3. The import's reach walks the GDFL import journal once per journal
 change.** `feeds_route::journal_reach` (read by `/gaps.json`'s `imported_to`
@@ -17338,7 +17381,32 @@ line 16,844 on 14 October 2026), once per journal change. The reach is the
 FURTHEST day whose import CLOSED for a kind, never its newest line (a re-run
 of an old day would move it backwards) and never a day begun and not closed
 (R3-05 repair 2). `/gaps.json` also lists the month's days begun and never
-closed: O(log n + rows in the month), at most 31 days of three kinds.
+closed: O(log n + rows in the month), at most 31 days of three kinds, and
+only the asked days AT OR BEFORE the reach — a month beginning past it scans
+nothing (repair 4: before, such a month asked the journal for a reversed
+span and the process aborted). REPAIR 4: a closed line for a day after today
+(IST) is not the reach; when the furthest closed day of the kind is after
+today, `imported_to` walks the journal newest first from today to the first
+closed row of the kind — O(rows between that row and today), once per
+request, and only while the journal names a future day, which an import
+never writes on its own. `ImportReach::not_imported` finds a day among the
+open days by a bisection of at most 31 entries (gate 11 rule 1, allowlisted
+with that bound).
+
+**L-R305-6. A settings save lists the settings directory once.**
+`store::settings::save` lists `<store>/settings/v1/` before it lands —
+O(generations), a count that grows only when the operator saves — so that a
+generation planted past a HOLE in the numbers refuses the save as stale
+against the true highest, rather than the save landing in the hole and being
+superseded on the next restart (repair 4). The listing is sorted (gate 11
+rule 4, allowlisted with this bound: the generations on disk, once per save
+and once per reader start). NOT CLOSED: a reader that only refreshes (one
+`stat` of the next name) does not see a generation past a hole until it
+lists again, at its next save or a restart; the hole itself is named in
+`/settings.json` (`holes`, `degraded`) whenever the directory was listed.
+Durability: a save syncs the generation's bytes, then the settings
+directory, its parent and the store root, so the first save's new
+directories survive a crash.
 
 **L-R305-5. `/feeds.json`'s `archive` is the vendor's archive AS MEASURED, and
 no delivered-folder inventory is read on that path.** It is the widest of

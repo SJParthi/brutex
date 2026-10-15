@@ -2785,6 +2785,16 @@ mod tests {
     /// The 2018-09 NIFTY 1s month audited over a store holding only the 3rd
     /// (less a 34-second hole), with `journal` as the GDFL import journal.
     async fn audited_with_journal(name: &str, journal: Option<&str>) -> serde_json::Value {
+        audited_month_with_journal(name, journal, "2018-09").await
+    }
+
+    /// [`audited_with_journal`]'s store and journal, with `asked` (a month
+    /// such as `2018-09`) the month the route is asked for.
+    async fn audited_month_with_journal(
+        name: &str,
+        journal: Option<&str>,
+        asked: &str,
+    ) -> serde_json::Value {
         let root = store_root(name);
         let month = store::path::YearMonth::new(2018, 9).expect("a month");
         let day = i64::from(day(2018, 9, 3).days_from_epoch());
@@ -2811,10 +2821,12 @@ mod tests {
         let site = std::sync::Arc::new(Site::serving(&masters(name, None, None), &root));
         let (code, body) = gaps(
             &site,
-            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2018-09&min_run=1",
+            &format!(
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month={asked}&min_run=1"
+            ),
         )
         .await;
-        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(code, axum::http::StatusCode::OK, "{asked}: {body}");
         body["month"][0].clone()
     }
 
@@ -2879,6 +2891,82 @@ mod tests {
                 .iter()
                 .all(|run| run["reason"] == "not-imported"),
             "{audited}"
+        );
+    }
+
+    /// **A MONTH THAT BEGINS TWO OR MORE DAYS PAST THE IMPORT'S REACH IS
+    /// ANSWERED, NEVER A PANIC** (R3-05 repair 4, the second agent's
+    /// blocking finding). Before: the open-day scan asked the journal for
+    /// `first of the month ..= the reach`, a reversed span; `BTreeMap::range`
+    /// panicked and `panic = "abort"` took the whole API down — on 15 October
+    /// 2026 for `month=2026-11` and for every contract expiring in November
+    /// or later. A month beginning the day after the reach (the boundary that
+    /// held) gave an empty span instead.
+    #[tokio::test]
+    async fn a_month_begun_two_or_more_days_past_the_reach_is_answered_never_a_panic() {
+        // THE REACH IS 29 AUGUST: SEPTEMBER BEGINS THREE DAYS PAST IT.
+        let journal = "begin indices 2018-08-29 *\n\
+            done indices 2018-08-29 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-past-reach", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-08-29", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(
+            audited["not_yet_minutes"], 0,
+            "2018 has happened: {audited}"
+        );
+        // EVERY SESSION AFTER THE 3RD (WHICH HOLDS ITS BARS) IS NOT IMPORTED.
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        let owed = owed_runs(&audited);
+        assert_eq!(owed.len(), 17, "{audited}");
+        assert!(
+            owed.iter().all(|run| run["reason"] == "not-imported"),
+            "{audited}"
+        );
+        // A FAR MONTH, AND THE LAST ONE THE ROUTE NAMES: answered, nothing
+        // lost and nothing not imported — those sessions have not happened.
+        for asked in ["2099-01", "9999-12"] {
+            let far =
+                audited_month_with_journal(&format!("gaps-far-{asked}"), Some(journal), asked)
+                    .await;
+            assert_eq!(far["lost_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["not_imported_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["imported_to"], "2018-08-29", "{asked}: {far}");
+        }
+    }
+
+    /// **A CLOSED JOURNAL LINE FOR A DAY AFTER TODAY IS NOT THE IMPORT'S
+    /// REACH** (R3-05 repair 4, the second agent's follow-up 3). Before: a
+    /// `done` line for 2099-01-01 made the reach 2099, so every day of
+    /// September 2018 the import never reached was a lost `vendor-hole` —
+    /// 17 sessions blamed on the vendor. Now the reach is the furthest closed
+    /// day at or before today, and the passed-over line is named.
+    #[tokio::test]
+    async fn a_closed_line_after_today_is_not_the_reach() {
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-future-line", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-09-03", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        assert!(
+            audited["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("2099-01-01") && from.contains("passed over")),
+            "{audited}"
+        );
+        // ONLY A FUTURE LINE: no reach at all, said, and nothing renamed.
+        let only_future = "begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let alone = audited_with_journal("gaps-future-only", Some(only_future)).await;
+        assert_eq!(alone["imported_to"], serde_json::Value::Null, "{alone}");
+        assert_eq!(alone["not_imported_minutes"], 0, "{alone}");
+        assert!(
+            alone["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("after today")),
+            "{alone}"
         );
     }
 

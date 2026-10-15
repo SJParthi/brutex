@@ -236,21 +236,11 @@ fn finest_fields(feed: pull::vendor::Feed) -> String {
 /// "Cost claims of the /db fix round that name no proof").
 pub(super) async fn feeds_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-    let mut out = String::from("[");
-    // THE STORE, READ ONCE FOR THE WHOLE ANSWER (D-3338). A folder feed is
-    // ready when its census holds bars — the store is what /db reads, and a
-    // folder probe answered a different question for a feed imported from
-    // somewhere else (DB-051). A cache hit is a refcount bump; a miss is the
-    // header read every census reader already pays. No directory is walked.
-    let (censuses, _entries) = census_now(&site);
-    // ONE CLOCK READ FOR THE WHOLE ANSWER, so two feeds' rolling floors are
-    // resolved against the same day. Reading it per row could straddle
-    // midnight and emit two answers that disagree by a day for no reason a
-    // reader could see. `None` when the clock is unusable, which every rolling
-    // floor below then reports as a null day beside a `rolling` kind — never
-    // as an absent floor.
-    let today = ingest::ist_day(std::time::SystemTime::now()).ok();
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     // THE OPERATOR'S SETTINGS, READ ONCE (R3-05): one `stat` when nothing
     // was saved since the last request, so a saved window is served on the
     // next request with no restart. ON THE BLOCKING POOL, NOT THIS WORKER
@@ -258,6 +248,53 @@ pub(super) async fn feeds_json(
     // it holds a runtime worker every other route needs.
     let settings =
         crate::server::settings_route::snapshot_off_worker(site.store_root.clone()).await;
+    // THE CENSUS READ AND THE HELD-SPAN WALK ON THE BLOCKING POOL TOO (R3-05
+    // repair 4, the second agent's follow-up). A cold held-span walk is
+    // O(census keys) — 0.66 to 2 s on the operator's store — and it ran
+    // inline on a runtime worker, so the first `/feeds.json` after a start
+    // stalled unrelated routes. A task that did not finish is a 503 that
+    // says so, never an empty list.
+    let answer = tokio::task::spawn_blocking(move || feeds_body(&site, &settings)).await;
+    let (status, body) = match answer {
+        Ok(body) => (axum::http::StatusCode::OK, body),
+        Err(why) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                r#"{{"refused":{}}}"#,
+                render::json_string(&format!(
+                    "the /feeds.json answer did not finish on the blocking pool: {why}"
+                ))
+            ),
+        ),
+    };
+    (
+        status,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+/// The body of `/feeds.json`: every feed's row, from one census read, one
+/// clock read and one settings snapshot. Synchronous file reads and the
+/// held-span walk: called on the blocking pool only.
+fn feeds_body(site: &Loaded, settings: &crate::server::settings_route::Snapshot) -> String {
+    let mut out = String::from("[");
+    // THE STORE, READ ONCE FOR THE WHOLE ANSWER (D-3338). A folder feed is
+    // ready when its census holds bars — the store is what /db reads, and a
+    // folder probe answered a different question for a feed imported from
+    // somewhere else (DB-051). A cache hit is a refcount bump; a miss is the
+    // header read every census reader already pays. No directory is walked.
+    let (censuses, _entries) = census_now(site);
+    // ONE CLOCK READ FOR THE WHOLE ANSWER, so two feeds' rolling floors are
+    // resolved against the same day. Reading it per row could straddle
+    // midnight and emit two answers that disagree by a day for no reason a
+    // reader could see. `None` when the clock is unusable, which every rolling
+    // floor below then reports as a null day beside a `rolling` kind — never
+    // as an absent floor.
+    let today = ingest::ist_day(std::time::SystemTime::now()).ok();
     for (n, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
         if n > 0 {
             out.push(',');
@@ -380,7 +417,7 @@ pub(super) async fn feeds_json(
                 today.map(|day| i64::from(day.days_from_epoch())),
             ),
             held = held_json(census_row(&censuses, feed), kind),
-            window = window_json(feed, &settings),
+            window = window_json(feed, settings),
             basis = basis_json(feed, &served, &derived),
             unverified = match feed.descriptor().basis {
                 pull::vendor::Basis::Unverified(why) => render::json_string(why),
@@ -398,13 +435,7 @@ pub(super) async fn feeds_json(
         );
     }
     out.push(']');
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        out,
-    )
+    out
 }
 
 /// Whether a feed can serve the operator, and why not — `ready` and `why` on
@@ -789,14 +820,29 @@ pub(crate) fn held_spans(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct JournalReach {
     /// Per kind, in `ImportKind::ALL` order: the furthest day whose import
-    /// CLOSED — `done`, `incomplete`, `refused` or `recounted`. A day begun
+    /// CLOSED — `done` (the journal reader reads a `recounted` line as
+    /// `DayOutcome::Done`), `incomplete` or `refused`. A day begun
     /// and never closed is not reached: its import did not finish, so its
     /// minutes are not imported rather than lost.
     pub(crate) closed: [Option<pull::session::Day>; 3],
-    /// The first and last day any import WROTE bars on (`done`, done with
-    /// refusals, `incomplete`, `recounted`), whatever its kind: the files of
+    /// The first and last day any import WROTE bars on ([`wrote`]: `done`,
+    /// which includes a `recounted` line, done with refusals, or
+    /// `incomplete`), whatever its kind: the files of
     /// those days were delivered, because an import read them.
     pub(crate) written: Option<(pull::session::Day, pull::session::Day)>,
+}
+
+/// `kind`'s place in `pull::gdfl_import::ImportKind::ALL`, by an exhaustive
+/// match rather than a search of the table (gate 11 rule 6): a new kind
+/// fails to compile here, and `every_import_kind_has_its_own_slot` holds the
+/// match equal to the table's order.
+const fn kind_slot(kind: pull::gdfl_import::ImportKind) -> usize {
+    use pull::gdfl_import::ImportKind;
+    match kind {
+        ImportKind::Indices => 0,
+        ImportKind::Stocks => 1,
+        ImportKind::Options => 2,
+    }
 }
 
 /// Whether a closing line about a day says the import wrote bars from its
@@ -854,10 +900,7 @@ pub(crate) fn journal_reach(
             if last_written.is_none() && wrote(row.outcome) {
                 last_written = Some(row.day);
             }
-            let slot = pull::gdfl_import::ImportKind::ALL
-                .iter()
-                .position(|kind| *kind == row.kind);
-            if let Some(slot) = slot.and_then(|slot| reach.closed.get_mut(slot))
+            if let Some(slot) = reach.closed.get_mut(kind_slot(row.kind))
                 && slot.is_none()
             {
                 *slot = Some(row.day);
@@ -973,14 +1016,65 @@ pub(crate) fn imported_to(
             "the GDFL import journal names no closed day for this segment's kind".to_owned(),
         );
     };
-    let to = i64::from(day.days_from_epoch());
     let civil = |epoch: i64| {
         u32::try_from(epoch)
             .ok()
             .and_then(|days| pull::session::Day::from_days(days).ok())
     };
+    let mut from = format!(
+        "the GDFL import journal: the furthest day whose {} import closed",
+        kind.as_str()
+    );
+    // A CLOSED DAY AFTER TODAY IS NOT EVIDENCE OF AN IMPORT (R3-05 repair 4,
+    // the second agent's follow-up 3), as `archive_json` already rules for
+    // the archive's span. Before: a `done` line for 2099-01-01 made the
+    // reach 2099, so every unimported day up to today was a lost vendor
+    // hole. The reach is the furthest closed day of the kind AT OR BEFORE
+    // today, and the passed-over line is named in `from`. Only a journal
+    // naming a future day walks: O(rows after that closed day), once per
+    // request (`docs/06-limits.md` L-R305-3).
+    let day = match today {
+        Some(now) if i64::from(day.days_from_epoch()) > now => {
+            let bounded = civil(now).and_then(|now| {
+                let (first, _) = snapshot.parsed.span()?;
+                snapshot
+                    .parsed
+                    .range(first, now)
+                    .rev()
+                    .find(|row| {
+                        row.kind == *kind
+                            && row.outcome != crate::server::import_journal::DayOutcome::Open
+                    })
+                    .map(|row| row.day)
+            });
+            let Some(bounded) = bounded else {
+                return none(format!(
+                    "the GDFL import journal's furthest closed {} day, {day}, is after today \
+                     and is not evidence of an import, and it names no closed day at or \
+                     before today",
+                    kind.as_str()
+                ));
+            };
+            from = format!(
+                "{from} at or before today; a closed line for {day}, after today, is not \
+                 evidence of an import and was passed over"
+            );
+            bounded
+        }
+        _ => day,
+    };
+    let to = i64::from(day.days_from_epoch());
     let mut open = Vec::new();
-    if let (Some(first), Some(last)) = (civil(days.0), civil(days.1.min(to))) {
+    // THE OPEN-DAY SCAN COVERS ONLY THE ASKED DAYS AT OR BEFORE THE REACH. A
+    // month that begins past the reach has none to scan, and is never handed
+    // to the journal as a reversed span (R3-05 repair 4: `month=2026-11` on
+    // 15 October 2026 asked for `1 Nov ..= 30 Sep` and, under
+    // `panic = "abort"`, took the API down; `Parsed::range` now also answers
+    // a reversed span with nothing).
+    let last = days.1.min(to);
+    if days.0 <= last
+        && let (Some(first), Some(last)) = (civil(days.0), civil(last))
+    {
         for row in snapshot.parsed.range(first, last) {
             if row.kind == *kind
                 && row.filter == "*"
@@ -994,10 +1088,7 @@ pub(crate) fn imported_to(
     open.dedup();
     ImportReach {
         to: Some(to),
-        from: format!(
-            "the GDFL import journal: the furthest day whose {} import closed",
-            kind.as_str()
-        ),
+        from,
         open,
         today,
     }
@@ -1206,23 +1297,20 @@ fn archive_json(
     // THE WIDEST AT EACH END, AND WHICH EVIDENCE SET IT. The descriptor
     // always has a span, so both folds find one; ties keep the earlier
     // evidence, the descriptor first.
-    let mut from = (i64::MAX, "");
-    let mut to = (i64::MIN, "");
+    // Each end keeps the evidence that set it, never a name to look up
+    // again: the source is that evidence's own (gate 11 rule 6).
+    let mut from = (i64::MAX, &descriptor);
+    let mut to = (i64::MIN, &descriptor);
     for evidence in all {
         if let Ok(span) = &evidence.span {
             if span.first < from.0 {
-                from = (span.first, evidence.by);
+                from = (span.first, evidence);
             }
             if span.last > to.0 {
-                to = (span.last, evidence.by);
+                to = (span.last, evidence);
             }
         }
     }
-    let said = |by: &str| {
-        all.iter()
-            .find(|evidence| evidence.by == by)
-            .map_or_else(String::new, |evidence| evidence.source.clone())
-    };
     let evidence: Vec<String> = all.iter().map(|evidence| evidence.json()).collect();
     format!(
         r#"{{"from":{},"to":{},"standing":"measured","from_binds":true,"to_binds":false,"source":{},"from_source":{},"to_source":{},"label_outside":{},"inventory":{},"evidence":[{}]}}"#,
@@ -1232,10 +1320,10 @@ fn archive_json(
             "the widest of the descriptor's dated measurement, the import journal and the \
              store's census; the last day is set by the {} and is a lower bound: the vendor \
              delivers daily, so a later day may be delivered and not imported",
-            to.1
+            to.1.by
         )),
-        render::json_string(&said(from.1)),
-        render::json_string(&said(to.1)),
+        render::json_string(&from.1.source),
+        render::json_string(&to.1.source),
         render::json_string(NOT_IMPORTED),
         render::json_string(
             "not read: no delivered-folder inventory is read on this path; /folder.json walks \
@@ -1510,7 +1598,7 @@ mod tests {
     async fn feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it() {
         let dir = masters("feeds-floors", None, None);
         let site = Loaded::new(Site::load(&dir, &store_root("feeds-floors")));
-        let (_, body) = feeds_json(axum::extract::State(site)).await;
+        let (_, _, body) = feeds_json(axum::extract::State(site)).await;
 
         // ONE VENDOR, TWO RUNGS, AND THE DISAGREEMENT IS PER RUNG — the whole
         // reason the field is keyed on the rung.
@@ -1674,7 +1762,7 @@ mod tests {
     async fn feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick() {
         let dir = masters("feeds-finest", None, None);
         let site = Loaded::new(Site::load(&dir, &store_root("feeds-finest")));
-        let (_, body) = feeds_json(axum::extract::State(site)).await;
+        let (_, _, body) = feeds_json(axum::extract::State(site)).await;
 
         // TWO SHAPES, FOUR ROWS. The brokers bottom out at a minute and one
         // record there is a BAR; the archives bottom out at a second and one
@@ -1808,10 +1896,50 @@ mod tests {
     // -- what is offered, what is held, and on what basis --------------------
 
     /// The route's answer, parsed: one object per feed, in `Feed::ALL` order.
+    /// **EVERY IMPORT KIND HAS ITS OWN SLOT, IN THE TABLE'S ORDER**: the
+    /// exhaustive match that replaced a search of `ImportKind::ALL`.
+    #[test]
+    fn every_import_kind_has_its_own_slot() {
+        for (at, kind) in pull::gdfl_import::ImportKind::ALL.into_iter().enumerate() {
+            assert_eq!(super::kind_slot(kind), at, "{kind:?}");
+        }
+    }
+
+    /// **THE `/feeds.json` BODY IS BUILT ON THE BLOCKING POOL, NEVER ON A
+    /// RUNTIME WORKER** (R3-05 repair 4, the second agent's follow-up). The
+    /// census read and the cold held-span walk (0.66 to 2 s on the operator's
+    /// store) ran inline in the async handler and stalled unrelated routes
+    /// after a start. The handler now awaits only the settings snapshot and
+    /// the blocking task; the body is a plain function.
+    #[test]
+    fn the_feeds_body_is_built_on_the_blocking_pool_never_a_worker() {
+        let source = include_str!("feeds_route.rs");
+        let handler = source
+            .split("pub(super) async fn feeds_json(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn feeds_body(").next())
+            .expect("the handler, then the body");
+        assert!(
+            handler.contains("tokio::task::spawn_blocking(move || feeds_body(&site, &settings))")
+        );
+        assert!(
+            !handler.contains("census_now("),
+            "no census read in the handler"
+        );
+        assert!(
+            !handler.contains("held_json("),
+            "no held-span walk in the handler"
+        );
+        assert!(
+            handler.contains("StatusCode::SERVICE_UNAVAILABLE"),
+            "a task that did not finish is said"
+        );
+    }
+
     async fn feeds_of(name: &str, root: &std::path::Path) -> Vec<serde_json::Value> {
         let dir = masters(name, None, None);
         let site = Loaded::new(Site::load(&dir, root));
-        let (_, body) = feeds_json(axum::extract::State(site)).await;
+        let (_, _, body) = feeds_json(axum::extract::State(site)).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("feeds JSON");
         parsed.as_array().expect("an array of feeds").clone()
     }
@@ -2316,7 +2444,7 @@ mod tests {
         let ask = |site: &Loaded| {
             let site = site.clone();
             async move {
-                let (_, body) = feeds_json(axum::extract::State(site)).await;
+                let (_, _, body) = feeds_json(axum::extract::State(site)).await;
                 let rows: Vec<serde_json::Value> = serde_json::from_str(&body).expect("feeds JSON");
                 row(&rows, "gdfl").clone()
             }
@@ -2380,7 +2508,7 @@ mod tests {
         let ask = |site: &Loaded| {
             let site = site.clone();
             async move {
-                let (_, body) = feeds_json(axum::extract::State(site)).await;
+                let (_, _, body) = feeds_json(axum::extract::State(site)).await;
                 let rows: Vec<serde_json::Value> = serde_json::from_str(&body).expect("feeds JSON");
                 row(&rows, "gdfl").clone()
             }

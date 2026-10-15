@@ -887,3 +887,106 @@ fn a_settings_directory_that_is_a_file_refuses_a_save_as_io() {
         "nothing written"
     );
 }
+
+/// **A GENERATION NAMED `u64::MAX` IS NAMED EXHAUSTION, NEVER A LOOP AND
+/// NEVER A STALE REFUSAL FOR EVER** (R3-05 repair 4, the second agent's
+/// follow-up 1). Before: the successor was `saturating_add(1)`, which is
+/// `u64::MAX` itself; the name existed, so every refresh re-read that one
+/// file 4,096 times and reported "4096 new generations read", and every save
+/// hard-linked onto the existing name and was refused as stale.
+#[test]
+fn a_generation_named_u64_max_is_named_exhaustion_never_a_loop() {
+    let root = root("u64-max");
+    good(&root, 1);
+    good(&root, u64::MAX);
+    let mut reader = Reader::new(&root);
+    reader.refresh().unwrap();
+    assert_eq!(reader.highest(), u64::MAX);
+    assert_eq!(reader.newest().map(|g| g.number), Some(u64::MAX));
+    // THE LISTING NAMES THE HOLE BELOW IT.
+    let holes = reader.holes().expect("a hole is named");
+    assert!(
+        holes.starts_with(&format!("{} generation", u64::MAX - 2)),
+        "{holes}"
+    );
+    assert!(holes.contains("(2, 3, "), "{holes}");
+    // A LATER REFRESH STEPS ONCE AND STOPS, NAMING WHY.
+    reader.refresh().unwrap();
+    let stopped = reader.stopped().expect("exhaustion is said");
+    assert!(stopped.contains("exhausted"), "{stopped}");
+    assert!(!stopped.contains("4096"), "{stopped}");
+    assert!(reader.faults().is_empty(), "{:?}", reader.faults());
+    // A SAVE IS REFUSED BY NAME, AND NOTHING IS WRITTEN.
+    let before = files(&root);
+    let refused = save(
+        &mut reader,
+        &change(u64::MAX, &[(Key::OpenOrder, "oldest")]),
+        no_extra,
+    );
+    assert!(
+        matches!(&refused, Err(Refusal::Io { why, .. }) if why.contains("exhausted")),
+        "{refused:?}"
+    );
+    assert_eq!(files(&root), before);
+}
+
+/// **A HOLE IN THE GENERATION NUMBERS IS NAMED, AND A SAVE NEVER LANDS IN
+/// IT** (R3-05 repair 4, the second agent's follow-up 2). Before: a live
+/// reader stepping `n + 1` never saw a generation planted past a missing
+/// number; a save landed in the hole, and a restart put the higher
+/// generation in force, superseding that save silently.
+#[test]
+fn a_hole_in_the_generation_numbers_is_named_and_a_save_never_lands_in_it() {
+    let root = root("hole");
+    good(&root, 1);
+    good(&root, 2);
+    let mut live = Reader::new(&root);
+    live.refresh().unwrap();
+    assert_eq!(live.holes(), None, "1 and 2 run unbroken");
+    good(&root, 5);
+    live.refresh().unwrap();
+    assert_eq!(
+        live.highest(),
+        2,
+        "a stepping reader cannot see past a hole"
+    );
+    // THE SAVE LISTS, FINDS 5, AND IS REFUSED AGAINST THE TRUE HIGHEST. (A
+    // real change: generation 2 holds `oldest`. Before the fix it landed 3.)
+    let refused = save(
+        &mut live,
+        &change(2, &[(Key::OpenOrder, "newest")]),
+        no_extra,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(Refusal::Stale {
+                expected: 2,
+                newest: 5
+            })
+        ),
+        "{refused:?}"
+    );
+    assert!(!path_of(&root, 3).exists(), "nothing landed in the hole");
+    // THE LIVE READER NOW AGREES WITH A RESTART, AND BOTH NAME THE HOLE.
+    let mut fresh = Reader::new(&root);
+    fresh.refresh().unwrap();
+    for reader in [&live, &fresh] {
+        assert_eq!(reader.highest(), 5);
+        assert_eq!(reader.newest().map(|g| g.number), Some(5));
+        let holes = reader.holes().expect("the hole is named");
+        assert!(
+            holes.starts_with("2 generation number(s) missing"),
+            "{holes}"
+        );
+        assert!(holes.contains("(3, 4)"), "{holes}");
+    }
+    // A SAVE AGAINST THE TRUE HIGHEST LANDS AFTER IT.
+    let saved = save(
+        &mut live,
+        &change(5, &[(Key::OpenOrder, "oldest")]),
+        no_extra,
+    )
+    .unwrap();
+    assert_eq!(saved.number, 6);
+}
