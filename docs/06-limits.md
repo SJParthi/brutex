@@ -16881,6 +16881,159 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
   of its own (L-WP81-4), cached for 30 s in the operations pool.
 
+## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
+
+- **L-WP12f-1. A scope change lists every done day of the kind once more.**
+  One new member in the stored scope (one new option underlying in the
+  store changes the stocks digest) makes the next run read the listing of
+  every day closed `done` under another digest, once, to find the days that
+  hold a file of a new member; the `examined` line then remembers the day.
+  O(done days of the kind) listing reads, once per scope. What a done day
+  owes when it owes nothing is one compare of digests and two hash probes.
+  NOT MEASURED at the real store's size (about 2,000 days a kind).
+- **L-WP12f-2. A reopened day costs one pass over its listing per member
+  key.** `cm_jobs` scans the day's listing for each member key the day
+  opens: O(members opened x listing entries). 6 members a day for the index
+  tree and 15 to 17 for the stock tree on the operator's archive.
+- **L-WP12f-3. The journal grows by two lines per member key** (`begin` and
+  its close) and by one `run` line per run that examines a day, and it is
+  loaded whole at each run's start: O(journal bytes) per run. The scope
+  ledger grows by one line per digest and one per examined day and is loaded
+  whole too.
+- **L-WP12f-4. The trade-for-trade series are a compiled list of two,
+  UNVERIFIED.** `gdfl_cm::SHARE_SERIES` is `BE` and `BZ`. No charter row
+  names NSE's series codes; the dated security masters that would name a
+  symbol's series start in 2026 and the spells start in 2018. Measured over
+  the vendor's 2,001 stock days (the audit of DB-B06): no day holds both a
+  share's own file and its `.BE` or `.BZ` file. A day that does refuses both
+  by name.
+- **L-WP12f-5. A month already served from repair generations takes one new
+  full copy per landed day.** The months the run of 10 Oct 2026 made from a
+  special session alone (67 on the operator's store) are repaired day by
+  day: each owed day that lands is one more generation, a full copy of the
+  month (D-3350, D-4875), the days after the special session included. For
+  the operator's store that is about 67 x 20 = 1,340 generations and about
+  33 GB written for about 3.2 GB of final data: ARITHMETIC from 22,500 bars
+  of about 105 bytes per series-day, NOT MEASURED at full size. NOT DONE:
+  landing a month's owed days in one repair, one generation a month.
+- **L-WP12f-6. A run reads owed days before its range only inside its first
+  month.** At most 30 days: one hash probe for a day no run closed, and for
+  a closed one what one key's debt costs (one compare of digests and two
+  hash probes when it owes nothing) per key that closed it, so O(filters
+  that closed the day), which is the operator's own few. The journal's load
+  builds that index once, O(done keys). Owed days of EARLIER months are not
+  reached: they stay owed, and land as their own months when a run's range
+  covers them.
+- **L-WP12f-7. A day not closed `done` is not owed, and a key closed under
+  names owes nothing it did not name.** A day whose keys are absent, open,
+  `incomplete` or restated (a `done` line from an older definition, or one
+  with no `definition=`) is not closed `done` and is passed over unsaid by a
+  later run under any filter; a run without a filter whose range covers it
+  reads it whole. A run asked for one later day on a store
+  that never read the earlier days of that month makes each member's month
+  from that day, a special session included. The same holds where the
+  earlier days were closed only under a filter that did not name the member
+  (days closed under `NIFTY,BANKNIFTY` owe INDIAVIX nothing). No run was
+  ever asked for those members on those days, so nothing is skipped and
+  nothing is refused or warned; the earlier days land later through the
+  versioned repair (L-WP12f-5 then applies to that month). A day closed
+  `done` under `*`, or under a filter that named the member, IS owed and is
+  read first, whatever the later run's filter (D-4878 item 6).
+- **L-WP12f-8. An options run records no scope**, so an options day is done
+  for whatever its run read. NOT DONE: what a member is for options is open.
+- **L-WP12f-9. Two imports on one store are not kept apart by a run-level
+  lock.** They fail loudly per month and leave duplicate generation files
+  (the second agent's check of 12 Oct 2026). Two runs started in the same
+  second take the same run id. NOT DONE here: the ingest automation's design
+  gives the run locks (`imports/gdfl.lock`, one per kind on census v4), the
+  journal lock and run ids taken from the runs ledger to IA-2 (D-4847;
+  `state/design/ingest-automation.md` finding F2), so this package adds no
+  second lock of its own.
+- **L-WP12f-10. An owed day the run's source does not hold is a named
+  failure of every run that reaches back to it.** A day closed `done` that
+  owes the run a member and whose listing the source cannot give
+  (`scope_reopen_unreadable`) fails the run (rc 1) and stays unexamined, on
+  every run of that month, until a run from a source that holds the day
+  examines it. After a scope change (L-WP12f-1) an import from a delivery
+  that holds only new days names up to 30 such failures a run. That is the
+  loud outcome, on purpose: the month is then being made without days it is
+  owed. NOT DONE: an outcome the scheduler can tell from a broken source
+  (IA-17, IA-3).
+- **L-WP12f-11. What one filter's run does for another filter's key is
+  remembered per pair, and a day read whole is not credited to another
+  key.** (a) Each distinct filter that reaches back over a key it did not
+  close writes one `examined` line per day per scope
+  (`<that filter>/<its own>`); a `--stored` stocks filter is some 200 names
+  long, so such a line is about 2 KB. (b) While such a key holds a member
+  key that is not `done`, every run under another filter lists that day
+  again (one listing, nothing read unless its filter wants the member).
+  (c) A run under a filter that reads an IN-RANGE day whole, under its own
+  key, does not close the whole-day key's member keys: the unfiltered run
+  reads those members of that day again, finds every bar present and writes
+  none. Bounded by the days such a run was asked for; NOT MEASURED.
+- **L-WP12f-12. An owed day whose member read fails does not stop the run.**
+  When a member key read for a day before the range closes `incomplete`
+  (another writer holds the month's lock) or `refused` (the store or the
+  vendor refuses the file), the failure is named and the run ends rc 1, but
+  the run goes on to its range: the member's later days are written, so its
+  month is made without the failed day, which lands later, when a run reads
+  it again, through the versioned repair (L-WP12f-5). Seen by the second
+  agent's check 3 (three filtered writers at once: one named lock failure,
+  rc 1, later days written; one more run of each converged with months
+  repaired 0 there; NOT MEASURED where a later day of the member's month was
+  written first).
+  Holding the member back for the rest of the run would need a close that
+  records a member it did not read, a new close shape; NOT DONE. It could
+  only ever apply to a passing failure (a held lock): a file the vendor
+  refuses is refused on every read, so holding its member back would stop
+  that member's later days for good, the outcome `CLAUDE.md` section 4 bans
+  as surely as a silent one. A day the source does not hold is L-WP12f-10.
+- **L-WP12f-13. A reading that builds fewer bars than a month holds is
+  answered `AlreadyPresent`.** The append-only month compares the bars a
+  batch offers against the held records from the batch's first stamp on and
+  never looks at the held record after the batch's last one, so a day read
+  again under a definition that builds a SUBSET of what was held (the held
+  day less its last bar) passes as present and its key could close `done`
+  with the extra bar still held. Measured 13 Oct 2026 on a private copy of
+  the real GDFL RELIANCE 2026-08 month with the build before this repair: a
+  filtered re-read of 2026-08-24 offered 6,685 seconds, wrote 0, failed 0,
+  closed `done ... definition=3`, and the month kept its 15:29:06 auction
+  print as a bar while the `.auc` sidecar filed the same print (month sha256
+  unchanged). D-4878 item 10 closes the one case this repository has: a key
+  that would read any share some key of that day, under any filter, built or
+  began under 2 or 3 in the closing auction's era is refused by name at
+  admission, and so is a member key (repair 6, 14 Oct 2026: check 4 read
+  RELIANCE through the append door under a fresh filter while only a names
+  key of another filter stood restated; repair 7, the same day: a later
+  run's own refusal no longer erases an early run's unclosed `begin`, which
+  had let the second run after it read the share and close it `done`; and a
+  whole-tree close under 4 ends a share's restatement only where its
+  `scope=`, resolved through the scope ledger, held the share; an unknown
+  digest holds nothing). It refuses MORE than it must in two shapes, loudly:
+  a whole-tree key asked on a day whose whole-tree key of an earlier
+  definition only whole-tree closes under 4 ended (a scope that held every
+  share is not provable by one probe), and a share whose remake ran under a
+  digest the ledger lost. The admission's walk for a share only whole-tree
+  closes ended is the day's keys naming that share, never the journal. Nor
+  can it see a month an
+  earlier definition wrote with no journal line naming it (a store copied
+  without its journal, or a journal line lost), and two runs interleaving
+  their lines in one journal, which would attribute a `begin` to the other
+  run's definition: no lock found in this repository serialises two import
+  runs over one journal (the census lock guards the census, not the
+  journal), so that case is NOT CLOSED. The
+  general check, one held record read
+  after an `AlreadyPresent` batch and refused when it is stamped on the
+  batch's own day, belongs to the shared landing (`ingest::from_rows`, owner
+  WP-13c / store) and is NOT DONE. So is the REMAKE that ends the refusal
+  (check 5 of WP-12f): no verb of this build writes a month as a new
+  generation holding fewer bars than the served one (`store::repair_month`
+  keeps every held bar, D-3350) nor the whole-tree close under 4 that ends
+  the era's refusal, so until a store writer and WP-80's remake land, every
+  stocks run touching a share day of the era an earlier definition's key
+  built is refused by name on every run, loudly, and nothing of it is
+  written. Owners: the store crate and WP-80.
+
 ## Cost claims of the /db fix round that name no proof — 12 October 2026
 
 Gate 12 asks every doc block that states a cost to name the test, the
@@ -17125,7 +17278,22 @@ months' own p50, p99 or max.
 | L-R401-04 | A partly imported 1-second or contract month reads `held`, settled | such a rung has no per-session count to compare against, so "held" is all the page can know | the month's bar count is shown; a file the census does not list cannot be seen by the page at all until the census recount (R3-06) lists it | R4-01 |
 | L-R401-05 | The GDFL census (about 184 MB) does not reach a browser on the shadow | the server cuts a response body about 10 s after it starts (R4-02 / R4-03), so every GDFL row reads "census not read" with the reason, never a count | V1's counts show only where the census arrives; owner R4-02 / R4-03 | R4-01 |
 
-## The GDFL re-key: done versus pending, one target per key, held months; a cli invocation's run (AG-02, D-4953)
+## One month spelling, and the `/bars` page's contract (AF-04, D-4962)
+
+Measured 15 October 2026 on a release build over a shadow of the real store
+(`state/fix/shadow.sh AF-04`, port 8703; the "before" build is feat/db-fix at
+521066e6 on port 8704), 200 sequential GETs per row after one warm-up, curl
+`time_total`, loaded shared machine, while another `cargo` build ran.
+Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
+`before.txt`, `after.txt`.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AF4-01 | The month parser and the contract parse, per request | none needed: `bars::month_of_text` inspects at most seven bytes (a longer text fails the slice pattern on its length) and `Contract::parse` one bounded segment; the query text they are cut from is already capped by `request_bounds_refusal` | after (n=200 each): `/bars` NIFTY option month (`2024-03-07-2200000-CE`, 2024-03, whole key) p50 0.82 ms, p99 1.79 ms, max 2.52 ms (before: a 404, p50 0.70 / p99 4.96 / max 19.02 ms); `/bars` NIFTY spot p50 0.74 / p99 1.66 / max 2.23 ms (before 1.01 / 10.98 / 11.65); `/bars.json` Zerodha NIFTY 1min spot month (945,991 bytes) 3.30 / 6.17 / 8.13 ms (before 2.44 / 4.89 / 10.69); `/bars.json` the option month (3,952,147 bytes, 50,734 bars) 14.13 / 25.99 / 37.96 ms (before 11.87 / 19.69 / 29.82); `/spot.json` 1.18 / 3.65 / 5.75 ms (before 0.85 / 1.62 / 1.82); `/greeks.json` 1.29 / 2.68 / 17.60 ms (before 0.96 / 2.16 / 6.36). The JSON bodies are byte-identical before and after (md5 in `before.txt`, `after.txt`); the differences are the machine's load, not the parse | AF-04 |
+| L-AF4-02 | A contract asked for with `segment=` and `exchange=` omitted | placed by one census hash probe per exchange (`facets::EXCHANGES`, two today) of the asked feed's census — never the spot walk, which sorts the whole census | after: `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE&timeframe=1s&month=2024-03` p50 1.02 ms, p99 2.52 ms, max 3.21 ms (n=200). Before, the same URL took the spot walk and answered NIFTY INDEX's bars in p50 534.53 ms, p99 942.15 ms, max 1,132.80 ms. The spot walk itself is unchanged and still costs that for a SPOT name asked without `segment=` (pre-existing, D-0686's section); it grows with the census, and is not this package's | AF-04 |
+| L-AF4-03 | Months spelt otherwise on routes this change does not own | `/bars/window.json` (`bars_route.rs` `WindowAsk::parse`, AF-05's file), `sources.rs` `month_of_text` and `dayflags.rs` `bound` still split on `-` and parse each half: `bars_route.rs` checks no length, so `2024-3` and `02024-03` still read as March on `/bars/window.json`; the other two check the halves' lengths, so `2024-+3` still reads as March there | AF-05 switches `bars_route.rs` to `bars::month_of_text`; `sources.rs` and `dayflags.rs` have no owner named — one-line delegations to the same parser | AF-04 (named), AF-05 |
+
+## The GDFL re-key: done versus pending, one target per key, held months; a cli invocation's run (AG-02, D-4969)
 
 `pull::gdfl_rekey` and `cli gdfl-rekey`. Measured 15 October 2026 on the
 shared, loaded build machine, release build. **The plan's cost per key** is

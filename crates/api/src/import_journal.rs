@@ -172,17 +172,19 @@ pub(crate) struct DayRow {
 }
 
 impl DayRow {
-    /// Whether the deciding line is `done` under a definition other than this
-    /// build's: the importer imports it again (D-2822). A capital-market day
-    /// built under 2 is current: definition 3 changed only an option second's
-    /// open interest (D-3342, `pull::gdfl_import::definition_is_current`).
+    /// Whether the deciding line is `done` under a definition the importer
+    /// does not take as current: it imports the day again (D-2822). The one
+    /// rule is `pull::gdfl_import::definition_is_current`, asked with the
+    /// key's day: an index day under 2 or 3 is current (D-3342), and a
+    /// share's day from 2026-08-03 under 2 or 3 is not, its closing auction's
+    /// band having changed what it folds (D-4878 item 10, CMP-07).
     pub(crate) fn restated(&self) -> bool {
         self.outcome.is_done()
             && !self.recounted
             && self
                 .stats
                 .definition
-                .is_some_and(|definition| !definition_is_current(self.kind, definition))
+                .is_some_and(|definition| !definition_is_current(self.kind, self.day, definition))
     }
 }
 
@@ -976,5 +978,35 @@ pub(crate) mod tests {
         assert!(old.restated());
         let new = row_of(&snap.parsed, ImportKind::Stocks, day("2020-01-02")).expect("row");
         assert!(!new.restated());
+    }
+
+    /// CMP-07: a share's day from 2026-08-03 built under 2 or 3 is restated
+    /// (its closing auction's band changed what it folds, D-4878 item 10),
+    /// while the same definitions stay current for a share's day before it,
+    /// for an index day and, under 3, for an option day; under this build's
+    /// definition nothing is restated.
+    #[test]
+    fn a_share_day_of_the_auction_era_under_an_older_definition_is_restated() {
+        let root = journal(
+            "auction-era",
+            "done stocks 2026-07-31 * definition=3 files=1\n\
+             done stocks 2026-08-03 * definition=2 files=1\n\
+             done stocks 2026-08-04 * definition=3 files=1\n\
+             done stocks 2026-08-05 * definition=4 files=1\n\
+             done indices 2026-08-04 * definition=2 files=2\n\
+             done options 2026-08-04 * definition=3 files=2\n",
+        );
+        let snap = snapshot(&root).expect("reads");
+        let restated = |kind, text| {
+            row_of(&snap.parsed, kind, day(text))
+                .expect("row")
+                .restated()
+        };
+        assert!(!restated(ImportKind::Stocks, "2026-07-31"));
+        assert!(restated(ImportKind::Stocks, "2026-08-03"));
+        assert!(restated(ImportKind::Stocks, "2026-08-04"));
+        assert!(!restated(ImportKind::Stocks, "2026-08-05"));
+        assert!(!restated(ImportKind::Indices, "2026-08-04"));
+        assert!(!restated(ImportKind::Options, "2026-08-04"));
     }
 }
