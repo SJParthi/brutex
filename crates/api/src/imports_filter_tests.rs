@@ -259,6 +259,7 @@ fn a_run_logged_elsewhere_says_where_it_looked() {
     assert!(says.contains("logs/gdfl/options"), "{says}");
     assert!(says.contains("logs/cli-batch"), "{says}");
     assert_eq!(lifecycle["not_read"], json!(["logs/cli-batch"]));
+    assert_eq!(lifecycle["not_read_total"], 1);
     // The run itself was found: its journal line is there.
     assert_eq!(got["run"]["journal_lines"].as_array().unwrap().len(), 1);
 }
@@ -406,4 +407,54 @@ fn a_month_of_filtered_closes_with_refusals_holds_no_phantom() {
     assert_eq!(got["counts"]["refused"], 0);
     assert_eq!(got["counts"]["done_with_refusals"], 28);
     assert_eq!(got["counts"]["done"], 28);
+}
+
+/// **EVERY UNREAD DIRECTORY IS COUNTED** (AF-02 repair round 1, the second
+/// agent's follow-up): past [`MAX_NOT_READ_NAMED`] the names stop, the count
+/// does not. 40 unread directories name the first 32, sorted, and say
+/// "and 8 more"; `not_read_total` carries 40.
+#[test]
+fn more_unread_directories_than_are_named_are_counted() {
+    let root = store("many-unread", &filtered_day(), "");
+    for i in 0..40 {
+        std::fs::create_dir_all(root.join("logs").join(format!("zz{i:02}"))).expect("mkdir");
+    }
+    let got = answer(&root, &ask("feed=gdfl&run=1791943060")).expect("reads");
+    let lifecycle = &got["run"]["lifecycle"];
+    let named = lifecycle["not_read"].as_array().expect("names");
+    assert_eq!(named.len(), MAX_NOT_READ_NAMED, "{got:#}");
+    assert_eq!(named[0], "logs/zz00");
+    assert_eq!(named[MAX_NOT_READ_NAMED - 1], "logs/zz31");
+    assert_eq!(lifecycle["not_read_total"], 40);
+    let says = lifecycle["says"].as_str().expect("a sentence");
+    assert!(
+        says.contains("logs/zz31 and 8 more are there and not read by this route"),
+        "{says}"
+    );
+}
+
+/// **AN UNREAD DIRECTORY UNDER A PARENT OF READ ONES IS NAMED** (AF-02
+/// repair round 1): `logs/gdfl` is only the parent of the read
+/// `logs/gdfl/{indices,stocks,options,store}`, so it is walked, and an
+/// unread `logs/gdfl/zzother` beside them is named; `logs/gdfl` itself, and
+/// the read `logs/gdfl/options`, are not.
+#[test]
+fn an_unread_directory_beside_read_ones_under_their_parent_is_named() {
+    let root = store("nested-unread", &filtered_day(), "");
+    for dir in ["gdfl/options", "gdfl/zzother", "cli"] {
+        std::fs::create_dir_all(root.join("logs").join(dir)).expect("mkdir");
+    }
+    let got = answer(&root, &ask("feed=gdfl&run=1791943060")).expect("reads");
+    let lifecycle = &got["run"]["lifecycle"];
+    assert_eq!(
+        lifecycle["not_read"],
+        json!(["logs/gdfl/zzother"]),
+        "{got:#}"
+    );
+    assert_eq!(lifecycle["not_read_total"], 1);
+    let says = lifecycle["says"].as_str().expect("a sentence");
+    assert!(
+        says.contains("logs/gdfl/zzother is there and not read by this route"),
+        "{says}"
+    );
 }

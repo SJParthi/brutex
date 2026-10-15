@@ -863,9 +863,10 @@ fn journal_rows(
 ) -> Result<JournalRows, String> {
     let kind = inst.kind();
     let mut by_day: HashMap<String, Value> = HashMap::with_capacity(PAGE_DAYS as usize);
-    // Each kept row's rank: whether its filter names the symbol, then its
-    // closing line. A higher rank replaces a lower one.
-    let mut ranks: HashMap<String, (bool, u64)> = HashMap::with_capacity(PAGE_DAYS as usize);
+    // Each kept row's rank: its closing line, then whether its filter names
+    // the symbol. A higher rank replaces a lower one: the newest close that
+    // covers the instrument is where its day stands.
+    let mut ranks: HashMap<String, (u64, bool)> = HashMap::with_capacity(PAGE_DAYS as usize);
     let mut names = Names::new(inst.symbol.as_str());
     let mut page = 0usize;
     let mut journal = Value::Null;
@@ -908,18 +909,24 @@ fn journal_rows(
             ) else {
                 continue;
             };
-            // THE INSTRUMENT'S OWN FILTER WINS over the whole tree's: a run
-            // given symbols journals their day under its list of names
+            // THE NEWEST CLOSE THAT COVERS THE INSTRUMENT IS WHERE IT STANDS.
+            // A run given symbols journals their day under its list of names
             // (`BANKNIFTY,NIFTY`, the 277-name key), and a list naming this
-            // symbol is this instrument's close (AF-02, ingest-6). Of
-            // several such closes, the newest line is where it stands. A
-            // filter that does not name it is another underlying's and says
-            // nothing about this one.
+            // symbol is this instrument's close (AF-02, ingest-6); `*` is the
+            // whole tree's, and covers it too. Of the closes that cover it,
+            // the newest line wins, whichever filter wrote it: the importer
+            // skips a day by kind, day AND filter (`pull::gdfl_import::admit`),
+            // so a `*` run re-imports a day a list closed, and that later
+            // close is the day's current state, clean or failed. A naming
+            // list beats `*` only on an equal line (none in a journal; the
+            // tie is the log-only row's line 0). A filter that does not name
+            // the symbol is another underlying's and says nothing about this
+            // one.
             let own = names.names(filter);
             if !own && filter != "*" {
                 continue;
             }
-            let rank = (own, row.get("line").and_then(Value::as_u64).unwrap_or(0));
+            let rank = (row.get("line").and_then(Value::as_u64).unwrap_or(0), own);
             if ranks.get(day).is_none_or(|kept| rank > *kept) {
                 let _was = ranks.insert(day.to_owned(), rank);
                 let _replaced = by_day.insert(day.to_owned(), row.clone());
@@ -949,7 +956,8 @@ fn journal_rows(
 /// names a symbol when one of its comma-separated names IS the symbol:
 /// `NIFTY` is named by `BANKNIFTY,NIFTY` and not by `NIFTYNXT50,BANKNIFTY`,
 /// whose text merely contains it. `*` names no symbol: it is the whole tree,
-/// ranked below any list that names the symbol ([`journal_rows`]).
+/// and covers every symbol; of the closes that cover one, the newest line
+/// wins ([`journal_rows`]).
 ///
 /// # Cost
 ///
@@ -4151,6 +4159,48 @@ fn other_first(import: &Value) -> Option<String> {
         })
 }
 
+/// What a `done` or `done_with_refusals` close says of its refusals.
+///
+/// * A CLOSE WHOSE REFUSALS ARE ALL ANOTHER FILE'S says so, as an incomplete
+///   one does (DB-G69): the 277-name key's ten refusals on 2026-04-16 were
+///   about other underlyings, and NIFTY's own contracts were imported
+///   (AF-02, ingest-6).
+/// * A CLOSE WITH REFUSALS OF THIS INSTRUMENT'S OWN names how many and the
+///   first, as a refused or incomplete one does: the phantom `*` row used to
+///   name it, and the close it gave way to must not say less (AF-02).
+/// * A CLEAN CLOSE NEVER LEAVES THIS INSTRUMENT'S OWN REFUSALS UNSAID (AF-02
+///   repair round 1): a refusal of the day about this instrument not dated
+///   before the close's run (a close with no run id cannot place it before
+///   itself) is said, never left in the JSON only.
+fn closed_phrase(import: &Value, outcome: &str, first_refusal: Option<&str>) -> Option<String> {
+    let count = |key: &str| import.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let this_count = import
+        .get("refusals")
+        .and_then(|r| r.get("this_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let failures = count("failures");
+    if outcome == "done" {
+        return first_refusal.map(|first| {
+            format!(
+                "closed done, yet the importer's log holds {this_count} refusal(s) of this day \
+                 about this instrument not dated before this run; the first is {first}"
+            )
+        });
+    }
+    Some(match (first_refusal, other_first(import)) {
+        (Some(first), _) => format!(
+            "imported with {failures} vendor refusal(s), {this_count} about this instrument; \
+             the first is {first}"
+        ),
+        (None, Some(other)) => format!(
+            "imported with {failures} vendor refusal(s), none about this instrument; the first \
+             is {other}"
+        ),
+        (None, None) => format!("imported with {failures} vendor refusal(s)"),
+    })
+}
+
 impl Says<'_> {
     /// The record's phrases, in a fixed order: the calendar, the import, the
     /// vendor's quality, Zerodha's ledger and junk, then the bars.
@@ -4341,35 +4391,9 @@ impl Says<'_> {
                 };
                 out.push(format!("incomplete at import{stage}{detail}"));
             }
-            // A CLOSE WHOSE REFUSALS ARE ALL ANOTHER FILE'S says so, as an
-            // incomplete one does (DB-G69): the 277-name key's ten refusals
-            // on 2026-04-16 were about other underlyings, and NIFTY's own
-            // contracts were imported (AF-02, ingest-6).
-            // A CLOSE WITH REFUSALS OF THIS INSTRUMENT'S OWN names how many
-            // and the first, as a refused or incomplete one does: the
-            // phantom `*` row used to name it, and the close it gave way to
-            // must not say less (AF-02).
-            "done_with_refusals" => out.push(match (&first_refusal, other_first(import)) {
-                (Some(first), _) => format!(
-                    "imported with {} vendor refusal(s), {} about this instrument; the first \
-                     is {first}",
-                    count("failures").unwrap_or(0),
-                    import
-                        .get("refusals")
-                        .and_then(|r| r.get("this_count"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0)
-                ),
-                (None, Some(other)) => format!(
-                    "imported with {} vendor refusal(s), none about this instrument; the first \
-                     is {other}",
-                    count("failures").unwrap_or(0)
-                ),
-                (None, None) => format!(
-                    "imported with {} vendor refusal(s)",
-                    count("failures").unwrap_or(0)
-                ),
-            }),
+            outcome @ ("done_with_refusals" | "done") => {
+                out.extend(closed_phrase(import, outcome, first_refusal.as_deref()));
+            }
             "open" => out.push("import begun and not closed".to_owned()),
             "recounted" => out.push("closed by the census recount".to_owned()),
             "none"
@@ -6401,7 +6425,7 @@ mod tests {
             "NIFTY28MAR1911500CE"
         );
         // The close names how many of its refusals are this contract's and
-        // the first (AF-02, D-4955).
+        // the first (AF-02, D-4970).
         says_has(
             one,
             "imported with 2 vendor refusal(s), 1 about this instrument; the first is \

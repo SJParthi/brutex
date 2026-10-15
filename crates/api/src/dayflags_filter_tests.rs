@@ -258,7 +258,10 @@ fn a_refusal_about_another_underlying_never_marks_this_one_refused() {
 /// * a symbol that is a PREFIX of another name (`NIFTY` in
 ///   `NIFTYNXT50,BANKNIFTY`) is not named: no false match;
 /// * a list that does not name it leaves the whole tree's `*` row in force;
-/// * a list that names it wins over `*`, older or newer;
+/// * of a list that names it and `*`, the NEWER close wins: the list over an
+///   older `*` (2026-04-08), and a newer `*` over the list (2026-04-09, the
+///   AF-02 repair: an older list close never hides the whole tree's later
+///   incomplete one);
 /// * of a ONE-NAME filter equal to the symbol and a list with a DUPLICATE
 ///   name, the newer close wins.
 #[test]
@@ -304,15 +307,21 @@ fn a_symbol_is_named_by_whole_names_and_its_newest_naming_close_wins() {
     assert_eq!(tree["import"]["outcome"], "incomplete", "{tree:#}");
     assert_eq!(tree["import"]["line"], line_of(&journal, "2026-04-07", "*"));
 
-    for on in ["2026-04-08", "2026-04-09"] {
-        let named = day_of(&root, "NSE-FNO-NIFTY", on);
-        assert_eq!(named["import"]["outcome"], "done", "{on}: {named:#}");
-        assert_eq!(
-            named["import"]["line"],
-            line_of(&journal, on, "BANKNIFTY,NIFTY"),
-            "{on}"
-        );
-    }
+    let named = day_of(&root, "NSE-FNO-NIFTY", "2026-04-08");
+    assert_eq!(named["import"]["outcome"], "done", "{named:#}");
+    assert_eq!(
+        named["import"]["line"],
+        line_of(&journal, "2026-04-08", "BANKNIFTY,NIFTY")
+    );
+    let later_tree = day_of(&root, "NSE-FNO-NIFTY", "2026-04-09");
+    assert_eq!(
+        later_tree["import"]["outcome"], "incomplete",
+        "{later_tree:#}"
+    );
+    assert_eq!(
+        later_tree["import"]["line"],
+        line_of(&journal, "2026-04-09", "*")
+    );
 
     let newest = day_of(&root, "NSE-FNO-NIFTY", "2026-04-10");
     assert_eq!(
@@ -424,5 +433,164 @@ fn a_close_with_this_instruments_own_refusals_names_the_first() {
                 NIFTY28APR2690000PE: line 7: not ten well-formed fields"),
         "{:?}",
         says(&put)
+    );
+}
+
+/// **A NEWER `*` CLOSE IS WHERE THE DAY STANDS, CLEAN OR FAILED** (AF-02
+/// repair round 1, the second agent's blocking finding). The importer skips
+/// a day by kind, day AND filter (`pull::gdfl_import::admit`), so the first
+/// `*` import over the window re-imports every options day a list closed.
+///
+/// * (a) a day closed `done_with_refusals` under `BANKNIFTY,NIFTY` and later
+///   re-imported clean under `*` reads the `*` close: `done`, its line, its
+///   run, and the list run's refusal said as history, never as the day's
+///   "imported with 1 vendor refusal(s)";
+/// * (b) a day closed clean under the list and later left `incomplete` under
+///   `*` by this instrument's own refusal reads `incomplete` and names the
+///   refused file, never `done` with the refusal unsaid.
+#[test]
+fn a_newer_whole_tree_close_wins_over_an_older_naming_list() {
+    let root = root_of("newer-tree");
+    // (a) list R1 refused one BANKNIFTY file; `*` R2 began after the refusal.
+    let mut journal = closed(
+        "done",
+        "2025-03-11",
+        "BANKNIFTY,NIFTY",
+        "failures=1 vendor_refused=1 reason=malformed_row run=1791171000",
+    );
+    journal.push_str(&closed(
+        "done",
+        "2025-03-11",
+        "*",
+        "failures=0 run=1791172000",
+    ));
+    // (b) list R3 clean; `*` R4 began before NIFTY's own refusal.
+    journal.push_str(&closed(
+        "done",
+        "2026-04-15",
+        "BANKNIFTY,NIFTY",
+        "failures=0 run=1791160000",
+    ));
+    journal.push_str(&closed(
+        "incomplete",
+        "2026-04-15",
+        "*",
+        "failures=1 vendor_refused=1 reason=malformed_row run=1791171000",
+    ));
+    write(&pull::gdfl_import::journal_path(&root), &journal);
+    ring(
+        &root,
+        &[
+            (
+                "options",
+                "2025-03-11",
+                "BANKNIFTY26JUN2590000CE",
+                "line 3: not ten well-formed fields",
+                "vendor",
+            ),
+            (
+                "options",
+                "2026-04-15",
+                "NIFTY28APR2699999CE",
+                "line 5: not ten well-formed fields",
+                "vendor",
+            ),
+        ],
+    );
+
+    for instrument in ["NSE-FNO-BANKNIFTY", "NSE-FNO-NIFTY"] {
+        let clean = day_of(&root, instrument, "2025-03-11");
+        assert_eq!(
+            clean["import"]["outcome"], "done",
+            "{instrument}: {clean:#}"
+        );
+        assert_eq!(
+            clean["import"]["line"],
+            line_of(&journal, "2025-03-11", "*"),
+            "{instrument}"
+        );
+        assert_eq!(clean["import"]["run"], 1_791_172_000_u64, "{instrument}");
+        assert_eq!(clean["import"]["refusals"]["this_count"], 0, "{instrument}");
+        let said = says(&clean);
+        assert!(
+            !said.iter().any(|s| s.starts_with("imported with")),
+            "{instrument}: {said:?}"
+        );
+        assert!(
+            said.iter().any(|s| s
+                == "1 refusal(s) logged by an earlier run are history, superseded by run \
+                    1791172000"),
+            "{instrument}: {said:?}"
+        );
+    }
+
+    let failed = day_of(&root, "NSE-FNO-NIFTY", "2026-04-15");
+    assert_eq!(failed["import"]["outcome"], "incomplete", "{failed:#}");
+    assert_eq!(
+        failed["import"]["line"],
+        line_of(&journal, "2026-04-15", "*")
+    );
+    assert_eq!(failed["import"]["refusals"]["this_count"], 1);
+    let said = says(&failed);
+    assert!(
+        said.iter().any(|s| s.starts_with("incomplete at import")
+            && s.contains("NIFTY28APR2699999CE: line 5: not ten well-formed fields")),
+        "{said:?}"
+    );
+}
+
+/// **A `done` CLOSE NEVER LEAVES THIS INSTRUMENT'S OWN REFUSALS UNSAID**
+/// (AF-02 repair round 1, the second agent's follow-up). A close with no run
+/// id (every journal line before run ids) cannot place a logged refusal
+/// before or after itself, so a refusal of the day about this instrument
+/// stays the day's: a `done` close says it, as a `done_with_refusals` one
+/// does, and never reads as a clean day with the refusal in the JSON only.
+#[test]
+fn a_done_close_with_this_instruments_own_logged_refusal_says_it() {
+    let root = root_of("done-own");
+    let mut journal = closed(
+        "done",
+        "2025-03-12",
+        "BANKNIFTY,NIFTY",
+        "failures=1 vendor_refused=1 reason=malformed_row",
+    );
+    journal.push_str(&closed("done", "2025-03-12", "*", "failures=0"));
+    write(&pull::gdfl_import::journal_path(&root), &journal);
+    ring(
+        &root,
+        &[(
+            "options",
+            "2025-03-12",
+            "NIFTY27MAR2599999PE",
+            "line 2: not ten well-formed fields",
+            "vendor",
+        )],
+    );
+
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2025-03-12");
+    assert_eq!(nifty["import"]["outcome"], "done", "{nifty:#}");
+    assert_eq!(
+        nifty["import"]["line"],
+        line_of(&journal, "2025-03-12", "*")
+    );
+    assert_eq!(nifty["import"]["refusals"]["this_count"], 1);
+    let said = says(&nifty);
+    assert!(
+        said.iter().any(|s| s
+            == "closed done, yet the importer's log holds 1 refusal(s) of this day about \
+                this instrument not dated before this run; the first is \
+                NIFTY27MAR2599999PE: line 2: not ten well-formed fields"),
+        "{said:?}"
+    );
+
+    // ANOTHER UNDERLYING'S DAY: nothing of its own, nothing said.
+    let bank = day_of(&root, "NSE-FNO-BANKNIFTY", "2025-03-12");
+    assert_eq!(bank["import"]["refusals"]["this_count"], 0, "{bank:#}");
+    assert!(
+        !says(&bank)
+            .iter()
+            .any(|s| s.starts_with("closed done, yet")),
+        "{:?}",
+        says(&bank)
     );
 }

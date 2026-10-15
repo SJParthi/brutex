@@ -1034,8 +1034,9 @@ fn run_json(root: &std::path::Path, parsed: &Parsed, evidence: &ImportRefusals, 
         "lifecycle": {
             "events": events,
             "events_total": lifecycle.records.len(),
-            "says": looked.as_ref().map(|(says, _)| says.clone()),
-            "not_read": looked.map(|(_, not_read)| not_read).unwrap_or_default(),
+            "says": looked.as_ref().map(|(says, _, _)| says.clone()),
+            "not_read_total": looked.as_ref().map_or(0, |(_, _, total)| *total),
+            "not_read": looked.map(|(_, not_read, _)| not_read).unwrap_or_default(),
             "from": lifecycle.from,
             "unread": lifecycle.unread,
             "capped": lifecycle.capped,
@@ -1064,29 +1065,19 @@ const MAX_NOT_READ_NAMED: usize = 32;
 /// operator's batch script), and a bare `events_total: 0` read as "this run
 /// logged nothing" when it meant "not where this route looks".
 ///
-/// One `read_dir` of `<store>/logs`, only for a run asked and found empty.
-fn where_looked(root: &std::path::Path, unread: &[String]) -> (String, Vec<String>) {
+/// One `read_dir` of `<store>/logs`, and one of each directory that is only
+/// a parent of read ones ([`unread_under`]), only for a run asked and found
+/// empty.
+fn where_looked(root: &std::path::Path, unread: &[String]) -> (String, Vec<String>, usize) {
     let read: Vec<String> = crate::logs::import_dirs()
         .map(|dir| format!("logs/{dir}"))
         .collect();
-    let covered = |name: &str| {
-        crate::logs::import_dirs().any(|dir| {
-            dir == name
-                || dir
-                    .strip_prefix(name)
-                    .is_some_and(|rest| rest.starts_with('/'))
-        })
-    };
-    let mut not_read: Vec<String> = std::fs::read_dir(root.join("logs"))
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| !covered(name))
-        .map(|name| format!("logs/{name}"))
-        .collect();
+    let mut not_read = Vec::new();
+    unread_under(&root.join("logs"), "", &mut not_read);
     not_read.sort();
+    // EVERY UNREAD DIRECTORY IS COUNTED, and the names past the cap are said
+    // as a number, never dropped without a word (AF-02 repair).
+    let total = not_read.len();
     not_read.truncate(MAX_NOT_READ_NAMED);
     let mut parts = vec![format!("no lifecycle event in {}", read.join(", "))];
     if !unread.is_empty() {
@@ -1096,14 +1087,50 @@ fn where_looked(root: &std::path::Path, unread: &[String]) -> (String, Vec<Strin
         ));
     }
     if !not_read.is_empty() {
+        let more = total.saturating_sub(not_read.len());
         parts.push(format!(
-            "{} {} there and not read by this route: a `cli` given BRUTEX_LOG_DIR logs \
+            "{}{} {} there and not read by this route: a `cli` given BRUTEX_LOG_DIR logs \
              where it was told",
             not_read.join(", "),
-            if not_read.len() == 1 { "is" } else { "are" }
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            },
+            if total == 1 { "is" } else { "are" }
         ));
     }
-    (parts.join("; "), not_read)
+    (parts.join("; "), not_read, total)
+}
+
+/// The directories under `dir` (`logs/<prefix>`) that no read covers, pushed
+/// as `logs/<path>`. A directory that IS read is skipped; one that is only a
+/// PARENT of read ones (`logs/gdfl`, whose `indices`, `stocks`, `options`
+/// and `store` are read) is walked one level down, so an unread
+/// `logs/gdfl/<other>` is named too (AF-02 repair). The depth is bounded by
+/// the read directories' own: no read directory is deeper than two names.
+fn unread_under(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+    let entries = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok());
+    for name in entries {
+        let path = format!("{prefix}{name}");
+        if crate::logs::import_dirs().any(|read| read == path) {
+            continue;
+        }
+        let parent = crate::logs::import_dirs().any(|read| {
+            read.strip_prefix(path.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if parent {
+            unread_under(&dir.join(&name), &format!("{path}/"), out);
+        } else {
+            out.push(format!("logs/{path}"));
+        }
+    }
 }
 
 /// `/dayflags.json`'s body for `query` over the store at `root`: the day

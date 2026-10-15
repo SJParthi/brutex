@@ -17376,7 +17376,7 @@ calls, not routes: the end-to-end figures of the design's §5.4 need the read
 door (SC-3) and are not measured here.
 
 
-## Import records on filtered days — D-4955 (AF-02, ingest-6), 14 October 2026
+## Import records on filtered days — D-4970 (AF-02, ingest-6), 14 October 2026
 
 What AF-02 adds to `/imports.json`, `/audit.json` and `/dayflags.json`, and
 what it costs. None of it is a new walk: `/imports.json`'s day rows stay the
@@ -17387,7 +17387,8 @@ range)), and `/dayflags.json` reads one page of `PAGE_DAYS` days through it.
 |---|---|---|---|
 | L-AF2-1 | `imports::merged`: is a logged kind-day named by the journal under ANY filter | one range of that day's keys in the parsed journal, at most the closes of that day (the operator's busiest options day holds three keys: `*`, `BANKNIFTY,NIFTY`, the 277-name key), per logged day in the asked range; the logged days are the ring's, not the journal's | see the table below; `a_month_of_filtered_closes_with_refusals_holds_no_phantom` pins one row per close over 28 days under the 277-name key |
 | L-AF2-2 | `dayflags::Names`: does a row's filter NAME the symbol | the comma split, O(bytes of the filter), once per DISTINCT filter string per request (`the_filter_is_split_once_per_distinct_string_per_request`: 84 rows, 3 splits); every other row is one hash probe of its filter text, O(bytes) of hashing, the same order as the copy of that text the walk already makes for the row. **Not O(1) in the filter's length; bounded by it**: the 277-name key is about 2,200 bytes | the 277-name RELIANCE page costs what the 15-byte NIFTY page costs (table below) |
-| L-AF2-3 | `imports::where_looked`: where a run with no lifecycle event was looked for | one `read_dir` of `<store>/logs`, only for a run asked by `run=` and found with no lifecycle event; O(entries of `<store>/logs`), six on the operator's store; at most 32 names returned (`MAX_NOT_READ_NAMED`) | `run=1791944932` below |
+| L-AF2-3 | `imports::where_looked`: where a run with no lifecycle event was looked for | one `read_dir` of `<store>/logs`, and (repair round 1) one of each directory that is only the PARENT of read ones (`logs/gdfl`; no read directory is deeper than two names, so the walk is at most two levels), only for a run asked by `run=` and found with no lifecycle event; O(entries of those directories): two on the operator's store on 15 October (`cli`, `cli-batch`; it holds no `logs/gdfl` yet, so no second level is read); at most 32 names returned (`MAX_NOT_READ_NAMED`), every one counted (`not_read_total`) | `run=1791944932` below |
+| L-AF2-4 | `dayflags::journal_rows`: which covering close a day stands on (repair round 1: the newest line wins, whichever filter) | one comparison of `(line, names)` per covering row, the same one comparison per row the first form made of `(names, line)`; the rows are the page's, already walked | the repair round's table below: no change at p50 |
 
 **Measured, 14 October 2026.** Each route asked 200 times of a release build
 of the code before this change (feat/db-fix 72c91a46 with the tests' module
@@ -17421,3 +17422,36 @@ and that the page whose rows carry the 2,200-byte filter costs no more than
 the page whose rows carry a 15-byte one. `/imports.json?outcome=refused` is
 the walk of the whole journal (L-AF2-1's probe runs once per logged day
 inside it), unchanged here and already named above as O(rows in range).
+
+**Repair round 1, measured 15 October 2026** (D-4970; the ranking is the
+newest covering line, a `done` close says this instrument's own refusals,
+and every unread log directory is counted). Two interleaved runs (each iteration asks both
+servers, alternating which goes first), n = 200 per route per build, each
+server over its own fresh shadow of the operator's store (bars through the
+link, GET only); `curl`'s `time_total`. Run 1: the build before AF-02
+(feat/db-fix 72c91a46 with the tests' module hooks only, `tgt/p-AF-02-before`)
+against the repair's release build (`cde73992`). Run 2: the first form's
+release build (`ff636f58`) against the same repair build. Load average 16 to
+19 (logs `state/fix/af02/r1/ab-orig/timings.txt` and
+`state/fix/af02/r1/ab-r1/timings.txt` in the work tree; the script is
+`state/fix/af02/r1/ab.sh`). p50 / p99 / max, ms:
+
+| Route | Before AF-02 | Repair (run 1) | First form `ff636f58` | Repair (run 2) |
+|---|---|---|---|---|
+| `/imports.json?feed=gdfl&outcome=refused` | 12.79 / 32.01 / 37.02 | 12.09 / 23.60 / 28.80 | 8.03 / 9.45 / 39.78 | 8.03 / 9.30 / 9.61 |
+| `/imports.json?feed=gdfl&kind=options&from=2026-04-16&to=2026-04-16` | 1.03 / 5.30 / 6.16 | 1.02 / 4.07 / 4.85 | 1.13 / 3.18 / 3.29 | 1.11 / 2.25 / 4.69 |
+| `/audit.json?feed=gdfl` | 1.38 / 9.88 / 13.75 | 1.41 / 11.66 / 14.94 | 1.46 / 3.49 / 6.20 | 1.47 / 4.57 / 8.35 |
+| `/dayflags.json?feed=gdfl&instrument=NSE-FNO-NIFTY&from=2026-04-15&to=2026-04-16` (15-byte list) | 1.51 / 3.98 / 6.03 | 1.49 / 4.33 / 6.07 | 1.81 / 6.03 / 7.24 | 1.78 / 4.38 / 6.82 |
+| the same for NSE-FNO-RELIANCE (the 2,200-byte 277-name list) | 1.04 / 1.76 / 1.90 | 1.04 / 1.82 / 1.85 | 1.51 / 3.42 / 5.16 | 1.48 / 4.02 / 8.44 |
+| NSE-FNO-NIFTY, April 2026 | 1.72 / 2.99 / 3.64 | 1.78 / 3.30 / 4.86 | 3.04 / 5.96 / 8.09 | 2.88 / 10.39 / 13.25 |
+| NSE-FNO-RELIANCE, April 2026 | 1.64 / 2.72 / 2.79 | 1.68 / 2.73 / 2.75 | 1.70 / 3.24 / 4.64 | 1.69 / 4.99 / 13.15 |
+| `/imports.json?feed=gdfl&run=1791944932` (logged to `logs/cli-batch`) | 13.12 / 20.13 / 26.43 | 12.94 / 20.32 / 23.49 | 14.14 / 22.65 / 29.55 | 14.10 / 23.19 / 29.06 |
+
+p50 is equal within 0.2 ms across the three builds on every route; the
+p99 and max columns move more between the two runs than between the builds
+in either, which is the shared host's scheduler (the same builds' p99 for
+the NIFTY month is 3.30 ms in run 1 and 10.39 ms in run 2). The per-request
+cost is bounded by the page's rows and does not grow with a filter's length
+past the one memoised split (L-AF2-2): the RELIANCE pages,
+whose rows carry the 2,200-byte 277-name filter, cost what the NIFTY pages
+carrying the 15-byte list cost.

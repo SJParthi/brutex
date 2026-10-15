@@ -68966,13 +68966,14 @@ rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
 
-### D-4955 — A log-only import row is made only for a kind-day no journal line of ANY filter names; a journal row is an instrument's when its filter NAMES the symbol as a whole name, the newest such close winning over `*`; a run with no lifecycle event says where it looked — 2026-10-14
+### D-4970 — A log-only import row is made only for a kind-day no journal line of ANY filter names; a journal row is an instrument's when its filter NAMES the symbol as a whole name or is `*`, the newest such close winning; a run with no lifecycle event says where it looked — 2026-10-14
 
 **Implemented by** AF-02 (`api::imports::merged`, `api::imports::where_looked`,
 `api::imports::run_json`, `api::dayflags::{journal_rows, Names, import_json,
 other_first}`, `Says::import_phrases`). **Number** chosen above every number in
-use on 14 October 2026 (D-4951 is taken twice in other worktrees, P-AF-03 and
-P-R3-16); renumber at landing if the head has moved (A6).
+use in any worktree on 15 October 2026 (the ledger's head on feat/db-fix is
+D-4965, and numbers up to D-4969 are taken in other worktrees); this entry was
+D-4955 before repair round 1. Renumber at landing if the head has moved (A6).
 
 **What was observed** (assurance finding ingest-6, confirmed by two
 skeptics on 14 October 2026; reproduced by AF-02 on a fresh shadow of the real
@@ -69005,12 +69006,24 @@ under any filter and are DB-025's intended log-only rows.
 2. A journal row is an instrument's when its filter names the instrument's
    symbol as one whole comma-separated name: `NIFTY` is named by
    `BANKNIFTY,NIFTY` and by the 277-name key, not by `NIFTYNXT50,BANKNIFTY`.
-   `*` names no symbol. Of the rows that name it, the newest closing line
-   wins; any naming row wins over `*`, older or newer, which keeps the rule
-   the code stated ("the instrument's own filter wins over the whole
-   tree's"). A list that does not name the symbol is another underlying's and
-   is skipped. Each distinct filter string is split once per request and
-   memoised; every other row is one hash probe.
+   `*` names no symbol and covers every one. Of the rows that cover it (`*`,
+   or a list naming it), the NEWEST closing line wins, whichever filter wrote
+   it; a naming list beats `*` only on an equal line (a journal has none; the
+   tie is the log-only row's line 0). A list that does not name the symbol is
+   another underlying's and is skipped. Each distinct filter string is split
+   once per request and memoised; every other row is one hash probe.
+   *Corrected in repair round 1, before landing:* this item first read "any
+   naming row wins over `*`, older or newer". The second agent showed that
+   the importer skips a day by kind, day AND filter
+   (`pull::gdfl_import::admit`), so the first `*` import over the window
+   re-imports every options day a list closed (2,990 `BANKNIFTY,NIFTY` days
+   on the operator's journal), and the older list close then hid the newer
+   `*` one: a day re-imported clean still read the list's stale
+   `done_with_refusals`, and a newer `*` run left `incomplete` by this
+   instrument's own refusal read `done` with the refusal unsaid, a fallback
+   that hides a failure. The real store holds no such kind-day today (every
+   list close is newer than any `*` close of its day), so no reading of it
+   changes.
 3. A day the log alone names whose refusals are none of them about the
    instrument (and none day-level: the calendar or the census, which
    `about_this` gives every instrument) reads `none` on `/dayflags.json`,
@@ -69027,16 +69040,26 @@ under any filter and are DB-025's intended log-only rows.
    carries `lifecycle.says` ("no lifecycle event in logs/cli, logs/gdfl/...")
    and `lifecycle.not_read`, the directories under `<store>/logs` that are
    there and that no read covers (a `cli` given `BRUTEX_LOG_DIR`, such as the
-   operator's `logs/cli-batch`), at most 32. One `read_dir`, only for a run
-   asked and found empty.
+   operator's `logs/cli-batch`), at most 32 named and every one counted
+   (`lifecycle.not_read_total`, and "and K more" in the sentence). A directory
+   that is only the parent of read ones (`logs/gdfl`) is walked one level, so
+   an unread `logs/gdfl/<other>` is named too. One `read_dir` of `logs` and
+   one of each such parent, only for a run asked and found empty.
+5. A `done` close with refusals of the day about this instrument that are not
+   dated before its run (a close with no run id cannot place them) says so:
+   "closed done, yet the importer's log holds K refusal(s) of this day about
+   this instrument not dated before this run; the first is ...". A clean
+   close never leaves the instrument's own refusals in the JSON only
+   (repair round 1).
 
 **Rejected.** Folding the refusals into "that run's row" by the `cli`
 attempt they were logged under: the attempt is known per kind-day, not per
 event, and two closes of one day can share no attempt at all (the two
 2026-04-16 closes were different runs); a guess by position would name a run
-the log does not. Ranking `*` by line against a naming list: a `*` re-import
-newer than a list would then speak for an instrument the list closed after
-checking it by name, and the old rule said the reverse.
+the log does not. Ranking any naming list above `*` whatever their order
+(this entry's first form): it reads a stale list close over the newer `*`
+re-import that superseded it, which the importer's per-filter skip makes
+reachable on every list-only day (item 2).
 
 **Store writes**: none. Read side only.
 
@@ -69052,13 +69075,19 @@ checking it by name, and the old rule said the reverse.
 `api::server::dayflags::filter_tests::a_symbol_is_named_by_whole_names_and_its_newest_naming_close_wins`,
 `api::server::dayflags::filter_tests::the_filter_is_split_once_per_distinct_string_per_request`,
 `api::server::dayflags::filter_tests::a_close_with_this_instruments_own_refusals_names_the_first`,
+`api::server::dayflags::filter_tests::a_newer_whole_tree_close_wins_over_an_older_naming_list`,
+`api::server::dayflags::filter_tests::a_done_close_with_this_instruments_own_logged_refusal_says_it`,
+`api::server::imports::filter_tests::more_unread_directories_than_are_named_are_counted`,
+`api::server::imports::filter_tests::an_unread_directory_beside_read_ones_under_their_parent_is_named`,
 and the existing `a_day_refused_whole_with_no_journal_line_is_read_from_the_log`,
-which stays green. Rows AF2-01 to AF2-07 of `docs/04-invariants.md` (the ids
+which stays green. Rows AF2-01 to AF2-08 of `docs/04-invariants.md` (the ids
 `IF-01..IF-06` this change first took are the indicator invariants' and were
 not reused). All twelve fail on the code before this change (eleven with the
 fix reverted and only the tests' module hooks kept; the twelfth with only its
 sentence reverted): logs `state/fix/af02/test-before-variant.log` and
-`state/fix/af02/test-before-arm.log` in the work tree.
+`state/fix/af02/test-before-arm.log` in the work tree. The repair round's
+four tests, and the changed 2026-04-09 case, fail on the first form
+(`ff636f58`) with the tests kept: `state/fix/af02/r1/before-filter.log`.
 
 **Measured** (`docs/06-limits.md`, "Import records on filtered days"): on
 fresh shadows of the operator's store, GET only, the change leaves every
