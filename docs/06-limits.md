@@ -17172,11 +17172,14 @@ raw's 7.4 to 51.2 µs, sealed p99 at most 1.55 times raw's (the 8,000 put).
 On a month of at most 73 bars (1, 2 and 19 bars here) raw's page is
 `BarFile`'s one cached block and reads nothing, so raw answers in 0.1 to
 0.5 µs at p99 and sealed, which keeps no cache (L-SC-17), in 1.1 to 6.4 µs.
-**Max**:
-up to 6.7 ms sealed and 4.3 ms raw on that run, and 0.38 ms sealed / 0.79 ms
-raw on run 2 (load near 18): the host's scheduler on a machine shared by a
-dozen builds, in both forms alike, not the format — the counted reads
+Opening a sealed month (a new handle, `fstat` and the 512-byte head): p50
+12.0 to 15.8 µs, p99 20.7 to 119.0 µs on run 3 and 28.2 to 52.3 µs on run 2.
+**Max**, over every call of a run: up to 7.8 ms sealed (an open) and 4.4 ms
+raw on run 3, and 0.38 ms sealed / 0.79 ms raw on run 2 (load near 18): the
+host's scheduler on a machine shared by a dozen builds, in both forms alike,
+not the format — the counted reads
 (`the_largest_month_reads_at_the_cost_of_the_smallest`) are two a page at
-any depth. Every p99 under 50 µs; no max over 50 ms. These are store-level
+any depth. Every sealed page, row and lookup p99 under 50 µs; no max over 50 ms.
+These are store-level
 calls, not routes: the end-to-end figures of the design's §5.4 need the read
 door (SC-3) and are not measured here.
