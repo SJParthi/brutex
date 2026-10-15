@@ -968,11 +968,13 @@ pub(super) fn append_ledger(
 
 /// [`append_ledger`] for `<store>/audit/<vendor>.<name>`, under the same line
 /// rules: the gap ledger is `gaps`, the repair journal `repairs` (D-3350).
+/// Taken under the ledger's exclusive lock ([`append_named_picking`]), so it
+/// never interleaves with another writer's batch.
 ///
 /// # Errors
 ///
-/// The host's words for a directory, open, write or sync that failed, or the
-/// refusal of a line that would break the line rules.
+/// The host's words for a directory, open, lock, write or sync that failed,
+/// or the refusal of a line that would break the line rules.
 pub(super) fn append_named(
     store_root: &Path,
     vendor: brutex_core::vendor::Vendor,
@@ -982,8 +984,102 @@ pub(super) fn append_named(
     if lines.is_empty() {
         return Ok(());
     }
-    let mut text = String::with_capacity(lines.iter().map(|line| line.len() + 1).sum());
-    for line in lines {
+    append_named_picking(store_root, vendor, name, |_ledger| {
+        Ok(std::borrow::Cow::Borrowed(lines))
+    })
+    .map(drop)
+}
+
+/// Appends to `<store>/audit/<vendor>.<name>` the lines `pick` chooses
+/// **while this process holds the ledger's exclusive `flock`**, and answers
+/// the ledger's length after the append and whether a torn last line was
+/// closed first. R3-18 rework (verify-R3-18-r1).
+///
+/// # Why the lines are chosen under the lock
+///
+/// A writer that decides what to write from an earlier read of the ledger
+/// (`gap_backfill`: "write no line for a `(key, day)` the ledger already
+/// names") is wrong the moment another writer appends between that read and
+/// its own append: the last line of a key wins, so a store-found line written
+/// after a vendor's line for the same day hides the vendor's reason, and two
+/// such writers each append every line. `pick` is handed the locked ledger to
+/// read what was added since its earlier read; every writer of the file —
+/// [`append_ledger`], [`append_named`] and this — takes the same lock, so
+/// nothing can be appended between `pick`'s read and the write.
+///
+/// # A torn last line is closed, never extended
+///
+/// A writer killed mid-append can leave a last line with no line break. The
+/// next line appended straight after it would be glued onto the fragment and
+/// both would read as one malformed line. When the ledger's last byte is not
+/// a line break, one is written first, the fragment stays a line of its own
+/// (every reader names it as a fault), and a `pull.ledger` warning says so.
+///
+/// # What the lock does not cover
+///
+/// `flock` is advisory: a writer that does not take it (a build older than
+/// this one) is not held off. Every writer in this tree takes it.
+///
+/// # Errors
+///
+/// The host's words for a directory, open, lock, read, write or sync that
+/// failed; something other than a regular file at the name; `pick`'s own
+/// refusal; or the refusal of a line that would break the line rules. Nothing
+/// is written on any of them.
+pub(crate) fn append_named_picking<'l>(
+    store_root: &Path,
+    vendor: brutex_core::vendor::Vendor,
+    name: &str,
+    pick: impl FnOnce(&mut std::fs::File) -> Result<std::borrow::Cow<'l, [String]>, String>,
+) -> Result<(u64, bool), String> {
+    use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
+    let dir = store_root.join("audit");
+    std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
+    let path = dir.join(format!("{}.{name}", vendor.as_str()));
+    let named = |why: std::io::Error| format!("{}: {why}", path.display());
+    // NEVER THROUGH A LINK, NEVER WAITING ON A PIPE: a link at the name is
+    // refused by the open (`O_NOFOLLOW`), a pipe opens at once (`O_NONBLOCK`)
+    // and is refused by the handle's own `fstat` below.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK)
+        .open(&path)
+        .map_err(|why| {
+            format!(
+                "{}: {why}; a ledger is appended only as a regular file, never through a link",
+                path.display()
+            )
+        })?;
+    if !file.metadata().map_err(named)?.is_file() {
+        return Err(format!(
+            "{}: not a regular file, so no line is appended to it",
+            path.display()
+        ));
+    }
+    let mut ledger = store::flock::Flock::lock(file, path.as_path()).map_err(named)?;
+    let lines = pick(&mut ledger)?;
+    if lines.is_empty() {
+        let end = ledger.metadata().map_err(named)?.len();
+        ledger.release().map_err(|why| why.to_string())?;
+        return Ok((end, false));
+    }
+    let mut text =
+        String::with_capacity(lines.iter().map(|line| line.len() + 1).sum::<usize>() + 1);
+    let len = ledger.metadata().map_err(named)?.len();
+    let mut last = [0_u8];
+    let torn = match len.checked_sub(1) {
+        Some(at) => {
+            ledger.read_exact_at(&mut last, at).map_err(named)?;
+            last != *b"\n"
+        }
+        None => false,
+    };
+    if torn {
+        text.push('\n');
+    }
+    for line in lines.iter() {
         if line.contains(['\n', '\r', '\t']) {
             return Err(format!(
                 "a ledger line holds a line break or a tab and was refused with its batch: {line:?}"
@@ -992,17 +1088,23 @@ pub(super) fn append_named(
         text.push_str(line);
         text.push('\n');
     }
-    let dir = store_root.join("audit");
-    std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-    let path = dir.join(format!("{}.{name}", vendor.as_str()));
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|why| format!("{}: {why}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_data())
-        .map_err(|why| format!("{}: {why}", path.display()))
+    ledger
+        .write_all(text.as_bytes())
+        .and_then(|()| ledger.sync_data())
+        .map_err(named)?;
+    ledger.release().map_err(|why| why.to_string())?;
+    if torn {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.ledger",
+                "a torn last line was closed before the append",
+            )
+            .with("path", telemetry::Value::Str(&path.display().to_string()))
+            .with("at", telemetry::Value::Uint(len)),
+        );
+    }
+    let written = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    Ok((len.saturating_add(written), torn))
 }
 
 #[cfg(test)]
@@ -1334,6 +1436,63 @@ mod tests {
         let file_root = root.join("NOT-A-DIR");
         std::fs::write(&file_root, b"x").unwrap();
         assert!(append_ledger(&file_root, vendor, &["gap X".to_owned()]).is_err());
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+
+    /// **EVERY APPEND TAKES THE LEDGER'S LOCK, CLOSES A TORN LAST LINE AND
+    /// NEVER WRITES THROUGH A LINK** (R3-18 rework, verify-R3-18-r1).
+    #[test]
+    fn the_ledger_append_waits_for_the_lock_closes_a_torn_line_and_refuses_a_link() {
+        use std::io::Write as _;
+        let root = std::env::temp_dir().join(format!("brutex-LEDGER-LOCK-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&root);
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        let audit = root.join("audit");
+        std::fs::create_dir_all(&audit).unwrap();
+        let path = audit.join("zerodha.gaps");
+
+        // A TORN LAST LINE: closed by one line break, then the batch.
+        std::fs::write(&path, "gap TORN 2019-09-2").unwrap();
+        append_ledger(&root, vendor, &["gap A".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN 2019-09-2\ngap A\n"
+        );
+        // A whole last line gets no extra break.
+        append_ledger(&root, vendor, &["gap B".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN 2019-09-2\ngap A\ngap B\n"
+        );
+
+        // THE LOCK: an append waits while another holder writes.
+        let mut holder = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        holder.lock().unwrap();
+        std::thread::scope(|scope| {
+            let run = scope.spawn(|| append_ledger(&root, vendor, &["gap C".to_owned()]));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!run.is_finished(), "the append waited for the lock");
+            write!(holder, "gap HELD").unwrap();
+            holder.unlock().unwrap();
+            run.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN 2019-09-2\ngap A\ngap B\ngap HELD\ngap C\n",
+            "the holder's unfinished line was closed, never glued to"
+        );
+
+        // A LINK AT THE NAME is refused, and its target is untouched.
+        let target = root.join("elsewhere");
+        std::fs::write(&target, "x\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let refused = append_ledger(&root, vendor, &["gap D".to_owned()]).unwrap_err();
+        assert!(refused.contains("never through a link"), "{refused}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x\n");
         let _cleanup = std::fs::remove_dir_all(&root);
     }
 

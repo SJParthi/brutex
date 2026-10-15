@@ -791,7 +791,7 @@ fn a_gap_ledger_is_written_for_stored_months_without_a_vendor_call() {
     let vendor = brutex_core::vendor::Vendor::Zerodha;
     let mut have = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
     assert_eq!(have.len(), 1);
-    let series = gap_backfill::series(&scratch.0, index_parts(), window, &have);
+    let mut series = gap_backfill::series(&scratch.0, index_parts(), window, &have);
     assert_eq!(series.key, "NSE-INDEX-NIFTY");
     assert!(
         series.tally.refused.is_empty(),
@@ -855,7 +855,10 @@ fn a_gap_ledger_is_written_for_stored_months_without_a_vendor_call() {
         "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run="
     ), "{}", series.lines[1]);
 
-    gap_backfill::write(&scratch.0, vendor, &series, &mut have).unwrap();
+    assert_eq!(
+        gap_backfill::write(&scratch.0, vendor, &mut series, &mut have).unwrap(),
+        4
+    );
     let written = ledger(&scratch.0);
     assert_eq!(written.lines().count(), 5);
     assert_eq!(
@@ -867,13 +870,16 @@ fn a_gap_ledger_is_written_for_stored_months_without_a_vendor_call() {
     // IDEMPOTENT: a second run, from a fresh read of the ledger, writes nothing.
     let again = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
     assert_eq!(again.len(), 5);
-    let second = gap_backfill::series(&scratch.0, index_parts(), window, &again);
+    let mut second = gap_backfill::series(&scratch.0, index_parts(), window, &again);
     assert!(
         second.lines.is_empty() && second.tally.already == 5,
         "{:?}",
         second.tally
     );
-    gap_backfill::write(&scratch.0, vendor, &second, &mut have.clone()).unwrap();
+    assert_eq!(
+        gap_backfill::write(&scratch.0, vendor, &mut second, &mut have.clone()).unwrap(),
+        0
+    );
     assert_eq!(ledger(&scratch.0), written);
 
     // A series the store does not hold owes nothing and reads nothing.
@@ -1164,5 +1170,181 @@ fn a_ledger_name_holding_a_link_or_a_directory_is_refused_by_name() {
         parsed.faults,
         [2],
         "the day that is not YYYY-MM-DD, by line"
+    );
+}
+
+/// The DB-A12 fixture with an EMPTY ledger, read: the store's four lines
+/// (2019-09-23 among them) found and none written yet.
+fn found_against_an_empty_ledger(
+    root: &Path,
+) -> (gap_backfill::Have, gap_backfill::Series, Window) {
+    let _fixture = db_a12_fixture(root);
+    let audit = root.join("audit");
+    fs::write(audit.join("zerodha.gaps"), "").unwrap();
+    let window = Window::new(day(2019, 1, 1), day(2026, 9, 30)).unwrap();
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let have = gap_backfill::ledgered(root, vendor).unwrap();
+    let series = gap_backfill::series(root, index_parts(), window, &have);
+    assert_eq!(series.lines.len(), 5, "{:?}", series.tally);
+    (have, series, window)
+}
+
+/// The `(key, day)` of every `gap` line, in ledger order.
+fn keyed(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter(|l| l.starts_with("gap "))
+        .map(|l| {
+            let mut w = l.split(' ').skip(1);
+            (w.next().unwrap().to_owned(), w.next().unwrap().to_owned())
+        })
+        .collect()
+}
+
+/// **A LINE ANOTHER WRITER APPENDS AFTER THE READ IS NEVER OVERTAKEN**
+/// (verify-R3-18-r1, blocking 1). The run reads the ledger and finds
+/// 2019-09-23 short; before it writes, a pull appends its own vendor line for
+/// that day. The write re-reads the ledger under its lock, drops the
+/// store-found line for 2019-09-23 (counted `raced`), and writes the others:
+/// the vendor's line stays the last line of its key and day. Before the
+/// rework the store-found line was appended after it and hid the vendor's
+/// reason.
+#[test]
+fn a_line_another_writer_appends_after_the_read_is_never_overtaken() {
+    let scratch = Scratch::new("RACE-READ");
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let (mut have, mut series, _) = found_against_an_empty_ledger(&scratch.0);
+    assert!(series.days.contains(&day(2019, 9, 23)));
+    let pulled = "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=vendor_empty run=99";
+    {
+        use std::io::Write as _;
+        let mut other = fs::OpenOptions::new()
+            .append(true)
+            .open(scratch.0.join("audit/zerodha.gaps"))
+            .unwrap();
+        writeln!(other, "{pulled}").unwrap();
+    }
+    let written = gap_backfill::write(&scratch.0, vendor, &mut series, &mut have).unwrap();
+    assert_eq!((written, series.tally.raced), (4, 1));
+    let text = ledger(&scratch.0);
+    let last_for_day = text
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("gap NSE-INDEX-NIFTY 2019-09-23 "))
+        .unwrap();
+    assert_eq!(last_for_day, pulled, "the vendor's reason stands:\n{text}");
+    assert_eq!(text.lines().count(), 5);
+    let mut pairs = keyed(&text);
+    let all = pairs.len();
+    pairs.sort();
+    pairs.dedup();
+    assert_eq!(pairs.len(), all, "each (key, day) once:\n{text}");
+    // THE READ POSITION MOVED PAST THE APPEND: the same lines offered again
+    // are all held, and nothing more is written.
+    let written = gap_backfill::write(&scratch.0, vendor, &mut series, &mut have).unwrap();
+    assert_eq!(written, 0);
+    assert_eq!(ledger(&scratch.0), text);
+}
+
+/// **TWO RUNS AT ONCE WRITE EACH LINE ONCE** (verify-R3-18-r1, blocking 1).
+/// Two threads each read the empty ledger and find the same five lines, then
+/// write together: the lock serialises them and the second re-reads what the
+/// first appended, so the ledger holds five lines, not ten.
+#[test]
+fn two_runs_at_once_write_each_line_once() {
+    let scratch = Scratch::new("RACE-TWO");
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let (have, series, _) = found_against_an_empty_ledger(&scratch.0);
+    let barrier = std::sync::Barrier::new(2);
+    let written: Vec<u64> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let (mut have, mut series) = (have.clone(), series.clone());
+                let (root, barrier) = (&scratch.0, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    gap_backfill::write(root, vendor, &mut series, &mut have).unwrap()
+                })
+            })
+            .collect();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+    let mut sorted = written.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, [0, 5], "one run wrote, the other found it all");
+    let text = ledger(&scratch.0);
+    assert_eq!(text.lines().count(), 5, "{text}");
+}
+
+/// **THE WRITE WAITS FOR ANOTHER HOLDER OF THE LEDGER'S LOCK.** A writer that
+/// holds the ledger's `flock` (as a pull's append does while it writes) keeps
+/// the stored-month write out until it lets go; the write then reads what
+/// that writer appended and writes nothing over it.
+#[test]
+fn the_write_waits_for_the_ledgers_lock_and_reads_what_its_holder_wrote() {
+    use std::io::Write as _;
+    let scratch = Scratch::new("RACE-LOCK");
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let (mut have, mut series, _) = found_against_an_empty_ledger(&scratch.0);
+    let path = scratch.0.join("audit/zerodha.gaps");
+    let mut holder = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    holder.lock().unwrap();
+    let pulled = "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=vendor_empty run=7";
+    let (written, raced) = std::thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            let written = gap_backfill::write(&scratch.0, vendor, &mut series, &mut have);
+            (written, series.tally.raced)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!run.is_finished(), "the write waited for the lock");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "", "nothing yet");
+        writeln!(holder, "{pulled}").unwrap();
+        holder.unlock().unwrap();
+        run.join().unwrap()
+    });
+    assert_eq!((written.unwrap(), raced), (4, 1));
+    let text = ledger(&scratch.0);
+    assert_eq!(text.lines().next(), Some(pulled), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.starts_with("gap NSE-INDEX-NIFTY 2019-09-23 "))
+            .count(),
+        1,
+        "{text}"
+    );
+}
+
+/// **A TORN LAST LINE IS CLOSED, NEVER EXTENDED.** A writer killed mid-line
+/// left a `gap` fragment with no line break; the read names its day (so no
+/// line is written over it), the write closes it with a line break before
+/// its own lines, and every written line stays whole.
+#[test]
+fn a_torn_last_line_is_closed_before_the_stored_lines() {
+    let scratch = Scratch::new("TORN-TAIL");
+    let vendor = brutex_core::vendor::Vendor::Zerodha;
+    let _fixture = db_a12_fixture(&scratch.0);
+    let path = scratch.0.join("audit/zerodha.gaps");
+    let torn = "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=3";
+    fs::write(&path, torn).unwrap();
+    let window = Window::new(day(2019, 1, 1), day(2026, 9, 30)).unwrap();
+    let mut have = gap_backfill::ledgered(&scratch.0, vendor).unwrap();
+    assert!(have.holds("NSE-INDEX-NIFTY", day(2019, 9, 23)));
+    let mut series = gap_backfill::series(&scratch.0, index_parts(), window, &have);
+    assert_eq!(series.lines.len(), 4);
+    assert_eq!(
+        gap_backfill::write(&scratch.0, vendor, &mut series, &mut have).unwrap(),
+        4
+    );
+    let text = ledger(&scratch.0);
+    assert!(
+        text.starts_with(&format!("{torn}\ngap NSE-INDEX-NIFTY ")),
+        "{text}"
+    );
+    assert!(text.ends_with('\n'));
+    assert_eq!(text.lines().count(), 5);
+    assert!(
+        text.lines()
+            .skip(1)
+            .all(|l| l.contains(" why=stored_short ") && l.ends_with(" source=store")),
+        "{text}"
     );
 }

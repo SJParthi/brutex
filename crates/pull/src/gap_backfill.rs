@@ -43,11 +43,18 @@
 //! - a session whose owed minutes no record states, or a day no calendar
 //!   attests ([`Tally::length_unjudged`], [`Tally::unattested`]).
 //!
-//! # Idempotent
+//! # Idempotent, and never over another writer's line
 //!
-//! The ledger's `(key, day)` pairs are read first; a second run finds every
-//! line the first wrote and writes nothing. Bars, census and sidecars are
-//! never opened for writing.
+//! The ledger's `(key, day)` pairs are read first ([`ledgered`]), and the
+//! byte where that read stopped is kept. Each series is then written under
+//! the ledger's exclusive lock, which every writer of the file takes
+//! (`request_minutes::append_named_picking`): the lines appended since that
+//! byte — by a pull, a repair or a second `--apply` — are read under the lock
+//! first, and every line whose `(key, day)` they now name is dropped before
+//! the append ([`Tally::raced`]). So a store-found line never follows another
+//! writer's line for the same key and day, two concurrent runs write each
+//! line once, and a second run finds every line the first wrote and writes
+//! nothing. Bars, census and sidecars are never opened for writing.
 //!
 //! # Cost
 //!
@@ -58,7 +65,7 @@
 //! and one sync per series written.
 
 use std::collections::HashSet;
-use std::io::BufRead as _;
+use std::io::BufRead;
 use std::path::Path;
 
 use brutex_core::vendor::Vendor;
@@ -69,13 +76,19 @@ use super::repair_plan::{self, Missing, Owes};
 use super::request_minutes;
 use crate::session::{Day, Window};
 
-/// The `(key, day)` pairs the ledger already holds a `gap` line for.
+/// The `(key, day)` pairs the ledger already holds a `gap` line for, and
+/// where the read that found them stopped.
 #[derive(Debug, Clone, Default)]
 pub struct Have {
     pairs: HashSet<(String, u32)>,
     /// Lines that are not a well-formed `gap` or another record kind, by
     /// line number: named, never silently skipped.
     pub faults: Vec<u64>,
+    /// Bytes of the ledger read, up to the end of its last whole line: the
+    /// next read under the lock starts here.
+    read_to: u64,
+    /// Whole lines read, so a fault found later keeps its line number.
+    lines: u64,
 }
 
 impl Have {
@@ -132,21 +145,54 @@ pub fn ledgered(root: &Path, vendor: Vendor) -> Result<Have, String> {
         Err(why) => return Err(format!("{}: {why}", path.display())),
     };
     let mut have = Have::default();
-    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|why| format!("{}: {why}", path.display()))?;
-        let number = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-        if !line.starts_with("gap ") {
-            continue;
+    scan(&mut have, std::io::BufReader::new(file))
+        .map_err(|why| format!("{}: {why}", path.display()))?;
+    Ok(have)
+}
+
+/// Every line `reader` holds, read into `have` from where its last read
+/// stopped. A last line with no line break — a writer killed mid-line — is
+/// read for its `(key, day)` (so nothing is written over it) but not counted
+/// as read: the next scan reads it again, closed. A line that is not UTF-8
+/// is a fault, named by its number.
+fn scan(have: &mut Have, mut reader: impl BufRead) -> std::io::Result<()> {
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let taken = reader.read_until(b'\n', &mut bytes)?;
+        if taken == 0 {
+            return Ok(());
         }
-        let mut words = line.split(' ').skip(1);
-        match (words.next(), words.next().and_then(parse_day)) {
-            (Some(key), Some(day)) if !key.is_empty() && !key.contains('=') => {
-                have.pairs.insert((key.to_owned(), day.days_from_epoch()));
+        let whole = bytes.last() == Some(&b'\n');
+        let number = have.lines.saturating_add(1);
+        let text = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        match std::str::from_utf8(text) {
+            Ok(line) if line.starts_with("gap ") => {
+                let mut words = line.split(' ').skip(1);
+                match (words.next(), words.next().and_then(parse_day)) {
+                    (Some(key), Some(day)) if !key.is_empty() && !key.contains('=') => {
+                        have.pairs.insert((key.to_owned(), day.days_from_epoch()));
+                    }
+                    _ => fault(have, number),
+                }
             }
-            _ => have.faults.push(number),
+            Ok(_) => {}
+            Err(_) => fault(have, number),
+        }
+        if whole {
+            have.lines = number;
+            have.read_to = have
+                .read_to
+                .saturating_add(u64::try_from(taken).unwrap_or(u64::MAX));
         }
     }
-    Ok(have)
+}
+
+/// `number` named as a fault once, however often a torn last line is read.
+fn fault(have: &mut Have, number: u64) {
+    if have.faults.last() != Some(&number) {
+        have.faults.push(number);
+    }
 }
 
 /// What one series' stored months owe the ledger.
@@ -160,6 +206,11 @@ pub struct Tally {
     pub short: u64,
     /// Of those, the ones the ledger already holds a line for.
     pub already: u64,
+    /// Lines found but not written because another writer — a pull, a
+    /// repair, another run — appended a line for the same `(key, day)` after
+    /// this run read the ledger: read under the ledger's lock, so its reason
+    /// stands.
+    pub raced: u64,
     /// Of those, `before_first`: never written.
     pub before_first: u64,
     /// Of those, `tail` sessions of the newest held month: never written.
@@ -337,16 +388,46 @@ fn held_stamps(file: &BarFile, day: Day, windows: &[(u32, u32)]) -> Result<Vec<i
 
 /// Appends `series`' lines to the ledger in one write and one sync, records
 /// them in `have` so a second call writes nothing, and says so in one
-/// `pull.gap_backfill` event.
+/// `pull.gap_backfill` event. Answers how many lines were written.
+///
+/// UNDER THE LEDGER'S EXCLUSIVE LOCK, the lines appended since `have`'s read
+/// stopped are read first and every line whose `(key, day)` they name is
+/// dropped ([`Tally::raced`]): the other writer's line stands, and is never
+/// followed by a store-found one for the same day.
 ///
 /// # Errors
 ///
-/// The ledger's own refusal: a directory, open, write or sync that failed.
-pub fn write(root: &Path, vendor: Vendor, series: &Series, have: &mut Have) -> Result<(), String> {
-    let written = request_minutes::append_ledger(root, vendor, &series.lines);
-    let lines = u64::try_from(series.lines.len()).unwrap_or(u64::MAX);
+/// The ledger's own refusal: a directory, open, lock, read, write or sync
+/// that failed. Nothing is written then.
+pub fn write(
+    root: &Path,
+    vendor: Vendor,
+    series: &mut Series,
+    have: &mut Have,
+) -> Result<u64, String> {
+    let mut kept_days: Vec<Day> = Vec::new();
+    let mut raced = 0_u64;
+    let written = request_minutes::append_named_picking(root, vendor, "gaps", |ledger| {
+        use std::io::{Seek as _, SeekFrom};
+        ledger
+            .seek(SeekFrom::Start(have.read_to))
+            .and_then(|_| scan(have, std::io::BufReader::new(&mut *ledger)))
+            .map_err(|why| format!("{}: {why}", ledger_path(root, vendor).display()))?;
+        let mut kept = Vec::with_capacity(series.lines.len());
+        for (line, &day) in series.lines.iter().zip(&series.days) {
+            if have.holds(&series.key, day) {
+                raced += 1;
+            } else {
+                kept.push(line.clone());
+                kept_days.push(day);
+            }
+        }
+        Ok(std::borrow::Cow::Owned(kept))
+    });
+    series.tally.raced += raced;
+    let lines = u64::try_from(kept_days.len()).unwrap_or(u64::MAX);
     let event = match &written {
-        Ok(()) => telemetry::Event::info("pull.gap_backfill", "stored-month gap lines written"),
+        Ok(_) => telemetry::Event::info("pull.gap_backfill", "stored-month gap lines written"),
         Err(_) => {
             telemetry::Event::error("pull.gap_backfill", "stored-month gap lines NOT written")
         }
@@ -357,14 +438,25 @@ pub fn write(root: &Path, vendor: Vendor, series: &Series, have: &mut Have) -> R
             .with("feed", telemetry::Value::Str(vendor.as_str()))
             .with("instrument", telemetry::Value::Str(&series.key))
             .with("lines", telemetry::Value::Uint(lines))
+            .with("raced", telemetry::Value::Uint(raced))
             .with("months", telemetry::Value::Uint(series.tally.months))
             .with("minutes", telemetry::Value::Uint(series.tally.minutes))
             .with("reason", telemetry::Value::Str(&reason)),
     );
-    written?;
-    for day in &series.days {
+    let (end, closed) = written?;
+    for day in &kept_days {
         have.pairs
             .insert((series.key.clone(), day.days_from_epoch()));
     }
-    Ok(())
+    // EVERY BYTE UP TO THE END IS NOW READ OR WRITTEN BY THIS RUN, AND WHOLE
+    // LINES: the append ended in a line break, and a torn last line it closed
+    // is one more line.
+    if lines > 0 {
+        have.lines = have
+            .lines
+            .saturating_add(lines)
+            .saturating_add(u64::from(closed));
+        have.read_to = end;
+    }
+    Ok(lines)
 }

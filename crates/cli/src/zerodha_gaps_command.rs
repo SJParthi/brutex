@@ -29,12 +29,24 @@
 //! ledger". A second `--apply` finds every line the first wrote and writes
 //! nothing. No bar, census row or sidecar is opened for writing.
 //!
+//! Each series is written under the ledger's exclusive lock, after reading
+//! what any other writer (a pull, a repair, a second `--apply`) appended since
+//! this run read the ledger; a line whose `(key, day)` such a writer named
+//! meanwhile is not written and is counted under `raced`, so a store-found
+//! line never follows another writer's line for the same day.
+//!
+//! An `--apply` run claims one run id from the event log, so its lines carry
+//! `run=<id>` and its `pull.gap_backfill` events the same id; a process with
+//! no event log says so and its lines carry `run=0`.
+//!
 //! # Exit
 //!
 //! [`OK`] when every month was read (and, applying, every line written);
-//! [`FAILED`] when a month would not open or the ledger would not take a
-//! line, each named; [`MISUSED`] for arguments that do not name a series and
-//! a window, before anything is opened.
+//! [`FAILED`] when a month would not open, the ledger would not take a line,
+//! or a named instrument has no stored `1min` month touching the window
+//! (a misspelt name or the wrong `--segment` is said, never answered with an
+//! empty table and success); [`MISUSED`] for arguments that do not name a
+//! series and a window, or name a flag twice, before anything is opened.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -96,17 +108,17 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
             arguments.len()
         ));
     };
-    let mut segment = "INDEX";
+    let mut segment: Option<&'static str> = None;
     let mut apply = false;
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         match *flag {
             "--apply" if !apply => apply = true,
-            "--segment" => {
+            "--segment" if segment.is_none() => {
                 let value = rest.next().ok_or("--segment takes a value")?;
                 segment = match value.to_ascii_uppercase().as_str() {
-                    "INDEX" => "INDEX",
-                    "CASH" => "CASH",
+                    "INDEX" => Some("INDEX"),
+                    "CASH" => Some("CASH"),
                     _ => {
                         return Err(format!(
                             "--segment `{}`: INDEX or CASH",
@@ -134,7 +146,7 @@ fn ask(arguments: &[&str]) -> Result<Ask, String> {
     };
     Ok(Ask {
         instrument,
-        segment,
+        segment: segment.unwrap_or("INDEX"),
         window,
         apply,
     })
@@ -200,12 +212,13 @@ fn symbols(root: &Path, ask: &Ask) -> Result<Vec<String>, String> {
 fn row(out: &mut String, name: &str, t: &gap_backfill::Tally, lines: usize) {
     let _ = writeln!(
         out,
-        "  {name:<20}  {:>6}  {:>8}  {:>5}  {lines:>5}  {:>7}  {:>7}  {:>12}  {:>8}  {:>8}  {:>10}",
+        "  {name:<20}  {:>6}  {:>8}  {:>5}  {lines:>5}  {:>7}  {:>7}  {:>5}  {:>12}  {:>8}  {:>8}  {:>10}",
         t.months,
         t.sessions,
         t.short,
         t.minutes,
         t.already,
+        t.raced,
         t.before_first,
         t.frontier,
         t.length_unjudged,
@@ -220,14 +233,16 @@ fn add(total: &mut gap_backfill::Tally, t: &gap_backfill::Tally) {
     total.short += t.short;
     total.minutes += t.minutes;
     total.already += t.already;
+    total.raced += t.raced;
     total.before_first += t.before_first;
     total.frontier += t.frontier;
     total.length_unjudged += t.length_unjudged;
     total.unattested += t.unattested;
 }
 
-/// The run's header: what is read, from where, and what the ledger holds.
-fn header(out: &mut String, root: &Path, ask: &Ask, series: usize, have: &Have) {
+/// The run's header: what is read, from where, what the ledger holds, and
+/// the run id the lines carry.
+fn header(out: &mut String, root: &Path, ask: &Ask, series: usize, have: &Have, run: Option<u64>) {
     let _ = writeln!(
         out,
         "ZERODHA STORED-MONTH GAP LEDGER ({}) — NSE/{} 1min, {}..{}: {series} series under {}; no vendor call",
@@ -256,10 +271,27 @@ fn header(out: &mut String, root: &Path, ask: &Ask, series: usize, have: &Have) 
             )
         }
     );
+    if ask.apply {
+        let _ = writeln!(
+            out,
+            "  {}",
+            run.map_or_else(
+                || "run 0: this process has no event log (or another run holds its key), so the lines carry run=0".to_owned(),
+                |run| format!("run {run}: every line written carries run={run}, and every pull.gap_backfill event the same id"),
+            )
+        );
+    }
     let _ = writeln!(
         out,
-        "  instrument            months  sessions  short  lines  minutes  already  before_first  frontier  unjudged  unattested"
+        "  instrument            months  sessions  short  lines  minutes  already  raced  before_first  frontier  unjudged  unattested"
     );
+}
+
+/// One run id from the event log, claimed for this process's events and
+/// lines; `None` when no log is installed or another run holds the key.
+fn claim_run() -> Option<u64> {
+    let sink = telemetry::global()?;
+    sink.reserve_run_id().filter(|&run| sink.claim_run(run))
 }
 
 fn run(root: &Path, ask: &Ask, out: &mut String) -> u8 {
@@ -281,11 +313,28 @@ fn run(root: &Path, ask: &Ask, out: &mut String) -> u8 {
             return FAILED;
         }
     };
-    header(out, root, ask, symbols.len(), &have);
+    let run = if ask.apply { claim_run() } else { None };
+    header(out, root, ask, symbols.len(), &have, run);
+    let code = series_rows(root, ask, &symbols, &mut have, out);
+    if let (Some(run), Some(sink)) = (run, telemetry::global()) {
+        sink.release_run(run);
+    }
+    code
+}
+
+/// One row per series, the lines written when applying, and the total.
+fn series_rows(
+    root: &Path,
+    ask: &Ask,
+    symbols: &[String],
+    have: &mut Have,
+    out: &mut String,
+) -> u8 {
+    let vendor = Vendor::Zerodha;
     let mut failed = false;
     let mut total = gap_backfill::Tally::default();
     let mut total_lines = 0_usize;
-    for symbol in &symbols {
+    for symbol in symbols {
         let Ok(month) = ask.window.from().year_month() else {
             continue;
         };
@@ -299,11 +348,46 @@ fn run(root: &Path, ask: &Ask, out: &mut String) -> u8 {
             month,
             file: FileKind::Bars,
         };
-        let series = gap_backfill::series(root, parts, ask.window, &have);
-        if series.tally.months == 0 && ask.instrument.is_none() {
-            continue;
+        let mut series = gap_backfill::series(root, parts, ask.window, have);
+        if series.tally.months == 0 {
+            if ask.instrument.is_none() {
+                continue;
+            }
+            // A NAMED SERIES THAT READS NOTHING IS SAID AND FAILS: a misspelt
+            // name or the wrong segment must not look like a clean month.
+            failed = true;
+            let _ = writeln!(
+                out,
+                "    NOTHING READ: the store holds no NSE/{}/{symbol} 1min month touching {}..{} (is the name or --segment wrong?)",
+                ask.segment,
+                ask.window.from(),
+                ask.window.to()
+            );
         }
-        row(out, symbol, &series.tally, series.lines.len());
+        // WRITTEN FIRST, so the row's `lines` is what reached the ledger when
+        // applying (what would, when not) and `raced` is already counted.
+        let mut lines = series.lines.len();
+        let mut said = String::new();
+        if ask.apply && !series.lines.is_empty() {
+            match gap_backfill::write(root, vendor, &mut series, have) {
+                Ok(written) => {
+                    lines = usize::try_from(written).unwrap_or(usize::MAX);
+                    if series.tally.raced > 0 {
+                        let _ = writeln!(
+                            said,
+                            "    RACED: {} line(s) not written: another writer named their day after this run read the ledger, and its line stands",
+                            series.tally.raced
+                        );
+                    }
+                }
+                Err(why) => {
+                    failed = true;
+                    lines = 0;
+                    let _ = writeln!(said, "    NOT WRITTEN: {why}");
+                }
+            }
+        }
+        row(out, symbol, &series.tally, lines);
         for why in &series.tally.refused {
             failed = true;
             let _ = writeln!(out, "    REFUSED {why}");
@@ -316,14 +400,8 @@ fn run(root: &Path, ask: &Ask, out: &mut String) -> u8 {
                 let _ = writeln!(out, "    ... and {} more", series.lines.len() - MAX_PRINTED);
             }
         }
-        if ask.apply
-            && !series.lines.is_empty()
-            && let Err(why) = gap_backfill::write(root, vendor, &series, &mut have)
-        {
-            failed = true;
-            let _ = writeln!(out, "    NOT WRITTEN: {why}");
-        }
-        total_lines += series.lines.len();
+        out.push_str(&said);
+        total_lines += lines;
         add(&mut total, &series.tally);
     }
     row(out, "TOTAL", &total, total_lines);
@@ -332,7 +410,15 @@ fn run(root: &Path, ask: &Ask, out: &mut String) -> u8 {
         "{}",
         match (ask.apply, failed) {
             (true, false) => format!(
-                "{total_lines} line(s) appended (why=stored_short); a second --apply writes nothing."
+                "{total_lines} line(s) appended (why=stored_short){}; a second --apply writes nothing.",
+                if total.raced > 0 {
+                    format!(
+                        ", {} not written because another writer named their day first",
+                        total.raced
+                    )
+                } else {
+                    String::new()
+                }
             ),
             (true, true) =>
                 "SOME LINES OR MONTHS FAILED, each named above; every other line was appended."
@@ -446,6 +532,15 @@ mod tests {
             &["NIFTY", "2019-09-01", "2019-09-30", "--segment", "FUT"][..],
             &["NIFTY", "2019-09-01", "2019-09-30", "--segment"][..],
             &["NIFTY", "2019-09-01", "2019-09-30", "--apply", "--apply"][..],
+            &[
+                "NIFTY",
+                "2019-09-01",
+                "2019-09-30",
+                "--segment",
+                "CASH",
+                "--segment",
+                "INDEX",
+            ][..],
             &["NIFTY", "2019-09-01", "2019-09-30", "--from-store", "x"][..],
             &["nifty!", "2019-09-01", "2019-09-30"][..],
         ] {
@@ -500,6 +595,39 @@ mod tests {
             "{out}"
         );
         assert_eq!(ledger(&scratch.0).unwrap(), written);
+    }
+
+    /// A NAMED INSTRUMENT THE STORE DOES NOT HOLD IS SAID AND FAILS
+    /// (verify-R3-18-r1 follow-up): a misspelt name or the wrong segment
+    /// never answers an empty table with success.
+    #[test]
+    fn a_named_instrument_the_store_does_not_hold_fails_by_name() {
+        let scratch = Scratch::new("UNKNOWN");
+        month(&scratch.0, "NIFTY");
+        let (code, out) = go(
+            &scratch.0,
+            &["NIFTYY", "2019-09-01", "2019-09-30", "--apply"],
+        );
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains("NOTHING READ: the store holds no NSE/INDEX/NIFTYY 1min month touching 2019-09-01..2019-09-30"),
+            "{out}"
+        );
+        let (code, out) = go(
+            &scratch.0,
+            &["NIFTY", "2019-09-01", "2019-09-30", "--segment", "CASH"],
+        );
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains("NSE/CASH/NIFTY"), "{out}");
+        assert_eq!(ledger(&scratch.0), None, "nothing written");
+        // Held, but not inside the window: said the same way.
+        let (code, out) = go(&scratch.0, &["NIFTY", "2020-01-01", "2020-01-31"]);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(out.contains("NOTHING READ"), "{out}");
+        // Held and inside: OK.
+        let (code, out) = go(&scratch.0, &["NIFTY", "2019-09-01", "2019-09-30"]);
+        assert_eq!(code, OK, "{out}");
+        assert!(!out.contains("NOTHING READ"), "{out}");
     }
 
     /// A month that will not open is named and fails the run; the other

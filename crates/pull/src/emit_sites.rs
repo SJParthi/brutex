@@ -361,7 +361,7 @@ fn drive_request_minutes(scratch: &Scratch) {
 /// The stored-month gap ledger's one event per series written (R3-18).
 fn drive_gap_backfill(scratch: &Scratch) {
     let day = window().from();
-    let series = crate::ingest::gap_backfill::Series {
+    let mut series = crate::ingest::gap_backfill::Series {
         key: "NSE-INDEX-EMITGAP".to_owned(),
         lines: vec![format!(
             "gap NSE-INDEX-EMITGAP {day} v=1 rung=1min owed=375 held=374 missing=1 first_missing=10:00 runs=1 longest=1 longest_at=10:00 why=stored_short run=0 fill=interior source=store"
@@ -373,7 +373,7 @@ fn drive_gap_backfill(scratch: &Scratch) {
     crate::ingest::gap_backfill::write(
         &scratch.store(),
         brutex_core::vendor::Vendor::Zerodha,
-        &series,
+        &mut series,
         &mut have,
     )
     .expect("the ledger takes the line");

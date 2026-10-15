@@ -1685,6 +1685,12 @@ struct GapLine {
     why: String,
     run: u64,
     line: u64,
+    /// Whether a missing minute may be one nobody traded (D-3321): the line
+    /// says `absence=may_be_no_trade`, or its key names a segment where a
+    /// minute has a bar only when somebody trades
+    /// (`pull::ingest::repair_plan::absence_may_be_no_trade`, the fold's one
+    /// rule). The store cannot tell such a minute from a vendor hole.
+    may_be_no_trade: bool,
 }
 
 impl GapLine {
@@ -1702,6 +1708,7 @@ impl GapLine {
             "why": self.why,
             "run": self.run,
             "line": self.line,
+            "absence": self.may_be_no_trade.then_some("may_be_no_trade"),
         })
     }
 }
@@ -1852,6 +1859,13 @@ fn parse_gap(number: u64, text: &str) -> Result<(String, u32, GapLine), String> 
         why: why.to_owned(),
         run: count_field("run", value(10))?,
         line: number,
+        may_be_no_trade: text
+            .split(' ')
+            .any(|word| word == "absence=may_be_no_trade")
+            || key
+                .split('-')
+                .nth(1)
+                .is_some_and(pull::ingest::repair_plan::absence_may_be_no_trade),
     };
     Ok((key.to_owned(), day.days_from_epoch(), line))
 }
@@ -4376,9 +4390,17 @@ impl Says<'_> {
 
     fn gap_phrases(&self, out: &mut Vec<String>) {
         if let Some(gap) = self.gap {
+            // A SHARE'S MISSING MINUTE MAY BE ONE NOBODY TRADED (D-3321), said
+            // wherever the line is shown: the store cannot tell it from a
+            // vendor hole, and a repair lands only what the feed serves.
+            let caveat = if gap.may_be_no_trade {
+                "; these may be minutes nobody traded: the store cannot tell a no-trade minute from a vendor hole (D-3321), and a repair or a pull lands only the minutes the feed serves"
+            } else {
+                ""
+            };
             out.push(match gap.why.as_str() {
                 "vendor_empty" => format!(
-                    "Zerodha minute gap: {} of {} owed minute(s) missing, the longest run {} from {}",
+                    "Zerodha minute gap: {} of {} owed minute(s) missing, the longest run {} from {}{caveat}",
                     gap.missing,
                     gap.owed,
                     gap.longest,
@@ -4388,11 +4410,16 @@ impl Says<'_> {
                 // `cli zerodha-gaps`): the store was read, the vendor was not,
                 // so no vendor reason is claimed.
                 "stored_short" => format!(
-                    "Zerodha minute gap found in the stored month (no vendor call, R3-18): {} of {} owed minute(s) missing, the longest run {} from {}; a versioned repair or a pull fills it",
+                    "Zerodha minute gap found in the stored month (no vendor call, R3-18): {} of {} owed minute(s) missing, the longest run {} from {}{}",
                     gap.missing,
                     gap.owed,
                     gap.longest,
-                    gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60))
+                    gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60)),
+                    if gap.may_be_no_trade {
+                        caveat
+                    } else {
+                        "; a versioned repair or a pull fills it"
+                    }
                 ),
                 "withheld_unmeasured_session" => {
                     "Zerodha withheld the day: a session of unmeasured length".to_owned()
@@ -5858,6 +5885,63 @@ mod tests {
         let gap = record(&got, "2019-09-23");
         assert_eq!(gap["gaps"]["why"], "stored_short", "{got:#}");
         assert_eq!(gap["gaps"]["missing"], 14);
+        says_has(
+            gap,
+            "Zerodha minute gap found in the stored month (no vendor call, R3-18): 14 of 375 owed minute(s) missing, the longest run 14 from 15:15; a versioned repair or a pull fills it",
+        );
+    }
+
+    /// **A SHARE'S STORED-MONTH GAP CARRIES THE NO-TRADE CAVEAT** (D-3321,
+    /// verify-R3-18-r1): an `NSE-CASH` line, labelled or not, never says a
+    /// repair "fills it" — the store cannot tell a minute nobody traded from a
+    /// vendor hole, and a repair lands only what the feed serves. An index's
+    /// line keeps its plain sentence and carries no label.
+    #[test]
+    fn a_shares_stored_month_gap_says_the_minutes_may_be_untraded() {
+        let root = root_of("stored-short-cash");
+        write(
+            &gaps_path(&root),
+            "gap NSE-CASH-ZZSHARE 2019-05-02 v=1 rung=1min owed=375 held=0 missing=375 first_missing=09:15 runs=1 longest=375 longest_at=09:15 why=stored_short run=0 fill=interior source=store absence=may_be_no_trade\n\
+             gap NSE-CASH-ZZOTHER 2019-05-02 v=1 rung=1min owed=375 held=370 missing=5 first_missing=10:00 runs=1 longest=5 longest_at=10:00 why=vendor_empty run=4\n\
+             gap NSE-INDEX-NIFTY 2019-05-02 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run=0 fill=interior source=store\n",
+        );
+        let caveat = "these may be minutes nobody traded: the store cannot tell a no-trade minute from a vendor hole (D-3321), and a repair or a pull lands only the minutes the feed serves";
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-CASH-ZZSHARE&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert_eq!(gap["gaps"]["absence"], "may_be_no_trade", "{got:#}");
+        says_has(
+            gap,
+            &format!(
+                "Zerodha minute gap found in the stored month (no vendor call, R3-18): 375 of 375 owed minute(s) missing, the longest run 375 from 09:15; {caveat}"
+            ),
+        );
+        assert!(
+            !gap["says"].to_string().contains("fills it"),
+            "a share's line never promises a fill: {got:#}"
+        );
+        // A vendor line for a share, unlabelled: the key's segment says it.
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-CASH-ZZOTHER&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert_eq!(gap["gaps"]["absence"], "may_be_no_trade", "{got:#}");
+        says_has(
+            gap,
+            &format!(
+                "Zerodha minute gap: 5 of 375 owed minute(s) missing, the longest run 5 from 10:00; {caveat}"
+            ),
+        );
+        // An index: computed every minute, no caveat, no label.
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert!(gap["gaps"]["absence"].is_null(), "{got:#}");
         says_has(
             gap,
             "Zerodha minute gap found in the stored month (no vendor call, R3-18): 14 of 375 owed minute(s) missing, the longest run 14 from 15:15; a versioned repair or a pull fills it",
