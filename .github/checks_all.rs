@@ -145,9 +145,22 @@ pub fn tools(root: &Path) -> Result<Vec<String>, String> {
 /// The workflow the gates are read from, relative to the root.
 pub const WORKFLOW: &str = ".github/workflows/ci.yml";
 
-/// Jobs whose steps run only on CI's runners: mutation testing takes hours
-/// a check run on one machine does not have. Written NOT RUN HERE.
-pub const CI_ONLY_JOBS: [&str; 3] = ["mutant-plan", "mutants", "ci-ok"];
+/// Jobs whose steps run only on CI's runners, each with why. Written NOT RUN
+/// HERE, never green.
+pub const CI_ONLY_JOBS: [(&str, &str); 3] = [
+    (
+        "mutant-plan",
+        "it plans mutation testing, which takes hours a check run on one machine does not have",
+    ),
+    (
+        "mutants",
+        "mutation testing takes hours a check run on one machine does not have",
+    ),
+    (
+        "ci-ok",
+        "it reads the results of the CI run's other jobs, which only CI's runner has",
+    ),
+];
 
 /// Words a step's script may not hold to be run on the operator's machine,
 /// each with why: a check run changes the worktree it checks and nothing
@@ -335,11 +348,9 @@ pub fn ci_checks(steps: &[CiStep]) -> Vec<Check> {
             name
         };
         let proves = format!("{} ({}, CI)", step.name.replace('\t', " "), step.job);
-        let declined = if CI_ONLY_JOBS.contains(&step.job.as_str()) {
-            Some(format!(
-                "the {} job runs on CI only (mutation testing takes hours)",
-                step.job
-            ))
+        let declined = if let Some((_, why)) = CI_ONLY_JOBS.iter().find(|(job, _)| *job == step.job)
+        {
+            Some(format!("the {} job runs on CI only: {why}", step.job))
         } else {
             CHANGES_THE_MACHINE
                 .iter()
@@ -1165,6 +1176,21 @@ mod tests {
             declined >= 2,
             "cargo install and npm ci are declined: {declined}"
         );
+        // EACH CI-ONLY JOB SAYS ITS OWN REASON (R3-14 repair 3): `ci-ok` was
+        // declined as "mutation testing takes hours", which is not that job.
+        let ci_ok: Vec<_> = checks
+            .iter()
+            .filter(|check| check.name.starts_with("ci-ci-ok-"))
+            .collect();
+        assert!(!ci_ok.is_empty(), "the ci-ok job is in the plan");
+        for check in ci_ok {
+            assert!(
+                check.command.contains("other jobs") && !check.command.contains("mutation"),
+                "{}: {}",
+                check.name,
+                check.command
+            );
+        }
         let read_back = read_plan(&plan_tsv(&checks)).expect("the plan reads back");
         assert_eq!(read_back, checks, "the plan survives its own file");
     }

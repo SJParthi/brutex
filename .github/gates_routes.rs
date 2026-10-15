@@ -30,7 +30,9 @@
 //! operator's pages are measured at 1x, 10x and 100x without exception. AND
 //! WHAT THE PAGE ITSELF ASKS FOR, read from its own source (R3-14 repair 2):
 //! every `/<route>.json` named in a quoted or template string of a file under
-//! `web/src/routes/db/`. `DB_READS` is a hand-kept list, and three routes the
+//! `web/src/routes/db/` or of the page's own library `web/src/lib/db/`, where
+//! most of its fetches live; a line that is a comment (it starts `//`, `*`,
+//! `/*` or `<!--`) names no read. `DB_READS` is a hand-kept list, and three routes the
 //! page reads (`/feeds.json`, `/aliases.json`, `/scrub.json`) were outside it
 //! and owed a bench as "not a /db read" (second agent, 15 Oct): the page's
 //! own fetches decide now, so a route the page starts reading is held to a
@@ -66,6 +68,9 @@ pub const SECTION: &str = "## Every route:";
 /// Where the `/db` page's own source lives: every route it asks for is a
 /// `/db` read whatever `DB_READS` says (R3-14 repair 2).
 pub const DB_PAGE: &str = "web/src/routes/db";
+/// The `/db` page's own library, where most of its fetches live (R3-14
+/// repair 3): read the same way as [`DB_PAGE`].
+pub const DB_LIB: &str = "web/src/lib/db";
 /// Where the `/db` reads are listed (`logs::DB_READS`).
 pub const LOGS: &str = "crates/api/src/logs.rs";
 
@@ -450,9 +455,32 @@ pub fn unbenched_reads(reads: &[String], benched: &BTreeSet<String>, whence: &st
 /// The `/<route>.json` paths `source` names right after a quote, a double
 /// quote or a backtick (a fetch's string or template literal), in order of
 /// first appearance, each once. A path is `/`, then ASCII lower-case letters,
-/// digits, `/`, `_` and `-`, then `.json`.
+/// digits, `/`, `_` and `-`, then `.json`. A line that is a comment (its
+/// first non-blank characters are `//`, `*`, `/*` or `<!--`) is skipped: a
+/// route named in prose is not a read (R3-14 repair 3). A comment that
+/// follows code on its line is still read, which can only over-count.
 #[must_use]
 pub fn page_reads(source: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for text in source.lines() {
+        let lead = text.trim_start();
+        if ["//", "*", "/*", "<!--"]
+            .iter()
+            .any(|c| lead.starts_with(c))
+        {
+            continue;
+        }
+        for route in line_reads(text) {
+            if !out.contains(&route) {
+                out.push(route);
+            }
+        }
+    }
+    out
+}
+
+/// [`page_reads`] of one line, comment or not.
+fn line_reads(source: &str) -> Vec<String> {
     let bytes = source.as_bytes();
     let mut out: Vec<String> = Vec::new();
     for (at, pair) in bytes.windows(2).enumerate() {
@@ -543,23 +571,27 @@ pub fn check(root: &Path) -> Result<(usize, usize, Vec<String>), String> {
         "`logs::DB_READS`",
     ));
     let mut asked: Vec<String> = Vec::new();
-    for file in files_under(&root.join(DB_PAGE))? {
-        // A FILE THAT IS NOT TEXT (an image) names no route.
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for route in page_reads(&text) {
-            if !asked.contains(&route) {
-                asked.push(route);
+    for dir in [DB_PAGE, DB_LIB] {
+        let mut here: Vec<String> = Vec::new();
+        for file in files_under(&root.join(dir))? {
+            // A FILE THAT IS NOT TEXT (an image) names no route.
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            for route in page_reads(&text) {
+                if !asked.contains(&route) && !here.contains(&route) {
+                    here.push(route);
+                }
             }
         }
+        found.extend(unbenched_reads(&here, &benched, dir));
+        asked.extend(here);
     }
     if asked.is_empty() {
         return Err(format!(
-            "{DB_PAGE}: the /db page names no route: the rule would go blind"
+            "{DB_PAGE} and {DB_LIB}: the /db page names no route: the rule would go blind"
         ));
     }
-    found.extend(unbenched_reads(&asked, &benched, DB_PAGE));
     Ok((table.len(), with_bench, found))
 }
 
@@ -802,7 +834,11 @@ pub fn audited_router_serving(site: S) -> Router {
         let page = "const a = await fetch(`/feeds.json`);\n\
                     fetch(`/bars/window.json?${q}`); fetch('/aliases.json?symbol=' + s);\n\
                     fetch(\"/scrub.json\"); fetch(`/feeds.json`);\n\
-                    // see /prose.json in a comment, `/${name}.json`, '/db', `/x-y_2.json`\n";
+                    see /prose.json in prose, `/${name}.json`, '/db', `/x-y_2.json`\n\
+                    // a comment line: `/in-a-comment.json`\n\
+                      * a doc line: `/in-a-doc.json`\n\
+                    /* '/in-a-block.json' */\n\
+                    <!-- '/in-markup.json' -->\n";
         assert_eq!(
             page_reads(page),
             [

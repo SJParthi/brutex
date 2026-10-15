@@ -14805,8 +14805,8 @@ bounds are all nonzero.
   rung's level-wise engine sweep over bars already loaded, or one
   candidate's exit grid, runs to its end, because gate 17 keeps the inner
   loops of `vocab`, `engine`, `indicators` and `runner` call-free. If that
-  stretch outlasts `SHUTDOWN_GRACE` (10 s) the task is abandoned and named,
-  as D-1582 states. How long such a stretch takes on real data is
+  stretch outlasts `SHUTDOWN_GRACE` (3 s since R3-14 repair 3; 10 s before)
+  the task is abandoned and named, as D-1582 states. How long such a stretch takes on real data is
   unmeasured.
 - **Cross-site failed-request log lines are rationed (D-1583).** For requests
   whose `Sec-Fetch-Site` names another site, at most
@@ -14833,11 +14833,22 @@ bounds are all nonzero.
   refuse a duplicate key themselves; any other route's body is checked
   whatever its `Content-Type` says (P5-06, D-2659). `member` and `leg` are
   list fields and may repeat and are not counted.
-- **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
-  (D-1582).** A sweep, descent or command still running then is abandoned
-  with the process — named on stderr and in the log — and its invocation
-  audit stays non-terminal. `cli` has no cancellation point inside a sweep;
-  threading one through it is not done.
+- **Shutdown waits at most `server::SHUTDOWN_GRACE` (3 s; 10 s until R3-14
+  repair 3) for engine tasks (D-1582).** A sweep, descent or command still
+  running then is abandoned with the process — named on stderr and in the
+  log — and its invocation audit stays non-terminal. `cli` has no
+  cancellation point inside a sweep; threading one through it is not done.
+- **A served stop (Ctrl-C or `SIGTERM`) ends within `speed::STOP_BOUND`,
+  6 s (R3-14 repair 3):** at most `speed::DRAIN_GRACE` (3 s) for requests
+  still open, which are then cut and counted as cancelled, and
+  `SHUTDOWN_GRACE` (3 s) for blocking work. The bound must stay inside
+  `speed::REDEPLOY_WAIT` (10 s, what the operator's redeploy waits for the
+  port) with half of itself to spare, which a test asserts. Throughout, the
+  process holds its log (`<store>/telemetry/events.lock`), the store's
+  `serve.lock` and its port, and frees them in that order after its exit
+  line, so a free port means a free store and a free log. A redeploy tool
+  that waits less than the bound for the port is not covered; waiting for
+  the old process's pid to end is the form that needs no number.
 - **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
   queue to another thread for the length of each landing, so the HTTP surface
   keeps answering; the landing itself is as costly as before (D-1446).

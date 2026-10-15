@@ -17507,8 +17507,8 @@ fn millis(span: std::time::Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// What a serving process keeps until its runtime has ended: the store's
-/// serve lock and a duplicate of its listening socket (R3-14).
+/// What a serving process keeps until its runtime has ended: its log, the
+/// store's serve lock and a duplicate of its listening socket (R3-14).
 ///
 /// # Why the port is kept
 ///
@@ -17523,12 +17523,30 @@ fn millis(span: std::time::Duration) -> u64 {
 /// arrives in that window waits in the kernel's backlog and is reset when the
 /// process ends; it is never answered by a server that is ending.
 ///
+/// # Why the log is kept, and closed first (R3-14 repair 3)
+///
+/// The store's log directory has its own lock, `<store>/telemetry/events.lock`,
+/// held by the process's sink. Freeing the store and the port while that lock
+/// lived on until the process's last instant let a successor started in the
+/// gap answer `/health` 200 and run its whole life with NO log and no audit
+/// stream ("log: NOT WRITABLE", 2 of 6 measured redeploys). [`Held::release`]
+/// therefore closes the sink this serve installed first
+/// ([`telemetry::Sink::close`]); a line after that is dropped and counted,
+/// never written into the successor's file.
+///
 /// # The order is the contract
 ///
-/// [`Drop`] releases the lock FIRST and the port SECOND, so no instant exists
-/// in which the port is free and the store is not.
+/// [`Held::release`] frees the log FIRST, the store SECOND and the port LAST,
+/// so no instant exists in which the port is free and either lock is not. It
+/// is called by [`end_served`] after the process's last line.
+///
+/// DROPPING a `Held` frees the store and then the port but leaves the log
+/// open: a log is the process's, a test process shares one across many
+/// serves, and only the process's end may close it.
 #[derive(Debug, Default)]
 pub struct Held {
+    /// The sink this serve installed, when it installed one.
+    log: Option<&'static telemetry::Sink>,
     /// The store's serve lock.
     lock: Option<ServeLock>,
     /// A duplicate of the listening socket; never accepted on.
@@ -17543,11 +17561,17 @@ impl Held {
         self.lock.is_some() && self.port.is_some()
     }
 
-    /// Releases the store, then the port. Dropping does the same.
+    /// Closes the log, then releases the store, then the port.
     pub fn release(mut self) {
+        if let Some(log) = self.log.take() {
+            // A failed sync or unlock is named by the sink itself, on stderr
+            // and in its health; the close happens either way.
+            let _closed = log.close();
+        }
         self.release_in_order();
     }
 
+    /// The store, then the port.
     fn release_in_order(&mut self) {
         drop(self.lock.take());
         drop(self.port.take());
@@ -17577,15 +17601,21 @@ fn keep_port(
 /// Ends a served process: the runtime first (at most `grace` for blocking
 /// work, see [`end_runtime`]), then the speed table's last counts
 /// ([`crate::speed::flush_at_exit`]: the requests the drain cut are counted
-/// when the runtime drops them), then the store and the port, in that order
-/// ([`Held`]). Returns how many engine tasks were abandoned.
+/// when the runtime drops them), then `last_word` (the binary's exit line),
+/// then the log, the store and the port, in that order ([`Held::release`]).
+/// Returns how many engine tasks were abandoned.
+///
+/// The exit line is said HERE, before the release, because after it the log
+/// may already be the successor's: a line written later would be dropped.
 pub fn end_served(
     runtime: tokio::runtime::Runtime,
     grace: std::time::Duration,
     held: Held,
+    last_word: impl FnOnce(),
 ) -> usize {
     let abandoned = end_runtime(runtime, grace);
     let _lines = crate::speed::flush_at_exit();
+    last_word();
     held.release();
     abandoned
 }
@@ -17597,9 +17627,11 @@ pub(crate) fn ended_then_released(
     runtime: tokio::runtime::Runtime,
     grace: std::time::Duration,
     held: Held,
+    last_word: impl FnOnce(),
 ) -> usize {
     let abandoned = wait_then_end(runtime, grace);
     let _lines = crate::speed::flush_at_exit();
+    last_word();
     held.release();
     abandoned
 }
@@ -18833,7 +18865,14 @@ pub const DEGRADED: u8 = 3;
 /// running for the rest of the sweep — next to a second `api serve` the free
 /// lock let start. The wait is now bounded by this, and what is abandoned is
 /// said, never silent.
-pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// THREE SECONDS, NOT TEN (R3-14 repair 3): the serve's whole stop is
+/// [`crate::speed::DRAIN_GRACE`] plus this, and it must end inside
+/// [`crate::speed::REDEPLOY_WAIT`], or a redeploy finds the port still bound
+/// and nothing listens afterwards. Work still running at three seconds is
+/// abandoned and named exactly as it was at ten; an append cut short is safe
+/// by construction (the bar file commits its header after its records).
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Ends the process's runtime, waiting at most `grace` for blocking work.
 ///
@@ -19439,6 +19478,15 @@ async fn run_in_over(
                 // let a retarget after admission send later writers elsewhere
                 // while this process still held the old store's lock.
                 let store_root = one_server.root.clone();
+                // KEPT FOR THE CALLER FROM HERE ON (R3-14): every return
+                // below, a refusal included, leaves the store and the port to
+                // `end_served`, which frees them after the exit line and in
+                // order (log, store, port). Dropped here, the port went first.
+                *held = Held {
+                    log: None,
+                    lock: Some(one_server),
+                    port: Some(kept_port),
+                };
                 let log_dir = match served_log_dir(&store_root) {
                     Ok(dir) => dir,
                     Err(why) => {
@@ -19455,6 +19503,9 @@ async fn run_in_over(
                     dir: log_dir,
                     ..asked
                 });
+                // THE LOG THIS SERVE OPENED IS CLOSED BEFORE ITS PORT IS FREED
+                // (R3-14 repair 3): see `Held`.
+                held.log = logging.as_ref().ok().copied();
                 say!("brutex api listening on http://{addr}/");
                 // THE BUILD, ON THE BANNER AND IN THE FIRST EVENT (DB-B71).
                 say!("  build:   {}", build_label());
@@ -19636,13 +19687,9 @@ async fn run_in_over(
                 // torn write leaves bytes past `n_valid` that the next run
                 // overwrites.
                 flying.abort();
-                // KEPT FOR THE CALLER (R3-14): the store and the port are
+                // `held` still has the store and the port (R3-14): they are
                 // released after the runtime has ended, not here, where
                 // blocking work may still be writing. See `Held`.
-                *held = Held {
-                    lock: Some(one_server),
-                    port: Some(kept_port),
-                };
                 code
             }
             Err(e) => {

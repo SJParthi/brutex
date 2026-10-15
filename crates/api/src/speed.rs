@@ -942,18 +942,35 @@ impl SharedStage {
 }
 
 /// How long a stop waits for requests still being answered before it writes
-/// the open minute and returns anyway (R3-14): the same ten seconds the
+/// the open minute and returns anyway (R3-14): the same three seconds the
 /// runtime's own end allows its blocking work (`server::SHUTDOWN_GRACE`).
-pub const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// THREE, NOT TEN (R3-14 repair 3). At ten, a stop with a request open held
+/// the port for twenty seconds, and the operator's redeploy, which waits about
+/// ten for the port, then started the new build against a port still bound:
+/// it was refused ("Address already in use"), and when the old process ended
+/// nothing listened. See [`REDEPLOY_WAIT`].
+pub const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// THE WHOLE STOP, BOUNDED (R3-14): from the signal to the process's end, at
 /// most [`DRAIN_GRACE`] for open requests, then `server::SHUTDOWN_GRACE` (the
-/// same ten seconds) for blocking work, so twenty seconds and the final
-/// writes. For all of it the store's `serve.lock` is held AND the port stays
-/// bound (`server::Held`): a redeploy that waits for the port to close finds
-/// the store free, never a refusal from a process that is still ending.
+/// same three seconds) for blocking work, so six seconds and the final
+/// writes. For all of it the log, the store's `serve.lock` and the port are
+/// held (`server::Held`), and freed in that order: a redeploy that waits for
+/// the port to close finds the store and the log free, never a refusal or a
+/// "log: NOT WRITABLE" from a process that is still ending.
 pub const STOP_BOUND: std::time::Duration =
     std::time::Duration::from_secs(DRAIN_GRACE.as_secs() + crate::server::SHUTDOWN_GRACE.as_secs());
+
+/// THE LEAST TIME A REDEPLOY WAITS for the old process's port after its
+/// `SIGTERM` before it starts the new build (R3-14 repair 3): the operator's
+/// redeploy polls the port fifty times 0.2 s apart, ten seconds of sleep
+/// (measured: the loop ended 13.4 s after the signal, counting the poll's own
+/// time). [`STOP_BOUND`] must end well inside it, with half of itself again to
+/// spare for the final writes and a loaded machine; a tool that waits less, or
+/// a bound raised past it, brings back the refused redeploy. Asserted by
+/// `speed_tests::the_whole_stop_ends_inside_what_a_redeploy_waits_for`.
+pub const REDEPLOY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Resolves `grace` after `stopping` says a stop was asked, having said in
 /// the log, at `warn` with the grace, how many requests were still open and

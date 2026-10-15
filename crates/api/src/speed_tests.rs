@@ -566,6 +566,16 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
         matches!((ran, ended), (Some(r), Some(e)) if r < e),
         "the binary keeps what the serve held and ends through end_served"
     );
+    // AND ITS EXIT LINE IS SAID INSIDE `end_served`, before the log is closed
+    // and the port freed (R3-14 repair 3): said after, it would be dropped.
+    let call = ended
+        .and_then(|at| main.get(at..))
+        .and_then(|rest| rest.split_once("});"))
+        .map_or("", |(call, _)| call);
+    assert!(
+        call.contains(concat!("note_", "exit(code, count)")),
+        "the exit line is end_served's last word: {call}"
+    );
     let server = include_str!("server.rs");
     let body = server
         .split_once(concat!("\npub async fn serve_", "limited("))
@@ -880,4 +890,26 @@ fn a_request_still_open_at_exit_is_named_not_dropped() {
         .filter(|(name, _)| name == route)
         .collect();
     assert!(still.is_empty(), "{still:?}");
+}
+
+/// **THE WHOLE STOP ENDS INSIDE WHAT A REDEPLOY WAITS FOR** (R3-14 repair 3).
+///
+/// Fails before the repair: the stop was bounded at twenty seconds (ten to
+/// drain, ten for blocking work) while the operator's redeploy waits about ten
+/// for the port, so a redeploy during a long read started the new build on a
+/// port still bound; it was refused, and when the old process ended nothing
+/// listened (measured: deploy loop ended at +13.4 s, the old process at +20 s).
+#[test]
+fn the_whole_stop_ends_inside_what_a_redeploy_waits_for() {
+    let spare = STOP_BOUND / 2;
+    assert!(
+        STOP_BOUND + spare <= REDEPLOY_WAIT,
+        "a stop bounded at {STOP_BOUND:?} leaves less than half of itself again ({spare:?}) \
+         inside the {REDEPLOY_WAIT:?} a redeploy waits for the port"
+    );
+    assert_eq!(
+        crate::server::ConnectionLimits::SERVED.drain_grace + crate::server::SHUTDOWN_GRACE,
+        STOP_BOUND,
+        "the served process's drain plus its runtime's end is the bound the stop line says"
+    );
 }
