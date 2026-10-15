@@ -17315,3 +17315,62 @@ about twelve agents' builds, so the tails are loaded-host tails.
 | L-CSL-3 | A `/gaps.json` CASH month decodes every observed day's master on every request | nothing remembers a decoded master between requests (finding p99-1, disputed and not in this run) | O(D), D the month's observed CAS days (at most 23). **Measured, sequential, n = 200 each**: RELIANCE 2026-08 (21 masters) AFTER p50 2,000.8 ms, p99 5,721.2 ms, max 6,477.1 ms; BEFORE p50 2,412.0 ms, p99 4,026.6 ms, max 4,071.0 ms; NIFTY INDEX 2026-08 (no master) AFTER p50 1.8, p99 3.3, max 4.5 ms; BEFORE 2.1 / 4.0 / 5.0 ms. The difference, about 95 ms a master at p50, is the gzip decode and CSV parse; the change moved it out from under the lock, not out of the request | p99-1 |
 | L-CSL-4 | Parallel requests for CASH months decode in parallel | each request decodes its own masters (L-CSL-3), now all at once instead of all but one refusing | **Measured, rounds of requests sent at once**: 4 symbols × 50 rounds, 2026-08 (n = 200): AFTER p50 2,573.1 ms, p99 4,754.5 ms, max 4,766.3 ms, 0 lock refusals, one body per symbol across all rounds; BEFORE p50 3.7 ms, p99 5,306.1 ms, max 5,524.0 ms with 150 of 200 answers `expected 0` naming "would block". 4 identical RELIANCE × 50 (n = 200): AFTER p50 2,697.4, p99 4,137.7, max 4,224.1 ms, 0 refusals, 1 distinct body; BEFORE p50 3.0, p99 5,580.6, max 6,164.6 ms, 150 refusals, 2 distinct bodies. 6 symbols × 34 rounds, 2026-09 (n = 204): AFTER p50 841.4, p99 1,176.9, max 1,207.8 ms, 0 refusals; BEFORE p50 3.0, p99 557.6, max 601.6 ms, 170 refusals. The BEFORE medians are the refusals' speed, not a cost the change added | AF-03 |
 | L-CSL-5 | `/bars.json` reads a refused day's master once per request | a refusal is not remembered past its request, so the next request tries the day again (a loaded master is kept process-wide; it is immutable once receipted) | one read per (request, day, series), O(1) a bar after it. **Measured, sequential, n = 200**: `/bars/window.json` RELIANCE 2026-08, 400 rows, AFTER p50 1.5 ms, p99 5.4 ms, max 14.8 ms; BEFORE 1.8 / 6.3 / 7.9 ms | AF-03 |
+
+## Sealed months: the `.sbar` file — D-4965, 15 October 2026
+
+`store::sealed` (SC-2). It builds and reads the file; nothing in the serving
+path opens one until the read door (SC-3) lands, so these are store-level
+figures, not a route's. Measured by `crates/store/tests/sealed_samples.rs` on
+real months cloned into a private root (`#[ignore]`d; log
+`state/fix/round2/sc2-acceptance-20261015.log`): release build, the `.sbar`
+written to disk and read through a `File`, warm page cache, `Instant` around
+each call, n = 2,000 sequential calls each, on 15 October 2026 with the
+machine's load average near 60 (other agents' builds). NIFTY first: GDFL spot
+1 s 2018-09, 2020-03 (the halts), 2026-08 and 2026-09 (with provenance); GDFL
+options 1 s, a 5,810-bar strike and a one-bar and a two-bar strike; Zerodha
+1, 2, 3, 5, 10, 15, 30 and 60 min and 1 day 2024-03; then BANKNIFTY 1 s 2020-03
+and RELIANCE 1 s 2026-08. Every row equal to the raw `.bin`, every lookup to a
+scan. Raw is the same month through `BarFile` (`read_record` per row, the
+page path today). Ranges below are the least and greatest of the months' own
+figures.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-SC-16 | A whole-month audit decodes the month | `SealedMonth::audit` checks every directory entry and frame, the stamps' order, the records' BLAKE3, the regenerated `.crc` image, the ranges, the extremes, the table, the provenance and the summary against the head | O(the month), once, for a seal or a scrub, never for a request; one frame (at most 14,508 bytes and 256 rows) held at a time plus the `.crc` image's 4 bytes a 73 bars (147 KB at 2,678,400 bars). Bounded by the month's rows; its time is not separately measured here (a 472,445-bar build, which does the same fold plus the encode, takes 81.5 to 90.1 ms) | SC-2 |
+| L-SC-17 | One row costs a frame | `SealedMonth` keeps no block cache: a row decodes the at most 256 rows of its frame (L-SC-1). The cache that makes a neighbouring row free is `BarFile`'s, which the read door (SC-3) fills with a sealed block's records | **Measured**: one row at a random offset, sealed p50 0.8 to 6.8 µs, p99 1.0 to 8.2 µs, max 1.4 to 26.7 µs; raw p50 0.0 to 3.1 µs, p99 0.0 to 3.9 µs, max 0.1 to 54.2 µs (raw's sub-microsecond figures are months of one 73-row block, held in `BarFile`'s cache). A 100-row page, sealed p50 0.9 to 7.4 µs, p99 1.2 to 14.3 µs, max 3.2 to 27.0 µs; raw p50 0.0 to 6.9 µs, p99 0.0 to 10.1 µs, max 0.2 to 96.3 µs: sealed p99 within 1.5 times raw's on every month above one frame. Flat in the month: 5,810 bars p99 12.5 µs, 400,200 to 472,496 bars 11.1 to 14.3 µs | SC-2 (cache: SC-3) |
+| L-SC-18 | A time lookup in a widened superblock bisects | a month written before D-0915 can hold two bars in one slot, so one table range can span more than 64 blocks | `ceil(log2(n_blocks + 1))` single-entry reads, 14 at the largest month (`a_widened_superblock_bisects_in_a_bounded_number_of_reads` counts them). Otherwise one table read, one read of at most 64 entries and one frame's stamps. **Measured** on the real months (none widened): sealed p50 0.0 to 2.8 µs, p99 0.0 to 3.9 µs, max 0.1 to 18.5 µs, flat from 1 bar to 472,445; raw (`.tix` or bisection) p50 0.0 to 0.5 µs, p99 0.0 to 116.5 µs, max 0.1 to 1,599.5 µs | SC-2 |
+| L-SC-19 | Building a sealed month is O(the month) and holds its frames | `Builder` folds every row once and keeps the encoded frames and the directory in memory until the file is written whole | once per month, in the background (the seal is SC-6's). **Measured**: 5 µs (1 bar) to 90.1 ms (472,496 bars); 69.8 to 90.1 ms for the four NIFTY 1 s months; peak memory the frames (0.43 to 1.47 MB for those months, at most `n_blocks` × 14,508 bytes) plus 24 bytes a block and one unencoded frame | SC-2 |
+| L-SC-20 | Opening a sealed month | a new handle and a 512-byte head read, checked | O(1). **Measured**: p50 12.0 to 14.0 µs, p99 23.3 to 31.0 µs, max 35.8 to 190.5 µs, the same at 1 bar and at 472,496: the open and `fstat` of a file, not the month | SC-2 |
+
+**Sizes on these months** (bytes of `.sbar` against the raw `.bin`): NIFTY 1 s
+432,607 to 1,471,930 bytes for 400,200 to 472,496 bars, 1.08 to 3.11 bytes a
+bar, 1.9 to 5.5% of the `.bin`; BANKNIFTY 1 s 2020-03 1.46 bytes a bar;
+RELIANCE 1 s 2026-08 2.74; NIFTY options 3.75 bytes a bar at 5,810 bars and the
+head plus one frame (582 and 584 bytes) at one and two bars; Zerodha NIFTY
+1 min to 1 day 4.67 to 37.7 bytes a bar, 2.1 to 7.6% of the `.bin` (a raw month
+carries a 32,768-byte header region however few its bars). The `.prv` of NIFTY
+2026-09 packs from 1,088 to 473 bytes.
+
+**Repeated on 15 October 2026 over 23 months** (logs
+`state/fix/round2/sc2-acceptance-20261015-run2.log` and `-run3.log`, the same test,
+a fresh private APFS clone): the eighteen above plus NIFTY 1 s 2019-10 (the
+Muhurat session) and 2020-09, and three NIFTY 2020-09-24 option months (the
+11,500 call's 2020-09 with provenance, 193,611 bars; its 2020-06, 156 bars;
+the 8,000 put's 2020-09 with provenance, 1,737 bars). Every row and every
+lookup equal again. Run 3, load average 24 to 46, months of more than 73
+bars: a 100-row page sealed p50 4.0 to 7.7 µs, p99 8.0 to 47.1 µs beside
+raw's 7.4 to 51.2 µs, sealed p99 at most 1.55 times raw's (the 8,000 put).
+On a month of at most 73 bars (1, 2 and 19 bars here) raw's page is
+`BarFile`'s one cached block and reads nothing, so raw answers in 0.1 to
+0.5 µs at p99 and sealed, which keeps no cache (L-SC-17), in 1.1 to 6.4 µs.
+Opening a sealed month (a new handle, `fstat` and the 512-byte head): p50
+12.0 to 15.8 µs, p99 20.7 to 119.0 µs on run 3 and 28.2 to 52.3 µs on run 2.
+**Max**, over every call of a run: up to 7.8 ms sealed (an open) and 4.4 ms
+raw on run 3, and 0.38 ms sealed / 0.79 ms raw on run 2 (load near 18): the
+host's scheduler on a machine shared by a dozen builds, in both forms alike,
+not the format — the counted reads
+(`the_largest_month_reads_at_the_cost_of_the_smallest`) are two a page at
+any depth. Every sealed page, row and lookup p99 under 50 µs; no max over 50 ms.
+These are store-level
+calls, not routes: the end-to-end figures of the design's §5.4 need the read
+door (SC-3) and are not measured here.

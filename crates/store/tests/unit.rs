@@ -2474,6 +2474,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.tix".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.prv".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.srt".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.sbar".to_owned(),
         ],
     );
 
@@ -2487,10 +2488,14 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // ninth is the provenance sidecar (D-3334): a record stream of its own,
     // self-checked per record, with no checksum sibling. The tenth is the
     // sort index (D-3349): derived from the bars like the time index, its runs
-    // and blocks self-checked, with no checksum sibling.
-    assert_eq!(FileKind::ALL.len(), 10);
+    // and blocks self-checked, with no checksum sibling. The eleventh is the
+    // sealed form of a closed month (D-4965): its head, directory entries,
+    // table, provenance and frames each carry their own checksum, so it has no
+    // checksum sibling either.
+    assert_eq!(FileKind::ALL.len(), 11);
     assert_eq!(FileKind::Provenance.checksums(), None);
     assert_eq!(FileKind::SortIndex.checksums(), None);
+    assert_eq!(FileKind::SealedBars.checksums(), None);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);

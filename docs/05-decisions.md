@@ -68895,3 +68895,73 @@ same process holding it exclusively for 9 s: AFTER the request answered at
 `pull::cash_session_cache::lock_tests::a_killed_holder_releases_the_day`,
 `pull::cash_session_cache::tests::local_lifecycle_busy_or_nonregular_lock_refuses_without_replacing_evidence`,
 `api::bars::change::tests::a_failed_masters_load_is_not_remembered`.
+
+### D-4965 — The sealed month: `.sbar` version 1, magic `BRUTEXC1`, a sibling kind holding a closed month's committed records in 256-row codec 1 frames behind a 512-byte head, a keyed directory, a time table past 64 blocks, the packed `.prv` image and the month summary; a pure function of its inputs — 2026-10-15
+
+**Implemented by** SC-2 (`store::sealed`: `Head`, `Builder`, `build`, `Built`,
+`SealedMonth`, `Positional`, `pack_provenance`, `unpack_provenance`,
+`SealedError`; `store::path::FileKind::SealedBars`; tests in
+`crates/store/src/sealed_tests.rs`, the real-month acceptance in
+`crates/store/tests/sealed_samples.rs`). **Specification** the compressed-store
+design (`state/design/store-compression-20261012.md` §3, §4.1, §4.2, §4.4, §6,
+§9 SC-2) and round 3's amendment A4 (the summary section). **Number**: the
+design proposed D-4928 for this decision; D-4928 went to WP-11c's day ledger
+on 12 October and the numbers up to D-4962 are in use or taken in open
+worktrees on 15 October 2026, so this takes the first number past them and
+the merge renumbers it if another lands first (amendment A6). The codec inside
+the frames is D-4939's and is not decided again here.
+
+**Decision.**
+
+1. **A form of a month, not a generation and not a bar layout.** A closed
+   month may be held as one `.sbar` beside (later instead of) its raw `.bin`;
+   both hold the same records bit for bit. The generation pointer (D-3350)
+   still says which content is served; the form says how it is stored.
+   `FileKind::SealedBars` (`.sbar`) is a sibling kind with its own magic and
+   version, NOT a row of `Layout::KNOWN`: it has no stride. `BRUTEXC1` shares
+   no prefix with `BRUTEXB`, so a build that predates it refuses a `.sbar`
+   opened as bars by its magic.
+2. **The file**: a 512-byte head; a directory of 24 bytes a block (where the
+   frame ends, its CRC-32C, its first stamp, four zero bytes, a CRC-32C over
+   those 20 bytes keyed by the block's index); a time table of
+   `ceil(month span / (4096 · timeframe)) + 1` keyed 8-byte entries when the
+   month has more than 64 blocks; the `.prv` image packed (XOR with the byte
+   256 before, zero runs as `(0x00, run − 1)`) and its CRC; the month summary
+   (A4: its version, two zero bytes, its bytes, a CRC); then the frames.
+   `docs/02-store-format.md` §8.5 gives every byte.
+3. **The head carries the raw month's committed header at a bar slot's
+   offsets** (magic and version aside), so `generation::Pointer::describes`
+   works on a sealed revision unchanged, plus the BLAKE3 of the records exactly
+   as the raw month held them, the CRC of the regenerated `.crc` image, the
+   `.prv` header's path digest, six column ranges and the `.srt` run header's
+   six extremes. Every field a reader can derive is derived again and refused
+   on any difference, and the head is checked against its path's symbol, rung,
+   month and digest, and the file's length.
+4. **A pure function**: the same committed records, header, path, `.prv` image
+   and summary give the same bytes on any host. No time, ordinal or build is
+   written.
+5. **Only version 3 is sealed.** A version 2 month holds no block checksums,
+   so nothing proves the bytes a seal would keep: `unverified_source`. Rows
+   must be in stamp order (equal stamps allowed) and inside the month's IST
+   span, and must start and end at the header's stamps; the builder refuses
+   anything else by name.
+6. **Reads are positional and bounded**: opening reads the head; a block, a
+   row or a page of at most `MAX_RANGE_ROWS` = 16,384 rows is one read of the
+   adjacent directory entries and one of the adjacent frames; a time lookup
+   is two table entries, at most 64 directory entries in one read (a range
+   wider than that, possible only for a month written before D-0915 with two
+   bars in one slot, is bisected one entry a step) and one frame's stamps.
+   `SealedMonth::audit` decodes the whole month against the head: O(the
+   month), for a seal and a scrub, never a request. No lock is taken: the file
+   is published once by rename and never written.
+7. **The month summary section carries R3-06's bytes and their version and
+   never reads them**: a new summary version is a new number in that section,
+   not a new `.sbar` version (A4).
+
+**What this does not decide.** Opening the sealed form in place of the raw one
+(the three-open read door, `read_range` for the API, `provenance::read` on a
+sealed month: SC-3); refusing a write to a sealed month and sending a late day
+to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
+rename, its journal and its failpoints (SC-6); when a month is closed and the
+sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
+SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
