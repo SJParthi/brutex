@@ -49,6 +49,9 @@ mod series;
 #[path = "bars_sort.rs"]
 mod sort;
 use series::SeriesPlan;
+/// The one `YYYY-MM` parser every route's `month`, `from` and `to` go through
+/// (app-7, AF-04). Re-exported because `series` is private to this module.
+pub(crate) use series::month_of_text;
 pub use series::{Filter, MAX_SERIES, SeriesKey};
 pub use sort::SortReport;
 

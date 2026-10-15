@@ -11,12 +11,12 @@
 //! and <https://nsearchives.nseindia.com/content/circulars/CMTR74466.zip>.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flate2::bufread::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -153,12 +153,26 @@ impl VerifiedLifecycleMaster {
 /// a historical event from one snapshot. Lifecycle dates are source assertions
 /// only: no pre-listing day, interruption or unexplained gap is exempted here.
 ///
+/// The lock is SHARED and waits at most [`LOCK_WAIT`] for an installer, so
+/// any number of readers in any number of processes answer at once and
+/// identically (AF-03, p99-2); it is released before the gzip is decoded.
+///
 /// # Errors
-/// Returns `UNVERIFIED` for absent/busy/nonregular locks, missing or corrupt
-/// cache evidence, unsupported receipts, bad gzip/CSV and filesystem failures.
+/// Returns `UNVERIFIED` for absent/nonregular locks, a lock an installer held
+/// past [`LOCK_WAIT`] (named with the wait, never "would block"), missing or
+/// corrupt cache evidence, unsupported receipts, bad gzip/CSV and filesystem
+/// failures.
 pub fn read_local_lifecycle(
     root: &Path,
     master_day: Day,
+) -> Result<VerifiedLifecycleMaster, String> {
+    read_local_lifecycle_within(root, master_day, LOCK_WAIT)
+}
+
+fn read_local_lifecycle_within(
+    root: &Path,
+    master_day: Day,
+    bound: Duration,
 ) -> Result<VerifiedLifecycleMaster, String> {
     let path = lock_path(root, master_day);
     if !regular_file(&path)? {
@@ -166,25 +180,22 @@ pub fn read_local_lifecycle(
             "UNVERIFIED local lifecycle master for {master_day}: existing cache lock is absent; no files created or download attempted"
         ));
     }
-    let lock = File::open(&path).map_err(|why| {
+    let file = File::open(&path).map_err(|why| {
         format!(
             "UNVERIFIED cannot open local lifecycle lock {}: {why}",
             path.display()
         )
     })?;
-    let lock = Flock::try_lock_shared(lock, path.clone()).map_err(|why| {
-        format!(
-            "UNVERIFIED local lifecycle lock {} unavailable: {why}",
-            path.display()
-        )
-    })?;
-    let bytes = read_entry(root, master_day)?.ok_or_else(|| {
+    still_regular(&path)?;
+    let lock = hold(&file, &path, Hold::Shared, bound)?;
+    let entry = read_entry(root, master_day)?;
+    lock.release().map_err(|u| format!("UNVERIFIED {u}"))?;
+    let bytes = entry.ok_or_else(|| {
         format!(
             "UNVERIFIED local lifecycle master for {master_day} is absent; no download attempted"
         )
     })?;
     let daily = decode(&bytes)?;
-    lock.release().map_err(|u| format!("UNVERIFIED {u}"))?;
     Ok(VerifiedLifecycleMaster {
         provenance: LifecycleProvenance {
             master_day,
@@ -330,14 +341,16 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
-        match read_entry(root, day)? {
+        let (path, file) = open_lock(root, day)?;
+        let lock = hold(&file, &path, Hold::Shared, LOCK_WAIT)?;
+        let entry = read_entry(root, day)?;
+        lock.release().map_err(|u| u.to_string())?;
+        match entry {
             Some(bytes) => {
                 result.insert(day.days_from_epoch(), decode(&bytes)?);
             }
             None => missing.push(day),
         }
-        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -374,8 +387,14 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
-        match read_entry(root, day)? {
+        // A READER SHARES THE DAY (AF-03, p99-2): it waits only for an
+        // installer, and releases before the decode, so identical requests in
+        // parallel give identical answers instead of "would block".
+        let (path, file) = open_lock(root, day)?;
+        let lock = hold(&file, &path, Hold::Shared, LOCK_WAIT)?;
+        let entry = read_entry(root, day)?;
+        lock.release().map_err(|u| u.to_string())?;
+        match entry {
             Some(bytes) => {
                 pending.insert(day.days_from_epoch(), decode(&bytes)?);
             }
@@ -387,7 +406,6 @@ where
             }
             None => missing.push(day),
         }
-        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -430,15 +448,46 @@ fn receipt(day: Day, bytes: &[u8]) -> String {
     )
 }
 
-// Persistent advisory locks serialize cooperating readers and installers.
-// A busy entry refuses promptly; no async task waits on a filesystem lock.
-// Each is released by an explicit unlock, never by closing the descriptor, so
-// a duplicate left in a child another thread spawned cannot hold it (D-0693).
+// Persistent advisory locks keep readers off a half-published entry
+// (AF-03, p99-2). READERS SHARE a day: any number of them, in any number of
+// processes (/gaps.json, the pull, the recovery auditor, `/bars.json`, a GDFL
+// import, `cli`), hold it at once, and only to read and receipt-check the
+// bytes; the gzip decode runs after the release. AN INSTALLER HOLDS IT ALONE,
+// only to re-check and publish one entry. Either side waits at most
+// `LOCK_WAIT` for the other and then refuses BY NAME, with the wait; a busy
+// day is never "would block" and never read as absent. Each lock is released
+// by an explicit unlock, never by closing the descriptor, so a duplicate left
+// in a child another thread spawned cannot hold it (D-0693).
 fn lock_path(root: &Path, day: Day) -> PathBuf {
     root.join(format!(".{}.lock", filename(day)))
 }
 
-fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+/// The longest a reader waits for an installer's exclusive hold, and an
+/// installer for the readers ahead of it, before refusing by name. An
+/// installer holds the day only to write one master (at most
+/// `MAX_COMPRESSED` bytes), its receipt and three syncs, and a reader only to
+/// read and receipt-check them, so this is a ceiling for a stalled disk, not
+/// an expected wait. The wait sleeps its thread; on an async path it is the
+/// same bounded blocking as the file reads around it. docs/06-limits.md.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// The first pause between two attempts; it doubles to [`LOCK_PAUSE_MAX`].
+const LOCK_PAUSE_FIRST: Duration = Duration::from_millis(1);
+/// The longest pause between two attempts.
+const LOCK_PAUSE_MAX: Duration = Duration::from_millis(20);
+
+/// Which side of a day's lock a caller takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// A reader: shares the day with every other reader.
+    Shared,
+    /// An installer: holds the day alone.
+    Exclusive,
+}
+
+/// The day's lock file, created when absent (never truncated); a symbolic
+/// link or a directory at its path is refused by name, before and after the
+/// open.
+fn open_lock(root: &Path, day: Day) -> Result<(PathBuf, File), String> {
     fs::create_dir_all(root)
         .map_err(|why| format!("cannot create cash-session cache {}: {why}", root.display()))?;
     let path = lock_path(root, day);
@@ -450,12 +499,71 @@ fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("cannot open cache lock {}: {why}", path.display()))?;
-    Flock::try_lock(file, path.clone()).map_err(|why| {
-        format!(
-            "cash-session cache lock {} unavailable: {why}",
+    still_regular(&path)?;
+    Ok((path, file))
+}
+
+/// Refuses a lock path that is no longer a regular file once opened.
+fn still_regular(path: &Path) -> Result<(), String> {
+    if regular_file(path)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "UNVERIFIED cache lock {} vanished while it was opened",
             path.display()
-        )
-    })
+        ))
+    }
+}
+
+/// Takes `hold` of an open lock file, waiting at most `bound`. Expected
+/// O(1): one attempt when nobody holds the other side; otherwise a bounded
+/// number of attempts, the pauses doubling from [`LOCK_PAUSE_FIRST`] to
+/// [`LOCK_PAUSE_MAX`].
+fn hold<'a>(
+    file: &'a File,
+    path: &'a Path,
+    side: Hold,
+    bound: Duration,
+) -> Result<Flock<&'a File, &'a Path>, String> {
+    let started = Instant::now();
+    let mut pause = LOCK_PAUSE_FIRST;
+    loop {
+        let taken = match side {
+            Hold::Shared => Flock::try_lock_shared(file, path),
+            Hold::Exclusive => Flock::try_lock(file, path),
+        };
+        match taken {
+            Ok(lock) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(why)) => {
+                return Err(format!(
+                    "UNVERIFIED cash-session cache lock {} refused by the host: {why}",
+                    path.display()
+                ));
+            }
+        }
+        let waited = started.elapsed();
+        if waited >= bound {
+            let (holder, outcome) = match side {
+                Hold::Shared => (
+                    "an installer held it exclusively",
+                    "the master is not read, and not read as absent",
+                ),
+                Hold::Exclusive => (
+                    "readers or another installer held it",
+                    "nothing was installed",
+                ),
+            };
+            return Err(format!(
+                "UNVERIFIED cash-session cache lock {} unavailable: {holder} for the whole {} ms bound (waited {} ms); {outcome}",
+                path.display(),
+                bound.as_millis(),
+                waited.as_millis()
+            ));
+        }
+        std::thread::sleep(pause.min(bound.saturating_sub(waited)));
+        pause = pause.saturating_mul(2).min(LOCK_PAUSE_MAX);
+    }
 }
 
 fn regular_file(path: &Path) -> Result<bool, String> {
@@ -549,9 +657,12 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
             "UNVERIFIED {day} precedes the 2026-08-03 cash-session identifier"
         ));
     }
-    // Validation precedes even creating the cache directory.
+    // Validation precedes even creating the cache directory, and the decode
+    // precedes the exclusive hold, so readers never wait through it.
     let eligibility = decode(bytes)?;
-    let lock = lock_day(root, day)?;
+    let (path, file) = open_lock(root, day)?;
+    let lock = hold(&file, &path, Hold::Exclusive, LOCK_WAIT)?;
+    // Re-checked under the hold: another installer may have published first.
     if let Some(existing) = read_entry(root, day)? {
         if existing != bytes {
             return Err(format!(
@@ -646,6 +757,10 @@ async fn download(url: String) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
+#[path = "cash_session_cache_lock_tests.rs"]
+mod lock_tests;
+
+#[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "tests fail immediately when fixture setup fails"
@@ -691,6 +806,11 @@ mod tests {
         let bytes = gzip(CSV.as_bytes());
         install(&temp.0, day(date), &bytes).expect("valid fixture installs");
         bytes
+    }
+    /// The day held alone, as an installer holds it mid-publication.
+    fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+        let (path, file) = open_lock(root, day)?;
+        Flock::try_lock(file, path).map_err(|why| why.to_string())
     }
 
     const LIFECYCLE_CSV: &str = "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n2029,IRFC,EQ,INE053F01010,1,1296345600,0,0\n";
@@ -866,11 +986,13 @@ mod tests {
         let temp = Temp::new();
         let bytes = seed(&temp, 3);
         let held = lock_day(&temp.0, day(3)).expect("exclusive publisher lock");
+        let why = read_local_lifecycle_within(&temp.0, day(3), Duration::from_millis(30))
+            .expect_err("an installer held past the bound");
         assert!(
-            read_local_lifecycle(&temp.0, day(3))
-                .expect_err("busy lock")
-                .contains("unavailable")
+            why.contains("unavailable") && why.contains("30 ms bound"),
+            "{why}"
         );
+        assert!(!why.contains("would block"), "{why}");
         drop(held);
         assert!(read_local_lifecycle(&temp.0, day(3)).is_ok());
         let lock = lock_path(&temp.0, day(3));

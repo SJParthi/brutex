@@ -1795,6 +1795,20 @@ jobs:
           pull/src/gdfl_lineage_tests.rs:println!:5
           pull/src/gdfl_nfo_tests.rs:eprintln!:12
           pull/src/gdfl_wp12e_tests.rs:println!:3"
+          # TWO MORE FILES, the same kind, declared by WP-12f's fifth
+          # round (14 Oct 2026), which ran this gate: test-only timings, each
+          # inside a `#[cfg(test)]`-mounted module, printed beside what the
+          # test asserts.
+          #
+          #   pull/src/gdfl_cm_admission_tests.rs println! 1: the p50/p99/max
+          #     of an eligible and an ineligible share-day's decode with the
+          #     auction's match band (an `#[ignore]` timing, run on demand).
+          #   pull/src/gdfl_scope_tests.rs println! 3: the p50/p99/max of
+          #     `Ctx::owed` over every calendar day 2018..2026 (two lines) and
+          #     of `restated_past_append` at two journal sizes a hundredfold
+          #     apart, whose ratio the test bounds.
+          declared="$declared pull/src/gdfl_cm_admission_tests.rs:println!:1
+          pull/src/gdfl_scope_tests.rs:println!:3"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -2463,6 +2477,22 @@ jobs:
 
           # D-2312: the walk and the spellings are `gates_runtime gate24`.
           "${RUNNER_TEMP:-/tmp}/gates-runtime" gate24
+
+      - name: Gate 28 — one way to create a temporary file
+        run: |
+          set -euo pipefail
+          # R3-16 (rules audit RA-287, RA-290): a temporary opened "create,
+          # truncate" opens a hard link planted at its name and writes through
+          # it. store::staging::create opens nothing already there, and this
+          # gate refuses a crate file that names a temporary without calling
+          # it; its LEGACY list of writers that still open their own may only
+          # shrink. The rule and its limits are .github/gates_tmp_open.rs,
+          # proved by its own tests before it is trusted.
+          tool="${RUNNER_TEMP:-/tmp}/gates-tmp-open"
+          rustc --edition=2024 --test -D warnings .github/gates_tmp_open.rs -o "${tool}-tests"
+          "${tool}-tests"
+          rustc --edition=2024 -D warnings .github/gates_tmp_open.rs -o "$tool"
+          "$tool" check
 
       - name: Gate 25 — the release profile still refuses silent wrapping
         run: |

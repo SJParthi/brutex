@@ -82,6 +82,14 @@ pub mod path;
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
 pub mod repair;
+/// One way to open a file for reading (no link followed, never a wait,
+/// regular files only) and the writer's refusal of a store whose `bars` is a
+/// link (R3-16; RA-317, RA-298).
+pub mod safe_open;
+/// The sealed form of a closed month, `.sbar` version 1: a 512-byte head, a
+/// keyed block directory, a time table, the packed `.prv` image and codec 1
+/// frames, built once and read by position (D-4965, SC-2).
+pub mod sealed;
 /// Codec 1 of a sealed month: one frame of at most 256 bars as seven
 /// bit-packed column streams, bit for bit for any seven `i64` (D-4939, SC-1).
 pub mod sealed_codec;

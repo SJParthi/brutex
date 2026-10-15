@@ -67983,6 +67983,208 @@ hand against the earlier head and saw the leftover this removes).
 and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
 `a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.
 
+### D-4878 — A GDFL capital-market day is done only for the members its close was asked to read; a wider scope reopens it for the new members alone — 2026-10-12
+
+**Implemented by** WP-12f (`pull`: `gdfl_import.rs`, `gdfl_import_scope.rs`,
+`gdfl_cm.rs`) and its repair round 1. **Findings** DB-B76, and the import
+half of DB-B06, DB-B17, DB-B40 and DB-B61.
+
+**Why.** The import journal's key is `<kind> <day> <filter>` and a `done` key
+was skipped whatever the run's scope had become. On 10 Oct 2026 a run under
+eight indices met 1,985 days closed `done` under two, skipped every one, and
+made six index series from the 12 special sessions alone.
+
+**Decision.**
+
+1. A capital-market run's `done` and `incomplete` lines carry
+   `scope=<digest>`: the first 16 hex digits of the SHA-256 of the run's
+   sorted member list. The list is written once per digest in a new
+   append-only ledger, `<store>/imports/gdfl.scopes`
+   (`scope <digest> <kind> n=<count> <m1>,<m2>,... .`). `scope=` is one more
+   `name=value` stat: no earlier reader refuses it.
+2. A close with no `scope=` (every line written before this) is read as
+   built under the swept surface of its kind.
+3. A day closed `done` under a narrower scope is read again only for the
+   members its close never covered that have a file that day, each under a
+   key of its own, `<filter>+<member>`. The base key is not closed again and
+   the old members' months are not touched. The day is then recorded
+   `examined <key> scope=<digest> run=<id> opened=<n> .` in the scope ledger,
+   so a day with no file of a new member is listed once per scope and not
+   again. The run's `run` line is in the journal before that line names its
+   id.
+4. A member whose month already holds a later day lands through the
+   versioned month repair (D-3350, D-4875), never in place.
+5. A member key's close is told as the member's ("member imported", "member
+   incomplete", "member refused", with `member=` and `key=`). "day imported"
+   is the day's, told once after its last member key, and the day is counted
+   once in `days_imported`: the import's pace is measured from the gaps
+   between "day imported" stamps.
+6. The done days of a run's first month that lie before its range are asked
+   what they owe the run, and what they owe is read first, in order. The run
+   says so at `warn` (`scope_reach_back`, with `first_owed=` and the `key=`
+   that owed it), once, when it reads a file of such a day; a day it only
+   lists is told at `info`. WHOSE CLOSE IS ASKED (repair 2, 12 Oct 2026): a
+   day the run's own key closed is that key's; any other day is asked of
+   EVERY key that closed it `done`, whatever its filter, the whole-day key
+   `*` among them. Such a key owes the members its close's scope never
+   covered that its own filter names, and the run reads the ones its own
+   filter wants under that key's member keys (`<that filter>+<member>`).
+   That the key was examined for this run's filter is remembered as
+   `examined <kind> <day> <that filter>/<the run's filter> ...`, never under
+   the key itself, so the key's own run still reads the members this filter
+   did not want. A member two keys owe is read once, and the day is counted
+   and told once. So no member's month is made from a later day while a day
+   of that month closed `done` by ANY run owes it, under a filter
+   (`--stored`, a named symbol) as under none, with `retry_refused` as
+   without it (check 3: a close with refusals before the range is asked like
+   any other, see item 7). At most 30 days. A day not closed `done` owes
+   nothing, and a key closed under names owes nothing it did not name
+   (`docs/06-limits.md`, L-WP12f-7). The one way a later day still lands
+   first: the owed day's own member read fails (a held month lock, a store
+   refusal, a file the vendor refuses). That failure is named and the run
+   ends rc 1, but it does not stop the run; the member's later days of the
+   range are written and the failed day lands later through the versioned
+   repair (L-WP12f-12).
+7. `retry_refused` reads again a member key closed done with refusals. A
+   BASE key closed done with refusals is read again whole only inside the
+   run's range (`admit`); before the range the flag changes nothing about
+   what that day owes, which is asked as for any other done day (check 3 of
+   WP-12f, 12 Oct 2026; before this, the flag made such a day owe nothing
+   and the month was made from the later days, unsaid).
+8. A share's `.BE` or `.BZ` day file is the share's own trading day, filed
+   under the share's key; the member is `NSE-CASH-<share>.<series>`. A day
+   holding both a share's own file and a series file refuses both by name.
+   The two series codes are a compiled list, UNVERIFIED against an NSE
+   circular (`docs/06-limits.md`, L-WP12f-4).
+9. **The closing auction's band runs through order matching, and its match
+   is kept apart booked or not** (SC-CLOSE-5, SC-CLOSE-6; refines D-3320
+   item 3; charter §9, "The auction's phases and where its band ends" and
+   "Which booked row is the auction's", whose timings rest on a broker's
+   dated notice and are UNVERIFIED against an NSE page). For a share the
+   day's security master flags eligible, from 2026-08-03: a zero-bid,
+   zero-ask traded row in `[15:15:00, 15:35:00)` is a print (the band ended
+   at 15:30 and lost the 9 of 145 measured prints stamped 15:30:00 to
+   15:30:02); and when every traded row in the match band `[15:28:00,
+   15:35:00)` is at one price, the booked ones are prints too (40 of 133
+   measured share-sessions had no zero-book row there). At two prices or
+   more no booked row is claimed: they stay rows of phase `cas`, counted in
+   `CmFile::auction_band_unattributed` and named by the import at warn
+   (`auction_band_unattributed`). A share whose eligibility is unknown is
+   refused by name when its band traded at one price with a booked row, as
+   a zero-book candidate refuses it: eligible, that row is the print, and
+   nothing says which. A print leaves the row count its row was put in, by
+   the one rule that put it there.
+10. **Definition 4 records item 9** (CMP-07). `BAR_DEFINITION` is 4. A
+   share's day from 2026-08-03 closed `done` under 2 or 3 is restated and
+   imported again; under 2 or 3 an index day, and a share's day before
+   2026-08-03, stay current, and so does an option day under 3 (D-3342 still
+   restates one under 2). The day question is
+   `vendor::cash_auction_eligibility_required`, the rule that asks for the
+   flag, and `/imports.json` asks the same function with the key's day.
+   **Such a day is refused by name at admission, every run, and never read
+   through the append door** (`reason=restated_auction_band`, stage `file`):
+   definition 4 takes the print OUT of the bars, the second reading is often
+   the held day less its last bar, and the append-only month answers that
+   `AlreadyPresent` (it compares the bars offered, never the held bar after
+   them), so the day would close `done` under 4 with the print still a bar,
+   unsaid. **The question is asked of the SHARES, not of one key** (repair 6,
+   14 Oct 2026, after check 4 read RELIANCE through the append door under a
+   fresh filter while a `HDFCBANK,RELIANCE` key stood closed under 3): a key
+   is refused when it would read any share that ANY key of that day, under
+   any filter, left possibly holding a bar 4 no longer builds — its last
+   `done` or `recounted` under 2 or 3, a close `incomplete` under one, or a
+   `begin` by a run under one never closed — and no later close under 4 of a
+   filter that read that share has ended it. A whole-tree key reads every
+   share; a member key (`<filter>+<member>`) reads its member and asks the
+   same question, since it bypasses its base key's admission. A `refused`
+   close of the run that wrote the early `begin` wrote nothing and undoes
+   that `begin`; it is that run's only when its `run=` equals the id of the
+   last whole `run` line before the `begin` (repair 7, 14 Oct 2026, after
+   check 5: this build's own first `restated_auction_band` refusal was taken
+   for the early run's close, erased the early `begin`, and the next run read
+   RELIANCE through the append door, 6,685 seconds offered and 0 written,
+   and closed it `done` under 4). A `refused` line of any other run, one
+   naming no run, or a `begin` no whole `run` line precedes keeps the entry:
+   refusing too much fails loudly, refusing too little fails silently. Which
+   definition a `begin` was written under is its run's: this build's `run`
+   line carries `definition=4`, and a run line without one (every build
+   before 4, which reads any `name=value` field of a run line) is an earlier
+   definition's, so a day this build began and a crash left open is read
+   again to make its months durable (WP-16), never refused. The months GDFL
+   CASH 2026-08 and 2026-09 are made again as new generations by WP-80
+   (D-3320 item 4); a names or member close under 4 ends the keys whose
+   shares it names all of, never a whole-tree key's. A WHOLE-TREE close under
+   4 read the members of ITS scope and no others, so it ends a key's share
+   only where that scope held the share: its `scope=` digest is resolved
+   through the scope ledger (`imports/gdfl.scopes`), a close naming none is
+   the swept surface, and a digest the ledger does not hold, or a run with
+   no ledger, holds nothing, so the share stands (repair 7, 14 Oct 2026,
+   after check 5's probe read ZZFOO, built under 3 by a names key, through
+   the append door under `*+NSE-CASH-ZZFOO` once a pre-scope `*` close under
+   4 stood; a names key outside that close's scope read it the same way). A
+   whole-tree key of an earlier definition that only whole-tree closes under
+   4 ended stands for every share none of their scopes held, and for an
+   asking whole-tree key always, since no probe of one share tells whether a
+   scope held every share. WP-80's remake therefore ends the refusal only
+   for the shares its scope holds: it runs under a scope holding every share
+   an earlier definition's key read in the era, or closes the rest by name.
+   A share a LATER scope adds stays refused on those days until a remake
+   whose scope holds it: an earlier definition's whole-tree key recorded no
+   scope, so it is taken to have read every share. Taking it as today's
+   swept surface instead would refuse too little, silently, for a share the
+   F&O list held when that build ran and no longer holds.
+   NO VERB OF THIS BUILD MAKES THAT REMAKE (repair 7, after check 5):
+   `gdfl-import` refuses every such key at admission, under any filter,
+   whole tree included, and the versioned repair (`store::repair_month`,
+   D-3350) keeps every held bar, so it cannot take the closing print out of
+   a month. The remake needs a writer that publishes a month as a new
+   generation holding FEWER bars than the served one, and the whole-tree
+   close under 4 it writes; owners the store crate and WP-80, named in
+   `docs/06-limits.md` L-WP12f-13. Until it lands, every stocks run touching
+   a day of the era that an earlier definition's key built is refused by
+   name on every run (rc 1, one journal line a key-day, no bar file), the
+   daily Ingest included for those days only; days after the era are not
+   touched.
+   O(1) in the journal's size: one hash probe for the day, one a share the
+   asking key names, and for a share only whole-tree closes ended one probe
+   a scope of that day's keys naming it (measured by
+   `the_auction_era_admission_check_costs_the_same_at_any_journal_size`).
+
+**Not done.** An options run records no scope. Landing a sparse month's owed
+days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day
+source digest compared across runs (DB-B77), the official open and close of
+an index file (DB-B18), the six stem hand-overs (DB-B12).
+
+**Proof.** `crates/pull/src/gdfl_scope_tests.rs`:
+`a_wider_scope_reads_a_done_day_again_for_its_new_members_only`,
+`a_close_with_no_scope_is_read_as_the_swept_surface`,
+`a_new_member_holding_only_a_later_day_takes_its_earlier_done_days`,
+`a_day_with_no_file_of_a_new_member_is_examined_once_and_never_listed_again`,
+`a_filtered_key_opens_no_member_its_filter_does_not_name`,
+`a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run`,
+`a_trade_for_trade_spell_is_filed_under_its_shares_key`,
+`a_member_keys_close_is_told_as_the_members_and_the_day_is_told_once`,
+`a_run_starting_past_owed_days_of_its_month_reads_them_first`,
+`a_filtered_run_reads_first_what_the_whole_day_key_owes_it`,
+`a_key_closed_under_names_owes_only_what_it_named`,
+`retry_refused_reads_again_a_member_key_closed_with_refusals`,
+`retry_refused_never_cancels_what_a_done_day_before_the_range_owes`,
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`,
+`a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`,
+`a_share_another_filter_built_under_an_earlier_definition_is_refused_under_every_filter_naming_it`,
+`a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused`,
+`a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused`,
+`the_auction_era_admission_check_costs_the_same_at_any_journal_size`;
+`crates/pull/src/gdfl_cm_admission_tests.rs`:
+`the_auction_band_runs_through_order_matching_and_stops_before_post_close`,
+`a_booked_match_at_the_one_band_price_is_a_print`,
+`two_band_prices_claim_no_booked_row_and_the_edges_hold`,
+`an_unknown_eligibility_refuses_a_one_price_booked_match_and_keeps_two_prices`,
+`a_booked_print_leaves_the_count_its_row_was_put_in`, and the timing
+`the_match_band_costs_one_pass_a_file` (ignored, on demand);
+`crates/api/src/import_journal.rs`:
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`.
+
 ### D-4928 — The day ledger gains four optional halt and flat-run fields; `/dayflags.json` names a minute-sampled index day and counts the bars inside a halt — 2026-10-12
 
 **Implemented by** WP-11c (`pull::gdfl_import::quality`, `cli gdfl-dayflags`
@@ -68400,6 +68602,369 @@ rule, as it did before it, so none is in the scan.
 `api::server::tests::a_run_whose_opening_record_was_refused_closes_behind_it_written_late`,
 `api::server::tests::every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`,
 `api::server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`.
+
+### D-4951 — One door to read a file, one to create a temporary, and a store whose `bars` is a link is never written (R3-16) — 2026-10-14
+
+Every reader opened its files its own way, and the ways differed exactly
+where it hurt: the verdict store's reader opened with `O_NOFOLLOW` alone, so
+a pipe at a year index's name held every lookup for ever (verify-IA-5-r2,
+follow-up 1); the GDFL tick store's day readers followed links, so a
+dangling one read as "no such day" and the run closed it `day_not_held` with
+exit 0 (FM-046). The rules audit asked for one reading rule (RA-317), one
+creating rule with a gate (RA-287, RA-290), a gone folder that is never
+deleted through (RA-294) and a writer that refuses a store whose `bars` is a
+link, as every test server's shadow is (RA-298, FM-198).
+
+1. **Reading** is `store::safe_open::open_read` (`open_read_len`,
+   `open_read_write` for an existing file a writer updates in place):
+   `O_NOFOLLOW | O_NONBLOCK`, the kind asked of the HANDLE, a regular file
+   only. Anything else is refused `read_not_regular` naming what it found
+   (`symlink`, `pipe`, `socket`, `char_device`, `block_device`,
+   `directory`); an absent name stays the host's `NotFound`
+   (`ReadRefusal::is_missing`), and a dangling link is not absent. A file
+   with several names is readable: "exactly one name" is a writer's rule.
+   Its users now: `store::verdict` (index, image and lock),
+   `cli::readonly_file::open`, `pull::gdfl_tickstore::open_day` (the
+   capital-market and options day readers).
+2. **Creating** stays `store::staging::create` (D-4922); its
+   `staging_not_regular` now names what it found. Gate 28
+   (`.github/gates_tmp_open.rs`) refuses a crate file that names a
+   temporary and calls the door fewer times than it names one; its LEGACY
+   list of five writers that still open their own may only shrink.
+3. **Writing** asks `store::safe_open::refuse_linked_store_root` once, by
+   name, before it opens anything: `linked_store_root` when `<root>/bars`
+   is a symbolic link (naming where it points), `store_bars_not_a_directory`
+   when it is something else. Every `cli` writing verb asks it
+   (`store_write::root_with`, and `gdfl-import` for its own root); a
+   read-only form never does, because a shadow exists to be read. The month
+   writer's refusal of any link below the root (CE-62, D-2686) stays behind
+   it.
+4. **The logs' gone folder**: the reaper reads the folder's identity again
+   before each delete and refuses, by name, a folder that changed after the
+   hand-over (a link or another directory in its place); nothing in it is
+   deleted and the generation waits for the next start.
+5. **A tick-store day name** holding a link (dangling or not), a pipe, a
+   socket or a device is refused `tick_store_malformed` saying which, never
+   read as absent; a directory stays `tick_store_unavailable`.
+
+Rejected: a per-component `openat` walk, which `std` does not offer without
+`unsafe` (every crate root forbids it), so a link swapped into a DIRECTORY
+above a name stays the limit L-R316-01 names (FM-223); "exactly one name"
+for readers, which would refuse a legitimate read through a second name;
+an `api` write gate for a linked store, which needs `api::server::WriteGate`
+(R4-02's file) and is named NOT DONE in L-R316-05.
+
+**Proved by** `store::safe_open::tests::a_pipe_device_or_link_is_refused_by_name`,
+`store::safe_open::tests::a_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`store::staging::tests::a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`,
+`store::verdict::tests::a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits`,
+`telemetry::sink::tests::a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched`,
+`cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`cli::gdfl_import_command::tests::gdfl_import_refuses_a_store_whose_bars_folder_is_a_link`,
+`pull::gdfl_tickstore::tests::a_dangling_day_file_link_is_refused_by_name_never_a_day_not_held`,
+`cli::gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`,
+`store::safe_open::tests::a_writer_refuses_a_linked_bars_directory`,
+and gate 28's own tests (`rustc --test .github/gates_tmp_open.rs`).
+
+### D-4952 — /ingest mounts every panel through one registry and one error boundary, a held month with no yardstick is settled, and a repair press sends only the eight fields for the plan's own member (R4-01) — 2026-10-15
+
+The operator's /ingest read "0 / unverified · NEVER IMPORTED" over 97 held
+1-second months of every GDFL share (V1), no page could start the versioned
+repair `POST /pull/repair` (Z6, D-3350), and every later /ingest panel
+(IA-12a, SC-8) needed a place to mount that was not another edit of the
+13,000-line page.
+
+1. **Month verdicts.** A month is `loading` until the census the page holds is
+   the selected feed's ("census loading", or "census not read" with the
+   reason), never 0 and never "never imported". A month that holds bars at a
+   rung with no per-session count (1 s, and every contract segment) is `held`:
+   counted, **settled**, never compared. Settled means a partly imported month
+   gives no sign it is partial; that is the honest limit of a rung with no
+   yardstick, and it is L-R401-04. Which rungs a feed stores is read per feed
+   from `/feeds.json` `rungs` + `derived_rungs`, not written in the page.
+2. **The contract fold** runs once per CENSUS stamp: the feed with the census's
+   own `x-brutex-census-generation` and epoch when the answer names them, else
+   the read itself. A re-read of an unchanged census walks nothing; while a
+   newer census of the same feed is walked the previous sums stand, labelled
+   "previous census, re-counting"; another feed's sums and a failed walk never
+   stand.
+3. **The panel registry.** Every `web/src/routes/ingest/panels/*.svelte` mounts
+   by its exported `order` (ties by file name) through
+   `web/src/lib/ingest-panels.js`. A panel without `order` or `title` is named
+   in one visible line and on the console and still mounted, last. Every panel
+   mounts inside its own `<svelte:boundary>` (`web/src/lib/IngestPanelSlot.svelte`):
+   one that throws is replaced by one line naming its file and error, logged
+   with the error, and every other panel and the page keep working. A panel
+   owns its fetches, answers a 404 or 503 with one named line, titles every
+   control, fits 375 px, and polls through `createPoller` (at most once a
+   second, never while hidden; a run that throws is kept as `failed` and the
+   poll goes on).
+4. **The repair press** sends exactly one `POST /pull/repair` with the eight
+   fields `target, vendor, granularity, cash_identity, member, from, to,
+   repair_reason`, written again in that order with every value encoded. The
+   server's template must hold exactly those eight, each once, for the plan's
+   own member; anything else is refused by name before a press. The template
+   `/pull/repair.json` writes today does not encode `member`, so every month of
+   `M&M` and `M&MFIN` is refused on the page ("cannot be repaired from this
+   page") until `crates/api/src/repair_route.rs` encodes it (a follow-up for
+   that file's owner); the panel never guesses a split member back together.
+5. **A projection** (`projection: {bytes, free_after, floor, basis, refused}`,
+   R4-07, R4-23, R4-29) is one line; `free_after` below zero reads "none, short
+   by X" and is shown as a refusal, never as a malformed field.
+
+Rejected: a page edit per panel (the 13,000-line page grows with every
+package); dropping a panel that breaks the contract (it hides the panel someone
+just added, CLAUDE.md §4); rebuilding the member from the plan's instrument
+while the template carries a stray key (a guess about how the server split it).
+
+**Proved by** `web/tests/ingest-held.test.js`
+(`gdfl_stock_rows_count_their_1s_months`, `a_1s_rung_of_an_archive_feed_is_stored`,
+`the_held_join_is_one_pass_per_census_stamp`,
+`a_reread_of_an_unchanged_census_walks_nothing_and_the_previous_sums_stand_labelled`),
+`web/tests/ingest-panels.test.js` (`panels_mount_in_order_and_a_bad_panel_is_named`,
+`a_panel_that_throws_is_one_named_line_and_the_page_keeps_working`,
+`a poll whose run throws keeps polling and says what failed`),
+`web/tests/zerodha-repair.test.js` (`a_zerodha_repair_press_sends_one_request_with_its_reason`,
+`a_member_holding_an_ampersand_is_never_sent_as_another_member`),
+`web/tests/ingest-months.test.js` (`each_reason_code_reads_its_sentence`),
+`web/tests/pull-plan.test.js` (`a_plan_projection_renders_one_line_and_a_refusal_by_name`,
+`a plan larger than the free space reads as short by its shortfall`).
+
+### D-4962 — One month spelling for every route, and the `/bars` page reads `contract=` and never answers a contract with its underlying (AF-04; app-6, app-7) — 2026-10-15
+
+Two findings of the 14 October attack run, each confirmed by two skeptics.
+
+**app-7.** Three copies of the month parser (`server::month_param`,
+`spot::month_param`, the `/bars` page's own closure) split on `-` and handed
+each half to `str::parse`, which takes a leading `+` and any run of leading
+zeros. So `2024-3`, `2024-003`, `2024-0003`, `02024-03`, `%2B2024-03` and
+`2024-%2B3` all answered March 2024 under HTTP 200 on `/bars.json`, `/bars`,
+`/spot.json`, `/greeks.json`, `/gaps.json` (`to`) and `/provenance.json`, while
+the refusal sentence promised `YYYY-MM`. The data served was right; one month
+had several request texts in every access record and bookmark.
+
+1. **`bars::month_of_text` is THE month parser**: exactly seven bytes, four
+   ASCII digits, `-`, two ASCII digits, then `YearMonth::new`'s range. The
+   bytes are checked before any integer parse, so no sign and no padding can
+   reach `from_str`. It was already the strict copy for `bars_series` but
+   checked only the halves' LENGTHS, so `2024-+3` passed it too.
+2. `server::month_param` and `spot::month_param` call it, with the sentence
+   they already used (`"…" is not a YYYY-MM month for "<field>"`). The `/bars`
+   page calls it through `bars_month`, and an ABSENT month keeps its own
+   sentence ("no month was named") while a misspelt one now gets the parser's —
+   before, a misspelt month was told it had not been named. The `/store`
+   filter's `from`/`to` read it too; a misspelt bound narrows nothing and the
+   filter bar shows "All", as for every malformed narrowing there.
+3. **Not in this change**, named so they are not lost: `bars_route.rs`
+   `WindowAsk::parse`'s `month_of` (`/bars/window.json`, AF-05's file, which
+   switches to this parser there); `sources.rs` `month_of_text` and
+   `dayflags.rs` `bound`, each length-checked but still taking `2024-+3`.
+
+**app-6.** `bars_html` read no `contract=` and passed `None` to `bars::open`
+under a comment calling the page spot only, a choice no ledger entry recorded.
+So every contract link — every contract row's link on `/store`, which
+`render.rs` also built without `contract=` — opened the underlying's spot
+path below `FNO/` and answered 404 "…/FNO/NIFTY/1s/2024-03.bin does not
+exist" about a contract whose bars `/bars.json` served. Worse, with `segment=`
+omitted the spot walk placed the name at `INDEX` (or `CASH`) and answered 200
+with NIFTY's own index bars for a NIFTY option, RELIANCE's cash bars for a
+RELIANCE option: a different instrument's bars under a page that never named
+the contract, the fallback `CLAUDE.md` §4 bans.
+
+4. **One contract parse** (`server::contract_param`) for `/bars.json`
+   (`Addressed::parse`) and the `/bars` page. Empty is absent (`contract=` and
+   no `contract` are one request, as `/bars.json` always read it); present and
+   malformed is 400 naming `contract=`, never a fallback to spot. `contract=`
+   given twice stays the boundary's refusal (`request_bounds_refusal`).
+5. **A contract is placed only where contracts are filed.**
+   `server::files_contracts` is an exhaustive `match` over `Segment`: `FNO`
+   files contracts, `INDEX` and `CASH` do not, so a new segment must decide at
+   compile time. `segment=` omitted with a contract is `FNO` — the type's own
+   fact, not a default. A contract under `INDEX`, `CASH` or an unknown segment
+   is 400 naming the contract. `exchange=` given wins with no census read;
+   omitted, the ASKED feed's census is probed once per exchange
+   (`facets::EXCHANGES`) for the whole key — a hash probe each, never the spot
+   walk's census sort, never another feed's census (D-0695). Held on one
+   exchange answers it, on two is the existing ambiguity refusal, on none is
+   404 naming the contract files asked about, never a spot path.
+6. **The page names the contract**: the title and header read
+   `<symbol> <contract>`, the pager's links carry `contract=`, and a 404 from
+   `bars::open` names the contract file it tried.
+7. **`/store` links carry the contract**: a contract row's coverage link adds
+   `contract=`, a spot row's is unchanged.
+
+**Rejected:** keeping the page spot only and refusing `contract=` with a
+sentence — `/store` already linked every contract row here, so the control
+the old comment waited for existed; and resolving a segment-less contract by
+the census's spot walk — that walk skips contract rows by design and is the
+path that answered the underlying.
+
+**Proved by** `api::server::bars_page_tests::every_route_refuses_a_month_not_spelled_yyyy_mm`,
+`…::the_one_month_parser_takes_exactly_four_digits_a_dash_and_two`,
+`…::the_bars_page_shows_the_contract_it_was_asked_for`,
+`…::a_malformed_contract_on_the_bars_page_is_400`,
+`…::the_bars_page_never_answers_a_contract_with_its_underlyings_bars`,
+`…::the_bars_page_contract_extremes_answer_by_name` and
+`…::a_store_contract_row_links_to_its_contract_and_the_link_opens`
+(docs/04 AF4-01..AF4-06); costs in docs/06 L-AF4-01..L-AF4-02.
+
+### D-4963 — Readers of a dated NSE cash master share the day's lock and wait a named bound for an installer; a refused master load is kept only by the request that met it — 2026-10-14
+
+**Context** (AF-03, assurance finding p99-2, confirmed by two skeptics on 14
+October 2026). Every reader of `<store>/session-masters` that went through
+`pull::cash_session_cache::prepare_observed_with` or `prepare_with` took the
+installer's lock: exclusive (`Flock::try_lock`), non-blocking, and held through
+the gzip decode of the master (1.8 to 2.2 s for the 21 masters of one
+`/gaps.json` month). Four `/gaps.json` requests for one CASH month in parallel
+gave one right answer (`expected 7560`) and three answers of `expected 0,
+unmeasured 30240` whose month row named "lock acquisition failed because the
+operation would block"; four IDENTICAL RELIANCE requests gave two different
+bodies (CLAUDE.md §3 rule 5). The same exclusive hold refused every shared
+reader beside it — `read_local_lifecycle`, which `/bars.json`, the recovery
+auditor, a GDFL stocks import and `cli` call — and `api`'s bars window kept
+such a refusal as `None` in a process-wide memo commented "loaded once", so
+one collision left that day's closing-auction eligibility `Unknown` until the
+process restarted: the hidden fallback §4 bans. The shipped `/gaps` page sends
+one request per view, so the collision needs two tabs, an agent, the recovery
+auditor or a pull beside a request; it is not the page's own grid.
+
+**Decision.**
+
+1. A READER SHARES THE DAY. `prepare_with`, `prepare_observed_with` and
+   `read_local_lifecycle` take the day's lock shared, read and receipt-check
+   the bytes, release, and only then decode. Any number of readers in any
+   number of processes hold the day at once, so identical requests give
+   byte-identical bodies.
+2. AN INSTALLER HOLDS THE DAY ALONE, and only to re-check the entry under the
+   hold and publish it (payload, receipt last, directory sync). Its decode
+   runs before the hold. A second installer of the same bytes finds the entry
+   on its re-check and writes nothing; different bytes refuse as a conflict.
+3. EITHER SIDE WAITS AT MOST `LOCK_WAIT` (5 s) for the other, retrying with
+   pauses doubling from 1 ms to 20 ms, and then refuses BY NAME: the lock's
+   path, who held it ("an installer held it exclusively" / "readers or another
+   installer held it"), the bound and the wait, and what did not happen ("the
+   master is not read, and not read as absent" / "nothing was installed"). No
+   answer says "would block". A host refusal other than contention is named
+   as the host's.
+4. A lock path that is a symbolic link or a directory is refused by name
+   before and after the open, on every path.
+5. `api`'s bars window keeps a master in the process-wide memo only when it
+   LOADED (immutable once receipted) or when the day needs none (before
+   2026-08-03). A refusal is kept with its reason by the request's `Rules`
+   alone, so the request reads that day once, not once per bar, and the next
+   request reads it again.
+
+**Rejected.** (a) Keeping the exclusive lock for readers and retrying in the
+route: the decode still runs under it, so the wait is the decode's 2 s per
+month, and the shared readers elsewhere still refuse. (b) A blocking
+`lock_shared` with no bound: a stalled installer would hang every request
+behind it with no answer at all. (c) Remembering the refusal process-wide with
+its reason and a timeout: a timeout is a second clock to tune, and the
+request is already the natural unit of a retry. (d) Memoising the decoded
+masters across `/gaps.json` requests (finding p99-1): disputed and not in
+this run; its cost is named in `docs/06-limits.md`.
+
+**What remains** (`docs/06-limits.md`, AF-03): the reader's bounded wait
+sleeps its thread, on an async path too; a stream of readers can hold an
+installer off for the whole bound, after which it refuses by name; a
+`/gaps.json` month still decodes about 21 masters per request (O(D)); a day
+whose master is absent is read once per request per series by `/bars.json`.
+The reason a request kept is not yet on the `/bars.json` wire: the bar's
+phase reads `unverified`, which is visible, and naming the reason in
+`faults` is one line in `crates/api/src/bars.rs`, outside this package.
+
+**Measured** (`docs/06-limits.md` L-CSL-1 to L-CSL-5; GET only, on a private
+shadow of the real store, two release builds on 127.0.0.1:8702, evidence in
+`state/fix/round2/af03-evidence/`). Four identical RELIANCE 2026-08
+`/gaps.json` requests at once, 50 rounds: BEFORE 150 of 200 answers named
+"would block" with `expected 0` and the bodies took 2 distinct values; AFTER
+0 of 200, one body, byte-identical to the request made alone. Six symbols at
+once on 2026-09, 34 rounds: 170 of 204 refused BEFORE, 0 AFTER. Another
+process holding a day's lock shared (as `cli` and a GDFL import do) for the
+whole of 40 parallel requests: BEFORE 40 of 40 refused, AFTER 0 of 40. The
+same process holding it exclusively for 9 s: AFTER the request answered at
+5.002 s with the bound named, and the next one, after the release, answered
+`expected 7560`.
+
+**Proved by** `pull::cash_session_cache::lock_tests::eight_readers_of_one_day_all_get_the_same_answer`,
+`pull::cash_session_cache::lock_tests::a_reader_beside_an_installer_waits_then_answers_or_names_the_wait`,
+`pull::cash_session_cache::lock_tests::an_installer_beside_readers_installs_once`,
+`pull::cash_session_cache::lock_tests::a_shared_reader_never_blocks_the_lifecycle_reader`,
+`pull::cash_session_cache::lock_tests::sixty_four_parallel_readers_all_answer_alike`,
+`pull::cash_session_cache::lock_tests::missing_empty_corrupt_and_nonregular_evidence_refuses_by_name`,
+`pull::cash_session_cache::lock_tests::a_killed_holder_releases_the_day`,
+`pull::cash_session_cache::tests::local_lifecycle_busy_or_nonregular_lock_refuses_without_replacing_evidence`,
+`api::bars::change::tests::a_failed_masters_load_is_not_remembered`.
+
+### D-4965 — The sealed month: `.sbar` version 1, magic `BRUTEXC1`, a sibling kind holding a closed month's committed records in 256-row codec 1 frames behind a 512-byte head, a keyed directory, a time table past 64 blocks, the packed `.prv` image and the month summary; a pure function of its inputs — 2026-10-15
+
+**Implemented by** SC-2 (`store::sealed`: `Head`, `Builder`, `build`, `Built`,
+`SealedMonth`, `Positional`, `pack_provenance`, `unpack_provenance`,
+`SealedError`; `store::path::FileKind::SealedBars`; tests in
+`crates/store/src/sealed_tests.rs`, the real-month acceptance in
+`crates/store/tests/sealed_samples.rs`). **Specification** the compressed-store
+design (`state/design/store-compression-20261012.md` §3, §4.1, §4.2, §4.4, §6,
+§9 SC-2) and round 3's amendment A4 (the summary section). **Number**: the
+design proposed D-4928 for this decision; D-4928 went to WP-11c's day ledger
+on 12 October and the numbers up to D-4962 are in use or taken in open
+worktrees on 15 October 2026, so this takes the first number past them and
+the merge renumbers it if another lands first (amendment A6). The codec inside
+the frames is D-4939's and is not decided again here.
+
+**Decision.**
+
+1. **A form of a month, not a generation and not a bar layout.** A closed
+   month may be held as one `.sbar` beside (later instead of) its raw `.bin`;
+   both hold the same records bit for bit. The generation pointer (D-3350)
+   still says which content is served; the form says how it is stored.
+   `FileKind::SealedBars` (`.sbar`) is a sibling kind with its own magic and
+   version, NOT a row of `Layout::KNOWN`: it has no stride. `BRUTEXC1` shares
+   no prefix with `BRUTEXB`, so a build that predates it refuses a `.sbar`
+   opened as bars by its magic.
+2. **The file**: a 512-byte head; a directory of 24 bytes a block (where the
+   frame ends, its CRC-32C, its first stamp, four zero bytes, a CRC-32C over
+   those 20 bytes keyed by the block's index); a time table of
+   `ceil(month span / (4096 · timeframe)) + 1` keyed 8-byte entries when the
+   month has more than 64 blocks; the `.prv` image packed (XOR with the byte
+   256 before, zero runs as `(0x00, run − 1)`) and its CRC; the month summary
+   (A4: its version, two zero bytes, its bytes, a CRC); then the frames.
+   `docs/02-store-format.md` §8.5 gives every byte.
+3. **The head carries the raw month's committed header at a bar slot's
+   offsets** (magic and version aside), so `generation::Pointer::describes`
+   works on a sealed revision unchanged, plus the BLAKE3 of the records exactly
+   as the raw month held them, the CRC of the regenerated `.crc` image, the
+   `.prv` header's path digest, six column ranges and the `.srt` run header's
+   six extremes. Every field a reader can derive is derived again and refused
+   on any difference, and the head is checked against its path's symbol, rung,
+   month and digest, and the file's length.
+4. **A pure function**: the same committed records, header, path, `.prv` image
+   and summary give the same bytes on any host. No time, ordinal or build is
+   written.
+5. **Only version 3 is sealed.** A version 2 month holds no block checksums,
+   so nothing proves the bytes a seal would keep: `unverified_source`. Rows
+   must be in stamp order (equal stamps allowed) and inside the month's IST
+   span, and must start and end at the header's stamps; the builder refuses
+   anything else by name.
+6. **Reads are positional and bounded**: opening reads the head; a block, a
+   row or a page of at most `MAX_RANGE_ROWS` = 16,384 rows is one read of the
+   adjacent directory entries and one of the adjacent frames; a time lookup
+   is two table entries, at most 64 directory entries in one read (a range
+   wider than that, possible only for a month written before D-0915 with two
+   bars in one slot, is bisected one entry a step) and one frame's stamps.
+   `SealedMonth::audit` decodes the whole month against the head: O(the
+   month), for a seal and a scrub, never a request. No lock is taken: the file
+   is published once by rename and never written.
+7. **The month summary section carries R3-06's bytes and their version and
+   never reads them**: a new summary version is a new number in that section,
+   not a new `.sbar` version (A4).
+
+**What this does not decide.** Opening the sealed form in place of the raw one
+(the three-open read door, `read_range` for the API, `provenance::read` on a
+sealed month: SC-3); refusing a write to a sealed month and sending a late day
+to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
+rename, its journal and its failpoints (SC-6); when a month is closed and the
+sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
+SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
 
 ### D-4955 — A log-only import row is made only for a kind-day no journal line of ANY filter names; a journal row is an instrument's when its filter NAMES the symbol as a whole name, the newest such close winning over `*`; a run with no lifecycle event says where it looked — 2026-10-14
 

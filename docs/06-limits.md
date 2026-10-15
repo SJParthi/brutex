@@ -16881,6 +16881,159 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
   of its own (L-WP81-4), cached for 30 s in the operations pool.
 
+## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
+
+- **L-WP12f-1. A scope change lists every done day of the kind once more.**
+  One new member in the stored scope (one new option underlying in the
+  store changes the stocks digest) makes the next run read the listing of
+  every day closed `done` under another digest, once, to find the days that
+  hold a file of a new member; the `examined` line then remembers the day.
+  O(done days of the kind) listing reads, once per scope. What a done day
+  owes when it owes nothing is one compare of digests and two hash probes.
+  NOT MEASURED at the real store's size (about 2,000 days a kind).
+- **L-WP12f-2. A reopened day costs one pass over its listing per member
+  key.** `cm_jobs` scans the day's listing for each member key the day
+  opens: O(members opened x listing entries). 6 members a day for the index
+  tree and 15 to 17 for the stock tree on the operator's archive.
+- **L-WP12f-3. The journal grows by two lines per member key** (`begin` and
+  its close) and by one `run` line per run that examines a day, and it is
+  loaded whole at each run's start: O(journal bytes) per run. The scope
+  ledger grows by one line per digest and one per examined day and is loaded
+  whole too.
+- **L-WP12f-4. The trade-for-trade series are a compiled list of two,
+  UNVERIFIED.** `gdfl_cm::SHARE_SERIES` is `BE` and `BZ`. No charter row
+  names NSE's series codes; the dated security masters that would name a
+  symbol's series start in 2026 and the spells start in 2018. Measured over
+  the vendor's 2,001 stock days (the audit of DB-B06): no day holds both a
+  share's own file and its `.BE` or `.BZ` file. A day that does refuses both
+  by name.
+- **L-WP12f-5. A month already served from repair generations takes one new
+  full copy per landed day.** The months the run of 10 Oct 2026 made from a
+  special session alone (67 on the operator's store) are repaired day by
+  day: each owed day that lands is one more generation, a full copy of the
+  month (D-3350, D-4875), the days after the special session included. For
+  the operator's store that is about 67 x 20 = 1,340 generations and about
+  33 GB written for about 3.2 GB of final data: ARITHMETIC from 22,500 bars
+  of about 105 bytes per series-day, NOT MEASURED at full size. NOT DONE:
+  landing a month's owed days in one repair, one generation a month.
+- **L-WP12f-6. A run reads owed days before its range only inside its first
+  month.** At most 30 days: one hash probe for a day no run closed, and for
+  a closed one what one key's debt costs (one compare of digests and two
+  hash probes when it owes nothing) per key that closed it, so O(filters
+  that closed the day), which is the operator's own few. The journal's load
+  builds that index once, O(done keys). Owed days of EARLIER months are not
+  reached: they stay owed, and land as their own months when a run's range
+  covers them.
+- **L-WP12f-7. A day not closed `done` is not owed, and a key closed under
+  names owes nothing it did not name.** A day whose keys are absent, open,
+  `incomplete` or restated (a `done` line from an older definition, or one
+  with no `definition=`) is not closed `done` and is passed over unsaid by a
+  later run under any filter; a run without a filter whose range covers it
+  reads it whole. A run asked for one later day on a store
+  that never read the earlier days of that month makes each member's month
+  from that day, a special session included. The same holds where the
+  earlier days were closed only under a filter that did not name the member
+  (days closed under `NIFTY,BANKNIFTY` owe INDIAVIX nothing). No run was
+  ever asked for those members on those days, so nothing is skipped and
+  nothing is refused or warned; the earlier days land later through the
+  versioned repair (L-WP12f-5 then applies to that month). A day closed
+  `done` under `*`, or under a filter that named the member, IS owed and is
+  read first, whatever the later run's filter (D-4878 item 6).
+- **L-WP12f-8. An options run records no scope**, so an options day is done
+  for whatever its run read. NOT DONE: what a member is for options is open.
+- **L-WP12f-9. Two imports on one store are not kept apart by a run-level
+  lock.** They fail loudly per month and leave duplicate generation files
+  (the second agent's check of 12 Oct 2026). Two runs started in the same
+  second take the same run id. NOT DONE here: the ingest automation's design
+  gives the run locks (`imports/gdfl.lock`, one per kind on census v4), the
+  journal lock and run ids taken from the runs ledger to IA-2 (D-4847;
+  `state/design/ingest-automation.md` finding F2), so this package adds no
+  second lock of its own.
+- **L-WP12f-10. An owed day the run's source does not hold is a named
+  failure of every run that reaches back to it.** A day closed `done` that
+  owes the run a member and whose listing the source cannot give
+  (`scope_reopen_unreadable`) fails the run (rc 1) and stays unexamined, on
+  every run of that month, until a run from a source that holds the day
+  examines it. After a scope change (L-WP12f-1) an import from a delivery
+  that holds only new days names up to 30 such failures a run. That is the
+  loud outcome, on purpose: the month is then being made without days it is
+  owed. NOT DONE: an outcome the scheduler can tell from a broken source
+  (IA-17, IA-3).
+- **L-WP12f-11. What one filter's run does for another filter's key is
+  remembered per pair, and a day read whole is not credited to another
+  key.** (a) Each distinct filter that reaches back over a key it did not
+  close writes one `examined` line per day per scope
+  (`<that filter>/<its own>`); a `--stored` stocks filter is some 200 names
+  long, so such a line is about 2 KB. (b) While such a key holds a member
+  key that is not `done`, every run under another filter lists that day
+  again (one listing, nothing read unless its filter wants the member).
+  (c) A run under a filter that reads an IN-RANGE day whole, under its own
+  key, does not close the whole-day key's member keys: the unfiltered run
+  reads those members of that day again, finds every bar present and writes
+  none. Bounded by the days such a run was asked for; NOT MEASURED.
+- **L-WP12f-12. An owed day whose member read fails does not stop the run.**
+  When a member key read for a day before the range closes `incomplete`
+  (another writer holds the month's lock) or `refused` (the store or the
+  vendor refuses the file), the failure is named and the run ends rc 1, but
+  the run goes on to its range: the member's later days are written, so its
+  month is made without the failed day, which lands later, when a run reads
+  it again, through the versioned repair (L-WP12f-5). Seen by the second
+  agent's check 3 (three filtered writers at once: one named lock failure,
+  rc 1, later days written; one more run of each converged with months
+  repaired 0 there; NOT MEASURED where a later day of the member's month was
+  written first).
+  Holding the member back for the rest of the run would need a close that
+  records a member it did not read, a new close shape; NOT DONE. It could
+  only ever apply to a passing failure (a held lock): a file the vendor
+  refuses is refused on every read, so holding its member back would stop
+  that member's later days for good, the outcome `CLAUDE.md` section 4 bans
+  as surely as a silent one. A day the source does not hold is L-WP12f-10.
+- **L-WP12f-13. A reading that builds fewer bars than a month holds is
+  answered `AlreadyPresent`.** The append-only month compares the bars a
+  batch offers against the held records from the batch's first stamp on and
+  never looks at the held record after the batch's last one, so a day read
+  again under a definition that builds a SUBSET of what was held (the held
+  day less its last bar) passes as present and its key could close `done`
+  with the extra bar still held. Measured 13 Oct 2026 on a private copy of
+  the real GDFL RELIANCE 2026-08 month with the build before this repair: a
+  filtered re-read of 2026-08-24 offered 6,685 seconds, wrote 0, failed 0,
+  closed `done ... definition=3`, and the month kept its 15:29:06 auction
+  print as a bar while the `.auc` sidecar filed the same print (month sha256
+  unchanged). D-4878 item 10 closes the one case this repository has: a key
+  that would read any share some key of that day, under any filter, built or
+  began under 2 or 3 in the closing auction's era is refused by name at
+  admission, and so is a member key (repair 6, 14 Oct 2026: check 4 read
+  RELIANCE through the append door under a fresh filter while only a names
+  key of another filter stood restated; repair 7, the same day: a later
+  run's own refusal no longer erases an early run's unclosed `begin`, which
+  had let the second run after it read the share and close it `done`; and a
+  whole-tree close under 4 ends a share's restatement only where its
+  `scope=`, resolved through the scope ledger, held the share; an unknown
+  digest holds nothing). It refuses MORE than it must in two shapes, loudly:
+  a whole-tree key asked on a day whose whole-tree key of an earlier
+  definition only whole-tree closes under 4 ended (a scope that held every
+  share is not provable by one probe), and a share whose remake ran under a
+  digest the ledger lost. The admission's walk for a share only whole-tree
+  closes ended is the day's keys naming that share, never the journal. Nor
+  can it see a month an
+  earlier definition wrote with no journal line naming it (a store copied
+  without its journal, or a journal line lost), and two runs interleaving
+  their lines in one journal, which would attribute a `begin` to the other
+  run's definition: no lock found in this repository serialises two import
+  runs over one journal (the census lock guards the census, not the
+  journal), so that case is NOT CLOSED. The
+  general check, one held record read
+  after an `AlreadyPresent` batch and refused when it is stamped on the
+  batch's own day, belongs to the shared landing (`ingest::from_rows`, owner
+  WP-13c / store) and is NOT DONE. So is the REMAKE that ends the refusal
+  (check 5 of WP-12f): no verb of this build writes a month as a new
+  generation holding fewer bars than the served one (`store::repair_month`
+  keeps every held bar, D-3350) nor the whole-tree close under 4 that ends
+  the era's refusal, so until a store writer and WP-80's remake land, every
+  stocks run touching a share day of the era an earlier definition's key
+  built is refused by name on every run, loudly, and nothing of it is
+  written. Owners: the store crate and WP-80.
+
 ## Cost claims of the /db fix round that name no proof — 12 October 2026
 
 Gate 12 asks every doc block that states a cost to name the test, the
@@ -17103,6 +17256,124 @@ months' own p50, p99 or max.
 | L-SC-1 | One row costs one frame | the frame is the unit of decoding: serving one row decodes the frame's rows, and its CRC-32C reads every byte of it | at most `block_rows` = 256 rows and `MAX_FRAME_LEN` = 14,508 bytes, whatever the month holds. Memory: a call reserves the frame's checked rows times 56 bytes, once (256 rows: 14,336 bytes; stamps only, 2,048), and nothing on a refusal, because every part of the frame is checked first (SC1-09, FM-284, counted by a global allocator); a month head stating 65,535 rows a block would let one call reserve 3,669,960 bytes, the codec's absolute ceiling, and refusing such a head is the month reader's (SC-3). **Measured, quiet** (the 15 timed months of 554 to 493,998 bars): one frame decoded with its checksum p50 5.0 to 6.0 µs, p99 5.8 to 7.3 µs, max 17 to 98 µs; a 100-row page at a random offset (the one or two frames it spans) p50 5.2 to 6.4 µs, p99 10.8 to 13.6 µs, max 19 to 76 µs; the stamps alone p50 0.9 to 1.4 µs, p99 1.1 to 1.9 µs; a month under 256 bars is one short frame, p50 0.1 to 3.8 µs. Flat in the month: the 472,445-bar NIFTY month decodes a frame at 6.0 / 7.3 µs (p50 / p99), the 554-bar option month at 5.6 / 6.2 µs. **Measured, under load** (25 timed months of 273 to 493,998 bars): decode p50 5.8 to 9.7 µs, p99 6.5 to 57.9 µs, max 7.5 µs to 22.7 ms; page p50 6.0 to 10.4 µs, p99 12.8 to 251 µs, max 16 µs to 14.2 ms. The milliseconds are the loaded host's scheduler, not the frame: month for month (the 15 months timed in both runs, decode and page) p50 rose 1.1 to 1.8 times, p99 up to 21 times, and the max reached milliseconds. **Re-measured after the check-before-reserve change** (FM-284, 14 October 2026, under load, log `state/fix/round2/sc1-acceptance-20261014-r3.log`, 33 timed months): decode p50 0.2 to 9.1 µs, p99 0.2 to 25.5 µs, max 0.3 µs to 163 ms; stamps p50 0.1 to 2.3 µs, p99 0.2 to 6.5 µs; page p50 0.2 to 10.5 µs, p99 0.2 to 61.9 µs; the NIFTY 1s month 6.5 / 8.0 / 10.5 µs (p50 / p99 / max); every encoded byte unchanged. SC-11's C-SEAL benches gate the tail on a quiet host | SC-1 |
 | L-SC-12 | Incompressible bars are not compressed | a frame of random fields has nothing to predict | at most 57 bytes a bar, 1 more than raw: 400 frames of random fields all between 50 × 256 and 57 × 256 bytes (`no_frame_exceeds_the_bound`), and never above `MAX_FRAME_LEN` | SC-1 |
 | L-SC-15 | Encoding a frame tries every width | the encoder measures each mode a column has at every width from 0 to its widest value, 65 lengths a stream at most, from a histogram of the residuals' bit lengths | O(rows) a column, once, when a month is sealed (L-SC-5 is the seal's). **Measured, quiet** (the same 15 months): a frame encoded p50 12.7 to 19.3 µs, p99 15.0 to 35.8 µs, max 18 to 100 µs; the 472,445-bar NIFTY month is 1,846 frames at p50 17.8 µs, about 33 ms in all. **Under load**: p50 14.5 to 51.6 µs, p99 16.8 µs to 17.1 ms, max 19 µs to 21.3 ms | SC-1 |
+
+## The shared file doors (R3-16, D-4951)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R316-01 | A link swapped into a DIRECTORY above a name a door opens | `O_NOFOLLOW` refuses a link at the last component only, and `std` offers no per-component `openat` without `unsafe`, which every crate root forbids | `store::file`'s writer walks every component below the root with `symlink_metadata` before it creates (CE-62, D-2686), so only a swap between that walk and the open is followed (FM-223, low); `store::safe_open` does not walk, so a reader trusts the directories above a name. Closing it needs `openat`, or a second walk after the open in `store::file` (R3-20's file) | R3-16 |
+| L-R316-02 | The logs' reaper: its look and its delete | the reaper reads the gone folder's identity (one `lstat`) before each `remove_dir_all`, which resolves the folder's name again | a folder swapped inside the microseconds between the two is still deleted through; one swapped any time before the look is refused by name and nothing in it is deleted (`a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched`). Closing the window needs a delete relative to a held directory handle, which `std` keeps inside `remove_dir_all` | R3-16 |
+| L-R316-03 | Gate 28 counts, it does not trace | it reads tokens, not data flow: a file passes when it calls `store::staging::create` at least once per temporary name it spells | a temporary spelt once and a call made once for another file pass together; a name built without a `.tmp` text (another suffix, or a name read from data) is not seen. What it guarantees: no file gains a temporary without gaining a call of the door, and its LEGACY list only shrinks | R3-16 |
+| L-R316-04 | Writers that still open their own temporaries | five files in gate 28's LEGACY list: `cli::live` (`<hex>.<pid>.tmp` by `File::create`) and `pull::census_store`'s epoch (`File::create`) open "create, truncate", the RA-290 open; `census_store`'s seal and sealed texts and `cli::search_checkpoint` use `create_new`, which refuses a leftover rather than clearing it; `pull::alerts` removes whatever name is in its way | converted by the package that next changes each file, which lowers its count in the same change: `census_store.rs` and `manifest.rs` (R3-19), `alerts.rs` (R3-21, R4-05); `live.rs` and `search_checkpoint.rs` have no owner named | R3-16 |
+| L-R316-05 | A test server over a linked store still accepts a write request | `state/fix/serve.sh` does not set `BRUTEX_READ_ONLY=1`, and `api::server::WriteGate` has no linked-store arm | every `cli` writing verb refuses such a root up front (D-4951); a write the `api` starts reaches the month writer, which refuses the linked `bars` component (`Symlinked`, CE-62) before a byte, but by its own word and after the request began. The arm belongs to `server.rs` (R4-02); the variable to the main session's tooling | R3-16 |
+| L-R316-06 | `store::staging::create` over a dead writer's leftover grows with the leftover's size | the helper makes the same four host calls whatever the leftover holds and reads none of its bytes, but the host's `unlink` frees the leftover's blocks, and that is the host's work, proportional to what was left | measured 14 Oct 2026, release, WD_BLACK, loaded machine (C-SF-03, `tgt/p-R3-16/bench1.log`): over a 0-byte leftover p50 63.6 us, p99 452.1 us, max 312.1 ms (n=10,000) alone and 60.8 / 1,571.6 us / 70.2 ms beside 2,000 names; over a freshly written 4 MiB leftover p50 1.88 ms, p99 12.65 ms, max 14.76 ms alone and 1.35 / 4.16 / 9.89 ms beside 2,000 names (n=200), 22x to 30x the 0-byte p50. Bounded by the largest file a writer stages under that name (a verdict image is at most `MAX_IMAGE_LEN`); C-SF-03 prints this ratio and holds only the directory ratio to the ceiling, so it claims no flatness the host does not give. Paid once per leftover, never per lookup | R3-16 |
+
+## The /ingest page (R4-01, D-4952)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R401-01 | First content of `/ingest?feed=gdfl&universe=fno&seg=spot&tf=1s` (208 rows x 97 months) | the target is p99 under 300 ms and no main-thread task over 50 ms; it was measured only on a loaded machine | measured 14 Oct 2026, headless Chrome over CDP on the R4-01 shadow, load average 38-52: cold (new tab, cache off) p50 164 ms, p99 308 ms, max 376 ms, n=200; warm p50 92 ms, p99 204 ms, max 308 ms, n=200; no long task before first content. Cold p99 is 8 ms over the target: NOT MET under that load, to be measured again on a quiet machine | R4-01 |
+| L-R401-02 | The contract fold walks every census cell once per census generation | the sums are per (underlying, segment, rung, month) for every underlying at once, so ticking another name walks nothing; a new census generation is walked again in slices | O(cells) per census generation, 0 per re-read of an unchanged census (counted: 50 re-reads, 0 cells walked); about 35 s for the 2.1 M-cell GDFL census on the loaded shadow; the previous sums stand, labelled, meanwhile. One lookup after the fold: p50 0.25 us, p99 1.0 us, n=100,000 (node, 19,400 folded cells, load average 95) | R4-01 |
+| L-R401-03 | `GET /pull/repair.json` is O(days asked) | the plan walks every session of the window; the panel reads it on a Plan press only, never on load | bounded at 3,653 days; measured 14 Oct 2026 on the R4-01 shadow, n=200 sequential: NIFTY 1min whole window p50 28.7 ms, p99 320.4 ms, max 1,345 ms; PIIND CASH p50 28.4 ms, p99 813.7 ms, max 1,798 ms | R4-01 |
+| L-R401-04 | A partly imported 1-second or contract month reads `held`, settled | such a rung has no per-session count to compare against, so "held" is all the page can know | the month's bar count is shown; a file the census does not list cannot be seen by the page at all until the census recount (R3-06) lists it | R4-01 |
+| L-R401-05 | The GDFL census (about 184 MB) does not reach a browser on the shadow | the server cuts a response body about 10 s after it starts (R4-02 / R4-03), so every GDFL row reads "census not read" with the reason, never a count | V1's counts show only where the census arrives; owner R4-02 / R4-03 | R4-01 |
+
+## One month spelling, and the `/bars` page's contract (AF-04, D-4962)
+
+Measured 15 October 2026 on a release build over a shadow of the real store
+(`state/fix/shadow.sh AF-04`, port 8703; the "before" build is feat/db-fix at
+521066e6 on port 8704), 200 sequential GETs per row after one warm-up, curl
+`time_total`, loaded shared machine, while another `cargo` build ran.
+Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
+`before.txt`, `after.txt`.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AF4-01 | The month parser and the contract parse, per request | none needed: `bars::month_of_text` inspects at most seven bytes (a longer text fails the slice pattern on its length) and `Contract::parse` one bounded segment; the query text they are cut from is already capped by `request_bounds_refusal` | after (n=200 each): `/bars` NIFTY option month (`2024-03-07-2200000-CE`, 2024-03, whole key) p50 0.82 ms, p99 1.79 ms, max 2.52 ms (before: a 404, p50 0.70 / p99 4.96 / max 19.02 ms); `/bars` NIFTY spot p50 0.74 / p99 1.66 / max 2.23 ms (before 1.01 / 10.98 / 11.65); `/bars.json` Zerodha NIFTY 1min spot month (945,991 bytes) 3.30 / 6.17 / 8.13 ms (before 2.44 / 4.89 / 10.69); `/bars.json` the option month (3,952,147 bytes, 50,734 bars) 14.13 / 25.99 / 37.96 ms (before 11.87 / 19.69 / 29.82); `/spot.json` 1.18 / 3.65 / 5.75 ms (before 0.85 / 1.62 / 1.82); `/greeks.json` 1.29 / 2.68 / 17.60 ms (before 0.96 / 2.16 / 6.36). The JSON bodies are byte-identical before and after (md5 in `before.txt`, `after.txt`); the differences are the machine's load, not the parse | AF-04 |
+| L-AF4-02 | A contract asked for with `segment=` and `exchange=` omitted | placed by one census hash probe per exchange (`facets::EXCHANGES`, two today) of the asked feed's census — never the spot walk, which sorts the whole census | after: `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE&timeframe=1s&month=2024-03` p50 1.02 ms, p99 2.52 ms, max 3.21 ms (n=200). Before, the same URL took the spot walk and answered NIFTY INDEX's bars in p50 534.53 ms, p99 942.15 ms, max 1,132.80 ms. The spot walk itself is unchanged and still costs that for a SPOT name asked without `segment=` (pre-existing, D-0686's section); it grows with the census, and is not this package's | AF-04 |
+| L-AF4-03 | Months spelt otherwise on routes this change does not own | `/bars/window.json` (`bars_route.rs` `WindowAsk::parse`, AF-05's file), `sources.rs` `month_of_text` and `dayflags.rs` `bound` still split on `-` and parse each half: `bars_route.rs` checks no length, so `2024-3` and `02024-03` still read as March on `/bars/window.json`; the other two check the halves' lengths, so `2024-+3` still reads as March there | AF-05 switches `bars_route.rs` to `bars::month_of_text`; `sources.rs` and `dayflags.rs` have no owner named — one-line delegations to the same parser | AF-04 (named), AF-05 |
+
+## Cash-session masters: shared readers, a named wait, a decode per request — D-4963, 14 October 2026
+
+`pull::cash_session_cache` and `api`'s bars window (AF-03, finding p99-2). A
+reader of a dated NSE cash master takes the day's lock SHARED, reads and
+receipt-checks the bytes, releases, then decodes; an installer holds the day
+alone only to re-check and publish. The figures below were taken on 14 October
+2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
+linked read-only under the kernel lock, session masters cloned) served by two
+release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
+`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`fix/db-AF-03`. GET requests only, timed client-side
+around each whole response (`state/fix/round2/af03-evidence/measure.py`,
+results `before.jsonl` and `after.jsonl` beside it), on a machine shared with
+about twelve agents' builds, so the tails are loaded-host tails.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-CSL-1 | A reader waits for an installer | an installer's exclusive hold covers writing one master (at most `MAX_COMPRESSED` bytes), its receipt and three syncs, and a reader must not read a half-published entry | at most `LOCK_WAIT` = 5 s, attempts paused 1, 2, 4, 8, 16 ms and then 20 ms (about 254 attempts at most), then a refusal that names the lock, "an installer held it exclusively", the bound, the wait, and that the master was not read as absent. The wait sleeps its thread, on an async path too (the pull's `prepare_cash_schedule`, `/gaps.json`'s `block_on`). **Measured**: another process holding a day exclusively for 9 s made one RELIANCE 2026-08 `/gaps.json` answer at 5.002 s with that refusal in `evidence_error`; the next request, after the release, answered `expected 7560` in 1.53 s. Uncontended, a hold is one `flock` attempt | AF-03 |
+| L-CSL-2 | An installer can be held off by readers | `flock` has no queue: a stream of readers whose shared holds overlap keeps the exclusive attempt failing | the same `LOCK_WAIT`, then "readers or another installer held it … nothing was installed". A reader holds only to read and receipt-check, never through the decode. UNMEASURED beyond the test's 60 ms hold (`an_installer_beside_readers_installs_once`): no stream of readers has been timed against a real installer | AF-03 |
+| L-CSL-3 | A `/gaps.json` CASH month decodes every observed day's master on every request | nothing remembers a decoded master between requests (finding p99-1, disputed and not in this run) | O(D), D the month's observed CAS days (at most 23). **Measured, sequential, n = 200 each**: RELIANCE 2026-08 (21 masters) AFTER p50 2,000.8 ms, p99 5,721.2 ms, max 6,477.1 ms; BEFORE p50 2,412.0 ms, p99 4,026.6 ms, max 4,071.0 ms; NIFTY INDEX 2026-08 (no master) AFTER p50 1.8, p99 3.3, max 4.5 ms; BEFORE 2.1 / 4.0 / 5.0 ms. The difference, about 95 ms a master at p50, is the gzip decode and CSV parse; the change moved it out from under the lock, not out of the request | p99-1 |
+| L-CSL-4 | Parallel requests for CASH months decode in parallel | each request decodes its own masters (L-CSL-3), now all at once instead of all but one refusing | **Measured, rounds of requests sent at once**: 4 symbols × 50 rounds, 2026-08 (n = 200): AFTER p50 2,573.1 ms, p99 4,754.5 ms, max 4,766.3 ms, 0 lock refusals, one body per symbol across all rounds; BEFORE p50 3.7 ms, p99 5,306.1 ms, max 5,524.0 ms with 150 of 200 answers `expected 0` naming "would block". 4 identical RELIANCE × 50 (n = 200): AFTER p50 2,697.4, p99 4,137.7, max 4,224.1 ms, 0 refusals, 1 distinct body; BEFORE p50 3.0, p99 5,580.6, max 6,164.6 ms, 150 refusals, 2 distinct bodies. 6 symbols × 34 rounds, 2026-09 (n = 204): AFTER p50 841.4, p99 1,176.9, max 1,207.8 ms, 0 refusals; BEFORE p50 3.0, p99 557.6, max 601.6 ms, 170 refusals. The BEFORE medians are the refusals' speed, not a cost the change added | AF-03 |
+| L-CSL-5 | `/bars.json` reads a refused day's master once per request | a refusal is not remembered past its request, so the next request tries the day again (a loaded master is kept process-wide; it is immutable once receipted) | one read per (request, day, series), O(1) a bar after it. **Measured, sequential, n = 200**: `/bars/window.json` RELIANCE 2026-08, 400 rows, AFTER p50 1.5 ms, p99 5.4 ms, max 14.8 ms; BEFORE 1.8 / 6.3 / 7.9 ms | AF-03 |
+
+## Sealed months: the `.sbar` file — D-4965, 15 October 2026
+
+`store::sealed` (SC-2). It builds and reads the file; nothing in the serving
+path opens one until the read door (SC-3) lands, so these are store-level
+figures, not a route's. Measured by `crates/store/tests/sealed_samples.rs` on
+real months cloned into a private root (`#[ignore]`d; log
+`state/fix/round2/sc2-acceptance-20261015.log`): release build, the `.sbar`
+written to disk and read through a `File`, warm page cache, `Instant` around
+each call, n = 2,000 sequential calls each, on 15 October 2026 with the
+machine's load average near 60 (other agents' builds). NIFTY first: GDFL spot
+1 s 2018-09, 2020-03 (the halts), 2026-08 and 2026-09 (with provenance); GDFL
+options 1 s, a 5,810-bar strike and a one-bar and a two-bar strike; Zerodha
+1, 2, 3, 5, 10, 15, 30 and 60 min and 1 day 2024-03; then BANKNIFTY 1 s 2020-03
+and RELIANCE 1 s 2026-08. Every row equal to the raw `.bin`, every lookup to a
+scan. Raw is the same month through `BarFile` (`read_record` per row, the
+page path today). Ranges below are the least and greatest of the months' own
+figures.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-SC-16 | A whole-month audit decodes the month | `SealedMonth::audit` checks every directory entry and frame, the stamps' order, the records' BLAKE3, the regenerated `.crc` image, the ranges, the extremes, the table, the provenance and the summary against the head | O(the month), once, for a seal or a scrub, never for a request; one frame (at most 14,508 bytes and 256 rows) held at a time plus the `.crc` image's 4 bytes a 73 bars (147 KB at 2,678,400 bars). Bounded by the month's rows; its time is not separately measured here (a 472,445-bar build, which does the same fold plus the encode, takes 81.5 to 90.1 ms) | SC-2 |
+| L-SC-17 | One row costs a frame | `SealedMonth` keeps no block cache: a row decodes the at most 256 rows of its frame (L-SC-1). The cache that makes a neighbouring row free is `BarFile`'s, which the read door (SC-3) fills with a sealed block's records | **Measured**: one row at a random offset, sealed p50 0.8 to 6.8 µs, p99 1.0 to 8.2 µs, max 1.4 to 26.7 µs; raw p50 0.0 to 3.1 µs, p99 0.0 to 3.9 µs, max 0.1 to 54.2 µs (raw's sub-microsecond figures are months of one 73-row block, held in `BarFile`'s cache). A 100-row page, sealed p50 0.9 to 7.4 µs, p99 1.2 to 14.3 µs, max 3.2 to 27.0 µs; raw p50 0.0 to 6.9 µs, p99 0.0 to 10.1 µs, max 0.2 to 96.3 µs: sealed p99 within 1.5 times raw's on every month above one frame. Flat in the month: 5,810 bars p99 12.5 µs, 400,200 to 472,496 bars 11.1 to 14.3 µs | SC-2 (cache: SC-3) |
+| L-SC-18 | A time lookup in a widened superblock bisects | a month written before D-0915 can hold two bars in one slot, so one table range can span more than 64 blocks | `ceil(log2(n_blocks + 1))` single-entry reads, 14 at the largest month (`a_widened_superblock_bisects_in_a_bounded_number_of_reads` counts them). Otherwise one table read, one read of at most 64 entries and one frame's stamps. **Measured** on the real months (none widened): sealed p50 0.0 to 2.8 µs, p99 0.0 to 3.9 µs, max 0.1 to 18.5 µs, flat from 1 bar to 472,445; raw (`.tix` or bisection) p50 0.0 to 0.5 µs, p99 0.0 to 116.5 µs, max 0.1 to 1,599.5 µs | SC-2 |
+| L-SC-19 | Building a sealed month is O(the month) and holds its frames | `Builder` folds every row once and keeps the encoded frames and the directory in memory until the file is written whole | once per month, in the background (the seal is SC-6's). **Measured**: 5 µs (1 bar) to 90.1 ms (472,496 bars); 69.8 to 90.1 ms for the four NIFTY 1 s months; peak memory the frames (0.43 to 1.47 MB for those months, at most `n_blocks` × 14,508 bytes) plus 24 bytes a block and one unencoded frame | SC-2 |
+| L-SC-20 | Opening a sealed month | a new handle and a 512-byte head read, checked | O(1). **Measured**: p50 12.0 to 14.0 µs, p99 23.3 to 31.0 µs, max 35.8 to 190.5 µs, the same at 1 bar and at 472,496: the open and `fstat` of a file, not the month | SC-2 |
+
+**Sizes on these months** (bytes of `.sbar` against the raw `.bin`): NIFTY 1 s
+432,607 to 1,471,930 bytes for 400,200 to 472,496 bars, 1.08 to 3.11 bytes a
+bar, 1.9 to 5.5% of the `.bin`; BANKNIFTY 1 s 2020-03 1.46 bytes a bar;
+RELIANCE 1 s 2026-08 2.74; NIFTY options 3.75 bytes a bar at 5,810 bars and the
+head plus one frame (582 and 584 bytes) at one and two bars; Zerodha NIFTY
+1 min to 1 day 4.67 to 37.7 bytes a bar, 2.1 to 7.6% of the `.bin` (a raw month
+carries a 32,768-byte header region however few its bars). The `.prv` of NIFTY
+2026-09 packs from 1,088 to 473 bytes.
+
+**Repeated on 15 October 2026 over 23 months** (logs
+`state/fix/round2/sc2-acceptance-20261015-run2.log` and `-run3.log`, the same test,
+a fresh private APFS clone): the eighteen above plus NIFTY 1 s 2019-10 (the
+Muhurat session) and 2020-09, and three NIFTY 2020-09-24 option months (the
+11,500 call's 2020-09 with provenance, 193,611 bars; its 2020-06, 156 bars;
+the 8,000 put's 2020-09 with provenance, 1,737 bars). Every row and every
+lookup equal again. Run 3, load average 24 to 46, months of more than 73
+bars: a 100-row page sealed p50 4.0 to 7.7 µs, p99 8.0 to 47.1 µs beside
+raw's 7.4 to 51.2 µs, sealed p99 at most 1.55 times raw's (the 8,000 put).
+On a month of at most 73 bars (1, 2 and 19 bars here) raw's page is
+`BarFile`'s one cached block and reads nothing, so raw answers in 0.1 to
+0.5 µs at p99 and sealed, which keeps no cache (L-SC-17), in 1.1 to 6.4 µs.
+Opening a sealed month (a new handle, `fstat` and the 512-byte head): p50
+12.0 to 15.8 µs, p99 20.7 to 119.0 µs on run 3 and 28.2 to 52.3 µs on run 2.
+**Max**, over every call of a run: up to 7.8 ms sealed (an open) and 4.4 ms
+raw on run 3, and 0.38 ms sealed / 0.79 ms raw on run 2 (load near 18): the
+host's scheduler on a machine shared by a dozen builds, in both forms alike,
+not the format — the counted reads
+(`the_largest_month_reads_at_the_cost_of_the_smallest`) are two a page at
+any depth. Every sealed page, row and lookup p99 under 50 µs; no max over 50 ms.
+These are store-level
+calls, not routes: the end-to-end figures of the design's §5.4 need the read
+door (SC-3) and are not measured here.
 
 
 ## Import records on filtered days — D-4955 (AF-02, ingest-6), 14 October 2026
