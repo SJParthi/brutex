@@ -31,7 +31,7 @@
 
 /** The verdict keys, worst first: the order is a claim about what to do. */
 export const VERDICT_ORDER = /** @type {const} */ ([
-  'fail', 'refused', 'unread', 'never', 'partial', 'short', 'flight', 'unknown', 'beyond', 'ok'
+  'fail', 'refused', 'unread', 'never', 'partial', 'short', 'flight', 'loading', 'unknown', 'held', 'beyond', 'ok'
 ]);
 
 /** @typedef {typeof VERDICT_ORDER[number]} Verdict */
@@ -77,10 +77,32 @@ export const VERDICTS = {
     'in flight',
     '/ingest/status.json names exactly this row in flight right now: this feed, this timeframe, this instrument, the spot segment. Nothing is waiting on you; it settles into verified, short, refused or failed on its own.'
   ],
+  /* THE CENSUS HAS NOT BEEN READ (R4-01, V1). Before it lands every probe of
+     the store answers "no file", and the row read "0 / unverified · NEVER
+     IMPORTED · 97/97 unproved" for a share whose 97 months were on disk —
+     measured on a shadow of the operator's store, 14 Oct 2026, for the first
+     seconds of every GDFL load. A month is not judged until the census it is
+     judged against has been read. */
+  loading: [
+    'info',
+    'census unread',
+    'The store census for this feed has not been read — it is being read, or the read failed — so no month file has been looked up and nothing on this row is a count. It is not “never imported” and not a zero: the verdict is withheld until /store.json answers, and the cell’s title says which of the two it is and why.'
+  ],
   unknown: [
     'info',
     'no yardstick',
     'This timeframe has no bars-per-session this page can state, so what is stored cannot be compared with the calendar. The bars are counted; the verdict is withheld rather than guessed.'
+  ],
+  /* A MONTH HELD AT A RUNG WITH NO PER-SESSION COUNT (R4-01, V1). One second
+     is a conflated snapshot: the archive held 22,426 rows across a
+     22,500-second session (docs/08-vendor-samples.md), so no number of bars
+     makes a month complete. A month that holds bars at such a rung is COUNTED
+     and not compared; it was `unknown`, and every GDFL share read "97/97
+     unproved" over 97 month files that were all there. */
+  held: [
+    'info',
+    'held · no yardstick',
+    'Every month file in the window that the feed can hold holds bars, and they are counted exactly. This timeframe has no bars-per-session yardstick (one record per second is a conflated snapshot, and a session holds as many seconds as traded), so no month is called verified or short: a held month is counted, not compared with the calendar.'
   ],
   beyond: [
     'info',
@@ -183,8 +205,24 @@ export function archiveLane(span, from, to) {
 
 /** A zeroed tally with one slot per verdict. @returns {Record<Verdict, number>} */
 export function emptySeen() {
-  return { fail: 0, refused: 0, unread: 0, never: 0, partial: 0, short: 0, flight: 0, unknown: 0, beyond: 0, ok: 0 };
+  return { fail: 0, refused: 0, unread: 0, never: 0, partial: 0, short: 0, flight: 0, loading: 0, unknown: 0, held: 0, beyond: 0, ok: 0 };
 }
+
+/**
+ * WHETHER A MONTH IS SETTLED: verified, held at a rung with no yardstick, or
+ * out of reach. Everything else is unproved, and a `loading` month is neither:
+ * it has not been looked up, so it is never offered to a pull either.
+ * @param {Verdict} k
+ */
+export const settledMonth = (k) => k === 'ok' || k === 'beyond' || k === 'held';
+
+/**
+ * WHETHER A MONTH IS OPEN — unproved and looked up, so a row's Pull may ask
+ * for it. A `loading` month is not open: asking a vendor for a month nobody
+ * has looked up would re-ask for what may already be on disk.
+ * @param {Verdict} k
+ */
+export const openMonth = (k) => !settledMonth(k) && k !== 'loading';
 
 /* ======================================================================
    THE PULL JOURNAL'S REFUSALS, JOINED TO MONTHS (DB-G23)
@@ -371,7 +409,10 @@ export function refusalBatches(symbols, max = 120) {
 /**
  * ONE MONTH FILE'S VERDICT.
  *
- * @param {{ beyond: boolean, bars: number | null, expect: number | null, refused: boolean, unread?: boolean, sessions?: number }} m
+ * @param {{ beyond: boolean, bars: number | null, expect: number | null, refused: boolean, unread?: boolean, sessions?: number, loading?: boolean, countOnly?: boolean }} m
+ *   `loading` is true while the census this month is judged against has not
+ *   been read (R4-01); `countOnly` is true when the RUNG has no bars-per-session
+ *   count, so a held month is counted and never compared (R4-01, V1);
  *   `bars` is `null` when the store holds no file for the month (which is not
  *   zero bars); `expect` is `null` when no denominator can be stated; `unread`
  *   is true when the pull journal's refusals were not read for the instrument
@@ -382,6 +423,9 @@ export function refusalBatches(symbols, max = 120) {
  */
 export function monthVerdict(m) {
   if (m.beyond) return 'beyond';
+  // NOT LOOKED UP IS NOT ABSENT (R4-01, V1): with the census unread, `bars`
+  // is null for every month whatever the disk holds.
+  if (m.loading) return 'loading';
   const open = m.refused ? 'refused' : m.unread ? 'unread' : null;
   // NOTHING OWED IS NOT "NEVER PULLED": a month whose days inside the window
   // hold no session (expect 0) owes no bar, so a missing file is not a gap. A
@@ -391,7 +435,11 @@ export function monthVerdict(m) {
   // up is not evidence that nothing is owed.
   if (m.bars === null && m.expect === 0 && m.sessions === 0) return m.refused ? 'refused' : 'ok';
   if (m.bars === null) return open ?? 'never';
-  if (m.expect === null) return 'unknown';
+  // HELD AT A RUNG WITH NO PER-SESSION COUNT: counted, not compared. Only when
+  // the caller says the RUNG has no yardstick (`countOnly`); a month whose
+  // denominator is unknown for another reason (no calendar, D-0420's withheld
+  // index month, a contract segment) stays `unknown`.
+  if (m.expect === null) return m.countOnly && m.bars > 0 ? 'held' : 'unknown';
   if (m.bars >= m.expect) return 'ok';
   return open ?? 'short';
 }
@@ -418,6 +466,9 @@ export function seriesVerdict(s) {
   // NO MONTH WAS JUDGED, so nothing was verified: "verified" over zero month
   // files is a claim with no evidence. The verdict is withheld.
   if (!(s.months > 0)) return 'unknown';
+  // THE CENSUS IS UNREAD: nothing below can be said, a halt included — `fail`
+  // needs a missing month, and no month has been looked up (R4-01, V1).
+  if ((seen.loading ?? 0) > 0) return 'loading';
   if (s.halted && missing > 0) return 'fail';
   // BEFORE `never`: a series whose refusals were not read is not "never pulled".
   if (unread > 0) return 'unread';
@@ -426,6 +477,7 @@ export function seriesVerdict(s) {
   if (seen.never > 0) return 'partial';
   if (seen.short > 0) return 'short';
   if (seen.unknown > 0) return 'unknown';
+  if ((seen.held ?? 0) > 0) return 'held';
   return 'ok';
 }
 
@@ -445,9 +497,8 @@ export function unsettledSpans(months, from, to, lastDayOf) {
   /** @type {{ from: string, to: string, months: number }[]} */
   const out = [];
   let start = -1;
-  const open = (/** @type {Verdict} */ k) => k !== 'ok' && k !== 'beyond';
   for (let i = 0; i <= months.length; i += 1) {
-    const isOpen = i < months.length && open(months[i].k);
+    const isOpen = i < months.length && openMonth(months[i].k);
     // A RUN ALSO ENDS WHERE THE MONTHS STOP BEING CONSECUTIVE, which a caller's
     // list may be if it filtered: never join two months across a gap.
     const adjacent = i > 0 && i < months.length && nextMonth(months[i - 1].month) === months[i].month;
@@ -535,4 +586,100 @@ export function defaultWindow(span, bounds) {
         ? `your window for this feed opens ${span.from}`
         : 'this feed states no span, so the window opens at the oldest day this page can ask for';
   return { from: from <= to ? from : to, to, why };
+}
+
+/* ======================================================================
+   THE WORDS FOR THE MONTH REASON CODES LATER PACKAGES SERVE (R4-01)
+   ----------------------------------------------------------------------
+   G4 `instrument_inactive`, COR-07 `before_listing` / `after_delisting`,
+   TC-04 `unread`, GAP-16 `vendor_publishes_none` and GAP-18 `complete` /
+   `checking` / `unreachable` are codes the server will put on a month (R4-19,
+   R4-05 and the gap packages own the serving). This page spells each once,
+   here, so the first package that serves one finds its words already pinned.
+
+   THE SENTENCE IS THE SERVER'S, NEVER THIS FILE'S. The reasons table R4-05 serves (
+   `$lib/reasons.js` `titleFor`) holds the long sentence of every code; the
+   caller passes that lookup in. Until it exists the code itself is the
+   title, said as the code — never a sentence invented here.
+
+   A FIELD THE CODE NEEDS AND THE REASON LACKS IS SAID, NOT FILLED. A
+   withdrawal with no circular reads `(circular not stated)`; NSE's circular
+   for a withdrawal is a fact only the server's source can carry
+   (`CLAUDE.md` §3 rule 1).
+   ====================================================================== */
+
+/** The codes this page has words for, in the order the ledger lists them. */
+export const REASON_CODES = /** @type {const} */ ([
+  'instrument_inactive', 'before_listing', 'after_delisting', 'unread',
+  'vendor_publishes_none', 'complete', 'checking', 'unreachable'
+]);
+
+/** @param {unknown} v @param {string} missing */
+const stated = (v, missing) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : missing);
+
+/**
+ * ONE REASON CODE AS A MONTH CELL READS IT.
+ *
+ * @param {{ code?: unknown, symbol?: unknown, circular?: unknown, date?: unknown, asked?: unknown, receipt?: unknown } | null | undefined} reason
+ *   what the server put on the month: the code and the fields it names.
+ * @param {((code: string) => string | null | undefined) | null} [titleFor]
+ *   the reasons table's sentence for a code (R4-05, /reasons.json), or null until it is served.
+ * @returns {{ code: string, word: string, title: string, known: boolean }}
+ *   `word` is the cell's text; `title` the sentence, or the code itself while
+ *   no sentence is served; `known` is false for a code this page has no words
+ *   for, which is shown verbatim rather than dropped.
+ */
+export function reasonWords(reason, titleFor = null) {
+  const code = typeof reason?.code === 'string' ? reason.code : '';
+  if (code === '') {
+    return { code: '', word: 'no reason code', title: 'The server named no reason code for this month: nothing here is a reason.', known: false };
+  }
+  const r = /** @type {Record<string, unknown>} */ (reason);
+  /** @type {string | null} */
+  let word = null;
+  switch (code) {
+    case 'instrument_inactive':
+      word = `not owed: NSE withdrew ${stated(r.symbol, 'this instrument')} (${stated(r.circular, 'circular not stated')})`;
+      break;
+    case 'before_listing':
+      word = 'before listing';
+      break;
+    case 'after_delisting':
+      word = `delisted ${stated(r.date, '(date not stated)')}`;
+      break;
+    case 'unread':
+      word = 'unread';
+      break;
+    case 'vendor_publishes_none':
+      word = `vendor publishes none (asked ${stated(r.asked, 'date not stated')}, receipt ${stated(r.receipt, 'not stated')})`;
+      break;
+    case 'complete':
+      word = `complete ${stated(r.date, '(date not stated)')}`;
+      break;
+    case 'checking':
+      word = 'checking';
+      break;
+    case 'unreachable':
+      word = 'unreachable';
+      break;
+    default:
+      word = null;
+  }
+  let sentence = null;
+  // A REASONS TABLE THAT THROWS IS NAMED IN THE TITLE, never read as "no
+  // sentence served" (R4-01 repair round 1).
+  let failed = null;
+  try {
+    sentence = typeof titleFor === 'function' ? titleFor(code) : null;
+  } catch (why) {
+    failed = why instanceof Error ? why.message : String(why);
+  }
+  const title = failed !== null
+    ? `${code}: the reasons table failed while looking this code up (${failed}), so the code is shown as the server sent it.`
+    : typeof sentence === 'string' && sentence !== ''
+      ? sentence
+      : `${code}: no sentence for this code is served by this build (/reasons.json), so the code is shown as the server sent it.`;
+  return word === null
+    ? { code, word: code, title, known: false }
+    : { code, word, title, known: true };
 }
