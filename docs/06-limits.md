@@ -12202,8 +12202,9 @@ rule 6); every bound is read from the source.
   `/boolean-statistics.json`, `/boolean-admission.json`,
   `/boolean-qualification.json`, `/boolean-qualified-search.json`,
   `/boolean-campaign.json`, `/boolean-qualified-campaign.json`,
-  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json` and
-  `/live.json`, several of them polled by the console, so the journal grows
+  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json`,
+  `/live.json` and `/settings` (R3-05: every settings change attempt, saved or
+  refused), several of them polled by the console, so the journal grows
   while the operator only watches.
 - **The code work per request is fixed; the filesystem's is not.** `begin`
   is one index append, one file create and about seven `fsync`s (two directory
@@ -17114,3 +17115,116 @@ months' own p50, p99 or max.
 | L-R316-04 | Writers that still open their own temporaries | five files in gate 28's LEGACY list: `cli::live` (`<hex>.<pid>.tmp` by `File::create`) and `pull::census_store`'s epoch (`File::create`) open "create, truncate", the RA-290 open; `census_store`'s seal and sealed texts and `cli::search_checkpoint` use `create_new`, which refuses a leftover rather than clearing it; `pull::alerts` removes whatever name is in its way | converted by the package that next changes each file, which lowers its count in the same change: `census_store.rs` and `manifest.rs` (R3-19), `alerts.rs` (R3-21, R4-05); `live.rs` and `search_checkpoint.rs` have no owner named | R3-16 |
 | L-R316-05 | A test server over a linked store still accepts a write request | `state/fix/serve.sh` does not set `BRUTEX_READ_ONLY=1`, and `api::server::WriteGate` has no linked-store arm | every `cli` writing verb refuses such a root up front (D-4951); a write the `api` starts reaches the month writer, which refuses the linked `bars` component (`Symlinked`, CE-62) before a byte, but by its own word and after the request began. The arm belongs to `server.rs` (R4-02); the variable to the main session's tooling | R3-16 |
 | L-R316-06 | `store::staging::create` over a dead writer's leftover grows with the leftover's size | the helper makes the same four host calls whatever the leftover holds and reads none of its bytes, but the host's `unlink` frees the leftover's blocks, and that is the host's work, proportional to what was left | measured 14 Oct 2026, release, WD_BLACK, loaded machine (C-SF-03, `tgt/p-R3-16/bench1.log`): over a 0-byte leftover p50 63.6 us, p99 452.1 us, max 312.1 ms (n=10,000) alone and 60.8 / 1,571.6 us / 70.2 ms beside 2,000 names; over a freshly written 4 MiB leftover p50 1.88 ms, p99 12.65 ms, max 14.76 ms alone and 1.35 / 4.16 / 9.89 ms beside 2,000 names (n=200), 22x to 30x the 0-byte p50. Bounded by the largest file a writer stages under that name (a verdict image is at most `MAX_IMAGE_LEN`); C-SF-03 prints this ratio and holds only the directory ratio to the ceiling, so it claims no flatness the host does not give. Paid once per leftover, never per lookup | R3-16 |
+
+## Settings, served spans and ceilings — R3-05, 14 October 2026
+
+**L-R305-1. A `/settings.json` GET is one `stat` when nothing was saved.**
+`store::settings::Reader::refresh` stats the NEXT generation's name; while it
+is absent the answer is the generation already held plus a fixed-size body:
+O(1), independent of how many generations exist. Not constant: the FIRST
+refresh after a start lists `<store>/settings/v1/` once, O(generations), a
+count that grows only when the operator saves; a refresh that finds new
+generations reads each once, at most `MAX_STEP` (4,096) of them per refresh
+(the rest wait, and the answer says `stopped`), each at most 64 KiB.
+`?history=N` reads N + 1 files, N at most 50.
+REPAIR 3 (15 October 2026): while a generation NEWER than the one in force
+did not read, every refresh reads each such generation again, newest first
+(at most `MAX_FAULTS`, 16, reads of at most 64 KiB), so a live reader and a
+fresh one agree; none when the settings are clean. Every read goes through
+`store::safe_open::open_read_len` (D-4951): a name that is a link, FIFO,
+socket, device or directory is a named fault after one `open` and one
+`fstat`, never a wait. The server's readers lock guards only the map of
+readers (a copy out, a copy back); no `stat` or read happens under it, and
+`/feeds.json` reads the settings on the blocking pool. MEASURED with a
+fault on the record (a FIFO at generation 1 of a shadow of the real store,
+release build, 15 October 2026, host load about 50, n = 200 sequential
+keep-alive GETs): `/feeds.json` p50 0.28 ms, p99 1.23 ms, max 1.41 ms;
+`/settings.json` p50 0.11 ms, p99 0.30 ms, max 0.49 ms. A day after today
+(IST) is evidence of nothing: `/feeds.json`'s journal or census span that
+names one sets neither end of `archive`, and `/gaps.json` counts a missing
+minute there as `not_yet_minutes`, out of the loss and of what was owed.
+
+**L-R305-2. `/feeds.json`'s held and archive spans walk the census once per
+census generation.** `feeds_route::held_spans` folds every key of the
+feed's census into per-segment first and last days the first time it sees a
+generation: O(keys). A request at the same generation is one map probe; an
+appended generation folds only the appended tail. The growth bench
+`feeds_route::tests::held_span_growth_bench` (1x, 10x, 100x keys) holds the
+hit and the one-key append within 4x of their 1x figure and counts one walk
+per scale; the walk itself is allowed to grow and is this row. MEASURED, 14
+October 2026 about 12:15 IST, `cargo test --release -p api --lib
+held_span_growth -- --ignored --nocapture`, one thread, an `Instant` pair
+around each call, host load about 55 (a shared host's numbers are not a gate;
+the ratio is): the walk 0.15 ms at 1,000 keys, 0.59 ms at 10,000, 16.2 ms at
+100,000, once per census generation; the hit's p99 125 ns at each scale (the
+quietest of three rounds of n = 200; max 20.5 us); the one-key append's p99
+1,208 ns, 2,208 ns and 3,291 ns (2.7x at 100x; max 11.5 us). An earlier run
+at host load 337 gave a single-round append p99 of 166 us at 100,000 keys
+(max 1.1 ms) with one walk, which is why the gate takes the quietest round.
+THE WALK ON THE OPERATOR'S STORE, measured by the second agent at 14 October
+2026 (R3-05 verify round 2, shadow of the real store): 664 ms for a census
+part of about 2.1 million keys and 82 ms for one of about 251,000; the third
+check (verify round 3, 15 October 2026) measured 2.04 s for the same first
+`/feeds.json` on its shadow, so the walk is AT LEAST 0.66 s to 2.04 s on this
+host and is not bounded by either figure. It is paid
+on the first `/feeds.json` after every server start, and again whenever the
+census reader re-reads a part whole (a part that cannot name its appended
+keys), because the memory lives in the process. LATENT, NOT FIXED: the memory
+is keyed by census part path, so it grows by one entry per census epoch file
+and walks a rotated part whole.
+
+**L-R305-3. The import's reach walks the GDFL import journal once per journal
+change.** `feeds_route::journal_reach` (read by `/gaps.json`'s `imported_to`
+and `not-imported` class, and by `/feeds.json`'s `archive` evidence) is one
+map probe while the journal's length and line count are unchanged. After it
+grows, it walks the journal's rows newest first until each of the three
+kinds' furthest CLOSED day and the last day an import wrote bars on are
+found, and oldest first until the first written day is: a few rows when the
+kinds stand on one day; at most the journal's rows (its 2026-09-30 line is
+line 16,844 on 14 October 2026), once per journal change. The reach is the
+FURTHEST day whose import CLOSED for a kind, never its newest line (a re-run
+of an old day would move it backwards) and never a day begun and not closed
+(R3-05 repair 2). `/gaps.json` also lists the month's days begun and never
+closed: O(log n + rows in the month), at most 31 days of three kinds.
+
+**L-R305-5. `/feeds.json`'s `archive` is the vendor's archive AS MEASURED, and
+no delivered-folder inventory is read on that path.** It is the widest of
+three pieces of evidence: the descriptor's dated measurement (`pull::vendor`
+`Descriptor::archive`, 2018-09-03 to 2026-09-24 as measured on 7 October
+2026), the first and last day the import journal says an import wrote bars
+on, and the store's held span. Its last day is a LOWER BOUND (`to_binds:
+false`): a day the vendor delivered after the last evidence is invisible to
+this route until an import writes it, so `/ingest` does not cap its form
+there and `/db` words such a day `not imported`. Reading the delivered
+folder itself is `/folder.json`'s, O(members), on demand; an inventory the
+daily ingest chain keeps would let this route name the delivered end, and is
+not built (owner: the ingest chain, R4-07 and R4-11).
+
+**L-R305-4. `/calendar.json`'s derivatives rows are bounded by the session
+table.** One row per era of `pull::vendor::Venue::NseDerivatives`'s dated
+hours (two today: 375 minutes to 2026-08-02, 385 from 2026-08-03), at most
+nine, each found by one bisection of the record's span: bounded by the
+table, independent of the request.
+
+MEASURED at the route, 14 October 2026 about 11:00 IST: the release `api` of
+this package on port 8474 over a fresh shadow of the real store, `curl`
+`time_total` per GET on a fresh connection, on the shared host under other
+agents' builds (a shared host's numbers are not a gate). p50 / p99 / max ms:
+
+| Route | 1 client, n = 200 | 60 clients, n = 600 |
+|---|---|---|
+| `/feeds.json` | 1.01 / 5.75 / 10.23 | 29.35 / 80.73 / 108.42; again 17.98 / 43.74 / 59.99 |
+| `/settings.json` | 0.76 / 1.62 / 2.14 | 17.85 / 56.68 / 65.53; again 24.46 / 54.61 / 79.40 |
+| `/calendar.json?feed=gdfl` | 0.79 / 4.03 / 7.05 | 18.87 / 48.24 / 61.21 |
+| `/gaps.json` NIFTY 2026-09-29 25000 CE, 1s, 2026-09 | 7.99 / 16.41 / 24.26 | 319 answered, 281 refused 429 by admission |
+| `/gaps.json` NIFTY spot 1s 2026-09 | 60.02 / 177.03 / 305.85 | 126 answered, 474 refused 429 by admission |
+| a 404 (`/robots.txt`), the harness's floor | — | 12.12 / 38.80 / 51.12 |
+
+The first `/settings.json` after a start (cold): 1.32, 1.39 and 23.31 ms over
+three restarts. **NOT MET at 60 clients:** the package's target is p99 under
+10 ms; with 60 `curl` processes on this host the floor of a request that does
+no work is 38.8 ms at p99, so the 60-client figures measure the host and the
+harness, not the route, and the target is NOT PROVED either way there.
+**NOT MEASURED:** both routes while an import writes (a shadow over the real
+store's bars takes GET only). `/gaps.json` is a month fold (its own rows in
+this file); this package added one journal probe to it.

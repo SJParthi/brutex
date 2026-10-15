@@ -251,6 +251,13 @@ pub(super) async fn feeds_json(
     // floor below then reports as a null day beside a `rolling` kind — never
     // as an absent floor.
     let today = ingest::ist_day(std::time::SystemTime::now()).ok();
+    // THE OPERATOR'S SETTINGS, READ ONCE (R3-05): one `stat` when nothing
+    // was saved since the last request, so a saved window is served on the
+    // next request with no restart. ON THE BLOCKING POOL, NOT THIS WORKER
+    // (repair 3): the read is file I/O, and an async handler that waits on
+    // it holds a runtime worker every other route needs.
+    let settings =
+        crate::server::settings_route::snapshot_off_worker(site.store_root.clone()).await;
     for (n, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
         if n > 0 {
             out.push(',');
@@ -352,7 +359,7 @@ pub(super) async fn feeds_json(
         let (served, derived) = rungs_of(feed);
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},{offer},"rungs":{rungs},"derived_rungs":{derived_rungs},"archive":{archive},"window":{window},"basis":{basis},"basis_unverified":{unverified},"close_source":{close_source},"closing_auction":{auction},"store":{store},"fno":{},"finest":{finest},"history":{history}}}"#,
+            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},{offer},"rungs":{rungs},"derived_rungs":{derived_rungs},"archive":{archive},"held":{held},"window":{window},"basis":{basis},"basis_unverified":{unverified},"close_source":{close_source},"closing_auction":{auction},"store":{store},"fno":{},"finest":{finest},"history":{history}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
             render::json_string(match kind {
@@ -366,8 +373,14 @@ pub(super) async fn feeds_json(
             offer = offer_fields(feed.descriptor().offer),
             rungs = words_array(served.iter().copied()),
             derived_rungs = words_array(derived.iter().map(|tf| tf.as_str())),
-            archive = span_json(feed.descriptor().archive, None),
-            window = span_json(feed.descriptor().window, Some(OUTSIDE_WINDOW)),
+            archive = archive_json(
+                feed,
+                census_row(&censuses, feed),
+                &site.store_root,
+                today.map(|day| i64::from(day.days_from_epoch())),
+            ),
+            held = held_json(census_row(&censuses, feed), kind),
+            window = window_json(feed, &settings),
             basis = basis_json(feed, &served, &derived),
             unverified = match feed.descriptor().basis {
                 pull::vendor::Basis::Unverified(why) => render::json_string(why),
@@ -579,30 +592,721 @@ fn offer_fields(offer: pull::vendor::Offer) -> String {
     }
 }
 
-/// The wire word for who states a span.
-const fn span_standing_word(standing: pull::vendor::SpanStanding) -> &'static str {
-    match standing {
-        pull::vendor::SpanStanding::Measured => "measured",
-        pull::vendor::SpanStanding::Operator => "operator",
+// -- what the store holds, measured from its census (R3-05) ------------------
+
+/// The words a day past the held span carries: the store has not imported
+/// it. Never "outside the vendor archive" and never a vendor hole — the
+/// vendor may well have delivered it (SC-CLOSE-2, CMP-04).
+pub(crate) const NOT_IMPORTED: &str = "not imported";
+
+/// The words a day past a PULLED feed's held span carries: its store has
+/// not pulled it (a broker feed is never imported).
+pub(crate) const NOT_PULLED: &str = "not pulled";
+
+/// A span of IST epoch days, both ends inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DaySpan {
+    /// The first day.
+    pub(crate) first: i64,
+    /// The last day.
+    pub(crate) last: i64,
+}
+
+impl DaySpan {
+    /// The span one census entry covers: its first and last bar's IST days.
+    const fn of_entry(entry: &pull::manifest::Entry) -> Self {
+        Self {
+            first: ist_epoch_day(entry.first_ts_micros),
+            last: ist_epoch_day(entry.last_ts_micros),
+        }
+    }
+
+    /// The smallest span holding both.
+    const fn widen(self, other: Self) -> Self {
+        Self {
+            first: if other.first < self.first {
+                other.first
+            } else {
+                self.first
+            },
+            last: if other.last > self.last {
+                other.last
+            } else {
+                self.last
+            },
+        }
     }
 }
 
-/// A dated span as one JSON object, or `null`. `label_outside` is the words
-/// a page prints on a month outside it, where the span has one.
-fn span_json(span: Option<pull::vendor::Span>, label_outside: Option<&str>) -> String {
-    let Some(span) = span else {
+/// The IST epoch day of a bar's timestamp.
+const fn ist_epoch_day(ts_micros: i64) -> i64 {
+    (ts_micros.div_euclid(1_000_000) + 19_800).div_euclid(86_400)
+}
+
+/// `epoch_day` as `YYYY-MM-DD`.
+fn day_text(epoch_day: i64) -> String {
+    u32::try_from(epoch_day)
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .map_or_else(|| epoch_day.to_string(), |day| day.to_string())
+}
+
+/// What one census part lists, per segment, at one generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartSpan {
+    /// The generation it was measured at.
+    generation: u64,
+    /// The span per segment, in `pull::manifest::SEGMENTS` order.
+    segments: [Option<DaySpan>; 3],
+}
+
+/// The slot of `segment` in [`PartSpan::segments`].
+const fn segment_slot(segment: brutex_core::instrument::Segment) -> usize {
+    match segment {
+        brutex_core::instrument::Segment::Index => 0,
+        brutex_core::instrument::Segment::Cash => 1,
+        brutex_core::instrument::Segment::Fno => 2,
+    }
+}
+
+impl PartSpan {
+    const EMPTY: [Option<DaySpan>; 3] = [None; 3];
+
+    /// Fold one key's newest entry in.
+    fn fold(&mut self, part: &census::Part, key: &pull::manifest::EntryKey) {
+        let Some(held) = part.held(key) else {
+            return;
+        };
+        let one = DaySpan::of_entry(&held.entry);
+        if let Some(slot) = self.segments.get_mut(segment_slot(key.segment)) {
+            *slot = Some(slot.map_or(one, |span| span.widen(one)));
+        }
+    }
+
+    /// Every key of `part`, walked: O(keys).
+    fn walk(part: &census::Part) -> Self {
+        let mut span = Self {
+            generation: part.header().generation,
+            segments: Self::EMPTY,
+        };
+        for key in part.held_keys() {
+            span.fold(part, key);
+        }
+        span
+    }
+}
+
+/// The held span of each census part file, and how many times that file's
+/// keys were walked whole — kept so a test can prove a hit and an append walk
+/// nothing.
+type Memory = std::collections::HashMap<std::path::PathBuf, (PartSpan, u64)>;
+
+/// The process's one [`Memory`].
+fn memory() -> std::sync::MutexGuard<'static, Memory> {
+    static MEMORY: std::sync::OnceLock<std::sync::Mutex<Memory>> = std::sync::OnceLock::new();
+    MEMORY
+        .get_or_init(|| std::sync::Mutex::new(Memory::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// How many times the census part at `path` has been walked whole.
+#[cfg(test)]
+pub(crate) fn walks_of(path: &std::path::Path) -> u64 {
+    memory().get(path).map_or(0, |(_, walks)| *walks)
+}
+
+/// The held span of one census part, remembered per part file and brought
+/// up to date by folding in only the keys appended since.
+///
+/// # Cost
+///
+/// * the same generation as last time: one map probe, O(1);
+/// * a newer generation the part can name its appended keys for
+///   (`census::Part::changed_since`): one probe per appended key —
+///   O(appended), the import's own work, never the history's;
+/// * otherwise (the first request, or a part re-read whole): one walk of
+///   its keys, O(keys), named for `docs/06-limits.md`. A part re-read whole
+///   cost the census reader the same O(keys) on that request already.
+///
+/// A span only widens as entries are appended, because the store is
+/// append-only (`CLAUDE.md` §3 rule 8): a month once held stays held at its
+/// generation. A part re-read whole is walked whole.
+fn part_span(part: &census::Part) -> PartSpan {
+    let generation = part.header().generation;
+    // A PART WITH NO FILE (built in memory) has no identity to remember.
+    if part.path().as_os_str().is_empty() {
+        return PartSpan::walk(part);
+    }
+    let mut memory = memory();
+    let kept = memory.get(part.path()).copied();
+    let kept = match kept {
+        Some((span, _)) if span.generation == generation => return span,
+        Some((span, walks)) if span.generation < generation => {
+            if let Some(since) = part.changed_since(span.generation) {
+                let mut span = span;
+                span.generation = generation;
+                for (_, key) in since.iter() {
+                    span.fold(part, key);
+                }
+                (span, walks)
+            } else {
+                (PartSpan::walk(part), walks.saturating_add(1))
+            }
+        }
+        Some((_, walks)) => (PartSpan::walk(part), walks.saturating_add(1)),
+        None => (PartSpan::walk(part), 1),
+    };
+    memory.insert(part.path().to_path_buf(), kept);
+    kept.0
+}
+
+/// What a feed's store holds: per segment, and over all of them; `Err` is
+/// why nothing can be said.
+pub(crate) fn held_spans(
+    row: Option<&census::VendorCensus>,
+) -> Result<(u64, [Option<DaySpan>; 3]), String> {
+    let row = row.ok_or("no census row for this feed")?;
+    let manifest = match &row.state {
+        census::Census::Held { manifest } => manifest,
+        census::Census::Absent | census::Census::Unreadable { .. } => return Err(row.note()),
+    };
+    let mut segments = PartSpan::EMPTY;
+    for part in manifest.parts() {
+        let span = part_span(part);
+        for (into, from) in segments.iter_mut().zip(span.segments) {
+            *into = match (*into, from) {
+                (Some(a), Some(b)) => Some(a.widen(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+    Ok((manifest.generation(), segments))
+}
+
+/// What the GDFL import journal says about its reach, read once per journal
+/// change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct JournalReach {
+    /// Per kind, in `ImportKind::ALL` order: the furthest day whose import
+    /// CLOSED — `done`, `incomplete`, `refused` or `recounted`. A day begun
+    /// and never closed is not reached: its import did not finish, so its
+    /// minutes are not imported rather than lost.
+    pub(crate) closed: [Option<pull::session::Day>; 3],
+    /// The first and last day any import WROTE bars on (`done`, done with
+    /// refusals, `incomplete`, `recounted`), whatever its kind: the files of
+    /// those days were delivered, because an import read them.
+    pub(crate) written: Option<(pull::session::Day, pull::session::Day)>,
+}
+
+/// Whether a closing line about a day says the import wrote bars from its
+/// files.
+const fn wrote(outcome: crate::server::import_journal::DayOutcome) -> bool {
+    use crate::server::import_journal::DayOutcome;
+    matches!(
+        outcome,
+        DayOutcome::Done | DayOutcome::DoneWithRefusals | DayOutcome::Incomplete
+    )
+}
+
+/// [`JournalReach`] of the journal at `root`, remembered per store against
+/// the journal's length and line count.
+///
+/// NOT `Parsed::last`: that is the kind's NEWEST LINE, and a re-run of an
+/// old day makes it go backwards — on the operator's journal the newest
+/// indices line names 2025-10-21 while indices are journaled through
+/// 2026-09-24, which would have called eleven months of held days "not
+/// imported".
+///
+/// Cost: while the journal does not grow, one map probe. After it grows,
+/// one walk of its rows newest first until every kind's closed day and the
+/// last written day are found, and one oldest first until the first written
+/// day is: O(rows after the furthest day of the kind that lags most) —
+/// three rows when the kinds stand on one day, as the operator's do; at most
+/// the journal's rows (12,196 lines on 13 Oct 2026), once per journal
+/// change. Named for `docs/06-limits.md` (L-R305-3).
+pub(crate) fn journal_reach(
+    root: &std::path::Path,
+    snapshot: &crate::server::import_journal::Snapshot,
+) -> JournalReach {
+    type Kept = std::collections::HashMap<std::path::PathBuf, ((u64, u64), JournalReach)>;
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<Kept>> = std::sync::OnceLock::new();
+    let parsed = &snapshot.parsed;
+    // KEYED BY LENGTH AND LINES, not lines alone: a journal replaced by one
+    // of the same line count is a different journal.
+    let stamp = (snapshot.bytes, parsed.lines);
+    let mut kept = KEPT
+        .get_or_init(|| std::sync::Mutex::new(Kept::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, reach)) = kept.get(root)
+        && *at == stamp
+    {
+        return *reach;
+    }
+    let mut reach = JournalReach::default();
+    if let Some((first, last)) = parsed.span() {
+        let mut last_written = None;
+        for row in parsed.range(first, last).rev() {
+            if row.outcome == crate::server::import_journal::DayOutcome::Open {
+                continue;
+            }
+            if last_written.is_none() && wrote(row.outcome) {
+                last_written = Some(row.day);
+            }
+            let slot = pull::gdfl_import::ImportKind::ALL
+                .iter()
+                .position(|kind| *kind == row.kind);
+            if let Some(slot) = slot.and_then(|slot| reach.closed.get_mut(slot))
+                && slot.is_none()
+            {
+                *slot = Some(row.day);
+            }
+            if last_written.is_some() && reach.closed.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        if let Some(last_written) = last_written {
+            let first_written = parsed
+                .range(first, last)
+                .find(|row| wrote(row.outcome))
+                .map_or(last_written, |row| row.day);
+            reach.written = Some((first_written, last_written));
+        }
+    }
+    kept.insert(root.to_path_buf(), (stamp, reach));
+    reach
+}
+
+/// How far a feed's IMPORT has reached for one segment, and the days inside
+/// that reach whose import began and never closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportReach {
+    /// The furthest day whose import of the segment's kind closed, as IST
+    /// epoch days; `None` when nothing can be said (see `from`).
+    pub(crate) to: Option<i64>,
+    /// Where `to` came from, or why there is none.
+    pub(crate) from: String,
+    /// Days of the asked range, at or before `to`, whose whole-tree import
+    /// (`*`) was begun and never closed and was never closed before: their
+    /// bars were not written, so their minutes are not imported, not lost.
+    /// Ascending.
+    pub(crate) open: Vec<i64>,
+    /// Today, IST epoch days, read once when the reach was built; `None`
+    /// when the clock could not be read (then no day is `not_yet`).
+    pub(crate) today: Option<i64>,
+}
+
+impl ImportReach {
+    /// Whether `day` (IST epoch days) is after today: a session that has
+    /// not happened yet owes nothing, so a minute the calendar names there
+    /// is neither lost nor "not imported" (R3-05 repair 3, the second
+    /// agent's follow-up: `/gaps.json` for 2026-10 counted 16..31 October as
+    /// 7,500 not-imported minutes on 15 October). Every feed, pulled or
+    /// imported. O(1).
+    pub(crate) fn not_yet(&self, day: i64) -> bool {
+        self.today.is_some_and(|today| day > today)
+    }
+
+    /// Whether `day` (IST epoch days) has not been imported: on or before
+    /// today, and past the reach or an import of it that never closed.
+    /// O(log open).
+    pub(crate) fn not_imported(&self, day: i64) -> bool {
+        !self.not_yet(day)
+            && (self.to.is_some_and(|last| day > last) || self.open.binary_search(&day).is_ok())
+    }
+}
+
+/// How far a feed's IMPORT has reached for `segment` (`INDEX`, `CASH` or
+/// `FNO`): the furthest day whose import of the segment's kind (indices,
+/// stocks, options) CLOSED in the GDFL import journal, read through the
+/// journal reader `/imports.json` and `/dayflags.json` use (R3-05, CMP-04),
+/// and the days of `days` (IST epoch days, both ends inclusive) before it
+/// whose import began and never closed. `from` says where the answer came
+/// from, or why there is none.
+///
+/// `to: None` — and so nothing is renamed `not imported` — for a feed that
+/// keeps no import journal (a pulled feed: Zerodha's months are pulled, not
+/// imported), a segment the journal has no closed line for, or a journal
+/// that cannot be read. The census's held span is NOT used here: a series
+/// whose own bars stop early, inside the import's reach, is the vendor's to
+/// explain, and only the journal knows the reach.
+///
+/// Cost: one `metadata` call and the journal's new bytes
+/// (`crate::server::import_journal::snapshot`), then [`journal_reach`]: O(1)
+/// while the journal does not move; plus O(log n + rows in `days`) for the
+/// open days — a month's rows, at most 31 days of three kinds.
+pub(crate) fn imported_to(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    segment: &str,
+    days: (i64, i64),
+) -> ImportReach {
+    let today = ingest::today_ist()
+        .ok()
+        .map(|day| i64::from(day.days_from_epoch()));
+    let none = |from: String| ImportReach {
+        to: None,
+        from,
+        open: Vec::new(),
+        today,
+    };
+    if vendor != brutex_core::vendor::Vendor::Gdfl {
+        return none(format!(
+            "{vendor:?} keeps no import journal: its months are pulled, not imported"
+        ));
+    }
+    let Ok(segment) = brutex_core::instrument::Segment::parse(segment) else {
+        return none(format!("{segment:?} is not a segment"));
+    };
+    let slot = segment_slot(segment);
+    let snapshot = match crate::server::import_journal::snapshot(root) {
+        Ok(snapshot) => snapshot,
+        Err(why) => return none(format!("the GDFL import journal cannot be read: {why}")),
+    };
+    let reach = journal_reach(root, &snapshot);
+    let (Some(kind), Some(day)) = (
+        pull::gdfl_import::ImportKind::ALL.get(slot),
+        reach.closed.get(slot).copied().flatten(),
+    ) else {
+        return none(
+            "the GDFL import journal names no closed day for this segment's kind".to_owned(),
+        );
+    };
+    let to = i64::from(day.days_from_epoch());
+    let civil = |epoch: i64| {
+        u32::try_from(epoch)
+            .ok()
+            .and_then(|days| pull::session::Day::from_days(days).ok())
+    };
+    let mut open = Vec::new();
+    if let (Some(first), Some(last)) = (civil(days.0), civil(days.1.min(to))) {
+        for row in snapshot.parsed.range(first, last) {
+            if row.kind == *kind
+                && row.filter == "*"
+                && row.outcome == crate::server::import_journal::DayOutcome::Open
+                && !row.previous.is_some_and(wrote)
+            {
+                open.push(i64::from(row.day.days_from_epoch()));
+            }
+        }
+    }
+    open.dedup();
+    ImportReach {
+        to: Some(to),
+        from: format!(
+            "the GDFL import journal: the furthest day whose {} import closed",
+            kind.as_str()
+        ),
+        open,
+        today,
+    }
+}
+
+/// The whole span of `segments`, or `None` when none holds anything.
+fn whole(segments: &[Option<DaySpan>; 3]) -> Option<DaySpan> {
+    segments.iter().flatten().copied().reduce(DaySpan::widen)
+}
+
+/// `held` on `/feeds.json`: the first and last day the feed's store holds,
+/// over all and per segment, measured from its census — or `null` beside a
+/// `why`.
+fn held_json(row: Option<&census::VendorCensus>, kind: pull::vendor::SourceKind) -> String {
+    let (generation, segments) = match held_spans(row) {
+        Ok(found) => found,
+        Err(why) => return format!(r#"{{"why":{}}}"#, render::json_string(&why)),
+    };
+    let Some(all) = whole(&segments) else {
+        return format!(
+            r#"{{"why":{}}}"#,
+            render::json_string("the census loaded and lists no month: nothing is imported")
+        );
+    };
+    let mut per = String::from("{");
+    for (n, (segment, span)) in pull::manifest::SEGMENTS.iter().zip(segments).enumerate() {
+        if n > 0 {
+            per.push(',');
+        }
+        let _ = match span {
+            Some(span) => write!(
+                per,
+                r#"{}:{{"from":{},"to":{}}}"#,
+                render::json_string(segment.as_str()),
+                render::json_string(&day_text(span.first)),
+                render::json_string(&day_text(span.last)),
+            ),
+            None => write!(per, r"{}:null", render::json_string(segment.as_str())),
+        };
+    }
+    per.push('}');
+    format!(
+        r#"{{"from":{},"to":{},"standing":"measured","source":{},"label_outside":{},"segments":{per}}}"#,
+        render::json_string(&day_text(all.first)),
+        render::json_string(&day_text(all.last)),
+        render::json_string(&format!(
+            "the store's census at generation {generation}: the first and last bar of every \
+             month it lists"
+        )),
+        render::json_string(match kind {
+            // A PULLED FEED IS NOT IMPORTED: a day outside what its store
+            // holds has not been pulled.
+            pull::vendor::SourceKind::Rest => NOT_PULLED,
+            pull::vendor::SourceKind::Folder => NOT_IMPORTED,
+        }),
+    )
+}
+
+/// One piece of evidence about how far a bought archive reaches.
+struct Evidence {
+    /// `descriptor`, `census` or `journal`.
+    by: &'static str,
+    /// The span it shows, or why it shows none.
+    span: Result<DaySpan, String>,
+    /// Where it was read.
+    source: String,
+}
+
+impl Evidence {
+    fn json(&self) -> String {
+        match &self.span {
+            Ok(span) => format!(
+                r#"{{"by":{},"from":{},"to":{},"source":{}}}"#,
+                render::json_string(self.by),
+                render::json_string(&day_text(span.first)),
+                render::json_string(&day_text(span.last)),
+                render::json_string(&self.source),
+            ),
+            Err(why) => format!(
+                r#"{{"by":{},"why":{},"source":{}}}"#,
+                render::json_string(self.by),
+                render::json_string(why),
+                render::json_string(&self.source),
+            ),
+        }
+    }
+}
+
+/// `evidence` unless its last day is after `today` (IST epoch days); then
+/// the same evidence with no span and a `why` naming both days. A day that
+/// has not happened is not evidence that a file was delivered.
+fn not_after_today(evidence: Evidence, today: Option<i64>) -> Evidence {
+    match (&evidence.span, today) {
+        (Ok(span), Some(today)) if span.last > today => Evidence {
+            span: Err(format!(
+                "names {} as its last day, after today {} (IST): a day that has not happened \
+                 shows no delivery, so this evidence sets neither end of the archive",
+                day_text(span.last),
+                day_text(today)
+            )),
+            ..evidence
+        },
+        _ => evidence,
+    }
+}
+
+/// `archive` on `/feeds.json` for a feed bought as an archive: how far the
+/// VENDOR'S delivered archive reaches, as far as this server can show it
+/// without walking a folder — never what the store has imported (that is
+/// `held`, served beside it).
+///
+/// Three pieces of evidence, each named in `evidence` with its span or why
+/// it has none, and the widest wins at each end:
+///
+/// * `descriptor` — the dated measurement `pull::vendor` records
+///   (`Descriptor::archive`), labelled as such;
+/// * `journal` — the first and last day the GDFL import journal says an
+///   import wrote bars on: the import read those days' delivered files;
+/// * `census` — the store's held span: a day the store holds was delivered.
+///
+/// `from_binds: true`: the measured first day is where the vendor's archive
+/// begins, and no file before it exists. `to_binds: false`: a measurement is
+/// dated, and the vendor delivers daily, so a later day may already be
+/// delivered and waiting — past `to` a day is `not imported`, never
+/// "outside the archive", and no form may cap there (FM-083, SC-CLOSE-2).
+/// No delivered-folder inventory is read on this path (`inventory` says
+/// so): `/folder.json` walks a folder on demand.
+///
+/// Never `{"why"}` while the descriptor records a span: an empty or
+/// unreadable census leaves the descriptor's dated span in force, and the
+/// census's row in `evidence` says why it adds nothing. `null` for a feed
+/// that is not an archive.
+///
+/// NO EVIDENCE REACHES PAST TODAY (IST, `today`): a journal or census day
+/// after today is a day that has not happened, so it shows no delivery.
+/// That piece of evidence then sets NEITHER end and says why in its row —
+/// never clamped to today, which would hide the bad line — and the other
+/// evidence decides (R3-05 repair 3, the second agent's follow-up: one
+/// `done` line for 2099-01-01 made `archive.to` 2099-01-01). `today: None`
+/// (the clock could not be read) bounds nothing, and `to_source` still names
+/// the evidence that set the end.
+///
+/// Cost: [`held_spans`] (a cached probe) and [`journal_reach`] (one
+/// `metadata` call and a cached probe while the journal does not move).
+fn archive_json(
+    feed: pull::vendor::Feed,
+    row: Option<&census::VendorCensus>,
+    root: &std::path::Path,
+    today: Option<i64>,
+) -> String {
+    let Some(measured) = feed.descriptor().archive else {
         return "null".to_owned();
     };
-    let label = match label_outside {
-        Some(words) => format!(r#","label_outside":{}"#, render::json_string(words)),
-        None => String::new(),
+    let descriptor = Evidence {
+        by: "descriptor",
+        span: Ok(DaySpan {
+            first: i64::from(measured.from.days_from_epoch()),
+            last: i64::from(measured.to.days_from_epoch()),
+        }),
+        source: format!("the descriptor's dated measurement: {}", measured.source),
+    };
+    let census = match held_spans(row) {
+        Ok((generation, segments)) => Evidence {
+            by: "census",
+            span: whole(&segments).ok_or_else(|| "the census loaded and lists no month".to_owned()),
+            source: format!(
+                "the store's census at generation {generation}: a day the store holds was \
+                 delivered"
+            ),
+        },
+        Err(why) => Evidence {
+            by: "census",
+            span: Err(why),
+            source: "the store's census".to_owned(),
+        },
+    };
+    let journal_source = "the GDFL import journal: the first and last day an import wrote bars \
+                          on, from that day's delivered files";
+    let journal = match crate::server::import_journal::snapshot(root) {
+        Ok(snapshot) => Evidence {
+            by: "journal",
+            span: journal_reach(root, &snapshot)
+                .written
+                .map(|(first, last)| DaySpan {
+                    first: i64::from(first.days_from_epoch()),
+                    last: i64::from(last.days_from_epoch()),
+                })
+                .ok_or_else(|| {
+                    if snapshot.present {
+                        "the journal names no day an import wrote bars on".to_owned()
+                    } else {
+                        "no import has run against this store: the journal is absent".to_owned()
+                    }
+                }),
+            source: journal_source.to_owned(),
+        },
+        Err(why) => Evidence {
+            by: "journal",
+            span: Err(format!("the GDFL import journal cannot be read: {why}")),
+            source: journal_source.to_owned(),
+        },
+    };
+    let journal = not_after_today(journal, today);
+    let census = not_after_today(census, today);
+    let all = [&descriptor, &journal, &census];
+    // THE WIDEST AT EACH END, AND WHICH EVIDENCE SET IT. The descriptor
+    // always has a span, so both folds find one; ties keep the earlier
+    // evidence, the descriptor first.
+    let mut from = (i64::MAX, "");
+    let mut to = (i64::MIN, "");
+    for evidence in all {
+        if let Ok(span) = &evidence.span {
+            if span.first < from.0 {
+                from = (span.first, evidence.by);
+            }
+            if span.last > to.0 {
+                to = (span.last, evidence.by);
+            }
+        }
+    }
+    let said = |by: &str| {
+        all.iter()
+            .find(|evidence| evidence.by == by)
+            .map_or_else(String::new, |evidence| evidence.source.clone())
+    };
+    let evidence: Vec<String> = all.iter().map(|evidence| evidence.json()).collect();
+    format!(
+        r#"{{"from":{},"to":{},"standing":"measured","from_binds":true,"to_binds":false,"source":{},"from_source":{},"to_source":{},"label_outside":{},"inventory":{},"evidence":[{}]}}"#,
+        render::json_string(&day_text(from.0)),
+        render::json_string(&day_text(to.0)),
+        render::json_string(&format!(
+            "the widest of the descriptor's dated measurement, the import journal and the \
+             store's census; the last day is set by the {} and is a lower bound: the vendor \
+             delivers daily, so a later day may be delivered and not imported",
+            to.1
+        )),
+        render::json_string(&said(from.1)),
+        render::json_string(&said(to.1)),
+        render::json_string(NOT_IMPORTED),
+        render::json_string(
+            "not read: no delivered-folder inventory is read on this path; /folder.json walks \
+             a folder on demand"
+        ),
+        evidence.join(","),
+    )
+}
+
+/// `window` on `/feeds.json`: the operator's window from the settings in
+/// force (R3-05), for a feed this build gives a window; `null` otherwise.
+///
+/// LOUD WHEN THE SETTINGS ARE DEGRADED (`CLAUDE.md` §4): while a settings
+/// generation cannot be read or the directory cannot be listed, an end that
+/// would come from the environment or the built-in default is NOT served —
+/// a saved window may differ, and serving the default would hide that — so
+/// the answer is `why` and `degraded` with no `from` or `to`. An end read
+/// from a generation that did read is served beside `degraded`. A window
+/// whose first day is after its last (a generation an older build saved) is
+/// refused the same way rather than served inverted.
+fn window_json(
+    feed: pull::vendor::Feed,
+    settings: &crate::server::settings_route::Snapshot,
+) -> String {
+    if feed.descriptor().window.is_none() {
+        return "null".to_owned();
+    }
+    let from = crate::server::settings_route::effective(settings, store::settings::Key::WindowFrom);
+    let to = crate::server::settings_route::effective(settings, store::settings::Key::WindowTo);
+    let degraded = crate::server::settings_route::degraded(settings);
+    let degraded_json = degraded
+        .as_deref()
+        .map_or_else(|| "null".to_owned(), render::json_string);
+    let refuse = |why: String| {
+        format!(
+            r#"{{"why":{},"degraded":{degraded_json}}}"#,
+            render::json_string(&why)
+        )
+    };
+    if let Some(fault) = &degraded
+        && (from.origin != "generation" || to.origin != "generation")
+    {
+        return refuse(format!(
+            "the operator's settings cannot be read ({fault}), so no window is served: the \
+             built-in default would hide a saved window"
+        ));
+    }
+    let (Some(first), Some(last)) = (from.value, to.value) else {
+        return refuse(format!(
+            "the operator's window has no first or last day in force (from: {}; to: {})",
+            from.source, to.source
+        ));
+    };
+    if first > last {
+        return refuse(format!(
+            "the window in force begins {first} ({}) after it ends {last} ({}): refused, not \
+             served inverted",
+            from.source, to.source
+        ));
+    }
+    let source = if from.source == to.source {
+        from.source
+    } else {
+        format!("from: {}; to: {}", from.source, to.source)
     };
     format!(
-        r#"{{"from":{},"to":{},"standing":{},"source":{}{label}}}"#,
-        render::json_string(&span.from.to_string()),
-        render::json_string(&span.to.to_string()),
-        render::json_string(span_standing_word(span.standing)),
-        render::json_string(span.source),
+        r#"{{"from":{},"to":{},"standing":"operator","source":{},"label_outside":{},"degraded":{degraded_json}}}"#,
+        render::json_string(&first),
+        render::json_string(&last),
+        render::json_string(&source),
+        render::json_string(OUTSIDE_WINDOW),
     )
 }
 
@@ -1285,20 +1989,25 @@ mod tests {
         );
     }
 
-    /// **GDFL IS ONE SECOND OVER ITS MEASURED ARCHIVE, 2018-09-03 TO
-    /// 2026-09-24, RAW, AND ITS OPEN INTEREST APPLIES TO CONTRACTS ONLY**
+    /// **GDFL IS ONE SECOND OVER ITS MEASURED ARCHIVE, RAW, AND ITS OPEN INTEREST APPLIES TO CONTRACTS ONLY**
     /// (D-2802, D-3322, D-3323, D-3324, D-3338; DB-051, DB-G24, DB-G68).
     #[tokio::test]
     async fn gdfl_is_one_second_over_its_measured_archive_and_raw() {
         let rows = feeds_of("feeds-basis", &gdfl_store("feeds-basis", None)).await;
 
-        // GDFL: one second, over 2018-09-03..2026-09-24, measured.
+        // GDFL: one second, over what its census measures.
         let gdfl = row(&rows, "gdfl");
         assert_eq!(gdfl["rungs"], serde_json::json!(["1s"]), "{gdfl}");
         assert_eq!(gdfl["derived_rungs"], serde_json::json!([]), "{gdfl}");
-        assert_eq!(gdfl["archive"]["from"], "2018-09-03");
-        assert_eq!(gdfl["archive"]["to"], "2026-09-24");
-        assert_eq!(gdfl["archive"]["standing"], "measured");
+        // AN EMPTY STORE STILL HAS AN ARCHIVE (R3-05 repair 2): the
+        // descriptor's dated measurement, labelled as such, its last day a
+        // lower bound; the census says why it adds nothing.
+        assert_eq!(gdfl["archive"]["from"], "2018-09-03", "{gdfl}");
+        assert_eq!(gdfl["archive"]["to"], "2026-09-24", "{gdfl}");
+        assert_eq!(gdfl["archive"]["standing"], "measured", "{gdfl}");
+        assert_eq!(gdfl["archive"]["to_binds"], false, "{gdfl}");
+        assert!(gdfl["archive"]["why"].is_null(), "{gdfl}");
+        assert!(gdfl["held"]["why"].is_string(), "{gdfl}");
         assert!(gdfl["window"].is_null());
         let history: Vec<&str> = gdfl["history"]
             .as_array()
@@ -1514,9 +2223,515 @@ mod tests {
             store_json(None),
             r#"{"state":"no_prefix","month_files":null,"bars":null,"note":null}"#
         );
-        // A SPAN IS NULL WHERE NONE IS HELD.
-        assert_eq!(span_json(None, Some(OUTSIDE_WINDOW)), "null");
+        // NO CENSUS ROW: the held span says why rather than inventing one.
+        assert_eq!(
+            held_json(None, pull::vendor::SourceKind::Folder),
+            r#"{"why":"no census row for this feed"}"#
+        );
         assert_eq!(words_array(std::iter::empty()), "[]");
         assert_eq!(words_array(["1s", "1min"].into_iter()), r#"["1s","1min"]"#);
+    }
+
+    /// The micros of `hh:mm:ss` IST on `day`.
+    fn ist_micros(day: (u16, u8, u8), hh: i64, mm: i64, ss: i64) -> i64 {
+        let days = i64::from(
+            Day::new(day.0, day.1, day.2)
+                .expect("a civil day")
+                .days_from_epoch(),
+        );
+        (days * 86_400 + hh * 3_600 + mm * 60 + ss - 19_800) * 1_000_000
+    }
+
+    /// A GDFL census holding one NIFTY spot month whose last bar is on
+    /// `spot_last` and one NIFTY option month whose last bar is 2020-09-16.
+    fn census_with(
+        root: &std::path::Path,
+        manifest: Option<pull::manifest::Manifest>,
+        spot_last: (u16, u8, u8),
+        spot_rows: u64,
+    ) -> pull::manifest::Manifest {
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        let mut manifest = manifest.unwrap_or_else(|| {
+            let mut fresh = Manifest::open(brutex_core::vendor::Vendor::Gdfl, &[], &[])
+                .expect("a genesis manifest");
+            fresh
+                .record(Entry {
+                    key: EntryKey {
+                        contract: Some(
+                            brutex_core::instrument::Contract::parse("2020-09-24-11000-CE")
+                                .expect("a contract"),
+                        ),
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Fno,
+                        symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                        timeframe: store::path::Timeframe::SECOND_1,
+                        month: store::path::YearMonth::new(2020, 9).expect("a month"),
+                    },
+                    rows: 7,
+                    first_ts_micros: ist_micros((2020, 9, 1), 9, 15, 0),
+                    last_ts_micros: ist_micros((2020, 9, 16), 15, 29, 59),
+                })
+                .expect("records the option month");
+            fresh
+        });
+        manifest
+            .record(Entry {
+                key: EntryKey {
+                    contract: None,
+                    exchange: brutex_core::instrument::Exchange::Nse,
+                    segment: brutex_core::instrument::Segment::Index,
+                    symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                    timeframe: store::path::Timeframe::SECOND_1,
+                    month: store::path::YearMonth::new(2026, 9).expect("a month"),
+                },
+                rows: spot_rows,
+                first_ts_micros: ist_micros((2026, 9, 1), 9, 15, 0),
+                last_ts_micros: ist_micros(spot_last, 15, 29, 59),
+            })
+            .expect("records the spot month");
+        let path = manifest_path(root, brutex_core::vendor::Vendor::Gdfl);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        // A NEW FILE BESIDE, RENAMED OVER: the census reader sees one whole
+        // image or the other, as a real commit leaves it.
+        let next = path.with_extension("next");
+        std::fs::write(&next, manifest.image()).expect("writes");
+        std::fs::rename(&next, &path).expect("renames");
+        manifest
+    }
+
+    /// **IMPORTING ONE DAY PAST THE OLD END MOVES THE SPAN, WITH NO REBUILD
+    /// AND NO RESTART** (R3-05, SC-CLOSE-2).
+    ///
+    /// Before: `archive.to` was `pull::vendor`'s typed `2026-09-24` whatever
+    /// the store held, so a page called 25-30 Sep "outside the vendor's
+    /// archive" though the files were delivered and only the import was
+    /// behind. Now the span is the census's, per segment, and a day past it
+    /// is `not imported`.
+    #[tokio::test]
+    async fn importing_one_day_past_the_old_end_moves_the_span() {
+        let root = store_root("feeds-held-moves");
+        let manifest = census_with(&root, None, (2026, 9, 24), 100);
+        let dir = masters("feeds-held-moves", None, None);
+        let site = Loaded::new(Site::load(&dir, &root));
+        let ask = |site: &Loaded| {
+            let site = site.clone();
+            async move {
+                let (_, body) = feeds_json(axum::extract::State(site)).await;
+                let rows: Vec<serde_json::Value> = serde_json::from_str(&body).expect("feeds JSON");
+                row(&rows, "gdfl").clone()
+            }
+        };
+
+        let census_file = pull::manifest::manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
+        let before = ask(&site).await;
+        // THE ARCHIVE'S FIRST DAY IS THE DESCRIPTOR'S MEASURED ONE: the
+        // store's first held day (2020-09-01) is later, and is `held`'s.
+        assert_eq!(before["archive"]["from"], "2018-09-03", "{before}");
+        assert_eq!(before["held"]["from"], "2020-09-01", "{before}");
+        assert_eq!(before["archive"]["to"], "2026-09-24", "{before}");
+        assert_eq!(before["archive"]["standing"], "measured");
+        assert_eq!(before["archive"]["label_outside"], NOT_IMPORTED);
+        assert_eq!(before["held"]["segments"]["INDEX"]["to"], "2026-09-24");
+        assert_eq!(before["held"]["segments"]["FNO"]["to"], "2020-09-16");
+        assert!(before["held"]["segments"]["CASH"].is_null(), "{before}");
+        // THE SAME ANSWER TWICE: nothing appended, nothing moves, and the
+        // second answer walked nothing — one walk, on the first request.
+        assert_eq!(ask(&site).await["held"], before["held"]);
+        assert_eq!(walks_of(&census_file), 1, "a hit walks nothing");
+
+        // ONE DAY IS IMPORTED PAST THE OLD END.
+        census_with(&root, Some(manifest), (2026, 9, 25), 101);
+        let after = ask(&site).await;
+        assert_eq!(after["archive"]["to"], "2026-09-25", "{after}");
+        assert_eq!(after["held"]["segments"]["INDEX"]["to"], "2026-09-25");
+        // THE OPTIONS' SPAN IS ITS OWN: the spot import does not move it.
+        assert_eq!(after["held"]["segments"]["FNO"]["to"], "2020-09-16");
+        assert_ne!(
+            after["held"]["source"], before["held"]["source"],
+            "a new generation"
+        );
+    }
+
+    /// **THE ARCHIVE SPAN FOLLOWS THE SOURCE'S EVIDENCE, NOT A CONSTANT AND
+    /// NOT THE IMPORT** (FM-083, HUMAN-037, SC-CLOSE-2; R3-05 repair 2).
+    ///
+    /// `archive` is how far the VENDOR'S delivered archive reaches: the
+    /// widest of the descriptor's dated measurement, the days the import
+    /// journal says an import wrote bars on, and the store's held span — each
+    /// end naming the evidence that set it, the last day never binding. The
+    /// store's own span is `held`, beside it.
+    ///
+    /// Before this repair: `archive` WAS the held span, so a store imported
+    /// to 2026-09-10 told /ingest the vendor's archive ended there and capped
+    /// the form on it, and an empty census served `{"why"}`, so /ingest
+    /// stopped treating GDFL as an imported feed. Before R3-05: the typed
+    /// 2026-09-24 in every case, whatever the journal or the store showed.
+    #[tokio::test]
+    async fn the_archive_span_follows_the_inventory_not_a_constant() {
+        let typed = pull::vendor::Feed::Gdfl
+            .descriptor()
+            .archive
+            .expect("GDFL's descriptor records a measured archive");
+        let typed_from = typed.from.to_string();
+        let typed_to = typed.to.to_string();
+        let root = store_root("feeds-archive-inventory");
+        let dir = masters("feeds-archive-inventory", None, None);
+        let site = Loaded::new(Site::load(&dir, &root));
+        let ask = |site: &Loaded| {
+            let site = site.clone();
+            async move {
+                let (_, body) = feeds_json(axum::extract::State(site)).await;
+                let rows: Vec<serde_json::Value> = serde_json::from_str(&body).expect("feeds JSON");
+                row(&rows, "gdfl").clone()
+            }
+        };
+        let by = |answer: &serde_json::Value, who: &str| {
+            answer["archive"]["evidence"]
+                .as_array()
+                .expect("evidence")
+                .iter()
+                .find(|row| row["by"] == who)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {who} evidence: {answer}"))
+        };
+
+        // NOTHING IMPORTED, NO JOURNAL: the descriptor's dated span, named as
+        // such, and each other piece of evidence says why it adds nothing.
+        let empty = ask(&site).await;
+        assert_eq!(empty["archive"]["from"], typed_from.as_str(), "{empty}");
+        assert_eq!(empty["archive"]["to"], typed_to.as_str(), "{empty}");
+        assert_eq!(empty["archive"]["from_binds"], true, "{empty}");
+        assert_eq!(empty["archive"]["to_binds"], false, "{empty}");
+        assert!(
+            empty["archive"]["to_source"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("the descriptor's dated measurement")),
+            "{empty}"
+        );
+        assert!(by(&empty, "census")["why"].is_string(), "{empty}");
+        assert!(by(&empty, "journal")["why"].is_string(), "{empty}");
+        assert!(empty["held"]["why"].is_string(), "{empty}");
+
+        // THE STORE HOLDS LESS THAN WAS DELIVERED: the archive is not cut
+        // back to it; the store's last day is `held`'s.
+        let manifest = census_with(&root, None, (2026, 9, 10), 50);
+        let short = ask(&site).await;
+        assert_eq!(short["archive"]["to"], typed_to.as_str(), "{short}");
+        assert_eq!(short["held"]["to"], "2026-09-10", "{short}");
+        assert_eq!(by(&short, "census")["to"], "2026-09-10", "{short}");
+
+        // THE IMPORT WROTE A DAY PAST THE MEASUREMENT: the journal moves the
+        // archive's last day. A day begun and never closed is no evidence.
+        let journal = pull::gdfl_import::journal_path(&root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        std::fs::write(
+            &journal,
+            "begin indices 2026-09-28 *\n\
+             done indices 2026-09-28 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+             begin indices 2026-09-29 *\n",
+        )
+        .expect("the journal");
+        let journaled = ask(&site).await;
+        assert_eq!(journaled["archive"]["to"], "2026-09-28", "{journaled}");
+        assert!(
+            journaled["archive"]["to_source"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("the GDFL import journal")),
+            "{journaled}"
+        );
+        assert_eq!(journaled["held"]["to"], "2026-09-10", "{journaled}");
+
+        // THE STORE HOLDS A LATER DAY: delivered, so the archive reaches it,
+        // and the census names itself as the evidence.
+        census_with(&root, Some(manifest), (2026, 9, 30), 150);
+        let past = ask(&site).await;
+        assert_eq!(past["archive"]["to"], "2026-09-30", "{past}");
+        assert_eq!(past["archive"]["from"], typed_from.as_str(), "{past}");
+        assert!(
+            past["archive"]["to_source"]
+                .as_str()
+                .is_some_and(|source| source.starts_with("the store's census at generation")),
+            "the span names the evidence it was read from: {past}"
+        );
+        assert_eq!(past["archive"]["label_outside"], NOT_IMPORTED);
+    }
+
+    /// **A DAY AFTER TODAY IS NOT EVIDENCE OF DELIVERY** (R3-05 repair 3,
+    /// the second agent's follow-up). Before: one journal `done` line for
+    /// 2099-01-01 made `archive.to` 2099-01-01, with the journal named as
+    /// its source. Now the journal's row says why it sets neither end, the
+    /// descriptor decides, and with no clock (`today: None`) nothing is
+    /// bounded and the journal's day still names itself.
+    #[test]
+    fn a_journal_day_after_today_is_not_evidence_of_delivery() {
+        let typed = pull::vendor::Feed::Gdfl
+            .descriptor()
+            .archive
+            .expect("GDFL's descriptor records a measured archive");
+        let root = store_root("feeds-archive-after-today");
+        let journal = pull::gdfl_import::journal_path(&root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        std::fs::write(
+            &journal,
+            "begin indices 2099-01-01 *\n\
+             done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+        )
+        .expect("the journal");
+        let today = i64::from(
+            Day::new(2026, 10, 15)
+                .expect("a real date")
+                .days_from_epoch(),
+        );
+        let answer: serde_json::Value = serde_json::from_str(&archive_json(
+            pull::vendor::Feed::Gdfl,
+            None,
+            &root,
+            Some(today),
+        ))
+        .expect("archive JSON");
+        assert_eq!(answer["to"], typed.to.to_string().as_str(), "{answer}");
+        assert!(
+            answer["to_source"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("the descriptor's dated measurement")),
+            "{answer}"
+        );
+        let journal_row = answer["evidence"]
+            .as_array()
+            .expect("evidence")
+            .iter()
+            .find(|row| row["by"] == "journal")
+            .cloned()
+            .expect("the journal's row");
+        assert!(journal_row["to"].is_null(), "{answer}");
+        let why = journal_row["why"].as_str().expect("the journal says why");
+        assert!(
+            why.contains("2099-01-01") && why.contains("2026-10-15"),
+            "{why}"
+        );
+        // NO CLOCK, NO BOUND: the journal's day is served as before.
+        let unbounded: serde_json::Value =
+            serde_json::from_str(&archive_json(pull::vendor::Feed::Gdfl, None, &root, None))
+                .expect("archive JSON");
+        assert_eq!(unbounded["to"], "2099-01-01", "{unbounded}");
+    }
+
+    /// **THE WINDOW IS REFUSED LOUDLY WHEN THE SETTINGS CANNOT BE READ, AND
+    /// NEVER SERVED INVERTED** (R3-05 repair 2, the second agent's blocking
+    /// 2 and 3).
+    ///
+    /// Before: with the settings directory unreadable, `/feeds.json` served
+    /// the built-in 2018-01-01..2026-09-30 as the window in force with no
+    /// word, while `/settings.json` said `degraded`; and a generation that
+    /// set `window.from` alone past the default `window.to` was served with
+    /// its first day after its last.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_window_is_refused_loudly_when_degraded_or_inverted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = store_root("feeds-window-degraded");
+        let (status, body) = crate::server::settings_route::change(
+            &root,
+            r#"{"expected":0,"changed_by":"test","reason":"widen","set":{"window.to":"2026-10-31"}}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let settings_dir = store::settings::dir(&root);
+        std::fs::set_permissions(&settings_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        let readable_anyway = std::fs::read_dir(&settings_dir).is_ok();
+        let rows = feeds_of("feeds-window-degraded", &root).await;
+        std::fs::set_permissions(&settings_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod back");
+        assert!(!readable_anyway, "this host reads a 000 directory (root?)");
+        let window = &row(&rows, "zerodha")["window"];
+        assert!(window["from"].is_null(), "{window}");
+        assert!(window["to"].is_null(), "{window}");
+        assert!(
+            window["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("cannot be read")),
+            "{window}"
+        );
+        assert!(window["degraded"].is_string(), "{window}");
+
+        // AN INVERTED GENERATION, as a build without the whole-window check
+        // could save it: `window.from` alone, past the default `window.to`.
+        let root = store_root("feeds-window-inverted");
+        let mut reader = store::settings::Reader::new(&root);
+        store::settings::save(
+            &mut reader,
+            &store::settings::Change {
+                expected: 0,
+                set: vec![(store::settings::Key::WindowFrom, "2026-10-01".to_owned())],
+                unset: Vec::new(),
+                changed_by: "an older build".to_owned(),
+                reason: "narrow to October".to_owned(),
+                at_micros: 1_700_000_000_000_000,
+            },
+            |_| Ok(()),
+        )
+        .expect("the store's own check passes one end");
+        let rows = feeds_of("feeds-window-inverted", &root).await;
+        let window = &row(&rows, "zerodha")["window"];
+        assert!(window["from"].is_null(), "{window}");
+        assert!(
+            window["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("not served inverted")),
+            "{window}"
+        );
+        assert!(window["degraded"].is_null(), "{window}");
+    }
+
+    /// **THE WINDOW IS THE OPERATOR'S SETTING**: saved, it is served on the
+    /// next request with no restart, and the built-in default is named while
+    /// nothing is saved (R3-05).
+    #[tokio::test]
+    async fn the_window_on_feeds_json_follows_the_saved_setting() {
+        let root = store_root("feeds-window-setting");
+        let rows = feeds_of("feeds-window-setting", &root).await;
+        let zerodha = row(&rows, "zerodha");
+        assert_eq!(zerodha["window"]["to"], "2026-09-30", "{zerodha}");
+        assert!(
+            zerodha["window"]["source"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("built-in default")),
+            "{zerodha}"
+        );
+        let (status, body) = crate::server::settings_route::change(
+            &root,
+            r#"{"expected":0,"changed_by":"test","reason":"widen","set":{"window.to":"2026-10-31"}}"#,
+        );
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let rows = feeds_of("feeds-window-setting", &root).await;
+        let zerodha = row(&rows, "zerodha");
+        assert_eq!(zerodha["window"]["from"], "2018-01-01", "{zerodha}");
+        assert_eq!(zerodha["window"]["to"], "2026-10-31", "{zerodha}");
+        let source = zerodha["window"]["source"].as_str().expect("a source");
+        assert!(source.starts_with("from: built-in default"), "{source}");
+        assert!(source.ends_with("; to: settings generation 1"), "{source}");
+    }
+
+    /// The p50, p99 and max of `samples`, nanoseconds.
+    fn quantiles(mut samples: Vec<u128>) -> (u128, u128, u128) {
+        samples.sort_unstable();
+        let at = |q: usize| samples[(samples.len() * q / 100).min(samples.len() - 1)];
+        (at(50), at(99), *samples.last().expect("samples"))
+    }
+
+    /// **GROWTH BENCH OF THE HELD SPAN: 1x, 10x, 100x KEYS** (R3-05).
+    ///
+    /// A census of 1,000, 10,000 and 100,000 option months. For each: the
+    /// first measure (a walk, O(keys)), 200 repeats at the same generation (a
+    /// hit, O(1)), and 200 one-key appends each read as a tail (a fold of the
+    /// appended key, O(appended)). The ratio gate: a hit and an append at 100x
+    /// cost no more than 4x their 1x figure, each the quietest of three
+    /// rounds of 200 (one round's p99 is three samples on a shared host);
+    /// the walk is allowed to grow and is the cost named for
+    /// `docs/06-limits.md`.
+    #[test]
+    #[ignore = "a growth bench: cargo test --release -p api held_span_growth -- --ignored --nocapture"]
+    fn held_span_growth_bench() {
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        let entry = |n: u32| Entry {
+            key: EntryKey {
+                contract: Some(
+                    brutex_core::instrument::Contract::parse(&format!(
+                        "2020-09-24-{}-CE",
+                        10_000 + n
+                    ))
+                    .expect("a contract"),
+                ),
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Fno,
+                symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+                timeframe: store::path::Timeframe::SECOND_1,
+                month: store::path::YearMonth::new(2020, 9).expect("a month"),
+            },
+            rows: 1,
+            first_ts_micros: ist_micros((2020, 9, 1), 9, 15, 0),
+            last_ts_micros: ist_micros(
+                (2020, 9, 1 + u8::try_from(n % 20).expect("small")),
+                15,
+                29,
+                59,
+            ),
+        };
+        let mut hits_p99 = Vec::new();
+        let mut appends_p99 = Vec::new();
+        for keys in [1_000_u32, 10_000, 100_000] {
+            let root = store_root(&format!("held-bench-{keys}"));
+            let path = manifest_path(&root, brutex_core::vendor::Vendor::Gdfl);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            let mut manifest =
+                Manifest::open(brutex_core::vendor::Vendor::Gdfl, &[], &[]).expect("genesis");
+            for n in 0..keys {
+                manifest.record(entry(n)).expect("records");
+            }
+            std::fs::write(&path, manifest.image()).expect("writes");
+            let mut census = census::read_vendor(&root, brutex_core::vendor::Vendor::Gdfl);
+            let started = std::time::Instant::now();
+            let (_, spans) = held_spans(Some(&census)).expect("a span");
+            let walk = started.elapsed().as_nanos();
+            assert_eq!(
+                spans[2].map(|s| day_text(s.last)),
+                Some("2020-09-20".to_owned())
+            );
+            // THREE ROUNDS PER SCALE, THE GATE ON THE QUIETEST: on a shared
+            // host one round's p99 is the third-largest of 200 samples, and
+            // two descheduled samples move it 60x (14 Oct, load 337 on 14
+            // cores: 1x 2,750 ns, 100x 166,416 ns, max 1.1 ms). A path that
+            // grew with the census would be slow in EVERY round, so the
+            // smallest round p99 still fails it; every round is printed.
+            let mut hit_rounds = Vec::new();
+            let mut append_rounds = Vec::new();
+            for round in 0..3_u32 {
+                let hits: Vec<u128> = (0..200)
+                    .map(|_| {
+                        let at = std::time::Instant::now();
+                        let _ = held_spans(Some(&census)).expect("a span");
+                        at.elapsed().as_nanos()
+                    })
+                    .collect();
+                let mut appends = Vec::new();
+                for n in 0..200 {
+                    manifest
+                        .record(entry(keys + round * 200 + n))
+                        .expect("records");
+                    std::fs::write(&path, manifest.image()).expect("writes");
+                    census = census::read_vendor_after(
+                        &root,
+                        brutex_core::vendor::Vendor::Gdfl,
+                        Some(&census),
+                    );
+                    let at = std::time::Instant::now();
+                    let _ = held_spans(Some(&census)).expect("a span");
+                    appends.push(at.elapsed().as_nanos());
+                }
+                let (hp50, hp99, hmax) = quantiles(hits);
+                let (ap50, ap99, amax) = quantiles(appends);
+                println!(
+                    "held span, {keys} keys, round {round}: walk {walk} ns; hit p50 {hp50} p99 {hp99} \
+                     max {hmax} ns (n=200); one-key append p50 {ap50} p99 {ap99} max {amax} ns (n=200)"
+                );
+                hit_rounds.push(hp99);
+                append_rounds.push(ap99);
+            }
+            // ONE WALK PER SCALE, on the first measure: no hit and no
+            // one-key append walked the census again.
+            let walks = walks_of(&path);
+            println!("held span, {keys} keys: walks {walks}");
+            assert_eq!(
+                walks, 1,
+                "{keys} keys: a hit or an append walked the census"
+            );
+            hits_p99.push(hit_rounds.into_iter().min().expect("three rounds"));
+            appends_p99.push(append_rounds.into_iter().min().expect("three rounds"));
+        }
+        assert!(hits_p99[2] <= hits_p99[0].max(1_000) * 4, "{hits_p99:?}");
+        assert!(
+            appends_p99[2] <= appends_p99[0].max(1_000) * 4,
+            "{appends_p99:?}"
+        );
     }
 }
