@@ -187,7 +187,7 @@ title = "repair row ceiling per timeframe grid and the before_promote step"
 
 [[package]]
 name = "WP-12f"
-merged = false
+merged = true
 title = "GDFL capital-market scope: trade-for-trade spells, stem hand-overs, alias indices"
 
 [[package]]
@@ -681,8 +681,12 @@ check = [
 ]
 closes = ["DB-070", "SC-CLOSE-21", "CMP-03", "CMP-01", "CMP-02"]
 helps = ["DB-G53"]
-not_rehearsed = "waits for WP-12f: its scope record and per-member reopening are not merged (it failed its third check on 12 Oct)"
-disk = "about 33 GB written for about 3.2 GB of data in about 1,340 full-copy generations (arithmetic, NOT MEASURED at full size, fix-WP-12f); measured samples: one Nov 2018 month of 7 index series 63 MB in 55 files, May 2024 222 MB in 61 files"
+rehearsed_ms = 23075
+rehearsed_bytes = 2702605046
+rehearsed_files = 752
+rehearsed_on = "build 7126ae98 (a stamped release cli of this branch, BRUTEX_COMMIT=7126ae98a10fd4f961db5e8264ebe9445d5dcd97, whose crates equal feat/db-fix 27c34adb, the first head holding WP-12f), 15 Oct 2026, on a private copy under work-20260925/shadow/R3-36-rh3/s18s19b: manifest/, imports/, audit/, logs/, session-masters/, bar-generations-v1/ and bar-revisions-v1/ cloned with cp -c, bars/ a real directory holding the GDFL INDEX and CASH trees cloned with cp -c (1,258 and 142,480 files) and the 347 underlying directories of the options tree, empty (the options tree holds 11,693,268 files; a capital-market run reads only the names of its directories, crates/cli/src/gdfl_import_command.rs stored_option_underlyings, and an indices run not even those); BRUTEX_GDFL_CM_ARCHIVE the vendor's outer zip, read only; days 2018-09-03 to 2018-11-30"
+rehearsed_result = "exit 0, 23,075 ms (48,875 ms on the first copy, s18s19, under heavier load, same receipt): 59 days imported, 30 closed, 0 refused, 0 incomplete, 295 files read, 0 refused, 8,641,534 rows, 6,345,922 of 6,363,430 seconds written, 95 months given a new generation, 1,997,709 rows outside the session, 0 failures; scope 7 index rows. 752 files written or appended (2,702,605,046 bytes), most of them the 95 full-copy generations. Measured by file mtime against a marker taken before the run (tgt/p-R3-36/r5/rh.py)."
+disk = "about 33 GB written for about 3.2 GB of data in about 1,340 full-copy generations (arithmetic, NOT MEASURED at full size, fix-WP-12f); measured samples: one Nov 2018 month of 7 index series 63 MB in 55 files, May 2024 222 MB in 61 files; the 15 Oct rehearsal of 2018-09-03 to 2018-11-30 wrote 2.70 GB in 752 files with 95 new generations, and a linear extrapolation of that sample to the 33 times as many days of the full span gives about 89 GB, not 33 GB (EXTRAPOLATED, the two disagree): measure a later span before the run"
 note = "Unfiltered (R-04). NIFTY and BANKNIFTY are not read again."
 
 [[step]]
@@ -701,9 +705,13 @@ check = [
 ]
 closes = ["DB-069", "DB-G53", "CMP-08"]
 helps = ["DB-B06", "DB-B12"]
-not_rehearsed = "waits for WP-12f: the trade-for-trade spells and stem hand-overs are not merged"
+rehearsed_ms = 363415
+rehearsed_bytes = 172909868
+rehearsed_files = 274
+rehearsed_on = "build 7126ae98 (a stamped release cli of this branch, BRUTEX_COMMIT=7126ae98a10fd4f961db5e8264ebe9445d5dcd97, whose crates equal feat/db-fix 27c34adb, the first head holding WP-12f), 15 Oct 2026, on a private copy under work-20260925/shadow/R3-36-rh3/s18s19b, after S-18's rehearsal on the same copy (the order the list runs them): manifest/, imports/, audit/, logs/, session-masters/, bar-generations-v1/ and bar-revisions-v1/ cloned with cp -c, bars/ a real directory holding the GDFL INDEX and CASH trees cloned with cp -c (1,258 and 142,480 files) and the 347 underlying directories of the options tree, empty (the options tree holds 11,693,268 files; a capital-market run reads only the names of its directories, crates/cli/src/gdfl_import_command.rs stored_option_underlyings, and an indices run not even those); BRUTEX_GDFL_CM_ARCHIVE the vendor's outer zip, read only; days 2018-09-03 to 2018-11-30"
+rehearsed_result = "exit 0, 363,415 ms: 59 days imported, 30 closed, 0 refused, 0 incomplete, 7,609 files read, 0 refused, 80,183,484 rows (39,330,699 LTQ=0 dropped), 63,999 of 39,517,567 seconds written, 36 months given a new generation, 68,328 rows outside the session, 0 failures; scope 7 index rows, 147 shares beyond the F&O list, 347 option underlyings. 274 files written or appended (172,909,868 bytes). A first rehearsal on a copy with no options tree (s18s19) read 885 files and scoped 21 shares and 0 underlyings: the options tree's directory names decide the share scope, so a copy without them under-scopes this step."
 last_run = "Parts ran by name on build app18, without WP-12f: the 12 special share days (S-30) and the renamed shares (S-31) on 13 Oct, and on 14 Oct 09:47:06 to 10:06:43 UTC cli gdfl-import stocks zip 2018-09-03 2026-09-24 --stored and the same over the tick store (runs 1791971226 and 1791972402, 161 names each, failures 0), so every option underlying then held got its cash series (D-3333 item 2). Exited shares, trade-for-trade spells and stem hand-overs wait for WP-12f; whether DB-069 and DB-G53 still hold is NOT PROVED until this step's check runs."
-disk = "NOT MEASURED at full span (fix-WP-12f); the rehearsal of the first months gives the sample"
+disk = "NOT MEASURED at full span. Measured sample (15 Oct rehearsal): 2018-09-03 to 2018-11-30 wrote 173 MB in 274 files in 363 s; the full span to 2026-07-31 holds about 33 times as many days, so about 5.7 GB and 3.3 h by linear extrapolation (EXTRAPOLATED; days the 14 Oct partial runs closed are not read again, so it is an upper bound only if later months cost no more than the first three)"
 note = "The range stops at 2026-07-31 (fix-WP-12f): under bar definition 4 the 38 auction-era days 2026-08-03 to 2026-09-24 are restated and every run refuses them by name (restated_auction_band); they are S-32. Unfiltered (R-04): 1,645 trade-for-trade sessions of 19 shares, the 11 special share days and the stored old names are read again; days already closed are not."
 
 [[step]]
@@ -940,5 +948,5 @@ check = [
   "GET /bars/window.json?feed=gdfl&timeframe=1s&key=NSE-CASH-RELIANCE&from=2026-08&to=2026-08&from_day=2026-08-03&to_day=2026-08-03&limit=1000&sort=ts&dir=desc: no bar of phase cas among the ordinary 1s bars, the auction prints answering under their own label (2 today, between 15:15 and 15:30 IST; read 15 Oct)",
 ]
 closes = ["CMP-07"]
-not_rehearsed = "waits for WP-12f: definition 4 and its restated_auction_band refusal are not merged"
+not_rehearsed = "waits for R3-22: the restate door is not merged (WP-12f, its other prerequisite, merged on 15 Oct)"
 disk = "the GDFL CASH 2026-08 and 2026-09 months copied once as new generations (to be measured on the rehearsal)"
