@@ -17004,7 +17004,18 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   began under 2 or 3 in the closing auction's era is refused by name at
   admission, and so is a member key (repair 6, 14 Oct 2026: check 4 read
   RELIANCE through the append door under a fresh filter while only a names
-  key of another filter stood restated). What it cannot see is a month an
+  key of another filter stood restated; repair 7, the same day: a later
+  run's own refusal no longer erases an early run's unclosed `begin`, which
+  had let the second run after it read the share and close it `done`; and a
+  whole-tree close under 4 ends a share's restatement only where its
+  `scope=`, resolved through the scope ledger, held the share; an unknown
+  digest holds nothing). It refuses MORE than it must in two shapes, loudly:
+  a whole-tree key asked on a day whose whole-tree key of an earlier
+  definition only whole-tree closes under 4 ended (a scope that held every
+  share is not provable by one probe), and a share whose remake ran under a
+  digest the ledger lost. The admission's walk for a share only whole-tree
+  closes ended is the day's keys naming that share, never the journal. Nor
+  can it see a month an
   earlier definition wrote with no journal line naming it (a store copied
   without its journal, or a journal line lost), and two runs interleaving
   their lines in one journal, which would attribute a `begin` to the other
@@ -17014,7 +17025,14 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   general check, one held record read
   after an `AlreadyPresent` batch and refused when it is stamped on the
   batch's own day, belongs to the shared landing (`ingest::from_rows`, owner
-  WP-13c / store) and is NOT DONE.
+  WP-13c / store) and is NOT DONE. So is the REMAKE that ends the refusal
+  (check 5 of WP-12f): no verb of this build writes a month as a new
+  generation holding fewer bars than the served one (`store::repair_month`
+  keeps every held bar, D-3350) nor the whole-tree close under 4 that ends
+  the era's refusal, so until a store writer and WP-80's remake land, every
+  stocks run touching a share day of the era an earlier definition's key
+  built is refused by name on every run, loudly, and nothing of it is
+  written. Owners: the store crate and WP-80.
 
 ## Cost claims of the /db fix round that name no proof — 12 October 2026
 

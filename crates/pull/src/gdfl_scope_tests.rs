@@ -1575,6 +1575,7 @@ fn ctx_of<'a>(
                 scope::Ledger::load(scope::scopes_path(run.store_root)).unwrap(),
             ),
             beyond: std::cell::RefCell::new(HashMap::new()),
+            shares: std::cell::RefCell::new(HashMap::new()),
         }),
     }
 }
@@ -1936,6 +1937,12 @@ fn era_run(
     .unwrap()
 }
 
+/// A run with no scope ledger: no whole-tree close is known to have read a
+/// share ([`Ctx::held`]).
+fn unheld(_scope: &str, _share: &str) -> bool {
+    false
+}
+
 /// Whether `report` names the restated auction band among its failures.
 fn names_restated(report: &Report) -> bool {
     report
@@ -2021,13 +2028,17 @@ fn a_share_another_filter_built_under_an_earlier_definition_is_refused_under_eve
 }
 
 /// A SHARE KEY AN EARLIER DEFINITION LEFT OPEN OR INCOMPLETE IS REFUSED TOO
-/// (D-4878 item 10). On four share days of the auction era: one begun by a
+/// (D-4878 item 10). On six share days of the auction era: one begun by a
 /// run whose `run` line names no definition (every build before 4) and never
 /// closed, and one closed `incomplete` under 3, may hold the print as a bar
 /// in the months they wrote, and are refused by name; one that earlier run
-/// began and closed `refused` wrote nothing and is read; and one begun under
-/// a run of definition 4 and never closed is this build's own crash, read
-/// again to make its months durable (WP-16), never refused.
+/// began and closed `refused` ITSELF (its `run=` is the run that began it)
+/// wrote nothing and is read; one begun by it and closed `refused` by a line
+/// that names no run, and one closed `refused` by a LATER run's line, say
+/// nothing of what the early run wrote before it was killed, and are refused
+/// (check 5 of WP-12f); and one begun under a run of definition 4 and never
+/// closed is this build's own crash, read again to make its months durable
+/// (WP-16), never refused.
 #[test]
 fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
     let root = scratch("wp12f-restated-open");
@@ -2036,8 +2047,10 @@ fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
         day(2026, 8, 5),
         day(2026, 8, 6),
         day(2026, 8, 7),
+        day(2026, 8, 10),
+        day(2026, 8, 11),
     ];
-    let [open, incomplete, refused, ours] = days;
+    let [open, incomplete, refused, ours, unknown, later] = days;
     let store = era_world(
         &root,
         &days,
@@ -2047,24 +2060,38 @@ fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
              begin stocks {open} RELIANCE\n\
              begin stocks {incomplete} RELIANCE\n\
              incomplete stocks {incomplete} RELIANCE definition=3 files=1 seconds=1 failures=1 \
-             stage=census reason=census_refused\n\
+             stage=census reason=census_refused run=11\n\
              begin stocks {refused} RELIANCE\n\
              refused stocks {refused} RELIANCE definition=3 stage=vendor reason=day_not_held \
+             failures=0 run=11\n\
+             begin stocks {unknown} RELIANCE\n\
+             refused stocks {unknown} RELIANCE definition=3 stage=vendor reason=day_not_held \
              failures=0\n\
+             begin stocks {later} RELIANCE\n\
              run 12 source=zip started=12 definition=4\n\
-             begin stocks {ours} RELIANCE\n"
+             begin stocks {ours} RELIANCE\n\
+             begin stocks {later} RELIANCE\n\
+             refused stocks {later} RELIANCE definition=4 stage=vendor reason=day_not_held \
+             failures=0 run=12\n"
         ),
     );
     let reliance = ["RELIANCE".to_owned()];
-    let report = era_run(&root, &store, (open, ours), &reliance, None);
+    let report = era_run(&root, &store, (open, later), &reliance, None);
     assert_eq!(
         (report.days_refused, report.files),
-        (2, 2),
+        (4, 2),
         "{:?}",
         report.failures
     );
     let journal = journal_text(&store);
-    for (d, expected) in [(open, 1), (incomplete, 1), (refused, 0), (ours, 0)] {
+    for (d, expected) in [
+        (open, 1),
+        (incomplete, 1),
+        (refused, 0),
+        (ours, 0),
+        (unknown, 1),
+        (later, 1),
+    ] {
         assert_eq!(
             lines_starting(
                 &journal,
@@ -2085,6 +2112,136 @@ fn a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused() {
         "{journal}"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// AN EARLY-OPEN SHARE KEY IS REFUSED ON EVERY RUN, WHATEVER REFUSAL
+/// FOLLOWS IT (D-4878 item 10; check 5 of WP-12f, 14 Oct 2026). A share key
+/// begun by a run under an earlier definition and never closed is imported
+/// TWICE, each time from one of five journals: the bare begin; the begin and
+/// an unrelated later refusal of the key by a run under 4 (`day_not_held`);
+/// the same refusal naming no run; a torn `run` line after the begin; and a
+/// begin under a run line of definition 5. Each run is refused by name and
+/// reads no file. The first run's own `refused` close was taken for the early
+/// run's, which erased the early begin, so the second run read the share
+/// through the append door (seconds offered, none written) and closed it
+/// `done` under 4 over a month still holding the print as a bar.
+#[test]
+fn an_early_open_share_key_is_refused_on_every_run_whatever_refusal_follows() {
+    let d = day(2026, 8, 4);
+    let early = format!("run 11 source=zip started=11\nbegin stocks {d} RELIANCE\n");
+    let shapes = [
+        ("bare", early.clone()),
+        (
+            "later refusal",
+            format!(
+                "{early}run 12 source=zip started=12 definition=4\n\
+                 refused stocks {d} RELIANCE definition=4 stage=vendor reason=day_not_held \
+                 failures=0 run=12\n"
+            ),
+        ),
+        (
+            "runless refusal",
+            format!(
+                "{early}refused stocks {d} RELIANCE definition=3 stage=vendor \
+                 reason=day_not_held failures=0\n"
+            ),
+        ),
+        (
+            "torn run",
+            format!("{early}run 14 source=zip started=14 defin"),
+        ),
+        (
+            "future run",
+            format!("run 15 source=zip started=15 definition=5\nbegin stocks {d} RELIANCE\n"),
+        ),
+    ];
+    let reliance = ["RELIANCE".to_owned()];
+    for (n, (shape, journal)) in shapes.into_iter().enumerate() {
+        let root = scratch(&format!("wp12f-early-twice-{n}"));
+        let store = era_world(&root, &[d], &["RELIANCE.NSE"], &journal);
+        for attempt in 1..=2 {
+            let report = era_run(&root, &store, (d, d), &reliance, None);
+            assert_eq!(
+                (report.days_refused, report.files, report.seconds),
+                (1, 0, 0),
+                "{shape} run {attempt}: {:?} {}",
+                report.failures,
+                journal_text(&store)
+            );
+            assert!(names_restated(&report), "{shape} run {attempt}");
+        }
+        let journal = journal_text(&store);
+        assert!(!share_held(&store, "RELIANCE"), "{shape}: {journal}");
+        assert!(
+            !journal
+                .lines()
+                .any(|line| line.starts_with(&format!("done stocks {d} RELIANCE "))),
+            "{shape}: {journal}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// AN EARLY-OPEN MEMBER KEY IS REFUSED ON EVERY RUN TOO (D-4878 items 4 and
+/// 10; check 5 of WP-12f). The whole tree closed `done` under 4 before scopes
+/// were recorded, so it owes the stored scope's ZZFOO; a run under an
+/// earlier definition then began ZZFOO's member key `*+NSE-CASH-ZZFOO` and
+/// never closed it. Imported TWICE under the stored scope, bare and with an
+/// unrelated later refusal of the member key in between: each run refuses
+/// the member key by name and reads nothing.
+#[test]
+fn an_early_open_member_key_is_refused_on_every_run() {
+    let era = day(2026, 8, 4);
+    let member = format!("stocks {era} *+NSE-CASH-ZZFOO");
+    let early = format!(
+        "run 12 source=zip started=12 definition=4\n\
+         begin stocks {era} *\n\
+         done stocks {era} * definition=4 files=1 seconds=1 failures=0 run=12\n\
+         run 13 source=zip started=13\n\
+         begin {member}\n"
+    );
+    let shapes = [
+        ("bare", early.clone()),
+        (
+            "later refusal",
+            format!(
+                "{early}run 14 source=zip started=14 definition=4\n\
+                 refused {member} definition=4 stage=vendor reason=day_not_held failures=0 \
+                 run=14\n"
+            ),
+        ),
+    ];
+    for (n, (shape, journal)) in shapes.into_iter().enumerate() {
+        let root = scratch(&format!("wp12f-early-member-{n}"));
+        let store = era_world(&root, &[era], &["RELIANCE.NSE", "ZZFOO.NSE"], &journal);
+        for attempt in 1..=2 {
+            let scope = Arc::new(CmScope::stored(["ZZFOO"]).unwrap());
+            let report = era_run(&root, &store, (era, era), &[], Some(scope));
+            assert!(
+                names_restated(&report) && report.files == 0 && report.seconds == 0,
+                "{shape} run {attempt}: files={} {:?} {}",
+                report.files,
+                report.failures,
+                journal_text(&store)
+            );
+        }
+        let journal = journal_text(&store);
+        assert!(!share_held(&store, "ZZFOO"), "{shape}: {journal}");
+        assert!(
+            lines_starting(
+                &journal,
+                &format!("refused {member} definition=4 stage=file reason=restated_auction_band")
+            ) >= 1,
+            "{shape}: {journal}"
+        );
+        assert!(
+            !journal
+                .lines()
+                .any(|line| line.starts_with(&format!("done {member} "))),
+            "{shape}: {journal}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// A MEMBER KEY ASKS THE SAME QUESTION (D-4878 items 4 and 10). A whole-tree
@@ -2113,6 +2270,13 @@ fn a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused() {
     let report = era_run(&root, &store, (era, era), &[], Some(scope));
     assert!(names_restated(&report), "{:?}", report.failures);
     assert_eq!(report.files, 0, "{:?}", report.failures);
+    // The receipt counts the day refused, never imported (check 5).
+    assert_eq!(
+        (report.days_refused, report.days_imported),
+        (1, 0),
+        "{:?}",
+        report.failures
+    );
     assert!(!share_held(&store, "ZZFOO"));
     let journal = journal_text(&store);
     assert_eq!(
@@ -2127,6 +2291,204 @@ fn a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused() {
         "{journal}"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A DAY WHOSE MEMBER KEYS ARE REFUSED AS RESTATED IS COUNTED REFUSED ONCE,
+/// AND IMPORTED ONLY WHEN A MEMBER WAS READ (D-4878 items 4 and 10; check 5
+/// of WP-12f, 14 Oct 2026: the receipt read "days imported 1, days refused
+/// 0" beside a `restated_auction_band` refusal of a member key). The whole
+/// tree closed `done` under 4 before scopes were recorded, so it owes the
+/// stored scope's ZZBAR and ZZFOO. Two journals:
+///
+/// - a names key built BOTH under 3: both member keys are refused by name,
+///   nothing read, the day is one in `days_refused` and none in
+///   `days_imported`;
+/// - a names key built ZZFOO alone under 3: ZZFOO's member key is refused,
+///   ZZBAR's is read, and the day is one in each.
+#[test]
+fn a_day_whose_member_keys_are_refused_as_restated_is_counted_refused_once() {
+    let era = day(2026, 8, 4);
+    let journal = |names: &str| {
+        format!(
+            "run 12 source=zip started=12 definition=4\n\
+             begin stocks {era} *\n\
+             done stocks {era} * definition=4 files=1 seconds=1 failures=0\n\
+             run 13 source=zip started=13\n\
+             begin stocks {era} {names}\n\
+             done stocks {era} {names} definition=3 files=1 seconds=1 failures=0\n"
+        )
+    };
+    let shapes = [
+        ("both built", journal("ZZBAR,ZZFOO"), (1, 0, 0), 2, false),
+        ("one built", journal("ZZFOO"), (1, 1, 1), 1, true),
+    ];
+    for (n, (shape, journal, counts, refused_lines, bar_read)) in shapes.into_iter().enumerate() {
+        let root = scratch(&format!("wp12f-restated-count-{n}"));
+        let stems = ["RELIANCE.NSE", "ZZBAR.NSE", "ZZFOO.NSE"];
+        let store = era_world(&root, &[era], &stems, &journal);
+        let scope = Arc::new(CmScope::stored(["ZZBAR", "ZZFOO"]).unwrap());
+        let report = era_run(&root, &store, (era, era), &[], Some(scope));
+        let journal = journal_text(&store);
+        assert_eq!(
+            (report.days_refused, report.days_imported, report.files),
+            counts,
+            "{shape}: {:?} {journal}",
+            report.failures
+        );
+        assert!(names_restated(&report), "{shape}");
+        assert_eq!(
+            lines_starting(&journal, &format!("refused stocks {era} *+NSE-CASH-ZZ")),
+            refused_lines,
+            "{shape}: {journal}"
+        );
+        assert!(!share_held(&store, "ZZFOO"), "{shape}");
+        assert_eq!(share_held(&store, "ZZBAR"), bar_read, "{shape}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A WHOLE-TREE CLOSE NEVER ENDS A SHARE'S RESTATEMENT FOR THE MEMBER KEYS
+/// IT OWES (D-4878 items 4 and 10; check 5 of WP-12f, 14 Oct 2026). A names
+/// key built ZZFOO under 3; the whole tree then closed `done` under 4 before
+/// scopes were recorded, so it read the swept surface and never ZZFOO. A run
+/// under the stored scope reads ZZFOO under the member key
+/// `*+NSE-CASH-ZZFOO`, which is owed exactly because that close never read
+/// it: refused by name, nothing read. Taking the whole-tree close as a
+/// reading of every share read ZZFOO through the append door. Once a close
+/// under 4 that NAMES ZZFOO stands after it, the share's months are built as
+/// 4 builds them and the member key is read.
+#[test]
+fn a_whole_tree_close_does_not_end_a_shares_restatement_for_the_member_keys_it_owes() {
+    let era = day(2026, 8, 4);
+    let built = format!(
+        "run 11 source=zip started=11\n\
+         begin stocks {era} ZZFOO\n\
+         done stocks {era} ZZFOO definition=3 files=1 seconds=1 failures=0\n\
+         run 12 source=zip started=12 definition=4\n\
+         begin stocks {era} *\n\
+         done stocks {era} * definition=4 files=1 seconds=1 failures=0\n"
+    );
+    let named = format!(
+        "{built}begin stocks {era} ZZFOO\n\
+         done stocks {era} ZZFOO definition=4 files=1 seconds=1 failures=0\n"
+    );
+    let shapes = [("whole only", built, true), ("named after", named, false)];
+    for (n, (shape, journal, refused)) in shapes.into_iter().enumerate() {
+        let root = scratch(&format!("wp12f-whole-member-{n}"));
+        let store = era_world(&root, &[era], &["RELIANCE.NSE", "ZZFOO.NSE"], &journal);
+        let scope = Arc::new(CmScope::stored(["ZZFOO"]).unwrap());
+        let report = era_run(&root, &store, (era, era), &[], Some(scope));
+        assert_eq!(
+            (names_restated(&report), report.files),
+            (refused, usize::from(!refused)),
+            "{shape}: {:?} {}",
+            report.failures,
+            journal_text(&store)
+        );
+        assert_eq!(share_held(&store, "ZZFOO"), !refused, "{shape}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// A WHOLE-TREE CLOSE UNDER 4 ENDS A SHARE'S RESTATEMENT ONLY WHERE ITS SCOPE
+/// HELD THE SHARE (D-4878 items 4 and 10; check 5 of WP-12f, 14 Oct 2026). A
+/// whole-tree close reads the members of its scope and no others, so a key
+/// that built a share under an earlier definition stands, for every key
+/// that reads that share, unless a later whole-tree close's `scope=` (asked
+/// of the scope ledger; none named is the swept surface) held it, or a
+/// names close under 4 named it. Five journals, each one share day of the
+/// auction era:
+///
+/// - ZZFOO built by name under 3, then the whole tree under 4 naming no
+///   scope (the swept surface, which holds no ZZFOO): a run naming ZZFOO is
+///   refused, nothing read;
+/// - the same, the whole tree's close naming the stored scope that holds
+///   ZZFOO, which the ledger records: read;
+/// - the same, the digest one the ledger does not hold: refused (not known
+///   to have read it);
+/// - RELIANCE built by name under 3, then the whole tree under 4 naming no
+///   scope: the swept surface holds RELIANCE, so a run naming it reads it;
+/// - the whole tree built under 3, then under 4 naming no scope, then a run
+///   under the stored scope: ZZFOO is owed under its member key, which the
+///   swept surface never read, and is refused.
+///
+/// Taking every whole-tree close as a reading of every share read ZZFOO
+/// through the append door in the first, third and fifth.
+#[test]
+fn a_whole_tree_close_ends_a_shares_restatement_only_where_its_scope_held_it() {
+    let era = day(2026, 8, 4);
+    let stored = Arc::new(CmScope::stored(["ZZFOO"]).unwrap());
+    let record = scope::Record::of(stored.members(CmKind::Stocks));
+    let named = |share: &str, scope: &str| {
+        format!(
+            "begin stocks {era} {share}\n\
+             done stocks {era} {share} definition=3 files=1 seconds=1 failures=0\n\
+             begin stocks {era} *\n\
+             done stocks {era} * definition=4 files=1 seconds=1 failures=0{scope}\n"
+        )
+    };
+    let in_ledger = format!(" scope={}", record.digest());
+    let shapes = [
+        ("swept close", named("ZZFOO", ""), false, "ZZFOO", true),
+        (
+            "held close",
+            named("ZZFOO", &in_ledger),
+            true,
+            "ZZFOO",
+            false,
+        ),
+        (
+            "unknown digest",
+            named("ZZFOO", &in_ledger),
+            false,
+            "ZZFOO",
+            true,
+        ),
+        (
+            "swept share",
+            named("RELIANCE", ""),
+            false,
+            "RELIANCE",
+            false,
+        ),
+        (
+            "whole tree",
+            format!(
+                "begin stocks {era} *\n\
+                 done stocks {era} * definition=3 files=1 seconds=1 failures=0\n\
+                 begin stocks {era} *\n\
+                 done stocks {era} * definition=4 files=1 seconds=1 failures=0\n"
+            ),
+            false,
+            "",
+            true,
+        ),
+    ];
+    for (n, (shape, journal, ledgered, only, refused)) in shapes.into_iter().enumerate() {
+        let root = scratch(&format!("wp12f-whole-scope-{n}"));
+        let store = era_world(&root, &[era], &["RELIANCE.NSE", "ZZFOO.NSE"], &journal);
+        if ledgered {
+            let mut ledger = scope::Ledger::load(scope::scopes_path(&store)).unwrap();
+            ledger.record("stocks", &record).unwrap();
+        }
+        let only: Vec<String> = only
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let share = only.first().map_or("ZZFOO", String::as_str);
+        let report = era_run(&root, &store, (era, era), &only, Some(Arc::clone(&stored)));
+        assert_eq!(
+            (names_restated(&report), report.files == 0),
+            (refused, refused),
+            "{shape}: files={} {:?} {}",
+            report.files,
+            report.failures,
+            journal_text(&store)
+        );
+        assert_eq!(share_held(&store, share), !refused, "{shape}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// THE AUCTION ERA'S ADMISSION CHECK COSTS THE SAME AT ANY JOURNAL SIZE
@@ -2148,7 +2510,7 @@ fn a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused() {
 fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
     let root = scratch("wp12f-admit-cost");
     let era: Vec<Day> = days(day(2026, 8, 3), day(2026, 9, 30));
-    let journal_of = |filters: usize, whole: bool, at: &str| -> Journal {
+    let journal_of = |filters: usize, (whole, ended): (bool, bool), at: &str| -> Journal {
         let store = root.join(at);
         let mut text = String::new();
         for d in &era {
@@ -2164,15 +2526,34 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
                     "done stocks {d} {only} definition=3 files=1 seconds=1 failures=0"
                 );
             }
+            if ended {
+                // A whole-tree close under 4 after them, under no scope:
+                // every names key's share is ended only by it, and stands
+                // where its scope did not hold it. Its run line says 4: a
+                // `begin` no run line precedes is an earlier definition's.
+                let _ = writeln!(text, "run 4 source=zip started=4 definition=4");
+                let _ = writeln!(text, "begin stocks {d} *");
+                let _ = writeln!(
+                    text,
+                    "done stocks {d} * definition=4 files=1 seconds=1 failures=0"
+                );
+            }
         }
         std::fs::create_dir_all(store.join("imports")).unwrap();
         std::fs::write(journal_path(&store), text).unwrap();
         Journal::load(journal_path(&store)).unwrap()
     };
-    let (small, large) = (journal_of(1, true, "small"), journal_of(100, true, "large"));
+    let (small, large) = (
+        journal_of(1, (true, false), "small"),
+        journal_of(100, (true, false), "large"),
+    );
     let (names_small, names_large) = (
-        journal_of(1, false, "names-small"),
-        journal_of(100, false, "names-large"),
+        journal_of(1, (false, false), "names-small"),
+        journal_of(100, (false, false), "names-large"),
+    );
+    let (ended_small, ended_large) = (
+        journal_of(1, (false, true), "ended small"),
+        journal_of(100, (false, true), "ended large"),
     );
     assert_eq!(
         (small.restated.len(), large.restated.len()),
@@ -2184,16 +2565,24 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
     for journal in [&small, &large] {
         assert!(restated_past_append(
             journal,
+            &unheld,
             ImportKind::Stocks,
             &asked_of("*"),
             probe
         ));
         assert!(
-            restated_past_append(journal, ImportKind::Stocks, &asked_of("INFY"), probe),
+            restated_past_append(
+                journal,
+                &unheld,
+                ImportKind::Stocks,
+                &asked_of("INFY"),
+                probe
+            ),
             "a names filter on a day whose whole-tree key is restated"
         );
         assert!(!restated_past_append(
             journal,
+            &unheld,
             ImportKind::Indices,
             &asked_of("*"),
             probe
@@ -2201,12 +2590,13 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
         let before = day(2026, 7, 31);
         assert!(!restated_past_append(
             journal,
+            &unheld,
             ImportKind::Stocks,
             &format!("stocks {before} *"),
             before
         ));
     }
-    for journal in [&names_small, &names_large] {
+    for journal in [&names_small, &names_large, &ended_small, &ended_large] {
         for (filter, restated) in [
             ("*", true),
             ("SYM000", true),
@@ -2220,7 +2610,13 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
             ("SYM000+ACC", false),
         ] {
             assert_eq!(
-                restated_past_append(journal, ImportKind::Stocks, &asked_of(filter), probe),
+                restated_past_append(
+                    journal,
+                    &unheld,
+                    ImportKind::Stocks,
+                    &asked_of(filter),
+                    probe
+                ),
                 restated,
                 "{filter}"
             );
@@ -2233,6 +2629,7 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
             let (key, d) = &asked[n % asked.len()];
             hits += usize::from(std::hint::black_box(restated_past_append(
                 journal,
+                &unheld,
                 ImportKind::Stocks,
                 key,
                 *d,
@@ -2252,19 +2649,22 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
     };
     let whole_asked = keys_on_every_day(&["*", "ACC", "ACC,INFY,TCS", "ACC+INFY"]);
     let names_asked = keys_on_every_day(&["*", "SYM000", "ACC,INFY,SYM000", "ACC+SYM000"]);
-    let mut at: [Vec<u128>; 4] = std::array::from_fn(|_| Vec::with_capacity(200));
+    let mut at: [Vec<u128>; 6] = std::array::from_fn(|_| Vec::with_capacity(200));
     for _ in 0..200 {
         at[0].push(batch(&small, &whole_asked));
         at[1].push(batch(&large, &whole_asked));
         at[2].push(batch(&names_small, &names_asked));
         at[3].push(batch(&names_large, &names_asked));
+        at[4].push(batch(&ended_small, &names_asked));
+        at[5].push(batch(&ended_large, &names_asked));
     }
-    let [s, l, ns, nl] = at.map(|mut nanos| spread(&mut nanos));
+    let [s, l, ns, nl, es, el] = at.map(|mut nanos| spread(&mut nanos));
     println!(
         "WP-12f restated_past_append, ns a call (200 batches of 1,000): whole tree, \
          {} restated keys p50={} p99={} max={}; {} restated keys p50={} p99={} max={}; \
          names only, {} restated keys p50={} p99={} max={}; {} restated keys p50={} p99={} \
-         max={}",
+         max={}; names ended only by a whole-tree close, {} restated keys p50={} p99={} \
+         max={}; {} restated keys p50={} p99={} max={}",
         small.restated.len(),
         s.0,
         s.1,
@@ -2280,9 +2680,17 @@ fn the_auction_era_admission_check_costs_the_same_at_any_journal_size() {
         names_large.restated.len(),
         nl.0,
         nl.1,
-        nl.2
+        nl.2,
+        ended_small.restated.len(),
+        es.0,
+        es.1,
+        es.2,
+        ended_large.restated.len(),
+        el.0,
+        el.1,
+        el.2
     );
-    for (smaller, larger) in [(s.0, l.0), (ns.0, nl.0)] {
+    for (smaller, larger) in [(s.0, l.0), (ns.0, nl.0), (es.0, el.0)] {
         assert!(
             larger <= 3 * smaller.max(1),
             "a hundredfold journal costs the check {larger} ns against {smaller} ns: it walks"

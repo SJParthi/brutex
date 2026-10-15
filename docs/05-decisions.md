@@ -68097,17 +68097,58 @@ made six index series from the 12 special sessions alone.
    filter that read that share has ended it. A whole-tree key reads every
    share; a member key (`<filter>+<member>`) reads its member and asks the
    same question, since it bypasses its base key's admission. A `refused`
-   close wrote nothing and undoes the early `begin` before it. Which
+   close of the run that wrote the early `begin` wrote nothing and undoes
+   that `begin`; it is that run's only when its `run=` equals the id of the
+   last whole `run` line before the `begin` (repair 7, 14 Oct 2026, after
+   check 5: this build's own first `restated_auction_band` refusal was taken
+   for the early run's close, erased the early `begin`, and the next run read
+   RELIANCE through the append door, 6,685 seconds offered and 0 written,
+   and closed it `done` under 4). A `refused` line of any other run, one
+   naming no run, or a `begin` no whole `run` line precedes keeps the entry:
+   refusing too much fails loudly, refusing too little fails silently. Which
    definition a `begin` was written under is its run's: this build's `run`
    line carries `definition=4`, and a run line without one (every build
    before 4, which reads any `name=value` field of a run line) is an earlier
    definition's, so a day this build began and a crash left open is read
    again to make its months durable (WP-16), never refused. The months GDFL
    CASH 2026-08 and 2026-09 are made again as new generations by WP-80
-   (D-3320 item 4), whose whole-tree `done` under 4 ends the refusal for
-   every key of the day; a names close under 4 ends only the keys whose
-   shares it read, never a whole-tree key's. O(1) in the journal's size: one
-   hash probe for the day and one a share the asking key names.
+   (D-3320 item 4); a names or member close under 4 ends the keys whose
+   shares it names all of, never a whole-tree key's. A WHOLE-TREE close under
+   4 read the members of ITS scope and no others, so it ends a key's share
+   only where that scope held the share: its `scope=` digest is resolved
+   through the scope ledger (`imports/gdfl.scopes`), a close naming none is
+   the swept surface, and a digest the ledger does not hold, or a run with
+   no ledger, holds nothing, so the share stands (repair 7, 14 Oct 2026,
+   after check 5's probe read ZZFOO, built under 3 by a names key, through
+   the append door under `*+NSE-CASH-ZZFOO` once a pre-scope `*` close under
+   4 stood; a names key outside that close's scope read it the same way). A
+   whole-tree key of an earlier definition that only whole-tree closes under
+   4 ended stands for every share none of their scopes held, and for an
+   asking whole-tree key always, since no probe of one share tells whether a
+   scope held every share. WP-80's remake therefore ends the refusal only
+   for the shares its scope holds: it runs under a scope holding every share
+   an earlier definition's key read in the era, or closes the rest by name.
+   A share a LATER scope adds stays refused on those days until a remake
+   whose scope holds it: an earlier definition's whole-tree key recorded no
+   scope, so it is taken to have read every share. Taking it as today's
+   swept surface instead would refuse too little, silently, for a share the
+   F&O list held when that build ran and no longer holds.
+   NO VERB OF THIS BUILD MAKES THAT REMAKE (repair 7, after check 5):
+   `gdfl-import` refuses every such key at admission, under any filter,
+   whole tree included, and the versioned repair (`store::repair_month`,
+   D-3350) keeps every held bar, so it cannot take the closing print out of
+   a month. The remake needs a writer that publishes a month as a new
+   generation holding FEWER bars than the served one, and the whole-tree
+   close under 4 it writes; owners the store crate and WP-80, named in
+   `docs/06-limits.md` L-WP12f-13. Until it lands, every stocks run touching
+   a day of the era that an earlier definition's key built is refused by
+   name on every run (rc 1, one journal line a key-day, no bar file), the
+   daily Ingest included for those days only; days after the era are not
+   touched.
+   O(1) in the journal's size: one hash probe for the day, one a share the
+   asking key names, and for a share only whole-tree closes ended one probe
+   a scope of that day's keys naming it (measured by
+   `the_auction_era_admission_check_costs_the_same_at_any_journal_size`).
 
 **Not done.** An options run records no scope. Landing a sparse month's owed
 days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day

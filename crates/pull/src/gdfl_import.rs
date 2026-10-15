@@ -2471,17 +2471,28 @@ struct Journal {
     /// earlier definition, one closed `incomplete` under one, and one begun
     /// by a run under one and never closed. Kept in journal order while the
     /// load reads, so a later close under 4 that covers a key's shares ends
-    /// it ([`Journal::read_line`]); only the load reads it.
-    auction_keys: HashMap<String, HashSet<String>>,
+    /// it ([`Journal::read_line`]); only the load reads it. Each filter maps
+    /// to how the closes under 4 after it ended it ([`Ended`]).
+    auction_keys: HashMap<String, HashMap<String, Ended>>,
     /// The keys of [`Journal::auction_keys`] begun by a run under an earlier
-    /// definition and not closed since, each with whether its filter was
-    /// already there before that `begin`: a `refused` close (which writes
-    /// nothing) gives the filter back that state.
-    begun_early: HashMap<String, bool>,
+    /// definition and not closed since, each with its filter's state before
+    /// that `begin` (absent, or the closes that had ended it) and the id of
+    /// the run that began it (the last whole `run` line before the `begin`;
+    /// `None` when no such line precedes it). Only THAT run's own `refused` close (which writes
+    /// nothing) gives the filter back its earlier state: a `refused` line of
+    /// another run, or one whose run is unknown, says nothing of what the
+    /// early run wrote before it was killed, and keeps the entry (check 5 of
+    /// WP-12f: a later run's own refusal had erased the early begin, so the
+    /// next run read the share through the append door).
+    begun_early: HashMap<String, (Option<Ended>, Option<u64>)>,
     /// The `definition=` of the last `run` line read: `None` before one, and
     /// for a run line that names none, which every build before definition 4
     /// wrote (WP-12f, D-4878 item 10).
     run_definition: Option<u32>,
+    /// The id of the last whole `run` line read: the run every `begin` after
+    /// it belongs to, since a run writes its `run` line before any other
+    /// (D-3317 item 4) and a `begin` carries no `run=` of its own.
+    run_id: Option<u64>,
     /// [`Journal::auction_keys`] folded once at the load's end into the
     /// shares each day's months may hold such a bar of: what admission asks,
     /// one hash probe a day and one a name the asking key names
@@ -2489,25 +2500,80 @@ struct Journal {
     auction_restated: HashMap<String, AuctionRestated>,
 }
 
+/// How the closes under 4 after a restated key of the auction era ended it
+/// (WP-12f, D-4878 item 10).
+#[derive(Clone, Debug, Default)]
+struct Ended {
+    /// A close under 4 of a names filter or a member key that reads every
+    /// share this key reads: built as 4 builds them, so the key is ended.
+    named: bool,
+    /// The whole-tree closes under 4 after it, each by its `scope=` (`""` for
+    /// one that names none: the swept surface, D-4878). A whole-tree close
+    /// read the members of ITS scope and no others, so it ends the key only
+    /// for the shares that scope holds ([`AuctionRestated::meets`]). Taking
+    /// it as a reading of every share let a member key the close was owed,
+    /// and a names key outside its scope, read the share through the append
+    /// door (check 5 of WP-12f). A day holds the operator's few closes.
+    whole: Vec<String>,
+}
+
+/// What a whole-tree close's scope held, as [`Ended::whole`] spells the
+/// scope: whether a close under that scope read `share`. A run that cannot
+/// tell (no scope ledger, or a digest the ledger does not hold) answers
+/// `false`: refusing too much fails loudly, refusing too little fails
+/// silently.
+type ScopeHeld<'h> = &'h dyn Fn(&str, &str) -> bool;
+
 /// The shares of one `stocks <day>` of the closing auction's era whose months
 /// may hold a bar definition 4 no longer builds (WP-12f, D-4878 item 10).
 #[derive(Debug, Default)]
 struct AuctionRestated {
-    /// A whole-tree key (`*`) is among them: every share of the day.
+    /// A whole-tree key (`*`) no close under 4 ended is among them: every
+    /// share of the day.
     every: bool,
-    /// The shares the others name.
+    /// The shares of the names and member keys no close under 4 ended.
     names: HashSet<String>,
+    /// Per share a names or member key named, for each such key only
+    /// whole-tree closes under 4 ended, those closes' scopes: the share
+    /// stands unless one scope of every such key held it.
+    whole_named: HashMap<String, Vec<Vec<String>>>,
+    /// For each whole-tree key only whole-tree closes under 4 ended, those
+    /// closes' scopes: every share stands unless one of them held it.
+    whole_every: Vec<Vec<String>>,
 }
 
 impl AuctionRestated {
     /// Whether a key under `filter` would read a share this day holds such a
-    /// bar of: always under `*`, since an entry exists only when some share
-    /// does; otherwise one probe a share the filter names.
-    fn meets(&self, filter: &str) -> bool {
+    /// bar of: under `*`, when any key's share stands; otherwise one probe a
+    /// share the filter names, and for a share only whole-tree closes ended
+    /// one probe of `held` a scope of the keys naming it (the day's few).
+    fn meets(&self, filter: &str, held: ScopeHeld<'_>) -> bool {
+        let unheld =
+            |share: &str, scopes: &[String]| !scopes.iter().any(|scope| held(scope, share));
+        let stands = |share: &str| {
+            self.names.contains(share)
+                || self
+                    .whole_named
+                    .get(share)
+                    .is_some_and(|keys| keys.iter().any(|scopes| unheld(share, scopes)))
+                || self.whole_every.iter().any(|scopes| unheld(share, scopes))
+        };
         self.every
             || match shares_of(filter) {
-                None => true,
-                Some(mut names) => names.any(|name| self.names.contains(name)),
+                // The whole tree reads every share its scope holds: a whole
+                // tree's key ended only by whole-tree closes stands for it
+                // unless one of them held every share, which no probe of one
+                // share can tell; a names key's share is walked, the day's
+                // few, ending at the first that stands.
+                None => {
+                    !self.names.is_empty()
+                        || !self.whole_every.is_empty()
+                        || self
+                            .whole_named
+                            .iter()
+                            .any(|(share, keys)| keys.iter().any(|scopes| unheld(share, scopes)))
+                }
+                Some(mut names) => names.any(stands),
             }
     }
 }
@@ -2525,17 +2591,9 @@ fn shares_of(filter: &str) -> Option<impl Iterator<Item = &str>> {
     Some(names.split(','))
 }
 
-/// Whether a close under filter `wide` read every share a key under filter
-/// `narrow` reads (WP-12f, D-4878 item 10).
-fn covers(wide: &str, narrow: &str) -> bool {
-    let Some(wide_names) = shares_of(wide) else {
-        return true;
-    };
-    let Some(mut narrow_names) = shares_of(narrow) else {
-        return false;
-    };
-    let wide_names: Vec<&str> = wide_names.collect();
-    narrow_names.all(|name| wide_names.contains(&name))
+/// A closing line's `scope=`, `None` when it carries none (D-4878).
+fn scope_of<'l>(stats: &[&'l str]) -> Option<&'l str> {
+    stats.iter().find_map(|field| field.strip_prefix("scope="))
 }
 
 /// Whether `kind` and `day`, as a journal line spells them, are a share's day
@@ -2631,15 +2689,33 @@ impl Journal {
         let mut auction_restated: HashMap<String, AuctionRestated> =
             HashMap::with_capacity(journal.auction_keys.len());
         for (of_day, filters) in std::mem::take(&mut journal.auction_keys) {
-            if filters.is_empty() {
-                continue;
-            }
-            let restated = auction_restated.entry(of_day).or_default();
-            for filter in &filters {
-                match shares_of(filter) {
-                    None => restated.every = true,
-                    Some(names) => restated.names.extend(names.map(str::to_owned)),
+            let mut restated = AuctionRestated::default();
+            for (filter, ended) in filters {
+                if ended.named {
+                    continue;
                 }
+                let shares = shares_of(&filter).map(|names| names.map(str::to_owned).collect());
+                match (shares, ended.whole.is_empty()) {
+                    (None, true) => restated.every = true,
+                    (Some(shares), true) => restated.names.extend::<Vec<String>>(shares),
+                    (None, false) => restated.whole_every.push(ended.whole),
+                    (Some(shares), false) => {
+                        for share in shares {
+                            restated
+                                .whole_named
+                                .entry(share)
+                                .or_default()
+                                .push(ended.whole.clone());
+                        }
+                    }
+                }
+            }
+            if restated.every
+                || !restated.names.is_empty()
+                || !restated.whole_named.is_empty()
+                || !restated.whole_every.is_empty()
+            {
+                auction_restated.insert(of_day, restated);
             }
         }
         journal.auction_restated = auction_restated;
@@ -2653,27 +2729,51 @@ impl Journal {
         self.auction_keys
             .entry(format!("{kind} {day}"))
             .or_default()
-            .insert(only.to_owned());
+            .insert(only.to_owned(), Ended::default());
     }
 
-    /// A close under 4 of `only`: what it read is built as 4 builds it, so
-    /// it ends its own key's entry and every key of the day whose shares it
-    /// read (the remake's whole-tree close ends them all). O(the day's
-    /// entries): a day holds the operator's few filters.
-    fn end_auction_keys(&mut self, kind: &str, day: &str, only: &str) {
-        if let Some(filters) = self.auction_keys.get_mut(&format!("{kind} {day}")) {
-            filters.retain(|filter| !covers(only, filter));
+    /// A close under 4 of `only`, whose `scope=` is `scope`: what it read is
+    /// built as 4 builds it. A names or member close ends every key of the
+    /// day whose shares it names all of; a whole-tree close is noted on every
+    /// key of the day with its scope, and ends a key's share only where that
+    /// scope held it ([`Ended::whole`]). O(the day's entries): a day holds
+    /// the operator's few filters.
+    fn end_auction_keys(&mut self, (kind, day, only): (&str, &str, &str), scope: Option<&str>) {
+        let Some(filters) = self.auction_keys.get_mut(&format!("{kind} {day}")) else {
+            return;
+        };
+        match shares_of(only) {
+            None => {
+                let scope = scope.unwrap_or("");
+                for ended in filters.values_mut() {
+                    if !ended.whole.iter().any(|held| held == scope) {
+                        ended.whole.push(scope.to_owned());
+                    }
+                }
+            }
+            Some(wide) => {
+                let wide: Vec<&str> = wide.collect();
+                for (filter, ended) in filters.iter_mut() {
+                    if shares_of(filter)
+                        .is_some_and(|mut narrow| narrow.all(|name| wide.contains(&name)))
+                    {
+                        ended.named = true;
+                    }
+                }
+            }
         }
     }
 
     /// What one closing or opening line does to [`Journal::auction_keys`]
     /// (D-4878 item 10). `built` is the definition the line says built the
-    /// day, `None` for a `begin`, whose run line says it, or a `refused`.
+    /// day, `None` for a `begin`, whose run line says it, or a `refused`;
+    /// `run` is the closing line's `run=`, `None` for a `begin` or a line
+    /// that carries none; `scope` its `scope=`, `None` for none.
     fn auction_line(
         &mut self,
         verb: &str,
         (kind, day, only): (&str, &str, &str),
-        built: Option<u32>,
+        (built, run, scope): (Option<u32>, Option<u64>, Option<&str>),
     ) {
         if !auction_share_day(kind, day) {
             return;
@@ -2688,17 +2788,30 @@ impl Journal {
                     let before = self
                         .auction_keys
                         .get(&format!("{kind} {day}"))
-                        .is_some_and(|filters| filters.contains(only));
-                    self.begun_early.entry(key).or_insert(before);
+                        .and_then(|filters| filters.get(only))
+                        .cloned();
+                    self.begun_early.entry(key).or_insert((before, self.run_id));
                     self.note_auction_key(kind, day, only);
                 }
             }
             "refused" => {
-                // Wrote nothing: an early `begin` before it is undone.
-                if self.begun_early.remove(&key) == Some(false)
+                // The early run's OWN refusal wrote nothing, so its `begin`
+                // is undone. Any other run's, or one whose run is unknown on
+                // either side, keeps the entry: refusing too much fails
+                // loudly, refusing too little reads the share through the
+                // append door and closes it done, unsaid.
+                let own = matches!(
+                    (self.begun_early.get(&key), run),
+                    (Some(&(_, Some(begun))), Some(closed)) if begun == closed
+                );
+                if own
+                    && let Some((before, _)) = self.begun_early.remove(&key)
                     && let Some(filters) = self.auction_keys.get_mut(&format!("{kind} {day}"))
                 {
-                    filters.remove(only);
+                    match before {
+                        Some(ended) => filters.insert(only.to_owned(), ended),
+                        None => filters.remove(only),
+                    };
                 }
             }
             "incomplete" => {
@@ -2710,7 +2823,7 @@ impl Journal {
             _ => {
                 self.begun_early.remove(&key);
                 if current(built) {
-                    self.end_auction_keys(kind, day, only);
+                    self.end_auction_keys((kind, day, only), scope);
                 } else {
                     self.note_auction_key(kind, day, only);
                 }
@@ -2727,6 +2840,52 @@ impl Journal {
     /// hash probe.
     fn left_open(&self, kind: ImportKind, day: Day) -> bool {
         self.open_days.contains(&format!("{} {day}", kind.as_str()))
+    }
+
+    /// A `done` line of `kind day only`: [`Journal::read_line`]'s arm, apart
+    /// so that function stays one screen. O(fields).
+    fn read_done(
+        &mut self,
+        (kind, day, only): (&str, &str, &str),
+        stats: &[&str],
+    ) -> Result<(), ()> {
+        let definition = built_under(stats)?;
+        let run = run_of(stats)?;
+        let refused = count_of(stats, "vendor_refused")?.unwrap_or(0);
+        self.auction_line(
+            "done",
+            (kind, day, only),
+            (definition, run, scope_of(stats)),
+        );
+        let key = format!("{kind} {day} {only}");
+        self.refused_close.remove(&key);
+        self.open.remove(&key);
+        self.incomplete.remove(&key);
+        // The LAST `done` of a key says which definition built what
+        // the store holds (D-2822); an index day built under 2 or 3,
+        // and a share's before 2026-08-03, holds the bars 4 builds
+        // (D-3342, D-4878 item 10, [`definition_is_current`]).
+        // The LAST `done` of a key also says which members it was
+        // asked to read (D-4878); one that says nothing is a close
+        // from before scopes were recorded.
+        match scope_of(stats) {
+            Some(digest) => self.scope_done.insert(key.clone(), digest.to_owned()),
+            None => self.scope_done.remove(&key),
+        };
+        if definition.is_some_and(|definition| current_for(kind, day, definition)) {
+            self.restated.remove(&key);
+            if refused > 0 {
+                self.with_refusals.insert(key.clone());
+            } else {
+                self.with_refusals.remove(&key);
+            }
+            self.done.insert(key);
+        } else {
+            self.done.remove(&key);
+            self.with_refusals.remove(&key);
+            self.restated.insert(key);
+        }
+        Ok(())
     }
 
     /// Folds one whole line into the journal's sets, or `Err(())` for a line
@@ -2750,49 +2909,20 @@ impl Journal {
                     return Err(());
                 }
                 self.runs.insert(id);
-                // The definition the run's days are built under, which its
-                // `begin` lines do not say (D-4878 item 10).
+                // The definition the run's days are built under, and the run
+                // they belong to, which its `begin` lines do not say (D-4878
+                // item 10).
                 self.run_definition = definition_of(rest)?;
+                self.run_id = Some(id);
             }
             ["begin", kind, day, only] => {
-                self.auction_line("begin", (*kind, *day, *only), None);
+                self.auction_line("begin", (*kind, *day, *only), (None, None, None));
                 let key = key(kind, day, only);
                 self.refused_close.remove(&key);
                 self.open.insert(key);
             }
             ["done", kind, day, only, stats @ ..] => {
-                let definition = built_under(stats)?;
-                run_of(stats)?;
-                let refused = count_of(stats, "vendor_refused")?.unwrap_or(0);
-                self.auction_line("done", (*kind, *day, *only), definition);
-                let key = key(kind, day, only);
-                self.refused_close.remove(&key);
-                self.open.remove(&key);
-                self.incomplete.remove(&key);
-                // The LAST `done` of a key says which definition built what
-                // the store holds (D-2822); an index day built under 2 or 3,
-                // and a share's before 2026-08-03, holds the bars 4 builds
-                // (D-3342, D-4878 item 10, [`definition_is_current`]).
-                // The LAST `done` of a key also says which members it was
-                // asked to read (D-4878); one that says nothing is a close
-                // from before scopes were recorded.
-                match stats.iter().find_map(|field| field.strip_prefix("scope=")) {
-                    Some(digest) => self.scope_done.insert(key.clone(), digest.to_owned()),
-                    None => self.scope_done.remove(&key),
-                };
-                if definition.is_some_and(|definition| current_for(kind, day, definition)) {
-                    self.restated.remove(&key);
-                    if refused > 0 {
-                        self.with_refusals.insert(key.clone());
-                    } else {
-                        self.with_refusals.remove(&key);
-                    }
-                    self.done.insert(key);
-                } else {
-                    self.done.remove(&key);
-                    self.with_refusals.remove(&key);
-                    self.restated.insert(key);
-                }
+                self.read_done((kind, day, only), stats)?;
             }
             // Not done, whatever closed the key before: the last line wins
             // (D-3317). A `refused` day wrote nothing this time; each is
@@ -2805,8 +2935,8 @@ impl Journal {
                 stats @ ..,
             ] => {
                 let built = definition_of(stats)?;
-                run_of(stats)?;
-                self.auction_line(verb, (*kind, *day, *only), built);
+                let run = run_of(stats)?;
+                self.auction_line(verb, (*kind, *day, *only), (built, run, scope_of(stats)));
                 let key = key(kind, day, only);
                 if *verb == "refused" {
                     let unrun: Vec<&str> = fields
@@ -2828,8 +2958,12 @@ impl Journal {
             ["recounted", kind, day, only, stats @ ..] => {
                 let definition = definition_of(stats)?;
                 count_of(stats, "months")?;
-                run_of(stats)?;
-                self.auction_line("recounted", (*kind, *day, *only), definition);
+                let run = run_of(stats)?;
+                self.auction_line(
+                    "recounted",
+                    (*kind, *day, *only),
+                    (definition, run, scope_of(stats)),
+                );
                 let key = key(kind, day, only);
                 self.refused_close.remove(&key);
                 self.open.remove(&key);
@@ -3244,6 +3378,10 @@ struct Scoped<'a> {
     /// Per scope a done close names (`None`: it names none), the members
     /// this run's scope holds beyond it, computed once per run.
     beyond: std::cell::RefCell<HashMap<Option<String>, std::sync::Arc<HashSet<String>>>>,
+    /// Per scope a whole-tree close of the auction era names (`""`: it names
+    /// none, the swept surface), the shares its members are filed under,
+    /// computed once per run ([`Ctx::held`]).
+    shares: std::cell::RefCell<HashMap<String, std::sync::Arc<HashSet<String>>>>,
 }
 
 /// What a day closed `done` still owes this run's scope (D-4878).
@@ -3259,6 +3397,54 @@ enum Owed {
 }
 
 impl Ctx<'_> {
+    /// Whether a whole-tree close under `scope` (`""`: none named, the swept
+    /// surface) read `share`: its scope holds a member filed under it
+    /// ([`crate::gdfl_cm::member_share`]). The share set of each scope is
+    /// built once a run from the scope ledger, then one probe. A run with no
+    /// scope, and a digest the ledger does not hold, answer `false`: that
+    /// close is not known to have read the share, so its restatement stands
+    /// (D-4878 item 10, check 5 of WP-12f).
+    fn held(&self, scope: &str, share: &str) -> bool {
+        let Some(scoped) = &self.scoped else {
+            return false;
+        };
+        if let Some(shares) = scoped.shares.borrow().get(scope) {
+            return shares.contains(share);
+        }
+        let shares: HashSet<String> = {
+            let ledger = scoped.ledger.borrow();
+            let members = if scope.is_empty() {
+                Some(&scoped.swept)
+            } else {
+                ledger.members_of(scope)
+            };
+            members
+                .into_iter()
+                .flat_map(|members| members.iter())
+                .map(|member| crate::gdfl_cm::member_share(member).to_owned())
+                .collect()
+        };
+        let answer = shares.contains(share);
+        scoped
+            .shares
+            .borrow_mut()
+            .insert(scope.to_owned(), std::sync::Arc::new(shares));
+        answer
+    }
+
+    /// Whether `key` of `day` would read a share whose months may hold a bar
+    /// definition 4 no longer builds ([`restated_past_append`]), each
+    /// whole-tree close's scope asked of this run's ledger ([`Ctx::held`]).
+    fn restated(&self, key: &str, day: Day) -> bool {
+        restated_past_append(
+            self.journal,
+            &|scope, share| self.held(scope, share),
+            self.run.kind,
+            key,
+            day,
+        )
+    }
+
     /// What `key`'s day, closed `done`, owes this run's scope: O(1) for a
     /// day that owes nothing (one compare of digests, two hash probes), and
     /// the members beyond a close's scope are computed once per scope; both
@@ -4768,7 +4954,7 @@ fn admit(ctx: &Ctx<'_>, key: &str, day: Day, report: &mut Report) -> bool {
             return false;
         }
     }
-    if restated_past_append(ctx.journal, ctx.run.kind, key, day) {
+    if ctx.restated(key, day) {
         report.days_refused += 1;
         let _refused = refuse_restated(ctx, (key, day), report);
         return false;
@@ -4814,7 +5000,9 @@ const RESTATED_AUCTION_BAND: &str = "restated_auction_band";
 /// longer builds (D-4878 item 10, CMP-07): a share some key of that day,
 /// UNDER ANY FILTER, closed `done` or `recounted` under 2 or 3, closed
 /// `incomplete` under one, or began under a run of one and never closed, and
-/// no later close under 4 of a filter that read it has ended. Such a key is
+/// no later close under 4 that read it has ended: a names or member close
+/// naming it, or a whole-tree close whose scope `held` it (a whole-tree
+/// close reads its scope's members and no others). Such a key is
 /// refused by name, every run, and never read through the append door:
 /// definition 4 takes the auction's print OUT of the bars, so the second
 /// reading is often the held day less its last bar, which the append-only
@@ -4828,10 +5016,18 @@ const RESTATED_AUCTION_BAND: &str = "restated_auction_band";
 ///
 /// O(1) in the journal's size: one hash probe for the day, then one probe a
 /// share the key names (`*` names none; a member key names one), the
-/// asking filter's own few, never a walk of the journal. Timed at two
+/// asking filter's own few, and for a share only whole-tree closes ended one
+/// probe of `held` a scope of the day's keys naming it (the day's own few
+/// lines), never a walk of the journal. Timed at two
 /// journal sizes a hundredfold apart by
 /// `pull::gdfl_import::tests::scope_reopen::the_auction_era_admission_check_costs_the_same_at_any_journal_size`.
-fn restated_past_append(journal: &Journal, kind: ImportKind, key: &str, day: Day) -> bool {
+fn restated_past_append(
+    journal: &Journal,
+    held: ScopeHeld<'_>,
+    kind: ImportKind,
+    key: &str,
+    day: Day,
+) -> bool {
     if kind != ImportKind::Stocks || !crate::vendor::cash_auction_eligibility_required(day) {
         return false;
     }
@@ -4841,7 +5037,7 @@ fn restated_past_append(journal: &Journal, kind: ImportKind, key: &str, day: Day
     journal
         .auction_restated
         .get(of_day)
-        .is_some_and(|restated| restated.meets(filter))
+        .is_some_and(|restated| restated.meets(filter, held))
 }
 
 /// Names `day` in `resumed` when the journal sends it back, whatever closed
@@ -5364,6 +5560,7 @@ where
                     .map_err(|why| ImportRefusal::Journal { why })?,
             ),
             beyond: std::cell::RefCell::new(HashMap::with_capacity(SCOPES_HINT)),
+            shares: std::cell::RefCell::new(HashMap::with_capacity(SCOPES_HINT)),
         }),
         None => None,
     };
@@ -5647,6 +5844,10 @@ struct Widened {
     /// The member keys closed, and the worst of their closes.
     closed: usize,
     worst: Option<Outcome>,
+    /// A member key of the day was refused before any file was read, its
+    /// share restated by the auction era ([`restated_past_append`]): the day
+    /// is one more in `days_refused`, once however many keys were.
+    restated: bool,
     /// The members read this day, under whichever key: a member two keys owe
     /// is read once.
     taken: HashSet<String>,
@@ -5654,8 +5855,13 @@ struct Widened {
 
 impl Widened {
     /// One "day imported" (or "day incomplete", "day refused") and one more
-    /// in `days_imported`, when the run closed a member key on the day.
+    /// in `days_imported`, when the run closed a member key on the day after
+    /// reading it; one more in `days_refused` when a member key was refused
+    /// unread as restated.
     fn tell(&self, ctx: &Ctx<'_>, day: Day, report: &mut Report) {
+        if self.restated {
+            report.days_refused += 1;
+        }
         if let (Some(before), Some(worst)) = (self.before, self.worst) {
             report.days_imported += 1;
             let told = (
@@ -5708,8 +5914,21 @@ where
         widened.before = Some(Mark::of(report));
     }
     for member in &members {
+        let member_key = format!("{key}+{member}");
+        // A member key reads its one share through the same append door a
+        // base key does, so it is asked the same question [`admit`] asks
+        // (D-4878 item 10), here, where every member key is made: refused
+        // by name before any file is read, and counted as the day's refusal
+        // ([`Widened::tell`]), never as a day imported (check 5 of WP-12f:
+        // the receipt read "days imported 1, days refused 0" beside the
+        // refusal).
+        if ctx.restated(&member_key, day) {
+            let _refused = refuse_restated(ctx, (&member_key, day), report);
+            widened.restated = true;
+            continue;
+        }
         let pass = Pass {
-            key: &format!("{key}+{member}"),
+            key: &member_key,
             day,
             member: Some(member),
         };
@@ -5849,11 +6068,9 @@ where
         "{day} is read under a request that does not hold it"
     );
     if pass.member.is_some() {
-        // A member key reads its one share through the same append door a
-        // base key does, so it is asked the same question (D-4878 item 10).
-        if restated_past_append(ctx.journal, run.kind, key, day) {
-            return Ok(Some(refuse_restated(ctx, (key, day), report)));
-        }
+        // A member key was asked whether the auction era restated its share
+        // where it was made ([`widen_key`], the one maker of a member
+        // `Pass`), as a base key is in [`admit`] (D-4878 item 10).
         let retried = ctx.options.retry_refused && ctx.journal.with_refusals.contains(key);
         name_retried(ctx.journal, run.kind, (key, day, retried), report);
     }
