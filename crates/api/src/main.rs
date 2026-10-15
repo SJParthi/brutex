@@ -50,18 +50,24 @@ fn main() -> std::process::ExitCode {
     // A BUILD NOBODY CAN NAME SERVES NO WRITE (DB-B71): armed here, by the
     // binary, before a router exists. See `api::server::arm_unstamped_gate`.
     let _refusal = api::server::arm_unstamped_gate();
+    // WHAT A SERVE KEEPS UNTIL THE RUNTIME HAS ENDED (R3-14): its serve lock
+    // and its port, released together after the last write, so a free port
+    // means a free store. See `api::server::Held`.
+    let mut held = api::server::Held::default();
     let code = runtime.block_on(async {
         match text_args(raw) {
             // CTRL-C OR SIGTERM (R3-14): a `kill -TERM` stops gracefully too,
             // so the speed table's open minute is written (`api::speed`).
-            Ok(args) => api::server::run(&args, Box::pin(api::speed::stop_asked())).await,
+            Ok(args) => {
+                api::server::run_held(&args, Box::pin(api::speed::stop_asked()), &mut held).await
+            }
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED
             }
         }
     });
-    let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
+    let _abandoned = api::server::end_served(runtime, api::server::SHUTDOWN_GRACE, held);
     note_exit(code, count);
     std::process::ExitCode::from(code)
 }

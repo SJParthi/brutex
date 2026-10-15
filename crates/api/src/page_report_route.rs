@@ -131,6 +131,10 @@ pub fn read(body: &str) -> Result<Report, Refusal> {
 pub struct Outcome {
     /// Whether its line was written.
     pub written: bool,
+    /// What the log did with its line: `None` when the ration kept it out
+    /// before the log was asked (R3-14 repair 1: this was ignored, and a line
+    /// the log dropped was answered `202 written`).
+    pub log: Option<telemetry::Emitted>,
     /// Reports written since the start, this one included.
     pub written_total: u64,
     /// Reports kept out since the start, this one included.
@@ -147,6 +151,7 @@ pub fn note(report: &Report, now_ms: u64) -> Outcome {
         let kept_out_total = KEPT_OUT.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         return Outcome {
             written: false,
+            log: None,
             written_total: WRITTEN.load(Ordering::Relaxed),
             kept_out_total,
         };
@@ -157,12 +162,48 @@ pub fn note(report: &Report, now_ms: u64) -> Outcome {
     if let Some(kept_out) = admit.summary {
         line = line.with("kept_out_before", telemetry::Value::Uint(kept_out));
     }
-    let _dropped_when_filtered = telemetry::emit(&line);
-    let written_total = WRITTEN.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    // THE LOG'S ANSWER IS READ (R3-14 repair 1): only a line that reached
+    // the file is counted written and answered `202 written`.
+    let log = telemetry::emit(&line);
+    let written = log.is_written();
+    let written_total = if written {
+        WRITTEN.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    } else {
+        WRITTEN.load(Ordering::Relaxed)
+    };
     Outcome {
-        written: true,
+        written,
+        log: Some(log),
         written_total,
         kept_out_total: KEPT_OUT.load(Ordering::Relaxed),
+    }
+}
+
+/// The status and the sentence one report's [`Outcome`] earns: `202` only for
+/// a line the log wrote; `429` when this route's own ration kept it out;
+/// `202` with `written: false` when the log's own floor or flood ration held
+/// it back (counted there, and said by its next line); `503` when the log
+/// could not take it at all, which is a failure the page must see.
+#[must_use]
+pub fn status_of(done: &Outcome) -> (u16, &'static str) {
+    match done.log {
+        None => (
+            429,
+            "counted, not written: the page-report ration of this minute is spent",
+        ),
+        Some(telemetry::Emitted::Written) => {
+            (202, "written to the log, which the audit stream keeps")
+        }
+        Some(telemetry::Emitted::Filtered) => (
+            202,
+            "counted, not written: the log's own floor or flood ration held the line back \
+             and says so in its next line",
+        ),
+        Some(telemetry::Emitted::Dropped | telemetry::Emitted::NotInstalled) => (
+            503,
+            "NOT WRITTEN: the log could not take the line (dropped, or no log is open); \
+             /logs names why",
+        ),
     }
 }
 
@@ -176,12 +217,7 @@ pub fn answer(body: &str, now_ms: u64) -> (u16, String) {
         ),
         Ok(report) => {
             let done = note(&report, now_ms);
-            let status = if done.written { 202 } else { 429 };
-            let why = if done.written {
-                "written to the log, which the audit stream keeps"
-            } else {
-                "counted, not written: the page-report ration of this minute is spent"
-            };
+            let (status, why) = status_of(&done);
             (
                 status,
                 serde_json::json!({

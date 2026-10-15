@@ -555,8 +555,16 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
     // so this file cannot match them.
     let main = include_str!("main.rs");
     assert!(
-        main.contains(concat!("Box::pin(api::speed::", "stop_asked()))")),
+        main.contains(concat!("Box::pin(api::speed::", "stop_asked())")),
         "the binary stops on SIGTERM too"
+    );
+    // AND ENDS THROUGH `end_served`, which counts what the drain cut and
+    // only then frees the store and the port (R3-14 repair 1).
+    let ran = main.find(concat!("api::server::run_", "held(&args"));
+    let ended = main.find(concat!("api::server::end_", "served(runtime"));
+    assert!(
+        matches!((ran, ended), (Some(r), Some(e)) if r < e),
+        "the binary keeps what the serve held and ends through end_served"
     );
     let server = include_str!("server.rs");
     let body = server
@@ -580,6 +588,10 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
 #[tokio::test]
 async fn a_stop_waits_for_open_requests_no_longer_than_its_grace() {
     let mark = crate::emitted::mark();
+    // ONE REQUEST OPEN AT THE BOUND, on a row no other test uses: the cut
+    // line must say how many and where (R3-14 repair 1).
+    let route = "/speed-test/open-at-the-bound";
+    let open = Pending::start(global().row(route, Kind::Route, now_ms()));
     let (stopping, asked) = tokio::sync::oneshot::channel();
     stopping.send(()).expect("the receiver is held");
     let started = std::time::Instant::now();
@@ -600,6 +612,27 @@ async fn a_stop_waits_for_open_requests_no_longer_than_its_grace() {
             .any(|record| crate::emitted::counts(record, "grace_ms", 50)),
         "the cut is said with its grace: {cut:?}"
     );
+    let ours = cut
+        .iter()
+        .find(|record| crate::emitted::says(record, "routes", &format!("{route}=1")))
+        .unwrap_or_else(|| panic!("the cut names the open request's route: {cut:?}"));
+    assert!(
+        ours.field("cut")
+            .and_then(telemetry::OwnedValue::as_u64)
+            .is_some_and(|n| n >= 1),
+        "and how many were cut: {ours:?}"
+    );
+    drop(open);
+    assert_eq!(
+        crate::server::ConnectionLimits::SERVED.drain_grace,
+        DRAIN_GRACE,
+        "the operator's server drains for DRAIN_GRACE"
+    );
+    assert_eq!(
+        STOP_BOUND,
+        DRAIN_GRACE + crate::server::SHUTDOWN_GRACE,
+        "the whole stop is the drain plus the runtime's end"
+    );
 
     // AND THE SERVER RACES IT: the needles are split so this file cannot
     // match them.
@@ -611,7 +644,7 @@ async fn a_stop_waits_for_open_requests_no_longer_than_its_grace() {
     let armed = body.find(concat!("stopping.", "send(())"));
     let raced = body.find(concat!(
         "crate::speed::drain_",
-        "bound(stop_asked, crate::speed::DRAIN_GRACE)"
+        "bound(stop_asked, limits.drain_grace)"
     ));
     let flushed = body.find(concat!("crate::speed::flush_", "at_shutdown()"));
     assert!(
@@ -694,4 +727,157 @@ async fn a_landing_and_a_scrub_are_timed_as_stages() {
         matches!((started, landed, finished), (Some(s), Some(l), Some(f)) if s < l && l < f),
         "each member's landing is timed around land_spot: {body}"
     );
+}
+
+/// **A STAGE TIMES ITS WORK, NOT THE REQUEST THAT STARTED IT** (R3-14 repair
+/// 2). The scrub's stage was a `Pending` held by the request future, so a
+/// client that left at one second counted the stage cancelled at one second
+/// while the scrub ran on for three minutes on the blocking pool (second
+/// agent, 15 Oct). A [`SharedStage`] is counted by whichever side finishes
+/// first, once: here the request side is dropped while the work runs, and the
+/// stage is counted only when the work ends, answered, with the work's time.
+#[test]
+fn a_stage_times_its_work_not_the_request_that_started_it() {
+    let name = "speed-test/work that outlives its request";
+    let row_of = || {
+        global()
+            .report(now_ms())
+            .rows
+            .into_iter()
+            .find(|row| row.route == format!("stage:{name}"))
+    };
+    let stage = SharedStage::start(name);
+    let in_work = stage.clone();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let work = std::thread::spawn(move || {
+        wait.recv().expect("the test says when the work ends");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        in_work.finish(Outcome::Answered)
+    });
+    // THE CLIENT LEAVES: the request's side is dropped while the work runs.
+    drop(stage);
+    assert!(
+        row_of().is_none_or(|row| row.since_start.n == 0),
+        "nothing is counted while the work runs: {:?}",
+        row_of()
+    );
+    go.send(()).expect("the work waits");
+    assert!(work.join().expect("the work ends"), "the work counted it");
+    let row = row_of().expect("the stage has its row");
+    assert_eq!(
+        (
+            row.since_start.n,
+            row.since_start.answered,
+            row.since_start.cancelled
+        ),
+        (1, 1, 0),
+        "counted once, answered, when the work ended: {row:?}"
+    );
+    assert!(
+        row.since_start.max_micros >= 30_000,
+        "with the work's time: {row:?}"
+    );
+
+    // EITHER SIDE COUNTS IT ONCE: the second finish finds it counted.
+    let twice = SharedStage::start(name);
+    assert!(twice.clone().finish(Outcome::Failed));
+    assert!(!twice.finish(Outcome::Answered), "counted once only");
+    let row = row_of().expect("the row");
+    assert_eq!(
+        (row.since_start.n, row.since_start.failed),
+        (2, 1),
+        "{row:?}"
+    );
+
+    // AND THE SCRUB USES IT, finishing inside the blocking closure: the
+    // needles are split so this file cannot match them.
+    let verify = include_str!("verify.rs");
+    let body = verify
+        .split_once(concat!("\npub(crate) async fn vendor_off_", "worker("))
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    let shared = body.find(concat!("speed::SharedStage::", "start(\"vendor scrub\")"));
+    let scrub = body.find(concat!("let report = ", "vendor(&root, &census);"));
+    let counted = body.find(concat!(
+        "in_scrub.",
+        "finish(crate::speed::Outcome::Answered)"
+    ));
+    assert!(
+        matches!((shared, scrub, counted), (Some(a), Some(b), Some(c)) if a < b && b < c),
+        "the scrub's stage is finished by the scrub itself: {body}"
+    );
+}
+
+/// **WHAT A STOP CUT IS NAMED BY ROW AND COUNT** (R3-14 repair 1). The cut
+/// line said only its grace; a reader could not tell whether one request was
+/// cut or fifty, or on which route. Every row with a request open is listed,
+/// the over-cap row included before it has counted anything, and a request
+/// counted (finished or dropped) leaves the list.
+#[test]
+fn what_a_stop_cut_is_named_by_row_and_count() {
+    let speed = Speed::new(0, 2);
+    let a = speed.row("/a", Kind::Route, 0);
+    let b = speed.row("/b", Kind::Route, 0);
+    let over = speed.row("/c", Kind::Route, 0);
+    let first = Pending::start(a.clone());
+    let second = Pending::start(a);
+    let third = Pending::start(b);
+    let fourth = Pending::start(over);
+    let open = speed.open_now();
+    assert_eq!(
+        open,
+        [
+            ("/a".to_owned(), 2),
+            ("/b".to_owned(), 1),
+            (OVER_CAP.to_owned(), 1)
+        ]
+    );
+    assert_eq!(
+        open_summary(&open),
+        (4, format!("/a=2, /b=1, {OVER_CAP}=1"))
+    );
+    first.finish(5, Outcome::Answered);
+    drop(second);
+    third.finish_now(Outcome::Failed);
+    drop(fourth);
+    assert!(speed.open_now().is_empty(), "{:?}", speed.open_now());
+    assert_eq!(open_summary(&[]), (0, String::new()));
+    let report = speed.report(1);
+    let a = &report.rows[0].since_start;
+    assert_eq!((a.n, a.answered, a.cancelled), (2, 1, 1));
+}
+
+/// **A REQUEST STILL OPEN WHEN THE PROCESS ENDS IS NAMED, NOT DROPPED**
+/// (R3-14 repair 1). `flush_at_exit` runs after the runtime has dropped every
+/// task, so each cut request has been counted by then; one whose future
+/// outlived the runtime cannot be, and is said at `error` with its row.
+#[test]
+fn a_request_still_open_at_exit_is_named_not_dropped() {
+    let mark = crate::emitted::mark();
+    let route = "/speed-test/open-past-the-exit";
+    let open = Pending::start(global().row(route, Kind::Route, now_ms()));
+    let _lines = flush_at_exit();
+    let named = crate::emitted::landed(
+        mark,
+        "api.speed",
+        "requests still open at exit were not counted",
+    );
+    assert!(
+        named
+            .iter()
+            .any(|record| crate::emitted::says(record, "routes", &format!("{route}=1"))),
+        "the request open past the exit is named: {named:?}"
+    );
+    assert!(telemetry::is_audited(
+        telemetry::Level::Error,
+        "api.speed",
+        "requests still open at exit were not counted"
+    ));
+    drop(open);
+    let still: Vec<_> = global()
+        .open_now()
+        .into_iter()
+        .filter(|(name, _)| name == route)
+        .collect();
+    assert!(still.is_empty(), "{still:?}");
 }

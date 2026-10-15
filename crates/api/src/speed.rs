@@ -196,6 +196,10 @@ struct Live {
     minute_max: AtomicU64,
     /// The first time this row ever took, plus one; zero until it has one.
     first_plus_one: AtomicU64,
+    /// Requests started on this row and not yet counted: one add at
+    /// [`Pending::start`], one subtract when it is counted (R3-14). Read only
+    /// at a stop, to say how many requests the drain bound cut and where.
+    open: AtomicU64,
 }
 
 impl Live {
@@ -206,6 +210,7 @@ impl Live {
             max: AtomicU64::new(0),
             minute_max: AtomicU64::new(0),
             first_plus_one: AtomicU64::new(0),
+            open: AtomicU64::new(0),
         }
     }
 }
@@ -651,6 +656,30 @@ impl Speed {
         lines
     }
 
+    /// Every row with a request still open, and how many: what a stop cut
+    /// short, or what outlived the runtime (R3-14). One walk of at most the
+    /// cap's rows, at a stop only; never on a request.
+    #[must_use]
+    pub fn open_now(&self) -> Vec<(String, u64)> {
+        self.all_with_over_cap()
+            .into_iter()
+            .filter_map(|row| {
+                let open = row.live.open.load(Ordering::Acquire);
+                (open > 0).then(|| (row.name.to_string(), open))
+            })
+            .collect()
+    }
+
+    /// [`Self::all`], with the over-cap row whether or not it has counted
+    /// anything yet: a request open on it has not.
+    fn all_with_over_cap(&self) -> Vec<Arc<Row>> {
+        let mut rows = self.all();
+        if !rows.iter().any(|row| Arc::ptr_eq(row, &self.over_cap)) {
+            rows.push(Arc::clone(&self.over_cap));
+        }
+        rows
+    }
+
     /// The report `/speed.json` serves, at `now_ms`.
     #[must_use]
     pub fn report(&self, now_ms: u64) -> Report {
@@ -761,6 +790,52 @@ pub fn flush_at_shutdown() -> usize {
     lines.len()
 }
 
+/// The open requests named in one line: `route=n` each, comma-separated, and
+/// their total. The order is the table's (routes first asked, then stages).
+#[must_use]
+pub fn open_summary(open: &[(String, u64)]) -> (u64, String) {
+    let total = open
+        .iter()
+        .map(|(_, n)| *n)
+        .fold(0_u64, u64::saturating_add);
+    let routes = open
+        .iter()
+        .map(|(route, n)| format!("{route}={n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (total, routes)
+}
+
+/// The last count a process makes, AFTER its runtime has ended (R3-14).
+///
+/// A request the drain bound cut ([`drain_bound`]) is still a live future in
+/// its connection task when `serve_limited` returns, so its [`Pending`] is
+/// counted only when the runtime drops that task, after the serve's own
+/// [`flush_at_shutdown`]. This second partial freeze writes those counts, each
+/// as [`Outcome::Cancelled`] with the time it had run, so every request the
+/// server received lands in exactly one minute line. A request still open even
+/// now (its future outlived the runtime's end) cannot be counted: it is named
+/// at `error` with how many and on which rows, never dropped in silence.
+/// Returns how many minute lines were written.
+pub fn flush_at_exit() -> usize {
+    let written = flush_at_shutdown();
+    if let Some(table) = TABLE.get() {
+        let open = table.open_now();
+        if !open.is_empty() {
+            let (total, routes) = open_summary(&open);
+            let _said = telemetry::emit(
+                &telemetry::Event::error(
+                    "api.speed",
+                    "requests still open at exit were not counted",
+                )
+                .with("open", telemetry::Value::Uint(total))
+                .with("routes", telemetry::Value::Str(&routes)),
+            );
+        }
+    }
+    written
+}
+
 /// What stops the server gracefully: Ctrl-C, or the `SIGTERM` every stop
 /// script and every redeploy sends (R3-14).
 ///
@@ -830,15 +905,61 @@ pub fn stage_start(name: &str) -> Pending {
     Pending::start(global().row(&format!("stage:{name}"), Kind::Stage, now_ms()))
 }
 
+/// One stage whose WORK may outlive the request that started it (R3-14
+/// repair 2): a scrub on the blocking pool goes on after its client left.
+///
+/// A [`Pending`] held by the request future was counted
+/// [`Outcome::Cancelled`] at about one second when a client left, while the
+/// scrub it timed ran on for three minutes: the stage timed the request, not
+/// the work. Each clone shares one `Pending`; whichever side calls
+/// [`Self::finish`] first counts it, once, and the others find it counted.
+/// The work's side finishes it when the work ends; the request's side
+/// finishes it only when the work never ran or never ended (a full pool, a
+/// panic). Dropped by every side unfinished, it counts `Cancelled` as a
+/// `Pending` does. One lock per finish, once per stage, never per row.
+#[derive(Debug, Clone)]
+pub struct SharedStage(std::sync::Arc<std::sync::Mutex<Option<Pending>>>);
+
+impl SharedStage {
+    /// Starts timing the stage `name`, as [`stage_start`] does.
+    #[must_use]
+    pub fn start(name: &str) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            stage_start(name),
+        ))))
+    }
+
+    /// Counts the stage with `outcome` if no clone has yet; returns whether
+    /// this call counted it.
+    pub fn finish(&self, outcome: Outcome) -> bool {
+        let taken = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        taken.map(|pending| pending.finish_now(outcome)).is_some()
+    }
+}
+
 /// How long a stop waits for requests still being answered before it writes
 /// the open minute and returns anyway (R3-14): the same ten seconds the
 /// runtime's own end allows its blocking work (`server::SHUTDOWN_GRACE`).
 pub const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// THE WHOLE STOP, BOUNDED (R3-14): from the signal to the process's end, at
+/// most [`DRAIN_GRACE`] for open requests, then `server::SHUTDOWN_GRACE` (the
+/// same ten seconds) for blocking work, so twenty seconds and the final
+/// writes. For all of it the store's `serve.lock` is held AND the port stays
+/// bound (`server::Held`): a redeploy that waits for the port to close finds
+/// the store free, never a refusal from a process that is still ending.
+pub const STOP_BOUND: std::time::Duration =
+    std::time::Duration::from_secs(DRAIN_GRACE.as_secs() + crate::server::SHUTDOWN_GRACE.as_secs());
+
 /// Resolves `grace` after `stopping` says a stop was asked, having said in
-/// the log, at `warn` with the grace, that the requests still open were cut
-/// short. `serve_limited` races it against the server's graceful stop, so the
-/// stop waits for open requests no longer than `grace`.
+/// the log, at `warn` with the grace, how many requests were still open and
+/// on which rows (`cut`, `routes`: `route=n`), that they were cut short.
+/// `serve_limited` races it against the server's graceful stop, so the stop
+/// waits for open requests no longer than `grace`.
 ///
 /// WHY A BOUND (R3-14). A graceful stop waits for every request still being
 /// answered. With `SIGTERM` now a graceful stop ([`stop_asked`]), one slow
@@ -847,11 +968,16 @@ pub const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 /// cut is said, never silent, and the caller then writes the open minute. A
 /// `stopping` whose sender went away unsent (the server ended on its own)
 /// never resolves, so it can never end a server that was not asked to stop.
+///
+/// A CUT REQUEST IS STILL COUNTED, LATER. Its future lives on in its
+/// connection task until the runtime ends; [`flush_at_exit`] writes it then.
 pub async fn drain_bound(stopping: tokio::sync::oneshot::Receiver<()>, grace: std::time::Duration) {
     if stopping.await.is_err() {
         std::future::pending::<()>().await;
     }
     tokio::time::sleep(grace).await;
+    let open = TABLE.get().map(Speed::open_now).unwrap_or_default();
+    let (cut, routes) = open_summary(&open);
     let _said = telemetry::emit(
         &telemetry::Event::warn(
             "api.serve",
@@ -860,7 +986,9 @@ pub async fn drain_bound(stopping: tokio::sync::oneshot::Receiver<()>, grace: st
         .with(
             "grace_ms",
             telemetry::Value::Uint(u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)),
-        ),
+        )
+        .with("cut", telemetry::Value::Uint(cut))
+        .with("routes", telemetry::Value::Str(&routes)),
     );
 }
 
@@ -877,6 +1005,7 @@ impl Pending {
     /// Starts timing one request on `row`.
     #[must_use]
     pub fn start(row: Handle) -> Self {
+        row.0.live.open.fetch_add(1, Ordering::AcqRel);
         Self {
             row: Some(row),
             started: std::time::Instant::now(),
@@ -893,6 +1022,7 @@ impl Pending {
     pub fn finish(mut self, micros: u64, outcome: Outcome) {
         if let Some(row) = self.row.take() {
             row.add(micros, outcome);
+            row.0.live.open.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
@@ -907,6 +1037,7 @@ impl Drop for Pending {
     fn drop(&mut self) {
         if let Some(row) = self.row.take() {
             row.add(self.micros(), Outcome::Cancelled);
+            row.0.live.open.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }

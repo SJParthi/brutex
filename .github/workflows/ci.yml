@@ -3776,7 +3776,7 @@ jobs:
           [ -s "$work/bench-manifests.z" ] || st_k=1
           "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work" "$st_p" "$st_k"
 
-      - name: Gate 28 — every served route has a limits row and a growth bench
+      - name: Gate 29 — every served route has a limits row and a growth bench
         run: |
           set -euo pipefail
           # R3-14 (NEW-02, RA-031, RA-064): `.github/gates_routes.rs`, std
@@ -3792,7 +3792,7 @@ jobs:
           rustc --edition=2024 -D warnings .github/gates_routes.rs -o "$work/gates-routes"
           "$work/gates-routes" .
 
-      - name: Gate 28b — the checks list and the owners check prove themselves
+      - name: Gate 29b — the checks list and the owners check prove themselves
         run: |
           set -euo pipefail
           # R3-14 (NEW-02, NEW-37, RA-184, RA-325). `.github/checks_all.rs`

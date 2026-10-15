@@ -112,3 +112,49 @@ fn a_page_report_is_rationed_and_audited() {
         "only the first line of the next window carries the count"
     );
 }
+
+/// **A REPORT THE LOG DID NOT TAKE IS NEVER ANSWERED "WRITTEN"** (R3-14
+/// repair 1). `note` ignored `telemetry::emit`'s answer, so a line the log
+/// dropped (a full disk, no log open) was answered `202 written` and counted
+/// in `written_total`. Each of the log's four answers, and the route's own
+/// ration, now earns its own status.
+#[test]
+fn a_report_the_log_did_not_take_is_never_answered_written() {
+    let with = |log| Outcome {
+        written: matches!(log, Some(telemetry::Emitted::Written)),
+        log,
+        written_total: 0,
+        kept_out_total: 0,
+    };
+    assert_eq!(status_of(&with(Some(telemetry::Emitted::Written))).0, 202);
+    assert_eq!(status_of(&with(None)).0, 429);
+    let held = status_of(&with(Some(telemetry::Emitted::Filtered)));
+    assert_eq!(held.0, 202);
+    assert!(held.1.starts_with("counted, not written"), "{}", held.1);
+    for failed in [
+        telemetry::Emitted::Dropped,
+        telemetry::Emitted::NotInstalled,
+    ] {
+        let (status, why) = status_of(&with(Some(failed)));
+        assert_eq!(status, 503, "{failed:?}");
+        assert!(why.starts_with("NOT WRITTEN"), "{why}");
+    }
+    // AND `note` READS THE LOG'S ANSWER rather than dropping it. Not driven
+    // here: the ration is the process's one window, which the test above
+    // spends (see its note). The needles are split so this file cannot match.
+    let source = include_str!("page_report_route.rs");
+    let body = source
+        .split_once(concat!("\npub fn ", "note("))
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .map_or("", |(body, _)| body);
+    let asked = body.find(concat!("let log = telemetry::", "emit(&line);"));
+    let read_back = body.find(concat!("let written = log.", "is_written();"));
+    assert!(
+        matches!((asked, read_back), (Some(a), Some(r)) if a < r),
+        "note counts a report written only when the log wrote it: {body}"
+    );
+    assert!(
+        !body.contains(concat!("let _dropped_when_", "filtered")),
+        "and drops the log's answer nowhere: {body}"
+    );
+}

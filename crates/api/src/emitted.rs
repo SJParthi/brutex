@@ -1982,8 +1982,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// caught` (a signal handler).
     const UNREACHABLE: usize = 12;
     // R3-14: the speed minute line, the page report and the bounded drain's
-    // cut, each read back off this sink by its own module's test.
-    const REACHED_IN_SPEED_TESTS: usize = 3;
+    // cut, each read back off this sink by its own module's test; and, at
+    // R3-14 repair 1, the stop's start line (`api.serve stop started`) and the
+    // exit's uncounted-requests line, read back by
+    // `server::stop_tests::a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free`
+    // and `speed::tests::a_request_still_open_at_exit_is_named_not_dropped`.
+    const REACHED_IN_SPEED_TESTS: usize = 5;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -2052,9 +2056,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 82 -> 83 at R3-14: `api.serve requests still open at the stop were cut
     // short`, read back off this sink by
     // `speed::tests::a_stop_waits_for_open_requests_no_longer_than_its_grace`.
+    //
+    // 83 -> 85 at R3-14 repair 1: `api.serve stop started` and `api.speed
+    // requests still open at exit were not counted`, both named in
+    // `REACHED_IN_SPEED_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 83,
+        lib_sites, 85,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

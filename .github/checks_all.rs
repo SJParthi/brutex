@@ -108,6 +108,7 @@ out=${1:?usage: checks_all script | bash -s -- <out dir> [--skip-test NAME]...}
 shift
 mkdir -p "$out/bin" || exit 2
 export CHECKS_BIN="$out/bin"
+export CHECKS_RUN_ID="${CHECKS_RUN_ID:-$(date -u +%s)}"
 rustc --edition=2024 -D warnings .github/checks_all.rs -o "$out/bin/checks_all" || exit 2
 "$out/bin/checks_all" plan "$@" > "$out/plan.tsv" || exit 2
 while IFS=$'\t' read -r name proves cmd; do
@@ -166,6 +167,37 @@ pub const CHANGES_THE_MACHINE: [(&str, &str); 2] = [
 
 /// The status a check exits with to say it was not run here, by design.
 pub const NOT_HERE: i32 = 125;
+
+/// `text` as ONE shell word that runs nothing: single-quoted, each `'` closed,
+/// escaped and reopened. A tab or a line break becomes a space first, because
+/// the plan is one line a check with tab-separated fields.
+///
+/// R3-14 repair 1: a declined step's reason was pasted inside `echo '...'`,
+/// and a reason holding an apostrophe ("another checkout's") ended the quote
+/// early. The `npm ci` line was then a syntax error (exit 2, reported RED
+/// instead of NOT RUN HERE) and the `cargo install` line ran the rest of its
+/// sentence as a command.
+#[must_use]
+pub fn shell_word(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| {
+            if matches!(c, '\t' | '\n' | '\r') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    format!("'{}'", flat.replace('\'', r"'\''"))
+}
+
+/// The command of a check declined on this machine: prints `why` and exits
+/// [`NOT_HERE`], whatever `why` says.
+#[must_use]
+pub fn declined_command(why: &str) -> String {
+    format!(r"printf '%s\n' {}; exit {NOT_HERE}", shell_word(why))
+}
 
 /// One `run:` step of the workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,16 +347,22 @@ pub fn ci_checks(steps: &[CiStep]) -> Vec<Check> {
                 .map(|(word, why)| format!("it runs `{word}`, which {why}"))
         };
         let command = if let Some(why) = declined {
-            format!("echo 'not run here: {why}'; exit {NOT_HERE}")
+            declined_command(&format!("not run here: {why}"))
         } else {
+            // THE RUNNER'S FILES AND IDS, EMULATED (R3-14 repair 1): a step
+            // that writes `$GITHUB_OUTPUT` or names `$GITHUB_RUN_ID` and
+            // `$GITHUB_RUN_ATTEMPT` failed here on the unset variable, and
+            // the result called that the tree's RED.
             let job = slug(&step.job);
             format!(
                 "mkdir -p \"$CHECKS_BIN/runner-temp-{job}\" \"$CHECKS_BIN/tmp-{job}\" && touch \
-                 \"$CHECKS_BIN/github-{job}.env\" && \
+                 \"$CHECKS_BIN/github-{job}.env\" \"$CHECKS_BIN/github-{job}.output\" && \
                  \"$CHECKS_BIN/checks_all\" step {} {index} > \"$CHECKS_BIN/{name}.sh\" && \
                  (set -a; . \"$CHECKS_BIN/github-{job}.env\"; set +a; CI=true GITHUB_WORKSPACE=\"$PWD\" \
                  RUNNER_TEMP=\"$CHECKS_BIN/runner-temp-{job}\" TMPDIR=\"$CHECKS_BIN/tmp-{job}\" \
                  GITHUB_ENV=\"$CHECKS_BIN/github-{job}.env\" \
+                 GITHUB_OUTPUT=\"$CHECKS_BIN/github-{job}.output\" \
+                 GITHUB_RUN_ID=\"$CHECKS_RUN_ID\" GITHUB_RUN_ATTEMPT=1 \
                  bash --noprofile --norc -eo pipefail \"$CHECKS_BIN/{name}.sh\")",
                 step.job
             )
@@ -418,13 +456,16 @@ pub fn plan(tools: &[String], steps: &[CiStep], skip: &[String]) -> Vec<Check> {
         "every confirmed finding and every audit row has an owner (needs CHECKS_BOARD and \
          CHECKS_RULES: the board is outside the repository)",
         format!(
-            "if [ -z \"${{CHECKS_BOARD:-}}\" ] || [ -z \"${{CHECKS_RULES:-}}\" ]; then echo 'not \
-             run here: CHECKS_BOARD and CHECKS_RULES name the board, which lives outside the \
-             repository'; exit {NOT_HERE}; fi; rustc --edition=2024 -D warnings \
+            "if [ -z \"${{CHECKS_BOARD:-}}\" ] || [ -z \"${{CHECKS_RULES:-}}\" ]; then {}; fi; \
+             rustc --edition=2024 -D warnings \
              .github/findings_owner.rs -o \"$CHECKS_BIN/findings_owner\" && \
              \"$CHECKS_BIN/findings_owner\" \"$CHECKS_BOARD/audit-result.json\" \
              \"$CHECKS_BOARD/fix-plan.json\" \"$CHECKS_BOARD/plan-round3-20261012.json\" \
-             \"$CHECKS_RULES\""
+             \"$CHECKS_RULES\"",
+            declined_command(
+                "not run here: CHECKS_BOARD and CHECKS_RULES name the board, which lives \
+                 outside the repository"
+            )
         ),
     ));
     out.extend(ci_checks(steps));
@@ -945,14 +986,20 @@ mod tests {
             ],
             "the formatting step is the plan's own `fmt`"
         );
-        assert!(
-            checks[4]
-                .command
-                .starts_with("echo 'not run here: it runs `cargo install`, which installs"),
+        assert_eq!(
+            words(&checks[4].command),
+            [
+                "printf",
+                "%s\\n",
+                "not run here: it runs `cargo install`, which installs a tool into the user's own \
+                 toolchain; the installed one is used by the plan's own checks",
+                ";",
+                "exit",
+                "125"
+            ],
             "{}",
             checks[4].command
         );
-        assert!(checks[4].command.ends_with("exit 125"));
         assert!(
             checks[2].command.contains("checks_all\" step build 1 >"),
             "{}",
@@ -992,6 +1039,167 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("| NOT RUN HERE (CI only) |"), "{text}");
+    }
+
+    /// The shell words of `command` as `bash` would split them, quotes
+    /// removed, with each unquoted `;`, `&&`, `||`, `|`, `(` and `)` a word of
+    /// its own. Enough of the grammar to prove what a plan line runs: single
+    /// quotes take everything literally, double quotes honour `\\`, and a
+    /// backslash outside quotes escapes the next character. Panics on an
+    /// unclosed quote, which is the syntax error this exists to catch.
+    fn words(command: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut word: Option<String> = None;
+        let mut chars = command.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => {
+                    let w = word.get_or_insert_with(String::new);
+                    loop {
+                        match chars.next() {
+                            Some('\'') => break,
+                            Some(x) => w.push(x),
+                            None => panic!("an unclosed single quote in: {command}"),
+                        }
+                    }
+                }
+                '"' => {
+                    let w = word.get_or_insert_with(String::new);
+                    loop {
+                        match chars.next() {
+                            Some('"') => break,
+                            Some('\\') => match chars.next() {
+                                Some(x @ ('"' | '\\' | '$' | '`')) => w.push(x),
+                                Some(x) => {
+                                    w.push('\\');
+                                    w.push(x);
+                                }
+                                None => panic!("an unclosed double quote in: {command}"),
+                            },
+                            Some(x) => w.push(x),
+                            None => panic!("an unclosed double quote in: {command}"),
+                        }
+                    }
+                }
+                '\\' => {
+                    if let Some(x) = chars.next() {
+                        word.get_or_insert_with(String::new).push(x);
+                    }
+                }
+                ' ' => out.extend(word.take()),
+                ';' | '(' | ')' => {
+                    out.extend(word.take());
+                    out.push(c.to_string());
+                }
+                '&' | '|' => {
+                    out.extend(word.take());
+                    if chars.peek() == Some(&c) {
+                        let _second = chars.next();
+                        out.push(format!("{c}{c}"));
+                    } else {
+                        out.push(c.to_string());
+                    }
+                }
+                _ => word.get_or_insert_with(String::new).push(c),
+            }
+        }
+        out.extend(word.take());
+        out
+    }
+
+    /// **A DECLINED COMMAND STAYS INERT WHATEVER ITS REASON SAYS** (R3-14
+    /// repair 1). The reason was pasted inside `echo '...'`: an apostrophe in
+    /// it closed the quote, so the `npm ci` line was a syntax error (exit 2,
+    /// RED instead of NOT RUN HERE) and the `cargo install` line ran
+    /// `the` as a command. Every hostile character now stays inside one word.
+    #[test]
+    fn a_declined_command_stays_inert_whatever_its_reason_says() {
+        for why in [
+            "another checkout's",
+            "it's `x`; rm -r \"$HOME\" && echo $(id) | sh",
+            "'",
+            "''\\'",
+            "a\ttab and a\nline break",
+            "",
+        ] {
+            let command = declined_command(why);
+            assert!(!command.contains(['\t', '\n']), "{command:?}");
+            let flat: String = why
+                .chars()
+                .map(|c| if matches!(c, '\t' | '\n') { ' ' } else { c })
+                .collect();
+            assert_eq!(
+                words(&command),
+                ["printf", "%s\\n", flat.as_str(), ";", "exit", "125"],
+                "{command}"
+            );
+        }
+    }
+
+    /// **EVERY LINE OF THE PLAN IS ONE WELL-FORMED COMMAND** (R3-14 repair
+    /// 1): over the real workflow, no command holds a tab or a line break
+    /// (the plan's own separators), every quote closes, and every declined
+    /// check is exactly a `printf` of its reason and `exit 125`. The tests
+    /// before this checked only a declined line's first words.
+    #[test]
+    fn every_line_of_the_plan_is_one_well_formed_command() {
+        let yml = std::fs::read_to_string(WORKFLOW).expect("run from the repository root");
+        let steps = ci_steps(&yml).expect("the workflow reads");
+        let checks = plan(&tools_here(), &steps, &["some_slow_test".to_owned()]);
+        let mut declined = 0;
+        for check in &checks {
+            assert!(
+                !check.command.contains(['\t', '\n', '\r']),
+                "{}",
+                check.name
+            );
+            let said = words(&check.command);
+            if said.first().map(String::as_str) == Some("printf") {
+                declined += 1;
+                assert_eq!(said.len(), 6, "{}: {said:?}", check.name);
+                assert_eq!(said[3..], [";", "exit", "125"], "{}", check.name);
+                assert!(said[2].starts_with("not run here: "), "{}", check.name);
+            }
+        }
+        assert!(
+            declined >= 2,
+            "cargo install and npm ci are declined: {declined}"
+        );
+        let read_back = read_plan(&plan_tsv(&checks)).expect("the plan reads back");
+        assert_eq!(read_back, checks, "the plan survives its own file");
+    }
+
+    /// **A STEP RUNS WITH THE RUNNER'S FILES AND IDS** (R3-14 repair 1). The
+    /// probe writes `$GITHUB_OUTPUT` and the coverage step names
+    /// `$GITHUB_RUN_ID` and `$GITHUB_RUN_ATTEMPT`; unset here, both failed on
+    /// the variable, and their REDs (and gate 20's after them) were the
+    /// runner's, not the tree's.
+    #[test]
+    fn a_step_runs_with_the_runners_files_and_ids() {
+        let step = CiStep {
+            job: "cover".to_owned(),
+            name: "Use a fresh coverage target".to_owned(),
+            script: "echo \"$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n"
+                .to_owned(),
+        };
+        let command = &ci_checks(std::slice::from_ref(&step))[0].command;
+        let said = words(command);
+        for set in [
+            "GITHUB_OUTPUT=$CHECKS_BIN/github-cover.output",
+            "GITHUB_RUN_ID=$CHECKS_RUN_ID",
+            "GITHUB_RUN_ATTEMPT=1",
+            "GITHUB_ENV=$CHECKS_BIN/github-cover.env",
+        ] {
+            assert!(said.iter().any(|w| w == set), "{set} in {command}");
+        }
+        assert!(
+            said.iter().any(|w| w == "$CHECKS_BIN/github-cover.output"),
+            "the output file is made before the step: {command}"
+        );
+        assert!(
+            RUNNER.contains("export CHECKS_RUN_ID=\"${CHECKS_RUN_ID:-$(date -u +%s)}\""),
+            "the run id is set once a run"
+        );
     }
 
     /// THE REAL WORKFLOW: every gate it runs is in the plan, gate 10 among

@@ -19,7 +19,12 @@
 //!   one-second bars ([`super::MONTH_SIZES`], every size indexed), laid in
 //!   whole sessions from 2024-06-03 09:15 IST, 22,500 seconds a day;
 //! * THE CENSUS: 1,000, 10,000 and 100,000 other series beside it, invented
-//!   cash symbols the routes are never asked about.
+//!   symbols the routes are never asked about: half cash one-minute months,
+//!   half one-second option contracts of OTHER underlyings over four expiries
+//!   ([`OTHER_EXPIRIES`]) and fifty strikes each (R3-14 repair 2: the census
+//!   was cash alone, so a chain, facet or calendar read that walked every
+//!   option contract in the store read flat). The proof is this bench,
+//!   `crates/api/benches/ratio.rs`, whose `served` module this is (gate 8).
 //!
 //! What a page asks stays the same size at every scale: NIFTY's index month,
 //! one option month, and a chain of [`STRIKES`] strikes on one expiry. A
@@ -37,10 +42,11 @@
 //! names, so a refusal or a miss is never what gets timed. Then n = 200
 //! sequential requests: p50, p99 and max are printed for every size, and the
 //! p50 ratio 1x -> 10x and 1x -> 100x is GATED at
-//! [`super::RATIO_CEILING_PERMILLE`]: per request, or, for the three routes
-//! whose answer or whose read IS the month or the census by design
-//! (`/bars.json`'s whole month, `/instruments.json`'s whole list, the gap
-//! audit's month), per row of the answer or per bar of the month ([`Per`]),
+//! [`super::RATIO_CEILING_PERMILLE`]: per request, or, for the two routes
+//! whose answer or whose read IS the month by design (`/bars.json`'s whole
+//! month, the gap audit's month), per row of the answer or per bar of the
+//! month ([`Per`]); the census's whole bodies (`/store.json`,
+//! `/instruments.json`) are gated as the `304` a page's revalidation is,
 //! so a sort, a second pass or a walk of what was not asked still breaches. The p99 ratio is printed, not gated:
 //! the 99th of 200 requests on a machine twelve agents share is two
 //! requests, and a gate on it would fail on a neighbour's build.
@@ -64,6 +70,11 @@ use super::{MONTH_SIZES, RATIO_CEILING_PERMILLE, bench_month, ratio, refuse};
 
 /// The census sizes beside the asked series: 1x / 10x / 100x.
 pub(crate) const CENSUS_SIZES: [usize; 3] = [1_000, 10_000, 100_000];
+
+/// The expiries the census's other underlyings' contracts name: the asked
+/// month's own and the three after it, as a real June chain holds.
+pub(crate) const OTHER_EXPIRIES: [&str; 4] =
+    ["2024-06-27", "2024-07-25", "2024-08-29", "2024-09-26"];
 
 /// Strikes on the chain's expiry, each a call and a put.
 pub(crate) const STRIKES: i64 = 10;
@@ -235,7 +246,9 @@ fn store_of(bars: usize, census: usize) -> PathBuf {
         }
     }
     for i in 0..census {
-        record(entry(
+        // HALF CASH, HALF OPTIONS OF OTHER UNDERLYINGS: every 400 contracts
+        // (four expiries, fifty strikes, a call and a put) share a symbol.
+        let key = if i % 2 == 0 {
             EntryKey {
                 contract: None,
                 exchange: Exchange::Nse,
@@ -243,9 +256,25 @@ fn store_of(bars: usize, census: usize) -> PathBuf {
                 symbol: symbol(&format!("S{i:07}")),
                 timeframe: Timeframe::MINUTE_1,
                 month: bench_month(),
-            },
-            375,
-        ));
+            }
+        } else {
+            let k = i / 2;
+            let expiry = OTHER_EXPIRIES
+                .get(k % OTHER_EXPIRIES.len())
+                .copied()
+                .unwrap_or(EXPIRY);
+            let strike = 1_000_000 + i64::try_from((k / 4) % 50).unwrap_or(0) * 5_000;
+            let side = if (k / 200) % 2 == 0 { "CE" } else { "PE" };
+            EntryKey {
+                contract: Some(contract(&format!("{expiry}-{strike}-{side}"))),
+                exchange: Exchange::Nse,
+                segment: Segment::Fno,
+                symbol: symbol(&format!("U{:06}", k / 400)),
+                timeframe: Timeframe::SECOND_1,
+                month: bench_month(),
+            }
+        };
+        record(entry(key, 375));
     }
     let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
     if let Err(why) = std::fs::write(&path, manifest.image()) {

@@ -73,6 +73,8 @@ mod census;
 mod chain;
 #[path = "ratio/dayflags.rs"]
 mod dayflags;
+#[path = "ratio/db_page.rs"]
+mod db_page;
 #[path = "ratio/greeks.rs"]
 mod greeks;
 #[path = "ratio/logs_dirs.rs"]
@@ -706,6 +708,7 @@ fn served_routes_are_flat() -> bool {
     ok &= provenance::provenance_is_flat(&mut stores);
     ok &= calendar::calendars_are_flat(&mut stores);
     ok &= reads::reads_are_flat(&mut stores);
+    ok &= db_page::page_reads_are_flat(&mut stores);
     for store in &stores {
         let _ignored = std::fs::remove_dir_all(&store.root);
     }
@@ -767,6 +770,7 @@ fn main() {
         provenance::ROUTES,
         calendar::ROUTES,
         reads::ROUTES,
+        db_page::ROUTES,
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));

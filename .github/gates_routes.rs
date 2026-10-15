@@ -27,7 +27,14 @@
 //!
 //! A `/db` READ MAY NOT BE OWED A BENCH: every route of `logs::DB_READS` (what
 //! a `/db` page reads its data from) must be declared by a bench, so the
-//! operator's pages are measured at 1x, 10x and 100x without exception.
+//! operator's pages are measured at 1x, 10x and 100x without exception. AND
+//! WHAT THE PAGE ITSELF ASKS FOR, read from its own source (R3-14 repair 2):
+//! every `/<route>.json` named in a quoted or template string of a file under
+//! `web/src/routes/db/`. `DB_READS` is a hand-kept list, and three routes the
+//! page reads (`/feeds.json`, `/aliases.json`, `/scrub.json`) were outside it
+//! and owed a bench as "not a /db read" (second agent, 15 Oct): the page's
+//! own fetches decide now, so a route the page starts reading is held to a
+//! bench the day it does.
 //!
 //! RED: a route with no row or no bench that nothing here names; an owed
 //! entry that is stale (the route left the table, or the row, bench or
@@ -56,6 +63,9 @@ pub const BENCH: &str = "crates/api/benches/ratio.rs";
 pub const BENCH_DIR: &str = "crates/api/benches/ratio";
 /// The heading prefix of the one section whose rows are route rows.
 pub const SECTION: &str = "## Every route:";
+/// Where the `/db` page's own source lives: every route it asks for is a
+/// `/db` read whatever `DB_READS` says (R3-14 repair 2).
+pub const DB_PAGE: &str = "web/src/routes/db";
 /// Where the `/db` reads are listed (`logs::DB_READS`).
 pub const LOGS: &str = "crates/api/src/logs.rs";
 
@@ -162,13 +172,11 @@ pub const BENCHES_OWED: &[Owed] = &[
         why: "reads the pull journal, the autopilot, the audit streams, the masters, the disk or \
               a fixed list, each under its own cap in docs/06-limits.md; not a /db read",
         routes: &[
-            "/aliases.json",
             "/audit.json",
             "/audit/page",
             "/autopilot.json",
             "/bars",
             "/disk.json",
-            "/feeds.json",
             "/folder.json",
             "/indexmap.json",
             "/ingest/refusals.json",
@@ -180,7 +188,6 @@ pub const BENCHES_OWED: &[Owed] = &[
             "/pull/recovery.json",
             "/pull/repair.json",
             "/pull/run.json",
-            "/scrub.json",
             "/store",
             "/universes.json",
             "/verify.json",
@@ -425,19 +432,77 @@ pub fn db_reads(source: &str) -> Result<Vec<String>, String> {
 }
 
 /// The findings of the `/db` rule: each read in `reads` that no bench
-/// declares, owed or not.
+/// declares, owed or not; `whence` says where the read was found.
 #[must_use]
-pub fn unbenched_reads(reads: &[String], benched: &BTreeSet<String>) -> Vec<String> {
+pub fn unbenched_reads(reads: &[String], benched: &BTreeSet<String>, whence: &str) -> Vec<String> {
     reads
         .iter()
         .filter(|route| !benched.contains(*route))
         .map(|route| {
             format!(
-                "{route}: a /db read (`logs::DB_READS`) with no growth bench; a /db read may not \
-                 be owed one (R3-14, RA-064)"
+                "{route}: a /db read ({whence}) with no growth bench; a /db read may not be owed \
+                 one (R3-14, RA-064)"
             )
         })
         .collect()
+}
+
+/// The `/<route>.json` paths `source` names right after a quote, a double
+/// quote or a backtick (a fetch's string or template literal), in order of
+/// first appearance, each once. A path is `/`, then ASCII lower-case letters,
+/// digits, `/`, `_` and `-`, then `.json`.
+#[must_use]
+pub fn page_reads(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    for (at, pair) in bytes.windows(2).enumerate() {
+        if !matches!(pair, [b'\'' | b'"' | b'`', b'/']) {
+            continue;
+        }
+        let start = at + 1;
+        let tail = bytes.get(start + 1..).unwrap_or_default();
+        let len = tail
+            .iter()
+            .take_while(|&&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"/_-.".contains(&b))
+            .count();
+        let Some(word) = source.get(start..start + 1 + len) else {
+            continue;
+        };
+        let Some((route, _)) = word.split_once(".json") else {
+            continue;
+        };
+        let route = format!("{route}.json");
+        if route.len() > ".json".len() + 1 && !out.contains(&route) {
+            out.push(route);
+        }
+    }
+    out
+}
+
+/// Every file under `dir`, recursively, sorted.
+///
+/// # Errors
+///
+/// A directory that cannot be read: the page rule would go blind.
+fn files_under(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(next) = todo.pop() {
+        let entries =
+            std::fs::read_dir(&next).map_err(|why| format!("{}: {why}", next.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|why| format!("{}: {why}", next.display()))?
+                .path();
+            if path.is_dir() {
+                todo.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Reads the tree at `root` and returns how many routes were read, how many
@@ -475,7 +540,26 @@ pub fn check(root: &Path) -> Result<(usize, usize, Vec<String>), String> {
     found.extend(unbenched_reads(
         &db_reads(&read(&root.join(LOGS))?)?,
         &benched,
+        "`logs::DB_READS`",
     ));
+    let mut asked: Vec<String> = Vec::new();
+    for file in files_under(&root.join(DB_PAGE))? {
+        // A FILE THAT IS NOT TEXT (an image) names no route.
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for route in page_reads(&text) {
+            if !asked.contains(&route) {
+                asked.push(route);
+            }
+        }
+    }
+    if asked.is_empty() {
+        return Err(format!(
+            "{DB_PAGE}: the /db page names no route: the rule would go blind"
+        ));
+    }
+    found.extend(unbenched_reads(&asked, &benched, DB_PAGE));
     Ok((table.len(), with_bench, found))
 }
 
@@ -699,9 +783,47 @@ pub fn audited_router_serving(site: S) -> Router {
         assert!(db_reads("nothing").is_err());
         assert!(db_reads("pub const DB_READS: [&str; 0] = [];").is_err());
         let benched = set(&["/a.json"]);
-        let found = unbenched_reads(&db_reads(logs).expect("read"), &benched);
+        let found = unbenched_reads(&db_reads(logs).expect("read"), &benched, "`logs::DB_READS`");
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].starts_with("/b.json: a /db read"), "{found:?}");
+        assert!(
+            found[0].starts_with("/b.json: a /db read (`logs::DB_READS`)"),
+            "{found:?}"
+        );
+    }
+
+    /// **WHAT THE /db PAGE ASKS FOR IS A /db READ** (R3-14 repair 2), read
+    /// from the page's own source: a quoted or template path ending `.json`,
+    /// each once, its query cut off; a path in prose, a path built from a
+    /// variable and a non-JSON page are not reads. Before this the page's
+    /// `/feeds.json`, `/aliases.json` and `/scrub.json` were owed a bench as
+    /// "not a /db read", and nothing could see it.
+    #[test]
+    fn a_read_the_db_page_makes_is_held_to_a_bench() {
+        let page = "const a = await fetch(`/feeds.json`);\n\
+                    fetch(`/bars/window.json?${q}`); fetch('/aliases.json?symbol=' + s);\n\
+                    fetch(\"/scrub.json\"); fetch(`/feeds.json`);\n\
+                    // see /prose.json in a comment, `/${name}.json`, '/db', `/x-y_2.json`\n";
+        assert_eq!(
+            page_reads(page),
+            [
+                "/feeds.json",
+                "/bars/window.json",
+                "/aliases.json",
+                "/scrub.json",
+                "/x-y_2.json"
+            ]
+        );
+        assert!(
+            page_reads("'/'.json `/.json` \"/").is_empty(),
+            "no empty route"
+        );
+        let benched = set(&["/feeds.json", "/bars/window.json"]);
+        let found = unbenched_reads(&page_reads(page), &benched, DB_PAGE);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with("/aliases.json: a /db read (web/src/routes/db)"),
+            "{found:?}"
+        );
     }
 
     #[test]

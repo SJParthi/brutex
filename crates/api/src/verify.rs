@@ -288,21 +288,29 @@ pub(crate) async fn vendor_off_worker(
 ) -> Result<Report, (axum::http::StatusCode, String)> {
     // TIMED AS A CHECKING STAGE (R3-14, RA-014): `stage:vendor scrub` on
     // `/speed.json`; a full pool (429) counts busy, a scrub that could not be
-    // joined (503) failed.
-    let stage = crate::speed::stage_start("vendor scrub");
-    let scrubbed = crate::detail::run_store_read(move || vendor(&root, &census))
-        .await
-        .map_err(|why| {
-            crate::detail::admission_refused(
-                "vendor scrub",
-                crate::detail::MAX_STORE_READ_CONCURRENT,
-                &why,
-            )
-        });
-    stage.finish_now(match &scrubbed {
-        Ok(_) => crate::speed::Outcome::Answered,
-        Err((status, _)) => crate::speed::Outcome::of(status.as_u16(), false),
+    // joined (503) failed. THE SCRUB IS TIMED, NOT THE REQUEST (R3-14 repair
+    // 2): the work finishes the stage when it ends, so a client that leaves
+    // at one second no longer counts a three-minute scrub cancelled at one.
+    let stage = crate::speed::SharedStage::start("vendor scrub");
+    let in_scrub = stage.clone();
+    let scrubbed = crate::detail::run_store_read(move || {
+        let report = vendor(&root, &census);
+        let _counted = in_scrub.finish(crate::speed::Outcome::Answered);
+        report
+    })
+    .await
+    .map_err(|why| {
+        crate::detail::admission_refused(
+            "vendor scrub",
+            crate::detail::MAX_STORE_READ_CONCURRENT,
+            &why,
+        )
     });
+    // A SCRUB THAT ENDED HAS COUNTED ITSELF; one that never ran (a full
+    // pool) or never ended (a panic) is counted here, by how it was refused.
+    if let Err((status, _)) = &scrubbed {
+        let _counted = stage.finish(crate::speed::Outcome::of(status.as_u16(), false));
+    }
     scrubbed
 }
 
