@@ -53,11 +53,17 @@
 //! and the process's peak resident set is read where the host keeps one
 //! (D-4875 (1), D-4898; `docs/06-limits.md` L-IA-26).
 //!
+//! C-SF-01 to C-SF-03 time R3-16's two shared file doors, the reading door
+//! and the staging create, in `ratio/safe_files.rs`.
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 
 use std::hint::black_box;
 use std::time::Instant;
+
+#[path = "ratio/safe_files.rs"]
+mod safe_files;
 
 use brutex_core::vendor::Vendor;
 use store::block;
@@ -1476,6 +1482,7 @@ fn main() {
     ok &= year_index_read_is_flat();
     ok &= generation_write_stays_n_log_n();
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
+    ok &= safe_files::run();
     if ok {
         println!("all ratios within the ceiling");
     } else {

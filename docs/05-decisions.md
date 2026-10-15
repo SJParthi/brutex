@@ -68401,7 +68401,134 @@ rule, as it did before it, so none is in the scan.
 `api::server::tests::every_record_of_a_run_names_one_source_and_a_refusal_before_it_closes_none`,
 `api::server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start`.
 
-### D-4951 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
+### D-4951 — One door to read a file, one to create a temporary, and a store whose `bars` is a link is never written (R3-16) — 2026-10-14
+
+Every reader opened its files its own way, and the ways differed exactly
+where it hurt: the verdict store's reader opened with `O_NOFOLLOW` alone, so
+a pipe at a year index's name held every lookup for ever (verify-IA-5-r2,
+follow-up 1); the GDFL tick store's day readers followed links, so a
+dangling one read as "no such day" and the run closed it `day_not_held` with
+exit 0 (FM-046). The rules audit asked for one reading rule (RA-317), one
+creating rule with a gate (RA-287, RA-290), a gone folder that is never
+deleted through (RA-294) and a writer that refuses a store whose `bars` is a
+link, as every test server's shadow is (RA-298, FM-198).
+
+1. **Reading** is `store::safe_open::open_read` (`open_read_len`,
+   `open_read_write` for an existing file a writer updates in place):
+   `O_NOFOLLOW | O_NONBLOCK`, the kind asked of the HANDLE, a regular file
+   only. Anything else is refused `read_not_regular` naming what it found
+   (`symlink`, `pipe`, `socket`, `char_device`, `block_device`,
+   `directory`); an absent name stays the host's `NotFound`
+   (`ReadRefusal::is_missing`), and a dangling link is not absent. A file
+   with several names is readable: "exactly one name" is a writer's rule.
+   Its users now: `store::verdict` (index, image and lock),
+   `cli::readonly_file::open`, `pull::gdfl_tickstore::open_day` (the
+   capital-market and options day readers).
+2. **Creating** stays `store::staging::create` (D-4922); its
+   `staging_not_regular` now names what it found. Gate 28
+   (`.github/gates_tmp_open.rs`) refuses a crate file that names a
+   temporary and calls the door fewer times than it names one; its LEGACY
+   list of five writers that still open their own may only shrink.
+3. **Writing** asks `store::safe_open::refuse_linked_store_root` once, by
+   name, before it opens anything: `linked_store_root` when `<root>/bars`
+   is a symbolic link (naming where it points), `store_bars_not_a_directory`
+   when it is something else. Every `cli` writing verb asks it
+   (`store_write::root_with`, and `gdfl-import` for its own root); a
+   read-only form never does, because a shadow exists to be read. The month
+   writer's refusal of any link below the root (CE-62, D-2686) stays behind
+   it.
+4. **The logs' gone folder**: the reaper reads the folder's identity again
+   before each delete and refuses, by name, a folder that changed after the
+   hand-over (a link or another directory in its place); nothing in it is
+   deleted and the generation waits for the next start.
+5. **A tick-store day name** holding a link (dangling or not), a pipe, a
+   socket or a device is refused `tick_store_malformed` saying which, never
+   read as absent; a directory stays `tick_store_unavailable`.
+
+Rejected: a per-component `openat` walk, which `std` does not offer without
+`unsafe` (every crate root forbids it), so a link swapped into a DIRECTORY
+above a name stays the limit L-R316-01 names (FM-223); "exactly one name"
+for readers, which would refuse a legitimate read through a second name;
+an `api` write gate for a linked store, which needs `api::server::WriteGate`
+(R4-02's file) and is named NOT DONE in L-R316-05.
+
+**Proved by** `store::safe_open::tests::a_pipe_device_or_link_is_refused_by_name`,
+`store::safe_open::tests::a_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`store::staging::tests::a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched`,
+`store::verdict::tests::a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits`,
+`telemetry::sink::tests::a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched`,
+`cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link`,
+`cli::gdfl_import_command::tests::gdfl_import_refuses_a_store_whose_bars_folder_is_a_link`,
+`pull::gdfl_tickstore::tests::a_dangling_day_file_link_is_refused_by_name_never_a_day_not_held`,
+`cli::gdfl_import_command::tests::a_dangling_day_file_link_ends_the_run_failed_never_a_day_not_held`,
+`store::safe_open::tests::a_writer_refuses_a_linked_bars_directory`,
+and gate 28's own tests (`rustc --test .github/gates_tmp_open.rs`).
+
+### D-4952 — /ingest mounts every panel through one registry and one error boundary, a held month with no yardstick is settled, and a repair press sends only the eight fields for the plan's own member (R4-01) — 2026-10-15
+
+The operator's /ingest read "0 / unverified · NEVER IMPORTED" over 97 held
+1-second months of every GDFL share (V1), no page could start the versioned
+repair `POST /pull/repair` (Z6, D-3350), and every later /ingest panel
+(IA-12a, SC-8) needed a place to mount that was not another edit of the
+13,000-line page.
+
+1. **Month verdicts.** A month is `loading` until the census the page holds is
+   the selected feed's ("census loading", or "census not read" with the
+   reason), never 0 and never "never imported". A month that holds bars at a
+   rung with no per-session count (1 s, and every contract segment) is `held`:
+   counted, **settled**, never compared. Settled means a partly imported month
+   gives no sign it is partial; that is the honest limit of a rung with no
+   yardstick, and it is L-R401-04. Which rungs a feed stores is read per feed
+   from `/feeds.json` `rungs` + `derived_rungs`, not written in the page.
+2. **The contract fold** runs once per CENSUS stamp: the feed with the census's
+   own `x-brutex-census-generation` and epoch when the answer names them, else
+   the read itself. A re-read of an unchanged census walks nothing; while a
+   newer census of the same feed is walked the previous sums stand, labelled
+   "previous census, re-counting"; another feed's sums and a failed walk never
+   stand.
+3. **The panel registry.** Every `web/src/routes/ingest/panels/*.svelte` mounts
+   by its exported `order` (ties by file name) through
+   `web/src/lib/ingest-panels.js`. A panel without `order` or `title` is named
+   in one visible line and on the console and still mounted, last. Every panel
+   mounts inside its own `<svelte:boundary>` (`web/src/lib/IngestPanelSlot.svelte`):
+   one that throws is replaced by one line naming its file and error, logged
+   with the error, and every other panel and the page keep working. A panel
+   owns its fetches, answers a 404 or 503 with one named line, titles every
+   control, fits 375 px, and polls through `createPoller` (at most once a
+   second, never while hidden; a run that throws is kept as `failed` and the
+   poll goes on).
+4. **The repair press** sends exactly one `POST /pull/repair` with the eight
+   fields `target, vendor, granularity, cash_identity, member, from, to,
+   repair_reason`, written again in that order with every value encoded. The
+   server's template must hold exactly those eight, each once, for the plan's
+   own member; anything else is refused by name before a press. The template
+   `/pull/repair.json` writes today does not encode `member`, so every month of
+   `M&M` and `M&MFIN` is refused on the page ("cannot be repaired from this
+   page") until `crates/api/src/repair_route.rs` encodes it (a follow-up for
+   that file's owner); the panel never guesses a split member back together.
+5. **A projection** (`projection: {bytes, free_after, floor, basis, refused}`,
+   R4-07, R4-23, R4-29) is one line; `free_after` below zero reads "none, short
+   by X" and is shown as a refusal, never as a malformed field.
+
+Rejected: a page edit per panel (the 13,000-line page grows with every
+package); dropping a panel that breaks the contract (it hides the panel someone
+just added, CLAUDE.md §4); rebuilding the member from the plan's instrument
+while the template carries a stray key (a guess about how the server split it).
+
+**Proved by** `web/tests/ingest-held.test.js`
+(`gdfl_stock_rows_count_their_1s_months`, `a_1s_rung_of_an_archive_feed_is_stored`,
+`the_held_join_is_one_pass_per_census_stamp`,
+`a_reread_of_an_unchanged_census_walks_nothing_and_the_previous_sums_stand_labelled`),
+`web/tests/ingest-panels.test.js` (`panels_mount_in_order_and_a_bad_panel_is_named`,
+`a_panel_that_throws_is_one_named_line_and_the_page_keeps_working`,
+`a poll whose run throws keeps polling and says what failed`),
+`web/tests/zerodha-repair.test.js` (`a_zerodha_repair_press_sends_one_request_with_its_reason`,
+`a_member_holding_an_ampersand_is_never_sent_as_another_member`),
+`web/tests/ingest-months.test.js` (`each_reason_code_reads_its_sentence`),
+`web/tests/pull-plan.test.js` (`a_plan_projection_renders_one_line_and_a_refusal_by_name`,
+`a plan larger than the free space reads as short by its shortfall`).
+
+### D-4953 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
 
 **Implemented by** R4-08 (E2E-02): `pull::tickstore_write` (tests in
 `crates/pull/src/tickstore_write_tests.rs`), the verb `cli tickstore-write ZIP
@@ -68537,14 +68664,14 @@ provenance (FM-056, the importer's); `read_index`'s own disjointness check
 `a_bts_whose_two_entries_share_a_block_is_refused`, and
 `cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes`.
 
-### D-4952 — E2E-05's codec half: the workspace keeps exactly two compressed formats, zstd frames and codec 1, and bars are not put in zstd frames — 2026-10-14
+### D-4954 — E2E-05's codec half: the workspace keeps exactly two compressed formats, zstd frames and codec 1, and bars are not put in zstd frames — 2026-10-14
 
 **Implemented by** R4-08 (the decision and its measurement only; the bar half
 is the SC series, log segments R4-10, census epochs R4-29).
 
 **Decision.** By design the workspace has two compressed formats and no third:
 
-1. **zstd frames, written and read by `ruzstd` alone** (D-2801, D-4951): the
+1. **zstd frames, written and read by `ruzstd` alone** (D-2801, D-4953): the
    tick store's day files (read since D-2801, now written) and R4-10's rolled
    non-bar segments. Their unit is a whole file or a whole member, read once
    and in full.

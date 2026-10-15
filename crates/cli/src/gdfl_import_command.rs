@@ -363,7 +363,13 @@ pub(crate) fn command_with(
         );
         return MISUSED;
     }
-    let roots = stamped_root(var, env).and_then(|data| Ok((data, store()?)));
+    // A STORE WHOSE `bars` IS A LINK IS NOT WRITTEN (R3-16, RA-298): asked
+    // once, by name, before the run reads a day (`store_write::writable`).
+    let roots = stamped_root(var, env).and_then(|data| {
+        let store = store()?;
+        crate::store_write::writable(&store)?;
+        Ok((data, store))
+    });
     let result = roots.and_then(|(data, store)| {
         let (scope, scope_words) = scope_for(kind, &store, stored_only, &mut only)?;
         let run = Run {

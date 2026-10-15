@@ -24,7 +24,7 @@
 //! | nothing | the new file |
 //! | a regular file with exactly one name | a dead writer's leftover: the NAME is removed (`unlink`, which changes no byte) and the create is tried once more; [`Staged::cleared`] says how many bytes it held |
 //! | a regular file with more than one name | refused `staging_linked`; nothing is removed, truncated or written |
-//! | anything else (a symbolic link, a directory, a pipe) | refused `staging_not_regular`; left as it is |
+//! | anything else (a symbolic link, a directory, a pipe, a socket, a device) | refused `staging_not_regular`, naming what it found ([`crate::safe_open::Found`]); left as it is |
 //! | a file again after the one removal | refused `staging_contended`: another writer is using this name |
 //!
 //! # What a caller must bring: a name of its own
@@ -56,18 +56,28 @@
 //! One host call (`open`) on a free name; four at most on a name that
 //! exists (`open`, `lstat`, `unlink`, `open`), whatever the leftover holds
 //! and however many names share its directory: no read, no listing, no
-//! loop. O(1) in the helper's own calls, counted in [`Staged::calls`] and
-//! pinned by
+//! loop. [`Staged::calls`] is that count as each branch states it, written
+//! by hand: the test
 //! `store::staging::tests::a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`
-//! at a leftover of 0 bytes and of 4 MiB, alone and beside 2,000 other
-//! names. What each call costs is the host's (measured: `docs/06-limits.md`
-//! L-IA-44).
+//! pins which branch a create took (at a leftover of 0 bytes and of 4 MiB,
+//! alone and beside 2,000 other names), NOT the host calls themselves
+//! (verify-IA-5-r2, follow-up 2). The calls are measured instead: C-SF-03 in
+//! `crates/store/benches/ratio.rs` times a create on a free name and over a
+//! leftover of 0 bytes and of 4 MiB, alone and beside 2,000 names, p50, p99
+//! and max at n = 10,000, and holds the cost flat in its directory (R3-16).
+//! It is NOT flat in the leftover's size, and is not claimed to be: the
+//! helper reads no byte of a leftover, but the host's `unlink` frees its
+//! blocks, measured 22x to 30x the 0-byte p50 at 4 MiB on `WD_BLACK`
+//! (`docs/06-limits.md` L-R316-06). What each call costs is the host's
+//! (`docs/06-limits.md` L-IA-44).
 
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+
+use crate::safe_open::Found;
 
 /// A staging file that [`create`] made, and what it had to clear to make it.
 #[derive(Debug)]
@@ -96,10 +106,12 @@ pub enum StagingError {
         links: u64,
     },
     /// `staging_not_regular`: the name is a symbolic link, a directory or a
-    /// special file. Left as it is.
+    /// special file; `found` says which. Left as it is.
     NotRegular {
         /// The staging name.
         path: PathBuf,
+        /// What is there.
+        found: Found,
     },
     /// `staging_contended`: the name existed again after its one removal:
     /// another writer is using it.
@@ -135,7 +147,7 @@ impl StagingError {
     pub fn path(&self) -> &Path {
         match self {
             Self::Linked { path, .. }
-            | Self::NotRegular { path }
+            | Self::NotRegular { path, .. }
             | Self::Contended { path }
             | Self::Io { path, .. } => path,
         }
@@ -151,10 +163,12 @@ impl fmt::Display for StagingError {
                 "{word}: {} is one of {links} names of a file; it is left as it is and nothing was written through it",
                 path.display()
             ),
-            Self::NotRegular { path } => write!(
+            Self::NotRegular { path, found } => write!(
                 f,
-                "{word}: {} is not a regular file; it is left as it is",
-                path.display()
+                "{word} ({}): {} is {}, not a regular file; it is left as it is",
+                found.word(),
+                path.display(),
+                found.sentence()
             ),
             Self::Contended { path } => write!(
                 f,
@@ -219,6 +233,7 @@ pub fn create(path: &Path) -> Result<Staged, StagingError> {
         Ok(meta) if !meta.is_file() => {
             return Err(StagingError::NotRegular {
                 path: path.to_path_buf(),
+                found: Found::of(meta.file_type()).unwrap_or(Found::Unknown),
             });
         }
         Ok(meta) if meta.nlink() != 1 => {
