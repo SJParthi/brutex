@@ -110,8 +110,16 @@
   import {
     VERDICT_ORDER, archiveLane, defaultWindow, emptySeen, feedSpan, monthVerdict, outsideSpan,
     refusalBatches, refusalErrorsSentence, refusalIndex, refusalJoin, refusalSentence, refusedMonth, seriesVerdict, unsettledSpans,
-    verdictWords, wholeUnlisted
+    verdictWords, wholeUnlisted, settledMonth
   } from '$lib/ingest-months.js';
+  // THE HELD-MONTHS JOIN (R4-01, V1): census readiness, the per-feed rung
+  // filing, and the contract fold once per census stamp.
+  import { censusKey, censusReadiness, censusStamp, createHeldJoin, foldDerivatives, heldMonth, rungStored, stopFold } from '$lib/ingest-held.js';
+  import { inSlices } from '$lib/census-worker.js';
+  // THE PANEL REGISTRY (R4-01): every file in ./panels/ mounts below, by its
+  // exported `order`, with no edit of this page.
+  import { panelRegistry, refusedLine } from '$lib/ingest-panels.js';
+  import IngestPanelSlot from '$lib/IngestPanelSlot.svelte';
   // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14): a feed whose store
   // holds bars is selectable whatever its ingest readiness, and only the
   // operator's feeds are offered (D-3338).
@@ -297,9 +305,16 @@
    * `dir`, `label` and `phrase` are three fields and never one.
    *
    * @typedef {{
-   *   dir: string, label: string, phrase: string, stored: boolean,
+   *   dir: string, label: string, phrase: string,
    *   per: number | null
    * }} Rung
+   */
+  /**
+   * A RUNG AS THE SELECTED FEED FILES IT (R4-01, V1): `stored` and `storedWhy`
+   * are `$lib/ingest-held.js` `rungStored` over `/feeds.json`'s `rungs` and
+   * `derived_rungs`; `null` when this server sent no `rungs`.
+   *
+   * @typedef {Rung & { stored: boolean | null, storedWhy: string }} FeedRung
    */
 
   /**
@@ -344,6 +359,7 @@
    *     flight: boolean
    *   }[],
    *   got: number, exp: number, unproved: number, missing: number,
+   *   held: number, stale: number, loadingWhy: string, loadingWord: string, noSpot: boolean,
    *   state: Verdict
    * }} CensusRow
    */
@@ -513,14 +529,12 @@
    * so; a hardcoded pair would not, and would be the second copy of a vendor
    * fact that D-0126, D-0131 and D-0138 each deleted from this page.
    *
-   * `stored` is `Granularity::store_timeframe().is_some()`. It is FALSE on `1s`,
-   * and that is the honest state of a tick pull today: the request parses, the
-   * feed declares the rung, and `pull::ingest::Plan::timeframe` then refuses it
-   * BY NAME at the write boundary because `crates/store` ships no `1s`
-   * directory. The row says so before it is ticked. The fold that makes those
-   * same archive seconds storable already exists — `pull::fold`, one-second
-   * buckets, first/max/min/last in file order — and it runs when these two feeds
-   * are asked for `1min`.
+   * `stored` IS NOT A FIELD OF THIS LIST ANY MORE (R4-01, V1). It said `false`
+   * on `1s` for every feed — "the store has no directory for it" — which has
+   * been false since D-2802 filed the GDFL archive's seconds under `1s`, and it
+   * is a fact about a FEED, not about a rung. `rungsHere` below reads it per
+   * feed from `/feeds.json`'s `rungs` and `derived_rungs`
+   * (`$lib/ingest-held.js` `rungStored`), so no feed is named in this file.
    *
    * `per` is BARS PER NSE SESSION, and `null` where this page cannot state one
    * from a verified fact. 09:15 to 15:30 is 375 minutes, so a full minute
@@ -531,9 +545,9 @@
    */
   /** @type {Rung[]} */
   const RUNGS = [
-    { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
-    { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
+    { dir: '1s', label: 'Ticks', phrase: 'one second', per: null },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', per: 375 },
+    { dir: '1day', label: '1 day', phrase: 'one day', per: 1 }
   ];
 
   // ───────────────────── HOW FINE EACH FEED CAN EVER ANSWER ─────────────────
@@ -1476,6 +1490,31 @@
   const active = $derived(feeds.all.find((f) => f.wire === feeds.active));
 
   /**
+   * THE LADDER AS THE SELECTED FEED FILES IT (R4-01, V1): whether the store
+   * files each rung for THIS feed, read off `/feeds.json` — never a constant.
+   * @type {FeedRung[]}
+   */
+  const rungsHere = $derived(
+    RUNGS.map((r) => {
+      const s = rungStored(/** @type {any} */ (active), r.dir);
+      return { ...r, stored: s.stored, storedWhy: s.why };
+    })
+  );
+
+  /* ─────────────────────────── THE PANELS (R4-01) ───────────────────────────
+     Every `./panels/*.svelte` is mounted at the foot of the page by its own
+     exported `order`, ties by file name. A panel that breaks the contract
+     (`$lib/ingest-panels.js`) is named in one line and on the console and is
+     still mounted, last: never dropped. Each owns its fetches; it is handed
+     only the selected feed. */
+  const panels = panelRegistry(import.meta.glob('./panels/*.svelte', { eager: true }));
+  const panelsRefused = refusedLine(panels.refused);
+  const panelCtx = $derived({ feed: feeds.active, row: active ?? null });
+  onMount(() => {
+    for (const r of panels.refused) console.error(`/ingest panel ${r.file}: ${r.why}`);
+  });
+
+  /**
    * THE SPAN THE FEED'S OWN DESCRIPTOR STATES (WP-61; DB-B38, DB-B46), read
    * off `/feeds.json` and nothing else: an archive vendor's measured span
    * (`archive`; both ends BIND, because no file exists outside it) or the
@@ -2037,7 +2076,7 @@
    */
   let rungTouched = $state(false);
   /** The ticked rungs, in the ladder's order. Never the tick order. */
-  const rungsChosen = $derived(RUNGS.filter((r) => rungSet.has(r.dir)));
+  const rungsChosen = $derived(rungsHere.filter((r) => rungSet.has(r.dir)));
   /**
    * THE FIRST TICKED RUNG, for the things that can only be about one: the
    * header chip and the feed floor's own sentence. Every COUNT reads
@@ -2090,7 +2129,7 @@
    *   can the VENDOR ever serve it   `/feeds.json` `finest` — and this is the
    *                                  only one that disables a row
    *   does this BUILD fetch it       `/feeds.json` `history[].served`
-   *   can the STORE file it          `RUNGS.stored`
+   *   can the STORE file it          `rungsHere.stored`
    *
    * ONLY THE FIRST DISABLES, and the rule is worth stating because the other
    * two are tempting: a row is drawn dead only where nothing anybody could ever
@@ -2111,7 +2150,7 @@
   const rungRows = $derived.by(() => {
     const wire = feeds.active ?? '';
     const name = feedName(wire);
-    return RUNGS.map((r) => {
+    return rungsHere.map((r) => {
       const v = floorVerdict(wire, r.dir);
       const fetches = feedFetches(r.dir);
       const says = [];
@@ -2169,23 +2208,24 @@
           `${name} does not declare this rung: crates/api's served() refuses the POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would be answered with a DIFFERENT bar length and filed under the one you asked for. Fixable, and not from here: record the endpoint in pull::vendor.`
         );
       }
-      if (!r.stored) {
-        long.push(
-          'The store has no directory for it, and the refusal is at the WRITE boundary rather than here: store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so pull::vendor::Granularity::store_timeframe answers None and pull::ingest::Plan::timeframe refuses the bar BY NAME rather than filing it under a rung it is not. That is a store-format limit and not a vendor one — the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.'
-        );
-      }
+      // WHETHER THIS FEED'S BARS ARE FILED AT THIS RUNG, per feed off
+      // `/feeds.json` (R4-01, V1). It said "the store has no directory" on the
+      // second rung of every feed, false for an archive feed since D-2802.
+      if (r.stored !== true) long.push(r.storedWhy);
 
       const status = v.permanent
         ? 'never served'
-        : fetches === false && !r.stored
-          ? 'not fetched · no store dir'
+        : fetches === false && r.stored === false
+          ? 'not fetched · not filed'
           : fetches === false
             ? 'not fetched by this build'
-            : !r.stored
-              ? 'no store directory'
-              : r.per === null
-                ? 'no session count'
-                : `${n(r.per)} bar(s) per session`;
+            : r.stored === false
+              ? 'not filed for this feed'
+              : r.stored === null
+                ? 'filing not stated'
+                : r.per === null
+                  ? 'no session count'
+                  : `${n(r.per)} bar(s) per session`;
 
       return {
         key: r.dir,
@@ -2288,7 +2328,7 @@
     for (const row of rungRows) {
       if (row.disabled) dead += 1;
       if (row.fetches === false) unfetched += 1;
-      if (!row.stored) unstored += 1;
+      if (row.stored === false) unstored += 1;
     }
     // `dead` IS NOW ALWAYS ZERO and the field stays, because the two callers
     // read it to decide whether to say anything at all — and a feed whose floor
@@ -3507,9 +3547,8 @@
     // THREE SENTENCES, BECAUSE THERE ARE THREE REFUSALS AND THEY ARE FIXED BY
     // THREE DIFFERENT THINGS. See `finestByWire` above for why one word
     // standing for all of them is the failure §4 names.
-    const unstored = rungsChosen.filter((x) => !x.stored);
+    const unstored = rungsChosen.filter((x) => x.stored === false);
     if (unstored.length > 0) {
-      const many = unstored.length > 1;
       out.push(
         // `phrase`, NOT `label` — see `RUNGS`. "The store has no directory for
         // ticks" is a sentence about the STORE, and the store has never heard
@@ -3520,7 +3559,10 @@
         // `Timeframe::KNOWN` has held seven entries since D-0054 and
         // `store_timeframe` answers for five of them. The true fact for the one
         // rung that can reach this line is that nothing below a minute is filed.
-        `The store has no directory for ${unstored.map((x) => x.phrase).join(', ')}. store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so ${many ? 'these rungs are' : 'this rung is'} refused at the WRITE boundary by pull::ingest::Plan::timeframe — expect a refusal rather than bars. That is a store-format limit and not a vendor one: the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.`
+        // R4-01 (V1): THE SENTENCE IS THE FEED'S OWN, per rung, off
+        // `/feeds.json` — it said nothing below a minute is stored, which has
+        // been false for an archive feed since D-2802.
+        unstored.map((x) => x.storedWhy).join(' ')
       );
     }
     const unfetched = rungsChosen.filter((x) => feedFetches(x.dir) === false);
@@ -4047,11 +4089,8 @@
     return head + un + em;
   });
 
-  /** The census spells an instrument `EXCHANGE-SEGMENT-SYMBOL`. */
-  /** @param {CatalogueRow} row */
-  function censusKey(row) {
-    return `${row.exchange}-${row.segment}-${row.symbol}`;
-  }
+  /* `censusKey` — the census's `EXCHANGE-SEGMENT-SYMBOL` — is
+     `$lib/ingest-held.js`'s, with the rest of the held join (R4-01). */
 
   // ------------------------------------------------- what this feed is MISSING
   //
@@ -4652,33 +4691,51 @@
    *             ONLY when a derivative segment is ticked and reachable, and it
    *             keeps only the ticked underlyings' sums.
    */
-  const derivativeBars = $derived.by(() => {
-    /** @type {Map<string, number>} */
-    const by = new Map();
-    if (!storeMine) return by;
-    if (!segmentsReached.some((seg) => seg.key !== 'spot')) return by;
-    const wanted = new Set(ticked.map((m) => m.symbol));
-    for (const c of store.readable) {
-      const p = parseKey(c.instrument);
-      const seg = segmentOf(p);
-      if (seg === null || seg === 'spot' || p.underlying === null || !wanted.has(p.underlying)) continue;
-      const k = `${p.underlying}|${seg}|${c.timeframe}|${c.month}`;
-      by.set(k, (by.get(k) ?? 0) + c.rows);
-    }
-    return by;
+  /* THE JOIN IS `$lib/ingest-held.js` (R4-01, V1), and it is read through
+     three things:
+
+       census    whether the census on hand is THIS feed's. Until it is, every
+                 month is `loading` — never "never imported", never a 0. The
+                 operator's screen read "0 / unverified · NEVER IMPORTED" over
+                 97 held months of every GDFL share for exactly that window.
+       spot      one probe of the shared `store.byCell` index, as before.
+       contract  the derivative fold, ONCE PER CENSUS STAMP and in slices: it
+                 sums every underlying, so ticking another name never walks the
+                 census again (it did, on every tick change, as a `$derived`
+                 over the ticked set), and no slice holds the page. */
+  const censusNow = $derived(
+    censusReadiness({ feed: feeds.active, storeFeed: store.feed, state: store.state, error: store.error })
+  );
+  const heldJoin = createHeldJoin();
+  /** Bumped when the contract fold publishes, so the census re-reads it. */
+  let heldTick = $state(0);
+  const wantsContracts = $derived(segmentsReached.some((seg) => seg.key !== 'spot'));
+  $effect(() => {
+    if (!storeMine || !wantsContracts || store.state === 'none') return;
+    // THE CENSUS'S OWN GENERATION, when the answer named it: a re-read of an
+    // unchanged census is the same stamp and walks nothing (R4-01 round 1).
+    const stamp = censusStamp({ feed: store.feed, generation: store.generation, at: store.at, server: store.lag?.generation ?? null, epoch: store.lag?.epoch ?? null });
+    // NO ABORT ON RE-RUN: a newer stamp cancels the walk inside the join, and
+    // leaving the page does (`onDestroy` below). See `foldDerivatives`.
+    void foldDerivatives(heldJoin, stamp, store.readable, {
+      parse: parseKey,
+      segmentOf,
+      slices: (count, work, signal) => inSlices(count, work, signal)
+    }).then((walked) => {
+      if (walked) heldTick += 1;
+    });
   });
+  onDestroy(() => stopFold(heldJoin));
 
   /**
-   * The bars one (instrument, segment, rung, month) holds, or `undefined` when
-   * the store holds no file for it — which is not zero bars.
+   * The bars one (instrument, segment, rung, month) holds, and whether it has
+   * been looked up at all. See `$lib/ingest-held.js` `heldMonth`.
    *
    * @param {CatalogueRow} m @param {string} seg @param {string} dir @param {string} ym
-   * @returns {number | undefined}
    */
   function heldBars(m, seg, dir, ym) {
-    if (!storeMine) return undefined;
-    if (seg === 'spot') return store.byCell.get(cellKey(censusKey(m), dir, ym));
-    return derivativeBars.get(`${m.symbol}|${seg}|${dir}|${ym}`);
+    void heldTick;
+    return heldMonth(heldJoin, (i, t, y) => store.byCell.get(cellKey(i, t, y)), censusNow, m, seg, dir, ym);
   }
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
@@ -5047,7 +5104,22 @@
           let exp = 0;
           let unproved = 0;
           let missing = 0;
+          /* MONTHS THAT HOLD BARS, counted for every row (R4-01, V1): at a rung
+             with no yardstick it is the only thing a month can be said to be. */
+          let heldCount = 0;
+          // Months counted from the PREVIOUS census while a newer one is
+          // walked (`heldMonth` `stale`): shown, and labelled so.
+          let staleCount = 0;
           const seen = emptySeen();
+          /* WHY THIS ROW'S MONTHS ARE NOT LOOKED UP, when they are not: the
+             census of this feed, or for a contract segment the fold of it. */
+          const loadingWhy = !censusNow.ready
+            ? censusNow.why
+            : s.key !== 'spot' && !heldJoin.ready
+              ? heldJoin.error
+                ? `The contract segments could not be summed from the census: ${heldJoin.error}. No contract month is judged.`
+                : 'The contract segments are being summed from the census, once per reading; no contract month is judged until it lands.'
+              : '';
           for (const ym of windowMonths) {
             const sessions = sessionsByMonth.get(ym) ?? 0;
             /* SPOT ONLY. A DERIVATIVE MONTH HAS NO DERIVABLE EXPECTATION.
@@ -5106,7 +5178,8 @@
             // WITH `s.key` IN IT. Without the segment this probe answered
             // the same number for every segment in the loop.
             const held = heldBars(m, s.key, r.dir, ym);
-            const bars = held === undefined ? null : held;
+            const bars = held.bars;
+            if (held.stale) staleCount += 1;
             // A MONTH THE FEED CANNOT REACH IS NOT A GAP. The floor is the
             // same one the date control refuses a day with.
             // ONE READ, ONE NAME. `feedFloor.at` is `string | null`, and
@@ -5137,17 +5210,26 @@
               : unlisted > 0
                 ? `the pull journal holds ${n(unlisted)} more whole-window refusal(s) of this instrument than /ingest/refusals.json lists, and one of them may cover this month`
                 : '';
-            const k = monthVerdict({ beyond, bars, expect, sessions, refused: why !== null, unread: s.key === 'spot' && unreadWhy !== '' });
+            const k = monthVerdict({
+              beyond, bars, expect, sessions, refused: why !== null, unread: s.key === 'spot' && unreadWhy !== '',
+              // NOT LOOKED UP IS NOT ABSENT, AND A SECOND HAS NO YARDSTICK
+              // (R4-01, V1): see `$lib/ingest-months.js`.
+              loading: held.loading,
+              // A CONTRACT SEGMENT HAS NO DERIVABLE EXPECTATION EITHER (see
+              // `derivable` above): its held months are counted the same way.
+              countOnly: r.per === null || !derivable
+            });
             got += bars ?? 0;
             exp += expect ?? 0;
-            if (k !== 'ok' && k !== 'beyond') unproved += 1;
+            if ((bars ?? 0) > 0) heldCount += 1;
+            if (!settledMonth(k) && k !== 'loading') unproved += 1;
             if (k === 'never' || k === 'short' || k === 'refused' || k === 'unread') missing += 1;
             seen[k] += 1;
             months.push({
               month: ym, sessions, exp: expect, got: bars, k,
               why: k === 'refused' ? why : null,
               unread: k === 'unread' ? unreadWhy : '',
-              flight: inFlight && k !== 'ok' && k !== 'beyond' && flightMonth(flight, ym)
+              flight: inFlight && !settledMonth(k) && flightMonth(flight, ym)
             });
           }
           // The series verdict, worst first, and every branch has evidence
@@ -5188,6 +5270,15 @@
             exp,
             unproved,
             missing,
+            held: heldCount,
+            stale: staleCount,
+            loadingWhy,
+            // A READ THAT FAILED IS NOT ONE STILL RUNNING: the word says which.
+            loadingWord: censusNow.word === 'failed' || (s.key !== 'spot' && heldJoin.error) ? 'census not read' : 'census loading',
+            // AN UNDERLYING THIS FEED HOLDS OPTIONS OF AND NO SPOT SERIES FOR
+            // (`/instruments.json` files it under FNO with `spot: false`): its
+            // spot row says so, its option rows count their months (R4-01).
+            noSpot: s.key === 'spot' && /** @type {any} */ (m).spot === false,
             state
           });
         }
@@ -5500,7 +5591,7 @@
    * timeframe and no attempt would help. Everything else is work.
    */
   const verdictSettled = $derived(
-    verdictTally.reduce((sum, seg) => (seg.k === 'ok' || seg.k === 'beyond' ? sum + seg.n : sum), 0)
+    verdictTally.reduce((sum, seg) => (settledMonth(seg.k) ? sum + seg.n : sum), 0)
   );
 
   /**
@@ -10044,14 +10135,25 @@
                       {/if}
                       <td
                         class="num mono"
-                        title={!c?.expectedKnown
+                        title={r.state === 'loading'
+                          ? r.loadingWhy
+                          : !c?.expectedKnown
                           ? `${n(r.got)} stored bar(s). The expected total is unverified because the timeframe or at least one reachable month's calendar expectation is unknown.`
                           : `${n(r.got)} stored against ${n(r.exp)} expected — ${n(windowSessions)} NSE session(s) inside the window × ${n(r.per)} bar(s) per session, over ${n(r.months.length)} month file(s).`}
                       >
+                        <!-- NOT LOOKED UP IS NOT ZERO (R4-01, V1): before the
+                             census lands this cell read `0 / unverified` over a
+                             share holding 3.6 crore one-second bars. -->
+                        {#if r.state === 'loading'}
+                          <span class="dim">{r.loadingWord}</span>
+                        {:else if r.noSpot}
+                          <span class="warn" title={`${feedName(feeds.active)} holds options on ${r.sym} and no spot series: /instruments.json lists it under FNO with spot false. Its option rows count their months; the spot has to be imported or pulled before a spot month or a greek can be read.`}>spot not stored</span>
+                        {:else}
                         <span class:up={c?.expectedKnown && r.got >= r.exp} class:warn={c?.expectedKnown && r.got < r.exp}
                           >{n(r.got)}</span
                         >
                         / {!c?.expectedKnown ? 'unverified' : n(r.exp)}
+                        {/if}
                         <!-- THE RATIO THE TWO NUMBERS ALREADY STATE, AS A
                              LENGTH. `0 / 11,29,875` and `11,04,320 / 11,29,875`
                              are both two long tabular numbers, and telling them
@@ -10094,11 +10196,24 @@
                         class="num mono"
                         class:warn={r.unproved > 0}
                         class:up={r.unproved === 0}
-                        title={r.unproved > 0
-                          ? `${n(r.unproved)} of the ${n(r.months.length)} month file(s) in the window are not settled: ${r.months.filter((m) => m.k !== 'ok' && m.k !== 'beyond').map((m) => `${monthLabel(m.month)} ${VERDICT[m.k][1]}${m.why ? ` (${m.why.days.join(', ') || 'whole window'})` : ''}`).join(', ')}.`
-                          : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, or out of this feed's reach.`}
+                        title={r.state === 'loading'
+                          ? r.loadingWhy
+                          : r.unproved > 0
+                          ? `${n(r.unproved)} of the ${n(r.months.length)} month file(s) in the window are not settled: ${r.months.filter((m) => !settledMonth(m.k)).map((m) => `${monthLabel(m.month)} ${VERDICT[m.k][1]}${m.why ? ` (${m.why.days.join(', ') || 'whole window'})` : ''}`).join(', ')}.${r.held > 0 ? ` ${n(r.held)} month file(s) hold bars.` : ''}`
+                          : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, held at a rung with no yardstick (counted, not compared), or out of this feed's reach. ${n(r.held)} of them hold bars.`}
                       >
-                        {n(r.unproved)}/{n(r.months.length)}
+                        <!-- R4-01 (V1): `census loading` until the census
+                             lands, never `97/97`; and at a rung with no
+                             yardstick the months that HOLD bars, `97/97 held`,
+                             because "unproved" is all such a month can never
+                             stop being. -->
+                        {#if r.state === 'loading'}
+                          <span class="dim">{r.loadingWord}</span>
+                        {:else if r.per === null || r.seg !== 'spot'}
+                          {n(r.held)}/{n(r.months.length)} held{r.unproved > 0 ? ` · ${n(r.unproved)} open` : ''}{#if r.stale > 0}<span class="dim" title="These counts are the previous census's of this feed; a newer census is being counted and replaces them when it is done."> · previous census, re-counting</span>{/if}
+                        {:else}
+                          {n(r.unproved)}/{n(r.months.length)}
+                        {/if}
                         <!-- THE COMPLEMENT, AS A LENGTH. `140/140` and `2/140`
                              are the same shape and opposite news; this is the
                              SETTLED share, so a full bar is a finished series
@@ -10355,6 +10470,16 @@
       {/if}
     </div>
   {/if}
+
+  <!-- THE PANEL REGISTRY (R4-01): ./panels/*.svelte, by exported `order`. -->
+  <section class="panels" aria-label="Panels">
+    {#if panelsRefused}<p class="warn mono panels-refused">{panelsRefused}</p>{/if}
+    <!-- EACH PANEL IN ITS OWN ERROR BOUNDARY: one that throws is one named
+         line, never a blank page (R4-01 repair round 1). -->
+    {#each panels.panels as p (p.file)}
+      <IngestPanelSlot panel={p} ctx={panelCtx} />
+    {/each}
+  </section>
 </div>
 
 <!-- ===================================================================== -->
@@ -10885,6 +11010,18 @@
 {/snippet}
 
 <style>
+  /* THE PANEL STACK (R4-01): one column, the page's own gap, never wider
+     than the page at 375 px. */
+  .panels {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+    min-width: 0;
+  }
+  .panels-refused {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
   /* Everything below is built from the tokens in $lib/theme.css. No colour,
      radius, duration or step is spelled twice — a hex code here would be a
      second theme that the toggle does not reach. */
