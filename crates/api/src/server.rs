@@ -1256,6 +1256,8 @@ fn floor_oldest(
 /// measurement, however sound it is.
 struct BarsAddress<'a> {
     symbol: &'a str,
+    /// The contract below the symbol, `None` for spot (app-6, AF-04).
+    contract: Option<&'a str>,
     segment: &'a str,
     vendor: &'a str,
     month: &'a str,
@@ -1278,6 +1280,7 @@ fn empty_bars_page(
         status,
         render::bars_page(&render::BarsView {
             symbol: at.symbol,
+            contract: at.contract,
             segment: at.segment,
             vendor: at.vendor,
             month: at.month,
@@ -1343,11 +1346,51 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
 ///
 /// One spelling of one parse, so `month` and the range's `to` cannot disagree
 /// about what a month looks like.
+///
+/// # The parse is [`bars::month_of_text`], and nothing else (app-7, AF-04)
+///
+/// This split on `-` and handed each half to `str::parse`, which takes a
+/// leading `+` and any run of leading zeros, so `2024-3`, `2024-003`,
+/// `2024-0003`, `02024-03`, `%2B2024-03` and `2024-%2B3` all answered March
+/// under HTTP 200 on `/bars.json`, `/gaps.json`, `/provenance.json` and, through
+/// `spot::month_param`'s copy, `/spot.json` and `/greeks.json`, while the
+/// sentence below promised `YYYY-MM`. Every route now reads the one strict
+/// parser, so the sentence is true and one month has one request text.
 fn month_param(query: &str, key: &str) -> Result<store::path::YearMonth, String> {
     let raw = param(query, key);
-    raw.split_once('-')
-        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-        .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
+    bars::month_of_text(&raw).ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
+}
+
+/// The `contract` parameter: absent (`None`, a spot series), a contract
+/// segment, or the sentence that refuses it by name.
+///
+/// ONE PARSE for `/bars.json` ([`Addressed::parse`]) and the `/bars` page
+/// ([`bars_html`]), so the page cannot accept a contract the JSON route
+/// refuses or the reverse (app-6, AF-04). An EMPTY value is absent — the JSON
+/// route has always read `contract=` that way and the front end sends it for
+/// spot — so `contract=` and no `contract` are one request. A present but
+/// unparseable value refuses rather than falling back to `None`: falling back
+/// reads the UNDERLYING's month and answers with a different instrument's
+/// bars, the one failure worse than a 400.
+///
+/// # Errors
+///
+/// The refusal sentence, naming the parameter.
+fn contract_param(query: &str) -> Result<Option<brutex_core::instrument::Contract>, String> {
+    let raw_contract = param(query, "contract");
+    if raw_contract.is_empty() {
+        return Ok(None);
+    }
+    brutex_core::instrument::Contract::parse(&raw_contract)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "contract={raw_contract:?} is not a contract segment this store can \
+                 name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
+                 not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
+                 uppercase letters, digits and hyphens."
+            )
+        })
 }
 
 /// Everything but the month that addresses a bar file, parsed once.
@@ -1406,22 +1449,8 @@ impl Addressed {
         // refuses by name rather than falling back to `None`: falling back would
         // read the UNDERLYING's month and answer with a different instrument's
         // bars, which is the one failure worse than a 400.
-        let raw_contract = param(query, "contract");
-        let contract = if raw_contract.is_empty() {
-            None
-        } else {
-            match brutex_core::instrument::Contract::parse(&raw_contract) {
-                Some(contract) => Some(contract),
-                None => {
-                    return Err(format!(
-                        "{raw_contract:?} is not a contract segment this store can \
-                         name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
-                         not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
-                         uppercase letters, digits and hyphens."
-                    ));
-                }
-            }
-        };
+        // One parse, shared with the `/bars` page: see `contract_param`.
+        let contract = contract_param(query)?;
         Ok(Self {
             vendor,
             month,
@@ -14570,10 +14599,11 @@ pub fn store_html(
 /// DIFFERENT filter than the one shown, which is why the controls render from
 /// this same struct: what the bar shows is what was parsed.
 fn store_filter(query: &str) -> census::StoreFilter {
-    let month = |raw: &str| -> Option<store::path::YearMonth> {
-        let (y, m) = raw.split_once('-')?;
-        store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-    };
+    // THE ONE MONTH PARSER (app-7, AF-04). This was a fifth lenient copy that
+    // read `from=2024-3` and `from=%2B2024-03` as March; a misspelt month is now
+    // `None`, shown as "All" like every other malformed narrowing here, so the
+    // bar still shows exactly what was applied.
+    let month = bars::month_of_text;
     let symbol = param(query, "symbol");
     census::StoreFilter {
         segment: brutex_core::instrument::Segment::parse(&param(query, "kind")).ok(),
@@ -14641,6 +14671,7 @@ fn bars_refusal(
         status,
         render::bars_page(&render::BarsView {
             symbol,
+            contract: None,
             segment,
             vendor,
             month: "—",
@@ -14701,7 +14732,179 @@ fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
     )
 }
 
-/// The exchange and segment to read one symbol's bars from.
+/// The exchange and segment to read one symbol's bars from: a spot series by
+/// [`locate_spot`], or a CONTRACT by [`locate_contract`] when `contract=`
+/// names one.
+///
+/// # Why a contract never takes the spot walk (app-6, AF-04)
+///
+/// The spot walk skips every contract row and answers with the identity of the
+/// SPOT series under `symbol`. With `contract=` given and `segment=` omitted,
+/// `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE` was placed at
+/// `NSE/INDEX`, opened the INDEX month and answered 200 with 410,767 NIFTY spot
+/// bars under a page that never named the contract; a RELIANCE option answered
+/// RELIANCE cash. A different instrument's bars under HTTP 200 is the fallback
+/// `CLAUDE.md` §4 bans and the one `Addressed::parse` calls worse than a 400.
+/// A contract is now placed only where a contract is filed, or refused by name.
+fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
+    match contract_param(query) {
+        Ok(None) => locate_spot(site, query, symbol),
+        Ok(Some(contract)) => locate_contract(site, query, symbol, contract),
+        Err(why) => Err(Unlocated::Refused(why)),
+    }
+}
+
+/// Whether `segment` files contract directories below its symbols.
+///
+/// An exhaustive `match`, not a list: a segment added to the store's type must
+/// decide here, at compile time, whether a contract can live under it. Spot
+/// indices and cash equities have no expiry and no strike, which is why
+/// `Contract::of` answers `None` for both.
+const fn files_contracts(segment: brutex_core::instrument::Segment) -> bool {
+    use brutex_core::instrument::Segment;
+    match segment {
+        Segment::Index | Segment::Cash => false,
+        Segment::Fno => true,
+    }
+}
+
+/// The `/bars` refusal for a request that names no month at all — a different
+/// sentence from a month that is named and misspelled, which
+/// [`month_param`] refuses by its own text (app-7, AF-04).
+const NO_MONTH: &str = "no month was named. A bar file is addressed by (vendor, exchange, \
+                        segment, symbol, timeframe, month) and the month is the one part \
+                        that cannot be defaulted — ?month=2025-07";
+
+/// The `/bars` month, through the one parser: absent is [`NO_MONTH`] and a
+/// misspelling is [`month_param`]'s own sentence (app-7, AF-04).
+fn bars_month(query: &str) -> Result<store::path::YearMonth, String> {
+    if param(query, "month").is_empty() {
+        return Err(NO_MONTH.to_owned());
+    }
+    month_param(query, "month")
+}
+
+/// The feed, rung and month a contract probe is keyed by, or the refusal the
+/// page would give for the first one that is wrong — the same sentences
+/// [`bars_html`] gives, so asking in either order reads the same.
+fn contract_probe_terms(
+    query: &str,
+) -> Result<(Vendor, store::path::Timeframe, store::path::YearMonth), String> {
+    let vendor = bars_vendor(query).map_err(str::to_owned)?;
+    let month = bars_month(query)?;
+    let timeframe = timeframe_param(query)?;
+    Ok((vendor, timeframe, month))
+}
+
+/// Where one CONTRACT's month is filed: the asked pair, or one census probe per
+/// exchange (app-6, AF-04).
+///
+/// * `segment=` omitted is `FNO`, the only segment that files contracts — not a
+///   default, the type's own fact ([`files_contracts`]). A segment that files
+///   none (`INDEX`, `CASH`, or one this store does not know) is refused: a
+///   contract cannot be below it, and opening the spot month there is the
+///   defect this replaces.
+/// * `exchange=` given wins outright and costs no census read, as for spot.
+/// * `exchange=` omitted asks the ASKED feed's census, and only that one,
+///   whether it holds `(contract, exchange, segment, symbol, rung, month)` —
+///   one hash probe per exchange, [`facets::EXCHANGES`], so the cost does not
+///   grow with the 1.15 million contracts a census can hold. The spot walk's
+///   whole-census sort is never taken here. Another feed's census would be the
+///   other-feed guess D-0695 refuses. Held on one exchange answers it; on two is
+///   ambiguous; on none is a 404 that names the contract files that were asked
+///   about — never a spot path.
+fn locate_contract(
+    site: &Site,
+    query: &str,
+    symbol: &str,
+    contract: brutex_core::instrument::Contract,
+) -> Result<(String, String), Unlocated> {
+    use brutex_core::instrument::Segment;
+    let asked_exchange = param(query, "exchange");
+    let asked_segment = param(query, "segment");
+    let segment = if asked_segment.is_empty() {
+        Segment::Fno.as_str().to_owned()
+    } else {
+        asked_segment
+    };
+    let Some(kind) = Segment::parse(&segment)
+        .ok()
+        .filter(|kind| files_contracts(*kind))
+    else {
+        return Err(Unlocated::NoContractSegment { segment, contract });
+    };
+    if !asked_exchange.is_empty() {
+        return Ok((asked_exchange, segment));
+    }
+    let (vendor, timeframe, month) = contract_probe_terms(query).map_err(Unlocated::Refused)?;
+    let (censuses, _) = census_now(site);
+    let own = censuses.iter().find(|census| census.vendor == vendor);
+    let held: Vec<brutex_core::instrument::Exchange> = match own.map(|census| &census.state) {
+        Some(census::Census::Unreadable { .. }) => {
+            return Err(Unlocated::AskedUnreadable(
+                own.map(census::VendorCensus::note).unwrap_or_default(),
+            ));
+        }
+        Some(census::Census::Held { manifest }) => match brutex_core::symbol::Symbol::new(symbol) {
+            Ok(stored) => facets::EXCHANGES
+                .into_iter()
+                .filter(|exchange| {
+                    manifest
+                        .held(&pull::manifest::EntryKey {
+                            contract: Some(contract),
+                            exchange: *exchange,
+                            segment: kind,
+                            symbol: stored,
+                            timeframe,
+                            month,
+                        })
+                        .is_some()
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+        Some(census::Census::Absent) | None => Vec::new(),
+    };
+    match *held.as_slice() {
+        [exchange] => Ok((exchange.as_str().to_owned(), segment)),
+        [first, second, ..] => Err(Unlocated::Ambiguous {
+            vendor,
+            first: (first, kind),
+            second: (second, kind),
+        }),
+        [] => {
+            let tried: Vec<String> = facets::EXCHANGES
+                .into_iter()
+                .filter_map(|exchange| {
+                    store::path::StorePath::new(store::path::PathParts {
+                        vendor,
+                        exchange: exchange.as_str(),
+                        segment: kind.as_str(),
+                        symbol,
+                        contract: Some(contract),
+                        timeframe,
+                        month,
+                        file: store::path::FileKind::Bars,
+                    })
+                    .ok()
+                    .map(|path| path.to_path_buf(&site.store_root).display().to_string())
+                })
+                .collect();
+            // A NAME NO PATH CAN CARRY is the request's fault, not the store's:
+            // an empty or unfileable `symbol=` names no contract file at all, so
+            // it is a 400 that says so rather than a 404 "asked about" nothing.
+            if tried.is_empty() {
+                return Err(Unlocated::Refused(format!(
+                    "symbol={symbol:?} is not a name this store files a contract \
+                     under, so contract={contract} names no file to open."
+                )));
+            }
+            Err(Unlocated::ContractNotHeld(tried))
+        }
+    }
+}
+
+/// The exchange and segment to read one SPOT symbol's bars from.
 ///
 /// [`Unlocated`] means **nothing placed under that name and nothing asked** — the
 /// caller refuses rather than probing a guessed path. Extracted from
@@ -14763,7 +14966,7 @@ fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
 /// Only that census can say where that feed filed the name, so when it cannot
 /// be read and the caller did not give the pair, the route refuses and names
 /// it, as `/calendar.json` does.
-fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
+fn locate_spot(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
     let asked_exchange = param(query, "exchange");
     let asked_segment = param(query, "segment");
     // AN EXPLICIT PAIR WINS OUTRIGHT AND COSTS NO CENSUS READ. The census
@@ -14847,6 +15050,18 @@ fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, Stri
 /// Why [`locate_series`] found no exchange and segment to read.
 #[derive(Debug, PartialEq, Eq)]
 enum Unlocated {
+    /// A parameter the placement reads is malformed: its own sentence, 400.
+    Refused(String),
+    /// `contract=` names a contract and the segment files none (app-6).
+    NoContractSegment {
+        /// The segment asked for, as typed.
+        segment: String,
+        /// The contract asked for.
+        contract: brutex_core::instrument::Contract,
+    },
+    /// The asked feed's census holds the contract on no exchange in the asked
+    /// rung and month: the contract files that were asked about (app-6).
+    ContractNotHeld(Vec<String>),
     /// No census that could be read holds a spot series under the name. Each
     /// census that could NOT be read is carried as its note, because a name one
     /// of them holds is invisible from here.
@@ -14910,6 +15125,29 @@ fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::Statu
     const EXPLICIT: &str = "Pass ?exchange= and ?segment= explicitly to address a series the \
                             census does not place.";
     let (status, sentence) = match *why {
+        Unlocated::Refused(ref sentence) => (StatusCode::BAD_REQUEST, sentence.clone()),
+        Unlocated::NoContractSegment {
+            ref segment,
+            contract,
+        } => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "contract={contract} was asked for under segment={segment:?}, and that \
+                 segment files no contracts: an option's or a future's bars are filed \
+                 only under FNO, below the underlying. Refused rather than opening \
+                 {symbol}'s own {segment} month, which would answer with a different \
+                 instrument's bars. Drop segment= or pass segment=FNO."
+            ),
+        ),
+        Unlocated::ContractNotHeld(ref tried) => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "the asked feed's census holds no {symbol} contract at this rung and \
+                 month on any exchange, so there is no contract file to open. Asked \
+                 about: {}. Pass ?exchange= to open one of them directly.",
+                tried.join(" and ")
+            ),
+        ),
         Unlocated::NotHeld(ref unreadable) if unreadable.is_empty() => (
             StatusCode::BAD_REQUEST,
             format!(
@@ -14979,15 +15217,35 @@ fn unlocatable(site: &Site, symbol: &str, why: &Unlocated) -> (axum::http::Statu
 /// store. D-0339 removed the helper and [`locate_series`] replaced
 /// it, placed ABOVE this paragraph rather than inside it — which is the mistake
 /// that split it in the first place.
+///
+/// # The contract it was asked for (app-6, AF-04)
+///
+/// This page read no `contract=` and passed `None` to `bars::open`, so every
+/// contract link — every contract row on `/store` among them — opened the
+/// underlying's SPOT path below `FNO/`, which does not exist, and answered 404
+/// "…/FNO/NIFTY/1s/2024-03.bin does not exist" about a contract whose 50,734
+/// bars `/bars.json` served. It now parses `contract=` with the JSON route's
+/// own [`contract_param`], places it with [`locate_series`], opens that file,
+/// and names the contract in the page header; a 404 names the contract file it
+/// tried.
 #[must_use]
 pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
+    use brutex_core::instrument::Contract;
     let symbol = stored_case(param(query, "symbol"));
     // THE SEGMENT COMES FROM THE CENSUS, NEVER FROM A DEFAULT — see
-    // `locate_series` for what the default was and what it cost.
+    // `locate_series` for what the default was and what it cost. A malformed
+    // `contract=` is refused there, by name, before anything is placed.
     let (exchange, segment) = match locate_series(site, query, &symbol) {
         Ok(pair) => pair,
         Err(why) => return unlocatable(site, &symbol, &why),
     };
+    // Already refused by name in `locate_series` when malformed; read again
+    // here for its value, and refused the same way should the two disagree.
+    let contract = match contract_param(query) {
+        Ok(contract) => contract,
+        Err(why) => return unlocatable(site, &symbol, &Unlocated::Refused(why)),
+    };
+    let contract_text = contract.as_ref().map(Contract::as_str);
     // See `bars_vendor` for why this is one parser and refuses by name.
     let vendor = match bars_vendor(query) {
         Ok(vendor) => vendor,
@@ -15004,23 +15262,22 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     };
     let page = page_number(query);
 
-    let month = {
-        let raw = param(query, "month");
-        raw.split_once('-')
-            .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-    };
-
-    let Some(month) = month else {
-        return bars_refusal(
-            site,
-            axum::http::StatusCode::BAD_REQUEST,
-            &symbol,
-            &segment,
-            vendor.as_str(),
-            "no month was named. A bar file is addressed by (vendor, exchange, \
-             segment, symbol, timeframe, month) and the month is the one part \
-             that cannot be defaulted — ?month=2025-07",
-        );
+    // THE ONE MONTH PARSER (app-7): this was a fourth lenient copy that took
+    // `2024-3` and `+2024-03`, and it answered "no month was named" for a
+    // month that WAS named, misspelled. Absent and misspelled are now two
+    // sentences, and only `YYYY-MM` opens a file.
+    let month = match bars_month(query) {
+        Ok(month) => month,
+        Err(why) => {
+            return bars_refusal(
+                site,
+                axum::http::StatusCode::BAD_REQUEST,
+                &symbol,
+                &segment,
+                vendor.as_str(),
+                &why,
+            );
+        }
     };
 
     // A NAMED-BUT-UNKNOWN RUNG IS THE PAGE'S OWN REFUSAL, not a default. The
@@ -15035,6 +15292,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
                 site,
                 &BarsAddress {
                     symbol: &symbol,
+                    contract: contract_text,
                     segment: &segment,
                     vendor: vendor.as_str(),
                     month: &month.to_string(),
@@ -15052,19 +15310,21 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
         &symbol,
         timeframe,
         month,
-        // THE HTML BARS PAGE ADDRESSES SPOT ONLY, and says so rather than
-        // silently passing `None` the way this whole family used to. It takes
-        // no contract in its query, so there is nothing to pass; the JSON route
-        // beside it is the one that grew the parameter. A contract asked for
-        // here would need a control on the page first, and inventing one to
-        // match a parameter is the wrong order.
-        None,
+        // THE CONTRACT ASKED FOR, or `None` for spot (app-6, AF-04). This was
+        // `None` unconditionally under a comment calling the page spot only, so
+        // a contract link opened the spot path below `FNO/` and answered "does
+        // not exist" about a file that was on disk — the parameter ignored
+        // silently and the refusal giving a reason that was not the true one.
+        // `/store`'s own contract rows link here, so the control the comment
+        // waited for already existed.
+        contract,
     ) {
         Err(why) => empty_bars_page(
             axum::http::StatusCode::NOT_FOUND,
             site,
             &BarsAddress {
                 symbol: &symbol,
+                contract: contract_text,
                 segment: &segment,
                 vendor: vendor.as_str(),
                 month: &month.to_string(),
@@ -15072,34 +15332,64 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
             },
             &why,
         ),
-        Ok(file) => {
-            // `n_valid` is a header field, so the page count is a division and
-            // not a walk — the same arithmetic every paged surface here uses.
-            let total = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-            let last_page = total.saturating_sub(1) / bars::PAGE_BARS;
-            let page = page.min(last_page);
-            let (rows, faults) =
-                bars::page(&file, page.saturating_mul(bars::PAGE_BARS), bars::PAGE_BARS);
-            let trouble = (!faults.is_empty()).then(|| faults.sentences().join(" · "));
-            (
-                axum::http::StatusCode::OK,
-                render::bars_page(&render::BarsView {
-                    symbol: &symbol,
-                    segment: &segment,
-                    vendor: vendor.as_str(),
-                    month: &month.to_string(),
-                    rows: &rows,
-                    total,
-                    page,
-                    last_page,
-                    timeframe: timeframe.as_str(),
-                    trouble: trouble.as_deref(),
-                    store_root: &site.store_root.display().to_string(),
-                }),
-            )
-        }
+        Ok(file) => held_bars_page(
+            site,
+            &BarsAddress {
+                symbol: &symbol,
+                contract: contract_text,
+                segment: &segment,
+                vendor: vendor.as_str(),
+                month: &month.to_string(),
+                timeframe: timeframe.as_str(),
+            },
+            &file,
+            page,
+        ),
     }
 }
+
+/// One page of an opened month's bars.
+///
+/// Extracted from [`bars_html`] when the contract joined its address (AF-04),
+/// to keep the handler inside the workspace's 100-line ceiling; it renders the
+/// same view the arm did, field for field.
+fn held_bars_page(
+    site: &Site,
+    at: &BarsAddress<'_>,
+    file: &store::file::BarFile,
+    page: usize,
+) -> (axum::http::StatusCode, String) {
+    // `n_valid` is a header field, so the page count is a division and
+    // not a walk — the same arithmetic every paged surface here uses.
+    let total = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+    let last_page = total.saturating_sub(1) / bars::PAGE_BARS;
+    let page = page.min(last_page);
+    let (rows, faults) = bars::page(file, page.saturating_mul(bars::PAGE_BARS), bars::PAGE_BARS);
+    let trouble = (!faults.is_empty()).then(|| faults.sentences().join(" · "));
+    (
+        axum::http::StatusCode::OK,
+        render::bars_page(&render::BarsView {
+            symbol: at.symbol,
+            contract: at.contract,
+            segment: at.segment,
+            vendor: at.vendor,
+            month: at.month,
+            rows: &rows,
+            total,
+            page,
+            last_page,
+            timeframe: at.timeframe,
+            trouble: trouble.as_deref(),
+            store_root: &site.store_root.display().to_string(),
+        }),
+    )
+}
+
+/// The `/bars` page's contract and month-spelling cases (AF-04: app-6, app-7),
+/// declared beside the handler they test.
+#[cfg(test)]
+#[path = "bars_page_tests.rs"]
+mod bars_page_tests;
 
 /// Whether a live vendor call may leave this process.
 ///
