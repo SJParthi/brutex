@@ -67983,6 +67983,208 @@ hand against the earlier head and saw the leftover this removes).
 and `the_series_bytes_are_pinned`; `crates/store/src/staging_tests.rs`
 `a_create_makes_one_host_call_on_a_free_name_and_four_over_a_leftover`.
 
+### D-4878 — A GDFL capital-market day is done only for the members its close was asked to read; a wider scope reopens it for the new members alone — 2026-10-12
+
+**Implemented by** WP-12f (`pull`: `gdfl_import.rs`, `gdfl_import_scope.rs`,
+`gdfl_cm.rs`) and its repair round 1. **Findings** DB-B76, and the import
+half of DB-B06, DB-B17, DB-B40 and DB-B61.
+
+**Why.** The import journal's key is `<kind> <day> <filter>` and a `done` key
+was skipped whatever the run's scope had become. On 10 Oct 2026 a run under
+eight indices met 1,985 days closed `done` under two, skipped every one, and
+made six index series from the 12 special sessions alone.
+
+**Decision.**
+
+1. A capital-market run's `done` and `incomplete` lines carry
+   `scope=<digest>`: the first 16 hex digits of the SHA-256 of the run's
+   sorted member list. The list is written once per digest in a new
+   append-only ledger, `<store>/imports/gdfl.scopes`
+   (`scope <digest> <kind> n=<count> <m1>,<m2>,... .`). `scope=` is one more
+   `name=value` stat: no earlier reader refuses it.
+2. A close with no `scope=` (every line written before this) is read as
+   built under the swept surface of its kind.
+3. A day closed `done` under a narrower scope is read again only for the
+   members its close never covered that have a file that day, each under a
+   key of its own, `<filter>+<member>`. The base key is not closed again and
+   the old members' months are not touched. The day is then recorded
+   `examined <key> scope=<digest> run=<id> opened=<n> .` in the scope ledger,
+   so a day with no file of a new member is listed once per scope and not
+   again. The run's `run` line is in the journal before that line names its
+   id.
+4. A member whose month already holds a later day lands through the
+   versioned month repair (D-3350, D-4875), never in place.
+5. A member key's close is told as the member's ("member imported", "member
+   incomplete", "member refused", with `member=` and `key=`). "day imported"
+   is the day's, told once after its last member key, and the day is counted
+   once in `days_imported`: the import's pace is measured from the gaps
+   between "day imported" stamps.
+6. The done days of a run's first month that lie before its range are asked
+   what they owe the run, and what they owe is read first, in order. The run
+   says so at `warn` (`scope_reach_back`, with `first_owed=` and the `key=`
+   that owed it), once, when it reads a file of such a day; a day it only
+   lists is told at `info`. WHOSE CLOSE IS ASKED (repair 2, 12 Oct 2026): a
+   day the run's own key closed is that key's; any other day is asked of
+   EVERY key that closed it `done`, whatever its filter, the whole-day key
+   `*` among them. Such a key owes the members its close's scope never
+   covered that its own filter names, and the run reads the ones its own
+   filter wants under that key's member keys (`<that filter>+<member>`).
+   That the key was examined for this run's filter is remembered as
+   `examined <kind> <day> <that filter>/<the run's filter> ...`, never under
+   the key itself, so the key's own run still reads the members this filter
+   did not want. A member two keys owe is read once, and the day is counted
+   and told once. So no member's month is made from a later day while a day
+   of that month closed `done` by ANY run owes it, under a filter
+   (`--stored`, a named symbol) as under none, with `retry_refused` as
+   without it (check 3: a close with refusals before the range is asked like
+   any other, see item 7). At most 30 days. A day not closed `done` owes
+   nothing, and a key closed under names owes nothing it did not name
+   (`docs/06-limits.md`, L-WP12f-7). The one way a later day still lands
+   first: the owed day's own member read fails (a held month lock, a store
+   refusal, a file the vendor refuses). That failure is named and the run
+   ends rc 1, but it does not stop the run; the member's later days of the
+   range are written and the failed day lands later through the versioned
+   repair (L-WP12f-12).
+7. `retry_refused` reads again a member key closed done with refusals. A
+   BASE key closed done with refusals is read again whole only inside the
+   run's range (`admit`); before the range the flag changes nothing about
+   what that day owes, which is asked as for any other done day (check 3 of
+   WP-12f, 12 Oct 2026; before this, the flag made such a day owe nothing
+   and the month was made from the later days, unsaid).
+8. A share's `.BE` or `.BZ` day file is the share's own trading day, filed
+   under the share's key; the member is `NSE-CASH-<share>.<series>`. A day
+   holding both a share's own file and a series file refuses both by name.
+   The two series codes are a compiled list, UNVERIFIED against an NSE
+   circular (`docs/06-limits.md`, L-WP12f-4).
+9. **The closing auction's band runs through order matching, and its match
+   is kept apart booked or not** (SC-CLOSE-5, SC-CLOSE-6; refines D-3320
+   item 3; charter §9, "The auction's phases and where its band ends" and
+   "Which booked row is the auction's", whose timings rest on a broker's
+   dated notice and are UNVERIFIED against an NSE page). For a share the
+   day's security master flags eligible, from 2026-08-03: a zero-bid,
+   zero-ask traded row in `[15:15:00, 15:35:00)` is a print (the band ended
+   at 15:30 and lost the 9 of 145 measured prints stamped 15:30:00 to
+   15:30:02); and when every traded row in the match band `[15:28:00,
+   15:35:00)` is at one price, the booked ones are prints too (40 of 133
+   measured share-sessions had no zero-book row there). At two prices or
+   more no booked row is claimed: they stay rows of phase `cas`, counted in
+   `CmFile::auction_band_unattributed` and named by the import at warn
+   (`auction_band_unattributed`). A share whose eligibility is unknown is
+   refused by name when its band traded at one price with a booked row, as
+   a zero-book candidate refuses it: eligible, that row is the print, and
+   nothing says which. A print leaves the row count its row was put in, by
+   the one rule that put it there.
+10. **Definition 4 records item 9** (CMP-07). `BAR_DEFINITION` is 4. A
+   share's day from 2026-08-03 closed `done` under 2 or 3 is restated and
+   imported again; under 2 or 3 an index day, and a share's day before
+   2026-08-03, stay current, and so does an option day under 3 (D-3342 still
+   restates one under 2). The day question is
+   `vendor::cash_auction_eligibility_required`, the rule that asks for the
+   flag, and `/imports.json` asks the same function with the key's day.
+   **Such a day is refused by name at admission, every run, and never read
+   through the append door** (`reason=restated_auction_band`, stage `file`):
+   definition 4 takes the print OUT of the bars, the second reading is often
+   the held day less its last bar, and the append-only month answers that
+   `AlreadyPresent` (it compares the bars offered, never the held bar after
+   them), so the day would close `done` under 4 with the print still a bar,
+   unsaid. **The question is asked of the SHARES, not of one key** (repair 6,
+   14 Oct 2026, after check 4 read RELIANCE through the append door under a
+   fresh filter while a `HDFCBANK,RELIANCE` key stood closed under 3): a key
+   is refused when it would read any share that ANY key of that day, under
+   any filter, left possibly holding a bar 4 no longer builds — its last
+   `done` or `recounted` under 2 or 3, a close `incomplete` under one, or a
+   `begin` by a run under one never closed — and no later close under 4 of a
+   filter that read that share has ended it. A whole-tree key reads every
+   share; a member key (`<filter>+<member>`) reads its member and asks the
+   same question, since it bypasses its base key's admission. A `refused`
+   close of the run that wrote the early `begin` wrote nothing and undoes
+   that `begin`; it is that run's only when its `run=` equals the id of the
+   last whole `run` line before the `begin` (repair 7, 14 Oct 2026, after
+   check 5: this build's own first `restated_auction_band` refusal was taken
+   for the early run's close, erased the early `begin`, and the next run read
+   RELIANCE through the append door, 6,685 seconds offered and 0 written,
+   and closed it `done` under 4). A `refused` line of any other run, one
+   naming no run, or a `begin` no whole `run` line precedes keeps the entry:
+   refusing too much fails loudly, refusing too little fails silently. Which
+   definition a `begin` was written under is its run's: this build's `run`
+   line carries `definition=4`, and a run line without one (every build
+   before 4, which reads any `name=value` field of a run line) is an earlier
+   definition's, so a day this build began and a crash left open is read
+   again to make its months durable (WP-16), never refused. The months GDFL
+   CASH 2026-08 and 2026-09 are made again as new generations by WP-80
+   (D-3320 item 4); a names or member close under 4 ends the keys whose
+   shares it names all of, never a whole-tree key's. A WHOLE-TREE close under
+   4 read the members of ITS scope and no others, so it ends a key's share
+   only where that scope held the share: its `scope=` digest is resolved
+   through the scope ledger (`imports/gdfl.scopes`), a close naming none is
+   the swept surface, and a digest the ledger does not hold, or a run with
+   no ledger, holds nothing, so the share stands (repair 7, 14 Oct 2026,
+   after check 5's probe read ZZFOO, built under 3 by a names key, through
+   the append door under `*+NSE-CASH-ZZFOO` once a pre-scope `*` close under
+   4 stood; a names key outside that close's scope read it the same way). A
+   whole-tree key of an earlier definition that only whole-tree closes under
+   4 ended stands for every share none of their scopes held, and for an
+   asking whole-tree key always, since no probe of one share tells whether a
+   scope held every share. WP-80's remake therefore ends the refusal only
+   for the shares its scope holds: it runs under a scope holding every share
+   an earlier definition's key read in the era, or closes the rest by name.
+   A share a LATER scope adds stays refused on those days until a remake
+   whose scope holds it: an earlier definition's whole-tree key recorded no
+   scope, so it is taken to have read every share. Taking it as today's
+   swept surface instead would refuse too little, silently, for a share the
+   F&O list held when that build ran and no longer holds.
+   NO VERB OF THIS BUILD MAKES THAT REMAKE (repair 7, after check 5):
+   `gdfl-import` refuses every such key at admission, under any filter,
+   whole tree included, and the versioned repair (`store::repair_month`,
+   D-3350) keeps every held bar, so it cannot take the closing print out of
+   a month. The remake needs a writer that publishes a month as a new
+   generation holding FEWER bars than the served one, and the whole-tree
+   close under 4 it writes; owners the store crate and WP-80, named in
+   `docs/06-limits.md` L-WP12f-13. Until it lands, every stocks run touching
+   a day of the era that an earlier definition's key built is refused by
+   name on every run (rc 1, one journal line a key-day, no bar file), the
+   daily Ingest included for those days only; days after the era are not
+   touched.
+   O(1) in the journal's size: one hash probe for the day, one a share the
+   asking key names, and for a share only whole-tree closes ended one probe
+   a scope of that day's keys naming it (measured by
+   `the_auction_era_admission_check_costs_the_same_at_any_journal_size`).
+
+**Not done.** An options run records no scope. Landing a sparse month's owed
+days in one repair (L-WP12f-5). A journal format line (DB-B69), a per-day
+source digest compared across runs (DB-B77), the official open and close of
+an index file (DB-B18), the six stem hand-overs (DB-B12).
+
+**Proof.** `crates/pull/src/gdfl_scope_tests.rs`:
+`a_wider_scope_reads_a_done_day_again_for_its_new_members_only`,
+`a_close_with_no_scope_is_read_as_the_swept_surface`,
+`a_new_member_holding_only_a_later_day_takes_its_earlier_done_days`,
+`a_day_with_no_file_of_a_new_member_is_examined_once_and_never_listed_again`,
+`a_filtered_key_opens_no_member_its_filter_does_not_name`,
+`a_torn_ledger_line_is_stepped_over_and_a_foreign_one_refuses_the_run`,
+`a_trade_for_trade_spell_is_filed_under_its_shares_key`,
+`a_member_keys_close_is_told_as_the_members_and_the_day_is_told_once`,
+`a_run_starting_past_owed_days_of_its_month_reads_them_first`,
+`a_filtered_run_reads_first_what_the_whole_day_key_owes_it`,
+`a_key_closed_under_names_owes_only_what_it_named`,
+`retry_refused_reads_again_a_member_key_closed_with_refusals`,
+`retry_refused_never_cancels_what_a_done_day_before_the_range_owes`,
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`,
+`a_restated_share_day_of_the_auction_era_is_refused_by_name_never_appended`,
+`a_share_another_filter_built_under_an_earlier_definition_is_refused_under_every_filter_naming_it`,
+`a_share_key_an_earlier_definition_left_open_or_incomplete_is_refused`,
+`a_member_key_reading_a_share_built_under_an_earlier_definition_is_refused`,
+`the_auction_era_admission_check_costs_the_same_at_any_journal_size`;
+`crates/pull/src/gdfl_cm_admission_tests.rs`:
+`the_auction_band_runs_through_order_matching_and_stops_before_post_close`,
+`a_booked_match_at_the_one_band_price_is_a_print`,
+`two_band_prices_claim_no_booked_row_and_the_edges_hold`,
+`an_unknown_eligibility_refuses_a_one_price_booked_match_and_keeps_two_prices`,
+`a_booked_print_leaves_the_count_its_row_was_put_in`, and the timing
+`the_match_band_costs_one_pass_a_file` (ignored, on demand);
+`crates/api/src/import_journal.rs`:
+`a_share_day_of_the_auction_era_under_an_older_definition_is_restated`.
+
 ### D-4928 — The day ledger gains four optional halt and flat-run fields; `/dayflags.json` names a minute-sampled index day and counts the bars inside a halt — 2026-10-12
 
 **Implemented by** WP-11c (`pull::gdfl_import::quality`, `cli gdfl-dayflags`
