@@ -2613,16 +2613,19 @@ jobs:
           # leftover no step closes, or two close; a pending step with neither
           # rehearsal figures nor the unmet prerequisite it waits for; a copy
           # or snapshot taken with a writer running or with no read-back of a
-          # restore (FM-221); and a `merged` flag the history contradicts.
+          # restore (FM-221); a census-recount gdfl span over a day D-3317
+          # item 5 excludes, read from the decision ledger (verify-R3-36-r3);
+          # a check line that runs a store writer without saying so; and a
+          # `merged` flag the history contradicts.
           # WHAT IT CANNOT SEE: whether a step really ran on the store. A run
           # is recorded from the store's own journal and ledgers, by hand.
-          # NO UNTRUSTED INPUT: two tracked files and this checkout's history.
+          # NO UNTRUSTED INPUT: three tracked files and this checkout's history.
           gs="${RUNNER_TEMP:-/tmp}/gates-store-steps"
           rustc --edition=2024 --test -D warnings .github/gates_store_steps.rs -o "${gs}-tests"
           "${gs}-tests"
           rustc --edition=2024 -D warnings .github/gates_store_steps.rs -o "$gs"
           git log --format=%s --merges > "${gs}-merges"
-          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs
+          "$gs" check config/store-steps.toml --merges "${gs}-merges" --writers crates/cli/src/store_write.rs --decisions docs/05-decisions.md
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu

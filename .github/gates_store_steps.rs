@@ -27,6 +27,11 @@
 //!   read a restore back (census recount, block scrub) before any writer
 //!   starts (`a_backup_taken_under_writers_is_refused_or_verified_on_restore`,
 //!   FM-221);
+//! * a `cli census-recount gdfl` span, in a command, a dry run or a check,
+//!   that covers a day D-3317 item 5 excludes, read from the decision ledger
+//!   (`a_recount_span_never_covers_a_day_the_ledger_excludes`,
+//!   verify-R3-36-r3), and a check line that runs a store writer without
+//!   saying it writes;
 //! * a run that did not close its step recorded as anything but the pending
 //!   step's `last_run`, and a step done before a step it follows that does
 //!   not say so in `ran_out_of_order`;
@@ -37,8 +42,9 @@
 //!   a package nothing uses, and every key or value the reader does not know.
 //!
 //! It starts no program. The workflow step hands it the merge subjects
-//! (`git log --format=%s --merges`) and the cli's writer table
-//! (`crates/cli/src/store_write.rs`) as files. A history that names no package
+//! (`git log --format=%s --merges`), the cli's writer table
+//! (`crates/cli/src/store_write.rs`) and the decision ledger
+//! (`docs/05-decisions.md`) as files. A history that names no package
 //! merge (a squash-merged branch) leaves the `merged` flags as written and the
 //! report says so in a line of its own; it is never read as "nothing merged".
 //!
@@ -477,6 +483,38 @@ const STOPPED: &str =
 /// and every block read against its checksum.
 const RESTORE_CHECKS: [&str; 2] = ["cli census-recount ", "cli scrub-blocks "];
 
+/// The wording a check line that runs a store writer carries, followed by
+/// what it writes, so whoever runs the check runs it as the write it is
+/// (verify-R3-36-r3: the restore read-back is `cli census-recount`, which
+/// rebuilds census rows and appends `recounted` journal lines, and it was
+/// written as a read).
+const CHECK_WRITES: &str = "this check writes ";
+
+/// How a census recount begins, wherever a line names one.
+const RECOUNT: &str = "cli census-recount ";
+
+/// The vendor whose import journal a recount closes days in: the cli's
+/// recount appends `recounted` lines for this vendor alone
+/// (`pull::census_store::recount`, `if vendor == Vendor::Gdfl`), so its span
+/// is the one the ledger bounds.
+const JOURNALED: &str = "gdfl";
+
+/// The decision-ledger entry, and the item of it, that name the days a GDFL
+/// recount's span must leave out: the vendor-refused days whose journal
+/// lines carry no stage, which the recount cannot tell from a census refusal
+/// (D-3317 item 5).
+const EXCLUDING_ENTRY: &str = "### D-3317 ";
+const EXCLUDING_ITEM: &str = "5. ";
+
+/// What may end a day written in prose (`--to 2018-11-05,`): the punctuation
+/// ends the command as well as the word.
+const DAY_ENDS: [char; 5] = [',', ';', ':', '.', ')'];
+
+/// The rsync options that remove a file, on either side: a copy of an
+/// append-only store never removes one (CLAUDE.md section 3 rule 8).
+/// Matched as prefixes, so `--del` covers every `--delete-*`.
+const RSYNC_REMOVES: [&str; 3] = ["--del", "--remove-source-files", "--force"];
+
 // ------------------------------------------------------------------ checks --
 
 /// One refusal: the named rule it breaks and what, by name.
@@ -501,6 +539,9 @@ struct Evidence {
     writers: Option<Writers>,
     /// Rows the fix reports mark as needing a store write.
     marked: Vec<String>,
+    /// The days no GDFL recount span may cover, read from D-3317 item 5 of
+    /// the decision ledger, or `None` when the ledger was not read.
+    excluded: Option<Vec<String>>,
 }
 
 /// The tables of one kind.
@@ -580,6 +621,16 @@ const RSYNC_DRY_OPTIONS: [&str; 10] = [
 /// Words that deny the clause they stand in.
 const DENIALS: [&str; 4] = ["not", "never", "nor", "instead"];
 
+/// What may follow a `no` that answers ("No: the operator's own"), where a
+/// `no` that qualifies a noun ("no snapshot was taken") is followed by a
+/// space and denies nothing.
+const ANSWERS: &str = ":,.;!?)";
+
+/// The two apostrophes a `n't` denial is written with: the typewriter one and
+/// the typographic one (U+2019), which an editor substitutes as you type
+/// (verify-R3-36-r3: `isn` U+2019 `t` passed as a word that denies nothing).
+const APOSTROPHES: [char; 2] = ['\'', '\u{2019}'];
+
 /// Characters that chain, substitute or redirect a second command. A
 /// newline (the reader's `\n` escape) ends one shell command and starts the
 /// next, as `;` does.
@@ -596,10 +647,35 @@ fn plain(c: char) -> bool {
     c.is_ascii_alphanumeric() || " -_./:=,+@%".contains(c)
 }
 
-/// Whether `word` denies its clause: one of [`DENIALS`] or a `n't` form.
+/// Whether `word` denies its clause: one of [`DENIALS`] or a `n't` form,
+/// with either apostrophe.
 fn denies(word: &str) -> bool {
     let w = word.to_ascii_lowercase();
-    DENIALS.contains(&w.as_str()) || w.ends_with("n't")
+    DENIALS.contains(&w.as_str()) || APOSTROPHES.iter().any(|a| w.ends_with(&format!("n{a}t")))
+}
+
+/// Whether `c` is part of a word for [`denies`]: a letter, a digit or an
+/// apostrophe.
+fn in_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || APOSTROPHES.contains(&c)
+}
+
+/// The first word of `text` that denies it: one [`denies`] names, or a `no`
+/// that answers, followed by one of [`ANSWERS`] or by the end of the text
+/// (verify-R3-36-r3: `No:` after the private-copy wording passed).
+fn denial(text: &str) -> Option<&str> {
+    let mut at = 0;
+    for word in text.split(|c: char| !in_word(c)) {
+        let end = at + word.len();
+        let next = text[end..].chars().next();
+        at = end + next.map_or(0, char::len_utf8);
+        if denies(word)
+            || (word.eq_ignore_ascii_case("no") && next.is_none_or(|c| ANSWERS.contains(c)))
+        {
+            return Some(word);
+        }
+    }
+    None
 }
 
 /// How one verb of the cli's `writes_the_store` lets its arguments choose a
@@ -641,6 +717,23 @@ impl Writers {
     }
 }
 
+/// `text` with every `//` and `/./` in a path made one `/`, until none is
+/// left: the spellings of one directory a path resolver treats as the same
+/// (verify-R3-36-r3: `runtime//store` and `runtime/./store` named the
+/// operator's store and passed as a private copy).
+fn squeezed(text: &str) -> String {
+    let mut s = text.to_owned();
+    loop {
+        let Some((at, len)) = ["//", "/./"]
+            .iter()
+            .find_map(|p| s.find(p).map(|at| (at, p.len())))
+        else {
+            return s;
+        };
+        s.replace_range(at..at + len, "/");
+    }
+}
+
 /// Why `line` does not put its store on a private copy, or `Ok` when it
 /// does: it says [`PRIVATE`] exactly once, as words of their own; it sets no
 /// `BRUTEX_STORE` itself; nothing in it names the operator's store; and no
@@ -655,17 +748,14 @@ fn private_copy(line: &str) -> Result<(), String> {
     if !(after.is_empty() || after.starts_with(' ')) {
         return Err(format!("{PRIVATE:?} runs on into {after:?}"));
     }
-    let lower = line.to_ascii_lowercase();
+    let lower = squeezed(&line.to_ascii_lowercase());
     if let Some(w) = REAL_STORE.iter().find(|w| lower.contains(*w)) {
         return Err(format!("it also says {w:?}"));
     }
     if before.contains("BRUTEX_STORE=") {
         return Err("it sets BRUTEX_STORE itself".to_owned());
     }
-    if let Some(w) = after
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '\''))
-        .find(|w| denies(w))
-    {
+    if let Some(w) = denial(after) {
         return Err(format!("{w:?} after the wording denies it"));
     }
     Ok(())
@@ -759,19 +849,22 @@ fn dry_run_writes(line: &str, writers: Option<&Writers>) -> Option<String> {
 /// Whether `why` says, in one clause of its own (clauses end at `.` and
 /// `;`), that the step ran before `id`: the clause holds the word `ran`,
 /// names `id` in the run of step ids that follows a `before`, and holds no
-/// word that denies it ([`denies`]).
+/// word that denies it ([`denial`]).
 fn says_ran_before(why: &str, id: &str) -> bool {
     why.split(['.', ';']).any(|clause| {
         let words: Vec<&str> = clause
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '\''))
+            .split(|c: char| !(in_word(c) || c == '-'))
             .filter(|w| !w.is_empty())
             .collect();
-        if words.iter().any(|w| denies(w)) || !words.iter().any(|w| w.eq_ignore_ascii_case("ran")) {
+        if denial(clause).is_some() || !words.iter().any(|w| w.eq_ignore_ascii_case("ran")) {
             return false;
         }
         let mut listing = false;
         for w in words {
-            let w = w.strip_suffix("'s").unwrap_or(w);
+            let w = w
+                .strip_suffix("'s")
+                .or_else(|| w.strip_suffix("\u{2019}s"))
+                .unwrap_or(w);
             if w.eq_ignore_ascii_case("before") {
                 listing = true;
             } else if listing && w == id {
@@ -796,6 +889,8 @@ fn check(entries: &[Entry], evidence: &Evidence) -> Vec<Problem> {
         rehearsal(step, &packages, &mut out);
         commands(step, &packages, evidence, &mut out);
         copies(step, &mut out);
+        recounts(step, evidence, &mut out);
+        check_writes(step, evidence, &mut out);
     }
     order(&steps, &ids, &mut out);
     leftovers(entries, &steps, evidence, &mut out);
@@ -1160,6 +1255,14 @@ fn rehearsal(step: &Entry, packages: &BTreeMap<String, bool>, out: &mut Vec<Prob
             format!("{label}: rehearsal figures beside a planned dry run: nothing has run a planned dry run, so nothing timed it"),
         ));
     }
+    // A dry run that ran took time: 0 ms is a figure nobody measured
+    // (verify-R3-36-r3).
+    if step.number("rehearsed_ms") == Some(0) {
+        out.push(problem(
+            "rehearsal",
+            format!("{label}: rehearsed_ms = 0: write the time the dry run took"),
+        ));
+    }
     if step.has("rehearsed_files") && !figures {
         out.push(problem(
             "rehearsal",
@@ -1233,6 +1336,42 @@ fn rehearsal(step: &Entry, packages: &BTreeMap<String, bool>, out: &mut Vec<Prob
     }
 }
 
+/// `line` with each `<NAME>` placeholder (no space and no `<` inside) read
+/// as the word `NAME`: the operator fills it, so its `|` (`<INDEX|CASH>`)
+/// and its brackets are not the shell's. A `<` that opens no placeholder is
+/// kept as written.
+fn outside_placeholders(line: &str) -> String {
+    let mut parts = line.split('<');
+    let mut out = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        match part.split_once('>') {
+            Some((name, rest)) if !name.is_empty() && !name.contains(char::is_whitespace) => {
+                out.push_str("NAME");
+                out.push_str(rest);
+            }
+            _ => {
+                out.push('<');
+                out.push_str(part);
+            }
+        }
+    }
+    out
+}
+
+/// The name after each `$` in `line` (`$NAME` or `${NAME}`): the letters,
+/// digits and `_` that follow, empty for a bare `$`.
+fn variables(line: &str) -> Vec<&str> {
+    line.match_indices('$')
+        .map(|(at, _)| {
+            let name = line[at + 1..].trim_start_matches('{');
+            let end = name
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(name.len());
+            &name[..end]
+        })
+        .collect()
+}
+
 fn commands(
     step: &Entry,
     packages: &BTreeMap<String, bool>,
@@ -1254,6 +1393,39 @@ fn commands(
         }
         // A done step ran its command, so the command is one a package
         // built: a planned line there names a run that cannot have happened.
+        // A command runs as written: nothing chained after it, no variable
+        // the step does not declare, and no rsync option that removes a file
+        // (verify-R3-36-r3). A `POST` line is a form's body, whose `&` joins
+        // fields, and a `planned:` line names no command yet.
+        if line.starts_with("cli ") || COPIES.iter().any(|h| line.starts_with(h)) {
+            let bare = outside_placeholders(line);
+            if let Some(c) = CHAINS.iter().find(|c| bare.contains(*c)) {
+                out.push(problem(
+                    "commands",
+                    format!(
+                        "{label}: command {line:?}: {c:?} chains or redirects a second command"
+                    ),
+                ));
+            }
+            for name in variables(&bare) {
+                if !step.list("env").iter().any(|e| e == name) {
+                    out.push(problem(
+                        "commands",
+                        format!("{label}: command {line:?} uses ${name}, which the step's env does not declare"),
+                    ));
+                }
+            }
+        }
+        if let Some(o) = line.strip_prefix("rsync ").and_then(|rest| {
+            rest.split_whitespace()
+                .take_while(|w| *w != "--")
+                .find(|w| RSYNC_REMOVES.iter().any(|r| w.starts_with(r)))
+        }) {
+            out.push(problem(
+                "commands",
+                format!("{label}: command {line:?}: rsync {o} removes files, and a copy of an append-only store removes none"),
+            ));
+        }
         if line.starts_with("planned: ") && step.text("state") == Some("done") {
             out.push(problem(
                 "commands",
@@ -1409,6 +1581,194 @@ fn copies(step: &Entry, out: &mut Vec<Problem>) {
             out.push(problem(
                 "copies",
                 format!("{label}: a restore is read back before any writer starts: name a check line beginning {:?}", head.trim_end()),
+            ));
+        }
+    }
+}
+
+/// Whether `word` is a `YYYY-MM-DD` day as the cli spells one: four, two
+/// and two ASCII digits joined by `-`. Days written so compare as text in
+/// the order they fall.
+fn is_day(word: &str) -> bool {
+    let b = word.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
+/// The days D-3317 item 5 says a GDFL recount's span must leave out, read
+/// from the decision ledger so the gate keeps no copy of them: every
+/// `YYYY-MM-DD` of the item, from its `5. ` line to the first line that is
+/// not indented under it, in the entry that begins `### D-3317 `. Refused
+/// when the entry, the item or any day in it is missing, so a ledger that
+/// moved the item cannot let every span pass.
+fn excluded_from(ledger: &str) -> Result<Vec<String>, String> {
+    let mut lines = ledger
+        .lines()
+        .skip_while(|l| !l.starts_with(EXCLUDING_ENTRY));
+    if lines.next().is_none() {
+        return Err(format!(
+            "the decision ledger holds no entry beginning {EXCLUDING_ENTRY:?}"
+        ));
+    }
+    let mut item = lines
+        .take_while(|l| !l.starts_with("#"))
+        .skip_while(|l| !l.starts_with(EXCLUDING_ITEM))
+        .peekable();
+    let Some(first) = item.next() else {
+        return Err(format!(
+            "{} holds no item beginning {EXCLUDING_ITEM:?}",
+            EXCLUDING_ENTRY.trim_end()
+        ));
+    };
+    let text: Vec<&str> = std::iter::once(first)
+        .chain(item.take_while(|l| l.starts_with(' ')))
+        .collect();
+    let days: Vec<String> = text
+        .iter()
+        .flat_map(|l| l.split(|c: char| !(c.is_ascii_digit() || c == '-')))
+        .filter(|w| is_day(w))
+        .map(str::to_owned)
+        .collect();
+    if days.is_empty() {
+        return Err(format!(
+            "item {EXCLUDING_ITEM:?} of {} names no YYYY-MM-DD day",
+            EXCLUDING_ENTRY.trim_end()
+        ));
+    }
+    Ok(days)
+}
+
+/// One `cli census-recount` a line names: its vendor word and its `--from`
+/// and `--to` days, each `None` when the words do not give it.
+#[derive(Debug, PartialEq, Eq)]
+struct Span<'a> {
+    vendor: &'a str,
+    from: Option<&'a str>,
+    to: Option<&'a str>,
+}
+
+/// The span of the recount whose words follow [`RECOUNT`] in `rest`: the
+/// vendor, then `--from DAY` and `--to DAY` in any order, as the cli reads
+/// them. The first word that is neither ends the command, and so does a day
+/// written with prose punctuation after it ([`DAY_ENDS`]). A value that is
+/// not a day, or a flag given twice, is why the cli would refuse it.
+fn span_of(rest: &str) -> Result<Span<'_>, String> {
+    let mut words = rest.split_whitespace();
+    let vendor = words.next().unwrap_or_default().trim_end_matches(DAY_ENDS);
+    let mut span = Span {
+        vendor,
+        from: None,
+        to: None,
+    };
+    while let Some(flag) = words.next() {
+        let slot = match flag {
+            "--from" => &mut span.from,
+            "--to" => &mut span.to,
+            _ => break,
+        };
+        let value = words.next().unwrap_or_default();
+        let day = value.trim_end_matches(DAY_ENDS);
+        if !is_day(day) {
+            return Err(format!("{flag} {value:?} is not a YYYY-MM-DD day"));
+        }
+        if slot.replace(day).is_some() {
+            return Err(format!("{flag} is given twice"));
+        }
+        if day.len() < value.len() {
+            break;
+        }
+    }
+    Ok(span)
+}
+
+/// Every census recount a step names, in its commands, dry runs and checks,
+/// against D-3317 item 5 (verify-R3-36-r3). The recount closes as
+/// `recounted` every day of its span whose last journal line is a stageless
+/// `incomplete`, and the two vendor-refused days of November 2018 end in
+/// one, so a span over either marks it done and no import retries its
+/// refused files: a failure hidden. Refused: a recount without `--from` (the
+/// cli refuses it, and a span with no start closes every day before its
+/// end), a `--to` before its `--from`, a GDFL span that covers an excluded
+/// day, and a GDFL span when the ledger was not read (NOT CHECKED is not a
+/// pass). A withdrawn step runs nothing, so it is not read.
+fn recounts(step: &Entry, evidence: &Evidence, out: &mut Vec<Problem>) {
+    if step.text("state") == Some("withdrawn") {
+        return;
+    }
+    let label = step.label();
+    for key in ["command", "dry_run", "check"] {
+        for line in step.list(key) {
+            for (at, _) in line.match_indices(RECOUNT) {
+                let mut refuse = |why: String| {
+                    out.push(problem(
+                        "recount",
+                        format!("{label}: {key} {line:?}: {why}"),
+                    ));
+                };
+                let span = match span_of(&line[at + RECOUNT.len()..]) {
+                    Ok(span) => span,
+                    Err(why) => {
+                        refuse(why);
+                        continue;
+                    }
+                };
+                let Some(from) = span.from else {
+                    refuse("a recount with no --from is refused by the cli, and a span with no start closes every refused day before its end (D-3317)".to_owned());
+                    continue;
+                };
+                if let Some(to) = span.to.filter(|to| *to < from) {
+                    refuse(format!("--to {to} is before --from {from}"));
+                    continue;
+                }
+                if span.vendor != JOURNALED {
+                    continue;
+                }
+                let Some(excluded) = &evidence.excluded else {
+                    refuse("the days D-3317 item 5 excludes were not read (give --decisions docs/05-decisions.md), so this span is NOT CHECKED".to_owned());
+                    continue;
+                };
+                for day in excluded {
+                    if from <= day.as_str() && span.to.is_none_or(|to| day.as_str() <= to) {
+                        refuse(format!(
+                            "the span covers {day}, which D-3317 item 5 excludes: the recount would close it as recounted and no import would retry its refused files"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A check line that runs a store writer says so ([`CHECK_WRITES`]): a check
+/// is read as a read, and one that writes the census or the journal is the
+/// first writer after whatever it checks (verify-R3-36-r3). Decided by the
+/// cli's own rule, over the line's words with prose punctuation trimmed;
+/// without the cli's table no verb is known and the report says so.
+fn check_writes(step: &Entry, evidence: &Evidence, out: &mut Vec<Problem>) {
+    let Some(writers) = &evidence.writers else {
+        return;
+    };
+    for line in step.list("check") {
+        let Some(rest) = line.strip_prefix("cli ") else {
+            continue;
+        };
+        let words: Vec<&str> = rest
+            .split_whitespace()
+            .map(|w| w.trim_end_matches(DAY_ENDS))
+            .collect();
+        if let [verb, arguments @ ..] = words.as_slice()
+            && writers.writes(verb, arguments)
+            && !line.contains(CHECK_WRITES)
+        {
+            out.push(problem(
+                "checks",
+                format!("{}: check {line:?} runs cli {verb}, which writes the store with these words: say {CHECK_WRITES:?} and what it writes, so it is run as the write it is", step.label()),
             ));
         }
     }
@@ -1785,7 +2145,7 @@ fn report(entries: &[Entry], evidence: &Evidence, problems: &[Problem]) -> Strin
         s,
         "steps whose command a package has not built yet: {planned}"
     );
-    for rule in ["fields", "leftovers", "rehearsal", "copies"] {
+    for rule in ["fields", "leftovers", "rehearsal", "copies", "recount"] {
         let n = problems.iter().filter(|p| p.rule == rule).count();
         let _ = writeln!(s, "{rule} refusals: {n}");
     }
@@ -1810,8 +2170,23 @@ fn report(entries: &[Entry], evidence: &Evidence, problems: &[Problem]) -> Strin
     if evidence.writers.is_none() {
         let _ = writeln!(
             s,
-            "cli writer table: not given; cli verbs NOT CHECKED, and a cli dry run passes only on a private copy"
+            "cli writer table: not given; cli verbs and the writes of check lines NOT CHECKED, and a cli dry run passes only on a private copy"
         );
+    }
+    match &evidence.excluded {
+        Some(days) => {
+            let _ = writeln!(
+                s,
+                "decision ledger: D-3317 item 5 read; no census-recount {JOURNALED} span may cover {}",
+                days.join(", ")
+            );
+        }
+        None => {
+            let _ = writeln!(
+                s,
+                "decision ledger: not given; every census-recount {JOURNALED} span is refused as NOT CHECKED"
+            );
+        }
     }
     // CI has no board to read, so it runs without --marked; the report says
     // which of the two checks ran (verify-R3-36-r2, followup).
@@ -1845,7 +2220,7 @@ fn run(text: &str, evidence: &Evidence) -> (String, bool) {
     }
 }
 
-const USAGE: &str = "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--marked IDS]";
+const USAGE: &str = "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS]";
 
 /// Each evidence flag with the file it names.
 type Flags<'a> = Vec<(&'a str, &'a str)>;
@@ -1863,7 +2238,9 @@ fn parse_arguments(args: &[String]) -> Result<(&str, Flags<'_>), String> {
     let mut seen = BTreeSet::new();
     for pair in rest.chunks(2) {
         let flag = pair[0].as_str();
-        if !["--merges", "--writers", "--marked"].contains(&flag) || !seen.insert(flag) {
+        if !["--merges", "--writers", "--decisions", "--marked"].contains(&flag)
+            || !seen.insert(flag)
+        {
             return Err(USAGE.to_owned());
         }
         flags.push((flag, pair[1].as_str()));
@@ -1887,6 +2264,7 @@ fn arguments(args: &[String], read_file: ReadFile<'_>) -> Result<(String, Eviden
         match flag {
             "--merges" => evidence.merged = Some(merged_from(&text)),
             "--writers" => evidence.writers = Some(table_from(&text)?),
+            "--decisions" => evidence.excluded = Some(excluded_from(&text)?),
             _ => evidence.marked = marked_from(&text),
         }
     }
@@ -1923,6 +2301,15 @@ fn gate(args: &[String], read_file: ReadFile<'_>) -> (String, String, u8) {
 /// it makes is outside a test (verify-R3-36-r2: a mutant of the old
 /// `print!`/`eprint!` lines in `main` survived, because no test runs
 /// `main`).
+///
+/// LIMIT (verify-R3-36-r3, followup): a stdout CLOSED by the caller
+/// (`gss check ... >&-`) exits 0, and no code in this tool can tell. Before
+/// `main` runs, std's runtime opens `/dev/null` on every standard descriptor
+/// it finds closed, so the report is written to `/dev/null` and every write
+/// succeeds. Measured on this machine (rustc 1.97.1, macOS), 15 Oct: with
+/// `>&-`, descriptor 1 is a character device whose `rdev` equals
+/// `/dev/null`'s, and the tool exits 0, exactly as with `>/dev/null`. The two
+/// are the same descriptor to the process; the workflow keeps its stdout.
 fn emit(
     (out, err, code): (String, String, u8),
     stdout: &mut dyn std::io::Write,
@@ -1960,6 +2347,9 @@ mod tests {
     const REAL: &str = include_str!("../config/store-steps.toml");
     /// The cli source whose `WRITERS` table names the store-writing verbs.
     const CLI_WRITERS: &str = include_str!("../crates/cli/src/store_write.rs");
+    /// The decision ledger whose D-3317 item 5 names the days no GDFL
+    /// recount span may cover.
+    const LEDGER: &str = include_str!("../docs/05-decisions.md");
 
     /// A small list that passes: one step ready and rehearsed, one waiting.
     const GOOD: &str = r#"
@@ -2020,9 +2410,12 @@ not_rehearsed = "waits for WP-02: the door is not built"
 disk = "unknown until rehearsed"
 "#;
 
+    /// The evidence CI hands the tool: the cli's writer table and the days
+    /// the decision ledger excludes from a GDFL recount.
     fn writers() -> Evidence {
         Evidence {
             writers: Some(table_from(CLI_WRITERS).expect("the cli's writer table and rule read")),
+            excluded: Some(excluded_from(LEDGER).expect("D-3317 item 5 reads")),
             ..Evidence::default()
         }
     }
@@ -2972,7 +3365,9 @@ disk = "unknown until rehearsed"
             &Evidence::default(),
         );
         assert!(passed);
-        assert!(report.contains("cli writer table: not given; cli verbs NOT CHECKED"));
+        assert!(report.contains(
+            "cli writer table: not given; cli verbs and the writes of check lines NOT CHECKED"
+        ));
     }
 
     #[test]
@@ -3140,7 +3535,9 @@ disk = "unknown until rehearsed"
         for name in ["WP-12f", "IA-10a", "R3-22", "SC-0", "WP-81"] {
             assert!(is_package_name(name), "{name}");
         }
-        for name in ["WP-12fx", "wp-1", "WP-", "WP-a", "WP12", "-1"] {
+        // "WP-100ab": two letters after three digits, which a quotient of
+        // the lengths (5 / 3 = 1) would let through (verify-R3-36-r3).
+        for name in ["WP-12fx", "wp-1", "WP-", "WP-a", "WP12", "-1", "WP-100ab"] {
             assert!(!is_package_name(name), "{name}");
         }
         for id in [
@@ -3207,6 +3604,7 @@ disk = "unknown until rehearsed"
                 "bad" => Ok(with(GOOD, "title = \"a ready step\"", "title = \" \"")),
                 "merges" => Ok("Merge WP-01: one\n".to_owned()),
                 "writers" => Ok(CLI_WRITERS.to_owned()),
+                "decisions" => Ok("### D-3317 — x\n5. **y** (2018-11-06)\n".to_owned()),
                 "marked" => Ok("DB-A01 # a row\n".to_owned()),
                 "garbage" => Ok("no table here".to_owned()),
                 other => Err(format!("{other}: no such file")),
@@ -3219,11 +3617,17 @@ disk = "unknown until rehearsed"
             "merges",
             "--writers",
             "writers",
+            "--decisions",
+            "decisions",
             "--marked",
             "marked",
         ]);
         let (out, err, code) = gate(&all, &files);
         assert_eq!((err.as_str(), code), ("", 0), "{out}");
+        assert!(
+            out.contains("decision ledger: D-3317 item 5 read; no census-recount gdfl span may cover 2018-11-06\n"),
+            "{out}"
+        );
         assert!(
             out.starts_with("store steps: 2 (pending 2, done 0, withdrawn 0)"),
             "{out}"
@@ -3256,12 +3660,20 @@ disk = "unknown until rehearsed"
                 vec!["check", "good", "--writers", "garbage"],
                 "gates_store_steps: the writer table (pub(crate) const WRITERS: [&str; N]) is not in the file read\n".to_owned(),
             ),
+            (
+                vec!["check", "good", "--decisions", "garbage"],
+                "gates_store_steps: the decision ledger holds no entry beginning \"### D-3317 \"\n".to_owned(),
+            ),
+            (
+                vec!["check", "good", "--decisions", "decisions", "--decisions", "decisions"],
+                format!("gates_store_steps: {USAGE}\n"),
+            ),
         ] {
             assert_eq!(gate(&args(&words), &files), (String::new(), why, 2), "{words:?}");
         }
         assert_eq!(
             USAGE,
-            "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--marked IDS]"
+            "usage: gates_store_steps check LIST [--merges SUBJECTS] [--writers STORE_WRITE_RS] [--decisions LEDGER] [--marked IDS]"
         );
     }
 
@@ -3359,8 +3771,9 @@ disk = "unknown until rehearsed"
 
     #[test]
     fn a_backup_taken_under_writers_is_refused_or_verified_on_restore() {
-        let recount = "cli census-recount gdfl --from 2018-09-03 --to 2026-09-30 on the restored copy, before any writer starts";
-        let scrub = "cli scrub-blocks gdfl on the restored copy";
+        let recount = "cli census-recount gdfl --from 2018-11-10 on the restored copy, before any writer starts (this check writes the census and the journal)";
+        let scrub =
+            "cli scrub-blocks gdfl on the restored copy (this check writes its log and cursor)";
         let rsync = "rsync -a <store> <drive>";
         let good = with_copy(rsync, STOPPED, &[recount, scrub]);
         assert_eq!(problems_of(&good, &writers()), Vec::<Problem>::new());
@@ -4151,7 +4564,9 @@ fields refusals: 0
 leftovers refusals: 0
 rehearsal refusals: 0
 copies refusals: 0
+recount refusals: 0
 merge history: 2 package merges read; merged flags checked
+decision ledger: D-3317 item 5 read; no census-recount gdfl span may cover 2018-11-06, 2018-11-09
 rows marked as needing a store write: none given; board rows outside the leftovers NOT CHECKED
 "
         );
@@ -4169,6 +4584,17 @@ rows marked as needing a store write: none given; board rows outside the leftove
             report.contains("REFUSED [fields] step at line 91: no id\n"),
             "{report}"
         );
+        // An empty id names nothing either, so the step is still named by
+        // its line (verify-R3-36-r3: the guard's mutant to `true` printed
+        // "step :").
+        let empty = with(&every_shape(), "id = \"S-05\"\n", "id = \"\"\n");
+        let (report, passed) = run(&empty, &evidence);
+        assert!(!passed);
+        assert!(
+            report.contains("REFUSED [fields] step at line 91: "),
+            "{report}"
+        );
+        assert!(!report.contains("step :"), "{report}");
         let stateless = with(&every_shape(), "state = \"withdrawn\"\n", "");
         let (report, _) = run(&stateless, &evidence);
         assert!(report.contains("\n| S-04 | ? | - |  |\n"), "{report}");
@@ -4176,7 +4602,7 @@ rows marked as needing a store write: none given; board rows outside the leftove
         // checks did not run.
         let (report, _) = run(&every_shape(), &Evidence::default());
         assert!(report.contains("merge history: not given; merged flags NOT CHECKED\n"));
-        assert!(report.contains("cli writer table: not given; cli verbs NOT CHECKED, and a cli dry run passes only on a private copy\n"));
+        assert!(report.contains("cli writer table: not given; cli verbs and the writes of check lines NOT CHECKED, and a cli dry run passes only on a private copy\n"));
         evidence.merged = Some(BTreeSet::new());
         let (report, _) = run(&every_shape(), &evidence);
         assert!(report.contains("merge history: names no package merge (a squash-merged history): the merged flags stand as written, NOT CHECKED against git\n"));
@@ -4483,5 +4909,539 @@ rows marked as needing a store write: none given; board rows outside the leftove
         ));
         // A pending step keeps its planned command while it waits.
         assert_eq!(problems_of(GOOD, &writers()), Vec::<Problem>::new());
+    }
+
+    /// GOOD with S-01's one check line replaced by `lines`.
+    fn with_checks(lines: &[&str]) -> String {
+        let lines: Vec<String> = lines.iter().map(|l| format!("{l:?}")).collect();
+        with(
+            GOOD,
+            "check = [\"GET /bars/window.json -> total above 0 (0 today)\"]",
+            &format!("check = [{}]", lines.join(", ")),
+        )
+    }
+
+    /// The recount refusals of GOOD with S-01's check replaced by `line`.
+    fn recount_refusals(line: &str, evidence: &Evidence) -> Vec<String> {
+        problems_of(&with_checks(&[line]), evidence)
+            .into_iter()
+            .filter(|p| p.rule == "recount")
+            .map(|p| p.what)
+            .collect()
+    }
+
+    #[test]
+    fn a_recount_span_never_covers_a_day_the_ledger_excludes() {
+        // The ledger in this repository: D-3317 item 5 names the two
+        // vendor-refused option days of November 2018, and nothing else.
+        assert_eq!(
+            excluded_from(LEDGER),
+            Ok(vec!["2018-11-06".to_owned(), "2018-11-09".to_owned()])
+        );
+        // The item is read from its `5. ` line to the first line not indented
+        // under it, inside the D-3317 entry only: the heading's own date, an
+        // earlier entry's item 5, the next item and the next entry are not
+        // read.
+        let ledger = "### D-3316 — a\n5. **x** 2017-01-01\n### D-3317 — b — 2026-10-07\n\n1. **y** 2017-02-02\n5. **z** closes (2018-11-06\n   and 2018-11-09).\n6. **w** 2018-12-01\n   2018-12-02\n### D-3318 — c\n5. 2019-01-01\n";
+        assert_eq!(
+            excluded_from(ledger),
+            Ok(vec!["2018-11-06".to_owned(), "2018-11-09".to_owned()])
+        );
+        let ended = "### D-3317 — b\n5. **z** 2018-11-06\n\n   2018-11-07\n";
+        assert_eq!(excluded_from(ended), Ok(vec!["2018-11-06".to_owned()]));
+        assert_eq!(
+            excluded_from("### D-3316 — a\n5. 2018-11-06\n"),
+            Err("the decision ledger holds no entry beginning \"### D-3317 \"".to_owned())
+        );
+        assert_eq!(
+            excluded_from("### D-3317 — b\n4. 2018-11-06\n## next\n5. 2018-11-07\n"),
+            Err("### D-3317 holds no item beginning \"5. \"".to_owned())
+        );
+        assert_eq!(
+            excluded_from("### D-3317 — b\n5. no day here, D-3317 and 2018-1-06\n"),
+            Err("item \"5. \" of ### D-3317 names no YYYY-MM-DD day".to_owned())
+        );
+        for day in ["2018-11-06", "0000-00-00"] {
+            assert!(is_day(day), "{day}");
+        }
+        for word in [
+            "",
+            "2018-11-6",
+            "2018/11/06",
+            "20181-1-06",
+            "2018-11-06x",
+            "x018-11-06",
+            "2018-1a-06",
+            "2018-11-0-",
+            "2018-11--6",
+            "-2018-11-0",
+        ] {
+            assert!(!is_day(word), "{word}");
+        }
+
+        // The words of a recount, as the cli reads them.
+        let span = |vendor, from, to| Ok(Span { vendor, from, to });
+        assert_eq!(
+            span_of("gdfl --from 2018-09-03 --to 2018-11-05, on the restored store"),
+            span("gdfl", Some("2018-09-03"), Some("2018-11-05"))
+        );
+        assert_eq!(
+            span_of("gdfl --to 2018-11-05 --from 2018-09-03"),
+            span("gdfl", Some("2018-09-03"), Some("2018-11-05"))
+        );
+        assert_eq!(span_of("gdfl, on the store"), span("gdfl", None, None));
+        assert_eq!(span_of(""), span("", None, None));
+        // Prose punctuation after a day ends the command: a `--to` after it
+        // is a word of the sentence, not of the cli, even where it follows
+        // at once.
+        assert_eq!(
+            span_of("gdfl --from 2018-11-10, then --to 2018-11-05"),
+            span("gdfl", Some("2018-11-10"), None)
+        );
+        assert_eq!(
+            span_of("gdfl --from 2018-11-10, --to 2018-11-05"),
+            span("gdfl", Some("2018-11-10"), None)
+        );
+        assert_eq!(
+            span_of("zerodha --from 2015-01-01 (the same)"),
+            span("zerodha", Some("2015-01-01"), None)
+        );
+        assert_eq!(
+            span_of("gdfl --from 2018-9-3"),
+            Err("--from \"2018-9-3\" is not a YYYY-MM-DD day".to_owned())
+        );
+        assert_eq!(
+            span_of("gdfl --from"),
+            Err("--from \"\" is not a YYYY-MM-DD day".to_owned())
+        );
+        assert_eq!(
+            span_of("gdfl --to 2018-11-05 --to 2018-11-08"),
+            Err("--to is given twice".to_owned())
+        );
+
+        // verify-R3-36-r3, blocking 1: the line the restore read-back carried
+        // covers both days and is refused once for each.
+        let evidence = writers();
+        let old = "cli census-recount gdfl --from 2018-09-03 --to 2026-09-30, on a store restored from the snapshot and before any writer starts (the same for zerodha): every count equals the census the snapshot holds";
+        let p = recount_refusals(old, &evidence);
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p[0].ends_with(": the span covers 2018-11-06, which D-3317 item 5 excludes: the recount would close it as recounted and no import would retry its refused files"), "{p:?}");
+        assert!(
+            p[0].starts_with("step S-01: check \"cli census-recount gdfl --from 2018-09-03"),
+            "{p:?}"
+        );
+        assert!(p[1].contains("the span covers 2018-11-09, which"), "{p:?}");
+        // Exactly the two days (the attack span of the check), each bound
+        // inclusive, an open end, and the spans either side.
+        for (words, covered) in [
+            (
+                "--from 2018-11-06 --to 2018-11-09",
+                vec!["2018-11-06", "2018-11-09"],
+            ),
+            ("--from 2018-11-06 --to 2018-11-06", vec!["2018-11-06"]),
+            ("--from 2018-11-09 --to 2018-11-09", vec!["2018-11-09"]),
+            ("--from 2018-09-03 --to 2018-11-06", vec!["2018-11-06"]),
+            ("--from 2018-11-09", vec!["2018-11-09"]),
+            ("--from 2018-09-03", vec!["2018-11-06", "2018-11-09"]),
+            ("--from 2018-09-03 --to 2018-11-05", vec![]),
+            ("--from 2018-11-07 --to 2018-11-08", vec![]),
+            ("--from 2018-11-10", vec![]),
+            ("--from 2018-11-10 --to 2026-09-30", vec![]),
+        ] {
+            let p = recount_refusals(&format!("cli census-recount gdfl {words}"), &evidence);
+            let days: Vec<&str> = covered
+                .iter()
+                .filter(|d| {
+                    p.iter()
+                        .any(|w| w.contains(&format!("the span covers {d},")))
+                })
+                .copied()
+                .collect();
+            assert_eq!(
+                (p.len(), days),
+                (covered.len(), covered.clone()),
+                "{words}: {p:?}"
+            );
+        }
+        // The recount closes journal days for gdfl alone, so a Zerodha span
+        // may run over the two days; every vendor's still needs --from.
+        assert_eq!(
+            recount_refusals("cli census-recount zerodha --from 2015-01-01", &evidence),
+            Vec::<String>::new()
+        );
+        for line in [
+            "cli census-recount zerodha --to 2026-09-30",
+            "cli census-recount gdfl, on the restored store",
+        ] {
+            let p = recount_refusals(line, &evidence);
+            assert_eq!(p.len(), 1, "{p:?}");
+            assert!(p[0].ends_with(": a recount with no --from is refused by the cli, and a span with no start closes every refused day before its end (D-3317)"), "{p:?}");
+        }
+        let p = recount_refusals(
+            "cli census-recount gdfl --from 2018-11-10 --to 2018-11-07",
+            &evidence,
+        );
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].ends_with(": --to 2018-11-07 is before --from 2018-11-10"),
+            "{p:?}"
+        );
+        // A day on the --from boundary is not before it.
+        assert_eq!(
+            recount_refusals(
+                "cli census-recount gdfl --from 2018-11-10 --to 2018-11-10",
+                &evidence
+            ),
+            Vec::<String>::new()
+        );
+        let p = recount_refusals("cli census-recount gdfl --from 2018-11-1", &evidence);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].ends_with(": --from \"2018-11-1\" is not a YYYY-MM-DD day"),
+            "{p:?}"
+        );
+        // Anywhere in a line, and every one a line names.
+        let p = recount_refusals(
+            "after the restore, cli census-recount gdfl --from 2018-11-06 --to 2018-11-06 and then cli census-recount gdfl --from 2018-11-09",
+            &evidence,
+        );
+        assert_eq!(p.len(), 2, "{p:?}");
+        // Without the ledger a GDFL span is NOT CHECKED, which is refused,
+        // and a Zerodha one is not judged by it.
+        let blind = Evidence {
+            writers: evidence.writers.clone(),
+            ..Evidence::default()
+        };
+        let p = recount_refusals("cli census-recount gdfl --from 2018-11-10", &blind);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].ends_with(": the days D-3317 item 5 excludes were not read (give --decisions docs/05-decisions.md), so this span is NOT CHECKED"), "{p:?}");
+        assert_eq!(
+            recount_refusals("cli census-recount zerodha --from 2015-01-01", &blind),
+            Vec::<String>::new()
+        );
+        // A command and a dry run are read as a check is.
+        let command = with(
+            GOOD,
+            "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\"]",
+            "command = [\"cli census-recount gdfl --from 2018-11-09\"]",
+        );
+        assert!(refused(
+            &problems_of(&command, &evidence),
+            "recount",
+            "step S-01: command \"cli census-recount gdfl --from 2018-11-09\": the span covers 2018-11-09"
+        ));
+        let dry = with(
+            GOOD,
+            "dry_run = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY with BRUTEX_STORE on a private copy\"]",
+            "dry_run = [\"cli census-recount gdfl --from 2018-11-06 with BRUTEX_STORE on a private copy\"]",
+        );
+        assert_eq!(by_rule(&problems_of(&dry, &evidence), "recount").len(), 2);
+        // A withdrawn step runs nothing, so its words are not judged.
+        let entries = read(&with(
+            &with_checks(&["cli census-recount gdfl --from 2018-11-06"]),
+            "state = \"pending\"\nwrites = \"new month generations\"\ncommand = [\"cli gdfl-import",
+            "state = \"withdrawn\"\nwrites = \"new month generations\"\ncommand = [\"cli gdfl-import",
+        ))
+        .expect("the list reads");
+        let step = of(&entries, "step")[0];
+        assert_eq!(step.text("state"), Some("withdrawn"));
+        let mut out = Vec::new();
+        recounts(step, &evidence, &mut out);
+        assert_eq!(out, Vec::<Problem>::new());
+        // The report counts them.
+        let (report, passed) = run(&with_checks(&[old]), &evidence);
+        assert!(!passed);
+        assert!(report.contains("\nrecount refusals: 2\n"), "{report}");
+        let (report, _) = run(GOOD, &Evidence::default());
+        assert!(
+            report.contains("\ndecision ledger: not given; every census-recount gdfl span is refused as NOT CHECKED\n"),
+            "{report}"
+        );
+
+        // The list in this repository: the two restore read-backs recount
+        // GDFL in three spans around the two days and Zerodha from its oldest
+        // month, and no line anywhere covers an excluded day.
+        let entries = read(REAL).expect("config/store-steps.toml reads");
+        assert_eq!(
+            by_rule(&check(&entries, &evidence), "recount"),
+            Vec::<&Problem>::new()
+        );
+        for id in ["S-01", "S-17"] {
+            let step = of(&entries, "step")
+                .into_iter()
+                .find(|s| s.text("id") == Some(id))
+                .expect("the step is in the list");
+            let spans: Vec<(&str, Option<&str>, Option<&str>)> = step
+                .list("check")
+                .iter()
+                .filter_map(|l| l.strip_prefix(RECOUNT))
+                .map(|rest| span_of(rest).expect("the span reads"))
+                .map(|s| (s.vendor, s.from, s.to))
+                .collect();
+            assert_eq!(
+                spans,
+                [
+                    ("gdfl", Some("2018-09-03"), Some("2018-11-05")),
+                    ("gdfl", Some("2018-11-07"), Some("2018-11-08")),
+                    ("gdfl", Some("2018-11-10"), None),
+                    ("zerodha", Some("2015-01-01"), None),
+                ],
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_check_that_runs_a_writer_says_it_writes() {
+        let evidence = writers();
+        let checks = |lines: &[&str]| -> Vec<String> {
+            problems_of(&with_checks(lines), &evidence)
+                .into_iter()
+                .filter(|p| p.rule == "checks")
+                .map(|p| p.what)
+                .collect()
+        };
+        let p = checks(&["cli scrub-blocks gdfl on the restored store: 0 bad"]);
+        assert_eq!(
+            p,
+            [
+                "step S-01: check \"cli scrub-blocks gdfl on the restored store: 0 bad\" runs cli scrub-blocks, which writes the store with these words: say \"this check writes \" and what it writes, so it is run as the write it is"
+            ]
+        );
+        assert_eq!(
+            checks(&[
+                "cli scrub-blocks gdfl on the restored store (this check writes its log and cursor): 0 bad"
+            ]),
+            Vec::<String>::new()
+        );
+        // The cli's own read-only forms read, and prose punctuation after a
+        // word does not hide one.
+        assert_eq!(
+            checks(&[
+                "cli tix-rebuild gdfl NSE/INDEX/NIFTY 1s 2018-09 2026-09 --dry-run says Indexed 97",
+                "cli tix-rebuild gdfl NSE/INDEX/NIFTY 1s 2018-09 2026-09 --dry-run, says Indexed 97",
+                "cli gdfl-rekey --plan judges 0 to move",
+                "cli audit-stored NIFTY",
+                "GET /x answers 0 (0 today)",
+            ]),
+            Vec::<String>::new()
+        );
+        let p = checks(&[
+            "cli gdfl-rekey --apply, then the plan",
+            "cli tix-rebuild gdfl NSE/INDEX/NIFTY 1s 2018-09 2026-09 says Indexed 97",
+        ]);
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p[0].contains("runs cli gdfl-rekey, which writes"), "{p:?}");
+        assert!(p[1].contains("runs cli tix-rebuild, which writes"), "{p:?}");
+        // Without the cli's table no verb is known, so nothing is judged and
+        // the report says so.
+        let blind = Evidence {
+            excluded: evidence.excluded.clone(),
+            ..Evidence::default()
+        };
+        assert!(
+            by_rule(
+                &problems_of(&with_checks(&["cli scrub-blocks gdfl"]), &blind),
+                "checks"
+            )
+            .is_empty()
+        );
+        let (report, _) = run(GOOD, &blind);
+        assert!(
+            report.contains(
+                "cli writer table: not given; cli verbs and the writes of check lines NOT CHECKED"
+            ),
+            "{report}"
+        );
+        // The list in this repository: every writing check says so.
+        let entries = read(REAL).expect("config/store-steps.toml reads");
+        assert_eq!(
+            by_rule(&check(&entries, &evidence), "checks"),
+            Vec::<&Problem>::new()
+        );
+    }
+
+    #[test]
+    fn a_command_runs_as_written_and_a_copy_removes_nothing() {
+        let evidence = writers();
+        let command = |line: &str| -> Vec<String> {
+            problems_of(
+                &with(
+                    GOOD,
+                    "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\"]",
+                    &format!("command = [{line:?}]"),
+                ),
+                &evidence,
+            )
+            .into_iter()
+            .filter(|p| p.rule == "commands")
+            .map(|p| p.what)
+            .collect()
+        };
+        assert_eq!(
+            command("cli gdfl-import options zip 2018-11-07 2018-11-07; cli gdfl-rekey --apply"),
+            [
+                "step S-01: command \"cli gdfl-import options zip 2018-11-07 2018-11-07; cli gdfl-rekey --apply\": \";\" chains or redirects a second command"
+            ]
+        );
+        for (line, c) in [
+            (
+                "cli gdfl-import options zip 2018-11-07 2018-11-07 > out",
+                ">",
+            ),
+            ("cli gdfl-import options zip <a b> 2018-11-07", ">"),
+            ("cli gdfl-import options zip <> 2018-11-07", ">"),
+            ("tmutil localsnapshot && cli gdfl-rekey --apply", "&"),
+            ("rsync -a A B | tee x", "|"),
+            ("cli gdfl-import options zip $(date) 2018-11-07", "$("),
+            (
+                "cli gdfl-import options zip 2018-11-07\ncli gdfl-rekey --apply",
+                "\n",
+            ),
+        ] {
+            let p = command(line);
+            assert!(
+                p.iter()
+                    .any(|w| w.ends_with(&format!(": {c:?} chains or redirects a second command"))),
+                "{line:?}: {p:?}"
+            );
+        }
+        // A placeholder's `|` and brackets are the operator's, and a declared
+        // variable is the step's own.
+        assert_eq!(
+            command(
+                "cli zerodha-repair <SYMBOL> 2018-01-01 2019-11-30 --segment <INDEX|CASH> --from-store $BRUTEX_STORE --reason 'S-16 refold', for each series"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            command("cli gdfl-import x ${BRUTEX_STORE}"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            command("cli gdfl-import x $OTHER_1"),
+            [
+                "step S-01: command \"cli gdfl-import x $OTHER_1\" uses $OTHER_1, which the step's env does not declare"
+            ]
+        );
+        assert_eq!(
+            command("tmutil localsnapshot $"),
+            [
+                "step S-01: command \"tmutil localsnapshot $\" uses $, which the step's env does not declare"
+            ]
+        );
+        // A form's body joins its fields with `&`, and a planned line runs
+        // nothing yet.
+        assert!(
+            !command("planned: the door; then the check")
+                .iter()
+                .any(|w| w.contains("chains"))
+        );
+        assert!(
+            !command("POST /pull/repair target=indices&vendor=zerodha")
+                .iter()
+                .any(|w| w.contains("chains"))
+        );
+        for o in [
+            "--delete",
+            "--delete-after",
+            "--del",
+            "--remove-source-files",
+            "--force",
+        ] {
+            assert_eq!(
+                command(&format!("rsync -a {o} A B")),
+                [format!(
+                    "step S-01: command \"rsync -a {o} A B\": rsync {o} removes files, and a copy of an append-only store removes none"
+                )]
+            );
+        }
+        // After `--`, a word is a file name.
+        assert_eq!(command("rsync -a A B -- --delete"), Vec::<String>::new());
+
+        assert_eq!(outside_placeholders("a <B|C> d"), "a NAME d");
+        assert_eq!(outside_placeholders("<A><B>"), "NAMENAME");
+        assert_eq!(outside_placeholders("a <b c> d"), "a <b c> d");
+        assert_eq!(outside_placeholders("x <> y"), "x <> y");
+        assert_eq!(outside_placeholders("x <y"), "x <y");
+        assert_eq!(outside_placeholders("x <a<b> y"), "x <aNAME y");
+        assert_eq!(outside_placeholders("é <Á b> é"), "é <Á b> é");
+        assert_eq!(outside_placeholders("é <A> é"), "é NAME é");
+        assert_eq!(variables("$A ${B_1} $ $C-d x"), ["A", "B_1", "", "C"]);
+        assert_eq!(variables("no variable"), Vec::<&str>::new());
+
+        // The list in this repository runs every command as written.
+        let entries = read(REAL).expect("config/store-steps.toml reads");
+        assert_eq!(
+            by_rule(&check(&entries, &evidence), "commands"),
+            Vec::<&Problem>::new()
+        );
+    }
+
+    #[test]
+    fn a_figure_nobody_measured_and_a_denial_in_any_spelling_are_refused() {
+        let zero = with(GOOD, "rehearsed_ms = 1_200", "rehearsed_ms = 0");
+        assert!(refused(
+            &problems_of(&zero, &writers()),
+            "rehearsal",
+            "S-01: rehearsed_ms = 0: write the time the dry run took"
+        ));
+        let one = with(GOOD, "rehearsed_ms = 1_200", "rehearsed_ms = 1");
+        assert_eq!(problems_of(&one, &writers()), Vec::<Problem>::new());
+
+        let copy = "cli x with BRUTEX_STORE on a private copy";
+        for (tail, word) in [
+            (" which isn\u{2019}t used", "isn\u{2019}t"),
+            (" which ISN'T used", "ISN'T"),
+            (" (really? No: the one the app reads)", "No"),
+            (" so: no.", "no"),
+            (" so: no", "no"),
+            (" (no)", "no"),
+        ] {
+            assert_eq!(
+                private_copy(&format!("{copy}{tail}")),
+                Err(format!("{word:?} after the wording denies it")),
+                "{tail:?}"
+            );
+        }
+        // A `no` that qualifies a noun denies nothing.
+        assert_eq!(private_copy(&format!("{copy} with no app running")), Ok(()));
+        assert_eq!(private_copy(&format!("{copy} and nothing else")), Ok(()));
+        assert_eq!(private_copy(&format!("{copy} (no app)")), Ok(()));
+        for spelling in [
+            "runtime//store",
+            "runtime/./store",
+            "runtime/.//./store",
+            "RUNTIME///STORE",
+        ] {
+            assert_eq!(
+                private_copy(&format!("{copy} of {spelling}")),
+                Err("it also says \"runtime/store\"".to_owned()),
+                "{spelling}"
+            );
+        }
+        assert_eq!(private_copy(&format!("{copy} of runtime/.store")), Ok(()));
+        assert_eq!(squeezed("a//b/./c///d/././e"), "a/b/c/d/e");
+        assert_eq!(squeezed("x/.y/..z"), "x/.y/..z");
+        assert_eq!(denial("a no b"), None);
+        assert_eq!(denial("é no:"), Some("no"));
+        assert_eq!(denial("éé no b, never"), Some("never"));
+        assert_eq!(denial(""), None);
+
+        // A clause that says a run came first is not denied by a `no` that
+        // qualifies a noun, and is by one that answers.
+        assert!(says_ran_before(
+            "ran before S-01: no snapshot was taken",
+            "S-01"
+        ));
+        assert!(!says_ran_before("it ran before S-01? No", "S-01"));
+        assert!(says_ran_before(
+            "it ran before S-01\u{2019}s snapshot",
+            "S-01"
+        ));
+        assert!(!says_ran_before(
+            "it isn\u{2019}t so that this ran before S-01",
+            "S-01"
+        ));
     }
 }

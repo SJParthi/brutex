@@ -17,7 +17,10 @@
 # a pending step without rehearsal figures that does not name what it waits
 # for; a step whose prerequisites are all merged that has no figures; and a
 # copy or snapshot of the store taken without every writer stopped, or whose
-# restore is not read back before any writer starts (FM-221).
+# restore is not read back before any writer starts (FM-221); a
+# `cli census-recount gdfl` span over a day D-3317 item 5 excludes (read from
+# docs/05-decisions.md); and a check line that runs a store writer without
+# saying "this check writes ..." (verify-R3-36-r3).
 #
 # WHERE A RUN'S RECORD COMES FROM: the store's own files, never memory:
 # imports/gdfl.journal (begin/done lines with run=<id>), imports/gdfl.lineage
@@ -261,13 +264,17 @@ prerequisites = ["WP-81", "operator: the restore drill (it changes what the driv
 check = [
   "tmutil listlocalsnapshots /Volumes/WD_BLACK lists the new snapshot; an empty list means the command did not cover this drive and the undo does not exist",
   "docs/36-ops-runbook.md section 4 holds the drill's commands, times and df before and after, and says whether one month came back alone",
-  "cli census-recount gdfl --from 2018-09-03 --to 2026-09-30, on a store restored from the snapshot and before any writer starts (the same for zerodha): every count equals the census the snapshot holds",
-  "cli scrub-blocks gdfl, on the restored store before any writer starts (the same for zerodha): 0 mismatches, or each bad block named",
+  "cli census-recount gdfl --from 2018-09-03 --to 2018-11-05 on a store restored from the snapshot, before any other writer starts (this check writes the GDFL census and the GDFL import journal, so it is the first writer after the restore): every count equals the census the snapshot holds",
+  "cli census-recount gdfl --from 2018-11-07 --to 2018-11-08 on the restored store, the same (this check writes the GDFL census and the GDFL import journal)",
+  "cli census-recount gdfl --from 2018-11-10 on the restored store, the same, with no --to so the span runs to the newest day the snapshot holds (this check writes the GDFL census and the GDFL import journal)",
+  "cli census-recount zerodha --from 2015-01-01 on the restored store, the same, from the oldest Zerodha month held (the 2015-01 index 1day bars, outside the operator's window and kept) to the newest (this check writes the Zerodha census; the recount closes journal days for gdfl alone)",
+  "cli scrub-blocks gdfl on the restored store, before any writer but the recount starts, run until audit/scrub-blocks.gdfl.cursor ends in a done line of a pass that began after the restore (a run resumes where the restored cursor stood, so when that cursor ends in a progress line the first done finishes the snapshot's pass, and the next pass is the read-back; this check writes audit/scrub-blocks.gdfl.log and .cursor): bad=0 unverifiable=0 misfiled=0 missing=0, or each bad block named",
+  "cli scrub-blocks zerodha on the restored store, the same (this check writes audit/scrub-blocks.zerodha.log and .cursor)",
 ]
 closes = ["RA-288", "RA-329"]
 not_rehearsed = "waits for operator: the drill, on a scratch volume first and then once on this drive"
 disk = "UNVERIFIED: a kept snapshot pins every block replaced after it (repair generations, compacted census epochs, rolled logs) as space no file listing shows; the drill's step 5 measures df before and after. Delete it once the run it guarded is checked green (tmutil deletelocalsnapshots)."
-note = "Take it and restore it with the app and every cli run stopped (R-02, FM-221): a copy taken while a writer appends holds torn months or a census that disagrees with them. No verb takes every census lock for a copy (NOT DONE in code). Since this list was written, the 13 and 14 Oct bulk writes (S-09, S-10, S-30, S-31 and the partial runs of S-14, S-16, S-19, S-28) ran with no snapshot taken. man tmutil gives localsnapshot no mount point, and this drive is excluded from Time Machine, so the first command is NOT PROVED to snapshot it."
+note = "Take it and restore it with the app and every cli run stopped (R-02, FM-221): a copy taken while a writer appends holds torn months or a census that disagrees with them. No verb takes every census lock for a copy (NOT DONE in code). Since this list was written, the 13 and 14 Oct bulk writes (S-09, S-10, S-30, S-31 and the partial runs of S-14, S-16, S-19, S-28) ran with no snapshot taken. man tmutil gives localsnapshot no mount point, and this drive is excluded from Time Machine, so the first command is NOT PROVED to snapshot it. The GDFL recount spans leave out 2018-11-06 and 2018-11-09, the two option days the vendor refused (D-3317 item 5): the recount closes as recounted every day of its span whose last journal line is an incomplete with no stage, and those two days end in one (read 15 Oct, read only), so a span over either would mark it done and no import would retry its refused files (verify-R3-36-r3). Their months are still recounted, because the recount rebuilds every month a day of its span touches. Gate 30 reads the excluded days from D-3317 item 5 and refuses a span that covers one."
 
 [[step]]
 id = "S-02"
@@ -643,14 +650,18 @@ dry_run = ["rsync -a --dry-run --stats RAW_ARCHIVES STORE SECOND_DRIVE"]
 prerequisites = ["WP-81", "operator: a second drive of at least the store plus the raw archives", "operator: every writer stopped (the app and every cli run) while the copy is taken"]
 check = [
   "GET /disk.json answers backup.recorded true and backup.last the copied= instant, and every page's standing no-copy line is gone (recorded:false today: ops/backups.log does not exist; read 15 Oct)",
-  "cli census-recount gdfl --from 2018-09-03 --to 2026-09-30 with BRUTEX_STORE on the copy, before any writer starts on it (the same for zerodha): every count equals the census copied",
-  "cli scrub-blocks gdfl with BRUTEX_STORE on the copy (the same for zerodha): 0 mismatches, or each bad block named",
+  "cli census-recount gdfl --from 2018-09-03 --to 2018-11-05 with BRUTEX_STORE on the copy, before any other writer starts on it (this check writes the copy's GDFL census and GDFL import journal, so it is the first writer on the copy): every count equals the census copied",
+  "cli census-recount gdfl --from 2018-11-07 --to 2018-11-08 with BRUTEX_STORE on the copy, the same (this check writes the copy's GDFL census and GDFL import journal)",
+  "cli census-recount gdfl --from 2018-11-10 with BRUTEX_STORE on the copy, the same, with no --to so the span runs to the newest day copied (this check writes the copy's GDFL census and GDFL import journal)",
+  "cli census-recount zerodha --from 2015-01-01 with BRUTEX_STORE on the copy, the same, from the oldest Zerodha month held (the 2015-01 index 1day bars, outside the operator's window and kept) to the newest (this check writes the copy's Zerodha census; the recount closes journal days for gdfl alone)",
+  "cli scrub-blocks gdfl with BRUTEX_STORE on the copy, run until the copy's audit/scrub-blocks.gdfl.cursor ends in a done line of a pass that began on the copy (a run resumes where the copied cursor stood; this check writes the copy's audit/scrub-blocks.gdfl.log and .cursor): bad=0 unverifiable=0 misfiled=0 missing=0, or each bad block named",
+  "cli scrub-blocks zerodha with BRUTEX_STORE on the copy, the same (this check writes the copy's audit/scrub-blocks.zerodha.log and .cursor)",
 ]
 env = ["BRUTEX_STORE"]
 closes = ["DB-B73"]
 not_rehearsed = "waits for operator: no second drive is attached"
 disk = "on the second drive: the store plus the raw archives (about 3.6 TiB used on this drive on 13 Oct); on this drive: one log line"
-note = "RAW_ARCHIVES, STORE and SECOND_DRIVE are the operator's three paths. The copy is append-only: no --delete-after, so a file removed from this drive is never removed from the copy (the store is append-only, CLAUDE.md section 3 rule 8; verify-R3-36-r1 followup). The dry run writes nothing on either side."
+note = "RAW_ARCHIVES, STORE and SECOND_DRIVE are the operator's three paths. The copy is append-only: no --delete-after, so a file removed from this drive is never removed from the copy (the store is append-only, CLAUDE.md section 3 rule 8; verify-R3-36-r1 followup). The dry run writes nothing on either side. The GDFL recount spans leave out 2018-11-06 and 2018-11-09 for the reason S-01's note gives (D-3317 item 5, verify-R3-36-r3), and the Zerodha one starts at the oldest Zerodha month the store holds, not at the GDFL archive's first day."
 
 [[step]]
 id = "S-18"
