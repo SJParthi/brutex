@@ -564,13 +564,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    (D-3349).
        cli tickstore-write ZIP ROOT [--run-id ID] [--workers N]
                                    write one GDFL day zip into the tick store
-                                   under ROOT as a BRTXTS01 day file where the
+                                   under ROOT (an existing directory, never
+                                   made) as a BRTXTS01 day file where the
                                    readers open it, every entry read back and
                                    compared with the zip before it is held; a
                                    held day is verified and left, a leftover
-                                   .bts.tmp* is refused and left, nothing is
+                                   temporary is refused and left, nothing is
                                    removed; one line of ROOT/tickstore-write.log
-                                   each run (E2E-02).
+                                   each run, naming the commit (E2E-02).
        cli tix-rebuild VENDOR EXCHANGE/SEGMENT/SYMBOL RUNG FROM TO [--dry-run]
                                    build the .tix time index of every named
                                    month of one spot series (FROM, TO are

@@ -68528,7 +68528,7 @@ while the template carries a stray key (a guess about how the server split it).
 `web/tests/pull-plan.test.js` (`a_plan_projection_renders_one_line_and_a_refusal_by_name`,
 `a plan larger than the free space reads as short by its shortfall`).
 
-### D-4953 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
+### D-4967 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
 
 **Implemented by** R4-08 (E2E-02): `pull::tickstore_write` (tests in
 `crates/pull/src/tickstore_write_tests.rs`), the verb `cli tickstore-write ZIP
@@ -68559,7 +68559,7 @@ names `pull`.
    DOS time, rebuilt bytes), never its `.bts` bytes (FM-249). The verify is
    writer-blind: it holds a tool-written file to the same rules. Every log
    line and event names the writer (`pull::tickstore_write/1 ruzstd-0.8.2
-   Fastest`) and the run.
+   Fastest`), the commit of the code that ran and the run.
 3. **Where the day file goes** is the readers' own path rule
    (`TickStore::day_path`, `NfoTickStore::day_path`), from the zip's FILE
    NAME, which must be exactly a tree's day folder for a real date plus
@@ -68575,9 +68575,14 @@ names `pull`.
    CRC-32 (a bad CRC writes NOTHING, not even the day's folder). Members are
    encoded in memory on up to eight threads and each block rebuilt through
    `gdfl_tickstore::rebuild` before it is kept; the day's blocks are capped at
-   4 GiB. Then `<day>.bts.tmp.<run-id>` is created exclusively in the day's
-   own folder (so the publish is a same-directory rename and cannot meet
-   EXDEV, FM-036), written, fsynced, and EVERY entry read back from it through
+   4 GiB. The tick store's root must already be a directory: a mistyped root
+   is refused `root_missing` and never made (a root no reader opens would
+   hold days nobody finds). A year or month folder made for the day has its
+   parent fsynced, outermost first. Then `<day>.bts.tmp.<run-id>` is created
+   through `store::staging::create`, the workspace's one door for a temporary
+   (R3-16, D-4951, gate 28), in the day's own folder (so the publish is a
+   same-directory rename and cannot meet EXDEV, FM-036), written, fsynced,
+   and EVERY entry read back from it through
    `gdfl_tickstore` and compared byte for byte with the zip's member read
    again, with each block after the one before it (`block_overlap`, FM-248).
    Only then is it renamed to `<day>.bts` and the folder fsynced: only then is
@@ -68588,15 +68593,45 @@ names `pull`.
    temporary of a full disk (`disk_full stage=compress file=… bytes=…`) or of a
    failed verify. A held day is verified against its zip and nothing is
    written (`held`); a held day that no longer matches is refused
-   `held_day_differs` and left as it is. Zips are kept.
+   `held_day_differs` and left as it is, and a zip that no longer reads back
+   as its own records state (a flipped byte, a cut stream) is refused
+   `zip_corrupt_on_verify`, the held day left and not blamed. Zips are kept.
+   **The staging door and this rule.** `store::staging::create` clears a
+   regular file with one name at the name it is handed (a dead writer's
+   leftover, D-4951). This writer never hands it such a name by choice: the
+   leftover check runs first, under the root's lock, and refuses any
+   `<day>.bts.tmp*`. The clear path is therefore reached only when a file
+   appears at this run's own name between that check and the create, which
+   is a race against the lock; the run then stops `temp_raced`, naming the
+   bytes the door cleared, and leaves its own empty temporary, which the next
+   run refuses by name. A second name of another file there is refused
+   `temp_not_created` (`staging_linked`) and nothing is written through it.
 6. **Every outcome is saved and visible**: one `v=1` line of the root's
-   append-only `tickstore-write.log` (verdict, day, zip, writer, run, entries,
-   columnar, raw fallbacks (FM-057), rows, CSV, zip and stored bytes,
-   milliseconds, or the refusal's code and words) and one `pull.tickstore.write`
-   event on `/logs`. A log line that cannot be written fails the verb.
+   append-only `tickstore-write.log`, fsynced (verdict, the day's and the
+   zip's paths quoted so a folder with a space stays one field, writer,
+   commit, run, entries, columnar, raw fallbacks (FM-057), rows, CSV, zip and
+   stored bytes, milliseconds, or the refusal's code and words) and one
+   `pull.tickstore.write` event on `/logs` carrying the same writer, commit
+   and run. A log line that cannot be written fails the verb.
 7. `cli tickstore-write` is a store writer in `store_write::WRITERS`: an
-   unstamped build refuses, because the log line names the code that wrote
-   the day.
+   unstamped build refuses, because the log line and the event name the
+   commit of the code that wrote the day (`commit=<stamp>`; `unstamped` only
+   when `BRUTEX_ALLOW_UNSTAMPED_WRITE=1` allowed it; a stamp outside
+   `[A-Za-z0-9_-]{1,64}` is refused `commit_invalid`).
+8. **Every name the writer opens is a regular file or a refusal.** The zip and
+   a held day file are opened through `store::safe_open` (D-4951); the lock
+   and the log after a look that does not follow a link. A link (dangling or
+   not), a pipe, a socket, a device or a directory at any of them is refused
+   `not_regular_file`, never followed and never waited on: a pipe at the
+   zip's name blocked `File::open` for ever, and a dangling link at a day's
+   name was taken for "no day" and replaced by the rename. No folder between
+   the root and the day file is written through a symbolic link
+   (`linked_folder`: R3-16's rule for a store whose `bars` is a link, RA-298,
+   on the tick store, so a shadow root whose `options` or `cm` links to the
+   real store is never written through); the root itself may be a link, as
+   `store::safe_open::refuse_linked_store_root` allows. A zip holding its day
+   folder and no file in it is refused `no_file_in_day`, not held as a day of
+   0 rows.
 
 **Measured** (14 October 2026, read-only copies (`cp -c`) of three real day
 zips and of the tool's day files for the same days, written into a scratch
@@ -68661,17 +68696,28 @@ provenance (FM-056, the importer's); `read_index`'s own disjointness check
 `a_locked_root_is_refused_and_nothing_is_written`,
 `two_writers_of_one_day_leave_one_verified_file`,
 `a_bts_from_another_writer_answers_the_same_entries`,
-`a_bts_whose_two_entries_share_a_block_is_refused`, and
-`cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes`.
+`a_bts_whose_two_entries_share_a_block_is_refused`,
+`the_log_line_and_the_event_name_the_commit`,
+`the_temporary_is_born_through_the_staging_door_and_a_race_is_named`,
+`a_name_that_is_not_a_regular_file_is_refused_and_never_waited_on`,
+`a_zip_of_only_its_day_folder_is_refused`,
+`a_corrupt_zip_on_a_held_day_is_named_and_the_day_is_not_blamed`,
+`a_missing_root_is_refused_and_never_made`,
+`every_new_folder_has_its_parent_fsynced`,
+`a_tick_store_folder_that_is_a_link_is_never_written_through`,
+`cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes`,
+and `cli::tickstore_command::tests::a_missing_root_is_refused_and_an_unstamped_line_says_so`;
+gate 28 (`.github/gates_tmp_open.rs`) passes with this module and the verb
+unlisted in its `LEGACY`.
 
-### D-4954 — E2E-05's codec half: the workspace keeps exactly two compressed formats, zstd frames and codec 1, and bars are not put in zstd frames — 2026-10-14
+### D-4968 — E2E-05's codec half: the workspace keeps exactly two compressed formats, zstd frames and codec 1, and bars are not put in zstd frames — 2026-10-14
 
 **Implemented by** R4-08 (the decision and its measurement only; the bar half
 is the SC series, log segments R4-10, census epochs R4-29).
 
 **Decision.** By design the workspace has two compressed formats and no third:
 
-1. **zstd frames, written and read by `ruzstd` alone** (D-2801, D-4953): the
+1. **zstd frames, written and read by `ruzstd` alone** (D-2801, D-4967): the
    tick store's day files (read since D-2801, now written) and R4-10's rolled
    non-bar segments. Their unit is a whole file or a whole member, read once
    and in full.

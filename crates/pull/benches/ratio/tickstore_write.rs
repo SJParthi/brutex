@@ -5,7 +5,11 @@
 //! Writing is O(the day's bytes) by design (every byte is read, encoded,
 //! written and read back once), so the bound asserted is the cost PER MEMBER
 //! of equal size: flat when the writer does no work that grows with the day
-//! beyond its bytes. Seconds per day and MB/s are printed beside it. The
+//! beyond its bytes. A day's fixed cost (the lock, the folders, the fsyncs,
+//! the threads) dominates a 1x day, so the 1x day is not the baseline: the
+//! MARGINAL cost per member from 1x to 10x is, against the marginal cost from
+//! 10x to 100x (the second check of R4-08 found the old ratio could hardly
+//! fail). Seconds per day and MB/s are printed beside it. The
 //! lookup is the readers' own: one listing of the written file, then one
 //! probe by ticker, which must cost the same at 100 times the members.
 //!
@@ -128,6 +132,7 @@ fn write_size(base: &Path, n: u32) -> (u128, u64, PathBuf) {
     let (mut best, mut csv, mut last) = (u128::MAX, 0, PathBuf::new());
     for trial in 0..WRITES {
         let root = base.join(format!("root-{n}-{trial}"));
+        std::fs::create_dir_all(&root).unwrap_or_else(|_| refuse("a root"));
         let start = Instant::now();
         let run = write_day(&zip, &root, &WriteOptions::new(&format!("bench-{trial}")));
         let ns = start.elapsed().as_nanos();
@@ -152,7 +157,7 @@ pub(crate) fn tickstore_write_is_flat_per_member() -> bool {
     ));
     println!("  C-TSW scratch (left for clean-up): {}", base.display());
     let sizes = [BASE_MEMBERS, BASE_MEMBERS * 10, BASE_MEMBERS * 100];
-    let mut per_member = Vec::new();
+    let mut days = Vec::new();
     let mut roots = Vec::new();
     for n in sizes {
         let (ns, csv, root) = write_size(&base, n);
@@ -161,13 +166,22 @@ pub(crate) fn tickstore_write_is_flat_per_member() -> bool {
             "  C-TSW-01 {n:>5} members: {:>9} us a day, {csv:>10} CSV bytes, {mb_per_s} MB/s",
             ns / 1_000
         );
-        per_member.push(ns * 1_000 / u128::from(n));
+        days.push(ns);
         roots.push((n, root));
     }
     let mut ok = true;
-    if let [one, ten, hundred] = per_member.as_slice() {
-        ok &= ratio("C-TSW-01 write per member, 10x day", *one, *ten);
-        ok &= ratio("C-TSW-01 write per member, 100x day", *one, *hundred);
+    if let [one, ten, hundred] = days.as_slice() {
+        // Picoseconds a member, the fixed part of a day subtracted.
+        let marginal = |small: u128, big: u128, members: u32| {
+            big.saturating_sub(small) * 1_000 / u128::from(members)
+        };
+        let low = marginal(*one, *ten, BASE_MEMBERS * 9);
+        let high = marginal(*ten, *hundred, BASE_MEMBERS * 90);
+        println!(
+            "  C-TSW-01 fixed part of a day about {} us (1x day less 1x marginal)",
+            one.saturating_sub(low * u128::from(BASE_MEMBERS) / 1_000) / 1_000
+        );
+        ok &= ratio("C-TSW-01 marginal write per member, 10x->100x", low, high);
     }
     let day = Day::new(2026, 9, 29).unwrap_or_else(|_| refuse("a real day"));
     let mut probes = Vec::new();

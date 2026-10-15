@@ -39,19 +39,38 @@
 //! 3. Every member is encoded in memory, in parallel, and each block is
 //!    rebuilt through [`crate::gdfl_tickstore::rebuild`] and compared before
 //!    it is kept.
-//! 4. The day file is written to `<day>.bts.tmp.<run-id>`, fsynced, and then
-//!    EVERY entry is read back from that file through
+//! 4. The tick store's root must already be a directory: a mistyped root is
+//!    refused `root_missing`, never made, since a root no reader opens would
+//!    hold days nobody finds. The day file is written to
+//!    `<day>.bts.tmp.<run-id>`, created through `store::staging::create`, the
+//!    workspace's one door for a temporary (R3-16, gate 28), fsynced, and
+//!    then EVERY entry is read back from that file through
 //!    [`crate::gdfl_tickstore`] and compared byte for byte with the zip's
 //!    member, read again. Only then is the temporary renamed to `<day>.bts`
-//!    and the directory fsynced: only then is the day held.
+//!    and the directory fsynced: only then is the day held. A year or month
+//!    folder made for the day has its parent fsynced first, so a power loss
+//!    cannot take back the folder of a day a log line called written.
 //! 5. A `<day>.bts.tmp*` left by a crash, a full disk or a failed verify is
-//!    refused BY NAME and LEFT: this code removes no file, ever (the
-//!    operator's deletion list owns that, R4-06). A held day is never
-//!    rewritten: a rerun verifies it and writes nothing, and a held day that
-//!    no longer matches its zip is refused with the old file untouched.
+//!    refused BY NAME and LEFT: this code removes no file by choice (the
+//!    operator's deletion list owns that, R4-06). The staging door clears a
+//!    one-name regular file at the name it is handed; the leftover check runs
+//!    first, under the root's lock, so that path is reached only when a file
+//!    appears at this run's own name between the check and the create, and
+//!    then the run stops `temp_raced`, naming the bytes the door cleared
+//!    (D-4967). A held day is never rewritten: a rerun verifies it and writes
+//!    nothing; a held day that no longer matches its zip is refused with the
+//!    old file untouched, and a zip that no longer reads back as its own
+//!    records state is refused `zip_corrupt_on_verify`, never blamed on the
+//!    held day.
+//! 6. The zip and a held day file are opened through `store::safe_open`, and
+//!    the lock and the log only after a look that does not follow a link: a
+//!    link, a pipe, a socket, a device or a directory at any of those names
+//!    is refused `not_regular_file`, never followed and never waited on.
 //!
 //! Every outcome, written, held or refused, is one line of the store's
-//! append-only [`LOG_NAME`] and one `pull.tickstore.write` event.
+//! append-only [`LOG_NAME`] (fsynced) and one `pull.tickstore.write` event,
+//! each naming the writer, the commit of the code that ran (`unstamped` when
+//! the caller has none) and the run.
 //!
 //! # Cost
 //!
@@ -74,6 +93,7 @@ use crate::gdfl_cm::{CmKind, CmRefusal, folder_day};
 use crate::gdfl_nfo::{FOLDER_PREFIX as NFO_FOLDER_PREFIX, NfoTickStore};
 use crate::gdfl_tickstore::{IndexEntry, TickStore, read_index, rebuild};
 use crate::session::Day;
+use store::safe_open::{Found, ReadRefusal};
 
 /// This writer, named on every log line and event: which code and which
 /// encoder produced a day file (FM-249). The separate tool's files are
@@ -83,6 +103,9 @@ pub const WRITER: &str = "pull::tickstore_write/1 ruzstd-0.8.2 Fastest";
 /// The append-only log of every outcome, one line each, in the tick store's
 /// root: the day file, the writer, the run, the counts, the verdict.
 pub const LOG_NAME: &str = "tickstore-write.log";
+
+/// The commit named on a log line and an event when the caller has none.
+pub const UNSTAMPED: &str = "unstamped";
 
 /// The root's lock file, the same name the separate tool locks, so the two
 /// writers never run on one root at once. It is opened, never removed.
@@ -95,7 +118,7 @@ pub const LOCK_NAME: &str = ".lock";
 pub const MEMBER_CAP: u64 = 2 << 30;
 
 /// The most compressed block bytes one day may hold in memory before its file
-/// is written, 4 GiB: about 26 times the largest day file the tool wrote for
+/// is written, 4 GiB: about 28 times the largest day file the tool wrote for
 /// September 2026 (151,027,298 bytes, `GFDLNFO_TICK_29092026.bts`).
 pub const DAY_BLOCKS_CAP: u64 = 4 << 30;
 
@@ -220,6 +243,38 @@ pub enum Refusal {
         /// The id.
         run_id: String,
     },
+    /// The commit stamp is not 1 to 64 of `[A-Za-z0-9_-]`: it could not be
+    /// one field of a log line.
+    CommitInvalid {
+        /// The stamp.
+        commit: String,
+    },
+    /// The tick store's root is not an existing directory. The writer never
+    /// makes a root: a mistyped one would hold days no reader opens.
+    RootMissing {
+        /// The root.
+        root: PathBuf,
+        /// What is there instead, or the host's refusal.
+        what: String,
+    },
+    /// A name the writer opens (the zip, a held day file, the lock or the
+    /// log) is not a regular file. It is never followed or waited on, and it
+    /// is left as it is.
+    NotRegularFile {
+        /// The name.
+        path: PathBuf,
+        /// What is there.
+        found: Found,
+    },
+    /// A folder between the tick store's root and the day file is a symbolic
+    /// link. The root may be one (where the operator keeps the store is the
+    /// operator's to place, as `store::safe_open::refuse_linked_store_root`
+    /// says), but a folder below it never is written through: a test's
+    /// shadow whose `options` or `cm` is a link would write the real store.
+    LinkedFolder {
+        /// The link.
+        path: PathBuf,
+    },
     /// The zip could not be opened or its length read.
     ZipUnavailable {
         /// The zip.
@@ -255,6 +310,12 @@ pub enum Refusal {
         stem: String,
         /// The first folder that disagrees, or nothing found.
         found: String,
+    },
+    /// The zip holds its day folder's directory entry and no file in it: a
+    /// day with no file is not held.
+    NoFileInDay {
+        /// The day folder.
+        stem: String,
     },
     /// More entries than the footer's `u32` count.
     TooManyEntries {
@@ -315,12 +376,43 @@ pub enum Refusal {
         /// The first difference.
         why: String,
     },
+    /// A member of the zip did not read back as the zip's own record states
+    /// while a held day was verified against it: the zip is the damaged
+    /// side, and the held day file is left as it is and not blamed.
+    ZipCorruptOnVerify {
+        /// The held day file.
+        path: PathBuf,
+        /// The zip reader's refusal.
+        why: String,
+    },
     /// The disk filled while the temporary was written; it is left, named.
     DiskFull {
         /// The temporary.
         temp: PathBuf,
         /// Bytes written before the disk filled.
         written: u64,
+    },
+    /// `store::staging::create` refused the temporary's name: a second name
+    /// of another file, a name that is not a regular file, or a name another
+    /// writer took again. Nothing was written through it.
+    TempNotCreated {
+        /// The temporary's name.
+        temp: PathBuf,
+        /// The door's word (`staging_linked`, `staging_not_regular`,
+        /// `staging_contended`).
+        word: &'static str,
+        /// The door's sentence.
+        why: String,
+    },
+    /// A file appeared at this run's own temporary name after the leftover
+    /// check, under the root's lock, and `store::staging::create` removed
+    /// that name to create the temporary. The run stops: this writer never
+    /// removes a file by choice, and says so when the door did.
+    TempRaced {
+        /// The temporary, left empty for the operator.
+        temp: PathBuf,
+        /// Bytes the removed name held.
+        cleared: u64,
     },
     /// Any other failure creating, writing or syncing a file.
     WriteFailed {
@@ -348,12 +440,17 @@ impl Refusal {
         match self {
             Self::NameNotCanonical { .. } => "name_not_canonical",
             Self::RunIdInvalid { .. } => "run_id_invalid",
+            Self::CommitInvalid { .. } => "commit_invalid",
+            Self::RootMissing { .. } => "root_missing",
+            Self::NotRegularFile { .. } => "not_regular_file",
+            Self::LinkedFolder { .. } => "linked_folder",
             Self::ZipUnavailable { .. } => "zip_unavailable",
             Self::ZipRefused { .. } => "zip_refused",
             Self::NameNotUtf8 { .. } => "name_not_utf8",
             Self::NameTooLong { .. } => "name_too_long",
             Self::DuplicateEntry { .. } => "duplicate_entry",
             Self::InnerFolderMismatch { .. } => "inner_folder_mismatch",
+            Self::NoFileInDay { .. } => "no_file_in_day",
             Self::TooManyEntries { .. } => "too_many_entries",
             Self::MemberTooLarge { .. } => "member_too_large",
             Self::MemberCorrupt { .. } => "member_corrupt",
@@ -363,7 +460,10 @@ impl Refusal {
             Self::LockFailed { .. } => "lock_failed",
             Self::StaleTemp { .. } => "stale_temp",
             Self::HeldDayDiffers { .. } => "held_day_differs",
+            Self::ZipCorruptOnVerify { .. } => "zip_corrupt_on_verify",
             Self::DiskFull { .. } => "disk_full",
+            Self::TempNotCreated { .. } => "temp_not_created",
+            Self::TempRaced { .. } => "temp_raced",
             Self::WriteFailed { .. } => "write_failed",
             Self::VerifyFailed { .. } => "verify_failed",
         }
@@ -379,9 +479,14 @@ impl core::fmt::Display for Refusal {
                 "{code}: `{name}` is not GFDLNFO_TICK_, GFDLCM_STOCK_TICK_ or \
                  GFDLCM_INDICES_TICK_ plus a real ddmmyyyy and `.zip`"
             ),
-            Self::RunIdInvalid { run_id } => {
-                write!(f, "{code}: `{run_id}` is not 1 to 64 of A-Z a-z 0-9 _ -")
+            Self::RunIdInvalid { run_id: value } | Self::CommitInvalid { commit: value } => {
+                write!(f, "{code}: `{value}` is not 1 to 64 of A-Z a-z 0-9 _ -")
             }
+            Self::RootMissing { .. }
+            | Self::NotRegularFile { .. }
+            | Self::LinkedFolder { .. }
+            | Self::ZipCorruptOnVerify { .. }
+            | Self::TempRaced { .. } => self.door_words(code, f),
             Self::ZipUnavailable { path, kind } => {
                 write!(f, "{code}: {} could not be read ({kind})", path.display())
             }
@@ -393,6 +498,12 @@ impl core::fmt::Display for Refusal {
                 write!(
                     f,
                     "{code}: the name states `{stem}`, the zip holds `{found}`"
+                )
+            }
+            Self::NoFileInDay { stem } => {
+                write!(
+                    f,
+                    "{code}: the zip holds the folder `{stem}` and no file in it"
                 )
             }
             Self::TooManyEntries { entries } => write!(f, "{code}: {entries}"),
@@ -423,6 +534,7 @@ impl core::fmt::Display for Refusal {
                 "{code}: {} does not match its zip ({why}); it is left as it is",
                 path.display()
             ),
+            Self::TempNotCreated { why, .. } => write!(f, "{code}: {why}"),
             Self::DiskFull { temp, written } => write!(
                 f,
                 "{code}: stage=compress file={} bytes={written}; the temporary is left",
@@ -436,6 +548,50 @@ impl core::fmt::Display for Refusal {
                 "{code}: {} ({why}); the temporary is left and the day is not held",
                 temp.display()
             ),
+        }
+    }
+}
+
+impl Refusal {
+    /// The words of the refusals about the names the writer opens and the
+    /// door it creates through: a free method rather than arms, so the
+    /// `Display` stays under `clippy::too_many_lines`.
+    fn door_words(&self, code: &str, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RootMissing { root, what } => write!(
+                f,
+                "{code}: {} is not an existing directory ({what}); the writer never \
+                 makes a tick store's root",
+                root.display()
+            ),
+            Self::NotRegularFile { path, found } => write!(
+                f,
+                "{code} ({}): {} is {}, not a regular file; it is neither followed nor \
+                 waited on, and it is left as it is",
+                found.word(),
+                path.display(),
+                found.sentence()
+            ),
+            Self::LinkedFolder { path } => write!(
+                f,
+                "{code}: {} is a symbolic link; no folder below a tick store's root is \
+                 written through one",
+                path.display()
+            ),
+            Self::ZipCorruptOnVerify { path, why } => write!(
+                f,
+                "{code}: the zip does not read back as its own records state ({why}); \
+                 the held day {} is left as it is and not blamed",
+                path.display()
+            ),
+            Self::TempRaced { temp, cleared } => write!(
+                f,
+                "{code}: a file of {cleared} bytes appeared at {} after the leftover \
+                 check, under the root's lock, and the staging door removed that name; \
+                 the run stops and its empty temporary is left for the operator",
+                temp.display()
+            ),
+            _ => write!(f, "{code}"),
         }
     }
 }
@@ -503,6 +659,22 @@ pub(crate) struct Faults {
     pub(crate) full_after: Option<u64>,
     /// The temporary's byte at this offset is inverted before the verify.
     pub(crate) flip_before_verify: Option<u64>,
+    /// A file put at the temporary's name after the leftover check and before
+    /// the create: the race the staging door's clear path answers.
+    pub(crate) plant_before_create: Option<Plant>,
+}
+
+/// What [`Faults::plant_before_create`] puts at the temporary's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the race hook is set by the tests alone")
+)]
+pub(crate) enum Plant {
+    /// A regular file with one name, of this many bytes.
+    File(u64),
+    /// A second name of the file `<root>/planted`.
+    HardLink,
 }
 
 /// How one day is written.
@@ -512,6 +684,9 @@ pub struct WriteOptions {
     run_id: String,
     /// Encoding and verifying threads.
     workers: usize,
+    /// The commit of the code that writes, named on every log line and
+    /// event; [`UNSTAMPED`] when the caller has none.
+    commit: Option<String>,
     /// Test-only faults.
     faults: Faults,
 }
@@ -524,8 +699,24 @@ impl WriteOptions {
         Self {
             run_id: run_id.to_owned(),
             workers: cores.clamp(1, 8),
+            commit: None,
             faults: Faults::default(),
         }
+    }
+
+    /// The same, naming `commit` as the code that writes.
+    #[must_use]
+    pub fn with_commit(self, commit: &str) -> Self {
+        Self {
+            commit: Some(commit.to_owned()),
+            ..self
+        }
+    }
+
+    /// The commit named on the log line and the event.
+    #[must_use]
+    pub fn commit(&self) -> &str {
+        self.commit.as_deref().unwrap_or(UNSTAMPED)
     }
 
     /// The same, with `workers` threads (at least one).
@@ -869,6 +1060,7 @@ fn preflight(identity: &DayIdentity, entries: &[ZipEntry]) -> Result<u64, Refusa
     }
     let mut seen = std::collections::HashSet::with_capacity(entries.len());
     let (mut inside, mut outside) = (0_u64, 0_u64);
+    let mut folder_only = false;
     for entry in entries {
         if std::str::from_utf8(&entry.raw_name).is_err() {
             return Err(Refusal::NameNotUtf8 {
@@ -896,7 +1088,13 @@ fn preflight(identity: &DayIdentity, entries: &[ZipEntry]) -> Result<u64, Refusa
         }
         let first = entry.name.split(['/', '\\']).next().unwrap_or_default();
         if first == identity.stem {
-            inside += 1;
+            // A directory entry is not a file of the day: a zip of only its
+            // folder is refused `no_file_in_day`, not held with 0 rows.
+            if is_directory(entry) {
+                folder_only = true;
+            } else {
+                inside += 1;
+            }
         } else if DayIdentity::of_zip_name(&format!("{first}.zip")).is_ok() {
             return Err(Refusal::InnerFolderMismatch {
                 stem: identity.stem.clone(),
@@ -905,6 +1103,11 @@ fn preflight(identity: &DayIdentity, entries: &[ZipEntry]) -> Result<u64, Refusa
         } else {
             outside += 1;
         }
+    }
+    if inside == 0 && folder_only {
+        return Err(Refusal::NoFileInDay {
+            stem: identity.stem.clone(),
+        });
     }
     if inside == 0 {
         return Err(Refusal::InnerFolderMismatch {
@@ -1117,11 +1320,25 @@ fn write_temp(
         step,
         kind: why.kind(),
     };
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp)
-        .map_err(|why| failed("create", &why))?;
+    // The workspace's one door for a temporary (R3-16, gate 28): it opens
+    // nothing already at the name. A one-name file there is cleared by the
+    // door, which this writer never chooses: the leftover check ran under the
+    // lock, so that is a race, and the run stops naming it (D-4967).
+    let staged = store::staging::create(temp).map_err(|why| match why {
+        store::staging::StagingError::Io { source, .. } => failed("create", &source),
+        other => Refusal::TempNotCreated {
+            temp: temp.to_path_buf(),
+            word: other.word(),
+            why: other.to_string(),
+        },
+    })?;
+    if let Some(cleared) = staged.cleared {
+        return Err(Refusal::TempRaced {
+            temp: temp.to_path_buf(),
+            cleared,
+        });
+    }
+    let file = staged.file;
     let (index, index_off) = index_bytes(entries, items);
     let frame = zstd(&index).map_err(|why| Refusal::EncodeFailed {
         name: "the index".to_owned(),
@@ -1168,18 +1385,39 @@ pub fn verify_file<B: ReadAt + Sync>(
     entries: &[ZipEntry],
     workers: usize,
 ) -> Result<DayReport, String> {
-    let file = File::open(bts).map_err(|why| format!("open: {}", why.kind()))?;
-    let len = file
-        .metadata()
-        .map_err(|why| format!("length: {}", why.kind()))?
-        .len();
-    let index = read_index(&file, len).map_err(|why| why.to_string())?;
+    let (file, len) = store::safe_open::open_read_len(bts).map_err(|why| format!("open: {why}"))?;
+    verify_open(&file, len, bts, zip, entries, workers).map_err(|why| match why {
+        Mismatch::File(why) => why,
+        Mismatch::Zip(why) => format!("the zip: {why}"),
+    })
+}
+
+/// Why a day file did not verify against its zip.
+#[derive(Debug)]
+enum Mismatch {
+    /// The day file differs from the zip.
+    File(String),
+    /// A member of the zip did not read back as the zip's own record
+    /// states: the zip is the damaged side.
+    Zip(String),
+}
+
+/// [`verify_file`] on a day file already open, of length `len`.
+fn verify_open<B: ReadAt + Sync>(
+    file: &File,
+    len: u64,
+    bts: &Path,
+    zip: &B,
+    entries: &[ZipEntry],
+    workers: usize,
+) -> Result<DayReport, Mismatch> {
+    let index = read_index(file, len).map_err(|why| Mismatch::File(why.to_string()))?;
     if index.len() != entries.len() {
-        return Err(format!(
+        return Err(Mismatch::File(format!(
             "{} entries, the zip holds {}",
             index.len(),
             entries.len()
-        ));
+        )));
     }
     let mut next = wide(MAGIC.len());
     let mut report = DayReport {
@@ -1199,20 +1437,20 @@ pub fn verify_file<B: ReadAt + Sync>(
             && stored.crc == entry.crc32
             && stored.dos_time == entry.dos_time;
         if !same {
-            return Err(format!(
+            return Err(Mismatch::File(format!(
                 "`{}`: name, size, CRC-32 or DOS time is not the zip's",
                 entry.name
-            ));
+            )));
         }
         if (stored.kind == KIND_DIR) != is_directory(entry) {
-            return Err(format!(
+            return Err(Mismatch::File(format!(
                 "`{}`: kind {} for this entry",
                 entry.name, stored.kind
-            ));
+            )));
         }
         if stored.kind != KIND_DIR {
             if stored.off < next {
-                return Err(format!("`{}`: block_overlap", entry.name));
+                return Err(Mismatch::File(format!("`{}`: block_overlap", entry.name)));
             }
             next = stored.off.saturating_add(stored.len);
         }
@@ -1224,7 +1462,6 @@ pub fn verify_file<B: ReadAt + Sync>(
             _ => {}
         }
     }
-    let file = &file;
     let index = &index;
     parallel(entries.len(), workers, &|at| {
         let (Some(stored), Some(entry)) = (index.get(at), entries.get(at)) else {
@@ -1235,7 +1472,9 @@ pub fn verify_file<B: ReadAt + Sync>(
         }
         let got = rebuild(file, stored)
             .map_err(|why| verify_refusal(format!("`{}`: {why}", entry.name)))?;
-        let want = member(zip, entry).map_err(|why| verify_refusal(why.to_string()))?;
+        // The zip's own refusal passes through as itself: the zip is then
+        // the damaged side, not the day file.
+        let want = member(zip, entry)?;
         if got == want {
             Ok(())
         } else {
@@ -1243,8 +1482,9 @@ pub fn verify_file<B: ReadAt + Sync>(
         }
     })
     .map_err(|why| match why {
-        Refusal::VerifyFailed { why, .. } => why,
-        other => other.to_string(),
+        Refusal::VerifyFailed { why, .. } => Mismatch::File(why),
+        corrupt @ Refusal::MemberCorrupt { .. } => Mismatch::Zip(corrupt.to_string()),
+        other => Mismatch::File(other.to_string()),
     })?;
     Ok(report)
 }
@@ -1281,13 +1521,42 @@ fn leftovers(dir: &Path, stem: &str) -> Result<Vec<(String, u64)>, Refusal> {
 /// swallowed.
 fn append_log(root: &Path, line: &str) -> Result<(), String> {
     let path = root.join(LOG_NAME);
+    if let Some(found) = not_regular(&path) {
+        return Err(format!(
+            "{} is {} ({}), not a regular file; it is left as it is",
+            path.display(),
+            found.sentence(),
+            found.word()
+        ));
+    }
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(|why| format!("{}: {}", path.display(), why.kind()))?;
     file.write_all(format!("{line}\n").as_bytes())
+        .and_then(|()| file.sync_all())
         .map_err(|why| format!("{}: {}", path.display(), why.kind()))
+}
+
+/// What is at `path` when something is there and it is not a regular file,
+/// looked at without following a link; `None` for nothing or a regular file.
+fn not_regular(path: &Path) -> Option<Found> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .and_then(|meta| Found::of(meta.file_type()))
+}
+
+/// `value` as one unquoted field of a log line when it is in the run id's
+/// alphabet, else `invalid` (the refusal's words carry it).
+fn token(value: &str) -> &str {
+    if run_id_ok(value) { value } else { "invalid" }
+}
+
+/// `text` as one quoted field of a log line: a path with a space stays one
+/// field.
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace(['"', '\n'], "'"))
 }
 
 /// What one run did to one day, logged and emitted.
@@ -1310,16 +1579,18 @@ pub fn write_day(zip: &Path, root: &Path, options: &WriteOptions) -> Run {
     let result = write_day_inner(zip, root, options);
     let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let zip_name = zip.display().to_string();
+    let zip_field = quoted(&zip_name);
+    let commit = token(options.commit());
+    let run = token(&options.run_id);
     let line = match &result {
         Ok(outcome) => {
             let r = outcome.report();
             format!(
-                "v=1 verdict={} day={} zip={zip_name} writer=\"{WRITER}\" run={} \
-                 entries={} columnar={} raw_fallbacks={} rows={} csv_bytes={} zip_bytes={} \
-                 stored_bytes={} outside_folder={} millis={millis}",
+                "v=1 verdict={} day={} zip={zip_field} writer=\"{WRITER}\" commit={commit} \
+                 run={run} entries={} columnar={} raw_fallbacks={} rows={} csv_bytes={} \
+                 zip_bytes={} stored_bytes={} outside_folder={} millis={millis}",
                 outcome.verdict(),
-                r.path.display(),
-                options.run_id,
+                quoted(&r.path.display().to_string()),
                 r.entries,
                 r.columnar,
                 r.raw_fallbacks,
@@ -1331,17 +1602,15 @@ pub fn write_day(zip: &Path, root: &Path, options: &WriteOptions) -> Run {
             )
         }
         Err(why) => format!(
-            "v=1 verdict=refused code={} zip={zip_name} writer=\"{WRITER}\" run={} \
-             millis={millis} why=\"{}\"",
+            "v=1 verdict=refused code={} zip={zip_field} writer=\"{WRITER}\" commit={commit} \
+             run={run} millis={millis} why={}",
             why.code(),
-            options.run_id,
-            why.to_string().replace(['"', '\n'], "'"),
+            quoted(&why.to_string()),
         ),
     };
-    let log_error = std::fs::create_dir_all(root)
-        .map_err(|why| format!("{}: {}", root.display(), why.kind()))
-        .and_then(|()| append_log(root, &line))
-        .err();
+    // The root is never made here either: a root that is not there has no
+    // log, and the caller is told so (`log_error`).
+    let log_error = append_log(root, &line).err();
     emit(&result, &zip_name, options, millis);
     Run {
         result,
@@ -1352,35 +1621,45 @@ pub fn write_day(zip: &Path, root: &Path, options: &WriteOptions) -> Run {
 
 /// The `pull.tickstore.write` event for one day.
 fn emit(result: &Result<Outcome, Refusal>, zip: &str, options: &WriteOptions, millis: u64) {
+    let words = match result {
+        Ok(outcome) => outcome.report().path.display().to_string(),
+        Err(why) => why.to_string(),
+    };
+    let _dropped_when_filtered = telemetry::emit(&event_of(result, zip, options, millis, &words));
+}
+
+/// The `pull.tickstore.write` event: `words` is the day file's path when
+/// the day was written or held, the refusal's words when it was refused.
+fn event_of<'a>(
+    result: &'a Result<Outcome, Refusal>,
+    zip: &'a str,
+    options: &'a WriteOptions,
+    millis: u64,
+    words: &'a str,
+) -> telemetry::Event<'a> {
     match result {
         Ok(outcome) => {
             let r = outcome.report();
-            let path = r.path.display().to_string();
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::info("pull.tickstore.write", outcome.verdict())
-                    .with("day", telemetry::Value::Str(&path))
-                    .with("stored_bytes", telemetry::Value::Uint(r.stored_bytes))
-                    .with("csv_bytes", telemetry::Value::Uint(r.csv_bytes))
-                    .with("entries", telemetry::Value::Uint(r.entries))
-                    .with("raw_fallbacks", telemetry::Value::Uint(r.raw_fallbacks))
-                    .with("zip", telemetry::Value::Str(zip))
-                    .with("writer", telemetry::Value::Str(WRITER))
-                    .with("run", telemetry::Value::Str(&options.run_id))
-                    .with("millis", telemetry::Value::Uint(millis)),
-            );
+            telemetry::Event::info("pull.tickstore.write", outcome.verdict())
+                .with("day", telemetry::Value::Str(words))
+                .with("stored_bytes", telemetry::Value::Uint(r.stored_bytes))
+                .with("csv_bytes", telemetry::Value::Uint(r.csv_bytes))
+                .with("entries", telemetry::Value::Uint(r.entries))
+                .with("raw_fallbacks", telemetry::Value::Uint(r.raw_fallbacks))
+                .with("zip", telemetry::Value::Str(zip))
+                .with("writer", telemetry::Value::Str(WRITER))
+                .with("commit", telemetry::Value::Str(options.commit()))
+                .with("run", telemetry::Value::Str(&options.run_id))
+                .with("millis", telemetry::Value::Uint(millis))
         }
-        Err(why) => {
-            let text = why.to_string();
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::warn("pull.tickstore.write", "refused")
-                    .with("code", telemetry::Value::Str(why.code()))
-                    .with("why", telemetry::Value::Str(&text))
-                    .with("zip", telemetry::Value::Str(zip))
-                    .with("writer", telemetry::Value::Str(WRITER))
-                    .with("run", telemetry::Value::Str(&options.run_id))
-                    .with("millis", telemetry::Value::Uint(millis)),
-            );
-        }
+        Err(why) => telemetry::Event::warn("pull.tickstore.write", "refused")
+            .with("code", telemetry::Value::Str(why.code()))
+            .with("why", telemetry::Value::Str(words))
+            .with("zip", telemetry::Value::Str(zip))
+            .with("writer", telemetry::Value::Str(WRITER))
+            .with("commit", telemetry::Value::Str(options.commit()))
+            .with("run", telemetry::Value::Str(&options.run_id))
+            .with("millis", telemetry::Value::Uint(millis)),
     }
 }
 
@@ -1391,39 +1670,73 @@ fn write_day_inner(zip: &Path, root: &Path, options: &WriteOptions) -> Result<Ou
             run_id: options.run_id.clone(),
         });
     }
+    if !run_id_ok(options.commit()) {
+        return Err(Refusal::CommitInvalid {
+            commit: options.commit().to_owned(),
+        });
+    }
     let name = zip
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let identity = DayIdentity::of_zip_name(&name)?;
-    let unavailable = |why: std::io::Error| Refusal::ZipUnavailable {
-        path: zip.to_path_buf(),
-        kind: why.kind(),
-    };
-    let source = File::open(zip).map_err(unavailable)?;
-    let zip_len = source.metadata().map_err(unavailable)?.len();
+    // Through the store's one reading door (R3-16): a pipe at the zip's name
+    // is refused, never waited on; a link is never followed.
+    let (source, zip_len) = store::safe_open::open_read_len(zip).map_err(|why| {
+        opened_refusal(&why, |kind| Refusal::ZipUnavailable {
+            path: zip.to_path_buf(),
+            kind,
+        })
+    })?;
     let entries = zip_entries(&source, 0, zip_len).map_err(|why| Refusal::ZipRefused { why })?;
     let outside_folder = preflight(&identity, &entries)?;
     let final_path = identity.path_under(root);
     let dir = final_path.parent().unwrap_or(root).to_path_buf();
-    std::fs::create_dir_all(root).map_err(|why| Refusal::WriteFailed {
-        path: root.to_path_buf(),
-        step: "create the root",
-        kind: why.kind(),
-    })?;
+    match std::fs::metadata(root) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(Refusal::RootMissing {
+                root: root.to_path_buf(),
+                what: "not a directory".to_owned(),
+            });
+        }
+        Err(why) => {
+            return Err(Refusal::RootMissing {
+                root: root.to_path_buf(),
+                what: why.kind().to_string(),
+            });
+        }
+    }
     let lock = lock_root(root)?;
+    refuse_linked_folders(root, &dir)?;
     let finish = |mut report: DayReport| {
         report.zip_bytes = zip_len;
         report.outside_folder = outside_folder;
         report
     };
-    if final_path.exists() {
-        return verify_file(&final_path, &source, &entries, options.workers)
-            .map(|report| Outcome::Held(finish(report)))
-            .map_err(|why| Refusal::HeldDayDiffers {
+    match store::safe_open::open_read_len(&final_path) {
+        Ok((held, len)) => {
+            return verify_open(&held, len, &final_path, &source, &entries, options.workers)
+                .map(|report| Outcome::Held(finish(report)))
+                .map_err(|why| match why {
+                    Mismatch::File(why) => Refusal::HeldDayDiffers {
+                        path: final_path.clone(),
+                        why,
+                    },
+                    Mismatch::Zip(why) => Refusal::ZipCorruptOnVerify {
+                        path: final_path.clone(),
+                        why,
+                    },
+                });
+        }
+        Err(why) if why.is_missing() => {}
+        Err(why) => {
+            return Err(opened_refusal(&why, |kind| Refusal::WriteFailed {
                 path: final_path.clone(),
-                why,
-            });
+                step: "open the held day",
+                kind,
+            }));
+        }
     }
     if dir.exists() {
         let left = leftovers(&dir, &identity.stem)?;
@@ -1433,12 +1746,11 @@ fn write_day_inner(zip: &Path, root: &Path, options: &WriteOptions) -> Result<Ou
     }
     let items = encode_all(&source, &entries, options.workers)?;
     // The day's folder is made only now: a refusal above writes nothing.
-    std::fs::create_dir_all(&dir).map_err(|why| Refusal::WriteFailed {
-        path: dir.clone(),
-        step: "create the day's folder",
-        kind: why.kind(),
-    })?;
+    make_dirs(&dir)?;
     let temp = dir.join(format!("{}{TMP_SUFFIX}.{}", identity.stem, options.run_id));
+    if let Some(plant) = options.faults.plant_before_create {
+        plant_at(&temp, root, plant)?;
+    }
     write_temp(&temp, &entries, &items, options.faults)?;
     drop(items);
     if let Some(at) = options.faults.flip_before_verify {
@@ -1461,6 +1773,12 @@ fn write_day_inner(zip: &Path, root: &Path, options: &WriteOptions) -> Result<Ou
 /// released when the returned handle is dropped or the process dies.
 fn lock_root(root: &Path) -> Result<File, Refusal> {
     let lock_path = root.join(LOCK_NAME);
+    if let Some(found) = not_regular(&lock_path) {
+        return Err(Refusal::NotRegularFile {
+            path: lock_path,
+            found,
+        });
+    }
     let lock = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1477,6 +1795,89 @@ fn lock_root(root: &Path) -> Result<File, Refusal> {
             kind: why.kind(),
         }),
     }
+}
+
+/// A refusal of `store::safe_open` as this writer's: what is at the name
+/// when it is not a regular file, else `other` with the host's error kind.
+fn opened_refusal(why: &ReadRefusal, other: impl FnOnce(std::io::ErrorKind) -> Refusal) -> Refusal {
+    if let Some(found) = why.found() {
+        return Refusal::NotRegularFile {
+            path: why.path().to_path_buf(),
+            found,
+        };
+    }
+    other(match why {
+        ReadRefusal::Io { source, .. } => source.kind(),
+        _ => std::io::ErrorKind::Other,
+    })
+}
+
+/// Every folder from `dir` up to, and not including, `root` that exists is
+/// a folder and not a symbolic link (R3-16's rule for a store, RA-298, on
+/// the tick store): at most one look per level, four at most for any day.
+fn refuse_linked_folders(root: &Path, dir: &Path) -> Result<(), Refusal> {
+    for level in dir.ancestors().take_while(|level| *level != root) {
+        if std::fs::symlink_metadata(level).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(Refusal::LinkedFolder {
+                path: level.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `dir` made with every missing folder above it, and the folder holding
+/// each new one fsynced, outermost first, so a power loss cannot take back a
+/// folder, and the day in it, that a log line already called written. The
+/// folders fsynced are returned. One look per missing level of the path,
+/// which stops at the root (it is never made).
+fn make_dirs(dir: &Path) -> Result<Vec<PathBuf>, Refusal> {
+    let mut missing = Vec::new();
+    let mut at = Some(dir);
+    while let Some(here) = at {
+        match std::fs::symlink_metadata(here) {
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(here);
+                at = here.parent();
+            }
+            _ => break,
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|why| Refusal::WriteFailed {
+        path: dir.to_path_buf(),
+        step: "create the day's folder",
+        kind: why.kind(),
+    })?;
+    let mut synced = Vec::with_capacity(missing.len());
+    for made in missing.iter().rev() {
+        let parent = made.parent().unwrap_or(made);
+        File::open(parent)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|why| Refusal::WriteFailed {
+                path: parent.to_path_buf(),
+                step: "fsync a new folder's parent",
+                kind: why.kind(),
+            })?;
+        synced.push(parent.to_path_buf());
+    }
+    Ok(synced)
+}
+
+/// The race hook: `plant` put at `temp` (test-only by its caller's flag).
+fn plant_at(temp: &Path, root: &Path, plant: Plant) -> Result<(), Refusal> {
+    let failed = |why: std::io::Error| Refusal::WriteFailed {
+        path: temp.to_path_buf(),
+        step: "race hook",
+        kind: why.kind(),
+    };
+    match plant {
+        Plant::File(len) => std::fs::write(temp, vec![b'x'; usize::try_from(len).unwrap_or(0)]),
+        Plant::HardLink => {
+            let other = root.join("planted");
+            std::fs::write(&other, b"another file").and_then(|()| std::fs::hard_link(&other, temp))
+        }
+    }
+    .map_err(failed)
 }
 
 /// The verified temporary renamed to the day's name and the folder fsynced:

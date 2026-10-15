@@ -7,9 +7,11 @@
 //! canonical name; a held day is verified and left as it is; a leftover
 //! temporary is refused by name and left; nothing is removed. Every outcome
 //! is one line of `ROOT/tickstore-write.log` and one `pull.tickstore.write`
-//! event. A build with no commit stamp does not write, as every store writer
-//! (`store_write`, DB-B71): the log line names the writer, and an unstamped
-//! one could not say which code that was.
+//! event, each naming the writer, the commit of this build and the run. A
+//! build with no commit stamp does not write, as every store writer
+//! (`store_write`, DB-B71), unless the allowance is set, and then it writes
+//! `commit=unstamped` on the line and the event. `ROOT` must already be a
+//! directory: a mistyped root is refused `root_missing`, never made.
 
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -101,6 +103,9 @@ pub(crate) fn command_with(
     }
     let run_id = words.run_id.map_or_else(fresh_run_id, str::to_owned);
     let mut options = WriteOptions::new(&run_id);
+    if let Some(commit) = commit {
+        options = options.with_commit(commit);
+    }
     if let Some(workers) = words.workers {
         options = options.with_workers(workers);
     }
@@ -108,7 +113,7 @@ pub(crate) fn command_with(
     let _infallible = writeln!(
         out,
         "tickstore-write: writer {WRITER}, commit {}, run {run_id}, {} ms",
-        commit.unwrap_or("unstamped"),
+        options.commit(),
         run.millis
     );
     let mut code = match &run.result {
@@ -270,6 +275,8 @@ mod tests {
         let zip = staged("same");
         let base = zip.parent().unwrap();
         let (by_verb, by_function) = (base.join("verb"), base.join("function"));
+        std::fs::create_dir_all(&by_verb).unwrap();
+        std::fs::create_dir_all(&by_function).unwrap();
         let mut out = String::new();
         let code = command_with(
             &[
@@ -290,7 +297,15 @@ mod tests {
             "{out}"
         );
         assert!(out.contains(WRITER), "{out}");
-        let run = write_day(&zip, &by_function, &WriteOptions::new("function"));
+        // The log line names the commit of the build that wrote the day
+        // (D-4967 item 7), not only the stdout.
+        let log = std::fs::read_to_string(by_verb.join("tickstore-write.log")).unwrap();
+        assert!(log.contains(&format!(" commit={STAMP} run=verb ")), "{log}");
+        let run = write_day(
+            &zip,
+            &by_function,
+            &WriteOptions::new("function").with_commit(STAMP),
+        );
         let Ok(Outcome::Written(report)) = run.result else {
             panic!("{run:?}");
         };
@@ -359,5 +374,38 @@ mod tests {
         assert!(out.contains("refused: name_not_canonical"), "{out}");
         assert!(out.contains("commit unstamped"), "{out}");
         assert!(fresh_run_id().starts_with("cli-"));
+    }
+
+    /// **A MISTYPED ROOT IS REFUSED, NEVER MADE**, and the run says its log
+    /// line could not be written; an allowed unstamped build writes
+    /// `commit=unstamped` on the line it does write.
+    #[test]
+    fn a_missing_root_is_refused_and_an_unstamped_line_says_so() {
+        let zip = staged("root");
+        let z = zip.to_str().unwrap();
+        let typo = zip.parent().unwrap().join("no-such-root");
+        let mut out = String::new();
+        assert_eq!(
+            command_with(&[z, typo.to_str().unwrap()], Some(STAMP), None, &mut out),
+            FAILED
+        );
+        assert!(out.contains("refused: root_missing"), "{out}");
+        assert!(out.contains("the log line was NOT written"), "{out}");
+        assert!(!typo.exists(), "the root is never made");
+        let root = zip.parent().unwrap().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut out = String::new();
+        let code = command_with(
+            &[z, root.to_str().unwrap(), "--run-id", "unstamped-run"],
+            None,
+            Some(OsStr::new("1")),
+            &mut out,
+        );
+        assert_eq!(code, OK, "{out}");
+        let log = std::fs::read_to_string(root.join("tickstore-write.log")).unwrap();
+        assert!(
+            log.contains(" commit=unstamped run=unstamped-run "),
+            "{log}"
+        );
     }
 }

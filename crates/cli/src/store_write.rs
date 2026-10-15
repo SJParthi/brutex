@@ -359,7 +359,12 @@ mod tests {
         }
         let shadowed = || Ok(shadow.clone());
         let owned = || Ok(real.clone());
-        let writing: [(&str, &[&str]); 10] = [
+        // `tickstore-write` (R4-08) never asks for this root: it writes the
+        // tick store under its own ROOT argument, and its own refusal of a
+        // linked folder there is `pull::tickstore_write`'s `linked_folder`
+        // (`a_tick_store_folder_that_is_a_link_is_never_written_through`).
+        // It is listed so the table stays every writer, once.
+        let writing: [(&str, &[&str]); 11] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -368,6 +373,7 @@ mod tests {
             ("gdfl-rekey", &["--apply"]),
             ("scrub-blocks", &[]),
             ("srt-build", &[]),
+            ("tickstore-write", &["ZIP", "ROOT"]),
             ("tix-rebuild", &[]),
             ("zerodha-repair", &["--from-store"]),
         ];

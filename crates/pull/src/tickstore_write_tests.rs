@@ -190,7 +190,10 @@ fn staged(tag: &str, name: &str, members: &[Member]) -> (PathBuf, PathBuf) {
     let zip = dir.join("in").join(name);
     std::fs::create_dir_all(zip.parent().unwrap()).unwrap();
     std::fs::write(&zip, zip_of(members)).unwrap();
-    (zip, dir.join("store"))
+    // The writer never makes a root (`root_missing`): the root is made here.
+    let root = dir.join("store");
+    std::fs::create_dir_all(&root).unwrap();
+    (zip, root)
 }
 
 fn options(run: &str) -> WriteOptions {
@@ -776,6 +779,7 @@ fn a_bts_from_another_writer_answers_the_same_entries() {
     };
     assert_eq!(report.raw_fallbacks, 2, "the other writer stored them raw");
     let ours_root = root.with_file_name("ours");
+    std::fs::create_dir_all(&ours_root).unwrap();
     let ours = write_day(&zip, &ours_root, &options("ours"));
     let Ok(Outcome::Written(mine)) = &ours.result else {
         panic!("{ours:?}");
@@ -1070,6 +1074,30 @@ fn every_refusal_names_its_code_in_its_words() {
             temp: "t".into(),
             why: "w".into(),
         },
+        Refusal::CommitInvalid { commit: "c".into() },
+        Refusal::RootMissing {
+            root: "r".into(),
+            what: "w".into(),
+        },
+        Refusal::NotRegularFile {
+            path: "p".into(),
+            found: Found::Pipe,
+        },
+        Refusal::NoFileInDay { stem: "s".into() },
+        Refusal::ZipCorruptOnVerify {
+            path: "p".into(),
+            why: "w".into(),
+        },
+        Refusal::TempNotCreated {
+            temp: "t".into(),
+            word: "staging_linked",
+            why: "w".into(),
+        },
+        Refusal::TempRaced {
+            temp: "t".into(),
+            cleared: 1,
+        },
+        Refusal::LinkedFolder { path: "l".into() },
     ];
     let mut codes = std::collections::BTreeSet::new();
     for why in &all {
@@ -1140,6 +1168,7 @@ fn measure_real_days_against_the_tools_files() {
     let spec = std::env::var("BRUTEX_TSW_REAL").expect("BRUTEX_TSW_REAL names the days");
     let out = PathBuf::from(std::env::var("BRUTEX_TSW_OUT").expect("BRUTEX_TSW_OUT"));
     refuse_the_real_store(&out);
+    std::fs::create_dir_all(&out).unwrap();
     for pair in spec.split(';').filter(|pair| !pair.is_empty()) {
         let (zip, tool) = pair.split_once('=').expect("ZIP=TOOL_BTS");
         let (zip, tool) = (Path::new(zip), Path::new(tool));
@@ -1310,4 +1339,375 @@ fn measure_ruzstd_fastest_on_bar_months() {
             paged * 1_000 / bars.max(1)
         );
     }
+}
+
+// ── the second check's blocking issues and follow-ups (verify-R4-08-r1) ────
+
+/// A stamp shaped like the one the build writes.
+const STAMP: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// The `commit` field of an event.
+fn commit_of<'a>(event: &telemetry::Event<'a>) -> Option<telemetry::Value<'a>> {
+    event
+        .fields()
+        .iter()
+        .find(|(key, _)| *key == "commit")
+        .map(|(_, value)| *value)
+}
+
+/// **THE LOG LINE AND THE EVENT NAME THE COMMIT OF THE CODE THAT WROTE THE
+/// DAY** (D-4967 item 7): the stamp when the caller names one, `unstamped`
+/// when it does not, `invalid` (refused `commit_invalid`) when it could not
+/// be one field. The zip's and the day's paths are quoted, so a vendor
+/// folder with a space stays one field.
+#[test]
+fn the_log_line_and_the_event_name_the_commit() {
+    let (zip, root) = staged("tsw-commit", &format!("{IDX}.zip"), &nifty_spot_members());
+    let spaced = zip
+        .parent()
+        .unwrap()
+        .join("vendor download")
+        .join(format!("{IDX}.zip"));
+    std::fs::create_dir_all(spaced.parent().unwrap()).unwrap();
+    std::fs::rename(&zip, &spaced).unwrap();
+    let stamped = options("stamped").with_commit(STAMP);
+    let run = write_day(&spaced, &root, &stamped);
+    assert!(matches!(run.result, Ok(Outcome::Written(_))), "{run:?}");
+    let plain = write_day(&spaced, &root, &options("plain"));
+    assert!(matches!(plain.result, Ok(Outcome::Held(_))), "{plain:?}");
+    let bad_options = options("bad").with_commit("not a stamp");
+    let bad = write_day(&spaced, &root, &bad_options);
+    assert_eq!(
+        bad.result,
+        Err(Refusal::CommitInvalid {
+            commit: "not a stamp".into()
+        })
+    );
+    let log = log_of(&root);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 3, "{log}");
+    assert!(
+        lines[0].contains(&format!(" commit={STAMP} run=stamped ")),
+        "{log}"
+    );
+    assert!(lines[1].contains(" commit=unstamped run=plain "), "{log}");
+    assert!(lines[2].contains(" commit=invalid run=bad "), "{log}");
+    assert!(lines[2].contains("`not a stamp`"), "{log}");
+    let zip_field = format!(" zip=\"{}\" ", spaced.display());
+    assert!(lines.iter().all(|line| line.contains(&zip_field)), "{log}");
+    let day_path = run
+        .result
+        .as_ref()
+        .unwrap()
+        .report()
+        .path
+        .display()
+        .to_string();
+    assert!(lines[0].contains(&format!(" day=\"{day_path}\" ")), "{log}");
+    let zip_name = spaced.display().to_string();
+    let event = event_of(&run.result, &zip_name, &stamped, 1, &day_path);
+    assert_eq!(commit_of(&event), Some(telemetry::Value::Str(STAMP)));
+    let plain_options = options("plain");
+    let event = event_of(&plain.result, &zip_name, &plain_options, 1, &day_path);
+    assert_eq!(commit_of(&event), Some(telemetry::Value::Str(UNSTAMPED)));
+    let event = event_of(&bad.result, &zip_name, &bad_options, 1, "why");
+    assert_eq!(
+        commit_of(&event),
+        Some(telemetry::Value::Str("not a stamp"))
+    );
+}
+
+/// **THE TEMPORARY IS BORN THROUGH THE STAGING DOOR (R3-16, gate 28), AND
+/// THE DOOR'S CLEAR PATH IS NAMED WHEN A RACE REACHES IT.** A one-name file
+/// put at the run's own temporary name after the leftover check is cleared
+/// by the door; the run stops `temp_raced` with the bytes, leaves its empty
+/// temporary, and the next run refuses that by name. A second name of
+/// another file there is refused `temp_not_created` (`staging_linked`), and
+/// the other file is neither cut nor written through.
+#[test]
+fn the_temporary_is_born_through_the_staging_door_and_a_race_is_named() {
+    let (zip, root) = staged("tsw-race", &format!("{IDX}.zip"), &nifty_spot_members());
+    let faults = Faults {
+        plant_before_create: Some(Plant::File(7)),
+        ..Faults::default()
+    };
+    let run = write_day(&zip, &root, &options("raced").with_faults(faults));
+    let path = TickStore::new(&root).day_path(CmKind::Indices, day(2026, 9, 25));
+    let temp = path.with_file_name(format!("{IDX}.bts.tmp.raced"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::TempRaced {
+            temp: temp.clone(),
+            cleared: 7
+        })
+    );
+    assert!(!path.exists(), "the day is not held");
+    assert_eq!(std::fs::metadata(&temp).unwrap().len(), 0, "left empty");
+    assert!(
+        log_of(&root).contains("code=temp_raced"),
+        "{}",
+        log_of(&root)
+    );
+    let next = write_day(&zip, &root, &options("next"));
+    assert_eq!(next.result.unwrap_err().code(), "stale_temp");
+    assert!(temp.exists(), "left for the operator");
+
+    let (zip, root) = staged("tsw-linked", &format!("{IDX}.zip"), &nifty_spot_members());
+    let faults = Faults {
+        plant_before_create: Some(Plant::HardLink),
+        ..Faults::default()
+    };
+    let run = write_day(&zip, &root, &options("linked").with_faults(faults));
+    let Err(Refusal::TempNotCreated { word, .. }) = &run.result else {
+        panic!("{run:?}");
+    };
+    assert_eq!(*word, "staging_linked");
+    assert_eq!(
+        std::fs::read(root.join("planted")).unwrap(),
+        b"another file",
+        "neither cut nor written through"
+    );
+    assert!(log_of(&root).contains("code=temp_not_created"));
+}
+
+/// **A NAME THE WRITER OPENS THAT IS NOT A REGULAR FILE IS REFUSED, NEVER
+/// FOLLOWED AND NEVER WAITED ON.** A pipe at the zip's name (it blocked
+/// `File::open` for ever), a dangling link at the held day's name (the old
+/// look took it for "no day" and the rename replaced it), a directory at the
+/// lock's name, and one at the log's name (the day is written; the run says
+/// its line was not).
+#[test]
+fn a_name_that_is_not_a_regular_file_is_refused_and_never_waited_on() {
+    let (zip, root) = staged("tsw-pipe", &format!("{IDX}.zip"), &nifty_spot_members());
+    let pipe = zip.with_file_name("GFDLCM_INDICES_TICK_26092026.zip");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo made {}", pipe.display());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (p, r) = (pipe.clone(), root.clone());
+    std::thread::spawn(move || {
+        let _gone_when_the_test_ended = tx.send(write_day(&p, &r, &options("pipe")).result);
+    });
+    let result = rx
+        .recv_timeout(std::time::Duration::from_mins(1))
+        .expect("refused at once, never waited on");
+    assert_eq!(
+        result,
+        Err(Refusal::NotRegularFile {
+            path: pipe,
+            found: Found::Pipe
+        })
+    );
+
+    let path = TickStore::new(&root).day_path(CmKind::Indices, day(2026, 9, 25));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere.bts"), &path).unwrap();
+    let run = write_day(&zip, &root, &options("dangling"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::NotRegularFile {
+            path: path.clone(),
+            found: Found::Symlink
+        })
+    );
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "left as it is"
+    );
+    assert_eq!(names_in(path.parent().unwrap()), vec![format!("{IDX}.bts")]);
+
+    let (zip, root) = staged("tsw-lockdir", &format!("{IDX}.zip"), &nifty_spot_members());
+    std::fs::create_dir_all(root.join(LOCK_NAME)).unwrap();
+    let run = write_day(&zip, &root, &options("lockdir"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::NotRegularFile {
+            path: root.join(LOCK_NAME),
+            found: Found::Directory
+        })
+    );
+
+    let (zip, root) = staged("tsw-logdir", &format!("{IDX}.zip"), &nifty_spot_members());
+    std::fs::create_dir_all(root.join(LOG_NAME)).unwrap();
+    let run = write_day(&zip, &root, &options("logdir"));
+    assert!(matches!(run.result, Ok(Outcome::Written(_))), "{run:?}");
+    let why = run.log_error.unwrap();
+    assert!(why.contains("not a regular file"), "{why}");
+}
+
+/// **A ZIP OF ONLY ITS DAY FOLDER IS NOT A DAY**: refused `no_file_in_day`
+/// before the lock is taken; a folder with one empty file is a day of 0
+/// rows.
+#[test]
+fn a_zip_of_only_its_day_folder_is_refused() {
+    let only = vec![
+        member(&format!("{IDX}/"), b""),
+        member(&format!("{IDX}/SUB/"), b""),
+    ];
+    let (zip, root) = staged("tsw-folder", &format!("{IDX}.zip"), &only);
+    let run = write_day(&zip, &root, &options("folder"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::NoFileInDay {
+            stem: IDX.to_owned()
+        })
+    );
+    assert_eq!(
+        names_in(&root),
+        vec![LOG_NAME.to_owned()],
+        "nothing written"
+    );
+    let one_empty = vec![
+        member(&format!("{IDX}/"), b""),
+        member(&format!("{IDX}/EMPTY.NSE_IDX.csv"), b""),
+    ];
+    let (zip, root) = staged("tsw-empty", &format!("{IDX}.zip"), &one_empty);
+    let run = write_day(&zip, &root, &options("empty"));
+    let Ok(Outcome::Written(report)) = &run.result else {
+        panic!("{run:?}");
+    };
+    assert_eq!((report.entries, report.rows), (2, 0));
+}
+
+/// **WHEN THE ZIP IS THE DAMAGED SIDE, THE HELD DAY IS NOT BLAMED**: one
+/// byte of a stored member flipped after its day was held is refused
+/// `zip_corrupt_on_verify`, naming the zip reader's refusal; the day file is
+/// left as it was. A held day whose zip states another DOS time for one
+/// entry, and nothing else, is refused `held_day_differs`.
+#[test]
+fn a_corrupt_zip_on_a_held_day_is_named_and_the_day_is_not_blamed() {
+    let mut members = nifty_spot_members();
+    let (zip, root) = staged("tsw-zipcut", &format!("{IDX}.zip"), &members);
+    let first = write_day(&zip, &root, &options("before"));
+    let Ok(Outcome::Written(written)) = first.result else {
+        panic!("{first:?}");
+    };
+    let before = std::fs::read(&written.path).unwrap();
+    let mut bytes = std::fs::read(&zip).unwrap();
+    let data = &members[1].data;
+    let at = bytes
+        .windows(data.len())
+        .position(|window| window == data.as_slice())
+        .unwrap()
+        + data.len() / 2;
+    bytes[at] ^= 0x01;
+    std::fs::write(&zip, &bytes).unwrap();
+    let again = write_day(&zip, &root, &options("after"));
+    let Err(Refusal::ZipCorruptOnVerify { path, why }) = &again.result else {
+        panic!("{again:?}");
+    };
+    assert_eq!(path, &written.path);
+    assert!(
+        why.contains("member_corrupt") && why.contains("CRC-32"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read(&written.path).unwrap(), before, "untouched");
+    assert!(log_of(&root).contains("code=zip_corrupt_on_verify"));
+
+    members[1].time ^= 0x0001;
+    std::fs::write(&zip, zip_of(&members)).unwrap();
+    let dated = write_day(&zip, &root, &options("dated"));
+    let Err(Refusal::HeldDayDiffers { why, .. }) = &dated.result else {
+        panic!("{dated:?}");
+    };
+    assert!(
+        why.contains("NIFTY.NSE_IDX.csv") && why.contains("DOS time"),
+        "{why}"
+    );
+    assert_eq!(std::fs::read(&written.path).unwrap(), before, "untouched");
+}
+
+/// **THE WRITER NEVER MAKES A ROOT**: a root that is not there, or is a
+/// regular file, is refused `root_missing`; nothing is made, and the run
+/// says its log line could not be written.
+#[test]
+fn a_missing_root_is_refused_and_never_made() {
+    let (zip, root) = staged("tsw-noroot", &format!("{IDX}.zip"), &nifty_spot_members());
+    let typo = root.join("typo");
+    let run = write_day(&zip, &typo, &options("typo"));
+    assert_eq!(run.result.as_ref().unwrap_err().code(), "root_missing");
+    assert!(!typo.exists(), "never made");
+    assert!(run.log_error.is_some(), "{run:?}");
+    let file = root.join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let run = write_day(&zip, &file, &options("file"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::RootMissing {
+            root: file.clone(),
+            what: "not a directory".to_owned()
+        })
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"x");
+}
+
+/// **EVERY FOLDER MADE FOR A DAY HAS ITS PARENT FSYNCED**, outermost first,
+/// so a power loss cannot take back the folder of a day a log line called
+/// written; a folder already there syncs nothing.
+#[test]
+fn every_new_folder_has_its_parent_fsynced() {
+    let base = scratch("tsw-dirs");
+    let dir = base.join("cm").join("INDICES").join("2026");
+    assert_eq!(
+        make_dirs(&dir).unwrap(),
+        vec![
+            base.clone(),
+            base.join("cm"),
+            base.join("cm").join("INDICES")
+        ]
+    );
+    assert!(dir.is_dir());
+    assert_eq!(make_dirs(&dir).unwrap(), Vec::<PathBuf>::new());
+    let month = dir.join("SEP_2026");
+    assert_eq!(make_dirs(&month).unwrap(), vec![dir.clone()]);
+}
+
+/// **NO FOLDER BELOW THE ROOT IS WRITTEN THROUGH A LINK** (R3-16's rule
+/// for a store, RA-298): a shadow root whose `cm` is a link to another
+/// store, or whose month folder is one, is refused `linked_folder` and
+/// nothing is made through the link; the root itself may be a link.
+#[test]
+fn a_tick_store_folder_that_is_a_link_is_never_written_through() {
+    let (zip, root) = staged("tsw-linkcm", &format!("{IDX}.zip"), &nifty_spot_members());
+    let real = root.with_file_name("real");
+    std::fs::create_dir_all(real.join("cm")).unwrap();
+    std::os::unix::fs::symlink(real.join("cm"), root.join("cm")).unwrap();
+    let run = write_day(&zip, &root, &options("linked-cm"));
+    assert_eq!(
+        run.result,
+        Err(Refusal::LinkedFolder {
+            path: root.join("cm")
+        })
+    );
+    assert_eq!(
+        names_in(&real.join("cm")),
+        Vec::<String>::new(),
+        "nothing made"
+    );
+
+    let (zip, root) = staged(
+        "tsw-linkmonth",
+        &format!("{IDX}.zip"),
+        &nifty_spot_members(),
+    );
+    let path = TickStore::new(&root).day_path(CmKind::Indices, day(2026, 9, 25));
+    let month = path.parent().unwrap();
+    std::fs::create_dir_all(month.parent().unwrap()).unwrap();
+    let elsewhere = root.with_file_name("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, month).unwrap();
+    let run = write_day(&zip, &root, &options("linked-month"));
+    assert_eq!(run.result.unwrap_err().code(), "linked_folder");
+    assert_eq!(names_in(&elsewhere), Vec::<String>::new(), "nothing made");
+
+    let (zip, root) = staged("tsw-linkroot", &format!("{IDX}.zip"), &nifty_spot_members());
+    let via = root.with_file_name("via-link");
+    std::os::unix::fs::symlink(&root, &via).unwrap();
+    let run = write_day(&zip, &via, &options("linked-root"));
+    assert!(matches!(run.result, Ok(Outcome::Written(_))), "{run:?}");
 }

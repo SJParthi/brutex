@@ -7151,7 +7151,7 @@ unless named otherwise; every fixture is invented.
 | ING-R401-04 | **A panel's poll survives a failed run.** It never runs faster than once a second or while hidden, and a run that throws is kept as `failed`, counted, reported, and followed by the next run | `web/tests/ingest-panels.test.js` · *a poll whose run throws keeps polling and says what failed* | ✓ |
 | ING-R401-05 | **A repair press sends one request of exactly the eight fields for the plan's own member.** A template with a key outside the eight, a field twice, or another member is refused by name and nothing is sent; the body is written again with every value encoded | `web/tests/zerodha-repair.test.js` · *a_zerodha_repair_press_sends_one_request_with_its_reason* · *a_member_holding_an_ampersand_is_never_sent_as_another_member* | ✓ |
 
-## The tick-store writer (R4-08, E2E-02; D-4953)
+## The tick-store writer (R4-08, E2E-02; D-4967)
 
 `pull::tickstore_write`. Proofs in `crates/pull/src/tickstore_write_tests.rs`
 unless named otherwise; every zip is built in code from invented files.
@@ -7168,3 +7168,10 @@ unless named otherwise; every zip is built in code from invented files.
 | TSW-08 | **One writer a root**: two writers of one day leave one verified file; a held lock refuses | `two_writers_of_one_day_leave_one_verified_file`, `a_locked_root_is_refused_and_nothing_is_written` | ✓ |
 | TSW-09 | **No C, no mapping**: `pull` names no `zstd`, `zstd-sys`, `memmap2` or `libc`, and the module no `unsafe` | `the_writer_links_no_c` | ✓ |
 | TSW-10 | **The verb and the function write the same bytes** | `cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes` | ✓ |
+| TSW-11 | **Every log line and event names the commit of the code that wrote the day**: the build's stamp, `unstamped` only when allowed, a stamp that could not be one field refused `commit_invalid`; the zip's and the day's paths are quoted fields | `the_log_line_and_the_event_name_the_commit`, `cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes`, `cli::tickstore_command::tests::a_missing_root_is_refused_and_an_unstamped_line_says_so` | ✓ |
+| TSW-12 | **The temporary is born through `store::staging::create`**; when a race reaches the door's clear path the run stops `temp_raced`, naming the bytes, and a second name of another file is refused `temp_not_created` with that file untouched | `the_temporary_is_born_through_the_staging_door_and_a_race_is_named`; gate 28 | ✓ |
+| TSW-13 | **A name the writer opens is a regular file or a refusal**: a pipe at the zip's name, a link at a held day's name, a directory at the lock's or the log's name are refused `not_regular_file` (the log's as the run's `log_error`), never followed, never waited on | `a_name_that_is_not_a_regular_file_is_refused_and_never_waited_on` | ✓ |
+| TSW-14 | **When the zip is the damaged side the held day is not blamed** (`zip_corrupt_on_verify`), and a held day whose zip states another DOS time alone is refused `held_day_differs` | `a_corrupt_zip_on_a_held_day_is_named_and_the_day_is_not_blamed` | ✓ |
+| TSW-15 | **The writer never makes a root**, and a zip of only its day folder is not a day (`root_missing`, `no_file_in_day`) | `a_missing_root_is_refused_and_never_made`, `a_zip_of_only_its_day_folder_is_refused` | ✓ |
+| TSW-16 | **Every folder made for a day has its parent fsynced**, outermost first, and the log line is fsynced | `every_new_folder_has_its_parent_fsynced` | ✓ |
+| TSW-17 | **No folder below the tick store's root is written through a link** (`linked_folder`; the root itself may be one), so a shadow whose `cm` or month folder links elsewhere makes nothing there | `a_tick_store_folder_that_is_a_link_is_never_written_through`; `cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link` lists the verb | ✓ |
