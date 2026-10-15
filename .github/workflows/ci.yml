@@ -2478,6 +2478,22 @@ jobs:
           # D-2312: the walk and the spellings are `gates_runtime gate24`.
           "${RUNNER_TEMP:-/tmp}/gates-runtime" gate24
 
+      - name: Gate 28 — one way to create a temporary file
+        run: |
+          set -euo pipefail
+          # R3-16 (rules audit RA-287, RA-290): a temporary opened "create,
+          # truncate" opens a hard link planted at its name and writes through
+          # it. store::staging::create opens nothing already there, and this
+          # gate refuses a crate file that names a temporary without calling
+          # it; its LEGACY list of writers that still open their own may only
+          # shrink. The rule and its limits are .github/gates_tmp_open.rs,
+          # proved by its own tests before it is trusted.
+          tool="${RUNNER_TEMP:-/tmp}/gates-tmp-open"
+          rustc --edition=2024 --test -D warnings .github/gates_tmp_open.rs -o "${tool}-tests"
+          "${tool}-tests"
+          rustc --edition=2024 -D warnings .github/gates_tmp_open.rs -o "$tool"
+          "$tool" check
+
       - name: Gate 25 — the release profile still refuses silent wrapping
         run: |
           set -euo pipefail

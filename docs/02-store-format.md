@@ -3823,3 +3823,75 @@ number it cannot name as `kind_<n>` and a record type it cannot name as
   what it replaced. A replacement stopped before step 3 leaves the damaged
   queue with two names; the next one finds the kept name by device and inode
   and uses it, so one damaged file is kept once (D-4883).
+
+## §39 — Sealed month frame, codec 1 (D-4939)
+
+One frame of a sealed month: at most `block_rows` bars (256 for every month the
+sealer writes; a reader passes what the month's head states, never a constant)
+as seven bit-packed column streams after a varint row 0. Written and read by
+`store::sealed_codec` and by nothing else. This section is the frame alone: the
+`.sbar` file around it (head, directory with each frame's CRC-32C, time table,
+provenance) is SC-2's and gets its own section when it lands. Codec 1 is
+written once: a change is a new codec byte, never a new meaning for a byte
+below. Little-endian; varints are unsigned LEB128 of at most ten bytes, the
+tenth carrying bit 63 alone; signed values are zigzag-mapped; every arithmetic
+step wraps, so any seven `i64` (`i64::MIN` open interest, a jump from
+`i64::MAX` to `i64::MIN`, a high below its open, a negative volume) come back
+bit for bit.
+
+**Frame.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | codec = 1 |
+| 1 | 1 | flags. bit 0: row 0's stamp is a whole number of seconds after the month's origin (00:00 IST on the 1st); bit 1: row 0's open interest is `i64::MIN` and no varint carries it. Any other bit is refused |
+| 2 | 2 | rows `m`, 1 to `block_rows` |
+| 4 | … | row 0, zigzag varints in this order: `(ts − origin) / unit` (unit 1,000,000 under flag bit 0, else 1), close, open − close, high − close, low − close, volume, open interest (absent under flag bit 1) |
+| … | … | seven streams, in the order ts, close, open, high, low, volume, open interest; each carries the `m − 1` residuals of rows 1 to `m − 1` |
+
+**Stream.**
+
+| Size | Field |
+|---|---|
+| 1 | bit 7: predictor mode; bits 0 to 6: width `w`, 0 to 64 |
+| varint | `n_exc`, the number of exceptions, at most `m − 1` |
+| 1 | `e`, the exception width, 0 to 64; present only when `n_exc > 0` |
+| varint | base |
+| varint | gcd, 1 to 2^62 − 1 |
+| `ceil((m − 1) · w / 8)` | packed values, `w` bits each, least significant bit first, zero padding |
+| `ceil(n_exc · p / 8)` | exception positions, strictly increasing, `p = max(1, bit length of m − 2)` bits each |
+| `ceil(n_exc · e / 8)` | exception values, `e` bits each |
+
+A residual is the packed value, or the exception value at an exception's
+position; plus base; zigzag undone; times gcd. The column is the residual plus
+its predictor:
+
+| Column | Mode 0 predictor | Mode 1 predictor |
+|---|---|---|
+| ts | previous row's ts | refused |
+| close | previous row's close | refused |
+| open | previous row's close | this row's close |
+| high | `max(open, close)` of this row | refused |
+| low | `min(open, close)` of this row | refused |
+| volume | zero | previous row's volume |
+| open interest | previous row's open interest | zero |
+
+**Bounds.** The encoder writes, for each column, the shortest stream over each
+mode the column has and every width from 0 to its widest value, ties to mode 0
+and then to the smaller width; plain packing is a candidate, so a stream is at
+most 2,062 bytes at 256 rows and a frame at most 14,508 (`MAX_FRAME_LEN` =
+`4 + 70 + 7 × 2,062`; `max_frame_len(block_rows)` for any other geometry). The
+same rows give the same bytes on any host.
+
+**Refusals.** The frame's CRC-32C is checked before any byte is read; then,
+each by its own name and never by a panic, with nothing appended to the
+caller's rows: `codec`, `flags`, `rows` (0 or above `block_rows`),
+`truncated`, `varint_too_long`, `width`, `mode`, `exception_count`,
+`exception_width`, `gcd`, `exception_position` (at or past `m − 1`),
+`exception_order`, `trailing_bytes`. `decode_stamps` makes every check
+`decode_frame` makes and unpacks only the ts stream. Every check, the
+trailing bytes included, is made before the caller's buffer grows: a refused
+frame reserves nothing, and an accepted one reserves its head's rows once
+(FM-284). Invariants SC1-01 to
+SC1-09 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
+`docs/06-limits.md`.

@@ -6,37 +6,18 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 
-// Per-architecture values live in store::open_flags: O_NOFOLLOW is bit 17 on
-// x86_64 Linux but 0x8000 on aarch64, where bit 17 is O_LARGEFILE (D-0980).
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-))]
-// One literal per target, not an `|` of the two: over disjoint bits `|` and `^`
-// agree, so that expression carried an equivalent mutant (D-0192).
-const FLAGS: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
-
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-))]
+/// Opens immutable evidence for reading through the store's one reading door
+/// (`store::safe_open::open_read`, R3-16): never through a final symbolic
+/// link, never waiting on a FIFO, never anything but a regular file, and each
+/// refusal naming what it found (a pipe, a socket, a device, a directory or a
+/// link). The per-architecture flags it used to spell here live in
+/// `store::open_flags` and are asked once, there (D-0980). The host's own
+/// refusal (an absent file among them) keeps its kind.
 pub(crate) fn open(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FLAGS)
-        .open(path)?;
-    if !file.metadata()?.file_type().is_file() {
-        return Err(std::io::Error::other(
-            "immutable evidence path is not a regular file",
-        ));
-    }
+    let file = store::safe_open::open_read(path).map_err(|why| match why {
+        store::safe_open::ReadRefusal::Io { source, .. } => source,
+        other => std::io::Error::other(other.to_string()),
+    })?;
     crate::result_set::file_generation(&file, path).map_err(std::io::Error::other)?;
     Ok(file)
 }
@@ -83,20 +64,6 @@ pub(crate) fn regular(_options: &mut OpenOptions, _path: &Path) -> std::io::Resu
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "ledger opens require verified macOS or Linux x86_64/aarch64 flags",
-    ))
-}
-
-#[cfg(not(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    )
-)))]
-pub(crate) fn open(_path: &Path) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "immutable read opens require verified macOS or Linux x86_64/aarch64 flags",
     ))
 }
 

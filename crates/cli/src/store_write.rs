@@ -33,7 +33,7 @@
 //! itself on every response (`x-brutex-build: unstamped`).
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The variable that lets a build with no commit stamp write the store
 /// anyway. Set it to `1`, and only for a deliberate one-off.
@@ -109,12 +109,27 @@ pub(crate) fn root_with(
     allow: Option<&OsStr>,
     root: &dyn Fn() -> Result<PathBuf, String>,
 ) -> Result<PathBuf, String> {
-    if writes_the_store(verb, arguments)
-        && let Some(why) = unstamped_write_refusal(commit, allow)
-    {
+    let writes = writes_the_store(verb, arguments);
+    if writes && let Some(why) = unstamped_write_refusal(commit, allow) {
         return Err(why);
     }
-    root()
+    let root = root()?;
+    if writes {
+        writable(&root)?;
+    }
+    Ok(root)
+}
+
+/// Refuses, by name, a store root no verb may write: one whose `bars` is a
+/// symbolic link (`linked_store_root`: a test server's shadow, whose `bars`
+/// is the real store's, RA-298) or is not a directory. Asked once, after the
+/// stamp and before the verb opens anything, by [`root_with`] for every
+/// writing invocation and by `gdfl-import` for its own root; a read-only
+/// form is never refused by it, because a shadow exists to be read. The
+/// rule is `store::safe_open::refuse_linked_store_root` (R3-16); the month
+/// writer's own refusal of any link below the root (CE-62) stays behind it.
+pub(crate) fn writable(root: &Path) -> Result<(), String> {
+    store::safe_open::refuse_linked_store_root(root).map_err(|why| why.to_string())
 }
 
 /// The store root `verb` may use for this invocation: the CLI's own, or the
@@ -317,6 +332,79 @@ mod tests {
                 "{verb} {arguments:?}"
             );
         }
+    }
+
+    /// **EVERY WRITING VERB REFUSES A STORE WHOSE BARS FOLDER IS A LINK**
+    /// (R3-16, RA-298, FM-198): the shape `state/fix/shadow.sh` makes. Every
+    /// verb of [`WRITERS`], in its writing form and with a stamp, is refused
+    /// `linked_store_root` naming the link; the read-only forms are given the
+    /// root, because a shadow exists to be read; and the same verbs are given
+    /// a root whose `bars` is its own. Nothing is created through the link.
+    #[test]
+    fn every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link() {
+        let scratch =
+            std::env::temp_dir().join(format!("brutex-cli-linked-root-{}", std::process::id()));
+        let real = scratch.join("real");
+        let shadow = scratch.join("shadow");
+        std::fs::create_dir_all(real.join("bars")).unwrap();
+        std::fs::create_dir_all(&shadow).unwrap();
+        let link = shadow.join("bars");
+        if std::fs::symlink_metadata(&link).is_err() {
+            std::os::unix::fs::symlink(real.join("bars"), &link).unwrap();
+        }
+        let shadowed = || Ok(shadow.clone());
+        let owned = || Ok(real.clone());
+        let writing: [(&str, &[&str]); 10] = [
+            ("alerts", &["--ack", "1"]),
+            ("census-migrate", &["gdfl"]),
+            ("census-recount", &["gdfl"]),
+            ("gdfl-dayflags", &[]),
+            ("gdfl-import", &[]),
+            ("gdfl-rekey", &["--apply"]),
+            ("scrub-blocks", &[]),
+            ("srt-build", &[]),
+            ("tix-rebuild", &[]),
+            ("zerodha-repair", &["--from-store"]),
+        ];
+        assert_eq!(writing.map(|(verb, _)| verb), WRITERS, "every writer, once");
+        for (verb, arguments) in writing {
+            let refused = root_with(verb, arguments, Some(STAMP), None, &shadowed)
+                .expect_err("a linked store is refused");
+            assert!(
+                refused.starts_with("linked_store_root: "),
+                "{verb}: {refused}"
+            );
+            assert!(
+                refused.contains(&link.display().to_string()),
+                "{verb}: {refused}"
+            );
+            assert_eq!(
+                root_with(verb, arguments, Some(STAMP), None, &owned),
+                Ok(real.clone()),
+                "{verb}: a store with its own bars is written"
+            );
+        }
+        for (verb, arguments) in [
+            ("alerts", &[][..]),
+            ("gdfl-rekey", &["--plan"][..]),
+            ("srt-build", &["--dry-run"][..]),
+            ("tix-rebuild", &["--dry-run"][..]),
+            ("zerodha-repair", &[][..]),
+            ("top", &[][..]),
+        ] {
+            assert_eq!(
+                root_with(verb, arguments, Some(STAMP), None, &shadowed),
+                Ok(shadow.clone()),
+                "{verb} {arguments:?} reads, and a shadow is there to be read"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(real.join("bars")).unwrap().count(),
+            0,
+            "nothing was created through the link"
+        );
+        assert!(writable(&shadow).unwrap_err().contains("linked_store_root"));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The closure a verb is handed: the refusal for a writing invocation of

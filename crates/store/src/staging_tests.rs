@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{StagingError, create};
+use crate::safe_open::Found;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -53,28 +54,80 @@ fn a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported() {
     assert_ne!(after.ino(), before, "it is a new file, not the old one cut");
 }
 
+/// Every temporary name the tree spells today, as its writer builds it, and
+/// the one the ingest design fixes for a stop file (RA-287), each beside the
+/// writer or the source that names it. The helper's answer must not depend
+/// on a name's shape: dots, a process number, a run, a stem in capitals.
+/// The writers here that still open their temporaries their own way are the
+/// legacy list of `.github/gates_tmp_open.rs`, which fails any NEW one; a
+/// package that names a new temporary adds its row here when it does.
+const TEMPORARY_NAMES: [(&str, &str); 10] = [
+    ("store::verdict, a year index", "2031.vdi.4242-7.tmp"),
+    (
+        "store::verdict, a day image",
+        "2031-03-04.g0000000001.vdt.4242-7.tmp",
+    ),
+    ("pull::census_store, an epoch", "000003.man.tmp"),
+    ("pull::census_store, a seal stub", "gdfl.man.seal.tmp"),
+    ("pull::census_store, the sealed text", "SEALED.tmp"),
+    ("pull::alerts, a queue's birth", "alerts.4242.tmp"),
+    (
+        "pull::gdfl_tickstore, a day file",
+        "GFDLCM_INDICES_TICK_01042024.bts.tmp",
+    ),
+    ("cli::live, a published result", "6b6b6b6b.4242.tmp"),
+    ("cli::search_checkpoint, a completion", "complete.tmp"),
+    (
+        "design (ingest-automation.md:1376), a stop file",
+        "gdfl.options.stop.tmp",
+    ),
+];
+
+/// **RA-290, RA-287: A HARD LINK AT A STAGING NAME IS REFUSED, AND THE FILE
+/// BEHIND IT IS UNTOUCHED** — at every temporary name in one table. A second
+/// name of another file planted at the temporary is never opened: the create
+/// is refused `staging_linked` naming the name and the count of names, not
+/// one byte of the file behind it changes, and the planted name is left for
+/// the operator to see. The same names with nothing there are created, so
+/// the refusal is the link's and not the name's.
 #[test]
 fn a_hard_link_at_a_staging_name_is_refused_and_the_file_behind_it_is_untouched() {
     let dir = dir("linked");
-    let victim = dir.join("victim.bin");
     let body = b"bytes that must survive".to_vec();
-    fs::write(&victim, &body).unwrap();
-    let path = dir.join("a.tmp");
-    fs::hard_link(&victim, &path).unwrap();
+    for (writer, name) in TEMPORARY_NAMES {
+        let victim = dir.join(format!("victim-of-{name}"));
+        fs::write(&victim, &body).unwrap();
+        let path = dir.join(name);
+        fs::hard_link(&victim, &path).unwrap();
 
-    let refusal = create(&path).unwrap_err();
-    assert_eq!(refusal.word(), "staging_linked");
-    assert!(
-        matches!(&refusal, StagingError::Linked { links: 2, path: p } if *p == path),
-        "{refusal}"
-    );
-    assert_eq!(refusal.path(), path);
-    assert_eq!(fs::read(&victim).unwrap(), body, "not one byte changed");
-    assert_eq!(
-        fs::metadata(&victim).unwrap().nlink(),
-        2,
-        "the planted name is left for the operator to see"
-    );
+        let refusal = create(&path).unwrap_err();
+        assert_eq!(refusal.word(), "staging_linked", "{writer}: {refusal}");
+        assert!(
+            matches!(&refusal, StagingError::Linked { links: 2, path: p } if *p == path),
+            "{writer}: {refusal}"
+        );
+        assert_eq!(refusal.path(), path, "{writer}");
+        assert!(refusal.to_string().contains("one of 2 names"), "{refusal}");
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            body,
+            "{writer}: not one byte changed"
+        );
+        assert_eq!(
+            fs::metadata(&victim).unwrap().nlink(),
+            2,
+            "{writer}: the planted name is left for the operator to see"
+        );
+
+        // THE SAME NAME, FREE: created empty, so the refusal above was the
+        // link's.
+        fs::remove_file(&path).unwrap();
+        let made = create(&path).unwrap();
+        assert_eq!((made.cleared, made.calls), (None, 1), "{writer}");
+        assert_eq!(fs::metadata(&path).unwrap().nlink(), 1, "{writer}");
+        assert_eq!(fs::read(&victim).unwrap(), body, "{writer}");
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -86,6 +139,11 @@ fn a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left() {
     std::os::unix::fs::symlink(&victim, &link).unwrap();
     let refusal = create(&link).unwrap_err();
     assert_eq!(refusal.word(), "staging_not_regular", "{refusal}");
+    assert!(
+        matches!(&refusal, StagingError::NotRegular { found: Found::Symlink, path } if *path == link),
+        "{refusal}"
+    );
+    assert!(refusal.to_string().contains("a symbolic link"), "{refusal}");
     assert_eq!(fs::read(&victim).unwrap(), b"kept");
     assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
 
@@ -102,6 +160,25 @@ fn a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left() {
     fs::create_dir(&folder).unwrap();
     assert_eq!(create(&folder).unwrap_err().word(), "staging_not_regular");
     assert!(folder.is_dir());
+
+    // A PIPE AND A SOCKET are named by what they are, and left.
+    let pipe = dir.join("pipe.tmp");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let socket = dir.join("socket.tmp");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    for (at, found) in [(&pipe, Found::Pipe), (&socket, Found::Socket)] {
+        let refusal = create(at).unwrap_err();
+        assert!(
+            matches!(&refusal, StagingError::NotRegular { found: f, .. } if *f == found),
+            "{refusal}"
+        );
+        assert!(refusal.to_string().contains(found.sentence()), "{refusal}");
+        assert!(fs::symlink_metadata(at).is_ok(), "left as it is");
+    }
 }
 
 #[test]

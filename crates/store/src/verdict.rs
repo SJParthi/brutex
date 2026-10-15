@@ -90,6 +90,7 @@ use crate::crc::crc32c;
 use crate::flock::Flock;
 use crate::path::Timeframe;
 use crate::provenance::Day;
+use crate::safe_open::{self, ReadRefusal};
 use crate::staging::{self, StagingError};
 
 // ------------------------------------------------------------- constants --
@@ -1405,6 +1406,16 @@ pub enum VerdictError {
         /// The path.
         path: PathBuf,
     },
+    /// `not_regular`: a verdict file's name holds a pipe, a socket, a
+    /// device or a directory. Refused by the store's one reading door
+    /// ([`safe_open`]) without waiting on it: a pipe at a year index's name
+    /// used to hold every lookup for ever (verify-IA-5-r2, RA-317).
+    NotRegular {
+        /// The path.
+        path: PathBuf,
+        /// What is there.
+        found: safe_open::Found,
+    },
     /// `io`: the host refused an operation.
     Io {
         /// The path.
@@ -1450,6 +1461,7 @@ impl VerdictError {
             Self::TrailerMismatch { .. } => "trailer_mismatch",
             Self::RecordCorrupt { .. } => "record_corrupt",
             Self::Symlinked { .. } => "symlinked",
+            Self::NotRegular { .. } => "not_regular",
             Self::Io { .. } => "io",
             #[cfg(test)]
             Self::Crashed { .. } => "crashed",
@@ -1592,6 +1604,7 @@ impl fmt::Display for VerdictError {
                 "{word}: {} is a symbolic link, which the verdict store never follows",
                 path.display()
             ),
+            Self::NotRegular { path, found } => not_regular(f, word, path, *found),
             Self::Io {
                 path,
                 action,
@@ -1601,6 +1614,24 @@ impl fmt::Display for VerdictError {
             Self::Crashed { at } => write!(f, "{word}: the writer stopped at {at}"),
         }
     }
+}
+
+/// [`VerdictError::NotRegular`] in words: what is at the name, and that
+/// nothing was read through it or waited on it.
+fn not_regular(
+    f: &mut fmt::Formatter<'_>,
+    word: &str,
+    path: &Path,
+    found: safe_open::Found,
+) -> fmt::Result {
+    write!(
+        f,
+        "{word} ({}): {} is {}, not a regular file; the verdict store reads and \
+         writes nothing else, and nothing waited on it",
+        found.word(),
+        path.display(),
+        found.sentence()
+    )
 }
 
 impl std::error::Error for VerdictError {
@@ -2625,11 +2656,7 @@ struct Owned {
 /// [`VerdictError::Io`] when the file cannot be read, and every refusal
 /// [`check_trailer`] names.
 pub fn read_image(path: &Path) -> Result<Image, VerdictError> {
-    let file = open_read(path)?;
-    let len = file
-        .metadata()
-        .map_err(|why| io_error(path, "stat", why))?
-        .len();
+    let (file, len) = open_read(path)?;
     if len > off(MAX_IMAGE_LEN) {
         return Err(corrupt(
             path,
@@ -2808,23 +2835,46 @@ fn read_year(
 
 // -------------------------------------------------------------- the files --
 
-/// Opens for reading, never through a final symbolic link.
-fn open_read(path: &Path) -> Result<File, VerdictError> {
-    let mut options = File::options();
-    options.read(true);
-    no_follow(&mut options);
-    options.open(path).map_err(|why| opened(path, why))
+/// Opens for reading through the store's one reading door
+/// ([`safe_open::open_read_len`]): never through a final symbolic link,
+/// never waiting on a pipe, never anything but a regular file. It opened
+/// with `O_NOFOLLOW` alone, so a pipe at a year index's or an image's name
+/// held `Reader::lookup` for ever (verify-IA-5-r2 follow-up 1; RA-317).
+/// Answers the length the door's own `fstat` read.
+fn open_read(path: &Path) -> Result<(File, u64), VerdictError> {
+    safe_open::open_read_len(path).map_err(read_refused)
 }
 
-/// Opens an existing file for reading and writing, never creating it and
-/// never through a final link. A year index is only ever born by
-/// [`genesis`], so an open that created one would be the half file D-4865
-/// refuses.
+/// Opens an existing file for reading and writing, never creating it,
+/// through the same door ([`safe_open::open_read_write`]). A year index is
+/// only ever born by [`genesis`], so an open that created one would be the
+/// half file D-4865 refuses.
 fn open_existing(path: &Path) -> Result<File, VerdictError> {
-    let mut options = File::options();
-    options.read(true).write(true);
-    no_follow(&mut options);
-    options.open(path).map_err(|why| opened(path, why))
+    safe_open::open_read_write(path)
+        .map(|(file, _len)| file)
+        .map_err(read_refused)
+}
+
+/// The reading door's refusal in this store's words: a link keeps its own
+/// (`symlinked`), every other kind is `not_regular`, and the host's refusal
+/// (an absent name among them) stays `io`.
+fn read_refused(why: ReadRefusal) -> VerdictError {
+    match why {
+        ReadRefusal::NotRegular {
+            path,
+            found: safe_open::Found::Symlink,
+        } => VerdictError::Symlinked { path },
+        ReadRefusal::NotRegular { path, found } => VerdictError::NotRegular { path, found },
+        ReadRefusal::Io {
+            path,
+            action,
+            source,
+        } => VerdictError::Io {
+            path,
+            action,
+            source,
+        },
+    }
 }
 
 /// Opens the commit lock file for writing, creating it, never through a
@@ -2832,11 +2882,27 @@ fn open_existing(path: &Path) -> Result<File, VerdictError> {
 /// and is never written, so whatever is at its name is not changed by this
 /// open. A writer's own temporary is not opened here: it is born by
 /// [`staging::create`], which opens nothing that already exists (RA-290).
+///
+/// Never waiting either: `O_NONBLOCK` with `O_NOFOLLOW`, and the handle's
+/// own `fstat` refuses anything but a regular file by what it is, so a pipe
+/// planted at the lock's name is `not_regular`, never a writer that waits
+/// (RA-317).
 fn open_lock(path: &Path) -> Result<File, VerdictError> {
     let mut options = File::options();
     options.read(true).write(true).create(true).truncate(false);
     no_follow(&mut options);
-    options.open(path).map_err(|why| opened(path, why))
+    let file = options.open(path).map_err(|why| opened(path, why))?;
+    let kind = file
+        .metadata()
+        .map_err(|why| io_error(path, "stat", why))?
+        .file_type();
+    match safe_open::Found::of(kind) {
+        None => Ok(file),
+        Some(found) => Err(VerdictError::NotRegular {
+            path: path.to_path_buf(),
+            found,
+        }),
+    }
 }
 
 /// Takes the commit lock within `wait`, in a counted loop of
@@ -2868,7 +2934,7 @@ fn lock_within<'f>(
     }
 }
 
-/// `O_NOFOLLOW` where `crate::open_flags` has a value for it.
+/// `O_NOFOLLOW | O_NONBLOCK` where `crate::open_flags` has a value for it.
 fn no_follow(options: &mut fs::OpenOptions) {
     #[cfg(any(
         target_os = "macos",
@@ -2879,7 +2945,7 @@ fn no_follow(options: &mut fs::OpenOptions) {
     ))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(crate::open_flags::O_NOFOLLOW);
+        options.custom_flags(crate::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     #[cfg(not(any(
         target_os = "macos",
@@ -2891,21 +2957,12 @@ fn no_follow(options: &mut fs::OpenOptions) {
     let _ = options;
 }
 
-/// An open's failure, named: a final link refused under `O_NOFOLLOW`.
+/// An open's failure, named as the reading door names it
+/// ([`safe_open::name_the_refusal`]): a final link refused under
+/// `O_NOFOLLOW` is `symlinked`, a directory, a socket or a device is
+/// `not_regular` by what it is, and anything else is the host's own.
 fn opened(path: &Path, why: io::Error) -> VerdictError {
-    #[cfg(any(
-        target_os = "macos",
-        all(
-            any(target_os = "linux", target_os = "android"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    ))]
-    if why.raw_os_error() == Some(crate::open_flags::ELOOP) {
-        return VerdictError::Symlinked {
-            path: path.to_path_buf(),
-        };
-    }
-    io_error(path, "open", why)
+    read_refused(safe_open::name_the_refusal(path, why))
 }
 
 /// Makes a directory's entries durable.
@@ -3776,18 +3833,14 @@ impl Reader {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         if !self.handles.contains_key(path) {
-            let file = match open_read(path) {
-                Ok(file) => file,
+            let (file, len) = match open_read(path) {
+                Ok(opened) => opened,
                 Err(VerdictError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
                     return Ok(None);
                 }
                 Err(other) => return Err(other),
             };
             cost.opens += 1;
-            let len = file
-                .metadata()
-                .map_err(|why| io_error(path, "stat", why))?
-                .len();
             if self.handles.len() >= HANDLE_CACHE
                 && let Some(oldest) = self
                     .handles

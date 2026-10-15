@@ -82,6 +82,13 @@ pub mod path;
 /// (D-3334; DB-078, DB-G56).
 pub mod provenance;
 pub mod repair;
+/// One way to open a file for reading (no link followed, never a wait,
+/// regular files only) and the writer's refusal of a store whose `bars` is a
+/// link (R3-16; RA-317, RA-298).
+pub mod safe_open;
+/// Codec 1 of a sealed month: one frame of at most 256 bars as seven
+/// bit-packed column streams, bit for bit for any seven `i64` (D-4939, SC-1).
+pub mod sealed_codec;
 pub mod sort_index;
 /// A writer's temporary file, created `O_EXCL` so a name that already exists
 /// (a hard link planted there, a dead writer's leftover) is never opened,

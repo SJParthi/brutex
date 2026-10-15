@@ -543,6 +543,49 @@ impl TickStore {
     }
 }
 
+/// Opens a day file through the store's one reading door
+/// (`store::safe_open::open_read_len`, R3-16): `Ok(None)` only when no file
+/// has the name. It opened with `File::open`, which follows a link and waits
+/// on a pipe, so a DANGLING link at a day's name read as "no such day" and
+/// the run closed it `day_not_held` with exit 0 (FM-046), and a pipe held the
+/// import for ever. Now a link (dangling or not), a pipe, a socket or a
+/// device at a day's name is refused `tick_store_malformed` naming what it
+/// is; a directory stays what it was, `tick_store_unavailable` (is a
+/// directory), as does every refusal of the host's own. Shared by the
+/// capital-market and the options day readers.
+///
+/// # Errors
+///
+/// [`CmRefusal::TickStoreMalformed`] and [`CmRefusal::TickStoreUnavailable`].
+pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRefusal> {
+    use store::safe_open::{Found, ReadRefusal};
+    match store::safe_open::open_read_len(path) {
+        Ok(opened) => Ok(Some(opened)),
+        Err(why) if why.is_missing() => Ok(None),
+        Err(ReadRefusal::Io { source, .. }) => Err(CmRefusal::TickStoreUnavailable {
+            kind: source.kind(),
+        }),
+        Err(why) if why.found() == Some(Found::Directory) => Err(CmRefusal::TickStoreUnavailable {
+            kind: std::io::ErrorKind::IsADirectory,
+        }),
+        Err(why) => Err(CmRefusal::TickStoreMalformed {
+            what: match why.found() {
+                Some(Found::Symlink) => {
+                    "a day file's name is a symbolic link (dangling or not), which the reader \
+                     never follows: the day is neither read nor taken for absent"
+                }
+                Some(Found::Pipe) => {
+                    "a day file's name is a pipe (FIFO), which the reader never waits on"
+                }
+                _ => {
+                    "a day file's name is not a regular file (a socket or a device), which \
+                     the reader never opens"
+                }
+            },
+        }),
+    }
+}
+
 impl CmSource for TickStore {
     type Locator = TickLocator;
 
@@ -560,14 +603,9 @@ impl CmSource for TickStore {
     /// [`CmRefusal::TickStoreUnavailable`] when the file exists but cannot be
     /// opened or read, and every refusal of [`read_index`].
     fn day(&self, kind: CmKind, day: Day) -> Result<Option<DayListing<TickLocator>>, CmRefusal> {
-        let unavailable =
-            |why: std::io::Error| CmRefusal::TickStoreUnavailable { kind: why.kind() };
-        let file = match std::fs::File::open(self.day_path(kind, day)) {
-            Ok(file) => file,
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(why) => return Err(unavailable(why)),
+        let Some((file, file_len)) = open_day(&self.day_path(kind, day))? else {
+            return Ok(None);
         };
-        let file_len = file.metadata().map_err(unavailable)?.len();
         let entries = read_index(&file, file_len)?;
         let file = Arc::new(file);
         let mut listing = DayListing::scoped(kind, day, Arc::clone(&self.scope));
@@ -1375,6 +1413,92 @@ mod tests {
         assert!(matches!(
             store.day(CmKind::Indices, third),
             Err(CmRefusal::TickStoreUnavailable { .. })
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **FM-046: A DANGLING DAY-FILE LINK IS REFUSED BY NAME, NEVER A DAY NOT
+    /// HELD** (R3-16). `File::open` followed a link, so a dangling one at a
+    /// day's name was `NotFound`, the day read as absent, and the run closed
+    /// it `day_not_held` with exit 0; a pipe held the reader for ever. Every
+    /// such name is now refused `tick_store_malformed` saying what it is, at
+    /// the capital-market and the options reader alike, within the wait; a
+    /// link to a real day file is refused the same way (never followed); and
+    /// the day with no name at all is still `None`.
+    #[test]
+    fn a_dangling_day_file_link_is_refused_by_name_never_a_day_not_held() {
+        let root =
+            std::env::temp_dir().join(format!("gdfl_tickstore_{}_links", std::process::id()));
+        let store = TickStore::new(&root);
+        let options = crate::gdfl_nfo::NfoTickStore::new(&root);
+        let real = root.join("a-real-day.bts");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&real, small()).unwrap();
+        let cm_day = store.day_path(CmKind::Indices, at());
+        let nfo_day = options.day_path(at());
+        for path in [&cm_day, &nfo_day] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        let kinds: [(&str, &str); 3] = [
+            ("dangling", "symbolic link"),
+            ("link to a day", "symbolic link"),
+            ("pipe", "pipe (FIFO)"),
+        ];
+        for (kind, named) in kinds {
+            for path in [&cm_day, &nfo_day] {
+                match kind {
+                    "dangling" => {
+                        std::os::unix::fs::symlink(root.join("unplugged"), path).unwrap();
+                    }
+                    "link to a day" => std::os::unix::fs::symlink(&real, path).unwrap(),
+                    _ => {
+                        let made = std::process::Command::new("mkfifo")
+                            .arg(path)
+                            .status()
+                            .unwrap();
+                        assert!(made.success());
+                    }
+                }
+            }
+            let (cm, nfo) = {
+                let (store, options) = (store.clone(), options.clone());
+                let (send, answer) = std::sync::mpsc::channel();
+                let _thread = std::thread::spawn(move || {
+                    let cm = store.day(CmKind::Indices, at()).map(|day| day.is_some());
+                    let nfo =
+                        crate::gdfl_nfo::NfoSource::day(&options, at()).map(|day| day.is_some());
+                    let _unheard_after_a_timeout = send.send((cm, nfo));
+                });
+                let answered = answer.recv_timeout(std::time::Duration::from_secs(10));
+                if answered.is_err() {
+                    // RELEASE a reader stuck on the pipe, so the failure
+                    // below is reported rather than the test hanging.
+                    for path in [&cm_day, &nfo_day] {
+                        let _release = std::fs::OpenOptions::new().write(true).open(path);
+                    }
+                }
+                assert!(answered.is_ok(), "a day reader waited on the {kind}");
+                answered.unwrap()
+            };
+            for (reader, answered) in [("cm", cm), ("options", nfo)] {
+                assert!(
+                    matches!(&answered, Err(CmRefusal::TickStoreMalformed { what })
+                        if what.contains(named)),
+                    "{reader} {kind}: {answered:?}"
+                );
+            }
+            for path in [&cm_day, &nfo_day] {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        assert!(
+            !root.join("unplugged").exists(),
+            "nothing is created through a dangling link"
+        );
+        assert!(matches!(store.day(CmKind::Indices, at()), Ok(None)));
+        assert!(matches!(
+            crate::gdfl_nfo::NfoSource::day(&options, at()),
+            Ok(None)
         ));
         std::fs::remove_dir_all(&root).unwrap();
     }
