@@ -480,6 +480,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.prv` | where the month's bars came from, one record per landing, version 1 (§8.3, D-3334) |
 | `.srt` | the bar file's sort index: rows ordered by each sortable column, in runs, version 1 (§8.4, D-3349) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
+| `.sbar` | the sealed form of a closed month: every committed record, the committed header and the `.prv` image in one file written once, version 1 (§8.5, D-4965) |
 
 ```
 bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.bin
@@ -953,6 +954,158 @@ across directories by hand — therefore binds. It still serves no value the
 bars do not hold: every row a reader serves is read from the `.bin` and
 checked against the entry that named it, and each place of a page that
 disagrees is a named fault carrying the command that rebuilds the index.
+
+### 8.5 `.sbar` — sealed month, version 1 (D-4965)
+
+**Why it exists.** A closed month never changes, and its raw form keeps 56
+bytes a bar beside a `.crc`, a `.tix` and a `.srt`. The sealed form holds the
+same records bit for bit in codec 1 frames (§39, D-4939) of 256 bars, about
+3 to 8 bytes a bar, behind a head that answers the month's counts, stamps,
+ranges and extremes with no further read. It is a **form** of a month, not a
+generation: the generation pointer (D-3350) still says which content is
+served, and inside the served directory the form says how it is stored. It is
+a sibling kind (`store::path::FileKind::SealedBars`), not a bar `Layout`: it
+has no stride, so `32768 + i·56` is never asked of it, and a build that
+predates it refuses a `.sbar` opened as bars by its magic (`BRUTEXC1` shares
+no prefix with `BRUTEXB`).
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2020-03.sbar
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2020-03.sbar
+```
+
+Written by `store::sealed::Builder` (bytes only; publishing them by rename is
+the sealer's, SC-6) and read by `store::sealed::SealedMonth` (the read door
+that opens it in place of the `.bin`, SC-3, is not in this version of the
+code: until it lands nothing writes or opens a `.sbar`). **It is a pure
+function** of the month's committed records, its committed header, its path,
+its `.prv` image and the month summary handed in: no time, no ordinal, no
+build stamp. The same month built twice, on any host, is the same bytes.
+Every integer is little-endian; every checksum is CRC-32C (§6's parameters).
+No mapping; every read is positional; the file is never opened for writing
+once published.
+
+```
+0        512             table_off        prv_off          sum_off         blocks_off       file_len
+├─ HEAD ──┼─ DIRECTORY ────┼─ TIME TABLE ────┼─ PROVENANCE ───┼─ SUMMARY ──────┼─ FRAMES ────────┤
+           24 × n_blocks    8 × (entries+1)   packed .prv      version + bytes  codec 1, back to back
+```
+
+**Head, 512 bytes.** Bytes 0 to 63 have a bar header slot's shape (§2), so the
+version is found before the layout is known and `Head::bar_header` gives
+`generation::Pointer::describes` the raw month's header unchanged.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 8 | magic `BRUTEXC1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | record stride `56`: what a frame decodes to |
+| 12 | 4 | flags: bit 0 time table present, bit 1 provenance present, bit 2 month summary present; any other bit is refused |
+| 16 | 8 | `generation` of the raw month's committed header, copied |
+| 24 | 8 | `n_valid` |
+| 32 | 8 | `first_ts_micros`, copied |
+| 40 | 8 | `last_ts_micros`, copied |
+| 48 | 4 | `symbol_id` |
+| 52 | 4 | `timeframe_secs` |
+| 56 | 4 | CRC-32C over bytes `0..56` and `60..64`, as every slot |
+| 60 | 4 | zero |
+| 64 | 2 | `block_rows`: 256 as written; a reader takes 1 to 256 and never assumes it |
+| 66 | 2 | codec `1` |
+| 68 | 2 | directory entry length `24` |
+| 70 | 2 | the raw bar version sealed: `3` (version 2 holds no block checksums, so nothing proves its bytes: `unverified_source`) |
+| 72 | 4 | `n_blocks` = `ceil(n_valid / block_rows)` |
+| 76 | 4 | rung slots a table entry spans, `4096` |
+| 80 | 4 | `table_entries`: the table holds `table_entries + 1`; zero when absent |
+| 84 | 4 | `prv_packed_len`, the checksum after it not counted |
+| 88 | 4 | `prv_raw_len`, the `.prv` image's length, at most 262,208 |
+| 92 | 2 | year; 94: month `u8`; 95: zero |
+| 96 | 8 | `table_off` = 512 + 24 · `n_blocks` |
+| 104 | 8 | `prv_off` = `table_off` + 8 · (`table_entries` + 1) when the table is present |
+| 112 | 8 | `blocks_off`: after the provenance and the summary |
+| 120 | 8 | `blocks_len`: every frame's bytes, at most `n_blocks` · 14,508 and `u32::MAX` |
+| 128 | 8 | `file_len` = `blocks_off` + `blocks_len`; a file of another length is refused |
+| 136 | 8 | `origin_micros`: 00:00 IST on the 1st of the month |
+| 144 | 8 | `sum_off`; 152: `sum_len` `u32`; 156: zero. Both zero when flag bit 2 is clear |
+| 160 | 32 | BLAKE3 of the `n_valid × 56` record bytes exactly as the raw month held them |
+| 192 | 4 | CRC-32C of the raw month's `.crc` image (§6) over blocks `0..blocks_for(n_valid)`, regenerated from the records; 196: zero |
+| 200 | 24 | the first 24 bytes of BLAKE3 over the month's `.bin` store path (the `.prv` header's digest, §8.3) |
+| 224 | 6 × 24 | column ranges, open, high, low, close, volume, open interest: nulls `u64`, smallest `i64`, largest `i64` (only open interest has a null; both zero when every row is null) |
+| 368 | 6 × 16 | extremes, each a value and the stamp of the EARLIEST bar holding it: close max, close min, high max, low min, widest `high − low`, heaviest volume (the `.srt` run header's six, §8.4) |
+| 464 | 44 | reserved, zero; a set byte is refused |
+| 508 | 4 | CRC-32C over bytes `0..508` |
+
+A reader checks, in this order: the length (at least 512), the magic, the
+version, the head's CRC, the slot's CRC, the stride, the flags, every reserved
+byte, `block_rows`, the codec, the entry length, the raw version, the table's
+slots; then derives every offset and count again from the head's own counts
+(`n_blocks`, the table flag, `table_entries`, each offset, the provenance and
+summary lengths, `blocks_len` and `file_len`) and refuses any difference by
+field; then the stamps (inside the month, first ≤ last), the column ranges and
+the extremes (each equal to its column's range and stamped inside the month);
+then against its path: symbol id, rung, year and month, path digest, and the
+file's length. Each refusal has its own name (`store::sealed::SealedError::reason`)
+and is one `store.sealed` error on the log.
+
+**Directory, 24 bytes a block.** Block `k` holds rows
+`k·block_rows .. min((k+1)·block_rows, n_valid)`.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 4 | `end`: where frame `k` ends, from `blocks_off`; it starts at entry `k−1`'s `end`, or 0 |
+| 4 | 4 | CRC-32C of the frame's bytes |
+| 8 | 8 | stamp of the block's first row |
+| 16 | 4 | zero |
+| 20 | 4 | CRC-32C over bytes `0..20` followed by `k` as 8 bytes |
+
+Row to block is a division; entries `k−1` and `k` are one read of 48 bytes. The
+keyed checksum binds an entry to its place, so a reader verifies exactly the
+entries it reads and never the whole directory. A frame whose span runs
+backwards, past `blocks_len`, past 14,508 bytes, or (the last) short of
+`blocks_len` is `entry_order`; one that fails its CRC or codec 1 is `frame`;
+one that decodes to another row count or first stamp is `frame_rows` or
+`first_stamp`.
+
+**Time table**, present exactly when `n_blocks > 64`: `table_entries + 1`
+entries of 8 bytes, a block number `u32` then CRC-32C over it followed by the
+entry's index as 8 bytes. Entry `s` is the block holding the first row stamped
+at or after `origin + s · 4096 · timeframe`, or `n_blocks`; `table_entries` is
+`ceil(month span / (4096 · timeframe))`: 633 for a thirty-day one-second month,
+654 for a thirty-one-day one. `first_at_or_after(ts)` answers 0 at or before
+the first stamp and `n_valid` after the last, from the head; otherwise it
+reads table entries `s, s+1`, the directory entries between them in one read
+(at most 64 at a time; a range wider than that, possible only for a month
+holding two bars in one slot, written before D-0915, is bisected one entry a
+step), and one frame's stamps. Without a table the whole directory is at most
+64 entries, one read. Equal stamps answer the first of them.
+
+**Provenance.** The month's `.prv` image (§8.3) byte for byte, packed: each
+byte combined by XOR with the byte 256 before it, then each run of 1 to 256
+zeros as `(0x00, run − 1)` and every other byte as itself; then the CRC-32C of
+the packed bytes. At most twice the image; an image of 64 bytes or more must
+carry this month's `.prv` header (`provenance_foreign` otherwise), and a
+shorter one (a sidecar whose header write was cut) is carried as it is.
+
+**Month summary** (round 3, amendment A4): a summary's own version `u16` (at
+least 1), two zero bytes, its bytes (at most 1 MiB), and a CRC-32C over
+everything before it. The format carries R3-06's bytes and never reads them: a
+new summary version is a new number in this section, not a new `.sbar`
+version.
+
+**Frames.** Codec 1 (§39), back to back from `blocks_off`.
+
+**An empty month is the head alone**, 512 bytes (with its provenance after it
+when it has one).
+
+**Kept and not kept.** Kept bit for bit: every committed record (the head's
+BLAKE3), the committed header's fields, every provenance byte. Not kept as
+bytes, because they are derived or are not data: the superseded header slot,
+bytes past the commit counter, the `.crc` (its image's CRC is in the head, and
+every frame has its own), the `.tix` (the time table replaces it) and the
+`.srt` v1. `SealedMonth::audit` decodes the whole month and checks every entry,
+frame, the stamps' order, the BLAKE3, the regenerated `.crc` image, the
+ranges, the extremes, the table, the provenance and the summary against the
+head: O(the month), once, for a seal and a scrub, never for a request
+(`docs/06-limits.md` L-SC-16).
 
 ## 9. What this format does not solve
 

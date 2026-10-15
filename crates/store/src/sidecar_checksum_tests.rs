@@ -377,8 +377,14 @@ fn record_families_keep_independent_checksums_in_every_write_order_and_exact_rep
         // Every sibling this fixture wrote. The provenance sidecar (D-3334)
         // is written by a landing's writer, not by `BarFile::append`, and this
         // fixture records no landing; its month is under the small-month
-        // threshold, so it has no `.tix` and no `.srt` either (D-4933).
-        for kind in [FileKind::TimeIndex, FileKind::SortIndex] {
+        // threshold, so it has no `.tix` and no `.srt` either (D-4933); and
+        // a sealed `.sbar` is written only by the sealer, never by an append
+        // (D-4965).
+        for kind in [
+            FileKind::TimeIndex,
+            FileKind::SortIndex,
+            FileKind::SealedBars,
+        ] {
             assert!(
                 !Fixture::path(kind).to_path_buf(&fixture.0).exists(),
                 "{kind:?} beside a small month"
@@ -389,7 +395,10 @@ fn record_families_keep_independent_checksums_in_every_write_order_and_exact_rep
             .filter(|kind| {
                 !matches!(
                     kind,
-                    FileKind::Provenance | FileKind::TimeIndex | FileKind::SortIndex
+                    FileKind::Provenance
+                        | FileKind::TimeIndex
+                        | FileKind::SortIndex
+                        | FileKind::SealedBars
                 )
             })
             .map(|kind| {

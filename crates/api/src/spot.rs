@@ -592,11 +592,12 @@ impl SpotAsk {
 /// # Errors
 ///
 /// Anything else, by name.
+///
+/// The server's one month parser, not a third copy of it: this one split on
+/// `-` and took `2024-3`, `2024-003` and a `+` sign, so `/spot.json` and
+/// `/greeks.json` answered months the sentence says they refuse (app-7, AF-04).
 pub fn month_param(query: &str) -> Result<YearMonth, String> {
-    let raw = param(query, "month");
-    raw.split_once('-')
-        .and_then(|(y, m)| YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-        .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for \"month\""))
+    super::month_param(query, "month")
 }
 
 /// What the three option analytics routes answer: status, headers, body.
