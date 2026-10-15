@@ -514,6 +514,11 @@ const MEMBER_PAST_DAY_ZIP: &str = "a member's data runs past its day zip";
 impl<B: ReadAt> CmSource for Archive<B> {
     type Locator = ZipLocator;
 
+    /// The scope this source's listings are built under (WP-12f, D-4878).
+    fn scope(&self) -> Arc<CmScope> {
+        Arc::clone(&self.scope)
+    }
+
     /// The day zip's central directory, every entry in its order with the
     /// size and CRC-32 it states. `None` when the archive holds no day zip
     /// for that tree and day.
