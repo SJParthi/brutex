@@ -589,6 +589,11 @@ pub(crate) fn open_day(path: &Path) -> Result<Option<(std::fs::File, u64)>, CmRe
 impl CmSource for TickStore {
     type Locator = TickLocator;
 
+    /// The scope this source's listings are built under (WP-12f, D-4878).
+    fn scope(&self) -> Arc<CmScope> {
+        Arc::clone(&self.scope)
+    }
+
     /// The day file's index, validated (§3), every entry in its order (the
     /// zip's) with the size and CRC-32 the zip's central directory stated.
     /// `None` when the store holds no `.bts` for that tree and day.

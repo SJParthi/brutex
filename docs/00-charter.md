@@ -875,6 +875,51 @@ vendor page labels it. It is kept as an auction observation, never as a
 continuous trade (D-3320). Whether an index level freezes during the auction
 is UNVERIFIED.
 
+**The auction's phases and where its band ends — read 13 Oct 2026
+(SC-CLOSE-5, WP-12f).** [Zerodha's dated implementation notice](https://zerodha.com/z-connect/general/everything-you-need-to-know-about-closing-auction-session-cas)
+(dated 10 July 2026; read again 13 Oct 2026, every quote below found on
+it), the source §7 already cites for the change of 3 August 2026, gives the
+cash closing auction four phases of five minutes each: reference price and
+the move out of continuous trading from 15:15, order entry from 15:20,
+limit-only order entry from 15:25 with a random close between 15:28 and
+15:30, and order matching from 15:30 to 15:35. NSE's own page cited in §7
+did not answer on 13 Oct 2026 (timed out), so these timings rest on the
+broker's notice and are UNVERIFIED against an NSE page or circular. The
+GDFL reader's auction band is therefore `[15:15:00, 15:35:00)`: it ends
+with the matching phase. Measured the same day on the vendor's original
+day zips, 3 Aug to 24 Sep 2026, RELIANCE, HDFCBANK, INFY and DALBHARAT on
+their flag-1 days (132 share-sessions; counts only, no price kept): a
+zero-bid, zero-ask traded row in `[15:15:00, 15:30:00)` on 83 sessions,
+in `[15:15:00, 15:35:00)` on 92 (the nine more are stamped 15:30:00 to
+15:30:02); no such row from 15:35:00 to 15:49:59; and 27 zero-book traded
+rows on 15 share-sessions from 15:50, the post-close session's, which the
+band leaves out.
+
+**Which booked row is the auction's — read and measured 13 Oct 2026
+(SC-CLOSE-6, WP-12f).** The same notice says the third phase "closes
+randomly between 3:28 pm and 3:30 pm" and that the exchange "runs the
+equilibrium price algorithm, in which all orders match at the equilibrium
+price", which becomes "the official closing price". The match is therefore
+stamped from 15:28 to the end of matching at 15:35, and at one price. Measured
+on the vendor's original day zips, 3 Aug to 24 Sep 2026, the same four shares
+on their 133 sessions with a closing print (the 132 flag-1 sessions and
+DALBHARAT 2026-08-27, whose own day's file says 0 while it traded as an
+auction; counts only, no price kept): every one of the
+145 closing prints the 13 Oct checks found is stamped 15:28:03 to 15:30:02;
+on 132 sessions every traded row in `[15:28:00, 15:35:00)` is at one price,
+the closing print's (149 rows, 50 of them with a book; on 40 sessions no row
+there has a zero bid and ask); on one session, RELIANCE 2026-08-31, the band
+traded at two prices, after 33 booked trades from 15:20:07, and its last row
+is the closing print. The reader's rule: when every traded row of an
+eligible share in `[15:28:00, 15:35:00)` is at one price, each is an auction
+print, booked or not; at two prices or more no booked row there is claimed
+as the auction's (no source says which), so those stay ordinary rows of
+phase `cas`, counted and named by the import, and only zero-book rows are
+prints (D-3320 item 3). The 15:15:00 to 15:15:09 trades with a book on 101
+of 114 sessions, and the booked trades from 15:15:10 to 15:27:59 on 6
+sessions, are outside the match band and stay rows; what they are is
+UNVERIFIED.
+
 ### FORCEMOT NSE interruption — verified 2026-09-06
 
 [NSE circular CML58560](https://archives.nseindia.com/content/circulars/CML58560.pdf)

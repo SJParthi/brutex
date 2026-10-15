@@ -2519,12 +2519,22 @@ fn coverage_table(view: &StoreView<'_>) -> String {
                     // comment on this very link already said "the link carries
                     // the WHOLE key … defaulting the rest is how it served the
                     // wrong month"; the rung was the part it did not carry.
+                    //
+                    // AND THE CONTRACT, ON A CONTRACT ROW (app-6, AF-04). The
+                    // seventh part of the key — `symbol/contract/` — was the one
+                    // this link still dropped, so every contract row on a
+                    // `/store?feed=gdfl` page (all 200 rows of every sampled
+                    // page) linked to its underlying's spot path below `FNO/`,
+                    // which does not exist, and the link answered 404.
                     "<a href=\"/bars?vendor={}&amp;exchange={}&amp;segment={}\
-                     &amp;symbol={}&amp;timeframe={}&amp;month={}\">{cell}</a>",
+                     &amp;symbol={}{}&amp;timeframe={}&amp;month={}\">{cell}</a>",
                     query_value(vendor.as_str()),
                     query_value(row.series.exchange.as_str()),
                     query_value(row.series.segment.as_str()),
                     query_value(row.series.symbol.as_str()),
+                    row.series.contract.map_or_else(String::new, |contract| {
+                        format!("&amp;contract={}", query_value(contract.as_str()))
+                    }),
                     query_value(row.series.timeframe.as_str()),
                     query_value(&row.month.to_string()),
                 )
@@ -2647,6 +2657,13 @@ pub fn store_page(view: &StoreView<'_>) -> String {
 pub struct BarsView<'a> {
     /// Which instrument, as the store names it.
     pub symbol: &'a str,
+    /// The contract below the symbol, `None` for a spot series.
+    ///
+    /// Carried so the header NAMES the contract these bars are, and the pager
+    /// keeps it on every page turn (app-6, AF-04): a page that drew an option's
+    /// bars under the underlying's bare name would read as the underlying's,
+    /// and a Next link without it opens the spot path below `FNO/`.
+    pub contract: Option<&'a str>,
     /// Its segment — the store path's, not a label.
     pub segment: &'a str,
     /// Whose bars these are.
@@ -2681,8 +2698,14 @@ pub struct BarsView<'a> {
 /// actually on the disk, and it is what makes every other number checkable.
 #[must_use]
 pub fn bars_page(view: &BarsView<'_>) -> String {
+    // THE INSTRUMENT, CONTRACT AND ALL: `NIFTY 2024-03-07-2200000-CE` and
+    // `NIFTY` are different series, and the header is what says which.
+    let named = view.contract.map_or_else(
+        || view.symbol.to_owned(),
+        |contract| format!("{} {contract}", view.symbol),
+    );
     let mut body = open_with(
-        &format!("brutex · {} · {}", view.symbol, view.month),
+        &format!("brutex · {named} · {}", view.month),
         "/store",
         crate::bars::BARS_STYLE,
     );
@@ -2699,7 +2722,7 @@ pub fn bars_page(view: &BarsView<'_>) -> String {
             escape(view.month),
             escape(view.timeframe).to_uppercase()
         ),
-        &format!("{}<br>as it is stored.", escape(view.symbol)),
+        &format!("{}<br>as it is stored.", escape(&named)),
         "Every row below is a record read out of the bar file by index — one          seek and one fixed-length read each, so the last page costs what the          first does. Prices are paisa integers all the way here and are split          into rupees rather than divided, because a float has no business          anywhere near a price.",
         ok,
         if ok { "held" } else { "nothing to show" },
@@ -2742,8 +2765,13 @@ pub fn bars_page(view: &BarsView<'_>) -> String {
     // THE WHOLE KEY ON EVERY PAGE TURN. A bar file is addressed by six parts
     // and this rebuilt four of them; the rung fell back to the 1min default,
     // which for a 1day store is a path that does not exist.
+    // The contract rides along when there is one: a page turn that dropped
+    // it opened the spot path below `FNO/` (app-6, AF-04).
+    let contract = view.contract.map_or_else(String::new, |contract| {
+        format!("&contract={}", query_value(contract))
+    });
     let base = format!(
-        "/bars?symbol={}&segment={}&vendor={}&timeframe={}&month={}",
+        "/bars?symbol={}{contract}&segment={}&vendor={}&timeframe={}&month={}",
         query_value(view.symbol),
         query_value(view.segment),
         query_value(view.vendor),
@@ -5060,6 +5088,9 @@ mod tests {
                 "bars",
                 bars_page(&BarsView {
                     symbol: text,
+                    // The contract is a field the header and the pager both
+                    // carry, so it takes the same hostile probe.
+                    contract: Some(text),
                     segment: text,
                     vendor: text,
                     month: text,
