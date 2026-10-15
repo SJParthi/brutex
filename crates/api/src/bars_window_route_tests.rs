@@ -341,16 +341,18 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
         assert_eq!(empty["bars"], serde_json::json!([]));
         assert_eq!(empty["total"], 4);
     }
+    // A CONTRACT THE STORE HOLDS NO MONTH OF NAMES NO SERIES (D-4966, AG-03,
+    // app-2): refused by name, never answered as three months outside a life
+    // it never had. A held series' empty months, extremes included, are
+    // `bars::window_tests::a_window_over_nothing_is_empty_and_says_how_many_months_were_absent`.
     let (status, contract) = fixture
         .get("contract=2025-06-26-2500000-CE&extremes=true")
         .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(contract["total"], 0);
-    assert_eq!(contract["months_missing"], 3);
-    assert_eq!(contract["months_outside_life"], 3);
-    assert_eq!(contract["extremes"]["range"], 0);
-    assert_eq!(contract["extremes"]["volume"], 0);
-    assert!(contract["extremes"]["close_max"].is_null());
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let why = contract["error"].as_str().expect("a refusal");
+    assert!(why.starts_with("unknown_series: "), "{why}");
+    assert!(why.contains("2025-06-26-2500000-CE"), "{why}");
+    assert!(why.ends_with("names no series dhan holds at 1min"), "{why}");
     for (path, expected) in fixture.paths.iter().zip(originals) {
         assert_eq!(fs::read(path).expect("read-only route"), expected);
     }
