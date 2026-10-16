@@ -1873,7 +1873,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open
     // is not known` (DB-B34), the scan's third answer, whose site is in
     // `pullrun` and is read back by the same test.
-    const REACHED_IN_SERVER_TESTS: usize = 27;
+    // 27 -> 28 at AH-02 (D-4975): `server::HeadDeadline::report`, the one
+    // site of `api.serve response cut` and `api.serve response closed by the
+    // client`, read back by `server::head_deadline_body_tests::
+    // a_reader_that_stops_reading_is_closed_and_logged_as_cut` and
+    // `a_client_that_closes_mid_body_is_logged_as_its_close_not_a_cut`.
+    const REACHED_IN_SERVER_TESTS: usize = 28;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2029,9 +2034,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
     // `api.recovery recovery not resumed`, reached in recovery tests. (That
     // branch counted 73 -> 74; the two packages' sites are added here.)
+    //
+    // 78 -> 79 at AH-02 (D-4975): the cut or client-close line of a response
+    // in flight, `server::HeadDeadline::report`, named above
+    // `REACHED_IN_SERVER_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 78,
+        lib_sites, 79,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
