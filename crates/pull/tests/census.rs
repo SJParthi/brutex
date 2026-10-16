@@ -1511,3 +1511,71 @@ fn a_contract_row_decodes_to_the_contract_it_was_written_with() {
         "no contract written, none read"
     );
 }
+
+/// A CONTRACT FIELD THAT IS SET AND DOES NOT READ BACK IS REFUSED, NEVER READ
+/// AS SPOT (cloud-attack-law-20261016, lens 2). `read_contract` answered `None`
+/// for a length past the field or text that is not UTF-8, and `None` is the
+/// spot key: a damaged contract row passed its checksum and was counted under
+/// its underlying's spot series.
+#[test]
+fn a_contract_field_that_does_not_read_back_is_refused_not_read_as_spot() {
+    use brutex_core::instrument::Contract;
+    use pull::manifest::{EntryFault, IMAGE_LEN};
+
+    let entry = Entry {
+        key: EntryKey {
+            contract: Some(Contract::parse("2025-09-30-FUT").expect("a legal contract")),
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            symbol: Symbol::new("BANKNIFTY").expect("a legal symbol"),
+            timeframe: Timeframe::DAY_1,
+            month: YearMonth::new(2025, 9).expect("a real month"),
+        },
+        rows: 21,
+        first_ts_micros: 1,
+        last_ts_micros: 2,
+    };
+    let image = Held::unknown(entry).image();
+    assert!(Held::decode(&image).is_ok(), "the written row reads back");
+    // Reseal the second half's checksum (0..60, stored at 60) so the only
+    // fault left is the one under test.
+    let resealed = |edit: &dyn Fn(&mut [u8])| {
+        let mut bytes = image;
+        edit(&mut bytes[IMAGE_LEN..]);
+        let crc = store::crc::crc32c(&bytes[IMAGE_LEN..IMAGE_LEN + 60]);
+        bytes[IMAGE_LEN + 60..IMAGE_LEN + 64].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    };
+    // A length past the 24-byte field.
+    let past = resealed(&|half| half[40] = 25);
+    assert_eq!(
+        Held::decode(&past).map(|held| held.entry.key.contract),
+        Err(EntryFault::ContractUnreadable { len: 25 })
+    );
+    // Text that is not UTF-8.
+    let garbled = resealed(&|half| half[16] = 0xFF);
+    assert_eq!(
+        Held::decode(&garbled).map(|held| held.entry.key.contract),
+        Err(EntryFault::ContractUnreadable { len: 14 })
+    );
+    // Text `Contract::parse` refuses.
+    let unparsed = resealed(&|half| half[16..30].copy_from_slice(b"not-a-contract"));
+    assert_eq!(
+        Held::decode(&unparsed).map(|held| held.entry.key.contract),
+        Err(EntryFault::ContractUnreadable { len: 14 })
+    );
+    assert!(
+        EntryFault::ContractUnreadable { len: 25 }
+            .to_string()
+            .contains("does not read back as a contract")
+    );
+    // A zero length is still spot, as every version-2 row is.
+    let spot = resealed(&|half| {
+        half[16..40].fill(0);
+        half[40] = 0;
+    });
+    assert_eq!(
+        Held::decode(&spot).map(|held| held.entry.key.contract),
+        Ok(None)
+    );
+}

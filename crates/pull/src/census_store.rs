@@ -1739,11 +1739,36 @@ fn write_receipt(
 #[must_use]
 pub fn legacy_drift(root: &Path, vendor: Vendor) -> Option<String> {
     let receipt = vendor_dir(root, vendor).join(MIGRATION_RECEIPT);
-    let text = fs::read_to_string(&receipt).ok()?;
-    let recorded: u64 = text
+    // ONLY AN ABSENT RECEIPT IS "NOT MIGRATED". This was `.ok()?` and `?` on
+    // the parse, so a receipt that could not be read, or that names no
+    // `legacy_bytes`, answered "no drift" — and this is the only warning that
+    // a pre-version-4 writer filed months the census does not read
+    // (`api::store_route`, `cli census-recount`). Every receipt `migrate`
+    // writes carries the line (cloud-attack-law-20261016).
+    let text = match fs::read_to_string(&receipt) {
+        Ok(text) => text,
+        Err(why) if why.kind() == ErrorKind::NotFound => return None,
+        Err(why) => {
+            return Some(format!(
+                "{} cannot be read ({why}), so whether a writer built before version 4 has \
+                 written to {} since the migration is not known",
+                receipt.display(),
+                manifest_path(root, vendor).display()
+            ));
+        }
+    };
+    let Some(recorded) = text
         .lines()
         .find_map(|line| line.strip_prefix("legacy_bytes="))
-        .and_then(|value| value.parse().ok())?;
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Some(format!(
+            "{} names no readable legacy_bytes, so drift of {} since the migration cannot \
+             be measured",
+            receipt.display(),
+            manifest_path(root, vendor).display()
+        ));
+    };
     let legacy = manifest_path(root, vendor);
     let superseded = superseded_path(root, vendor);
     if let Ok(kept) = fs::symlink_metadata(&superseded) {
