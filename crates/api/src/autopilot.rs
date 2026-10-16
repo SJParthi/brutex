@@ -8518,4 +8518,53 @@ mod cloud_mutant_tests {
             "{before} <= {shown} <= {after}"
         );
     }
+
+    /// A pass that stands off for a press in flight is followed by a NAP, not
+    /// by the next pass: the loop waits the standoff's seconds, crediting
+    /// each one, rather than re-entering `round` at once (kills `waited > 0`
+    /// turned to `==` or `<`). The site may reach a broker, but nothing is
+    /// asked of one: the standoff returns before any seat is taken, and the
+    /// credential is a script against a closed loopback port besides.
+    #[tokio::test]
+    async fn a_standoff_is_followed_by_a_nap_and_not_by_the_next_pass() {
+        let root = crate::scratch::path("autopilot-cloud-standoff-nap");
+        let _ = std::fs::remove_dir_all(&root);
+        let (masters, store) = (root.join("masters"), root.join("store"));
+        std::fs::create_dir_all(&masters).expect("mkdir masters");
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir store");
+        let mut site = Site::serving(&masters, &store);
+        site.credentials = crate::credential_law::Credentials::Scripted(std::sync::Arc::new(
+            crate::credential_law::Script::new("http://127.0.0.1:1", vec![Ok("unused".to_owned())]),
+        ));
+        let site = Loaded::new(site);
+        *site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::pullrun::Progress::claimed());
+        site.autopilot.resume();
+        let flying = tokio::spawn(fly(Loaded::clone(&site)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS + 30);
+        let waited = loop {
+            let (detail, waiting) = site
+                .autopilot
+                .inspect(|status| (status.detail.clone(), status.waiting_ms))
+                .expect("a readable status");
+            if detail.starts_with("a hand-made pull is running") && waiting >= 2_000 {
+                break waiting;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no nap followed the standoff: {}",
+                site.autopilot.json()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        site.autopilot.pause();
+        flying.abort();
+        let _aborted = flying.await;
+        assert!(waited >= 2_000);
+        assert!(!site.journal().path.exists(), "no tick ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
