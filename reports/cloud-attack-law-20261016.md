@@ -429,7 +429,7 @@ before and holds existing correct behaviour that had no test.
 
 Run here on this branch's code (head `e52425a`; only `reports/` changed after
 `9748776`, the last code commit), as uid 0 in this container, 4 cores, on
-2026-10-16 between 05:26 and the end of the core run (recorded in the next commit) UTC. Logs are in the session scratchpad;
+2026-10-16 between 05:26 and 05:58 UTC. Logs are in the session scratchpad;
 none is committed.
 
 | gate | command | result |
@@ -440,9 +440,9 @@ none is committed.
 | store | `cargo test -p store --locked --no-fail-fast` | **exit 101, one failure, environmental**: lib 229 passed; 33 integration binaries, 412 passed, 1 failed, 4 ignored (32 green); doc-tests 11 passed. The one failure is `cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not` (`crates/store/tests/cited_commits.rs:637`), explained under lens 3: the snapshot base is one commit, so commits the docs cite are not ancestors of `HEAD`. This branch edits neither cited document |
 | pull | `cargo test -p pull --locked --no-fail-fast` | **green**: exit 0. lib 1221 passed, 17 ignored (each `#[ignore]` carries its reason); 20 integration binaries, 375 passed, 0 failed, 6 ignored (`census` 21 passed, `census_v4` 9 passed and 1 ignored, `store_evidence` 5 ignored); doc-tests 38 passed |
 | api | `cargo test -p api --locked --no-fail-fast` | **green as root**: exit 0. lib 1976 passed, 0 failed, 5 ignored (before this branch: 1966 passed, 10 failed as root, the ten permission tests lens 3 names); `main.rs` 3 passed; `tests/binary.rs` 4 passed; doc-tests 1 passed |
-| cli | `cargo test -p cli --locked --no-fail-fast` | queued when this was committed; the next commit records it |
-| engine | `cargo test -p engine --locked --no-fail-fast` | queued when this was committed; the next commit records it |
-| core | `cargo test -p core --locked --no-fail-fast` | queued when this was committed; the next commit records it |
+| cli | `cargo test -p cli --locked --no-fail-fast` | **exit 101, one failure, root-only**: lib 2035 passed, 1 failed, 1 ignored (731.9s); `main.rs` 0 tests; 14 integration binaries, 60 passed, 0 failed; doc-tests 1 passed. The one failure is `scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger` (`crates/cli/src/scrub_blocks_tests.rs:611:53`). It passes when the same binary runs it as uid 65534 (lens 3; open finding 13) |
+| engine | `cargo test -p engine --locked --no-fail-fast` | **green**: exit 0. lib 104 passed; 4 integration binaries, 27 passed; doc-tests 0 |
+| core | `cargo test -p core --locked --no-fail-fast` | **exit 101, two binaries red, both from the snapshot's workflow file**: lib 192 passed; 6 of 8 integration binaries green (`graph` 15, `findings` 14, `cost_invariants` 5, `zerodha_index` 5, `bound_probe` 2, `lint` 2); doc-tests 4 passed. `banned_lists` fails 0 of 2 at `crates/core/tests/banned_lists.rs:81:10` ("the step declares its list as VARIABLE=…"), the panic CI's Gate 1e shows. `claim_reader` fails 2 of 3, at `crates/core/tests/claim_reader.rs:66:5` (gate 12's step does not run `"$tool" gate12 "$allow_claim"`) and `:124:9` (an allowance reads `["crates/cli/src/lib.rs", "2"]`, the old `FILE COUNT` form D-2314 replaced). Both binaries `include_str!` `.github/workflows/ci.yml` (`banned_lists.rs`, `claim_reader.rs:24`). On this snapshot that file is `main`'s copy, while the tests are `feat/db-fix`'s, and this branch changes neither. CI never reaches `claim_reader`: without `--no-fail-fast`, cargo stops at the first failing binary, `banned_lists` |
 
 "Ignored" tests were not run by these commands. Each needs the operator's real
 store or a timing host, and none is counted as passed above.
@@ -457,7 +457,21 @@ three red checks are Gate 1e (at `crates/core/tests/banned_lists.rs:81`), Gate
 W (`web/build` drift), and `ci-ok`, which only rolls the others up. Neither
 underlying failure is in a file this branch changes: `git diff --name-only`
 against the base lists nothing under `.github/`, `web/` or `crates/core/tests/`.
-The stand-down comment on the PR says so.
+The local `core` run above reproduces Gate 1e's panic on this tree byte for
+byte, so the failure is in the tree rather than in CI. The stand-down comment
+on the PR says so.
+
+**Net of the gates.** Two gates are clean: format and lint. Four crates are
+green as uid 0: runner, pull, api and engine. Across the seven crates run,
+7,529 tests passed, 6 failed and 33 were ignored. By crate, passed/failed/
+ignored: runner 792/0/0, store 652/1/4, pull 1634/0/23, api 1984/0/5, cli
+2096/1/1, engine 131/0/0, core 240/4/0. None of the six failures is in code
+this branch changed:
+
+- 1 needs history the snapshot does not have (store `cited_commits`).
+- 1 is a mode-bit test that root cannot fail (cli `scrub_blocks`).
+- 4 compare against the workflow file the snapshot took from `main` (core
+  `banned_lists` ×2, `claim_reader` ×2).
 
 ## Open findings, most dangerous first
 
