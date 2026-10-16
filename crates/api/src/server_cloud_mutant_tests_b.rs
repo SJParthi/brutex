@@ -2296,3 +2296,44 @@ fn audit_html_clamps_to_the_last_page_of_a_two_page_journal() {
 /// What the model says of a call premium twenty times its spot.
 const MODEL_SUPREMUM: &str = "the model refused this quote: price 48000000 is at or above the \
                               model's supremum 2400000; no volatility produces it";
+
+/// A FEED THAT SERVES EXPIRED DERIVATIVES GOES ON TO DISCOVERY; it is not
+/// refused as one that declares none. Groww serves them by name, so the walk
+/// asks for the month's expiries. With the site's budget unreadable, that ask
+/// is refused by the budget before a request is built (`laddered` charges
+/// before it asks, on every attempt), so no socket opens, and the answer is
+/// the budget's refusal rather than the "declares no expired-derivative
+/// history" arm (kills `delete !` at `!spec.fno.serves()` in `fno_walk`).
+#[tokio::test]
+async fn a_feed_that_serves_expired_derivatives_goes_on_to_discovery() {
+    let root = Root::new("walk-groww-serves");
+    let site = scripted_site(&root, "http://127.0.0.1:1", vec![Ok("cloudb".to_owned())]);
+    std::thread::scope(|scope| {
+        let poisoner = scope.spawn(|| {
+            let _budgets = site.budgets.lock().expect("not yet poisoned");
+            panic!("poison the budget lock before discovery");
+        });
+        assert!(poisoner.join().is_err());
+    });
+    assert!(
+        site.budgets.lock().is_err(),
+        "the premise: no budget can be read"
+    );
+    let today = day(2025, 8, 2);
+    let (status, body) = walk(&groww_request(today), today, &site).await;
+    assert!(
+        !body.contains("declares no expired-derivative history"),
+        "{}",
+        visible(&body)
+    );
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{}", visible(&body));
+    assert!(
+        body.contains(
+            "was not reached: the rate budget for Groww cannot be read: another request \
+             panicked while holding it, so the allowance already spent is unknown. Nothing is \
+             issued on an unknown budget."
+        ),
+        "{}",
+        visible(&body)
+    );
+}
