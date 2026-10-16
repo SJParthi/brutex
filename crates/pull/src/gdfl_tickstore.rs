@@ -1503,3 +1503,76 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+mod cloud_mutant_tests {
+    //! Mutant kills and coverage for the columnar rebuild (cloud mutation
+    //! round, 2026-10-16). Frames are written by hand as one raw zstd block
+    //! (RFC 8878 §3.1), so no encoder call is added beside the decoder.
+
+    use super::{COLUMN_TEXT, Column, PAST_SIZE, bad, columnar};
+
+    /// A zstd frame holding `payload` in one raw block: magic, a
+    /// single-segment header with the content size, one last raw block.
+    fn raw_frame(payload: &[u8]) -> Vec<u8> {
+        let n = payload.len();
+        let mut out = vec![0x28, 0xB5, 0x2F, 0xFD];
+        if n < 256 {
+            out.push(0x20);
+            out.push(u8::try_from(n).unwrap());
+        } else {
+            out.push(0x60);
+            out.extend_from_slice(&u16::try_from(n - 256).unwrap().to_le_bytes());
+        }
+        let block = (u32::try_from(n).unwrap() << 3) | 1;
+        out.extend_from_slice(&block.to_le_bytes()[..3]);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A columnar body (after its kind byte): LF rows, no trailing
+    /// terminator, `header`, and one text column `text` of `rows` fields.
+    fn one_text_column(header: &[u8], rows: u64, text: &[u8]) -> Vec<u8> {
+        let mut body = vec![0, 0];
+        body.extend_from_slice(&u32::try_from(header.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(header);
+        body.extend_from_slice(&1_u32.to_le_bytes());
+        body.extend_from_slice(&rows.to_le_bytes());
+        let frame = raw_frame(text);
+        let len = u64::try_from(text.len()).unwrap();
+        body.push(0);
+        body.extend_from_slice(&len.to_le_bytes());
+        body.extend_from_slice(&len.to_le_bytes());
+        body.extend_from_slice(&u64::try_from(frame.len()).unwrap().to_le_bytes());
+        body.extend_from_slice(&frame);
+        body
+    }
+
+    /// The columns' texts can fit the stated size while the rows they
+    /// rebuild do not (each row adds a terminator): such a block is refused
+    /// as it passes the size, and a size that holds the rows exactly is
+    /// rebuilt byte for byte.
+    #[test]
+    fn rows_rebuilt_past_the_stated_size_refuse_and_exactly_at_it_rebuild() {
+        let body = one_text_column(b"A", 2, b"1\n2");
+        assert_eq!(columnar(&body, 2, 4).unwrap_err(), bad(PAST_SIZE));
+        assert_eq!(columnar(&body, 2, 5).unwrap(), b"A\n1\n2");
+    }
+
+    /// A numeric column renders each value from its shape and is refused as
+    /// soon as its text passes the length the block states; at exactly that
+    /// length it is kept.
+    #[test]
+    fn a_numeric_column_past_its_stated_text_length_refuses() {
+        // One row, shape 0, no delta, two byte planes of the zigzag of 12345.
+        let payload = [0, 0, 2, 0x72, 0x60];
+        assert_eq!(
+            Column::numeric(&payload, 1, 4).err(),
+            Some(bad(COLUMN_TEXT))
+        );
+        let column = Column::numeric(&payload, 1, 5).unwrap();
+        assert_eq!(column.field(0), b"12345");
+        assert_eq!(column.text_len(), 5);
+    }
+}

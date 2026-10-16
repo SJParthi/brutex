@@ -498,3 +498,25 @@ fn fold_an_anchor_overflow_names_its_stamp() {
         "{said}"
     );
 }
+
+// ═══ gdfl_tickstore: a socket where a day file belongs ═════════════════════
+
+/// A socket at a day file's name is refused as not a regular file, by
+/// name, never opened and never taken for an absent day.
+#[test]
+fn tickstore_a_socket_at_a_day_name_is_refused_by_name() {
+    use pull::gdfl_cm::{CmKind, CmRefusal, CmSource as _};
+    let root = scratch("TickSocket");
+    let store = pull::gdfl_tickstore::TickStore::new(&root);
+    let d = day(2024, 4, 1);
+    let path = store.day_path(CmKind::Indices, d);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    match store.day(CmKind::Indices, d) {
+        Err(CmRefusal::TickStoreMalformed { what }) => {
+            assert!(what.contains("a socket or a device"), "{what}");
+        }
+        other => panic!("{other:?}"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
