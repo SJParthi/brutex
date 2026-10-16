@@ -4695,4 +4695,85 @@ mod cloud_mutant_tests {
             "record 0's detail offset is not its first entry"
         );
     }
+
+    /// One planned record of `name` and `code` with `details`.
+    fn planned(name: &str, code: Code, details: Vec<Detail>) -> super::Planned {
+        super::Planned {
+            key: Key::instrument(name).unwrap(),
+            run: 1,
+            facts: Facts::of(code),
+            details,
+        }
+    }
+
+    /// `count` details of `payload` bytes each: `count * (8 + payload)`
+    /// section bytes.
+    fn details(count: usize, payload: usize) -> Vec<Detail> {
+        vec![
+            Detail {
+                kind: 3,
+                payload: vec![0x5A; payload],
+            };
+            count
+        ]
+    }
+
+    /// **THE DETAIL SECTION HOLDS EXACTLY `DETAIL_CAP` BYTES; THE DAY'S
+    /// DETAILS ARE KEPT WHOLE OR NOT AT ALL, AND SO IS EACH RECORD'S, AND ONCE
+    /// ONE OWNER DOES NOT FIT EVERY LATER OWNER IS CAPPED TOO.**
+    ///
+    /// Covers `section`'s cap: day details of exactly the cap are kept and one
+    /// byte more are not; a record whose details reach the cap exactly is
+    /// kept, the next owner that would pass it is capped and flagged
+    /// `DETAILS_CAPPED`, and so is every owner after it even when it would
+    /// fit. 4 MiB of payload, in memory only.
+    #[test]
+    fn the_detail_section_holds_exactly_its_cap_and_caps_whole_owners() {
+        use super::{DETAIL_HEAD_LEN, flags, section};
+        // 64 entries of 65,528 payload bytes: 64 * 65,536 = DETAIL_CAP.
+        assert_eq!(64 * (DETAIL_HEAD_LEN + 65_528), DETAIL_CAP);
+        let at_cap = details(64, 65_528);
+        let kept = section(&at_cap, &mut []);
+        assert_eq!(
+            (kept.capped, kept.entries, kept.bytes.len()),
+            (false, 64, DETAIL_CAP)
+        );
+        let mut past = at_cap.clone();
+        past[0].payload.push(0);
+        let dropped = section(&past, &mut []);
+        assert_eq!(
+            (dropped.capped, dropped.entries, dropped.bytes.len()),
+            (true, 0, 0)
+        );
+
+        // A day detail of 3 bytes (11 section bytes), then ZZA filling the
+        // section to the cap exactly, then ZZB and ZZC which no longer fit.
+        let day = details(1, 3);
+        let mut zza = details(64, 65_528);
+        zza[63].payload.truncate(65_528 - 11);
+        let mut plans = vec![
+            planned("ZZA", Code::Match, zza),
+            planned("ZZB", Code::Match, details(1, 1)),
+            planned("ZZC", Code::Match, Vec::new()),
+            planned("ZZD", Code::Match, details(1, 1)),
+        ];
+        let built = section(&day, &mut plans);
+        assert_eq!(built.bytes.len(), DETAIL_CAP, "filled exactly");
+        assert!(built.capped);
+        assert_eq!(built.entries, 1 + 64);
+        assert_eq!(
+            built.first,
+            vec![12, 0, 0, 0],
+            "ZZA's first entry follows the day's"
+        );
+        let capped: Vec<bool> = plans
+            .iter()
+            .map(|plan| plan.facts.flags & flags::DETAILS_CAPPED != 0)
+            .collect();
+        assert_eq!(
+            capped,
+            [false, true, false, true],
+            "only owners with details are flagged"
+        );
+    }
 }
