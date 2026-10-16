@@ -293,6 +293,35 @@ fn windows(roots: &[(usize, PathBuf)]) {
     let _stated = flat("window at= (O(months), unasserted)", &costs);
 }
 
+/// `/verify.json`'s scrub over a census of 1, 10 and 100 held months.
+///
+/// `api::verify::vendor` opens every held entry's file and reads its header
+/// and two records, so it is O(entries) by its own doc (D-1501), which also
+/// says no bench timed it. PRINTED, not asserted: the scrub is one admitted
+/// request at a time (WP-33c), and the figure is the per-month cost.
+fn verifies(roots: &[(usize, PathBuf)]) {
+    let mut costs = Vec::with_capacity(roots.len());
+    for (months, root) in roots {
+        let census = api::census::read_vendor(root, Vendor::Gdfl);
+        let report = api::verify::vendor(root, &census);
+        if !report.verified() || report.tally.agreed != u64::try_from(*months).unwrap_or(0) {
+            refuse(&format!(
+                "the scrub of {months} fixture months did not agree on every one: {}",
+                report.say()
+            ));
+        }
+        spread(
+            &format!("verify scrub, {months} months"),
+            SPREAD_CALLS,
+            || api::verify::vendor(black_box(root), black_box(&census)).tally.agreed,
+        );
+        costs.push(cost_ps(20, || {
+            api::verify::vendor(black_box(root), black_box(&census)).tally.agreed
+        }));
+    }
+    let _stated = flat("verify scrub (O(entries), unasserted)", &costs);
+}
+
 /// Every month-axis row. Run by `crates/api/benches/ratio.rs`'s `main`.
 pub(crate) fn rows_are_measured() -> bool {
     let started = Instant::now();
@@ -302,6 +331,7 @@ pub(crate) fn rows_are_measured() -> bool {
         started.elapsed().as_millis()
     );
     windows(&roots);
+    verifies(&roots);
     for (_, root) in roots {
         let _ignored = std::fs::remove_dir_all(root);
     }

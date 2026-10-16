@@ -1315,7 +1315,16 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         _ => return Err(NfoRefusal::HeaderUnknown),
     }
     let date = format!("{:02}/{:02}/{:04}", day.day(), day.month(), day.year());
-    let mut rows = Vec::new();
+    // RESERVED ONCE, FROM THE BODY, as `csv::decode_rows` is (D-1203): every
+    // row is one line after the header, so the body's newlines bound the
+    // rows, and `cap` bounds the reservation as it bounds the rows kept.
+    let bound = body
+        .iter()
+        .filter(|&&byte| byte == b'\n')
+        .count()
+        .saturating_add(1)
+        .min(cap);
+    let mut rows = Vec::with_capacity(bound);
     let mut quoted_rows = 0_u32;
     for (index, raw) in lines.enumerate() {
         let line = u32::try_from(index.saturating_add(2)).unwrap_or(u32::MAX);
@@ -1325,8 +1334,23 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
         let malformed = NfoRefusal::MalformedRow { line };
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         let text = core::str::from_utf8(raw).map_err(|_| malformed.clone())?;
-        let fields: Vec<&str> = text.split(',').collect();
-        let &[
+        // TEN FIELDS INTO A FIXED ARRAY, NOT A VECTOR PER ROW: the
+        // capital-market reader's `parse_row` shape. An eleventh field is a
+        // malformed row the moment it is seen, so a line of a million commas
+        // costs eleven steps, not a million-slot allocation.
+        let mut fields = [""; 10];
+        let mut count = 0_usize;
+        for field in text.split(',') {
+            let Some(slot) = fields.get_mut(count) else {
+                return Err(malformed);
+            };
+            *slot = field;
+            count = count.saturating_add(1);
+        }
+        if count != fields.len() {
+            return Err(malformed);
+        }
+        let [
             ticker,
             row_date,
             time,
@@ -1337,10 +1361,7 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
             ask_qty,
             ltq,
             oi,
-        ] = fields.as_slice()
-        else {
-            return Err(malformed);
-        };
+        ] = fields;
         if ticker != stem {
             return Err(NfoRefusal::TickerMismatch { line });
         }
