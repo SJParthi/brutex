@@ -1747,6 +1747,62 @@ mod bars_series_rs {
         );
     }
 
+    /// **WITHOUT THE LOOKBACK, A ROW INSIDE ITS RUN STILL MEASURES AGAINST
+    /// THE KEPT ROW BEFORE IT, AND EACH MONTH'S FIRST ROW AFTER AN UNKEPT ONE
+    /// IS FIRST IN ITS WINDOW.** Five months, each with a kept 09:20 and an
+    /// unkept 09:30: a page from offset 1 with no bound measures its first
+    /// row against the row before it in the file, and under 09:20–09:21 every
+    /// month after the first is found among the request's months by the slot
+    /// bisection, from either half. Runs `previous_is_kept`'s inside-the-run
+    /// answer and `slot_of`'s right-half step, which no test reached.
+    #[test]
+    fn bars_series_without_the_lookback_kept_rows_still_measure() {
+        let scratch = Scratch::new("series-no-lookback");
+        for m in 3..=7 {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[
+                    (open_of(m, 2) + 300, i64::from(m) * 100),
+                    (open_of(m, 2) + 900, i64::from(m) * 100 + 1),
+                ],
+            );
+        }
+        let mut asked = query(month(3), month(7));
+        asked.lookback = false;
+        asked.offset = Some(1);
+        asked.limit = 1;
+        let got = window(scratch.root(), &asked).expect("answers");
+        let first: Vec<(i64, Option<i64>)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.chg))
+            .collect();
+        assert_eq!(first, vec![(301, Some(33))], "09:30 against 09:20, kept");
+        asked.offset = Some(0);
+        asked.limit = 50;
+        asked.filter.tod = Some((33_600, 33_660));
+        let got = window(scratch.root(), &asked).expect("answers");
+        let whys: Vec<(i64, &str)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.chg_why))
+            .collect();
+        assert_eq!(
+            whys,
+            vec![
+                (300, "no_earlier_stored_bar"),
+                (400, "first_bar_in_window"),
+                (500, "first_bar_in_window"),
+                (600, "first_bar_in_window"),
+                (700, "first_bar_in_window"),
+            ]
+        );
+    }
+
     /// **A MONTH WHOSE FILE WILL NOT STAT, AND ONE WHOSE GENERATION POINTER
     /// IS NOT A FILE, ARE EACH ONE FAULT BY NAME**, and the months that read
     /// are still answered. May's name is a link to itself (the kernel's

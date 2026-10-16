@@ -3525,4 +3525,73 @@ mod cloud_mutant_tests {
         assert_eq!(audited["days_held"], 1);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **EVERY WAY A VOTE JOIN CAN END IS ANSWERED BY NAME.** On one served
+    /// site with no store: while the census is read at start the vote says it
+    /// waits on that (`202`); a build queued for the series and never begun
+    /// is followed and waited out, and says it is queued (`202`); finished
+    /// under the stamp the request reads, its answer is parked and handed to
+    /// the next request as it is; and with `MAX_BUILDS` other builds in
+    /// flight a new one is not admitted (`429`). Runs `voted`'s parked,
+    /// start-up, full and queued arms, which no test reached.
+    #[tokio::test]
+    async fn every_way_a_vote_join_ends_is_answered_by_name() {
+        use crate::calendar_of::build::{Joined, MAX_BUILDS};
+        let root = crate::scratch::path("cloud-vote-joins");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+        let reason = |answer: Result<PeerCalendar, GapsAnswer>| {
+            let Err((status, _, body)) = answer else {
+                panic!("a vote with no build behind it answered");
+            };
+            let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+            (
+                status,
+                body["reason"].as_str().unwrap_or_default().to_owned(),
+            )
+        };
+        let builds = &site.calendars.builds;
+        {
+            let _reading = builds.reading_census_at_start();
+            let (status, why) = reason(voted(&site, &asked).await);
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+            assert!(why.contains("reading its census at start"), "{why}");
+        }
+        builds.bound_waits(std::time::Duration::from_millis(1));
+        let now = crate::server::census_cache::manifest_stamps(&site.store_root);
+        let key = vote_key(&asked);
+        let Joined::Lead(queued) = builds.votes.join(&key, Some(&now), None) else {
+            panic!("the first join leads");
+        };
+        let (status, why) = reason(voted(&site, &asked).await);
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert!(why.contains("it is queued"), "{why}");
+        drop(queued.enter(Some(now.clone())));
+        builds
+            .votes
+            .flights
+            .finish(&key, &queued, Err((418, "parked".to_owned())));
+        let Err((status, _, body)) = voted(&site, &asked).await else {
+            panic!("a parked refusal is handed out as it is");
+        };
+        assert_eq!((status.as_u16(), body.as_str()), (418, "parked"));
+        let mut held = Vec::with_capacity(MAX_BUILDS);
+        for other in 0..MAX_BUILDS {
+            let mut key = key.clone();
+            key.3 = format!("OTHER{other}");
+            let Joined::Lead(build) = builds.votes.join(&key, Some(&now), None) else {
+                panic!("room for build {other}");
+            };
+            held.push(build);
+        }
+        let Err((status, _, body)) = voted(&site, &asked).await else {
+            panic!("a full build map admits no vote");
+        };
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.contains("builds are queued or running"), "{body}");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
