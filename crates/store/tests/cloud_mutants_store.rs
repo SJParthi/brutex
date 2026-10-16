@@ -2205,3 +2205,147 @@ fn a_frame_entry_at_either_bound_of_its_span_is_read_and_checked_as_a_frame() {
         assert!(out.is_empty());
     }
 }
+
+/// **A MONTH WITH NO BAR ANSWERS EVERY TIME LOOKUP WITH ROW 0.**
+///
+/// Covers `BarFile::locate`'s empty-month path, which answers before the
+/// time index is asked anything, for the earliest, an ordinary and the latest
+/// stamp, on a writer that has just created the month.
+#[test]
+fn a_month_with_no_bar_answers_every_time_lookup_with_row_zero() {
+    use store::file::BarFile;
+    use store::path::FileKind;
+    let root = scratch("empty-month-lookup");
+    let writer = BarFile::open_or_create(&root, second_month(FileKind::Bars), 11).unwrap();
+    for ts in [i64::MIN, 0, second_bar(0, 0).ts_micros, i64::MAX] {
+        assert_eq!(writer.first_at_or_after(ts).unwrap(), 0, "{ts}");
+    }
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A TIME INDEX THAT IS THERE BUT CANNOT BE READ IS SAID SO, AND EVERY
+/// LOOKUP STILL ANSWERS BY THE BISECTION.**
+///
+/// Covers a reader's index decision for a `.tix` name holding something
+/// other than a file: not "absent", whatever the month's size, but
+/// `Unreadable` naming the directory, and the lookup that follows answers
+/// exactly as the bars say.
+#[test]
+fn a_time_index_that_cannot_be_read_is_named_and_lookups_still_answer() {
+    use store::file::{BarFile, StoreError, TimeLookup};
+    use store::path::FileKind;
+    use store::time_index::Why;
+    let root = scratch("tix-unreadable");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let _absent = fs::remove_file(&tix);
+    fs::create_dir(&tix).unwrap();
+    let reader = BarFile::open_existing(&root, bars, 11).unwrap();
+    let decided = reader.time_lookup();
+    assert!(
+        matches!(
+            &decided,
+            TimeLookup::Bisection(Why::Unreadable(StoreError::IsADirectory { path, .. })) if *path == tix
+        ),
+        "{decided:?}"
+    );
+    let at = second_bar(17, 0).ts_micros;
+    assert_eq!(reader.first_at_or_after(at).unwrap(), 17);
+    drop(reader);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **AN INDEXED LOOKUP WHOSE BAR WILL NOT READ IS THAT BAR'S REFUSAL, NOT A
+/// SILENT FALL BACK TO THE BISECTION.**
+///
+/// Covers `BarFile::locate`'s bar fault. Only a daily month's index ever
+/// reads a bar (an intraday slot is exactly one bar wide), and this build
+/// writes no index for a month under `INDEX_MIN_ROWS`; a `.tix` beside a
+/// daily month is what a build before the small-month rule (D-4933) left,
+/// and a reader still serves it. It is written here entry by entry through
+/// `store::time_index`'s public format. With the bars cut short under the
+/// open reader, a mid-day lookup the index sends to a bar is that read's
+/// refusal.
+#[test]
+fn an_indexed_lookup_whose_bar_will_not_read_is_that_bars_refusal() {
+    use store::file::{BarFile, StoreError, TimeLookup};
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    use store::time_index::{Entry, Geometry, entry_offset, split};
+    const SYMBOL: u32 = 11;
+    const DAY: i64 = 86_400_000_000;
+    let month = YearMonth::new(2031, 2).unwrap();
+    let daily = |file| {
+        StorePath::new(PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::DAY_1,
+            month,
+            file,
+        })
+        .unwrap()
+    };
+    let root = scratch("tix-daily-bar-fault");
+    let bars = daily(FileKind::Bars);
+    let origin = month.ist_bounds_micros().0;
+    let days: Vec<store::format::Bar> = (0..10)
+        .map(|d| store::format::Bar {
+            ts_micros: origin + d * DAY,
+            ..second_bar(d, 0)
+        })
+        .collect();
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&days).unwrap();
+    drop(writer);
+    let geometry = Geometry::new(month, 86_400, SYMBOL);
+    assert!(!geometry.exact());
+    let mut occupancy = 0u64;
+    for bar in &days {
+        let (bucket, bit) = split(geometry.slot_of(bar.ts_micros).unwrap());
+        assert_eq!(bucket, 0);
+        occupancy |= 1 << bit;
+    }
+    let mut tix = geometry.encode().to_vec();
+    tix.resize(usize::try_from(entry_offset(0)).unwrap(), 0);
+    tix.extend_from_slice(
+        &Entry {
+            occupancy,
+            before: 0,
+        }
+        .encode(0),
+    );
+    fs::write(daily(FileKind::TimeIndex).to_path_buf(&root), &tix).unwrap();
+    let reader = BarFile::open_existing(&root, bars, SYMBOL).unwrap();
+    assert_eq!(reader.time_lookup(), TimeLookup::Indexed);
+    let noon = days[4].ts_micros + DAY / 2;
+    assert_eq!(reader.first_at_or_after(noon).unwrap(), 5);
+    // A second reader, its index decided and no bar read, so no block of
+    // the month is held in memory when the bars are cut short.
+    let cold = BarFile::open_existing(&root, bars, SYMBOL).unwrap();
+    assert_eq!(cold.time_lookup(), TimeLookup::Indexed);
+    drop(reader);
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(bars.to_path_buf(&root))
+        .unwrap();
+    file.set_len(32_768 + 56 * 2).unwrap();
+    drop(file);
+    let refusal = cold.first_at_or_after(noon).unwrap_err();
+    let bar_path = bars.to_path_buf(&root);
+    assert!(
+        matches!(
+            &refusal,
+            StoreError::ShortRead { path, offset, asked: 56, read: 0 }
+                if *path == bar_path && *offset == 32_768 + 56 * 4
+        ),
+        "row 4, the bar the index sends noon of day 5 to: {refusal:?}"
+    );
+    drop(cold);
+    let _ignored = fs::remove_dir_all(&root);
+}
