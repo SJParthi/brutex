@@ -2458,3 +2458,28 @@ async fn an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_r
     let json = site.autopilot.json();
     assert!(json.contains(r#""journal_error":"""#), "{json}");
 }
+
+/// A run the pull order refused whole (409) carries the STANDING class fact,
+/// under the label the conductor reads; any other refusal carries none
+/// (kills `order_class_fact -> None` and `-> Some(("", String::new()))`).
+#[test]
+fn a_run_the_pull_order_refused_carries_the_standing_class_fact() {
+    let (label, value) =
+        order_class_fact(axum::http::StatusCode::CONFLICT).expect("a 409 is the order's");
+    assert_eq!(label, crate::pullrun::RETRY_CLASS_FACT);
+    assert_eq!(
+        value,
+        format!(
+            "{} — the pull order withholds every instrument asked for; asking again returns \
+             the same until the pass it names has landed",
+            crate::pullrun::RetryClass::Standing.word()
+        )
+    );
+    for code in [
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        axum::http::StatusCode::BAD_GATEWAY,
+    ] {
+        assert_eq!(order_class_fact(code), None, "{code}");
+    }
+}
