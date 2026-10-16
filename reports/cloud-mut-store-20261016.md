@@ -31,7 +31,8 @@ verdict}.rs` and `crates/telemetry/src/sink.rs`.
     constant that differs there);
   - **not at all**, because the program's behaviour is identical.
 - **Pass 2** re-ran those 34 on the base tree with the full suite of their
-  crate, heavy tests included: *see below*.
+  crate, heavy tests included: **all 34 survive it**, so nothing in the
+  repository's own suite contradicts their class.
 - **Production line coverage** rose in every file that had room:
 
   | file | before | after |
@@ -146,7 +147,24 @@ The two appendices list all 112 new tests with what they assert.
 
 ## Pass 2: the equivalents against the full suite
 
-*Pending: filled in from `store-p2-equiv` and `telemetry-p2-equiv`.*
+**All 34 survive the full suite.** Each was re-tested on the pristine base tree
+against every test target of its crate (`--tests`), heavy tests included
+(`a_flipped_bit_anywhere_is_refused_by_name`,
+`the_largest_month_reads_at_the_cost_of_the_smallest`,
+`a_days_keys_fit_whatever_the_keys_are` and the rest pass 1 skipped), at
+opt-level 1. Two tests were skipped: `cited_commits`, which fails here for the
+environment reason below, and `only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29`,
+a 10 s text scan of the repository that runs no store code, so it can kill no
+mutant.
+
+| crate | mutants | caught | missed |
+|---|---:|---:|---:|
+| store | 33 | 0 | 33 |
+| telemetry | 1 | 0 | 1 |
+
+The store run hit its 25-minute box after 28 of the 33 (all 28 missed), and
+the remaining 5 ran in a second run (all 5 missed). So nothing in the
+repository's own suite contradicts the class of any of the 34.
 
 ## Equivalent mutants
 
