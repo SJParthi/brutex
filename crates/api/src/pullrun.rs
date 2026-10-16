@@ -693,6 +693,183 @@ pub struct Interrupted {
     /// open (its opening record and everything after it were read), but an
     /// OLDER run left open would not have been seen (DB-B34, repair 3).
     pub older_unread: Option<String>,
+    /// How many runs the records read leave open, this one included: **1**
+    /// when it is the only one (AG-01, code-3). The walk kept every run left
+    /// open and reported only the newest, so a second feed cut short in the
+    /// same crash, or an older run of another ask cut short by an earlier
+    /// crash, was on no document and no log line. `0` only on a run the walk
+    /// has not finished with.
+    pub open_count: u64,
+    /// Every OTHER run the records read leave open, in the order their
+    /// records were read, newest first; at most [`OPEN_NAMED`] `- 1` of them,
+    /// and [`Self::open_count`] counts the rest (AG-01, code-3).
+    pub also_open: Vec<AlsoOpen>,
+    /// Run records the journal's index names before the scan that the scan
+    /// did NOT read, because they lie behind the [`INTERRUPTED_RUNS`] newest
+    /// ones it read: a run left open among them is not reported, and the
+    /// document says how many there are (AG-01, code-3). `0` when every run
+    /// record before the scan was read, or when the journal is no longer than
+    /// the scan.
+    pub runs_unread: u64,
+}
+
+/// How many runs left open one document names: **64**, the newest and 63
+/// others ([`Interrupted::also_open`]), the same bound as the run records
+/// read through the index ([`INTERRUPTED_RUNS`]). The records read can leave
+/// more open (every one of the newest [`INTERRUPTED_SCAN`] records may be an
+/// opening record); those are counted ([`Interrupted::open_count`]) and not
+/// named, so the document stays bounded (AG-01).
+pub const OPEN_NAMED: usize = INTERRUPTED_RUNS;
+
+/// Another run the records read leave open, beside the one
+/// [`Restart::Interrupted`] reports first (AG-01, code-3): what an operator
+/// needs to re-run it, and no more.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlsoOpen {
+    /// Its opening record's ordinal.
+    pub ordinal: u64,
+    /// When it was opened.
+    pub opened_at_secs: i64,
+    /// The newest record of it that was read.
+    pub last_at_secs: i64,
+    /// What it was fetching from.
+    pub source: String,
+    /// The spot route's run, or an expired-F&O walk.
+    pub scope: crate::audit::Scope,
+    /// Its ask, when its opening record was read and names one.
+    pub ask: Option<u64>,
+    /// Its window, as days since the epoch.
+    pub window: Option<(u32, u32)>,
+    /// Its member failures among the records read.
+    pub failures: u64,
+    /// Whether [`Self::failures`] is its whole count.
+    pub failures_whole: bool,
+    /// Why it may have been closed after all, when it may: a record after
+    /// its opening record would not decode (it may be the closing record),
+    /// or it is known only through a restated head and the run records before
+    /// the scan could not be read (its closing record may lie there). `None`
+    /// when the records read leave it open and nothing read could close it.
+    pub doubt: Option<&'static str>,
+}
+
+impl AlsoOpen {
+    /// The run in a clause: `record N (spot, from..to, source "S", ask X,
+    /// last record at T s since the epoch, F member failure(s))`.
+    fn clause(&self) -> String {
+        let scope = match self.scope {
+            crate::audit::Scope::Spot => "a pull run",
+            crate::audit::Scope::Fno => "an expired-F&O walk",
+        };
+        let window = self.window.map_or_else(
+            || "no window".to_owned(),
+            |(from, to)| format!("{}..{}", day_text(from), day_text(to)),
+        );
+        let ask = self
+            .ask
+            .map_or_else(|| "no ask".to_owned(), |ask| format!("ask {ask:016x}"));
+        let failures = if self.failures_whole {
+            format!("{} member failure(s)", self.failures)
+        } else {
+            format!("at least {} member failure(s)", self.failures)
+        };
+        let doubt = self.doubt.map_or_else(String::new, |why| {
+            format!("; it may have been closed: {why}")
+        });
+        format!(
+            "record {} ({scope}, {window}, source {:?}, {ask}, opened at {} s and last read at \
+             {} s since the epoch, {failures}{doubt})",
+            self.ordinal, self.source, self.opened_at_secs, self.last_at_secs
+        )
+    }
+
+    fn json(&self, out: &mut String) {
+        out.push_str("{\"ordinal\":");
+        out.push_str(&self.ordinal.to_string());
+        out.push_str(",\"openedAtSecs\":");
+        out.push_str(&self.opened_at_secs.to_string());
+        out.push_str(",\"lastRecordAtSecs\":");
+        out.push_str(&self.last_at_secs.to_string());
+        out.push_str(",\"source\":");
+        out.push_str(&quote_for_json(&self.source));
+        out.push_str(",\"scope\":");
+        out.push_str(match self.scope {
+            crate::audit::Scope::Spot => "\"spot\"",
+            crate::audit::Scope::Fno => "\"fno\"",
+        });
+        out.push_str(",\"ask\":");
+        match self.ask {
+            Some(ask) => out.push_str(&quote_for_json(&format!("{ask:016x}"))),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"from\":");
+        match self.window {
+            Some((from, to)) => {
+                out.push_str(&quote_for_json(&day_text(from)));
+                out.push_str(",\"to\":");
+                out.push_str(&quote_for_json(&day_text(to)));
+            }
+            None => out.push_str("null,\"to\":null"),
+        }
+        out.push_str(",\"failures\":");
+        out.push_str(&self.failures.to_string());
+        out.push_str(",\"failuresWhole\":");
+        out.push_str(if self.failures_whole { "true" } else { "false" });
+        out.push_str(",\"mayBeClosed\":");
+        match self.doubt {
+            Some(why) => out.push_str(&quote_for_json(why)),
+            None => out.push_str("null"),
+        }
+        out.push('}');
+    }
+}
+
+impl From<&Interrupted> for AlsoOpen {
+    fn from(run: &Interrupted) -> Self {
+        Self {
+            ordinal: run.ordinal,
+            opened_at_secs: run.opened_at_secs,
+            last_at_secs: run.last_at_secs,
+            source: run.source.clone(),
+            scope: run.scope,
+            ask: run.ask,
+            window: run.window,
+            failures: run.failures,
+            failures_whole: run.failures_whole,
+            doubt: None,
+        }
+    }
+}
+
+/// The feeds whose spot leg writes NO opening record: every feed whose
+/// source is a local archive folder (`pull::vendor::SourceKind::Folder`),
+/// read from the vendor table, not listed here (AG-01, code-2). Such a leg
+/// lands through `server::local_answer`, which writes only its closing record
+/// (`landed_answer(.., None)`), so one cut short leaves nothing for the
+/// restart scan to read.
+fn unjournalled_feeds() -> impl Iterator<Item = pull::vendor::Feed> {
+    pull::vendor::Feed::ALL.into_iter().filter(|feed| {
+        matches!(
+            feed.descriptor().transport.kind(),
+            pull::vendor::SourceKind::Folder
+        )
+    })
+}
+
+/// [`unjournalled_feeds`] in one sentence, said with every restart answer.
+fn unjournalled_words() -> String {
+    let names = unjournalled_feeds()
+        .map(pull::vendor::Feed::display)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        " A spot leg over an archive-folder feed ({}) writes no opening record, only its \
+         closing record when it lands, so one cut short leaves nothing for this scan to read \
+         and is never reported here, whatever the answer above; `/audit` lists the closing \
+         records such legs wrote.",
+        names.join(", ")
+    )
 }
 
 impl Interrupted {
@@ -778,7 +955,7 @@ impl Interrupted {
                  {INTERRUPTED_SCAN} records and {INTERRUPTED_RUNS} run records"
             ),
         };
-        format!(
+        let mut out = format!(
             "INTERRUPTED: {what}{window} was opened at journal record {} ({} s since the \
              epoch) and has no closing record; the last record of it that was read was written \
              at {} s since the epoch, with {failures} on record after it. No run of this server \
@@ -787,7 +964,57 @@ impl Interrupted {
              already written are in the store; {again} to fetch what is left: {superseded}.\
              {doubt}",
             self.ordinal, self.opened_at_secs, self.last_at_secs
-        )
+        );
+        out.push_str(&self.others_words());
+        out
+    }
+
+    /// The OTHER runs left open, and the run records the scan did not read,
+    /// in sentences (AG-01, code-3); empty when this is the only run open and
+    /// every run record before the scan was read, so the sentence of one run
+    /// is byte for byte what it was.
+    fn others_words(&self) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::new();
+        if self.open_count > 1 {
+            let named = self
+                .also_open
+                .iter()
+                .map(AlsoOpen::clause)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _infallible = write!(
+                out,
+                " {} runs read have no closing record, not this one only: this is the one whose \
+                 records were read last, and the others are {named}.",
+                self.open_count
+            );
+            let unnamed = self
+                .open_count
+                .saturating_sub(1)
+                .saturating_sub(self.also_open.len() as u64);
+            if unnamed > 0 {
+                let _infallible = write!(
+                    out,
+                    " {unnamed} more run(s) read have no closing record and are counted, not \
+                     named (a document names {OPEN_NAMED}); `/audit` lists them."
+                );
+            }
+            out.push_str(
+                " Each was cut short, or is still being run by another process, as said of \
+                 this one; each is re-run, and superseded, the same way.",
+            );
+        }
+        if self.runs_unread > 0 {
+            let _infallible = write!(
+                out,
+                " {} older run record(s) that the journal's index names lie before the \
+                 {INTERRUPTED_RUNS} run records read through it and were not read, so a run left \
+                 open among them is not reported.",
+                self.runs_unread
+            );
+        }
+        out
     }
 
     fn json(&self, out: &mut String) {
@@ -841,7 +1068,20 @@ impl Interrupted {
         }
         out.push_str(",\"words\":");
         out.push_str(&quote_for_json(&self.words()));
-        out.push('}');
+        // EVERY RUN LEFT OPEN (AG-01, code-3): after the keys above, which
+        // are the newest run's exactly as before.
+        out.push_str(",\"openCount\":");
+        out.push_str(&self.open_count.to_string());
+        out.push_str(",\"runRecordsUnread\":");
+        out.push_str(&self.runs_unread.to_string());
+        out.push_str(",\"alsoOpen\":[");
+        for (at, other) in self.also_open.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            other.json(out);
+        }
+        out.push_str("]}");
     }
 }
 
@@ -860,6 +1100,225 @@ pub enum Restart {
     /// would not decode and may be a run's opening or closing record, so
     /// whether a run is open is NOT KNOWN; the reason, in its own words.
     NotKnown(String),
+    /// NOT KNOWN because a guess of the walk decides which runs are open
+    /// (AG-01): the guesses, and the half that IS known -- every run the
+    /// walk's reading leaves open, which of them no guess can move, and how
+    /// many runs a guessed close surely left open. It was a bare
+    /// [`Self::NotKnown`], which dropped every run the records surely leave
+    /// open and wrote no ERROR line for any of them (second check, blocking 2).
+    Guessed(Box<Guessed>),
+}
+
+/// [`Restart::Guessed`]'s answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Guessed {
+    /// The guesses, in words, bounded ([`guessed_words`]).
+    pub why: String,
+    /// The walk's own reading: the run read last that it leaves open,
+    /// carrying every other one ([`Interrupted::also_open`]); `None` when it
+    /// leaves none. A READING, not the answer: a guess may name the wrong run
+    /// in it, so it is never served as `/pull/run.json`'s `interrupted`.
+    pub reading: Option<Interrupted>,
+    /// The opening ordinals of the runs a live guess names, ascending, at
+    /// most [`OPEN_NAMED`]: each may be open or closed, whichever way that
+    /// guess went.
+    pub guessed_runs: Vec<u64>,
+    /// The runs of the reading open WHICHEVER WAY THE GUESSES GO: no guess
+    /// names them, and nothing read may have closed them (no record after
+    /// their opening record that would not decode, no close of theirs before
+    /// an unreadable index). Each is written to `/logs` as "a pull run has no
+    /// closing record", as an interrupted answer's runs are.
+    pub sure: Vec<AlsoOpen>,
+    /// The runs of the reading that no guess names and that something read
+    /// may have closed after all, each with why ([`AlsoOpen::doubt`]): a
+    /// record after its opening record that would not decode, or (for a run
+    /// known only through a restated head) a close of it that may lie before
+    /// an unreadable index. Named, never logged as cut short and never
+    /// dropped: every run of the reading is in exactly one of `sure`, this
+    /// and `guessed_runs`, or counted in `unnamed` (third check of AG-01).
+    pub doubted: Vec<AlsoOpen>,
+    /// Runs of the reading counted and not named ([`OPEN_NAMED`]), so not
+    /// sorted into sure or guessed.
+    pub unnamed: u64,
+    /// The pairing guesses whose count of runs left open is a fact
+    /// ([`LeftOpen`]), at most [`OPEN_NAMED`].
+    pub left_open: Vec<LeftOpen>,
+}
+
+impl Guessed {
+    /// How many runs are surely open: every sure run, and every run a
+    /// counted pairing surely left open.
+    #[must_use]
+    pub fn at_least_open(&self) -> u64 {
+        (self.sure.len() as u64).saturating_add(
+            self.left_open
+                .iter()
+                .map(|counted| counted.left_open)
+                .fold(0, u64::saturating_add),
+        )
+    }
+
+    /// The answer in sentences.
+    fn words(&self) -> String {
+        use core::fmt::Write as _;
+        let at_least = self.at_least_open();
+        let mut out = if at_least == 0 {
+            format!("NOT KNOWN whether a pull run was left open: {}.", self.why)
+        } else {
+            format!(
+                "NOT KNOWN which pull runs were left open, though at least {at_least} run(s) \
+                 were: {}.",
+                self.why
+            )
+        };
+        if !self.sure.is_empty() {
+            let named = self
+                .sure
+                .iter()
+                .map(AlsoOpen::clause)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _infallible = write!(
+                out,
+                " Open whichever way the guesses are read, with no closing record: {named}. Each \
+                 was cut short, or is still being run by another process, and is re-run from \
+                 /pull/spot (a pull run) or /pull/fno (an expired-F&O walk) with the same ask."
+            );
+        }
+        if !self.doubted.is_empty() {
+            let named = self
+                .doubted
+                .iter()
+                .map(AlsoOpen::clause)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _infallible = write!(
+                out,
+                " Open in the walk's reading and named by no guess, though something read may \
+                 have closed it after all: {named}."
+            );
+        }
+        for counted in &self.left_open {
+            let _infallible = write!(
+                out,
+                " The closing record at record {} could end only one of the {} runs of its \
+                 scope, window and source (source {:?}) opened at records {}, and no later \
+                 closing record of theirs was read, so {} of them have no closing record; which \
+                 is not known.",
+                counted.close,
+                counted.runs.len(),
+                counted.source,
+                counted
+                    .runs
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                counted.left_open
+            );
+        }
+        if !self.guessed_runs.is_empty() {
+            let _infallible = write!(
+                out,
+                " A guess names the run(s) opened at records {}: each is open or closed \
+                 whichever way its guess went.",
+                self.guessed_runs
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if self.unnamed > 0 {
+            let _infallible = write!(
+                out,
+                " {} more run(s) of the walk's reading have no closing record and are counted, \
+                 not named (a document names {OPEN_NAMED}); `/audit` lists them.",
+                self.unnamed
+            );
+        }
+        // THE RUN RECORDS THE INDEX NAMES AND THE SCAN DID NOT READ, as an
+        // interrupted answer says them: a guessed answer dropped the count.
+        if let Some(behind) = self
+            .reading
+            .as_ref()
+            .map(|run| run.runs_unread)
+            .filter(|n| *n > 0)
+        {
+            let _infallible = write!(
+                out,
+                " {behind} older run record(s) that the journal's index names lie before the \
+                 {INTERRUPTED_RUNS} run records read through it and were not read, so a run left \
+                 open among them is not reported."
+            );
+        }
+        out.push_str(" Nothing else is claimed; `/audit` lists the journal's runs.");
+        out
+    }
+
+    /// The answer's own keys on `/pull/run.json`'s `restart` object, each
+    /// after a comma.
+    fn json(&self, out: &mut String) {
+        out.push_str(",\"reading\":");
+        match &self.reading {
+            Some(run) => run.json(out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"guessedRuns\":[");
+        out.push_str(
+            &self
+                .guessed_runs
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push_str("],\"sureOpen\":[");
+        for (at, run) in self.sure.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            run.json(out);
+        }
+        out.push_str("],\"doubtedOpen\":[");
+        for (at, run) in self.doubted.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            run.json(out);
+        }
+        out.push_str("],\"leftOpen\":[");
+        for (at, counted) in self.left_open.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"close\":");
+            out.push_str(&counted.close.to_string());
+            out.push_str(",\"runs\":[");
+            out.push_str(
+                &counted
+                    .runs
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            out.push_str("],\"leftOpen\":");
+            out.push_str(&counted.left_open.to_string());
+            out.push_str(",\"scope\":");
+            out.push_str(match counted.scope {
+                crate::audit::Scope::Spot => "\"spot\"",
+                crate::audit::Scope::Fno => "\"fno\"",
+            });
+            out.push_str(",\"source\":");
+            out.push_str(&quote_for_json(&counted.source));
+            out.push('}');
+        }
+        out.push_str("],\"atLeastOpen\":");
+        out.push_str(&self.at_least_open().to_string());
+        out.push_str(",\"unnamed\":");
+        out.push_str(&self.unnamed.to_string());
+    }
 }
 
 impl Restart {
@@ -868,7 +1327,7 @@ impl Restart {
     pub const fn interrupted(&self) -> Option<&Interrupted> {
         match self {
             Self::Interrupted(run) => Some(run),
-            Self::Clean | Self::NotKnown(_) => None,
+            Self::Clean | Self::NotKnown(_) | Self::Guessed(_) => None,
         }
     }
 
@@ -878,13 +1337,22 @@ impl Restart {
         match self {
             Self::Clean => "clean",
             Self::Interrupted(_) => "interrupted",
-            Self::NotKnown(_) => "not_known",
+            Self::NotKnown(_) | Self::Guessed(_) => "not_known",
         }
     }
 
-    /// The state in one sentence.
+    /// The state in one sentence, and what no state of the scan can see: a
+    /// spot leg over an archive-folder feed, which writes no opening record
+    /// ([`unjournalled_feeds`]; AG-01, code-2).
     #[must_use]
     pub fn words(&self) -> String {
+        let mut out = self.state_words();
+        out.push_str(&unjournalled_words());
+        out
+    }
+
+    /// [`Self::words`] without the archive-folder sentence.
+    fn state_words(&self) -> String {
         match self {
             // NOT "a later run of the same window and source closed (that run
             // asked the vendor for the same days again)" (DB-B34, repair 6):
@@ -906,6 +1374,7 @@ impl Restart {
                 "NOT KNOWN whether a pull run was left open: {why}. Nothing is claimed either \
                  way; `/audit` lists the journal's runs."
             ),
+            Self::Guessed(guessed) => guessed.words(),
         }
     }
 }
@@ -915,9 +1384,16 @@ fn day_text(days: u32) -> String {
     pull::session::Day::from_days(days).map_or_else(|_| days.to_string(), |day| day.to_string())
 }
 
-/// The run the records `read` leave open, if any. `read` is journal records
-/// oldest first, as `(ordinal, record)`: every run record from the oldest of
-/// them on, and whichever member failures were read with them.
+/// The runs the records `read` leave open, if any: the one whose records
+/// were read last, carrying every other one ([`Interrupted::also_open`],
+/// [`Interrupted::open_count`]). `read` is journal records oldest first, as
+/// `(ordinal, record)`: every run record from the oldest of them on, and
+/// whichever member failures were read with them.
+///
+/// This is the walk's own reading. Where that reading is a GUESS -- a close
+/// that could end more than one run, a restated head behind a close that may
+/// be its own (AG-01, codes 4 and 7) -- the walk still takes one reading, so
+/// this answers, but [`restart_scan`] answers NOT KNOWN and names the guess.
 ///
 /// # The walk
 ///
@@ -927,26 +1403,47 @@ fn day_text(days: u32) -> String {
 ///   opened at record N", written when another writer appended in between)
 ///   rejoins the run it names; it carries the opening record's own source,
 ///   window and time, so it stands for an opening record that lies before
-///   `read`. A restatement written AFTER its run closed (a failure whose first
-///   append was refused, offered again behind the closing record) is not a
-///   new run. A restatement of a run that IS open rejoins it whatever closed
-///   before it: an earlier run's closing record of the same window and
-///   source says nothing about this one.
+///   `read`. A restatement of a run a close read earlier ENDED is not a new
+///   run (a failure whose first append was refused, offered again behind
+///   the closing record). A restatement of a run that IS open rejoins it
+///   whatever closed before it: an earlier run's closing record of the same
+///   window and source says nothing about this one.
+/// * A restatement of a run NOT read, behind a closing record of its scope,
+///   window and source that ended no run read, OPENS the run, and the pair
+///   is a guess (AG-01, code-7): that close may be the run's own (the
+///   legitimate late offer above, whose opening record lies before `read`)
+///   or another run's, and neither record names an ask, so the two cannot
+///   be told apart. It was dropped as closed, and a run cut short behind
+///   another run's close read "clean"; and the close was never used up, so
+///   800 restatements behind it were all dropped. Now only a run's FIRST
+///   head read meets the close (every later head rejoins the run it
+///   opened), so one run behind one close is one guess with every failure
+///   counted; a head of another run of the same scope, window and source
+///   meets the same close too, since it may be that run's close as well.
 /// * A closing run record ends a run of its own scope, window AND source,
 ///   and no other (DB-B34, repair 6; D-4950): the run whose record it
 ///   directly follows (the ordinal before it), when that run is one, since
 ///   a close written through its run's thread always follows a record of
-///   that run (`audit::Journal::close_run`); else the newest open run of its
-///   scope, window and source (a close written before D-4950). A close that
-///   matches no open run closes NOTHING. It was paired by its window alone
-///   too, and a press refused before its run opened (the pull order, a
-///   mapping refusal, a refused broker) wrote a NOT STARTED record under its
-///   target's label with the window it asked for: that record closed the
-///   run cut short, of any scope, and the next start answered "clean". A
-///   record of [`crate::audit::Outcome::Refused`] closes nothing either: it
-///   is a request refused before anything ran, which is how such a press is
+///   that run (`audit::Journal::close_run`). Else, when exactly one open run
+///   is of its scope, window and source, that run (a close written before
+///   D-4950). Else, when several are (AG-01, code-4): the one whose ask the
+///   close names, if it names one and one run has it; the newest, when every
+///   one of them names one same ask and the close is not NOT STARTED (the
+///   same pull finished, so whichever it ended, the others are superseded
+///   as below); and otherwise the newest as a GUESS that supersedes nothing
+///   -- a close written without its run's thread could end either run. It
+///   went silently to the newest, and two walks of one underlying and
+///   window on two feeds read crosswise. A close that matches no open run
+///   closes NOTHING. It was paired by its window alone too, and a press
+///   refused before its run opened (the pull order, a mapping refusal, a
+///   refused broker) wrote a NOT STARTED record under its target's label
+///   with the window it asked for: that record closed the run cut short, of
+///   any scope, and the next start answered "clean". A record of
+///   [`crate::audit::Outcome::Refused`] closes nothing either: it is a
+///   request refused before anything ran, which is how such a press is
 ///   written now.
-/// * A closing record that ends a run SUPERSEDES every older run still open
+/// * A closing record that ends a run it is PROVEN to end (by position, by
+///   being the only candidate, by ask) SUPERSEDES every older run still open
 ///   of the same scope, window and source whose opening record names the
 ///   SAME ASK as the run it ended ([`crate::audit::ask_of`]): the same pull
 ///   (the feed, the identity policy, the target, the instruments, the rung)
@@ -955,23 +1452,34 @@ fn day_text(days: u32) -> String {
 ///   policy and the endpoint TEMPLATE, the same for every target and rung,
 ///   cut to 64 bytes, so a 1day pull of the indices superseded a 1min pull
 ///   of the stocks over the same window. A run whose opening record names
-///   no ask is never superseded and supersedes nothing, and a close NOT
-///   STARTED supersedes nothing: it asked the vendor for nothing (repair 5).
-///   Two runs of one pull in flight at once (a server run and a `cli` pull)
-///   whose closes were written before D-4950 still cannot be told apart
-///   (`docs/06-limits.md`).
+///   no ask is never superseded and supersedes nothing, a close NOT STARTED
+///   supersedes nothing: it asked the vendor for nothing (repair 5), and a
+///   close paired by a guess supersedes nothing (AG-01: two Dhan walks cut
+///   short read "clean" behind a Zerodha walk's close). Two runs of ONE ask
+///   in flight at once (a server run and a `cli` pull, or two api
+///   processes) whose close does not directly follow its run still cannot
+///   be told apart: the walk ends the newest and supersedes the older, so if
+///   the close was truly the OLDER run's, the newer one cut short reads as
+///   superseded although only an older run is ever superseded. The same pull
+///   finished either way, so its days were fetched; what is not said is that
+///   the other run was cut short (`docs/06-limits.md`, D-4976).
 /// * A member failure is counted to the run whose record it follows, and
 ///   NEVER opens one. Failures with no opening record before them are a
 ///   closed run's (the layout before D-3341, and `RunLedger::rest`'s when
 ///   the opening record was refused) or another run's; either way they are
 ///   no evidence that a run is open.
 ///
-/// What is still open at the end was never closed.
+/// What is still open at the end was never closed. A guess still decides
+/// the answer at the end only while a run it could have left open IS open:
+/// a pairing guess whose other candidates all ended later by closes of their
+/// own (not by being superseded), or a restated run that closed later,
+/// decides nothing ([`Walk::guessed`]).
 ///
 /// # Cost
 ///
-/// O(records read); the open list is bounded by the runs in flight at once,
-/// which the feed seats bound.
+/// O(records read x runs open): one pass, and each close looks at the open
+/// list once. Both are bounded by the read ([`INTERRUPTED_SCAN`] records and
+/// [`INTERRUPTED_RUNS`] run records), whatever the journal's length.
 #[must_use]
 pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupted> {
     walk(read).open
@@ -979,30 +1487,182 @@ pub fn interrupted_in(read: &[(u64, crate::audit::Record)]) -> Option<Interrupte
 
 /// What one walk of [`interrupted_in`] found.
 struct Walk {
-    /// The newest run left open, if any.
+    /// The run left open whose records were read last, carrying every other
+    /// one left open; `None` when none is.
     open: Option<Interrupted>,
     /// The ordinal of the newest closing record the walk paired with a run
-    /// it does NOT directly follow: the newest open run of its scope, window
-    /// and source. A record before it that would not decode may be the
-    /// opening record of another run of that window and source that the
-    /// close truly belongs to, and the run the walk closed would then be open
-    /// ([`Interrupted::newer_may_be_open`]). A close that directly follows a
-    /// record of its run cannot be moved by such a record (nothing lies
-    /// between them), and one that closed nothing hides no run.
+    /// it does NOT directly follow. A record before it that would not decode
+    /// may be the opening record of another run of that window and source
+    /// that the close truly belongs to, and the run the walk closed would
+    /// then be open ([`Interrupted::newer_may_be_open`]). A close that
+    /// directly follows a record of its run cannot be moved by such a record
+    /// (nothing lies between them), and one that closed nothing hides no
+    /// run.
     weak_close: Option<u64>,
+    /// The walk's guesses that still decide the answer (AG-01, codes 4 and
+    /// 7): while one is here the answer is NOT KNOWN, never "clean" and
+    /// never a run named as the one cut short when it may be the wrong one.
+    guessed: Vec<Guess>,
+    /// The live pairing guesses whose count of runs left open is a fact of
+    /// the records ([`LeftOpen`]); the last conditions on it (damage, an
+    /// unreadable index) are [`judged`]'s.
+    left_open: Vec<LeftOpen>,
+}
+
+/// A record's window, as days since the epoch; `None` for a record that
+/// names none.
+fn window_of(record: &crate::audit::Record) -> Option<(u32, u32)> {
+    (record.from_days != 0 || record.to_days != 0).then_some((record.from_days, record.to_days))
+}
+
+/// Whether `record` is a closing record: a run record that neither opens a
+/// run nor refuses one.
+fn is_close(record: &crate::audit::Record) -> bool {
+    use crate::audit::{Kind, Outcome};
+    record.kind == Kind::Run && !matches!(record.outcome, Outcome::Opened | Outcome::Refused)
+}
+
+/// Whether two records are of one scope, window and source.
+fn same_key(one: &crate::audit::Record, other: &crate::audit::Record) -> bool {
+    one.scope == other.scope && window_of(one) == window_of(other) && one.source == other.source
+}
+
+/// A reading the walk had to take that nothing read proves (AG-01).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Guess {
+    /// A closing record at `close` that does not directly follow a record of
+    /// the run it closes, read while the runs opened at `runs` (newest first;
+    /// the walk paired it with the first) were open with its scope, window
+    /// and source and did not name one same ask (code-4). `at` is the
+    /// close's position among the records walked.
+    Pairing {
+        close: u64,
+        runs: Vec<u64>,
+        at: usize,
+    },
+    /// A head at `head` restating the run opened at `run` (not read), behind
+    /// the closing record at `close` of its scope, window and source that
+    /// ended no run read (code-7). `at` is the head's position among the
+    /// records walked.
+    Unseen {
+        close: u64,
+        head: u64,
+        run: u64,
+        at: usize,
+    },
+}
+
+/// A live pairing guess whose close SURELY left all of its runs open but
+/// one (AG-01, second check's blocking 2): a close ends at most one run, so of
+/// the `runs.len()` runs of its scope, window and source open when it was
+/// written, `runs.len() - 1` had no closing record after it. Made only where
+/// that count is a fact of the records and not of the walk's reading: the
+/// guess is the first of its scope, window and source, no closing record of
+/// those follows it, no record that would not decode lies after the oldest of
+/// its runs' opening records, and none of its runs is known only through a
+/// restated head whose close may lie before an unreadable index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeftOpen {
+    /// The closing record the guess is about.
+    pub close: u64,
+    /// The opening ordinals of the runs it could end, newest first.
+    pub runs: Vec<u64>,
+    /// How many of them have no closing record: `runs.len() - 1`.
+    pub left_open: u64,
+    /// Their scope.
+    pub scope: crate::audit::Scope,
+    /// Their source.
+    pub source: String,
+}
+
+impl Guess {
+    /// Where among the records walked the record that made the guess lies.
+    const fn at(&self) -> usize {
+        match self {
+            Self::Pairing { at, .. } | Self::Unseen { at, .. } => *at,
+        }
+    }
+
+    /// The runs the guess names: every run a pairing could end, or the
+    /// restated run behind an unseen close.
+    fn names(&self) -> &[u64] {
+        match self {
+            Self::Pairing { runs, .. } => runs,
+            Self::Unseen { run, .. } => core::slice::from_ref(run),
+        }
+    }
+
+    /// The guess in a clause, for a NOT KNOWN answer.
+    fn words(&self) -> String {
+        match self {
+            Self::Pairing { close, runs, .. } => format!(
+                "the closing record at record {close} does not directly follow a record of the \
+                 run it closes, and a close written without its run's thread could end either \
+                 run: {} runs of its scope, window and source were open when it was written, \
+                 opened at records {}, their opening records do not name one same ask and the \
+                 close names none, so which of them it ended, and which was cut short, is not \
+                 known",
+                runs.len(),
+                runs.iter()
+                    .take(OPEN_NAMED)
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Unseen {
+                close, head, run, ..
+            } => format!(
+                "the run opened at record {run}, read only through its head restated at record \
+                 {head}, has before it the closing record at record {close} of its scope, window \
+                 and source, which ended no run read: that close may be this run's own (a \
+                 failure offered again behind its run's close is restated so) or another run's, \
+                 and neither record names an ask, so whether this run was cut short is not known"
+            ),
+        }
+    }
+}
+
+/// A closing record that ended no run that was read: its ordinal, scope,
+/// window and source, so a head restated after it is read as a guess.
+type Unseen = (u64, crate::audit::Scope, Option<(u32, u32)>, String);
+
+/// [`walk`]'s state between two records.
+#[derive(Default)]
+struct Walker {
+    /// The runs opened and not yet closed, in the order they were first
+    /// read.
+    open: Vec<Interrupted>,
+    /// Opening ordinals of the runs a closing record ended: a head restated
+    /// after one is not a new run.
+    closed: Vec<u64>,
+    /// The closing records that ended no run that was read: a run's first
+    /// restated head read behind one is a guess ([`Guess::Unseen`]).
+    unseen: Vec<Unseen>,
+    /// The run whose record was read last, while a member failure or a close
+    /// may still follow it.
+    current: Option<u64>,
+    /// [`Walk::weak_close`].
+    weak_close: Option<u64>,
+    /// Every guess taken, live or not; [`walk`] keeps the live ones.
+    guessed: Vec<Guess>,
+    /// Opening ordinals of the runs a later run of the same ask superseded:
+    /// done, but not ended by a close of their own.
+    superseded: Vec<u64>,
+    /// The position among the records walked of the record being read.
+    position: usize,
 }
 
 /// [`interrupted_in`]'s walk, with the newest closing record it could not
-/// pair by position ([`Walk::weak_close`]).
+/// pair by position ([`Walk::weak_close`]) and its live guesses.
 fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
     use crate::audit::{Kind, Outcome};
     let mut walker = Walker::default();
     // The ordinal of the record read just before this one: a close written
     // through its run's thread directly follows a record of that run.
     let mut previous: Option<u64> = None;
-    for (ordinal, record) in read {
-        let window = (record.from_days != 0 || record.to_days != 0)
-            .then_some((record.from_days, record.to_days));
+    for (position, (ordinal, record)) in read.iter().enumerate() {
+        walker.position = position;
+        let window = window_of(record);
         let follows = previous.and_then(|before| before.checked_add(1)) == Some(*ordinal);
         previous = Some(*ordinal);
         match (record.kind, record.outcome) {
@@ -1020,32 +1680,87 @@ fn walk(read: &[(u64, crate::audit::Record)]) -> Walk {
             }
         }
     }
-    // The newest still-open run is the one that was cut short.
-    Walk {
-        open: walker.open.pop(),
-        weak_close: walker.weak_close,
+    // A GUESS DECIDES THE ANSWER ONLY WHILE A RUN IT COULD HAVE LEFT OPEN IS
+    // OPEN (AG-01): a pairing whose other candidates all ended later by a
+    // close of their own, or a restated run that closed later, is settled
+    // whichever way it went. A candidate SUPERSEDED later did not end by a
+    // close of its own: the guessed close may have been its close, and the
+    // run the walk closed with it is then open, so that guess still decides.
+    let unsettled: std::collections::HashSet<u64> = walker
+        .open
+        .iter()
+        .map(|run| run.ordinal)
+        .chain(walker.superseded.iter().copied())
+        .collect();
+    let still_open: std::collections::HashSet<u64> =
+        walker.open.iter().map(|run| run.ordinal).collect();
+    let live = |guess: &Guess| match guess {
+        Guess::Pairing { runs, .. } => runs.iter().skip(1).any(|other| unsettled.contains(other)),
+        Guess::Unseen { run, .. } => still_open.contains(run),
+    };
+    // HOW MANY RUNS A LIVE PAIRING SURELY LEFT OPEN (AG-01, second check's
+    // blocking 2). A close ends at most one run, so of the k runs it could
+    // end, k - 1 had no closing record after it -- a fact of the records, not
+    // of the walk's reading, while nothing before it was a guess about their
+    // scope, window and source (the k would be the reading's) and nothing
+    // after it is a close of theirs (one could end, or supersede, any of
+    // them). Bounded: each live pairing looks at the records after it once.
+    let mut left_open = Vec::new();
+    for (index, guess) in walker.guessed.iter().enumerate() {
+        let Guess::Pairing { close, runs, at } = guess else {
+            continue;
+        };
+        let Some((_, made)) = read.get(*at) else {
+            continue;
+        };
+        let first_of_key = walker.guessed.get(..index).is_some_and(|earlier| {
+            earlier.iter().all(|other| {
+                read.get(other.at())
+                    .is_none_or(|(_, record)| !same_key(record, made))
+            })
+        });
+        let last_close_of_key = read
+            .get(at.saturating_add(1)..)
+            .unwrap_or_default()
+            .iter()
+            .all(|(_, record)| !(is_close(record) && same_key(record, made)));
+        if live(guess) && first_of_key && last_close_of_key {
+            left_open.push(LeftOpen {
+                close: *close,
+                runs: runs.clone(),
+                left_open: (runs.len() as u64).saturating_sub(1),
+                scope: made.scope,
+                source: made.source.clone(),
+            });
+        }
     }
-}
-
-/// A closing record that ended no run that was read: its scope, window and
-/// source, so a head restated after it is not read as a new run.
-type Unseen = (crate::audit::Scope, Option<(u32, u32)>, String);
-
-/// [`walk`]'s state between two records.
-#[derive(Default)]
-struct Walker {
-    /// The runs opened and not yet closed, oldest first.
-    open: Vec<Interrupted>,
-    /// Opening ordinals of the runs a closing record ended, and the closing
-    /// records that ended no run that was read: a head restated after either
-    /// is not a new run.
-    closed: Vec<u64>,
-    unseen: Vec<Unseen>,
-    /// The run whose record was read last, while a member failure or a close
-    /// may still follow it.
-    current: Option<u64>,
-    /// [`Walk::weak_close`].
-    weak_close: Option<u64>,
+    let guessed = walker
+        .guessed
+        .into_iter()
+        .filter(|guess| live(guess))
+        .collect();
+    // EVERY RUN LEFT OPEN (AG-01, code-3). The newest still-open run was
+    // reported and every other was dropped: a second feed cut short in the
+    // same crash, or an older run of another ask cut short by an earlier
+    // crash, was on no document and no log line.
+    let open_count = walker.open.len() as u64;
+    let mut runs = walker.open;
+    let open = runs.pop().map(|mut newest| {
+        newest.open_count = open_count;
+        newest.also_open = runs
+            .iter()
+            .rev()
+            .take(OPEN_NAMED.saturating_sub(1))
+            .map(AlsoOpen::from)
+            .collect();
+        newest
+    });
+    Walk {
+        open,
+        weak_close: walker.weak_close,
+        guessed,
+        left_open,
+    }
 }
 
 impl Walker {
@@ -1057,15 +1772,30 @@ impl Walker {
             .and_then(|rest| rest.trim().parse::<u64>().ok());
         let first = restated.unwrap_or(ordinal);
         let known = self.open.iter().any(|run| run.ordinal == first);
-        if restated.is_some()
-            && !known
-            && (self.closed.contains(&first)
-                || self.unseen.iter().any(|(scope, held, source)| {
-                    *scope == record.scope && *held == window && *source == record.source
-                }))
-        {
+        if restated.is_some() && !known && self.closed.contains(&first) {
             self.current = None;
             return;
+        }
+        // A HEAD RESTATED BEHIND A CLOSE THAT ENDED NO RUN READ (AG-01,
+        // code-7): the close may be this run's own or another run's, and
+        // nothing read tells which. The run is OPENED and the pair is a
+        // guess. Only the run's first head read meets the close: every later
+        // head of it rejoins the open run (`known`), so 800 restatements
+        // behind one close are one run, one guess, every failure counted.
+        // The close stays there for a head of ANOTHER run, whose close it may
+        // be just as well.
+        if restated.is_some() && !known {
+            let behind = self.unseen.iter().find(|(_, scope, held, source)| {
+                *scope == record.scope && *held == window && *source == record.source
+            });
+            if let Some((close, ..)) = behind {
+                self.guessed.push(Guess::Unseen {
+                    close: *close,
+                    head: ordinal,
+                    run: first,
+                    at: self.position,
+                });
+            }
         }
         if !known {
             self.open.push(Interrupted {
@@ -1094,6 +1824,9 @@ impl Walker {
                 undecodable: String::new(),
                 newer_may_be_open: false,
                 older_unread: None,
+                open_count: 0,
+                also_open: Vec::new(),
+                runs_unread: 0,
             });
         }
         self.current = Some(first);
@@ -1115,22 +1848,45 @@ impl Walker {
         let mine = |run: &Interrupted| {
             run.scope == record.scope && run.window == window && run.source == record.source
         };
+        // A NOT STARTED CLOSE SUPERSEDES NOTHING (repair 5): it asked the
+        // vendor for nothing (no credential, no budget, an archive feed), so
+        // it is no evidence that the older run's days were fetched. It still
+        // closes its own run.
+        let not_started = record.outcome == crate::audit::Outcome::NotStarted;
         // THE RUN IT DIRECTLY FOLLOWS FIRST: a close written through its run's
         // thread always follows a record of that run, so it is never handed to
         // another run of the same pull.
+        //
+        // NOT AN EXPIRED-F&O WALK'S, WHILE TWO OR MORE OF ITS WALKS ARE OPEN
+        // (AG-01, second check's blocking 1; the attack's A1). An F&O walk
+        // opens and closes with a plain `Journal::append`, not through
+        // `open_run`/`close_run` (D-4950 Decided 2 is not yet built for it:
+        // server.rs, R4-02), so its close lands wherever the append lock let
+        // it, and directly behind ANOTHER walk's opening record as easily as
+        // behind its own. Walk G opens, walk D opens, G's close lands behind
+        // D's opening record: by position the close was D's, G was reported
+        // cut short and D, the walk that was, was hidden. With two or more
+        // walks of its scope, window and source open, position proves nothing
+        // and the close goes to the candidates' rules below (one ask, a named
+        // ask, or a guess). With one, it is that walk's either way.
+        let positional = record.scope != crate::audit::Scope::Fno
+            || self.open.iter().filter(|run| mine(run)).nth(1).is_none();
         let beside = self
             .current
-            .filter(|_| follows)
+            .filter(|_| follows && positional)
             .and_then(|first| self.open.iter().position(|run| run.ordinal == first))
             .filter(|&at| self.open.get(at).is_some_and(&mine));
-        let ended = beside.or_else(|| self.open.iter().rposition(&mine));
+        let (ended, proven) = match beside {
+            Some(at) => (Some(at), true),
+            None => self.by_candidates(ordinal, record, not_started, &mine),
+        };
         if beside.is_none() && ended.is_some() {
             self.weak_close = Some(ordinal);
         }
         self.current = None;
         let Some(at) = ended else {
             self.unseen
-                .push((record.scope, window, record.source.clone()));
+                .push((ordinal, record.scope, window, record.source.clone()));
             return;
         };
         let run = self.open.remove(at);
@@ -1145,22 +1901,76 @@ impl Walker {
         // window and source alone are no such evidence: every Zerodha spot run
         // of a window carries one source, whatever its target or rung.
         //
-        // A NOT STARTED CLOSE SUPERSEDES NOTHING (repair 5): it asked the
-        // vendor for nothing (no credential, no budget, an archive feed), so
-        // it is no evidence that the older run's days were fetched. It still
-        // closes its own run.
-        let not_started = record.outcome == crate::audit::Outcome::NotStarted;
-        if let Some(ask) = run.ask.filter(|_| !not_started) {
+        // ONLY A CLOSE PROVEN TO BE THE RUN'S (AG-01): a close the walk paired
+        // by a guess is no evidence the pull it guessed was made and finished,
+        // and superseding by it read two Dhan walks cut short as "clean".
+        if let Some(ask) = run.ask.filter(|_| proven && !not_started) {
             let closed = &mut self.closed;
+            let superseded = &mut self.superseded;
             self.open.retain(|older| {
                 let same = mine(older) && older.ask == Some(ask);
                 if same {
                     closed.push(older.ordinal);
+                    superseded.push(older.ordinal);
                 }
                 !same
             });
         }
         self.closed.push(run.ordinal);
+    }
+
+    /// A close that does not directly follow a record of an open run of its
+    /// own: the position in [`Self::open`] of the run it ends, if any, and
+    /// whether it is PROVEN to end that run (AG-01, code-4).
+    ///
+    /// * No open run of its scope, window and source: none.
+    /// * Exactly one: that one (a close written before D-4950), proven.
+    /// * Several: the one whose ask the close names, when it names one and
+    ///   exactly one run has it (no build writes an ask on a close yet; a
+    ///   later one may), proven. Else, when every one names one same ask and
+    ///   the close is not NOT STARTED, the newest, proven: the same pull
+    ///   finished, whichever run it was, so the others are superseded with
+    ///   it. Else the newest as a GUESS ([`Guess::Pairing`]).
+    fn by_candidates(
+        &mut self,
+        ordinal: u64,
+        record: &crate::audit::Record,
+        not_started: bool,
+        mine: &dyn Fn(&Interrupted) -> bool,
+    ) -> (Option<usize>, bool) {
+        let candidates: Vec<usize> = self
+            .open
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| mine(run))
+            .map(|(at, _)| at)
+            .collect();
+        let (Some(&newest), true) = (candidates.last(), candidates.len() > 1) else {
+            return (candidates.last().copied(), true);
+        };
+        let ask_at = |at: &usize| self.open.get(*at).and_then(|run| run.ask);
+        if let Some(named) = crate::audit::ask_of(&record.note) {
+            let mut by_ask = candidates.iter().filter(|at| ask_at(at) == Some(named));
+            if let (Some(&one), None) = (by_ask.next(), by_ask.next()) {
+                return (Some(one), true);
+            }
+        }
+        let first_ask = candidates.first().and_then(ask_at);
+        let one_ask = first_ask.is_some() && candidates.iter().all(|at| ask_at(at) == first_ask);
+        if one_ask && !not_started {
+            return (Some(newest), true);
+        }
+        let runs = candidates
+            .iter()
+            .rev()
+            .filter_map(|at| self.open.get(*at).map(|run| run.ordinal))
+            .collect();
+        self.guessed.push(Guess::Pairing {
+            close: ordinal,
+            runs,
+            at: self.position,
+        });
+        (Some(newest), false)
     }
 }
 
@@ -1245,7 +2055,7 @@ const INDEX_WAIT: core::time::Duration = core::time::Duration::from_millis(100);
 
 /// [`restart_scan`], waiting at most `waits` pauses for a held lock.
 fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart {
-    use crate::audit::{Kind, Log, Outcome};
+    use crate::audit::Log;
     let log = journal.look();
     if let Log::Unreadable { reason } = &log {
         return not_known(format!("the pull journal cannot be read ({reason})"));
@@ -1285,16 +2095,52 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     // they could not be read, when they could not.
     let mut read: Vec<(u64, crate::audit::Record)> = Vec::new();
     let mut unread: Option<String> = None;
+    let mut runs_unread = 0_u64;
     if scan_first > 0 {
         match older_runs_built(journal, records, scan_first, waits) {
             Ok(older) => {
                 read = older.read;
                 damaged.extend(older.damaged);
+                runs_unread = older.runs_unread;
             }
             Err(why) => unread = Some(why),
         }
     }
     read.extend(tail);
+    judged(
+        &read,
+        damaged,
+        unread,
+        Bounds {
+            records,
+            scan_first,
+            runs_unread,
+        },
+    )
+}
+
+/// How far [`restart_scan`] read: the journal's length, the first record of
+/// the scan, and the run records the index names before the scan that it
+/// did not read ([`Interrupted::runs_unread`]).
+#[derive(Clone, Copy)]
+struct Bounds {
+    records: u64,
+    scan_first: u64,
+    runs_unread: u64,
+}
+
+/// [`restart_scan`]'s answer over what it read: `read` oldest first,
+/// `damaged` the records it could not decode, `unread` why the run records
+/// before the scan could not be read through the index, when they could not.
+/// The journal is not touched here, so the same answer is reached from
+/// records in memory ([`restart_in`]).
+fn judged(
+    read: &[(u64, crate::audit::Record)],
+    mut damaged: Vec<Damaged>,
+    unread: Option<String>,
+    bounds: Bounds,
+) -> Restart {
+    use crate::audit::{Kind, Outcome};
     damaged.sort_by_key(|(ordinal, _)| *ordinal);
     damaged.dedup_by_key(|(ordinal, _)| *ordinal);
     // A run record was read: an opening record, or a closing one. A refusal
@@ -1305,7 +2151,9 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     let Walk {
         open: found,
         weak_close,
-    } = walk(&read);
+        guessed,
+        left_open,
+    } = walk(read);
     // WHICH OF THE DAMAGED RECORDS PUT THE ANSWER IN DOUBT. A record that
     // would not decode may be a run's opening record or its closing record.
     // STRICTLY before the opening record of the run the readable records
@@ -1330,30 +2178,109 @@ fn restart_scan_waiting(journal: &crate::audit::Journal, waits: u32) -> Restart 
     if !doubt.is_empty() {
         return not_known(damaged_words(&doubt, found.as_ref()));
     }
-    verdict(
-        found,
-        &before,
-        unread,
-        Span {
+    // A GUESS THAT STILL DECIDES IS NOT AN ANSWER (AG-01, codes 4 and 7): a
+    // close that could end either of two runs, or a restated run behind a
+    // close that may be its own. The walk took one reading so that it could
+    // go on; the answer names the guess instead of the reading -- and,
+    // beside it, every run of the reading, the ones no guess can move, and
+    // how many runs a guessed close surely left open (second check's
+    // blocking 2: they were dropped, with every ERROR line).
+    let span = Span {
+        records: bounds.records,
+        scan_first: bounds.scan_first,
+        settled,
+        weak_close,
+        runs_unread: bounds.runs_unread,
+    };
+    if !guessed.is_empty() {
+        return guessed_answer(&guessed, found, left_open, &before, unread.as_deref(), span);
+    }
+    verdict(found, &before, unread, span)
+}
+
+/// The scan's answer over records already read, oldest first, with nothing
+/// damaged and every run record before them read: [`restart_scan`] without
+/// the journal, for a test that states a journal's shape as records.
+#[cfg(test)]
+pub(crate) fn restart_in(read: &[(u64, crate::audit::Record)]) -> Restart {
+    let records = read
+        .last()
+        .map_or(0, |(ordinal, _)| ordinal.saturating_add(1));
+    judged(
+        read,
+        Vec::new(),
+        None,
+        Bounds {
             records,
-            scan_first,
-            settled,
-            weak_close,
+            scan_first: 0,
+            runs_unread: 0,
         },
     )
 }
 
+/// Why the answer is NOT KNOWN when guesses decide it: each guess, bounded,
+/// and what the walk's own reading would have said, so the half that is
+/// known is told and not handed over as the answer (AG-01).
+fn guessed_words(guessed: &[Guess], found: Option<&Interrupted>, unread: Option<&str>) -> String {
+    use core::fmt::Write as _;
+    let mut out = guessed
+        .iter()
+        .take(DAMAGED_NAMED)
+        .map(Guess::words)
+        .collect::<Vec<_>>()
+        .join("; and ");
+    if let Some(more) = guessed.len().checked_sub(DAMAGED_NAMED).filter(|n| *n > 0) {
+        let _infallible = write!(out, "; and {more} more such guess(es)");
+    }
+    match found {
+        Some(run) => {
+            let _infallible = write!(
+                out,
+                ". Read one way, the records leave {} run(s) open, the run opened at record {} \
+                 read last; read the other way, another run is open in its place or as well",
+                run.open_count.max(1),
+                run.ordinal
+            );
+        }
+        None => out.push_str(
+            ". Read one way, the records leave no run open; read the other way, a run is open",
+        ),
+    }
+    if let Some(why) = unread {
+        let _infallible = write!(
+            out,
+            ". The run records before the scan could not be read through the journal's index \
+             ({why}) either"
+        );
+    }
+    out
+}
+
 /// How much of the journal [`restart_scan`] read: its length, the first
 /// record of the scan, whether the records read hold a run record (an
-/// opening or a closing one), and the newest closing record the walk could
-/// not pair by position ([`Walk::weak_close`]).
+/// opening or a closing one), the newest closing record the walk could not
+/// pair by position ([`Walk::weak_close`]), and the run records before the
+/// scan it did not read ([`Interrupted::runs_unread`]).
 #[derive(Clone, Copy)]
 struct Span {
     records: u64,
     scan_first: u64,
     settled: bool,
     weak_close: Option<u64>,
+    runs_unread: u64,
 }
+
+/// Why an [`AlsoOpen`] run may have been closed after all: a record after
+/// its opening record would not decode.
+const CLOSE_UNDECODED: &str = "a record after its opening record could not be decoded and may be \
+                               its closing record";
+
+/// Why an [`AlsoOpen`] run may have been closed after all: it is known only
+/// through a restated head, and the run records before the scan, where its
+/// closing record may lie, could not be read.
+const CLOSE_UNREAD: &str = "it is known only through a restated head, and the run records before \
+                            the scan, where its closing record may lie, could not be read through \
+                            the journal's index";
 
 /// [`restart_scan`]'s answer once no damaged record is in doubt: `found` is
 /// the run the readable records leave open, `before` the damaged records
@@ -1369,7 +2296,7 @@ fn verdict(
         records,
         scan_first,
         settled,
-        weak_close,
+        ..
     } = span;
     match found {
         // THE INDEX COULD NOT BE READ AND THE RUN IS KNOWN ONLY THROUGH A
@@ -1385,43 +2312,8 @@ fn verdict(
             unread.unwrap_or_default()
         )),
         Some(mut run) => {
-            // The count is the run's whole count only when every record
-            // after its opening record was read.
-            run.failures_whole = run.failures_whole && run.ordinal >= scan_first;
-            run.undecodable_before = before.len() as u64;
-            run.undecodable = damaged_list(before);
-            // A record before it that would not decode, and a closing record
-            // after that one the walk could not pair by position: the close may
-            // belong to the damaged record, and the run the walk closed with
-            // it may be open and newer (the third check's `v62r3_p2`).
-            run.newer_may_be_open = before
-                .first()
-                .zip(weak_close)
-                .is_some_and(|((oldest, _), weak)| weak > *oldest);
-            // Its opening record and every record after it were read, so it
-            // IS open; what the index would have added is an older open run,
-            // and that it could not is said.
-            run.older_unread = unread;
-            let _dropped_when_filtered = telemetry::emit(
-                &telemetry::Event::error("pull.run", "a pull run has no closing record")
-                    .with("ordinal", telemetry::Value::Uint(run.ordinal))
-                    .with("failures", telemetry::Value::Uint(run.failures))
-                    .with("source", telemetry::Value::Str(&run.source))
-                    .with(
-                        "undecodable_before",
-                        telemetry::Value::Uint(before.len() as u64),
-                    )
-                    .with("undecodable", telemetry::Value::Str(&run.undecodable))
-                    .with(
-                        "newer_may_be_open",
-                        telemetry::Value::Bool(run.newer_may_be_open),
-                    )
-                    .with(
-                        "older_unread",
-                        telemetry::Value::Str(run.older_unread.as_deref().unwrap_or("")),
-                    )
-                    .with("reason", telemetry::Value::Str(&run.words())),
-            );
+            decorate(&mut run, before, unread, span);
+            logged(&run, before.len() as u64);
             Restart::Interrupted(run)
         }
         // THE INDEX COULD NOT BE READ: never a plain "clean" (DB-B34, repair
@@ -1444,6 +2336,274 @@ fn verdict(
             None => Restart::Clean,
         },
     }
+}
+
+/// What the scan read, set on the run the walk's reading leaves open and on
+/// every other one it carries: how whole its failure count is, the damaged
+/// records before it, whether a newer run may be open, what the index could
+/// not tell and, for each other run, what may have closed it after all.
+/// Shared by an interrupted answer and a guessed one's reading.
+fn decorate(run: &mut Interrupted, before: &[Damaged], unread: Option<String>, span: Span) {
+    let scan_first = span.scan_first;
+    // The count is the run's whole count only when every record after its
+    // opening record was read.
+    run.failures_whole = run.failures_whole && run.ordinal >= scan_first;
+    run.undecodable_before = before.len() as u64;
+    run.undecodable = damaged_list(before);
+    // A record before it that would not decode, and a closing record after
+    // that one the walk could not pair by position: the close may belong to
+    // the damaged record, and the run the walk closed with it may be open and
+    // newer (the third check's `v62r3_p2`).
+    run.newer_may_be_open = before
+        .first()
+        .zip(span.weak_close)
+        .is_some_and(|((oldest, _), weak)| weak > *oldest);
+    // Its opening record and every record after it were read, so it IS open;
+    // what the index would have added is an older open run, and that it could
+    // not is said.
+    run.older_unread = unread;
+    run.runs_unread = span.runs_unread;
+    // EVERY OTHER RUN LEFT OPEN, with what may have closed it (AG-01, code-3):
+    // a record after its opening record that would not decode, or a close
+    // before the scan that could not be read.
+    for other in &mut run.also_open {
+        other.failures_whole = other.failures_whole && other.ordinal >= scan_first;
+        other.doubt = if before.iter().any(|(at, _)| *at > other.ordinal) {
+            Some(CLOSE_UNDECODED)
+        } else if other.ordinal < scan_first && run.older_unread.is_some() {
+            Some(CLOSE_UNREAD)
+        } else {
+            None
+        };
+    }
+}
+
+/// [`restart_scan`]'s answer when a live guess decides it (AG-01): NOT
+/// KNOWN, carrying the walk's reading decorated as an interrupted answer's
+/// run is, the runs no guess can move, and the counts a guessed close surely
+/// left open; logged as an interrupted answer is for the runs that are sure,
+/// besides the WARN line every NOT KNOWN answer writes.
+fn guessed_answer(
+    guessed: &[Guess],
+    found: Option<Interrupted>,
+    left_open: Vec<LeftOpen>,
+    before: &[Damaged],
+    unread: Option<&str>,
+    span: Span,
+) -> Restart {
+    let why = guessed_words(guessed, found.as_ref(), unread);
+    let named: std::collections::BTreeSet<u64> = guessed
+        .iter()
+        .flat_map(|guess| guess.names().iter().copied())
+        .collect();
+    let reading = found.map(|mut run| {
+        decorate(&mut run, before, unread.map(str::to_owned), span);
+        run
+    });
+    let mut sure = Vec::new();
+    let mut doubted = Vec::new();
+    let mut unnamed = 0;
+    if let Some(run) = &reading {
+        // The run read last is open unless a guess names it, or it is known
+        // only through a restated head whose close may lie before an index
+        // that could not be read; the records before it that would not
+        // decode cannot be its close.
+        let restated_unread = run.ordinal < span.scan_first && run.older_unread.is_some();
+        if !named.contains(&run.ordinal) {
+            let mut newest = AlsoOpen::from(run);
+            if restated_unread {
+                newest.doubt = Some(CLOSE_UNREAD);
+                doubted.push(newest);
+            } else {
+                sure.push(newest);
+            }
+        }
+        // EVERY OTHER RUN OF THE READING IS SAID: sure, or doubted with why
+        // (third check of AG-01: a doubted run of a guessed answer was in
+        // `reading` only, and its words never named it).
+        for other in run
+            .also_open
+            .iter()
+            .filter(|other| !named.contains(&other.ordinal))
+        {
+            if other.doubt.is_none() {
+                sure.push(other.clone());
+            } else {
+                doubted.push(other.clone());
+            }
+        }
+        unnamed = run
+            .open_count
+            .saturating_sub(1)
+            .saturating_sub(run.also_open.len() as u64);
+    }
+    // A COUNT IS A FACT ONLY WHERE NOTHING READ COULD MOVE IT: no record that
+    // would not decode after the oldest of its runs' opening records (it may
+    // be one of their closes), and none of its runs known only through a
+    // restated head whose close may lie before an index that could not be
+    // read.
+    let left_open = left_open
+        .into_iter()
+        .filter(|counted| {
+            let oldest = counted.runs.iter().copied().min().unwrap_or(0);
+            before.iter().all(|(at, _)| *at < oldest)
+                && (unread.is_none() || oldest >= span.scan_first)
+        })
+        .take(OPEN_NAMED)
+        .collect();
+    let answer = Guessed {
+        why,
+        reading,
+        guessed_runs: named.into_iter().take(OPEN_NAMED).collect(),
+        sure,
+        doubted,
+        unnamed,
+        left_open,
+    };
+    let words = answer.words();
+    warned(&words);
+    surely_logged(&answer);
+    Restart::Guessed(Box::new(answer))
+}
+
+/// A guessed answer's ERROR lines (AG-01, second check's blocking 2): "a
+/// pull run has no closing record" for each run open whichever way the
+/// guesses go, as an interrupted answer writes it for each of its runs, and
+/// "pull runs have no closing record, which of them is not known" for each
+/// guessed close that surely left runs open. A guessed answer wrote one WARN
+/// line and nothing else, so `/logs` named no run the records surely leave
+/// open.
+fn surely_logged(answer: &Guessed) {
+    let open_count = answer.reading.as_ref().map_or(0, |run| run.open_count);
+    let reasons = answer
+        .sure
+        .iter()
+        .map(|run| {
+            format!(
+                "INTERRUPTED: {}, open whichever way the restart scan's guesses are read; which \
+                 other runs are open is NOT KNOWN, and the restart answer says why",
+                run.clause()
+            )
+        })
+        .collect::<Vec<_>>();
+    let counts = answer
+        .left_open
+        .iter()
+        .map(|counted| {
+            format!(
+                "the closing record at record {} could end only one of the runs opened at \
+                 records {}, so {} of them have no closing record; which is not known",
+                counted.close,
+                counted
+                    .runs
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                counted.left_open
+            )
+        })
+        .collect::<Vec<_>>();
+    let sure = answer.sure.iter().zip(&reasons).map(|(run, reason)| {
+        telemetry::Event::error("pull.run", "a pull run has no closing record")
+            .with("ordinal", telemetry::Value::Uint(run.ordinal))
+            .with("failures", telemetry::Value::Uint(run.failures))
+            .with("source", telemetry::Value::Str(&run.source))
+            .with("open_count", telemetry::Value::Uint(open_count))
+            .with("guessed", telemetry::Value::Bool(true))
+            .with("reason", telemetry::Value::Str(reason))
+    });
+    let counted = answer
+        .left_open
+        .iter()
+        .zip(&counts)
+        .map(|(counted, reason)| {
+            telemetry::Event::error(
+                "pull.run",
+                "pull runs have no closing record, which of them is not known",
+            )
+            .with("close", telemetry::Value::Uint(counted.close))
+            .with("runs", telemetry::Value::Uint(counted.runs.len() as u64))
+            .with("left_open", telemetry::Value::Uint(counted.left_open))
+            .with("source", telemetry::Value::Str(&counted.source))
+            .with("reason", telemetry::Value::Str(reason))
+        });
+    emitted_all(sure.chain(counted));
+}
+
+/// Writes `events` to the installed sink: the ONE emit site of every ERROR
+/// line the restart scan writes, interrupted and guessed alike, so
+/// `emitted`'s count of sites is what it was.
+fn emitted_all<'a>(events: impl Iterator<Item = telemetry::Event<'a>>) {
+    for event in events {
+        let _dropped_when_filtered = telemetry::emit(&event);
+    }
+}
+
+/// The ERROR line "a pull run has no closing record", ONCE FOR EACH RUN LEFT
+/// OPEN that the document names, each with its own ordinal, and one more for
+/// the runs counted and not named (AG-01, code-3). It was written for the
+/// newest run only, so `/logs` named one run of several cut short.
+///
+/// ONE EMIT SITE, as before: the lines are built first and written by the
+/// same call, so `emitted`'s count of sites is unchanged and the site stays
+/// the one `server::tests::a_run_cut_short_by_a_restart_is_logged_when_it_is_found`
+/// reads back. The lines it now writes beside the first are read back by
+/// `restart_tests::three_runs_left_open_are_all_named` (one per run named)
+/// and `restart_tests::the_open_list_stops_at_the_scan_bound_and_says_so`
+/// (the line for the runs counted and not named).
+fn logged(run: &Interrupted, undecodable_before: u64) {
+    let words = run.words();
+    let reasons = run
+        .also_open
+        .iter()
+        .map(|other| {
+            format!(
+                "INTERRUPTED: {}, one of {} runs read with no closing record; the one read last \
+                 is record {}, and its line says what is re-run and how",
+                other.clause(),
+                run.open_count,
+                run.ordinal
+            )
+        })
+        .collect::<Vec<_>>();
+    let unnamed = run
+        .open_count
+        .saturating_sub(1)
+        .saturating_sub(run.also_open.len() as u64);
+    let newest = telemetry::Event::error("pull.run", "a pull run has no closing record")
+        .with("ordinal", telemetry::Value::Uint(run.ordinal))
+        .with("failures", telemetry::Value::Uint(run.failures))
+        .with("source", telemetry::Value::Str(&run.source))
+        .with(
+            "undecodable_before",
+            telemetry::Value::Uint(undecodable_before),
+        )
+        .with("undecodable", telemetry::Value::Str(&run.undecodable))
+        .with(
+            "newer_may_be_open",
+            telemetry::Value::Bool(run.newer_may_be_open),
+        )
+        .with(
+            "older_unread",
+            telemetry::Value::Str(run.older_unread.as_deref().unwrap_or("")),
+        )
+        .with("open_count", telemetry::Value::Uint(run.open_count))
+        .with("reason", telemetry::Value::Str(&words));
+    let others = run.also_open.iter().zip(&reasons).map(|(other, reason)| {
+        telemetry::Event::error("pull.run", "a pull run has no closing record")
+            .with("ordinal", telemetry::Value::Uint(other.ordinal))
+            .with("failures", telemetry::Value::Uint(other.failures))
+            .with("source", telemetry::Value::Str(&other.source))
+            .with("open_count", telemetry::Value::Uint(run.open_count))
+            .with("reason", telemetry::Value::Str(reason))
+    });
+    let counted = (unnamed > 0).then(|| {
+        telemetry::Event::error("pull.run", "pull runs have no closing record, not named")
+            .with("unnamed", telemetry::Value::Uint(unnamed))
+            .with("open_count", telemetry::Value::Uint(run.open_count))
+    });
+    emitted_all(core::iter::once(newest).chain(others).chain(counted));
 }
 
 /// A record the restart scan was handed, or was told of by the journal's
@@ -1502,15 +2662,21 @@ fn damaged_words(doubt: &[Damaged], found: Option<&Interrupted>) -> String {
 
 /// [`Restart::NotKnown`] for `why`, logged where an operator reads it.
 fn not_known(why: String) -> Restart {
+    warned(&why);
+    Restart::NotKnown(why)
+}
+
+/// The WARN line every NOT KNOWN answer writes, with its reason: the one
+/// emit site of it, for a bare answer and a guessed one alike.
+fn warned(why: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(
             telemetry::Level::Warn,
             "pull.run",
             "whether a pull run was left open is not known",
         )
-        .with("reason", telemetry::Value::Str(&why)),
+        .with("reason", telemetry::Value::Str(why)),
     );
-    Restart::NotKnown(why)
 }
 
 /// What [`older_runs`] read before the scan.
@@ -1520,6 +2686,9 @@ struct Older {
     /// The records that did not, or that the index files as undecodable and
     /// were not read again.
     damaged: Vec<Damaged>,
+    /// Run records the index names below the scan that were NOT read: those
+    /// behind the [`INTERRUPTED_RUNS`] newest (AG-01, code-3).
+    runs_unread: u64,
 }
 
 /// [`older_runs`], building the journal's index first when it cannot be read
@@ -1659,6 +2828,7 @@ fn older_runs(
     ordinals.dedup();
     let mut out = Older {
         read: Vec::with_capacity(ordinals.len()),
+        runs_unread: below.saturating_sub(INTERRUPTED_RUNS) as u64,
         damaged: as_filed
             .iter()
             .map(|at| {
@@ -1726,6 +2896,24 @@ pub fn status_json(progress: &Progress, today: Option<i64>, restart: Option<&Res
             out.push_str(&quote_for_json(state.word()));
             out.push_str(",\"words\":");
             out.push_str(&quote_for_json(&state.words()));
+            // THE LEGS NO ANSWER COVERS (AG-01, code-2): by wire name, read
+            // from the vendor table, so a page can say which feeds' runs the
+            // answer above cannot speak for.
+            out.push_str(",\"unjournalledFeeds\":[");
+            for (at, feed) in unjournalled_feeds().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                out.push_str(&quote_for_json(feed.wire()));
+            }
+            out.push(']');
+            // A GUESSED ANSWER'S KNOWN HALF (AG-01, second check's blocking
+            // 2): the walk's reading, the runs no guess can move and the
+            // counts a guessed close surely left open. Only on that answer, so
+            // every other answer's document is what it was.
+            if let Restart::Guessed(guessed) = state {
+                guessed.json(&mut out);
+            }
             out.push('}');
         }
         None => out.push_str("null"),
@@ -2981,6 +4169,10 @@ pub fn summary_of(passes: u32, retries: u32, landed: Option<u64>, stopped: bool)
          Full basket coverage has not been verified."
     )
 }
+
+#[cfg(test)]
+#[path = "pullrun_restart_tests.rs"]
+mod restart_tests;
 
 #[cfg(test)]
 // THE SAME ALLOW EVERY TEST MODULE IN THIS CRATE CARRIES. A test that indexes a
@@ -5581,7 +6773,12 @@ mod tests {
             0,
         );
         assert_eq!(interrupted_in(&after_close), None);
-        // The same, with the opening record before the records read.
+        // The same, with the opening record before the records read. The
+        // close may be the run's own (as above) or ANOTHER run's of the same
+        // scope, window and source, and neither record names an ask, so the
+        // two shapes are one: NOT KNOWN, never "clean" (AG-01, code-7). It
+        // read None, and a live run cut short behind another run's close read
+        // clean. The walk's own reading keeps the run open (D-4976).
         let unseen = numbered(
             vec![
                 closed_at(120, "kite", 20_000, 20_010),
@@ -5590,7 +6787,13 @@ mod tests {
             ],
             900,
         );
-        assert_eq!(interrupted_in(&unseen), None);
+        assert!(
+            matches!(restart_in(&unseen), Restart::Guessed(_)),
+            "{:?}",
+            restart_in(&unseen)
+        );
+        assert_eq!(restart_in(&unseen).word(), "not_known");
+        assert_eq!(interrupted_in(&unseen).map(|run| run.ordinal), Some(0));
         // A restated head with NO close before it stands for its opening
         // record, which lies before the records read: the run is open, with
         // the opening record's own ordinal, window and source.

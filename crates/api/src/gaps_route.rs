@@ -1183,10 +1183,27 @@ async fn audit_cash_schedule(
 /// `halted` (sourced) or `halt-suspected` (UNVERIFIED, D-3320) rather than
 /// `outside-window`; a minute with no print in a trade-driven series (a `1s`
 /// share or option, D-3336 §2) is `no-print` rather than `vendor-hole`; and a
-/// minute after a contract's expiry day is `expired`.
-fn run_word(gap: &pull::gaps::Gap, trade_driven: bool, expiry: Option<i64>) -> &'static str {
+/// minute after a contract's expiry day is `expired`; and a missing minute
+/// on a day past the last one whose import of the segment's kind closed, or
+/// on a day whose import began and never closed, is `not-imported` — the
+/// import has not written it, which says nothing about the vendor (R3-05,
+/// CMP-04, SC-CLOSE-2).
+fn run_word(
+    gap: &pull::gaps::Gap,
+    trade_driven: bool,
+    expiry: Option<i64>,
+    reach: &super::feeds_route::ImportReach,
+) -> &'static str {
     if expiry.is_some_and(|last| gap.day > last) {
         return "expired";
+    }
+    // A DAY THAT HAS NOT HAPPENED YET owes nothing: neither a loss nor "not
+    // imported" (R3-05 repair 3).
+    if gap.reason == pull::gaps::Reason::VendorHole && reach.not_yet(gap.day) {
+        return NOT_YET_WORD;
+    }
+    if gap.reason == pull::gaps::Reason::VendorHole && reach.not_imported(gap.day) {
+        return NOT_IMPORTED_WORD;
     }
     if gap.reason == pull::gaps::Reason::OutsideWindow
         && let Some(halt) = pull::calendar::halt_on(gap.day)
@@ -1204,6 +1221,13 @@ fn run_word(gap: &pull::gaps::Gap, trade_driven: bool, expiry: Option<i64>) -> &
     }
     gap.reason.word()
 }
+
+/// The run word for a day the import has not reached (R3-05, CMP-04).
+const NOT_IMPORTED_WORD: &str = "not-imported";
+
+/// The word for a missing minute on a day after today (IST): the session
+/// has not happened, so the minute is neither owed nor lost (R3-05 repair 3).
+const NOT_YET_WORD: &str = "not-yet";
 
 /// The last session day of a contract: the expiry date its segment opens
 /// with (`YYYY-MM-DD-…`), or `None` for a spot series or a contract whose
@@ -1276,6 +1300,16 @@ fn audit_one(
     let one_second = asked.timeframe == store::path::Timeframe::SECOND_1;
     let trade_driven = one_second && asked.segment != "INDEX";
     let expiry = expiry_of(asked.contract.as_ref());
+    // HOW FAR THE IMPORT HAS REACHED for this feed's segment, and the days
+    // of this month whose import began and never closed, from the GDFL
+    // import journal: a cached probe, O(1) while the journal does not move
+    // (R3-05).
+    let reach = super::feeds_route::imported_to(
+        &site.store_root,
+        asked.vendor,
+        &asked.segment,
+        (first, last),
+    );
 
     // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
     // `n_valid` seeks of known length and nothing scans.
@@ -1333,7 +1367,7 @@ fn audit_one(
     let words: Vec<&'static str> = ledger
         .gaps
         .iter()
-        .map(|gap| run_word(gap, trade_driven, expiry))
+        .map(|gap| run_word(gap, trade_driven, expiry, &reach))
         .collect();
     let runs = ledger
         .gaps
@@ -1368,9 +1402,52 @@ fn audit_one(
     // the loss and from what was owed; a closed day renamed `expired` was
     // never either.
     let expired_lost = minutes_of("expired", true);
-    let mut lost_minutes = ledger.lost_minutes().saturating_sub(expired_lost);
-    ledger.expected = ledger.expected.saturating_sub(expired_lost);
+    // A DAY THE IMPORT HAS NOT REACHED IS NOT A LOSS EITHER (CMP-04): its
+    // minutes leave the loss and the owed count exactly as `expired` does,
+    // and each run still names it.
+    let not_imported = minutes_of(NOT_IMPORTED_WORD, true);
+    // NOR IS A DAY THAT HAS NOT HAPPENED YET (R3-05 repair 3): out of the
+    // loss, out of what was owed, and out of `not_imported_minutes` too.
+    let not_yet = minutes_of(NOT_YET_WORD, true);
+    let mut lost_minutes = ledger
+        .lost_minutes()
+        .saturating_sub(expired_lost)
+        .saturating_sub(not_imported)
+        .saturating_sub(not_yet);
+    ledger.expected = ledger
+        .expected
+        .saturating_sub(expired_lost)
+        .saturating_sub(not_imported)
+        .saturating_sub(not_yet);
     let mut members = halts_member(&stamps, first, last);
+    // THE DAYS THE IMPORT HAS NOT REACHED, COUNTED APART (CMP-04): neither
+    // lost nor owed, and shown beside the day the census says the import
+    // reached for this feed's segment — `null` when the census cannot say, in
+    // which case nothing was renamed.
+    members.push_str(r#","not_imported_minutes":"#);
+    members.push_str(&not_imported.to_string());
+    members.push_str(r#","not_yet_minutes":"#);
+    members.push_str(&not_yet.to_string());
+    members.push_str(r#","imported_to":"#);
+    members.push_str(
+        &reach
+            .to
+            .map_or_else(|| "null".to_owned(), |day| render::json_string(&iso(day))),
+    );
+    members.push_str(r#","imported_to_from":"#);
+    members.push_str(&render::json_string(&reach.from));
+    // THE DAYS WHOSE IMPORT BEGAN AND NEVER CLOSED, inside the reach: not
+    // imported, never lost.
+    members.push_str(r#","import_open_days":["#);
+    members.push_str(
+        &reach
+            .open
+            .iter()
+            .map(|day| render::json_string(&iso(*day)))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    members.push(']');
     if one_second {
         let no_print = minutes_of("no-print", false);
         // THE SESSION MINUTES AFTER EXPIRY, not every minute of those days:
@@ -1392,6 +1469,7 @@ fn audit_one(
             min_run,
             fold_error.as_deref(),
             (no_print, expired),
+            &reach,
         );
     }
 
@@ -1470,7 +1548,8 @@ fn halts_member(stamps: &[i64], first: i64, last: i64) -> String {
 #[expect(
     clippy::too_many_arguments,
     reason = "the month's rows and days, its calendar, and the four facts that decide \
-              what a second owes: trade-driven, expiry, the listing bound, a fold refusal"
+              what a second owes: trade-driven, expiry, the listing bound, a fold refusal, \
+              and how far the import has reached"
 )]
 fn one_second_members(
     rows: &[store::format::Bar],
@@ -1482,6 +1561,7 @@ fn one_second_members(
     min_run: u32,
     fold_error: Option<&str>,
     (no_print, expired): (u32, u32),
+    reach: &super::feeds_route::ImportReach,
 ) -> String {
     let fold_error = fold_error.map_or_else(|| "null".to_owned(), render::json_string);
     if trade_driven {
@@ -1501,7 +1581,16 @@ fn one_second_members(
             expiry.map_or_else(|| "null".to_owned(), |day| format!(r#""{}""#, iso(day))),
         );
     }
-    let audit = second_audit(rows, first, last, calendar, min_run);
+    let mut audit = second_audit(rows, first, last, calendar, min_run);
+    // A RUN ON A DAY THE IMPORT HAS NOT REACHED is named so, never a vendor
+    // hole (R3-05, CMP-04).
+    for run in &mut audit.runs {
+        if reach.not_yet(run.day) {
+            run.reason = NOT_YET_WORD;
+        } else if reach.not_imported(run.day) {
+            run.reason = NOT_IMPORTED_WORD;
+        }
+    }
     let listed = audit
         .runs
         .iter()
@@ -2691,6 +2780,326 @@ mod tests {
                 .as_str()
                 .is_some_and(|why| why.contains("calendar=record"))
         );
+    }
+
+    /// The 2018-09 NIFTY 1s month audited over a store holding only the 3rd
+    /// (less a 34-second hole), with `journal` as the GDFL import journal.
+    async fn audited_with_journal(name: &str, journal: Option<&str>) -> serde_json::Value {
+        audited_month_with_journal(name, journal, "2018-09").await
+    }
+
+    /// [`audited_with_journal`]'s store and journal, with `asked` (a month
+    /// such as `2018-09`) the month the route is asked for.
+    async fn audited_month_with_journal(
+        name: &str,
+        journal: Option<&str>,
+        asked: &str,
+    ) -> serde_json::Value {
+        let root = store_root(name);
+        let month = store::path::YearMonth::new(2018, 9).expect("a month");
+        let day = i64::from(day(2018, 9, 3).days_from_epoch());
+        let hole = (12 * 3_600 + 21 * 60 + 40)..(12 * 3_600 + 21 * 60 + 74);
+        let stamps: Vec<i64> = (33_300..55_800)
+            .filter(|second| !hole.contains(second))
+            .map(|second| second_of(day, second))
+            .collect();
+        write_rows(
+            &root,
+            Vendor::Gdfl,
+            "INDEX",
+            "NIFTY",
+            None,
+            store::path::Timeframe::SECOND_1,
+            month,
+            &stamps,
+        );
+        if let Some(lines) = journal {
+            let path = pull::gdfl_import::journal_path(&root);
+            std::fs::create_dir_all(path.parent().expect("imports/")).expect("mkdir");
+            std::fs::write(&path, lines).expect("the journal");
+        }
+        let site = std::sync::Arc::new(Site::serving(&masters(name, None, None), &root));
+        let (code, body) = gaps(
+            &site,
+            &format!(
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month={asked}&min_run=1"
+            ),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{asked}: {body}");
+        body["month"][0].clone()
+    }
+
+    /// The runs of `audited` on session minutes: not `closed`, not
+    /// `outside-window`.
+    fn owed_runs(audited: &serde_json::Value) -> Vec<serde_json::Value> {
+        audited["gaps"]
+            .as_array()
+            .expect("minute runs")
+            .iter()
+            .filter(|run| run["reason"] != "closed" && run["reason"] != "outside-window")
+            .cloned()
+            .collect()
+    }
+
+    /// **A DAY THE IMPORT HAS NOT REACHED IS `not-imported`, NEVER A VENDOR
+    /// HOLE, AND IS NOT COUNTED LOST** (R3-05, CMP-04, SC-CLOSE-2).
+    ///
+    /// Before: the GDFL import journal named 2018-09-03 as the last indices
+    /// day, yet every later session of the month was `vendor-hole` — 17
+    /// whole days of 375 lost minutes blamed on the vendor for an import that
+    /// had not run, while `/dayflags.json` said "not reached by the import
+    /// yet". The 3rd's own 34-second hole is still a vendor hole.
+    #[tokio::test]
+    async fn a_day_the_import_has_not_reached_is_not_imported_and_not_lost() {
+        // THE NEWEST LINE RE-RUNS AN OLDER DAY: the reach is the furthest day
+        // the journal names, never its newest line's (the operator's journal
+        // ends its indices on a re-run of 2025-10-21 with 2026-09-24 reached).
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-08-31 *\n\
+            done indices 2018-08-31 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-not-imported", Some(journal)).await;
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["expected"], 375, "the 3rd alone is owed: {audited}");
+        // COUNTED APART, beside the day the import reached and its source.
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        assert_eq!(audited["imported_to"], "2018-09-03", "{audited}");
+        assert!(
+            audited["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("import journal") && from.contains("indices")),
+            "{audited}"
+        );
+        // EVERY OWED MINUTE PAST THE 3RD IS `not-imported`: one whole-session
+        // run on each of the 17 sessions after it, and no `vendor-hole`.
+        let owed = owed_runs(&audited);
+        assert_eq!(owed.len(), 17, "{audited}");
+        assert!(
+            owed.iter()
+                .all(|run| run["reason"] == "not-imported" && run["minutes"] == 375),
+            "{audited}"
+        );
+        let seconds = audited["second_runs"].as_array().expect("second runs");
+        assert_eq!(seconds[0]["date"], "2018-09-03");
+        assert_eq!(
+            seconds[0]["reason"], "vendor-hole",
+            "the 3rd's own hole: {audited}"
+        );
+        assert!(
+            seconds[1..]
+                .iter()
+                .all(|run| run["reason"] == "not-imported"),
+            "{audited}"
+        );
+    }
+
+    /// **A MONTH THAT BEGINS TWO OR MORE DAYS PAST THE IMPORT'S REACH IS
+    /// ANSWERED, NEVER A PANIC** (R3-05 repair 4, the second agent's
+    /// blocking finding). Before: the open-day scan asked the journal for
+    /// `first of the month ..= the reach`, a reversed span; `BTreeMap::range`
+    /// panicked and `panic = "abort"` took the whole API down — on 15 October
+    /// 2026 for `month=2026-11` and for every contract expiring in November
+    /// or later. A month beginning the day after the reach (the boundary that
+    /// held) gave an empty span instead.
+    #[tokio::test]
+    async fn a_month_begun_two_or_more_days_past_the_reach_is_answered_never_a_panic() {
+        // THE REACH IS 29 AUGUST: SEPTEMBER BEGINS THREE DAYS PAST IT.
+        let journal = "begin indices 2018-08-29 *\n\
+            done indices 2018-08-29 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-past-reach", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-08-29", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(
+            audited["not_yet_minutes"], 0,
+            "2018 has happened: {audited}"
+        );
+        // EVERY SESSION AFTER THE 3RD (WHICH HOLDS ITS BARS) IS NOT IMPORTED.
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        let owed = owed_runs(&audited);
+        assert_eq!(owed.len(), 17, "{audited}");
+        assert!(
+            owed.iter().all(|run| run["reason"] == "not-imported"),
+            "{audited}"
+        );
+        // A FAR MONTH, AND THE LAST ONE THE ROUTE NAMES: answered, nothing
+        // lost and nothing not imported — those sessions have not happened.
+        for asked in ["2099-01", "9999-12"] {
+            let far =
+                audited_month_with_journal(&format!("gaps-far-{asked}"), Some(journal), asked)
+                    .await;
+            assert_eq!(far["lost_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["not_imported_minutes"], 0, "{asked}: {far}");
+            assert_eq!(far["imported_to"], "2018-08-29", "{asked}: {far}");
+        }
+    }
+
+    /// **A CLOSED JOURNAL LINE FOR A DAY AFTER TODAY IS NOT THE IMPORT'S
+    /// REACH** (R3-05 repair 4, the second agent's follow-up 3). Before: a
+    /// `done` line for 2099-01-01 made the reach 2099, so every day of
+    /// September 2018 the import never reached was a lost `vendor-hole` —
+    /// 17 sessions blamed on the vendor. Now the reach is the furthest closed
+    /// day at or before today, and the passed-over line is named.
+    #[tokio::test]
+    async fn a_closed_line_after_today_is_not_the_reach() {
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let audited = audited_with_journal("gaps-future-line", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-09-03", "{audited}");
+        assert_eq!(audited["lost_minutes"], 0, "{audited}");
+        assert_eq!(audited["not_imported_minutes"], 17 * 375, "{audited}");
+        assert!(
+            audited["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("2099-01-01") && from.contains("passed over")),
+            "{audited}"
+        );
+        // ONLY A FUTURE LINE: no reach at all, said, and nothing renamed.
+        let only_future = "begin indices 2099-01-01 *\n\
+            done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n";
+        let alone = audited_with_journal("gaps-future-only", Some(only_future)).await;
+        assert_eq!(alone["imported_to"], serde_json::Value::Null, "{alone}");
+        assert_eq!(alone["not_imported_minutes"], 0, "{alone}");
+        assert!(
+            alone["imported_to_from"]
+                .as_str()
+                .is_some_and(|from| from.contains("after today")),
+            "{alone}"
+        );
+    }
+
+    /// **A DAY THAT HAS NOT HAPPENED YET IS `not-yet`: NEITHER LOST NOR NOT
+    /// IMPORTED** (R3-05 repair 3, the second agent's follow-up). Before:
+    /// `/gaps.json` for October 2026, asked on 15 October, counted 16..31
+    /// October as 7,500 not-imported minutes; for a pulled feed, whose reach
+    /// says nothing, the same minutes were lost `vendor-hole`. The rule is
+    /// one path for every feed: an imported reach and a pulled one.
+    #[test]
+    fn a_day_after_today_is_not_yet_never_lost_or_not_imported() {
+        let day = |d: u8| {
+            i64::from(
+                pull::session::Day::new(2026, 10, d)
+                    .expect("a real date")
+                    .days_from_epoch(),
+            )
+        };
+        let gap = |on: i64| pull::gaps::Gap {
+            day: on,
+            from: 555,
+            to: 929,
+            reason: pull::gaps::Reason::VendorHole,
+        };
+        let imported = super::super::feeds_route::ImportReach {
+            to: Some(day(14)),
+            from: "test".to_owned(),
+            open: Vec::new(),
+            today: Some(day(15)),
+        };
+        let pulled = super::super::feeds_route::ImportReach {
+            to: None,
+            from: "pulled".to_owned(),
+            open: Vec::new(),
+            today: Some(day(15)),
+        };
+        for reach in [&imported, &pulled] {
+            assert_eq!(run_word(&gap(day(16)), false, None, reach), NOT_YET_WORD);
+            assert_eq!(run_word(&gap(day(31)), true, None, reach), NOT_YET_WORD);
+            assert!(reach.not_yet(day(16)) && !reach.not_imported(day(16)));
+            assert!(!reach.not_yet(day(15)));
+        }
+        // TODAY ITSELF, past the reach: not imported (the day has begun).
+        assert_eq!(
+            run_word(&gap(day(15)), false, None, &imported),
+            NOT_IMPORTED_WORD
+        );
+        assert_eq!(run_word(&gap(day(15)), false, None, &pulled), "vendor-hole");
+        // NO CLOCK: nothing is `not-yet`; the reach decides as before.
+        let unclocked = super::super::feeds_route::ImportReach {
+            today: None,
+            ..imported.clone()
+        };
+        assert_eq!(
+            run_word(&gap(day(16)), false, None, &unclocked),
+            NOT_IMPORTED_WORD
+        );
+    }
+
+    /// **A DAY WHOSE IMPORT BEGAN AND NEVER CLOSED IS `not-imported`, NEVER
+    /// LOST** — in the middle of the reach and at its end (R3-05 repair 2,
+    /// the second agent's follow-up 1).
+    ///
+    /// Before: the reach was the furthest day ANY line named, a `begin` with
+    /// no closing line included, so the trailing open 6th moved the reach to
+    /// the 6th and both open days were `vendor-hole`, 750 minutes lost. Now
+    /// the reach is the furthest CLOSED day (the 5th), the open 4th inside
+    /// it is named, and only the 5th — closed and holding nothing — is owed
+    /// and lost.
+    #[tokio::test]
+    async fn a_day_begun_and_never_closed_is_not_imported_and_not_lost() {
+        let journal = "begin indices 2018-09-03 *\n\
+            done indices 2018-09-03 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-09-04 *\n\
+            begin indices 2018-09-05 *\n\
+            done indices 2018-09-05 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+            begin indices 2018-09-06 *\n";
+        let audited = audited_with_journal("gaps-open-day", Some(journal)).await;
+        assert_eq!(audited["imported_to"], "2018-09-05", "{audited}");
+        assert_eq!(
+            audited["import_open_days"],
+            serde_json::json!(["2018-09-04"]),
+            "{audited}"
+        );
+        assert_eq!(audited["lost_minutes"], 375, "the 5th alone: {audited}");
+        assert_eq!(audited["expected"], 2 * 375, "the 3rd and 5th: {audited}");
+        assert_eq!(audited["not_imported_minutes"], 16 * 375, "{audited}");
+        let owed = owed_runs(&audited);
+        assert_eq!(
+            owed.iter()
+                .filter(|run| run["reason"] == "not-imported")
+                .count(),
+            16,
+            "the open 4th and the 15 sessions after the 5th: {audited}"
+        );
+        assert_eq!(
+            owed.iter()
+                .filter(|run| run["reason"] == "vendor-hole")
+                .count(),
+            1,
+            "only the closed, empty 5th is a vendor hole: {audited}"
+        );
+    }
+
+    /// **WITHOUT AN IMPORT JOURNAL FOR THE SEGMENT'S KIND, NOTHING IS
+    /// RENAMED**, and the month says why (R3-05, CMP-04): no journal at all,
+    /// or one that names only another kind (options through 2020-09-16),
+    /// leaves the same 17 days `vendor-hole` and lost — the census's held
+    /// span is never taken as the import's reach.
+    #[tokio::test]
+    async fn without_a_journal_for_the_kind_nothing_is_renamed_and_the_month_says_why() {
+        let options_only = "begin options 2020-09-16 *\n";
+        for (name, journal) in [
+            ("gaps-no-journal", None),
+            ("gaps-other-kind", Some(options_only)),
+        ] {
+            let audited = audited_with_journal(name, journal).await;
+            assert!(audited["imported_to"].is_null(), "{name}: {audited}");
+            assert!(
+                audited["imported_to_from"]
+                    .as_str()
+                    .is_some_and(|why| !why.is_empty()),
+                "{name}: {audited}"
+            );
+            assert_eq!(audited["not_imported_minutes"], 0, "{name}: {audited}");
+            assert_eq!(audited["lost_minutes"], 17 * 375, "{name}: {audited}");
+            let owed = owed_runs(&audited);
+            assert_eq!(owed.len(), 17, "{name}: {audited}");
+            assert!(
+                owed.iter().all(|run| run["reason"] == "vendor-hole"),
+                "{name}: {audited}"
+            );
+        }
     }
 
     /// Record one month of one series in `vendor`'s census, as a landing would.

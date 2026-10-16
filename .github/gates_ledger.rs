@@ -1334,7 +1334,14 @@ struct Allowlists {
 }
 
 /// Rule 1. docs/07 layer 4: never `binary_search`.
-const ALLOW_SEARCH: Allow = &[("crates/store/src/file.rs", 1)];
+const ALLOW_SEARCH: Allow = &[
+    ("crates/store/src/file.rs", 1),
+    // R3-05 repair 4: `ImportReach::not_imported` bisects the asked month's
+    // days whose import began and never closed, at most 31 (one month's
+    // days), ascending as `imported_to` builds them. O(log 31) per minute
+    // run. Reason in docs/06-limits.md, gate 11 rule 1 and L-R305-3.
+    ("crates/api/src/feeds_route.rs", 1),
+];
 
 /// Rule 2. CLAUDE.md section 7, both halves of it.
 const ALLOW_FLOAT: Allow = &[
@@ -1506,6 +1513,12 @@ const ALLOW_SORT: Allow = &[
     // order; O(n log n) per image written (L-IA-4), never on a lookup. Its
     // reason is in docs/06-limits.md, gate 11 rule 4 (D-4861).
     ("crates/store/src/verdict.rs", 1),
+    // R3-05 repair 4: `store::settings::list_numbers` sorts the generation
+    // numbers of one settings directory, O(g log g) for g generations on
+    // disk, once per reader start and once per save; never on a refresh or
+    // a GET that finds nothing new. Reason in docs/06-limits.md, gate 11
+    // rule 4 and L-R305-6.
+    ("crates/store/src/settings.rs", 1),
     ("crates/cli/src/boolean_statistics_v1.rs", 1),
     ("crates/pull/src/ingest.rs", 1),
     ("crates/api/src/recovery.rs", 2),
@@ -1596,6 +1609,11 @@ const ALLOW_SCAN: Allow = &[
     ("crates/api/src/server.rs", 5),
     ("crates/api/src/calendar_route.rs", 1),
     ("crates/api/src/census_cache.rs", 1),
+    // R3-05: `feeds_route::census_row`'s fallback, a `find` for one feed's
+    // row over the per-vendor census read when the row is not at its
+    // vendor's index; bounded by `Vendor::ALL`, as the five above. Reason in
+    // docs/06-limits.md, gate 11 rules 6 and 7.
+    ("crates/api/src/feeds_route.rs", 1),
     ("crates/api/src/instruments_route.rs", 2),
     ("crates/api/src/store_route.rs", 2),
     ("crates/api/src/store_wire.rs", 1),
