@@ -1787,6 +1787,76 @@ mod bars_series_rs {
         assert!(june.faults.is_empty(), "{:?}", june.faults);
     }
 
+    /// Holds the fixture series' minute month `m` exclusive, as an import
+    /// writer holds it, without writing a byte.
+    fn hold(root: &std::path::Path, m: u8) -> store::flock::Flock<std::fs::File> {
+        let lock = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: SEGMENT,
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(m),
+            file: FileKind::Lock,
+        })
+        .expect("a legal path")
+        .to_path_buf(root);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock file");
+        store::flock::Flock::try_lock(file, lock).expect("the month's lock is free")
+    }
+
+    /// **A BOUND THAT DOES NOT CUT A MONTH'S RECORDS OPENS NO MONTH.** May's
+    /// first record is at midnight IST of the 2nd, and the day bound starts
+    /// exactly there; a time-of-day bound whose first second is one past its
+    /// last keeps no second of any day. Neither needs a lookup, so with May
+    /// held by another writer (counted while it was free) the plan is still
+    /// built and the window answers. Kills `cut_months`' `lo > first_ts` →
+    /// `>=` and `day_runs`' `window_lo < window_hi` → `<=`, each of which
+    /// opened the month to locate an edge that needed no locating.
+    #[test]
+    fn bars_series_a_bound_that_cuts_no_record_opens_no_month() {
+        let scratch = Scratch::new("series-no-lookup");
+        let midnight = open_of(5, 2) - 33_300;
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[(midnight, 10), (open_of(5, 2), 11)],
+        );
+        let free = window(scratch.root(), &query(month(5), month(5))).expect("answers");
+        assert_eq!(free.total, 2);
+        let _held = hold(scratch.root(), 5);
+        let mut from_midnight = query(month(5), month(5));
+        from_midnight.filter.from = Some(midnight * 1_000_000);
+        let got = window(scratch.root(), &from_midnight)
+            .expect("a bound at the first record locates nothing");
+        assert_eq!(got.total, 2);
+        let mut no_second = query(month(5), month(5));
+        no_second.filter.tod = Some((33_601, 33_600));
+        let got =
+            window(scratch.root(), &no_second).expect("a window of no second locates nothing");
+        assert_eq!(got.total, 0);
+        // AN EMPTY MONTH IS NEVER LOCATED IN, held or not: June holds no
+        // record, so a day bound inside it has nothing to cut.
+        empty_month(scratch.root(), 6);
+        let free = window(scratch.root(), &query(month(6), month(6))).expect("answers");
+        assert_eq!((free.total, free.months_read), (0, 1));
+        let _june = hold(scratch.root(), 6);
+        let mut inside_june = query(month(6), month(6));
+        inside_june.filter.from = Some((open_of(6, 10) - 33_300) * 1_000_000);
+        let got = window(scratch.root(), &inside_june).expect("an empty month locates nothing");
+        assert_eq!(got.total, 0);
+    }
+
     /// **AN EDGE MONTH A DAY BOUND LEAVES NO ROW OF IS NO RUN**, so the next
     /// month's first row has no kept row behind it. April's only row is
     /// before the 20th, the bound's first day: with the lookback off, May's

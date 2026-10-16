@@ -2634,3 +2634,234 @@ impl Unread {
 #[cfg(test)]
 #[path = "bars_sort_tests.rs"]
 mod tests;
+
+/// Tests written for mutants and unrun lines a cloud mutation pass found in
+/// this file (`reports/cloud-mut-api-a-20261016.md`). Each names its target.
+/// Every bar is generated, in a scratch store the test removes.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a fixture that cannot be planted is a test that cannot run, and \
+              must fail loudly"
+)]
+mod cloud_mutant_tests {
+    use std::path::PathBuf;
+
+    use brutex_core::instrument::Contract;
+    use brutex_core::vendor::Vendor;
+    use store::format::{Bar, OI_NULL};
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    use store::sort_index::{Column, Shape, SortIndex};
+
+    use super::super::{Filter, SeriesKey, SortKey, WindowQuery, window};
+
+    const MICROS: i64 = 1_000_000;
+    const CE: &str = "2031-03-27-1000000-CE";
+
+    /// A scratch store root, emptied first.
+    fn scratch(tag: &str) -> PathBuf {
+        let root = crate::scratch::path(&format!("cloud-sort-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        root
+    }
+
+    fn option() -> SeriesKey {
+        SeriesKey::new("NSE", "FNO", "NIFTY", Contract::parse(CE))
+    }
+
+    fn index() -> SeriesKey {
+        SeriesKey::new("NSE", "INDEX", "NIFTY", None)
+    }
+
+    fn month(m: u8) -> YearMonth {
+        YearMonth::new(2031, m).expect("a month")
+    }
+
+    /// Bar `i` of a month: three sessions of 120 minutes from 09:15 IST on
+    /// the 2nd, 3rd and 4th, a close that wanders, and the open interest
+    /// given.
+    fn bar(month: YearMonth, i: i64, open_interest: i64) -> Bar {
+        let day = 1 + i / 120;
+        let ts = month.ist_bounds_micros().0 + (day * 86_400 + 555 * 60 + (i % 120) * 60) * MICROS;
+        let close = 10_000 + (i * 7_919 + i64::from(month.month()) * 13) % 997;
+        Bar {
+            ts_micros: ts,
+            open: close,
+            high: close + 5,
+            low: close - 5,
+            close,
+            volume: 1,
+            open_interest,
+        }
+    }
+
+    /// Writes `rows` as `key`'s month on GDFL, and plants a sort index of
+    /// runs of 130 built from `indexed` — the same rows, or rows a test
+    /// altered. Returns the `.srt`'s path.
+    fn write(
+        root: &std::path::Path,
+        key: &SeriesKey,
+        month: YearMonth,
+        rows: &[Bar],
+        indexed: &[Bar],
+    ) -> PathBuf {
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: &key.exchange,
+            segment: &key.segment,
+            symbol: &key.symbol,
+            contract: key.contract,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        let symbol_id = super::symbol_id(&key.symbol);
+        let mut file = store::file::BarFile::open_or_create(root, path, symbol_id)
+            .expect("a generated bar file");
+        file.append(rows).expect("generated records");
+        let bars = path.to_path_buf(root);
+        crate::scratch::plant_pre_rule_sort_index(
+            &bars,
+            &Shape::of(month, 60, symbol_id),
+            indexed,
+            130,
+        );
+        bars.with_extension("srt")
+    }
+
+    fn query(series: SeriesKey, from: YearMonth, to: YearMonth, sort: SortKey) -> WindowQuery {
+        WindowQuery {
+            vendor: Vendor::Gdfl,
+            timeframe: Timeframe::MINUTE_1,
+            series: vec![series],
+            from,
+            to,
+            sort,
+            desc: false,
+            offset: Some(0),
+            limit: 37,
+            want_extremes: false,
+            at: None,
+            filter: Filter::default(),
+            lookback: true,
+            coverage: false,
+        }
+    }
+
+    /// **A RUN WHOSE EVERY ROW IS NULL IN THE COLUMN HOLDS NO VALUE TO
+    /// SLICE.** February's open interest is null on every bar; January's is a
+    /// number. The open-interest page from the first row is January's
+    /// smallest, from the indexes, and February's runs are passed over when
+    /// the rows holding the chosen value are gathered. Runs `value_slices`'
+    /// all-null run, which no test reached.
+    #[test]
+    fn a_run_whose_every_row_is_null_holds_no_value() {
+        let root = scratch("all-null-run");
+        let jan: Vec<Bar> = (0..360)
+            .map(|i| bar(month(1), i, 40_000 + (i * 31) % 360))
+            .collect();
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        write(&root, &option(), month(1), &jan, &jan);
+        write(&root, &option(), month(2), &feb, &feb);
+        let got = window(
+            &root,
+            &query(option(), month(1), month(2), SortKey::OpenInterest),
+        )
+        .expect("answers");
+        let served: Vec<i64> = got.bars.iter().map(|row| row.bar.open_interest).collect();
+        let mut want: Vec<i64> = jan.iter().map(|bar| bar.open_interest).collect();
+        want.sort_unstable();
+        want.truncate(37);
+        assert_eq!(served, want);
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!((report.indexed_rows, report.scanned_rows), (720, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A CUT RUN WHOSE ENTRIES INSIDE THE BOUND DO NOT COUNT ITS ROWS
+    /// THERE IS READ, AND SAYS SO IN NUMBERS.** The index was built from
+    /// rows one of which — row 50, inside the first run — is stamped on the
+    /// 3rd rather than the 2nd, so the run's first and last stamps still bind
+    /// it to the bars. A day bound from the 3rd cuts that run: its entries
+    /// inside the bound are 11 and the bars there are 10, so the stretch is
+    /// read and named, and the page is the brute force. Runs `cut_entries`'
+    /// count refusal, which no test reached.
+    #[test]
+    fn a_cut_run_whose_entries_miscount_the_bound_is_read() {
+        let root = scratch("cut-miscount");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let mut indexed = rows.clone();
+        indexed[50].ts_micros = rows[120].ts_micros + 30 * MICROS;
+        write(&root, &index(), month(1), &rows, &indexed);
+        let third = month(1).ist_bounds_micros().0 + 2 * 86_400 * MICROS;
+        let mut asked = query(index(), month(1), month(1), SortKey::Close);
+        asked.filter.from = Some(third);
+        let got = window(&root, &asked).expect("answers");
+        let mut want: Vec<(i64, i64)> = rows
+            .iter()
+            .filter(|bar| bar.ts_micros >= third)
+            .map(|bar| (bar.close, bar.ts_micros))
+            .collect();
+        want.sort_unstable();
+        want.truncate(37);
+        let served: Vec<(i64, i64)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.bar.ts_micros))
+            .collect();
+        assert_eq!(served, want);
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert!(
+            report.scanned_why.iter().any(|why| why.contains(
+                "its run holds 11 entries inside the day bound and the bars hold 10 rows there"
+            )),
+            "{report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **MORE THAN `MAX_BROKEN` MONTHS WHOSE INDEXES FAIL WHILE THEY ARE READ
+    /// ARE REFUSED BY NAME**, never asked again without end. Ten months, every
+    /// run of each with a close block that fails its checksum: each attempt
+    /// sets one month aside and asks again, and past the ninth the page is
+    /// refused naming the cap. Runs `page`'s refusal, which no test reached.
+    #[test]
+    fn past_max_broken_failing_indexes_the_page_is_refused() {
+        let root = scratch("max-broken");
+        for m in 1..=10 {
+            let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+            let srt = write(&root, &index(), month(m), &rows, &rows);
+            let shape = Shape::of(month(m), 60, super::symbol_id("NIFTY"));
+            let at: Vec<u64> = SortIndex::open(&srt, &shape)
+                .expect("the planted index opens")
+                .runs()
+                .iter()
+                .map(|run| run.offset + run.column(Column::Close).entries_at() + 9)
+                .collect();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&srt)
+                .expect("the planted index");
+            for at in at {
+                let mut byte = [0u8; 1];
+                std::os::unix::fs::FileExt::read_exact_at(&file, &mut byte, at).expect("a byte");
+                byte[0] ^= 0x04;
+                std::os::unix::fs::FileExt::write_all_at(&file, &byte, at).expect("a byte");
+            }
+        }
+        let why = window(&root, &query(index(), month(1), month(10), SortKey::Close))
+            .expect_err("past the cap the page is refused");
+        assert!(
+            why.starts_with(&format!(
+                "more than {} months' sort indexes failed while this page read them",
+                super::MAX_BROKEN
+            )),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

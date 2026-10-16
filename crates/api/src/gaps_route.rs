@@ -3595,4 +3595,80 @@ mod cloud_mutant_tests {
         drop(held);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Set in the child [`a_full_calendar_pool_refuses_the_census_and_the_audit`]
+    /// runs itself in, where the pool it fills is that process's alone.
+    const FULL_POOL_CHILD: &str = "BRUTEX_CLOUD_MUTANT_FULL_CALENDAR_POOL_CHILD";
+
+    /// **A FULL CALENDAR POOL REFUSES BY NAME, BOTH WHERE THE SERIES IS FOUND
+    /// IN THE CENSUS AND WHERE ITS MONTHS ARE AUDITED** — `429`, never an
+    /// audit that did not happen. Every slot of the pool is held; then a
+    /// request that names no exchange or segment must read the census to
+    /// find them, and a request that names both must audit its span, and
+    /// each is refused. Runs `gaps_json`'s two admission refusals, which no
+    /// test reached. The pool is process-wide, so the test runs itself in a
+    /// child process where nothing else needs it.
+    #[test]
+    fn a_full_calendar_pool_refuses_the_census_and_the_audit() {
+        if std::env::var_os(FULL_POOL_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+                .args([
+                    "--exact",
+                    "server::gaps_route::cloud_mutant_tests::\
+                     a_full_calendar_pool_refuses_the_census_and_the_audit",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FULL_POOL_CHILD, "1")
+                .output()
+                .expect("the child test process starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "child failed or ran no test:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let root = crate::scratch::path("cloud-full-calendar-pool");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("a scratch root");
+            let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(
+                crate::detail::MAX_CALENDAR_CONCURRENT + 1,
+            ));
+            let holders: Vec<_> = (0..crate::detail::MAX_CALENDAR_CONCURRENT)
+                .map(|_| {
+                    let gate = std::sync::Arc::clone(&gate);
+                    tokio::spawn(crate::detail::run_calendar(move || {
+                        gate.wait();
+                    }))
+                })
+                .collect();
+            while crate::detail::run_calendar(|| ()).await != Err(crate::detail::RunError::Saturated)
+            {
+                tokio::task::yield_now().await;
+            }
+            for query in [
+                "/gaps.json?feed=dhan&symbol=NIFTY&timeframe=1min&month=2025-05",
+                "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2025-05",
+            ] {
+                let uri: axum::http::Uri = query.parse().expect("a URI");
+                let (status, _, body) = gaps_json(axum::extract::State(site.clone()), uri).await;
+                assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{query}: {body}");
+                assert!(body.contains("calendar derivation not admitted"), "{query}: {body}");
+            }
+            gate.wait();
+            for holder in holders {
+                holder.await.expect("a holder").expect("admitted");
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
 }
