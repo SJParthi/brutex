@@ -49,6 +49,8 @@
 mod census;
 #[path = "ratio/logs_dirs.rs"]
 mod logs_dirs;
+#[path = "ratio/months.rs"]
+mod months;
 #[path = "ratio/sources.rs"]
 mod sources;
 #[path = "ratio/spot.rs"]
@@ -596,6 +598,7 @@ fn main() {
     ok &= spot::probes_are_flat();
     ok &= sources::pages_are_flat();
     ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
+    ok &= months::rows_are_measured();
     if ok {
         println!("all ratios within the ceiling");
     } else {
