@@ -68965,3 +68965,328 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-4966 — A window key whose plan holds no month at its feed and rung is refused `unknown_series`, naming the key and any successor the lineage or the alias table records; "an absence, not a refusal" now covers only a series that holds at least one month (AG-03) — 2026-10-15
+
+**Implemented by** AG-03 (`crates/api/src/bars.rs`, `refuse_unknown_series`
+and `successor_of`; tests `crates/api/src/bars_unknown_series_tests.rs`).
+**Finding** app-2 (assurance attack, 14 Oct 2026, confirmed by both
+skeptics; severity medium by one, low by the other).
+
+**What was observed.** `GET /bars/window.json` answered a key that names no
+series — an unknown symbol (`NSE-INDEX-NOTASYMBOL`), a pre-rename name
+(`NSE-CASH-ZOMATO`), a BSE key with no files (`BSE-INDEX-SENSEX`), a rung the
+feed never stores (gdfl `1min`), a nonsense segment (`NSE-FOO-NIFTY`), 1,024
+contracts that never existed — `200` with `total 0`, every asked month
+counted in `months_outside_life`, `missing_months []` and `faults null`.
+Apart from `key`, that is the body a REAL series gets for a month outside its
+life (ETERNAL zerodha 1min 2020-03; HDFC gdfl 1s 2024-03), so no field told
+"no such series" from "nothing in range": the cause was mislabelled, not only
+hidden. The cause was deliberate — `bars_series.rs`'s `held_months` comment
+calls a directory that does not exist "an absence, not a refusal" — but no
+decision or limit recorded it for a series with no file at all, and D-3332
+gave alias resolution to Search and `/spot.json` only. `/bars.json` refuses
+such a key only as a side effect of opening one absent month (the same `400`
+a held series gets for NIFTY 2030-01), so it was no model either.
+
+**Decision.**
+
+1. **A key whose plan holds no month at all is refused.** After every
+   series' plan is built and before any is tallied, a plan whose `held_all`
+   is empty — its rung directory does not exist, or exists and holds no
+   `YYYY-MM.bin` — refuses the window:
+   `unknown_series: <key> names no series <feed> holds at <rung>`.
+2. **A window with any such key is refused whole**, never answered for its
+   held keys with the rest hidden: `unknown_series: <n> of <m> keys name no
+   series <feed> holds at <rung>: <key>, <key>, …`, naming at most
+   `MAX_NAMED_UNKNOWN` = 16 and counting the rest (`, and <r> more`), so a
+   window of `MAX_SERIES` keys that all name nothing is refused in one
+   bounded sentence.
+3. **The successor is named when something records one, and never
+   guessed.** First the GDFL re-key's lineage (`now <by>`, D-3331); else, for
+   a series' own price (no contract) on an NSE key of a feed the alias table
+   keys (`brutex_core::alias::KEYED_FEEDS`: zerodha, gdfl), the key
+   `brutex_core::alias::option_underlying` files the symbol's price series
+   under — the one table `/spot.json` resolves through (D-3332): `now
+   NSE-CASH-ETERNAL` for a renamed share, `filed as
+   NSE-INDEX-NIFTYFINSERVICE` for an index asked by its F&O symbol. A
+   contract key gets the lineage's successor only (the table answers where a
+   symbol's own price lives, not where its options are filed); a BSE key, a
+   feed outside `KEYED_FEEDS` and a symbol with no row get none. Whether the
+   successor holds months at this rung is not probed.
+4. **What does not change.** A series holding at least one month at this
+   feed and rung still answers a month before its first file or after its
+   last `200` with `months_outside_life` (D-3326, DB-065); an index's missing
+   month inside its feed's span is still a hole (DB-B47); an expired contract
+   with files is held; a key in the wrong case keeps its own `400`; an
+   unlistable directory keeps its own `cannot list` refusal; a retired key
+   keeps D-3331's. The `held_months` comment's "an absence, not a refusal"
+   is narrowed by this entry to series that hold at least one month; the
+   comment itself is in `bars_series.rs` (AF-04's file) and is not edited
+   here.
+5. **The refusal leaves through the route's existing `refuse()` path**, so
+   its status is that path's `400`. A distinct `404` needs `bars_route.rs`
+   (AF-05's) and is a named follow-on (L-AG03-01).
+
+**Side effect, stated.** A window with no `feed=` reads Dhan (RT-DB-01, owned
+by R4-02). Before, it answered `total 0, months_outside_life 1` for NIFTY
+2024-03; now it is refused `unknown_series: NSE-INDEX-NIFTY names no series
+dhan holds at 1min`. R4-02's feed rule is unchanged; its symptom is now loud.
+
+**Rejected.** A per-series fault on a `200` (one skeptic's cheaper form): a
+grid would still render an empty history beside it, the hidden-fallback shape
+`CLAUDE.md` §4 bans. Probing the census facet index per key (the finding's
+suggestion): `held_all` is already the plan's memoised directory listing, one
+`stat` per key, and it is what the window reads, so a census lag cannot make
+the two disagree. Serving the successor's bars under the asked key: an alias
+the caller did not ask for, answered silently.
+
+**Proved by** `api::bars::unknown_series_tests::an_unknown_symbol_is_refused_on_the_window`,
+`…::a_renamed_old_name_is_refused_naming_its_successor`,
+`…::a_rung_the_feed_never_stores_is_refused`,
+`…::a_bse_key_with_no_files_is_refused`,
+`…::a_window_with_one_unknown_key_among_held_ones_is_refused_naming_it`,
+`…::a_held_series_outside_its_life_still_answers_200_unchanged`,
+`…::an_index_hole_is_still_a_hole`,
+`…::a_rung_directory_that_holds_no_bin_is_refused`,
+`…::a_rung_directory_that_cannot_be_listed_keeps_its_own_error`,
+`…::max_series_keys_all_unknown_are_refused_in_one_bounded_sentence`,
+`…::a_key_differing_only_in_case_keeps_its_own_refusal`,
+`…::an_expired_contract_that_has_files_is_held`,
+`…::an_empty_symbol_is_refused_and_never_answered_empty`,
+`…::a_garbage_segment_is_refused`,
+`…::a_one_month_and_a_max_window_months_range_both_refuse_an_unknown_key`,
+`…::the_no_feed_default_is_refused_naming_its_feed`,
+`…::a_superseded_key_names_the_key_the_lineage_moved_it_to`;
+`api::bars::window_tests::a_window_over_nothing_is_empty_and_says_how_many_months_were_absent`
+and `api::server::bars_window_route_tests::window_pages_preserve_integer_values_month_gaps_and_change_provenance`,
+which pinned the old answer for a series with no month (`200`,
+`months_outside_life`) and now pin the refusal beside the held series' empty
+answer; and on a shadow of the real store (L-AG03-02).
+
+### D-4967 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
+
+**Implemented by** R4-08 (E2E-02): `pull::tickstore_write` (tests in
+`crates/pull/src/tickstore_write_tests.rs`), the verb `cli tickstore-write ZIP
+ROOT [--run-id ID] [--workers N]` (`crates/cli/src/tickstore_command.rs`), the
+bench C-TSW-01/02 (`crates/pull/benches/ratio/tickstore_write.rs`). The crate
+graph does not change: `pull` already reads the tick store, and `cli` already
+names `pull`.
+
+**Decision.**
+
+1. **New code, nothing ported that links C.** The separate tool
+   (`/Volumes/WD_BLACK/brutex/tickstore`) depends on `zstd = 0.13` (C libzstd
+   through a `build.rs`), `memmap2`, `libc` and `rayon`; `CLAUDE.md` §2 forbids
+   the binding and §4 the mapping. The writer uses only the workspace's
+   `ruzstd` 0.8.2 encoder (D-2801) at `Fastest`, the one compressing level
+   that crate implements (`Default`, `Better` and `Best` are
+   `unimplemented!()` in its `encoding/frame_compressor.rs`); a panic inside
+   the encoder is caught and refused by name. The zip is read only through
+   `pull::gdfl_archive` (one zip authority, FM-238), which gains two fields on
+   `ZipEntry`: the name's raw bytes and the record's DOS date and time. The
+   lock is `std::fs::File::try_lock` on the root's `.lock`, the same file the
+   tool locks, so the two never write one root at once. No new dependency.
+2. **The format is the frozen one.** Container, index, footer, CRC and the
+   columnar transform are `tickstore-data/FORMAT.md` v1 to the byte; only the
+   zstd frames differ, and any valid frame decodes in `pull::gdfl_tickstore`.
+   A file from this writer is therefore NOT the tool's bytes for the same zip,
+   and **a day's identity is its decoded entries** (name bytes, size, CRC-32,
+   DOS time, rebuilt bytes), never its `.bts` bytes (FM-249). The verify is
+   writer-blind: it holds a tool-written file to the same rules. Every log
+   line and event names the writer (`pull::tickstore_write/1 ruzstd-0.8.2
+   Fastest`), the commit of the code that ran and the run.
+3. **Where the day file goes** is the readers' own path rule
+   (`TickStore::day_path`, `NfoTickStore::day_path`), from the zip's FILE
+   NAME, which must be exactly a tree's day folder for a real date plus
+   `.zip`. A conflict copy (`… (1).zip`), `_v2`, `.ZIP` or a bad date is
+   refused `name_not_canonical` rather than written under a name no reader
+   opens (FM-024's writer half). The zip must hold an entry in the folder its
+   name states and none in another day's folder (`inner_folder_mismatch`);
+   other stray members are kept, counted as `outside_folder`.
+4. **The protocol.** Before anything is written: names UTF-8 (the readers
+   decode names lossily, so two non-UTF-8 names could not be told apart,
+   FM-248), at most a `u16` long, unique; at most a `u32` of entries; no
+   member over 2 GiB; every member inflated and held to its central size and
+   CRC-32 (a bad CRC writes NOTHING, not even the day's folder). Members are
+   encoded in memory on up to eight threads and each block rebuilt through
+   `gdfl_tickstore::rebuild` before it is kept; the day's blocks are capped at
+   4 GiB. The tick store's root must already be a directory: a mistyped root
+   is refused `root_missing` and never made (a root no reader opens would
+   hold days nobody finds). A year or month folder made for the day has its
+   parent fsynced, outermost first. Then `<day>.bts.tmp.<run-id>` is created
+   through `store::staging::create`, the workspace's one door for a temporary
+   (R3-16, D-4951, gate 28), in the day's own folder (so the publish is a
+   same-directory rename and cannot meet EXDEV, FM-036), written, fsynced,
+   and EVERY entry read back from it through
+   `gdfl_tickstore` and compared byte for byte with the zip's member read
+   again, with each block after the one before it (`block_overlap`, FM-248).
+   Only then is it renamed to `<day>.bts` and the folder fsynced: only then is
+   the day held.
+5. **Nothing is removed and nothing is overwritten.** A `<day>.bts.tmp*` from
+   any run (the tool's `.bts.tmp` included) is refused `stale_temp` with each
+   name and length and left for the operator's deletion list; so is the
+   temporary of a full disk (`disk_full stage=compress file=… bytes=…`) or of a
+   failed verify. A held day is verified against its zip and nothing is
+   written (`held`); a held day that no longer matches is refused
+   `held_day_differs` and left as it is, and a zip that no longer reads back
+   as its own records state (a flipped byte, a cut stream) is refused
+   `zip_corrupt_on_verify`, the held day left and not blamed. Zips are kept.
+   **The staging door and this rule.** `store::staging::create` clears a
+   regular file with one name at the name it is handed (a dead writer's
+   leftover, D-4951). This writer never hands it such a name by choice: the
+   leftover check runs first, under the root's lock, and refuses any
+   `<day>.bts.tmp*`. The clear path is therefore reached only when a file
+   appears at this run's own name between that check and the create, which
+   is a race against the lock; the run then stops `temp_raced`, naming the
+   bytes the door cleared, and leaves its own empty temporary, which the next
+   run refuses by name. A second name of another file there is refused
+   `temp_not_created` (`staging_linked`) and nothing is written through it.
+6. **Every outcome is saved and visible**: one `v=1` line of the root's
+   append-only `tickstore-write.log`, fsynced (verdict, the day's and the
+   zip's paths quoted so a folder with a space stays one field, writer,
+   commit, run, entries, columnar, raw fallbacks (FM-057), rows, CSV, zip and
+   stored bytes, milliseconds, or the refusal's code and words) and one
+   `pull.tickstore.write` event on `/logs` carrying the same writer, commit
+   and run. A log line that cannot be written fails the verb.
+7. `cli tickstore-write` is a store writer in `store_write::WRITERS`: an
+   unstamped build refuses, because the log line and the event name the
+   commit of the code that wrote the day (`commit=<stamp>`; `unstamped` only
+   when `BRUTEX_ALLOW_UNSTAMPED_WRITE=1` allowed it; a stamp outside
+   `[A-Za-z0-9_-]{1,64}` is refused `commit_invalid`).
+8. **Every name the writer opens is a regular file or a refusal.** The zip and
+   a held day file are opened through `store::safe_open` (D-4951); the lock
+   and the log after a look that does not follow a link. A link (dangling or
+   not), a pipe, a socket, a device or a directory at any of them is refused
+   `not_regular_file`, never followed and never waited on: a pipe at the
+   zip's name blocked `File::open` for ever, and a dangling link at a day's
+   name was taken for "no day" and replaced by the rename. No folder between
+   the root and the day file is written through a symbolic link
+   (`linked_folder`: R3-16's rule for a store whose `bars` is a link, RA-298,
+   on the tick store, so a shadow root whose `options` or `cm` links to the
+   real store is never written through); the root itself may be a link, as
+   `store::safe_open::refuse_linked_store_root` allows. A zip holding its day
+   folder and no file in it is refused `no_file_in_day`, not held as a day of
+   0 rows.
+
+**Measured** (14 October 2026, read-only copies (`cp -c`) of three real day
+zips and of the tool's day files for the same days, written into a scratch
+root, never the tick store; `pull::tickstore_write::tests::measure_real_days_against_the_tools_files`,
+log `tgt/p-R4-08/measure-20261014/measure-r1.log`, on a loaded machine):
+
+| Day (quiet, median, heavy) | Entries | CSV bytes | Zip | Tool's `.bts` (C level 9) | This writer | Ratio | Write + verify |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `GFDLCM_INDICES_TICK_25092026` | 142 | 527,441,952 | 19,533,129 | 8,042,422 | 16,400,878 | 2.04 | 9.6 s, 55 MB/s |
+| `GFDLCM_STOCK_TICK_28092026` | 3,683 | 429,168,931 | 64,243,134 | 37,566,114 | 60,066,755 | 1.60 | 17.5 s, 24 MB/s |
+| `GFDLNFO_TICK_29092026` | 20,056 | 2,560,452,061 | 259,145,610 | 151,027,298 | 255,904,074 | 1.69 | 60.5 s, 42 MB/s |
+
+Every entry of all three days round-tripped byte for byte, and each tool file
+verified against its zip by the same rules. One entry rebuilt from this
+writer's file: p50 0.30 / 0.69 / 125 ms, p99 81 / 87 / 260 ms (options,
+stocks, indices; the indices' files are 3.7 MB each); from the tool's file
+p50 0.30 / 0.68 / 143 ms, p99 93 / 98 / 404 ms: decoding is no slower. The
+readers' point lookup on the written file: p50 41 ns, p99 125 ns, max
+0.34 ms (scheduler), n = 200,540 (options) and 36,820 (stocks).
+
+**The cost of `Fastest`, stated rather than hidden**: this writer's files are
+1.60 to 2.04 times the tool's. New days at the measured rate are about 332 MB a
+trading day against the tool's 197 MB (EXTRAPOLATION from the three days:
+about 34 GB more a year of 250 days). The 241.8 GiB already written is never
+rewritten; were it rebuilt by this writer it would be about 387 to 493 GiB
+(EXTRAPOLATION, not proposed).
+
+**Rejected.** (a) Porting the tool with `zstd`: C through a `build.rs`, §2.
+(b) Byte identity with the tool's files: impossible across encoders, and not
+what identity means here (item 2). (c) Removing a temporary on failure, as the
+tool does: the operator's rule is that code removes no file. (d) A lock file
+per day: about 6,000 files for a lock one root file gives. (e) A hand-written
+encoder now. `ruzstd` 0.8.2's block encoder never emits a repeat offset
+(`encoding/blocks/compressed.rs`: "TODO make use of the offset history"), and a
+custom match finder (`FrameCompressor::new_with_matcher`) cannot add them, so
+the lever on the cost of `Fastest` is a hand-written block encoder in pure
+Rust. It is NOT built here; `docs/06-limits.md` L-TSW-4 names it with this
+measurement as its baseline. A day written now stays valid (any frame
+decodes), and a smaller writer later writes new files beside it, never over it.
+
+**What remains** (owners named): the chain's journal and FM-230's
+re-verify-then-record and quarantine-then-rebuild-under-a-new-name (E2E-03);
+the zip-shape ambiguity refusals inside `gdfl_archive` (local name vs central,
+overlapping members; IA-3, FM-238); a free-space floor before a day (pure
+Rust has no `statvfs` without `libc`; FM-055: the full disk is refused by name
+after the fact, the temporary left); a per-day source digest in the import's
+provenance (FM-056, the importer's); `read_index`'s own disjointness check
+(FM-248's reader half, `gdfl_tickstore`'s owner).
+
+**Proved by** `pull::tickstore_write::tests::a_bts_round_trips_every_entry_byte_identical`,
+`a_nifty_options_day_is_read_back_by_the_options_reader`,
+`a_bts_tmp_left_by_a_crash_is_refused_and_left`,
+`a_second_tickstore_run_writes_nothing`,
+`a_changed_zip_fails_verify_and_keeps_the_old_bts`, `the_writer_links_no_c`,
+`a_bad_crc_is_refused_and_nothing_is_written`,
+`a_member_over_4_gib_is_a_u64_and_is_refused_before_it_is_read`,
+`a_full_disk_leaves_the_temp_named_and_the_next_run_refuses_it`,
+`a_write_that_does_not_read_back_is_not_published`,
+`a_name_that_is_not_a_canonical_day_zip_is_refused_by_name`,
+`entries_the_readers_could_not_tell_apart_are_refused_by_name`,
+`an_unreadable_zip_is_refused_with_the_archive_readers_refusal`,
+`a_locked_root_is_refused_and_nothing_is_written`,
+`two_writers_of_one_day_leave_one_verified_file`,
+`a_bts_from_another_writer_answers_the_same_entries`,
+`a_bts_whose_two_entries_share_a_block_is_refused`,
+`the_log_line_and_the_event_name_the_commit`,
+`the_temporary_is_born_through_the_staging_door_and_a_race_is_named`,
+`a_name_that_is_not_a_regular_file_is_refused_and_never_waited_on`,
+`a_zip_of_only_its_day_folder_is_refused`,
+`a_corrupt_zip_on_a_held_day_is_named_and_the_day_is_not_blamed`,
+`a_missing_root_is_refused_and_never_made`,
+`every_new_folder_has_its_parent_fsynced`,
+`a_tick_store_folder_that_is_a_link_is_never_written_through`,
+`cli::tickstore_command::tests::the_cli_verb_and_the_function_write_identical_bytes`,
+and `cli::tickstore_command::tests::a_missing_root_is_refused_and_an_unstamped_line_says_so`;
+gate 28 (`.github/gates_tmp_open.rs`) passes with this module and the verb
+unlisted in its `LEGACY`.
+
+### D-4968 — E2E-05's codec half: the workspace keeps exactly two compressed formats, zstd frames and codec 1, and bars are not put in zstd frames — 2026-10-14
+
+**Implemented by** R4-08 (the decision and its measurement only; the bar half
+is the SC series, log segments R4-10, census epochs R4-29).
+
+**Decision.** By design the workspace has two compressed formats and no third:
+
+1. **zstd frames, written and read by `ruzstd` alone** (D-2801, D-4967): the
+   tick store's day files (read since D-2801, now written) and R4-10's rolled
+   non-bar segments. Their unit is a whole file or a whole member, read once
+   and in full.
+2. **Codec 1 (D-4939)** for sealed bar months: seven bit-packed column streams
+   in frames of at most 256 bars, so a page decodes one or two frames.
+
+E2E-05 asked to "reuse the tick store's codec" for bars. That is not met, on
+purpose: the tick store's codec is only small at the levels that need the C
+binding §2 forbids, and at `ruzstd` `Fastest`, the level this workspace can
+write, it is several times larger and far slower per page than codec 1 on the
+same months.
+
+**Measured** (14 October 2026, `pull::tickstore_write::tests::measure_ruzstd_fastest_on_bar_months`,
+the seven sample months the compressed-store design measured codec 1 on,
+`state/design/store-compression/blocks/samples/`; version-1 rows are 56 bytes
+a bar; pages are 256-bar frames, the only zstd layout in which a page stays
+O(1); decode timed under load, n = 2,000 random pages a month; log
+`tgt/p-R4-08/measure-20261014/measure-r1.log`):
+
+| Month | Bars | `ruzstd` `Fastest`, one frame, bytes a bar | 256-bar frames, bytes a bar | Page decode p50 / p99 | Codec 1 (design §1, blocks codec), bytes a bar |
+|---|---:|---:|---:|---:|---:|
+| NIFTY spot 1s 2026-08 | 472,445 | 20.34 | 20.49 | 61 µs / 2.12 ms | 3.24 |
+| RELIANCE 1s 2026-08 | 224,653 | 12.00 | 13.40 | 34 µs / 1.15 ms | 2.87 |
+| NIFTY option, large | 115,555 | 12.96 | 13.18 | 36 µs / 0.91 ms | 2.45 |
+| NIFTY option, at the money | 112,451 | 14.46 | 15.28 | 45 µs / 1.82 ms | 2.68 |
+| NIFTY option, mid | 25,626 | 15.76 | 16.49 | 50 µs / 2.15 ms | 3.01 |
+| NIFTY option, tiny | 554 | 19.01 | 19.11 | 34 µs / 1.12 ms | 4.9 (2,734 B) |
+| Zerodha NIFTY 1min 2026-08 | 7,875 | 23.37 | 25.50 | 71 µs / 2.34 ms | not in the design's table; NOT MEASURED here |
+
+Codec 1 is 3.9 to 6.3 times smaller on every month both measured, and its page p99 was
+measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
+(under load; the quiet figure for `ruzstd` is NOT measured).
+
+**Rejected.** A third format for bars (zstd-in-blocks): measured above.
+Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
+GDFL tick file is text whose exact bytes the tick store must give back.

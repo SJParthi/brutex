@@ -215,9 +215,13 @@ pub const FLAG_CHECKSUMS: u32 = 1;
 
 /// Open interest is absent, as opposed to genuinely zero.
 ///
-/// Spot indices carry no open interest and store this sentinel. Conflating it
-/// with a real `0` would make a derivative series and an index series
-/// indistinguishable on a field that decides which is which.
+/// Spot indices and shares carry no open interest, and rows landed since
+/// D-3322 store this sentinel for them. Zerodha rows landed before it hold
+/// `0` and are never rewritten in place (`docs/02-store-format.md` §3, R3-18),
+/// so a reader of an index or a share treats its open interest as not
+/// applicable whatever is stored. Conflating the sentinel with a real `0`
+/// would make a derivative series and an index series indistinguishable on a
+/// field that decides which is which.
 pub const OI_NULL: i64 = i64::MIN;
 
 /// One bar. Seven `i64`, 56 bytes, no padding.
