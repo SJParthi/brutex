@@ -495,12 +495,14 @@ impl WindowAsk {
                 param(query, "feed")
             ));
         };
+        // THE ONE STRICT PARSER, as `server::month_param` promises every route
+        // reads (app-7, AF-04). This split on `-` and handed each half to
+        // `str::parse`, which takes a leading `+` and any run of leading zeros,
+        // so `2025-1`, `02025-01` and `%2B2025-01` answered January under 200
+        // here after the other routes had stopped (cloud-attack-law-20261016).
         let month_of = |key: &str| {
             let raw = param(query, key);
-            raw.split_once('-')
-                .and_then(|(y, m)| {
-                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-                })
+            bars::month_of_text(&raw)
                 .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
         };
         let from = month_of("from")?;

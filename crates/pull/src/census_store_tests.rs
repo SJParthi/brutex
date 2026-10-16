@@ -1543,3 +1543,44 @@ fn elsewhere_file(root: &Path) -> PathBuf {
     std::fs::write(&at, b"x").expect("written");
     at
 }
+
+/// A migration receipt that cannot be read, or that names no `legacy_bytes`,
+/// is named — never answered as "no drift" (cloud-attack-law-20261016, lens 2).
+/// `legacy_drift` is the only warning that a pre-version-4 writer filed months
+/// the census does not read, and its `.ok()?` turned a damaged receipt into
+/// silence. Only an ABSENT receipt is "not migrated".
+#[test]
+fn a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift() {
+    let scratch = Scratch::new("RECEIPT");
+    let root = scratch.root();
+    assert_eq!(
+        record(root, Vendor::Gdfl, &[row(0, 1)]).map(|c| c.len()),
+        Ok(1)
+    );
+    assert_eq!(
+        record(root, Vendor::Gdfl, &[row(1, 1)]).map(|c| c.len()),
+        Ok(1)
+    );
+    migrate(root, Vendor::Gdfl).expect("it migrates");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None, "unchanged since");
+    let receipt = vendor_dir(root, Vendor::Gdfl).join("MIGRATED");
+    let whole = std::fs::read(&receipt).expect("receipt");
+
+    std::fs::write(&receipt, [0xFF_u8, 0xFE, b'\n']).expect("not UTF-8");
+    let unread = legacy_drift(root, Vendor::Gdfl).expect("an unreadable receipt is named");
+    assert!(
+        unread.contains("MIGRATED") && unread.contains("cannot be read"),
+        "{unread}"
+    );
+
+    std::fs::write(&receipt, b"format=1\n").expect("no legacy_bytes");
+    let unmeasured = legacy_drift(root, Vendor::Gdfl).expect("a receipt with no length is named");
+    assert!(
+        unmeasured.contains("names no readable legacy_bytes"),
+        "{unmeasured}"
+    );
+
+    std::fs::write(&receipt, &whole).expect("whole again");
+    assert_eq!(legacy_drift(root, Vendor::Gdfl), None);
+    assert_eq!(legacy_drift(root, Vendor::Zerodha), None, "not migrated");
+}

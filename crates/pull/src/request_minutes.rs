@@ -30,7 +30,6 @@
 //! lines, written once and synced once. UNVERIFIED as a measured bound: no
 //! bench times this. `docs/06-limits.md`, D-1493.
 
-use std::io::Write as _;
 use std::path::Path;
 
 use super::{Failure, Ingested, Plan};
@@ -912,27 +911,22 @@ pub(super) fn append_named(
     if lines.is_empty() {
         return Ok(());
     }
-    let mut text = String::with_capacity(lines.iter().map(|line| line.len() + 1).sum());
     for line in lines {
         if line.contains(['\n', '\r', '\t']) {
             return Err(format!(
                 "a ledger line holds a line break or a tab and was refused with its batch: {line:?}"
             ));
         }
-        text.push_str(line);
-        text.push('\n');
     }
-    let dir = store_root.join("audit");
-    std::fs::create_dir_all(&dir).map_err(|why| format!("{}: {why}", dir.display()))?;
-    let path = dir.join(format!("{}.{name}", vendor.as_str()));
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|why| format!("{}: {why}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_data())
-        .map_err(|why| format!("{}: {why}", path.display()))
+    // A TORN LAST LINE IS CLOSED BEFORE THE NEXT ONE IS WRITTEN, by the one
+    // helper every GDFL ledger already appends through (D-2826). This opened
+    // the file for append and wrote, so a crash fragment glued itself onto the
+    // next run's first line: one fault counted, and that gap line lost
+    // (cloud-attack-law-20261016).
+    let path = store_root
+        .join("audit")
+        .join(format!("{}.{name}", vendor.as_str()));
+    crate::gdfl_import::append_lines(&path, lines)
 }
 
 #[cfg(test)]
@@ -1264,6 +1258,33 @@ mod tests {
         let file_root = root.join("NOT-A-DIR");
         std::fs::write(&file_root, b"x").unwrap();
         assert!(append_ledger(&file_root, vendor, &["gap X".to_owned()]).is_err());
+        let _cleanup = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A TORN LAST LINE IS CLOSED BEFORE THE NEXT APPEND** (cloud-attack-law-20261016,
+    /// lens 4). A crash left `gap TORN` with no line end, and the next run's
+    /// first line was glued onto it — one fault where there were two lines,
+    /// and the real gap line read as part of the fragment. Every GDFL ledger
+    /// already closed a torn line (D-2826); this one did not.
+    #[test]
+    fn a_torn_gap_line_is_closed_before_the_next_append() {
+        let root = std::env::temp_dir().join(format!("brutex-LEDGER-TORN-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&root);
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        let path = root.join("audit").join("zerodha.gaps");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"gap TORN").unwrap();
+        append_ledger(&root, vendor, &["gap NIFTY 2026-01-02 x".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN\ngap NIFTY 2026-01-02 x\n"
+        );
+        append_ledger(&root, vendor, &["gap NEXT".to_owned()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "gap TORN\ngap NIFTY 2026-01-02 x\ngap NEXT\n",
+            "a whole last line gains no blank line"
+        );
         let _cleanup = std::fs::remove_dir_all(&root);
     }
 

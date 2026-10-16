@@ -845,3 +845,53 @@ fn a_recount_does_not_count_a_withdrawn_key_back() {
     let (_, after) = census_keys(root);
     assert_eq!(after, settled, "nothing withdrawn came back");
 }
+
+/// A key superseded twice to different targets, or retired twice with
+/// different records, refuses the ledger by line; an identical repeat — a
+/// crash re-writing the same line — is still one record
+/// (cloud-attack-law-20261016, lens 2). The second line silently replaced the
+/// first, so the later target won in a ledger read "whole or refused".
+#[test]
+fn a_key_withdrawn_twice_with_different_records_refuses_the_ledger() {
+    let pointer = SupersededRecord {
+        underlying: sym("NIFTY"),
+        old: c(STATED),
+        new: c(SETTLED),
+        kind: AliasKind::VendorRedated,
+        months: 2,
+        bars: 3,
+        digest: [7; 32],
+    };
+    let elsewhere = SupersededRecord {
+        new: c("2023-06-27-1000000-PE"),
+        ..pointer
+    };
+    let why = Withdrawn::parse(&format!("{}\n{}\n", pointer.line(), elsewhere.line())).unwrap_err();
+    assert!(why.contains("line 2"), "{why}");
+    assert!(why.contains("superseded twice"), "{why}");
+    assert!(
+        why.contains(SETTLED) && why.contains("2023-06-27-1000000-PE"),
+        "{why}"
+    );
+    let repeated = Withdrawn::parse(&format!("{0}\n{0}\n", pointer.line())).unwrap();
+    assert_eq!(
+        repeated.counts(),
+        (1, 0),
+        "an identical repeat is one record"
+    );
+
+    let refusal = RetiredRecord {
+        underlying: sym("NIFTY"),
+        key: c(IMPOSSIBLE[0]),
+        why: RetiredWhy::StrikeImplausible,
+        day: d(2019, 5, 30),
+        median: Some(1_180_000),
+        days: 1,
+        bars: 5,
+    };
+    let other = RetiredRecord { days: 2, ..refusal };
+    let why = Withdrawn::parse(&format!("{}\n{}\n", refusal.line(), other.line())).unwrap_err();
+    assert!(why.contains("retired twice"), "{why}");
+    let repeated = Withdrawn::parse(&format!("{0}\n{0}\n", refusal.line())).unwrap();
+    assert_eq!(repeated.counts(), (0, 1));
+}

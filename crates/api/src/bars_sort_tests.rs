@@ -1630,8 +1630,20 @@ fn concurrent_value_pages_are_each_the_brute_force() {
 /// server restarted and the printed `cli srt-build` answered `kept`. Now the
 /// refused month is read and named, and the next request, the file readable
 /// again and not a byte of it changed, is served from the index.
+#[cfg(unix)]
 #[test]
 fn a_host_refusal_of_an_index_is_not_remembered() {
+    // Mode bits do not bind root, and this body returned before its first
+    // assertion there, passing while asserting nothing (CLAUDE.md section 4;
+    // cloud-attack-law-20261016). It now runs where they bind (D-0995).
+    crate::isolated::where_permission_binds(
+        "bars::sort::tests::a_host_refusal_of_an_index_is_not_remembered",
+        a_host_refusal_of_an_index_is_not_remembered_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_host_refusal_of_an_index_is_not_remembered_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = Root::new("host-refusal");
     write(&root);
@@ -1647,11 +1659,10 @@ fn a_host_refusal_of_an_index_is_not_remembered() {
     std::fs::remove_file(&feb).unwrap();
     std::fs::write(&feb, &bytes).unwrap();
     std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o000)).unwrap();
-    if std::fs::File::open(&feb).is_ok() {
-        // A process that may read anything (root) cannot be refused this way.
-        std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
-        return;
-    }
+    assert!(
+        std::fs::File::open(&feb).is_err(),
+        "mode 000 binds where this body runs (D-0995)"
+    );
     let refused = window(&root.0, &ask).unwrap();
     std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
     let page = served(&refused);
@@ -1686,8 +1697,20 @@ fn a_host_refusal_of_an_index_is_not_remembered() {
 /// this request's alone: the month is read and named WITHOUT a rebuild
 /// command (there is nothing to rebuild), and the next request is served
 /// from the index.
+#[cfg(unix)]
 #[test]
 fn a_host_refusal_met_while_reading_an_index_is_this_requests_alone() {
+    // Mode bits do not bind root, and this body returned before its first
+    // assertion there, passing while asserting nothing (CLAUDE.md section 4;
+    // cloud-attack-law-20261016). It now runs where they bind (D-0995).
+    crate::isolated::where_permission_binds(
+        "bars::sort::tests::a_host_refusal_met_while_reading_an_index_is_this_requests_alone",
+        a_host_refusal_met_while_reading_an_index_is_this_requests_alone_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_host_refusal_met_while_reading_an_index_is_this_requests_alone_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = Root::new("host-refusal-read");
     write(&root);
@@ -1701,10 +1724,10 @@ fn a_host_refusal_met_while_reading_an_index_is_this_requests_alone() {
     window(&root.0, &warm).unwrap();
 
     std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o000)).unwrap();
-    if std::fs::File::open(&feb).is_ok() {
-        std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
-        return;
-    }
+    assert!(
+        std::fs::File::open(&feb).is_err(),
+        "mode 000 binds where this body runs (D-0995)"
+    );
     let refused = window(&root.0, &ask);
     std::fs::set_permissions(&feb, std::fs::Permissions::from_mode(0o644)).unwrap();
     let refused = refused.unwrap();

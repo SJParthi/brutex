@@ -180,9 +180,10 @@ impl Withdrawn {
     ///
     /// # Errors
     ///
-    /// A `superseded` or `retired` line that does not parse, or one key both
-    /// superseded and retired, named by line: a ledger the re-key cannot
-    /// read whole is refused, never read as the part that parsed.
+    /// A `superseded` or `retired` line that does not parse, one key both
+    /// superseded and retired, or one key superseded or retired twice with
+    /// different records, named by line: a ledger the re-key cannot read whole
+    /// is refused, never read as the part that parsed.
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut out = Self {
             superseded: HashMap::with_capacity(64),
@@ -199,14 +200,36 @@ impl Withdrawn {
                 let record = SupersededRecord::parse(line).ok_or_else(|| {
                     format!("line {at} does not parse as a `superseded` record: {line:?}")
                 })?;
-                let _ = out
+                // A KEY MOVES ONCE. A second line naming the same key with
+                // different fields was a silent replacement — the later target
+                // won — in a ledger this function promises to read whole or
+                // refuse (cloud-attack-law-20261016). An identical repeat (a
+                // crash re-write) is the same record and is kept.
+                if let Some(held) = out
                     .superseded
-                    .insert((record.underlying, record.old), record);
+                    .insert((record.underlying, record.old), record)
+                    && held != record
+                {
+                    return Err(format!(
+                        "line {at}: {} is superseded twice, to {} and to {}; a key moves once",
+                        option_key(record.underlying, record.old),
+                        held.new.as_str(),
+                        record.new.as_str()
+                    ));
+                }
             } else if line.starts_with("retired ") {
                 let record = RetiredRecord::parse(line).ok_or_else(|| {
                     format!("line {at} does not parse as a `retired` record: {line:?}")
                 })?;
-                let _ = out.retired.insert((record.underlying, record.key), record);
+                if let Some(held) = out.retired.insert((record.underlying, record.key), record)
+                    && held != record
+                {
+                    return Err(format!(
+                        "line {at}: {} is retired twice with different records; a key is \
+                         retired once",
+                        option_key(record.underlying, record.key)
+                    ));
+                }
             } else {
                 continue;
             }

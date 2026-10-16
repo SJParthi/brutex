@@ -801,3 +801,20 @@ fn the_event_and_stopped_records_are_read_and_move_no_rung() {
     let torn = LineageIndex::of(&format!("{text}stopped NSE-FNO-NIFTY ex=2020-06-16 v=1\n"));
     assert_eq!((torn.records, torn.unread), (2, 1));
 }
+
+/// An expiry with a SIGNED field is refused, never read as another spelling
+/// of a day (cloud-attack-law-20261016, lens 8): the width check let
+/// `2019-+3-28` through, and `str::parse` read it as 2019-03-28.
+#[test]
+fn an_expiry_with_a_signed_field_is_refused_not_read_as_another_spelling() {
+    assert_eq!(expiry_param("2019-03-28"), Expiry::new(2019, 3, 28).ok());
+    for bad in [
+        "2019-+3-28",
+        "2019-03-+8",
+        "+019-03-28",
+        "2019-3-28",
+        "2019-03-2",
+    ] {
+        assert_eq!(expiry_param(bad), None, "{bad}");
+    }
+}

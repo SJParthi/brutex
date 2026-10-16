@@ -1373,6 +1373,17 @@ mod tests {
     /// file that is not its stated size refuses before it decodes.
     #[test]
     fn a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses() {
+        // Mode bits do not bind root, which is how this suite runs in a
+        // container: re-run the body where they do (D-0995;
+        // cloud-attack-law-20261016 found it failing as root).
+        crate::support::where_permission_binds(
+            "gdfl_tickstore::tests::a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses",
+            a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses_body() {
         let csv = n50_csv(true, false);
         let block = columnar_block(true, false, HEADER_OPEN_INTEREST, 3, &n50_columns());
         let mut wrong = put(

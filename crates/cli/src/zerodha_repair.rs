@@ -435,15 +435,18 @@ fn plan_all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
             return FAILED;
         }
     };
-    // IN NAME ORDER, so two runs print the same table.
-    let mut symbols = std::collections::BTreeSet::new();
-    for entry in entries.filter_map(Result::ok) {
-        if let Some(name) = entry.file_name().to_str()
-            && brutex_core::symbol::Symbol::new(name).is_ok()
-        {
-            symbols.insert(name.to_owned());
+    // IN NAME ORDER, so two runs print the same table; an entry the listing
+    // could not read refuses the plan rather than shortening it.
+    let symbols = match crate::series_identity::series_names(
+        &dir,
+        entries.map(|entry| entry.map(|e| e.file_name())),
+    ) {
+        Ok(symbols) => symbols,
+        Err(why) => {
+            let _ = writeln!(out, "ZERODHA REPAIR PLAN REFUSED: {why}");
+            return FAILED;
         }
-    }
+    };
     let _ = writeln!(
         out,
         "ZERODHA REPAIR PLAN, EVERY SERIES (read-only) — NSE/{} {}, {}..{}: {} series under {}",

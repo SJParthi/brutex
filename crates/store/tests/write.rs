@@ -2034,3 +2034,85 @@ fn the_writer_refuses_a_symlinked_month_file_or_directory() {
         "nothing created through the linked directory"
     );
 }
+
+// ===========================================================================
+// Extreme inputs with no test before cloud-attack-law-20261016 (lens 8)
+// ===========================================================================
+
+/// The READER door and the WRITER door of one month refuse each other by
+/// name, and neither refusal writes a byte. `a_second_writer_is_refused_..`
+/// pins writer against writer; nothing pinned a reader arriving while a
+/// writer holds the month, or a writer arriving while readers do. The
+/// reader's shared lock (`file.rs`, `open_existing_at`) is what keeps a
+/// half-published commit from being served.
+#[test]
+fn a_reader_and_a_writer_of_one_month_refuse_each_other_by_name() {
+    let scratch = Scratch::new("reader-writer");
+    let root = scratch.root();
+    let lock = bars_path().with_file(FileKind::Lock).to_path_buf(root);
+
+    let mut writer = open(root).expect("create");
+    assert!(writer.append(&batch(0, 3)).is_ok());
+    assert_eq!(
+        outcome(BarFile::open_existing(root, bars_path(), SYMBOL)),
+        Err(StoreError::Locked { path: lock.clone() }),
+        "a reader never reads a month a writer holds"
+    );
+    drop(writer);
+
+    let first = BarFile::open_existing(root, bars_path(), SYMBOL).expect("reader");
+    let second = BarFile::open_existing(root, bars_path(), SYMBOL).expect("readers share");
+    let before = image(root);
+    assert_eq!(
+        outcome(open(root)),
+        Err(StoreError::Locked { path: lock.clone() }),
+        "a writer never commits under a reader"
+    );
+    assert_eq!(image(root), before, "the refused writer wrote nothing");
+    assert_eq!(first.read_record(2), Ok(bar(2)));
+    assert_eq!(second.read_record(0), Ok(bar(0)));
+    drop((first, second));
+
+    let mut writer = open(root).expect("the month is free again");
+    assert_eq!(
+        writer.append(&batch(3, 1)),
+        Ok(Appended::Committed {
+            first_index: 3,
+            n_valid: 4
+        })
+    );
+}
+
+/// The READER door on a zero-byte `.bin` refuses it as holding no header and
+/// creates nothing. The WRITER door initialises such a file
+/// (`a_zero_byte_file_is_initialised_rather_than_condemned`); a reader that
+/// did the same, or answered "zero records", would turn a month a crash left
+/// empty into a month that silently holds nothing.
+#[test]
+fn the_reader_door_refuses_a_zero_byte_month_and_creates_nothing() {
+    let scratch = Scratch::new("reader-zero");
+    let root = scratch.root();
+    let bars = bars_path().to_path_buf(root);
+    fs::create_dir_all(bars.parent().expect("a month has a directory")).expect("dirs");
+    fs::write(&bars, b"").expect("an empty month");
+
+    let refused = outcome(BarFile::open_existing(root, bars_path(), SYMBOL));
+    assert!(
+        matches!(
+            &refused,
+            Err(StoreError::Format { path, source: FormatError::NoValidHeader }) if *path == bars
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fs::metadata(&bars).expect("still there").len(),
+        0,
+        "the reader initialised nothing"
+    );
+    for kind in [FileKind::Lock, FileKind::Checksums, FileKind::TimeIndex] {
+        assert!(
+            !bars_path().with_file(kind).to_path_buf(root).exists(),
+            "the reader created a {kind:?}"
+        );
+    }
+}

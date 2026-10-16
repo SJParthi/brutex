@@ -498,14 +498,26 @@ fn build(root: &Path, path: StorePath<'_>, symbol_id: u32) -> Line {
 /// month's `.srt` or its staging name — when that is there and is not a
 /// regular file: a link, a directory, a pipe. The store's door leaves such a
 /// name as it is and refuses the month, so a dry run says the same.
+///
+/// A name that could not be LOOKED AT is refused too, never read as absent:
+/// `store::sort_index_writer` refuses every `lstat` failure but `NotFound`
+/// on both names, so a dry run that said `would build` there would say
+/// something other than what the build step does. This was `.ok()?`, which
+/// turned an I/O error into "nothing is there" (cloud-attack-law-20261016).
 fn name_refused(name: &Path) -> Option<String> {
-    let meta = std::fs::symlink_metadata(name).ok()?;
-    (!meta.is_file()).then(|| {
-        format!(
-            "{} is not a regular file; the build step leaves it as it is and refuses the month",
+    match std::fs::symlink_metadata(name) {
+        Ok(meta) => (!meta.is_file()).then(|| {
+            format!(
+                "{} is not a regular file; the build step leaves it as it is and refuses the month",
+                name.display()
+            )
+        }),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => None,
+        Err(why) => Some(format!(
+            "{} could not be inspected: {why}; the build step refuses the month",
             name.display()
-        )
-    })
+        )),
+    }
 }
 
 /// One month as a reader sees it, writing nothing — and saying what the
