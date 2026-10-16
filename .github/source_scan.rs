@@ -1559,15 +1559,19 @@ fn build_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
 }
 
 /// The programs crate code may start by name (RO-5, D-2344): `git` and
-/// `mkfifo` in tests that build fixtures, and the three platform URL openers
-/// `api` hands the operator's browser to (D-1202). Anything else is refused.
-const SPAWN_PROGRAMS: [&str; 6] = [
+/// `mkfifo` in tests that build fixtures, the three platform URL openers
+/// `api` hands the operator's browser to (D-1202), and `/bin/df`, the POSIX
+/// free-space probe `api`'s `/disk.json` reads (WP-81, D-3384; listed by
+/// D-5252): a fixed absolute path, never a shell or an interpreter. Anything
+/// else is refused.
+const SPAWN_PROGRAMS: [&str; 7] = [
     "git",
     "mkfifo",
     "/usr/bin/mkfifo",
     "xdg-open",
     "open",
     "explorer.exe",
+    "/bin/df",
 ];
 
 /// The string literals in `toks`, minus an `expect(..)` message, which names
@@ -4884,6 +4888,12 @@ mod tests {
             "fn t() { let (p, a) = h(); Command::new(p); } fn h() -> (&'static str, u8) { (\"node\", 0) }",
             "use std::process::Command as C; fn t() { C::new(\"sh\"); }",
             "fn t() { Command::new(if x { \"git\" } else { \"sh\" }); }",
+            // D-5252 lists `/bin/df` by its absolute path only: a bare `df`
+            // is resolved through PATH, and another absolute path is another
+            // program.
+            "fn t() { Command::new(\"df\"); }",
+            "fn t() { Command::new(\"/usr/bin/df\"); }",
+            "fn t() { Command::new(\"/bin/sh\"); }",
         ] {
             assert!(
                 !spawn_findings("t.rs", src).unwrap().is_empty(),
@@ -4898,6 +4908,7 @@ mod tests {
             "fn bin() -> PathBuf { PathBuf::from(env!(\"CARGO_BIN_EXE_cli\")) } fn t() { Command::new(bin()); }",
             "fn h() -> (&'static str, u8) { match x { A => (\"open\", 0), _ => (\"xdg-open\", 0) } } fn t() { let (program, args) = h(); Command::new(program); }",
             "fn t() { Command::new(\"git\"); Command::new(\"/usr/bin/mkfifo\"); }",
+            "fn measure() { let o = std::process::Command::new(\"/bin/df\").arg(\"-Pk\").output(); }",
         ] {
             assert_eq!(
                 spawn_findings("t.rs", src).unwrap(),

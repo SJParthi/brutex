@@ -69098,3 +69098,64 @@ workflow edit this change does not make.
 **Rejected.** *Keeping the exception after the operator allowed the edit.* An
 exception is a place the rule does not hold; with the reason for it gone, it is
 only a place a future occurrence could hide.
+
+### D-5252 — `/bin/df`, by that absolute path only, joins the programs crate code may start: it is `/disk.json`'s free-space probe, not a shell or an interpreter — 2026-10-16
+
+**Status: locked.** Asked for by the operator on 16 October 2026 ("unblock CI
+here"), to clear gate 0 for every branch cut from `feat/db-fix`.
+
+**What was red.** Gate 0's spawn scan (AFG-44, D-2344) refused
+`crates/api/src/disk_route.rs:127`, `Command::new("/bin/df")`, the POSIX
+`df -Pk` probe WP-81 added for `/disk.json`'s `filesystem` block (D-3384;
+findings DB-B73, DB-B59). `feat/db-fix` at `4756cce0` failed it on its own,
+so every branch cut from it was red at the first step of the language-purity
+job, and every later gate in that job never ran.
+
+**Decision.** `SPAWN_PROGRAMS` in `.github/source_scan.rs` gains `"/bin/df"`,
+and only that spelling. A bare `df` is resolved through `PATH`, which gate 1e
+shadows for interpreters and shells precisely because a name on `PATH` is
+whatever the environment says it is; an absolute path names one file. The
+scanner's own test `a_spawn_must_name_the_running_binary_a_cargo_binary_or_a_listed_program`
+now passes `/disk.json`'s exact call and still refuses `df`, `/usr/bin/df` and
+`/bin/sh`; `AFG-44` says so.
+
+**Why this and not the alternatives.**
+
+* *Read free space without a process.* The standard library has no
+  `statvfs`; reaching it needs `unsafe` (refused by gate 16 in every crate
+  root) or a new dependency (`libc`, `nix`, `rustix`, `fs4`), each a new
+  arrow and a new `deny.toml` question for one number on one page.
+* *Delete the probe.* `/disk.json` exists because a full drive was found only
+  by its absence (D-3384); removing the free-space answer brings that back.
+* *Leave gate 0 red.* Every later language-purity gate is then unread on
+  every branch, which hides far more than one listed program could.
+
+`df` is neither a shell nor an interpreter, takes no program text, and is
+started with fixed arguments and the store root as its only operand. D-1603's
+concern — crate code starting a shell or an interpreter — is untouched.
+
+### D-5253 — Gate 1d declares the fifteen `crates/pull` literals `feat/db-fix` carried undeclared — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1d (every segment-shaped string literal under
+`crates/pull` is declared, CLAUDE.md §8) refused fifteen words on
+`feat/db-fix` at `4756cce0` itself: `--test-threads`, `race`, `observer`,
+`ready`, `decode_frame`, `decode_stamps`, `dangling`, `unplugged`, `pipe`,
+`request-before-record`, `calendar_past_record`, `cache`, `retained`,
+`1421286` and `1421400`. They arrived with the cash-session cache and its
+lock tests, the GDFL tick store's file-kind refusals, the allocation tests,
+`request_minutes`' refusal codes and `calendar.rs`'s measured short days,
+none of which ran this gate.
+
+**Decision.** One declared list, `DB_FIX_BASE_LITERAL` in
+`.github/gates_tree.rs`, holds all fifteen, each read at its line and named in
+the list's comment by kind: test-harness flags, `expect` labels, scratch and
+fixture words, refusal codes and message pieces this repository chose, and two
+record ordinals of the operator's pull journal cited as evidence. None is an
+account, an environment, a vendor credential or a field of a parameter path.
+The gate's self-test `gate_1d_declares_the_lists_zero_work_added` now also
+checks three of them.
+
+**Rejected.** *Excluding test files from the gate.* The gate reads test code on
+purpose: a fixture is where a real segment would be pasted first.
