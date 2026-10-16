@@ -3457,10 +3457,12 @@ mod cloud_mutant_tests {
     /// force of the rows it keeps and counts the rows it read: 240, 120,
     /// 360, then none, because the whole month's fold is held. A part of the
     /// month held as the whole month's would answer the third request from
-    /// the memo, with nothing read. Kills `extremes_of`'s `delete !` on the
+    /// the memo, with nothing read. Then each part again: its own fold is
+    /// held, never the whole month's. Kills `extremes_of`'s `delete !` on the
     /// volume flag, all three mutants of `start == 0 && end == n_valid` in
-    /// its read loop, `rows += read` → `*=`, `-=`, `rows += …` → `*=` for a
-    /// whole month, and `missed == 0` → `!=`.
+    /// its read loop and `&&` → `||` in its memo test, `rows += read` →
+    /// `*=`, `-=`, `rows += …` → `*=` for a whole month, and `missed == 0` →
+    /// `!=`.
     #[test]
     fn a_time_ordered_pages_extremes_hold_only_a_whole_months_fold() {
         let root = scratch("ts-extremes");
@@ -3490,6 +3492,57 @@ mod cloud_mutant_tests {
             (Some(index_extremes(&rows)), 0),
             "the whole month's fold is held"
         );
+        assert_eq!(
+            ask(Some(third), None),
+            (Some(index_extremes(&rows[120..])), 0),
+            "a part of the month is its own held fold, never the whole month's"
+        );
+        assert_eq!(
+            ask(None, Some(third)),
+            (Some(index_extremes(&rows[..120])), 0),
+            "a part of the month is its own held fold, never the whole month's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAY BOUND'S END IS EXCLUSIVE IN A CUT RUN'S ENTRIES TOO.** The
+    /// 4th's first bar is stamped at midnight IST, the instant a bound
+    /// keeping the 3rd ends at, and it lies inside the second index run. The
+    /// run's entries inside the bound are its 110 rows on the 3rd, which
+    /// match the bars, so both cut runs are served from their entries and
+    /// nothing is read. Kills `cut_entries`' `at < hi` → `<=` (the midnight
+    /// entry joined, the count said 111, and the run was read instead).
+    #[test]
+    fn a_day_bounds_end_is_exclusive_in_a_cut_runs_entries() {
+        let root = scratch("cut-end");
+        let (lo, _) = month(1).ist_bounds_micros();
+        let fourth = lo + 3 * 86_400 * MICROS;
+        let mut rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        rows[240].ts_micros = fourth;
+        write(&root, &index(), month(1), &rows, &rows);
+        let mut asked = query(index(), month(1), month(1), SortKey::Close);
+        asked.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        asked.filter.to = Some(fourth);
+        let got = window(&root, &asked).expect("answers");
+        let mut want: Vec<(i64, i64)> = rows[120..240]
+            .iter()
+            .map(|bar| (bar.close, bar.ts_micros))
+            .collect();
+        want.sort_unstable();
+        want.truncate(37);
+        let served: Vec<(i64, i64)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.bar.ts_micros))
+            .collect();
+        assert_eq!(served, want);
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!(
+            (report.cut_runs, report.indexed_rows, report.scanned_rows),
+            (2, 120, 0),
+            "{report:?}"
+        );
+        assert!(report.scanned_why.is_empty(), "{report:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
