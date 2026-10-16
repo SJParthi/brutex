@@ -2091,3 +2091,33 @@ fn a_sealed_heads_extremes_name_the_earliest_bar_of_each_tie() {
     assert_eq!((held.range_max.v, held.range_max.ts), (300, at(2)));
     assert_eq!((held.volume_max.v, held.volume_max.ts), (20, at(2)));
 }
+
+/// **A STAGING NAME HELD BY A LINK OR A SECOND NAME IS REFUSED IN WORDS THAT
+/// SAY WHAT IS THERE AND THAT IT WAS LEFT ALONE.**
+///
+/// Covers the text of `staging_not_regular` and `staging_linked`, which the
+/// staging tests match by variant and print only when they fail.
+#[test]
+fn a_staging_refusal_of_what_is_there_says_it_was_left_alone() {
+    use store::safe_open::Found;
+    use store::staging::StagingError;
+    let path = PathBuf::from("/nonexistent/cloud/a.tmp");
+    let not_regular = StagingError::NotRegular {
+        path: path.clone(),
+        found: Found::Symlink,
+    };
+    assert_eq!(
+        not_regular.to_string(),
+        format!(
+            "staging_not_regular ({}): /nonexistent/cloud/a.tmp is a symbolic link, not a \
+             regular file; it is left as it is",
+            Found::Symlink.word()
+        )
+    );
+    let linked = StagingError::Linked { path, links: 3 };
+    assert_eq!(
+        linked.to_string(),
+        "staging_linked: /nonexistent/cloud/a.tmp is one of 3 names of a file; it is left as it \
+         is and nothing was written through it"
+    );
+}

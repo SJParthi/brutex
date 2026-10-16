@@ -8493,4 +8493,45 @@ mod cloud_mutant_tests {
         drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
+
+    /// **A RETIRED GENERATION WHOSE FOLDER IS GONE, OR IS ANOTHER FOLDER NOW,
+    /// IS NOT DELETED THROUGH, AND THE REASON SAYS WHICH.**
+    ///
+    /// Covers `changed_under`'s three answers: the folder handed over is
+    /// still that folder (nothing to say), another directory has its name, and
+    /// nothing has its name. Each refusal names the folder and the generation.
+    #[test]
+    fn a_retired_generation_under_a_changed_folder_says_what_changed() {
+        use super::changed_under;
+        let dir = scratch("changed-under");
+        let folder = dir.join("audit.idx.gone");
+        std::fs::create_dir_all(&folder).expect("the folder");
+        let gone = audit_gone_is_ours(&folder)
+            .expect("a directory")
+            .expect("there");
+        let job = Retired {
+            path: folder.join("g1"),
+            gone,
+        };
+        assert_eq!(changed_under(&job), None, "the same folder");
+        let said = |why: &str| {
+            format!(
+                "{}: is no longer the folder {} was retired into ({why}); nothing in it is \
+                 deleted, and the generation stays for the next start",
+                folder.display(),
+                job.path.display()
+            )
+        };
+        // Renamed aside, the old folder keeps its inode, so the new one cannot
+        // be given the same identity on any filesystem.
+        std::fs::rename(&folder, dir.join("aside")).expect("renamed aside");
+        std::fs::create_dir(&folder).expect("a new folder of the same name");
+        assert_eq!(
+            changed_under(&job),
+            Some(said("another directory has its name now"))
+        );
+        std::fs::remove_dir(&folder).expect("removed again");
+        assert_eq!(changed_under(&job), Some(said("nothing has its name now")));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 }

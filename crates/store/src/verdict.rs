@@ -5039,4 +5039,36 @@ mod cloud_mutant_tests {
         assert_eq!(images.len(), 1, "only generation 1: {images:?}");
         let _ignored = std::fs::remove_dir_all(&root);
     }
+
+    /// **A WHOLE IMAGE WHOSE DAY BLOCK FAILS ITS CHECK IS REFUSED BY THE DAY
+    /// BLOCK'S OWN REFUSAL.**
+    ///
+    /// Covers `parse`'s day-block step: one byte of the day block changed and
+    /// the image re-sealed, so the trailer and the header pass and the day
+    /// block's CRC is what refuses; the refusal is exactly what `decode_day`
+    /// says of those bytes alone.
+    #[test]
+    fn a_whole_image_with_a_damaged_day_block_is_refused_by_it() {
+        use super::HEADER_LEN;
+        let mut bytes = committed_image();
+        bytes[HEADER_LEN + 8] ^= 0x01;
+        reseal(&mut bytes);
+        let alone = decode_day(&bytes[HEADER_LEN..TABLE_OFFSET], Path::new(PATH)).map(|_| ());
+        assert!(alone.is_err());
+        assert_eq!(format!("{:?}", parsed(&bytes)), format!("{alone:?}"));
+    }
+
+    /// **A WRITER STOPPED AT A CRASH POINT SAYS WHERE.**
+    ///
+    /// Covers the text of the test-only `crashed` refusal, which the crash
+    /// seam's tests match by variant and never print.
+    #[test]
+    fn a_crashed_writer_names_the_point_it_stopped_at() {
+        let crashed = VerdictError::Crashed { at: "image linked" };
+        assert_eq!(crashed.word(), "crashed");
+        assert_eq!(
+            crashed.to_string(),
+            "crashed: the writer stopped at image linked"
+        );
+    }
 }
