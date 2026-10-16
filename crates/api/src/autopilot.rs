@@ -8341,4 +8341,56 @@ mod cloud_mutant_tests {
             }
         }
     }
+
+    /// A status lock a panicking publisher poisoned answers HALTED, naming
+    /// the poisoned lock, never an empty or a stale document (kills the
+    /// deleted `phase` and `detail` fields of the refusal).
+    #[test]
+    fn a_poisoned_status_lock_answers_halted_and_says_why() {
+        let control = Control::new();
+        std::thread::scope(|scope| {
+            let poisoner = scope.spawn(|| {
+                let _held = control.status.lock();
+                panic!("a publisher that panics while it holds the status lock");
+            });
+            assert!(poisoner.join().is_err(), "the publisher panicked");
+        });
+        assert!(control.status.is_poisoned());
+        let json = control.json();
+        let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(doc["state"], "halted", "{json}");
+        assert_eq!(doc["phase"], "halted", "{json}");
+        assert!(
+            doc["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with("the autopilot's status lock is poisoned")),
+            "{json}"
+        );
+    }
+
+    /// Holding every seat holds each feed's own seat: no feed's seat can be
+    /// taken beside it, and every one is free again once it is dropped (kills
+    /// the all-seats mask's `- 1` turned to `+ 1` or `/ 1`).
+    #[test]
+    fn every_seat_held_at_once_holds_each_feeds_seat() {
+        let control = Control::new();
+        {
+            let _all = control.take_every_seat().expect("every seat starts free");
+            for feed in pull::vendor::Feed::ALL {
+                assert!(control.take_seat(feed).is_none(), "{feed:?}'s seat is held");
+            }
+        }
+        for feed in pull::vendor::Feed::ALL {
+            assert!(
+                control.take_seat(feed).is_some(),
+                "{feed:?}'s seat is free again"
+            );
+        }
+        let one = control.take_seat(pull::vendor::Feed::Dhan).expect("free");
+        assert!(
+            control.take_every_seat().is_none(),
+            "one held seat refuses them all"
+        );
+        drop(one);
+    }
 }
