@@ -16830,11 +16830,15 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   for 16 names); cached, n=200, 0.06 / 0.17 / 1.79 ms. That figure included
   the `df` child, which was not timed apart on the operator's machine and the
   figure was not re-taken there after D-5240. On the 4-core cloud container on
-  16 Oct 2026 (n=1,000 after 50 warm-up calls, three runs, a temporary
-  directory, nearest rank): the filesystem step alone was p50 1.56–1.74 ms,
-  p99 2.91–3.70 ms, max 4.69–5.93 ms with the child and is p50 3.1–5.2 µs,
-  p99 7.2–11.2 µs, max 64–69 µs with `statvfs(2)`; the whole uncached answer
-  over an empty store was p50 1.57–1.71 ms and is p50 17.7–17.8 µs.
+  16 Oct 2026, the build before and the build after run in three interleaved
+  rounds (n=1,000 each after 50 warm-up calls, one test thread, an empty store
+  in a temporary directory, nearest rank; ranges across the rounds): the
+  filesystem step alone was p50 1.49–1.53 ms, p99 2.18–3.00 ms, max
+  4.60–5.85 ms with the child and is p50 3.0–4.5 µs, p99 7.1–11.2 µs, max
+  36–85 µs with `statvfs(2)`; the `GET /disk.json` handler with its cache
+  cleared before each call, through the operations pool, was p50 1.62–1.65 ms,
+  p99 2.35–3.27 ms, max 4.66–9.66 ms and is p50 67–72 µs, p99 136–152 µs, max
+  0.21–0.85 ms; with the cache warm it is unchanged, p50 39–41 µs.
 - **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
   O(blocks of that month) in TIME; its answer is constant-size.** Every block
   is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar

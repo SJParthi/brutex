@@ -68965,3 +68965,99 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-5240 — No shipped code starts an outside program except the browser opener; `/disk.json` measures with `statvfs(2)` and no longer runs `/bin/df` (RUST-1) — 2026-10-16
+
+**Finding (RUST-1).** A scan of `feat/db-fix` at `4756cce0` on 16 Oct 2026
+found every tracked file conforming to `CLAUDE.md` §2, and two places in
+shipped code that start an outside program anyway:
+`crates/api/src/disk_route.rs:127` ran `/bin/df -Pk <store root>` for
+`/disk.json`'s free space, and `crates/api/src/server.rs:18999`
+(`open_unless_suppressed`) opens the operator's browser through the platform's
+URL handler when the server starts. Nothing refused a run-time spawn: gate 2
+reads build scripts only, and no test read shipped code for one.
+
+**Decision.**
+
+1. **`/disk.json` measures in this process.** One `statvfs(2)` gives the three
+   numbers, each a count of `f_frsize`-byte fragments: `total_bytes` is
+   `f_blocks`, `used_bytes` is `f_blocks − f_bfree`, `free_bytes` is
+   `f_bavail` — the same three fields `df -Pk` printed in 1024-byte blocks, so
+   on a filesystem whose fragment is a multiple of 1 KiB the bytes are the ones
+   it gave, and on any other they are exact where it rounded. `mount` is where
+   the filesystem is mounted: on macOS `statfs(2)`'s `f_mntonname`, the field
+   BSD `df` prints; elsewhere the highest directory above the canonical root
+   still on its device, as coreutils' `find_mount_point` finds it. The keys,
+   their order and their types are unchanged; `source` reads `statvfs` instead
+   of `df -Pk`. Two refusals are new and name the root: one that does not exist
+   (`df` refused it too, in its own words) and one that is no directory (`df`
+   measured the filesystem around a file). `parse_df` and its test are removed:
+   nothing prints `df` output for it to read.
+2. **A new dependency, `rustix` 1.1.4**, `default-features = false`, features
+   `std` and `fs`, with `linux-raw-sys` 0.12.1 behind it on Linux; every other
+   package it names (`bitflags`, `errno`, `libc`, `windows-sys`) was already
+   locked at the version it takes. The `libc` already in the lock does not fit:
+   `api` is `#![forbid(unsafe_code)]` and every call through `libc` is
+   `unsafe`. `nix` was read and refused: its `Statfs` exposes no mount point on
+   macOS. `docs/07-plan.md` had already audited `rustix` 1.1.4 as locally
+   auditable with no native source. The registry scan, run before the pin
+   moved: `rustix` ships 318 `.rs` files and `linux-raw-sys` 462, and neither
+   ships a `.c`, `.cc`, `.cpp`, `.h`, `.S`, `.asm` or `.js` file. On Linux
+   `rustix` makes the system call itself through `core::arch::asm!`, ordinary
+   stable Rust as `graviola`'s is; on macOS it calls `libc`. `linux-raw-sys`
+   has no `build.rs`. `rustix`'s `build.rs` runs `rustc` (or a
+   `RUSTC_WRAPPER`) on feature probes and emits `cfg`s: the same probe the
+   thirteen packages of `docs/06-limits.md` §96 run, so §96 now lists fourteen.
+   The `vocab` lockfile pin moves from 192 packages to 194 and to the new
+   fingerprint, with this scan recorded beside it.
+3. **A gate refuses a run-time spawn outside an allowlist.**
+   `crates/vocab/tests/no_runtime_spawn.rs` walks every `.rs` file under
+   `crates/`, lexes it (comments, strings, raw strings, chars and lifetimes
+   recognised; a file it cannot lex is a failure) and fails on any naming, in
+   shipped code, of the type the `process` modules of `std` and `tokio` start a
+   child with — the path with any spacing or a raw identifier, an import group
+   holding it, a glob import of the module and a renamed module. The needle is
+   assembled with `concat!`. Its allowlist holds exactly one function,
+   `open_unless_suppressed` in `crates/api/src/server.rs`, once, because it
+   *opens the operator's own browser, front-end launch, never a build or data
+   step*; an entry that stops matching, or a second naming in the same
+   function, is a failure. Test code is what only the test harness compiles:
+   any file under `crates/<crate>/tests/`; an item, statement, field, arm or
+   argument behind `#[test]` or a `cfg` that holds only under `test`
+   (`any(test, X)` and `not(test)` are shipped); a module file a test-only
+   `mod` declaration or `include!` names, by `rustc`'s path rules, closed over
+   every module those files declare; and a file under `#![cfg(test)]`. A file
+   named `*_tests.rs` that no test-only declaration reaches is shipped, and the
+   gate fails on its name. Benches, examples, binaries and build scripts are
+   scanned whole. On the tree before this change it failed with exactly one
+   line, `crates/api/src/disk_route.rs:127 in fn measure`; after it, it passes,
+   with the browser opener matched and the test-code namings counted.
+
+**Measured on the 4-core cloud container on 16 Oct 2026**: the base commit
+and this change, each with the same timing harness, run in three
+interleaved rounds; n = 1,000 each after 50 warm-up calls, one test thread, an
+empty store in a temporary directory, nearest rank; ranges are across the
+rounds. The harness was removed before this entry's commit.
+
+| What | Before (`/bin/df -Pk` child) p50 / p99 / max | After (`statvfs(2)`) p50 / p99 / max |
+|---|---|---|
+| `measure`, the filesystem step alone | 1.49–1.53 ms / 2.18–3.00 ms / 4.60–5.85 ms | 3.0–4.5 µs / 7.1–11.2 µs / 36–85 µs |
+| `measured`, the whole uncached answer | 1.54 ms / 2.16–2.31 ms / 4.16–6.95 ms | 17.4–23.2 µs / 44–76 µs / 91–561 µs |
+| `GET /disk.json` handler, cache cleared before each call | 1.62–1.65 ms / 2.35–3.27 ms / 4.66–9.66 ms | 67–72 µs / 136–152 µs / 0.21–0.85 ms |
+| `GET /disk.json` handler, cache warm | 39–40 µs / 82–140 µs / 0.13–2.38 ms | 39–41 µs / 94–130 µs / 0.27–0.46 ms |
+
+The handler rows go through `run_ops_read`'s admission and blocking pool, as a
+request does; the HTTP framing around them is not timed. The route serves a
+cached answer for 30 s, so a page's poll still costs one `Mutex` read between
+measurements; what changed is the cost of the read that misses. The
+operator's-machine figure in `docs/06-limits.md` L-WP81-4 included the child
+and was not re-taken.
+
+**What this does not decide.** Whether §2's build-script sentence should reach
+dependencies stays the owner's open question (D-2328, D-0555, D-1602), and this
+dependency adds one more probe to that inventory rather than answering it. The
+browser opener stays a spawn: the operating system's URL handler is the only
+way to open the browser the operator chose, and the allowlist names it rather
+than pretend it is not there. A dependency that spawns at run time is not under
+`crates/` and is not read by the gate; `crates/vocab/tests/workspace_is_rust.rs`
+pins the dependency set so a new one is reviewed.

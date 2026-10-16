@@ -1052,7 +1052,8 @@ mod tests {
         let body = measured(&root, None);
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
         let keys = |value: &serde_json::Value| {
-            let mut keys: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+            let mut keys: Vec<String> =
+                value.as_object().expect("object").keys().cloned().collect();
             keys.sort();
             keys
         };
@@ -1089,77 +1090,6 @@ mod tests {
         assert!(body.contains(&text), "{text}\nis not in\n{body}");
         assert!(number("used_bytes") <= number("total_bytes"));
         assert!(number("free_bytes") <= number("total_bytes"));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[ignore = "RUST-1 timing harness, run by hand"]
-    fn rust1_route_timing() {
-        let root = crate::scratch::path("disk-route-route-timing");
-        let _ = std::fs::remove_dir_all(&root);
-        let masters = root.join("masters");
-        std::fs::create_dir_all(&masters).unwrap();
-        let site = Loaded::new(Site::load(&masters, &root));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        for (label, miss) in [("route-miss", true), ("route-hit", false)] {
-            let mut ns: Vec<u128> = Vec::with_capacity(1000);
-            for k in 0..1050 {
-                if miss {
-                    *LAST.lock().unwrap() = None;
-                }
-                let t = Instant::now();
-                let (status, _, body) =
-                    runtime.block_on(disk_json(axum::extract::State(Loaded::clone(&site))));
-                let took = t.elapsed().as_nanos();
-                assert_eq!(status, axum::http::StatusCode::OK);
-                let _ = std::hint::black_box(body);
-                if k >= 50 {
-                    ns.push(took);
-                }
-            }
-            ns.sort_unstable();
-            println!(
-                "RUST1 {label} n=1000 p50_ns={} p99_ns={} max_ns={} min_ns={}",
-                ns[499], ns[989], ns[999], ns[0]
-            );
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    #[ignore = "RUST-1 timing harness, run by hand"]
-    fn rust1_timing() {
-        let root = crate::scratch::path("disk-route-timing");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let runs: [(&str, &dyn Fn()); 2] = [
-            ("measure", &|| {
-                let _ = std::hint::black_box(measure(&root));
-            }),
-            ("measured", &|| {
-                let _ = std::hint::black_box(measured(&root, None));
-            }),
-        ];
-        for (label, f) in runs {
-            for _ in 0..50 {
-                f();
-            }
-            let mut ns: Vec<u128> = (0..1000)
-                .map(|_| {
-                    let t = Instant::now();
-                    f();
-                    t.elapsed().as_nanos()
-                })
-                .collect();
-            ns.sort_unstable();
-            println!(
-                "RUST1 {label} n=1000 p50_ns={} p99_ns={} max_ns={} min_ns={}",
-                ns[499], ns[989], ns[999], ns[0]
-            );
-        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
