@@ -2701,3 +2701,84 @@ fn a_time_index_or_sort_index_refusal_says_which_file_and_why() {
         "/nonexistent/cloud/2031-02.srt: sort index not written: the disk is full"
     );
 }
+
+/// **AN INDEXED ONE-SECOND LOOKUP ANSWERS FROM THE INDEX ALONE AND READS NO
+/// BAR.**
+///
+/// Kills `replace == with !=` in `BarFile::locate`'s empty-month test (every
+/// month with a bar would bisect; caught before only by a timeout, as a
+/// large month's lookups then crawl): an intraday slot is exactly one bar
+/// wide, so the index alone places a stamp. The bars are cut away under a
+/// reader whose index is decided and which has read no bar; every lookup
+/// still answers, where a bisection would have to read a bar that is gone.
+#[test]
+fn an_indexed_one_second_lookup_reads_no_bar() {
+    use store::file::{BarFile, TimeLookup};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("tix-exact-no-bar-read");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    drop(writer);
+    let reader = BarFile::open_existing(&root, bars, SYMBOL).unwrap();
+    assert_eq!(reader.time_lookup(), TimeLookup::Indexed);
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(bars.to_path_buf(&root))
+        .unwrap();
+    file.set_len(32_768).unwrap();
+    drop(file);
+    for row in [1_i64, 2, 600, 1_098, 1_099] {
+        let ts = second_bar(row, 0).ts_micros;
+        assert_eq!(reader.first_at_or_after(ts).unwrap(), row.unsigned_abs());
+        assert_eq!(
+            reader.first_at_or_after(ts + 500_000).unwrap(),
+            row.unsigned_abs() + 1
+        );
+    }
+    drop(reader);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A SMALL MONTH'S LOOKUPS BISECT TO EVERY ROW, AND END.**
+///
+/// Kills `replace < with <=` and `replace / with %` in the bisection
+/// `first_at_or_after` (caught before only by a timeout: both can stop the
+/// range from shrinking). A month under the index threshold bisects every
+/// lookup; each runs on a worker with a deadline, for every bar's own stamp
+/// and the microsecond after it.
+#[test]
+fn a_small_months_lookups_bisect_to_every_row_and_end() {
+    use store::file::{BarFile, TimeLookup};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("bisect-ends");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 41)).unwrap();
+    drop(writer);
+    let (send, answer) = std::sync::mpsc::channel();
+    let worker_root = root.clone();
+    std::thread::spawn(move || {
+        let reader = BarFile::open_existing(&worker_root, bars, SYMBOL).unwrap();
+        let decided = reader.time_lookup();
+        let found: Vec<(u64, u64)> = (0..41)
+            .map(|row| {
+                let ts = second_bar(row, 0).ts_micros;
+                (
+                    reader.first_at_or_after(ts).unwrap(),
+                    reader.first_at_or_after(ts + 1).unwrap(),
+                )
+            })
+            .collect();
+        let _receiver_gone = send.send((decided, found));
+    });
+    let (decided, found) = answer
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("every lookup ended");
+    assert!(matches!(decided, TimeLookup::Bisection(_)), "{decided:?}");
+    let rows: Vec<(u64, u64)> = (0..41).map(|row| (row, row + 1)).collect();
+    assert_eq!(found, rows);
+    let _ignored = fs::remove_dir_all(&root);
+}
