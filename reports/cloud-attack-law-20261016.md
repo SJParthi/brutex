@@ -23,6 +23,7 @@ the 3,355 fallback-shaped lines classified for lens 2.
 | 6 depth | No depth parameter on the Apriori sweep; the ladder stops only on an empty frontier or a recorded halt. The separate expression search has an undocumented ~1M-candidate wall (finding). |
 | 7 docs vs code | §5's graph equals `cargo metadata` exactly. **15 ✓ invariant rows name tests that exist nowhere**, several describing behaviour later decisions reversed. **35 decision ids cited in code have no ledger entry** — D-3349 to D-3353 alone are cited 317 times. |
 | 8 extreme cases | Coverage matrix below. **Ten tests added**; three of them exposed real parser bugs, fixed here. |
+| gates | `fmt` and workspace `clippy -D warnings` clean. Seven crates tested as uid 0: **7,529 passed, 6 failed, 33 ignored**. None of the six failures is in code this branch changed (see Gates). `cargo deny`, coverage and mutation testing are not installed here: UNVERIFIED. |
 
 ## Lens 1 — look-ahead
 
@@ -412,7 +413,7 @@ before and holds existing correct behaviour that had no test.
 | cli | `results::tests::creating_the_run_ledger_syncs_its_directory_and_the_root` | 4 | failed (source shape) |
 | cli | `results::tests::the_ledger_is_fsynced_and_never_merely_flushed` (changed) | 4 | counts three direct barriers now and names the third |
 | pull | `census::a_contract_field_that_does_not_read_back_is_refused_not_read_as_spot` (`crates/pull/tests/census.rs`) | 2 | did not compile before (`EntryFault::ContractUnreadable` is new) |
-| pull | `census_store::tests::a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift` | 2 | see the gate table |
+| pull | `census_store::tests::a_migration_receipt_that_cannot_be_read_is_named_not_read_as_no_drift` | 2 | failed: run against the base's `census_store.rs`, it panicked at `census_store_tests.rs:1570:51` with "an unreadable receipt is named". A non-UTF-8 receipt was read as no drift (`None`) |
 | pull | `gdfl_rekey::tests::a_key_withdrawn_twice_with_different_records_refuses_the_ledger` | 2 | failed |
 | pull | `ingest::request_minutes::tests::a_torn_gap_line_is_closed_before_the_next_append` | 4 | failed (`"gap TORNgap NIFTY …"`) |
 | pull | `gdfl_import::tests::the_budget_saturday_2025_02_01_is_imported_and_an_ordinary_saturday_is_closed` | 8 | pins |
@@ -444,8 +445,12 @@ none is committed.
 | engine | `cargo test -p engine --locked --no-fail-fast` | **green**: exit 0. lib 104 passed; 4 integration binaries, 27 passed; doc-tests 0 |
 | core | `cargo test -p core --locked --no-fail-fast` | **exit 101, two binaries red, both from the snapshot's workflow file**: lib 192 passed; 6 of 8 integration binaries green (`graph` 15, `findings` 14, `cost_invariants` 5, `zerodha_index` 5, `bound_probe` 2, `lint` 2); doc-tests 4 passed. `banned_lists` fails 0 of 2 at `crates/core/tests/banned_lists.rs:81:10` ("the step declares its list as VARIABLE=…"), the panic CI's Gate 1e shows. `claim_reader` fails 2 of 3, at `crates/core/tests/claim_reader.rs:66:5` (gate 12's step does not run `"$tool" gate12 "$allow_claim"`) and `:124:9` (an allowance reads `["crates/cli/src/lib.rs", "2"]`, the old `FILE COUNT` form D-2314 replaced). Both binaries `include_str!` `.github/workflows/ci.yml` (`banned_lists.rs`, `claim_reader.rs:24`). On this snapshot that file is `main`'s copy, while the tests are `feat/db-fix`'s, and this branch changes neither. CI never reaches `claim_reader`: without `--no-fail-fast`, cargo stops at the first failing binary, `banned_lists` |
 
-"Ignored" tests were not run by these commands. Each needs the operator's real
-store or a timing host, and none is counted as passed above.
+"Ignored" tests were not run by these commands, and none is counted as passed
+above. Every `#[ignore]` attribute in the seven crates carries its reason. Each
+reason falls in one of three groups: data outside the repository, named by an
+environment variable (vendor archives, NSE samples, the operator's store); a
+timing measurement meant for a release build; or, in one case, a fixture that
+"peaks near 2 GB".
 
 **Not run here, and why.** `cargo deny check`, line and branch coverage, and
 mutation testing (CLAUDE.md §9) were not run: none of the three tools is
