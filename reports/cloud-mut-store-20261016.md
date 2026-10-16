@@ -61,7 +61,7 @@ changed.
 | store `sort_index_writer.rs` | 74 | 58 | 6 | 0 | 10 | 2 (equivalent in practice) |
 | store `path.rs` | 130 | 118 | 1 | 0 | 11 | 0 |
 | store `verdict.rs` | 840 | 714 | 59 | 5 | 62 | 13 (equivalent) |
-| store `sealed.rs` | 638 | pending | | | | |
+| store `sealed.rs` | 638 | 582 | 22 | 10 | 24 | 3 (equivalent) |
 | store `file.rs` | 407 | pending | | | | |
 | store `emits.rs`, `lib.rs` | 0 | no mutable code | | | | |
 
