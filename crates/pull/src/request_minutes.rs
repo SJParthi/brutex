@@ -1541,4 +1541,135 @@ mod cloud_mutant_tests {
             Some(store::path::YearMonth::new(2031, 3).unwrap())
         );
     }
+
+    /// Runs `f` on its own thread and fails the test if it does not answer
+    /// within two seconds: a pointer that stops advancing is a failure here,
+    /// not a hang.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(f()));
+        answer
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("answered within two seconds")
+    }
+
+    /// `refused` finds a second in any list, asked in time order, each
+    /// pointer stepping only past seconds below the one asked; equal seconds
+    /// are found again. Kills every mutant of its step and its test.
+    #[test]
+    fn a_refused_second_is_found_in_any_list_asked_in_order() {
+        let answers = within(|| {
+            let lists = vec![vec![10, 20, 30], vec![15]];
+            let mut cursor = Cursor::new(&lists);
+            [5, 10, 10, 15, 16, 20, 29, 30, 31].map(|second| cursor.refused(second))
+        });
+        assert_eq!(
+            answers,
+            [false, true, true, true, false, true, false, true, false]
+        );
+    }
+
+    /// `any_in` answers whether any refused second lies in `[from, to)`:
+    /// the end excluded, the start included, across lists. Kills every
+    /// mutant of its step and its two bounds.
+    #[test]
+    fn any_refused_second_in_a_half_open_span_is_found() {
+        let answers = within(|| {
+            let lists = vec![vec![10, 20], vec![35]];
+            let mut cursor = Cursor::new(&lists);
+            [
+                (0, 10),
+                (0, 11),
+                (11, 20),
+                (20, 21),
+                (21, 35),
+                (30, 36),
+                (36, 99),
+            ]
+            .map(|(from, to)| cursor.any_in(from, to))
+        });
+        assert_eq!(answers, [false, true, false, true, false, true, false]);
+    }
+
+    fn whole_session(day: Day) -> Vec<RawRow> {
+        let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+        (0..375).map(|minute| row(open + minute * 60)).collect()
+    }
+
+    /// A minute refused by name after the vendor sent it is missing from the
+    /// store: its day is a `refused_day` ledger line short by it, with no
+    /// receipt finding (the landing named the refusal). Kills the refused
+    /// second's filter and `short_why`'s day test.
+    #[test]
+    fn a_minute_refused_by_name_is_a_refused_day_and_no_receipt_finding() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let rows = whole_session(day);
+        let refused = rows[45].timestamp + IST_OFFSET_SECS;
+        let refusals = Refusals {
+            seconds: vec![vec![refused]],
+            ..Refusals::default()
+        };
+        let audit = within(move || {
+            audit_refused(
+                &rows,
+                plan_at(&request_on(day, day), "NSE", "INDEX"),
+                Venue::NseIndex,
+                &refusals,
+            )
+        });
+        assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+        let [line] = audit.days.as_slice() else {
+            panic!("{:?}", audit.days);
+        };
+        assert_eq!(
+            (
+                line.why,
+                line.owed,
+                line.held,
+                line.missing,
+                line.first_missing
+            ),
+            (Why::RefusedDay, 375, 374, 1, Some(600))
+        );
+    }
+
+    /// A day the store refused before its month's first held bar is a
+    /// `refused_front` line; the next day, whole, writes none; a repair that
+    /// filled a whole day says so with a `repaired` line. Kills the fronts'
+    /// and the repairs' day-order steps.
+    #[test]
+    fn a_front_day_is_refused_front_and_a_repaired_whole_day_says_repaired() {
+        let (d1, d2, d3) = (
+            Day::new(2022, 10, 3).unwrap(),
+            Day::new(2022, 10, 4).unwrap(),
+            Day::new(2022, 10, 6).unwrap(),
+        );
+        let mut rows = whole_session(d2);
+        rows.extend(whole_session(Day::new(2022, 10, 5).unwrap()));
+        rows.extend(whole_session(d3));
+        let refusals = Refusals {
+            seconds: Vec::new(),
+            fronts: vec![d1.days_from_epoch() - 9, d1.days_from_epoch()],
+            repaired: vec![d1.days_from_epoch() - 2, d3.days_from_epoch()],
+        };
+        let audit = within(move || {
+            let request = request_on(d1, d3);
+            audit_refused(
+                &rows,
+                plan_at(&request, "NSE", "INDEX"),
+                Venue::NseIndex,
+                &refusals,
+            )
+        });
+        assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+        let lines: Vec<(Day, Why, u32, u32)> = audit
+            .days
+            .iter()
+            .map(|line| (line.day, line.why, line.held, line.missing))
+            .collect();
+        assert_eq!(
+            lines,
+            [(d1, Why::RefusedFront, 0, 375), (d3, Why::Repaired, 375, 0)]
+        );
+    }
 }
