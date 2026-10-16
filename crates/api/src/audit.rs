@@ -5334,4 +5334,59 @@ mod cloud_mutant_tests {
             .expect("the catch-up ran");
         assert_eq!(ours(again), 0, "a whole index is no news");
     }
+
+    /// A journal that is there and cannot be opened refuses the index build
+    /// by name, and `ensure_index` logs that at Error. Root ignores modes, so
+    /// this bites for a non-root user, as the suite is meant to run.
+    #[test]
+    fn an_unreadable_journal_refuses_the_index_build_and_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("index-unreadable");
+        let path = journal_path(&root);
+        std::fs::create_dir_all(path.parent().expect("audit/")).expect("mkdir");
+        std::fs::write(&path, run_record().image()).expect("a journal");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let why = Journal::at(&root).build_index();
+        let shown = path.display().to_string();
+        let from = crate::emitted::mark();
+        let thread = ensure_index(&root).expect("a thread");
+        thread.join().expect("the build ran");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod back");
+        let why = why.expect_err("refused");
+        assert!(why.starts_with(&format!("{shown}: ")), "{why}");
+        assert!(why.contains("ermission denied"), "{why}");
+        let logged = crate::emitted::landed(from, "api.audit", "journal index not written")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "path", &shown))
+            .collect::<Vec<_>>();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(crate::emitted::says(&logged[0], "why", "ermission denied"));
+        assert_eq!(logged[0].level, telemetry::Level::Error);
+    }
+
+    /// A range read past the journal's end is refused by name, naming the
+    /// record it ended at, never filed as if the rest were there.
+    #[test]
+    fn a_range_past_the_journal_end_is_refused_by_name() {
+        let root = scratch("range-past-end");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let dir = journal.index_dir();
+        let mut batch = Batch::default();
+        let why = journal
+            .file_range(0, 10, &mut batch, &dir)
+            .expect_err("only one record is there");
+        assert_eq!(
+            why,
+            format!(
+                "{}: the file ended at record 1 of 10",
+                journal.path.display()
+            )
+        );
+        assert_eq!(
+            batch.built.records, 1,
+            "the one record that was there was filed"
+        );
+    }
 }

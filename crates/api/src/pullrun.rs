@@ -8294,4 +8294,91 @@ mod cloud_mutant_tests {
             .clone()
             .unwrap_or_default()
     }
+
+    /// The leg encoding the page writes: `route|vendor|dir|label|payload`,
+    /// each part's `%`, `&`, `=`, `|` and `+` escaped, twice over.
+    fn enc(raw: &str) -> String {
+        let mut out = String::new();
+        for ch in raw.chars() {
+            match ch {
+                '%' => out.push_str("%25"),
+                '&' => out.push_str("%26"),
+                '=' => out.push_str("%3D"),
+                '|' => out.push_str("%7C"),
+                '+' => out.push_str("%2B"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// A leg whose payload names more distinct fields than the form
+    /// middleware's own bound refuses the whole run by name, and the bound
+    /// itself is admitted (`FormKeys::TooMany`).
+    #[test]
+    fn a_leg_whose_payload_names_too_many_fields_refuses_the_run() {
+        let leg = |distinct: usize| {
+            let mut body = String::from("vendor=dhan&granularity=1day");
+            for n in 2..distinct {
+                body.push_str(&format!("&k{n}=v"));
+            }
+            let joined = format!("/pull/spot|dhan|1day|wide|{}", enc(&body));
+            format!("leg={}", enc(&joined))
+        };
+        let bound = crate::server::MAX_DISTINCT_FORM_KEYS;
+        assert_eq!(
+            legs_from(&leg(bound)).expect("the bound is admitted").len(),
+            1
+        );
+        match legs_from(&leg(bound + 1)) {
+            Err(Refusal::Malformed(why)) => assert!(
+                why.ends_with(&format!(
+                    "(its form names more than {bound} distinct fields)"
+                )),
+                "{why}"
+            ),
+            other => panic!("a payload past the bound must refuse the run: {other:?}"),
+        }
+    }
+
+    /// A leg failure or a dead chain addressed to a feed the document does
+    /// not hold changes nothing and does not panic.
+    #[tokio::test]
+    async fn an_edit_to_a_feed_the_document_does_not_hold_changes_nothing() {
+        let site = site("edit-past-feeds");
+        let run = claim(&site);
+        let before = observed(&site);
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1day".to_owned(),
+            label: "dhan · 1day".to_owned(),
+            body: String::new(),
+        };
+        let status = axum::http::StatusCode::BAD_GATEWAY;
+        note_leg_failure(
+            &site,
+            run,
+            3,
+            &leg,
+            (status, "<p>no receipt</p>"),
+            LegOutcome::Store,
+        );
+        let facts = vec![("Refused because", "a seat is held".to_owned())];
+        let refused = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "REFUSED",
+            reason: "synthetic",
+            good: false,
+            facts: &facts,
+            footnote: "No vendor was contacted.",
+        });
+        note_leg_failure(&site, run, 3, &leg, (status, &refused), LegOutcome::Store);
+        let dead = tokio::spawn(async { panic!("a chain that dies on purpose") })
+            .await
+            .expect_err("the task panicked");
+        note_dead_chain(&site, run, 3, 1, &dead);
+        assert_eq!(observed(&site), before);
+        assert!(observed(&site).feeds.is_empty());
+    }
 }
