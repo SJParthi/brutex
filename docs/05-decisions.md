@@ -69385,4 +69385,8 @@ browser opener stays a spawn: the operating system's URL handler is the only
 way to open the browser the operator chose, and the allowlist names it rather
 than pretend it is not there. A dependency that spawns at run time is not under
 `crates/` and is not read by the gate; `crates/vocab/tests/workspace_is_rust.rs`
-pins the dependency set so a new one is reviewed.
+pins the dependency set so a new one is reviewed. Nor does it build the
+tick-store writer's free-space floor: D-4967's "pure Rust has no `statvfs`
+without `libc`" stops being true of this workspace with this change, but
+`pull` does not depend on `rustix`, so `docs/06-limits.md` L-TSW-7 stands and
+taking it there is that floor's owner's choice (FM-055, R4-08).
