@@ -124,7 +124,11 @@ sha1     = "0.10"
 flate2   = "1"
 # zstd frames in pure Rust: no build.rs, no C (D-2801). `pull` reads the GDFL
 # tick store with it; `lake` names the same version and features itself.
-ruzstd   = { version = "0.8", default-features = false, features = ["std", "hash"] }
+# 0.9.1 is the floor, not a preference: 0.8.2 is RUSTSEC-2026-0344 (a block's
+# DECODED size was never bounded, so a tiny frame could allocate gigabytes) and
+# 0.9.1 is the fix. Both call sites pass 0.8.2's 100 MiB window ceiling back
+# explicitly, so the bump widens nothing they accept. D-5090.
+ruzstd   = { version = "0.9.1", default-features = false, features = ["std", "hash"] }
 # SHA-256, for the AWS SigV4 signature in `pull::ssm`. Pure Rust, RustCrypto,
 # with no `asm` feature — so no assembly and no C. That is the whole reason the
 # AWS SDK was refused in favour of signing the one request by hand. See D-0051.

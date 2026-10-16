@@ -68965,3 +68965,79 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling — 2026-10-16
+
+**Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
+`feat/db-fix` stopped at `STEP deny rc=1` (gate 72c91a46, 14 Oct):
+`cargo deny check` failed `advisories` on **RUSTSEC-2026-0344**, "Decompression
+bomb in `ruzstd`: a tiny input can exhaust memory (OOM)",
+<https://rustsec.org/advisories/RUSTSEC-2026-0344>, against `ruzstd` 0.8.2
+(reached through `lake` and `pull`), patched `>= 0.9.1`. The advisory's cause:
+a compressed block's DECODED size was never held to RFC 8878's
+`Block_Maximum_Size = min(Window_Size, 128 KiB)`. Re-run on 16 Oct against the
+advisory database at commit `479c888c` (2026-10-16), the same check also
+failed on four advisories dated 2026-10-14 against `rustls` 0.23.45, each
+patched `>= 0.23.46`: RUSTSEC-2026-0346 (`Debug` of client session values
+exposes TLS secrets), RUSTSEC-2026-0347 (buffered data sent to the outer
+server after ECH rejection), RUSTSEC-2026-0348 (brotli certificate
+decompression can allocate up to 1 GiB before authentication) and
+RUSTSEC-2026-0349 (an unauthenticated ServerHello can downgrade later
+connections to classical key exchange).
+
+**Decision.**
+
+1. **`ruzstd` floor 0.9.1**, in the root `[workspace.dependencies]` line and
+   `crates/lake/Cargo.toml` (0.9 is outside `"0.8"`'s semver range, so the
+   lines move, not only the lock). 0.9.1 is the newest published version.
+   Same features (`std`, `hash`); its dependency list is unchanged (`twox-hash`).
+2. **`rustls` 0.23.46 in `Cargo.lock` only**: a patch release inside every
+   manifest's existing range; its dependency list is unchanged.
+3. **Both decode call sites pass the window ceiling by name**:
+   `lake::page::LakePageReader::decode` and `pull::gdfl_tickstore::unzstd` call
+   `StreamingDecoder::new_with_max_window_size(_, 128 MiB)`. 128 MiB is 0.9.1's
+   own `DEFAULT_MAX_WINDOW_SIZE`, so this is exactly what 0.9.1's `new` does;
+   naming it means a later `ruzstd` that moves its default cannot move ours.
+4. **What the bump refuses that 0.8.2 accepted, stated rather than hidden.**
+   (a) A block that decodes past its `Block_Maximum_Size` — the advisory's
+   class; a ten-byte frame that 0.8.2 expanded to 4,096 bytes is now refused.
+   (b) A frame declaring a window over 128 MiB: 0.8.2 checked its 100 MiB
+   `MAXIMUM_ALLOWED_WINDOW_SIZE` only when a decoder was `reset` for a second
+   frame, and both call sites build one decoder per frame, so it checked
+   nothing (measured: an 8 GiB declared window was accepted). Neither is
+   silent: each is the call site's existing refusal (`zstd frame refused` /
+   `zstd decode refused` in `lake`, `TickStoreMalformed` in `pull`).
+5. **Every frame written before still reads to the same bytes — measured, not
+   assumed.** A throwaway harness outside the repository links 0.8.2 and 0.9.1
+   side by side and drives both through the call sites' own shape (decoder,
+   `take(want + 1)`, `read_to_end`): every zstd frame of all **2,001** GDFL
+   index day files in the tick store (NIFTY spot and every other index,
+   2018–2026, special sessions included; 1,592,231 frames, 6.66 GB in,
+   329 GB out) plus six whole option and stock days — options, every
+   underlying and strike in the file (NIFTY, BANKNIFTY, stocks, illiquid
+   strikes alike): 25 and 27 Oct 2019 (the Muhurat session), 1 Feb 2020
+   (budget Saturday), 4 Jun 2024 (the largest file in the store); stocks:
+   3 Feb 2020 and 31 Aug 2026 — 337,126 more frames, 1,929,357 in all:
+   **0 frames differ, 0 refused by either**. The largest
+   declared window is 4,194,304 bytes (2^22), as the writer's settings predict
+   (`zstd` 0.13.3, level 9; libzstd 1.5.7 `clevels.h` gives level 9 window log
+   22), 1/32 of the ceiling. In the repository, six frames 0.8.2's own encoder
+   wrote (Raw with and without content, RLE across block boundaries,
+   Compressed) are frozen as hex in `crates/lake/src/zstd_v082_frames.rs` and
+   decoded byte for byte through both call sites; every truncation is refused,
+   a stated length one byte long or short is refused, and the two crafted
+   frames of point 4 are refused (both crafted tests fail under 0.8.2).
+6. **No timing changed**, so `docs/06-limits.md` gains no row. Same harness,
+   same frames, the two versions interleaved per iteration: real tick-store
+   frames p50 301 µs vs 0.8.2's 308 µs, p99 2.56 ms vs 2.52 ms (n = 1,592,231);
+   synthetic frames n = 2,000 each, 0.9.1 equal or faster at p50 and p99 on all
+   six. Decoding stays O(frame) as before; nothing moved onto a per-request path.
+7. **The dependency fingerprint is re-pinned** in
+   `crates/vocab/tests/workspace_is_rust.rs` after the scan it demands:
+   `ruzstd` 0.9.1 ships no `build.rs` and no C/assembly; `rustls` 0.23.46's
+   non-Rust file set equals 0.23.45's and its `build.rs` is byte-identical.
+   Package count unchanged at 195.
+
+**Supersedes** the version lines of D-2801 point 5 and of the `lake` entry
+that first named `ruzstd` 0.8; the reasons those gave (pure Rust, no
+`build.rs`, no C) still hold for 0.9.1.
