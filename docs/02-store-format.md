@@ -161,9 +161,23 @@ pulled before an action and one pulled after it may sit here on different
 bases with nothing to tell them apart. numeric-pass16 p16num-2, D-1969.
 
 **`i64::MIN` is the open-interest null sentinel.** Zero means zero. Spot
-indices carry no open interest and store the sentinel; conflating that with a
-genuine zero would make a derivative series and an index series indistinguish-
-able on a field that matters.
+indices and shares carry no open interest; conflating a null with a genuine
+zero would make a derivative series and an index series indistinguishable on a
+field that matters.
+
+**What the store actually holds for them is two things, by landing date.** Rows
+landed since D-3322 (the Kite decode's `withhold`, `crates/pull/src/fetch.rs`,
+pinned by `an_index_or_a_share_is_filed_with_the_null_and_a_contract_keeps_its_interest`)
+store the sentinel, as GDFL's always did. Rows the Zerodha landing filed before
+it store **0**: measured on the operator's store, every NIFTY `1min` bar
+(796,027) and `1day` bar (2,911) holds 0, and the derived rungs folded from
+them inherit it (DB-A08, DB-A14). Those months are not rewritten in place
+(§3 rule 8 of `CLAUDE.md`); a re-landing is a new generation. So a stored 0 on
+an `INDEX` or `CASH` series is NOT a measured zero, and every read says so:
+`/bars.json` and `/bars/window.json` serve `"oi": null` with
+`"oichg_why": "not_a_derivative"` for those segments whatever is stored
+(D-3322 item 2). This sentence used to say spot indices store the sentinel,
+which no Zerodha month landed before D-3322 does (R3-18).
 
 **A record has no structure that a lost write violates.** An all-zero record is
 a legal flat bar whose open interest is a real zero. Nothing about the record
@@ -466,6 +480,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.prv` | where the month's bars came from, one record per landing, version 1 (§8.3, D-3334) |
 | `.srt` | the bar file's sort index: rows ordered by each sortable column, in runs, version 1 (§8.4, D-3349) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
+| `.sbar` | the sealed form of a closed month: every committed record, the committed header and the `.prv` image in one file written once, version 1 (§8.5, D-4965) |
 
 ```
 bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.bin
@@ -939,6 +954,158 @@ across directories by hand — therefore binds. It still serves no value the
 bars do not hold: every row a reader serves is read from the `.bin` and
 checked against the entry that named it, and each place of a page that
 disagrees is a named fault carrying the command that rebuilds the index.
+
+### 8.5 `.sbar` — sealed month, version 1 (D-4965)
+
+**Why it exists.** A closed month never changes, and its raw form keeps 56
+bytes a bar beside a `.crc`, a `.tix` and a `.srt`. The sealed form holds the
+same records bit for bit in codec 1 frames (§39, D-4939) of 256 bars, about
+3 to 8 bytes a bar, behind a head that answers the month's counts, stamps,
+ranges and extremes with no further read. It is a **form** of a month, not a
+generation: the generation pointer (D-3350) still says which content is
+served, and inside the served directory the form says how it is stored. It is
+a sibling kind (`store::path::FileKind::SealedBars`), not a bar `Layout`: it
+has no stride, so `32768 + i·56` is never asked of it, and a build that
+predates it refuses a `.sbar` opened as bars by its magic (`BRUTEXC1` shares
+no prefix with `BRUTEXB`).
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2020-03.sbar
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2020-03.sbar
+```
+
+Written by `store::sealed::Builder` (bytes only; publishing them by rename is
+the sealer's, SC-6) and read by `store::sealed::SealedMonth` (the read door
+that opens it in place of the `.bin`, SC-3, is not in this version of the
+code: until it lands nothing writes or opens a `.sbar`). **It is a pure
+function** of the month's committed records, its committed header, its path,
+its `.prv` image and the month summary handed in: no time, no ordinal, no
+build stamp. The same month built twice, on any host, is the same bytes.
+Every integer is little-endian; every checksum is CRC-32C (§6's parameters).
+No mapping; every read is positional; the file is never opened for writing
+once published.
+
+```
+0        512             table_off        prv_off          sum_off         blocks_off       file_len
+├─ HEAD ──┼─ DIRECTORY ────┼─ TIME TABLE ────┼─ PROVENANCE ───┼─ SUMMARY ──────┼─ FRAMES ────────┤
+           24 × n_blocks    8 × (entries+1)   packed .prv      version + bytes  codec 1, back to back
+```
+
+**Head, 512 bytes.** Bytes 0 to 63 have a bar header slot's shape (§2), so the
+version is found before the layout is known and `Head::bar_header` gives
+`generation::Pointer::describes` the raw month's header unchanged.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 8 | magic `BRUTEXC1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | record stride `56`: what a frame decodes to |
+| 12 | 4 | flags: bit 0 time table present, bit 1 provenance present, bit 2 month summary present; any other bit is refused |
+| 16 | 8 | `generation` of the raw month's committed header, copied |
+| 24 | 8 | `n_valid` |
+| 32 | 8 | `first_ts_micros`, copied |
+| 40 | 8 | `last_ts_micros`, copied |
+| 48 | 4 | `symbol_id` |
+| 52 | 4 | `timeframe_secs` |
+| 56 | 4 | CRC-32C over bytes `0..56` and `60..64`, as every slot |
+| 60 | 4 | zero |
+| 64 | 2 | `block_rows`: 256 as written; a reader takes 1 to 256 and never assumes it |
+| 66 | 2 | codec `1` |
+| 68 | 2 | directory entry length `24` |
+| 70 | 2 | the raw bar version sealed: `3` (version 2 holds no block checksums, so nothing proves its bytes: `unverified_source`) |
+| 72 | 4 | `n_blocks` = `ceil(n_valid / block_rows)` |
+| 76 | 4 | rung slots a table entry spans, `4096` |
+| 80 | 4 | `table_entries`: the table holds `table_entries + 1`; zero when absent |
+| 84 | 4 | `prv_packed_len`, the checksum after it not counted |
+| 88 | 4 | `prv_raw_len`, the `.prv` image's length, at most 262,208 |
+| 92 | 2 | year; 94: month `u8`; 95: zero |
+| 96 | 8 | `table_off` = 512 + 24 · `n_blocks` |
+| 104 | 8 | `prv_off` = `table_off` + 8 · (`table_entries` + 1) when the table is present |
+| 112 | 8 | `blocks_off`: after the provenance and the summary |
+| 120 | 8 | `blocks_len`: every frame's bytes, at most `n_blocks` · 14,508 and `u32::MAX` |
+| 128 | 8 | `file_len` = `blocks_off` + `blocks_len`; a file of another length is refused |
+| 136 | 8 | `origin_micros`: 00:00 IST on the 1st of the month |
+| 144 | 8 | `sum_off`; 152: `sum_len` `u32`; 156: zero. Both zero when flag bit 2 is clear |
+| 160 | 32 | BLAKE3 of the `n_valid × 56` record bytes exactly as the raw month held them |
+| 192 | 4 | CRC-32C of the raw month's `.crc` image (§6) over blocks `0..blocks_for(n_valid)`, regenerated from the records; 196: zero |
+| 200 | 24 | the first 24 bytes of BLAKE3 over the month's `.bin` store path (the `.prv` header's digest, §8.3) |
+| 224 | 6 × 24 | column ranges, open, high, low, close, volume, open interest: nulls `u64`, smallest `i64`, largest `i64` (only open interest has a null; both zero when every row is null) |
+| 368 | 6 × 16 | extremes, each a value and the stamp of the EARLIEST bar holding it: close max, close min, high max, low min, widest `high − low`, heaviest volume (the `.srt` run header's six, §8.4) |
+| 464 | 44 | reserved, zero; a set byte is refused |
+| 508 | 4 | CRC-32C over bytes `0..508` |
+
+A reader checks, in this order: the length (at least 512), the magic, the
+version, the head's CRC, the slot's CRC, the stride, the flags, every reserved
+byte, `block_rows`, the codec, the entry length, the raw version, the table's
+slots; then derives every offset and count again from the head's own counts
+(`n_blocks`, the table flag, `table_entries`, each offset, the provenance and
+summary lengths, `blocks_len` and `file_len`) and refuses any difference by
+field; then the stamps (inside the month, first ≤ last), the column ranges and
+the extremes (each equal to its column's range and stamped inside the month);
+then against its path: symbol id, rung, year and month, path digest, and the
+file's length. Each refusal has its own name (`store::sealed::SealedError::reason`)
+and is one `store.sealed` error on the log.
+
+**Directory, 24 bytes a block.** Block `k` holds rows
+`k·block_rows .. min((k+1)·block_rows, n_valid)`.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 4 | `end`: where frame `k` ends, from `blocks_off`; it starts at entry `k−1`'s `end`, or 0 |
+| 4 | 4 | CRC-32C of the frame's bytes |
+| 8 | 8 | stamp of the block's first row |
+| 16 | 4 | zero |
+| 20 | 4 | CRC-32C over bytes `0..20` followed by `k` as 8 bytes |
+
+Row to block is a division; entries `k−1` and `k` are one read of 48 bytes. The
+keyed checksum binds an entry to its place, so a reader verifies exactly the
+entries it reads and never the whole directory. A frame whose span runs
+backwards, past `blocks_len`, past 14,508 bytes, or (the last) short of
+`blocks_len` is `entry_order`; one that fails its CRC or codec 1 is `frame`;
+one that decodes to another row count or first stamp is `frame_rows` or
+`first_stamp`.
+
+**Time table**, present exactly when `n_blocks > 64`: `table_entries + 1`
+entries of 8 bytes, a block number `u32` then CRC-32C over it followed by the
+entry's index as 8 bytes. Entry `s` is the block holding the first row stamped
+at or after `origin + s · 4096 · timeframe`, or `n_blocks`; `table_entries` is
+`ceil(month span / (4096 · timeframe))`: 633 for a thirty-day one-second month,
+654 for a thirty-one-day one. `first_at_or_after(ts)` answers 0 at or before
+the first stamp and `n_valid` after the last, from the head; otherwise it
+reads table entries `s, s+1`, the directory entries between them in one read
+(at most 64 at a time; a range wider than that, possible only for a month
+holding two bars in one slot, written before D-0915, is bisected one entry a
+step), and one frame's stamps. Without a table the whole directory is at most
+64 entries, one read. Equal stamps answer the first of them.
+
+**Provenance.** The month's `.prv` image (§8.3) byte for byte, packed: each
+byte combined by XOR with the byte 256 before it, then each run of 1 to 256
+zeros as `(0x00, run − 1)` and every other byte as itself; then the CRC-32C of
+the packed bytes. At most twice the image; an image of 64 bytes or more must
+carry this month's `.prv` header (`provenance_foreign` otherwise), and a
+shorter one (a sidecar whose header write was cut) is carried as it is.
+
+**Month summary** (round 3, amendment A4): a summary's own version `u16` (at
+least 1), two zero bytes, its bytes (at most 1 MiB), and a CRC-32C over
+everything before it. The format carries R3-06's bytes and never reads them: a
+new summary version is a new number in this section, not a new `.sbar`
+version.
+
+**Frames.** Codec 1 (§39), back to back from `blocks_off`.
+
+**An empty month is the head alone**, 512 bytes (with its provenance after it
+when it has one).
+
+**Kept and not kept.** Kept bit for bit: every committed record (the head's
+BLAKE3), the committed header's fields, every provenance byte. Not kept as
+bytes, because they are derived or are not data: the superseded header slot,
+bytes past the commit counter, the `.crc` (its image's CRC is in the head, and
+every frame has its own), the `.tix` (the time table replaces it) and the
+`.srt` v1. `SealedMonth::audit` decodes the whole month and checks every entry,
+frame, the stamps' order, the BLAKE3, the regenerated `.crc` image, the
+ranges, the extremes, the table, the provenance and the summary against the
+head: O(the month), once, for a seal and a scrub, never for a request
+(`docs/06-limits.md` L-SC-16).
 
 ## 9. What this format does not solve
 
@@ -3894,4 +4061,115 @@ trailing bytes included, is made before the caller's buffer grows: a refused
 frame reserves nothing, and an accepted one reserves its head's rows once
 (FM-284). Invariants SC1-01 to
 SC1-09 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
+`docs/06-limits.md`.
+
+## §40 — The tick store's day file, `BRTXTS01` version 1 (D-2801, D-4967)
+
+The GDFL tick store holds one day file (`.bts`) for each vendor day zip: every
+entry of the zip, losslessly, in the zip's central-directory order, with the
+entry's raw name bytes (Windows `\` separators kept), its uncompressed size,
+CRC-32 and DOS date and time. Read by `pull::gdfl_tickstore` (and through it
+`gdfl_cm` and `gdfl_nfo`); written by `pull::tickstore_write` and, for the
+files already on disk, by the separate tool that first defined the format
+(its specification, `tickstore-data/FORMAT.md`, lives outside this
+repository; this section is the repository's copy of what a reader and a
+writer must agree on). Version 1 is frozen: a change mints a new magic
+(`BRTXTS02`) and a version 1 file is never rewritten. All integers are
+little-endian. "zstd" is one standard zstd frame: any valid frame decodes,
+so files from different encoders are equally version 1 (the tool wrote C
+zstd level 9; `pull::tickstore_write` writes `ruzstd` `Fastest`), and a
+day's identity is its decoded entries, never its file bytes (FM-249).
+
+**Where a day file lives**, under the tick store's root, from the zip's own
+canonical name:
+
+| Tree | Day zip | Day file |
+|---|---|---|
+| Options | `GFDLNFO_TICK_<DDMMYYYY>.zip` | `options/<YYYY>/<MON_YYYY>/GFDLNFO_TICK_<DDMMYYYY>.bts` |
+| Stocks | `GFDLCM_STOCK_TICK_<DDMMYYYY>.zip` | `cm/STOCKS/<YYYY>/<MON_YYYY>/GFDLCM_STOCK_TICK_<DDMMYYYY>.bts` |
+| Indices | `GFDLCM_INDICES_TICK_<DDMMYYYY>.zip` | `cm/INDICES/<YYYY>/<MON_YYYY>/GFDLCM_INDICES_TICK_<DDMMYYYY>.bts` |
+
+A missing day file means the day is not held. A `<day>.bts.tmp*` beside it
+is an unfinished write: readers ignore it, `pull::tickstore_write` refuses
+the day by name while one is there (`stale_temp`) and never removes it.
+
+**Layout.**
+
+```
+offset 0            magic "BRTXTS01" (8 bytes)
+offset 8            block 0 | block 1 | ... (concatenated, no padding)
+index_off           the index, one zstd frame
+file length - 40    the footer (40 bytes)
+```
+
+| Footer offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | `index_off` u64 |
+| 8 | 8 | `index_len` u64, the compressed frame's length |
+| 16 | 8 | `index_raw_len` u64 |
+| 24 | 4 | `index_crc` u32, CRC-32 (IEEE, zlib's polynomial) of the decompressed index |
+| 28 | 4 | `n` u32, the entry count |
+| 32 | 8 | magic `"BRTXTSE1"` |
+
+A file is valid only when `index_off + index_len + 40` is its length, the
+index decompresses to `index_raw_len` bytes with CRC `index_crc`, and every
+block lies inside `[8, index_off)`. The writer also holds every block after
+the one before it and not overlapping it (`block_overlap`, FM-248).
+
+**The index** is `n` entries, no padding, each:
+
+| Size | Field |
+|---:|---|
+| 2 | `name_len` u16 |
+| `name_len` | the raw zip entry name |
+| 1 | `kind`: 0 a directory entry (no block, length 0), 1 a columnar CSV, 2 raw |
+| 8 | `off` u64, the block's absolute offset |
+| 8 | `len` u64, the block's length |
+| 8 | `size` u64, the file's length (the zip's uncompressed size) |
+| 4 | `crc` u32, the file's CRC-32 (the zip's) |
+| 8 | `rows` u64, data rows after the header line (0 for kind 2) |
+| 4 | `dos_time` u32: the zip's DOS date in the high 16 bits, its DOS time in the low 16 |
+
+Names are unique (a writer refuses a zip with a duplicate); a lookup hashes
+the index by name once and is O(1) a probe.
+
+**Blocks.** The first byte is the kind.
+
+- Kind 2 (raw): `0x02`, then one zstd frame of the file's bytes. Any file
+  that is not a perfectly regular CSV: mixed line endings, ragged rows, a
+  stray `\r`, an empty file.
+- Kind 1 (columnar): `0x01`; `crlf` u8 (1 when lines end `\r\n`, 0 for
+  `\n`); `trailing` u8 (1 when the file ends with a terminator);
+  `header_len` u32 and the header line without its terminator; `ncols` u32
+  (the header's commas plus one); `rows` u64; then `ncols` columns, each
+  `tag` u8 (0 text, 1 numeric), `payload_len` u64 (decompressed),
+  `text_len` u64 (the column text's length), `zlen` u64 and a zstd frame of
+  `zlen` bytes holding the payload.
+
+A column's text is that column's field of every data row joined with `\n`, no
+trailing `\n`; a field never holds `,`, `\r` or `\n` (such a file is kind 2).
+Tag 0's payload is the text. Tag 1's payload is `shape[rows]`, `delta` u8,
+`w` u8 and `w` byte planes of `rows` bytes: value `x_i = Σ plane_k[i] << 8k`,
+zigzag `z_i = (x_i >> 1) ^ -(x_i & 1)`, and `v_i = v_{i-1} + z_i` (wrapping,
+`v_{-1} = 0`) when `delta` is 1, else `v_i = z_i`. A field renders from
+`(shape_i, v_i)`: shape bit 5 is a time, `HH:MM:SS` with `HH = v / 3600`,
+`MM = v / 60 % 60`, `SS = v % 60`, two digits each; otherwise an optional `-`
+(bit 4), then `|v|` in decimal, zero-padded to at least `d + 1` digits where
+`d = shape & 0x0F`, with a `.` inserted `d` digits from the right when
+`d > 0`. A column is numeric only if every field re-renders byte for byte.
+
+**Rebuild**: the header, then for each row the terminator and the row's
+fields joined by `,`, then a final terminator when `trailing`. With no rows
+every column text is empty. The result's length must be `size` and its CRC-32
+`crc`, or the reader refuses the file.
+
+**How a day is written** (`pull::tickstore_write`, D-4967): every member is
+held to its zip CRC before anything is written; the file is written as
+`<day>.bts.tmp.<run-id>` in the day's own folder through
+`store::staging::create`, fsynced, read back entry by entry through
+`gdfl_tickstore` and compared byte for byte with the zip, then renamed to
+`<day>.bts` and the folder fsynced. A held day is verified and never
+rewritten. Every outcome is one line of the root's append-only
+`tickstore-write.log` naming the writer, the commit and the run. Invariants
+TSW-01 to TSW-17 in `docs/04-invariants.md`; limits L-TSW-1 to L-TSW-9 in
 `docs/06-limits.md`.

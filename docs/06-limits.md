@@ -17474,3 +17474,139 @@ Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 | L-AF4-01 | The month parser and the contract parse, per request | none needed: `bars::month_of_text` inspects at most seven bytes (a longer text fails the slice pattern on its length) and `Contract::parse` one bounded segment; the query text they are cut from is already capped by `request_bounds_refusal` | after (n=200 each): `/bars` NIFTY option month (`2024-03-07-2200000-CE`, 2024-03, whole key) p50 0.82 ms, p99 1.79 ms, max 2.52 ms (before: a 404, p50 0.70 / p99 4.96 / max 19.02 ms); `/bars` NIFTY spot p50 0.74 / p99 1.66 / max 2.23 ms (before 1.01 / 10.98 / 11.65); `/bars.json` Zerodha NIFTY 1min spot month (945,991 bytes) 3.30 / 6.17 / 8.13 ms (before 2.44 / 4.89 / 10.69); `/bars.json` the option month (3,952,147 bytes, 50,734 bars) 14.13 / 25.99 / 37.96 ms (before 11.87 / 19.69 / 29.82); `/spot.json` 1.18 / 3.65 / 5.75 ms (before 0.85 / 1.62 / 1.82); `/greeks.json` 1.29 / 2.68 / 17.60 ms (before 0.96 / 2.16 / 6.36). The JSON bodies are byte-identical before and after (md5 in `before.txt`, `after.txt`); the differences are the machine's load, not the parse | AF-04 |
 | L-AF4-02 | A contract asked for with `segment=` and `exchange=` omitted | placed by one census hash probe per exchange (`facets::EXCHANGES`, two today) of the asked feed's census — never the spot walk, which sorts the whole census | after: `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE&timeframe=1s&month=2024-03` p50 1.02 ms, p99 2.52 ms, max 3.21 ms (n=200). Before, the same URL took the spot walk and answered NIFTY INDEX's bars in p50 534.53 ms, p99 942.15 ms, max 1,132.80 ms. The spot walk itself is unchanged and still costs that for a SPOT name asked without `segment=` (pre-existing, D-0686's section); it grows with the census, and is not this package's | AF-04 |
 | L-AF4-03 | Months spelt otherwise on routes this change does not own | `/bars/window.json` (`bars_route.rs` `WindowAsk::parse`, AF-05's file), `sources.rs` `month_of_text` and `dayflags.rs` `bound` still split on `-` and parse each half: `bars_route.rs` checks no length, so `2024-3` and `02024-03` still read as March on `/bars/window.json`; the other two check the halves' lengths, so `2024-+3` still reads as March there | AF-05 switches `bars_route.rs` to `bars::month_of_text`; `sources.rs` and `dayflags.rs` have no owner named — one-line delegations to the same parser | AF-04 (named), AF-05 |
+
+## Cash-session masters: shared readers, a named wait, a decode per request — D-4963, 14 October 2026
+
+`pull::cash_session_cache` and `api`'s bars window (AF-03, finding p99-2). A
+reader of a dated NSE cash master takes the day's lock SHARED, reads and
+receipt-checks the bytes, releases, then decodes; an installer holds the day
+alone only to re-check and publish. The figures below were taken on 14 October
+2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
+linked read-only under the kernel lock, session masters cloned) served by two
+release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
+`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`fix/db-AF-03`. GET requests only, timed client-side
+around each whole response (`state/fix/round2/af03-evidence/measure.py`,
+results `before.jsonl` and `after.jsonl` beside it), on a machine shared with
+about twelve agents' builds, so the tails are loaded-host tails.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-CSL-1 | A reader waits for an installer | an installer's exclusive hold covers writing one master (at most `MAX_COMPRESSED` bytes), its receipt and three syncs, and a reader must not read a half-published entry | at most `LOCK_WAIT` = 5 s, attempts paused 1, 2, 4, 8, 16 ms and then 20 ms (about 254 attempts at most), then a refusal that names the lock, "an installer held it exclusively", the bound, the wait, and that the master was not read as absent. The wait sleeps its thread, on an async path too (the pull's `prepare_cash_schedule`, `/gaps.json`'s `block_on`). **Measured**: another process holding a day exclusively for 9 s made one RELIANCE 2026-08 `/gaps.json` answer at 5.002 s with that refusal in `evidence_error`; the next request, after the release, answered `expected 7560` in 1.53 s. Uncontended, a hold is one `flock` attempt | AF-03 |
+| L-CSL-2 | An installer can be held off by readers | `flock` has no queue: a stream of readers whose shared holds overlap keeps the exclusive attempt failing | the same `LOCK_WAIT`, then "readers or another installer held it … nothing was installed". A reader holds only to read and receipt-check, never through the decode. UNMEASURED beyond the test's 60 ms hold (`an_installer_beside_readers_installs_once`): no stream of readers has been timed against a real installer | AF-03 |
+| L-CSL-3 | A `/gaps.json` CASH month decodes every observed day's master on every request | nothing remembers a decoded master between requests (finding p99-1, disputed and not in this run) | O(D), D the month's observed CAS days (at most 23). **Measured, sequential, n = 200 each**: RELIANCE 2026-08 (21 masters) AFTER p50 2,000.8 ms, p99 5,721.2 ms, max 6,477.1 ms; BEFORE p50 2,412.0 ms, p99 4,026.6 ms, max 4,071.0 ms; NIFTY INDEX 2026-08 (no master) AFTER p50 1.8, p99 3.3, max 4.5 ms; BEFORE 2.1 / 4.0 / 5.0 ms. The difference, about 95 ms a master at p50, is the gzip decode and CSV parse; the change moved it out from under the lock, not out of the request | p99-1 |
+| L-CSL-4 | Parallel requests for CASH months decode in parallel | each request decodes its own masters (L-CSL-3), now all at once instead of all but one refusing | **Measured, rounds of requests sent at once**: 4 symbols × 50 rounds, 2026-08 (n = 200): AFTER p50 2,573.1 ms, p99 4,754.5 ms, max 4,766.3 ms, 0 lock refusals, one body per symbol across all rounds; BEFORE p50 3.7 ms, p99 5,306.1 ms, max 5,524.0 ms with 150 of 200 answers `expected 0` naming "would block". 4 identical RELIANCE × 50 (n = 200): AFTER p50 2,697.4, p99 4,137.7, max 4,224.1 ms, 0 refusals, 1 distinct body; BEFORE p50 3.0, p99 5,580.6, max 6,164.6 ms, 150 refusals, 2 distinct bodies. 6 symbols × 34 rounds, 2026-09 (n = 204): AFTER p50 841.4, p99 1,176.9, max 1,207.8 ms, 0 refusals; BEFORE p50 3.0, p99 557.6, max 601.6 ms, 170 refusals. The BEFORE medians are the refusals' speed, not a cost the change added | AF-03 |
+| L-CSL-5 | `/bars.json` reads a refused day's master once per request | a refusal is not remembered past its request, so the next request tries the day again (a loaded master is kept process-wide; it is immutable once receipted) | one read per (request, day, series), O(1) a bar after it. **Measured, sequential, n = 200**: `/bars/window.json` RELIANCE 2026-08, 400 rows, AFTER p50 1.5 ms, p99 5.4 ms, max 14.8 ms; BEFORE 1.8 / 6.3 / 7.9 ms | AF-03 |
+
+## Sealed months: the `.sbar` file — D-4965, 15 October 2026
+
+`store::sealed` (SC-2). It builds and reads the file; nothing in the serving
+path opens one until the read door (SC-3) lands, so these are store-level
+figures, not a route's. Measured by `crates/store/tests/sealed_samples.rs` on
+real months cloned into a private root (`#[ignore]`d; log
+`state/fix/round2/sc2-acceptance-20261015.log`): release build, the `.sbar`
+written to disk and read through a `File`, warm page cache, `Instant` around
+each call, n = 2,000 sequential calls each, on 15 October 2026 with the
+machine's load average near 60 (other agents' builds). NIFTY first: GDFL spot
+1 s 2018-09, 2020-03 (the halts), 2026-08 and 2026-09 (with provenance); GDFL
+options 1 s, a 5,810-bar strike and a one-bar and a two-bar strike; Zerodha
+1, 2, 3, 5, 10, 15, 30 and 60 min and 1 day 2024-03; then BANKNIFTY 1 s 2020-03
+and RELIANCE 1 s 2026-08. Every row equal to the raw `.bin`, every lookup to a
+scan. Raw is the same month through `BarFile` (`read_record` per row, the
+page path today). Ranges below are the least and greatest of the months' own
+figures.
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-SC-16 | A whole-month audit decodes the month | `SealedMonth::audit` checks every directory entry and frame, the stamps' order, the records' BLAKE3, the regenerated `.crc` image, the ranges, the extremes, the table, the provenance and the summary against the head | O(the month), once, for a seal or a scrub, never for a request; one frame (at most 14,508 bytes and 256 rows) held at a time plus the `.crc` image's 4 bytes a 73 bars (147 KB at 2,678,400 bars). Bounded by the month's rows; its time is not separately measured here (a 472,445-bar build, which does the same fold plus the encode, takes 81.5 to 90.1 ms) | SC-2 |
+| L-SC-17 | One row costs a frame | `SealedMonth` keeps no block cache: a row decodes the at most 256 rows of its frame (L-SC-1). The cache that makes a neighbouring row free is `BarFile`'s, which the read door (SC-3) fills with a sealed block's records | **Measured**: one row at a random offset, sealed p50 0.8 to 6.8 µs, p99 1.0 to 8.2 µs, max 1.4 to 26.7 µs; raw p50 0.0 to 3.1 µs, p99 0.0 to 3.9 µs, max 0.1 to 54.2 µs (raw's sub-microsecond figures are months of one 73-row block, held in `BarFile`'s cache). A 100-row page, sealed p50 0.9 to 7.4 µs, p99 1.2 to 14.3 µs, max 3.2 to 27.0 µs; raw p50 0.0 to 6.9 µs, p99 0.0 to 10.1 µs, max 0.2 to 96.3 µs: sealed p99 within 1.5 times raw's on every month above one frame. Flat in the month: 5,810 bars p99 12.5 µs, 400,200 to 472,496 bars 11.1 to 14.3 µs | SC-2 (cache: SC-3) |
+| L-SC-18 | A time lookup in a widened superblock bisects | a month written before D-0915 can hold two bars in one slot, so one table range can span more than 64 blocks | `ceil(log2(n_blocks + 1))` single-entry reads, 14 at the largest month (`a_widened_superblock_bisects_in_a_bounded_number_of_reads` counts them). Otherwise one table read, one read of at most 64 entries and one frame's stamps. **Measured** on the real months (none widened): sealed p50 0.0 to 2.8 µs, p99 0.0 to 3.9 µs, max 0.1 to 18.5 µs, flat from 1 bar to 472,445; raw (`.tix` or bisection) p50 0.0 to 0.5 µs, p99 0.0 to 116.5 µs, max 0.1 to 1,599.5 µs | SC-2 |
+| L-SC-19 | Building a sealed month is O(the month) and holds its frames | `Builder` folds every row once and keeps the encoded frames and the directory in memory until the file is written whole | once per month, in the background (the seal is SC-6's). **Measured**: 5 µs (1 bar) to 90.1 ms (472,496 bars); 69.8 to 90.1 ms for the four NIFTY 1 s months; peak memory the frames (0.43 to 1.47 MB for those months, at most `n_blocks` × 14,508 bytes) plus 24 bytes a block and one unencoded frame | SC-2 |
+| L-SC-20 | Opening a sealed month | a new handle and a 512-byte head read, checked | O(1). **Measured**: p50 12.0 to 14.0 µs, p99 23.3 to 31.0 µs, max 35.8 to 190.5 µs, the same at 1 bar and at 472,496: the open and `fstat` of a file, not the month | SC-2 |
+
+**Sizes on these months** (bytes of `.sbar` against the raw `.bin`): NIFTY 1 s
+432,607 to 1,471,930 bytes for 400,200 to 472,496 bars, 1.08 to 3.11 bytes a
+bar, 1.9 to 5.5% of the `.bin`; BANKNIFTY 1 s 2020-03 1.46 bytes a bar;
+RELIANCE 1 s 2026-08 2.74; NIFTY options 3.75 bytes a bar at 5,810 bars and the
+head plus one frame (582 and 584 bytes) at one and two bars; Zerodha NIFTY
+1 min to 1 day 4.67 to 37.7 bytes a bar, 2.1 to 7.6% of the `.bin` (a raw month
+carries a 32,768-byte header region however few its bars). The `.prv` of NIFTY
+2026-09 packs from 1,088 to 473 bytes.
+
+**Repeated on 15 October 2026 over 23 months** (logs
+`state/fix/round2/sc2-acceptance-20261015-run2.log` and `-run3.log`, the same test,
+a fresh private APFS clone): the eighteen above plus NIFTY 1 s 2019-10 (the
+Muhurat session) and 2020-09, and three NIFTY 2020-09-24 option months (the
+11,500 call's 2020-09 with provenance, 193,611 bars; its 2020-06, 156 bars;
+the 8,000 put's 2020-09 with provenance, 1,737 bars). Every row and every
+lookup equal again. Run 3, load average 24 to 46, months of more than 73
+bars: a 100-row page sealed p50 4.0 to 7.7 µs, p99 8.0 to 47.1 µs beside
+raw's 7.4 to 51.2 µs, sealed p99 at most 1.55 times raw's (the 8,000 put).
+On a month of at most 73 bars (1, 2 and 19 bars here) raw's page is
+`BarFile`'s one cached block and reads nothing, so raw answers in 0.1 to
+0.5 µs at p99 and sealed, which keeps no cache (L-SC-17), in 1.1 to 6.4 µs.
+Opening a sealed month (a new handle, `fstat` and the 512-byte head): p50
+12.0 to 15.8 µs, p99 20.7 to 119.0 µs on run 3 and 28.2 to 52.3 µs on run 2.
+**Max**, over every call of a run: up to 7.8 ms sealed (an open) and 4.4 ms
+raw on run 3, and 0.38 ms sealed / 0.79 ms raw on run 2 (load near 18): the
+host's scheduler on a machine shared by a dozen builds, in both forms alike,
+not the format — the counted reads
+(`the_largest_month_reads_at_the_cost_of_the_smallest`) are two a page at
+any depth. Every sealed page, row and lookup p99 under 50 µs; no max over 50 ms.
+These are store-level
+calls, not routes: the end-to-end figures of the design's §5.4 need the read
+door (SC-3) and are not measured here.
+
+## The stored-month gap ledger and the repair plan's short sessions (R3-18)
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R318-01 | `repair_plan::plan` (and `GET /pull/repair.json`) lists the series' `1min` rung directory on every request | the plan needs the series' first held month to tell `before_first` from a hole, and nothing but the directory names it; no sidecar or census row holds a series' first minute month | O(months held) per request, bounded by the feed's span (a Zerodha `1min` series holds at most about 141 months, 2015-2026). Measured by the R3-18 builder on 15 Oct 2026 (`the_plan_per_month_asked_is_flat_in_months_stored`, n=200 interleaved, warm, loaded host): one month asked of 1, 10 and 100 months held, p50 ratio 10x 1.08 and 100x 2.10, inside gate 8's 3.0 ceiling and asserted; the p99 ratio (3.46 at 10x, 2.11 at 100x) is printed and NOT asserted on a shared host. Re-run by the R3-18 repair round, 15 Oct 2026, load average 12-31: p50 113 / 121 / 229 us, p99 187 / 251 / 545 us, max 191 / 257 / 547 us at 1 / 10 / 100 months held; ratio p50 1.07 and 2.02, p99 1.34 and 2.91. The 100x p99 sits just under the 3.0 ceiling because the listing grows with the months held, so p99 flatness is NOT PROVED. `GET /pull/repair.json` for one month of NIFTY on the R3-18 shadow, 15 Oct 2026, n=200 sequential, load average 82: p50 0.52 ms, p99 0.95 ms, max 1.29 ms. Closing it needs a per-series first-month record kept by the landing | R3-18 |
+| L-R318-02 | `cli zerodha-gaps` reads the whole ledger once per run | the ledger is append-only and keyed by line, with no index of `(key, day)` | O(ledger lines) once per run (about 79,000 lines, 9 MB, on 9 Oct 2026), then per series O(lines appended since that read) under the ledger's lock, and per short session at most its owed minutes read from the month | R3-18 |
+| L-R318-03 | The ledger's lock is advisory | `flock(2)` holds off only writers that take it; every writer in this tree does (`request_minutes::append_named_picking`, which `append_ledger` and `append_named` call), but a running build from before this change does not | until every process that appends to `audit/<feed>.gaps` or `audit/<feed>.repairs` runs a build with this change, run `cli zerodha-gaps --apply` only while no pull or repair runs against that store | R3-18 |
+| L-R318-04 | A ledger append waits for the lock's holder | an append that reads what others wrote cannot let a second writer in between its read and its write | one holder's read of the lines appended since its last read, one write and one `sync_data`; a holder that hangs inside its sync holds every ledger writer of that feed | R3-18 |
+
+## Window keys that name no series (AG-03, D-4966)
+
+Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af (before)
+and `fix/db-AG-03` (after), each serving its own fresh shadow of the real
+store (bars linked read-only, `state/fix/shadow.sh`, `serve.sh`), GET only,
+n = 300 sequential requests per case on one keep-alive connection
+(`curl -K`, `%{time_total}`), two rounds in opposite order on the loaded
+shared machine. Figures are p50 / p99 / max in ms, round 1 then round 2;
+summaries in `tgt/p-AG-03/evidence/{before,after,before2,after2}/summary.tsv`.
+Every held selection probed (ten timed, 63 byte-compared: NIFTY zerodha 1min
+to 1day, NIFTY gdfl 1s spot and 46 NIFTY option months 2018-09 to 2026,
+BANKNIFTY, RELIANCE, a deep-in-the-money strike, a held share outside its
+life, a contract after its expiry) answered byte for byte the same before
+and after.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG03-01 | `unknown_series` is a `400`, not a distinct `404` | the window's status mapping is `bars_route.rs` (AF-05's file); the refusal leaves through its existing `refuse()` path | every such refusal opens with the code `unknown_series`, so a client tells it from the route's other `400`s by its prefix. A `404` is a follow-on after AF-05. **NOT DONE** | AG-03 → AF-05 |
+| L-AG03-02 | Knowing a key names a series costs one directory `stat` per key, O(keys) a request | a key names a series only if its rung directory lists a month file, and nothing smaller than that listing says so; the plan already pays it (`held_months`, memoised by the directory's stamp) and the refusal adds no probe | at most `MAX_SERIES` = 1,024 keys. The refusal adds one pass over the plans and a successor lookup for at most `MAX_NAMED_UNKNOWN` = 16 keys (the alias table: at most three probes and one hop per applied change), and one comparison a plan against the re-key's next superseded row, the rows being in the plans' order, and its sentence is under 1,024 bytes. **Held key, unchanged within noise**: zerodha NIFTY 1min before 0.443 / 1.092 / 1.959 and 0.484 / 1.829 / 2.679, after 0.487 / 1.032 / 3.695 and 0.520 / 1.705 / 2.652; a gdfl 1s NIFTY option month before 0.467 / 1.954 / 5.388 and 0.547 / 1.744 / 1.912, after 0.490 / 1.096 / 2.705 and 0.523 / 2.665 / 3.857. Over the ten held cases p50 was 0.130 to 0.583 before and 0.087 to 0.584 after; round 1 after had three p99 spikes (BANKNIFTY 7.45, RELIANCE 3.10, a refusal 5.29) that round 2 did not repeat (1.08, 1.38, 0.64), the host's scheduler and not the route. **Unknown key** (`NSE-INDEX-NOTASYMBOL`) before `200` 0.145 / 0.630 / 1.512 and 0.079 / 0.625 / 1.414, after `400` 0.294 / 1.284 / 3.322 and 0.098 / 2.963 / 4.153; **alias key** (`NSE-CASH-ZOMATO`) before 0.090 / 1.182 / 2.910 and 0.075 / 0.319 / 0.708, after 0.149 / 1.196 / 2.296 and 0.073 / 0.636 / 0.984; **no `feed=`** before 0.123 / 0.942 / 1.807 and 0.069 / 0.307 / 0.404, after 0.100 / 3.017 / 3.626 and 0.070 / 0.743 / 0.951. **1,024 unknown contracts in one window** (the O(keys) case at its bound): before `200`, 54,594 bytes, 11.480 / 24.921 / 43.468 and 11.199 / 21.426 / 45.319; after `400`, 641 bytes, 10.209 / 16.735 / 17.989 and 10.196 / 15.127 / 16.997 | AG-03 |
+| L-AG03-03 | A successor is named from a table, not probed, and a contract key gets only the lineage's | whether the successor holds months at this rung would be one more `stat` per named key; and the alias table answers where a symbol's OWN price series lives, not where its options are filed | the successor is the table's sourced name (D-3332) or the re-key's recorded one (D-3331), labelled `now` (a rename or a re-key) or `filed as` (an index asked by its F&O symbol or under the wrong segment); a BSE key, a feed outside `KEYED_FEEDS` and a symbol with no row get none, so nothing is guessed | AG-03 |
+| L-AG03-04 | A window with no `feed=` is now refused under Dhan | the route defaults the feed to Dhan (RT-DB-01, R4-02's rule), which holds nothing; before this it answered `total 0, months_outside_life 1` for NIFTY 2024-03 | it is refused `unknown_series: NSE-INDEX-NIFTY names no series dhan holds at 1min`, which makes app-8's window symptom loud; the default itself is R4-02's to change | R4-02 |
+| L-AG03-05 | `/bars.json` still refuses a key that names nothing only through the month it cannot open | `/bars.json` is a one-month read and this package changed the window only | its `400` names the path it looked for (`.../2024-03.bin does not exist`), the same refusal a held series' absent month gets, so it is loud but not labelled `unknown_series`. **NOT DONE** | follow-on |
+| L-AG03-06 | The `held_months` comment in `bars_series.rs` still reads "an absence, not a refusal" for every directory that does not exist | `bars_series.rs` is AF-04's file and this package reads `held_all` without editing it | D-4966 narrows the comment to series that hold at least one month; rewording it falls to the package that next edits `bars_series.rs`. **NOT DONE** | AF-04 follow-on |
+
+## The tick-store writer: one day zip to one verified day file — D-4967, 14 October 2026
+
+`pull::tickstore_write` and `cli tickstore-write` (R4-08, E2E-02). Measured on
+read-only copies of three real September 2026 day zips (quiet: indices
+2026-09-25; median: stocks 2026-09-28; heavy: options 2026-09-29), written
+into a scratch root, on a machine other agents were loading
+(`pull::tickstore_write::tests::measure_real_days_against_the_tools_files`,
+log `tgt/p-R4-08/measure-20261014/measure-r1.log`).
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-TSW-1 | Writing a day reads, encodes, writes and reads back every byte | the day file must hold every entry and be compared with the zip before it is held | O(the day's CSV bytes), by design. Measured: indices 9.6 s (527 MB of CSV, 55 MB/s), stocks 17.5 s (429 MB, 24 MB/s), options 60.5 s (2.56 GB, 42 MB/s), on up to eight threads, write and verify together. Through `cli tickstore-write` (release, 15 October, a lighter load): 4.2 s, 6.7 s and 23.9 s for the same three days, the files byte-identical to the first run's. Bench C-TSW-01 (release, invented options days of 40, 400 and 4,000 members, 15 October): 55.8 ms, 93.2 ms and 588.5 ms a day, a fixed part of about 52 ms a day (the lock, the folders, the fsyncs, the threads); the MARGINAL cost a member from 10x to 100x is 1.32x the marginal cost from 1x to 10x (the first form divided by the whole 1x day, fixed part included, and could hardly fail), within the 3.0x ceiling | R4-08 |
+| L-TSW-2 | A rerun on a held day verifies it whole | "a held, verified day writes nothing" is only known by comparing it again | O(the day's bytes), the same pass as L-TSW-1 without the encode: the tool's options day verified in 13.1 s (195 MB/s), stocks 4.2 s, indices 3.3 s; this writer's three days held again on 15 October in 4.8 s, 1.0 s and 0.9 s (options, stocks, indices). A chain that records a verified day (E2E-03) need not re-verify it | R4-08 |
+| L-TSW-3 | Memory | members are encoded in memory before the day's file is created, so a bad member writes nothing | the day's compressed blocks, refused past 4 GiB (`day_too_large`, about 16 times the heaviest measured day's 256 MB), plus one member per thread, each refused past 2 GiB before it is read (`member_too_large`; the largest measured member is 14.5 MB) | R4-08 |
+| L-TSW-4 | The files are larger than the tool's | `ruzstd` implements only its `Fastest` level; the tool wrote C zstd level 9 | 1.60 to 2.04 times the tool's bytes for the same day (indices 16.4 MB against 8.0 MB, stocks 60.1 against 37.6 MB, options 255.9 against 151.0 MB). About 332 MB a trading day against 197 MB, about 34 GB more a year (EXTRAPOLATION from three days). Why, read from `ruzstd` 0.8.2's source: its block encoder never emits a repeat offset (`encoding/blocks/compressed.rs`, "TODO make use of the offset history"), which columnar text repeats constantly, and its matcher takes matches of 5 bytes or more over a short window. A better match finder (`FrameCompressor::new_with_matcher`) cannot add repeat offsets, so closing the gap needs a hand-written block encoder in pure Rust; NOT built, this row is its baseline | R4-08 |
+| L-TSW-5 | One entry rebuilt | a file is decoded whole | O(the file's bytes), the reader's (`gdfl_tickstore::rebuild`), unchanged: from this writer's options day p50 0.30 ms, p99 81 ms, max 275 ms (n = 20,054), from the tool's p50 0.30 ms, p99 93 ms; indices files (3.7 MB each) p50 125 ms, p99 260 ms (n = 141) | R4-08 |
+| L-TSW-6 | Point lookup on a written day | none: it is O(1) | the readers' listing, one probe: p50 41 ns, p99 125 ns, max 0.34 ms (scheduler), n = 200,540 on the options day and 36,820 on the stocks day; the tool's own figure was 208 ns p99. Bench C-TSW-02 on a written 4,000-member day: p50 41 ns, p99 42 ns, max 167 ns, n = 20,000; flat at 10x and 100x members (1.03x, 1.04x) | R4-08 |
+| L-TSW-7 | No free-space floor before a day | `std` has no `statvfs`, and `libc` is not taken for it | a full disk is refused after the fact by name (`disk_full stage=compress file=<temp> bytes=<n>`), the temporary left for the operator's deletion list, and the next run refuses the day until it is gone (`stale_temp`). Projection before a run: about 332 MB of new day files a trading day, three files a day | R4-08 |
+| L-TSW-8 | One writer a root: writes of different days refuse each other | the root's one `.lock` (the tool's own lock file) keeps the two writers off one root; a lock a day would be about 6,000 files the tool does not know | a second writer on the same root is refused `day_locked` at once, by name, never waits; measured by the second check on real data (an options and an indices day of one date at once: one written, one refused and logged). The ingest chain (E2E-03) runs the days of a root one after another or retries the refused one | E2E-03 |
+| L-TSW-9 | The staging door's clear path | `store::staging::create` removes the name of a one-name regular file it finds at the temporary's name (D-4951) | not reached by choice: the leftover check runs first under the root's lock and refuses every `<day>.bts.tmp*`; a file appearing at the run's own name after it (a race against the lock) is cleared by the door, and the run stops `temp_raced` naming its bytes and leaves its own empty temporary (TSW-12) | R4-08 |
