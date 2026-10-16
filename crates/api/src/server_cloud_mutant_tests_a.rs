@@ -1750,3 +1750,65 @@ async fn only_an_nse_cash_series_with_no_contract_has_a_dated_cash_audit() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A reload that meets a non-routine decline is refused, the held universe
+/// kept, even with no unreadable row (kills `read.non_routine > 0` turned to
+/// `< 0`, which no count satisfies).
+#[test]
+fn a_reload_with_a_non_routine_decline_is_refused() {
+    let full = agreeing("clouda-reparse-nr-full");
+    let site = super::tests::site("clouda-reparse-nr", &full);
+    let generation = site.universe().generation;
+    let declined = masters(
+        "clouda-reparse-nr-eqx",
+        Some(&format!(
+            "{GROWW_HEAD}\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n\
+             NSE,CASH,,RELIANCE,EQ,EQX,INE002A01018,,,NSE-RELIANCE\n"
+        )),
+        Some(&format!(
+            "{DHAN_HEAD}\
+             NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+        )),
+    );
+    let refused = site
+        .reparse(&declined)
+        .expect_err("a non-routine decline refuses");
+    assert!(
+        refused.starts_with("master reload refused: 0 unreadable rows and 1 unrecognised declines"),
+        "{refused}"
+    );
+    assert_eq!(
+        site.universe().generation,
+        generation,
+        "the held universe stays"
+    );
+}
+
+/// A feed that was already unread when the universe was loaded, and is still
+/// unread, is not a feed LOST by the reload: the reload goes through (kills
+/// `old == vendor` turned to `!=`, which calls every unread feed lost).
+#[test]
+fn a_feed_already_unread_is_not_lost_by_a_reload() {
+    let groww_only = masters(
+        "clouda-reparse-groww-only",
+        Some(&format!(
+            "{GROWW_HEAD}\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+        )),
+        None,
+    );
+    let site = super::tests::site("clouda-reparse-groww-only", &groww_only);
+    assert!(
+        site.universe()
+            .read
+            .unread
+            .iter()
+            .any(|(vendor, _)| *vendor == Vendor::Dhan),
+        "the premise: Dhan's master is absent"
+    );
+    let generation = site.universe().generation;
+    site.reparse(&groww_only)
+        .expect("nothing that was readable is lost");
+    assert_eq!(site.universe().generation, generation.wrapping_add(1));
+}
