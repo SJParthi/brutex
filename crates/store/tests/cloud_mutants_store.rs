@@ -279,3 +279,205 @@ fn every_found_kind_has_its_sentence() {
         assert_eq!(found.sentence(), sentence, "{found:?}");
     }
 }
+
+/// A one-minute month for the generation tests: invented `CLOUDIDX` bars in
+/// 2024-06.
+fn minute_month() -> store::path::StorePath<'static> {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "CLOUDIDX",
+        contract: None,
+        timeframe: store::path::Timeframe::MINUTE_1,
+        month: store::path::YearMonth::new(2024, 6).unwrap(),
+        file: store::path::FileKind::Bars,
+    })
+    .unwrap()
+}
+
+/// Five invented minute bars after 09:15 IST on each of `days` of June 2024.
+fn minute_sessions(days: &[i64]) -> Vec<store::format::Bar> {
+    const JUNE_IST_MIDNIGHT: i64 = 1_717_180_200;
+    days.iter()
+        .flat_map(|&day| {
+            (0..5).map(move |minute| {
+                let secs = JUNE_IST_MIDNIGHT + (day - 1) * 86_400 + 555 * 60 + minute * 60;
+                let price = 3_000_000 + day * 1_000 + minute;
+                store::format::Bar {
+                    ts_micros: secs * 1_000_000,
+                    open: price,
+                    high: price + 9,
+                    low: price - 9,
+                    close: price + 2,
+                    volume: 0,
+                    open_interest: store::format::OI_NULL,
+                }
+            })
+        })
+        .collect()
+}
+
+/// **A REVISION WRITTEN TO AFTER ITS PROMOTION IS REFUSED BY EVERY REBUILD
+/// DOOR, BY NAME.**
+///
+/// Covers the D-3350 refusal in `BarFile::sort_index_existing` ("not
+/// sorted"), `BarFile::index_existing` ("not indexed") and
+/// `BarFile::open_existing_audited` ("not audited"): a promoted revision
+/// appended to outside the repair protocol no longer matches the pointer its
+/// promotion wrote, and no door sorts, indexes or audits it as if it did.
+#[test]
+fn every_rebuild_door_refuses_a_revision_that_moved_after_promotion() {
+    use store::file::{BarFile, StoreError};
+    const SYMBOL: u32 = 11;
+    let root = scratch("revision-moved");
+    let month = minute_month();
+    BarFile::open_or_create(&root, month, SYMBOL)
+        .unwrap()
+        .append(&minute_sessions(&[17]))
+        .unwrap();
+    let policy = store::repair::Policy {
+        open_interest_applies: false,
+        basis_witness: false,
+    };
+    store::repair::repair_month(&root, month, SYMBOL, &minute_sessions(&[3, 17]), policy).unwrap();
+    BarFile::open_or_create(&root.join("bar-revisions-v1/1"), month, SYMBOL)
+        .unwrap()
+        .append(&minute_sessions(&[20]))
+        .unwrap();
+    let pointer = store::generation::pointer_path(&root, month);
+    for (door, answer) in [
+        (
+            "not sorted",
+            BarFile::sort_index_existing(&root, month, SYMBOL).map(|_| ()),
+        ),
+        (
+            "not indexed",
+            BarFile::index_existing(&root, month, SYMBOL).map(|_| ()),
+        ),
+    ] {
+        match answer {
+            Err(StoreError::Generation { path, reason }) => {
+                assert_eq!(path, pointer, "{door}");
+                assert_eq!(
+                    reason,
+                    format!("revision 1 is not the one its promotion recorded; {door}")
+                );
+            }
+            other => panic!("{door}: {other:?}"),
+        }
+    }
+    let Err(audited) = BarFile::open_existing_audited(&root, month, SYMBOL, u64::MAX) else {
+        panic!("a moved revision is audited");
+    };
+    assert!(
+        audited.starts_with("repair revision 1 of ")
+            && audited.ends_with(" is not the one its promotion recorded; not audited"),
+        "{audited}"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// A one-second NIFTY month in 2031-02, the sort-index tests' shape.
+fn second_month(file: store::path::FileKind) -> store::path::StorePath<'static> {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: store::path::Timeframe::SECOND_1,
+        month: store::path::YearMonth::new(2031, 2).unwrap(),
+        file,
+    })
+    .unwrap()
+}
+
+/// Invented one-second bar `i` of 2031-02, from 09:15 IST on the 1st, its
+/// stamp moved `nudge` microseconds.
+fn second_bar(i: i64, nudge: i64) -> store::format::Bar {
+    let origin = store::path::YearMonth::new(2031, 2)
+        .unwrap()
+        .ist_bounds_micros()
+        .0;
+    let close = 5_550_000 + (i * 7_919) % 613;
+    store::format::Bar {
+        ts_micros: origin + (555 * 60 + i) * 1_000_000 + nudge,
+        open: close - 11,
+        high: close + 40,
+        low: close - 40,
+        close,
+        volume: (i * 31) % 19,
+        open_interest: store::format::OI_NULL,
+    }
+}
+
+fn second_bars(from: i64, to: i64) -> Vec<store::format::Bar> {
+    (from..to).map(|i| second_bar(i, 0)).collect()
+}
+
+/// **THE REBUILD DOOR NAMES EVERY WAY AN INDEX FAILS TO DESCRIBE ITS MONTH,
+/// AND WRITES IT WHOLE.**
+///
+/// Covers each reason `BarFile::sort_index_existing` gives before it writes a
+/// month whole: runs that order only the first rows, bytes past the last run,
+/// an index that will not walk, and runs that are another month's bars. Each
+/// time the answer is one run over every row, and the bars are untouched.
+#[test]
+fn the_rebuild_door_names_each_way_an_index_fails_its_month() {
+    use store::file::{BarFile, Resorted};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("srt-reasons");
+    let srt = second_month(FileKind::SortIndex).to_path_buf(&root);
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    let first_rows_only = fs::read(&srt).expect("an index after 1,100 rows");
+    writer.append(&second_bars(1_100, 1_200)).unwrap();
+    drop(writer);
+    let bars_before = fs::read(bars.to_path_buf(&root)).unwrap();
+    let rebuild = || BarFile::sort_index_existing(&root, bars, SYMBOL).unwrap();
+    let built = |answer: store::file::SortIndexed| match answer.outcome {
+        Resorted::Built(why) => {
+            assert_eq!((answer.n_valid, answer.runs), (1_200, 1));
+            why
+        }
+        other => panic!("{other:?}"),
+    };
+
+    fs::write(&srt, &first_rows_only).unwrap();
+    assert_eq!(built(rebuild()), "its runs order rows 0..1100 of 1200");
+
+    let whole = fs::read(&srt).unwrap();
+    let mut trailing = whole.clone();
+    trailing.extend_from_slice(b"not a run");
+    fs::write(&srt, &trailing).unwrap();
+    let why = built(rebuild());
+    assert!(
+        why.starts_with("bytes past its last run are not a run ("),
+        "{why}"
+    );
+    assert_eq!(fs::read(&srt).unwrap(), whole, "rebuilt to the same bytes");
+
+    fs::write(&srt, b"not an index").unwrap();
+    let why = built(rebuild());
+    assert!(!why.is_empty(), "the walk's refusal is named");
+
+    // Another month's bars of the same shape: an index that walks and
+    // describes nothing here.
+    let other = scratch("srt-reasons-other");
+    let mut writer = BarFile::open_or_create(&other, bars, SYMBOL).unwrap();
+    writer
+        .append(&(0..1_200).map(|i| second_bar(i + 7, 0)).collect::<Vec<_>>())
+        .unwrap();
+    drop(writer);
+    fs::copy(second_month(FileKind::SortIndex).to_path_buf(&other), &srt).unwrap();
+    let why = built(rebuild());
+    assert!(!why.is_empty(), "the bind's refusal is named");
+
+    assert_eq!(rebuild().outcome, Resorted::Kept, "and kept after");
+    assert_eq!(fs::read(bars.to_path_buf(&root)).unwrap(), bars_before);
+    let _ignored = fs::remove_dir_all(&root);
+    let _ignored = fs::remove_dir_all(&other);
+}
