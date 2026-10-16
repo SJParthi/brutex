@@ -96,6 +96,7 @@
   import { ask as ask_ } from '$lib/ask.js';
   import { fetchWithBusyRetry } from '../../../saved-backtest/requests.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  import { BASE_MS, createStatusPoll, statusAnswer } from '$lib/status-poll.js';
   import { sweepAdmission, sweepLaunchStop, sweepSubmission } from '$lib/sweep-admission.js';
   import { settleComparison } from '$lib/bounded-comparison.js';
   import { runtimeInspection } from '$lib/runtime-inspection.svelte.js';
@@ -2375,7 +2376,36 @@
   let unconfirmedSubmission = $state(false);
   let submittedAttempt = $state('');
   const launchStop = $derived(sweepLaunchStop(sweep, launchAdmission, unconfirmedSubmission));
-  const statusRequests = createPageRequests();
+  /** What the status poll is doing, shown beside the status it checks.
+   * @type {import('$lib/status-poll.js').PollState} */
+  let statusPoll = $state({ delay: 2000, interval: 2000, unknownStreak: 0, stopped: '', hidden: false, parked: false, checks: 0, backedOff: false });
+  /* THE STATUS POLL BACKS OFF, PAUSES AND STOPS OUT LOUD (p99-7, AF-06).
+     Every `/backtest/run.json` GET writes one invocation-journal file and about
+     eight full fsyncs to the store drive (D-1445). This page asked every 2 s
+     for as long as it stayed open, hidden or not, and for ever while the answer
+     was `unknown` — about 1,800 journal files an hour per open tab. The same
+     single-flight owner still runs every read; `$lib/status-poll.js` decides
+     only WHEN a re-poll fires: 2 s while a sweep is in flight (its rung
+     progress, best rows and finish are read on that tick, so they are never
+     more than 2 s old), 2 s after any change, doubling to 60 s while a settled,
+     idle or `unknown` answer is unchanged, nothing while the tab is hidden, and
+     a stop with the reason and a Refresh control after ten `unknown` answers
+     in a row. */
+  const statusRequests = createStatusPoll({
+    requests: createPageRequests(),
+    isPoll: (work) => work === pollSweep || work === refreshCurrentAdmission,
+    followsRun: (work) => work === pollSweep,
+    answer: () => statusAnswer(sweep, launchAdmission),
+    visible: () => typeof document === 'undefined' || document.visibilityState !== 'hidden',
+    listen: (wake) => {
+      if (typeof document === 'undefined') return () => {};
+      document.addEventListener('visibilitychange', wake);
+      return () => document.removeEventListener('visibilitychange', wake);
+    },
+    report: (next) => {
+      statusPoll = next;
+    }
+  });
 
   /**
    * `YYYY-MM` as the two numbers the route wants, or null.
@@ -7496,7 +7526,7 @@
       {#if !launchStop && sweep.run?.where === 'cli'}
         <p><b>The execution slot is free.</b> The requested sweep must still pass its input checks, and the server checks the slot again before starting. This does not mark the older command completed.</p>
       {/if}
-      <p>The monitor will retry. A silent, stale or unreadable log is never counted as a completed sweep.</p>
+      <p>A silent, stale or unreadable log is never counted as a completed sweep.</p>
     </div>
   {:else if sweep.phase === 'failed'}
     <!-- WHICH COMMAND WAS REFUSED, and this is the arm where the payload most
@@ -7515,6 +7545,27 @@
     {#if sweep.run}
       <pre class="runlog bad">{sweep.why}</pre>
     {/if}
+  {/if}
+
+  <!-- THE STATUS POLL SAYS WHAT IT IS DOING (p99-7, AF-06). A poll that slowed,
+       paused or stopped is a state, and a page that stopped asking without
+       saying so would look exactly like a page with nothing to report. -->
+  {#if statusPoll.stopped}
+    <div class="inline-note bad runstate" role="status" data-status-poll="stopped">
+      <p>{statusPoll.stopped}</p>
+      <button type="button" onclick={() => statusRequests.refresh(adoptRunning)}>Refresh</button>
+    </div>
+  {:else if statusPoll.hidden && statusPoll.parked}
+    <p class="inline-note runstate dim" data-status-poll="paused">Status checks are paused while this tab is hidden; showing it checks at once.</p>
+  {:else if statusPoll.backedOff || sweep.phase === 'unknown'}
+    <!-- ONLY WHEN THE POLL REALLY IS SLOWED. A sweep in flight is checked every
+         2 s, so a running page never says its status "has not changed". -->
+    <p class="inline-note runstate dim" data-status-poll="waiting">
+      {statusPoll.backedOff
+        ? `The status has not changed, so the next check is in ${Math.round(statusPoll.delay / 1000)} s (it doubles up to 60 s, and returns to 2 s on any change).`
+        : `Checking the status again in ${BASE_MS / 1000} s.`}
+      <button type="button" onclick={() => statusRequests.refresh(adoptRunning)}>Check now</button>
+    </p>
   {/if}
 
   {#if load.phase === 'loading'}
