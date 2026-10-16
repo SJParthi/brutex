@@ -5560,4 +5560,89 @@ mod cloud_mutant_tests {
             format!("{}: Not a directory (os error 20)", building.display())
         );
     }
+
+    /// `f` once, and again while another holder of `/dev/full`'s one inode
+    /// (a parallel run of this suite) has the append lock for its microsecond.
+    #[cfg(target_os = "linux")]
+    fn past_a_shared_lock<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+        for _ in 0..200 {
+            match f() {
+                Err(why) if why.contains("append lock") => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                answered => return answered,
+            }
+        }
+        f()
+    }
+
+    /// A JOURNAL WHOSE DEVICE IS FULL REFUSES THE RECORD BY NAME: the write
+    /// fails, the truncation back fails too on a device that is not a regular
+    /// file, and the append answers both (`appended`'s refused
+    /// `write_rolled_back`). Linux's `/dev/full` refuses every write with
+    /// ENOSPC, the failure an operator's full disk gives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_journal_on_a_full_device_refuses_the_record_and_says_the_truncation_failed() {
+        let root = scratch("journal-full-device");
+        let journal = Journal::at(&root);
+        std::fs::create_dir_all(journal.path.parent().expect("audit/")).expect("mkdir");
+        std::os::unix::fs::symlink("/dev/full", &journal.path).expect("a link to /dev/full");
+        let shown = journal.path.display().to_string();
+        let why = past_a_shared_lock(|| journal.append(&run_record())).expect_err("refused");
+        assert_eq!(
+            why,
+            format!(
+                "{shown}: cannot append the record — No space left on device (os error 28); \
+                 truncating its partial bytes back to 0 bytes also failed: Invalid argument \
+                 (os error 22); the journal may now end torn and the next append refuses it"
+            )
+        );
+        assert!(
+            !journal.notes_path().exists(),
+            "a run record files no whole note"
+        );
+    }
+
+    /// A WHOLE NOTE THE NOTES FILE CANNOT TAKE LEAVES THE MEMBER RECORD AS IT
+    /// WAS, CUT, and is logged at Error: the record still lands, as version 2
+    /// with no offset, and nothing names a note that is not there
+    /// (`append_note`'s refused `write_rolled_back`, `note_whole_failed`).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_whole_note_the_notes_file_cannot_take_leaves_the_member_record_cut() {
+        let root = scratch("notes-full-device");
+        let journal = Journal::at(&root);
+        std::fs::create_dir_all(journal.path.parent().expect("audit/")).expect("mkdir");
+        std::os::unix::fs::symlink("/dev/full", journal.notes_path()).expect("a link");
+        let long = "the vendor refused this member over a window it says it does not \
+                    serve, in words longer than the record's own note field holds";
+        let cut = Record::member_failure(Scope::Spot, at(5), "NIFTY", window(), long);
+        assert!(cut.note_was_cut(), "the premise: the note field cuts it");
+        let from = crate::emitted::mark();
+        past_a_shared_lock(|| journal.append_member(&cut, long)).expect("the record lands");
+        let page = journal.page(1, 0, 1).expect("a page");
+        let [entry] = page.as_slice() else {
+            panic!("one entry: {page:?}");
+        };
+        let landed = entry.decoded.clone().expect("decodes");
+        assert_eq!(
+            (landed.version, landed.note_at, &entry.whole_note),
+            (VERSION, None, &None),
+            "{landed:?}"
+        );
+        assert_eq!(landed.note, cut.note, "the cut note, as it was");
+        let notes = journal.notes_path().display().to_string();
+        let logged = crate::emitted::landed(from, "api.audit", "whole note not appended")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "path", &notes))
+            .collect::<Vec<_>>();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert_eq!(logged[0].level, telemetry::Level::Error);
+        assert!(crate::emitted::says(&logged[0], "instrument", "NIFTY"));
+        assert!(
+            crate::emitted::says(&logged[0], "why", "No space left on device"),
+            "{logged:?}"
+        );
+    }
 }

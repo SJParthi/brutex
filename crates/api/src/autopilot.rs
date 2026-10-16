@@ -8101,6 +8101,50 @@ mod cloud_mutant_tests {
         );
     }
 
+    /// A PAUSED LOOP COMES ROUND AND DWELLS AGAIN. Once the paused dwell has
+    /// published its words, the test writes other words over them; one paused
+    /// interval later the loop has come round (`fly`'s `continue` after
+    /// `dwell_paused`) and the paused words are back. Still nothing is asked of
+    /// any vendor, and no tick is journalled.
+    #[tokio::test]
+    async fn a_paused_live_loop_comes_round_and_dwells_again() {
+        let site = tracked_site("fly-paused-again", true);
+        assert_eq!(site.broker, Broker::Live);
+        site.autopilot.pause();
+        let flying = tokio::spawn(fly(Loaded::clone(&site)));
+        let paused = |site: &Loaded| {
+            site.autopilot
+                .inspect(|status| {
+                    status.phase == Phase::Paused && status.detail.contains("Press Resume")
+                })
+                .unwrap_or(false)
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !paused(&site) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}",
+                site.autopilot.json()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        site.autopilot.publish(|status| {
+            status.detail = String::from("overwritten by the test");
+        });
+        assert!(!paused(&site), "the words were overwritten");
+        while !paused(&site) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the paused loop never came round: {}",
+                site.autopilot.json()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        flying.abort();
+        let _aborted = flying.await;
+        assert!(!site.journal().path.exists(), "no round ran");
+    }
+
     /// The last microsecond a full session leaves on `d`: the 15:29 IST bar,
     /// 09:59 UTC.
     fn close_of(d: Day) -> i64 {
@@ -8565,6 +8609,124 @@ mod cloud_mutant_tests {
         let _aborted = flying.await;
         assert!(waited >= 2_000);
         assert!(!site.journal().path.exists(), "no tick ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A TICK THAT REACHES ITS INSTRUMENTS CLOSES ITS RUN WITH THE RUN'S OWN
+    /// RECORD (`tick`'s `Record::of_run` arm). A loopback vendor answers every
+    /// request with one generated daily bar, so both tracked indices are
+    /// reached and stored, and the closing record says the books balance.
+    /// Every request goes to `127.0.0.1`: the credential is the script's,
+    /// whose base replaces each feed's. The bar is generated, not market data.
+    #[tokio::test]
+    async fn a_tick_that_reaches_its_instruments_closes_its_run_with_the_runs_own_record() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let base: &'static str = Box::leak(
+            format!("http://{}", listener.local_addr().expect("its address")).into_boxed_str(),
+        );
+        let asked = std::sync::Arc::new(AtomicU64::new(0));
+        let count = std::sync::Arc::clone(&asked);
+        // 1_785_728_700 is 2026-08-03 09:15 IST.
+        let app = axum::Router::new().fallback(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            async {
+                "{\"open\":[24500.75],\"high\":[24501.50],\"low\":[24499.25],\
+                 \"close\":[24500.50],\"volume\":[250],\"timestamp\":[1785728700]}"
+            }
+        });
+        let vendor = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the fake serves");
+        });
+
+        let root = crate::scratch::path("autopilot-cloud-tick-reached");
+        let _ = std::fs::remove_dir_all(&root);
+        let (masters, store) = (root.join("masters"), root.join("store"));
+        std::fs::create_dir_all(&masters).expect("mkdir masters");
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir store");
+        std::fs::write(
+            masters.join("dhan_scrip.csv"),
+            "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,INSTRUMENT_TYPE,\
+             SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n\
+             NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n\
+             NSE,I,NA,INDEX,BANKNIFTY,BANKNIFTY,INDEX,NA,0001-01-01,,,25\n",
+        )
+        .expect("write the master");
+        let mut site = Site::serving(&masters, &store);
+        site.credentials = crate::credential_law::Credentials::Scripted(std::sync::Arc::new(
+            crate::credential_law::Script::new(base, vec![Ok("live".to_owned())]),
+        ));
+        let site = Loaded::new(site);
+        // THE PAUSE FLAG IS READ PER INSTRUMENT, so a paused control would stop
+        // the run before its first request.
+        site.autopilot.resume();
+        let granularity = pull::vendor::Granularity::Day1;
+        let timeframe = granularity.store_timeframe().expect("the daily rung");
+        let series = tracked_series(&site, timeframe);
+        assert_eq!(series.len(), 2, "NIFTY and BANKNIFTY are tracked");
+        let unit = next_window(
+            |_| None,
+            &series,
+            month(2026, 8),
+            (day(2026, 8, 3), day(2026, 8, 5)),
+        )
+        .expect("nothing is held, so the whole span is owed");
+        let state = FeedState::new(
+            pull::vendor::Feed::Dhan,
+            brutex_core::vendor::Vendor::Dhan,
+            month(2026, 8),
+        );
+
+        let outcome = tick(&site, &state, &unit, granularity, &series).await;
+        vendor.abort();
+        let _aborted = vendor.await;
+
+        assert_eq!(
+            (outcome.attempted, outcome.reached, outcome.stored),
+            (2, 2, 2),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.reason, None, "{outcome:?}");
+        assert_eq!(outcome.journal_error, None, "{outcome:?}");
+        assert!(!outcome.stopped, "{outcome:?}");
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            2,
+            "one request per instrument"
+        );
+        let journal = site.journal();
+        let audit::Log::Held { records, .. } = journal.look() else {
+            panic!("the tick wrote its journal: {:?}", journal.look());
+        };
+        let page = journal
+            .page(records, 0, records)
+            .expect("the journal reads");
+        let decoded: Vec<audit::Record> = page
+            .into_iter()
+            .map(|entry| entry.decoded.expect("each record decodes"))
+            .collect();
+        assert_eq!(
+            decoded.len(),
+            2,
+            "the run's opening and its close: {decoded:?}"
+        );
+        let closed = &decoded[0];
+        assert_eq!(closed.kind, audit::Kind::Run, "{closed:?}");
+        assert_eq!(closed.outcome, audit::Outcome::Stored, "{closed:?}");
+        // A RUN RECORD'S NOTE IS CUT TO ITS FIELD and keeps the whole length;
+        // only a member failure files its whole reason beside the journal.
+        let whole = "every row accounted for: stored, folded into an open bar, or dropped";
+        assert!(
+            whole.starts_with(&closed.note) && !closed.note.is_empty(),
+            "{closed:?}"
+        );
+        assert_eq!(usize::from(closed.note_bytes), whole.len(), "{closed:?}");
+        assert!(closed.source.contains("autopilot"), "{closed:?}");
+        assert_eq!(
+            closed.source, decoded[1].source,
+            "one source opens and closes the run"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

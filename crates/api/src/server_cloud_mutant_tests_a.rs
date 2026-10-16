@@ -1812,3 +1812,130 @@ fn a_feed_already_unread_is_not_lost_by_a_reload() {
         .expect("nothing that was readable is lost");
     assert_eq!(site.universe().generation, generation.wrapping_add(1));
 }
+
+/// `body`'s answer, awaited while every store-read slot is held by a blocking
+/// task that waits to be released; every holder is released and joined after.
+async fn with_every_store_read_slot_held<T>(body: impl std::future::Future<Output = T>) -> T {
+    let (started, mut running) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut releases = Vec::new();
+    let mut holders = Vec::new();
+    for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        releases.push(release);
+        let started = started.clone();
+        holders.push(tokio::spawn(crate::detail::run_store_read(move || {
+            let _sent = started.send(());
+            let _released = wait.recv();
+        })));
+    }
+    for _ in 0..crate::detail::MAX_STORE_READ_CONCURRENT {
+        running.recv().await.expect("every holder starts");
+    }
+    let answered = body.await;
+    for release in releases {
+        release.send(()).expect("a holder waits");
+    }
+    for holder in holders {
+        assert!(holder.await.expect("joined").is_ok());
+    }
+    answered
+}
+
+/// `GET /indexmap.json` READS NSE'S CATALOGUE FROM THE MASTERS FOLDER ON EACH
+/// REQUEST (`indexmap_json`, `indexmap_reading`). A feed this build does not
+/// name is refused before any file is read; with no catalogue the answer is a
+/// 500 naming the file it tried; once the file is there the answer is
+/// `indexmap::answer`'s over the feed's own index symbols; and with every
+/// store-read slot held the request is refused by admission. The folder comes
+/// from `BRUTEX_MASTERS`, so the reads run in a child.
+#[test]
+fn the_index_map_reads_the_catalogue_from_the_masters_folder_on_each_request() {
+    if in_child() {
+        end_harness_line();
+        let dir = handed(CHILD_MASTERS);
+        let site = Loaded::new(Site::load(&dir, &handed(CHILD_STORE)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async move {
+            let ask = |feed: &str| -> axum::http::Uri {
+                format!("/indexmap.json?feed={feed}")
+                    .parse()
+                    .expect("a uri")
+            };
+            let json = axum::http::HeaderValue::from_static("application/json; charset=utf-8");
+
+            let (status, headers, body) =
+                indexmap_json(axum::extract::State(Loaded::clone(&site)), ask("nope")).await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(body, no_such_feed_json("nope"));
+            assert_eq!(headers[0].1, json);
+
+            let catalogue = dir.join("nse_indices.csv");
+            let why = crate::indexmap::Published::read(&catalogue).expect_err("not there yet");
+            let (status, headers, body) =
+                indexmap_json(axum::extract::State(Loaded::clone(&site)), ask("dhan")).await;
+            assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                body,
+                format!("{{\"error\":{}}}", crate::pullrun::quote_for_json(&why))
+            );
+            assert!(why.contains("nse_indices.csv"), "{why}");
+            assert_eq!(headers[0].1, json);
+
+            std::fs::write(
+                &catalogue,
+                "index_name,category\nNIFTY 50,Broad Market Indices\n",
+            )
+            .expect("the catalogue");
+            let nse = crate::indexmap::Published::read(&catalogue).expect("it reads");
+            let (status, headers, body) =
+                indexmap_json(axum::extract::State(Loaded::clone(&site)), ask("dhan")).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(
+                (status, body),
+                crate::indexmap::answer(&site, &nse, Vendor::Dhan, vec!["NIFTY"])
+            );
+            assert_eq!(headers[0].1, json);
+
+            let (status, headers, body) = with_every_store_read_slot_held(indexmap_json(
+                axum::extract::State(Loaded::clone(&site)),
+                ask("dhan"),
+            ))
+            .await;
+            assert_eq!(
+                (status, body),
+                crate::detail::admission_refused(
+                    "index map read",
+                    crate::detail::MAX_STORE_READ_CONCURRENT,
+                    &crate::detail::RunError::Saturated,
+                )
+            );
+            assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(headers[0].1, json);
+        });
+        println!("CLOUDA-INDEXMAP=read");
+        return;
+    }
+    let dir = masters(
+        "clouda-indexmap",
+        None,
+        Some(&format!(
+            "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,13\n"
+        )),
+    );
+    let _ = std::fs::remove_file(dir.join("nse_indices.csv"));
+    let root = fresh_dir("indexmap-store");
+    let (stdout, _stderr) = rerun_child(
+        "the_index_map_reads_the_catalogue_from_the_masters_folder_on_each_request",
+        &[
+            (CHILD_MASTERS, dir.as_os_str()),
+            (CHILD_STORE, root.as_os_str()),
+            ("BRUTEX_MASTERS", dir.as_os_str()),
+        ],
+    );
+    assert!(has_line(&stdout, "CLOUDA-INDEXMAP=read"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
