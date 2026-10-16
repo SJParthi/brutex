@@ -55,11 +55,11 @@ changed.
 | file | mutants | pass 1 caught | pass 1 missed | timeout | unviable | after: missed |
 |---|---:|---:|---:|---:|---:|---:|
 | telemetry `sink.rs` | 433 | 341 | 38 | 9 | 45 | 1 (equivalent) |
-| store `staging.rs` + `safe_open.rs` | 67 | 37 | 13 | 0 | 17 | pending |
+| store `staging.rs` + `safe_open.rs` | 67 | 37 | 13 | 0 | 17 | 3 (equivalent) |
 | store `sealed_codec.rs` | 272 | 258 | 0 | 1 | 13 | 0 |
 | store `time_index.rs` | 135 | 127 | 0 | 2 | 6 | 0 |
-| store `sort_index_writer.rs` | 74 | pending | | | | |
-| store `path.rs` | 130 | pending | | | | |
+| store `sort_index_writer.rs` | 74 | 58 | 6 | 0 | 10 | 2 (equivalent in practice) |
+| store `path.rs` | 130 | pending (88 of 130: 83 caught, 1 missed, 4 unviable) | | | | 0 of that 1 |
 | store `verdict.rs` | 840 | pending | | | | |
 | store `sealed.rs` | 638 | pending | | | | |
 | store `file.rs` | 407 | pending | | | | |
@@ -79,6 +79,7 @@ all 9 are **caught** (fail fast).
 | `safe_open.rs:310:21` NotFound guard → `false` in `open_regular` | `ENOENT` then goes through `name_the_refusal`, whose `lstat` sees the same absence and returns the same `Io { action: "open", source }`. It costs one more `lstat`, and differs only if a name appears between the two calls, which no test can stage. |
 | `staging.rs:254:21` NotFound guard → `true` in `create` | Reachable only if `lstat` fails other than `ENOENT` straight after `open` said `EEXIST`: the directory's search permission revoked between two calls. |
 | `staging.rs:263:21` AlreadyExists guard → `true` in `create` | Reachable only if the second `O_EXCL` create fails other than `EEXIST` after the unlink succeeded: the directory changed between two calls. |
+| `sort_index_writer.rs:651:21` NotFound guard → `true` in `clear_staging`; `sort_index_writer.rs:661:21` the same in `walk_sidecar` | The `.srt` and its `.new.srt` staging name live in the directory of the bar file the door or writer has just opened, so `lstat` there fails other than `ENOENT` only if that directory's permissions change between two calls of one function. |
 
 ## Findings (not fixed; no production line changed)
 
