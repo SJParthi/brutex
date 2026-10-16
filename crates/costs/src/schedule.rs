@@ -342,7 +342,7 @@ pub const DHAN_EQUITY_BROKERAGE_RATE: Cited = Cited::named(
 /// The ₹20 cap on Dhan's equity intraday and MTF brokerage, per order.
 pub const DHAN_EQUITY_BROKERAGE_CAP: Paisa = Paisa::from_raw(2_000);
 
-/// Dhan F&O brokerage: ₹20 per executed order, flat.
+/// Dhan F&O brokerage: ₹20 per executed order, whatever the order's value.
 pub const DHAN_FNO_BROKERAGE: Paisa = Paisa::from_raw(2_000);
 
 /// Dhan DP charge: ₹12.50 per delivery or MTF sell day, plus GST.
@@ -357,7 +357,7 @@ pub const DHAN_SQUARE_OFF_FEE: Paisa = Paisa::from_raw(2_000);
 /// `order_value`, rounded half-up to the paisa.
 ///
 /// Equity delivery is free; equity intraday and MTF pay the lower of ₹20 and
-/// 0.03%; futures and options pay ₹20 flat.
+/// 0.03%; futures and options pay a fixed ₹20.
 ///
 /// # Errors
 ///
@@ -753,7 +753,7 @@ fn dated_card(kind: TradeKind, exchange: Exchange, day: TradeDay) -> Result<Rate
     .into())
 }
 
-/// The dated options card: the regime's rows on `day`, the flat rates from
+/// The dated options card: the regime's rows on `day`, the undated rates from
 /// `crate::rate`, exactly as `crate::trip::Rates::resolve` reads them.
 fn dated_option_card(exchange: Exchange, day: TradeDay) -> Result<RateCard, ChargeError> {
     let base = exchange_charge_rate(exchange, day)?;

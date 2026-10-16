@@ -217,6 +217,8 @@ impl OrderCharges {
 ///
 /// The rate card is resolved once, when the day opens. Each [`Self::add`]
 /// updates the totals in constant time; [`Self::settle`] prices them.
+/// Measured by `crates/costs/benches/stack.rs`: C-CHG-02 for the add, C-CHG-04
+/// for the settle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientSecurityDay {
     card: RateCard,

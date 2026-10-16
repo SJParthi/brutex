@@ -28,7 +28,7 @@
 //! # No floats, and no wrapping
 //!
 //! Every product is formed in `i128`, where an `i64 × i64` cannot overflow.
-//! The one narrowing back to [`Paisa`] is [`crate::money::narrow`], which
+//! The one narrowing back to [`Paisa`] is `crate::money::narrow`, which
 //! refuses rather than saturates.
 
 use std::fmt;
