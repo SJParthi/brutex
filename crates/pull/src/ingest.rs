@@ -130,6 +130,10 @@ use std::fs;
 /// next epoch, migration and recount. D-3316 (WP-10).
 #[path = "census_store.rs"]
 pub mod census_store;
+/// The gap ledger for months already stored, from the store and the calendar
+/// with no vendor call (R3-18).
+#[path = "gap_backfill.rs"]
+pub mod gap_backfill;
 #[path = "identity_screen.rs"]
 pub mod identity_screen;
 /// What a versioned repair of a series' months would do, read-only: the one
@@ -2295,6 +2299,18 @@ impl NotHeld {
 /// One lookup per day of the slice — at most 31 — through the month's own
 /// time index; a month that will not open holds nothing to ask, and every day
 /// of the slice is then not held.
+///
+/// **A HELD DAY'S OFFERED BAR THE STORE LACKS IS NOT HELD EITHER (FM-166,
+/// R3-18).** A day the store holds SHORT — 2019-09-23 without 15:20 — whose
+/// missing minute the vendor now serves was read as held, so the re-pull's
+/// audit counted the served minute held and wrote no line: the minute the
+/// vendor now publishes and the append door refused was named nowhere. Each
+/// held day's offered bars are now merged against the day's stored stamps
+/// (one more lookup, and one read per stored bar of the day, in time order:
+/// O(the day's bars), the order the landing already read them in), and an
+/// offered bar the store does not hold is a refused row's second, so the
+/// ledger line names it `refused_day` with its minute. A record that will
+/// not read leaves the rest of the day not held, never held by guess.
 fn not_held_days(
     slice: &[store::format::Bar],
     store_root: &Path,
@@ -2329,21 +2345,59 @@ fn not_held_days(
                 .and_then(|index| file.read_record(index).ok())
                 .is_some_and(|bar| bar.ts_micros < day_start + 86_400 * 1_000_000)
         });
-        if !holds_day {
-            seconds.extend(
-                slice
-                    .get(at..end)
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|bar| local_second_of(bar.ts_micros)),
-            );
-            if first_day.is_some_and(|first| day < first)
-                && let Ok(number) = u32::try_from(day)
-            {
-                fronts.push(number);
+        let offered = slice.get(at..end).unwrap_or(&[]);
+        match file.as_ref().filter(|_| holds_day) {
+            None => {
+                seconds.extend(offered.iter().map(|bar| local_second_of(bar.ts_micros)));
+                if first_day.is_some_and(|first| day < first)
+                    && let Ok(number) = u32::try_from(day)
+                {
+                    fronts.push(number);
+                }
             }
+            Some(file) => offered_not_stored(file, (held, day_start), offered, seconds),
         }
         at = end;
+    }
+}
+
+/// The IST-local seconds of `offered` (one held day's bars, ascending) that
+/// `file` does not hold, appended to `seconds` in time order: one walk of the
+/// day's stored bars beside the offered ones (FM-166, R3-18).
+fn offered_not_stored(
+    file: &BarFile,
+    (held, day_start): (u64, i64),
+    offered: &[store::format::Bar],
+    seconds: &mut Vec<i64>,
+) {
+    let day_end = day_start + 86_400 * 1_000_000;
+    let at = |ts: i64| file.first_at_or_after(ts).ok().map(|index| index.min(held));
+    let (Some(mut index), Some(end)) = (at(day_start), at(day_end)) else {
+        seconds.extend(offered.iter().map(|bar| local_second_of(bar.ts_micros)));
+        return;
+    };
+    let mut stored = None;
+    for bar in offered {
+        while index < end {
+            let ts = if let Some(ts) = stored {
+                ts
+            } else {
+                let Ok(record) = file.read_record(index) else {
+                    // UNREADABLE: the rest of the day is not held.
+                    index = end;
+                    break;
+                };
+                *stored.insert(record.ts_micros)
+            };
+            if ts >= bar.ts_micros {
+                break;
+            }
+            index += 1;
+            stored = None;
+        }
+        if index >= end || stored != Some(bar.ts_micros) {
+            seconds.push(local_second_of(bar.ts_micros));
+        }
     }
 }
 

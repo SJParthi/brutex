@@ -202,8 +202,24 @@ pub(super) fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>
 /// been timed here, and a page cache is not a bound — so the claim is the
 /// shape, not the nanoseconds, and it says which.
 ///
-/// A month is at most 375 × ~22 bars and is sent whole: the chart pans and
-/// zooms locally after that, with no request per viewport change.
+/// # How much one answer carries, measured (p99-9, AF-05)
+///
+/// This said "a month is at most 375 × ~22 bars and is sent whole". That is a
+/// one-minute month, about 8,250 bars. A one-second month is about 63 times
+/// that: gdfl NIFTY 1s 2026-07 holds 517,373 bars, and the whole month is
+/// 71,397,475 bytes of JSON (measured on 14 October 2026, n = 8, p50
+/// 121.76 ms). The size comes from the rows asked for, so two things bound an
+/// answer. A day window (`from=` and `to=`) cuts the month to its days: one
+/// day of that month is 3,105,001 bytes. `/bars/window.json` pages any range,
+/// at most [`bars::MAX_WINDOW_LIMIT`] rows a page. With no window, this
+/// route sends the whole month: no cap on its rows is in this file when AF-05
+/// lands. R3-08 (RA-060), not yet merged then, adds one that refuses a
+/// too-large answer by name; whichever merges second rewrites this sentence.
+///
+/// **This route takes no `limit`, `page` or `offset`, and it refuses each one
+/// by name.** Until AF-05 they were accepted and ignored: `limit=2` answered
+/// 200 with all 71,397,475 bytes, which is the hidden fallback `CLAUDE.md` §4
+/// bans (D-4973).
 ///
 /// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
 /// §7 reserves. It becomes JSON `null` rather than a number, because zero means
@@ -233,6 +249,17 @@ pub(super) async fn bars_json(
         )
     };
 
+    // NO PARAMETER IS SILENTLY IGNORED (p99-9, RT-DB-11, D-4973): a pager
+    // that sends `limit=2` here and gets the whole month would treat a
+    // 71 MB answer as its two rows. Checked before anything else, so the
+    // refusal is the same whatever the rest of the query says.
+    if let Some(sent) = paging_sent(query) {
+        return refuse(format!(
+            "/bars.json takes no limit or page; page with /bars/window.json or narrow \
+             with from and to ({sent:?} was sent)"
+        ));
+    }
+
     let asked = match Addressed::parse(query) {
         Ok(asked) => asked,
         Err(why) => return refuse(why),
@@ -255,10 +282,12 @@ pub(super) async fn bars_json(
         Ok(bounds) => bounds,
         Err(why) => return refuse(why),
     };
-    // OFF THE ASYNC WORKERS (DB-066). A month of one-second bars is a 35 MB
-    // read and render; on a Tokio worker it stalled every other route that
-    // shared it. The blocking pool admits it, and a full pool answers 429 by
-    // name rather than queueing behind it.
+    // OFF THE ASYNC WORKERS (DB-066). A whole month of one-second bars is a
+    // large read and render: gdfl NIFTY 1s 2026-07 is 517,373 records read
+    // and 71,397,475 bytes rendered (measured, p99-9; this said "35 MB"), and
+    // a day window cuts that to one day's rows. On a Tokio worker it stalled
+    // every other route that shared it. The blocking pool admits it, and a
+    // full pool answers 429 by name rather than queueing behind it.
     // STOPPED WHEN THE CLIENT GOES (DB-N15): the read looks at the flag
     // between chunks of rows.
     let answer = cancellable(false, move |cancel| {
@@ -337,14 +366,34 @@ fn month_answer(
     //
     // Landing at or past the end is therefore treated as "the bisection could
     // not help" rather than as "the window is empty": read the month and let
-    // `bars_array` filter, which is exactly the previous behaviour. A window
-    // genuinely past the last bar costs one wasted pass and still answers `[]`
-    // -- the same answer, arrived at by reading rather than by assuming.
-    let begins = from_micros
+    // `bars_array` filter, which is exactly the previous behaviour.
+    //
+    // A WINDOW GENUINELY PAST THE LAST BAR IS ANSWERED FROM ONE RECORD (p99-8,
+    // W1-api5-8, D-4972, which narrows D-1446). It cost a whole pass to answer
+    // `[]`: 517,373 records on gdfl NIFTY 1s 2026-07, p50 35-44 ms against
+    // about 1 ms for a window before the first bar. The two cases differ in
+    // the LAST record, so that record is read, once. See
+    // [`past_the_last_bar`]. Only a tail that does not read back as the
+    // header's last bar (zero-filled or refused by its checksum) keeps the
+    // full read above. A file cut short of its header never reaches here: the
+    // open above refuses it by name.
+    let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
-        .and_then(|index| usize::try_from(index).ok())
-        .filter(|&index| index < held)
-        .unwrap_or(0);
+        .and_then(|index| usize::try_from(index).ok());
+    if past_the_last_bar(
+        held,
+        file.header().last_ts_micros,
+        from_micros,
+        landed,
+        |last| {
+            file.read_record(u64::try_from(last).ok()?)
+                .ok()
+                .map(|bar| bar.ts_micros)
+        },
+    ) {
+        return Ok((axum::http::StatusCode::OK, "[]".to_owned()));
+    }
+    let begins = landed.filter(|&index| index < held).unwrap_or(0);
     // THE END IS BISECTED TOO, and the first version said it did not need to be.
     //
     // That commit argued "those rows have to be read to be returned, so a second
@@ -395,6 +444,62 @@ fn month_answer(
         ));
     }
     Ok((axum::http::StatusCode::OK, out))
+}
+
+/// The paging parameters `/bars/window.json` reads and `/bars.json` does not.
+const NOT_TAKEN_HERE: [&str; 3] = ["limit", "page", "offset"];
+
+/// The first of [`NOT_TAKEN_HERE`] that `query` names, or `None`.
+///
+/// A key counts with a value, with an empty value (`limit=`) or with none at
+/// all (`limit`). `param` reads none of those for this route, so each one
+/// would otherwise be ignored without a word. One pass over the query string.
+fn paging_sent(query: &str) -> Option<&'static str> {
+    query.split('&').find_map(|pair| {
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        NOT_TAKEN_HERE.into_iter().find(|taken| *taken == key)
+    })
+}
+
+/// Whether every committed bar of a month is older than `from_micros`,
+/// decided by reading ONE record: the last (p99-8, D-4972).
+///
+/// `landed` is where the time lookup put `from_micros`. Below `held`, a bar
+/// at or after `from` exists and this is `false` without a read. At or past
+/// `held`, it means one of two things, and only the last record tells them
+/// apart:
+///
+/// * **every bar is older.** The last record is the header's last bar,
+///   stamped below `from`. Every batch the writer commits begins after the
+///   header's `last_ts_micros` (`store::header::Header::advance` refuses
+///   anything else), so no record holds a later stamp, and the answer is
+///   `[]`.
+/// * **the tail is not what the header says.** The header names records whose
+///   bytes are zeros from a newly allocated extent (D-1446), or bytes the
+///   checksum refuses, or a stamp the header does not name. That record
+///   stamps 0, does not equal the header's last stamp, or does not read. (A
+///   file cut short of its header is refused by `open` before this runs.)
+///   The answer is `false`, and the caller keeps the full read that is
+///   correct on such a file and names its faults.
+///
+/// An empty month (`held` 0) reads nothing either way and gets `false`. So
+/// does a request with no `from`. `last_stamp` reads the record at the index
+/// it is given, and is called at most once. That bound is what the tests
+/// count.
+fn past_the_last_bar(
+    held: usize,
+    header_last_ts: i64,
+    from_micros: Option<i64>,
+    landed: Option<usize>,
+    last_stamp: impl FnOnce(usize) -> Option<i64>,
+) -> bool {
+    let (Some(from), Some(landed)) = (from_micros, landed) else {
+        return false;
+    };
+    let Some(last) = held.checked_sub(1).filter(|_| landed >= held) else {
+        return false;
+    };
+    last_stamp(last).is_some_and(|stamp| stamp != 0 && stamp == header_last_ts && stamp < from)
 }
 
 /// One page of bars across a RANGE of months and one or more series,
@@ -495,12 +600,13 @@ impl WindowAsk {
                 param(query, "feed")
             ));
         };
+        // THE ONE STRICT MONTH SPELLING (app-7, AF-04/AF-05): this split on
+        // `-` and handed each half to `str::parse`, so `2024-3`, `2024-003`,
+        // `2024-0003`, `02024-03` and the `%2B` forms all named March 2024
+        // here, the last route to accept them.
         let month_of = |key: &str| {
             let raw = param(query, key);
-            raw.split_once('-')
-                .and_then(|(y, m)| {
-                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
-                })
+            bars::month_of_text(&raw)
                 .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
         };
         let from = month_of("from")?;
@@ -1326,6 +1432,486 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{junk}");
         assert!(junk.contains("from"), "named date refusal: {junk}");
         assert_eq!(junk.matches("\"t\":").count(), 0, "no bar response: {junk}");
+    }
+
+    /// Midday IST on day `d` of January 2024 (day 0 is the 1st), in micros.
+    /// `19_723` days after 1970-01-01 is 2024-01-01.
+    const fn january_noon(d: i64) -> i64 {
+        ((19_723 + d) * 86_400 - 19_800 + 6 * 3_600) * 1_000_000
+    }
+
+    /// An invented Dhan NIFTY 1min month, January 2024, holding one bar at
+    /// midday IST on each of `days`, and the site serving it. The prices
+    /// (100-ish paisa, volume 1) cannot be mistaken for a real NIFTY bar.
+    fn january(name: &str, days: &[i64]) -> (std::path::PathBuf, Loaded) {
+        let root = store_root(name);
+        let path = january_path();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        let rows: Vec<store::format::Bar> = days
+            .iter()
+            .map(|&d| store::format::Bar {
+                ts_micros: january_noon(d),
+                open: 100 + d,
+                high: 110 + d,
+                low: 90 + d,
+                close: 105 + d,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        if !rows.is_empty() {
+            file.append(&rows).expect("legal bars");
+        }
+        drop(file);
+        let site = std::sync::Arc::new(Site::serving(&masters(name, None, None), &root));
+        (root, site)
+    }
+
+    /// Where [`january`] writes its month.
+    fn january_path() -> store::path::StorePath<'static> {
+        store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month: store::path::YearMonth::new(2024, 1).expect("a legal month"),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path")
+    }
+
+    /// What the full read answered for a window: every record read, then
+    /// `bars_array_of` filtering them. The answer `month_answer` gave for
+    /// every window before AF-05.
+    fn full_read_answer(site: &Loaded, from: Option<i64>, to: Option<i64>) -> String {
+        let asked = january_asked();
+        let file = asked.open(site, asked.month).expect("the month opens");
+        let held = usize::try_from(file.header().n_valid).expect("fits");
+        let (rows, faults) = bars::page(&file, 0, held);
+        assert!(faults.is_empty(), "a whole fixture");
+        bars_array_of(
+            &rows,
+            from,
+            to,
+            Some(brutex_core::instrument::Segment::Index),
+        )
+        .0
+    }
+
+    /// The January month as `/bars.json` addresses it.
+    fn january_asked() -> Addressed {
+        Addressed::parse(
+            "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2024-01",
+        )
+        .expect("a legal address")
+    }
+
+    /// `month_answer` with a cancel flag that is ALREADY SET. `page_cancellable`
+    /// looks at the flag before reading its first chunk of a non-empty range,
+    /// so this answers `Ok` only when no record range was read. That is the
+    /// seam that counts the full read: `Err("cancelled ...")` means one was
+    /// started.
+    fn answer_reading_no_range(
+        site: &Loaded,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<(axum::http::StatusCode, String), String> {
+        let (cancel, guard) = bars::Cancel::pair();
+        drop(guard);
+        assert!(cancel.is_cancelled(), "the seam needs a set flag");
+        month_answer(site, &january_asked(), from, to, &cancel)
+    }
+
+    /// `month_answer` as a request runs it, with a flag nobody sets.
+    fn answer(
+        site: &Loaded,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<(axum::http::StatusCode, String), String> {
+        month_answer(site, &january_asked(), from, to, &bars::Cancel::never())
+    }
+
+    /// `past_the_last_bar` with a reader that counts its calls and answers
+    /// `stamp` for the index it is given, after checking it is the last.
+    fn decided(
+        held: usize,
+        header_last: i64,
+        from: Option<i64>,
+        landed: Option<usize>,
+        stamp: Option<i64>,
+    ) -> (bool, usize) {
+        let reads = std::cell::Cell::new(0usize);
+        let past = past_the_last_bar(held, header_last, from, landed, |index| {
+            reads.set(reads.get() + 1);
+            assert_eq!(Some(index), held.checked_sub(1), "only the LAST record");
+            stamp
+        });
+        (past, reads.get())
+    }
+
+    /// **A WINDOW PAST THE LAST BAR READS ONE RECORD (p99-8, W1-api5-8,
+    /// D-4972).** It read the whole month to answer `[]`: 517,373 records
+    /// on gdfl NIFTY 1s 2026-07, p50 35-44 ms, against about 1 ms for a
+    /// window before the first bar.
+    ///
+    /// Counted twice. Through the decision's reader: exactly one record is
+    /// asked for, the last, at a one-second month's size and at one bar.
+    /// Through the route's own reader: with the cancel flag set before the
+    /// call, a full read would answer `cancelled`, and this answers `[]`.
+    /// Before AF-05 both fail: the decision did not exist, and the route
+    /// started the full read. The extremes are a window a day past the last
+    /// bar, one at the month's end, one years past it (2030), one starting a
+    /// second after the last bar inside its own day, and a month of one bar.
+    #[tokio::test]
+    async fn a_window_past_the_last_bar_reads_one_record() {
+        // THE DECISION, at the size of the measured month.
+        let held = 517_373;
+        let last = 1_785_491_999_000_000;
+        assert_eq!(
+            decided(held, last, Some(last + 1), Some(held), Some(last)),
+            (true, 1)
+        );
+        assert_eq!(
+            decided(1, last, Some(last + 1), Some(1), Some(last)),
+            (true, 1),
+            "a one-bar month"
+        );
+        // A lookup that lands PAST `held` (it never should) is past too.
+        assert_eq!(
+            decided(held, last, Some(last + 1), Some(held + 9), Some(last)),
+            (true, 1)
+        );
+
+        // THE ROUTE, on an invented month with bars on 2, 3 and 4 January.
+        let (_root, site) = january("af05past", &[1, 2, 3]);
+        let after = |d: i64| Some(january_noon(d) - 6 * 3_600 * 1_000_000);
+        for (what, from, to) in [
+            ("the day after the last bar", after(4), after(5)),
+            ("the month's last day", after(30), after(31)),
+            ("the first day of the next month", after(31), after(32)),
+            ("2030-01-01", Some(1_893_436_200_000_000), None),
+            (
+                "one second after the last bar, inside its own day",
+                Some(january_noon(3) + 1_000_000),
+                after(4),
+            ),
+        ] {
+            let (status, body) = answer_reading_no_range(&site, from, to)
+                .unwrap_or_else(|why| panic!("{what}: a full read was started: {why}"));
+            assert_eq!(status, axum::http::StatusCode::OK, "{what}");
+            assert_eq!(body, "[]", "{what}");
+            // And it is the full read's answer, byte for byte.
+            assert_eq!(body, full_read_answer(&site, from, to), "{what}");
+        }
+        let (_root, one) = january("af05one", &[5]);
+        assert_eq!(
+            answer_reading_no_range(&one, after(6), None).expect("no full read"),
+            (axum::http::StatusCode::OK, "[]".to_owned()),
+            "a one-bar month"
+        );
+
+        // THROUGH THE HANDLER, by day: a window after the month, and years
+        // after it, answer 200 `[]`.
+        for q in [
+            "&from=2024-02-01&to=2024-02-01",
+            "&from=2030-01-01&to=2030-01-01",
+        ] {
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{q}"
+            )
+            .parse()
+            .expect("a uri");
+            let (status, _, body) =
+                bars_json(axum::extract::State(std::sync::Arc::clone(&site)), uri).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (axum::http::StatusCode::OK, "[]"),
+                "{q}"
+            );
+        }
+    }
+
+    /// **A TAIL THAT IS NOT THE HEADER'S LAST BAR STILL TAKES THE FULL READ
+    /// (D-1446, kept by D-4972).** A header can name records whose bytes are
+    /// zeros from a newly allocated extent. An all-zero bar stamps 0, below
+    /// every real `from`, so the lookup lands past the end for a window
+    /// INSIDE the data. Answering `[]` from the last record there would be a
+    /// silent wrong answer, so a last stamp of 0, a last stamp the header does
+    /// not name, and a last record that will not read each keep the full
+    /// read.
+    ///
+    /// On disk, two damages, and neither is a quiet `[]`:
+    ///
+    /// * **the last record zeroed under its checksum.** The last record does
+    ///   not read, so the full read is started, and it answers 206 naming
+    ///   the faulted records. (A file born without checksums would read the
+    ///   zeroed record as a bar stamped 0, which the decision's stamp-0 case
+    ///   above covers.)
+    /// * **the file cut one record short of what its header names.** The
+    ///   store refuses that file when it is OPENED (`n_valid claims more
+    ///   records than the file holds`), so no record is read, the past-end
+    ///   decision is never reached, and the route answers 400 with the
+    ///   store's sentence. The first version of this test expected the full
+    ///   read and a 206 here, and failed on this branch: the store's open
+    ///   refuses the file first, which is the louder answer.
+    #[tokio::test]
+    async fn a_zero_filled_tail_still_takes_the_full_read() {
+        let held = 3;
+        let last = january_noon(3);
+        let from = Some(last + 1);
+        for (what, stamp) in [
+            ("a zero-filled record", Some(0)),
+            ("a stamp the header does not name", Some(last - 60_000_000)),
+            ("a stamp past the header's", Some(last + 60_000_000)),
+            ("a record that will not read", None),
+        ] {
+            assert_eq!(
+                decided(held, last, from, Some(held), stamp),
+                (false, 1),
+                "{what}"
+            );
+        }
+        // A stamp at or after `from` is not past the end.
+        assert_eq!(
+            decided(held, last, Some(last), Some(held), Some(last)),
+            (false, 1)
+        );
+
+        for (what, damage) in [
+            ("the last record zeroed", 0u8),
+            ("cut one record short", 1u8),
+        ] {
+            let (root, site) = january(&format!("af05tail{damage}"), &[1, 2, 3]);
+            let path = january_path().to_path_buf(&root);
+            let len = std::fs::metadata(&path).expect("the month").len();
+            let record = store::format::RECORD_LEN as u64;
+            let opened = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("writable fixture");
+            if damage == 0 {
+                use std::os::unix::fs::FileExt as _;
+                opened
+                    .write_all_at(&[0u8; store::format::RECORD_LEN], len - record)
+                    .expect("zeroed");
+            } else {
+                opened.set_len(len - record).expect("cut");
+            }
+            drop(opened);
+            let started = answer_reading_no_range(&site, from, None);
+            if damage == 1 {
+                // REFUSED AT THE OPEN, before any record is read: the seam
+                // with its flag set and the plain call give the same
+                // sentence, and the handler answers 400 with it.
+                let sentence = "n_valid claims more records than the file holds";
+                for got in [started, answer(&site, from, None)] {
+                    assert!(
+                        got.as_ref().is_err_and(|why| why.contains(sentence)),
+                        "{what}: refused by name at the open: {got:?}"
+                    );
+                }
+                let uri: axum::http::Uri = "/bars.json?feed=dhan&exchange=NSE&segment=INDEX\
+                     &symbol=NIFTY&timeframe=1min&month=2024-01&from=2024-01-05&to=2024-01-05"
+                    .parse()
+                    .expect("a uri");
+                let (status, _, body) =
+                    bars_json(axum::extract::State(std::sync::Arc::clone(&site)), uri).await;
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "{what}: {body}"
+                );
+                assert!(body.contains(sentence), "{what}: {body}");
+                assert!(!body.contains("\"bars\""), "{what}: no bars: {body}");
+                continue;
+            }
+            assert!(
+                started
+                    .as_ref()
+                    .is_err_and(|why| why.starts_with("cancelled")),
+                "{what}: the full read is taken: {started:?}"
+            );
+            let (status, body) = answer(&site, from, None).expect("an answer");
+            assert_eq!(
+                status,
+                axum::http::StatusCode::PARTIAL_CONTENT,
+                "{what}: the damage is named: {body}"
+            );
+            // A ZEROED RECORD FAILS ITS CHECKSUM BLOCK, so every record the
+            // block seals is refused (three here). The count is named, and no
+            // bar is served from the damaged block.
+            let faulted: u64 = body
+                .split_once("\"faulted_records\":")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .and_then(|count| count.parse().ok())
+                .unwrap_or_else(|| panic!("{what}: a fault count: {body}"));
+            assert!(faulted >= 1, "{what}: {body}");
+            assert!(body.starts_with(r#"{"bars":[]"#), "{what}: {body}");
+        }
+    }
+
+    /// **A WINDOW BEFORE THE FIRST BAR STAYS ONE LOOKUP AND READS NO RANGE.**
+    /// The case p99-8 measured against (about 1 ms). The last record is not
+    /// read, and no range is either. Also an empty month (`n_valid` 0), which
+    /// reads nothing whatever the window is, and a window starting on the
+    /// last bar's own day, which is not past the end and answers that day.
+    #[test]
+    fn a_window_before_the_first_bar_stays_one_bisection() {
+        assert_eq!(decided(3, 9, Some(1), Some(0), Some(9)), (false, 0));
+        assert_eq!(decided(3, 9, Some(1), Some(2), Some(9)), (false, 0));
+        assert_eq!(decided(3, 9, None, Some(3), Some(9)), (false, 0), "no from");
+        assert_eq!(
+            decided(3, 9, Some(10), None, Some(9)),
+            (false, 0),
+            "no lookup"
+        );
+        assert_eq!(
+            decided(0, 0, Some(10), Some(0), Some(9)),
+            (false, 0),
+            "empty"
+        );
+
+        let midnight = |d: i64| Some(january_noon(d) - 6 * 3_600 * 1_000_000);
+        let (_root, site) = january("af05before", &[2, 3, 4]);
+        // 1 January holds no bar: the window lies before the first one.
+        assert_eq!(
+            answer_reading_no_range(&site, midnight(0), midnight(1)).expect("no range read"),
+            (axum::http::StatusCode::OK, "[]".to_owned())
+        );
+        // The last bar's own day is answered, not cut off as "past".
+        let (status, day) = answer(&site, midnight(4), midnight(5)).expect("an answer");
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(day.matches("\"t\":").count(), 1, "{day}");
+        assert!(day.contains("\"o\":104"), "the last day's bar: {day}");
+
+        let (_root, empty) = january("af05empty", &[]);
+        for from in [None, midnight(0), midnight(40)] {
+            assert_eq!(
+                answer_reading_no_range(&empty, from, None).expect("nothing read"),
+                (axum::http::StatusCode::OK, "[]".to_owned()),
+                "{from:?}"
+            );
+        }
+    }
+
+    /// **`/bars.json` REFUSES `limit`, `page` AND `offset` BY NAME (p99-9,
+    /// RT-DB-11, D-4973).** They were accepted and ignored: `limit=2`
+    /// answered 200 with the whole month, 71,397,475 bytes on gdfl NIFTY 1s
+    /// 2026-07. A key counts with a value, with an empty one, and bare, and
+    /// first or last in the query. The request without one still answers.
+    #[tokio::test]
+    async fn bars_json_refuses_limit_and_page_by_name() {
+        let (_root, site) = january("af05paging", &[1, 2, 3]);
+        let read = |q: &str| {
+            let site = std::sync::Arc::clone(&site);
+            let uri: axum::http::Uri = format!(
+                "/bars.json?{q}feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+        let (status, _, all) = read("").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{all}");
+        assert_eq!(all.matches("\"t\":").count(), 3);
+        for (q, named) in [
+            ("limit=2&", "limit"),
+            ("page=1&", "page"),
+            ("page=1&limit=2&", "page"),
+            ("offset=0&", "offset"),
+            ("limit=&", "limit"),
+            ("limit&", "limit"),
+            ("from=2024-01-02&to=2024-01-02&limit=1&", "limit"),
+        ] {
+            let (status, _, body) = read(q).await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{q}: {body}");
+            assert!(
+                body.contains(
+                    "/bars.json takes no limit or page; page with /bars/window.json or \
+                     narrow with from and to"
+                ),
+                "{q}: {body}"
+            );
+            assert!(
+                body.contains(&format!("\\\"{named}\\\" was sent")),
+                "{q}: {body}"
+            );
+            assert!(!body.contains("\"t\":"), "{q}: no bars: {body}");
+        }
+        // LAST IN THE QUERY, after every addressing field.
+        let uri: axum::http::Uri = "/bars.json?feed=dhan&exchange=NSE&segment=INDEX\
+             &symbol=NIFTY&timeframe=1min&month=2024-01&limit=2"
+            .parse()
+            .expect("a uri");
+        let (status, _, body) =
+            bars_json(axum::extract::State(std::sync::Arc::clone(&site)), uri).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        // A KEY THAT ONLY STARTS WITH ONE IS NOT ONE.
+        assert_eq!(paging_sent("limited=2&pages=1&offsets=0"), None);
+        assert_eq!(paging_sent("feed=x&page"), Some("page"));
+    }
+
+    /// **`/bars/window.json` TAKES ONE SPELLING OF A MONTH (app-7).** Its
+    /// `from` and `to` split on `-` and parsed each half, so `2024-3`,
+    /// `2024-003`, `2024-0003`, `02024-03` and `%2B`-signed halves all named
+    /// March 2024 under 200 (measured on app18: total 6,855 for each). Each is
+    /// refused here by field, and the one spelling still parses.
+    #[test]
+    fn window_json_refuses_a_month_not_spelled_yyyy_mm() {
+        let ask = |from: &str, to: &str| {
+            WindowAsk::parse(&format!(
+                "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min\
+                 &from={from}&to={to}"
+            ))
+        };
+        let good = ask("2024-03", "2024-03").expect("the one spelling");
+        assert_eq!(
+            (good.from.to_string(), good.to.to_string()),
+            ("2024-03".to_owned(), "2024-03".to_owned())
+        );
+        for bad in [
+            "2024-3",
+            "2024-003",
+            "2024-0003",
+            "02024-03",
+            "%2B2024-03",
+            "2024-%2B3",
+            "+2024-03",
+            "2024-+3",
+            "2024-03x",
+            "2024-13",
+            "2024-00",
+            "2024-",
+            "-03",
+            "",
+            "2024_03",
+            "２０２４-03",
+        ] {
+            let from = ask(bad, "2024-03")
+                .err()
+                .unwrap_or_else(|| panic!("from={bad} parsed"));
+            assert!(
+                from.contains("is not a YYYY-MM month for \"from\""),
+                "{bad}: {from}"
+            );
+            let to = ask("2024-03", bad)
+                .err()
+                .unwrap_or_else(|| panic!("to={bad} parsed"));
+            assert!(
+                to.contains("is not a YYYY-MM month for \"to\""),
+                "{bad}: {to}"
+            );
+        }
     }
 
     /// **A FULL SCAN POOL REFUSES A SCAN BY NAME, AND A SEEK IS STILL
