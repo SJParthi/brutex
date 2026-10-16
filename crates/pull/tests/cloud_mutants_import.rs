@@ -603,6 +603,12 @@ fn request_minutes_a_gap_line_names_the_sinks_run() {
 
 /// A plain stored zip of `members`, in order (APPNOTE 4.3, no ZIP64).
 fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+    stored_zip_with(members, &[])
+}
+
+/// [`stored_zip`], every local header carrying `extra` as its extra field
+/// (the central records carry none, as APPNOTE 4.4.11 allows).
+fn stored_zip_with(members: &[(&str, &[u8])], extra: &[u8]) -> Vec<u8> {
     fn le16(out: &mut Vec<u8>, v: usize) {
         out.extend_from_slice(&u16::try_from(v).unwrap().to_le_bytes());
     }
@@ -624,8 +630,9 @@ fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
         le32(&mut out, len);
         le32(&mut out, len);
         le16(&mut out, name.len());
-        le16(&mut out, 0);
+        le16(&mut out, extra.len());
         out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(extra);
         out.extend_from_slice(data);
         le32(&mut central, 0x0201_4b50);
         for v in [20, 20, 0, 0] {
@@ -699,6 +706,20 @@ mod zip_readers {
                 what: "a day zip's local header has no signature"
             })
         );
+    }
+
+    /// A stored member whose local header carries an extra field the central
+    /// record does not: its span starts past the name AND the extra field.
+    /// Kills the extra length added as subtracted.
+    #[test]
+    fn a_stored_members_span_skips_its_local_extra_field() {
+        let name = "APR_2024/GFDLNFO_TICK_01042024.zip";
+        let zip = super::stored_zip_with(&[(name, b"Inner")], b"EXTRA123");
+        let len = u64::try_from(zip.len()).unwrap();
+        let entries = zip_entries(&zip, 0, len).unwrap();
+        let (at, n) = stored_span(&zip, &entries[0]).unwrap();
+        assert_eq!((at, n), (30 + u64::try_from(name.len()).unwrap() + 8, 5));
+        assert_eq!(&zip[usize::try_from(at).unwrap()..][..5], b"Inner");
     }
 
     /// An options year zip naming one day zip twice refuses that day; one
@@ -858,6 +879,11 @@ mod cm_scope_and_auction {
         assert_ne!(before, after, "no master, then a master");
         assert_ne!(after, before);
         assert_eq!(after, listing(&scope));
+        // An index day asks no eligibility: two listings of it are one.
+        assert_eq!(
+            DayListing::<()>::new(CmKind::Indices, d),
+            DayListing::<()>::new(CmKind::Indices, d)
+        );
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(later).unwrap();
     }
@@ -892,5 +918,168 @@ mod cm_scope_and_auction {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+// ═══ extreme inputs, end to end through a stored archive ═══════════════════
+
+mod cm_extremes {
+    use super::{day, scratch, stored_zip};
+    use brutex_core::instrument::{Exchange, InstrumentKey};
+    use pull::gdfl_archive::Archive;
+    use pull::gdfl_cm::{CmRefusal, CmScope, HEADER_OPEN_INTEREST, read_day};
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    /// An outer archive holding one stocks day zip of `files` for `d`.
+    fn stocks_day(d: pull::session::Day, files: &[(&str, &[u8])]) -> Archive<Vec<u8>> {
+        let folder = format!(
+            "GFDLCM_STOCK_TICK_{:02}{:02}{:04}",
+            d.day(),
+            d.month(),
+            d.year()
+        );
+        let named: Vec<(String, &[u8])> = files
+            .iter()
+            .map(|(name, bytes)| (format!("{folder}/{name}"), *bytes))
+            .collect();
+        let members: Vec<(&str, &[u8])> = named.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let inner = stored_zip(&members);
+        let month = [
+            "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+        ][usize::from(d.month()) - 1];
+        let outer_name = format!("STOCKS/{}/{month}_{}/{folder}.zip", d.year(), d.year());
+        let outer = stored_zip(&[(outer_name.as_str(), &inner)]);
+        let len = u64::try_from(outer.len()).unwrap();
+        Archive::from_source(outer, len).unwrap()
+    }
+
+    fn row(stem: &str, d: &str, time: &str, ltp: &str, bid: &str, ask: &str, ltq: u32) -> String {
+        format!("{stem},{d},{time},{ltp},{bid},10,{ask},10,{ltq},0")
+    }
+
+    /// A share named with `&` (`M&M`) is read through its own stem. Every
+    /// row is kept in file order: a pre-open row, an in-session trade, the
+    /// same trade stated twice, a LATE row stamped before the one ahead of
+    /// it, a quote-only row (LTQ 0), a post-close row, and a last row with no
+    /// newline. The largest stamp is the running maximum, which the late
+    /// row does not raise; a quote-only row is counted, never usable alone.
+    #[test]
+    fn duplicate_late_and_quote_only_rows_are_kept_in_file_order() {
+        let d = day(2024, 4, 1);
+        let date = "01/04/2024";
+        let stem = "M&M.NSE";
+        let rows = [
+            row(stem, date, "09:07:01", "1850.50", "1850.00", "1851.00", 5),
+            row(stem, date, "10:00:00", "1852.00", "1851.95", "1852.05", 7),
+            row(stem, date, "10:00:00", "1852.00", "1851.95", "1852.05", 7),
+            row(stem, date, "09:59:58", "1851.75", "1851.70", "1851.80", 3),
+            row(stem, date, "11:00:00", "1853.00", "1852.95", "1853.05", 0),
+            row(stem, date, "15:45:00", "1854.00", "0", "0", 2),
+        ];
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{}", rows.join("\r\n"));
+        let archive = stocks_day(d, &[("M&M.NSE.csv", text.as_bytes())]);
+        let key = InstrumentKey::cash(Exchange::Nse, "M&M").unwrap();
+        let file = read_day(&archive, &key, d).unwrap().unwrap().file;
+        let stamps: Vec<u32> = file.rows.iter().map(|r| r.sod).collect();
+        assert_eq!(stamps, [32_821, 36_000, 36_000, 35_998, 39_600, 56_700]);
+        assert_eq!(
+            file.rows.iter().map(|r| r.line).collect::<Vec<_>>(),
+            [2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            (file.rows_pre, file.rows_in_session, file.rows_post),
+            (1, 4, 1)
+        );
+        assert_eq!(file.ltq_zero_rows, 1);
+        assert_eq!(file.max_sod, 56_700);
+        assert!(!file.final_newline);
+        assert_eq!(file.refused.total(), 0);
+    }
+
+    /// A zero-length file, a header with no row, a file cut inside its last
+    /// row, and a file of one quote-only row each refuse by name.
+    #[test]
+    fn empty_header_only_cut_and_quote_only_files_refuse_by_name() {
+        let d = day(2024, 4, 1);
+        let key = InstrumentKey::cash(Exchange::Nse, "M&M").unwrap();
+        let header = format!("{HEADER_OPEN_INTEREST}\r\n");
+        let cut = format!("{header}M&M.NSE,01/04/2024,10:0");
+        let quote_only = format!(
+            "{header}{}\r\n",
+            row(
+                "M&M.NSE",
+                "01/04/2024",
+                "10:00:00",
+                "1852.00",
+                "1851.95",
+                "1852.05",
+                0
+            )
+        );
+        for (bytes, want) in [
+            (Vec::new(), CmRefusal::HeaderUnknown),
+            (header.clone().into_bytes(), CmRefusal::NoSessionRows),
+            (cut.into_bytes(), CmRefusal::MalformedRow { line: 2 }),
+            (quote_only.into_bytes(), CmRefusal::NoSessionRows),
+        ] {
+            let archive = stocks_day(d, &[("M&M.NSE.csv", &bytes)]);
+            assert_eq!(read_day(&archive, &key, d), Err(want.clone()), "{want:?}");
+        }
+    }
+
+    /// From 2026-08-03 an eligible share's closing-auction print (bid and
+    /// ask zero, LTQ positive, in the auction band) is diverted out of the
+    /// rows the fold sees, the same print stated twice merged with its
+    /// count; with no security master the same file is refused by name.
+    #[test]
+    fn an_eligible_shares_closing_auction_print_is_diverted_from_its_rows() {
+        let d = day(2026, 8, 4);
+        let date = "04/08/2026";
+        let stem = "RELIANCE.NSE";
+        let rows = [
+            row(stem, date, "15:00:00", "1400.00", "1399.95", "1400.05", 9),
+            row(stem, date, "15:28:07", "1401.50", "0", "0", 400),
+            row(stem, date, "15:28:07", "1401.50", "0", "0", 400),
+            row(stem, date, "15:40:00", "1401.50", "1401.45", "1401.55", 1),
+        ];
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{}\r\n", rows.join("\r\n"));
+        let masters = scratch("CmAuctionMasters");
+        let at = brutex_core::universe::FNO_INDEX
+            .position("RELIANCE")
+            .unwrap();
+        let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{isin},1\n"
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(csv.as_bytes()).unwrap();
+        pull::cash_session_cache::install(&masters, d, &gz.finish().unwrap()).unwrap();
+        let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
+        let scope = Arc::new(CmScope::swept().with_masters(masters.clone()));
+        let archive = stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]).with_scope(scope);
+        let file = read_day(&archive, &key, d).unwrap().unwrap().file;
+        assert_eq!(
+            file.rows.iter().map(|r| r.sod).collect::<Vec<_>>(),
+            [54_000, 56_400]
+        );
+        assert_eq!(file.auction.len(), 1);
+        let print = file.auction[0];
+        assert_eq!(
+            (
+                print.sod,
+                print.price,
+                print.quantity,
+                print.rows,
+                print.line
+            ),
+            (55_687, 140_150, 400, 2, 3)
+        );
+        let blind = stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]);
+        assert!(matches!(
+            read_day(&blind, &key, d),
+            Err(CmRefusal::AuctionEligibilityUnknown { .. })
+        ));
+        std::fs::remove_dir_all(masters).unwrap();
     }
 }
