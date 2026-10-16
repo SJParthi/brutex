@@ -2675,3 +2675,29 @@ fn the_sort_rebuild_door_refuses_a_month_that_does_not_validate() {
     );
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **A TIME-INDEX OR SORT-INDEX REFUSAL SAYS WHICH FILE AND WHY.**
+///
+/// Kills `replace write_time_index -> fmt::Result with Ok(Default::default())`
+/// and the same for `write_sort_index`: each would print nothing for its
+/// refusal, which an operator reads in the caller's event.
+#[test]
+fn a_time_index_or_sort_index_refusal_says_which_file_and_why() {
+    use store::file::StoreError;
+    let time = StoreError::TimeIndex {
+        path: PathBuf::from("/nonexistent/cloud/2031-02.tix"),
+        reason: "an entry fails its checksum".to_owned(),
+    };
+    assert_eq!(
+        time.to_string(),
+        "/nonexistent/cloud/2031-02.tix: time index refused: an entry fails its checksum"
+    );
+    let sort = StoreError::SortIndex {
+        path: PathBuf::from("/nonexistent/cloud/2031-02.srt"),
+        reason: "the disk is full".to_owned(),
+    };
+    assert_eq!(
+        sort.to_string(),
+        "/nonexistent/cloud/2031-02.srt: sort index not written: the disk is full"
+    );
+}
