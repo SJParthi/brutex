@@ -287,11 +287,20 @@ shared 4-core VM. Not re-run here.
 |---|---|---|
 | format | `cargo fmt --all --check` | **clean** |
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **clean, exit 0** (after two lint fixes in the new bench rows, b46cf95, and one in `gdfl_nfo.rs`, 217381e) |
-| tests | `cargo test -p api -p pull -p store --locked` | see the line below |
+| tests | `cargo test -p api -p pull -p store --locked --no-fail-fast` | 4,245 passed, 15 failed, 32 ignored — all 15 environmental or base-snapshot, below |
 | benches | `cargo bench -p {api,store,pull} --profile dev --locked --bench ratio` | store, pull: **all ratios within the ceiling**; api: one BREACH in the existing C-15 row above (run 2), none in run 1; every new asserted row ok |
 | bench profile | `cargo bench -p api --locked --no-run` | **not completed**: SIGKILL (out of memory) linking `cli` under fat LTO beside a concurrent test build |
 
-**Full run of the three touched crates: still running when this commit was made; the next commit records its result.**
+**Full run, `cargo test -p api -p pull -p store --locked --no-fail-fast`: 4,245 passed, 15 failed, 32 ignored (61 test binaries and doc-test sets), exit 101.** Every one of the 15 is in a file this branch does not edit, and each is accounted for:
+
+| failed | where | why it fails here | evidence |
+|---|---|---|---|
+| 10 | `api` lib: `logs::tests::{a_directory_that_turns_unreadable_is_never_answered_as_read, a_ring_file_that_stays_unreadable_is_named_once, logs_names_a_directory_it_may_not_search}`, `pullrun::tests::{an_index_that_cannot_be_read_never_leaves_the_answer_clean, an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be}`, `server::tests::{a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing, a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name, a_run_cut_short_by_a_restart_is_logged_when_it_is_found, a_store_that_cannot_take_a_write_is_found_by_asking_it, an_expired_fno_walk_cut_short_is_seen_at_the_next_start}` | the container runs as uid 0, which mode bits do not bind; one test says so: "mode 000 does not stop this process … run the tests as a user the mode bits bind" (`logs.rs:6517`) | the same compiled binary run as `nobody` (`runuser -u nobody`): **10 passed, 0 failed** |
+| 3 | `pull` lib: `gdfl_import::tests::{a_day_ledger_that_will_not_take_a_line_leaves_the_day_open, a_journal_that_cannot_be_written_fails_the_day_by_name}`, `gdfl_tickstore::tests::a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses` | uid 0, as above | run as `nobody`: **3 passed, 0 failed** |
+| 1 | `store` lib: `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported` (`staging_tests.rs:54`) | the test asserts a re-created file gets a new inode; this host's ext4 `/tmp` hands the freed number straight back (1,859,583 both times) | `echo > f; stat; rm; echo > f; stat` on `/tmp`: 1631353 → 1631353, three of three; fails as `nobody` too |
+| 1 | `store --test cited_commits` (`cited_commits.rs:637`) | it checks every commit the docs cite is an ancestor of `refs/remotes/origin/main`; the base is a one-commit snapshot, so `feat/db-fix`'s history is absent (`3cc6b8e0`, `521066e6`) | the docs it reads (`docs/04-invariants.md`, `docs/06-limits.md`) are untouched by this branch |
+
+`api` lib: 1,962 passed + the 10 above as `nobody` = all 1,972 non-ignored tests pass. `pull` lib: 1,215 + 3. `store` lib: 227 passed, 1 environmental.
 
 Targeted runs before the full one: `gdfl_nfo` 70 passed / 6 ignored; `livejson` 7
 passed; `bars_route` + `bars_window` 38 passed; `facets` 25 passed.
