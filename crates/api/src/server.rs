@@ -20173,6 +20173,16 @@ mod tests {
     /// a write are faults; a healthy store is none and keeps no probe file.
     #[test]
     fn a_store_that_cannot_take_a_write_is_found_by_asking_it() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "server::tests::a_store_that_cannot_take_a_write_is_found_by_asking_it",
+            a_store_that_cannot_take_a_write_is_found_by_asking_it_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_store_that_cannot_take_a_write_is_found_by_asking_it_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = crate::scratch::path("store-fault-probe");
         let _ = std::fs::remove_dir_all(&root);
@@ -20620,6 +20630,16 @@ mod tests {
     /// names for the census path when another ingest holds the census lock.
     #[test]
     fn a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "server::tests::a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing",
+            a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_failure_of_the_store_keeps_the_leg_owed_and_is_never_called_standing_body() {
         use crate::pullrun::RetryClass;
         use std::os::unix::fs::PermissionsExt as _;
         let root = crate::scratch::path("store-fault-class");
@@ -20946,6 +20966,16 @@ mod tests {
     /// "healthy" although the directory takes no new file.
     #[test]
     fn a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "server::tests::a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name",
+            a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_probe_name_that_cannot_be_unlinked_is_a_fault_by_name_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = crate::scratch::path("wp62-r3-probe-readonly");
         let _ = std::fs::remove_dir_all(&root);
@@ -20994,6 +21024,16 @@ mod tests {
     /// open logs nothing.
     #[test]
     fn a_run_cut_short_by_a_restart_is_logged_when_it_is_found() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "server::tests::a_run_cut_short_by_a_restart_is_logged_when_it_is_found",
+            a_run_cut_short_by_a_restart_is_logged_when_it_is_found_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_run_cut_short_by_a_restart_is_logged_when_it_is_found_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = crate::scratch::path("server-interrupted-run-logged");
         let _ = std::fs::remove_dir_all(&root);
@@ -27119,8 +27159,24 @@ mod tests {
     /// same window and source: whole, the scan reads clean; cut between the
     /// two, it reads INTERRUPTED naming the underlying and the window. A
     /// journal that refuses the opening record is said on the receipt.
-    #[tokio::test]
-    async fn an_expired_fno_walk_cut_short_is_seen_at_the_next_start() {
+    #[test]
+    fn an_expired_fno_walk_cut_short_is_seen_at_the_next_start() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "server::tests::an_expired_fno_walk_cut_short_is_seen_at_the_next_start",
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a current-thread runtime")
+                    .block_on(an_expired_fno_walk_cut_short_is_seen_at_the_next_start_body());
+            },
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    async fn an_expired_fno_walk_cut_short_is_seen_at_the_next_start_body() {
         let root = store_root("fno-opened");
         let journal = audit::Journal::at(&root);
         let site = Site::new(universe(&root), census::read_all(&root), root.clone());

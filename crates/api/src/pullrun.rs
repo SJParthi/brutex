@@ -5936,6 +5936,16 @@ mod tests {
     /// said, with both reasons, never a guess either way.
     #[test]
     fn an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "pullrun::tests::an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be",
+            an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn an_absent_index_is_built_by_the_scan_and_not_known_is_said_when_it_cannot_be_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let over = INTERRUPTED_SCAN + 50;
         let with_failures = |head: crate::audit::Record, failures: u64| {
@@ -6352,6 +6362,16 @@ mod tests {
     /// NOT KNOWN now, naming the index's reason.
     #[test]
     fn an_index_that_cannot_be_read_never_leaves_the_answer_clean() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "pullrun::tests::an_index_that_cannot_be_read_never_leaves_the_answer_clean",
+            an_index_that_cannot_be_read_never_leaves_the_answer_clean_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn an_index_that_cannot_be_read_never_leaves_the_answer_clean_body() {
         let shaped = |closed_b: bool| {
             let mut records = vec![opened_at(100, "kite", 20_000, 20_010)];
             records.extend((0..850).map(|at| failure_at(200 + at)));

@@ -6545,6 +6545,16 @@ mod tests {
     /// directory in a kind's `unread`, and read again once it can be.
     #[test]
     fn a_directory_that_turns_unreadable_is_never_answered_as_read() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "logs::tests::a_directory_that_turns_unreadable_is_never_answered_as_read",
+            a_directory_that_turns_unreadable_is_never_answered_as_read_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_directory_that_turns_unreadable_is_never_answered_as_read_body() {
         let root = crate::scratch::path("logs-dir-turns-unreadable");
         let _ignored = std::fs::remove_dir_all(&root);
         let logs = root.join("logs");
@@ -6655,6 +6665,16 @@ mod tests {
     /// `read` once they are not.
     #[test]
     fn logs_names_a_directory_it_may_not_search() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "logs::tests::logs_names_a_directory_it_may_not_search",
+            logs_names_a_directory_it_may_not_search_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn logs_names_a_directory_it_may_not_search_body() {
         let root = crate::scratch::path("logs-dirs-unsearchable");
         let _ignored = std::fs::remove_dir_all(&root);
         let logs = root.join("logs");
@@ -6709,6 +6729,16 @@ mod tests {
     /// first seen empty stayed at 0 files while its bytes grew.
     #[test]
     fn a_ring_file_that_stays_unreadable_is_named_once() {
+        // Mode bits do not bind root, so as root this failed for a reason that
+        // is not true (cloud-attack-law-20261016). It runs where they bind (D-0995).
+        crate::isolated::where_permission_binds(
+            "logs::tests::a_ring_file_that_stays_unreadable_is_named_once",
+            a_ring_file_that_stays_unreadable_is_named_once_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_ring_file_that_stays_unreadable_is_named_once_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = crate::scratch::path("logs-ring-file-unreadable");
         let _ignored = std::fs::remove_dir_all(&dir);
