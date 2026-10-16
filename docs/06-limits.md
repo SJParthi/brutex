@@ -18136,30 +18136,37 @@ kept against 718.5 ms and 326.2 ms read from the bars. Gate 8
 (`crates/api/benches/ratio/gaps.rs`, n=200): a kept one-second month of 1,024,
 10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x).
 
-**The span row compares like with like (R3-06 repair).** It first held a
+**The span row compares like with like (R3-06 repairs).** It first held a
 2006-01..2007-12 span to a tenth of 2006-01..2025-12, and those are different
 months: the calendar of record vouches for days from 2018-01-01, so all 24
 base months were unmeasured days and 96 of the 240 measured ones, which cost
 more to audit. It breached at 11.1x and 17.6x and passed at 0.9x and 5.1x,
-by load. It now asks the 240 months whole and as the ten 24-month tiles that
-cover them, one of each per round, and holds the whole's p99 to 1.5x the
-tiles' p99s summed. Measured 16 October 2026 (release bench build of
-`fix/db-R3-06`, n=200 a row, load average 25 to 44 on 14 cores): tiles from
-2006 to 2016 p50 4.20 to 4.34 ms and from 2018 to 2024 p50 5.51 to 5.72 ms
-(the era difference, measured), p99 10.3 to 17.2 ms; the ten summed p50
-48.25 ms, p99 138.57 ms; the whole p50 45.97 ms, p99 93.39 ms, max 209.50 ms:
-p99 0.673x (ceiling 1.5x), p50 0.953x. The same comparison over the real
-months on a clone (Zerodha NIFTY 1 min, 2006-10..2026-09, 105 held, `.sum`
-built by `cli msum-build`; curl `time_total`, n=100 rounds, load average
-about 190): whole p50 29.33 ms, p99 101.34 ms; tiles summed p50 36.13 ms,
-p99 148.90 ms; 0.81x and 0.68x. A tile of months with no file answers in
-about 1 ms, one of 24 held months in about 6.8 ms.
-Re-measured on that clone after the repair (n=200, one client, load average
-about 220): Zerodha NIFTY 1 min 2024-10..2026-09 kept p50 4.8 ms, p99 7.5 ms,
-max 10.8 ms; 2006-10..2026-09 p50 20.4 ms, p99 26.0 ms, max 57.5 ms; GDFL
-NIFTY 1 s 2018-09..2019-08 p50 37.8 ms, p99 40.9 ms, max 44.4 ms. Every kept
-month answered `unreadable_records: null`; a 1 s month with no `.sum`
-(2019-09) read 392,147 records and answered `0`.
+by load. The first repair asked the 240 months whole and as the ten 24-month
+tiles that cover them and held the whole's p99 to 1.5x the tiles' own p99s
+added up; that compared one 40 ms answer with ten 4 ms ones, and a stall of
+the machine lands in a tenth as many of the short ones, so under load 68 to
+120 it breached at 1.504x with the medians at 0.990x. The row now runs 600
+rounds; each asks the whole once and every tile once, in an order that
+alternates by round, and the round's ten tile times are SUMMED into one
+sample, so both samples cover the same months and about the same wall time.
+The whole's p99 is held to 1.5x the p99 of those sums. Measured 17 October
+2026 (release bench build of `fix/db-R3-06` at `0200b6f93`, n=600 a row,
+load average 16 to 30 on 14 cores, other agents' builds queued beside it):
+tiles from 2006 to 2016 p50 3.35 to 3.39 ms and from 2018 to 2024 p50 4.42
+to 4.51 ms (the era difference, measured), p99 5.4 to 7.5 ms; the ten summed
+per round p50 39.48 ms, p99 52.21 ms, max 83.10 ms; the whole p50 39.21 ms,
+p99 51.27 ms, max 841.67 ms: p99 0.981x (ceiling 1.5x), p50 0.993x. The
+same gate run's kept one-second months of 1,024, 10,240 and 102,400 bars:
+p99 3.03, 3.15 and 3.21 ms (1.037x and 1.059x).
+Re-measured on a clone after the repair (Zerodha NIFTY 1 min 2006-10..2026-09,
+105 months held, and GDFL NIFTY 1 s 2018-09..2019-08, `.sum` built by
+`cli msum-build`; curl `time_total`, n=200 sequential, one client, load
+average 84 to 107): Zerodha NIFTY 1 min 2024-10..2026-09 kept p50 6.9 ms,
+p99 15.7 ms, max 17.2 ms; 2006-10..2026-09 p50 25.1 ms, p99 52.6 ms, max
+72.4 ms; GDFL NIFTY 1 s 2018-09..2019-08 p50 79.2 ms, p99 143.9 ms, max
+150.0 ms. Every kept month answered `unreadable_records: null`; a 1 s month
+with no `.sum` (2019-09) read 392,147 records and answered `0`; every one of
+the 117 summaries `msum-build` wrote is one `store.sum` INFO line.
 
 **Not measured**: `/gaps.json` with an import writing the months it reads (no
 import may run against a shadow whose bars are the real store's); the
