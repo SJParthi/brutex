@@ -1656,3 +1656,74 @@ mod bars_series_rs {
         );
     }
 }
+
+/// `bars_sort.rs`: the value page from sort indexes, through the public
+/// window.
+mod bars_sort_rs {
+    use super::{Scratch, may, open_second, write_month};
+    use api::bars::{Filter, SeriesKey, SortKey, WindowQuery, window};
+    use brutex_core::vendor::Vendor;
+    use store::path::Timeframe;
+
+    fn close_page(series: SeriesKey) -> WindowQuery {
+        WindowQuery {
+            vendor: Vendor::Dhan,
+            timeframe: Timeframe::MINUTE_1,
+            series: vec![series],
+            from: may(),
+            to: may(),
+            sort: SortKey::Close,
+            desc: false,
+            offset: Some(0),
+            limit: 50,
+            want_extremes: false,
+            at: None,
+            filter: Filter::default(),
+            lookback: true,
+            coverage: false,
+        }
+    }
+
+    /// **A DIRECTORY AT AN INDEX'S NAME IS NOT A REGULAR FILE, AND ITS MONTH
+    /// IS READ.** The `.srt` name is taken by a directory: the month's rows
+    /// are ordered by reading them, the reason names the name and what it is,
+    /// and the command that would index the month is offered. Runs `view`'s
+    /// "not a regular file" arm, which no test reached (a symbolic link was
+    /// the only non-file tried).
+    #[test]
+    fn bars_sort_a_directory_at_an_index_name_is_read_and_named() {
+        let scratch = Scratch::new("sort-srt-directory");
+        let open = open_second();
+        let bars = write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            may(),
+            &[(open, 30), (open + 60, 10), (open + 120, 20)],
+        );
+        let srt = bars.with_extension("srt");
+        std::fs::create_dir(&srt).expect("a directory at the index's name");
+        let got = window(
+            scratch.root(),
+            &close_page(SeriesKey::new("NSE", "INDEX", "NIFTY", None)),
+        )
+        .expect("the month is read, not refused");
+        let closes: Vec<i64> = got.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(closes, vec![10, 20, 30]);
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!((report.indexed_rows, report.scanned_rows), (0, 3));
+        assert_eq!(report.scanned_why.len(), 1, "{:?}", report.scanned_why);
+        let why = &report.scanned_why[0];
+        assert!(
+            why.contains(&format!("{} is not a regular file", srt.display()))
+                && why.starts_with("NSE-INDEX-NIFTY 2025-05: 3 rows read: "),
+            "{why}"
+        );
+        assert_eq!(
+            report.build,
+            vec!["cli srt-build dhan NSE/INDEX/NIFTY 1min 2025-05 2025-05".to_owned()],
+            "a directory is not the small-month rule: a rebuild would index it"
+        );
+    }
+}
