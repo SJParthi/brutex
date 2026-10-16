@@ -2786,3 +2786,64 @@ async fn a_refused_window_is_logged_by_its_chunk_counted_from_one() {
         "{logged:?}"
     );
 }
+
+/// A site whose rate budget cannot be read: its lock is poisoned.
+fn with_unreadable_budget(site: Site) -> Site {
+    std::thread::scope(|scope| {
+        let poisoner = scope.spawn(|| {
+            let _budgets = site.budgets.lock().expect("not yet poisoned");
+            panic!("poison the budget lock");
+        });
+        assert!(poisoner.join().is_err());
+    });
+    assert!(
+        site.budgets.lock().is_err(),
+        "the premise: no budget can be read"
+    );
+    site
+}
+
+/// THE FIRST ATTEMPT IS THE CALLER'S AND A RETRY IS CHARGED HERE. With the
+/// budget unreadable, a window answered at once is still answered (kills `>`
+/// turned to `>=` and `==` at `attempt > 1`), and a retry after a 503 is
+/// refused on the budget rather than sent (kills `>` turned to `<`). The
+/// second case sleeps the backend ladder's first second.
+#[tokio::test]
+async fn the_first_attempt_is_not_charged_here_and_a_retry_is() {
+    let request = pull::fetch::BarRequest {
+        instrument_id: "990003".to_owned(),
+        listing: pull::vendor::Listing::Index,
+        window: spot(DHAN_DAY).window,
+        granularity: pull::vendor::Granularity::Day1,
+    };
+
+    let vendor = FakeVendor::answering(|_, _| (200, dhan_bar(AUG_03))).await;
+    let (source, _) = loopback_source(&vendor);
+    let fx = Fixture::new("retry-first-free");
+    let site = with_unreadable_budget(fx.refused());
+    let answered = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
+        .await
+        .expect("the first attempt is asked whatever the budget says");
+    assert_eq!(answered.rows.len(), 1);
+    assert_eq!(vendor.seen().len(), 1);
+
+    let busy = FakeVendor::answering(|nth, _| {
+        if nth == 0 {
+            (503, "busy".to_owned())
+        } else {
+            (200, dhan_bar(AUG_03))
+        }
+    })
+    .await;
+    let (source, _) = loopback_source(&busy);
+    let fx = Fixture::new("retry-charged");
+    let site = with_unreadable_budget(fx.refused());
+    let refused = with_retry(&source, &request, pull::vendor::Feed::Dhan, &site)
+        .await
+        .expect_err("the retry is charged, and the budget cannot be read");
+    assert!(
+        refused.starts_with("the rate budget for Dhan cannot be read"),
+        "{refused}"
+    );
+    assert_eq!(busy.seen().len(), 1, "the retry was never sent");
+}
