@@ -799,3 +799,39 @@ fn a_small_month_is_small_in_the_receipt_and_writes_nothing() {
     let index = SortIndex::open(&srt, &Shape::of(month, 1, symbol_id)).unwrap();
     assert_eq!((index.runs().len(), index.coverage()), (1, 500));
 }
+
+/// A name the dry run could not LOOK AT is refused, never read as absent
+/// (cloud-attack-law-20261016, lens 2). `name_refused` was
+/// `symlink_metadata(name).ok()?`, so any lookup failure — not only
+/// `NotFound` — came back as "nothing is there", and the dry run said
+/// `would build` where `store::sort_index_writer` refuses the month on that
+/// same `lstat` failure. A path through a regular file fails with
+/// `NotADirectory`, which is a failure and not an absence.
+#[test]
+fn a_dry_run_names_an_uninspectable_name_rather_than_reading_it_as_absent() {
+    let root = Root::new();
+    let plain = root.0.join("plain");
+    fs::write(&plain, b"not a directory").unwrap();
+
+    let through_a_file = plain.join("2033-07.srt");
+    let lookup = fs::symlink_metadata(&through_a_file).unwrap_err();
+    assert_ne!(
+        lookup.kind(),
+        std::io::ErrorKind::NotFound,
+        "the witness must be a lookup FAILURE, not an absence: {lookup}"
+    );
+    let why = super::name_refused(&through_a_file)
+        .expect("a name that could not be inspected is refused, not read as absent");
+    assert!(why.contains("could not be inspected"), "{why}");
+    assert!(why.contains("refuses the month"), "{why}");
+    assert!(why.contains(&through_a_file.display().to_string()), "{why}");
+
+    // Absence stays absence, and a regular file is still no refusal.
+    assert_eq!(super::name_refused(&root.0.join("2033-07.srt")), None);
+    assert_eq!(super::name_refused(&plain), None);
+    // A directory at the name is still refused for what it is.
+    let dir = root.0.join("2033-08.srt");
+    fs::create_dir(&dir).unwrap();
+    let why = super::name_refused(&dir).expect("a directory is not a regular file");
+    assert!(why.contains("is not a regular file"), "{why}");
+}
