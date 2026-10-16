@@ -8393,4 +8393,129 @@ mod cloud_mutant_tests {
         );
         drop(one);
     }
+
+    fn census_of(vendor: brutex_core::vendor::Vendor, state: Census) -> VendorCensus {
+        VendorCensus {
+            vendor,
+            path: std::path::PathBuf::from("/nowhere/manifest.man"),
+            state,
+        }
+    }
+
+    /// Each feed's report carries its own name, store prefix, attempts,
+    /// months done, halt and stalls (kills each of those fields deleted from
+    /// the report `survey` builds).
+    #[test]
+    fn each_feeds_report_carries_its_own_state() {
+        let yesterday = day(2026, 8, 6);
+        let mut feeds = drivable(yesterday);
+        let censuses: Vec<VendorCensus> = feeds
+            .iter()
+            .map(|f| census_of(f.vendor, Census::Absent))
+            .collect();
+        feeds[0].attempts = 2;
+        feeds[0].months_done = 5;
+        feeds[0].halted = Some("a dead token, re-read and unchanged".to_owned());
+        feeds[0].halt_kind = Some(Halt::Credential);
+        let rung = feeds[0].rung;
+        feeds[0].stalls.push(Stall {
+            month: month(2021, 5),
+            attempts: MAX_MONTH_ATTEMPTS,
+            reason: "it would not land".to_owned(),
+            retried: 1,
+            at_unix: 7,
+            rung,
+        });
+        let (reports, _) = survey(&mut feeds, &[series("NIFTY")], &censuses, yesterday);
+        assert_eq!(reports.len(), feeds.len());
+        for (report, state) in reports.iter().zip(&feeds) {
+            assert_eq!(report.feed, state.feed.display());
+            assert_eq!(report.vendor, state.vendor.as_str());
+        }
+        assert_eq!(reports[0].attempts, 2);
+        assert_eq!(reports[0].months_done, 5);
+        assert_eq!(reports[0].halted, "a dead token, re-read and unchanged");
+        assert_eq!(reports[0].stalls, feeds[0].stalls);
+        assert_eq!(reports[1].halted, "");
+    }
+
+    /// An unreadable census halts ITS feed and no other (kills the census
+    /// lookup's `c.vendor == state.vendor` turned to `!=`).
+    #[test]
+    fn an_unreadable_census_halts_only_its_own_feed() {
+        let yesterday = day(2026, 8, 6);
+        let mut feeds = drivable(yesterday);
+        let censuses: Vec<VendorCensus> = feeds
+            .iter()
+            .enumerate()
+            .map(|(nth, f)| {
+                census_of(
+                    f.vendor,
+                    if nth == 0 {
+                        Census::Unreadable {
+                            reason: "bytes that do not decode".to_owned(),
+                            fault: crate::census::Fault::Io(std::io::ErrorKind::InvalidData),
+                        }
+                    } else {
+                        Census::Absent
+                    },
+                )
+            })
+            .collect();
+        let (reports, _) = survey(&mut feeds, &[series("NIFTY")], &censuses, yesterday);
+        assert_eq!(feeds[0].halt_kind, Some(Halt::Census));
+        assert!(
+            reports[0].halted.contains("bytes that do not decode"),
+            "{}",
+            reports[0].halted
+        );
+        for (report, state) in reports.iter().zip(&feeds).skip(1) {
+            assert!(state.halted.is_none(), "{:?} was halted", state.feed);
+            assert_eq!(report.halted, "");
+        }
+    }
+
+    /// Two feeds owing the SAME oldest month: the first is chosen (kills
+    /// `ordinal(unit.month) < ordinal(held.month)` turned to `<=`).
+    #[test]
+    fn of_two_feeds_owing_one_month_the_first_is_chosen() {
+        let yesterday = day(2026, 8, 6);
+        let mut feeds = drivable(yesterday);
+        assert!(feeds.len() >= 2);
+        for state in &mut feeds {
+            state.frontier = month(2025, 3);
+        }
+        let censuses: Vec<VendorCensus> = feeds
+            .iter()
+            .map(|f| census_of(f.vendor, Census::Absent))
+            .collect();
+        let (_, chosen) = survey(&mut feeds, &[series("NIFTY")], &censuses, yesterday);
+        let (slot, unit) = chosen.expect("an empty store owes every month");
+        assert_eq!(unit.month, month(2025, 3));
+        assert_eq!(slot, 0, "the first feed owing the month");
+    }
+
+    /// A nap publishes the governor's absorbed throttling in milliseconds:
+    /// what was absorbed, divided by a thousand (kills `/ 1_000` turned to
+    /// `%` or `*`).
+    #[tokio::test]
+    async fn a_nap_reports_absorbed_throttling_in_milliseconds() {
+        let site = empty_site("nap-absorbed");
+        site.autopilot.resume();
+        pull::rate::note_absorbed(5_000_000);
+        let before = pull::rate::absorbed_micros() / 1_000;
+        nap(&site, 1).await;
+        let after = pull::rate::absorbed_micros() / 1_000;
+        let shown = site
+            .autopilot
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .absorbed_ms;
+        assert!(before >= 5_000);
+        assert!(
+            shown >= before && shown <= after,
+            "{before} <= {shown} <= {after}"
+        );
+    }
 }
