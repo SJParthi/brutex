@@ -419,6 +419,35 @@ test('when the instrument matches nothing the Timeframe box says so, and blames 
   // While the page opens (no instrument yet, or one instrument's census rows)
   // it is a wait, never a finding.
   assert.match(body, /if \(filter === '' \|\| db\.censusScope\) return opening;/);
+  // R3-01 repair 1: "is this name held" is ONE PROBE of a set folded once per
+  // census load, not a scan of the census on every change that reaches it.
+  assert.match(body, /const held = universe !== '' && heldUnderlyings\.has\(filter\);/);
+  assert.doesNotMatch(source, /db\.deco\.(some|find|filter|findIndex)\(/, 'no per-change scan of the census');
+  assert.match(source, /const heldUnderlyings = \$derived\.by\(\(\) => \{\n\s+const s = new Set\(\);\n\s+for \(const r of db\.deco\) s\.add\(r\.underlying\);/);
+  assert.match(source, /const stored = heldUnderlyings;/, 'the universe counts reuse the one fold');
+});
+
+test('a_lower_case_key_is_named_and_not_read', () => {
+  // Second agent, 16 Oct: key=nse-fno-nifty-2019-03-28-1150000-ce opened a spot
+  // underlying `nifty-2019-03-28-1150000-ce`, said nothing, and the address the
+  // page wrote from it was not the one opened.
+  const today = '2026-10-16';
+  for (const key of ['nse-fno-nifty-2019-03-28-1150000-ce', 'nse-index-nifty', 'NSE-INDEX-Nifty', 'NSE-FNO-NIFTY-2019-03-28-1150000-ce']) {
+    assert.equal(linkOfKey(key), null, `${key} is not a stored key`);
+    const c = linkedContract({ key }, today, '2026-09-24');
+    assert.equal(c.sym, undefined, `${key} names no underlying`);
+    assert.deepEqual([c.seg, c.exp, c.strikes, c.side], [undefined, undefined, [], undefined]);
+    assert.equal(c.notes.length, 1, 'said once');
+    assert.match(c.notes[0], /is not an instrument key: a stored key is written in capitals .* never re-cased/);
+    // The address the page writes from it names no key and no invented
+    // underlying, and it is the same address again on reload.
+    const q = encodeDb({ feed: 'gdfl', sym: c.sym, seg: c.seg });
+    assert.equal(q, 'feed=gdfl');
+    assert.equal(encodeDb(decodeDb(q).sel), q);
+  }
+  // The capitals still read, and a key with no small letter keeps its old note.
+  assert.equal(linkOfKey('NSE-INDEX-NIFTY')?.sym, 'NIFTY');
+  assert.equal(linkedContract({ key: 'NIFTY' }, today, '2026-09-24').notes[0], 'key="NIFTY" is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])');
 });
 
 test('SC-CLOSE-18: a contract grid runs to 15:39 from 03 Aug 2026, a CAS share marks 15:15-15:29', () => {

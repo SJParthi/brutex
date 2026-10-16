@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dbHistory, encodeDb, decodeDb, addressNow, GESTURE_MS } from '../src/lib/urlstate.js';
+import { dbHistory, encodeDb, decodeDb, addressNow, GESTURE_MS, isChoiceGesture, CHOICE_TARGET } from '../src/lib/urlstate.js';
 import { dbSource } from './database-page-fixture.js';
 
 /** What `applyAddress(search, true)` does: every field from the entry, every
@@ -164,6 +164,51 @@ test('a seed, a clamp and a restore correct the current entry and never add one'
   assert.equal(b.history.popped(encodeDb(b.page)), false);
 });
 
+test('a press off a control, or a key that chooses nothing, arms no Back entry', () => {
+  // Second agent, 16 Oct: any pointerdown or keydown armed a push, so a seed
+  // or a clamp settling within GESTURE_MS of a click on blank space became a
+  // Back entry of its own.
+  /** A target that is, or sits inside, a `CHOICE_TARGET` (tag) or nothing (null). */
+  const on = (/** @type {string | null} */ tag) => ({
+    closest: (/** @type {string} */ sel) => {
+      assert.equal(sel, CHOICE_TARGET);
+      return tag;
+    }
+  });
+  const control = on('button');
+  const blank = on(null);
+  // The filter itself.
+  assert.equal(isChoiceGesture({ type: 'pointerdown', button: 0, target: control }), true);
+  assert.equal(isChoiceGesture({ type: 'keydown', key: 'Enter', target: control }), true);
+  assert.equal(isChoiceGesture({ type: 'keydown', key: 'a', target: control }), true);
+  assert.equal(isChoiceGesture({ type: 'keydown', key: 'ArrowDown', target: control }), true);
+  for (const key of ['Tab', 'Shift', 'Meta', 'Control', 'Alt', 'Escape', 'CapsLock', 'F5', 'F12', '']) {
+    assert.equal(isChoiceGesture({ type: 'keydown', key, target: control }), false, `${key || 'no key'} chooses nothing`);
+  }
+  assert.equal(isChoiceGesture({ type: 'pointerdown', button: 2, target: control }), false, 'a right press opens a menu');
+  assert.equal(isChoiceGesture({ type: 'pointerdown', button: 0, target: blank }), false, 'blank space');
+  assert.equal(isChoiceGesture({ type: 'keydown', key: 'Enter', target: blank }), false, 'a key on the page body');
+  assert.equal(isChoiceGesture({ type: 'pointerdown', button: 0, target: {} }), false, 'a target that is not an element');
+  assert.equal(isChoiceGesture({ type: 'pointerdown', button: 0, target: null }), false);
+  assert.equal(isChoiceGesture({ type: 'click', target: control }), false, 'only the two events the page listens to');
+  assert.equal(isChoiceGesture(null), false);
+  for (const sel of ['input', 'select', 'button', 'a[href]', 'label', '[role="option"]', '[role="row"]', '[role="tab"]', '[tabindex]']) {
+    assert.ok(CHOICE_TARGET.split(', ').includes(sel), `${sel} can make a choice`);
+  }
+  // Through the history rule: a press on blank space is not the cause of the
+  // seed after it, a press on a control is.
+  const b = browser('');
+  b.settle();
+  assert.equal(b.history.gesture({ type: 'pointerdown', button: 0, target: blank }), false);
+  assert.equal(b.seed({ page: 3 }), 'replace');
+  assert.equal(b.history.gesture({ type: 'keydown', key: 'Tab', target: control }), false);
+  assert.equal(b.seed({ page: 4 }), 'replace');
+  assert.equal(b.entries.length, 1, 'no entry was made by a press that chose nothing');
+  assert.equal(b.history.gesture({ type: 'pointerdown', button: 0, target: control }), true);
+  assert.equal(b.seed({ page: 5 }), 'push');
+  assert.equal(b.entries.length, 2);
+});
+
 test('the page wires the rule: push and replace from SvelteKit, popstate within /db, presses and keys', () => {
   const source = dbSource('../src/lib/db/selection.svelte.js');
   assert.match(source, /import \{ replaceState, pushState \} from '\$app\/navigation';/);
@@ -172,6 +217,8 @@ test('the page wires the rule: push and replace from SvelteKit, popstate within 
   assert.match(source, /window\.addEventListener\('popstate', pop\);/);
   assert.match(source, /window\.addEventListener\('pointerdown', press, true\);/);
   assert.match(source, /window\.addEventListener\('keydown', press, true\);/);
+  // The event goes to the rule, which keeps only a choice made on a control.
+  assert.ok(source.includes('const press = (/** @type {Event} */ e) => void history.gesture(/** @type {any} */ (e));'));
   // A popstate onto ANOTHER path is the router's (leaving /db), not a restore.
   assert.match(source, /if \(location\.pathname !== page\.url\.pathname\) return;/);
   // The page leaves its title behind for a page that sets none (/terminal).

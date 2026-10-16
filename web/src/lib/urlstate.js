@@ -558,14 +558,64 @@ export function dbHref(sel) {
      - a write after Back or Forward restored an entry is a correction too:
        pushing there would erase every Forward entry;
      - a write with no press or key since the last one (a seed filling a
-       rung, the pager clamping past the end) is a correction;
+       rung, the pager clamping past the end) is a correction — and only a
+       press or key ON A CONTROL counts (`isChoiceGesture`): a click on blank
+       space, Tab, Escape or a modifier alone chooses nothing;
      - otherwise — the operator pressed or typed something and the selection
        moved — it is a new entry. One press is one entry however many
        settled states it passes through: the press is spent by the first.
    ====================================================================== */
 
-/** How long a press or key stays the cause of the next write, ms. */
+/** How long a press or key stays the cause of the next write, ms. A BOUND, not
+ *  a measured figure: every choice on /db moves the selection in the press's
+ *  own task (a pick sets a field `encodeDb` writes), so the first write after
+ *  a press lands within milliseconds; a selection that first moves later than
+ *  this is written as a correction — the address is still exact, only that
+ *  step's own Back entry is not made (D-3337 as amended by R3-01). */
 export const GESTURE_MS = 30_000;
+
+/**
+ * What on /db can make a choice: a form control, a link, a label (which
+ * toggles its box), a menu or grid item, or anything that takes focus. A
+ * press anywhere else — the page's background, a heading, a chart's canvas —
+ * changes no selection and arms nothing (R3-01 repair 1: any pointerdown or
+ * keydown used to arm a push, so a seed or a clamp settling within
+ * `GESTURE_MS` of a click on blank space became a Back entry of its own).
+ */
+export const CHOICE_TARGET = [
+  'input', 'select', 'textarea', 'button', 'a[href]', 'label', 'summary',
+  '[role="option"]', '[role="tab"]', '[role="row"]', '[role="gridcell"]', '[role="button"]',
+  '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="menuitem"]',
+  '[role="menuitemradio"]', '[role="menuitemcheckbox"]', '[role="slider"]',
+  '[role="spinbutton"]', '[role="combobox"]', '[role="listbox"]', '[tabindex]'
+].join(', ');
+
+/** Keys that choose nothing: a modifier alone, focus moving on, a dismissal. */
+const NOT_A_CHOICE_KEY = new Set([
+  'Tab', 'Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'OS', 'Super', 'Hyper', 'Fn', 'FnLock',
+  'CapsLock', 'NumLock', 'ScrollLock', 'Escape', 'ContextMenu', 'Dead', 'Unidentified'
+]);
+
+/**
+ * Whether one `pointerdown` or `keydown` can be the cause of the next
+ * address: the primary button or a key that is not in `NOT_A_CHOICE_KEY`,
+ * on (or inside) a `CHOICE_TARGET`. Pure: it reads only the event's own
+ * fields, so `web/tests/db-history.test.js` drives it with plain objects.
+ *
+ * @param {{type?: string, key?: string, button?: number, target?: any} | null | undefined} e
+ */
+export function isChoiceGesture(e) {
+  if (!e || typeof e !== 'object') return false;
+  const t = e.target;
+  const control = t && typeof t.closest === 'function' ? t.closest(CHOICE_TARGET) : null;
+  if (!control) return false;
+  if (e.type === 'pointerdown') return (e.button ?? 0) === 0;
+  if (e.type === 'keydown') {
+    const key = String(e.key ?? '');
+    return key !== '' && !NOT_A_CHOICE_KEY.has(key) && !/^F\d{1,2}$/.test(key);
+  }
+  return false;
+}
 
 /**
  * The address on screen, without `?`: the browser's `location.search` where
@@ -598,9 +648,16 @@ export function dbHistory(io) {
   let restoring = false;
   let pressedAt = -Infinity;
   return {
-    /** A press or a key on the page. */
-    gesture() {
+    /**
+     * A press or a key on the page. With its event, only one that
+     * `isChoiceGesture` accepts counts; without one (a caller that has
+     * already decided, as the tests do) it counts.
+     * @param {Parameters<typeof isChoiceGesture>[0]} [e]
+     */
+    gesture(e) {
+      if (e !== undefined && !isChoiceGesture(e)) return false;
       pressedAt = clock();
+      return true;
     },
     /**
      * Back or Forward landed on another entry of this page: restore what it

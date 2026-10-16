@@ -7227,3 +7227,18 @@ unless named otherwise; every zip is built in code from invented files.
 | TSW-15 | **The writer never makes a root**, and a zip of only its day folder is not a day (`root_missing`, `no_file_in_day`) | `a_missing_root_is_refused_and_never_made`, `a_zip_of_only_its_day_folder_is_refused` | ✓ |
 | TSW-16 | **Every folder made for a day has its parent fsynced**, outermost first, and the log line is fsynced | `every_new_folder_has_its_parent_fsynced` | ✓ |
 | TSW-17 | **No folder below the tick store's root is written through a link** (`linked_folder`; the root itself may be one), so a shadow whose `cm` or month folder links elsewhere makes nothing there | `a_tick_store_folder_that_is_a_link_is_never_written_through`; `cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link` lists the verb | ✓ |
+
+## The /db address and its history (R3-01, D-5301)
+
+`web/src/lib/urlstate.js` (`encodeDb`, `decodeDb`, `dbHistory`,
+`isChoiceGesture`) and `web/src/lib/db/selection-model.js`
+(`linkedContract`). Proofs in `web/tests/db-address.test.js` and
+`web/tests/db-history.test.js`, run by `npm test` in `web/`.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R301-01 | **An address the page writes never names a field twice.** Strikes are one comma field (`k=1160000,1200000`), moneyness rungs one comma field, so the server's one-value-per-field rule never refuses an address the page wrote | `an_address_with_two_strikes_reloads`, `every_db_choice_round_trips_through_the_address` (every key at once: `repeatedKey(q) === null`) | ✓ |
+| R301-02 | **One selection is one address, byte for byte**: keys in `DB_KEYS` order, strikes sorted numerically and deduplicated, defaults not written, and `encodeDb(decodeDb(q).sel) === q` for every key | `every_db_choice_round_trips_through_the_address`; `urlstate.test.js` `one /db selection is one address: strikes sorted and deduplicated, keys in D-3337 order` | ✓ |
+| R301-03 | **Every value a link carries is honoured or named, never dropped**, each distinct problem once and at most `MAX_REFUSED` of them; an excluded feed is refused by name and probes nothing; a key in small letters is refused and never re-cased | `a_linked_page_number_is_honoured_or_refused`, `an_excluded_feed_in_a_link_is_refused_by_name`, `an_absurd_address_names_each_problem_once_and_a_bounded_few`, `an unknown sort, direction, side, view, universe, rows or field is named, never dropped`, `a_lower_case_key_is_named_and_not_read` | ✓ |
+| R301-04 | **One choice made on a control is one Back entry; nothing else adds one**: a seed, a clamp, a restore after Back or Forward, and a press or key that chooses nothing (blank space, Tab, Escape, a modifier) correct the current entry | `back_and_forward_restore_each_selection`, `a seed, a clamp and a restore correct the current entry and never add one`, `a press off a control, or a key that chooses nothing, arms no Back entry` | ✓ |
+| R301-05 | **Reading an address is constant work per address**: encode, decode and `linkedContract` under 1 ms at p99, n = 1,000; whether a typed name is held is one `Set` probe (`heldUnderlyings`), not a scan of the census | `encode plus decode, with the contract resolved, stays under 1 ms at p99 (n = 1,000)`, `when the instrument matches nothing the Timeframe box says so, and blames no other rung` | ✓ |

@@ -540,6 +540,14 @@ export function keepOffered(picks, offer) {
  *   expiry: string, strike: string, side: string}}
  */
 export function linkOfKey(key) {
+  /* A KEY IN SMALL LETTERS IS NOT A KEY (R3-01 repair 1). A store key is
+     written in capitals — `Symbol::new` upper-cases a name and
+     `Contract::parse` (crates/core/src/instrument.rs) refuses any byte but
+     A–Z, 0–9 and `-` — so `nse-fno-nifty-2019-03-28-1150000-ce` names nothing
+     stored. Read as written it became a spot underlying
+     `nifty-2019-03-28-1150000-ce` with no word said, and the address written
+     from it was not the one opened. It is refused, never re-cased. */
+  if (typeof key === 'string' && /[a-z]/.test(key)) return null;
   const p = parseKey(key);
   if (!p.underlying || p.why) return null;
   return {
@@ -713,7 +721,12 @@ export function linkedContract(sel, today, archiveTo) {
   /** @type {string[]} */
   const notes = [];
   let link = sel.key ? linkOfKey(sel.key) : null;
-  if (sel.key && link === null) notes.push(`key=${quote(sel.key)} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`);
+  if (sel.key && link === null)
+    notes.push(
+      /[a-z]/.test(sel.key)
+        ? `key=${quote(sel.key)} is not an instrument key: a stored key is written in capitals (NSE-FNO-NIFTY-2019-03-28-1150000-CE), and a key is never re-cased to make it one`
+        : `key=${quote(sel.key)} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`
+    );
   const clash = keyConflict(sel, link);
   if (clash) {
     notes.push(clash);

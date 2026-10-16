@@ -700,11 +700,19 @@ export function selectionState(db) {
      underlying is `NSE-FNO-ACC`, a key no census row carries (its rows are
      `NSE-FNO-ACC-<expiry>-<strike>-CE`), so a key join counted every such
      member "not held" over a store holding its contracts. */
+  /** Every underlying the census holds a month of: ONE FOLD PER CENSUS LOAD, so
+   *  "is this name held" is one probe wherever it is asked (R3-01 repair 1:
+   *  the Timeframe refusal asked it with `db.deco.some`, a scan of the whole
+   *  census on every change that reached it). */
+  const heldUnderlyings = $derived.by(() => {
+    const s = new Set();
+    for (const r of db.deco) s.add(r.underlying);
+    return s;
+  });
   const universeCount = $derived.by(() => {
     const out = new Map();
     if (!catalogueIsThisFeed) return out;
-    const stored = new Set();
-    for (const r of db.deco) stored.add(r.underlying);
+    const stored = heldUnderlyings;
     for (const u of UNIVERSES) {
       if (!u.token || !tokensHere.has(u.token)) continue;
       let members = 0;
@@ -1104,9 +1112,9 @@ export function selectionState(db) {
        nor the segment (R3-01). `sym=ZZZZ` read "none of them is stored under
        Spot … it is the segment above", which sends the reader to a rung that
        cannot fix it. Whether the name is held at all is asked of the whole
-       census only on this refusal path, once per change, with an early exit. */
+       census by one probe of `heldUnderlyings`, folded once per census load. */
     if (instrumentMatched.length === 0) {
-      const held = universe !== '' && db.deco.some((/** @type {any} */ r) => r.underlying === filter);
+      const held = universe !== '' && heldUnderlyings.has(filter);
       return held
         ? `${filter} is held by ${feedDisplay(feeds.active)} but is not in ${chosenUniverse.label}, so there is no row here to read a rung off — the Universe rung is what narrows it out; choose Everything or another universe`
         : `${feedDisplay(feeds.active)} holds no instrument-month for ${filter.length > 40 ? `${filter.slice(0, 24)}… (${fmt(filter.length)} characters)` : filter}, so there is no row here to read a rung off — the Instrument box matches nothing; choose another instrument`;
@@ -2952,7 +2960,7 @@ export function selectionPaging(db) {
      popstate of a navigation AWAY from /db (another path) is the router's. */
   $effect(() => {
     if (typeof window === 'undefined') return;
-    const press = () => history.gesture();
+    const press = (/** @type {Event} */ e) => void history.gesture(/** @type {any} */ (e));
     const pop = () => {
       if (location.pathname !== page.url.pathname) return;
       untrack(() => history.popped(encoded));
