@@ -1897,6 +1897,48 @@ mod bars_series_rs {
         assert_eq!(got.total, 0);
     }
 
+    /// **TWO MONTHS THAT WILL NOT OPEN ARE TWO FAULTS, EACH WITH ITS OWN
+    /// ROWS.** April and May are counted while free, then held by another
+    /// writer; a time-of-day order streams every kept row and opens neither.
+    /// The answer says each month once, with its two rows — never one line
+    /// for both. Kills `note_unread`'s `at.slot == slot` guard → `true`,
+    /// which folded May's rows into April's line.
+    #[test]
+    fn bars_series_two_months_that_will_not_open_are_two_faults() {
+        let scratch = Scratch::new("series-two-unopened");
+        for m in [4, 5] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[(open_of(m, 2), 10), (open_of(m, 2) + 60, 11)],
+            );
+        }
+        let free = window(scratch.root(), &query(month(4), month(5))).expect("answers");
+        assert_eq!(free.total, 4);
+        let _april = hold(scratch.root(), 4);
+        let _may = hold(scratch.root(), 5);
+        let mut asked = query(month(4), month(5));
+        asked.sort = SortKey::TimeOfDay;
+        let got = window(scratch.root(), &asked).expect("months that will not open are faults");
+        let unopened: Vec<&String> = got
+            .faults
+            .iter()
+            .filter(|fault| fault.contains("the month did not open"))
+            .collect();
+        assert_eq!(unopened.len(), 2, "{:?}", got.faults);
+        assert!(
+            unopened[0].contains("2025-04") && unopened[0].contains("none of its 2 kept rows"),
+            "{unopened:?}"
+        );
+        assert!(
+            unopened[1].contains("2025-05") && unopened[1].contains("none of its 2 kept rows"),
+            "{unopened:?}"
+        );
+    }
+
     /// **AN EDGE MONTH A DAY BOUND LEAVES NO ROW OF IS NO RUN**, so the next
     /// month's first row has no kept row behind it. April's only row is
     /// before the 20th, the bound's first day: with the lookback off, May's

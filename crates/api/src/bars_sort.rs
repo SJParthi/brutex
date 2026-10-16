@@ -2901,6 +2901,91 @@ mod cloud_mutant_tests {
         );
     }
 
+    /// **A PAGE ASKED AGAIN COUNTS ITS UNREAD ROWS ONCE.** February has no
+    /// index, so its rows are read, and another writer holds it, so they are
+    /// not; January's index fails its checksum when the page reads it, so
+    /// the page is asked again with January read. The answer counts
+    /// February's 360 unread rows once — the attempt that failed does not
+    /// add its own count. Kills `SeriesPlan::clear_unread` → `()` (in
+    /// `bars_series.rs`), which carried the failed attempt's count into the
+    /// answer.
+    #[test]
+    fn a_page_asked_again_counts_its_unread_rows_once() {
+        let root = scratch("retry-unread");
+        let srts: Vec<PathBuf> = (1..=3)
+            .map(|m| {
+                let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+                write(&root, &index(), month(m), &rows, &rows)
+            })
+            .collect();
+        std::fs::remove_file(&srts[1]).expect("February is left with no index");
+        let ask = query(index(), month(1), month(3), SortKey::Close);
+        let free = window(&root, &ask)
+            .expect("answers")
+            .sort_index
+            .expect("a value sort says what it used");
+        assert_eq!(
+            (free.indexed_rows, free.scanned_rows, free.unread_rows),
+            (720, 360, 0)
+        );
+        let shape = Shape::of(month(1), 60, super::symbol_id("NIFTY"));
+        let at: Vec<u64> = SortIndex::open(&srts[0], &shape)
+            .expect("January's index opens")
+            .runs()
+            .iter()
+            .map(|run| run.offset + run.column(Column::Close).entries_at() + 9)
+            .collect();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&srts[0])
+            .expect("January's index");
+        for at in at {
+            let mut byte = [0u8; 1];
+            std::os::unix::fs::FileExt::read_exact_at(&file, &mut byte, at).expect("a byte");
+            byte[0] ^= 0x04;
+            std::os::unix::fs::FileExt::write_all_at(&file, &byte, at).expect("a byte");
+        }
+        drop(file);
+        let lock = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(2),
+            file: FileKind::Lock,
+        })
+        .expect("a generated path")
+        .to_path_buf(&root);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock file");
+        let _held = store::flock::Flock::try_lock(held, lock).expect("February's lock is free");
+        let report = window(&root, &ask)
+            .expect("answers")
+            .sort_index
+            .expect("a value sort says what it used");
+        assert!(
+            report
+                .scanned_why
+                .iter()
+                .any(|why| why.contains("2031-01") && why.contains("failed when it was read")),
+            "January was set aside and the page asked again: {report:?}"
+        );
+        assert_eq!(
+            (report.unread_rows, report.unread_months),
+            (360, 1),
+            "{report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A HOST'S REFUSAL OF AN INDEX IS THIS REQUEST'S ALONE, AND NEVER
     /// REMEMBERED** — run in a process the mode bits bind, since root may
     /// read a `0o000` file and the tests beside this one stand down there.
