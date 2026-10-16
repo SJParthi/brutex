@@ -739,3 +739,208 @@ fn every_verdict_refusal_has_its_word_its_sentence_and_its_cause() {
         Some(staging.to_string())
     );
 }
+
+/// **EVERY VERDICT CODE AND ONE-BYTE ENUMERATION ROUND-TRIPS THROUGH ITS BYTE,
+/// AND SAYS ITS WORD.**
+///
+/// The words are what the routes and documents print (D-4809: numbered
+/// append-only, never renamed); a byte this build does not know is `None`,
+/// never another value. Each table is the format's own, in code order.
+#[test]
+fn every_verdict_code_and_byte_enumeration_round_trips_and_says_its_word() {
+    use store::verdict::{Code, DayState, JournalOutcome, Mode, SourceHeld, Unit, V3Manifest};
+    let codes = [
+        "match",
+        "value_mismatch",
+        "missing_in_store",
+        "extra_in_store",
+        "count_mismatch",
+        "source_refused",
+        "store_without_source",
+        "absent_from_store",
+        "store_unreadable",
+        "no_response_kept",
+        "not_compared",
+        "source_lacks_day",
+        "vendor_hole",
+        "withheld_by_rule",
+        "built_under_earlier_rule",
+        "day_partial",
+        "no_ledger",
+        "owed",
+    ];
+    assert_eq!(Code::ALL.len(), codes.len());
+    for (at, (code, word)) in Code::ALL.iter().zip(codes).enumerate() {
+        assert_eq!(usize::from(code.code()), at + 1);
+        assert_eq!(Code::from_code(code.code()), Some(*code));
+        assert_eq!(code.word(), word);
+        assert_eq!(code.to_string(), word);
+    }
+    assert_eq!(Code::from_code(0), None, "unset");
+    assert_eq!(Code::from_code(19), None, "a later build's");
+
+    fn round<T: Copy + PartialEq + std::fmt::Debug>(
+        all: &[T],
+        code: fn(T) -> u8,
+        from: fn(u8) -> Option<T>,
+        word: fn(T) -> &'static str,
+        words: &[(u8, &str)],
+    ) {
+        assert_eq!(all.len(), words.len());
+        for (value, (byte, said)) in all.iter().zip(words) {
+            assert_eq!(code(*value), *byte, "{value:?}");
+            assert_eq!(from(*byte), Some(*value));
+            assert_eq!(word(*value), *said);
+        }
+        assert_eq!(from(200), None, "a byte this build does not know");
+    }
+    round(
+        Mode::ALL,
+        Mode::code,
+        Mode::from_code,
+        Mode::word,
+        &[
+            (1, "inline"),
+            (2, "cold"),
+            (3, "completeness"),
+            (4, "deferred"),
+            (5, "unverified_import"),
+            (6, "zerodha_merge"),
+            (7, "zerodha_cold"),
+        ],
+    );
+    round(
+        Unit::ALL,
+        Unit::code,
+        Unit::from_code,
+        Unit::word,
+        &[(0, "second"), (1, "minute"), (2, "day")],
+    );
+    round(
+        DayState::ALL,
+        DayState::code,
+        DayState::from_code,
+        DayState::word,
+        &[
+            (0, "complete"),
+            (1, "stopped"),
+            (2, "source_lost"),
+            (3, "disk_full"),
+            (4, "census"),
+            (5, "held_back_cap"),
+            (6, "not_imported"),
+            (7, "verify_off"),
+        ],
+    );
+    round(
+        JournalOutcome::ALL,
+        JournalOutcome::code,
+        JournalOutcome::from_code,
+        JournalOutcome::word,
+        &[
+            (0, "none"),
+            (1, "done"),
+            (2, "done_with_refusals"),
+            (3, "incomplete"),
+            (4, "refused"),
+        ],
+    );
+    round(
+        SourceHeld::ALL,
+        SourceHeld::code,
+        SourceHeld::from_code,
+        SourceHeld::word,
+        &[(0, "no"), (1, "yes"), (2, "unknown")],
+    );
+    round(
+        V3Manifest::ALL,
+        V3Manifest::code,
+        V3Manifest::from_code,
+        V3Manifest::word,
+        &[
+            (0, "absent"),
+            (1, "agrees"),
+            (2, "disagrees"),
+            (3, "unverified"),
+        ],
+    );
+}
+
+/// **A FLAG BIT THIS BUILD DOES NOT NAME IS KEPT, AND SAID BY NUMBER.**
+///
+/// Covers `flags::unnamed`: a reader keeps every bit a later build appended
+/// (D-4844) and names it `flag_<n>` beside the named ones.
+#[test]
+fn a_flag_bit_this_build_does_not_name_is_kept_and_said_by_number() {
+    use store::verdict::flags;
+    let later = 1u64 << 22 | 1 << 40;
+    let bits = flags::TIX_ABSENT | flags::SOURCE_CRC_UNRECORDED | later;
+    assert_eq!(flags::unnamed(bits), later);
+    assert_eq!(flags::unnamed(flags::KNOWN), 0);
+    assert_eq!(
+        flags::words(bits),
+        ["tix_absent", "source_crc_unrecorded", "flag_22", "flag_40"]
+    );
+}
+
+/// **EVERY FILING BYTE ROUND-TRIPS, AND A BYTE NO TABLE HOLDS NAMES
+/// NOTHING.**
+///
+/// Covers the exchange, segment and feed bytes of a verdict image's series:
+/// each value is filed under its own byte and read back as itself, and 0 or
+/// a byte past the table is `None`, never another exchange, segment or
+/// vendor.
+#[test]
+fn every_verdict_filing_byte_round_trips_and_an_unknown_one_names_nothing() {
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::vendor::Vendor;
+    use store::verdict::{
+        exchange_code, exchange_of, feed_code, feed_of, segment_code, segment_of,
+    };
+    for (exchange, byte) in [(Exchange::Nse, 1), (Exchange::Bse, 2)] {
+        assert_eq!(exchange_code(exchange), byte);
+        assert_eq!(exchange_of(byte), Some(exchange));
+    }
+    assert_eq!(exchange_of(0), None);
+    assert_eq!(exchange_of(3), None);
+    for (segment, byte) in [(Segment::Index, 1), (Segment::Cash, 2), (Segment::Fno, 3)] {
+        assert_eq!(segment_code(segment), byte);
+        assert_eq!(segment_of(byte), Some(segment));
+    }
+    assert_eq!(segment_of(0), None);
+    assert_eq!(segment_of(4), None);
+    for (at, vendor) in Vendor::ALL.iter().enumerate() {
+        let byte = u8::try_from(at + 1).unwrap();
+        assert_eq!(feed_code(*vendor), Some(byte));
+        assert_eq!(feed_of(byte), Some(*vendor));
+    }
+    assert_eq!(feed_of(0), None);
+    assert_eq!(feed_of(u8::try_from(Vendor::ALL.len() + 1).unwrap()), None);
+}
+
+/// **A STEM LONGER THAN THE KEY FIELD IS CUT AT A CHARACTER BOUNDARY, KEEPS
+/// ITS WHOLE NAME, AND HASHES AS THE WHOLE.**
+///
+/// Covers `Key::hash` and the stem's cut: the kept text never splits a
+/// character, `whole` and `Display` give the name as written, and the hash a
+/// probe uses is the whole name's, so two stems sharing their first 64 bytes
+/// are two keys.
+#[test]
+fn a_long_stem_is_cut_at_a_character_and_hashed_whole() {
+    use store::verdict::{KEY_LEN, Key, key_hash};
+    let whole = format!("{}é-TAIL", "Z".repeat(KEY_LEN - 1));
+    let key = Key::stem(&whole).unwrap();
+    assert_eq!(key.text(), "Z".repeat(KEY_LEN - 1), "é is not split");
+    assert_eq!(key.whole(), Some(whole.as_str()));
+    assert_eq!(key.to_string(), whole);
+    assert_eq!(key.hash(), key_hash(whole.as_bytes()));
+    let other = Key::stem(&format!("{}é-OTHER", "Z".repeat(KEY_LEN - 1))).unwrap();
+    assert_eq!(other.text(), key.text());
+    assert_ne!(other.hash(), key.hash());
+    let short = Key::instrument("ZZCLOUD").unwrap();
+    assert_eq!(
+        (short.whole(), short.to_string()),
+        (None, "ZZCLOUD".to_owned())
+    );
+    assert_eq!(short.hash(), key_hash(b"ZZCLOUD"));
+}
