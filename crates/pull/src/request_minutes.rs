@@ -1298,6 +1298,7 @@ mod tests {
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::indexing_slicing,
+    clippy::panic,
     reason = "a test that cannot panic cannot fail"
 )]
 mod cloud_mutant_tests {
@@ -1513,15 +1514,22 @@ mod cloud_mutant_tests {
         let [group] = groups.as_slice() else {
             panic!("{groups:?}");
         };
+        let march = store::path::YearMonth::new(2031, 3).unwrap();
         assert_eq!(
             (
                 group.why,
                 group.count,
-                group.month.as_str(),
+                group.month.clone(),
                 group.first_day.as_str(),
                 group.last_day.as_str()
             ),
-            (Why::Unverified, 2, "2031-03", "2031-03-03", "2031-03-04")
+            (
+                Why::Unverified,
+                2,
+                march.to_string(),
+                "2031-03-03",
+                "2031-03-04"
+            )
         );
         assert_eq!(
             group.text,
