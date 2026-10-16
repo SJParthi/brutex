@@ -920,18 +920,15 @@ fn every_golden_quote_reports_its_inputs_its_net_and_its_breakeven() {
                 .map(|(_, line)| line.units())
                 .sum::<i128>()
         );
-        match (case.buy, case.sell) {
-            (Some(buy), Some(sell)) => {
-                let gross = (sell - buy) * case.quantity;
-                assert_eq!(q.net_pnl(), Ok(paisa(gross - total)), "{}", case.name);
-            }
-            _ => {
-                one_sided += 1;
-                assert_eq!(
-                    q.net_pnl(),
-                    Err(ChargeError::OneSided { figure: "net P&L" })
-                );
-            }
+        if let (Some(buy), Some(sell)) = (case.buy, case.sell) {
+            let gross = (sell - buy) * case.quantity;
+            assert_eq!(q.net_pnl(), Ok(paisa(gross - total)), "{}", case.name);
+        } else {
+            one_sided += 1;
+            assert_eq!(
+                q.net_pnl(),
+                Err(ChargeError::OneSided { figure: "net P&L" })
+            );
         }
         let breakeven = q.points_to_breakeven().expect("in range").raw();
         assert!(
