@@ -40,7 +40,7 @@ verdict}.rs` and `crates/telemetry/src/sink.rs`.
   | `verdict.rs` | 89.09% | 99.21% |
   | `staging.rs` | 80.22% | 97.80% |
   | `sort_index_writer.rs` | 93.95% | 97.37% |
-  | `file.rs` | 93.64% | 96.87% |
+  | `file.rs` | 93.64% | 96.91% |
   | `sink.rs` | 97.08% | 99.69% |
   | `time_index.rs` | 99.22% | 100% |
 
@@ -244,10 +244,18 @@ add thousands of lines to `sink.rs` and `verdict.rs`. Before was measured on
 the base tree, after on this branch at `a4c0f2c`. The profiles of the
 uid-65534 children are included both times.
 
+One test was committed after that run: `f1c6492`,
+`each_commits_line_says_what_it_left_the_time_index_as`. A targeted
+`cargo llvm-cov` run of that test alone, at `f1c6492`, exported from its own
+profile alone, hits `file.rs:3411` once. That line is `index_note`'s "lookups
+bisect" arm, which only the `Debug` `store.append` line evaluates. So
+`file.rs`'s after count below is 66, not the `a4c0f2c` union's 67. Its branch
+counts are the `a4c0f2c` union's.
+
 | file | lines | missed before → after | line % before → after | branches | missed before → after | branch % before → after |
 |---|---:|---:|---:|---:|---:|---:|
 | `store/src/emits.rs` | 285 | 6 → 6 | 97.89 → 97.89 | 2 | 0 → 0 | 100.00 → 100.00 |
-| `store/src/file.rs` | 2,139 | 136 → 67 | 93.64 → 96.87 | 308 | 43 → 21 | 86.04 → 93.18 |
+| `store/src/file.rs` | 2,139 | 136 → 66 | 93.64 → 96.91 | 308 | 43 → 21 | 86.04 → 93.18 |
 | `store/src/path.rs` | 205 | 0 → 0 | 100.00 → 100.00 | 30 | 0 → 0 | 100.00 → 100.00 |
 | `store/src/safe_open.rs` | 176 | 10 → 8 | 94.32 → 95.45 | 22 | 2 → 2 | 90.91 → 90.91 |
 | `store/src/sealed.rs` | 1,407 | 0 → 0 | 100.00 → 100.00 | 274 | 6 → 6 | 97.81 → 97.81 |
@@ -273,7 +281,6 @@ branch entries any one binary reports for it.
 | `file.rs:3346, 4408-4416` | `resume` failing on an index this handle has just rebuilt and written (a host fault), and `index_refused`, reached only from such arms. |
 | `file.rs:3351, 3455, 3534, 3562, 3565` | The time index is `None` or not `Ready` after the caller found it so. |
 | `file.rs:3362-3372, 3475-3494` | `extend` refusing `OffGrid`, `Outside` or another reason after admission has already refused those bars. |
-| `file.rs:3411` | `index_note`'s "lookups bisect" arm, evaluated only by the `Debug` `store.append` line. Covered by `each_commits_line_says_what_it_left_the_time_index_as`, committed after the final coverage run (`f1c6492`), and **not re-measured**. |
 | `file.rs:3783, 3793-3795` | A covered range no `Layout` produces; a buffer whose length a `const` assertion fixes. |
 | `file.rs:3920, 3929, 3933, 3951` | A read failing only during overlap diagnosis, after the same records were read to decide the overlap; and `index >= n_valid`, which a strictly increasing batch past the last held stamp has already passed. |
 | `file.rs:3981` | `suffix_that_follows` on an empty month: admission refuses an unordered batch (`BatchNotOrdered`) before `Header::advance`, and with no bar held `advance` refuses only `last < first`. |
@@ -306,9 +313,9 @@ must re-measure and lower the `sink.rs` count (and the prose in
 
 ## Gates
 
-Run locally on this branch's code (`a4c0f2c`; every commit after it changes
-only this report) with the default `dev` profile and target directory, at
-2026-10-16 09:10–09:45 UTC. GitHub CI did not run the Rust gates to the end
+Run locally on this branch's code as of `f1c6492` (the run was at `d2f81d0`,
+and every commit after `f1c6492` changes only this report), with the default
+`dev` profile and target directory, at 2026-10-16 09:30–09:36 UTC. GitHub CI did not run the Rust gates to the end
 on this branch, for the base-snapshot reasons listed under Environment
 failures.
 
@@ -348,12 +355,13 @@ this branch added. All 112 new tests pass in both environments.
     seam in production code, and this session changed no production line.
   - The `verdict.rs` write seam could reach three of them, but it can be
     armed only from `verdict_tests.rs`, which this session did not edit.
-- **Line coverage is not 100%** in `file.rs` (67 production lines),
+- **Line coverage is not 100%** in `file.rs` (66 production lines),
   `verdict.rs` (16), `sort_index_writer.rs` (10), `safe_open.rs` (8),
   `sink.rs` (4) and `staging.rs` (2), plus `emits.rs`'s 6 test-only lines.
   Each line is listed with its reason above.
-- **`file.rs:3411`** is covered by a test committed after the final coverage
-  run, and was not re-measured.
+- **The coverage union was not re-run after `f1c6492`.** That commit's one
+  test was measured on its own (Coverage, above); the rest of the "after"
+  column is the `a4c0f2c` union.
 - **Branch coverage is not 100%** in nine files. The table gives the counts.
   The branch-only gaps were not traced one by one: most are the `None` or
   `Err` side of the same arms as the uncovered lines, or of `get`/`get_mut`
