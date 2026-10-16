@@ -1710,3 +1710,43 @@ fn the_universe_counts_unreadable_rows_and_unrecognised_classes_across_vendors()
     assert_eq!(read.unrecognised, 2, "EQX at each vendor");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A dated cash-session audit is asked only of an NSE CASH series with no
+/// contract: a BSE cash series and an NSE index are answered `None` at once,
+/// before any ISIN is looked up, inside a window that holds audit-era days
+/// (kills either `||` of the guard turned to `&&`, which send both on to
+/// the ISIN refusal).
+#[tokio::test]
+async fn only_an_nse_cash_series_with_no_contract_has_a_dated_cash_audit() {
+    let dir = fresh_dir("cash-guard-masters");
+    let root = fresh_dir("cash-guard-store");
+    let site = Site::load(&dir, &root);
+    let day = auction_era_open_day();
+    let window = pull::session::Window::new(day, day).expect("a one-day window");
+    let asked = |exchange: &str, segment: &str| Addressed {
+        vendor: brutex_core::vendor::Vendor::Zerodha,
+        month: day.year_month().expect("a month"),
+        timeframe: store::path::Timeframe::MINUTE_1,
+        contract: None,
+        exchange: exchange.to_owned(),
+        segment: segment.to_owned(),
+        symbol: "ZZNOISIN".to_owned(),
+    };
+    for (exchange, segment) in [("BSE", "CASH"), ("NSE", "INDEX")] {
+        let answered = audit_cash_schedule_window(&site, &asked(exchange, segment), window).await;
+        assert!(
+            matches!(answered, Ok(None)),
+            "{exchange} {segment}: {:?}",
+            answered.map(|schedule| schedule.is_some())
+        );
+    }
+    let refused = audit_cash_schedule_window(&site, &asked("NSE", "CASH"), window)
+        .await
+        .expect_err("NSE CASH is audited, and this name has no ISIN");
+    assert_eq!(
+        refused,
+        "ZZNOISIN: no exact current ISIN for dated cash-session audit"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
