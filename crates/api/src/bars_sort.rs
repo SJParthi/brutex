@@ -2900,4 +2900,70 @@ mod cloud_mutant_tests {
             "10 + 90 is the budget, held together"
         );
     }
+
+    /// **A HOST'S REFUSAL OF AN INDEX IS THIS REQUEST'S ALONE, AND NEVER
+    /// REMEMBERED** — run in a process the mode bits bind, since root may
+    /// read a `0o000` file and the tests beside this one stand down there.
+    /// February's `.srt` is made unreadable twice: once before any request
+    /// walked it (its walk is refused, its rows are read, and the refusal is
+    /// not kept), and once after a request walked it while it was free (the
+    /// page meets the refusal while it reads the index, sets February aside
+    /// for this request and reads its rows). Each time the mode is restored,
+    /// the next request is served from all three indexes again. Kills
+    /// `view`'s `== with !=` on both halves of the set-aside match (the page
+    /// then never finds the month it set aside and is asked again past the
+    /// cap), its `|| with &&` on what passes, and its `delete !` on what is
+    /// remembered.
+    #[test]
+    fn a_host_refusal_of_an_index_is_this_requests_alone() {
+        crate::isolated::where_permission_binds(
+            "bars::sort::cloud_mutant_tests::a_host_refusal_of_an_index_is_this_requests_alone",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("host-refusal");
+                let srts: Vec<PathBuf> = (1..=3)
+                    .map(|m| {
+                        let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+                        write(&root, &index(), month(m), &rows, &rows)
+                    })
+                    .collect();
+                let ask = query(index(), month(1), month(3), SortKey::Close);
+                let mode = |mode: u32| {
+                    std::fs::set_permissions(&srts[1], std::fs::Permissions::from_mode(mode))
+                        .expect("February's index takes the mode");
+                };
+                let read = || {
+                    let answer = window(&root, &ask).expect("a refused index is read, never fatal");
+                    answer.sort_index.expect("a value sort says what it used")
+                };
+                mode(0o000);
+                let refused = read();
+                assert_eq!((refused.indexed_rows, refused.scanned_rows), (720, 360));
+                mode(0o644);
+                let restored = read();
+                assert_eq!(
+                    (restored.indexed_rows, restored.scanned_rows),
+                    (1_080, 0),
+                    "a refused walk is not remembered"
+                );
+                mode(0o000);
+                let aside = read();
+                assert_eq!((aside.indexed_rows, aside.scanned_rows), (720, 360));
+                assert!(
+                    aside.scanned_why.iter().any(|why| why.contains(
+                        "the host refused its .srt sort index while this request read it"
+                    )),
+                    "{aside:?}"
+                );
+                mode(0o644);
+                let again = read();
+                assert_eq!(
+                    (again.indexed_rows, again.scanned_rows),
+                    (1_080, 0),
+                    "a refusal met while reading is not remembered"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+            },
+        );
+    }
 }
