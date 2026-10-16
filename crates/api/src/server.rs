@@ -7435,6 +7435,13 @@ async fn fetch_chunks(
                 // `read_markers` only reads the head. It would have travelled
                 // all the way to the operator's page as an invisible control
                 // character and told nothing downstream anything.
+                //
+                // `VENDOR_DOWN` the same way, and put back only on a refusal
+                // with nothing before it: a written prefix makes the
+                // instrument a success, which clears the breaker, and nothing
+                // strips the marker from `Chunks::unfetched`.
+                let vendor_down = marked_why.starts_with(VENDOR_DOWN);
+                let marked_why = marked_why.trim_start_matches(VENDOR_DOWN);
                 let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
                 let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
                 let sentence = {
@@ -7479,6 +7486,8 @@ async fn fetch_chunks(
                 };
                 let sentence = if credential_dead {
                     format!("{CREDENTIAL_DEAD}{sentence}")
+                } else if vendor_down && bodies.is_empty() {
+                    format!("{VENDOR_DOWN}{sentence}")
                 } else {
                     sentence
                 };
@@ -8384,8 +8393,15 @@ async fn with_retry(
                     // was asked twice more.
                     Step::Answered => return Err(text),
                     Step::ServerDown { answered } => {
+                        // MARKED, as `laddered` marks its own: `broker_run`'s
+                        // breaker counts consecutive instruments by this
+                        // marker and by nothing else. Without it the spot
+                        // path, which retries here and not in `laddered`,
+                        // could never trip that breaker, and an outage cost
+                        // this whole ladder for every instrument in the run.
+                        // `fetch_chunks` lifts it and puts it back in front.
                         return Err(format!(
-                            "{text} — and its own side has now failed {answered} \
+                            "{VENDOR_DOWN}{text} — and its own side has now failed {answered} \
                              time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
                              allowed. The vendor is reachable and failing, which \
                              is not a blip this run can wait out."
@@ -10972,6 +10988,10 @@ async fn fetch_chain_chunks(
                 // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
                 // buried the verdict mid-string, where no reader looks, so
                 // `fno_land` sent the dead token to every remaining contract.
+                // `VENDOR_DOWN` is stripped: no breaker reads it on this
+                // path, and left on it would reach the page as an invisible
+                // control character.
+                let refusal = refusal.trim_start_matches(VENDOR_DOWN);
                 let dead = refusal.starts_with(CREDENTIAL_DEAD);
                 let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {

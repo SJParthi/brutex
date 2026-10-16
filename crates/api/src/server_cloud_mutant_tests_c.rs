@@ -2310,3 +2310,88 @@ async fn an_unreadable_committed_cash_month_refuses_the_schedule() {
     );
     assert!(dated.is_empty(), "no eligibility was acquired");
 }
+
+// ------------------------------------------------- the spot breaker (fixed)
+
+/// THE SPOT RUN'S VENDOR-DOWN BREAKER TRIPS. Every request is answered with
+/// Dhan's own backend refusal (`DH-908`, `Disposition::RetryBounded`), so each
+/// instrument spends its retry ladder and is refused as the vendor's side
+/// failing. The third such instrument in a row stops the run with
+/// `vendor_down_sentence(3, 3, 4)` and the fourth is never refused or filed.
+///
+/// Before the fix the run ended with `stopped = None` and all four refused:
+/// `with_retry`, the spot path's ladder, wrote no `VENDOR_DOWN` marker, and
+/// `fetch_chunks` would have buried one mid-sentence anyway. No refusal an
+/// operator reads carries either control character.
+#[tokio::test]
+async fn three_instruments_lost_to_the_vendors_own_side_stop_a_spot_run() {
+    let vendor = FakeVendor::answering(|_, _| {
+        (
+            400,
+            "{\"errorType\":\"Data_API_Error\",\"errorCode\":\"DH-908\",\
+             \"errorMessage\":\"Server was not able to process request\"}"
+                .to_owned(),
+        )
+    })
+    .await;
+    let script = live(&vendor, "live");
+    let fx = Fixture::four_indices("spot-vendor-down");
+    let site = fx.serving(&script);
+    let asked = ingest::parse_spot(
+        "target=indices&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05",
+        aug_10(),
+    )
+    .expect("asked");
+
+    let run = broker_run(&asked, &site, &[]).await;
+
+    assert_eq!(
+        run.stopped.as_deref(),
+        Some(vendor_down_sentence(3, 3, 4).as_str()),
+        "{run:?}"
+    );
+    assert_eq!(run.reached, 0);
+    assert_eq!(
+        run.refused.len(),
+        3,
+        "the fourth is not filed: {:?}",
+        run.refused
+    );
+    for why in &run.refused {
+        assert!(
+            why.contains("its own side has now failed 0 time(s) on this chunk"),
+            "{why}"
+        );
+        assert!(
+            !why.contains(VENDOR_DOWN) && !why.contains(WIRE_REACHED),
+            "a marker reached the operator: {why:?}"
+        );
+    }
+    assert!(run.touched_wire);
+    assert!(!run.credential_dead);
+    // Lanes widen to three after the first answer, so the fourth instrument
+    // was fetched ahead; its six requests are the only cost past the breaker.
+    assert_eq!(vendor.seen().len(), 4 * THROTTLE_ATTEMPTS as usize);
+}
+
+/// A server-down refusal on the F&O contract path is stripped of the
+/// `VENDOR_DOWN` marker before it is filed: that path has no breaker to read
+/// it, and an operator must never see a control character.
+#[test]
+fn the_fno_contract_refusal_carries_no_vendor_down_marker() {
+    let marked = format!("{VENDOR_DOWN}status 503: busy");
+    let refusal = marked.trim_start_matches(VENDOR_DOWN);
+    assert_eq!(refusal, "status 503: busy");
+    let source = include_str!("server.rs");
+    let path = source
+        .split_once("Err(refusal) => {\n                // THE MARKER STAYS AT THE HEAD.")
+        .expect("the F&O contract refusal arm exists")
+        .1;
+    let arm = &path[..path
+        .find("result: Fetched::ContractRefused")
+        .expect("it files")];
+    assert!(
+        arm.contains("refusal.trim_start_matches(VENDOR_DOWN)"),
+        "the arm strips VENDOR_DOWN before filing the refusal"
+    );
+}
