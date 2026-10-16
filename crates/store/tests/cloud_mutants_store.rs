@@ -1565,3 +1565,33 @@ fn a_file_of_exactly_the_longest_day_image_is_read_and_one_byte_more_is_not() {
     drop(file);
     let _ignored = fs::remove_dir_all(&dir);
 }
+
+/// **TWO VALID YEAR-INDEX SLOTS AT THE SAME COMMIT ARE READ FROM SLOT 0.**
+///
+/// Kills `replace > with >=` in `read_year`, which would prefer slot 1 on a
+/// tie. The committed slot is copied over the other, so both are valid at
+/// one commit; the reader keeps slot 0, as the function's contract says, and
+/// the answer is the same commit either way.
+#[test]
+fn two_year_index_slots_at_one_commit_are_read_from_slot_zero() {
+    use store::verdict::{Code, INDEX_SLOT_LEN, INDEX_SLOT_STRIDE, Reader, commit};
+    let root = scratch("verdict-slot-tie");
+    let series = verdict_series(&root);
+    let committed = commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    )
+    .unwrap();
+    let before = Reader::new().year(&series, 2031).unwrap().unwrap();
+    assert_eq!(before.commit, committed.commit);
+    let path = series.year_index(2031);
+    let mut bytes = fs::read(&path).unwrap();
+    let from = usize::from(before.slot) * INDEX_SLOT_STRIDE;
+    let to = (1 - usize::from(before.slot)) * INDEX_SLOT_STRIDE;
+    let slot = bytes[from..from + INDEX_SLOT_LEN].to_vec();
+    bytes[to..to + INDEX_SLOT_LEN].copy_from_slice(&slot);
+    fs::write(&path, &bytes).unwrap();
+    let tied = Reader::new().year(&series, 2031).unwrap().unwrap();
+    assert_eq!((tied.slot, tied.commit), (0, committed.commit));
+    let _ignored = fs::remove_dir_all(&root);
+}
