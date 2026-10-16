@@ -5407,4 +5407,43 @@ mod cloud_mutant_tests {
             .expect("a failure lands");
         assert_eq!((thread.first(), thread.last()), (2, 3));
     }
+
+    /// A record AT a run record's ordinal belongs to the run before it (the
+    /// run record itself names no member), and one after it to it (kills the
+    /// partition's `<` turned to `<=`).
+    #[test]
+    fn a_record_belongs_to_the_run_record_strictly_before_it() {
+        use brutex_core::vendor::Vendor;
+        let index = Indexed {
+            runs: vec![(0, Some(Vendor::Dhan)), (5, Some(Vendor::Groww))],
+            ..Indexed::default()
+        };
+        assert_eq!(index.vendor_before(0), None, "nothing before the first");
+        assert_eq!(index.vendor_before(5), Some(Vendor::Dhan));
+        assert_eq!(index.vendor_before(6), Some(Vendor::Groww));
+    }
+
+    /// A `runs` entry of the right length and a checksum that verifies, but
+    /// another mark, is not a run entry (kills the `||` turned to `&&`).
+    #[test]
+    fn a_run_entry_with_another_mark_is_not_read() {
+        let good = run_entry(3, 90, None);
+        assert_eq!(read_run_entry(&good), Some((3, 0, ATTRIBUTION_RULE)));
+        let mut other = good;
+        other[24..28].copy_from_slice(b"XXXX");
+        let crc = crc32c(&other[..RUN_ENTRY - 4]);
+        other[RUN_ENTRY - 4..].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(read_run_entry(&other), None);
+        assert_eq!(read_run_entry(&good[..RUN_ENTRY - 1]), None, "short");
+    }
+
+    /// A source's letters, digits, `-` and `_` name its refusal file as they
+    /// are, and only every other byte is escaped (kills the `||` turned to
+    /// `&&`).
+    #[test]
+    fn a_source_file_keeps_letters_digits_dash_and_underscore() {
+        assert_eq!(source_file("kite_x-9Z"), Some("kite_x-9Z.idx".to_owned()));
+        assert_eq!(source_file("a/b c"), Some("a%2Fb%20c.idx".to_owned()));
+        assert_eq!(source_file(""), None);
+    }
 }
