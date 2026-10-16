@@ -515,7 +515,8 @@ mod cloud_mutant_tests {
     fn the_dispatched_verb_refuses_a_misuse_with_its_usage() {
         let mut out = String::new();
         assert_eq!(command(&["gdfl"], &mut out), MISUSED);
-        assert!(out.starts_with("refused: ") && out.contains(USAGE), "{out}");
+        assert!(out.starts_with("refused: "), "{out}");
+        assert!(out.contains(USAGE), "{out}");
     }
 
     /// A month filed under another symbol's header id is refused by the

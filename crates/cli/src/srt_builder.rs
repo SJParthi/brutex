@@ -806,26 +806,8 @@ mod cloud_mutant_tests {
             (count, appends, bare): (i64, usize, bool),
             symbol: &str,
         ) {
-            let symbol_id =
-                u32::try_from(brutex_core::universe::fnv1a(symbol) & u64::from(u32::MAX)).unwrap();
-            let mut writer = BarFile::open_or_create(
-                &self.0,
-                Self::path(contract, month, FileKind::Bars),
-                symbol_id,
-            )
-            .unwrap();
-            let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
-            let rows: Vec<Bar> = (0..count)
-                .map(|k| Bar {
-                    ts_micros: open + k * 1_000_000,
-                    open: 3_210_000 + k % 17,
-                    high: 3_210_050 + k % 17,
-                    low: 3_209_950 + k % 17,
-                    close: 3_210_010 + (k * 7) % 13,
-                    volume: k % 5,
-                    open_interest: if contract.is_some() { 77 } else { OI_NULL },
-                })
-                .collect();
+            let mut writer = self.writer(contract, month, symbol);
+            let rows = Self::rows(contract.is_some(), month, 0..count);
             if !rows.is_empty() {
                 let cut = if appends == 1 { rows.len() } else { 1_024 };
                 let (first, rest) = rows.split_at(cut);
@@ -841,6 +823,34 @@ mod cloud_mutant_tests {
             if bare && srt.exists() {
                 fs::remove_file(srt).unwrap();
             }
+        }
+
+        /// The writer of one month, filed under `symbol`'s header id.
+        fn writer(&self, contract: Option<&str>, month: YearMonth, symbol: &str) -> BarFile {
+            let symbol_id =
+                u32::try_from(brutex_core::universe::fnv1a(symbol) & u64::from(u32::MAX)).unwrap();
+            BarFile::open_or_create(
+                &self.0,
+                Self::path(contract, month, FileKind::Bars),
+                symbol_id,
+            )
+            .unwrap()
+        }
+
+        /// Invented bars `ks` of a month: bar `k` one second after bar
+        /// `k - 1`, from 09:15 IST on the month's second day.
+        fn rows(contract: bool, month: YearMonth, ks: std::ops::Range<i64>) -> Vec<Bar> {
+            let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+            ks.map(|k| Bar {
+                ts_micros: open + k * 1_000_000,
+                open: 3_210_000 + k % 17,
+                high: 3_210_050 + k % 17,
+                low: 3_209_950 + k % 17,
+                close: 3_210_010 + (k * 7) % 13,
+                volume: k % 5,
+                open_interest: if contract { 77 } else { OI_NULL },
+            })
+            .collect()
         }
     }
 
@@ -871,7 +881,8 @@ mod cloud_mutant_tests {
     fn the_dispatched_verb_refuses_a_misuse_with_its_usage() {
         let mut out = String::new();
         assert_eq!(command(&["gdfl"], &mut out), MISUSED);
-        assert!(out.starts_with("refused: ") && out.contains(USAGE), "{out}");
+        assert!(out.starts_with("refused: "), "{out}");
+        assert!(out.contains(USAGE), "{out}");
     }
 
     /// A store root that cannot be proven fails the run, and a name the
@@ -898,10 +909,8 @@ mod cloud_mutant_tests {
         );
         assert_eq!(code, MISUSED, "{out}");
         assert_eq!(asked.get(), 1, "a misuse never asks for the store root");
-        assert!(
-            out.contains("is not a store path") && out.contains(USAGE),
-            "{out}"
-        );
+        assert!(out.contains("is not a store path"), "{out}");
+        assert!(out.contains(USAGE), "{out}");
     }
 
     /// A `*` over a symbol the store has never listed is refused by name.
@@ -910,16 +919,13 @@ mod cloud_mutant_tests {
         let root = Root::new();
         let (code, out) = root.run(&["gdfl", "NSE/FNO/NIFTY/*", "1s", "2032-01", "2032-01"]);
         assert_eq!(code, FAILED, "{out}");
-        assert!(
-            out.starts_with("SRT BUILD REFUSED: cannot list ")
-                && out.contains("Nothing was written."),
-            "{out}"
-        );
+        assert!(out.starts_with("SRT BUILD REFUSED: cannot list "), "{out}");
+        assert!(out.ends_with(". Nothing was written.\n"), "{out}");
     }
 
     /// **WHAT A `*` LEFT ALONE IS SAID WHEN EITHER COUNT IS NOT ZERO, AND
-    /// ONLY THEN.** A link alone is named; a run that left nothing alone
-    /// prints no `NOT WALKED` line.
+    /// ONLY THEN.** A link alone is named, and so is a stray entry alone; a
+    /// run that left nothing alone prints no `NOT WALKED` line.
     #[test]
     fn not_walked_is_said_for_a_link_alone_and_never_for_nothing() {
         let root = Root::new();
@@ -953,6 +959,24 @@ mod cloud_mutant_tests {
             ),
             "{out}"
         );
+        fs::remove_file(symbol.join(pe)).unwrap();
+        fs::create_dir(symbol.join("not-a-contract")).unwrap();
+        let (code, out) = root.run(&[
+            "gdfl",
+            "NSE/FNO/NIFTY/*",
+            "1s",
+            "2032-02",
+            "2032-02",
+            "--dry-run",
+        ]);
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains(
+                "  NOT WALKED: 0 symbolic link(s) — never followed, nothing is built through a \
+                 link — and 1 other entr(ies) that are not contract directories\n"
+            ),
+            "{out}"
+        );
         // And a spot run lists nothing, so it leaves nothing alone.
         root.month(None, ym(2032, 2), (1_200, 1, false), "NIFTY");
         let (code, out) = root.run(&span("2032-02", "2032-02", true));
@@ -975,6 +999,37 @@ mod cloud_mutant_tests {
             ),
             "{out}"
         );
+    }
+
+    /// **ONE RUN OVER FEWER ROWS THAN THE MONTH COMMITS IS NOT `indexed`.**
+    /// The month's index as it stood at 1,024 rows is put back after 176
+    /// more were appended: one run, but over rows 0..1024 of 1,200. The dry
+    /// run says it would build it and names what the run covers; the build
+    /// writes it whole.
+    #[test]
+    fn one_run_over_fewer_rows_than_committed_is_built_again() {
+        let root = Root::new();
+        let month = ym(2032, 9);
+        root.month(None, month, (1_024, 1, false), "NIFTY");
+        let srt = root.file(None, month, FileKind::SortIndex);
+        let before_the_append = fs::read(&srt).unwrap();
+        let mut writer = root.writer(None, month, "NIFTY");
+        writer
+            .append(&Root::rows(false, month, 1_024..1_200))
+            .unwrap();
+        drop(writer);
+        fs::write(&srt, &before_the_append).unwrap();
+        let (code, out) = root.run(&span("2032-09", "2032-09", true));
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains(
+                "  2032-09  would build        1200 bars  1 runs ordering rows 0..1024 of 1200\n"
+            ),
+            "{out}"
+        );
+        let (code, out) = root.run(&span("2032-09", "2032-09", false));
+        assert_eq!(code, OK, "{out}");
+        assert!(out.contains("  2032-09  built          "), "{out}");
     }
 
     /// An empty month — a file that commits no rows — is `empty`, dry or
@@ -1118,10 +1173,13 @@ mod cloud_mutant_tests {
         let (code, out) = root.run(&star);
         assert_eq!(code, FAILED, "{out}");
         assert!(
-            out.contains(&format!("{MAX_CONTRACTS} series × 1 month(s)"))
-                && out.contains(&format!(
-                    "NO MONTH HELD: none of the {MAX_CONTRACTS} contract(s) holds a month"
-                )),
+            out.contains(&format!("{MAX_CONTRACTS} series × 1 month(s)")),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "NO MONTH HELD: none of the {MAX_CONTRACTS} contract(s) holds a month"
+            )),
             "{out}"
         );
         fs::create_dir(symbol.join(format!("C{MAX_CONTRACTS:06}"))).unwrap();

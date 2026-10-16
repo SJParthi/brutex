@@ -734,8 +734,8 @@ mod cloud_mutant_tests {
         ));
         let refused = at("GDFL IMPORT REFUSED: ");
         assert!(
-            receipt < workers && workers < durability && durability < refused,
-            "{out}"
+            [receipt, workers, durability, refused].is_sorted(),
+            "the receipt, its workers and durability, then the refusal: {out}"
         );
         assert!(
             out.get(refused..)
