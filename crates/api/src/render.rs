@@ -5624,6 +5624,36 @@ mod cloud_mutant_tests {
         );
     }
 
+    /// **A FOLDER THE WALK MAY NOT LIST IS PASSED OVER, AND THE WALK GOES
+    /// ON.** Under a process the mode bits bind, a `0o000` folder holding a
+    /// `.csv` is a directory that will not list: it is not offered, and its
+    /// sibling still is. Runs `collect_csv_dirs`' unreadable-directory
+    /// return, which no test reached.
+    #[test]
+    fn a_folder_the_walk_may_not_list_is_passed_over() {
+        crate::isolated::where_permission_binds(
+            "render::cloud_mutant_tests::a_folder_the_walk_may_not_list_is_passed_over",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("walk-locked");
+                file(&root.join("a").join("x.csv"));
+                file(&root.join("locked").join("y.csv"));
+                let locked = root.join("locked");
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                    .expect("the folder is locked");
+                let mut found = Vec::new();
+                collect_csv_dirs(&root, 2, &mut found);
+                let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+                let _ = std::fs::remove_dir_all(&root);
+                assert_eq!(
+                    found,
+                    vec![root.join("a").to_string_lossy().into_owned()],
+                    "the locked folder is not offered; its sibling is"
+                );
+            },
+        );
+    }
+
     /// Set by [`folder_suggestions_follow_their_switch_and_walk_home`] in the
     /// child it runs: the child prints what the walk found and stops.
     const SUGGESTIONS_CHILD: &str = "BRUTEX_CLOUD_MUTANT_SUGGESTIONS_CHILD";
