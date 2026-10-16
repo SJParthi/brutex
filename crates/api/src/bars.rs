@@ -4055,4 +4055,81 @@ mod cloud_mutant_tests {
         // 2025-05-02 03:45 UTC is 09:15 IST, second 33,300 of the IST day.
         assert_eq!(SortKey::TimeOfDay.of(&one), 33_300);
     }
+
+    /// **A WINDOW THAT MET AN UNREADABLE RECORD SAYS SO ON THE RECORD, ONCE**,
+    /// naming the file. Kills `delete !` on the window's fault test, which
+    /// wrote the line only for a window that met none (and so never).
+    #[allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "a fixture that cannot be planted is a test that cannot run"
+    )]
+    #[test]
+    fn a_window_that_met_an_unreadable_record_says_so_once() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-cloud-window-fault-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "TESTSEG",
+            symbol: "CLOUDWIN",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("CLOUDWIN") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let start = month.ist_bounds_micros().0 + 33_300 * 1_000_000;
+        let rows: Vec<Bar> = (0..5)
+            .map(|i| bar(start + i * 60_000_000, 90, 110, 100 + i, 1))
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&rows).expect("generated records");
+        drop(file);
+        let on_disk = path.to_path_buf(&root);
+        let mut bytes = std::fs::read(&on_disk).expect("the month");
+        let stamp = rows[2].ts_micros.to_le_bytes();
+        let at = bytes
+            .windows(8)
+            .rposition(|w| w == stamp)
+            .expect("the record's stamp is in the file");
+        bytes[at] ^= 0x01;
+        std::fs::write(&on_disk, &bytes).expect("damage the generated month");
+
+        let from = crate::emitted::mark();
+        let got = window(
+            &root,
+            &WindowQuery::single(
+                Vendor::Dhan,
+                SeriesKey::new("NSE", "TESTSEG", "CLOUDWIN", None),
+                Timeframe::MINUTE_1,
+                month,
+                month,
+                SortKey::Ts,
+                false,
+                0,
+                50,
+                false,
+            ),
+        )
+        .expect("the window answers");
+        assert!(got.faulted_records > 0, "{:?}", got.faults);
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.bars", "records unreadable")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "file", "cloud-window-fault"))
+                .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(mine.len(), 1, "one line for the request: {mine:?}");
+        assert!(crate::emitted::counts(
+            &mine[0],
+            "faults",
+            got.faulted_records
+        ));
+    }
 }
