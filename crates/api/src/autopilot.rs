@@ -8100,4 +8100,245 @@ mod cloud_mutant_tests {
             "no round ran, so no tick was journalled"
         );
     }
+
+    /// The last microsecond a full session leaves on `d`: the 15:29 IST bar,
+    /// 09:59 UTC.
+    fn close_of(d: Day) -> i64 {
+        (i64::from(d.days_from_epoch()) * 86_400 + 9 * 3_600 + 59 * 60) * 1_000_000
+    }
+
+    /// One month's window over four series, in an order that makes each
+    /// clause of the walk decide something:
+    /// * a series held through `to` is DONE, not behind (kills `day < to`
+    ///   turned to `<=` or to `true`);
+    /// * a series whose resume falls before `from` is clamped up to `from`
+    ///   (kills `resume < from` turned to `==`);
+    /// * the window starts at the EARLIEST resume, not the last one walked
+    ///   (kills `current <= resume` turned to `false`).
+    #[test]
+    fn the_window_starts_at_the_earliest_resume_and_a_series_held_through_to_is_done() {
+        let (from, to) = (day(2024, 3, 4), day(2024, 3, 20));
+        let march = month(2024, 3);
+        let early = series("EARLY");
+        let none = series("NONE");
+        let full = series("FULL");
+        let late = series("LATE");
+        let held = |key: &EntryKey| {
+            if *key == early.at(march) {
+                Some(close_of(day(2024, 2, 28)))
+            } else if *key == full.at(march) {
+                Some(close_of(to))
+            } else if *key == late.at(march) {
+                Some(close_of(day(2024, 3, 10)))
+            } else {
+                None
+            }
+        };
+        let unit = next_window(held, &[early, none, full, late], march, (from, to))
+            .expect("three series are behind");
+        assert_eq!((unit.window.from(), unit.window.to()), (from, to));
+        assert_eq!((unit.behind, unit.done), (3, 1));
+        assert_eq!(unit.month, march);
+    }
+
+    /// A month whose span is ONE day is a span, not nothing (kills `to <
+    /// from` turned to `<=`).
+    #[test]
+    fn a_one_day_span_is_a_span() {
+        assert_eq!(
+            month_span(month(2024, 3), day(2024, 3, 31), day(2024, 4, 10)),
+            Some((day(2024, 3, 31), day(2024, 3, 31)))
+        );
+        assert_eq!(
+            month_span(month(2024, 3), day(2024, 1, 1), day(2024, 3, 1)),
+            Some((day(2024, 3, 1), day(2024, 3, 1)))
+        );
+        assert_eq!(
+            month_span(month(2024, 3), day(2024, 4, 1), day(2024, 4, 10)),
+            None
+        );
+    }
+
+    /// A manifest loads for the vendor that holds one and for no other
+    /// (kills `c.vendor == vendor` turned to `!=`).
+    #[test]
+    fn a_manifest_loads_only_for_the_vendor_that_holds_it() {
+        use brutex_core::vendor::Vendor;
+        let manifest = pull::manifest::Manifest::open(Vendor::Dhan, &[], &[]).expect("a manifest");
+        let censuses = [VendorCensus {
+            vendor: Vendor::Dhan,
+            path: std::path::PathBuf::from("/nowhere/manifest.man"),
+            state: Census::Held {
+                manifest: crate::census::Manifests::single(manifest),
+            },
+        }];
+        assert!(manifest_loads(&censuses, Vendor::Dhan));
+        assert!(!manifest_loads(&censuses, Vendor::Groww));
+        assert!(!manifest_loads(&[], Vendor::Dhan));
+    }
+
+    /// A stall acted on an hour ago is not due again for six (kills
+    /// `6 * 3600` turned to `6 + 3600`); at six hours it is.
+    #[test]
+    fn a_stall_is_reconsidered_only_six_hours_after_it_was_last_acted_on() {
+        assert_eq!(STALL_RECHECK_SECS, 21_600);
+        let now = 2_000_000_000_i64;
+        let mut feeds = drivable(day(2026, 8, 6));
+        let rung = feeds[0].rung;
+        feeds[0].stalls.push(Stall {
+            month: month(2021, 5),
+            attempts: MAX_MONTH_ATTEMPTS,
+            reason: "it would not land".to_owned(),
+            retried: 0,
+            at_unix: now - 3_700,
+            rung,
+        });
+        assert_eq!(reconsider(&mut feeds, now), None, "an hour is not six");
+        assert_eq!(feeds[0].stalls[0].retried, 0);
+        feeds[0].stalls[0].at_unix = now - STALL_RECHECK_SECS;
+        assert!(reconsider(&mut feeds, now).is_some(), "six hours is");
+        assert_eq!(feeds[0].stalls[0].retried, 1);
+    }
+
+    /// Two feeds stalled on the SAME month: the first feed's is reconsidered
+    /// and the second's is left (kills `rung < held` turned to `<=`).
+    #[test]
+    fn of_two_stalls_on_one_month_the_first_feeds_is_reconsidered() {
+        let now = 2_000_000_000_i64;
+        let mut feeds = drivable(day(2026, 8, 6));
+        assert!(feeds.len() >= 2, "two feeds to choose between");
+        for state in feeds.iter_mut().take(2) {
+            let rung = state.rung;
+            state.stalls.push(Stall {
+                month: month(2021, 5),
+                attempts: MAX_MONTH_ATTEMPTS,
+                reason: "it would not land".to_owned(),
+                retried: 0,
+                at_unix: now - STALL_RECHECK_SECS,
+                rung,
+            });
+        }
+        let first = feeds[0].feed.display().to_owned();
+        let said = reconsider(&mut feeds, now).expect("one is reconsidered");
+        assert!(
+            said.starts_with(&format!("nothing else is missing, so {first}'s")),
+            "{said}"
+        );
+        assert_eq!(
+            (feeds[0].stalls[0].retried, feeds[1].stalls[0].retried),
+            (1, 0)
+        );
+    }
+
+    /// Two failures, two feeds and two stalls on one feed render as JSON
+    /// arrays with one comma between items (kills each `n > 0` / `k > 0`
+    /// separator turned to `==`, `<` or `>=`).
+    #[test]
+    fn the_status_renders_every_list_as_valid_json() {
+        let window = Window::new(day(2024, 3, 1), day(2024, 3, 31)).expect("a window");
+        let failed = |instrument: &str| Failed {
+            instrument: instrument.to_owned(),
+            about: About::of(None, None, window),
+            why: "a gap".to_owned(),
+            at: "2026-08-06".to_owned(),
+        };
+        let stall = |m: u8| Stall {
+            month: month(2021, m),
+            attempts: MAX_MONTH_ATTEMPTS,
+            reason: "it would not land".to_owned(),
+            retried: 0,
+            at_unix: 0,
+            rung: pull::vendor::Granularity::Day1,
+        };
+        let status = Status {
+            failures: vec![failed("NIFTY"), failed("BANKNIFTY")],
+            feeds: vec![
+                FeedReport {
+                    feed: "Dhan".to_owned(),
+                    stalls: vec![stall(5), stall(6)],
+                    ..FeedReport::default()
+                },
+                FeedReport {
+                    feed: "Groww".to_owned(),
+                    ..FeedReport::default()
+                },
+            ],
+            ..Status::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&status.json()).expect("valid JSON");
+        assert_eq!(doc["failures"].as_array().map(Vec::len), Some(2));
+        assert_eq!(doc["failures"][1]["instrument"], "BANKNIFTY");
+        assert_eq!(doc["feeds"].as_array().map(Vec::len), Some(2));
+        assert_eq!(doc["feeds"][0]["stalls"].as_array().map(Vec::len), Some(2));
+        assert_eq!(doc["feeds"][1]["feed"], "Groww");
+    }
+
+    /// The environment decides whether a served autopilot starts paused, read
+    /// once at construction: `run` flies, anything else stays paused, and a
+    /// read-only server stays grounded even when told to run (kills
+    /// `flies_on_startup -> false`, `Control::serving -> Default::default()`,
+    /// its `||` turned to `&&` and its deleted `!`). Each case runs in a child
+    /// of this test binary with the environment it names, because the
+    /// variables are process-wide.
+    #[test]
+    fn the_served_autopilot_reads_its_switch_from_the_environment() {
+        const CASE: &str = "BRUTEX_CLOUD_AUTOPILOT_CASE";
+        let name = "autopilot::cloud_mutant_tests::the_served_autopilot_reads_its_switch_from_the_environment";
+        match std::env::var(CASE).as_deref() {
+            Ok("run") => {
+                assert!(flies_on_startup());
+                assert!(!Control::serving().is_paused(), "run flies");
+            }
+            Ok("pause") => {
+                assert!(!flies_on_startup());
+                assert!(Control::serving().is_paused(), "pause stays paused");
+            }
+            Ok("unset") => {
+                assert!(!flies_on_startup());
+                assert!(Control::serving().is_paused(), "no word stays paused");
+            }
+            Ok("run-read-only") => {
+                assert!(flies_on_startup());
+                assert!(Control::serving().is_paused(), "read-only grounds it");
+            }
+            Ok(other) => panic!("unknown case {other}"),
+            Err(_) => {
+                let os = std::ffi::OsStr::new;
+                for (case, env) in [
+                    (
+                        "run",
+                        vec![
+                            (AUTOPILOT_ENV, os("run")),
+                            (crate::server::READ_ONLY_ENV, os("0")),
+                        ],
+                    ),
+                    (
+                        "pause",
+                        vec![
+                            (AUTOPILOT_ENV, os("pause")),
+                            (crate::server::READ_ONLY_ENV, os("0")),
+                        ],
+                    ),
+                    (
+                        "unset",
+                        vec![
+                            (AUTOPILOT_ENV, os("")),
+                            (crate::server::READ_ONLY_ENV, os("0")),
+                        ],
+                    ),
+                    (
+                        "run-read-only",
+                        vec![
+                            (AUTOPILOT_ENV, os("run")),
+                            (crate::server::READ_ONLY_ENV, os("1")),
+                        ],
+                    ),
+                ] {
+                    let mut env = env;
+                    env.push((CASE, os(case)));
+                    let _ = crate::isolated::rerun(name, &env);
+                }
+            }
+        }
+    }
 }
