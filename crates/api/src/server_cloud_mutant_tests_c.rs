@@ -2395,3 +2395,66 @@ fn the_fno_contract_refusal_carries_no_vendor_down_marker() {
         "the arm strips VENDOR_DOWN before filing the refusal"
     );
 }
+
+// ------------------------------------------- the autopilot, flying (loopback)
+
+/// AN UNPAUSED AUTOPILOT THAT MAY REACH A BROKER FLIES ITS LOOP AND JOURNALS
+/// A TICK. Every feed's credential is the script's, so any request would go to
+/// the loopback fake vendor, which refuses each one with a plain 400. After
+/// the twenty-second grace the loop chooses the day rung's oldest month (a
+/// Zerodha month: no instrument in these masters maps to Zerodha), runs one
+/// tick and journals it: no instrument was reached and the run was not
+/// blocked, so the record is NOT STARTED with the tick's own default reason,
+/// and it closes the run the tick opened (`autopilot::fly`'s loop and
+/// `tick`'s unblocked arms).
+#[tokio::test]
+async fn an_unpaused_live_autopilot_journals_a_tick_whose_every_instrument_was_refused() {
+    let vendor = FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
+    let script = live(&vendor, "live");
+    let fx = Fixture::new("fly-live-tick");
+    let site = Loaded::new(fx.serving(&script));
+    assert_eq!(site.broker, Broker::Live);
+    site.autopilot.resume();
+    let flying = tokio::spawn(crate::autopilot::fly(Loaded::clone(&site)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(150);
+    let records = loop {
+        let records = journal_records(&fx.root);
+        // THE RECORD LANDS BEFORE THE STATUS COUNTS THE TICK, so both are
+        // waited for.
+        if records
+            .iter()
+            .any(|record| record.outcome == audit::Outcome::NotStarted)
+            && !site.autopilot.json().contains(r#""ticks":0,"#)
+        {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no tick was journalled: {}",
+            site.autopilot.json()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    site.autopilot.pause();
+    flying.abort();
+    let _aborted = flying.await;
+
+    let closed = records
+        .iter()
+        .find(|record| record.outcome == audit::Outcome::NotStarted)
+        .expect("the tick's record");
+    assert_eq!(closed.kind, audit::Kind::Run);
+    assert!(closed.source.contains("autopilot"), "{closed:?}");
+    assert_eq!(
+        closed.note, "no instrument in the universe could be reached",
+        "{closed:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.outcome == audit::Outcome::Opened),
+        "the tick opened its run before its first instrument: {records:?}"
+    );
+    let json = site.autopilot.json();
+    assert!(json.contains(r#""journal_error":"""#), "{json}");
+}
