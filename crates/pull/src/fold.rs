@@ -2377,3 +2377,96 @@ mod guard {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+mod cloud_mutant_tests {
+    //! Mutant kills and coverage for the completeness fold's private helpers
+    //! (cloud mutation round, 2026-10-16).
+
+    use super::{Bucket, Withheld, owed_buckets, session_close, session_open};
+    use crate::calendar::{DayKind, Session, Window};
+
+    /// Every reason's aggregated label, word for word: the sentence an
+    /// operator reads for a counted reason, so a reason silently relabelled
+    /// or blanked is a failure here.
+    #[test]
+    fn every_withheld_reason_has_its_own_label() {
+        let labels = [
+            (
+                Withheld::Incomplete,
+                "incomplete or invalid minute coverage",
+            ),
+            (
+                Withheld::Absent,
+                "scheduled buckets with no minute between observed ones",
+            ),
+            (
+                Withheld::AbsentTail,
+                "scheduled buckets with no minute after a day's last observed one",
+            ),
+            (
+                Withheld::Unverified,
+                "days outside the calendar's authority",
+            ),
+            (
+                Withheld::Unsized,
+                "traded sessions whose length no record states",
+            ),
+            (
+                Withheld::Closed,
+                "minute bars on days the calendar measures closed",
+            ),
+            (
+                Withheld::Unattested,
+                "days whose session hours cannot attest the stored grid",
+            ),
+        ];
+        for (why, label) in labels {
+            assert_eq!(why.label(), label, "{why:?}");
+        }
+    }
+
+    /// A session of no windows has no open bucket and no close; a day that
+    /// is not an open session has neither either.
+    #[test]
+    fn a_session_with_no_window_opens_and_closes_nothing() {
+        let empty = DayKind::Open(Session {
+            windows: [Window { from: 555, to: 929 }, Window { from: 0, to: 0 }],
+            count: 0,
+        });
+        assert_eq!(session_open(empty, 0, Bucket::MINUTE), Ok(None));
+        assert_eq!(session_close(empty, 0), None);
+        for kind in [
+            DayKind::Closed,
+            DayKind::Unmeasured,
+            DayKind::OpenLengthUnmeasured,
+        ] {
+            assert_eq!(session_open(kind, 0, Bucket::MINUTE), Ok(None), "{kind:?}");
+            assert_eq!(session_close(kind, 0), None, "{kind:?}");
+        }
+        let full = DayKind::Open(Session::full());
+        assert_eq!(session_close(full, 0), Some(930 * 60_000_000));
+        assert_eq!(session_close(full, i64::MAX), None, "past the i64 range");
+    }
+
+    /// Counting owed buckets stops at the end of the `i64` line instead of
+    /// wrapping: a range whose next bucket start would overflow counts the
+    /// buckets it could reach and no more.
+    #[test]
+    fn owed_buckets_stop_at_the_end_of_the_i64_line() {
+        let full = DayKind::Open(Session::full());
+        let width = 60_000_000;
+        assert_eq!(
+            owed_buckets(full, 0, i64::MAX - width / 2, i64::MAX, width),
+            0,
+            "no scheduled minute up there, and no wrap to count one"
+        );
+        // A regular day's 375 one-minute buckets, counted exactly.
+        assert_eq!(owed_buckets(full, 0, 555 * width, 930 * width, width), 375);
+        assert_eq!(
+            owed_buckets(full, 0, 555 * width, 930 * width, 15 * width),
+            25
+        );
+    }
+}

@@ -2141,6 +2141,34 @@ mod cloud_mutant_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// An installer whose readers let go part-way through the bound waits for
+    /// them and takes the day: a held lock is waited on, never refused at the
+    /// first attempt. Kills the bound test's `>=` read as `<`.
+    #[test]
+    fn an_installer_waits_for_readers_who_let_go_inside_the_bound() {
+        let root = scratch("CloudCashWait");
+        let (path, file) = open_lock(&root, Day::new(2026, 8, 3).unwrap()).unwrap();
+        let (taken, released) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let file = File::open(&reader_path).unwrap();
+            let lock = hold(&file, &reader_path, Hold::Shared, LOCK_WAIT).unwrap();
+            taken.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+            lock.release().unwrap();
+        });
+        released.recv().unwrap();
+        let started = Instant::now();
+        let alone = hold(&file, &path, Hold::Exclusive, LOCK_WAIT).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "the installer waited for the reader"
+        );
+        alone.release().unwrap();
+        reader.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// A path the host cannot even inspect (a component is a file) is named
     /// as that, never read as absent; `write_new` never overwrites.
     #[test]

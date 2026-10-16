@@ -484,3 +484,17 @@ mod cash_loaders {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// ═══ fold ═════════════════════════════════════════════════════════════════
+
+/// The anchor refusal names the stamp it could not place and why it was
+/// refused rather than saturated.
+#[test]
+fn fold_an_anchor_overflow_names_its_stamp() {
+    let said = pull::fold::FoldError::AnchorOverflow { ts_micros: -42 }.to_string();
+    assert!(
+        said.starts_with("the snapshot stamped -42 cannot be shifted onto the IST day grid")
+            && said.contains("Refused rather than saturated"),
+        "{said}"
+    );
+}
