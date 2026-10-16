@@ -4191,6 +4191,9 @@ mod cloud_mutant_tests {
     };
     use std::path::Path;
 
+    use super::{Carry, Detail, Entry, Generation, Series, blake3, commit, home_of, parse};
+    use crate::provenance::Day;
+
     const PATH: &str = "/nonexistent/cloud/2031-03-04.g0000000001.vdt";
 
     /// The CRC over `bytes[..at]` written at `at`, as every encoder does.
@@ -4454,6 +4457,242 @@ mod cloud_mutant_tests {
         assert_eq!(
             corrupt_why(with(150, 1, true)),
             "record 3's reserved bytes are not zero"
+        );
+    }
+
+    /// The bytes of a committed two-record image: `ZZA` (match, one detail)
+    /// and `ZZB` (value mismatch, one detail), with one day detail.
+    fn committed_image() -> Vec<u8> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-vd-cloud-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let entry = |name: &str, code: Code, payload: &[u8]| Entry {
+            key: Key::instrument(name).unwrap(),
+            facts: Facts::of(code),
+            details: vec![Detail {
+                kind: 2,
+                payload: payload.to_vec(),
+            }],
+        };
+        let generation = Generation {
+            day: Day::new(2031, 3, 4).unwrap(),
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::ValueMismatch),
+            day_details: vec![Detail {
+                kind: 1,
+                payload: b"day".to_vec(),
+            }],
+            entries: vec![
+                entry("ZZA", Code::Match, b"aa"),
+                entry("ZZB", Code::ValueMismatch, b"bbb"),
+            ],
+            carry: Carry::WholeDay,
+        };
+        let path = commit(&series, &generation).unwrap().path;
+        let bytes = std::fs::read(path).unwrap();
+        let _ignored = std::fs::remove_dir_all(&root);
+        bytes
+    }
+
+    /// The BLAKE3 trailer over everything before it, as a writer seals it.
+    fn reseal(bytes: &mut [u8]) {
+        let end = bytes.len() - TRAILER_LEN;
+        let digest = blake3::hash(&bytes[..end]);
+        bytes[end..].copy_from_slice(&digest);
+    }
+
+    /// Where the records, the table and the detail section start.
+    fn places(bytes: &[u8]) -> (usize, usize, usize) {
+        let header = decode_header(bytes, Path::new(PATH)).unwrap();
+        let shape = geometry(&header, Path::new(PATH)).unwrap();
+        (
+            shape.records_at,
+            shape.capacity,
+            usize::try_from(header.detail_offset).unwrap(),
+        )
+    }
+
+    fn parsed(bytes: &[u8]) -> Result<(), VerdictError> {
+        parse(bytes, Path::new(PATH)).map(|_| ())
+    }
+
+    /// **EVERY WHOLE-IMAGE CHECK REFUSES BY NAME.**
+    ///
+    /// Covers `parse`: an image shorter than a header and a day block, a
+    /// length the header does not imply, records out of (code, key) order,
+    /// per-code counts that differ from the records, an empty slot carrying a
+    /// tag, a slot naming a record past the records, a slot whose tag is not
+    /// its record's, more occupied slots than records, and a record its
+    /// probe window does not find. Each change is re-sealed, so the check
+    /// named is the one that refuses.
+    #[test]
+    fn every_whole_image_check_refuses_by_name() {
+        let good = committed_image();
+        assert!(parsed(&good).is_ok(), "{:?}", parsed(&good));
+        let (records_at, capacity, _) = places(&good);
+        let slot = |i: usize| TABLE_OFFSET + SLOT_LEN * i;
+        let mark_of = |bytes: &[u8], i: usize| super::u32_at(bytes, slot(i));
+        let empty = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark_of(&good, i) == 0)
+            .unwrap();
+        let occupied = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark_of(&good, i) != 0)
+            .unwrap();
+        let changed = |change: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = good.clone();
+            change(&mut bytes);
+            reseal(&mut bytes);
+            parsed(&bytes)
+        };
+
+        assert_eq!(
+            corrupt_why(parsed(&good[..TABLE_OFFSET + TRAILER_LEN - 1])),
+            "shorter than a header and a day block"
+        );
+        let len = good.len();
+        assert_eq!(
+            corrupt_why(changed(&|b| b
+                .splice(len - TRAILER_LEN..len - TRAILER_LEN, [0; 8])
+                .for_each(drop))),
+            format!("{} bytes where the header implies {len}", len + 8)
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let (first, second) = b.split_at_mut(records_at + RECORD_STRIDE);
+                first[records_at..].swap_with_slice(&mut second[..RECORD_STRIDE]);
+            })),
+            "records 0 and 1 are out of (code, key) order"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let record = &mut b[records_at + RECORD_STRIDE..records_at + 2 * RECORD_STRIDE];
+                record[72] = Code::MissingInStore.code();
+                fix(record, 156);
+            })),
+            "the per-code counts differ from the records"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, slot(empty) + 4, &9u32.to_le_bytes()))),
+            format!("empty slot {empty} carries a tag")
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, slot(empty), &99u32.to_le_bytes()))),
+            format!("slot {empty} names record 98, past the records")
+        );
+        let ordinal = usize::try_from(mark_of(&good, occupied) - 1).unwrap();
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let tag = super::u32_at(b, slot(occupied) + 4) ^ 1;
+                put(b, slot(occupied) + 4, &tag.to_le_bytes());
+            })),
+            format!("slot {occupied}'s tag is not record {ordinal}'s")
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let held: [u8; SLOT_LEN] = b[slot(occupied)..slot(occupied) + SLOT_LEN]
+                    .try_into()
+                    .unwrap();
+                put(b, slot(empty), &held);
+            })),
+            "3 occupied slots for 2 records"
+        );
+        // The occupied slot moved one past its probe window: still one slot
+        // per record, each tag its record's, and not where a lookup looks.
+        let record = decode_record(
+            &good[records_at + RECORD_STRIDE * ordinal..records_at + RECORD_STRIDE * (ordinal + 1)],
+            Path::new(PATH),
+            0,
+        )
+        .unwrap();
+        let home = home_of(record.key.hash, capacity);
+        let outside = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| (i < home || i >= home + super::MAX_PROBE) && mark_of(&good, i) == 0)
+            .unwrap();
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let held: [u8; SLOT_LEN] = b[slot(occupied)..slot(occupied) + SLOT_LEN]
+                    .try_into()
+                    .unwrap();
+                put(b, slot(occupied), &[0; SLOT_LEN]);
+                put(b, slot(outside), &held);
+            })),
+            format!("record {ordinal} is not where its probe window finds it")
+        );
+    }
+
+    /// **EVERY DETAIL-SECTION CHECK REFUSES BY NAME.**
+    ///
+    /// Covers `parse_details`: an entry that runs past the section, an entry
+    /// out of owner order, an entry of kind 0, an entry naming no record, an
+    /// entry count the header does not state, and a record whose
+    /// `detail_at` is not its first entry.
+    #[test]
+    fn every_detail_section_check_refuses_by_name() {
+        let good = committed_image();
+        let (records_at, _, details) = places(&good);
+        // The section: the day's entry (owner 0, 3 bytes), then ZZA's
+        // (owner 1, 2 bytes), then ZZB's (owner 2, 3 bytes).
+        let entry = [details, details + 8 + 3, details + 8 + 3 + 8 + 2];
+        assert_eq!(super::u32_at(&good, entry[1]), 1);
+        assert_eq!(super::u32_at(&good, entry[2]), 2);
+        let changed = |change: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = good.clone();
+            change(&mut bytes);
+            reseal(&mut bytes);
+            parsed(&bytes)
+        };
+        let at = |n: usize| entry[n] - details;
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[2] + 6, &9u16.to_le_bytes()))),
+            format!("detail entry at {} runs past the section", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[1] + 4, &0u16.to_le_bytes()))),
+            format!("detail entry at {} is out of order or unset", at(1))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                put(b, entry[1], &2u32.to_le_bytes());
+                put(b, entry[2], &1u32.to_le_bytes());
+            })),
+            format!("detail entry at {} is out of order or unset", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[2], &3u32.to_le_bytes()))),
+            format!("detail entry at {} names no record", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                put(b, 180, &4u32.to_le_bytes());
+                fix(b, 252);
+            })),
+            "the detail entries differ from the header's count"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let record = &mut b[records_at..records_at + RECORD_STRIDE];
+                put(record, 120, &99u32.to_le_bytes());
+                fix(record, 156);
+            })),
+            "record 0's detail offset is not its first entry"
         );
     }
 }
