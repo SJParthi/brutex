@@ -2504,9 +2504,29 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
      wp12f-owed-cost wp12f-reach wp12f-restated-auction wp12f-restated-member \
      wp12f-restated-names wp12f-restated-open wp12f-retry wp12f-series wp12f-sparse \
      wp12f-told wp12f-torn wp12f-widen";
+// D-5253: the fifteen words `feat/db-fix` at 4756cce0 carried undeclared, so
+// this gate was red on that base for every branch. Each was read at its line.
+// (1) Test-harness words: `--test-threads` (the libtest flag two lock tests
+// and `tests/support` pass to a child test process); `race`, `observer` and
+// `ready` (`expect` labels of the cash-session lock tests and the `.ready`
+// marker one of them writes); `decode_frame` and `decode_stamps` (labels of
+// `tests/allocation.rs`, the codec functions they time); `dangling` and
+// `unplugged` (a symlink-kind fixture of `gdfl_tickstore`'s tests and the
+// missing target it points at); `pipe` (`expect` labels and the FIFO
+// refusal's own words); `request-before-record` (a `tests/derive.rs` case
+// name). (2) Words of messages and codes this repository chose:
+// `calendar_past_record` (a `request_minutes` refusal code), `cache` and
+// `retained` (pieces of `cash_session_cache` refusal messages, split on the
+// message's slashes). (3) `1421286` and `1421400`: record ordinals of the
+// operator's pull journal, cited as evidence in `calendar.rs`'s measured
+// short days and asserted by its test. None names an account, an
+// environment, a vendor credential or a field of a parameter path.
+const DB_FIX_BASE_LITERAL: &str = "--test-threads race observer ready decode_frame \
+     decode_stamps dangling unplugged pipe request-before-record calendar_past_record \
+     cache retained 1421286 1421400";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 61] = [
+const DECLARED: [&str; 62] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2568,6 +2588,7 @@ const DECLARED: [&str; 61] = [
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
     WP12F_LITERAL,
+    DB_FIX_BASE_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {
@@ -4242,6 +4263,10 @@ mod tests {
             "18935",
             "stamp",
             "reliance",
+            // D-5253.
+            "--test-threads",
+            "calendar_past_record",
+            "1421400",
         ] {
             assert!(d.contains(w), "{w}");
         }

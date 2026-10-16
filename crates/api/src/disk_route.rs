@@ -14,7 +14,9 @@
 //! # What it answers
 //!
 //! * `filesystem` — total, used and free bytes of the filesystem the store
-//!   root is on, from POSIX `df -Pk` (1024-byte blocks), or the refusal.
+//!   root is on and where it is mounted, from one `statvfs(2)` in this
+//!   process (D-5240: it was a `/bin/df -Pk` child), or the refusal naming
+//!   the root — one that does not exist or is no directory is not measured.
 //! * `feeds` — per vendor with a census: its format, its months and rows,
 //!   the bar bytes those rows occupy at the bar file's own geometry (a LOWER
 //!   BOUND: sidecars and time indexes are not counted), and every census file
@@ -40,8 +42,9 @@
 //!
 //! # Cost
 //!
-//! One `df` child process, one `lstat` per census file and one directory
-//! listing per migrated segment — O(epochs), which compaction alone grows, a
+//! One `statvfs(2)`, one `stat` per directory from the store root up to its
+//! mount point (one `statfs(2)` instead on macOS) and no child process, one
+//! `lstat` per census file and one directory listing per migrated segment — O(epochs), which compaction alone grows, a
 //! handful today — a 4 KiB tail read of the receipt log, and per feed one
 //! 8 KiB tail read of its scrub cursor (the findings index behind it is
 //! rebuilt only when its ledger moves, `scrub_route::with_index`). The answer is
@@ -76,7 +79,7 @@ const MAX_NAMED_BAD: usize = 16;
 /// The last answer, for one store root, and when it was measured.
 static LAST: Mutex<Option<(PathBuf, Instant, String)>> = Mutex::new(None);
 
-/// One filesystem, as `df -Pk` reports it, in bytes.
+/// One filesystem, as `statvfs(2)` reports it, in bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Filesystem {
     pub(crate) total: u64,
@@ -85,59 +88,109 @@ pub(crate) struct Filesystem {
     pub(crate) mount: String,
 }
 
-/// The filesystem in POSIX `df -Pk` output: a header line, then one line
-/// `<name> <1024-blocks> <used> <available> <capacity%> <mounted on>`. The
-/// capacity column is found by its `%`, so a mount point with spaces is kept
-/// whole.
+/// The filesystem `root` is on, measured now and in this process.
+///
+/// One `statvfs(2)` gives the numbers, each a count of `f_frsize`-byte
+/// fragments: `total` is `f_blocks`; `used` is `f_blocks - f_bfree`, so the
+/// blocks a filesystem reserves for its superuser count as used, as `df`
+/// counts them; `free` is `f_bavail`, what an unprivileged writer such as this
+/// server may still take. `df -Pk` printed the same three fields in 1024-byte
+/// blocks, so on a filesystem whose fragment is a multiple of 1 KiB these are
+/// the bytes it gave, and on any other they are exact where it rounded.
+///
+/// NO CHILD PROCESS (D-5240). This was `/bin/df -Pk <root>`, the one program
+/// outside the browser opener that shipped code started;
+/// `crates/vocab/tests/no_runtime_spawn.rs` now refuses another.
 ///
 /// # Errors
 ///
-/// The sentence naming what in the output could not be read.
-pub(crate) fn parse_df(text: &str) -> Result<Filesystem, String> {
-    let line = text
-        .lines()
-        .rfind(|line| !line.trim().is_empty())
-        .ok_or_else(|| "df printed nothing".to_owned())?;
-    let words: Vec<&str> = line.split_whitespace().collect();
-    let at = words
-        .iter()
-        .rposition(|word| word.ends_with('%'))
-        .filter(|at| *at >= 4)
-        .ok_or_else(|| format!("df line {line:?} has no capacity column"))?;
-    let kib = |offset: usize| -> Result<u64, String> {
-        words
-            .get(at - offset)
-            .and_then(|word| word.parse::<u64>().ok())
-            .map(|blocks| blocks.saturating_mul(1024))
-            .ok_or_else(|| format!("df line {line:?} has no number {offset} before its capacity"))
-    };
+/// A sentence naming `root`: it does not exist, it cannot be measured (the
+/// call's own error, such as a path through a regular file), it is not a
+/// directory, or its mount point cannot be found.
+fn measure(root: &Path) -> Result<Filesystem, String> {
+    let vfs = rustix::fs::statvfs(root).map_err(|why| {
+        if why == rustix::io::Errno::NOENT {
+            format!(
+                "{} does not exist, so no filesystem is measured for it",
+                root.display()
+            )
+        } else {
+            format!(
+                "{} cannot be measured: statvfs answered {why}",
+                root.display()
+            )
+        }
+    })?;
+    // A FILE IS NO STORE ROOT. `df` measured the filesystem around one, which
+    // answered a question nobody asked about the store.
+    let meta = std::fs::metadata(root)
+        .ok()
+        .filter(std::fs::Metadata::is_dir)
+        .ok_or_else(|| {
+            format!(
+                "{} is not a directory, so it is no store root whose filesystem is measured",
+                root.display()
+            )
+        })?;
+    let bytes = |fragments: u64| fragments.saturating_mul(vfs.f_frsize);
     Ok(Filesystem {
-        total: kib(3)?,
-        used: kib(2)?,
-        free: kib(1)?,
-        mount: words
-            .get(at + 1..)
-            .map(|rest| rest.join(" "))
-            .unwrap_or_default(),
+        total: bytes(vfs.f_blocks),
+        used: bytes(vfs.f_blocks.saturating_sub(vfs.f_bfree)),
+        free: bytes(vfs.f_bavail),
+        mount: mount_point(root, &meta)?,
     })
 }
 
-/// The filesystem `root` is on, measured now.
-fn measure(root: &Path) -> Result<Filesystem, String> {
-    let output = std::process::Command::new("/bin/df")
-        .arg("-Pk")
-        .arg(root)
-        .output()
-        .map_err(|why| format!("/bin/df could not be run: {why}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "/bin/df -Pk {} answered {}: {}",
-            root.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+/// Where the filesystem holding the directory `root` is mounted, as the
+/// filesystem itself records it: `statfs(2)`'s `f_mntonname`, the field BSD
+/// `df` prints. A walk upward would be wrong here: APFS firmlinks put
+/// `/Users` and `/private/var` on the data volume mounted at
+/// `/System/Volumes/Data`.
+///
+/// # Errors
+///
+/// A sentence naming `root` when `statfs(2)` refuses it.
+#[cfg(target_vendor = "apple")]
+fn mount_point(root: &Path, _meta: &std::fs::Metadata) -> Result<String, String> {
+    let fs = rustix::fs::statfs(root).map_err(|why| {
+        format!(
+            "{} has no mount point to name: statfs answered {why}",
+            root.display()
+        )
+    })?;
+    let name: Vec<u8> = fs
+        .f_mntonname
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+        .collect();
+    Ok(String::from_utf8_lossy(&name).into_owned())
+}
+
+/// Where the filesystem holding the directory `root` is mounted: the highest
+/// directory above its canonical path still on its device, as coreutils'
+/// `find_mount_point` finds it. A bind mount of the same device higher up is
+/// not told apart, as that walk does not tell it apart.
+///
+/// # Errors
+///
+/// A sentence naming `root` when it cannot be made canonical.
+#[cfg(not(target_vendor = "apple"))]
+fn mount_point(root: &Path, meta: &std::fs::Metadata) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let canonical = std::fs::canonicalize(root).map_err(|why| {
+        format!(
+            "{} has no mount point to name: it cannot be made canonical ({why})",
+            root.display()
+        )
+    })?;
+    let mut mount = canonical.as_path();
+    while let Some(parent) = mount.parent()
+        && std::fs::metadata(parent).is_ok_and(|above| above.dev() == meta.dev())
+    {
+        mount = parent;
     }
-    parse_df(&String::from_utf8_lossy(&output.stdout))
+    Ok(mount.display().to_string())
 }
 
 /// One census file and what it is to the census.
@@ -469,7 +522,7 @@ pub(crate) fn measured(root: &Path, site: Option<&Site>) -> String {
         Ok(fs) => {
             let _ = write!(
                 out,
-                r#"{{"total_bytes":{},"used_bytes":{},"free_bytes":{},"mount":{},"source":"df -Pk"}}"#,
+                r#"{{"total_bytes":{},"used_bytes":{},"free_bytes":{},"mount":{},"source":"statvfs"}}"#,
                 fs.total,
                 fs.used,
                 fs.free,
@@ -586,25 +639,6 @@ pub(super) async fn disk_json(
 )]
 mod tests {
     use super::*;
-
-    /// `df -Pk` as macOS and Linux print it, a mount with a space, and the
-    /// refusals.
-    #[test]
-    fn df_output_is_read_by_its_capacity_column() {
-        let mac = "Filesystem     1024-blocks       Used  Available Capacity  Mounted on\n\
-                   /dev/disk7s1    7811891200 3620421632 4191469568    47%    /Volumes/WD_BLACK\n";
-        let fs = parse_df(mac).expect("read");
-        assert_eq!(fs.total, 7_811_891_200 * 1024);
-        assert_eq!(fs.used, 3_620_421_632 * 1024);
-        assert_eq!(fs.free, 4_191_469_568 * 1024);
-        assert_eq!(fs.mount, "/Volumes/WD_BLACK");
-        let spaced = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
-                      /dev/x 100 40 60 40% /Volumes/My Disk\n";
-        assert_eq!(parse_df(spaced).expect("read").mount, "/Volumes/My Disk");
-        assert!(parse_df("").is_err());
-        assert!(parse_df("Filesystem\n/dev/x 1 2 3 /m\n").is_err());
-        assert!(parse_df("h\n/dev/x a 2 3 4% /m\n").is_err());
-    }
 
     /// The census files of a sealed vendor carry their roles, the kept bytes
     /// are the superseded file and the older epoch, and a missing receipt
@@ -877,6 +911,185 @@ mod tests {
                 std::fs::remove_file(&at).unwrap();
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fields `statvfs(2)` answers for `dir`, read apart from [`measure`]:
+    /// fragment size, blocks, free blocks, blocks an unprivileged writer may
+    /// take, and the filesystem id.
+    fn statvfs_of(dir: &Path) -> (u64, u64, u64, u64, u64) {
+        let vfs = rustix::fs::statvfs(dir).expect("statvfs");
+        (
+            vfs.f_frsize,
+            vfs.f_blocks,
+            vfs.f_bfree,
+            vfs.f_bavail,
+            vfs.f_fsid,
+        )
+    }
+
+    /// **THE NUMBERS ARE WHAT `statvfs(2)` RETURNS (D-5240)**, on a temporary
+    /// directory: total is blocks, used is blocks less free blocks, free is
+    /// what an unprivileged writer may take, each in fragments; the mount
+    /// point is on the directory's own filesystem, and is the highest
+    /// directory above it that still is.
+    #[test]
+    fn the_filesystem_numbers_are_what_statvfs_returns() {
+        let dir = crate::scratch::path("disk-route-statvfs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // ONLY A QUIET READ IS COMPARED: another process may write between two
+        // reads, so a measurement counts when the fields read on each side of
+        // it agree.
+        let mut compared = 0;
+        for _ in 0..200 {
+            let before = statvfs_of(&dir);
+            let fs = measure(&dir).expect("measured");
+            if statvfs_of(&dir) != before {
+                continue;
+            }
+            let (fragment, blocks, free, available, _) = before;
+            assert_eq!(fs.total, blocks * fragment);
+            assert_eq!(fs.used, (blocks - free) * fragment);
+            assert_eq!(fs.free, available * fragment);
+            compared += 1;
+            if compared == 3 {
+                break;
+            }
+        }
+        assert_eq!(compared, 3, "the filesystem never held still across a read");
+
+        let fs = measure(&dir).expect("measured");
+        let mount = Path::new(&fs.mount);
+        assert!(mount.is_absolute(), "{}", fs.mount);
+        assert_eq!(
+            statvfs_of(mount).4,
+            statvfs_of(&dir).4,
+            "{} is not on the filesystem of {}",
+            fs.mount,
+            dir.display()
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let device = std::fs::metadata(&dir).unwrap().dev();
+            assert!(
+                std::fs::canonicalize(&dir).unwrap().starts_with(mount),
+                "{} is not above {}",
+                fs.mount,
+                dir.display()
+            );
+            assert_eq!(std::fs::metadata(mount).unwrap().dev(), device);
+            if let Some(parent) = mount.parent() {
+                assert_ne!(
+                    std::fs::metadata(parent).unwrap().dev(),
+                    device,
+                    "{} is not the highest directory on its device",
+                    fs.mount
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A MISSING STORE ROOT IS REFUSED BY NAME (D-5240)**, by `measure` and
+    /// as the whole answer's `filesystem.error`, never measured as the
+    /// filesystem around it.
+    #[test]
+    fn a_missing_root_is_refused_by_name() {
+        let dir = crate::scratch::path("disk-route-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let absent = dir.join("absent");
+        let named = absent.display().to_string();
+        let why = measure(&absent).expect_err("refused");
+        assert!(
+            why.contains(&named) && why.contains("does not exist"),
+            "{why}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&measured(&absent, None)).expect("JSON");
+        assert_eq!(parsed["filesystem"]["error"], why.as_str());
+        assert!(parsed["filesystem"].get("free_bytes").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STORE ROOT THAT IS NO DIRECTORY IS REFUSED (D-5240)**: a regular
+    /// file is not measured as the filesystem it sits on.
+    #[test]
+    fn a_root_that_is_no_directory_is_refused() {
+        let dir = crate::scratch::path("disk-route-file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("store-root-that-is-a-file");
+        std::fs::write(&file, b"x").unwrap();
+        let named = file.display().to_string();
+        let why = measure(&file).expect_err("refused");
+        assert!(
+            why.contains(&named) && why.contains("is not a directory"),
+            "{why}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&measured(&file, None)).expect("JSON");
+        assert_eq!(parsed["filesystem"]["error"], why.as_str());
+        // A path THROUGH a file is refused with the call's own error.
+        let below = file.join("below");
+        let why = measure(&below).expect_err("refused");
+        assert!(
+            why.contains(&below.display().to_string()) && why.contains("cannot be measured"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE ROUTE'S JSON SHAPE IS UNCHANGED (D-5240)**: the same top-level
+    /// keys, and the filesystem object's five in the same order with the same
+    /// types. Only `source` changes, to name the measurement now taken.
+    #[test]
+    fn the_disk_json_shape_is_unchanged() {
+        let root = crate::scratch::path("disk-route-shape");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let body = measured(&root, None);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let keys = |value: &serde_json::Value| {
+            let mut keys: Vec<String> =
+                value.as_object().expect("object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            keys(&parsed),
+            [
+                "backup",
+                "census_kept_bytes",
+                "feeds",
+                "filesystem",
+                "measured_ttl_secs",
+                "projection",
+                "projection_why",
+                "retention",
+                "schema",
+                "store"
+            ]
+        );
+        assert!(body.starts_with(r#"{"schema":1,"store":"#), "{body}");
+        let fs = &parsed["filesystem"];
+        assert_eq!(
+            keys(fs),
+            ["free_bytes", "mount", "source", "total_bytes", "used_bytes"]
+        );
+        let number = |key: &str| fs[key].as_u64().unwrap_or_else(|| panic!("{key}: {fs}"));
+        let mount = fs["mount"].as_str().expect("mount");
+        let text = format!(
+            r#""filesystem":{{"total_bytes":{},"used_bytes":{},"free_bytes":{},"mount":{},"source":"statvfs"}},"feeds":["#,
+            number("total_bytes"),
+            number("used_bytes"),
+            number("free_bytes"),
+            render::json_string(mount)
+        );
+        assert!(body.contains(&text), "{text}\nis not in\n{body}");
+        assert!(number("used_bytes") <= number("total_bytes"));
+        assert!(number("free_bytes") <= number("total_bytes"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

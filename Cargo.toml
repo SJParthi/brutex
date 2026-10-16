@@ -130,6 +130,14 @@ ruzstd   = { version = "0.8", default-features = false, features = ["std", "hash
 # AWS SDK was refused in favour of signing the one request by hand. See D-0051.
 sha2     = { version = "0.10", default-features = false }
 governor = "0.7"
+# `statvfs(2)`, and on macOS `statfs(2)`'s mount point, for `/disk.json`
+# without starting `/bin/df` (D-5240). It replaces that child process. Safe
+# wrappers are the point: `api` is `#![forbid(unsafe_code)]`, so the `libc`
+# already in this lock cannot be called from it, and `nix` exposes no mount
+# point on macOS. Rust only: raw system calls on Linux, `libc` on macOS; no C
+# and no `cc`. Its `build.rs` runs `rustc` feature probes, the same kind the
+# thirteen packages `docs/06-limits.md` §96 lists already run.
+rustix   = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
 aws-config  = "1"
 aws-sdk-ssm = "1"
 
