@@ -8052,7 +8052,14 @@ mod cloud_mutant_tests {
             label: "dhan · 1day".to_owned(),
             body: String::new(),
         };
-        conduct_with(Loaded::clone(&held), run, vec![leg], failing).await;
+        // BOUNDED, so a run that never sees its stop FAILS here rather than
+        // hanging the suite.
+        tokio::time::timeout(
+            core::time::Duration::from_mins(1),
+            conduct_with(Loaded::clone(&held), run, vec![leg], failing),
+        )
+        .await
+        .expect("the stop ends the run within one retry wait");
         stopper.await.expect("the stopper ran");
         let elapsed = started.elapsed();
         let seen = observed(&held);
@@ -8381,5 +8388,220 @@ mod cloud_mutant_tests {
         note_dead_chain(&site, run, 3, 1, &dead);
         assert_eq!(observed(&site), before);
         assert!(observed(&site).feeds.is_empty());
+    }
+
+    /// A synthetic spot receipt: `verdict`, and `wrote` bars under the spot
+    /// landing's label.
+    fn receipt_wrote(status: u16, verdict: &str, wrote: u64) -> (axum::http::StatusCode, String) {
+        let facts = vec![(BARS_WRITTEN_FACTS[0], wrote.to_string())];
+        (
+            axum::http::StatusCode::from_u16(status).expect("HTTP status"),
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict,
+                reason: "synthetic coordinator receipt",
+                good: verdict == "STORED",
+                facts: &facts,
+                footnote: "No vendor was contacted.",
+            }),
+        )
+    }
+
+    fn spot_leg(vendor: &str) -> Leg {
+        Leg {
+            route: Route::Spot,
+            vendor: vendor.to_owned(),
+            dir: "1day".to_owned(),
+            label: format!("{vendor} · 1day"),
+            body: String::new(),
+        }
+    }
+
+    /// A run whose every pass stores more bars runs EXACTLY [`MAX_PASSES`]
+    /// passes, and when its last pass leaves a leg owed it stops at the
+    /// ceiling at once, with no retry wait for a pass that can never run.
+    /// Each feed's document names how many legs it carries. Kills `passes <
+    /// MAX_PASSES` turned to `<=` (a 401st request), the retry wait's own `<`
+    /// turned to `<=` (a twenty-second sleep), the idle flag's `>=` turned
+    /// to `<` (the stop would not be the ceiling) and the deleted `legs` field.
+    #[tokio::test]
+    async fn a_run_that_grows_every_pass_stops_at_the_pass_ceiling_without_a_last_wait() {
+        let held = site("pass-ceiling");
+        let run = claim(&held);
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&asked);
+        let request = move |_site: Loaded, _leg: Leg| {
+            let nth = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            async move {
+                if nth < MAX_PASSES as usize {
+                    receipt_wrote(200, "STORED", 1)
+                } else {
+                    receipt_wrote(502, "FAILED", 0)
+                }
+            }
+        };
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            core::time::Duration::from_secs(15),
+            conduct_with(Loaded::clone(&held), run, vec![spot_leg("dhan")], request),
+        )
+        .await
+        .expect("no retry wait after the last allowed pass");
+        let elapsed = started.elapsed();
+        let seen = observed(&held);
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_PASSES as usize
+        );
+        assert_eq!(seen.passes, MAX_PASSES);
+        assert_eq!(seen.stop, Some(Stop::Ceiling), "{:?}", seen.finished);
+        assert!(elapsed < RETRY_WAIT, "{elapsed:?}");
+        assert_eq!(seen.feeds.len(), 1);
+        assert_eq!(seen.feeds[0].legs, 1, "the document names the feed's legs");
+        assert_eq!(seen.bars_written, Some(u64::from(MAX_PASSES) - 1));
+    }
+
+    /// Two feeds render as two comma-separated objects that parse (kills the
+    /// feeds separator's `nth > 0` turned to `>=`).
+    #[test]
+    fn two_feeds_render_as_valid_json() {
+        let progress = Progress {
+            feeds: vec![
+                FeedReport {
+                    vendor: "dhan".to_owned(),
+                    ..FeedReport::default()
+                },
+                FeedReport {
+                    vendor: "groww".to_owned(),
+                    ..FeedReport::default()
+                },
+            ],
+            ..Progress::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&progress.json()).expect("valid JSON");
+        assert_eq!(doc["feeds"].as_array().map(Vec::len), Some(2));
+        assert_eq!(doc["feeds"][1]["vendor"], "groww");
+    }
+
+    /// No feed with standing failures, no standing note (kills `standing >
+    /// 0` turned to `>=`).
+    #[test]
+    fn a_feed_with_no_standing_failures_is_not_named_as_standing() {
+        let progress = Progress {
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                standing: 0,
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        assert_eq!(standing_note(&progress), "");
+        let standing = Progress {
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                standing: 1,
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        assert!(standing_note(&standing).contains("dhan (1 leg(s))"));
+    }
+
+    /// A chain that died having attempted only the legs it finished counts
+    /// none as interrupted (kills `attempted > legs_done` turned to `>=`).
+    #[tokio::test]
+    async fn a_dead_chain_whose_attempts_all_returned_skips_the_rest() {
+        let site = site("dead-chain-even");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                legs: 3,
+                legs_done: 1,
+                ..FeedReport::default()
+            }];
+        });
+        let dead = tokio::spawn(async { panic!("a chain that dies on purpose") })
+            .await
+            .expect_err("the task panicked");
+        note_dead_chain(&site, run, 0, 1, &dead);
+        assert_eq!(
+            observed(&site).feeds[0].skipped,
+            2,
+            "3 legs, 1 done, none interrupted"
+        );
+    }
+
+    /// An opening record with no window is a run with no window, and one
+    /// whose window starts on day 0 keeps it (kills each `!= 0` turned to
+    /// `== 0` and the `||` turned to `&&`).
+    #[test]
+    fn a_run_record_with_no_window_is_read_as_having_none() {
+        let mut bare = opened(100);
+        bare.from_days = 0;
+        bare.to_days = 0;
+        let open = interrupted_in(&[(0, bare)]).expect("open");
+        assert_eq!(open.window, None);
+        let mut epoch = opened(100);
+        epoch.from_days = 0;
+        epoch.to_days = 5;
+        let open = interrupted_in(&[(0, epoch)]).expect("open");
+        assert_eq!(open.window, Some((0, 5)));
+    }
+
+    /// A journal the scan reads whole needs no index: with the index gone
+    /// and `audit/` taking no write it is still CLEAN, never NOT KNOWN
+    /// (kills `scan_first > 0` turned to `>=`). Root ignores modes, so this
+    /// bites for a non-root user, as the suite is meant to run.
+    #[test]
+    fn a_journal_read_whole_by_the_scan_needs_no_index() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut images = vec![opened(100).image(), closed(120).image()];
+        images.extend(failures(200, 10));
+        let journal = journal_of_images("whole-no-index", &images);
+        let index = journal.index_dir();
+        std::fs::rename(&index, index.with_extension("aside")).expect("moved aside");
+        let audit = index.parent().expect("audit/").to_path_buf();
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let found = restart_scan_waiting(&journal, 0);
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(found, Restart::Clean);
+    }
+
+    /// With the index unreadable and only member failures in the scan, the
+    /// reason says the scan holds no run record (kills the `settled` test's
+    /// `==` turned to `!=` and `&&` turned to `||`).
+    #[test]
+    fn a_scan_of_member_failures_alone_holds_no_run_record() {
+        let mut images = vec![opened(100).image()];
+        images.extend(failures(200, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("failures-alone", &images);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(why.contains("records hold no run record"), "{why}");
+    }
+
+    /// A run opened at EXACTLY the scan's first record was read with every
+    /// record after it, so with the index unreadable it is still reported
+    /// open, with the older runs named unread (kills `run.ordinal <
+    /// scan_first` turned to `<=`).
+    #[test]
+    fn a_run_opened_at_the_scans_first_record_is_open_though_the_index_is_unreadable() {
+        let mut images = failures(10, 10);
+        images.push(opened(100).image());
+        images.extend(failures(200, INTERRUPTED_SCAN - 1));
+        let journal = journal_of_images("open-at-scan-first", &images);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("it is open");
+        assert_eq!(run.ordinal, 10);
+        assert!(run.older_unread.is_some());
     }
 }
