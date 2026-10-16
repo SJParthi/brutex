@@ -2043,3 +2043,51 @@ fn a_provenance_image_that_packs_past_its_length_is_sealed_and_read() {
     let month = SealedMonth::open(built.to_bytes(), path, 4_242).unwrap();
     assert_eq!(month.provenance().unwrap(), Some(image.to_vec()));
 }
+
+/// **A SEALED HEAD'S EXTREMES CARRY THE EARLIEST BAR THAT HOLDS EACH, AND MOVE
+/// ONLY FOR A STRICTLY MORE EXTREME BAR.**
+///
+/// Kills `replace > with >=` and `replace < with <=` in `fold_extremes`
+/// (D-3326: the earlier bar keeps a tie). Four one-second bars: the first two
+/// equal, the last two equal and more extreme in every column but the
+/// smallest close. Each extreme must name the first bar of its tie: the
+/// smallest close bar 0, every other one bar 2. (The function's doc comment
+/// cites `sealed::the_head_extremes_are_the_sort_runs` as the test holding
+/// the rule; no test of that name exists in this tree.)
+#[test]
+fn a_sealed_heads_extremes_name_the_earliest_bar_of_each_tie() {
+    use store::format::{Bar, OI_NULL};
+    use store::sealed::{SealedMonth, build};
+    let path = sealed_path();
+    let open = store::path::YearMonth::new(2024, 6)
+        .unwrap()
+        .ist_bounds_micros()
+        .0
+        + 555 * 60_000_000;
+    let bar = |i: i64, (o, h, l, c, v): (i64, i64, i64, i64, i64)| Bar {
+        ts_micros: open + i * 1_000_000,
+        open: o,
+        high: h,
+        low: l,
+        close: c,
+        volume: v,
+        open_interest: OI_NULL,
+    };
+    let quiet = (1_000, 1_000, 1_000, 1_000, 10);
+    let wide = (1_000, 1_200, 900, 1_100, 20);
+    let bars = [bar(0, quiet), bar(1, quiet), bar(2, wide), bar(3, wide)];
+    let mut header = empty_month_header();
+    header.n_valid = 4;
+    header.first_ts_micros = bars[0].ts_micros;
+    header.last_ts_micros = bars[3].ts_micros;
+    let built = build(path, &header, &bars, None, None).unwrap();
+    let month = SealedMonth::open(built.to_bytes(), path, 4_242).unwrap();
+    let held = month.head().extremes;
+    let at = |i: usize| bars[i].ts_micros;
+    assert_eq!((held.close_min.v, held.close_min.ts), (1_000, at(0)));
+    assert_eq!((held.close_max.v, held.close_max.ts), (1_100, at(2)));
+    assert_eq!((held.high_max.v, held.high_max.ts), (1_200, at(2)));
+    assert_eq!((held.low_min.v, held.low_min.ts), (900, at(2)));
+    assert_eq!((held.range_max.v, held.range_max.ts), (300, at(2)));
+    assert_eq!((held.volume_max.v, held.volume_max.ts), (20, at(2)));
+}
