@@ -160,6 +160,23 @@ impl fmt::Display for Ratio {
     }
 }
 
+/// `numerator / D` rounded half-up, for a divisor this crate fixes at compile
+/// time.
+///
+/// Infallible, where [`round_half_up`] is not: every `D` this is instantiated
+/// with is a positive named constant, so the division is total, the doubled
+/// remainder (below `D`) cannot leave `i128`, and `quotient + 1` is taken only
+/// when `D ≥ 2`. A refusal arm here would be one no input could reach.
+#[must_use]
+pub(crate) const fn half_up<const D: i128>(numerator: i128) -> i128 {
+    let quotient = numerator.div_euclid(D);
+    if numerator.rem_euclid(D) * 2 >= D {
+        quotient + 1
+    } else {
+        quotient
+    }
+}
+
 /// A paisa amount rendered as rupees with two decimals: `₹73.90`, `-₹0.05`.
 ///
 /// Integer arithmetic only — a division and a remainder on the magnitude.
@@ -311,6 +328,14 @@ mod tests {
             Err(CostError::NotPositive {
                 quantity: "rate divisor",
                 value: -2
+            })
+        );
+        // A ratio over nothing never reaches a division: the rounding refuses it.
+        assert_eq!(
+            Ratio::new(1, 0).apply(paisa(10), 1, Quantum::Paisa),
+            Err(CostError::NotPositive {
+                quantity: "rounding denominator",
+                value: 0
             })
         );
     }

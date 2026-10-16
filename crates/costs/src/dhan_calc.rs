@@ -40,7 +40,7 @@ use brutex_core::price::Paisa;
 
 use crate::charge_error::ChargeError;
 use crate::error::CostError;
-use crate::exact::{Rupees, round_half_up};
+use crate::exact::{Rupees, half_up};
 use crate::money::narrow;
 use crate::schedule::{Product, TradeKind};
 
@@ -96,7 +96,7 @@ impl Exact {
     /// [`ChargeError::Cost`] carrying an overflow when it leaves `i64`.
     pub fn to_paisa(self) -> Result<Paisa, ChargeError> {
         Ok(narrow(
-            round_half_up(self.0, UNITS_PER_PAISA)?,
+            half_up::<UNITS_PER_PAISA>(self.0),
             "a calculator line",
         )?)
     }
@@ -108,7 +108,8 @@ impl Exact {
     ///
     /// [`ChargeError::Cost`] carrying an overflow when it leaves `i64`.
     pub fn to_whole_rupee(self) -> Result<Paisa, ChargeError> {
-        let rupees = round_half_up(self.0, UNITS_PER_RUPEE)?;
+        // At most i128::MAX / 10^9 rupees, so the paisa are inside i128.
+        let rupees = half_up::<UNITS_PER_RUPEE>(self.0);
         Ok(narrow(rupees * 100, "a whole-rupee calculator line")?)
     }
 }
@@ -130,7 +131,7 @@ pub struct DhanQuote {
     stamp: Exact,
     gst: Exact,
     dp: Exact,
-    total: Paisa,
+    total: Exact,
 }
 
 /// Quotes one calculator input: a kind, a venue, a quantity in units, and a
@@ -161,7 +162,7 @@ pub struct DhanQuote {
 ///     Some(Paisa::from_raw(1_520_00)),
 ///     Some(Paisa::from_raw(1_530_00)),
 /// )?;
-/// assert_eq!(q.total().raw(), 74_28);
+/// assert_eq!(q.total()?.raw(), 74_28);
 /// assert!(q.to_string().starts_with("Dhan calculator (estimate)"));
 /// # Ok::<(), costs::charge_error::ChargeError>(())
 /// ```
@@ -234,11 +235,13 @@ pub fn quote(
     let brokerage = order_brokerage(kind, buy_value) + order_brokerage(kind, sell_value);
     let exchange_charge = traded * exchange_rate;
     let sebi = traded * SEBI;
-    let exchange_for_gst = round_half_up(exchange_charge, UNITS_PER_TEN_THOUSANDTH_RUPEE)?
-        * UNITS_PER_TEN_THOUSANDTH_RUPEE;
-    let gst = round_half_up((brokerage + exchange_for_gst) * GST_PERCENT, 100)?;
-    let sum = brokerage + exchange_charge + sebi + stt + stamp + gst + dp;
-    let total = narrow(round_half_up(sum, UNITS_PER_PAISA)?, "the calculator total")?;
+    // Every line is an i64 value times a constant of at most 15,000 (or a
+    // ₹20 or ₹14.75 constant), so each is below 2^78 and their sum is far
+    // inside i128: no step here can overflow, and none is guarded.
+    let exchange_for_gst =
+        half_up::<UNITS_PER_TEN_THOUSANDTH_RUPEE>(exchange_charge) * UNITS_PER_TEN_THOUSANDTH_RUPEE;
+    let gst = half_up::<100>((brokerage + exchange_for_gst) * GST_PERCENT);
+    let total = brokerage + exchange_charge + sebi + stt + stamp + gst + dp;
 
     Ok(DhanQuote {
         kind,
@@ -254,7 +257,7 @@ pub fn quote(
         stamp: Exact(stamp),
         gst: Exact(gst),
         dp: Exact(dp),
-        total,
+        total: Exact(total),
     })
 }
 
@@ -405,8 +408,17 @@ impl DhanQuote {
     /// The total the page shows: the exact sum of the unrounded lines, half-up
     /// to the paisa. Within one paisa of the page on every case measured;
     /// the page's own last-paisa rule is UNVERIFIED.
+    ///
+    /// # Errors
+    ///
+    /// [`ChargeError::Cost`] carrying an overflow.
+    pub fn total(&self) -> Result<Paisa, ChargeError> {
+        self.total.to_paisa()
+    }
+
+    /// The total, unrounded.
     #[must_use]
-    pub const fn total(&self) -> Paisa {
+    pub const fn exact_total(&self) -> Exact {
         self.total
     }
 
@@ -421,9 +433,10 @@ impl DhanQuote {
         let (Some(bought), Some(sold)) = (self.buy_value, self.sell_value) else {
             return Err(ChargeError::OneSided { figure: "net P&L" });
         };
+        let total = self.total()?;
         sold.raw()
             .checked_sub(bought.raw())
-            .and_then(|gross| gross.checked_sub(self.total.raw()))
+            .and_then(|gross| gross.checked_sub(total.raw()))
             .map(Paisa::from_raw)
             .ok_or(ChargeError::Cost(CostError::Overflow {
                 operation: "the calculator net P&L",
@@ -439,8 +452,18 @@ impl DhanQuote {
     ///
     /// [`ChargeError::Cost`] carrying an overflow.
     pub fn points_to_breakeven(&self) -> Result<Paisa, ChargeError> {
-        let per_unit = round_half_up(i128::from(self.total.raw()), i128::from(self.quantity))?;
-        Ok(narrow(per_unit, "the calculator breakeven")?)
+        let total = self.total()?.raw();
+        // `quantity` is at least 1 -- `quote` refuses anything else -- so the
+        // division is total, the remainder is below it, and comparing the
+        // remainder with what is left of the divisor is the half-up test
+        // without doubling anything that could overflow.
+        let quotient = total.div_euclid(self.quantity);
+        let remainder = total.rem_euclid(self.quantity);
+        Ok(Paisa::from_raw(if remainder >= self.quantity - remainder {
+            quotient + 1
+        } else {
+            quotient
+        }))
     }
 }
 
@@ -475,7 +498,10 @@ impl fmt::Display for DhanQuote {
                 Err(_) => write!(f, "\n  {name}: refused (overflow)")?,
             }
         }
-        write!(f, "\n  total: {}", Rupees(self.total))
+        match self.total() {
+            Ok(amount) => write!(f, "\n  total: {}", Rupees(amount)),
+            Err(_) => f.write_str("\n  total: refused (overflow)"),
+        }
     }
 }
 
@@ -637,7 +663,9 @@ mod tests {
             Some(rs(1_530_00)),
         )
         .expect("priced");
-        assert_eq!(v1.total(), rs(74_28));
+        assert_eq!(v1.total(), Ok(rs(74_28)));
+        // 40 + 4.68175 + 0.1525 + 19.125 + 2.28 + 8.042724 = ₹74.281974, exactly.
+        assert_eq!(v1.exact_total().units(), 74_281_974_000);
         // Gross ₹500 less ₹74.28.
         assert_eq!(v1.net_pnl(), Ok(rs(425_72)));
         // ₹74.28 over 50 units: ₹1.4856 -> ₹1.49.
@@ -658,9 +686,29 @@ mod tests {
         assert_eq!(sbi.net_pnl(), Ok(rs(-442_24)));
         // The widest total still has a breakeven: a quotient never grows.
         let mut wide = v1;
-        wide.total = rs(i64::MAX);
+        wide.total = Exact(i128::from(i64::MAX) * UNITS_PER_PAISA);
         wide.quantity = 1;
         assert_eq!(wide.points_to_breakeven(), Ok(rs(i64::MAX)));
+        // A remainder of exactly half the quantity goes up; less goes down.
+        let mut half = v1;
+        half.total = Exact(5 * UNITS_PER_PAISA);
+        half.quantity = 2;
+        assert_eq!(half.points_to_breakeven(), Ok(rs(3)));
+        half.total = Exact(7 * UNITS_PER_PAISA);
+        half.quantity = 3;
+        assert_eq!(half.points_to_breakeven(), Ok(rs(2)));
+        half.total = Exact(8 * UNITS_PER_PAISA);
+        assert_eq!(half.points_to_breakeven(), Ok(rs(3)));
+        // A total too wide to show refuses every figure built on it.
+        let mut past = v1;
+        past.total = Exact(i128::MAX);
+        let refused = Err(ChargeError::Cost(CostError::Overflow {
+            operation: "a calculator line",
+        }));
+        assert_eq!(past.total(), refused);
+        assert_eq!(past.net_pnl(), refused);
+        assert_eq!(past.points_to_breakeven(), refused);
+        assert!(past.to_string().ends_with("total: refused (overflow)"));
     }
 
     #[test]

@@ -638,7 +638,7 @@ fn total_misses() -> Vec<(&'static str, i64)> {
     GOLDEN
         .iter()
         .filter_map(|case| {
-            let gap = case.page[7] - quoted(case).total().raw();
+            let gap = case.page[7] - quoted(case).total().expect("in range").raw();
             (gap != 0).then_some((case.name, gap))
         })
         .collect()
@@ -647,7 +647,7 @@ fn total_misses() -> Vec<(&'static str, i64)> {
 #[test]
 fn every_calculator_total_is_within_one_paisa_of_the_page() {
     for case in &GOLDEN {
-        let mine = quoted(case).total().raw();
+        let mine = quoted(case).total().expect("in range").raw();
         assert!(
             (case.page[7] - mine).abs() <= 1,
             "{}: page {} vs {mine}",
@@ -732,7 +732,7 @@ fn every_golden_case_has_a_precise_figure_or_a_named_refusal() {
             "| {} | {} | {} | {} |",
             case.name,
             costs::exact::Rupees(paisa(case.page[7])),
-            costs::exact::Rupees(quoted(case).total()),
+            costs::exact::Rupees(quoted(case).total().expect("in range")),
             shown
         )
         .expect("a String takes every write");
@@ -852,7 +852,7 @@ fn the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_wher
     let v1 = &GOLDEN[0];
     let q = quoted(v1);
     let precise = precise_total(v1).expect("priced");
-    assert_eq!(q.total().raw() - precise.raw(), 38);
+    assert_eq!(q.total().expect("in range").raw() - precise.raw(), 38);
     // The calculator's unrounded STT and stamp: 19.125 + 2.28 = 21.405; the
     // precise rupees: 19 + 2 = 21. Its GST: 8.042724; precise: 8.07.
     // 0.405 - (8.07 - 8.042724) = 0.377276, and the rest is the last-paisa
@@ -891,5 +891,118 @@ fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases
             assert_eq!(dated.lines(), today.lines(), "{} on {on}", case.name);
             assert_eq!(dated.total(), today.total(), "{} on {on}", case.name);
         }
+    }
+}
+
+#[test]
+fn every_golden_quote_reports_its_inputs_its_net_and_its_breakeven() {
+    // The figures the page shows beside the charges, on every reading: the
+    // net P&L is the gross less the total (refused, never zero, for a
+    // one-sided reading), and the breakeven is the total spread over the
+    // units, half-up to the paisa.
+    let mut one_sided = 0;
+    for case in &GOLDEN {
+        let q = quoted(case);
+        assert_eq!(
+            (q.kind(), q.exchange(), q.quantity()),
+            (case.kind, case.exchange, case.quantity)
+        );
+        let value = |price: Option<i64>| price.map(|p| paisa(p * case.quantity));
+        assert_eq!(q.buy_value(), value(case.buy), "{}", case.name);
+        assert_eq!(q.sell_value(), value(case.sell), "{}", case.name);
+        let turnover = q.buy_value().map_or(0, Paisa::raw) + q.sell_value().map_or(0, Paisa::raw);
+        assert_eq!(q.turnover(), paisa(turnover));
+        let total = q.total().expect("in range").raw();
+        assert_eq!(
+            q.exact_total().units(),
+            q.exact_lines()
+                .iter()
+                .map(|(_, line)| line.units())
+                .sum::<i128>()
+        );
+        match (case.buy, case.sell) {
+            (Some(buy), Some(sell)) => {
+                let gross = (sell - buy) * case.quantity;
+                assert_eq!(q.net_pnl(), Ok(paisa(gross - total)), "{}", case.name);
+            }
+            _ => {
+                one_sided += 1;
+                assert_eq!(
+                    q.net_pnl(),
+                    Err(ChargeError::OneSided { figure: "net P&L" })
+                );
+            }
+        }
+        let breakeven = q.points_to_breakeven().expect("in range").raw();
+        assert!(
+            (breakeven * case.quantity - total).abs() * 2 <= case.quantity,
+            "{}: {breakeven} x {} is not the nearest paisa to {total}",
+            case.name,
+            case.quantity
+        );
+        for line in [
+            q.brokerage(),
+            q.exchange_charge(),
+            q.sebi(),
+            q.stt(),
+            q.stamp(),
+            q.gst(),
+            q.dp(),
+        ] {
+            assert!(line.expect("in range").raw() >= 0, "{}", case.name);
+        }
+    }
+    assert_eq!(
+        one_sided, 4,
+        "O1 and the three Vodafone Idea BSE buy-only readings"
+    );
+}
+
+#[test]
+fn every_calculator_refusal_reaches_a_caller_outside_the_crate_by_name() {
+    use costs::error::CostError;
+    // What the page shows as 0 or NaN, refused by name through the public
+    // surface a report or the UI would call.
+    let refused = |quantity, buy: Option<i64>, sell: Option<i64>| {
+        quote(I, NSE, quantity, buy.map(paisa), sell.map(paisa)).expect_err("refused")
+    };
+    let not_positive =
+        |quantity, value| ChargeError::Cost(CostError::NotPositive { quantity, value });
+    assert_eq!(
+        refused(0, Some(1_520_00), Some(1_530_00)),
+        not_positive("quantity", 0)
+    );
+    assert_eq!(
+        refused(-50, Some(1_520_00), None),
+        not_positive("quantity", -50)
+    );
+    assert_eq!(
+        refused(50, Some(0), Some(1_530_00)),
+        not_positive("buy price", 0)
+    );
+    assert_eq!(
+        refused(50, Some(1_520_00), Some(-1)),
+        not_positive("sell price", -1)
+    );
+    assert_eq!(refused(50, None, None), ChargeError::NoOrder);
+    assert_eq!(
+        refused(i64::MAX, Some(2), None),
+        ChargeError::Cost(CostError::Overflow {
+            operation: "calculator quantity x price"
+        })
+    );
+    assert_eq!(
+        refused(1, Some(i64::MAX), Some(1)),
+        ChargeError::Cost(CostError::Overflow {
+            operation: "the calculator turnover"
+        })
+    );
+    for kind in [FUT, OPT] {
+        assert_eq!(
+            quote(kind, BSE, 65, Some(paisa(100_00)), None).expect_err("never read"),
+            ChargeError::NotOnPage {
+                what: "BSE futures and options"
+            }
+        );
     }
 }
