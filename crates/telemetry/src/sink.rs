@@ -7866,7 +7866,12 @@ mod tests {
               test that cannot panic cannot fail."
 )]
 mod cloud_mutant_tests {
-    use super::{FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Pair, Rationed};
+    use super::{
+        Audit, EventKeys, FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Held, Pair, Rationed, Reap, Retired,
+        audit_gone_is_ours, is_day_text, postings_of, reaper,
+    };
+    use crate::event::Event;
+    use std::sync::atomic::Ordering;
 
     /// The key `Flood::admit` files a pair under, computed the same way.
     fn key_of(target: &str, message: &str) -> u64 {
@@ -7944,5 +7949,198 @@ mod cloud_mutant_tests {
         want.sort_unstable();
         assert_eq!(kept, want, "the new pair is followed in the room made");
         assert_eq!(flood.pairs[&new].written, 1, "and its first line counted");
+    }
+
+    /// **A DAY IS EXACTLY `YYYY-MM-DD`.**
+    ///
+    /// Kills `replace is_day_text -> bool with true` and `replace && with ||`
+    /// after the length test: either files a 10-byte text that is not a day,
+    /// or any text at all, under the `day` dimension of the audit index, so a
+    /// probe for a real day would share its posting with garbage.
+    #[test]
+    fn only_a_ten_byte_dashed_date_is_a_day() {
+        assert!(is_day_text("2026-10-16"));
+        for not_a_day in [
+            "2026x10-16",
+            "2026-10x16",
+            "2026/10/16",
+            "20261016ab",
+            "2026-10-1",
+            "2026-10-16T",
+            "",
+        ] {
+            assert!(!is_day_text(not_a_day), "{not_a_day:?}");
+        }
+    }
+
+    /// **AN EVENT'S `month` IS POSTED ONLY WHEN IT IS `YYYY-MM`; OTHERWISE
+    /// ITS DAY'S MONTH IS.**
+    ///
+    /// Kills `replace == with !=` and `replace && with ||` in the month filter
+    /// of `postings_of`: the first refuses every real month (an event naming
+    /// only `month = "2026-10"` would carry no month posting), the second
+    /// posts any seven-byte text as a month in place of the day's own.
+    #[test]
+    fn a_month_is_posted_only_when_it_is_one() {
+        let month_of = |event: &Event<'_>| {
+            postings_of(&EventKeys(event, 0))[1]
+                .as_deref()
+                .map(str::to_owned)
+        };
+        let alone = Event::error("cloud.audit", "refused").with("month", "2026-10");
+        assert_eq!(month_of(&alone).as_deref(), Some("2026-10"));
+        let both = Event::error("cloud.audit", "refused")
+            .with("month", "2026-10")
+            .with("day", "2026-09-15");
+        assert_eq!(month_of(&both).as_deref(), Some("2026-10"), "named wins");
+        let seven_not_a_month = Event::error("cloud.audit", "refused")
+            .with("month", "2026-1x")
+            .with("day", "2026-09-15");
+        assert_eq!(
+            month_of(&seven_not_a_month).as_deref(),
+            Some("2026-09"),
+            "the day's month, not seven bytes of garbage"
+        );
+        let long = Event::error("cloud.audit", "refused").with("month", "2026-10-01");
+        assert_eq!(month_of(&long), None);
+    }
+
+    /// A directory of this module's own, emptied first.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-telemetry-cloud-unit-{name}-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// **A NAME THAT CANNOT BE ASKED ABOUT IS NOT "NOTHING THERE".**
+    ///
+    /// Kills `replace match guard e.kind() == NotFound with true` in
+    /// `audit_gone_is_ours`: it answers `Ok(None)` for every refusal, so a
+    /// `audit.idx.gone` the host will not describe (here: below a regular
+    /// file, `ENOTDIR`) would be taken for absent and created or listed past.
+    #[test]
+    fn a_gone_folder_that_cannot_be_asked_about_is_refused() {
+        let dir = scratch("gone-unaskable");
+        assert_eq!(audit_gone_is_ours(&dir.join("absent")), Ok(None));
+        let held = audit_gone_is_ours(&dir)
+            .expect("a directory")
+            .expect("there");
+        assert_ne!(held, Held { dev: 0, ino: 0 });
+        let file = dir.join("a-file");
+        std::fs::write(&file, b"x").expect("a file");
+        let said = audit_gone_is_ours(&file.join("audit.idx.gone"))
+            .expect_err("below a file nothing can be asked about");
+        assert!(said.to_lowercase().contains("not a directory"), "{said}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs the reaper over `jobs` to the end, on this thread.
+    fn reap_all(jobs: Vec<Retired>, reap: &Reap) {
+        let (send, receive) = std::sync::mpsc::channel();
+        for job in jobs {
+            send.send(job).expect("the channel is open");
+        }
+        drop(send);
+        reaper(&receive, reap);
+    }
+
+    /// **A RETIRED GENERATION ALREADY GONE IS REAPED, NOT A FAILURE; ONE THAT
+    /// IS THERE IS DELETED.**
+    ///
+    /// Kills `replace reaper with ()` (nothing is ever deleted; caught before
+    /// only by a test that timed out waiting) and `replace match guard
+    /// e.kind() == NotFound with false` in `reaper` (an entry something else
+    /// already removed is counted as a failed delete and the stream turns
+    /// loud for ever).
+    #[test]
+    fn the_reaper_deletes_what_is_there_and_counts_what_is_gone_as_done() {
+        let gone = scratch("reaper-done");
+        let held = audit_gone_is_ours(&gone).expect("asked").expect("there");
+        let there = gone.join("4");
+        std::fs::create_dir_all(there.join("instrument")).expect("a generation");
+        std::fs::write(there.join("instrument").join("VBL.idx"), [0u8; 32]).expect("a posting");
+        let reap = Reap::default();
+        reap.waiting.store(2, Ordering::Relaxed);
+        reap_all(
+            vec![
+                Retired {
+                    path: there.clone(),
+                    gone: held,
+                },
+                Retired {
+                    path: gone.join("5"),
+                    gone: held,
+                },
+            ],
+            &reap,
+        );
+        assert!(!there.exists(), "deleted");
+        assert_eq!(reap.reaped.load(Ordering::Relaxed), 2);
+        assert_eq!(reap.failures.load(Ordering::Relaxed), 0);
+        assert_eq!(reap.waiting.load(Ordering::Relaxed), 0);
+        assert_eq!(*reap.said.lock().expect("unpoisoned"), None);
+        let _ignored = std::fs::remove_dir_all(&gone);
+    }
+
+    /// **A DELETE REFUSED BECAUSE THE FOLDER CHANGED IS COUNTED AND NAMED.**
+    ///
+    /// Kills `replace Reap::fail with ()`: a refusal would leave no count and
+    /// no words, so `reap_failures` reads 0 while the entry stays on disk.
+    /// Caught before only by a timeout.
+    #[test]
+    fn a_refused_delete_is_counted_and_named() {
+        let gone = scratch("reaper-refused");
+        let entry = gone.join("4");
+        std::fs::create_dir_all(&entry).expect("a generation");
+        let reap = Reap::default();
+        reap.waiting.store(1, Ordering::Relaxed);
+        reap_all(
+            vec![Retired {
+                path: entry.clone(),
+                gone: Held { dev: 0, ino: 0 },
+            }],
+            &reap,
+        );
+        assert!(entry.exists(), "never deleted through a changed folder");
+        assert_eq!(reap.failures.load(Ordering::Relaxed), 1);
+        assert_eq!(reap.reaped.load(Ordering::Relaxed), 0);
+        assert_eq!(reap.waiting.load(Ordering::Relaxed), 1, "still waiting");
+        let said = reap.said.lock().expect("unpoisoned").clone();
+        assert!(
+            said.as_deref()
+                .is_some_and(|why| why.contains("is no longer the folder")),
+            "{said:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&gone);
+    }
+
+    /// **AN OPEN STREAM HAS A REAPER TO HAND RETIRED GENERATIONS TO.**
+    ///
+    /// Kills `replace Audit::start_reaper -> Result<(), String> with Ok(())`
+    /// and the same of `Audit::start_reaper_with`: neither starts the thread
+    /// nor keeps its channel, so every roll's retired generation waits for
+    /// ever. Caught before only by tests that timed out waiting.
+    #[test]
+    fn an_open_audit_stream_holds_its_reapers_channel() {
+        let dir = scratch("reaper-started");
+        let (audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        assert!(audit.reaper.is_some(), "the reaper's channel is held");
+        drop(audit);
+
+        let (mut audit, _said) = Audit::open(&dir, 8);
+        let mut spawned = false;
+        let answer = audit.start_reaper_with(|_jobs, _reap| {
+            spawned = true;
+            Ok(())
+        });
+        assert_eq!(answer, Ok(()));
+        assert!(spawned, "the start is asked for");
+        assert!(audit.reaper.is_some());
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
