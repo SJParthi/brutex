@@ -5492,4 +5492,72 @@ mod cloud_mutant_tests {
         assert!(at_three.runs.is_empty(), "the run AT the cover is not read");
         assert_eq!(at_three.malformed, 0);
     }
+
+    /// A build that meets another writer's lock does nothing and SAYS it was
+    /// busy (kills the deleted `busy` field).
+    #[test]
+    fn a_build_under_another_writers_lock_says_it_was_busy() {
+        let root = scratch("build-busy");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let holder = Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&journal.path)
+                .expect("the journal handle"),
+            journal.path.clone(),
+        )
+        .expect("nothing else holds it");
+        let built = journal.build_index().expect("a busy lock is no failure");
+        drop(holder);
+        assert!(built.busy);
+        assert_eq!((built.records, built.covered), (0, 0), "nothing was done");
+    }
+
+    /// An index AHEAD of its journal (the journal cut back in place, same
+    /// inode) is rebuilt from scratch, saying why, never trusted as it is
+    /// (kills the guard `covered <= first` turned to `true`).
+    #[test]
+    fn an_index_ahead_of_its_journal_is_rebuilt_from_scratch() {
+        let root = scratch("index-ahead");
+        let journal = Journal::at(&root);
+        journal.append(&member("a gap")).expect("lands");
+        journal.append(&member("a gap")).expect("lands");
+        journal.append(&run_record()).expect("a run at 2");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal.path)
+            .expect("open")
+            .set_len(RECORD_LEN_U64)
+            .expect("cut back to one record");
+        let built = journal.build_index().expect("rebuilt");
+        assert!(built.from_scratch);
+        assert_eq!(
+            built.why.as_deref(),
+            Some("the index covered 3 records and the journal held 1")
+        );
+        assert_eq!(built.covered, 1);
+        let index = journal.read_index(1).expect("reads");
+        assert!(index.runs.is_empty());
+    }
+
+    /// A half-built index that cannot be cleared is refused with the CLEAR's
+    /// own error, not with what a build over it would have met later (kills
+    /// the guard `e.kind() != NotFound` turned to `false`).
+    #[test]
+    fn a_half_built_index_that_cannot_be_cleared_is_refused_by_the_clears_error() {
+        let root = scratch("building-file-error");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let dir = journal.index_dir();
+        std::fs::remove_dir_all(&dir).expect("the index is removed");
+        let building = dir.with_extension(format!("{INDEX_SUFFIX}.building"));
+        std::fs::write(&building, b"a file, not a half-built index").expect("write");
+        let why = journal.build_index().expect_err("refused");
+        assert_eq!(
+            why,
+            format!("{}: Not a directory (os error 20)", building.display())
+        );
+    }
 }
