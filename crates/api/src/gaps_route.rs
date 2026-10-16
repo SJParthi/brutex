@@ -3278,4 +3278,251 @@ mod cloud_mutant_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // ---- lines no test ran (coverage) ------------------------------------
+
+    /// **A RANGE PAST ITS CEILING STOPS AND SAYS SO, AND DECEMBER ROLLS INTO
+    /// THE NEXT YEAR.** Runs `span_of`'s truncation return and `next_month`'s
+    /// December arm.
+    #[test]
+    fn a_span_rolls_december_and_stops_at_its_ceiling_by_name() {
+        let (span, truncated) = span_of(month(2024, 12), month(2025, 2), 240);
+        assert_eq!(span, vec![month(2024, 12), month(2025, 1), month(2025, 2)]);
+        assert!(!truncated);
+        let (span, truncated) = span_of(month(2000, 1), month(2030, 12), 12);
+        assert_eq!(span.len(), 12);
+        assert_eq!(span.last(), Some(&month(2000, 12)));
+        assert!(truncated, "the ceiling is said, never a silent take");
+    }
+
+    /// **THE RECORD'S CALENDAR KEEPS A SESSION OF UNKNOWN LENGTH UNKNOWN, AND
+    /// A DAY PAST WHAT IT SOURCES UNMEASURED.** A session the record says
+    /// traded with a length it does not know owes nothing and loses nothing;
+    /// a day after `SOURCED_LAST_DAY` is not called closed. Runs
+    /// `record_calendar`'s `OpenLengthUnmeasured` and `Unmeasured` arms.
+    #[test]
+    fn the_record_keeps_unknown_lengths_and_unsourced_days_unmeasured() {
+        use pull::calendar::DayKind;
+        // THE FIRST SUCH DAY THE RECORD HOLDS, found rather than named: a
+        // special session sourced later moves it, and the arm stays covered.
+        let muhurat = (pull::calendar::SOURCED_FIRST_DAY..=pull::calendar::SOURCED_LAST_DAY)
+            .find(|day| pull::calendar::exchange_kind_of(*day) == DayKind::OpenLengthUnmeasured)
+            .expect("the record holds a session of unmeasured length");
+        let record = record_calendar(muhurat - 3, muhurat + 3);
+        assert_eq!(record.kind_of(muhurat), DayKind::OpenLengthUnmeasured);
+
+        let past = pull::calendar::SOURCED_LAST_DAY + 3;
+        assert_eq!(pull::calendar::exchange_kind_of(past), DayKind::Unmeasured);
+        let record = record_calendar(pull::calendar::SOURCED_LAST_DAY - 5, past);
+        assert_eq!(record.kind_of(past), DayKind::Unmeasured);
+    }
+
+    /// **A CARVING THAT WOULD NEED MORE WINDOWS THAN A SESSION HOLDS IS A
+    /// SESSION OF UNKNOWN LENGTH**: 2020-03-13's halt cutting the first of two
+    /// windows leaves three runs. Runs `carved`'s `None`.
+    #[test]
+    fn a_carving_past_the_window_limit_is_a_session_of_unknown_length() {
+        let two_windows = pull::calendar::Observed::from_runs(18_334, &[(555, 700), (800, 929)])
+            .session
+            .expect("two windows are a session");
+        assert_eq!(carved(18_334, two_windows), None);
+    }
+
+    /// **A SOURCED HALT'S MINUTES ARE `halted`, A SUSPECTED ONE'S
+    /// `halt-suspected`, AND A CONTRACT'S MINUTES PAST EXPIRY `expired`.**
+    /// Runs `run_word`'s sourced-halt arm, which no fixture reached.
+    #[test]
+    fn a_minute_inside_a_sourced_halt_is_halted() {
+        use pull::gaps::{Gap, Reason};
+        let gap = |day: i64, from: u16, to: u16, reason: Reason| Gap {
+            day,
+            from,
+            to,
+            reason,
+        };
+        let outage = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        assert_eq!(
+            run_word(&gap(outage, 700, 710, Reason::OutsideWindow), false, None),
+            "halted"
+        );
+        assert_eq!(
+            run_word(&gap(18_334, 570, 580, Reason::OutsideWindow), false, None),
+            "halt-suspected"
+        );
+        assert_eq!(
+            run_word(
+                &gap(outage, 700, 710, Reason::OutsideWindow),
+                false,
+                Some(outage - 1)
+            ),
+            "expired"
+        );
+    }
+
+    /// **AN ABSENT OR SHORT BOUND IS NAMED `null`, NOT A DATE.** Runs
+    /// `gaps_body`'s `day_text` refusal for a day no calendar can name.
+    #[test]
+    fn a_bound_no_calendar_can_name_is_null() {
+        let calendar = calendar_of(
+            "record",
+            (epoch_day(2025, 5, 1), i64::MAX),
+            &[month(2025, 5)],
+        );
+        assert!(calendar["last"].is_null(), "{calendar}");
+        assert_eq!(calendar["first"], "2025-05-01");
+    }
+
+    /// **A FULL VOTE MAP IS A NAMED `429`, AND A FINISHED BUILD'S REFUSAL IS
+    /// ANSWERED WITH ITS OWN STATUS** — or `500` for a status no answer can
+    /// carry. Runs `votes_full` and `vote_of`'s refusal arm.
+    #[test]
+    fn a_full_vote_map_and_a_refused_build_answer_by_name() {
+        let (status, headers, body) = votes_full();
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(
+            body.contains(&crate::calendar_of::build::MAX_BUILDS.to_string())
+                && body.contains("calendar=record"),
+            "{body}"
+        );
+        let refused = vote_of(Err((503, "the pool said no".to_owned()))).expect_err("refused");
+        assert_eq!(refused.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.2, "the pool said no");
+        let nonsense = vote_of(Err((1_000, String::new()))).expect_err("refused");
+        assert_eq!(nonsense.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// One one-second bar `second` seconds past IST midnight of `day`.
+    fn second_bar(day: i64, second: i64) -> store::format::Bar {
+        store::format::Bar {
+            ts_micros: (day * 86_400 - 19_800 + second) * 1_000_000,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        }
+    }
+
+    /// **WITH NO CALENDAR GIVEN THE TYPED TABLE DECIDES, A HELD SECOND NO
+    /// SESSION OWES IS OUTSIDE, AND A DAY HOLDING EVERY OWED SECOND HAS NO
+    /// LONGEST RUN.** Runs `second_audit`'s table fallback and its in-session
+    /// outside count, `trade_days`' table fallback, and the `null` longest run
+    /// `one_second_members` draws for a whole day.
+    #[test]
+    fn a_whole_day_by_the_table_has_no_missing_second() {
+        let day = epoch_day(2025, 5, 2);
+        let mut rows: Vec<store::format::Bar> = (33_300..55_800)
+            .map(|second| second_bar(day, second))
+            .collect();
+        rows.insert(0, second_bar(day, 30_000));
+        let audit = second_audit(&rows, day, day, None, 1);
+        assert_eq!(
+            (audit.expected, audit.held, audit.missing),
+            (22_500, 22_500, 0)
+        );
+        assert_eq!(audit.outside, 1, "08:20:00 is held and owed by no session");
+        assert_eq!(audit.days.len(), 1);
+        assert_eq!(audit.days[0].longest, None);
+        let members = one_second_members(&rows, day, day, None, false, None, 1, None, (0, 0));
+        assert!(members.contains(r#""longest_run":null"#), "{members}");
+
+        let days = trade_days(&rows, day, day, None, None);
+        assert_eq!((days.sessions, days.held), (1, 1));
+        assert!(days.without.is_empty());
+    }
+
+    /// **PAST `MAX_GAPS` LISTED RUNS THE LIST STOPS AND SAYS SO**, while every
+    /// run is still counted. Runs `close_run`'s truncation.
+    #[test]
+    fn past_max_gaps_listed_runs_the_list_is_truncated_by_name() {
+        let mut audit = SecondAudit::default();
+        let mut day = SecondDay {
+            day: 1,
+            expected: 0,
+            held: 0,
+            missing: 0,
+            longest: None,
+        };
+        let runs = u32::try_from(pull::gaps::MAX_GAPS).expect("small") + 3;
+        for at in 0..runs {
+            let mut open = Some((at * 10, at * 10 + 4));
+            close_run(&mut audit, &mut day, &mut open, 1);
+        }
+        assert_eq!(audit.runs.len(), pull::gaps::MAX_GAPS);
+        assert!(audit.truncated);
+        assert_eq!(audit.run_count, u64::from(runs));
+    }
+
+    /// **A MALFORMED AUDIT IS A `400` NAMING WHAT IS WRONG**, and so is a
+    /// symbol the store cannot name when the census is asked to find it.
+    /// Runs `gaps_json`'s parse refusal and `identity_in_census`'s symbol
+    /// refusal.
+    #[tokio::test]
+    async fn a_malformed_audit_and_an_unnamable_symbol_are_refused_by_name() {
+        let root = crate::server::tests::store_root("cloud-gaps-malformed");
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-malformed", None, None),
+            &root,
+        ));
+        for (query, word) in [
+            (
+                "feed=nobody&symbol=NIFTY&timeframe=1min&month=2025-05",
+                "feed",
+            ),
+            (
+                "feed=gdfl&symbol=not%20a%20symbol&timeframe=1s&month=2025-05",
+                "is not a symbol the store can name",
+            ),
+        ] {
+            let uri: axum::http::Uri = format!("/gaps.json?{query}").parse().expect("a URI");
+            let (code, _, body) = gaps_json(axum::extract::State(Loaded::clone(&site)), uri).await;
+            assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{query}: {body}");
+            assert!(body.contains(word), "{query}: {body}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A ONE-SECOND SHARE IS TRADE-DRIVEN AND AUDITED ON THE EXCHANGE
+    /// CALENDAR, NOT THE CASH SCHEDULE** (D-3336 §2): it owes no count. Runs
+    /// `audit_one`'s trade-driven cash arm.
+    #[tokio::test]
+    async fn a_one_second_share_owes_no_count() {
+        let root = crate::server::tests::store_root("cloud-gaps-second-share");
+        let day = epoch_day(2025, 5, 2);
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "CASH",
+            symbol: "RELIANCE",
+            contract: None,
+            timeframe: store::path::Timeframe::SECOND_1,
+            month: month(2025, 5),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("RELIANCE") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(&root, path, id).expect("a file");
+        file.append(&[second_bar(day, 33_300)]).expect("one print");
+        drop(file);
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-second-share", None, None),
+            &root,
+        ));
+        let uri: axum::http::Uri =
+            "/gaps.json?feed=gdfl&exchange=NSE&segment=CASH&symbol=RELIANCE&timeframe=1s&month=2025-05"
+                .parse()
+                .expect("a URI");
+        let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], true, "{audited}");
+        assert_eq!(audited["expected"], 0);
+        assert_eq!(audited["lost_minutes"], 0);
+        assert_eq!(audited["days_held"], 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

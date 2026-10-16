@@ -232,6 +232,96 @@ mod spot_rs {
             Spot::OutsideMonth
         );
     }
+
+    /// **A ZERO STAMP IS NEVER A BRACKET** (DB-039): the record before `t`
+    /// stamped at the epoch is the zero-filled extent `store::file`
+    /// documents, so a miss beside it is `spot_order_broken`, not a named
+    /// absence. January 1970 is a month the store files, and 1970-01-01 05:30
+    /// IST — the epoch — lies on its minute grid. Runs `spot_at`'s return of a
+    /// verdict that is not `NoBar`, which no test reached.
+    #[test]
+    fn a_miss_beside_a_zero_stamp_is_order_broken() {
+        let scratch = Scratch::new("spot-zero-stamp");
+        let january = YearMonth::new(1970, 1).expect("the store's first month");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            january,
+            &[(0, 100), (60, 101)],
+        );
+        let file = api::bars::open(
+            scratch.root(),
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            january,
+            None,
+        )
+        .expect("the generated month opens");
+        assert_eq!(
+            spot::close_at(&file, january, 30_000_000).expect("read"),
+            Spot::OrderBroken
+        );
+        assert_eq!(
+            spot::close_at(&file, january, 60_000_000).expect("read"),
+            Spot::At {
+                close: 101,
+                ts_micros: 60_000_000,
+            },
+            "a hit is still a hit"
+        );
+    }
+
+    /// **A FULL STORE-READ POOL IS A NAMED `429` WITH `Retry-After`** through
+    /// the handler itself (DB-066, DB-G80). Every slot is held by a read that
+    /// waits on this test; the handler is then refused at admission. Runs
+    /// `spot_json`'s refusal arm, which no test reached: the route's own test
+    /// called `not_admitted` directly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spot_json_is_refused_by_name_when_every_store_read_slot_is_held() {
+        let scratch = spot_store("spot-saturated");
+        let masters = scratch.root().join("masters");
+        std::fs::create_dir_all(&masters).expect("an empty master root");
+        let site: api::server::Loaded =
+            std::sync::Arc::new(api::server::Site::load(&masters, scratch.root()));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(
+            api::detail::MAX_STORE_READ_CONCURRENT + 1,
+        ));
+        let holders: Vec<_> = (0..api::detail::MAX_STORE_READ_CONCURRENT)
+            .map(|_| {
+                let release = std::sync::Arc::clone(&release);
+                tokio::spawn(api::detail::run_store_read(move || {
+                    let _ = release.wait();
+                }))
+            })
+            .collect();
+        // THE POOL IS FULL ONCE A PROBE IS REFUSED: each holder takes its
+        // slot before its closure runs, so this waits only for them to start.
+        let mut full = false;
+        for _ in 0..200 {
+            if api::detail::run_store_read(|| ()).await == Err(api::detail::RunError::Saturated) {
+                full = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let uri: axum::http::Uri = format!("/spot.json?{}", spot_query(&[open_second()]))
+            .parse()
+            .expect("a URI");
+        let (status, headers, body) = spot::spot_json(axum::extract::State(site), uri).await;
+        let _ = release.wait();
+        for holder in holders {
+            assert_eq!(holder.await.expect("joined"), Ok(()));
+        }
+        assert!(full, "the holders never filled the pool");
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(headers[axum::http::header::RETRY_AFTER], "1");
+        assert!(body.contains("a spot read"), "{body}");
+    }
 }
 
 /// `ladder.rs`.
@@ -407,6 +497,42 @@ mod ladder_rs {
         let held = probing(&census);
         assert!(held(&key(1)));
         assert!(!held(&key(2)));
+    }
+
+    /// **AN OPTION WAITS ON THE FUTURES LEG UNDER THE FUTURES' OWN SEGMENT
+    /// ONCE SPOT IS WHOLE.** With spot held at both rungs, an expired-options
+    /// pass is refused for the futures day pass, probed under `FNO` — the arm
+    /// of the leg gate that names a derivative predecessor, which no test
+    /// reached: each one that asked an option stopped at spot first.
+    #[test]
+    fn ladder_an_option_waits_on_futures_once_spot_is_whole() {
+        let option = Wanted {
+            leg: Leg::Option,
+            symbol: sym("NIFTY"),
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            month: month(3),
+        };
+        let probed = std::cell::RefCell::new(Vec::new());
+        let held = |k: &EntryKey| {
+            probed.borrow_mut().push((k.segment, k.timeframe));
+            k.segment == Segment::Index
+        };
+        let gated = gate(held, Feed::Zerodha, Timeframe::DAY_1, &[option]);
+        assert_eq!(
+            gated,
+            Gate::LegFirst {
+                needs: Leg::Future,
+                at: Timeframe::DAY_1,
+                missing: 1,
+                of: 1,
+            }
+        );
+        assert_eq!(
+            probed.borrow().last().copied(),
+            Some((Segment::Fno, Timeframe::DAY_1)),
+            "the futures leg is probed under its own segment"
+        );
     }
 }
 

@@ -940,4 +940,101 @@ mod cloud_mutant_tests {
         assert_eq!(session_before(day(6)), Some(day(5)));
         assert_eq!(session_before(day(5)), Some(day(2)));
     }
+
+    /// **TWO DAY BARS OF ADJACENT SESSIONS ARE MEASURED**: a day bar spans its
+    /// session, so the intraday rules (halt, phase, bucket) do not apply to
+    /// it. Runs `judge`'s day-rung return, which no test reached.
+    #[test]
+    fn two_day_bars_of_adjacent_sessions_are_measured() {
+        let daily = rules("INDEX", "NIFTY", Timeframe::DAY_1);
+        let midnight = |d: u8| {
+            day_start(i64::from(
+                pull::session::Day::new(2025, 5, d)
+                    .expect("a day")
+                    .days_from_epoch(),
+            ))
+        };
+        assert_eq!(
+            daily.judge(&bar_at(midnight(5)), &bar_at(midnight(6))),
+            None
+        );
+        assert_eq!(
+            daily.phase_word(&bar_at(midnight(6))),
+            None,
+            "no phase on a day rung"
+        );
+    }
+
+    /// **A SERIES ON NO NSE VENUE HAS NO HALT AND NO PHASE BETWEEN ANY TWO
+    /// BARS.** `judge` stops before asking for such a series; these are the
+    /// helpers' own answers, which no test reached.
+    #[test]
+    fn a_series_on_no_venue_has_no_halt_and_no_phase() {
+        let other = rules("TESTSEG", "WINDOWTEST", Timeframe::SECOND_1);
+        let (day, seconds) = index_halt();
+        let second = |s: u32| day_start(day) + i64::from(s) * MICROS;
+        assert!(!other.halted_between(second(seconds.from), second(seconds.resume)));
+        assert!(!other.phases_differ(day, second(33_300), second(seconds.from)));
+        assert_eq!(other.phase_word(&bar_at(second(33_300))), None);
+    }
+
+    /// **A SHARE THE UNIVERSE NAMES NO ISIN FOR HAS NO CLOSING-AUCTION FLAG**,
+    /// and neither does a day before the epoch: both are `Unknown`, never
+    /// `NotEligible`. Runs `eligibility`'s two early returns.
+    #[test]
+    fn eligibility_is_unknown_without_an_identity_or_a_day() {
+        let unknown = rules("CASH", "NOSUCHSHARE", Timeframe::MINUTE_1);
+        assert!(unknown.cash_identity.is_none());
+        assert_eq!(unknown.eligibility(20_000), CasEligibility::Unknown);
+        let known = rules("CASH", "RELIANCE", Timeframe::MINUTE_1);
+        assert!(known.cash_identity.is_some());
+        assert_eq!(known.eligibility(-1), CasEligibility::Unknown);
+    }
+
+    /// **EVERY PHASE HAS ITS OWN WIRE WORD.** Runs the four arms of
+    /// `phase_word` no stored fixture reached.
+    #[test]
+    fn every_phase_has_its_own_wire_word() {
+        let words = [
+            (Phase::Closed, "closed"),
+            (Phase::BeforeOpen, "before_open"),
+            (Phase::PreOpen, "pre_open"),
+            (Phase::Continuous, "continuous"),
+            (Phase::Halted, "halted"),
+            (Phase::ReopeningAuction, "reopening_auction"),
+            (Phase::Break, "break"),
+            (Phase::ClosingAuction, "cas"),
+            (Phase::PostClose, "post_close"),
+            (Phase::Unverified, "unverified"),
+        ];
+        for (phase, word) in words {
+            assert_eq!(phase_word(phase), word, "{phase:?}");
+        }
+    }
+
+    /// **A LEDGER THAT EXISTS AND WILL NOT READ IS SAID, NOT READ AS EMPTY.**
+    /// A directory where `imports/gdfl.lineage` should be passes the `stat`
+    /// and refuses the read: the fault names the path and says no lineage was
+    /// applied. Runs `Lineage::read`'s read-refusal arm.
+    #[test]
+    fn a_ledger_that_will_not_read_is_said_and_applies_nothing() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-cloud-ledger-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(pull::gdfl_lineage::lineage_path(&root))
+            .expect("a directory where the ledger should be");
+        let lineage = Lineage::read(&root, Vendor::Gdfl);
+        let _ = std::fs::remove_dir_all(&root);
+        let fault = lineage.fault.clone().expect("the refusal is said");
+        assert!(
+            fault.starts_with("cannot read ") && fault.ends_with("no lineage was applied"),
+            "{fault}"
+        );
+        assert!(fault.contains("gdfl.lineage"), "{fault}");
+        assert!(lineage.ledger.is_none());
+        assert_eq!(lineage.status_of("NSE-FNO-NIFTY"), None);
+    }
 }

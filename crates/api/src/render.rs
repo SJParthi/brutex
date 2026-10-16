@@ -5628,10 +5628,11 @@ mod cloud_mutant_tests {
     /// child it runs: the child prints what the walk found and stops.
     const SUGGESTIONS_CHILD: &str = "BRUTEX_CLOUD_MUTANT_SUGGESTIONS_CHILD";
 
-    /// What `folder_suggestions` answers in a child of this test binary whose
+    /// What `folder_suggestions` answers, and the fine print `folder_input`
+    /// draws under an empty list, in a child of this test binary whose
     /// environment is `home` and `switch`: the process environment is read
     /// in the child, so this process's is never changed.
-    fn suggestions_in_child(home: &std::path::Path, switch: Option<&str>) -> String {
+    fn suggestions_in_child(home: &std::path::Path, switch: Option<&str>) -> (String, String) {
         let mut child = std::process::Command::new(std::env::current_exe().expect("this binary"));
         child
             .args([
@@ -5653,11 +5654,13 @@ mod cloud_mutant_tests {
             "child failed or ran no test:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        stdout
-            .lines()
-            .find_map(|line| line.split_once("SUGGESTED=").map(|(_, found)| found))
-            .expect("the child says what it found")
-            .to_owned()
+        let said = |key: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.split_once(key).map(|(_, found)| found.to_owned()))
+                .expect("the child says what it found")
+        };
+        (said("SUGGESTED="), said("NOTE="))
     }
 
     /// **FOLDER SUGGESTIONS ARE ON UNLESS TURNED OFF, A WORD THE SWITCH DOES
@@ -5670,6 +5673,9 @@ mod cloud_mutant_tests {
     fn folder_suggestions_follow_their_switch_and_walk_home() {
         if std::env::var_os(SUGGESTIONS_CHILD).is_some() {
             println!("SUGGESTED={:?}", folder_suggestions());
+            let input = folder_input(&[]);
+            let note = input.split_once("</datalist>").map_or("", |(_, note)| note);
+            println!("NOTE={note}");
             return;
         }
         let home = scratch("home");
@@ -5701,10 +5707,27 @@ mod cloud_mutant_tests {
         let off = suggestions_in_child(&home, Some("off"));
         let refused = suggestions_in_child(&home, Some("maybe"));
         let _ = std::fs::remove_dir_all(&home);
-        assert_eq!(on, walked, "unset is on");
-        assert_eq!(said_on, walked);
-        assert_eq!(off, "[]");
-        assert_eq!(refused, "[]", "a word the switch refuses walks nothing");
+        assert_eq!(on.0, walked, "unset is on");
+        assert_eq!(said_on.0, walked);
+        assert_eq!(off.0, "[]");
+        assert_eq!(refused.0, "[]", "a word the switch refuses walks nothing");
+        // AND THE PICKER SAYS WHICH (CE-39): the count when on, that the
+        // switch is off, or the refusal of a word it does not take.
+        assert!(on.1.contains("0 folder(s) holding CSVs found"), "{}", on.1);
+        assert!(
+            off.1
+                .contains("are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS is off)"),
+            "{}",
+            off.1
+        );
+        assert!(
+            refused
+                .1
+                .contains("suggestions are off: BRUTEX_ARCHIVE_SUGGESTIONS="),
+            "{}",
+            refused.1
+        );
+        assert!(refused.1.contains("is not a switch"), "{}", refused.1);
     }
 
     /// **A DATE INPUT IS THE MONTH-GRID PICKER, ITS IDS SCOPED BY THE FORM AND
