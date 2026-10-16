@@ -2551,3 +2551,37 @@ fn a_table_slot_of_sixty_five_blocks_is_bisected_one_entry_a_step() {
     // Bisection steps: 7 for `T`, 6 for `T + 1`, each within the ceiling.
     assert_eq!(looked, [(100, 1 + 7 + 1 + 1), (16_484, 1 + 6 + 1 + 1)]);
 }
+
+/// **A SEALED MONTH'S AUDIT WALKS EVERY BLOCK ONCE AND ENDS: EMPTY, ONE
+/// CHUNK, AND MORE THAN 256 BLOCKS.**
+///
+/// Kills `replace < with ==` and `replace < with <=` in `audited`'s walk
+/// over the directory in chunks of 256 entries (caught before only by a
+/// timeout: an empty month under the first, and every month under the
+/// second, ask for 0 more entries for ever). Each audit runs on a worker
+/// with a deadline and must count every row: 0, 6,000 (24 blocks) and
+/// 70,000 (274 blocks, two chunks).
+#[test]
+fn a_sealed_months_audit_walks_every_block_once_and_ends() {
+    use store::sealed::{SealedMonth, build};
+    let (send, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let counted = [0_i64, 6_000, 70_000].map(|n| {
+            let bars = sealed_bars(n);
+            let mut header = empty_month_header();
+            if n > 0 {
+                header.n_valid = u64::try_from(n).unwrap();
+                header.first_ts_micros = bars[0].ts_micros;
+                header.last_ts_micros = bars[bars.len() - 1].ts_micros;
+            }
+            let built = build(sealed_path(), &header, &bars, None, None).unwrap();
+            let month = SealedMonth::open(built.to_bytes(), sealed_path(), 4_242).unwrap();
+            month.audit().unwrap().rows
+        });
+        let _receiver_gone = send.send(counted);
+    });
+    let counted = answer
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("every audit ended");
+    assert_eq!(counted, [0, 6_000, 70_000]);
+}
