@@ -17384,6 +17384,30 @@ door (SC-3) and are not measured here.
 | L-R318-03 | The ledger's lock is advisory | `flock(2)` holds off only writers that take it; every writer in this tree does (`request_minutes::append_named_picking`, which `append_ledger` and `append_named` call), but a running build from before this change does not | until every process that appends to `audit/<feed>.gaps` or `audit/<feed>.repairs` runs a build with this change, run `cli zerodha-gaps --apply` only while no pull or repair runs against that store | R3-18 |
 | L-R318-04 | A ledger append waits for the lock's holder | an append that reads what others wrote cannot let a second writer in between its read and its write | one holder's read of the lines appended since its last read, one write and one `sync_data`; a holder that hangs inside its sync holds every ledger writer of that feed | R3-18 |
 
+## Window keys that name no series (AG-03, D-4966)
+
+Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af (before)
+and `fix/db-AG-03` (after), each serving its own fresh shadow of the real
+store (bars linked read-only, `state/fix/shadow.sh`, `serve.sh`), GET only,
+n = 300 sequential requests per case on one keep-alive connection
+(`curl -K`, `%{time_total}`), two rounds in opposite order on the loaded
+shared machine. Figures are p50 / p99 / max in ms, round 1 then round 2;
+summaries in `tgt/p-AG-03/evidence/{before,after,before2,after2}/summary.tsv`.
+Every held selection probed (ten timed, 63 byte-compared: NIFTY zerodha 1min
+to 1day, NIFTY gdfl 1s spot and 46 NIFTY option months 2018-09 to 2026,
+BANKNIFTY, RELIANCE, a deep-in-the-money strike, a held share outside its
+life, a contract after its expiry) answered byte for byte the same before
+and after.
+
+| ID | Limit | Why it is not closed | Bound | Package |
+|---|---|---|---|---|
+| L-AG03-01 | `unknown_series` is a `400`, not a distinct `404` | the window's status mapping is `bars_route.rs` (AF-05's file); the refusal leaves through its existing `refuse()` path | every such refusal opens with the code `unknown_series`, so a client tells it from the route's other `400`s by its prefix. A `404` is a follow-on after AF-05. **NOT DONE** | AG-03 → AF-05 |
+| L-AG03-02 | Knowing a key names a series costs one directory `stat` per key, O(keys) a request | a key names a series only if its rung directory lists a month file, and nothing smaller than that listing says so; the plan already pays it (`held_months`, memoised by the directory's stamp) and the refusal adds no probe | at most `MAX_SERIES` = 1,024 keys. The refusal adds one pass over the plans and a successor lookup for at most `MAX_NAMED_UNKNOWN` = 16 keys (the alias table: at most three probes and one hop per applied change), and one comparison a plan against the re-key's next superseded row, the rows being in the plans' order, and its sentence is under 1,024 bytes. **Held key, unchanged within noise**: zerodha NIFTY 1min before 0.443 / 1.092 / 1.959 and 0.484 / 1.829 / 2.679, after 0.487 / 1.032 / 3.695 and 0.520 / 1.705 / 2.652; a gdfl 1s NIFTY option month before 0.467 / 1.954 / 5.388 and 0.547 / 1.744 / 1.912, after 0.490 / 1.096 / 2.705 and 0.523 / 2.665 / 3.857. Over the ten held cases p50 was 0.130 to 0.583 before and 0.087 to 0.584 after; round 1 after had three p99 spikes (BANKNIFTY 7.45, RELIANCE 3.10, a refusal 5.29) that round 2 did not repeat (1.08, 1.38, 0.64), the host's scheduler and not the route. **Unknown key** (`NSE-INDEX-NOTASYMBOL`) before `200` 0.145 / 0.630 / 1.512 and 0.079 / 0.625 / 1.414, after `400` 0.294 / 1.284 / 3.322 and 0.098 / 2.963 / 4.153; **alias key** (`NSE-CASH-ZOMATO`) before 0.090 / 1.182 / 2.910 and 0.075 / 0.319 / 0.708, after 0.149 / 1.196 / 2.296 and 0.073 / 0.636 / 0.984; **no `feed=`** before 0.123 / 0.942 / 1.807 and 0.069 / 0.307 / 0.404, after 0.100 / 3.017 / 3.626 and 0.070 / 0.743 / 0.951. **1,024 unknown contracts in one window** (the O(keys) case at its bound): before `200`, 54,594 bytes, 11.480 / 24.921 / 43.468 and 11.199 / 21.426 / 45.319; after `400`, 641 bytes, 10.209 / 16.735 / 17.989 and 10.196 / 15.127 / 16.997 | AG-03 |
+| L-AG03-03 | A successor is named from a table, not probed, and a contract key gets only the lineage's | whether the successor holds months at this rung would be one more `stat` per named key; and the alias table answers where a symbol's OWN price series lives, not where its options are filed | the successor is the table's sourced name (D-3332) or the re-key's recorded one (D-3331), labelled `now` (a rename or a re-key) or `filed as` (an index asked by its F&O symbol or under the wrong segment); a BSE key, a feed outside `KEYED_FEEDS` and a symbol with no row get none, so nothing is guessed | AG-03 |
+| L-AG03-04 | A window with no `feed=` is now refused under Dhan | the route defaults the feed to Dhan (RT-DB-01, R4-02's rule), which holds nothing; before this it answered `total 0, months_outside_life 1` for NIFTY 2024-03 | it is refused `unknown_series: NSE-INDEX-NIFTY names no series dhan holds at 1min`, which makes app-8's window symptom loud; the default itself is R4-02's to change | R4-02 |
+| L-AG03-05 | `/bars.json` still refuses a key that names nothing only through the month it cannot open | `/bars.json` is a one-month read and this package changed the window only | its `400` names the path it looked for (`.../2024-03.bin does not exist`), the same refusal a held series' absent month gets, so it is loud but not labelled `unknown_series`. **NOT DONE** | follow-on |
+| L-AG03-06 | The `held_months` comment in `bars_series.rs` still reads "an absence, not a refusal" for every directory that does not exist | `bars_series.rs` is AF-04's file and this package reads `held_all` without editing it | D-4966 narrows the comment to series that hold at least one month; rewording it falls to the package that next edits `bars_series.rs`. **NOT DONE** | AF-04 follow-on |
+
 ## The tick-store writer: one day zip to one verified day file — D-4967, 14 October 2026
 
 `pull::tickstore_write` and `cli tickstore-write` (R4-08, E2E-02). Measured on

@@ -68966,6 +68966,104 @@ rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
 
+### D-4966 — A window key whose plan holds no month at its feed and rung is refused `unknown_series`, naming the key and any successor the lineage or the alias table records; "an absence, not a refusal" now covers only a series that holds at least one month (AG-03) — 2026-10-15
+
+**Implemented by** AG-03 (`crates/api/src/bars.rs`, `refuse_unknown_series`
+and `successor_of`; tests `crates/api/src/bars_unknown_series_tests.rs`).
+**Finding** app-2 (assurance attack, 14 Oct 2026, confirmed by both
+skeptics; severity medium by one, low by the other).
+
+**What was observed.** `GET /bars/window.json` answered a key that names no
+series — an unknown symbol (`NSE-INDEX-NOTASYMBOL`), a pre-rename name
+(`NSE-CASH-ZOMATO`), a BSE key with no files (`BSE-INDEX-SENSEX`), a rung the
+feed never stores (gdfl `1min`), a nonsense segment (`NSE-FOO-NIFTY`), 1,024
+contracts that never existed — `200` with `total 0`, every asked month
+counted in `months_outside_life`, `missing_months []` and `faults null`.
+Apart from `key`, that is the body a REAL series gets for a month outside its
+life (ETERNAL zerodha 1min 2020-03; HDFC gdfl 1s 2024-03), so no field told
+"no such series" from "nothing in range": the cause was mislabelled, not only
+hidden. The cause was deliberate — `bars_series.rs`'s `held_months` comment
+calls a directory that does not exist "an absence, not a refusal" — but no
+decision or limit recorded it for a series with no file at all, and D-3332
+gave alias resolution to Search and `/spot.json` only. `/bars.json` refuses
+such a key only as a side effect of opening one absent month (the same `400`
+a held series gets for NIFTY 2030-01), so it was no model either.
+
+**Decision.**
+
+1. **A key whose plan holds no month at all is refused.** After every
+   series' plan is built and before any is tallied, a plan whose `held_all`
+   is empty — its rung directory does not exist, or exists and holds no
+   `YYYY-MM.bin` — refuses the window:
+   `unknown_series: <key> names no series <feed> holds at <rung>`.
+2. **A window with any such key is refused whole**, never answered for its
+   held keys with the rest hidden: `unknown_series: <n> of <m> keys name no
+   series <feed> holds at <rung>: <key>, <key>, …`, naming at most
+   `MAX_NAMED_UNKNOWN` = 16 and counting the rest (`, and <r> more`), so a
+   window of `MAX_SERIES` keys that all name nothing is refused in one
+   bounded sentence.
+3. **The successor is named when something records one, and never
+   guessed.** First the GDFL re-key's lineage (`now <by>`, D-3331); else, for
+   a series' own price (no contract) on an NSE key of a feed the alias table
+   keys (`brutex_core::alias::KEYED_FEEDS`: zerodha, gdfl), the key
+   `brutex_core::alias::option_underlying` files the symbol's price series
+   under — the one table `/spot.json` resolves through (D-3332): `now
+   NSE-CASH-ETERNAL` for a renamed share, `filed as
+   NSE-INDEX-NIFTYFINSERVICE` for an index asked by its F&O symbol. A
+   contract key gets the lineage's successor only (the table answers where a
+   symbol's own price lives, not where its options are filed); a BSE key, a
+   feed outside `KEYED_FEEDS` and a symbol with no row get none. Whether the
+   successor holds months at this rung is not probed.
+4. **What does not change.** A series holding at least one month at this
+   feed and rung still answers a month before its first file or after its
+   last `200` with `months_outside_life` (D-3326, DB-065); an index's missing
+   month inside its feed's span is still a hole (DB-B47); an expired contract
+   with files is held; a key in the wrong case keeps its own `400`; an
+   unlistable directory keeps its own `cannot list` refusal; a retired key
+   keeps D-3331's. The `held_months` comment's "an absence, not a refusal"
+   is narrowed by this entry to series that hold at least one month; the
+   comment itself is in `bars_series.rs` (AF-04's file) and is not edited
+   here.
+5. **The refusal leaves through the route's existing `refuse()` path**, so
+   its status is that path's `400`. A distinct `404` needs `bars_route.rs`
+   (AF-05's) and is a named follow-on (L-AG03-01).
+
+**Side effect, stated.** A window with no `feed=` reads Dhan (RT-DB-01, owned
+by R4-02). Before, it answered `total 0, months_outside_life 1` for NIFTY
+2024-03; now it is refused `unknown_series: NSE-INDEX-NIFTY names no series
+dhan holds at 1min`. R4-02's feed rule is unchanged; its symptom is now loud.
+
+**Rejected.** A per-series fault on a `200` (one skeptic's cheaper form): a
+grid would still render an empty history beside it, the hidden-fallback shape
+`CLAUDE.md` §4 bans. Probing the census facet index per key (the finding's
+suggestion): `held_all` is already the plan's memoised directory listing, one
+`stat` per key, and it is what the window reads, so a census lag cannot make
+the two disagree. Serving the successor's bars under the asked key: an alias
+the caller did not ask for, answered silently.
+
+**Proved by** `api::bars::unknown_series_tests::an_unknown_symbol_is_refused_on_the_window`,
+`…::a_renamed_old_name_is_refused_naming_its_successor`,
+`…::a_rung_the_feed_never_stores_is_refused`,
+`…::a_bse_key_with_no_files_is_refused`,
+`…::a_window_with_one_unknown_key_among_held_ones_is_refused_naming_it`,
+`…::a_held_series_outside_its_life_still_answers_200_unchanged`,
+`…::an_index_hole_is_still_a_hole`,
+`…::a_rung_directory_that_holds_no_bin_is_refused`,
+`…::a_rung_directory_that_cannot_be_listed_keeps_its_own_error`,
+`…::max_series_keys_all_unknown_are_refused_in_one_bounded_sentence`,
+`…::a_key_differing_only_in_case_keeps_its_own_refusal`,
+`…::an_expired_contract_that_has_files_is_held`,
+`…::an_empty_symbol_is_refused_and_never_answered_empty`,
+`…::a_garbage_segment_is_refused`,
+`…::a_one_month_and_a_max_window_months_range_both_refuse_an_unknown_key`,
+`…::the_no_feed_default_is_refused_naming_its_feed`,
+`…::a_superseded_key_names_the_key_the_lineage_moved_it_to`;
+`api::bars::window_tests::a_window_over_nothing_is_empty_and_says_how_many_months_were_absent`
+and `api::server::bars_window_route_tests::window_pages_preserve_integer_values_month_gaps_and_change_provenance`,
+which pinned the old answer for a series with no month (`200`,
+`months_outside_life`) and now pin the refusal beside the held series' empty
+answer; and on a shadow of the real store (L-AG03-02).
+
 ### D-4967 — The tick-store writer is in the workspace and pure Rust: `ruzstd` `Fastest` frames in the frozen `BRTXTS01` v1 container, a day held only after every entry reads back from its file, and no file ever removed — 2026-10-14
 
 **Implemented by** R4-08 (E2E-02): `pull::tickstore_write` (tests in
