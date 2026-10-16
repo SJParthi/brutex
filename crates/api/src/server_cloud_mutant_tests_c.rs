@@ -2855,3 +2855,68 @@ fn one_second_is_said_in_seconds() {
     assert_eq!(render_elapsed(1_000_000), "1.000 s");
     assert_eq!(render_elapsed(999_999), "999.999 ms");
 }
+
+/// A refused run is the document the page reads: `started:false` and the
+/// reason quoted as one JSON string (kills `run_refusal_json -> String::new()`
+/// and `-> "xyzzy"`).
+#[test]
+fn a_refused_run_is_the_started_false_document_with_its_reason_quoted() {
+    let document = run_refusal_json("a run \"is\" already in flight");
+    assert_eq!(
+        document,
+        r#"{"started":false,"why":"a run \"is\" already in flight"}"#
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&document).expect("one JSON document");
+    assert_eq!(parsed["why"], "a run \"is\" already in flight");
+}
+
+/// `GET /pull/run.json` with no run in this process answers the default
+/// progress, with what the journal said about the run before it, as JSON
+/// (kills `pull_run_json -> (Default, Default, String::new())` and
+/// `-> (.., "xyzzy")`).
+#[tokio::test]
+async fn the_run_document_with_no_run_is_the_default_progress_and_the_restart() {
+    let fx = Fixture::new("run-json-idle");
+    let site = Loaded::new(fx.refused());
+    let today = ingest::ist_moment(std::time::SystemTime::now())
+        .ok()
+        .map(|now| i64::from(now.day().days_from_epoch()));
+    let (code, headers, body) = pull_run_json(axum::extract::State(Loaded::clone(&site))).await;
+    assert_eq!(code, axum::http::StatusCode::OK);
+    assert_eq!(headers, json_headers());
+    assert_eq!(
+        body,
+        crate::pullrun::status_json(
+            &crate::pullrun::Progress::default(),
+            today,
+            Some(&site.restart)
+        )
+    );
+    assert!(body.starts_with("{\"running\":false"), "{body}");
+}
+
+/// A stop with a run slot that holds a run which is NOT running stops
+/// nothing: the slot is left as it was and the answer says nothing was in
+/// flight (kills the match guard `progress.running()` turned to `true`).
+#[tokio::test]
+async fn a_stop_with_a_run_that_is_not_running_stops_nothing() {
+    let fx = Fixture::new("stop-not-running");
+    let site = Loaded::new(fx.refused());
+    let idle = crate::pullrun::Progress::default();
+    assert!(!idle.running(), "the premise: never started");
+    *site.run.lock().expect("the slot") = Some(idle);
+    let (code, headers, body) = pull_run_stop(axum::extract::State(Loaded::clone(&site))).await;
+    assert_eq!(code, axum::http::StatusCode::OK);
+    assert_eq!(headers, json_headers());
+    assert_eq!(body, pull_stop_json(false, false));
+    assert!(
+        !site
+            .run
+            .lock()
+            .expect("the slot")
+            .as_ref()
+            .expect("still held")
+            .stopping,
+        "a run that is not running is not marked stopping"
+    );
+}
