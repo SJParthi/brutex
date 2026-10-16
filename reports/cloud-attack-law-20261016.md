@@ -425,6 +425,40 @@ before and holds existing correct behaviour that had no test.
 | store | `file::tests::the_kernels_own_enospc_from_dev_full_is_disk_full_by_name` | 8 | pins (first measurement of a real `ENOSPC`) |
 | store | `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported` (changed) | 3 | **failed once** in a full `cargo test -p store` run here: its `assert_ne!(ino)` raced inode reuse; the leftover is now held open so its number cannot be reissued, and the test also asserts the leftover's bytes were not cut |
 
+## Gates
+
+Run here on this branch's code (head `e52425a`; only `reports/` changed after
+`9748776`, the last code commit), as uid 0 in this container, 4 cores, on
+2026-10-16 between 05:26 and the end of the core run (recorded in the next commit) UTC. Logs are in the session scratchpad;
+none is committed.
+
+| gate | command | result |
+|---|---|---|
+| format | `cargo fmt --all --check` | **clean**: exit 0, no output |
+| lint | `cargo clippy --workspace --all-targets -- -D warnings` | **clean**: exit 0, no warning, 1m 40s |
+| runner | `cargo test -p runner --locked --no-fail-fast` | **green**: exit 0. lib 740 passed; 12 integration binaries 46 passed; doc-tests 6 passed |
+| store | `cargo test -p store --locked --no-fail-fast` | **exit 101, one failure, environmental**: lib 229 passed; 33 integration binaries, 412 passed, 1 failed, 4 ignored (32 green); doc-tests 11 passed. The one failure is `cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not` (`crates/store/tests/cited_commits.rs:637`), explained under lens 3: the snapshot base is one commit, so commits the docs cite are not ancestors of `HEAD`. This branch edits neither cited document |
+| pull | `cargo test -p pull --locked --no-fail-fast` | **green**: exit 0. lib 1221 passed, 17 ignored (each `#[ignore]` carries its reason); 20 integration binaries, 375 passed, 0 failed, 6 ignored (`census` 21 passed, `census_v4` 9 passed and 1 ignored, `store_evidence` 5 ignored); doc-tests 38 passed |
+| api | `cargo test -p api --locked --no-fail-fast` | running when this was committed; the next commit records it |
+| cli | `cargo test -p cli --locked --no-fail-fast` | queued when this was committed; the next commit records it |
+| engine | `cargo test -p engine --locked --no-fail-fast` | queued when this was committed; the next commit records it |
+| core | `cargo test -p core --locked --no-fail-fast` | queued when this was committed; the next commit records it |
+
+"Ignored" tests were not run by these commands. Each needs the operator's real
+store or a timing host, and none is counted as passed above.
+
+**Not run here, and why.** `cargo deny check`, line and branch coverage, and
+mutation testing (CLAUDE.md §9) were not run: none of the three tools is
+installed in this container, and the task's gate list did not name them.
+Whether this branch keeps coverage at 100% and leaves no surviving mutant on
+the modules it touched is **UNVERIFIED**. CI runs the repository's workflows,
+which come from `main`, against this tree, which comes from `feat/db-fix`. Its
+three red checks are Gate 1e (at `crates/core/tests/banned_lists.rs:81`), Gate
+W (`web/build` drift), and `ci-ok`, which only rolls the others up. Neither
+underlying failure is in a file this branch changes: `git diff --name-only`
+against the base lists nothing under `.github/`, `web/` or `crates/core/tests/`.
+The stand-down comment on the PR says so.
+
 ## Open findings, most dangerous first
 
 Each is in its lens table above with its exact fix; this is the order to take
