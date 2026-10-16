@@ -183,6 +183,7 @@ const _: () = {
         time_index,
         provenance,
         sort_index,
+        sealed_bars,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -194,6 +195,7 @@ const _: () = {
     assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
     assert!(provenance.extension().len() <= MAX_EXTENSION_LEN);
     assert!(sort_index.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(sealed_bars.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -714,11 +716,20 @@ pub enum FileKind {
     /// order are committed. Derived from the bars, never a record stream
     /// itself. See [`crate::sort_index`]. D-3349.
     SortIndex,
+    /// The sealed form of a closed month (`.sbar` version 1): every committed
+    /// record, the committed header and the provenance image in one file
+    /// written once by rename and never opened for writing again. A sibling
+    /// kind with its own magic and version, as the time, sort and provenance
+    /// files are — NOT a bar [`crate::layout::Layout`]: it has no fixed
+    /// stride, so `base + 32768 + i * 56` is never asked of it, and the bar
+    /// doors refuse it as `NotABarPath` until the read door (SC-3) opens it.
+    /// See [`crate::sealed`]. D-4965.
+    SealedBars,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -729,6 +740,7 @@ impl FileKind {
         Self::TimeIndex,
         Self::Provenance,
         Self::SortIndex,
+        Self::SealedBars,
     ];
 
     /// The file extension, dot included.
@@ -745,6 +757,7 @@ impl FileKind {
             Self::TimeIndex => ".tix",
             Self::Provenance => ".prv",
             Self::SortIndex => ".srt",
+            Self::SealedBars => ".sbar",
         }
     }
 
@@ -762,7 +775,8 @@ impl FileKind {
             | Self::GreekChecksums
             | Self::TimeIndex
             | Self::Provenance
-            | Self::SortIndex => None,
+            | Self::SortIndex
+            | Self::SealedBars => None,
         }
     }
 }

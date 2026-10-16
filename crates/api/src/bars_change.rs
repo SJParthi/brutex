@@ -44,14 +44,16 @@
 //! lookups walking back over closed days, the three-entry halt table, two
 //! phase lookups and this series' lineage events (one or two). The lineage
 //! ledger is read once per change of its stamp; a closing-auction eligibility
-//! master once per day it is asked about (both bounded memos).
+//! master once per day it is asked about when it LOADS (both bounded memos),
+//! and once per day per request when it is refused, because a refusal is not
+//! remembered past its request (AF-03, D-4963).
 //!
 //! UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
 //! "Cost claims of the /db fix round that name no proof").
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use brutex_core::instrument::Segment;
 use brutex_core::vendor::Vendor;
@@ -127,7 +129,17 @@ struct Ledger {
 /// The parsed ledger, by its path and stamp.
 static LEDGERS: Memo<PathBuf, (u64, i64, i64, Arc<Ledger>)> = Memo::new();
 
-/// Each day's closing-auction master, loaded once.
+/// Each day's closing-auction master THAT LOADED, kept once: a receipted
+/// master is immutable, so a later read could only repeat it. A day that
+/// needs no master (before 2026-08-03) is kept as `None`.
+///
+/// A FAILED LOAD IS NEVER KEPT HERE (AF-03, p99-2). Kept as `None` it read
+/// exactly like a day with no master, so one refusal — a lock held by a
+/// concurrent reader, or a master not yet installed — left that day's
+/// closing-auction eligibility `Unknown` until the process restarted: the
+/// fallback CLAUDE.md §4 bans. A refusal is kept, with its reason, only by
+/// the request that met it ([`Rules`]'s `refused`), and the next request
+/// reads the day again.
 static MASTERS: Memo<
     (PathBuf, u32),
     Option<Arc<pull::cash_session_cache::VerifiedLifecycleMaster>>,
@@ -144,6 +156,9 @@ pub(super) struct Rules {
     lineage: Vec<LineageEvent>,
     cash_identity: Option<(String, String)>,
     masters: PathBuf,
+    /// This request's refused master loads, by IST day, with their reasons:
+    /// a day is read at most once per request, and again by the next one.
+    refused: Mutex<HashMap<u32, String>>,
 }
 
 impl Rules {
@@ -187,6 +202,7 @@ impl Rules {
             lineage,
             cash_identity,
             masters: root.join("session-masters"),
+            refused: Mutex::new(HashMap::new()),
         }
     }
 
@@ -341,21 +357,54 @@ impl Rules {
         let Ok(days) = u32::try_from(day) else {
             return CasEligibility::Unknown;
         };
-        let memo = (self.masters.clone(), days);
-        let master = MASTERS.get(&memo).unwrap_or_else(|| {
-            let loaded = pull::session::Day::from_days(days)
-                .ok()
-                .filter(|civil| pull::vendor::cash_auction_eligibility_required(*civil))
-                .and_then(|civil| {
-                    pull::cash_session_cache::read_local_lifecycle(&self.masters, civil).ok()
-                })
-                .map(Arc::new);
-            MASTERS.put(memo, loaded.clone());
-            loaded
-        });
-        master
+        self.master(days)
             .and_then(|master| master.cas_eligibility(symbol, isin).ok())
             .unwrap_or(CasEligibility::Unknown)
+    }
+
+    /// IST day `days`'s master: the process-wide memo's when it loaded
+    /// before, else read now. A refusal is remembered for this request only,
+    /// with its reason (AF-03). Expected O(1) per bar: a hit in either memo
+    /// is one hash probe, and a miss reads the day once per request.
+    fn master(&self, days: u32) -> Option<Arc<pull::cash_session_cache::VerifiedLifecycleMaster>> {
+        let memo = (self.masters.clone(), days);
+        if let Some(kept) = MASTERS.get(&memo) {
+            return kept;
+        }
+        if self
+            .refused
+            .lock()
+            .is_ok_and(|refused| refused.contains_key(&days))
+        {
+            return None;
+        }
+        let Some(civil) = pull::session::Day::from_days(days)
+            .ok()
+            .filter(|civil| pull::vendor::cash_auction_eligibility_required(*civil))
+        else {
+            MASTERS.put(memo, None);
+            return None;
+        };
+        match pull::cash_session_cache::read_local_lifecycle(&self.masters, civil) {
+            Ok(loaded) => {
+                let loaded = Arc::new(loaded);
+                MASTERS.put(memo, Some(Arc::clone(&loaded)));
+                Some(loaded)
+            }
+            Err(why) => {
+                if let Ok(mut refused) = self.refused.lock() {
+                    refused.insert(days, why);
+                }
+                None
+            }
+        }
+    }
+
+    /// Why this request could not load IST day `days`'s master, if it could
+    /// not: the reason its `Unknown` eligibility stands on.
+    #[cfg(test)]
+    fn refusal(&self, days: u32) -> Option<String> {
+        self.refused.lock().ok()?.get(&days).cloned()
     }
 }
 
@@ -632,5 +681,104 @@ pub(super) mod for_tests {
             ledger.status.get(key).cloned(),
             ledger.events.get(key).map_or(0, Vec::len),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "tests fail immediately when fixture setup fails"
+)]
+mod tests {
+    use super::*;
+
+    /// A gzip member of one stored (uncompressed) deflate block: `api` has
+    /// no compressor, and the master reader only needs a valid member.
+    fn stored_gzip(text: &[u8]) -> Vec<u8> {
+        let mut crc = !0u32;
+        for &byte in text {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let len = u16::try_from(text.len()).expect("one stored block");
+        let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(text);
+        out.extend_from_slice(&(!crc).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(text.len()).expect("small").to_le_bytes());
+        out
+    }
+
+    /// **A FAILED MASTERS LOAD IS NOT REMEMBERED (AF-03, p99-2).** A share's
+    /// 15:20 minute on 2026-08-03 reads `unverified` while that day's master
+    /// is not there, and the request keeps the refusal with its reason, so
+    /// it reads the day once and not once per bar. The master then lands, as
+    /// the pull installs it: the NEXT request reads the day again and carries
+    /// the closing-auction phase. The process-wide memo kept the refusal as
+    /// `None`, and the day stayed `unverified` until a restart.
+    #[test]
+    fn a_failed_masters_load_is_not_remembered() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-af03-masters-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let masters = root.join("session-masters");
+        std::fs::create_dir_all(&masters).expect("a scratch store");
+        let key = SeriesKey::new("NSE", "CASH", "RELIANCE", None);
+        let rules = || {
+            Rules::of(
+                &root,
+                Timeframe::MINUTE_1,
+                &key,
+                &Lineage::read(&root, Vendor::Zerodha),
+            )
+        };
+        let on = pull::session::Day::new(2026, 8, 3).expect("a CAS day");
+        let days = on.days_from_epoch();
+        let minute = |hh: i64, mm: i64| Bar {
+            ts_micros: day_start(i64::from(days)) + (hh * 3_600 + mm * 60) * MICROS,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let auction = minute(15, 20);
+
+        let first = rules();
+        assert_eq!(first.phase_word(&auction), Some("unverified"));
+        let why = first.refusal(days).expect("the refusal is kept, named");
+        assert!(
+            why.contains("UNVERIFIED") && why.contains("absent"),
+            "{why}"
+        );
+
+        let isin = brutex_core::universe::nse_isin("RELIANCE").expect("an F&O share");
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n7,RELIANCE,EQ,{},1\n",
+            isin.as_str()
+        );
+        pull::cash_session_cache::install(&masters, on, &stored_gzip(csv.as_bytes()))
+            .expect("the master lands");
+
+        // The same request keeps its refusal: one read of the day per request.
+        assert_eq!(first.phase_word(&auction), Some("unverified"));
+        // The next request reads the day again, and the phase is carried.
+        let second = rules();
+        assert_eq!(second.phase_word(&auction), Some("cas"));
+        assert_eq!(second.phase_word(&minute(15, 10)), Some("continuous"));
+        assert_eq!(second.refusal(days), None);
+        // And it is kept: the master is immutable once receipted.
+        assert_eq!(rules().phase_word(&auction), Some("cas"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
