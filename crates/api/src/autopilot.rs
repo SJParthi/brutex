@@ -7782,3 +7782,322 @@ mod tests {
         }
     }
 }
+
+/// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): each one
+/// pins a behaviour a surviving mutant broke, or reaches a line no other test
+/// reached.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::symbol::Symbol;
+
+    fn day(y: u16, m: u8, d: u8) -> Day {
+        Day::new(y, m, d).expect("a day")
+    }
+
+    fn month(y: u16, m: u8) -> YearMonth {
+        YearMonth::new(y, m).expect("a month")
+    }
+
+    fn series(name: &str) -> Series {
+        Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new(name).expect("a symbol"),
+            timeframe: Timeframe::MINUTE_1,
+        }
+    }
+
+    /// A site whose masters hold one tracked index (NIFTY, Groww's master),
+    /// on a store root of its own. `name` must differ per test.
+    fn tracked_site(name: &str, live: bool) -> Loaded {
+        let root = crate::scratch::path(&format!("autopilot-cloud-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let masters = root.join("masters");
+        let store = root.join("store");
+        std::fs::create_dir_all(&masters).expect("mkdir masters");
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir store");
+        std::fs::write(
+            masters.join("groww_instruments.csv"),
+            "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+             expiry_date,strike_price,groww_symbol\n\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n",
+        )
+        .expect("write the master");
+        Loaded::new(if live {
+            Site::serving(&masters, &store)
+        } else {
+            Site::load(&masters, &store)
+        })
+    }
+
+    fn empty_site(name: &str) -> Loaded {
+        let dir = crate::scratch::path(&format!("autopilot-cloud-empty-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        Loaded::new(Site::load(&dir, &dir))
+    }
+
+    /// The third driver's word is its own.
+    #[test]
+    fn the_recovery_driver_is_labelled_recovery() {
+        assert_eq!(Driver::Recovery.label(), "recovery");
+        assert_eq!(Driver::Hand.label(), "hand");
+        assert_eq!(Driver::Autopilot.label(), "autopilot");
+    }
+
+    /// `Control::default` is `Control::new`: not paused, and the same
+    /// document.
+    #[test]
+    fn a_default_control_is_a_new_one() {
+        let made = Control::default();
+        assert!(!made.is_paused());
+        assert_eq!(made.json(), Control::new().json());
+    }
+
+    /// A store root that is a file is refused by name, and nothing is written
+    /// beside it.
+    #[test]
+    fn a_store_root_that_is_a_file_is_not_writable() {
+        let dir = crate::scratch::path("autopilot-cloud-root-file");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let root = dir.join("store");
+        std::fs::write(&root, b"a file, not a store root").expect("write");
+        let why = store_writable(&root, "dhan").expect_err("refused");
+        assert!(
+            why.contains(&format!(
+                "configured store root {} is not a directory",
+                root.display()
+            )),
+            "{why}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("read_dir").count(),
+            1,
+            "only the file itself"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Every series the masters track becomes one spot series of the rung
+    /// asked for, and the list is sorted and has no duplicate.
+    #[test]
+    fn the_tracked_universe_becomes_the_rungs_series() {
+        let site = tracked_site("tracked-series", false);
+        let found = tracked_series(&site, Timeframe::DAY_1);
+        assert!(!found.is_empty(), "NIFTY is a tracked index");
+        assert!(found.iter().all(|one| one.contract.is_none()));
+        assert!(found.iter().all(|one| one.timeframe == Timeframe::DAY_1));
+        assert!(found.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            found
+                .iter()
+                .any(|one| one.symbol.as_str() == "NIFTY" && one.exchange == Exchange::Nse),
+            "{found:?}"
+        );
+    }
+
+    /// At the last month the calendar has, a caught-up scan stops there: no
+    /// month after it exists, so it answers that month and no unit.
+    #[test]
+    fn the_frontier_stops_at_the_last_month_the_calendar_has() {
+        let last = day(9999, 12, 31);
+        let axis = [series("NIFTY")];
+        // The last bar of the last day: 15:29 IST, 09:59 UTC.
+        let close = (i64::from(last.days_from_epoch()) * 86_400 + 9 * 3_600 + 59 * 60) * 1_000_000;
+        let held = |_: &EntryKey| Some(close);
+        let (at, unit) = frontier(held, &axis, month(9999, 12), day(9999, 12, 1), last);
+        assert_eq!(at, month(9999, 12));
+        assert_eq!(unit, None);
+    }
+
+    /// One second of a nap is credited before it is slept, and the countdown
+    /// it publishes is a second away.
+    #[tokio::test]
+    async fn a_nap_credits_the_second_it_sleeps() {
+        let site = empty_site("nap");
+        // `Site::load` builds its control grounded in a test process: resumed
+        // here, so the nap sleeps rather than returning on the pause flag.
+        site.autopilot.resume();
+        let before = ingest::epoch_secs(std::time::SystemTime::now());
+        nap(&site, 1).await;
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""waiting_ms":1000,"#), "{json}");
+        let due = site
+            .autopilot
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .due_unix;
+        assert!(due >= before + 1 && due <= before + 3, "{due} vs {before}");
+    }
+
+    /// A store-halted feed whose next probe is not due says how many were
+    /// made and when the next is; one whose allowance is spent says that;
+    /// neither touches the disk.
+    #[test]
+    fn a_store_halt_between_probes_or_past_its_allowance_says_so() {
+        let site = empty_site("probe-later");
+        let yesterday = day(2026, 8, 6);
+        let mut feeds = drivable(yesterday);
+        let now = ingest::epoch_secs(std::time::SystemTime::now());
+        let name = feeds[0].feed.display().to_owned();
+        feeds[0].halted = Some("the store refused twice".to_owned());
+        feeds[0].halt_kind = Some(Halt::Store);
+        feeds[0].probe = Some(Probe {
+            made: 2,
+            due_unix: now + 600,
+        });
+        let said = probe_store_halts(&site, &mut feeds);
+        assert!(
+            said.contains(&format!(
+                " {name} stays halted: 2 of {STORE_PROBES} write probes made, the next in"
+            )),
+            "{said}"
+        );
+        assert!(feeds[0].halted.is_some(), "nothing revived it");
+
+        feeds[0].probe = Some(Probe {
+            made: STORE_PROBES,
+            due_unix: 0,
+        });
+        let said = probe_store_halts(&site, &mut feeds);
+        assert!(
+            said.starts_with(&format!(" {name}: the disk was re-checked")),
+            "{said}"
+        );
+        assert!(said.contains("THAT ALLOWANCE IS NOW SPENT"), "{said}");
+
+        // A store halt with no probe armed says nothing at all.
+        feeds[0].probe = None;
+        assert_eq!(probe_store_halts(&site, &mut feeds), "");
+        assert!(
+            std::fs::read_dir(&site.store_root)
+                .expect("read_dir")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STORE_PROBE_PREFIX)),
+            "no probe file was written"
+        );
+    }
+
+    /// An empty universe whose read names no unavailable vendor says that no
+    /// vendor named a reason, never an empty reason.
+    #[test]
+    fn no_universe_with_no_unavailable_vendor_says_no_reason_was_named() {
+        let read = crate::server::Read::new(
+            crate::merge::Merged::default(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            0,
+            0,
+        );
+        let said = Settled::NoUniverse.say(&read, "", " probed.");
+        assert!(
+            said.starts_with("NOT COMPLETE — NOTHING IS TRACKED."),
+            "{said}"
+        );
+        assert!(said.contains(". no vendor named a reason. "), "{said}");
+        assert!(said.ends_with(" probed."), "{said}");
+    }
+
+    /// A press in flight stands the backfill off before anything is read.
+    #[tokio::test]
+    async fn a_press_in_flight_stands_the_backfill_off() {
+        let site = empty_site("press");
+        *site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(crate::pullrun::Progress::claimed());
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let mut feeds = drivable(yesterday);
+        let pass = round(
+            &site,
+            &mut feeds,
+            &[series("NIFTY")],
+            pull::vendor::Granularity::Minute1,
+        )
+        .await;
+        assert_eq!((pass.wait, pass.owed), (SEAT_WAIT_SECS, true));
+        let json = site.autopilot.json();
+        assert!(
+            json.contains("a hand-made pull is running, so the backfill is standing off"),
+            "{json}"
+        );
+        assert!(!site.journal().path.exists(), "no tick ran");
+    }
+
+    /// Every feed halted: nothing is chosen and nothing reconsidered, the
+    /// phase is HALTED and the detail says every feed is halted.
+    #[tokio::test]
+    async fn every_feed_halted_is_said_and_the_rung_is_clear() {
+        let site = empty_site("all-halted");
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let mut feeds = drivable(yesterday);
+        for state in &mut feeds {
+            state.halted = Some("a dead token, re-read and unchanged".to_owned());
+            state.halt_kind = Some(Halt::Credential);
+        }
+        let pass = round(
+            &site,
+            &mut feeds,
+            &[series("NIFTY")],
+            pull::vendor::Granularity::Minute1,
+        )
+        .await;
+        assert_eq!((pass.wait, pass.owed), (IDLE_POLL_SECS, false));
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""state":"halted""#), "{json}");
+        assert!(
+            json.contains("every feed is halted. The reasons are below"),
+            "{json}"
+        );
+        assert!(!site.journal().path.exists(), "no tick ran");
+    }
+
+    /// A process that may reach a broker but is paused before it flies
+    /// publishes its target and journal before the grace window, then stays
+    /// paused: no round runs, so nothing is asked of any vendor.
+    #[tokio::test]
+    async fn a_paused_live_autopilot_publishes_its_target_and_stays_paused() {
+        let site = tracked_site("fly-paused", true);
+        assert_eq!(site.broker, Broker::Live);
+        site.autopilot.pause();
+        let flying = tokio::spawn(fly(Loaded::clone(&site)));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        flying.abort();
+        let _aborted = flying.await;
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let json = site.autopilot.json();
+        assert!(json.contains(r#""state":"paused""#), "{json}");
+        assert!(
+            json.contains(&format!(r#""to":"{yesterday}","instruments":"#)),
+            "{json}"
+        );
+        assert!(json.contains(r#""timeframe":"1day","feed":"""#), "{json}");
+        let journal = site.journal().path.display().to_string();
+        assert!(
+            json.contains(&format!(r#""journal":{}"#, render::json_string(&journal))),
+            "{json}"
+        );
+        assert!(
+            !site.journal().path.exists(),
+            "no round ran, so no tick was journalled"
+        );
+    }
+}
