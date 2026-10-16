@@ -1445,6 +1445,54 @@ mod cm_extremes {
         std::fs::remove_dir_all(masters).unwrap();
     }
 
+    /// A file read with refused rows says so in ONE warn line naming the day
+    /// and every count (never one line per row), and a clean file says
+    /// nothing. Invented rows.
+    #[test]
+    fn a_file_with_refused_rows_is_one_warn_line_and_a_clean_file_none() {
+        use super::{logged, sink};
+        let _installed = sink();
+        let stem = "RELIANCE.NSE";
+        let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
+        let said = |marker: &str| -> Vec<String> {
+            logged(marker)
+                .into_iter()
+                .filter(|line| line.contains("\"msg\":\"rows refused, file read\""))
+                .collect()
+        };
+        let (d, date) = (day(2024, 4, 9), "09/04/2024");
+        let good = row(stem, date, "10:00:00", "1400.00", "1399.95", "1400.05", 1);
+        let bad = row(stem, date, "10:00:01", "1400.00", "Bid", "1400.05", 1);
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{bad}\r\n{bad}\r\n{good}\r\n");
+        let file = read_day(
+            &stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]),
+            &key,
+            d,
+        )
+        .unwrap()
+        .unwrap()
+        .file;
+        assert_eq!((file.refused.total(), file.rows.len()), (2, 1));
+        let lines = said("\"day\":\"2024-04-09\"");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("\"rows_refused\":2") && lines[0].contains("\"malformed\":2"),
+            "{}",
+            lines[0]
+        );
+        let (d, date) = (day(2024, 4, 10), "10/04/2024");
+        let good = row(stem, date, "10:00:00", "1400.00", "1399.95", "1400.05", 1);
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{good}\r\n");
+        read_day(
+            &stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]),
+            &key,
+            d,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(said("\"day\":\"2024-04-10\"").is_empty());
+    }
+
     /// The refused-row bound is more than one row in a thousand: 65 refused
     /// rows (above the floor of 64) among exactly 65,000 read keep the file,
     /// and the same 65 among 64,999 refuse it by name. Invented rows.
