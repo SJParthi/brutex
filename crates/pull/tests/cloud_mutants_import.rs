@@ -499,6 +499,22 @@ fn fold_an_anchor_overflow_names_its_stamp() {
     );
 }
 
+/// The ladder is finished only once its last rung is climbed: not fresh, not
+/// one rung short of the end, and not after a failed last stage.
+#[test]
+fn fold_the_ladder_is_finished_only_after_its_last_rung() {
+    let mut ladder = pull::fold::Ladder::new();
+    assert!(!ladder.finished(), "a fresh ladder");
+    for _ in 1..pull::fold::LADDER.len() {
+        ladder.record(true);
+    }
+    assert!(!ladder.finished(), "one rung short");
+    ladder.record(false);
+    assert!(!ladder.finished(), "the last stage failed");
+    ladder.record(true);
+    assert!(ladder.finished());
+}
+
 /// The completeness fold's paths through its public forms: an index day's
 /// absent head and tail, a special session's first bucket, duplicate and
 /// off-grid minutes, withheld days counted under their own sentence, and the
