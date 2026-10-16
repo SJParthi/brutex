@@ -4976,3 +4976,362 @@ mod tests {
         assert!(!may_name_a_refusal("request minute coverage UNVERIFIED"));
     }
 }
+
+/// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): each one
+/// pins a behaviour a surviving mutant broke, or reaches a line no other test
+/// reached.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+
+    /// A store root nobody else in this process shares, emptied first.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = crate::scratch::path(&format!("audit-cloud-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    fn window() -> Window {
+        let day = pull::session::Day::from_days(20_000).expect("a day");
+        Window::new(day, day).expect("a window")
+    }
+
+    fn member(note: &str) -> Record {
+        Record::member_failure(Scope::Spot, at(100), "NIFTY", window(), note)
+    }
+
+    fn run_record() -> Record {
+        Record::refused(
+            Scope::Spot,
+            Outcome::Failed,
+            at(90),
+            "zerodha_kite",
+            "closed",
+        )
+        .with_window(window())
+    }
+
+    /// The image's checksum recomputed after a field was edited in place.
+    fn reseal(image: &mut [u8; RECORD_LEN]) {
+        let crc = crc32c(&covered(image));
+        write_at(image, OFF_CRC, crc.to_le_bytes());
+    }
+
+    /// The two faults no test had printed say exactly what they are.
+    #[test]
+    fn the_kind_and_whole_note_faults_say_what_they_are() {
+        assert_eq!(
+            RecordFault::UnknownKind { code: 9 }.to_string(),
+            "record-kind byte 9 is not one this build writes — a later build wrote this \
+             record and it is not read rather than being rendered as a run it is not"
+        );
+        assert_eq!(
+            RecordFault::WholeNoteOnARun.to_string(),
+            "a version-3 record that is not a member failure: only a member failure \
+             carries a whole-note offset, so this record is not read"
+        );
+    }
+
+    /// A version-1 record whose kept note runs past the version-1 field is
+    /// refused by name, measured against the longer version-1 field.
+    #[test]
+    fn a_version_one_note_past_its_field_is_refused() {
+        let mut image = run_record().image();
+        write_at(&mut image, OFF_VERSION, VERSION_ONE.to_le_bytes());
+        let past = u8::try_from(NOTE_CAPACITY_V1 + 1).expect("fits a byte");
+        write_at(&mut image, OFF_NOTE_KEPT, [past]);
+        reseal(&mut image);
+        assert_eq!(
+            Record::decode(&image),
+            Err(RecordFault::KeptPastCapacity {
+                kept: past,
+                capacity: u8::try_from(NOTE_CAPACITY_V1).expect("fits a byte"),
+            })
+        );
+    }
+
+    /// A whole note exactly [`MAX_WHOLE_NOTE`] long is kept whole and read
+    /// back as written (kills the cap's `<=` turned to `<`).
+    #[test]
+    fn a_whole_note_of_exactly_the_cap_reads_back_whole() {
+        let root = scratch("note-at-cap");
+        let journal = Journal::at(&root);
+        let whole = "y".repeat(MAX_WHOLE_NOTE);
+        journal
+            .append_member(&member(&whole), &whole)
+            .expect("the record lands");
+        let page = journal.page(1, 0, 1).expect("a page");
+        let record = page[0].decoded.as_ref().expect("decodes");
+        assert_eq!(record.version, VERSION_WHOLE_NOTE);
+        assert_eq!(page[0].whole_note, Some(Ok(whole.clone())));
+        assert_eq!(journal.whole_note(0, 0), Ok(whole));
+    }
+
+    /// A notes entry that is not one, of another layout, claiming more than
+    /// the cap, or failing its checksum is refused by name; and a notes file
+    /// that is gone is named on the page's row rather than dropped.
+    #[test]
+    fn a_damaged_notes_entry_is_refused_by_name() {
+        let root = scratch("note-damaged");
+        let journal = Journal::at(&root);
+        let whole = "x".repeat(NOTE_CAPACITY + 40);
+        journal
+            .append_member(&member(&whole), &whole)
+            .expect("the record lands");
+        let notes = journal.notes_path();
+        let good = std::fs::read(&notes).expect("the notes file");
+        let refused = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bad = good.clone();
+            edit(&mut bad);
+            std::fs::write(&notes, &bad).expect("write");
+            journal
+                .whole_note(0, 0)
+                .expect_err("a damaged entry is refused")
+        };
+        let why = refused(&|bytes| bytes[0] = b'X');
+        assert!(
+            why.ends_with("the note at byte 0 is not a note entry"),
+            "{why}"
+        );
+        let why = refused(&|bytes| bytes[4] = 9);
+        assert!(
+            why.ends_with("has entry layout 9; this build reads 1"),
+            "{why}"
+        );
+        let claimed = u32::try_from(MAX_WHOLE_NOTE + 1).expect("fits");
+        let why = refused(&|bytes| bytes[20..24].copy_from_slice(&claimed.to_le_bytes()));
+        assert!(
+            why.ends_with(&format!(
+                "claims {} bytes, past the {MAX_WHOLE_NOTE} kept",
+                MAX_WHOLE_NOTE + 1
+            )),
+            "{why}"
+        );
+        let why = refused(&|bytes| bytes[NOTE_HEAD] ^= 1);
+        assert!(why.contains("fails its checksum"), "{why}");
+
+        std::fs::remove_file(&notes).expect("the notes file is removed");
+        let page = journal.page(1, 0, 1).expect("the journal still pages");
+        let Some(Err(why)) = &page[0].whole_note else {
+            panic!(
+                "a notes file that is gone is named: {:?}",
+                page[0].whole_note
+            );
+        };
+        assert!(why.contains("pull.notes"), "{why}");
+    }
+
+    /// A notes file whose lock another holder has: the record still lands,
+    /// as version 2 with its note cut, and names no whole note.
+    #[test]
+    fn a_whole_note_that_cannot_be_locked_leaves_the_record_cut() {
+        let root = scratch("note-locked");
+        let journal = Journal::at(&root);
+        std::fs::create_dir_all(root.join("audit")).expect("audit/");
+        let notes = journal.notes_path();
+        std::fs::write(&notes, b"").expect("an empty notes file");
+        let holder = Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&notes)
+                .expect("the notes handle"),
+            notes.clone(),
+        )
+        .expect("nothing else holds it");
+        let whole = "z".repeat(NOTE_CAPACITY + 40);
+        let landed = journal.append_member(&member(&whole), &whole);
+        drop(holder);
+        landed.expect("the record lands without its whole note");
+        let page = journal.page(1, 0, 1).expect("a page");
+        let record = page[0].decoded.as_ref().expect("decodes");
+        assert_eq!(record.version, VERSION);
+        assert_eq!(record.note_at, None);
+        assert_eq!(record.note, "z".repeat(NOTE_CAPACITY));
+        assert_eq!(page[0].whole_note, None);
+        assert_eq!(
+            std::fs::read(&notes).expect("read"),
+            b"",
+            "nothing was written"
+        );
+    }
+
+    /// A cover whose checksum fails is not read as a cover.
+    #[test]
+    fn a_cover_failing_its_checksum_is_not_read() {
+        let root = scratch("cover-crc");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let cover = journal.index_dir().join("cover");
+        let mut bytes = std::fs::read(&cover).expect("the cover");
+        bytes[13] ^= 0xFF;
+        std::fs::write(&cover, bytes).expect("write");
+        let why = journal.read_index(1).expect_err("refused");
+        assert!(why.ends_with("not a cover this build wrote"), "{why}");
+    }
+
+    /// An `ident` that is there and cannot be read is named in its own
+    /// words, never called "no index".
+    #[test]
+    fn an_ident_that_cannot_be_read_is_named() {
+        let root = scratch("ident-dir");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let ident = journal.index_dir().join("ident");
+        std::fs::remove_file(&ident).expect("rm");
+        std::fs::create_dir(&ident).expect("a directory where ident was");
+        let why = journal.read_index(1).expect_err("refused");
+        assert!(why.contains("ident"), "{why}");
+        assert!(!why.starts_with("no index at"), "{why}");
+    }
+
+    /// A `runs` file that is a directory is named, never read as empty.
+    #[test]
+    fn an_index_file_that_cannot_be_read_is_named() {
+        let root = scratch("runs-dir");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let runs = journal.index_dir().join("runs");
+        std::fs::remove_file(&runs).expect("rm");
+        std::fs::create_dir(&runs).expect("a directory where runs was");
+        let why = journal.read_index(1).expect_err("refused");
+        assert!(why.contains("runs"), "{why}");
+    }
+
+    /// A `runs` entry filed under another attribution rule, or naming a
+    /// vendor code this build does not know, has its vendor read from the
+    /// record itself; one whose record will not decode is malformed.
+    #[test]
+    fn a_run_entry_of_another_rule_reads_its_vendor_from_the_record() {
+        let root = scratch("runs-rule");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let runs = journal.index_dir().join("runs");
+        let rewrite = |code: u8, rule: u8| {
+            let mut entry = run_entry(0, 90, None);
+            entry[16] = code;
+            entry[17] = rule;
+            let crc = crc32c(&entry[..RUN_ENTRY - 4]);
+            entry[RUN_ENTRY - 4..].copy_from_slice(&crc.to_le_bytes());
+            std::fs::write(&runs, entry).expect("write");
+        };
+        for (code, rule) in [(0, ATTRIBUTION_RULE + 1), (200, ATTRIBUTION_RULE)] {
+            rewrite(code, rule);
+            let index = journal.read_index(1).expect("reads");
+            assert_eq!(
+                index.runs,
+                vec![(0, Some(brutex_core::vendor::Vendor::Zerodha))],
+                "code {code} rule {rule}"
+            );
+            assert_eq!(index.malformed, 0);
+        }
+        // The record itself damaged: nothing to read the vendor from.
+        use std::os::unix::fs::FileExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal.path)
+            .expect("open")
+            .write_all_at(&[0xFF; RECORD_LEN], 0)
+            .expect("damage");
+        let index = journal.read_index(1).expect("reads");
+        assert!(index.runs.is_empty());
+        assert_eq!(index.malformed, 1);
+    }
+
+    /// No source names no refusal file; a record past the end is not read;
+    /// an absent journal builds no index.
+    #[test]
+    fn edges_of_the_index_readers_answer_rather_than_guess() {
+        let root = scratch("index-edges");
+        let journal = Journal::at(&root);
+        assert_eq!(journal.build_index(), Ok(IndexBuilt::default()));
+        assert!(
+            !journal.index_dir().exists(),
+            "an absent journal builds nothing"
+        );
+        journal.append(&run_record()).expect("lands");
+        assert_eq!(journal.refusal_ordinals("", 10), Ok(Vec::new()));
+        let why = journal.records_at(&[5]).expect_err("past the end");
+        assert!(why.contains("cannot read record 5"), "{why}");
+    }
+
+    /// A half-built index that cannot be cleared refuses the rebuild by name.
+    #[test]
+    fn a_half_built_index_that_cannot_be_cleared_refuses_the_rebuild() {
+        let root = scratch("building-file");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let dir = journal.index_dir();
+        std::fs::remove_dir_all(&dir).expect("the index is removed");
+        let building = dir.with_extension(format!("{INDEX_SUFFIX}.building"));
+        std::fs::write(&building, b"a file, not a half-built index").expect("write");
+        let why = journal.build_index().expect_err("refused");
+        assert!(why.contains(".building"), "{why}");
+    }
+
+    /// A catch-up that must file a refusal where `refusals/` cannot be made
+    /// refuses by name.
+    #[test]
+    fn a_catch_up_whose_refusals_directory_cannot_be_made_is_refused() {
+        use std::io::Write as _;
+        let root = scratch("refusals-file");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("lands");
+        let refusals = journal.index_dir().join("refusals");
+        let _ignored = std::fs::remove_dir_all(&refusals);
+        std::fs::write(&refusals, b"a file").expect("a file where refusals/ goes");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal.path)
+            .expect("open")
+            .write_all(&member("refused by the vendor").image())
+            .expect("a raw append the index has not seen");
+        let why = journal.build_index().expect_err("refused");
+        assert!(why.contains("refusals: cannot create"), "{why}");
+    }
+
+    /// `ensure_index` builds an absent index once, in the background, and
+    /// says so once; a second call over an index already whole says nothing;
+    /// a store with no journal starts nothing.
+    #[test]
+    fn ensure_index_builds_once_and_says_so_once() {
+        let root = scratch("ensure");
+        assert!(ensure_index(&root).is_none(), "no journal, no thread");
+        let path = journal_path(&root);
+        std::fs::create_dir_all(path.parent().expect("audit/")).expect("mkdir");
+        std::fs::write(&path, run_record().image()).expect("a journal with no index");
+        let shown = path.display().to_string();
+        let ours = |from| {
+            crate::emitted::landed(from, "api.audit", "journal index build finished")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "path", &shown))
+                .count()
+        };
+        let from = crate::emitted::mark();
+        ensure_index(&root)
+            .expect("a thread")
+            .join()
+            .expect("the build ran");
+        assert!(Journal::at(&root).index_dir().join("cover").is_file());
+        assert_eq!(ours(from), 1);
+        let again = crate::emitted::mark();
+        ensure_index(&root)
+            .expect("a thread")
+            .join()
+            .expect("the catch-up ran");
+        assert_eq!(ours(again), 0, "a whole index is no news");
+    }
+}
