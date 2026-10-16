@@ -8729,4 +8729,40 @@ mod cloud_mutant_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// A ROUND THAT CARRIES ON IS IDLE, NOT HALTED, even over a universe that
+    /// would otherwise halt it: a reconsidered stall is about to be asked for
+    /// on the next pass, and `carry_on` outranks the empty universe (kills `&&`
+    /// turned to `||` in the phase `round` publishes when nothing is chosen).
+    #[tokio::test]
+    async fn a_round_that_carries_on_a_stall_is_idle_even_over_an_empty_universe() {
+        let site = empty_site("carry-on-idle");
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let mut feeds = drivable(yesterday);
+        let now = ingest::epoch_secs(std::time::SystemTime::now());
+        feeds
+            .first_mut()
+            .expect("a drivable feed")
+            .stalls
+            .push(Stall {
+                month: month(2021, 3),
+                attempts: MAX_MONTH_ATTEMPTS,
+                reason: String::from("attempted 3 times and never completed"),
+                retried: 0,
+                at_unix: now.saturating_sub(STALL_RECHECK_SECS * 2),
+                rung: pull::vendor::Granularity::Minute1,
+            });
+        assert!(
+            Settled::over(&[]).halts(),
+            "the premise: an empty universe halts a round with nothing to carry on"
+        );
+        let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        assert!(pass.owed, "the reconsidered month is owed");
+        assert_eq!(
+            site.autopilot.inspect(|status| status.phase),
+            Some(Phase::Idle),
+            "{}",
+            site.autopilot.json()
+        );
+    }
 }
