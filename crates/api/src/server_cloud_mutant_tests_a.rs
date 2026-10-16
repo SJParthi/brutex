@@ -1674,3 +1674,39 @@ fn the_entry_point_reads_its_directories_from_the_environment() {
         let _ = std::fs::remove_dir_all(path);
     }
 }
+
+/// The universe counts every unreadable row and every unrecognised listing
+/// class it met, ACROSS vendors (kills `unreadable += …` and `unrecognised
+/// += …` turned to `*=`, which leave both at zero).
+#[test]
+fn the_universe_counts_unreadable_rows_and_unrecognised_classes_across_vendors() {
+    let dir = crate::scratch::path("clouda-universe-counts");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("groww_instruments.csv"),
+        "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+         expiry_date,strike_price,groww_symbol\n\
+         NSE,CASH,,RELIANCE,EQ\n\
+         NSE,CASH,,INFY,EQ\n\
+         NSE,CASH,,TCS,EQ,EQX,INE467B01029,,,NSE-TCS\n\
+         NSE,CASH,,CHOLAFIN,EQ,EQ,INE121A01024,,,NSE-CHOLAFIN\n",
+    )
+    .expect("the groww master");
+    std::fs::write(
+        dir.join("dhan_scrip.csv"),
+        format!(
+            "{}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQX,,,,1333\n\
+             NSE,E,INE009A01021,EQUITY,INFY\n",
+            super::tests::DHAN_HEAD
+        ),
+    )
+    .expect("the dhan master");
+    let read = universe(&dir);
+    assert_eq!(
+        read.unreadable, 3,
+        "two short Groww rows and one short Dhan row"
+    );
+    assert_eq!(read.unrecognised, 2, "EQX at each vendor");
+    let _ = std::fs::remove_dir_all(&dir);
+}
