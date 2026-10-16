@@ -1109,21 +1109,26 @@ mod tests {
                 for when in [TradeDay::MIN, day(2018, 1, 1), CURRENT_AS_OF, TradeDay::MAX] {
                     let refused = RateCard::resolve(kind, exchange, when, RateSelector::Dated)
                         .expect_err("no dated equity or futures history");
-                    let ChargeError::Cost(CostError::Unverified(refusal)) = refused else {
-                        panic!("a dated refusal, not {refused:?}");
-                    };
-                    assert_eq!(refusal.on(), when);
-                    assert_eq!(refusal.exchange(), Some(exchange));
-                    assert_eq!(refusal.window_start(), TradeDay::MIN);
-                    assert_eq!(refusal.verified_from(), None);
-                    assert_eq!(refusal.source(), NO_DATED_HISTORY);
-                    assert_eq!(refusal.remediation(), NO_DATED_HISTORY_REMEDY);
                     let want = if kind == TradeKind::Futures {
                         "futures charge stack (dated rates)"
                     } else {
                         "equity cash charge stack (dated rates)"
                     };
-                    assert_eq!(refusal.charge(), want);
+                    // Every field of the refusal, at once: the charge, the
+                    // venue, the day, an open window from the start of
+                    // history, the citation gap and the remedy.
+                    assert_eq!(
+                        refused,
+                        ChargeError::Cost(CostError::Unverified(Refusal::with_remediation(
+                            want,
+                            Some(exchange),
+                            when,
+                            TradeDay::MIN,
+                            None,
+                            NO_DATED_HISTORY,
+                            NO_DATED_HISTORY_REMEDY,
+                        )))
+                    );
                     assert!(refused.to_string().contains("CurrentOnEveryDate"));
                 }
             }

@@ -707,4 +707,61 @@ mod tests {
             ]
         );
     }
+
+    /// A writer that succeeds `budget` times and then fails for good.
+    struct FailsAfter {
+        budget: usize,
+        written: usize,
+    }
+
+    impl fmt::Write for FailsAfter {
+        fn write_str(&mut self, _: &str) -> fmt::Result {
+            if self.written < self.budget {
+                self.written += 1;
+                Ok(())
+            } else {
+                Err(fmt::Error)
+            }
+        }
+    }
+
+    /// How many budgets leave `value` unrendered: the writes it needs.
+    fn writes_needed(value: &impl fmt::Display) -> usize {
+        use fmt::Write as _;
+        (0..256)
+            .filter(|&budget| {
+                let mut writer = FailsAfter { budget, written: 0 };
+                write!(writer, "{value}").is_err()
+            })
+            .count()
+    }
+
+    #[test]
+    fn display_propagates_a_writer_error_from_every_part_it_writes() {
+        let both = quote(
+            INTRADAY,
+            Exchange::Nse,
+            50,
+            Some(rs(1_520_00)),
+            Some(rs(1_530_00)),
+        )
+        .expect("priced");
+        let buy_only =
+            quote(INTRADAY, Exchange::Nse, 50, Some(rs(1_520_00)), None).expect("priced");
+        let sell_only =
+            quote(INTRADAY, Exchange::Nse, 50, None, Some(rs(1_530_00))).expect("priced");
+        let mut refused_line = both;
+        refused_line.stt = Exact(i128::MAX);
+        assert_eq!(
+            [
+                writes_needed(&both),
+                writes_needed(&buy_only),
+                writes_needed(&sell_only),
+                writes_needed(&refused_line),
+            ],
+            // A missing side writes one literal where a present one writes
+            // two parts and a value; a refused line writes its literal alone.
+            [89, 84, 84, 83]
+        );
+    }
 }

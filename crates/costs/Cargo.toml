@@ -47,3 +47,14 @@ workspace = true
 name    = "ratio"
 harness = false
 test    = false
+
+# ---------------------------------------------------------------------------
+# Package CHG-1 — the charge stack's p50 / p99 / max per executed order and per
+# client-security-day, and the ratios that would show a cost growing with the
+# trade. Same shape as `ratio`, for the same reasons: no framework, no
+# dependency, not run by `cargo test`. D-5118.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "stack"
+harness = false
+test    = false

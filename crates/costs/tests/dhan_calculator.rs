@@ -862,3 +862,34 @@ fn the_precise_and_calculator_modes_differ_where_the_rules_differ_and_agree_wher
         21_405_000_000
     );
 }
+
+/// The live option readings of 15-16 Oct 2026, priced precisely under the
+/// DATED selector, must equal today's table once the regime carries FA73061's
+/// 0.03553% row from 2026-03-01. Until package CHG-0 lands that row, the
+/// regime still answers FA64232's 0.03503% for October 2026 — without the
+/// IPFT, which FA73061 folds into its own row — and this fails. The local
+/// merge un-ignores it (D-5115).
+#[test]
+#[ignore = "needs CHG-0's FA73061 regime row"]
+fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases() {
+    let options: Vec<&Case> = GOLDEN.iter().filter(|case| case.kind == OPT).collect();
+    assert_eq!(options.len(), 11);
+    for (year, month, d) in [(2026, 10, 15), (2026, 10, 16), (2026, 3, 1)] {
+        let on = TradeDay::new(year, month, d).expect("a real date");
+        for case in &options {
+            let price = |selector| {
+                let mut day = ClientSecurityDay::open(OPT, NSE, on, selector).expect("priced");
+                for (side, price) in [(OrderSide::Buy, case.buy), (OrderSide::Sell, case.sell)] {
+                    let price = paisa(price.expect("both legs"));
+                    day.add(Order::new(side, case.quantity, price).expect("valid"))
+                        .expect("in range");
+                }
+                day.settle().expect("settled")
+            };
+            let dated = price(RateSelector::Dated);
+            let today = price(RateSelector::CurrentOnEveryDate);
+            assert_eq!(dated.lines(), today.lines(), "{} on {on}", case.name);
+            assert_eq!(dated.total(), today.total(), "{} on {on}", case.name);
+        }
+    }
+}

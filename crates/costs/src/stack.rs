@@ -828,9 +828,7 @@ impl fmt::Display for DayCharges {
 )]
 mod tests {
     use super::*;
-    use crate::schedule::{
-        BSE_EQUITY_EXCHANGE, CURRENT_AS_OF, FA73061_EFFECTIVE, STT_EQUITY_DELIVERY, STT_FUTURES,
-    };
+    use crate::schedule::{BSE_EQUITY_EXCHANGE, CURRENT_AS_OF, STT_EQUITY_DELIVERY, STT_FUTURES};
 
     fn day(year: u16, month: u8, d: u8) -> TradeDay {
         TradeDay::new(year, month, d).expect("a real date")
@@ -1396,43 +1394,58 @@ mod tests {
         assert_eq!(charges.stt(), rs(8_00)); // 0.10% of 7,800 = 7.80 -> 8
     }
 
-    /// The live option cases of 15-16 Oct 2026, priced under the DATED
-    /// selector, must equal today's table once the regime carries FA73061's
-    /// 0.03553% row. Until package CHG-0 lands that row, the regime still
-    /// answers FA64232's 0.03503% for October 2026 and this fails.
-    #[test]
-    #[ignore = "needs CHG-0's FA73061 regime row"]
-    fn the_dated_regime_and_todays_table_agree_on_the_live_october_2026_option_cases() {
-        let cases: [(i64, i64, i64); 10] = [
-            (65, 100_00, 120_00),
-            (130, 42_50, 55_25),
-            (65, 1_205_00, 1_236_50),
-            (260, 45, 85),
-            (30, 520_00, 610_45),
-            (90, 480_00, 410_15),
-            (500, 24_50, 31_20),
-            (1_000, 6_85, 4_10),
-            (1_500, 35, 20),
-            (650, 15, 5),
-        ];
-        for when in [day(2026, 10, 15), day(2026, 10, 16), FA73061_EFFECTIVE] {
-            for (quantity, bought, sold) in cases {
-                let price = |selector| {
-                    let mut csd =
-                        ClientSecurityDay::open(TradeKind::Options, Exchange::Nse, when, selector)
-                            .expect("priced");
-                    csd.add(buy(quantity, bought)).expect("in range");
-                    csd.add(sell(quantity, sold)).expect("in range");
-                    csd.settle().expect("settled")
-                };
-                let dated = price(RateSelector::Dated);
-                let today = price(RateSelector::CurrentOnEveryDate);
-                assert_eq!(
-                    lines(&dated),
-                    lines(&today),
-                    "{quantity} @{bought}->{sold} on {when}"
-                );
+    /// A writer that succeeds `budget` times and then fails for good, so
+    /// every `?` in a `Display` is taken in turn (`crate::error`'s method).
+    struct FailsAfter {
+        budget: usize,
+        written: usize,
+    }
+
+    impl fmt::Write for FailsAfter {
+        fn write_str(&mut self, _: &str) -> fmt::Result {
+            if self.written < self.budget {
+                self.written += 1;
+                Ok(())
+            } else {
+                Err(fmt::Error)
             }
         }
+    }
+
+    /// How many budgets leave `value` unrendered: the writes it needs.
+    fn writes_needed(value: &impl fmt::Display) -> usize {
+        use fmt::Write as _;
+        (0..256)
+            .filter(|&budget| {
+                let mut writer = FailsAfter { budget, written: 0 };
+                write!(writer, "{value}").is_err()
+            })
+            .count()
+    }
+
+    #[test]
+    fn display_propagates_a_writer_error_from_every_part_it_writes() {
+        // A Display that swallowed a writer error would report success with a
+        // truncated breakdown: a total with no lines, or lines with no label.
+        let v1 = priced(
+            INTRADAY,
+            Exchange::Nse,
+            &[buy(50, 1_520_00), sell(50, 1_530_00)],
+        );
+        let fut = priced(
+            TradeKind::Futures,
+            Exchange::Nse,
+            &[buy(65, 25_200_00), sell(65, 25_250_00)],
+        );
+        assert_eq!(writes_needed(&v1), 145);
+        assert_eq!(writes_needed(&fut), 147);
+        assert!(
+            writes_needed(&fut) < 256,
+            "the budget is not itself the answer"
+        );
+        assert!(
+            writes_needed(&fut) > writes_needed(&v1),
+            "the UNVERIFIED line is written too"
+        );
     }
 }
