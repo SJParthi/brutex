@@ -777,3 +777,280 @@ mod render_json_rs {
         }
     }
 }
+
+/// `bars.rs`: the public window and page reads, over generated months.
+mod bars_rs {
+    use super::{Scratch, write_month};
+    use api::bars::{
+        Cancel, Filter, MAX_SERIES, SeriesKey, SortKey, Window, WindowQuery, page_cancellable,
+        window,
+    };
+    use brutex_core::vendor::Vendor;
+    use store::path::{Timeframe, YearMonth};
+
+    fn month(m: u8) -> YearMonth {
+        YearMonth::new(2025, m).expect("a month")
+    }
+
+    /// The UTC second of 09:15 IST on day `d` of 2025-`m`.
+    fn open_of(m: u8, d: u8) -> i64 {
+        i64::from(
+            pull::session::Day::new(2025, m, d)
+                .expect("a day")
+                .days_from_epoch(),
+        ) * 86_400
+            + 13_500
+    }
+
+    /// `n` one-minute bars from 09:15 IST on day `d` of 2025-`m`, closing at
+    /// `base + i`.
+    fn minutes(m: u8, d: u8, n: i64, base: i64) -> Vec<(i64, i64)> {
+        (0..n).map(|i| (open_of(m, d) + i * 60, base + i)).collect()
+    }
+
+    fn query(series: Vec<SeriesKey>, from: YearMonth, to: YearMonth) -> WindowQuery {
+        WindowQuery {
+            vendor: Vendor::Dhan,
+            timeframe: Timeframe::MINUTE_1,
+            series,
+            from,
+            to,
+            sort: SortKey::Ts,
+            desc: false,
+            offset: Some(0),
+            limit: 50,
+            want_extremes: false,
+            at: None,
+            filter: Filter::default(),
+            lookback: true,
+            coverage: false,
+        }
+    }
+
+    fn index(symbol: &str) -> SeriesKey {
+        SeriesKey::new("NSE", "INDEX", symbol, None)
+    }
+
+    fn read(root: &std::path::Path, asked: &WindowQuery) -> Window {
+        window(root, asked).expect("the window answers")
+    }
+
+    /// **A WINDOW NAMES ONE TO `MAX_SERIES` SERIES, AND NO SERIES IS REFUSED
+    /// BY NAME**, before any file is read. Runs the series-count refusal,
+    /// which no test reached.
+    #[test]
+    fn bars_a_window_naming_no_series_or_too_many_is_refused_by_name() {
+        let scratch = Scratch::new("bars-series-count");
+        let none = window(scratch.root(), &query(Vec::new(), month(5), month(5)))
+            .expect_err("no series is refused");
+        assert!(
+            none.starts_with("too_many_series") && none.contains("0 were named"),
+            "{none}"
+        );
+        let many = vec![index("NIFTY"); MAX_SERIES + 1];
+        let refused = window(scratch.root(), &query(many, month(5), month(5)))
+            .expect_err("too many series is refused");
+        assert!(
+            refused.contains(&format!("{} were named", MAX_SERIES + 1)),
+            "{refused}"
+        );
+    }
+
+    /// **OPEN INTEREST OVER INDEX SERIES IS TIME ORDER, AND ITS EXTREMES ARE
+    /// FOLDED.** An index has no open interest (D-3322), so the page is a
+    /// seek, said `by_time`, and `extremes=1` still answers. Runs the extremes
+    /// arm of the by-time open-interest path.
+    #[test]
+    fn bars_open_interest_over_an_index_is_time_order_with_its_extremes() {
+        let scratch = Scratch::new("bars-oi-by-time");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 5, 100),
+        );
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.sort = SortKey::OpenInterest;
+        asked.desc = true;
+        asked.want_extremes = true;
+        let got = read(scratch.root(), &asked);
+        let report = got.sort_index.expect("a sort report");
+        assert!(report.by_time);
+        assert_eq!(report.column, "oi");
+        let closes: Vec<i64> = got.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(
+            closes,
+            vec![100, 101, 102, 103, 104],
+            "ascending time in both directions"
+        );
+        let extremes = got.extremes.expect("folded");
+        assert_eq!(extremes.close_max.map(|e| e.v), Some(104));
+        assert_eq!(extremes.close_min.map(|e| e.v), Some(100));
+        assert_eq!(got.extremes_why, None);
+    }
+
+    /// **A TIME-OF-DAY ORDER FOLDS THE EXTREMES OF EVERY KEPT ROW IT
+    /// STREAMS.** Runs the scan's extremes fold and its `Some(extremes)`.
+    #[test]
+    fn bars_a_time_of_day_order_folds_the_extremes_it_streams() {
+        let scratch = Scratch::new("bars-tod-extremes");
+        let mut rows = minutes(5, 2, 3, 200);
+        rows.extend(minutes(5, 5, 3, 300));
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &rows,
+        );
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.sort = SortKey::TimeOfDay;
+        asked.want_extremes = true;
+        let got = read(scratch.root(), &asked);
+        let closes: Vec<i64> = got.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(
+            closes,
+            vec![200, 300, 201, 301, 202, 302],
+            "by the second of the day, ties in time order"
+        );
+        let extremes = got.extremes.expect("folded");
+        assert_eq!(extremes.close_max.map(|e| e.v), Some(302));
+        assert_eq!(extremes.close_min.map(|e| e.v), Some(200));
+        assert_eq!(got.scan_rows, 6);
+    }
+
+    /// **OVER SEVERAL SERIES, A HOLE IS NAMED WITH THE SERIES IT IS IN.** Runs
+    /// `tally`'s keyed hole, which no test reached: every hole test was over
+    /// one series.
+    #[test]
+    fn bars_a_hole_over_several_series_names_its_series() {
+        let scratch = Scratch::new("bars-keyed-hole");
+        for (m, base) in [(4, 10), (6, 30)] {
+            write_month(
+                scratch.root(),
+                "INDEX",
+                "NIFTY",
+                Timeframe::MINUTE_1,
+                month(m),
+                &minutes(m, 2, 2, base),
+            );
+        }
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "BANKNIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 2, 50),
+        );
+        let got = read(
+            scratch.root(),
+            &query(vec![index("NIFTY"), index("BANKNIFTY")], month(4), month(6)),
+        );
+        assert_eq!(
+            got.missing_months,
+            vec!["NSE-INDEX-NIFTY 2025-05".to_owned()]
+        );
+        assert_eq!(
+            got.months_missing, 3,
+            "NIFTY's hole and BANKNIFTY's two outside its life"
+        );
+        assert_eq!(got.months_outside_life, 2);
+        assert_eq!(got.total, 6);
+    }
+
+    /// **TWO DAY SERIES MERGE BY TIME**: a day bar may sit anywhere in its
+    /// day, so the merge bisects microseconds there. Runs `merged`'s day-rung
+    /// step.
+    #[test]
+    fn bars_two_day_series_merge_by_time() {
+        let scratch = Scratch::new("bars-day-merge");
+        let midnight = |d: u8| open_of(5, d) - 33_300;
+        for (symbol, days, base) in [("NIFTY", [2, 6], 10), ("BANKNIFTY", [5, 7], 20)] {
+            let rows: Vec<(i64, i64)> = days
+                .iter()
+                .zip(0..)
+                .map(|(&d, i)| (midnight(d), base + i))
+                .collect();
+            write_month(
+                scratch.root(),
+                "INDEX",
+                symbol,
+                Timeframe::DAY_1,
+                month(5),
+                &rows,
+            );
+        }
+        let mut asked = query(vec![index("NIFTY"), index("BANKNIFTY")], month(5), month(5));
+        asked.timeframe = Timeframe::DAY_1;
+        asked.offset = Some(1);
+        asked.limit = 2;
+        let got = read(scratch.root(), &asked);
+        let picked: Vec<(usize, i64)> = got
+            .bars
+            .iter()
+            .map(|row| (row.series, row.bar.close))
+            .collect();
+        assert_eq!(
+            picked,
+            vec![(1, 20), (0, 11)],
+            "rows 1 and 2 of 2, 5, 6, 7 May"
+        );
+        assert_eq!(got.total, 4);
+    }
+
+    /// **WITH THE LOOKBACK OFF, THE SERIES' FIRST ROW HAS NOTHING BEHIND IT**:
+    /// no earlier month is held at all, so it is `no_earlier_stored_bar`, not
+    /// a predecessor left unread. Runs `behind_of`'s no-earlier-month arm.
+    #[test]
+    fn bars_the_first_row_with_no_earlier_month_has_nothing_behind_it() {
+        let scratch = Scratch::new("bars-lookback-first");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 3, 100),
+        );
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.lookback = false;
+        let got = read(scratch.root(), &asked);
+        assert_eq!(got.bars[0].chg_why, "no_earlier_stored_bar");
+        assert_eq!(got.bars[1].chg, Some(100), "101 against 100 is +1%");
+    }
+
+    /// **A CANCELLABLE PAGE PAST THE MONTH'S END STOPS AT THE LAST ROW.** Runs
+    /// `page_cancellable`'s short-chunk stop.
+    #[test]
+    fn bars_a_cancellable_page_past_the_end_returns_what_is_held() {
+        let scratch = Scratch::new("bars-page-short");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 10, 100),
+        );
+        let file = api::bars::open(
+            scratch.root(),
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            None,
+        )
+        .expect("the month opens");
+        let (rows, faults) =
+            page_cancellable(&file, 4, 1_000, &Cancel::never()).expect("not cancelled");
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.first().map(|bar| bar.close), Some(104));
+        assert!(faults.is_empty());
+    }
+}
