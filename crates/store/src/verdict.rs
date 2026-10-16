@@ -4168,3 +4168,907 @@ impl Reader {
 #[cfg(test)]
 #[path = "verdict_tests.rs"]
 mod tests;
+
+/// Mutation-survivor and coverage tests for this module's private decoders
+/// (cloud session 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+/// Each refusal is driven by ONE changed field, its CRC recomputed where the
+/// check runs after the CRC, so the refusal under test is the one that fires.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{
+        CODE_SLOTS, Code, DETAIL_CAP, DayBlock, Exchange, Facts, ImageHeader, Key, MAX_CAPACITY,
+        Mode, OVERFLOW_SLOTS, RECORD_STRIDE, SLOT_LEN, Segment, TABLE_OFFSET, TRAILER_LEN,
+        Timeframe, Unit, Vendor, VerdictError, crc_to, decode_day, decode_header, decode_record,
+        encode_day, encode_header, encode_record, geometry, put, unit_of,
+    };
+    use std::path::Path;
+
+    use super::{Carry, Detail, Entry, Generation, Series, blake3, commit, home_of, parse};
+    use crate::provenance::Day;
+
+    const PATH: &str = "/nonexistent/cloud/2031-03-04.g0000000001.vdt";
+
+    /// The CRC over `bytes[..at]` written at `at`, as every encoder does.
+    fn fix(bytes: &mut [u8], at: usize) {
+        let crc = crc_to(bytes, at);
+        put(bytes, at, &crc.to_le_bytes());
+    }
+
+    /// The `why` of an `image_corrupt`, or a panic naming what came instead.
+    fn corrupt_why(answer: Result<impl std::fmt::Debug, VerdictError>) -> String {
+        match answer {
+            Err(VerdictError::ImageCorrupt { why, .. }) => why,
+            other => panic!("not image_corrupt: {other:?}"),
+        }
+    }
+
+    /// The `(what, value)` of a `written_by_newer_build`.
+    fn unknown(answer: Result<impl std::fmt::Debug, VerdictError>) -> (&'static str, u64) {
+        match answer {
+            Err(VerdictError::Unknown { what, value, .. }) => (what, value),
+            other => panic!("not written_by_newer_build: {other:?}"),
+        }
+    }
+
+    fn header() -> ImageHeader {
+        let mut counts = [0; CODE_SLOTS];
+        counts[1] = 2;
+        ImageHeader {
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            timeframe: Timeframe::SECOND_1,
+            unit: unit_of(Timeframe::SECOND_1),
+            epoch_day: 22_342,
+            generation: 1,
+            records: 2,
+            capacity: 16,
+            counts,
+            run: 7,
+            written_at: 9,
+            verifier: 1,
+            mode: Mode::Inline,
+            rule_set: 0,
+            previous: 0,
+            carried: 0,
+            origin: [0; 16],
+            detail_offset: 0,
+            detail_bytes: 0,
+            detail_entries: 0,
+        }
+    }
+
+    /// **EVERY CHECK OF AN IMAGE HEADER REFUSES BY NAME.**
+    ///
+    /// The magic, the version, the stride, the CRC (and a header cut short),
+    /// the reserved bytes, a timeframe no rung has, a unit this build does not
+    /// know or that is not the timeframe's, and a feed, exchange, segment or
+    /// mode byte no table holds. A whole header decodes as itself.
+    #[test]
+    fn every_check_of_an_image_header_refuses_by_name() {
+        let path = Path::new(PATH);
+        let good = encode_header(&header());
+        assert_eq!(decode_header(&good, path).unwrap(), header());
+        let with = |at: usize, value: &[u8], crc: bool| {
+            let mut bytes = good;
+            put(&mut bytes, at, value);
+            if crc {
+                fix(&mut bytes, 252);
+            }
+            decode_header(&bytes, path)
+        };
+        assert_eq!(
+            corrupt_why(with(0, b"X", false)),
+            "the magic is not BRUTEXVD"
+        );
+        assert_eq!(
+            unknown(with(8, &2u16.to_le_bytes(), false)),
+            ("image version", 2)
+        );
+        assert_eq!(
+            corrupt_why(with(10, &161u16.to_le_bytes(), false)),
+            "the record stride is not 160"
+        );
+        assert_eq!(
+            corrupt_why(with(30, &[0xFF], false)),
+            "the header fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(decode_header(&good[..200], path)),
+            "the header fails its CRC-32C",
+            "a header cut short"
+        );
+        assert_eq!(
+            corrupt_why(with(200, &[1], true)),
+            "the header's reserved bytes are not zero"
+        );
+        assert_eq!(
+            unknown(with(184, &7u32.to_le_bytes(), true)),
+            ("timeframe seconds", 7)
+        );
+        assert_eq!(unknown(with(15, &[9], true)), ("unit", 9));
+        assert_eq!(
+            corrupt_why(with(15, &[Unit::Day.code()], true)),
+            "the unit is not the timeframe's"
+        );
+        assert_eq!(unknown(with(12, &[0], true)), ("feed", 0));
+        assert_eq!(unknown(with(14, &[9], true)), ("exchange", 9));
+        assert_eq!(unknown(with(13, &[9], true)), ("segment", 9));
+        assert_eq!(unknown(with(146, &[0], true)), ("mode", 0));
+    }
+
+    /// **A HEADER WHOSE GEOMETRY CANNOT HOLD ITS RECORDS IS REFUSED, AND ONE
+    /// THAT CAN IS MEASURED EXACTLY.**
+    ///
+    /// The table's capacity (not a power of two, below the floor, above the
+    /// ceiling), records that overfill it, per-code counts that do not sum to
+    /// the records or count code 0, and a detail section out of its place or
+    /// past its cap.
+    #[test]
+    fn a_header_whose_geometry_cannot_hold_its_records_is_refused() {
+        let path = Path::new(PATH);
+        let refused = |change: &dyn Fn(&mut ImageHeader)| {
+            let mut h = header();
+            change(&mut h);
+            corrupt_why(geometry(&h, path).map(|shape| shape.len))
+        };
+        for capacity in [24, 8, u32::try_from(MAX_CAPACITY).unwrap() * 2] {
+            assert_eq!(
+                refused(&|h| h.capacity = capacity),
+                format!("table capacity {capacity} is not a power of two in range")
+            );
+        }
+        assert_eq!(
+            refused(&|h| {
+                h.records = 9;
+                h.counts[1] = 9;
+            }),
+            "9 records overfill a table of 16"
+        );
+        assert_eq!(
+            refused(&|h| h.counts[1] = 1),
+            "the per-code counts do not sum to the records"
+        );
+        assert_eq!(
+            refused(&|h| {
+                h.counts[0] = 1;
+                h.counts[1] = 1;
+            }),
+            "the per-code counts do not sum to the records",
+            "code 0 is unset and counts nothing"
+        );
+        let records_end = TABLE_OFFSET + SLOT_LEN * (16 + OVERFLOW_SLOTS) + RECORD_STRIDE * 2;
+        let end = u32::try_from(records_end).unwrap();
+        let place = "the detail section's place does not follow the records";
+        for (bytes, offset, entries) in [
+            (u32::try_from(DETAIL_CAP).unwrap() + 1, end, 1),
+            (10, 0, 1),
+            (10, end, 0),
+            (10, end + 8, 1),
+            (0, end, 0),
+        ] {
+            assert_eq!(
+                refused(&|h| {
+                    h.detail_bytes = bytes;
+                    h.detail_offset = offset;
+                    h.detail_entries = entries;
+                }),
+                place,
+                "{bytes} bytes at {offset}, {entries} entries"
+            );
+        }
+        let mut h = header();
+        h.detail_bytes = 10;
+        h.detail_offset = end;
+        h.detail_entries = 1;
+        let shape = geometry(&h, path).unwrap();
+        assert_eq!(shape.len, records_end + 10 + TRAILER_LEN);
+        assert_eq!(shape.records_at, records_end - RECORD_STRIDE * 2);
+        assert_eq!(shape.capacity, 16);
+    }
+
+    /// **EVERY CHECK OF A DAY BLOCK REFUSES BY NAME.**
+    ///
+    /// Its CRC (and a block cut short), its reserved bytes, and each of its
+    /// five enumerations at a byte this build does not know. A whole block
+    /// decodes as itself.
+    #[test]
+    fn every_check_of_a_day_block_refuses_by_name() {
+        let path = Path::new(PATH);
+        let day = DayBlock::of(Code::Match);
+        let good = encode_day(&day);
+        assert_eq!(decode_day(&good, path).unwrap(), day);
+        let with = |at: usize, value: u8, crc: bool| {
+            let mut bytes = good;
+            bytes[at] = value;
+            if crc {
+                fix(&mut bytes, 252);
+            }
+            decode_day(&bytes, path)
+        };
+        assert_eq!(
+            corrupt_why(with(40, 1, false)),
+            "the day block fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(decode_day(&good[..255], path)),
+            "the day block fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(with(100, 1, true)),
+            "the day block's reserved bytes are not zero"
+        );
+        assert_eq!(unknown(with(1, 9, true)), ("source held", 9));
+        assert_eq!(unknown(with(2, 9, true)), ("v3 manifest", 9));
+        assert_eq!(unknown(with(3, 9, true)), ("journal outcome", 9));
+        assert_eq!(unknown(with(4, 9, true)), ("day state", 9));
+        assert_eq!(unknown(with(5, 0, true)), ("worst code", 0));
+    }
+
+    /// **EVERY CHECK OF A RECORD REFUSES BY NAME, NAMING THE RECORD.**
+    ///
+    /// Its CRC (and a record cut short) as `record_corrupt` with its ordinal;
+    /// a key field that is empty, not UTF-8, or not zero after its key; a code
+    /// this build does not know; and reserved bytes that are not zero. A whole
+    /// record decodes as itself.
+    #[test]
+    fn every_check_of_a_record_refuses_by_name() {
+        let path = Path::new(PATH);
+        let key = Key::instrument("ZZCLOUD").unwrap();
+        let facts = Facts::of(Code::ValueMismatch);
+        let good = encode_record(&key, 7, &facts, 3);
+        let record = decode_record(&good, path, 3).unwrap();
+        assert_eq!(
+            (record.key, record.run, record.facts, record.detail_at),
+            (key, 7, facts, 3)
+        );
+        let with = |at: usize, value: u8, crc: bool| {
+            let mut bytes = good;
+            bytes[at] = value;
+            if crc {
+                fix(&mut bytes, 156);
+            }
+            decode_record(&bytes, path, 3)
+        };
+        for answer in [with(90, 1, false), decode_record(&good[..159], path, 3)] {
+            assert!(
+                matches!(answer, Err(VerdictError::RecordCorrupt { ordinal: 3, .. })),
+                "{answer:?}"
+            );
+        }
+        let not_a_key = "record 3's key field is not a key";
+        assert_eq!(corrupt_why(with(8, 0, true)), not_a_key, "empty");
+        assert_eq!(corrupt_why(with(8, 0xFF, true)), not_a_key, "not UTF-8");
+        assert_eq!(
+            corrupt_why(with(8 + 7 + 1, b'X', true)),
+            not_a_key,
+            "not zero after the key"
+        );
+        assert_eq!(unknown(with(72, 0, true)), ("verdict code", 0));
+        assert_eq!(unknown(with(72, 99, true)), ("verdict code", 99));
+        assert_eq!(
+            corrupt_why(with(150, 1, true)),
+            "record 3's reserved bytes are not zero"
+        );
+    }
+
+    /// The bytes of a committed two-record image: `ZZA` (match, one detail)
+    /// and `ZZB` (value mismatch, one detail), with one day detail.
+    fn committed_image() -> Vec<u8> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-vd-cloud-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let entry = |name: &str, code: Code, payload: &[u8]| Entry {
+            key: Key::instrument(name).unwrap(),
+            facts: Facts::of(code),
+            details: vec![Detail {
+                kind: 2,
+                payload: payload.to_vec(),
+            }],
+        };
+        let generation = Generation {
+            day: Day::new(2031, 3, 4).unwrap(),
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::ValueMismatch),
+            day_details: vec![Detail {
+                kind: 1,
+                payload: b"day".to_vec(),
+            }],
+            entries: vec![
+                entry("ZZA", Code::Match, b"aa"),
+                entry("ZZB", Code::ValueMismatch, b"bbb"),
+            ],
+            carry: Carry::WholeDay,
+        };
+        let path = commit(&series, &generation).unwrap().path;
+        let bytes = std::fs::read(path).unwrap();
+        let _ignored = std::fs::remove_dir_all(&root);
+        bytes
+    }
+
+    /// The BLAKE3 trailer over everything before it, as a writer seals it.
+    fn reseal(bytes: &mut [u8]) {
+        let end = bytes.len() - TRAILER_LEN;
+        let digest = blake3::hash(&bytes[..end]);
+        bytes[end..].copy_from_slice(&digest);
+    }
+
+    /// Where the records, the table and the detail section start.
+    fn places(bytes: &[u8]) -> (usize, usize, usize) {
+        let header = decode_header(bytes, Path::new(PATH)).unwrap();
+        let shape = geometry(&header, Path::new(PATH)).unwrap();
+        (
+            shape.records_at,
+            shape.capacity,
+            usize::try_from(header.detail_offset).unwrap(),
+        )
+    }
+
+    fn parsed(bytes: &[u8]) -> Result<(), VerdictError> {
+        parse(bytes, Path::new(PATH)).map(|_| ())
+    }
+
+    /// **EVERY WHOLE-IMAGE CHECK REFUSES BY NAME.**
+    ///
+    /// Covers `parse`: an image shorter than a header and a day block, a
+    /// length the header does not imply, records out of (code, key) order,
+    /// per-code counts that differ from the records, an empty slot carrying a
+    /// tag, a slot naming a record past the records, a slot whose tag is not
+    /// its record's, more occupied slots than records, and a record its
+    /// probe window does not find. Each change is re-sealed, so the check
+    /// named is the one that refuses.
+    #[test]
+    fn every_whole_image_check_refuses_by_name() {
+        let good = committed_image();
+        assert!(parsed(&good).is_ok(), "{:?}", parsed(&good));
+        let (records_at, capacity, _) = places(&good);
+        let slot = |i: usize| TABLE_OFFSET + SLOT_LEN * i;
+        let mark_of = |bytes: &[u8], i: usize| super::u32_at(bytes, slot(i));
+        let empty = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark_of(&good, i) == 0)
+            .unwrap();
+        let occupied = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark_of(&good, i) != 0)
+            .unwrap();
+        let changed = |change: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = good.clone();
+            change(&mut bytes);
+            reseal(&mut bytes);
+            parsed(&bytes)
+        };
+
+        assert_eq!(
+            corrupt_why(parsed(&good[..TABLE_OFFSET + TRAILER_LEN - 1])),
+            "shorter than a header and a day block"
+        );
+        let len = good.len();
+        assert_eq!(
+            corrupt_why(changed(&|b| b
+                .splice(len - TRAILER_LEN..len - TRAILER_LEN, [0; 8])
+                .for_each(drop))),
+            format!("{} bytes where the header implies {len}", len + 8)
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let (first, second) = b.split_at_mut(records_at + RECORD_STRIDE);
+                first[records_at..].swap_with_slice(&mut second[..RECORD_STRIDE]);
+            })),
+            "records 0 and 1 are out of (code, key) order"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let record = &mut b[records_at + RECORD_STRIDE..records_at + 2 * RECORD_STRIDE];
+                record[72] = Code::MissingInStore.code();
+                fix(record, 156);
+            })),
+            "the per-code counts differ from the records"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, slot(empty) + 4, &9u32.to_le_bytes()))),
+            format!("empty slot {empty} carries a tag")
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, slot(empty), &99u32.to_le_bytes()))),
+            format!("slot {empty} names record 98, past the records")
+        );
+        let ordinal = usize::try_from(mark_of(&good, occupied) - 1).unwrap();
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let tag = super::u32_at(b, slot(occupied) + 4) ^ 1;
+                put(b, slot(occupied) + 4, &tag.to_le_bytes());
+            })),
+            format!("slot {occupied}'s tag is not record {ordinal}'s")
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let held: [u8; SLOT_LEN] = b[slot(occupied)..slot(occupied) + SLOT_LEN]
+                    .try_into()
+                    .unwrap();
+                put(b, slot(empty), &held);
+            })),
+            "3 occupied slots for 2 records"
+        );
+        // The occupied slot moved one past its probe window: still one slot
+        // per record, each tag its record's, and not where a lookup looks.
+        let record = decode_record(
+            &good[records_at + RECORD_STRIDE * ordinal..records_at + RECORD_STRIDE * (ordinal + 1)],
+            Path::new(PATH),
+            0,
+        )
+        .unwrap();
+        let home = home_of(record.key.hash, capacity);
+        let outside = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| (i < home || i >= home + super::MAX_PROBE) && mark_of(&good, i) == 0)
+            .unwrap();
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let held: [u8; SLOT_LEN] = b[slot(occupied)..slot(occupied) + SLOT_LEN]
+                    .try_into()
+                    .unwrap();
+                put(b, slot(occupied), &[0; SLOT_LEN]);
+                put(b, slot(outside), &held);
+            })),
+            format!("record {ordinal} is not where its probe window finds it")
+        );
+    }
+
+    /// **EVERY DETAIL-SECTION CHECK REFUSES BY NAME.**
+    ///
+    /// Covers `parse_details`: an entry that runs past the section, an entry
+    /// out of owner order, an entry of kind 0, an entry naming no record, an
+    /// entry count the header does not state, and a record whose
+    /// `detail_at` is not its first entry.
+    #[test]
+    fn every_detail_section_check_refuses_by_name() {
+        let good = committed_image();
+        let (records_at, _, details) = places(&good);
+        // The section: the day's entry (owner 0, 3 bytes), then ZZA's
+        // (owner 1, 2 bytes), then ZZB's (owner 2, 3 bytes).
+        let entry = [details, details + 8 + 3, details + 8 + 3 + 8 + 2];
+        assert_eq!(super::u32_at(&good, entry[1]), 1);
+        assert_eq!(super::u32_at(&good, entry[2]), 2);
+        let changed = |change: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = good.clone();
+            change(&mut bytes);
+            reseal(&mut bytes);
+            parsed(&bytes)
+        };
+        let at = |n: usize| entry[n] - details;
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[2] + 6, &9u16.to_le_bytes()))),
+            format!("detail entry at {} runs past the section", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[1] + 4, &0u16.to_le_bytes()))),
+            format!("detail entry at {} is out of order or unset", at(1))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                put(b, entry[1], &2u32.to_le_bytes());
+                put(b, entry[2], &1u32.to_le_bytes());
+            })),
+            format!("detail entry at {} is out of order or unset", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| put(b, entry[2], &3u32.to_le_bytes()))),
+            format!("detail entry at {} names no record", at(2))
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                put(b, 180, &4u32.to_le_bytes());
+                fix(b, 252);
+            })),
+            "the detail entries differ from the header's count"
+        );
+        assert_eq!(
+            corrupt_why(changed(&|b| {
+                let record = &mut b[records_at..records_at + RECORD_STRIDE];
+                put(record, 120, &99u32.to_le_bytes());
+                fix(record, 156);
+            })),
+            "record 0's detail offset is not its first entry"
+        );
+    }
+
+    /// One planned record of `name` and `code` with `details`.
+    fn planned(name: &str, code: Code, details: Vec<Detail>) -> super::Planned {
+        super::Planned {
+            key: Key::instrument(name).unwrap(),
+            run: 1,
+            facts: Facts::of(code),
+            details,
+        }
+    }
+
+    /// `count` details of `payload` bytes each: `count * (8 + payload)`
+    /// section bytes.
+    fn details(count: usize, payload: usize) -> Vec<Detail> {
+        vec![
+            Detail {
+                kind: 3,
+                payload: vec![0x5A; payload],
+            };
+            count
+        ]
+    }
+
+    /// **THE DETAIL SECTION HOLDS EXACTLY `DETAIL_CAP` BYTES; THE DAY'S
+    /// DETAILS ARE KEPT WHOLE OR NOT AT ALL, AND SO IS EACH RECORD'S, AND ONCE
+    /// ONE OWNER DOES NOT FIT EVERY LATER OWNER IS CAPPED TOO.**
+    ///
+    /// Covers `section`'s cap: day details of exactly the cap are kept and one
+    /// byte more are not; a record whose details reach the cap exactly is
+    /// kept, the next owner that would pass it is capped and flagged
+    /// `DETAILS_CAPPED`, and so is every owner after it even when it would
+    /// fit. 4 MiB of payload, in memory only.
+    #[test]
+    fn the_detail_section_holds_exactly_its_cap_and_caps_whole_owners() {
+        use super::{DETAIL_HEAD_LEN, flags, section};
+        // 64 entries of 65,528 payload bytes: 64 * 65,536 = DETAIL_CAP.
+        assert_eq!(64 * (DETAIL_HEAD_LEN + 65_528), DETAIL_CAP);
+        let at_cap = details(64, 65_528);
+        let kept = section(&at_cap, &mut []);
+        assert_eq!(
+            (kept.capped, kept.entries, kept.bytes.len()),
+            (false, 64, DETAIL_CAP)
+        );
+        let mut past = at_cap.clone();
+        past[0].payload.push(0);
+        let dropped = section(&past, &mut []);
+        assert_eq!(
+            (dropped.capped, dropped.entries, dropped.bytes.len()),
+            (true, 0, 0)
+        );
+
+        // A day detail of 3 bytes (11 section bytes), then ZZA filling the
+        // section to the cap exactly, then ZZB and ZZC which no longer fit.
+        let day = details(1, 3);
+        let mut zza = details(64, 65_528);
+        zza[63].payload.truncate(65_528 - 11);
+        let mut plans = vec![
+            planned("ZZA", Code::Match, zza),
+            planned("ZZB", Code::Match, details(1, 1)),
+            planned("ZZC", Code::Match, Vec::new()),
+            planned("ZZD", Code::Match, details(1, 1)),
+        ];
+        let built = section(&day, &mut plans);
+        assert_eq!(built.bytes.len(), DETAIL_CAP, "filled exactly");
+        assert!(built.capped);
+        assert_eq!(built.entries, 1 + 64);
+        assert_eq!(
+            built.first,
+            vec![12, 0, 0, 0],
+            "ZZA's first entry follows the day's"
+        );
+        let capped: Vec<bool> = plans
+            .iter()
+            .map(|plan| plan.facts.flags & flags::DETAILS_CAPPED != 0)
+            .collect();
+        assert_eq!(
+            capped,
+            [false, true, false, true],
+            "only owners with details are flagged"
+        );
+    }
+
+    /// **DAYS ARE COUNTED THE PROLEPTIC GREGORIAN WAY BEFORE YEAR 1 TOO.**
+    ///
+    /// Kills `replace - with +` and `replace - with /` in the era of a
+    /// negative year (`(y - 399) / 400`): `Day` begins at year 1, so only a
+    /// direct call reaches it, and the function's contract is the whole
+    /// proleptic calendar. 0000-03-01 is day -719,468 (the algorithm's own
+    /// anchor), year 0 is a leap year, and 400 years are 146,097 days.
+    #[test]
+    fn days_before_year_one_are_counted_the_proleptic_way() {
+        use super::days_from_civil;
+        assert_eq!(days_from_civil(0, 3, 1), -719_468);
+        assert_eq!(days_from_civil(0, 1, 1), -719_528, "Jan and a leap Feb");
+        assert_eq!(days_from_civil(-1, 12, 31), -719_529);
+        assert_eq!(days_from_civil(-400, 3, 1), -719_468 - 146_097);
+    }
+
+    /// **A DETAIL SECTION OF EXACTLY `DETAIL_CAP` BYTES IS IN PLACE.**
+    ///
+    /// Kills `replace > with >=` in `geometry`'s cap test, which refuses a
+    /// section `section` itself fills to the cap exactly.
+    #[test]
+    fn a_detail_section_of_exactly_the_cap_is_in_place() {
+        let path = Path::new(PATH);
+        let records_end = TABLE_OFFSET + SLOT_LEN * (16 + OVERFLOW_SLOTS) + RECORD_STRIDE * 2;
+        let mut h = header();
+        h.detail_bytes = u32::try_from(DETAIL_CAP).unwrap();
+        h.detail_offset = u32::try_from(records_end).unwrap();
+        h.detail_entries = 64;
+        let shape = geometry(&h, path).unwrap();
+        assert_eq!(shape.len, records_end + DETAIL_CAP + TRAILER_LEN);
+    }
+
+    /// **AN IMAGE OF EXACTLY A HEADER, A DAY BLOCK AND A TRAILER IS READ AS
+    /// ONE, AND REFUSED FOR WHAT IT LACKS.**
+    ///
+    /// Kills `replace < with <=` in `parse`'s length floor: such an image is
+    /// long enough to be read, sealed, and refused by its geometry (its
+    /// header implies a table), never as "shorter than a header and a day
+    /// block".
+    #[test]
+    fn an_image_of_exactly_the_floor_is_read_and_refused_by_its_geometry() {
+        let good = committed_image();
+        let mut floor = good[..TABLE_OFFSET + TRAILER_LEN].to_vec();
+        reseal(&mut floor);
+        let implied = good.len();
+        assert_eq!(
+            corrupt_why(parsed(&floor)),
+            format!("{} bytes where the header implies {implied}", floor.len())
+        );
+    }
+
+    /// **A DETAIL SECTION IS WALKED ENTRY BY ENTRY TO ITS END, IN BOUNDED
+    /// TIME.**
+    ///
+    /// Kills `replace += with *=` in `parse_details`' step to the next entry
+    /// (from 0 it never moves; caught before only by a timeout): a whole
+    /// image with details is parsed on a worker with a deadline, and every
+    /// detail is read back in place.
+    #[test]
+    fn a_detail_section_is_walked_to_its_end_in_bounded_time() {
+        let good = committed_image();
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _receiver_gone = send.send(parse(&good, Path::new(PATH)));
+        });
+        let image = answer
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("parse returned")
+            .unwrap();
+        assert_eq!(image.day_details.len(), 1);
+        let per: Vec<usize> = image
+            .records
+            .iter()
+            .map(|(_, details)| details.len())
+            .collect();
+        assert_eq!(per, [1, 1]);
+    }
+
+    /// **A KEY IS FOUND ONLY BY ITS HASH AND ITS TEXT TOGETHER.**
+    ///
+    /// Kills `replace && with || in Reader::lookup`: a record whose hash is the
+    /// asked key's but whose text is another's (a 64-bit hash collision, made
+    /// here by building the record's key by hand) must not answer for it; nor
+    /// may the record's text asked under another hash with the same tag and
+    /// home slot (bit 20 changed). The record answers for its own key alone.
+    #[test]
+    fn a_key_is_found_only_by_its_hash_and_its_text_together() {
+        use super::{Found, NoRecord, Reader, key_hash};
+        let root = std::env::temp_dir().join(format!(
+            "brutex-verdict-cloud-collision-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let day = Day::new(2031, 3, 4).unwrap();
+        let collided = Key {
+            text: "ZZB".to_owned(),
+            hash: key_hash(b"ZZA"),
+            whole: None,
+        };
+        let generation = Generation {
+            day,
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::Match),
+            day_details: Vec::new(),
+            entries: vec![Entry {
+                key: collided.clone(),
+                facts: Facts::of(Code::Match),
+                details: Vec::new(),
+            }],
+            carry: Carry::WholeDay,
+        };
+        commit(&series, &generation).unwrap();
+        let found = |key: &Key| {
+            Reader::new()
+                .lookup(&series, day, key)
+                .unwrap()
+                .answer
+                .expect("the day is committed")
+                .found
+        };
+        assert!(
+            matches!(found(&collided), Found::Record { ordinal: 0, .. }),
+            "its own key"
+        );
+        for other in [
+            Key::instrument("ZZA").unwrap(),
+            Key {
+                text: "ZZB".to_owned(),
+                hash: key_hash(b"ZZA") ^ (1 << 20),
+                whole: None,
+            },
+        ] {
+            assert_eq!(
+                found(&other),
+                Found::NoRecord(NoRecord::NotInDay),
+                "{other:?}"
+            );
+        }
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RECORD WHOSE PROBE WINDOW FINDS ANOTHER RECORD FIRST IS REFUSED.**
+    ///
+    /// Kills `replace match guard found == ordinal with true` in `parse`, which
+    /// would accept any record its window finds something for. Record 0 is
+    /// given record 1's hash (its CRC recomputed) and its slot record 1's tag,
+    /// the image re-sealed: every slot still names a record with its own tag,
+    /// but both records now probe one window for one tag, so a lookup of one
+    /// of them finds the other. The writer never builds this (`place` refuses
+    /// a tag repeated in a window); a damaged image that says it must be
+    /// refused.
+    #[test]
+    fn a_record_whose_probe_window_finds_another_first_is_refused() {
+        let good = committed_image();
+        let (records_at, capacity, _) = places(&good);
+        let slot = |i: usize| TABLE_OFFSET + SLOT_LEN * i;
+        let mark = |b: &[u8], i: usize| super::u32_at(b, slot(i));
+        let tag = |b: &[u8], i: usize| super::u32_at(b, slot(i) + 4);
+        let mut bytes = good;
+        let other = super::u64_at(&bytes, records_at + RECORD_STRIDE);
+        let other_tag = u32::try_from(other >> 32).unwrap();
+        let record = &mut bytes[records_at..records_at + RECORD_STRIDE];
+        record[..8].copy_from_slice(&other.to_le_bytes());
+        fix(record, 156);
+        let own = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark(&bytes, i) == 1)
+            .unwrap();
+        put(&mut bytes, slot(own) + 4, &other_tag.to_le_bytes());
+        reseal(&mut bytes);
+        let home = home_of(other, capacity);
+        let first = (home..home + super::MAX_PROBE)
+            .find(|&i| mark(&bytes, i) != 0 && tag(&bytes, i) == other_tag)
+            .unwrap();
+        let refused = 2 - mark(&bytes, first);
+        assert_eq!(
+            corrupt_why(parsed(&bytes)),
+            format!("record {refused} is not where its probe window finds it")
+        );
+    }
+
+    /// **A DAY WHOSE GENERATION COUNTER IS AT ITS END IS REFUSED, NEVER
+    /// WRAPPED.**
+    ///
+    /// Covers `publish`'s exhausted counter: a year index whose day has
+    /// committed generation `u32::MAX` (written here as a valid next slot) has
+    /// no next generation, so the commit is refused `image_corrupt` naming the
+    /// year index, and no image is linked.
+    #[test]
+    fn a_day_at_the_last_generation_is_refused_never_wrapped() {
+        use super::{Cost, SLOT_STRIDE_U64, day_of_year, encode_slot, read_year};
+        use std::os::unix::fs::FileExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "brutex-verdict-cloud-exhausted-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let day = Day::new(2031, 3, 4).unwrap();
+        let generation = Generation {
+            day,
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::Match),
+            day_details: Vec::new(),
+            entries: vec![Entry {
+                key: Key::instrument("ZZA").unwrap(),
+                facts: Facts::of(Code::Match),
+                details: Vec::new(),
+            }],
+            carry: Carry::WholeDay,
+        };
+        commit(&series, &generation).unwrap();
+        let path = series.year_index(2031);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut year = read_year(&file, &path, 2031, &mut Cost::default()).unwrap();
+        year.days[day_of_year(day)].generation = u32::MAX;
+        let next = year.commit + 1;
+        file.write_all_at(
+            &encode_slot(2031, next, &year.days),
+            (next % 2) * SLOT_STRIDE_U64,
+        )
+        .unwrap();
+        drop(file);
+        assert_eq!(
+            corrupt_why(commit(&series, &generation)),
+            "the generation counter is exhausted"
+        );
+        let images: Vec<_> = std::fs::read_dir(series.dir().join("2031"))
+            .unwrap()
+            .map(|name| name.unwrap().file_name())
+            .collect();
+        assert_eq!(images.len(), 1, "only generation 1: {images:?}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A WHOLE IMAGE WHOSE DAY BLOCK FAILS ITS CHECK IS REFUSED BY THE DAY
+    /// BLOCK'S OWN REFUSAL.**
+    ///
+    /// Covers `parse`'s day-block step: one byte of the day block changed and
+    /// the image re-sealed, so the trailer and the header pass and the day
+    /// block's CRC is what refuses; the refusal is exactly what `decode_day`
+    /// says of those bytes alone.
+    #[test]
+    fn a_whole_image_with_a_damaged_day_block_is_refused_by_it() {
+        use super::HEADER_LEN;
+        let mut bytes = committed_image();
+        bytes[HEADER_LEN + 8] ^= 0x01;
+        reseal(&mut bytes);
+        let alone = decode_day(&bytes[HEADER_LEN..TABLE_OFFSET], Path::new(PATH)).map(|_| ());
+        assert!(alone.is_err());
+        assert_eq!(format!("{:?}", parsed(&bytes)), format!("{alone:?}"));
+    }
+
+    /// **A WRITER STOPPED AT A CRASH POINT SAYS WHERE.**
+    ///
+    /// Covers the text of the test-only `crashed` refusal, which the crash
+    /// seam's tests match by variant and never print.
+    #[test]
+    fn a_crashed_writer_names_the_point_it_stopped_at() {
+        let crashed = VerdictError::Crashed { at: "image linked" };
+        assert_eq!(crashed.word(), "crashed");
+        assert_eq!(
+            crashed.to_string(),
+            "crashed: the writer stopped at image linked"
+        );
+    }
+}
