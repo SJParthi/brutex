@@ -17282,7 +17282,8 @@ months' own p50, p99 or max.
 
 Measured 15 October 2026 on a release build over a shadow of the real store
 (`state/fix/shadow.sh AF-04`, port 8703; the "before" build is feat/db-fix at
-521066e6 on port 8704), 200 sequential GETs per row after one warm-up, curl
+521066e6, which `main`'s squash merge does not keep, on port 8704), 200
+sequential GETs per row after one warm-up, curl
 `time_total`, loaded shared machine, while another `cargo` build ran.
 Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 `before.txt`, `after.txt`.
@@ -17302,7 +17303,8 @@ alone only to re-check and publish. The figures below were taken on 14 October
 2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
 linked read-only under the kernel lock, session masters cloned) served by two
 release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
-`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`feat/db-fix` holds them at 521066e6, which `main`'s squash merge does not
+keep (so its code is that head's), AFTER is
 `fix/db-AF-03`. GET requests only, timed client-side
 around each whole response (`state/fix/round2/af03-evidence/measure.py`,
 results `before.jsonl` and `after.jsonl` beside it), on a machine shared with

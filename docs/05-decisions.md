@@ -69275,3 +69275,20 @@ handle it now asserts what the test's name claims directly: the leftover's
 link count is 0 (it lost its name), its bytes are still `half a file` (it was
 replaced, never cut), and the new file at the path is a different inode and
 empty. Six runs in six pass. No production code changes.
+
+### D-5257 — `521066e6`, a `feat/db-fix` commit `docs/06-limits.md` cites, is listed as squashed — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1e's `cargo test`, once D-5256 let `store`'s unit tests
+pass, stopped at `store`'s `cited_commits`:
+`every_commit_the_store_records_cite_is_on_main_or_says_why_not` refused
+`521066e6`, cited twice in `docs/06-limits.md` (the AF-04 and D-4963 sections
+name it as the head their "before" builds ran) and neither an ancestor of
+`origin/main` nor listed in `NOT_ON_MAIN`.
+
+**Decision.** `521066e6` is an ancestor of this branch's `HEAD` and not of
+`main` — SC-1's merge fix-up on `feat/db-fix` — so it is listed as
+`Off::Squashed`, and both citing sentences now say that "`main`'s squash merge
+does not keep" it, the words the test requires of every such sentence. The
+figures and the claims around them are unchanged.
