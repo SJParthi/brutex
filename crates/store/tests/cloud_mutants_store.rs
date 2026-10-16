@@ -2353,12 +2353,29 @@ fn an_indexed_lookup_whose_bar_will_not_read_is_that_bars_refusal() {
 /// A sealed month read from memory, counting every positional read.
 struct CountedReads {
     bytes: Vec<u8>,
-    reads: std::rc::Rc<std::cell::Cell<u64>>,
+    reads: std::sync::Arc<AtomicU64>,
+}
+
+impl CountedReads {
+    /// The month in `bytes`, and the count of the reads made of it.
+    fn month(
+        bytes: Vec<u8>,
+        path: store::path::StorePath<'_>,
+    ) -> (store::sealed::SealedMonth<Self>, std::sync::Arc<AtomicU64>) {
+        let reads = std::sync::Arc::new(AtomicU64::new(0));
+        let source = Self {
+            bytes,
+            reads: std::sync::Arc::clone(&reads),
+        };
+        let month = store::sealed::SealedMonth::open(source, path, 4_242).unwrap();
+        reads.store(0, Ordering::Relaxed);
+        (month, reads)
+    }
 }
 
 impl store::sealed::Positional for CountedReads {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-        self.reads.set(self.reads.get() + 1);
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let at = usize::try_from(offset).unwrap();
         let Some(bytes) = self.bytes.get(at..at + buf.len()) else {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
@@ -2423,21 +2440,16 @@ fn a_tabled_sealed_month_finds_every_stamp_in_three_reads() {
         header.last_ts_micros = bars[bars.len() - 1].ts_micros;
         let built = build(path, &header, &bars, None, None).unwrap();
         assert!(built.head().table_entries > 0, "{timeframe:?} has a table");
-        let reads = std::rc::Rc::new(std::cell::Cell::new(0));
-        let month = SealedMonth::open(
-            CountedReads {
-                bytes: built.to_bytes(),
-                reads: std::rc::Rc::clone(&reads),
-            },
-            path,
-            4_242,
-        )
-        .unwrap();
+        let (month, reads) = CountedReads::month(built.to_bytes(), path);
         let scan = |ts: i64| u64::try_from(bars.partition_point(|bar| bar.ts_micros < ts)).unwrap();
         for ts in [i64::MIN, bars[0].ts_micros - 1, bars[0].ts_micros] {
-            reads.set(0);
+            reads.store(0, Ordering::Relaxed);
             assert_eq!(month.first_at_or_after(ts).unwrap(), 0);
-            assert_eq!(reads.get(), 0, "{timeframe:?} {ts}: answered by the head");
+            assert_eq!(
+                reads.load(Ordering::Relaxed),
+                0,
+                "{timeframe:?} {ts}: answered by the head"
+            );
         }
         // Every 97th bar, and the last five: the month's last table slot
         // starts inside its last block, where the table's first block IS the
@@ -2447,17 +2459,14 @@ fn a_tabled_sealed_month_finds_every_stamp_in_three_reads() {
             .chain(bars.len() - 5..bars.len())
         {
             for ts in [bars[at].ts_micros, bars[at].ts_micros - 1] {
-                reads.set(0);
+                reads.store(0, Ordering::Relaxed);
                 assert_eq!(
                     month.first_at_or_after(ts).unwrap(),
                     scan(ts),
                     "{timeframe:?} {ts}"
                 );
-                assert!(
-                    reads.get() <= 3,
-                    "{timeframe:?} {ts}: {} reads",
-                    reads.get()
-                );
+                let made = reads.load(Ordering::Relaxed);
+                assert!(made <= 3, "{timeframe:?} {ts}: {made} reads");
             }
         }
     }
@@ -2479,18 +2488,24 @@ fn a_tabled_sealed_month_finds_every_stamp_in_three_reads() {
 /// **A TABLE SLOT THAT SPANS 65 BLOCKS IS BISECTED ONE ENTRY A STEP, NEVER
 /// READ WHOLE.**
 ///
-/// Kills `replace < with <=` in `last_before`: `BISECT_IN_ONE_READ` is the
-/// most directory entries a lookup reads in one positional read, and 64
-/// blocks after the first make 65 to consider. A one-second month written
-/// before D-0915 piles 16,384 bars (64 whole blocks) on one stamp, and the
-/// next bar opens the next table slot, so a stamp just after the pile has a
-/// slot of blocks 0 to 64. The answer is the bar after the pile either way;
-/// the cost is the bisection's: one table read, at most `ceil(log2(65 + 1))`
-/// = 7 single-entry reads (6 for this stamp), one read of the found entry
-/// and the one before it, and one frame read.
+/// Kills `replace < with <=` in `last_before`'s choice of path:
+/// `BISECT_IN_ONE_READ` is the most directory entries a lookup reads in one
+/// positional read, and 64 blocks after the first make 65 to consider. Kills
+/// `replace < with <=` in the bisection's step (a block whose first stamp
+/// EQUALS the stamp asked is not before it), and the bisection's five
+/// arithmetic mutants, which loop for ever (caught before only by a
+/// timeout): every lookup runs on a worker with a deadline.
+///
+/// A one-second month written before D-0915: 100 bars, then 16,384 piled on
+/// one stamp `T`, then 100 more in the next table slot, so the slot of `T`
+/// spans blocks 0 to 64. `T` itself answers the first piled bar (row 100);
+/// `T + 1` answers the first bar after the pile (row 16,484). The cost is
+/// the bisection's: one table read, at most `ceil(log2(65 + 1))` = 7
+/// single-entry reads, one read of the found entry and the one before it,
+/// and one frame read; the one-read path would make 3 in all.
 #[test]
 fn a_table_slot_of_sixty_five_blocks_is_bisected_one_entry_a_step() {
-    use store::sealed::{BISECT_IN_ONE_READ, SealedMonth, build};
+    use store::sealed::{BISECT_IN_ONE_READ, build};
     let path = sealed_path();
     let origin = store::path::YearMonth::new(2024, 6)
         .unwrap()
@@ -2498,37 +2513,41 @@ fn a_table_slot_of_sixty_five_blocks_is_bisected_one_entry_a_step() {
         .0;
     let pile = origin + 33_300 * 1_000_000;
     let next_slot = origin + 9 * 4_096 * 1_000_000;
-    let bars: Vec<store::format::Bar> = sealed_bars(16_384 + 100)
+    let bars: Vec<store::format::Bar> = sealed_bars(100 + 16_384 + 100)
         .into_iter()
         .enumerate()
-        .map(|(i, bar)| store::format::Bar {
-            ts_micros: if i < 16_384 {
-                pile
-            } else {
-                next_slot + (i64::try_from(i).unwrap() - 16_384) * 1_000_000
-            },
-            ..bar
+        .map(|(i, bar)| {
+            let i = i64::try_from(i).unwrap();
+            store::format::Bar {
+                ts_micros: match i {
+                    0..100 => pile - (100 - i) * 1_000_000,
+                    100..16_484 => pile,
+                    _ => next_slot + (i - 16_484) * 1_000_000,
+                },
+                ..bar
+            }
         })
         .collect();
     let mut header = empty_month_header();
-    header.n_valid = 16_484;
-    header.first_ts_micros = pile;
-    header.last_ts_micros = bars[16_483].ts_micros;
+    header.n_valid = 16_584;
+    header.first_ts_micros = bars[0].ts_micros;
+    header.last_ts_micros = bars[16_583].ts_micros;
     let built = build(path, &header, &bars, None, None).unwrap();
     assert!(u64::from(built.head().n_blocks) > BISECT_IN_ONE_READ);
-    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
-    let month = SealedMonth::open(
-        CountedReads {
-            bytes: built.to_bytes(),
-            reads: std::rc::Rc::clone(&reads),
-        },
-        path,
-        4_242,
-    )
-    .unwrap();
-    reads.set(0);
-    assert_eq!(month.first_at_or_after(pile + 1).unwrap(), 16_384);
-    // The bisection over blocks 0 to 64 settles this stamp in 6 steps (at most
-    // ceil(log2(66)) = 7); the one-read path would make 3 reads in all.
-    assert_eq!(reads.get(), 1 + 6 + 1 + 1);
+    let bytes = built.to_bytes();
+    let (send, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (month, reads) = CountedReads::month(bytes, sealed_path());
+        let looked = [pile, pile + 1].map(|ts| {
+            reads.store(0, Ordering::Relaxed);
+            let found = month.first_at_or_after(ts).unwrap();
+            (found, reads.load(Ordering::Relaxed))
+        });
+        let _receiver_gone = send.send(looked);
+    });
+    let looked = answer
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("both lookups answered");
+    // Bisection steps: 7 for `T`, 6 for `T + 1`, each within the ceiling.
+    assert_eq!(looked, [(100, 1 + 7 + 1 + 1), (16_484, 1 + 6 + 1 + 1)]);
 }
