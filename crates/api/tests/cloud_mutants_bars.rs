@@ -1140,6 +1140,103 @@ mod bars_rs {
         assert!(html.contains("<td class=\"num delta\">0.00</td>"), "{html}");
         assert!(!html.contains("+0.00"), "{html}");
     }
+
+    /// **ONLY A GDFL OPTION ON NSE IS DECODED FOR THE KEY IT CONTINUES AS**
+    /// (D-3331; WP-12c): the same contract on another feed, or on another
+    /// exchange, is no GDFL key and has no successor. Kills both `|| with &&`
+    /// in `rekey_status`'s guard, each of which decoded one of them.
+    #[test]
+    fn bars_only_a_gdfl_nse_option_is_decoded_for_its_successor() {
+        let scratch = Scratch::new("bars-rekey-guard");
+        let contract = brutex_core::instrument::Contract::parse("2023-06-29-1000000-PE");
+        let ask = |vendor: Vendor, exchange: &str| {
+            let mut asked = query(
+                vec![SeriesKey::new(exchange, "FNO", "NIFTY", contract)],
+                YearMonth::new(2020, 6).expect("a month"),
+                YearMonth::new(2020, 6).expect("a month"),
+            );
+            asked.vendor = vendor;
+            asked.timeframe = Timeframe::SECOND_1;
+            read(scratch.root(), &asked).superseded
+        };
+        assert_eq!(ask(Vendor::Dhan, "NSE"), Vec::new(), "not a GDFL key");
+        assert_eq!(ask(Vendor::Gdfl, "BSE"), Vec::new(), "not an NSE key");
+        assert_eq!(
+            ask(Vendor::Gdfl, "NSE"),
+            vec![api::bars::SupersededBy {
+                key: "NSE-FNO-NIFTY-2023-06-29-1000000-PE".to_owned(),
+                by: "NSE-FNO-NIFTY-2023-06-28-1000000-PE".to_owned(),
+                kind: "vendor_redated",
+                recorded: false,
+            }],
+            "the decoder files it under its settled expiry"
+        );
+    }
+
+    /// **EXACTLY `MAX_SERIES` SERIES ARE READ**: the bound is inclusive.
+    /// Kills `> with >=` in the series-count refusal.
+    #[test]
+    fn bars_exactly_max_series_series_are_read() {
+        let scratch = Scratch::new("bars-max-series");
+        let many: Vec<SeriesKey> = (0..MAX_SERIES).map(|i| index(&format!("S{i}"))).collect();
+        let got = read(scratch.root(), &query(many, month(5), month(5)));
+        assert_eq!(got.series.len(), MAX_SERIES);
+        assert_eq!(got.total, 0);
+    }
+
+    /// **A TIME-OF-DAY ORDER NOT ASKED FOR ITS EXTREMES SERVES NONE.** Kills
+    /// `&& with ||` on the scan's extremes, which served them unasked.
+    #[test]
+    fn bars_a_time_of_day_order_serves_no_extremes_unasked() {
+        let scratch = Scratch::new("bars-tod-unasked");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 3, 200),
+        );
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.sort = SortKey::TimeOfDay;
+        let got = read(scratch.root(), &asked);
+        assert_eq!(got.bars.len(), 3);
+        assert_eq!(got.extremes, None);
+        assert_eq!(got.extremes_why, None);
+    }
+
+    /// **EXTREMES A DAMAGED MONTH WITHHOLDS ARE WITHHELD BY NAME, AND THE
+    /// PAGE IS STILL ANSWERED** on the by-time open-interest path. Kills the
+    /// match guard `why.starts_with("cancelled") -> true` there, which failed
+    /// the whole window over extremes it could not fold.
+    #[test]
+    fn bars_extremes_a_damaged_month_withholds_leave_the_page_answered() {
+        let scratch = Scratch::new("bars-oi-damaged");
+        let rows = minutes(5, 2, 5, 100);
+        let path = write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &rows,
+        );
+        let mut bytes = std::fs::read(&path).expect("the month");
+        let stamp = (rows[2].0 * 1_000_000).to_le_bytes();
+        let at = bytes
+            .windows(8)
+            .rposition(|w| w == stamp)
+            .expect("the record's stamp is in the file");
+        bytes[at] ^= 0x01;
+        std::fs::write(&path, &bytes).expect("damage the generated month");
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.sort = SortKey::OpenInterest;
+        asked.want_extremes = true;
+        let got = window(scratch.root(), &asked).expect("the page is answered");
+        assert_eq!(got.extremes, None);
+        let why = got.extremes_why.expect("withheld by name");
+        assert!(why.starts_with("months_unread"), "{why}");
+    }
 }
 
 /// `bars_series.rs`: series keys, and the plan a window reads by.
