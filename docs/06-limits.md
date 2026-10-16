@@ -17115,6 +17115,152 @@ BUILT; what that costs until it is, is the disk item below.
   is withheld from every 1min pull by name until an empty daily answer is
   recorded durably (a decision is needed; DB-B27).
 
+### Pull runtime: every run left open, the scan's guesses, the leg it cannot see (AG-01, D-4976)
+
+- **The restart scan's walk is bounded by what it reads, now as before.**
+  It reads at most `INTERRUPTED_SCAN` = 800 records and `INTERRUPTED_RUNS` =
+  64 run records through the index whatever the journal's length; the walk
+  over them is O(records read x runs open) (each close looks at the open
+  list once), at most 864 x 864 steps on a journal every record of which is a
+  run record, and its guesses hold at most (864 / 2)^2 candidate ordinals
+  (1.5 MB) on the same adversarial journal. Once per process, at site load.
+  Measured (`restart_tests::restart_cost_with_64_open_runs`, release, this
+  machine under the shared build load, n = 200 each): `restart_scan` over an
+  8,001-record journal with 64 runs open p50 423 us, p99 922 us, max 953 us
+  (re-runs 427/844/925 and 420/713/723; the feat/db-fix code on the same
+  journal, naming one run: 321/821/1,073, 343/787/804, 359/863/920); with 1
+  run open 250/532/534 us (feat/db-fix 283/588/749); `status_json` carrying
+  64 open runs p50 141 us, p99 286 us, max 365 us (re-runs 145/303/759 and
+  146/352/363; feat/db-fix, carrying one run, 5/9/10 us). Final code (16
+  October, `cargo test -p api --lib restart_cost -- --ignored`, test profile
+  optimized + debuginfo, n = 200 each, shared build load): 64 open p50
+  476 us, p99 1,469 us, max 1,673 us; 1 open 333/650/753 us; `status_json`
+  with 64 open 141/341/495 us (`state/fix/logs-AG-01-r3/cost.log`); re-run
+  on the final tree (16 October 16:50, same command, load average about 45):
+  64 open 444/669/726 us, 1 open 305/494/757 us, `status_json` with 64 open
+  141/162/213 us (`state/fix/logs-AG-01-r4/cost.log`); and again at 17:00
+  with the timing split into two tests, load average about 65: 64 open
+  529/1,702/4,019 us, 1 open 353/4,625/18,629 us, `status_json` with 64 open
+  206/5,735/8,705 us (`cost2.log`; the tail is the machine's load, the
+  medians move by a fifth). Built per GET of
+  `/pull/run.json`, so a page read costs at most this with 64 runs open,
+  whatever the journal's length. Before-numbers: a scratch tree of
+  feat/db-fix 079ad4af with the same journal shapes
+  (`state/fix/logs-AG-01/before-tests2.log`, `cost-rerun.log`).
+- **`/pull/run.json` grows with the runs left open, bounded at 64.** The
+  run read last keeps its keys; `alsoOpen` names at most 63 more
+  (`OPEN_NAMED` = 64 in all, about 400 bytes each) and its sentence about as
+  much again, so the document is at most about 60 KB larger with 64 runs
+  open, and unchanged in size but for `"openCount":1,"runRecordsUnread":0,
+  "alsoOpen":[]` and the `restart.unjournalledFeeds` list with one or none.
+  More than 64 open runs among the records read are counted, not named;
+  `/audit` lists them. Measured (final code, 16 October) on two fresh
+  shadows of the real store (4,217,222 journal records; the real journal
+  leaves no run open, so both answer "clean"), 300 sequential GETs each,
+  interleaved with the feat/db-fix restart code (`tgt/p-AG-01-beforebin`;
+  `pullrun.rs` is unchanged on feat/db-fix since it was built) under the
+  shared build load, curl `time_total`: this build n = 300 p50 0.806 ms,
+  p99 5.774 ms, max 21.923 ms; feat/db-fix n = 300 p50 0.815 ms, p99
+  6.574 ms, max 21.958 ms; every answer 200
+  (`state/fix/logs-AG-01-r3/times-real.txt`). The 15 October figures were
+  n = 400 p50 0.888, p99 3.163, max 9.110 ms against 0.864/3.499/16.861.
+- **A run left open behind the 64 run records read is counted, not
+  reported** (`runRecordsUnread`): the index names how many run records lie
+  behind those read, and the document says how many; what they hold is not
+  read.
+- **The scan answers NOT KNOWN where its pairing is a guess** (D-4976): a
+  close that does not directly follow a record of its run and could end more
+  than one open run of its scope, window and source whose asks are not one
+  (or are one and the close is NOT STARTED); and a restated head of a run not
+  read behind a close of its scope, window and source that ended no run read.
+  It reads NOT KNOWN until a run it could have left open closes, or the
+  records lie behind the scan. The operator's journal (14 October: 4,217,222
+  records, 39 run records, no restatement) holds neither shape.
+- **Narrowing the WP-62 bullet "Both pull routes write an opening record
+  (repair 5): the spot route since D-3341":** the spot route over an
+  ARCHIVE-FOLDER feed (`Transport::LocalArchive`: TrueData and Global
+  Datafeeds today) writes NO opening record: `server::local_answer` lands the
+  leg and writes only its closing record (`landed_answer(.., None)`). A leg
+  cut short is therefore never reported by the restart scan, whatever its
+  answer; every answer now says so in its words and in
+  `restart.unjournalledFeeds`. NOT DONE (code-2's real fix, `server.rs`,
+  after AF-04, owner R4-02): an opening record, through a thread, for an
+  archive-folder leg. Reach today: the operator's journal holds 0 such runs
+  (GDFL lands through `cli gdfl-import` and its own imports journal).
+- **Narrowing the WP-62 bullet "Every close this build writes for a run that
+  opened goes through the run's thread":** false for the expired-F&O walk.
+  `server::fno_opened` opens it and every arm closes it with a plain
+  `journal.append` (`FnoPage::say` / `recorded_fact`), and its close carries
+  no ask. Two walks of one underlying and window on two feeds share scope,
+  window and source. Since D-4976 Decided 7 a close of either, while both are
+  open and their asks are not one, is NOT KNOWN naming both, whether or not
+  it directly follows a record of one of them (an F&O walk's position proves
+  nothing): never the wrong walk, but never the right one either. NOT DONE
+  (code-4's root, `server.rs`, after AF-04, owner R4-02): F&O walks opening
+  and closing through `open_run` / `close_run` carrying their ask, after
+  which their close is proved by position as a spot run's is.
+- **Two runs of ONE ask in flight at once are still not told apart when
+  their close is not behind its run** (as the WP-62 rows said before
+  D-4976, kept by D-4976 Decided 2). Every candidate names the same ask and
+  the close is not NOT STARTED: the walk ends the newest and supersedes the
+  older, so the answer is "clean". If the close was truly the OLDER run's,
+  the newer one was cut short and reads superseded, although only an older
+  run is ever superseded. The same pull (feed, identity policy, target,
+  instruments, rung and window) was made and finished by one of them, so
+  its days were fetched; what is not said is that the other run was cut
+  short. Reach: two api processes, or a server run and a `cli` pull, of one
+  ask at once, with a close written outside the run's thread (an F&O walk's
+  plain close, or a close written before D-4950). Pinned unchanged by
+  `api::pullrun::tests::damage_before_the_reported_run_that_a_later_window_pairing_may_need_is_said`.
+  Closes once every close goes through its run's thread (R4-02, above).
+- **A guessed NOT KNOWN carries its known half, bounded** (D-4976
+  Decided 8). `restart.reading` is the walk's reading (at most 64 runs, as
+  `interrupted` is), `sureOpen` and `doubtedOpen` at most 64 runs between
+  them (each a subset of the reading, disjoint; D-4976 Decided 9),
+  `guessedRuns` at most 64 ordinals and `leftOpen` at most 64 counts, so the
+  guessed document is at most about twice an interrupted one's. Each sure
+  run and each counted pairing is one ERROR line, so a guessed start writes
+  at most 128 ERROR lines and one WARN line. Finding the counts looks, for
+  each live pairing guess, at the records after it once and at the guesses
+  before it once: at most 864 x 864 record comparisons on a journal every
+  record of which is a run record, once per process at site load. Measured by the second
+  check on the code before the guessed answer carried its known half (its
+  probe P5, n = 200): 432 opens of one key with distinct asks then 432
+  closes, every close but the first a pairing guess, `restart_scan` p50
+  1.1 ms, p99 11.1 ms, max 11.6 ms. Re-measured on the final code, which
+  adds one pass over each live pairing's later records
+  (`restart_tests::restart_cost_of_the_walks_worst_case`, test profile optimized +
+  debuginfo, n = 200 each, 16 October, load average about 45,
+  `state/fix/logs-AG-01-r4/cost.log`): that same shape (864 run records of
+  one F&O key, answer clean) p50 1,081 us, p99 1,231 us, max 1,236 us; the
+  largest guessed answer (432 walks of one key open and one close of it, so
+  431 counted as surely open) p50 255 us, p99 382 us, max 907 us, and
+  `status_json` carrying it p50 114 us, p99 188 us, max 201 us, its words
+  4,063 bytes and its document 33,227 bytes. Again at 17:00, load average
+  about 65 (`cost2.log`): 1,419/11,784/25,711 us, 299/7,142/9,970 us and
+  139/1,244/1,789 us; the p99 under that load is the scheduler's, and both
+  runs stay bounded (the scan runs once per process at site load; the
+  document is built per GET). A count is WITHHELD, not guessed, wherever a later close of the
+  guessed runs' scope, window and source, a damaged record after the oldest
+  of them, an earlier guess of their key or an unreadable index could move
+  it; the runs are then named as guessed and not counted. A run of the
+  reading beyond the 64 named is neither sure nor guessed: it is counted
+  (`unnamed`).
+- **A journal holding only a torn record reads "clean"** and the words do
+  not say a torn tail was seen (`Journal::look` counts whole records; a
+  write cut mid-record leaves a tail no record decodes from). A process that
+  died writing an opening record did not go on to run the pull, so "clean"
+  is not false, but the tail is not mentioned. NOT DONE (owner: the next
+  package that owns `api::audit::Journal::look`).
+- **A duplicate closing record** (one run's close written twice) closes
+  nothing when no other run of its scope, window and source is open; when
+  exactly one other is, it is read as that run's close (the weak path, as
+  before D-4976). NOT PROVED that any writer can write a close twice.
+- **The restart answer and its open list are not shown on a page.**
+  `/pull/run.json` carries them and `/logs` carries the ERROR lines; the
+  `/ingest` page does not render `restart` or `interrupted` (NOT DONE; owner
+  the `/ingest` page's next package).
+
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
 Rows landed by WP-81 with the code they bound. Every figure is a closed-loop
