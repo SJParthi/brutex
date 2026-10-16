@@ -4930,4 +4930,43 @@ mod cloud_mutant_tests {
         }
         let _ignored = std::fs::remove_dir_all(&root);
     }
+
+    /// **A RECORD WHOSE PROBE WINDOW FINDS ANOTHER RECORD FIRST IS REFUSED.**
+    ///
+    /// Kills `replace match guard found == ordinal with true` in `parse`, which
+    /// would accept any record its window finds something for. Record 0 is
+    /// given record 1's hash (its CRC recomputed) and its slot record 1's tag,
+    /// the image re-sealed: every slot still names a record with its own tag,
+    /// but both records now probe one window for one tag, so a lookup of one
+    /// of them finds the other. The writer never builds this (`place` refuses
+    /// a tag repeated in a window); a damaged image that says it must be
+    /// refused.
+    #[test]
+    fn a_record_whose_probe_window_finds_another_first_is_refused() {
+        let good = committed_image();
+        let (records_at, capacity, _) = places(&good);
+        let slot = |i: usize| TABLE_OFFSET + SLOT_LEN * i;
+        let mark = |b: &[u8], i: usize| super::u32_at(b, slot(i));
+        let tag = |b: &[u8], i: usize| super::u32_at(b, slot(i) + 4);
+        let mut bytes = good;
+        let other = super::u64_at(&bytes, records_at + RECORD_STRIDE);
+        let other_tag = u32::try_from(other >> 32).unwrap();
+        let record = &mut bytes[records_at..records_at + RECORD_STRIDE];
+        record[..8].copy_from_slice(&other.to_le_bytes());
+        fix(record, 156);
+        let own = (0..capacity + OVERFLOW_SLOTS)
+            .find(|&i| mark(&bytes, i) == 1)
+            .unwrap();
+        put(&mut bytes, slot(own) + 4, &other_tag.to_le_bytes());
+        reseal(&mut bytes);
+        let home = home_of(other, capacity);
+        let first = (home..home + super::MAX_PROBE)
+            .find(|&i| mark(&bytes, i) != 0 && tag(&bytes, i) == other_tag)
+            .unwrap();
+        let refused = 2 - mark(&bytes, first);
+        assert_eq!(
+            corrupt_why(parsed(&bytes)),
+            format!("record {refused} is not where its probe window finds it")
+        );
+    }
 }

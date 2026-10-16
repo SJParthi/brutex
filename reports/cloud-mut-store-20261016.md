@@ -59,8 +59,8 @@ changed.
 | store `sealed_codec.rs` | 272 | 258 | 0 | 1 | 13 | 0 |
 | store `time_index.rs` | 135 | 127 | 0 | 2 | 6 | 0 |
 | store `sort_index_writer.rs` | 74 | 58 | 6 | 0 | 10 | 2 (equivalent in practice) |
-| store `path.rs` | 130 | pending (88 of 130: 83 caught, 1 missed, 4 unviable) | | | | 0 of that 1 |
-| store `verdict.rs` | 840 | pending | | | | |
+| store `path.rs` | 130 | 118 | 1 | 0 | 11 | 0 |
+| store `verdict.rs` | 840 | 714 | 59 | 5 | 62 | pending |
 | store `sealed.rs` | 638 | pending | | | | |
 | store `file.rs` | 407 | pending | | | | |
 | store `emits.rs`, `lib.rs` | 0 | no mutable code | | | | |
@@ -80,6 +80,12 @@ all 9 are **caught** (fail fast).
 | `staging.rs:254:21` NotFound guard → `true` in `create` | Reachable only if `lstat` fails other than `ENOENT` straight after `open` said `EEXIST`: the directory's search permission revoked between two calls. |
 | `staging.rs:263:21` AlreadyExists guard → `true` in `create` | Reachable only if the second `O_EXCL` create fails other than `EEXIST` after the unlink succeeded: the directory changed between two calls. |
 | `sort_index_writer.rs:651:21` NotFound guard → `true` in `clear_staging`; `sort_index_writer.rs:661:21` the same in `walk_sidecar` | The `.srt` and its `.new.srt` staging name live in the directory of the bar file the door or writer has just opened, so `lstat` there fails other than `ENOENT` only if that directory's permissions change between two calls of one function. |
+| `verdict.rs:410:29` `<` → `<=` in `Code::worse` | Severity is injective over the codes, so equal severity means the same code, and either answer is that code. |
+| `verdict.rs:839:9` `Series::feed_byte` → `Ok(0)` and → `Ok(1)` | Both callers discard the value (`series.feed_byte()?` in `validate`; the header's feed byte is written from `feed_code` directly); the `Err` arm needs a `Vendor` outside `Vendor::ALL`, which the type cannot hold. |
+| `verdict.rs:3016:30` guard → `true` / `false`, `3016:42` `!=` → `==` in `write_durable` | The guard runs only when `remove_file` FAILS after a refused write, on the temporary this call created in the same directory moments before. Failing needs the directory changed, or the file removed, by another actor between two calls of one function. The `cfg(test)` write seam can be armed only from `verdict_tests.rs`, which this session did not edit. |
+| `verdict.rs:3080:21` guard → `true` / `false`, `3080:32` `!=` → `==` in `remove_tmp` | The same: every call removes a temporary this writer made, under the commit lock, in a directory it has just written. |
+| `verdict.rs:3102:21` guard → `true` / `false`, `3102:32` `==` → `!=` in `genesis` | The link runs under the commit lock straight after `open_existing` found no index, so `EEXIST` needs an actor that does not take the lock to create the index between two calls; any other link error (`EMLINK`, `EPERM`, `ENOSPC`) is a host fault no test-owned substitute produces on the same directory as a file just written. |
+| `verdict.rs:3277:25` guard → `true` in `publish` | The same as `genesis`: a link error other than `EEXIST`, under the lock, is a host fault. |
 
 ## Findings (not fixed; no production line changed)
 
