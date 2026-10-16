@@ -226,3 +226,261 @@ mod auction_sidecar {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// ═══ scrub: a record that fails its checksum, a month born without them ═══
+
+mod scrub_reads {
+    use super::{day, scratch};
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::symbol::Symbol;
+    use brutex_core::vendor::Vendor;
+    use pull::manifest::{Entry, EntryKey};
+    use pull::scrub::{self, Finding};
+    use store::file::BarFile;
+    use store::format::{Bar, OI_NULL};
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+
+    fn path() -> StorePath<'static> {
+        StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2031, 3).unwrap(),
+            file: FileKind::Bars,
+        })
+        .unwrap()
+    }
+
+    /// A month whose one record no longer matches its block checksum: the
+    /// counts agree, so only reading the record can tell, and the scrub says
+    /// `Unreadable` with the path and the store's own words — never
+    /// `Agrees`, never a `Bounds` built from a value it could not read.
+    #[test]
+    fn a_record_that_fails_its_checksum_is_unreadable_not_agreement() {
+        let root = scratch("ScrubRot");
+        // 09:15 IST on 2031-03-03.
+        let ts = i64::from(day(2031, 3, 3).days_from_epoch()) * 86_400_000_000 + 13_500_000_000;
+        let mut writer = BarFile::open_or_create(&root, path(), 7).unwrap();
+        writer
+            .append(&[Bar {
+                ts_micros: ts,
+                open: 101,
+                high: 109,
+                low: 99,
+                close: 105,
+                volume: 3,
+                open_interest: OI_NULL,
+            }])
+            .unwrap();
+        drop(writer);
+        let entry = Entry {
+            key: EntryKey {
+                contract: None,
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                symbol: Symbol::new("NIFTY").unwrap(),
+                timeframe: Timeframe::MINUTE_1,
+                month: YearMonth::new(2031, 3).unwrap(),
+            },
+            rows: 1,
+            first_ts_micros: ts,
+            last_ts_micros: ts,
+        };
+        assert_eq!(scrub::one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+        let file = BarFile::open_existing(&root, path(), 7).unwrap();
+        let at = usize::try_from(file.layout().offset_of(0).unwrap()).unwrap();
+        let bin = file.path().to_path_buf();
+        drop(file);
+        let mut bytes = std::fs::read(&bin).unwrap();
+        bytes[at + 8] ^= 0x5a;
+        std::fs::write(&bin, bytes).unwrap();
+        let shown = path().to_path_buf(&root).display().to_string();
+        match scrub::one(&entry, &root, Vendor::Dhan, 7) {
+            Finding::Unreadable { path, why } => {
+                assert_eq!(path, shown);
+                assert!(!why.is_empty());
+            }
+            other => panic!("a rotted record read as {other:?}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A month born without block checksums (a version-2 header, written
+    /// here by hand as every build before the writer's fix wrote one) has
+    /// nothing to verify against: the block pass says so, by the file's
+    /// name, and checks nothing.
+    #[test]
+    fn a_month_born_without_checksums_is_unverifiable_by_the_block_pass() {
+        let root = scratch("ScrubUnsealed");
+        let bin = path().to_path_buf(&root);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let layout = store::layout::Layout::V2;
+        let genesis = store::header::Header::genesis_at(layout, 7, 60, 0);
+        let commit = genesis.commit().unwrap();
+        let mut bytes = vec![0_u8; usize::try_from(layout.header_len()).unwrap()];
+        let at = usize::try_from(commit.offset).unwrap();
+        bytes[at..at + commit.bytes.len()].copy_from_slice(&commit.bytes);
+        std::fs::write(&bin, bytes).unwrap();
+        let file = BarFile::open_existing(&root, path(), 7).unwrap();
+        assert!(!file.header().checksums_present(), "the premise");
+        let pass = scrub::blocks(&file, 0, u64::MAX);
+        assert_eq!((pass.blocks, pass.checked, pass.next), (0, 0, None));
+        assert!(pass.bad.is_empty());
+        let why = pass.unverifiable.unwrap();
+        assert!(
+            why.contains("without block checksums") && why.contains(&bin.display().to_string()),
+            "{why}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// ═══ gdfl_cm::auction: the sidecar's directory and lock refusals ═══════════
+
+mod auction_refusals {
+    use super::{day, scratch};
+    use brutex_core::instrument::{Exchange, InstrumentKey};
+    use pull::gdfl_cm::CmRefusal;
+    use pull::gdfl_cm::auction::{self, Print};
+
+    const PRINT: Print = Print {
+        sod: 15 * 3_600 + 28 * 60 + 7,
+        price: 50_000,
+        quantity: 3,
+        rows: 1,
+        line: 2,
+    };
+
+    /// A sidecar whose directory cannot be made (a file stands where the
+    /// share's directory goes) is refused naming that directory.
+    #[test]
+    fn a_sidecar_whose_directory_cannot_be_made_is_refused_by_name() {
+        let root = scratch("AucNoDir");
+        let key = InstrumentKey::cash(Exchange::Nse, "ZZDIR").unwrap();
+        let d = day(2031, 3, 4);
+        let sidecar = auction::path(&root, &key, d).unwrap();
+        let blocker = sidecar.parent().unwrap().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        std::fs::write(&blocker, b"in the way").unwrap();
+        match auction::append(&root, &key, d, &[PRINT]) {
+            Err(CmRefusal::AuctionSidecar { why }) => {
+                assert!(why.contains(&blocker.display().to_string()), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A sidecar another writer holds is refused as busy, by name, and is
+    /// left byte for byte as it was; once the writer lets go the append
+    /// goes through.
+    #[test]
+    fn a_sidecar_another_writer_holds_is_refused_as_busy() {
+        let root = scratch("AucBusy");
+        let key = InstrumentKey::cash(Exchange::Nse, "ZZBUSY").unwrap();
+        let (d1, d2) = (day(2031, 3, 4), day(2031, 3, 5));
+        assert_eq!(
+            auction::append(&root, &key, d1, &[PRINT]).unwrap().written,
+            1
+        );
+        let sidecar = auction::path(&root, &key, d1).unwrap();
+        let before = std::fs::read(&sidecar).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&sidecar)
+            .unwrap();
+        let held = store::flock::Flock::try_lock(file, sidecar.clone()).unwrap();
+        match auction::append(&root, &key, d2, &[PRINT]) {
+            Err(CmRefusal::AuctionSidecar { why }) => {
+                assert!(why.contains("is busy or cannot be locked"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        held.release().unwrap();
+        assert_eq!(
+            auction::append(&root, &key, d2, &[PRINT]).unwrap().written,
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// ═══ cash_session_cache: the two public loaders over a warm cache ══════════
+
+mod cash_loaders {
+    use super::{day, scratch};
+    use std::collections::HashMap;
+    use std::io::Write as _;
+
+    const CSV: &str = "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n1363,HINDALCO,EQ,INE038A01020,1\n16921,20MICRONS,EQ,INE144J01027,0\n";
+
+    fn gzip() -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(CSV.as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// `prepare` over a window whose every required master is held answers
+    /// each, keyed by IST day number, without asking any host; the weekend
+    /// inside it owes nothing. Kills `prepare` answering an empty or a
+    /// one-entry map.
+    #[test]
+    fn prepare_over_a_held_window_answers_every_required_day() {
+        let root = scratch("CashPrepare");
+        let (mon, tue) = (day(2026, 8, 3), day(2026, 8, 4));
+        for held in [mon, tue] {
+            pull::cash_session_cache::install(&root, held, &gzip()).unwrap();
+        }
+        let window = pull::session::Window::new(day(2026, 8, 1), tue).unwrap();
+        let map = runtime()
+            .block_on(pull::cash_session_cache::prepare(&root, window))
+            .unwrap();
+        assert_eq!(map.len(), 2);
+        let flags = map.get(&mon.days_from_epoch()).unwrap();
+        assert!(flags.eligibility("HINDALCO", "INE038A01020").unwrap());
+        assert!(!flags.eligibility("20MICRONS", "INE144J01027").unwrap());
+        assert!(map.contains_key(&tue.days_from_epoch()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `prepare_observed` fills the caller's cache with every observed day's
+    /// held master, deduplicated, without asking any host. Kills
+    /// `prepare_observed` read as `Ok(())`.
+    #[test]
+    fn prepare_observed_fills_the_cache_from_held_masters() {
+        let root = scratch("CashObserved");
+        let (mon, tue) = (day(2026, 8, 3), day(2026, 8, 4));
+        for held in [mon, tue] {
+            pull::cash_session_cache::install(&root, held, &gzip()).unwrap();
+        }
+        let mut cache = HashMap::new();
+        runtime()
+            .block_on(pull::cash_session_cache::prepare_observed(
+                &root,
+                &[tue, mon, tue],
+                &mut cache,
+            ))
+            .unwrap();
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache
+                .get(&tue.days_from_epoch())
+                .unwrap()
+                .eligibility("HINDALCO", "INE038A01020")
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -2114,6 +2114,75 @@ mod cloud_mutant_tests {
         server.join().unwrap();
     }
 
+    /// An installer that cannot take the day alone within its bound refuses
+    /// naming who held it and that nothing was installed; a reader beside
+    /// another reader is never refused. The exclusive arm of the bound's
+    /// message, which the 5-second production bound keeps out of the other
+    /// tests.
+    #[test]
+    fn an_installer_that_cannot_hold_the_day_alone_names_the_readers() {
+        let root = scratch("CloudCashHold");
+        let (path, file) = open_lock(&root, Day::new(2026, 8, 3).unwrap()).unwrap();
+        let reader = hold(&file, &path, Hold::Shared, LOCK_WAIT).unwrap();
+        let second = File::open(&path).unwrap();
+        let other = hold(&second, &path, Hold::Shared, Duration::from_millis(5)).unwrap();
+        let third = File::open(&path).unwrap();
+        let why = hold(&third, &path, Hold::Exclusive, Duration::from_millis(30)).unwrap_err();
+        assert!(
+            why.contains("readers or another installer held it")
+                && why.contains("for the whole 30 ms bound")
+                && why.contains("nothing was installed"),
+            "{why}"
+        );
+        other.release().unwrap();
+        reader.release().unwrap();
+        let alone = hold(&third, &path, Hold::Exclusive, Duration::from_millis(30)).unwrap();
+        alone.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A path the host cannot even inspect (a component is a file) is named
+    /// as that, never read as absent; `write_new` never overwrites.
+    #[test]
+    fn an_uninspectable_path_is_named_and_write_new_never_overwrites() {
+        let root = scratch("CloudCashInspect");
+        let file = root.join("Plain");
+        fs::write(&file, b"held").unwrap();
+        let why = regular_file(&file.join("Below")).unwrap_err();
+        assert!(why.starts_with("cannot inspect"), "{why}");
+        let why = write_new(&file, b"other").unwrap_err();
+        assert!(why.contains("no existing file was overwritten"), "{why}");
+        assert_eq!(fs::read(&file).unwrap(), b"held");
+        write_new(&root.join("Fresh"), b"new").unwrap();
+        assert_eq!(fs::read(root.join("Fresh")).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A lock file that exists and cannot be opened refuses the read by name
+    /// and the path, run where permission bits bind (D-0995).
+    #[test]
+    fn a_lock_that_cannot_be_opened_refuses_the_read_by_name() {
+        crate::support::where_permission_binds(
+            "cash_session_cache::cloud_mutant_tests::a_lock_that_cannot_be_opened_refuses_the_read_by_name",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("CloudCashSealed");
+                let day = Day::new(2026, 8, 3).unwrap();
+                drop(open_lock(&root, day).unwrap());
+                let lock = lock_path(&root, day);
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+                let why = read_local_lifecycle(&root, day).unwrap_err();
+                assert!(
+                    why.starts_with("UNVERIFIED cannot open local lifecycle lock")
+                        && why.contains(&lock.display().to_string()),
+                    "{why}"
+                );
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
+
     /// An undeclared (chunked) body of exactly 4 MiB is read whole; one byte
     /// more is refused as it arrives. Kills the running total's `>` read as
     /// `>=`, `==` or `<`.
