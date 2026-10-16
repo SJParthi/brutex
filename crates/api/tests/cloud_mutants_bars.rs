@@ -2178,6 +2178,35 @@ mod bars_series_rs {
         assert_eq!(got.at_index, Some(0));
     }
 
+    /// **`at` ON A FILE'S LAST RECORD COUNTS ONLY THE ROWS BEFORE IT.** May
+    /// holds three rows; `at` its last row's own stamp is index 2 ascending
+    /// (two rows strictly before it) and 0 descending. Kills `rank`'s
+    /// header check `ts > last_ts` → `>=` and `==`, which counted the last
+    /// row as before an instant equal to it.
+    #[test]
+    fn bars_series_at_the_last_record_counts_only_the_rows_before_it() {
+        let scratch = Scratch::new("series-at-last");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[
+                (open_of(5, 2), 10),
+                (open_of(5, 2) + 60, 11),
+                (open_of(5, 2) + 120, 12),
+            ],
+        );
+        for (desc, want) in [(false, 2), (true, 0)] {
+            let mut asked = query(month(5), month(5));
+            asked.at = Some((open_of(5, 2) + 120) * 1_000_000);
+            asked.desc = desc;
+            let got = window(scratch.root(), &asked).expect("answers");
+            assert_eq!(got.at_index, Some(want), "desc {desc}");
+        }
+    }
+
     /// **AN INSTANT PAST THE CALENDAR'S LAST YEAR IS AFTER EVERY ROW, AND ONE
     /// BEFORE THE EPOCH IS BEFORE EVERY ROW.** `at=` takes any whole number of
     /// unix seconds, so 10000-01-01 reaches the window; the calendar names no
