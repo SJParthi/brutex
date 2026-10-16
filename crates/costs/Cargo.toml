@@ -34,6 +34,23 @@ description  = "Indian F&O statutory rates: the dated regime table, and the refu
 # and a path dependency with no version IS a wildcard.
 brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 
+# ---------------------------------------------------------------------------
+# Package CHG-1 — the charge stack's p50 / p99 / max per executed order and per
+# client-security-day, and the ratios that would show a cost growing with the
+# trade. Same shape as `ratio` below, for the same reasons: no framework, no
+# dependency, not run by `cargo test`. D-5118.
+#
+# It sits HERE, above `[lints]`, and not directly after `ratio`, because gate
+# 14's parser reads a `[[bench]]` table only up to the next NON-bench header or
+# the end of the file: a `[[bench]]` that directly follows another hides the
+# first from it, and the gate then refuses `benches/ratio.rs` as undeclared.
+# Two `[[bench]]` tables must never be adjacent in this file.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "stack"
+harness = false
+test    = false
+
 [lints]
 workspace = true
 

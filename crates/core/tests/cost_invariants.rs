@@ -21,7 +21,9 @@
 //!
 //! `graph.rs` names every manifest by hand because `include_str!` takes a
 //! literal. A test does not have to: it runs, so it can WALK. This walks
-//! `crates/` for `benches/ratio.rs` and reads the document, both at runtime, so
+//! `crates/` for every bench binary — each `benches/ratio.rs`, and any other
+//! `benches/*.rs` a crate carries (D-5120) — and reads the document, both at
+//! runtime, so
 //! **a crate added tomorrow is covered without editing this file** — which is
 //! the same failure mode one layer up, since a hand-written list is exactly the
 //! kind of written claim that stops matching the tree.
@@ -124,6 +126,54 @@ fn bench_sources() -> BTreeMap<String, String> {
         "no crate under {} carries benches/ratio.rs — either the walk is wrong \
          or gate 8 has nothing to run, and both are failures",
         crates_dir.display()
+    );
+    out
+}
+
+/// Every bench binary's root file — each `crates/<name>/benches/*.rs` — keyed by
+/// its path under `crates/`. This, not [`bench_sources`], is what the ids are
+/// read from.
+///
+/// `ratio.rs` is gate 8's harness and every crate carries one, which
+/// [`every_crate_carries_a_ratio_bench`] holds. But gate 8 runs `cargo bench
+/// --workspace`, which runs EVERY bench target, and a crate may carry a second:
+/// `costs/benches/stack.rs` (package CHG-1) prints `C-CHG-01` to `C-CHG-05`.
+/// Reading `ratio.rs` alone failed those five rows as unbenched while the bench
+/// that measures them ran in the same gate. D-5120.
+///
+/// Top-level files only: a file under `benches/ratio/` is a module of
+/// `ratio.rs`, not a binary of its own.
+fn every_bench_source() -> BTreeMap<String, String> {
+    let crates_dir = workspace_root().join("crates");
+    let mut out = BTreeMap::new();
+    for entry in std::fs::read_dir(&crates_dir)
+        .expect("crates/ is readable")
+        .flatten()
+    {
+        let Ok(files) = std::fs::read_dir(entry.path().join("benches")) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|why| panic!("{} must be readable: {why}", path.display()));
+            let key = path.strip_prefix(&crates_dir).unwrap_or(&path);
+            out.insert(key.display().to_string(), source);
+        }
+    }
+    // Every `ratio.rs` is among them: this walk is a superset of the other one,
+    // never a replacement that could quietly read less.
+    let ratios = bench_sources().len();
+    let read = out
+        .keys()
+        .filter(|k| k.ends_with("/benches/ratio.rs"))
+        .count();
+    assert_eq!(
+        read, ratios,
+        "every benches/ratio.rs is a bench binary's root"
     );
     out
 }
@@ -246,7 +296,7 @@ fn every_measured_cost_invariant_is_declared() {
     // NOWHERE ELSE" — and nothing acted on it until D-0298.
     let doc = invariants();
     let rows = declared_rows(&doc);
-    let undeclared: Vec<String> = printed_ids(&bench_sources())
+    let undeclared: Vec<String> = printed_ids(&every_bench_source())
         .into_iter()
         .filter(|id| !rows.contains_key(id))
         .collect();
@@ -270,7 +320,7 @@ fn every_declared_cost_invariant_reaches_a_bench() {
     // by" has to say by what.
     let doc = invariants();
     let rows = declared_rows(&doc);
-    let printed = printed_ids(&bench_sources());
+    let printed = printed_ids(&every_bench_source());
     let reached = proven(&rows, &printed);
 
     let unproven: Vec<&String> = rows.keys().filter(|id| !reached.contains(*id)).collect();
@@ -292,7 +342,7 @@ fn the_reconciliation_is_reading_something() {
     // none, and exited zero".
     let doc = invariants();
     let rows = declared_rows(&doc);
-    let benches = bench_sources();
+    let benches = every_bench_source();
     let printed = printed_ids(&benches);
 
     assert!(
@@ -304,7 +354,7 @@ fn the_reconciliation_is_reading_something() {
     );
     assert!(
         printed.len() > 50,
-        "the benches print {} distinct cost id(s) across {} crate(s). Too few \
+        "the benches print {} distinct cost id(s) across {} bench file(s). Too few \
          means the literal parser stopped matching, and both checks above would \
          then pass vacuously",
         printed.len(),

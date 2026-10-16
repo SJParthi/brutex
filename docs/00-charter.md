@@ -1287,3 +1287,49 @@ BEL, GAIL, TATACHEM, CENTURYTEX and the others the sweep lists): each `event`
 record says what moved and never why. `TATAGLOBAL -> TATACONSUM` and
 `KPIT -> BSOFT` have no row in NSE's `symbolchange.csv` as read on 7 Oct 2026
 (above), so their options keep two keys (D-3354).
+
+## CHG-1 charge-stack rate sources — read 15 and 16 Oct 2026 (D-5110 to D-5119)
+
+`CLAUDE.md` §3 rule 1: every rate `crates/costs/src/schedule.rs` and
+`crates/costs/src/dhan_calc.rs` apply traces to a row here. **How these were
+obtained, stated first because it bounds every row below:** the figures and
+the circular numbers come from the operator's CHG-1 brief of 16 Oct 2026,
+which records Dhan's pricing page and calculator as read by the operator on 15
+and 16 Oct 2026. The session that wrote the code could not fetch any source
+itself — `nsearchives.nseindia.com` and `dhan.co` were refused by the cloud
+environment's network policy (HTTP 403 on CONNECT) — so **no circular body
+was read and no digest is recorded**. A row whose figure the brief attributes
+to a named circular or page is `Cited`; a row with no named source, or with an
+unverified zero in it, is `UNVERIFIED`, is still priced (the brief orders it),
+and every output that uses it lists it (`stack::DayCharges::unverified_sources`).
+
+| Rate | Figure, exactly | Source | Status | Where applied |
+|---|---|---|---|---|
+| NSE cash transaction charge + IPFT | Rs 306.99 + Rs 0.01 per crore each side = 30,700 / 10^9 | NSE circular `FA73061`, effective 2026-03-01 | Cited | `schedule::NSE_EQUITY_EXCHANGE` |
+| NSE futures transaction charge + IPFT | Rs 182.99 + Rs 0.01 per crore = 18,300 / 10^9 | NSE `FA73061` | Cited | `schedule::NSE_FUTURES_EXCHANGE` |
+| NSE options transaction charge + IPFT | Rs 3,552.99 + Rs 0.01 per crore of premium = 355,300 / 10^9 (0.03553%) | NSE `FA73061` | Cited — today's table only; the dated path reads `crate::regime` (package CHG-0 adds the dated row) | `schedule::NSE_OPTIONS_EXCHANGE` |
+| BSE cash, all-in | Rs 375 per crore = 375 / 10^7 | none — the brief marks it UNVERIFIED as a circular; Dhan's calculator uses 0.000038 | **UNVERIFIED** | `schedule::BSE_EQUITY_EXCHANGE` |
+| BSE SENSEX/Bankex options | Rs 3,250 per crore of premium + BSE IPFT taken as 0 | BSE notice of 27-Sep-2024 (`regime::BSE_EXCHANGE_CHARGE`); the IPFT zero is `rate::BSE_IPFT`'s, UNVERIFIED | **UNVERIFIED** (the zero) | `schedule::BSE_OPTIONS_EXCHANGE` |
+| SEBI turnover fee | Rs 10 per crore each side = 10 / 10^7 | sebi.gov.in fee schedule (`rate::SEBI_TURNOVER_FEE`, `COSTS_VERIFIED` §4) | Cited | `schedule::SEBI_FEE` |
+| STT, equity intraday | 0.025% of the non-delivery value = 25 / 10^5, per client per security per day; the value is the non-delivery quantity × the day's VWAP of all the client's trades in the security | NSE circular `NSE/CMTR/5588` (the NSE basis), as the brief cites it | Cited | `schedule::STT_EQUITY_NON_DELIVERY` |
+| STT, equity delivery and MTF | 0.1% each side = 1 / 10^3 | none named | **UNVERIFIED** | `schedule::STT_EQUITY_DELIVERY` |
+| STT, futures | 0.05% of the sell value = 5 / 10^4 | none named (no Finance Act section is recorded for the futures figure) | **UNVERIFIED** | `schedule::STT_FUTURES` |
+| STT, options | 0.15% of the sell premium = 15 / 10^4 | Finance Bill 2026, DEC-COST-003 — the `regime::STT_OPTIONS` row from 2026-04-01 | Cited | `schedule::STT_OPTIONS` |
+| STT, options exercise | 0.15% of intrinsic value = 15 / 10^4 | Finance Act 2026, DEC-COST-004 — the `regime::STT_EXERCISE` row from 2026-04-01 | Cited (the brief asked for UNVERIFIED unless citable; the regime row is the citation) | `schedule::STT_EXERCISE` |
+| Stamp duty, equity intraday | 0.003% of the FIFO buy value of the non-deliverable quantity = 3 / 10^5 | NSE Clearing `NCL/CMPT/43115` | Cited | `schedule::STAMP_EQUITY_NON_DELIVERY` |
+| Stamp duty, equity delivery and MTF | 0.015% of the buy value = 15 / 10^5 | `NCL/CMPT/43115` | Cited | `schedule::STAMP_EQUITY_DELIVERY` |
+| Stamp duty, futures | 0.002% of the buy value = 2 / 10^5 | `NCL/CMPT/43115` | Cited | `schedule::STAMP_FUTURES` |
+| Stamp duty, options | 0.003% of the buy premium = 3 / 10^5 | `NCL/CMPT/43115`; `rate::STAMP_DUTY_BUY_SIDE` (`COSTS_VERIFIED` §6) | Cited | `schedule::STAMP_OPTIONS` |
+| GST | 18% of brokerage + exchange charge (IPFT included) + SEBI fee = 18 / 100 | `rate::GST_ON_FEE_BASE` (`COSTS_VERIFIED`) | Cited | `schedule::GST` |
+| Dhan brokerage, equity intraday and MTF | the lower of Rs 20 and 0.03% of the order value, per executed order | Dhan pricing page `https://dhan.co/pricing/`, read 15-16 Oct 2026 | Cited | `schedule::dhan_brokerage` |
+| Dhan brokerage, equity delivery | Rs 0 | Dhan pricing page | Cited | `schedule::dhan_brokerage` |
+| Dhan brokerage, F&O | Rs 20 per executed order | Dhan pricing page | Cited | `schedule::DHAN_FNO_BROKERAGE` |
+| Dhan DP charge | Rs 12.50 + GST on a delivery or MTF sell | Dhan pricing page | Cited | `schedule::DHAN_DP_CHARGE` |
+| Dhan square-off at the 15:10 intraday ceiling | Rs 20 + 18% GST per order, applied only when the caller says the exit was the broker's | the CHG-1 brief (Dhan RMS) | Cited for equity intraday; the F&O applicability is **UNVERIFIED** (D-5116) | `schedule::DHAN_SQUARE_OFF_FEE` |
+| Dhan calculator constants (comparison only) | brokerage 0.0003 capped at Rs 20; exchange 0.0000307 NSE equity, 0.000038 BSE equity, 0.0000183 futures, 0.0003553 options; SEBI 0.000001; STT 0.00025 / 0.001 / 0.0005 / 0.0015; stamp 0.00003 / 0.00015 / 0.00002 / 0.00003; DP 14.75; GST 0.18 x (brokerage + exchange rounded to 4 decimals) | Dhan calculator `https://dhan.co/calculators/brokerage-calculator/`, read through the page UI 15-16 Oct 2026 by the operator; 48 readings pinned in `crates/costs/tests/dhan_calculator.rs` | Cited as **the page's own arithmetic**, never as a statutory rate | `dhan_calc` |
+
+**Rounding directions and aggregation levels are not rates and have no row
+above:** no source this repository holds states which way an exact half goes,
+or whether a contract note aggregates the exchange charge, the SEBI fee and the
+GST per security or per note. Both are recorded as UNVERIFIED in
+`docs/06-limits.md` §CHG-1 (D-5113).
