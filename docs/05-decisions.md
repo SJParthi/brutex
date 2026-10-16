@@ -69300,7 +69300,7 @@ CensusStep, Group::check,
 Withdrawn::{parse, counts_for, line_of, superseded_records, retired_records,
 admits}, apply}`, `cli::gdfl_rekey::{render_survey, render_plan}`,
 `cli::operation_audit::{RunClaim, claim_invocation_run}`. **Number** the
-ledger's head + 1 at landing (A6): D-4969 on 15 October 2026, the head then D-4962 (AF-04), with D-4963 to D-4968 already held by AF-07, SC-2, AG-03 and R4-08 in flight; renumbered again if
+ledger's head + 1 at landing (A6): D-4969, still the head + 1 on 16 October 2026 after AF-03 (D-4963), SC-2 (D-4965), AG-03 (D-4966) and R4-08 (D-4967, D-4968) landed; renumbered again if
 another package took it first (round 3, amendment A6).
 
 **What was observed.** (1) rekey-3: the old keys' files are kept for ever, so
