@@ -50,7 +50,7 @@ verdict}.rs` and `crates/telemetry/src/sink.rs`.
   `sort_index_writer.rs`, `safe_open.rs`, `staging.rs` and `sink.rs`, and
   branch coverage is not 100% in nine files.** See NOT DONE.
 - **No production line was changed and no real bug was found.** The new tests
-  found five defects in the tree, none a code defect in scope: one misnamed
+  found six defects in the tree, none a code defect in scope: one misnamed
   refusal under a race, two test-tree defects, a doc comment citing a test
   that does not exist, and two CI failures on the base snapshot. See Findings
   and Environment failures.
@@ -306,11 +306,79 @@ must re-measure and lower the `sink.rs` count (and the prose in
 
 ## Gates
 
-*Pending: filled in once measured.*
+Run locally on this branch's code (`a4c0f2c`; every commit after it changes
+only this report) with the default `dev` profile and target directory, at
+2026-10-16 09:10–09:45 UTC. GitHub CI did not run the Rust gates to the end
+on this branch, for the base-snapshot reasons listed under Environment
+failures.
+
+| gate | command | result |
+|---|---|---|
+| format | `cargo fmt --all --check` | **pass** (exit 0) |
+| lint | `cargo clippy -p store -p telemetry --all-targets -- -D warnings` | **pass** (exit 0, no diagnostic) |
+| test, as given, in the container as it runs (root, default `TMPDIR`) | `cargo test -p store -p telemetry --locked` | **exit 101** at the first failing target, `store --lib`: 248 passed, 1 failed (`staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`, ext4 inode reuse); later targets did not run |
+| the same, every target | `cargo test -p store -p telemetry --locked --no-fail-fast` | **exit 101**: 38 targets, 922 passed, 5 failed, 4 ignored. Failed: `cited_commits` (one-commit snapshot) and the four `sink::tests` chmod tests (root ignores mode bits). The inode test passed on this run, so whether ext4 reuses the inode decides it. |
+| test, as given, as an ordinary user would run it (`CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` dropped, `TMPDIR` on tmpfs) | `cargo test -p store -p telemetry --locked` | **exit 101** at the first failing target, `store --test cited_commits`; later targets did not run |
+| the same, every target | `cargo test -p store -p telemetry --locked --no-fail-fast` | **exit 101**: 38 targets, **926 passed, 1 failed (`cited_commits`), 4 ignored** (the four that need real data or a timing bench) |
+
+Every failure is one listed under Environment failures, and none is in a test
+this branch added. All 112 new tests pass in both environments.
+
+## The extreme cases the task named
+
+| case | where it is exercised |
+|---|---|
+| zero-length, truncated, torn files | `a_whole_image_with_a_damaged_day_block_is_refused_by_it`, `an_image_of_exactly_the_floor_is_read_and_refused_by_its_geometry`, `an_indexed_lookup_whose_bar_will_not_read_is_that_bars_refusal` (bars cut short under a reader), `an_indexed_one_second_lookup_reads_no_bar`, `the_sort_rebuild_door_refuses_a_month_that_does_not_validate` (one record short), `a_torn_month_whose_sidecar_cannot_be_measured_is_refused` (interrupted genesis), `a_verdict_reader_refuses_a_damaged_index_or_image_by_name` (index cut to 9 bytes) |
+| damaged header slot | `two_year_index_slots_at_one_commit_are_read_from_slot_zero` (verdict index slots), `every_check_of_an_image_header_refuses_by_name`; a bar file's damaged slot is read from its other slot (one flipped byte opened cleanly here) and is held by the existing `store` tests |
+| file at maximum size | `a_file_of_exactly_the_longest_day_image_is_read_and_one_byte_more_is_not` (a sparse `MAX_IMAGE_LEN` file), `a_detail_section_of_exactly_the_cap_is_in_place`, `a_frame_entry_at_either_bound_of_its_span_is_read_and_checked_as_a_frame` (exactly `max_frame_len`) |
+| a read racing a write | `a_leftover_that_vanishes_before_the_look_leaves_the_create_free`, `two_writers_making_one_new_directory_chain_at_once_both_open`, `a_held_commit_lock_is_refused_when_the_wait_ends` |
+| disk full (a test-owned substitute) | `an_audited_line_the_file_refuses_is_dropped_and_named` (a read-only handle as the target), `an_audited_event_neither_file_takes_is_dropped_from_both` (a `Target` that answers `StorageFull`), `a_batch_flush_reports_its_earliest_failure_and_a_linked_file_is_one` (a flush that refuses); no real disk was filled |
+| read-only directory | `an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves`, `a_retired_index_that_cannot_be_removed_refuses_the_append`, `a_leftover_whose_name_cannot_be_removed_is_refused_as_a_remove`, `a_store_root_that_cannot_be_listed_refuses_the_first_commit_of_a_series`, all run as uid 65534 |
+| non-UTF-8 names | not by a new test: every name in scope is rendered from typed `PathParts`, so it is UTF-8; a record key that is not UTF-8 is refused in `every_check_of_a_record_refuses_by_name`; non-UTF-8 file names are walked by the existing `catalog` tests (`\xFF` names), outside this scope |
+| the 1,024-bar boundary | `a_small_month_whose_committed_bar_will_not_read_crosses_unindexed` (1,000 → 1,030 crosses `INDEX_MIN_ROWS`), `each_commits_line_says_what_it_left_the_time_index_as` (1,100 written whole at the crossing), `a_small_months_lookups_bisect_to_every_row_and_end` (below it) |
+| a sealed month offered an append | `a_torn_month_whose_sidecar_cannot_be_measured_is_refused` (never re-initialised); a month whose checksum sidecar proves commits is refused `CommittedRecordsLost` by the existing `write.rs` tests (D-1520), and one served from a repair revision `Superseded` by `generation.rs` |
 
 ## NOT DONE
 
-*Pending.*
+- **"No surviving mutant" is not met literally.** 34 mutants survive. Each is
+  argued equivalent above, and pass 2 shows the full suite does not contradict
+  any of them, but no test kills them.
+  - 15 of the 34 are reachable only through a fault or race between two
+    system calls of one function. A deterministic test would need a fault
+    seam in production code, and this session changed no production line.
+  - The `verdict.rs` write seam could reach three of them, but it can be
+    armed only from `verdict_tests.rs`, which this session did not edit.
+- **Line coverage is not 100%** in `file.rs` (67 production lines),
+  `verdict.rs` (16), `sort_index_writer.rs` (10), `safe_open.rs` (8),
+  `sink.rs` (4) and `staging.rs` (2), plus `emits.rs`'s 6 test-only lines.
+  Each line is listed with its reason above.
+- **`file.rs:3411`** is covered by a test committed after the final coverage
+  run, and was not re-measured.
+- **Branch coverage is not 100%** in nine files. The table gives the counts.
+  The branch-only gaps were not traced one by one: most are the `None` or
+  `Err` side of the same arms as the uncovered lines, or of `get`/`get_mut`
+  on buffers whose size is fixed.
+- **Pass 2 re-ran only the 34 equivalents, not every pass-1 survivor.** The
+  "missed" and "timeout" columns are therefore pass 1's, from a suite without
+  the heavy tests, so some of those 204 may already be caught on the base by a
+  heavy test. Every one of them is now caught by a new test either way.
+- **Mutation testing ran at opt-level 0 (pass 1, after-runs) and 1 (pass 2),
+  not at the workspace's opt-level 3.**
+- **CI gate 20 must be lowered by the operator.** This branch covers lines
+  that gate's exact-count ratchet declares uncovered: `sink.rs 21` in
+  `ci.yml`, and the prose in `docs/06-limits.md`. This session may not edit
+  workflows.
+- **GitHub CI on the PR is red, for two base-snapshot reasons this branch
+  cannot fix in scope.** Gate W1 fails on a stale `web/build`. Gate 1e fails
+  in `core`'s `banned_lists` tests. Both are described above and in comments
+  on the PR.
+- **`cargo deny check` was not run.** It is not among this task's gates, and
+  this branch adds no dependency.
+- **The findings above are reported, not fixed.** None is a production bug in
+  scope.
+- **No entry was added to `docs/04-invariants.md` or `docs/05-decisions.md`.**
+  The new tests pin behaviour the code and its doc comments already state;
+  they add no invariant and lock no choice.
 
 ## Appendix A: new unit tests (private items)
 
