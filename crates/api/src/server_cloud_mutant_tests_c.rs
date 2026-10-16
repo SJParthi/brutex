@@ -2603,3 +2603,63 @@ fn a_window_opening_on_the_epochs_first_day_is_read_like_any_other() {
         Ok(vec![first, second])
     );
 }
+
+/// A BODY WHOSE CASH SCHEDULE IS REFUSED IS STILL A MEMBER THE RUN WAS HANDED.
+/// Two equity minute bodies under an identity that is not an NSE cash source
+/// are each refused before anything lands, and the landing counts both as
+/// members, every row as read, and one failure per body naming its month
+/// (kills `delete field members` in `land_spot`'s refused arm).
+#[tokio::test]
+async fn a_body_whose_cash_schedule_is_refused_is_still_a_member() {
+    let fx = Fixture::new("cash-refused-members");
+    let site = fx.refused();
+    let reliance = brutex_core::instrument::InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Cash,
+        underlying: brutex_core::symbol::Symbol::new("RELIANCE").expect("a symbol"),
+        kind: brutex_core::instrument::Kind::Equity,
+    };
+    let row = |timestamp: i64| pull::fetch::RawRow {
+        timestamp,
+        open: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        volume: 1,
+        open_interest: None,
+    };
+    let window = spot(DHAN_DAY).window;
+    let mut landed = window_of("RELIANCE", "INDEX", pull::vendor::Granularity::Minute1);
+    landed.listing = pull::vendor::Listing::Equity;
+    landed.bodies = vec![
+        (
+            window,
+            pull::fetch::RawWindow {
+                rows: vec![row(AUG_03)],
+            },
+        ),
+        (
+            window,
+            pull::fetch::RawWindow {
+                rows: vec![row(AUG_03 + 60), row(AUG_03 + 120)],
+            },
+        ),
+    ];
+    let mut dated = std::collections::HashMap::new();
+    let done = land_spot(&landed, &reliance, &site, &mut dated, None).await;
+    assert_eq!(
+        (done.members, done.rows_read, done.bars_committed),
+        (2, 3, 0),
+        "{done:?}"
+    );
+    let august = store::path::YearMonth::new(2026, 8).expect("a month");
+    assert_eq!(done.failures.len(), 2, "{done:?}");
+    for failure in &done.failures {
+        assert_eq!(failure.instrument, "RELIANCE");
+        assert_eq!(
+            failure.why,
+            "cash schedule requires the exact NSE cash source identity"
+        );
+        assert_eq!((failure.month, failure.day), (Some(august), None));
+    }
+}
