@@ -3388,10 +3388,9 @@ mod cloud_mutant_tests {
     /// it reads, in room for twice that, cutting the worst half in place
     /// each time the room fills. Every page, in both directions, is the
     /// brute force, and the extremes asked beside it are the month's with no
-    /// volume. Kills `keep_best`'s `keep - 1` → `keep / 1` (the bar a later
-    /// row must beat was then one of the kept rows at random, not the worst,
-    /// so rows that belonged on the page were passed over) and `page_once`'s
-    /// `delete !` on the read rows' volume flag.
+    /// volume. Kills `page_once`'s `delete !` on the read rows' volume flag.
+    /// (Written against `keep_best`'s `keep - 1` → `keep / 1` too, and it
+    /// does NOT kill it: see the next test.)
     #[test]
     fn a_page_of_read_rows_kept_while_they_are_read_is_the_brute_force() {
         let root = scratch("read-kept");
@@ -3419,6 +3418,62 @@ mod cloud_mutant_tests {
                 assert_eq!(got.extremes, Some(index_extremes(&rows)));
                 let report = got.sort_index.expect("a value sort says what it used");
                 assert_eq!((report.indexed_rows, report.scanned_rows), (0, 360));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A READ MONTH IN ANY ORDER PAGES AS THE BRUTE FORCE.** Two dozen
+    /// months of 360 distinct closes, each in the order a xorshift shuffle
+    /// of its seed gives, with no index: the first page of each, in both
+    /// directions, is the brute force. The fixture above, whose closes are
+    /// an arithmetic progression, never makes `keep_best`'s selection leave
+    /// anything but the worst kept row last; in about one order in twenty a
+    /// selection pivot lands exactly on index `keep`, and only then does the
+    /// worst row's place matter. Kills `keep_best`'s `keep - 1` → `keep / 1`
+    /// under the pinned toolchain (seeds 6 and 22 descending, 18 and 19
+    /// ascending; measured by simulating the read loop over each order).
+    #[test]
+    fn a_read_month_in_any_order_pages_as_the_brute_force() {
+        let root = scratch("read-shuffled");
+        for seed in 1..=24_u64 {
+            let mut state = seed;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut order: Vec<i64> = (0..360).collect();
+            for i in (1..360_usize).rev() {
+                let j = usize::try_from(next() % (i as u64 + 1)).expect("an index");
+                order.swap(i, j);
+            }
+            let at = YearMonth::new(
+                2031 + u16::try_from(seed / 12).expect("a year"),
+                u8::try_from(seed % 12 + 1).expect("a month"),
+            )
+            .expect("a month");
+            let rows: Vec<Bar> = (0..360)
+                .map(|i| {
+                    let mut row = bar(at, i, OI_NULL);
+                    let close = 10_000 + 7 * order[usize::try_from(i).expect("a row")];
+                    (row.open, row.high, row.low, row.close) = (close, close + 5, close - 5, close);
+                    row
+                })
+                .collect();
+            let srt = write(&root, &index(), at, &rows, &rows);
+            std::fs::remove_file(srt).expect("the month is left with no index");
+            for desc in [false, true] {
+                let key = |close: i64| if desc { -close } else { close };
+                let mut want: Vec<i64> = rows.iter().map(|bar| key(bar.close)).collect();
+                want.sort_unstable();
+                want.truncate(37);
+                let mut asked = query(index(), at, at, SortKey::Close);
+                asked.desc = desc;
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<i64> = got.bars.iter().map(|row| key(row.bar.close)).collect();
+                assert_eq!(served, want, "seed {seed} desc {desc}");
             }
         }
         let _ = std::fs::remove_dir_all(&root);
