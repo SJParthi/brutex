@@ -58,7 +58,7 @@ import {
   calendarOf,
   dayCode,
   keepOffered,
-  linkOfKey,
+  linkedContract,
   rebound,
   timeBound,
   DEFAULT_INSTRUMENT,
@@ -2277,46 +2277,34 @@ export function selectionSeeds(db) {
         selectFeed(sel.feed);
       }
     }
-    const link = sel.key ? linkOfKey(sel.key) : null;
-    if (sel.key && link === null) notes.push(`key=${quote(sel.key)} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`);
-    const sym = sel.sym ?? link?.sym;
-    if (sym) db.filter = sym;
+    /* THE CONTRACT THE LINK NAMES — the key, the fields beside it and the
+       segment — is resolved by one pure function (`linkedContract`,
+       selection-model.js) and only applied here. It names, and does not
+       apply: a key whose underlying disagrees with `sym` (`key=…NIFTY…&
+       sym=BANKNIFTY` opened BANKNIFTY with NIFTY's strike and an empty
+       grid, 13 Oct); a segment its contract has left (`seg=options-live`
+       for an expired contract, `linkedSegment`); a contract field on a
+       segment without that rung (`seg=spot&side=PE` stranded the grid, 16
+       Oct, `offSegment`). Inside one underlying a field beside the key is
+       read in place of the key's (`key=…CE&side=PE`, `keyOverride`). */
+    const segFeed = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
+    const c = linkedContract(sel, db.today, /** @type {any} */ (segFeed)?.archive?.to ?? null);
+    notes.push(...c.notes);
+    if (c.sym) db.filter = c.sym;
     else if (entry) db.filter = '';
     if (sel.universe !== undefined) db.universe = sel.universe;
     else if (entry) db.universe = '';
-    const exp = sel.exp ?? link?.expiry;
-    const strikes = sel.k ?? (link?.strike ? [link.strike] : []);
-    const side = sel.side ?? link?.side;
-    if (sel.seg) db.kind = sel.seg;
-    else if (!link && exp) {
-      /* A contract named without a segment is read as one: an option when
-         a strike or side is named, else a future, filed by its expiry. */
-      const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
-      db.kind = segmentOf(
-        { expiry: exp, instrument: strikes.length || side ? 'contract-CE' : 'contract-FUT' },
-        db.today,
-        /** @type {any} */ (f)?.archive?.to ?? null
-      );
-    } else if (link) {
-      const f = feeds.all.find((x) => x.wire === (sel.feed ?? feeds.active));
-      db.kind =
-        link.contract === 'spot'
-          ? 'spot'
-          : segmentOf(
-              { expiry: link.expiry, instrument: /** @type {string} */ (sel.key) },
-              db.today,
-              /** @type {any} */ (f)?.archive?.to ?? null
-            );
-    } else if (entry) db.kind = '';
+    if (c.seg) db.kind = c.seg;
+    else if (entry) db.kind = '';
     if (sel.tf) db.timeframe = sel.tf;
     else if (entry) db.timeframe = '';
-    if (exp) db.expiry = exp;
+    if (c.exp) db.expiry = c.exp;
     else if (entry) db.expiry = '';
-    if (strikes.length) db.strikePick = new Set(strikes);
+    if (c.strikes.length) db.strikePick = new Set(c.strikes);
     else if (entry && db.strikePick.size) db.strikePick = new Set();
-    if (sel.mny?.length) db.mnyPick = new Set(sel.mny);
+    if (c.mny.length) db.mnyPick = new Set(c.mny);
     else if (entry && db.mnyPick.size) db.mnyPick = new Set();
-    if (side) db.side = side;
+    if (c.side) db.side = c.side;
     else if (entry) db.side = '';
     /* THE SPOT RULE (D-3328) lives in the chain state; a page without it
        (the seam fixture) has nothing to restore. */

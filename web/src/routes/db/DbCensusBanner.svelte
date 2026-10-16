@@ -33,7 +33,7 @@
   import { page } from '$app/state';
   import { store, syncStore, wholeStore, surveyStores, survey, refreshStore, watchCensus, checkCensusHead, facets } from '$lib/store.svelte.js';
   import { decodeDb, DB_DEFAULTS, addressNow } from '$lib/urlstate.js';
-  import { linkOfKey, DEFAULT_INSTRUMENT } from '$lib/db/selection-model.js';
+  import { linkOfKey, keyConflict, DEFAULT_INSTRUMENT } from '$lib/db/selection-model.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { denominators } from '$lib/completeness.js';
   import { decorateRow, instrumentDescription } from '$lib/db/decoration.js';
@@ -165,7 +165,11 @@
          `page.url` is the URL /db was entered with, not this entry's. */
       const { sel } = decodeDb(addressNow(page.url.search));
       if (sel.view && sel.view !== DB_DEFAULTS.view) return null;
-      const link = sel.key ? linkOfKey(sel.key) : null;
+      /* A key whose underlying the `sym` beside it contradicts is not read,
+         as the link reader does not read it (`keyConflict`, R3-01); inside
+         one underlying a field beside the key wins, as it does there. */
+      const keyed = sel.key ? linkOfKey(sel.key) : null;
+      const link = keyConflict(sel, keyed) ? null : keyed;
       return { underlying: sel.sym ?? link?.sym ?? DEFAULT_INSTRUMENT, expiry: sel.exp ?? link?.expiry ?? null };
     };
     $effect(() => {

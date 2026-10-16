@@ -251,6 +251,24 @@ export const DB_KEYS = [
  */
 export const DB_DEFAULTS = { sort: 'ts', dir: 'desc', page: 1, view: 'bars', oow: false, spot: 'exact', rows: 'fit' };
 
+/**
+ * The most characters a list field (`k`, `mny`) is read for: 64 values of 16
+ * characters. A BOUND, NOT A VENDOR FACT — a chain lists far fewer strikes
+ * than a person can tick, and a longer field is refused by its length before
+ * it is split.
+ */
+export const MAX_LIST_FIELD = 16 * 64;
+
+/**
+ * The most refusals one address names one by one; the rest are counted in a
+ * closing entry. A BOUND: a link holds a handful of fields, and a notice that
+ * grows with the link is not read.
+ */
+export const MAX_REFUSED = 12;
+
+/** How many unknown field names the one sentence about them quotes. */
+const UNKNOWN_NAMED = 8;
+
 const PAISA = /^\d{1,15}$/;
 /** A moneyness rung: ATM, ITM, OTM, or a numbered rung such as ITM-1 / OTM+2. */
 const RUNG = /^(ATM|ITM|OTM)([+-]\d{1,3})?$/;
@@ -360,8 +378,24 @@ export function decodeDb(search) {
   const sel = {};
   /** @type {Array<{key: string, value: string, why: string}>} */
   const refused = [];
+  /* EACH PROBLEM ONCE, AND A BOUNDED FEW OF THEM (R3-01). `mny=a,a,a,…` was
+     one identical sentence per comma and `x0=1&x1=1&…` one per field — the
+     notice under the controls grew with the link (second agent, shadow 13
+     Oct). A value refused twice is named once; past `MAX_REFUSED` the rest
+     are COUNTED in one closing entry, never dropped in silence. */
+  const seen = new Set();
+  let more = 0;
   /** @param {string} key @param {string} value @param {string} why */
-  const refuse = (key, value, why) => refused.push({ key, value: value.length > 64 ? `${value.slice(0, 64)}…` : value, why });
+  const refuse = (key, value, why) => {
+    const id = `${key}\u0000${value}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    if (refused.length >= MAX_REFUSED) {
+      more += 1;
+      return;
+    }
+    refused.push({ key, value: value.length > 64 ? `${value.slice(0, 64)}…` : value, why });
+  };
   /** @param {string} k */
   const raw = (k) => (p.has(k) ? String(p.get(k)) : '');
   for (const k of ['feed', 'universe', 'seg', 'sym', 'key', 'tf', 'sort', 'view']) {
@@ -400,8 +434,8 @@ export function decodeDb(search) {
   }
   const strikes = [];
   for (const field of p.getAll('k')) {
-    if (field.length > 16 * 64) {
-      refuse('k', field, `k is ${field.length.toLocaleString('en-IN')} characters long, and /db reads at most ${16 * 64}`);
+    if (field.length > MAX_LIST_FIELD) {
+      refuse('k', field, `k is ${field.length.toLocaleString('en-IN')} characters long, and /db reads at most ${MAX_LIST_FIELD}`);
       continue;
     }
     for (const part of field.split(',')) {
@@ -413,7 +447,11 @@ export function decodeDb(search) {
   }
   if (strikes.length) sel.k = [...new Set(strikes)].sort((a, b) => Number(a) - Number(b));
   const mny = [];
-  for (const part of raw('mny').split(',')) {
+  const rungField = raw('mny');
+  if (rungField.length > MAX_LIST_FIELD) {
+    refuse('mny', rungField, `mny is ${rungField.length.toLocaleString('en-IN')} characters long, and /db reads at most ${MAX_LIST_FIELD}`);
+  }
+  for (const part of rungField.length > MAX_LIST_FIELD ? [] : rungField.split(',')) {
     const v = part.trim();
     if (!v) continue;
     if (RUNG.test(v)) mny.push(v);
@@ -462,8 +500,25 @@ export function decodeDb(search) {
      misspelt `strike=` would otherwise open every strike while the address
      reads as if it asked for one. */
   const known = new Set(DB_KEYS);
-  for (const k of new Set(p.keys())) {
-    if (!known.has(k)) refuse(k, raw(k), `${quote(k)} is not a field of a /db address (it reads ${DB_KEYS.join(', ')})`);
+  /* ONE SENTENCE FOR EVERY FIELD IT DOES NOT READ, naming the first few and
+     counting the rest: forty unknown fields were forty copies of the field
+     list (R3-01, shadow 16 Oct). */
+  const unknown = [...new Set(p.keys())].filter((k) => !known.has(k));
+  if (unknown.length > 0) {
+    const named = unknown.slice(0, UNKNOWN_NAMED);
+    const rest = unknown.length - named.length;
+    refuse(
+      unknown[0],
+      unknown.length === 1 ? raw(unknown[0]) : named.join(','),
+      `${named.map((k) => quote(k)).join(', ')}${rest > 0 ? ` and ${rest.toLocaleString('en-IN')} more` : ''} ${unknown.length === 1 ? 'is not a field' : 'are not fields'} of a /db address (it reads ${DB_KEYS.join(', ')})`
+    );
+  }
+  if (more > 0) {
+    refused.push({
+      key: '…',
+      value: '',
+      why: `and ${more.toLocaleString('en-IN')} more value(s) this page could not read, not listed one by one`
+    });
   }
   return { sel, refused };
 }
