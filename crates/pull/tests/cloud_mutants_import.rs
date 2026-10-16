@@ -499,6 +499,278 @@ fn fold_an_anchor_overflow_names_its_stamp() {
     );
 }
 
+/// The completeness fold's paths through its public forms: an index day's
+/// absent head and tail, a special session's first bucket, duplicate and
+/// off-grid minutes, withheld days counted under their own sentence, and the
+/// snapshot fold's reservation.
+mod fold_paths {
+    use super::day;
+    use pull::calendar::Runtime;
+    use pull::fold::{Bucket, Derived, Tally};
+    use pull::session::Day;
+    use pull::vendor::Venue;
+    use store::format::Bar;
+
+    const MINUTE: i64 = 60_000_000;
+
+    /// IST midnight of `d`, as UTC microseconds.
+    fn midnight(d: Day) -> i64 {
+        (i64::from(d.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS) * 1_000_000
+    }
+
+    /// One invented bar stamped `ts_micros`.
+    fn bar(ts_micros: i64) -> Bar {
+        Bar {
+            ts_micros,
+            open: 1_000,
+            high: 1_010,
+            low: 990,
+            close: 1_005,
+            volume: 3,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// One-minute bars at `minutes` past IST midnight on `d`.
+    fn at(d: Day, minutes: impl IntoIterator<Item = i64>) -> Vec<Bar> {
+        minutes
+            .into_iter()
+            .map(|m| bar(midnight(d) + m * MINUTE))
+            .collect()
+    }
+
+    /// `f` on a thread, failing after ten seconds instead of hanging: a
+    /// mutant that zeroes a bucket width loops forever counting buckets.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(f()));
+        answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("answered within ten seconds")
+    }
+
+    /// The detailed form's sentences, one per withheld bucket, range or day.
+    fn detailed(bars: &[Bar], secs: u32, venue: Venue) -> Vec<String> {
+        let bars = bars.to_vec();
+        within(move || {
+            pull::fold::complete_minutes_with_calendar(
+                &bars,
+                Bucket::of_secs(secs).unwrap(),
+                venue,
+                None,
+                Runtime::default(),
+            )
+            .unwrap()
+            .1
+        })
+    }
+
+    /// The derive's counted form.
+    fn derived(bars: &[Bar], secs: u32, venue: Venue) -> Derived {
+        let bars = bars.to_vec();
+        within(move || {
+            pull::fold::derive_minutes(
+                &bars,
+                Bucket::of_secs(secs).unwrap(),
+                venue,
+                None,
+                Runtime::default(),
+            )
+            .unwrap()
+        })
+    }
+
+    /// An index owes every minute of its session, so a day that starts late
+    /// names its absent head from the session's first bucket, and a day that
+    /// stops early names its absent tail once the next day begins; each is
+    /// counted withheld by the buckets it owes. A share's minute with no
+    /// candle is no trade, so the same holes are no bar and no sentence.
+    #[test]
+    fn an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not() {
+        let first = day(2025, 7, 1);
+        // 09:25..=14:59: the first day's first two five-minute buckets and its
+        // last six hold no minute. The second day is whole.
+        let mut bars = at(first, 565..900);
+        bars.extend(at(day(2025, 7, 2), 555..930));
+        let m = midnight(first);
+        assert_eq!(
+            detailed(&bars, 300, Venue::NseIndex),
+            [
+                format!(
+                    "bucket range [{}, {}): absent: observed 0, scheduled 10; withheld; historical gap refill requires a versioned store repair",
+                    m + 555 * MINUTE,
+                    m + 565 * MINUTE
+                ),
+                format!(
+                    "bucket range [{}, {}): absent: observed 0, scheduled 30; observed-day tail withheld; historical gap refill requires a versioned store repair",
+                    m + 900 * MINUTE,
+                    m + 930 * MINUTE
+                ),
+            ]
+        );
+        assert_eq!(
+            derived(&bars, 300, Venue::NseIndex).tally,
+            Tally {
+                days: 2,
+                buckets: 67 + 75,
+                withheld: 2 + 6,
+                partial: 0
+            }
+        );
+        let share = derived(&bars, 300, Venue::NseCash);
+        assert!(share.diagnostics.is_empty(), "{:?}", share.diagnostics);
+        assert_eq!(
+            share.tally,
+            Tally {
+                days: 2,
+                buckets: 142,
+                withheld: 0,
+                partial: 0
+            }
+        );
+    }
+
+    /// A special session's absent first bucket is named from that bucket's
+    /// start on the regular 09:15 grid: the 2024-11-01 Muhurat opened at
+    /// 18:00, so its first hour bucket starts at 17:15 and owes the fifteen
+    /// minutes 18:00..=18:14, not a range starting at the window's open.
+    #[test]
+    fn a_muhurats_absent_first_bucket_is_named_from_its_grid_start() {
+        let evening = day(2024, 11, 1);
+        let m = midnight(evening);
+        assert_eq!(
+            detailed(&at(evening, 1_095..1_140), 3_600, Venue::NseIndex),
+            [format!(
+                "bucket range [{}, {}): absent: observed 0, scheduled 15; withheld; historical gap refill requires a versioned store repair",
+                m + 1_035 * MINUTE,
+                m + 1_095 * MINUTE
+            )]
+        );
+    }
+
+    /// A bucket whose row count equals the minutes it owes is still withheld
+    /// when one row repeats a stamp or sits off the minute grid: the count
+    /// matches, the coverage does not. For an index and a share alike, since
+    /// an invalid row is no more a trade than a missing one.
+    #[test]
+    fn a_duplicate_or_off_grid_minute_never_completes_a_bucket() {
+        let d = day(2025, 7, 1);
+        let m = midnight(d);
+        let mut bars = at(d, 555..930);
+        // 09:24 missing and 09:23 twice: five rows where five are owed.
+        bars[9] = bars[8];
+        // 09:30 stamped half a minute late: five rows, one off the grid.
+        bars[15].ts_micros += 30_000_000;
+        let notes = detailed(&bars, 300, Venue::NseIndex);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        for (note, start) in notes.iter().zip([560, 570]) {
+            assert!(
+                note.starts_with(&format!(
+                    "bucket {}: incomplete or invalid minute coverage: observed 5, scheduled 5,",
+                    m + start * MINUTE
+                )),
+                "{note}"
+            );
+        }
+        for venue in [Venue::NseIndex, Venue::NseCash] {
+            assert_eq!(
+                derived(&bars, 300, venue).tally,
+                Tally {
+                    days: 1,
+                    buckets: 73,
+                    withheld: 2,
+                    partial: 0
+                },
+                "{venue:?}"
+            );
+        }
+    }
+
+    /// Every bucket of a withheld day is counted under that day's own
+    /// sentence, and only there: minute bars on a closed Sunday are one store
+    /// defect, and two cash days from 2026-08-03 with no dated eligibility are
+    /// one counted line of 150 buckets — never a coverage fault per bucket.
+    #[test]
+    fn a_withheld_days_buckets_are_counted_under_its_own_sentence() {
+        let sunday = day(2025, 7, 6);
+        let tuesday = day(2026, 8, 4);
+        let mut bars = at(sunday, 555..560);
+        bars.extend(at(tuesday, 555..930));
+        bars.extend(at(day(2026, 8, 5), 555..930));
+        let share = derived(&bars, 300, Venue::NseCash);
+        assert!(share.bars.is_empty());
+        assert_eq!(
+            share.tally,
+            Tally {
+                days: 0,
+                buckets: 0,
+                withheld: 1 + 75 + 75,
+                partial: 0
+            }
+        );
+        assert_eq!(
+            share.diagnostics,
+            [
+                format!(
+                    "day {}: minute bars on a day the calendar measures as closed; store defect; derived buckets withheld",
+                    sunday.days_from_epoch()
+                ),
+                format!(
+                    "days whose session hours cannot attest the stored grid: 150 bucket(s) withheld on 2 day(s), 2026-08-04..2026-08-05, over 2 note(s); the first: day {}: cash session UNVERIFIED on 2026-08-04: dated eligibility required; derived buckets withheld",
+                    tuesday.days_from_epoch()
+                ),
+            ]
+        );
+    }
+
+    /// The snapshot fold reserves exactly what it can return: the buckets
+    /// its span covers, capped at one bar per snapshot, so a dense run ends
+    /// with no slack and a sparse one never reserves its empty span.
+    #[test]
+    fn a_fold_reserves_exactly_the_bars_it_can_return() {
+        let open = midnight(day(2025, 7, 1)) + 555 * MINUTE;
+        let dense: Vec<Bar> = (0..3).map(|i| bar(open + i * MINUTE)).collect();
+        let out = pull::fold::fold(&dense, Bucket::MINUTE).unwrap();
+        assert_eq!((out.len(), out.capacity()), (3, 3));
+        let sparse = [bar(open), bar(open + 100 * MINUTE)];
+        let out = pull::fold::fold(&sparse, Bucket::MINUTE).unwrap();
+        assert_eq!((out.len(), out.capacity()), (2, 2));
+    }
+
+    /// A one-second bar is stamped at its second's start, never at its first
+    /// traded row's sub-second stamp, and a quote-only row (no trade) still
+    /// gives its second the open interest it carried.
+    #[test]
+    fn a_seconds_bar_is_stamped_at_its_seconds_start() {
+        use pull::fold::Placed;
+        let open = midnight(day(2025, 7, 1)) + 555 * MINUTE;
+        let rows = [
+            Placed {
+                bar: bar(open + 250_000),
+                traded: true,
+            },
+            Placed {
+                bar: Bar {
+                    open_interest: 40,
+                    ..bar(open + 1_750_000)
+                },
+                traded: false,
+            },
+            Placed {
+                bar: bar(open + 1_900_000),
+                traded: true,
+            },
+        ];
+        let out = pull::fold::fold_seconds_with_last_oi(&rows).unwrap();
+        assert_eq!(
+            out.iter()
+                .map(|b| (b.ts_micros, b.open_interest))
+                .collect::<Vec<_>>(),
+            [(open, i64::MIN), (open + 1_000_000, 40)]
+        );
+    }
+}
+
 // ═══ gdfl_tickstore: a socket where a day file belongs ═════════════════════
 
 /// A socket at a day file's name is refused as not a regular file, by

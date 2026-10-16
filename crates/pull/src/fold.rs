@@ -2384,7 +2384,7 @@ mod cloud_mutant_tests {
     //! Mutant kills and coverage for the completeness fold's private helpers
     //! (cloud mutation round, 2026-10-16).
 
-    use super::{Bucket, Withheld, owed_buckets, session_close, session_open};
+    use super::{Bucket, Withheld, bucket_start, owed_buckets, session_close, session_open};
     use crate::calendar::{DayKind, Session, Window};
 
     /// Every reason's aggregated label, word for word: the sentence an
@@ -2450,6 +2450,44 @@ mod cloud_mutant_tests {
         assert_eq!(session_close(full, i64::MAX), None, "past the i64 range");
     }
 
+    /// An open session's first bucket starts on the fold's own grid: 09:15
+    /// itself for a regular day, and for a window opening off the grid (an
+    /// 18:00 Muhurat) the hour bucket that holds its first minute, 17:15.
+    /// A day bucket sits on IST midnight.
+    #[test]
+    fn a_sessions_first_bucket_is_on_the_folds_grid() {
+        const MINUTE: i64 = 60_000_000;
+        let midnight = 20_000 * 86_400 * 1_000_000 - 19_800 * 1_000_000;
+        let full = DayKind::Open(Session::full());
+        assert_eq!(
+            session_open(full, midnight, Bucket::MINUTE),
+            Ok(Some(midnight + 555 * MINUTE))
+        );
+        let evening = DayKind::Open(Session {
+            windows: [
+                Window {
+                    from: 1_080,
+                    to: 1_139,
+                },
+                Window { from: 0, to: 0 },
+            ],
+            count: 1,
+        });
+        let hour = Bucket::of_secs(3_600).unwrap();
+        assert_eq!(
+            session_open(evening, midnight, hour),
+            Ok(Some(midnight + 1_035 * MINUTE))
+        );
+        assert_eq!(
+            bucket_start(midnight + 1_079 * MINUTE, hour),
+            Some(midnight + 1_035 * MINUTE)
+        );
+        assert_eq!(
+            bucket_start(midnight + 1_079 * MINUTE, Bucket::DAY),
+            Some(midnight)
+        );
+    }
+
     /// Counting owed buckets stops at the end of the `i64` line instead of
     /// wrapping: a range whose next bucket start would overflow counts the
     /// buckets it could reach and no more.
@@ -2468,5 +2506,8 @@ mod cloud_mutant_tests {
             owed_buckets(full, 0, 555 * width, 930 * width, 15 * width),
             25
         );
+        // From midnight: the 37 quarter-hours before the open owe nothing and
+        // are not counted.
+        assert_eq!(owed_buckets(full, 0, 0, 930 * width, 15 * width), 25);
     }
 }
