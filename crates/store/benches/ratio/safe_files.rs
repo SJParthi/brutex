@@ -1,5 +1,7 @@
 //! C-SF-01, C-SF-02 and C-SF-03: the two shared file doors of R3-16, timed
-//! where the store lives.
+//! where the store lives. This module of the `crates/store/benches/ratio.rs`
+//! bench is the measurement; its figures are in `docs/06-limits.md`
+//! (L-R316-06).
 //!
 //! The directory is `CARGO_TARGET_TMPDIR`, under the target directory, so a
 //! run whose target directory is on the store's drive times that drive's

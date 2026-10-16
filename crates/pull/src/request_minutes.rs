@@ -228,8 +228,8 @@ pub(super) fn report(
     };
     let audit = audit_refused(rows, plan, venue, refusals);
     for group in aggregate(&audit.findings, plan.vendor) {
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
+        let event =
+            telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
                 .with("instrument", telemetry::Value::Str(instrument))
                 // `feed`, `instrument` and `month` are three of the audit
                 // stream's index dimensions (D-3341 item 3).
@@ -239,8 +239,9 @@ pub(super) fn report(
                 .with("count", telemetry::Value::Uint(u64::from(group.count)))
                 .with("first_day", telemetry::Value::Str(&group.first_day))
                 .with("last_day", telemetry::Value::Str(&group.last_day))
-                .with("reason", telemetry::Value::Str(&group.text)),
-        );
+                .with("reason", telemetry::Value::Str(&group.text));
+        // Emitted on the line above the failure it records (gate 19).
+        let _dropped_when_filtered = telemetry::emit(&event);
         done.failures.push(group.receipt(instrument));
     }
     if audit.days.is_empty() {

@@ -518,7 +518,8 @@ fn still_regular(path: &Path) -> Result<(), String> {
 /// Takes `hold` of an open lock file, waiting at most `bound`. Expected
 /// O(1): one attempt when nobody holds the other side; otherwise a bounded
 /// number of attempts, the pauses doubling from [`LOCK_PAUSE_FIRST`] to
-/// [`LOCK_PAUSE_MAX`].
+/// [`LOCK_PAUSE_MAX`]. The bound is held by
+/// `pull::cash_session_cache::lock_tests::a_reader_beside_an_installer_waits_then_answers_or_names_the_wait`.
 fn hold<'a>(
     file: &'a File,
     path: &'a Path,

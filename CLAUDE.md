@@ -77,6 +77,15 @@ else — the front end is unrestricted. Any language, any framework, any
 toolchain, any file extension. Narrowed to that directory by D-0052 and widened
 to "unrestricted within it" by D-0053.
 
+**The exception has one exception of its own, and it holds everywhere.** The
+language whose files end in `.py` — written "the Py-language" in this
+repository, because its name is not written at all — is never used anywhere,
+`web/` included: not as a dependency, a tool, a build step, a script or a file.
+Its name appears in no tracked file, in any case. That is the operator's rule
+of 16 October 2026, recorded as D-5250, and `cargo test` enforces it:
+`crates/vocab/tests/no_py_language.rs` refuses the name, the language's file
+extensions and a shebang that runs its interpreter, in every tracked file.
+
 Everything the exception does not name is unchanged. `crates/**` is Rust. The
 engine, the store, the vocabulary, the sweep, the ingest and the HTTP surface do
 not gain a second language, and a file under `crates/` with one of those

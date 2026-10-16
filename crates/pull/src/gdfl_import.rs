@@ -4442,7 +4442,13 @@ impl Filing<'_> {
                     match self.provenance(handed, held, done.bars_committed, begin_line) {
                         Ok(true) => filed.receipt = Receipt::Provenance,
                         Ok(false) => {}
-                        Err(refused) => filed.failures.push(refused),
+                        Err(refusal) => filed.failures.push(note_staged(
+                            self.run,
+                            self.day,
+                            &handed.file.name,
+                            Stage::File,
+                            &refusal,
+                        )),
                     }
                 }
                 Landed::NewGeneration => {
@@ -4537,14 +4543,15 @@ impl Filing<'_> {
     /// run names its origin and the source named the file's member, and says
     /// whether it wrote one. A record the sidecar refuses is a named failure
     /// of the day, never silence: the bars stay committed and stay
-    /// unrecorded, which `/provenance.json` labels reconstructed.
+    /// unrecorded, which `/provenance.json` labels reconstructed. The refusal
+    /// is handed back un-noted; the caller notes it as it records it.
     fn provenance(
         &self,
         handed: &Handed,
         held: &Held,
         committed: usize,
         begin_line: u64,
-    ) -> Result<bool, Staged> {
+    ) -> Result<bool, ImportRefusal> {
         let run = self.run;
         let (Some(origin), Some(member), Some(source)) =
             (self.origin, handed.facts.member.as_ref(), self.source)
@@ -4581,10 +4588,8 @@ impl Filing<'_> {
             };
             record_provenance(run.store_root, held, committed, &landing)
         });
-        recorded.map_err(|why| {
-            let refusal = ImportRefusal::Provenance { why };
-            note_staged(run, self.day, &handed.file.name, Stage::File, &refusal)
-        })
+        // The refusal is noted where it is pushed, by the caller (gate 19).
+        recorded.map_err(|why| ImportRefusal::Provenance { why })
     }
 
     /// A file whose day its month lacked inside what it holds, landed as a
@@ -5279,6 +5284,18 @@ fn stop_at_census(
     let kind = ctx.run.kind;
     let cause = Cause::open(Stage::Census, census_code(&room));
     let words = census_words(&why, &room);
+    // The ONE `error` event, emitted beside the failure it records (gate 19),
+    // before the day is closed: `close_day` reads `report` and never moves
+    // `days_imported`, so the event says what it said after the close.
+    {
+        let day_text = day.to_string();
+        let event = stopped_event(
+            (kind, day_text.as_str(), cause),
+            (words.as_str(), report.days_imported),
+            room.as_ref().ok(),
+        );
+        let _dropped_when_filtered = telemetry::emit(&event);
+    }
     failures.push(Staged {
         cause,
         failure: failure_on(day, &format!("{day} census"), words.clone()),
@@ -5289,13 +5306,6 @@ fn stop_at_census(
         (before, &report, max_back_s),
         &mut failures,
     );
-    let day_text = day.to_string();
-    let event = stopped_event(
-        (kind, day_text.as_str(), cause),
-        (words.as_str(), report.days_imported),
-        room.as_ref().ok(),
-    );
-    let _dropped_when_filtered = telemetry::emit(&event);
     report
         .failures
         .extend(failures.into_iter().map(|one| one.failure));

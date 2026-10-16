@@ -16335,7 +16335,7 @@ switch on the returned exception name."* A grep for `error_type` across
 
 **The pair that forced it.** `TokenException` and `PermissionException` are both
 answered under HTTP 403 — the first documented on the exceptions page, the
-second in the vendor's own Python SDK. On the status axis they are one event.
+second in the vendor's own SDK. On the status axis they are one event.
 They are not one event to an operator: the first is fixed by the credential
 somebody refreshes tonight, and the second is an API key with no
 historical-data subscription, which fails identically forever. The unentitled
@@ -68965,3 +68965,330 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-5250 — The Py-language is used nowhere in this repository and its name appears in no tracked file; one line of D-0207 is the only recorded exception, and a `cargo test` gate refuses everything else — 2026-10-16
+
+**Status: locked.** The operator's rule, given on 16 October 2026 at 08:35 IST.
+Throughout this entry the language is called "the Py-language": the language
+whose source files end in `.py`. Its name is not written here, because this
+entry is a tracked file and the rule it records applies to it.
+
+**Decision.**
+
+1. **The rule.** The Py-language is never used anywhere in this repository —
+   not as a dependency, a tool, a build step, a script, a notebook or a file —
+   and its name appears in no tracked file, in any case, `web/` included. This
+   is stricter than `CLAUDE.md` §2 twice over: §2 refuses the language by
+   extension only outside `web/` (D-0053 made `web/` unrestricted), and §2 says
+   nothing about the name.
+2. **Five lines named it on `feat/db-fix` at `4756cce0`, in four files.** Four
+   are rewritten so the meaning stays and the name goes. Each now says "the
+   vendor's own SDK", which is the charter's own wording: `docs/00-charter.md`,
+   the `PermissionException` row, *"Live in the vendor's own SDK"*, which
+   already cites the SDK's repository and file. Nothing the sentences claimed
+   about the vendor changed; only the language's name went.
+
+   | File | Line | Was | Now |
+   |---|---|---|---|
+   | `crates/pull/src/kite.rs` | 25 | `vendor's own` + the name + ` SDK.` | `vendor's own SDK.` |
+   | `crates/pull/src/kite.rs` | 102 | the name + ` SDK. An entitlement failure, not a session failure.` | `SDK. An entitlement failure, not a session failure.` |
+   | `crates/pull/src/refusal.rs` | 29 | `in its own` + the name + ` SDK rather than on the` | `in its own SDK rather than on the` |
+   | `crates/pull/src/vendor.rs` | 6227 | `in the vendor's own` + the name + ` SDK -- so on the status axis they are one` | `in the vendor's own SDK -- so on the status axis they are one` |
+
+3. **The fifth is inside D-0207, and it stays.** This ledger's header says
+   *"Append only. Entries are never edited"*, and no decision allows an
+   editorial redaction of an old entry. Two entries bent the rule, each for one
+   named defect and neither as a general licence: D-0212 left a false claim
+   standing with *"an additive bracket, because this file is append-only and a
+   bracket is not a rewrite"*, and D-0215 repointed two citations in place
+   *"because leaving them would be worse than the append-only rule they
+   bend"*. Neither covers removing a word. So the line stays exactly as
+   written: `docs/05-decisions.md` line 16338, D-0207's paragraph headed **The
+   pair that forced it.**, the words "the vendor's own" + the name + " SDK".
+   **This entry supersedes that wording**: read D-0207's sentence as *"the
+   second in the vendor's own SDK"*. It is the only occurrence of the name in
+   the tree, and the only exception the gate below admits. Whether to redact it
+   in place is the operator's decision; doing so means removing the exception
+   from the gate and from `NOPY-04` in the same change.
+4. **The gate.** `crates/vocab/tests/no_py_language.rs`, beside
+   `workspace_is_rust.rs`, the other workspace-wide Rust-only scan that runs
+   under `cargo test`. It reads every file `git ls-files` lists, from the
+   working tree, every byte of each, and fails on: the name in any case, in a
+   file's bytes or in its path; a file whose extension is `py`, `pyi`, `pyc`,
+   `pyo`, `pyw`, `pyd`, `pyz` or `ipynb`; and a shebang line, on any line, that
+   runs the interpreter by its name or as `py`, `pypy`, `jython` or `graalpy`
+   (a `#![` Rust inner attribute is not a shebang). The needle is
+   `concat!("py", "thon")`-style halves with a length tripwire, so the test file
+   never holds the word. The exception is matched by EXACT PATH AND EXACT LINE
+   CONTENT and must match exactly once: a copied line fails, and so does the
+   line's disappearance. A tree with no `.git` (a `cargo-mutants` copy) or a
+   host where `git` cannot run is walked as a directory instead, skipping
+   `.git`, the root `target` and every `node_modules`, and the run says so; a
+   `.git` that `git` cannot list is a failure. Invariants `NOPY-01` to
+   `NOPY-06` in `docs/04-invariants.md`.
+
+**What this does not change.**
+
+* **CI gate 15 and its allowlist in `.github/workflows/ci.yml` are untouched**:
+  this change edits no workflow. Its allowlist still names all four files; after
+  this change three of them hold no occurrence, which gate 15 reports as a loose
+  entry and does not fail on (*"THE COUNTS ARE CEILINGS, NOT EXACT"*). Pruning
+  it to `docs/05-decisions.md 1` is a workflow edit left to whoever may make one.
+* **`CLAUDE.md` §2 is not edited here.** It still says that under `web/` the
+  front end may use *"Any language"*. This entry narrows that for one language,
+  which is a scope change under §3 rule 2, and §2's sentence should say so; that
+  edit is the operator's. Until it lands, this entry and the gate are the
+  record, and `CLAUDE.md` §10's precedence rule reads the two as a
+  contradiction for `web/` alone.
+
+**Rejected.**
+
+* *Deleting the four sentences.* Gate 15's own comment refuses that trade: it
+  would delete true provenance about the vendor (§3 rule 1). The rewrite keeps
+  the provenance — the SDK is still the vendor's own, and the charter row still
+  names its repository — and drops only the name, which the provenance never
+  needed.
+* *Editing D-0207 in place.* See item 3: nothing allows it, and doing it
+  anyway is the move the ledger's header forbids.
+* *A per-file or pattern exception.* Gate 15's escape hatch is a count per
+  file, so any line of an allowed file may carry the name up to its ceiling.
+  This gate's is one path and one exact line, matched exactly once.
+* *Folding the extension and shebang checks into gate 15.* It lives in a
+  workflow, which this change does not edit, and it does not run under
+  `cargo test`, which §9 makes the definition of done.
+
+**Why.** A rule that lives in a document is negotiated in every pull request; a
+rule that fails the build is not (D-0001). Gate 15's own comment lists what it
+cannot see — the interpreter's binary name and a shebang line — and a `.py`
+under `web/` passes gate 1, because `web/` is exempt from the extension
+allowlist. This gate closes all three under `cargo test`.
+
+### D-5251 — D-0207's one line naming the Py-language is redacted in place, on the operator's word; no exception remains, and `CLAUDE.md` §2 states the rule — 2026-10-16
+
+**Status: locked.** The operator, asked on 16 October 2026 whether to redact the
+one line D-5250 had kept, answered yes. This entry is that permission and
+supersedes D-5250 item 3 and its "What this does not change" bullet on
+`CLAUDE.md` §2.
+
+**Decision.**
+
+1. **One in-place edit of an old entry, and only this one.** D-0207's paragraph
+   headed **The pair that forced it.** (line 16338 at `4756cce0`) read "the
+   vendor's own" + the language's name + " SDK". It now reads *"the second in
+   the vendor's own SDK. On the status axis they are one event."* Nothing else
+   in D-0207, or in any other entry, is touched. The ledger's header rule —
+   *"Entries are never edited"* — stands for every other case; this is a named
+   exception granted by the operator for one word, in the same spirit as
+   D-0212's bracket and D-0215's repointing, and it grants nothing further.
+2. **The gate excuses nothing.** `crates/vocab/tests/no_py_language.rs` loses
+   its exception: no path, no line, no pattern. The line D-0207 used to hold is
+   kept in the test only as data, to prove it is now refused at any path
+   (`no_line_is_excused_not_even_the_one_d0207_held`, which also pins D-0207's
+   line as this entry left it). `NOPY-04` is restated to match.
+3. **`CLAUDE.md` §2 states the rule.** One paragraph under the `web/`
+   exception: the Py-language is never used anywhere, `web/` included, and its
+   name appears in no tracked file; it cites D-5250 and the gate. `CLAUDE.md`
+   and D-5250 no longer contradict each other for `web/`.
+
+**What it does not change.** CI gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files; all four now hold no
+occurrence, so gate 15 reports four loose entries and passes. Emptying it is a
+workflow edit this change does not make.
+
+**Rejected.** *Keeping the exception after the operator allowed the edit.* An
+exception is a place the rule does not hold; with the reason for it gone, it is
+only a place a future occurrence could hide.
+
+### D-5252 — `/bin/df`, by that absolute path only, joins the programs crate code may start: it is `/disk.json`'s free-space probe, not a shell or an interpreter — 2026-10-16
+
+**Status: locked.** Asked for by the operator on 16 October 2026 ("unblock CI
+here"), to clear gate 0 for every branch cut from `feat/db-fix`.
+
+**What was red.** Gate 0's spawn scan (AFG-44, D-2344) refused
+`crates/api/src/disk_route.rs:127`, `Command::new("/bin/df")`, the POSIX
+`df -Pk` probe WP-81 added for `/disk.json`'s `filesystem` block (D-3384;
+findings DB-B73, DB-B59). `feat/db-fix` at `4756cce0` failed it on its own,
+so every branch cut from it was red at the first step of the language-purity
+job, and every later gate in that job never ran.
+
+**Decision.** `SPAWN_PROGRAMS` in `.github/source_scan.rs` gains `"/bin/df"`,
+and only that spelling. A bare `df` is resolved through `PATH`, which gate 1e
+shadows for interpreters and shells precisely because a name on `PATH` is
+whatever the environment says it is; an absolute path names one file. The
+scanner's own test `a_spawn_must_name_the_running_binary_a_cargo_binary_or_a_listed_program`
+now passes `/disk.json`'s exact call and still refuses `df`, `/usr/bin/df` and
+`/bin/sh`; `AFG-44` says so.
+
+**Why this and not the alternatives.**
+
+* *Read free space without a process.* The standard library has no
+  `statvfs`; reaching it needs `unsafe` (refused by gate 16 in every crate
+  root) or a new dependency (`libc`, `nix`, `rustix`, `fs4`), each a new
+  arrow and a new `deny.toml` question for one number on one page.
+* *Delete the probe.* `/disk.json` exists because a full drive was found only
+  by its absence (D-3384); removing the free-space answer brings that back.
+* *Leave gate 0 red.* Every later language-purity gate is then unread on
+  every branch, which hides far more than one listed program could.
+
+`df` is neither a shell nor an interpreter, takes no program text, and is
+started with fixed arguments and the store root as its only operand. D-1603's
+concern — crate code starting a shell or an interpreter — is untouched.
+
+### D-5253 — Gate 1d declares the fifteen `crates/pull` literals `feat/db-fix` carried undeclared — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1d (every segment-shaped string literal under
+`crates/pull` is declared, CLAUDE.md §8) refused fifteen words on
+`feat/db-fix` at `4756cce0` itself: `--test-threads`, `race`, `observer`,
+`ready`, `decode_frame`, `decode_stamps`, `dangling`, `unplugged`, `pipe`,
+`request-before-record`, `calendar_past_record`, `cache`, `retained`,
+`1421286` and `1421400`. They arrived with the cash-session cache and its
+lock tests, the GDFL tick store's file-kind refusals, the allocation tests,
+`request_minutes`' refusal codes and `calendar.rs`'s measured short days,
+none of which ran this gate.
+
+**Decision.** One declared list, `DB_FIX_BASE_LITERAL` in
+`.github/gates_tree.rs`, holds all fifteen, each read at its line and named in
+the list's comment by kind: test-harness flags, `expect` labels, scratch and
+fixture words, refusal codes and message pieces this repository chose, and two
+record ordinals of the operator's pull journal cited as evidence. None is an
+account, an environment, a vendor credential or a field of a parameter path.
+The gate's self-test `gate_1d_declares_the_lists_zero_work_added` now also
+checks three of them.
+
+**Rejected.** *Excluding test files from the gate.* The gate reads test code on
+purpose: a fixture is where a real segment would be pasted first.
+
+### D-5254 — Sixteen invariant rows citing tests that were deleted or renamed are restated to what the code and its tests show today — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 10 (every invariant names a test that exists) refused
+`feat/db-fix` at `4756cce0` on its own: fifteen references named functions
+that no longer exist, and ZMC-01 cited a path-qualified test that had been
+renamed. Each was traced to the commit that removed or renamed it:
+`bd6b6f5a` (WP-30, D-3327 items 1 and 4: one census cache cell per vendor;
+`/instruments.json` built from the facet index), `bfccbd24` (WP-35, D-3336
+item 3: the calendar is the exchange record, built once per feed generation),
+`50c2437e` (WP-13b, D-3319, D-3321, D-3341: every Muhurat has a recorded
+window, special sessions fold inside their windows, request-minute gaps are
+one event per month and reason), `de98c55a` (D-3342, `BAR_DEFINITION` 3),
+`efc353ed` (WP-12d: an older day is back-filled as a new generation),
+`704072ad` (D-3317 item 7: a census refusal stops the run) and `3a208d57`
+(D-3331 item 1: an expiry on a closed day settles on the previous session).
+None of those changes restated the rows that pinned the old behaviour.
+
+**Decision.** Each row keeps its id and is restated to the behaviour the code
+has now, citing the test that proves it — never only renamed, because twelve
+of the sixteen described behaviour their own decisions changed on purpose, and
+a row pointed at a test proving the opposite of its sentence would be green and
+false. Each restated row says "restated by D-5254" and names the decision that
+changed the behaviour: SS-06, MR-34, AF-23, AF-28j, PIF-02, APIC-05,
+C4-CLI-03-03, AFA-13, ZR-04, ZX-20, AFG-71, GI-01, GI-07, GI-10, ZMC-01.
+
+**Claims withdrawn, not proven, said plainly.** Five rows asserted something
+the deleted tests checked and no test checks now, and the restated rows say so
+instead of keeping the claim: SS-06's manifest-read COUNT for
+`/instruments.json` (only the source's shape and body equality are proven);
+MR-34's empty-store answer; APIC-05's answer for a census-only symbol asked by
+name (read from the code: 503 `bars: "unopened"`, untested); ZR-04's BSE
+listing of a shared symbol (the fixture files every census under NSE); and
+PIF-02's end-to-end withholding of an unsized day, which has no subject now
+that every calendar day has a recorded window. Each is a test someone can
+write; none is written here.
+
+**Left stale, recorded rather than guessed at.** `docs/06-limits.md`'s D-0686
+and D-0695 sections still describe the shared census cache's costs ("Each such
+request reads every vendor's manifest"), which D-3327 item 1 changed; and
+`docs/11-findings.md` (append-only) still cites the old AFA-13 and AFG-71
+names. Correcting the limits text needs its own measurement; neither is read
+by a gate.
+
+**Rejected.** *Gate 10's allowlist.* It exempts a row from the check, which
+would leave sixteen false or unproven rows looking proven.
+
+### D-5255 — Gates 12 and 19 and gate 11's rule 5c are cleared by naming proofs and moving events and allows to where the gates read them; no behaviour changes — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+All three were red on `feat/db-fix` at `4756cce0` on its own.
+
+**Gate 12 (every cost claim names its proof).** Five doc blocks claimed a
+bound and named nothing. Each now names the test or bench that bears on it:
+`bars_change::master` names `api::bars::change::tests::a_failed_masters_load_is_not_remembered`
+(a refused day read once per request, not once per bar); `month_of_text`
+names `api::server::bars_page_tests::the_one_month_parser_takes_exactly_four_digits_a_dash_and_two`;
+`short_day_on` names `pull::calendar::tests::the_measured_short_days_are_recorded_and_still_owe_their_minutes`,
+which now also asserts `SHORT_DAYS.len() == 2`, the walk the claim calls
+O(1); `cash_session_cache::hold` names
+`pull::cash_session_cache::lock_tests::a_reader_beside_an_installer_waits_then_answers_or_names_the_wait`;
+and `store`'s `benches/ratio/safe_files.rs` names its bench root,
+`crates/store/benches/ratio.rs`, and its figures in `docs/06-limits.md`
+L-R316-06.
+
+**Gate 19 (a failure the receipt shows is a failure the log records).** Four
+`failures.push` sites in `crates/pull` were refused. Two already logged, out of
+the gate's sight, inside the callee: `NotHeld::month` (renamed `note_month`,
+the repository's name for a helper that logs, which is what it does) and
+`gdfl_import`'s `provenance` (it now hands its refusal back un-noted and the
+caller notes it with the same `note_staged` call, as it records it). Two
+logged further from the push than the gate's twelve lines:
+`request_minutes::report` builds its event first and emits it on the line
+above the push, and `stop_at_census` emits its one `error` event before the
+push and the day's close instead of after them — `close_day` reads `report`
+and never moves `days_imported`, so the event's fields are unchanged. No event
+is added, dropped or doubled.
+
+**Gate 11 rule 5c (a local allow is a panic the lint table cannot show).**
+`census.rs` and `facets.rs` put their test modules' panic-lint allows on the
+`mod` line of a production file. They now sit as `#![allow(..)]` at the top
+of `census_tail_tests.rs` and `facets_tests.rs`, the convention
+`sources_tests.rs` already follows, with the same lints and reason.
+
+**What stays red, said plainly.** Gate 11's rules 1, 2, 3, 4, 6 and 7 refuse
+about ninety file entries across `api`, `pull`, `cli`, `store`, `telemetry` and
+`costs` on the same base: constructs on the O(1) paths with no allowlist line
+and no reason in `docs/06-limits.md`. Each needs the construct removed or its
+bound argued; that is an O(1) audit of the code that added them, not an
+unblock, and none is decided here. Gate 23 refuses seven undeclared prints
+(`api/src/server.rs` 5, `store/src/sealed_tests.rs` 2, measurement output of
+hand-run and sealed-month tests); its declarations live in
+`.github/workflows/ci.yml`, which this change may not edit.
+
+### D-5256 — The staging test holds the leftover open, because a host may reuse a freed inode number for the very next file — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1e's `cargo test` stopped at
+`store::staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+on a GitHub runner: `assert_ne!(after.ino(), before)` saw `9707437` on both
+sides. Reproduced six times in six in this session's container. The test
+recorded the leftover's inode number, let `store::staging::create` unlink it,
+and compared that number with the new file's. Once the old file is unlinked and
+no handle holds it, ext4 hands its inode number to the next file created in
+the directory, so the numbers matched although the files are different. The
+code under test was right; the proof was not.
+
+**Decision.** The test opens the leftover before `create` and holds the handle
+across it, so the old inode cannot be freed or its number reused. Through that
+handle it now asserts what the test's name claims directly: the leftover's
+link count is 0 (it lost its name), its bytes are still `half a file` (it was
+replaced, never cut), and the new file at the path is a different inode and
+empty. Six runs in six pass. No production code changes.
+
+### D-5257 — `521066e6`, a `feat/db-fix` commit `docs/06-limits.md` cites, is listed as squashed — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1e's `cargo test`, once D-5256 let `store`'s unit tests
+pass, stopped at `store`'s `cited_commits`:
+`every_commit_the_store_records_cite_is_on_main_or_says_why_not` refused
+`521066e6`, cited twice in `docs/06-limits.md` (the AF-04 and D-4963 sections
+name it as the head their "before" builds ran) and neither an ancestor of
+`origin/main` nor listed in `NOT_ON_MAIN`.
+
+**Decision.** `521066e6` is an ancestor of this branch's `HEAD` and not of
+`main` — SC-1's merge fix-up on `feat/db-fix` — so it is listed as
+`Off::Squashed`, and both citing sentences now say that "`main`'s squash merge
+does not keep" it, the words the test requires of every such sentence. The
+figures and the claims around them are unchanged.

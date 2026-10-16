@@ -441,7 +441,9 @@ fn life_of(key: &SeriesKey, vendor: Vendor, held: &[YearMonth]) -> Option<(YearM
 /// dash) still passed it. One spelling of a month means one request text per
 /// month in every access record and every bookmark.
 ///
-/// O(1): a fixed seven-byte pattern, six digit tests and two small integers.
+/// O(1): a fixed seven-byte pattern, six digit tests and two small integers;
+/// anything not exactly seven bytes is refused before a digit is read
+/// (`api::server::bars_page_tests::the_one_month_parser_takes_exactly_four_digits_a_dash_and_two`).
 #[must_use]
 pub(crate) fn month_of_text(text: &str) -> Option<YearMonth> {
     let &[y0, y1, y2, y3, b'-', m0, m1] = text.as_bytes() else {

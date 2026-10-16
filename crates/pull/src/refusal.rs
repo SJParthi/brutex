@@ -26,7 +26,7 @@
 //! # What that cost, concretely, and it is one pair
 //!
 //! Kite documents `TokenException` as *"Preceded by a `403` header"*. It
-//! documents `PermissionException` — in its own Python SDK rather than on the
+//! documents `PermissionException` — in its own SDK rather than on the
 //! exceptions page — as *"Default code is 403"*, and that is what an API key
 //! with no historical-data subscription is answered with.
 //!
