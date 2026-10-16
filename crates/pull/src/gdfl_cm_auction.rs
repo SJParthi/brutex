@@ -388,3 +388,85 @@ fn note_filed(key: &InstrumentKey, day: Day, path: &Path, offered: usize, writte
             .with("sidecar", path_text.as_str()),
     );
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    //! Mutant kills for [`merge`] (cloud mutation round, 2026-10-16). Every
+    //! price and quantity is invented.
+
+    use super::{CmRow, Print, merge};
+
+    const fn row(line: u32, sod: u32, ltp: i64, ltq: u64) -> CmRow {
+        CmRow {
+            line,
+            sod,
+            ltp,
+            ltq,
+        }
+    }
+
+    /// Only a row identical to the last print in ALL THREE of second, price
+    /// and quantity raises its count; a row differing in any one of them is
+    /// a new print, and the merged print keeps its FIRST row's line. Kills
+    /// each `&&` of the merge test read as `||` and each `==` read as `!=`.
+    #[test]
+    fn a_row_merges_only_when_second_price_and_quantity_all_match() {
+        let first = row(10, 55_687, 123_405, 7);
+        for (other, what) in [
+            (row(11, 55_688, 123_405, 7), "another second"),
+            (row(11, 55_687, 123_410, 7), "another price"),
+            (row(11, 55_687, 123_405, 8), "another quantity"),
+        ] {
+            let mut prints = Vec::new();
+            merge(&mut prints, first);
+            merge(&mut prints, other);
+            assert_eq!(prints.len(), 2, "{what} is a new print");
+            assert_eq!(
+                prints[1],
+                Print {
+                    sod: other.sod,
+                    price: other.ltp,
+                    quantity: other.ltq,
+                    rows: 1,
+                    line: 11,
+                },
+                "{what}"
+            );
+            assert_eq!(prints[0].rows, 1, "{what} leaves the first alone");
+        }
+        let mut prints = Vec::new();
+        merge(&mut prints, first);
+        merge(&mut prints, row(11, 55_687, 123_405, 7));
+        merge(&mut prints, row(12, 55_687, 123_405, 7));
+        assert_eq!(
+            prints,
+            [Print {
+                sod: 55_687,
+                price: 123_405,
+                quantity: 7,
+                rows: 3,
+                line: 10,
+            }],
+            "three identical rows are one print stated three times, its quantity never summed"
+        );
+    }
+
+    /// The count saturates rather than wrapping to zero.
+    #[test]
+    fn a_merged_count_saturates() {
+        let mut prints = vec![Print {
+            sod: 1,
+            price: 2,
+            quantity: 3,
+            rows: u32::MAX,
+            line: 4,
+        }];
+        merge(&mut prints, row(5, 1, 2, 3));
+        assert_eq!(prints[0].rows, u32::MAX);
+        assert_eq!(prints.len(), 1);
+    }
+}

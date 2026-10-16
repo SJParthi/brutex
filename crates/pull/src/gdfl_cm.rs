@@ -5422,3 +5422,136 @@ mod tests {
 #[cfg(test)]
 #[path = "gdfl_cm_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+mod cloud_mutant_tests {
+    //! Mutant kills and coverage for the day admission rule (cloud mutation
+    //! round, 2026-10-16).
+
+    use super::{CmRefusal, admitted, landed};
+    use crate::calendar::{DayKind, Session, Window};
+    use crate::session::Day;
+
+    fn one_window(from: u16, to: u16) -> Session {
+        Session {
+            windows: [Window { from, to }, Window { from: 0, to: 0 }],
+            count: 1,
+        }
+    }
+
+    /// A regular session is read; a recorded special session the store's
+    /// session authority keeps is read inside its windows; one it keeps no
+    /// bar of (a window at midnight), or a session of no window at all, is
+    /// refused by name as landing nothing; an unmeasured day, a closed day
+    /// and a day of unmeasured length each refuse by their own name.
+    #[test]
+    fn a_day_is_admitted_only_where_its_windows_land() {
+        let day = Day::new(2024, 4, 2).unwrap();
+        assert_eq!(
+            admitted(day, DayKind::Open(Session::full())),
+            Ok(Session::full())
+        );
+        let muhurat = crate::calendar::special_session(17_842).unwrap();
+        let evening = Day::from_days(17_842).unwrap();
+        assert!(landed(evening, muhurat.session));
+        assert_eq!(
+            admitted(evening, DayKind::Open(muhurat.session)),
+            Ok(muhurat.session)
+        );
+        for stranded in [
+            one_window(0, 5),
+            Session {
+                count: 0,
+                ..one_window(555, 929)
+            },
+        ] {
+            assert!(!landed(day, stranded), "{stranded:?}");
+            assert_eq!(
+                admitted(day, DayKind::Open(stranded)),
+                Err(CmRefusal::CalendarWindowNotLanded {
+                    kind: DayKind::Open(stranded)
+                })
+            );
+        }
+        assert_eq!(
+            admitted(day, DayKind::Unmeasured),
+            Err(CmRefusal::CalendarUnmeasured)
+        );
+        for kind in [DayKind::Closed, DayKind::OpenLengthUnmeasured] {
+            assert_eq!(
+                admitted(day, kind),
+                Err(CmRefusal::CalendarNotRegular { kind })
+            );
+        }
+    }
+
+    /// A share member is filed in its share's months: the member's name less
+    /// the instrument id's prefix and less a trade-for-trade series, and a
+    /// name without the prefix is read as the symbol. Invented symbols.
+    #[test]
+    fn a_share_member_is_filed_under_its_own_share() {
+        use super::member_share;
+        assert_eq!(member_share("NSE-CASH-ZZSHARE"), "ZZSHARE");
+        assert_eq!(member_share("NSE-CASH-ZZSHARE.BE"), "ZZSHARE");
+        assert_eq!(member_share("ZZSHARE.BZ"), "ZZSHARE");
+        assert_eq!(member_share("NSE-CASH-ZZ.SHARE"), "ZZ.SHARE");
+    }
+
+    /// A same-second spread of exactly the threshold counts, one a paisa
+    /// short does not, and of two seconds equally wide the first is named
+    /// the widest. Invented values.
+    #[test]
+    fn a_spread_at_the_threshold_counts_and_the_first_widest_second_is_named() {
+        use super::{DUAL_SPREAD_BPS, DualSpread, SpreadRun};
+        assert_eq!(DUAL_SPREAD_BPS, 10, "the premise: ten basis points");
+        let mut run = SpreadRun::default();
+        let mut out = DualSpread::default();
+        for (sod, ltp) in [
+            (33_300, 100_000),
+            (33_300, 100_100),
+            (33_301, 200_000),
+            (33_301, 200_200),
+            (33_302, 100_000),
+            (33_302, 100_099),
+        ] {
+            run.observe(sod, ltp, &mut out);
+        }
+        run.finish(&mut out);
+        assert_eq!(
+            out,
+            DualSpread {
+                seconds: 2,
+                max_bps: 10,
+                max_at: Some(33_300)
+            }
+        );
+    }
+
+    /// A run whose lowest value is not positive has no spread in basis
+    /// points of it, so it is never counted however wide it is, and the run
+    /// after it still is. Invented values.
+    #[test]
+    fn a_run_with_no_positive_low_is_never_counted() {
+        use super::{DualSpread, SpreadRun};
+        let mut run = SpreadRun::default();
+        let mut out = DualSpread::default();
+        for (sod, ltp) in [
+            (33_300, 0),
+            (33_300, 50_000),
+            (33_301, 100_000),
+            (33_301, 100_100),
+        ] {
+            run.observe(sod, ltp, &mut out);
+        }
+        run.finish(&mut out);
+        assert_eq!(
+            out,
+            DualSpread {
+                seconds: 1,
+                max_bps: 10,
+                max_at: Some(33_301)
+            }
+        );
+    }
+}

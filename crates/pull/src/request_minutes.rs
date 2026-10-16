@@ -1292,3 +1292,664 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    //! Mutant kills and coverage for the request-minute audit (cloud
+    //! mutation round, 2026-10-16). Every stamp and price is invented.
+
+    use super::*;
+    use crate::calendar::Runtime;
+    use crate::fetch::BarRequest;
+    use crate::session::Window;
+
+    fn row(timestamp: i64) -> RawRow {
+        RawRow {
+            timestamp,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: None,
+        }
+    }
+
+    fn request_on(from: Day, to: Day) -> BarRequest {
+        BarRequest {
+            instrument_id: String::new(),
+            listing: crate::vendor::Listing::Index,
+            window: Window::new(from, to).unwrap(),
+            granularity: Granularity::Minute1,
+        }
+    }
+
+    fn plan_at<'a>(request: &'a BarRequest, exchange: &'a str, segment: &'a str) -> Plan<'a> {
+        Plan {
+            calendar: Runtime::default(),
+            cash_schedule: None,
+            columns: crate::csv::Columns::TrueDataIndex,
+            request,
+            encoding: TimestampEncoding::EpochSecondsUtc,
+            scale: crate::vendor::PriceScale::Paisa,
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            exchange,
+            segment,
+            contract: None,
+        }
+    }
+
+    /// Only an NSE index or cash minute request for a spot series is
+    /// audited: an exchange or segment the parsers refuse, another venue, a
+    /// derivative listing, a contract or a daily request is not.
+    #[test]
+    fn only_an_nse_spot_minute_request_is_audited() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let request = request_on(day, day);
+        assert_eq!(
+            audited_venue(plan_at(&request, "NSE", "INDEX")),
+            Some(Venue::NseIndex)
+        );
+        assert_eq!(
+            audited_venue(plan_at(&request, "NSE", "CASH")),
+            Some(Venue::NseCash)
+        );
+        for (exchange, segment) in [("ZZZ", "INDEX"), ("NSE", "ZZZ"), ("BSE", "INDEX")] {
+            assert_eq!(
+                audited_venue(plan_at(&request, exchange, segment)),
+                None,
+                "{exchange} {segment}"
+            );
+        }
+        let daily = BarRequest {
+            granularity: Granularity::Day1,
+            ..request_on(day, day)
+        };
+        assert_eq!(audited_venue(plan_at(&daily, "NSE", "INDEX")), None);
+        let derivative = BarRequest {
+            listing: crate::vendor::Listing::Derivative,
+            ..request_on(day, day)
+        };
+        assert_eq!(audited_venue(plan_at(&derivative, "NSE", "INDEX")), None);
+    }
+
+    /// Every stamp encoding lands on the IST-local second: UTC milliseconds
+    /// floored to their second then shifted, UTC seconds and offset text
+    /// shifted, IST text as written.
+    #[test]
+    fn every_stamp_encoding_lands_on_the_ist_local_second() {
+        let utc = 1_700_000_000_i64;
+        let ist = i128::from(utc) + 19_800;
+        assert_eq!(
+            local_seconds(utc * 1_000 + 999, TimestampEncoding::EpochMillisUtc),
+            ist
+        );
+        assert_eq!(
+            local_seconds(-1, TimestampEncoding::EpochMillisUtc),
+            i128::from(19_800 - 1),
+            "a millisecond before the epoch floors to the second before it"
+        );
+        assert_eq!(local_seconds(utc, TimestampEncoding::EpochSecondsUtc), ist);
+        assert_eq!(
+            local_seconds(utc, TimestampEncoding::IsoDateTimeOffset),
+            ist
+        );
+        assert_eq!(
+            local_seconds(utc, TimestampEncoding::IstDateTimeText),
+            i128::from(utc)
+        );
+        assert_eq!(
+            local_seconds(utc, TimestampEncoding::IsoDateTimeText),
+            i128::from(utc)
+        );
+    }
+
+    /// A withheld day counts its own rows only: a row of the day before is
+    /// consumed and not counted, its first second and its last are counted,
+    /// and the next day's first row is left for the next day.
+    #[test]
+    fn a_withheld_day_counts_only_its_own_rows_and_leaves_the_next_days() {
+        let day = Day::new(2031, 3, 9).unwrap();
+        let base = i128::from(day.days_from_epoch()) * 86_400;
+        let stamps = vec![
+            base - 60,
+            base,
+            base + 60,
+            base + 86_399,
+            base + 86_400,
+            base + 90_000,
+        ];
+        let mut rest = stamps.into_iter().peekable();
+        let mut audit = Audit::default();
+        withheld_day(day, base, &mut rest, &mut audit);
+        assert_eq!(
+            rest.next(),
+            Some(base + 86_400),
+            "the next day's row is left"
+        );
+        assert_eq!(audit.days.len(), 1);
+        let line = audit.days[0];
+        assert_eq!(
+            (line.day, line.held, line.owed, line.missing, line.runs),
+            (day, 3, 0, 0, 0)
+        );
+        assert_eq!(line.why, Why::WithheldUnsized);
+        let [finding] = audit.findings.as_slice() else {
+            panic!("{:?}", audit.findings);
+        };
+        assert_eq!(
+            (finding.why, finding.day, finding.detail, finding.minutes),
+            (Why::WithheldUnsized, Some(day), "unsized session", 0)
+        );
+        assert!(
+            finding
+                .text
+                .starts_with("request minute coverage UNVERIFIED on 2031-03-09:")
+                && finding
+                    .text
+                    .contains("3 minute row(s) withheld with the day"),
+            "{}",
+            finding.text
+        );
+    }
+
+    /// A traded session whose length no record states (a Muhurat the
+    /// circular names and no record has sized) is withheld whole and said,
+    /// through the audit: one `withheld_unmeasured_session` line holding
+    /// the day's rows, one finding, and no vendor-gap finding. The day is
+    /// looked for on the calendar rather than named, so a later record of
+    /// its window moves the test to the next such day.
+    #[test]
+    fn an_unsized_session_is_withheld_whole_through_the_audit() {
+        let found =
+            (crate::calendar::SOURCED_FIRST_DAY..=crate::calendar::SOURCED_LAST_DAY).find(|&at| {
+                crate::session::with_recorded_window(at, Runtime::default().kind_of(at))
+                    == DayKind::OpenLengthUnmeasured
+            });
+        let Some(number) = found else {
+            // The calendar sizes every traded day: the arm has no subject,
+            // which is what the walk above just proved for every day.
+            assert!(found.is_none());
+            return;
+        };
+        let day = Day::from_days(u32::try_from(number).unwrap()).unwrap();
+        let request = request_on(day, day);
+        let plan = plan_at(&request, "NSE", "INDEX");
+        let evening = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 18 * 3_600;
+        let rows = [row(evening), row(evening + 60), row(evening + 120)];
+        let audit = audit_venue(&rows, plan, Venue::NseIndex);
+        assert_eq!(audit.days.len(), 1);
+        assert_eq!(
+            (audit.days[0].why, audit.days[0].held),
+            (Why::WithheldUnsized, 3)
+        );
+        assert_eq!(audit.findings.len(), 1, "{:?}", audit.findings);
+        assert_eq!(audit.findings[0].why, Why::WithheldUnsized);
+        assert_eq!(
+            gap_line("NSE-INDEX-NIFTY", &audit.days[0], 4),
+            format!(
+                "gap NSE-INDEX-NIFTY {day} v=1 rung=1min owed=0 held=3 missing=0 first_missing=- runs=0 longest=0 longest_at=- why=withheld_unmeasured_session run=4"
+            )
+        );
+    }
+
+    /// Two UNVERIFIED findings of one month are one counted sentence naming
+    /// both days and quoting the first; its receipt is filed under the
+    /// month and, spanning two days, under no single day.
+    #[test]
+    fn a_month_of_unverified_findings_is_one_counted_sentence() {
+        let (d1, d2) = (Day::new(2031, 3, 3).unwrap(), Day::new(2031, 3, 4).unwrap());
+        let findings = vec![
+            unverified_finding(d1, "venue hours", "First reason"),
+            unverified_finding(d2, "venue hours", "Second reason"),
+        ];
+        let groups = aggregate(&findings, brutex_core::vendor::Vendor::Zerodha);
+        let [group] = groups.as_slice() else {
+            panic!("{groups:?}");
+        };
+        let march = store::path::YearMonth::new(2031, 3).unwrap();
+        assert_eq!(
+            (
+                group.why,
+                group.count,
+                group.month.clone(),
+                group.first_day.as_str(),
+                group.last_day.as_str()
+            ),
+            (
+                Why::Unverified,
+                2,
+                march.to_string(),
+                "2031-03-03",
+                "2031-03-04"
+            )
+        );
+        assert_eq!(
+            group.text,
+            "request minute coverage UNVERIFIED in 2031-03: 2 finding(s) on 2 day(s), 2031-03-03..2031-03-04; the first: request minute coverage UNVERIFIED on 2031-03-03: First reason"
+        );
+        assert_eq!(group.about_day, None);
+        assert_eq!(
+            group.about_month,
+            Some(store::path::YearMonth::new(2031, 3).unwrap())
+        );
+    }
+
+    /// Runs `f` on its own thread and fails the test if it does not answer
+    /// within two seconds: a pointer that stops advancing is a failure here,
+    /// not a hang.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(f()));
+        answer
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("answered within two seconds")
+    }
+
+    /// `refused` finds a second in any list, asked in time order, each
+    /// pointer stepping only past seconds below the one asked; equal seconds
+    /// are found again. Kills every mutant of its step and its test.
+    #[test]
+    fn a_refused_second_is_found_in_any_list_asked_in_order() {
+        let answers = within(|| {
+            let lists = vec![vec![10, 20, 30], vec![15]];
+            let mut cursor = Cursor::new(&lists);
+            [5, 10, 10, 15, 16, 20, 29, 30, 31].map(|second| cursor.refused(second))
+        });
+        assert_eq!(
+            answers,
+            [false, true, true, true, false, true, false, true, false]
+        );
+    }
+
+    /// `any_in` answers whether any refused second lies in `[from, to)`:
+    /// the end excluded, the start included, across lists. Kills every
+    /// mutant of its step and its two bounds.
+    #[test]
+    fn any_refused_second_in_a_half_open_span_is_found() {
+        let answers = within(|| {
+            let lists = vec![vec![10, 20], vec![35]];
+            let mut cursor = Cursor::new(&lists);
+            [
+                (0, 10),
+                (0, 11),
+                (11, 20),
+                (20, 21),
+                (21, 35),
+                (30, 36),
+                (36, 99),
+            ]
+            .map(|(from, to)| cursor.any_in(from, to))
+        });
+        assert_eq!(answers, [false, true, false, true, false, true, false]);
+    }
+
+    fn whole_session(day: Day) -> Vec<RawRow> {
+        let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+        (0..375).map(|minute| row(open + minute * 60)).collect()
+    }
+
+    /// A minute refused by name after the vendor sent it is missing from the
+    /// store: its day is a `refused_day` ledger line short by it, with no
+    /// receipt finding (the landing named the refusal). Kills the refused
+    /// second's filter and `short_why`'s day test.
+    #[test]
+    fn a_minute_refused_by_name_is_a_refused_day_and_no_receipt_finding() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let rows = whole_session(day);
+        let refused = rows[45].timestamp + IST_OFFSET_SECS;
+        let refusals = Refusals {
+            seconds: vec![vec![refused]],
+            ..Refusals::default()
+        };
+        let audit = within(move || {
+            audit_refused(
+                &rows,
+                plan_at(&request_on(day, day), "NSE", "INDEX"),
+                Venue::NseIndex,
+                &refusals,
+            )
+        });
+        assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+        let [line] = audit.days.as_slice() else {
+            panic!("{:?}", audit.days);
+        };
+        assert_eq!(
+            (
+                line.why,
+                line.owed,
+                line.held,
+                line.missing,
+                line.first_missing
+            ),
+            (Why::RefusedDay, 375, 374, 1, Some(600))
+        );
+    }
+
+    /// A day the store refused before its month's first held bar is a
+    /// `refused_front` line; the next day, whole, writes none; a repair that
+    /// filled a whole day says so with a `repaired` line. Kills the fronts'
+    /// and the repairs' day-order steps.
+    #[test]
+    fn a_front_day_is_refused_front_and_a_repaired_whole_day_says_repaired() {
+        let (d1, d2, d3) = (
+            Day::new(2022, 10, 3).unwrap(),
+            Day::new(2022, 10, 4).unwrap(),
+            Day::new(2022, 10, 6).unwrap(),
+        );
+        let mut rows = whole_session(d2);
+        rows.extend(whole_session(Day::new(2022, 10, 5).unwrap()));
+        rows.extend(whole_session(d3));
+        let refusals = Refusals {
+            seconds: Vec::new(),
+            fronts: vec![d1.days_from_epoch() - 9, d1.days_from_epoch()],
+            repaired: vec![d1.days_from_epoch() - 2, d3.days_from_epoch()],
+        };
+        let audit = within(move || {
+            let request = request_on(d1, d3);
+            audit_refused(
+                &rows,
+                plan_at(&request, "NSE", "INDEX"),
+                Venue::NseIndex,
+                &refusals,
+            )
+        });
+        assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+        let lines: Vec<(Day, Why, u32, u32)> = audit
+            .days
+            .iter()
+            .map(|line| (line.day, line.why, line.held, line.missing))
+            .collect();
+        assert_eq!(
+            lines,
+            [(d1, Why::RefusedFront, 0, 375), (d3, Why::Repaired, 375, 0)]
+        );
+    }
+
+    /// A day with no candle at all in the middle of a window is that day's
+    /// own gap, every one of its 375 minutes, said as the vendor's empty
+    /// answer in one finding and one day line; the whole days either side
+    /// owe nothing and fabricate nothing.
+    #[test]
+    fn a_missing_day_in_the_middle_of_a_window_is_its_own_whole_gap() {
+        let (d1, d2, d3) = (
+            Day::new(2022, 10, 10).unwrap(),
+            Day::new(2022, 10, 11).unwrap(),
+            Day::new(2022, 10, 12).unwrap(),
+        );
+        let mut rows = whole_session(d1);
+        rows.extend(whole_session(d3));
+        let audit = within(move || {
+            let request = request_on(d1, d3);
+            audit_refused(
+                &rows,
+                plan_at(&request, "NSE", "INDEX"),
+                Venue::NseIndex,
+                &Refusals::default(),
+            )
+        });
+        let [finding] = audit.findings.as_slice() else {
+            panic!("{:?}", audit.findings);
+        };
+        assert_eq!(
+            (finding.why, finding.day, finding.minutes),
+            (Why::VendorEmpty, Some(d2), 375)
+        );
+        assert_eq!(
+            finding.text,
+            "request minute coverage gap on 2022-10-11: 09:15–15:30 IST (end exclusive), 375 missing scheduled minutes; no bars fabricated"
+        );
+        let lines: Vec<(Day, Why, u32, u32)> = audit
+            .days
+            .iter()
+            .map(|line| (line.day, line.why, line.held, line.missing))
+            .collect();
+        assert_eq!(lines, [(d2, Why::VendorEmpty, 0, 375)]);
+    }
+
+    fn at_minute(day: Day, minute: i64) -> i64 {
+        i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + minute * 60
+    }
+
+    /// `report` hands an audited answer's gap to the receipt (one failure,
+    /// filed under its month and day) and to the ledger (one `gap` line),
+    /// and an unaudited answer to neither; a ledger that cannot be written is
+    /// a named receipt failure of its own. Kills `report` read as `()`.
+    #[test]
+    fn report_files_the_receipt_and_the_ledger_line_or_names_the_ledger_it_could_not_write() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let request = request_on(day, day);
+        let rows: Vec<RawRow> = (5..375)
+            .map(|minute| row(at_minute(day, 555 + minute)))
+            .collect();
+        let root = crate::gdfl_fixtures::scratch("CloudReport");
+        let mut done = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &root,
+            plan_at(&request, "NSE", "INDEX"),
+            &mut done,
+            &Refusals::default(),
+        );
+        let [failure] = done.failures.as_slice() else {
+            panic!("{:?}", done.failures);
+        };
+        assert_eq!(failure.instrument, "NIFTY");
+        assert!(
+            failure
+                .why
+                .starts_with("request minute coverage gap on 2022-10-03: 09:15–09:20 IST"),
+            "{}",
+            failure.why
+        );
+        assert_eq!(
+            (failure.day, failure.month),
+            (Some(day), day.year_month().ok())
+        );
+        let ledger = std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap();
+        let lines: Vec<&str> = ledger.lines().collect();
+        assert_eq!(lines.len(), 1, "{ledger}");
+        assert!(
+            lines[0].starts_with(
+                "gap NSE-INDEX-NIFTY 2022-10-03 v=1 rung=1min owed=375 held=370 missing=5 first_missing=09:15 runs=1 longest=5 longest_at=09:15 why=vendor_empty run="
+            ),
+            "{}",
+            lines[0]
+        );
+        // An answer the audit does not name is neither a failure nor a line.
+        let mut untouched = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &root,
+            plan_at(&request, "BSE", "INDEX"),
+            &mut untouched,
+            &Refusals::default(),
+        );
+        assert!(untouched.failures.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap(),
+            ledger
+        );
+        // A ledger whose directory is a file: the gap is still on the receipt,
+        // and the unwritten ledger is a failure of its own.
+        let blocked = crate::gdfl_fixtures::scratch("CloudReportBlocked");
+        std::fs::write(blocked.join("audit"), b"not a directory").unwrap();
+        let mut named = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &blocked,
+            plan_at(&request, "NSE", "INDEX"),
+            &mut named,
+            &Refusals::default(),
+        );
+        assert_eq!(named.failures.len(), 2, "{:?}", named.failures);
+        assert!(
+            named.failures[1]
+                .why
+                .starts_with("the minute-gap ledger was not written (1 day line(s)):"),
+            "{}",
+            named.failures[1].why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(blocked).unwrap();
+    }
+
+    /// An unmeasured day after the calendar of record ends is a past-record
+    /// finding; one before it begins is an UNVERIFIED one. Kills the guard's
+    /// comparison mutated, and the guard forced either way.
+    #[test]
+    fn a_day_past_the_record_and_a_day_before_it_are_named_apart() {
+        let after = Day::new(2027, 1, 4).unwrap();
+        let before = Day::new(2017, 12, 29).unwrap();
+        for (day, why) in [(after, Why::PastRecord), (before, Why::Unverified)] {
+            let request = request_on(day, day);
+            let audit = audit_venue(&[], plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+            let [finding] = audit.findings.as_slice() else {
+                panic!("{day}: {:?}", audit.findings);
+            };
+            assert_eq!((finding.why, finding.day), (why, Some(day)), "{day}");
+            assert!(audit.days.is_empty(), "{day}");
+        }
+        // The past-record sentence leads with the words a run folds these
+        // findings by, names the record's last day and the day, and says the
+        // vendor's bars are kept as landed.
+        let request = request_on(after, after);
+        let audit = audit_venue(&[], plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        let text = &audit.findings[0].text;
+        let reason = Runtime::default().unverified_reason(i64::from(after.days_from_epoch()));
+        assert_eq!(
+            text,
+            &format!(
+                "{} (it ends on 2026-12-31): 2027-01-04: {reason}; bars the vendor sent for it are kept as landed, and no completeness is claimed until the record is extended",
+                crate::calendar::PAST_RECORD_FINDING
+            )
+        );
+    }
+
+    /// Of two missing runs of equal length the FIRST is the day's longest:
+    /// a later run must be strictly longer to take its place. Kills the
+    /// longest-run test's `>` read as `>=`.
+    #[test]
+    fn of_two_equal_runs_the_first_is_the_longest() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let request = request_on(day, day);
+        let rows: Vec<RawRow> = (555..930)
+            .filter(|minute| ![600, 601, 700, 701].contains(minute))
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&rows, plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        let [line] = audit.days.as_slice() else {
+            panic!("{:?}", audit.days);
+        };
+        assert_eq!(
+            (
+                line.missing,
+                line.runs,
+                line.longest,
+                line.longest_at,
+                line.first_missing
+            ),
+            (4, 2, 2, Some(600), Some(600))
+        );
+    }
+
+    /// From 2026-08-03 an index still owes 09:15 to 15:30 and needs no cash
+    /// schedule; a share eligible for the closing auction owes 09:15 to
+    /// 15:15 by its dated flag; a share with no flag is UNVERIFIED. Kills the
+    /// cash test's `&&` read as `||` and `==` read as `!=`, and the full
+    /// session's guard forced false.
+    #[test]
+    fn after_the_auction_change_the_index_owes_the_full_day_and_a_share_its_dated_close() {
+        let day = Day::new(2026, 8, 4).unwrap();
+        let request = request_on(day, day);
+        let index: Vec<RawRow> = (555..930)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&index, plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        assert!(
+            audit.findings.is_empty() && audit.days.is_empty(),
+            "{:?}",
+            audit.findings
+        );
+        let mut schedule = crate::cash_auction::Schedule::default();
+        schedule.insert(day, true).unwrap();
+        let share: Vec<RawRow> = (555..915)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let plan = Plan {
+            cash_schedule: Some(&schedule),
+            ..plan_at(&request, "NSE", "CASH")
+        };
+        let audit = audit_venue(&share, plan, Venue::NseCash);
+        assert!(
+            audit.findings.is_empty() && audit.days.is_empty(),
+            "{:?}",
+            audit.findings
+        );
+        let short: Vec<RawRow> = (555..914)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&short, plan, Venue::NseCash);
+        assert_eq!(audit.days.len(), 1);
+        assert_eq!(
+            (
+                audit.days[0].owed,
+                audit.days[0].missing,
+                audit.days[0].first_missing
+            ),
+            (360, 1, Some(914))
+        );
+        let unflagged = audit_venue(&share, plan_at(&request, "NSE", "CASH"), Venue::NseCash);
+        let [finding] = unflagged.findings.as_slice() else {
+            panic!("{:?}", unflagged.findings);
+        };
+        assert_eq!(
+            (finding.why, finding.detail),
+            (Why::Unverified, "dated cash eligibility")
+        );
+    }
+
+    /// A derive ledger that writes is no failure and holds the lines; one
+    /// that cannot be written is a named failure filed under its month.
+    /// Kills `record_derived` read as `None`.
+    #[test]
+    fn record_derived_names_an_unwritten_ledger_under_its_month() {
+        let month = store::path::YearMonth::new(2031, 3).unwrap();
+        let lines = vec![
+            "derive NSE-INDEX-NIFTY 5min 2031-03 v=1 days=1 buckets=75 withheld=0 partial=0 run=0"
+                .to_owned(),
+        ];
+        let root = crate::gdfl_fixtures::scratch("CloudDerived");
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        assert_eq!(record_derived(&root, vendor, "NIFTY", month, &lines), None);
+        assert_eq!(
+            std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap(),
+            format!("{}\n", lines[0])
+        );
+        std::fs::remove_dir_all(root.join("audit")).unwrap();
+        std::fs::write(root.join("audit"), b"not a directory").unwrap();
+        let failure = record_derived(&root, vendor, "NIFTY", month, &lines).unwrap();
+        assert_eq!(
+            (failure.instrument.as_str(), failure.month, failure.day),
+            ("NIFTY", Some(month), None)
+        );
+        assert!(
+            failure.why.starts_with(&format!(
+                "{month}: the derive ledger was not written (1 line(s)):"
+            )),
+            "{}",
+            failure.why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
