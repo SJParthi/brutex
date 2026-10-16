@@ -922,6 +922,52 @@ mod bars_rs {
         assert_eq!(got.scan_rows, 6);
     }
 
+    /// **NO MORE THAN `MAX_NAMED_MISSING` HOLES ARE NAMED, AND THE COUNT IS
+    /// ALWAYS WHOLE.** One series held in 2023-01 and 2025-12 has 34 holes
+    /// between: the first 24 are named, in order, and all 34 are counted.
+    /// Kills `tally`'s `<` → `<=`, which names a 25th.
+    #[test]
+    fn bars_past_max_named_missing_holes_are_counted_but_not_named() {
+        let scratch = Scratch::new("bars-named-cap");
+        for (year, m) in [(2023, 1), (2025, 12)] {
+            let held = YearMonth::new(year, m).expect("a month");
+            let open = i64::from(
+                pull::session::Day::new(year, m, 2)
+                    .expect("a day")
+                    .days_from_epoch(),
+            ) * 86_400
+                + 13_500;
+            write_month(
+                scratch.root(),
+                "INDEX",
+                "NIFTY",
+                Timeframe::MINUTE_1,
+                held,
+                &[(open, 10), (open + 60, 11)],
+            );
+        }
+        let got = read(
+            scratch.root(),
+            &query(
+                vec![index("NIFTY")],
+                YearMonth::new(2023, 1).expect("a month"),
+                YearMonth::new(2025, 12).expect("a month"),
+            ),
+        );
+        assert_eq!(got.months_missing, 34, "every hole is counted");
+        assert_eq!(got.months_outside_life, 0);
+        assert_eq!(got.missing_months.len(), api::bars::MAX_NAMED_MISSING);
+        assert_eq!(
+            (
+                got.missing_months.first().map(String::as_str),
+                got.missing_months.last().map(String::as_str)
+            ),
+            (Some("2023-02"), Some("2025-01")),
+            "the first holes in order, unkeyed over one series"
+        );
+        assert_eq!(got.total, 4);
+    }
+
     /// **OVER SEVERAL SERIES, A HOLE IS NAMED WITH THE SERIES IT IS IN.** Runs
     /// `tally`'s keyed hole, which no test reached: every hole test was over
     /// one series.
