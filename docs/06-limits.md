@@ -17460,9 +17460,33 @@ the paisa, equals the page on 33 readings and misses by exactly one paisa on
 15: eight where the page shows a paisa more and seven where it shows a paisa
 less (`costs::dhan_calculator::the_one_paisa_total_misses_are_listed_with_their_direction`).
 Neither truncation nor ceiling fits all 15 (the Yes Bank delivery reading
-needs a floor, the NIFTY 25300 CE reading a ceiling). The page's own rule —
-probably floating-point accumulation in its script — is UNVERIFIED. The brief
-says 49 readings were measured; it carried 48, so one exact reading is absent.
+needs a floor, the NIFTY 25300 CE reading a ceiling). The page's own rule is
+UNVERIFIED. The brief says 49 readings were measured; it carried 48, so one
+exact reading is absent.
+
+**A search for a rule that fits all 48 found none.** On 16 Oct 2026 a
+throwaway test (not committed) tried every combination of:
+
+- each line exact, or rounded to the paisa half-up, down or up;
+- the exchange line rounded to 10⁻⁴ rupee;
+- brokerage rounded per order;
+- three GST bases;
+- four final roundings.
+
+That is 262,500 rules over the whole-trade lines. A second pass of 941,192
+rules rounded each line per side (buy and sell priced apart, GST per side).
+
+- The best rule fits **41 of 48**: the SEBI fee and stamp rounded half-up to
+  the paisa before the sum, everything else exact.
+- No per-side rule fits 44.
+- The 41-of-48 rule still misses seven readings, and they pull in opposite
+  directions: D1 needs the SEBI fee unrounded where V3 needs it rounded.
+
+Floating-point accumulation cannot explain the misses either: the D1 total sits
+0.0055 rupee from the page's figure, orders of magnitude beyond a double's
+error at these sizes. The replica keeps the brief's stated rule (33 exact)
+rather than adopting a 41-of-48 fit no source supports; the pinned miss list is
+what a future rule must reproduce.
 
 ### Partly squared delivery days and open intraday days are refused
 
