@@ -17407,8 +17407,8 @@ door (SC-3) and are not measured here.
 
 ## Window keys that name no series (AG-03, D-4966)
 
-Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af (before)
-and `fix/db-AG-03` (after), each serving its own fresh shadow of the real
+Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af (before;
+a commit `main`'s squash merge does not keep) and `fix/db-AG-03` (after), each serving its own fresh shadow of the real
 store (bars linked read-only, `state/fix/shadow.sh`, `serve.sh`), GET only,
 n = 300 sequential requests per case on one keep-alive connection
 (`curl -K`, `%{time_total}`), two rounds in opposite order on the loaded
