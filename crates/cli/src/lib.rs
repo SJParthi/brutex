@@ -89,6 +89,8 @@ pub use scrub_blocks::{
 /// not, unless told to (DB-B71, WP-81).
 mod store_write;
 pub use store_write::{ALLOW_UNSTAMPED_VAR, unstamped_write_refusal};
+/// `cli msum-build`: the `.sum` month summary for named months of a series (R3-06, D-4980).
+mod msum_builder;
 /// `cli series-identity`: every stored minute of a series judged against its
 /// own stored day bars, read-only: the minutes a landing refuses today and the
 /// months that hold them (WP-13d).
@@ -550,6 +552,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and its totals are the last line of
                                    audit/scrub-blocks.VENDOR.cursor. Writes
                                    those two files and nothing else (DB-B74).
+       cli msum-build VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT|/*] RUNG FROM TO [--dry-run]
+                                   write the .sum month summary of every named
+                                   month (FROM, TO are YYYY-MM) whole, in a new
+                                   file renamed over the old, so /gaps.json
+                                   reads it and no bar; bars never change, a
+                                   month not held is not created, a month
+                                   another process holds is refused. `*` walks
+                                   every contract under the symbol. --dry-run
+                                   writes nothing (R3-06, D-4980).
        cli srt-build VENDOR EXCHANGE/SEGMENT/SYMBOL[/CONTRACT|/*] RUNG FROM TO [--dry-run]
                                    write the .srt sort index of every named
                                    month (FROM, TO are YYYY-MM) as one run, in
@@ -2713,6 +2724,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["scrub-blocks", arguments @ ..] if !arguments.is_empty() => {
             scrub_blocks::command(arguments, out)
         }
+        ["msum-build", arguments @ ..] if !arguments.is_empty() => {
+            msum_builder::command(arguments, out)
+        }
         ["srt-build", arguments @ ..] if !arguments.is_empty() => {
             srt_builder::command(arguments, out)
         }
@@ -2793,7 +2807,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 47] = [
+const COMMANDS: [&str; 48] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2822,6 +2836,7 @@ const COMMANDS: [&str; 47] = [
     "ledger-all",
     "ledger-v6",
     "ledger-v6-replay",
+    "msum-build",
     "policy-check",
     "pool",
     "pool-oos",

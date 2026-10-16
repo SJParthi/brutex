@@ -47,6 +47,8 @@
 
 #[path = "ratio/census.rs"]
 mod census;
+#[path = "ratio/gaps.rs"]
+mod gaps;
 #[path = "ratio/logs_dirs.rs"]
 mod logs_dirs;
 #[path = "ratio/sources.rs"]
@@ -594,6 +596,7 @@ fn main() {
     ok &= census::probes_are_flat();
     ok &= window::seeks_are_flat();
     ok &= spot::probes_are_flat();
+    ok &= gaps::answers_are_flat();
     ok &= sources::pages_are_flat();
     ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
     if ok {

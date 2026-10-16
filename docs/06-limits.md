@@ -17374,3 +17374,65 @@ any depth. Every sealed page, row and lookup p99 under 50 µs; no max over 50 ms
 These are store-level
 calls, not routes: the end-to-end figures of the design's §5.4 need the read
 door (SC-3) and are not measured here.
+
+## `/gaps.json` and the month summary (R3-06; D-4980; DB-A30)
+
+**The bound.** `/gaps.json` is O(months asked) per request, capped at 12
+one-second months and 240 minute months (`asked_range`), audited on the
+calendar pool (at most 8 at once; a ninth is answered 429 `calendar derivation
+not admitted (Saturated)`, never queued silently). A month whose `.sum` is kept
+reads one summary and no bar record; its cost is one open, one read of the
+section (771 to 1,629 bytes for a minute month, 52 to 66 KB for a dense
+one-second month, at most 340,912 bytes), one pass over its minutes and, for a
+spot index at one second, one pass over each day's owed seconds (at most 86,400
+a day). None of it moves with the bars a month holds. A month with no usable
+summary (none kept, under 1,024 bars, torn, stale, sparse seconds an index
+audit needs, input the fold may refuse) reads its bars whole, O(bars), and the
+answer says `"summary":"built"`, why, and how many records it read.
+
+**Measured** (16 October 2026, load average 42 to 59 on 14 cores; release
+build of `fix/db-R3-06`; nearest-rank over the 200 answers):
+
+| Selection | Read from | n | clients | p50 | p99 | max |
+|---|---|---:|---:|---:|---:|---:|
+| GDFL NIFTY 1 s, 2018-09..2019-08 (5,167,003 bars) | 12 kept summaries, 0 bar records | 200 | 1 | 66.7 ms | 145.1 ms | 201.9 ms |
+| the same | the real store, no `.sum`: 5,167,003 bar records | 200 | 1 | 682.9 ms | 1,494.5 ms | 1,859.2 ms |
+| Zerodha NIFTY 1 min, 2024-10..2026-09 (24 months) | kept | 200 | 1 | 5.9 ms | 36.6 ms | 63.1 ms |
+| Zerodha NIFTY 1 min, 2006-10..2026-09 (240 months, 105 held) | kept | 200 | 1 | 29.9 ms | 86.7 ms | 103.2 ms |
+| the same | the real store: 796,027 bar records | 200 | 1 | 94.7 ms | 157.4 ms | 204.0 ms |
+| GDFL NIFTY 1 s, 12 months | kept | 600 asked, 238 admitted | 60 | 285.4 ms | 481.0 ms | 502.0 ms |
+| Zerodha NIFTY 1 min, 240 months | kept | 600 asked, 377 admitted | 60 | 227.4 ms | 392.2 ms | 486.0 ms |
+
+The rest of the 60-client requests were the pool's named 429. Cold (the first
+request after a server start, page cache not dropped): 60.0 ms and 67.6 ms
+kept against 718.5 ms and 326.2 ms read from the bars. Gate 8
+(`crates/api/benches/ratio/gaps.rs`, n=200): a kept one-second month of 1,024,
+10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x); a
+24- and a 240-month span p99 11.6 and 46.8 ms (4.04x, ceiling 10x).
+
+**Not measured**: `/gaps.json` with an import writing the months it reads (no
+import may run against a shadow whose bars are the real store's); the
+summary read at 10x and 100x the store's month COUNT (a summary is found by
+path arithmetic, one open, so the count is not on the path, but that is not a
+measurement); whether the writer's `.sum` step costs less than its `.srt` step
+(the `.srt` step has no seam to time alone: a 375-bar commit onto a 1x, 10x and
+100x month measured p50 124 to 135 ms, p99 221 to 257 ms with all its steps,
+and the `.sum` step's own work p50 32 to 37 ms, p99 68 to 95 ms, n=100 each, at
+load average above 40).
+
+**A cost the summary does not remove, owned elsewhere.** A cash stock's minute
+month on or after 2026-08-03 builds its dated cash-session schedule from the
+local NSE masters on every request (`server::audit_cash_schedule_window`):
+Zerodha RELIANCE 1 min 2026-08 answers in 1.87 s and 2026-09 in 0.38 s with
+its summary kept and no bar read, and a 2018-01..2026-09 span in 2.5 to 2.7 s
+either way, against 10 ms for 2018-01..2021-12. O(days of the month) master
+reads per request, not O(1); the fix (a schedule kept per month and master
+stamp) belongs to the owner of that function (R4-20's sequenced edit).
+
+**Disk** (measured on the clone): one `.sum` and one inode per month of 1,024
+bars or more while it is unsealed, none once sealed. GDFL cash and index 1 s
+months average 58.8 KB (60 KiB on disk); minute and option months 1.2 to
+1.6 KB (one 4 KiB block). Projected for the store: 29,482 GDFL cash and index
+1 s months x 60 KiB = 1.69 GiB, and at most 270,589 other months x 4 KiB =
+1.03 GiB; at most 300,071 inodes (D-4933's count of months at 1,024 bars or
+more), about 2.7 GiB in all until sealing moves the bytes into the `.sbar`.

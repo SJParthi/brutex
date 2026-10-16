@@ -68,13 +68,14 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 10] = [
+pub(crate) const WRITERS: [&str; 11] = [
     "alerts",
     "census-migrate",
     "census-recount",
     "gdfl-dayflags",
     "gdfl-import",
     "gdfl-rekey",
+    "msum-build",
     "scrub-blocks",
     "srt-build",
     "tix-rebuild",
@@ -84,16 +85,17 @@ pub(crate) const WRITERS: [&str; 10] = [
 /// Whether `verb`, invoked with `arguments`, writes the store.
 ///
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
-/// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`, `gdfl-rekey`
-/// without `--apply`, and `zerodha-repair` without `--from-store` each state
-/// in their own module that they write nothing; `alerts` writes only as
+/// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`,
+/// `msum-build ... --dry-run`, `gdfl-rekey` without `--apply`, and
+/// `zerodha-repair` without `--from-store` each state in their own module
+/// that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it.
 #[must_use]
 pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
-        "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
+        "msum-build" | "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
         "gdfl-rekey" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
@@ -354,13 +356,14 @@ mod tests {
         }
         let shadowed = || Ok(shadow.clone());
         let owned = || Ok(real.clone());
-        let writing: [(&str, &[&str]); 10] = [
+        let writing: [(&str, &[&str]); 11] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
             ("gdfl-dayflags", &[]),
             ("gdfl-import", &[]),
             ("gdfl-rekey", &["--apply"]),
+            ("msum-build", &[]),
             ("scrub-blocks", &[]),
             ("srt-build", &[]),
             ("tix-rebuild", &[]),
@@ -387,6 +390,7 @@ mod tests {
         for (verb, arguments) in [
             ("alerts", &[][..]),
             ("gdfl-rekey", &["--plan"][..]),
+            ("msum-build", &["--dry-run"][..]),
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
             ("zerodha-repair", &[][..]),

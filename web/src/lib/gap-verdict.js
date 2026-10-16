@@ -131,3 +131,31 @@ export function auditRung(rows, instrument) {
   }
   return second ? '1s' : null;
 }
+
+/**
+ * How a month's gap answer was read (R3-06, D-4980): off the month's kept
+ * summary, with no bar record read, or from its bars because no summary was
+ * usable — and then why, and how many records it cost. A slow answer is
+ * named, never silent; a server that does not say is "not stated", never
+ * read as either.
+ *
+ * @param {{ summary?: string, summary_fallback?: string | null, bar_records_read?: number }} month
+ * @returns {{ kind: 'kept' | 'built' | 'none' | 'unknown', word: string, why: string }}
+ */
+export function readFrom(month) {
+  const records = typeof month.bar_records_read === 'number' ? month.bar_records_read : null;
+  switch (month.summary) {
+    case 'kept':
+      return { kind: 'kept', word: 'summary', why: 'read off the month summary; no bar record read' };
+    case 'built':
+      return {
+        kind: 'built',
+        word: records == null ? 'bars' : `bars · ${records.toLocaleString('en-IN')} records`,
+        why: month.summary_fallback || 'no usable month summary; the server gave no reason'
+      };
+    case 'absent_file':
+      return { kind: 'none', word: '—', why: 'the month file is absent; nothing was read' };
+    default:
+      return { kind: 'unknown', word: 'not stated', why: 'this server does not say how the month was read' };
+  }
+}
