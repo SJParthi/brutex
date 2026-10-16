@@ -3054,13 +3054,11 @@ mod cloud_mutant_tests {
     }
 
     /// **A PAGE INSIDE AN INDEX RUN OF SEVERAL BLOCKS IS THE BRUTE FORCE.**
-    /// Every other fixture's runs fit one fence block (`FENCE` entries), so
-    /// the fence table alone answers each bound exactly. One run of 1,000
-    /// rows is four blocks: the value bisection's lower and upper counts from
-    /// the fences differ, and the exact count is read only between them.
-    /// Pages at the start, inside and at the end, in both directions, are
-    /// the brute force. Kills `Arrays::more_than`'s `ub += b` → `*=`, which
-    /// collapsed the upper count and answered "not more" too early.
+    /// Every other fixture's index runs are at most 130 rows, one fence block
+    /// (`FENCE` entries) each. One run of 1,000 rows is four blocks: the
+    /// bounds the value bisection takes from the fences are a block wide,
+    /// and the exact count is read between them. Pages at the start, inside
+    /// and at the end, in both directions, are the brute force.
     #[test]
     fn a_page_inside_a_run_of_several_blocks_is_the_brute_force() {
         let root = scratch("multi-block");
@@ -3108,6 +3106,71 @@ mod cloud_mutant_tests {
                 assert_eq!(served, page, "desc {desc} offset {offset}");
                 let report = got.sort_index.expect("a value sort says what it used");
                 assert_eq!((report.indexed_runs, report.scanned_rows), (1, 0));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A PAGE OVER READ ROWS AND A WIDE INDEX RUN IS THE BRUTE FORCE.**
+    /// January's 1,000 rows are one index run of four blocks. February has
+    /// no index (a month under the small-month threshold), so its 360 rows
+    /// are read and the page's best of them held. The value bisection adds
+    /// the held rows at or below a value to the run's fence-bounded counts.
+    /// Pages at four offsets, in both directions, are the brute force over
+    /// all 1,360 rows. Kills `Arrays::more_than`'s `lb += a` → `*=`: it
+    /// multiplied the held rows by the run's lower count, said "more than k"
+    /// for a value too small, and the page started in the wrong place.
+    #[test]
+    fn a_page_over_read_rows_and_a_wide_run_is_the_brute_force() {
+        let root = scratch("read-and-wide");
+        let jan: Vec<Bar> = (0..1_000).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        let symbol_id = super::symbol_id("NIFTY");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(1),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        store::file::BarFile::open_or_create(&root, path, symbol_id)
+            .expect("a generated bar file")
+            .append(&jan)
+            .expect("generated records");
+        crate::scratch::plant_pre_rule_sort_index(
+            &path.to_path_buf(&root),
+            &Shape::of(month(1), 60, symbol_id),
+            &jan,
+            1_000,
+        );
+        let feb_srt = write(&root, &index(), month(2), &feb, &feb);
+        std::fs::remove_file(feb_srt).expect("February is left with no index");
+        for desc in [false, true] {
+            let key = |close: i64| if desc { -close } else { close };
+            let mut want: Vec<(i64, i64)> = jan
+                .iter()
+                .chain(&feb)
+                .map(|bar| (key(bar.close), bar.ts_micros))
+                .collect();
+            want.sort_unstable();
+            for offset in [0, 150, 400, 900] {
+                let mut asked = query(index(), month(1), month(2), SortKey::Close);
+                asked.desc = desc;
+                asked.offset = Some(offset);
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<(i64, i64)> = got
+                    .bars
+                    .iter()
+                    .map(|row| (key(row.bar.close), row.bar.ts_micros))
+                    .collect();
+                let page: Vec<(i64, i64)> = want.iter().skip(offset).take(37).copied().collect();
+                assert_eq!(served, page, "desc {desc} offset {offset}");
+                let report = got.sort_index.expect("a value sort says what it used");
+                assert_eq!((report.indexed_rows, report.scanned_rows), (1_000, 360));
             }
         }
         let _ = std::fs::remove_dir_all(&root);
