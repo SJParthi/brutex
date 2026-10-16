@@ -2143,6 +2143,41 @@ mod bars_series_rs {
         }
     }
 
+    /// **AN INSTANT BEFORE ITS DAY'S KEPT RUN IS RANKED WITHOUT OPENING THE
+    /// MONTH.** Under 09:20–09:21 May keeps the 5th's 09:20 and 09:21; `at`
+    /// 09:17 of the 5th lies inside May's records and inside that day's
+    /// bucket but before its run, so its index is the run's first, with no
+    /// lookup. The day runs are memoised from a request made while May was
+    /// free, so with May held by another writer the plan is still built and
+    /// `at` still answers. Kills `rank`'s `|| with &&`, which went on to
+    /// locate 09:17 in the held month.
+    #[test]
+    fn bars_series_an_instant_before_its_days_run_is_ranked_unopened() {
+        let scratch = Scratch::new("series-at-before-run");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[
+                (open_of(5, 2), 10),
+                (open_of(5, 5), 11),
+                (open_of(5, 5) + 300, 12),
+                (open_of(5, 5) + 360, 13),
+            ],
+        );
+        let mut asked = query(month(5), month(5));
+        asked.filter.tod = Some((33_600, 33_660));
+        let free = window(scratch.root(), &asked).expect("answers");
+        assert_eq!(free.total, 2);
+        let _held = hold(scratch.root(), 5);
+        asked.at = Some((open_of(5, 5) + 120) * 1_000_000);
+        let got =
+            window(scratch.root(), &asked).expect("an instant before the run locates nothing");
+        assert_eq!(got.at_index, Some(0));
+    }
+
     /// **AN INSTANT PAST THE CALENDAR'S LAST YEAR IS AFTER EVERY ROW, AND ONE
     /// BEFORE THE EPOCH IS BEFORE EVERY ROW.** `at=` takes any whole number of
     /// unix seconds, so 10000-01-01 reaches the window; the calendar names no
