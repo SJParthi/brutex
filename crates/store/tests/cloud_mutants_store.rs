@@ -209,3 +209,73 @@ fn a_leftover_whose_name_cannot_be_removed_is_refused_as_a_remove_body() {
     );
     let _ignored = fs::remove_dir_all(&dir);
 }
+
+/// **EVERY STAGING REFUSAL SAYS WHAT IT IS, NAMES ITS PATH, AND CARRIES THE
+/// HOST'S ERROR ONLY WHEN THERE IS ONE.**
+///
+/// Covers the refusal text, `path` and `source` of the two refusals the other
+/// staging tests meet only through a race or a host error: the operator
+/// reads these words in the caller's event.
+#[test]
+fn every_staging_refusal_names_itself_its_path_and_its_cause() {
+    use std::error::Error as _;
+    use store::staging::StagingError;
+    let path = PathBuf::from("/nonexistent/cloud/a.tmp");
+    let contended = StagingError::Contended { path: path.clone() };
+    assert_eq!(contended.word(), "staging_contended");
+    assert_eq!(contended.path(), path);
+    assert_eq!(
+        contended.to_string(),
+        "staging_contended: /nonexistent/cloud/a.tmp existed again after it was cleared; \
+         another writer is using the name"
+    );
+    assert!(contended.source().is_none());
+    let io = StagingError::Io {
+        path: path.clone(),
+        action: "remove",
+        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    };
+    assert_eq!(io.path(), path);
+    assert_eq!(
+        io.to_string(),
+        "io: remove /nonexistent/cloud/a.tmp: permission denied"
+    );
+    assert_eq!(
+        io.source().map(ToString::to_string).as_deref(),
+        Some("permission denied")
+    );
+    let not_regular = StagingError::NotRegular {
+        path: path.clone(),
+        found: store::safe_open::Found::Pipe,
+    };
+    assert_eq!(not_regular.path(), path);
+    assert!(not_regular.source().is_none());
+    let linked = StagingError::Linked {
+        path: path.clone(),
+        links: 3,
+    };
+    assert_eq!(linked.path(), path);
+    assert!(linked.source().is_none());
+}
+
+/// **EVERY KIND A READER REFUSES IS SAID IN WORDS AN OPERATOR CAN ACT ON.**
+///
+/// Covers [`store::safe_open::Found::sentence`] for every kind, `Unknown`
+/// included: no host this crate builds for produces a file type outside the
+/// other six, so only a direct call reaches that arm.
+#[test]
+fn every_found_kind_has_its_sentence() {
+    use store::safe_open::Found;
+    let table = [
+        (Found::Symlink, "a symbolic link"),
+        (Found::Pipe, "a pipe (FIFO)"),
+        (Found::Socket, "a UNIX socket"),
+        (Found::CharDevice, "a character device"),
+        (Found::BlockDevice, "a block device"),
+        (Found::Directory, "a directory"),
+        (Found::Unknown, "a file of a kind this host does not name"),
+    ];
+    for (found, sentence) in table {
+        assert_eq!(found.sentence(), sentence, "{found:?}");
+    }
+}
