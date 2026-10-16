@@ -1180,6 +1180,58 @@ mod tests {
         );
     }
 
+    /// A frame of one Raw `A` and one Compressed block that repeats it `ml`
+    /// times from a single sequence: `ml + 1` bytes of `A` in 22. Laid out
+    /// byte by byte beside `lake::page`'s `one_sequence_frame`, its twin: a
+    /// 1 MiB window, the Raw block, then literals none, one sequence, all
+    /// three codes RLE (literal length 0, offset 2, match length 52), and a
+    /// bitstream of 16 match-length bits, two zero offset bits and the marker.
+    fn one_sequence_frame(ml: u32) -> Vec<u8> {
+        let [lo, hi, ..] = (ml - 65_539).to_le_bytes();
+        let mut frame = vec![
+            0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x50, 0x08, 0x00, 0x00, b'A', 0x4D, 0x00, 0x00, 0x00,
+            0x01, 0x54, 0x00, 0x02, 0x34,
+        ];
+        frame.extend([lo, hi, 0x04]);
+        frame
+    }
+
+    /// RUSTSEC-2026-0344 (D-5260): before `ruzstd` 0.9.1 a Compressed block
+    /// was never held to `Block_Maximum_Size` (RFC 8878 §3.1.1.2.4, the
+    /// smaller of the window and 128 KiB), so one small block could make
+    /// gigabytes before `unzstd`'s one-byte-past cap took a byte of it. A
+    /// block two bytes past the maximum, under an entry size that matches
+    /// every byte the frame holds, is refused `FRAME`; on 0.8.2 it decodes.
+    /// The same frame at exactly 128 KiB still decodes, which is the premise.
+    #[test]
+    fn a_compressed_block_past_the_block_maximum_refuses_the_frame() {
+        let at_limit = unzstd(&one_sequence_frame(131_072), 131_073).unwrap();
+        assert_eq!(at_limit.len(), 131_073, "the premise: the A and its block");
+        assert!(at_limit.iter().all(|b| *b == b'A'));
+        assert_eq!(
+            unzstd(&one_sequence_frame(131_074), 131_075),
+            Err(bad(FRAME)),
+            "the decoder refuses where the length check would have agreed"
+        );
+    }
+
+    /// `ruzstd` 0.9 refuses a frame declaring a window past 128 MiB at its
+    /// header, before anything is allocated for it (D-5260); 0.8.2 decoded
+    /// it. The one-byte frame at exactly 128 MiB still decodes.
+    #[test]
+    fn a_frame_declaring_a_window_past_128_mib_refuses() {
+        // magic; no single segment, no content size; the window descriptor,
+        // 2^(10 + 17) = 128 MiB at 0x88 and 2^(10 + 18) at 0x90; the last
+        // block, Raw, size 1 (1 | 1<<3); `A`.
+        let window = |descriptor: u8| {
+            [
+                0x28, 0xB5, 0x2F, 0xFD, 0x00, descriptor, 0x09, 0x00, 0x00, b'A',
+            ]
+        };
+        assert_eq!(unzstd(&window(0x88), 1), Ok(b"A".to_vec()), "the premise");
+        assert_eq!(unzstd(&window(0x90), 1), Err(bad(FRAME)));
+    }
+
     /// A columnar block with a field outside its range refuses by the rule.
     #[test]
     fn a_malformed_columnar_block_refuses() {

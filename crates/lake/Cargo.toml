@@ -72,8 +72,10 @@ parquet-format-safe = { version = "0.2", default-features = false }
 
 # ZSTD page bodies, in Rust. No build.rs, no C. The `zstd` crate appears in
 # ruzstd's manifest only as a DEV-dependency, so it is not built by us --
-# confirmed absent from `cargo tree -p lake --no-dedupe`.
-ruzstd = { version = "0.8", default-features = false, features = ["std", "hash"] }
+# confirmed absent from `cargo tree -p lake --no-dedupe`. The same requirement
+# the workspace manifest gives `pull`: 0.9.1, because 0.8.2 and 0.9.0 are
+# RUSTSEC-2026-0344 (D-5260).
+ruzstd = { version = "0.9.1", default-features = false, features = ["std", "hash"] }
 
 # The buffer type `parquet`'s page and column readers are written against.
 bytes = { version = "1", default-features = false, features = ["std"] }
