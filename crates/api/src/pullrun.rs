@@ -8318,9 +8318,10 @@ mod cloud_mutant_tests {
     #[test]
     fn a_leg_whose_payload_names_too_many_fields_refuses_the_run() {
         let leg = |distinct: usize| {
+            use std::fmt::Write as _;
             let mut body = String::from("vendor=dhan&granularity=1day");
             for n in 2..distinct {
-                body.push_str(&format!("&k{n}=v"));
+                let _infallible = write!(body, "&k{n}=v");
             }
             let joined = format!("/pull/spot|dhan|1day|wide|{}", enc(&body));
             format!("leg={}", enc(&joined))
