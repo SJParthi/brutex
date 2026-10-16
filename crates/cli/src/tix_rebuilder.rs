@@ -491,3 +491,117 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 #[cfg(test)]
 #[path = "tix_rebuilder_tests.rs"]
 mod tests;
+
+/// THE CLOUD MUTATION PASS (`reports/cloud-mut-cli-20261016.md`): each test
+/// pins the behaviour a mutant of this file broke while every other test
+/// stayed green, or runs a line no test reached. Invented stores only.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use store::format::{Bar, OI_NULL};
+
+    use super::*;
+
+    /// The dispatched verb refuses a misuse with its usage, before the store
+    /// root is asked for.
+    #[test]
+    fn the_dispatched_verb_refuses_a_misuse_with_its_usage() {
+        let mut out = String::new();
+        assert_eq!(command(&["gdfl"], &mut out), MISUSED);
+        assert!(out.starts_with("refused: "), "{out}");
+        assert!(out.contains(USAGE), "{out}");
+    }
+
+    /// A month filed under another symbol's header id is refused by the
+    /// store, dry or not, and no index is written for it.
+    #[test]
+    fn a_month_under_another_symbols_id_is_refused_dry_or_not() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "brutex-cli-tix-cloud-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let month = YearMonth::new(2019, 1).unwrap();
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .unwrap();
+        let other =
+            u32::try_from(brutex_core::universe::fnv1a("BANKNIFTY") & u64::from(u32::MAX)).unwrap();
+        let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+        let bars: Vec<Bar> = (0..1_100_i64)
+            .map(|k| Bar {
+                ts_micros: open + k * 1_000_000,
+                open: 424_200,
+                high: 424_300,
+                low: 424_100,
+                close: 424_250,
+                volume: 0,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        let mut writer = BarFile::open_or_create(&root, path, other).unwrap();
+        writer.append(&bars).unwrap();
+        drop(writer);
+        let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root);
+        fs::remove_file(&tix).unwrap();
+        for dry in [true, false] {
+            let mut arguments = vec!["gdfl", "NSE/INDEX/NIFTY", "1s", "2019-01", "2019-01"];
+            if dry {
+                arguments.push("--dry-run");
+            }
+            let mut out = String::new();
+            let at = root.clone();
+            let code = command_with(&arguments, &move || Ok(at.clone()), &mut out);
+            assert_eq!(code, FAILED, "{out}");
+            assert!(out.contains("  2019-01  REFUSED       "), "{out}");
+            assert!(out.contains("refused 1"), "{out}");
+        }
+        assert!(!tix.exists(), "no index is written for a refused month");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The receipt line for a month a reader does not find indexed after the
+    /// step, which no store state in a test reaches, word for word.
+    #[test]
+    fn the_receipt_line_for_a_month_a_reader_does_not_find_indexed() {
+        let mut out = String::new();
+        render_line(
+            &mut out,
+            YearMonth::new(2019, 7).unwrap(),
+            &Line::NotIndexed {
+                n_valid: 1_100,
+                reader: "Bisection(Stale)".to_owned(),
+            },
+        );
+        assert_eq!(
+            out,
+            "  2019-07  NOT INDEXED        1100 bars  the step finished and a reader still \
+             answers Bisection(Stale)\n"
+        );
+        assert!(
+            !Line::NotIndexed {
+                n_valid: 0,
+                reader: String::new()
+            }
+            .clean()
+        );
+    }
+}

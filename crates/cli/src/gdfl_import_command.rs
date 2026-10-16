@@ -556,3 +556,284 @@ pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
 #[cfg(test)]
 #[path = "gdfl_import_command_tests.rs"]
 mod tests;
+
+/// THE CLOUD MUTATION PASS (`reports/cloud-mut-cli-20261016.md`): each test
+/// pins the behaviour a mutant of this file broke while every other test
+/// stayed green, or runs a line no test reached. No vendor byte: the one
+/// archive here is built at run time from invented values.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use pull::gdfl_cm::CmKind;
+
+    use super::*;
+
+    /// A fresh directory unique to this test and call.
+    fn scratch(tag: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-cli-gdfl-cloud-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `pairs` as an environment, with the allowance a test build needs to
+    /// write: a test binary built from a dirty tree carries no commit stamp.
+    fn env_of(pairs: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {
+        let mut pairs: Vec<(String, OsString)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect();
+        pairs.push((ALLOW_UNSTAMPED_VAR.to_owned(), OsString::from("1")));
+        move |var| pairs.iter().find(|(k, _)| k == var).map(|(_, v)| v.clone())
+    }
+
+    /// A plain zip of `members`, every one stored (method 0).
+    fn zip_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let le16 = |out: &mut Vec<u8>, v: usize| {
+            out.extend_from_slice(&u16::try_from(v).unwrap().to_le_bytes());
+        };
+        let le32 = |out: &mut Vec<u8>, v: usize| {
+            out.extend_from_slice(&u32::try_from(v).unwrap().to_le_bytes());
+        };
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in members {
+            let (at, crc) = (out.len(), pull::gdfl_archive::crc32(data));
+            le32(&mut out, 0x0403_4b50);
+            le16(&mut out, 20);
+            le16(&mut out, 0);
+            le16(&mut out, 0);
+            le32(&mut out, 0);
+            out.extend_from_slice(&crc.to_le_bytes());
+            le32(&mut out, data.len());
+            le32(&mut out, data.len());
+            le16(&mut out, name.len());
+            le16(&mut out, 0);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            le32(&mut central, 0x0201_4b50);
+            le16(&mut central, 20);
+            le16(&mut central, 20);
+            le16(&mut central, 0);
+            le16(&mut central, 0);
+            le32(&mut central, 0);
+            central.extend_from_slice(&crc.to_le_bytes());
+            le32(&mut central, data.len());
+            le32(&mut central, data.len());
+            le16(&mut central, name.len());
+            for _ in 0..4 {
+                le16(&mut central, 0);
+            }
+            le32(&mut central, 0);
+            le32(&mut central, at);
+            central.extend_from_slice(name.as_bytes());
+        }
+        let at = out.len();
+        out.extend_from_slice(&central);
+        le32(&mut out, 0x0605_4b50);
+        le16(&mut out, 0);
+        le16(&mut out, 0);
+        le16(&mut out, members.len());
+        le16(&mut out, members.len());
+        le32(&mut out, central.len());
+        le32(&mut out, at);
+        le16(&mut out, 0);
+        out
+    }
+
+    /// An invented NIFTY index file of `day`: a pre-open row, session rows
+    /// through the day and a row after the close, at a level NIFTY never
+    /// printed.
+    fn index_csv(day: Day) -> Vec<u8> {
+        let open = 9 * 3_600 + 15 * 60;
+        let close = 15 * 3_600 + 30 * 60;
+        let mut seconds = vec![open - 300];
+        seconds.extend((0..22_500).step_by(997).map(|s| open + s));
+        seconds.push(close + 60);
+        let mut text = String::from(pull::gdfl_cm::HEADER_OPEN_INTEREST);
+        for (k, sod) in seconds.into_iter().enumerate() {
+            let _ = write!(
+                text,
+                "\r\nNIFTY 50.NSE_IDX,{:02}/{:02}/{:04},{:02}:{:02}:{:02},4242.{:02},0,0,0,0,0,0",
+                day.day(),
+                day.month(),
+                day.year(),
+                sod / 3_600,
+                sod / 60 % 60,
+                sod % 60,
+                k % 100
+            );
+        }
+        text.push_str("\r\n");
+        text.into_bytes()
+    }
+
+    /// A capital-market outer archive holding `day`'s index zip, whose one
+    /// member is the invented NIFTY file.
+    fn cm_archive(day: Day) -> Vec<u8> {
+        let folder = pull::gdfl_cm::day_folder_name(CmKind::Indices, day);
+        let csv = index_csv(day);
+        let inner = zip_of(&[(&format!("{folder}/NIFTY 50.NSE_IDX.csv"), &csv)]);
+        zip_of(&[(
+            &pull::gdfl_archive::day_zip_name(CmKind::Indices, day),
+            &inner,
+        )])
+    }
+
+    /// **A CENSUS REFUSAL PRINTS WHAT THE RUN DID BEFORE IT, THEN THE
+    /// REFUSAL** (D-3317 item 7): the run's receipt and how it filed its
+    /// days come first, the refusal last, exit FAILED. The census here is a
+    /// directory, which the census cannot read.
+    #[test]
+    fn a_census_refusal_prints_the_receipt_and_how_it_filed_then_the_refusal() {
+        let root = scratch("census");
+        let store = root.join("store");
+        std::fs::create_dir_all(store.join("manifest").join("gdfl.man")).unwrap();
+        let cm = root.join("cm.zip");
+        std::fs::write(&cm, cm_archive(Day::new(2024, 4, 1).unwrap())).unwrap();
+        let env = env_of(&[
+            (CM_ARCHIVE_VAR, cm.into_os_string()),
+            (WORKERS_VAR, OsString::from("1")),
+            (DURABILITY_VAR, OsString::from("each-write")),
+        ]);
+        let mut out = String::new();
+        let code = command_with(
+            &["indices", "zip", "2024-04-01", "2024-04-01", "NIFTY"],
+            &env,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        assert_eq!(code, FAILED, "{out}");
+        let at = |part: &str| {
+            out.find(part)
+                .unwrap_or_else(|| panic!("{part:?} in {out}"))
+        };
+        let receipt = at(&format!(
+            "GDFL IMPORT -- indices from zip into {}\n",
+            store.display()
+        ));
+        let workers = at(&format!(
+            "  workers             1 ({WORKERS_VAR}, 1 to {})\n",
+            Workers::MAX
+        ));
+        let durability = at(&format!(
+            "  durability          each-write ({DURABILITY_VAR}; D-3353)\n"
+        ));
+        let refused = at("GDFL IMPORT REFUSED: ");
+        assert!(
+            [receipt, workers, durability, refused].is_sorted(),
+            "the receipt, its workers and durability, then the refusal: {out}"
+        );
+        assert!(
+            out.get(refused..)
+                .is_some_and(|tail| tail.contains("census")),
+            "{out}"
+        );
+        assert!(
+            !out.contains("  scope  "),
+            "a refused run prints no scope: {out}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The receipt says how the run filed its days: the workers and the
+    /// durability it was given, each beside the variable that sets it.
+    #[test]
+    fn the_receipt_names_the_workers_and_durability_it_filed_with() {
+        let mut out = String::new();
+        render_how(
+            &mut out,
+            (
+                Workers::new(3).unwrap(),
+                Durability::parse("day-each-file").unwrap(),
+            ),
+        );
+        assert_eq!(
+            out,
+            format!(
+                "  workers             3 ({WORKERS_VAR}, 1 to {})\n  durability          \
+                 day-each-file ({DURABILITY_VAR}; D-3353)\n",
+                Workers::MAX
+            )
+        );
+        // And the verb prints exactly what it was asked for, after the
+        // receipt, on a clean run.
+        let root = scratch("how");
+        let store = root.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let env = env_of(&[
+            (TICKSTORE_VAR, root.join("ts").into_os_string()),
+            (WORKERS_VAR, OsString::from("2")),
+            (DURABILITY_VAR, OsString::from("each-write")),
+        ]);
+        let mut out = String::new();
+        let code = command_with(
+            &["options", "tickstore", "2024-04-01", "2024-04-01", "NIFTY"],
+            &env,
+            &|| Ok(store.clone()),
+            &mut out,
+        );
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains(&format!(
+                "  failures            0\n  workers             2 ({WORKERS_VAR}, 1 to {})\n  \
+                 durability          each-write ({DURABILITY_VAR}; D-3353)\n",
+                Workers::MAX
+            )),
+            "{out}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The process environment is read as it is: a variable this test
+    /// process holds comes back with its value.
+    #[test]
+    fn the_process_environment_is_read_as_it_is() {
+        let (name, value) = std::env::vars_os()
+            .find_map(|(name, value)| {
+                let name = name.into_string().ok()?;
+                (!value.is_empty()).then_some((name, value))
+            })
+            .expect("a test process carries a set, non-empty variable");
+        assert_eq!(process_env(&name), Some(value));
+    }
+
+    /// The store root is the CLI's own, proved as every verb proves it.
+    #[test]
+    fn the_store_root_is_the_clis_own() {
+        assert_eq!(cli_store(), crate::store_root());
+    }
+
+    /// An options tree that cannot be listed is named, never read as one
+    /// that holds no underlying; and an underlying whose name is not text
+    /// is refused by name.
+    #[test]
+    fn an_options_tree_that_cannot_be_listed_or_named_is_refused() {
+        let root = scratch("tree");
+        let tree = options_tree(&root);
+        std::fs::create_dir_all(tree.parent().unwrap()).unwrap();
+        std::fs::write(&tree, b"a file where the tree belongs").unwrap();
+        let why = stored_option_underlyings(&root).expect_err("a file is not a tree");
+        assert!(why.starts_with(&tree.display().to_string()), "{why}");
+        std::fs::remove_file(&tree).unwrap();
+
+        let odd = std::ffi::OsStr::from_bytes(b"NIFTY\xff");
+        std::fs::create_dir_all(tree.join(odd)).unwrap();
+        let why = stored_option_underlyings(&root).expect_err("a name that is not text");
+        assert!(why.contains("is not a symbol"), "{why}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
