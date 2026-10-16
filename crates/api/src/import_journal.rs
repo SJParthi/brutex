@@ -1010,3 +1010,379 @@ pub(crate) mod tests {
         assert!(!restated(ImportKind::Options, "2026-08-04"));
     }
 }
+
+/// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): each one
+/// pins a behaviour a surviving mutant broke, or reaches a line no other test
+/// reached. The name says the behaviour; the mutant it kills is named beside
+/// it.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::tests::journal;
+    use super::*;
+
+    fn day(text: &str) -> Day {
+        parse_day(text).expect("a day")
+    }
+
+    fn row(parsed: &Parsed, kind: ImportKind, on: &str) -> DayRow {
+        parsed
+            .range(day(on), day(on))
+            .find(|row| row.kind == kind && row.filter == "*")
+            .cloned()
+            .expect("a row for the key")
+    }
+
+    /// An empty line is skipped: it is counted as a line and is never a
+    /// foreign one (kills deleting the `return` for an empty line).
+    #[test]
+    fn an_empty_line_is_counted_and_never_foreign() {
+        let root = journal(
+            "cloud-empty-line",
+            "begin indices 2022-03-04 *\n\nbegin stocks 2022-03-04 *\n",
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert_eq!(parsed.lines, 3);
+        assert_eq!(parsed.foreign_count, 0, "{:?}", parsed.foreign);
+        assert!(parsed.foreign.is_empty());
+        assert_eq!(parsed.keys(), 2);
+    }
+
+    /// Past [`MAX_NAMED_FAULTS`] torn and foreign lines are counted but no
+    /// longer named: exactly 32 of each are kept by number (kills `<` to `<=`
+    /// on both caps).
+    #[test]
+    fn faults_past_the_cap_are_counted_and_only_the_first_32_named() {
+        let mut text = String::new();
+        for n in 0..40 {
+            text.push_str(&format!("done ind{n} (torn)\n"));
+        }
+        for n in 0..40 {
+            text.push_str(&format!("nonsense {n}\n"));
+        }
+        let root = journal("cloud-fault-cap", &text);
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert_eq!(parsed.torn_count, 40);
+        assert_eq!(parsed.torn.len(), MAX_NAMED_FAULTS);
+        assert_eq!(parsed.torn, (1..=32).collect::<Vec<u64>>());
+        assert_eq!(parsed.foreign_count, 40);
+        assert_eq!(parsed.foreign.len(), MAX_NAMED_FAULTS);
+        assert_eq!(parsed.foreign[31], (72, "nonsense 31".to_owned()));
+    }
+
+    /// A key's first close has no previous outcome; a `begin` after a close
+    /// remembers the close it reopens, and a first `begin` remembers nothing
+    /// (kills `>` to `>=`, `==` and `<` on both `closes > 0` guards).
+    #[test]
+    fn previous_is_set_only_when_an_earlier_close_existed() {
+        let root = journal(
+            "cloud-previous",
+            "done stocks 2020-01-01 * definition=4 files=1\n\
+             begin stocks 2020-01-02 *\n\
+             done stocks 2020-01-03 * definition=4 files=1\n\
+             begin stocks 2020-01-03 *\n",
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        let first_close = row(&parsed, ImportKind::Stocks, "2020-01-01");
+        assert_eq!(first_close.outcome, DayOutcome::Done);
+        assert_eq!(first_close.previous, None);
+        assert_eq!((first_close.closes, first_close.attempts), (1, 0));
+
+        let first_begin = row(&parsed, ImportKind::Stocks, "2020-01-02");
+        assert_eq!(first_begin.outcome, DayOutcome::Open);
+        assert_eq!(first_begin.previous, None);
+        assert_eq!((first_begin.closes, first_begin.attempts), (0, 1));
+
+        let reopened = row(&parsed, ImportKind::Stocks, "2020-01-03");
+        assert_eq!(reopened.outcome, DayOutcome::Open);
+        assert_eq!(reopened.previous, Some(DayOutcome::Done));
+        assert_eq!((reopened.closes, reopened.attempts), (1, 1));
+        assert_eq!(reopened.line, 4);
+    }
+
+    /// Every count a closing line can carry is read into its own field, an
+    /// unknown field is kept out of the row without dropping the line, and
+    /// `vendor_refused=0` is a plain `done` (kills each deleted `Close::read`
+    /// arm and `> 0` to `>= 0` or a constant guard).
+    #[test]
+    fn every_count_is_read_by_name_and_zero_vendor_refusals_is_plain_done() {
+        let root = journal(
+            "cloud-every-count",
+            "done stocks 2020-01-06 * definition=4 files=1 seconds=2 failures=3 late=4 \
+             late_unresolved=5 max_back_s=6 vendor_refused=0 months=7 run=8 \
+             stage=fold reason=none future_field=kept%20out\n",
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert_eq!(parsed.foreign_count, 0, "{:?}", parsed.foreign);
+        let done = row(&parsed, ImportKind::Stocks, "2020-01-06");
+        assert_eq!(
+            done.stats,
+            Stats {
+                definition: Some(4),
+                files: Some(1),
+                seconds: Some(2),
+                failures: Some(3),
+                late: Some(4),
+                late_unresolved: Some(5),
+                max_back_s: Some(6),
+                vendor_refused: Some(0),
+                months: Some(7),
+                run: Some(8),
+            }
+        );
+        assert_eq!(done.outcome, DayOutcome::Done);
+        assert!(!done.recounted);
+        assert_eq!(done.stage.as_deref(), Some("fold"));
+        assert_eq!(done.reason.as_deref(), Some("none"));
+        assert!(!done.cut);
+        assert_eq!(done.census_closes, 0);
+    }
+
+    /// A stage or reason longer than [`MAX_VALUE_BYTES`] is cut and the row
+    /// says so, whichever of the two was long (kills `|=` to `&=`).
+    #[test]
+    fn a_long_stage_or_reason_is_cut_and_the_row_says_so() {
+        let long = "x".repeat(MAX_VALUE_BYTES + 4);
+        let root = journal(
+            "cloud-cut",
+            &format!(
+                "refused stocks 2020-01-07 * definition=4 stage={long} reason=short failures=1\n\
+                 refused stocks 2020-01-08 * definition=4 stage=short reason={long} failures=1\n\
+                 refused stocks 2020-01-09 * definition=4 stage=short reason=short failures=1\n"
+            ),
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        let long_stage = row(&parsed, ImportKind::Stocks, "2020-01-07");
+        assert!(long_stage.cut);
+        assert_eq!(
+            long_stage.stage.as_deref().map(str::len),
+            Some(MAX_VALUE_BYTES)
+        );
+        assert_eq!(long_stage.reason.as_deref(), Some("short"));
+        let long_reason = row(&parsed, ImportKind::Stocks, "2020-01-08");
+        assert!(long_reason.cut);
+        assert_eq!(
+            long_reason.reason.as_deref().map(str::len),
+            Some(MAX_VALUE_BYTES)
+        );
+        let neither = row(&parsed, ImportKind::Stocks, "2020-01-09");
+        assert!(!neither.cut);
+        assert_eq!(neither.outcome, DayOutcome::Refused);
+    }
+
+    /// `capped` keeps a value of exactly the cap whole and uncut, cuts one
+    /// byte more to the cap, and steps back off a split character rather
+    /// than answering empty (kills `<=` to `>` and the deleted `!`).
+    #[test]
+    fn capped_keeps_the_cap_and_steps_back_off_a_split_character() {
+        let at_cap = "a".repeat(MAX_VALUE_BYTES);
+        assert_eq!(capped(at_cap.clone()), (at_cap.clone(), false));
+        assert_eq!(capped("short".to_owned()), ("short".to_owned(), false));
+        assert_eq!(capped(format!("{at_cap}b")), (at_cap, true));
+        // One ASCII byte then two-byte characters: byte 96 falls inside one.
+        let split = format!("a{}", "é".repeat(60));
+        let (kept, cut) = capped(split);
+        assert!(cut);
+        assert_eq!(kept, format!("a{}", "é".repeat(47)));
+        assert_eq!(kept.len(), MAX_VALUE_BYTES - 1);
+    }
+
+    /// Lowercase escapes decode exactly as uppercase ones do (kills the
+    /// deleted `a..=f` arm and its arithmetic mutants).
+    #[test]
+    fn lowercase_and_uppercase_escapes_decode_alike() {
+        assert_eq!(percent_decoded("%2f%2F%3a%3A").as_deref(), Some("//::"));
+        assert_eq!(percent_decoded("%7e%5f").as_deref(), Some("~_"));
+        assert_eq!(hex_value(b'a'), Some(10));
+        assert_eq!(hex_value(b'f'), Some(15));
+        assert_eq!(hex_value(b'A'), Some(10));
+        assert_eq!(hex_value(b'F'), Some(15));
+        assert_eq!(hex_value(b'0'), Some(0));
+        assert_eq!(hex_value(b'9'), Some(9));
+        assert_eq!(hex_value(b'g'), None);
+        assert_eq!(hex_value(b'G'), None);
+    }
+
+    /// `restated` is about a done day only: a refused day and a recounted day
+    /// under an old definition are not restated (kills `&&` to `||` on the
+    /// first conjunction and the deleted `!` before `recounted`).
+    #[test]
+    fn only_a_done_unrecounted_day_under_an_old_definition_is_restated() {
+        let root = journal(
+            "cloud-restated",
+            "refused stocks 2020-01-05 * definition=1 stage=x reason=y failures=1\n\
+             recounted stocks 2020-01-06 * definition=1 months=1\n\
+             done stocks 2020-01-07 * definition=1 files=1\n\
+             begin stocks 2020-01-08 *\n",
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert!(!row(&parsed, ImportKind::Stocks, "2020-01-05").restated());
+        let recounted = row(&parsed, ImportKind::Stocks, "2020-01-06");
+        assert!(recounted.recounted);
+        assert!(!recounted.restated());
+        assert!(row(&parsed, ImportKind::Stocks, "2020-01-07").restated());
+        assert!(!row(&parsed, ImportKind::Stocks, "2020-01-08").restated());
+    }
+
+    /// The run-id index: `runs_of`, `runs_before` and `nth_of` answer from
+    /// the positions each id's lines were filed at, and `None` for an id or a
+    /// line of it the journal does not hold.
+    #[test]
+    fn the_run_index_names_each_ids_lines_and_nothing_else() {
+        let root = journal(
+            "cloud-run-index",
+            "run 5 a=1\nrun 7 b=2\nrun 5 c=3\nbegin stocks 2020-01-01 *\n",
+        );
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert_eq!(parsed.runs.len(), 3);
+        assert_eq!(parsed.runs_unindexed, 0);
+        let lines: Vec<u64> = parsed.runs_of(5).map(|run| run.line).collect();
+        assert_eq!(lines, [1, 3]);
+        assert_eq!(
+            parsed.runs_of(7).map(|run| run.line).collect::<Vec<_>>(),
+            [2]
+        );
+        assert_eq!(parsed.runs_of(9).count(), 0);
+        assert_eq!(parsed.runs_before(5, 0), Some(0));
+        assert_eq!(parsed.runs_before(5, 1), Some(2));
+        assert_eq!(parsed.runs_before(7, 0), Some(1));
+        assert_eq!(parsed.runs_before(5, 2), None);
+        assert_eq!(parsed.runs_before(9, 0), None);
+        assert_eq!(parsed.nth_of(0), Some(0));
+        assert_eq!(parsed.nth_of(1), Some(0));
+        assert_eq!(parsed.nth_of(2), Some(1));
+        assert_eq!(parsed.nth_of(3), None);
+    }
+
+    /// A journal path that cannot be measured for any reason but absence is
+    /// an error by name, never an absent journal (kills the `NotFound` guard
+    /// replaced with `true`).
+    #[test]
+    fn a_journal_that_cannot_be_measured_is_named_not_called_absent() {
+        let root = crate::scratch::path("importjournal-cloud-notdir");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&root);
+        // The store root is a FILE, so `imports/gdfl.journal` under it is
+        // ENOTDIR — not NotFound.
+        std::fs::write(&root, b"not a directory").expect("a file");
+        let why = snapshot(&root).expect_err("a path under a file is not absent");
+        assert!(why.contains("gdfl.journal"), "{why}");
+        std::fs::remove_file(&root).expect("cleanup");
+    }
+
+    /// A line that is not UTF-8 is counted as foreign and shown lossily.
+    #[test]
+    fn a_line_that_is_not_utf8_is_foreign_and_shown_lossily() {
+        let root = journal("cloud-not-utf8", "begin indices 2022-03-04 *\n");
+        let path = pull::gdfl_import::journal_path(&root);
+        let mut bytes = b"begin indices 2022-03-04 *\n".to_vec();
+        bytes.extend_from_slice(b"\xff\xfebad\n");
+        std::fs::write(&path, bytes).expect("write");
+        let parsed = snapshot(&root).expect("reads").parsed;
+        assert_eq!(parsed.lines, 2);
+        assert_eq!(parsed.foreign_count, 1);
+        assert_eq!(parsed.foreign[0], (2, "\u{fffd}\u{fffd}bad".to_owned()));
+    }
+
+    /// Bytes appended without a newline are read, held as unterminated and
+    /// never parsed.
+    #[test]
+    fn an_append_with_no_newline_is_read_and_held_unterminated() {
+        use std::io::Write as _;
+        let root = journal("cloud-no-newline", "begin indices 2022-03-04 *\n");
+        let path = pull::gdfl_import::journal_path(&root);
+        let first = snapshot(&root).expect("reads");
+        assert_eq!((first.parsed.lines, first.unterminated), (1, 0));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open")
+            .write_all(b"done ind")
+            .expect("append");
+        let second = snapshot(&root).expect("reads");
+        assert_eq!(second.read_now, 8);
+        assert_eq!(second.unterminated, 8);
+        assert_eq!(second.parsed.lines, 1);
+        assert!(Arc::ptr_eq(&first.parsed, &second.parsed));
+    }
+
+    /// A journal truncated in place (same inode, shorter) is read again from
+    /// the start, never answered from the stale parse (kills `||` to `&&` and
+    /// `len < upto` to `==` or `>`).
+    #[test]
+    fn a_journal_truncated_in_place_is_read_again() {
+        let root = journal(
+            "cloud-truncated",
+            "begin indices 2022-03-04 *\nbegin options 2019-11-13 *\n",
+        );
+        let path = pull::gdfl_import::journal_path(&root);
+        assert_eq!(snapshot(&root).expect("reads").parsed.lines, 2);
+        // `fs::write` truncates the SAME file: the inode does not change.
+        std::fs::write(&path, "begin stocks 2020-01-01 *\n").expect("rewrite");
+        let again = snapshot(&root).expect("reads");
+        assert_eq!(again.parsed.lines, 1);
+        assert_eq!(again.read_now, 26);
+        assert_eq!(again.parsed.keys(), 1);
+        assert_eq!(
+            row(&again.parsed, ImportKind::Stocks, "2020-01-01").outcome,
+            DayOutcome::Open
+        );
+    }
+
+    /// A journal replaced by a LONGER file (another inode) is read again from
+    /// the start: only the identity can tell, since the length grew (kills
+    /// `identity_of` returning a constant and `||` to `&&`).
+    #[test]
+    fn a_journal_replaced_by_a_longer_file_is_read_again() {
+        let root = journal("cloud-replaced-longer", "begin indices 2022-03-04 *\n");
+        let path = pull::gdfl_import::journal_path(&root);
+        assert_eq!(snapshot(&root).expect("reads").parsed.lines, 1);
+        // Written beside it and renamed over it, so both inodes exist at once
+        // and the new one cannot reuse the old one's number.
+        let beside = path.with_extension("next");
+        std::fs::write(
+            &beside,
+            "begin stocks 2020-01-01 *\nbegin stocks 2020-01-02 *\n",
+        )
+        .expect("write the replacement");
+        std::fs::rename(&beside, &path).expect("replace");
+        let again = snapshot(&root).expect("reads");
+        assert_eq!(again.parsed.lines, 2);
+        assert_eq!(again.parsed.foreign_count, 0, "{:?}", again.parsed.foreign);
+        assert!(
+            again
+                .parsed
+                .range(day("2022-03-04"), day("2022-03-04"))
+                .next()
+                .is_none(),
+            "the replaced file's rows must not survive"
+        );
+        assert_eq!(again.parsed.keys(), 2);
+    }
+
+    /// A journal that has not grown is answered from what was parsed without
+    /// opening it again: a journal that can no longer be opened still answers
+    /// (kills `len > upto` to `>=`). Root ignores modes, so this only bites
+    /// for a non-root user — which is how the suite is meant to run.
+    #[test]
+    fn a_journal_that_has_not_grown_is_not_opened_again() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = journal("cloud-not-reopened", "begin indices 2022-03-04 *\n");
+        let path = pull::gdfl_import::journal_path(&root);
+        let first = snapshot(&root).expect("reads");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let second = snapshot(&root);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod back");
+        let second = second.expect("nothing new: answered from the parse, not the file");
+        assert_eq!(second.read_now, 0);
+        assert!(Arc::ptr_eq(&first.parsed, &second.parsed));
+    }
+}
