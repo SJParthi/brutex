@@ -2581,7 +2581,7 @@ fn a_sealed_months_audit_walks_every_block_once_and_ends() {
         let _receiver_gone = send.send(counted);
     });
     let counted = answer
-        .recv_timeout(std::time::Duration::from_secs(60))
+        .recv_timeout(std::time::Duration::from_mins(1))
         .expect("every audit ended");
     assert_eq!(counted, [0, 6_000, 70_000]);
 }
