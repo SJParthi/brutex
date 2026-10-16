@@ -1578,11 +1578,21 @@ struct Candidate {
 
 impl Candidate {
     /// Whether this path could not be measured whole: block-only, a refused bar
-    /// on its crossing table, or a hole the walk located (D-1514). This is the
-    /// `refused_paths` count; whether a given VARIANT is priced is
-    /// [`Self::refused_at`]'s question.
+    /// on its crossing table, a hole the walk located (D-1514), or an entry
+    /// [`entry_fills`] could not price. This is the `refused_paths` count;
+    /// whether a given VARIANT is priced is [`Self::refused_at`]'s question.
+    ///
+    /// # The zero entry is a measurement not taken
+    ///
+    /// [`entry_fills`] answers `0` for the pessimistic entry when the cost
+    /// model refuses the bar — for a long, a positive low under one tick, which
+    /// `costs::fill::fills_at`'s printed-extreme sell leg refuses and
+    /// `Candle::check_evaluable` admits. Its doc calls zero "no usable entry",
+    /// but `realised` charged it as the entry price: a long bought at 0 paisa,
+    /// a pessimistic total above the optimistic one, on the ranking path. Fills
+    /// are at least a tick, so `== 0` and nothing wider (cloud-attack-law-20261016).
     fn unmeasured(&self) -> bool {
-        self.block_only || self.cross.refused() > 0 || self.hole.is_some()
+        self.block_only || self.entry_pess == 0 || self.cross.refused() > 0 || self.hole.is_some()
     }
 
     /// Whether a variant exiting at `exit_offset` from `entry` cannot be priced
@@ -1608,7 +1618,10 @@ impl Candidate {
             .cross
             .first_refused()
             .map_or(self.cross.refused() > 0, |hole| hole <= exit_offset);
-        self.block_only || crossing_hole || self.hole.is_some_and(|hole| hole <= exit_offset)
+        self.block_only
+            || self.entry_pess == 0
+            || crossing_hole
+            || self.hole.is_some_and(|hole| hole <= exit_offset)
     }
 }
 
@@ -7670,6 +7683,67 @@ mod tests {
             0,
             "a hole at or before the exit leaves the exit unknowable"
         );
+    }
+
+    /// A long whose entry bar prints a positive low under one tick has no
+    /// pessimistic entry: `entry_fills` answers its `0` sentinel, and the path
+    /// is unmeasured rather than bought at 0 paisa (cloud-attack-law-20261016,
+    /// lens 2). `realised` charged the sentinel as the entry price, so this
+    /// path booked one trade whose pessimistic reading was the whole exit price.
+    #[test]
+    fn a_sub_tick_entry_low_refuses_the_path_rather_than_charging_a_zero_entry() {
+        let bars = vec![
+            candle(0, 2_500_000, 2_500_100, 1, 2_500_000),
+            candle(1, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(2, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(3, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+        ];
+        assert!(
+            bars.iter().all(|bar| bar.check_evaluable().is_ok()),
+            "a bar the folds admit"
+        );
+        let wide = probe_ladder(&[900_000]);
+        let ladders = Ladders {
+            stops: &wide,
+            targets: &wide,
+            trails: &wide,
+        };
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+        assert_eq!(
+            (entry_pess, entry_opt),
+            (0, 2_500_000),
+            "the cost model refuses the printed-extreme sell leg at a 1-paisa low"
+        );
+        let candidate = super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 3,
+            block_only: false,
+            hole: None,
+            cross: crossings_checked(&bars, 0, 3, entry_opt, Side::Long, ladders, &[true; 4]),
+            entry_pess,
+            entry_opt,
+        };
+        assert!(
+            candidate.unmeasured(),
+            "a zero entry is a measurement not taken"
+        );
+        assert!((0..=3).all(|exit| candidate.refused_at(exit)));
+        let cell = super::one_variant(
+            &bars,
+            &[candidate],
+            (wide.rungs(), wide.rungs(), wide.rungs()),
+            super::Variant {
+                stop: None,
+                target: None,
+                tsl: None,
+                ttp: None,
+            },
+            Side::Long,
+            None,
+        );
+        assert_eq!(cell.trades, 0, "no trade is booked at a 0-paisa entry");
+        assert_eq!(cell.pessimistic, 0);
     }
 
     /// D-1514. `unmeasured` is the `refused_paths` count and is true for each
