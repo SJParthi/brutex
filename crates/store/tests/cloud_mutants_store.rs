@@ -2782,3 +2782,146 @@ fn a_small_months_lookups_bisect_to_every_row_and_end() {
     assert_eq!(found, rows);
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// A daily NIFTY month of 2031-02 (GDFL, NSE INDEX).
+fn daily_month(file: store::path::FileKind) -> store::path::StorePath<'static> {
+    store::path::StorePath::new(store::path::PathParts {
+        vendor: brutex_core::vendor::Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: store::path::Timeframe::DAY_1,
+        month: store::path::YearMonth::new(2031, 2).unwrap(),
+        file,
+    })
+    .unwrap()
+}
+
+/// A daily month of ten bars, one at each IST midnight of 2031-02-01 to
+/// -10, and the `.tix` a build before the small-month rule (D-4933) left
+/// beside it, written entry by entry. Returns the bars.
+fn daily_month_with_a_legacy_index(root: &std::path::Path) -> Vec<store::format::Bar> {
+    use store::file::BarFile;
+    use store::path::FileKind;
+    use store::time_index::{Entry, Geometry, entry_offset, split};
+    let month = store::path::YearMonth::new(2031, 2).unwrap();
+    let origin = month.ist_bounds_micros().0;
+    let days: Vec<store::format::Bar> = (0..10)
+        .map(|d| store::format::Bar {
+            ts_micros: origin + d * 86_400_000_000,
+            ..second_bar(d, 0)
+        })
+        .collect();
+    let mut writer = BarFile::open_or_create(root, daily_month(FileKind::Bars), 11).unwrap();
+    writer.append(&days).unwrap();
+    drop(writer);
+    let geometry = Geometry::new(month, 86_400, 11);
+    let mut occupancy = 0u64;
+    for bar in &days {
+        let (_, bit) = split(geometry.slot_of(bar.ts_micros).unwrap());
+        occupancy |= 1 << bit;
+    }
+    let mut tix = geometry.encode().to_vec();
+    tix.resize(usize::try_from(entry_offset(0)).unwrap(), 0);
+    tix.extend_from_slice(
+        &Entry {
+            occupancy,
+            before: 0,
+        }
+        .encode(0),
+    );
+    fs::write(daily_month(FileKind::TimeIndex).to_path_buf(root), &tix).unwrap();
+    days
+}
+
+/// **A SECOND DAILY BAR ON ONE IST DAY RETIRES THE MONTH'S INDEX, AND AN INDEX
+/// ALREADY GONE IS ALREADY RETIRED.**
+///
+/// Kills `replace match guard gone.kind() == ErrorKind::NotFound with false`
+/// and `replace == with !=` in `remove_index`: both would refuse the append
+/// because the `.tix` it must remove is not there. A writer holds a daily
+/// month's legacy index ready, the `.tix` is deleted under it, and a second
+/// bar on the last day (D-0915) cannot share the slot: the month stops being
+/// indexed, says why, and the bar commits.
+#[test]
+fn a_second_daily_bar_retires_an_index_already_gone_and_commits() {
+    use store::file::{Appended, BarFile, TimeLookup};
+    use store::path::FileKind;
+    use store::time_index::Why;
+    let root = scratch("tix-retire-gone");
+    let days = daily_month_with_a_legacy_index(&root);
+    let mut writer = BarFile::open_or_create(&root, daily_month(FileKind::Bars), 11).unwrap();
+    assert_eq!(writer.time_lookup(), TimeLookup::Indexed);
+    let tix = daily_month(FileKind::TimeIndex).to_path_buf(&root);
+    fs::remove_file(&tix).unwrap();
+    let second = store::format::Bar {
+        ts_micros: days[9].ts_micros + 3_600_000_000,
+        ..days[9]
+    };
+    assert!(matches!(
+        writer.append(&[second]),
+        Ok(Appended::Committed { n_valid: 11, .. })
+    ));
+    assert!(
+        matches!(
+            writer.time_lookup(),
+            TimeLookup::Bisection(Why::SharedSlot { index: 10, ts_micros }) if ts_micros == second.ts_micros
+        ),
+        "{:?}",
+        writer.time_lookup()
+    );
+    assert!(!tix.exists());
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_retired_index_that_cannot_be_removed_refuses_the_append() {
+    support::where_permission_binds(
+        "a_retired_index_that_cannot_be_removed_refuses_the_append",
+        a_retired_index_that_cannot_be_removed_refuses_the_append_body,
+    );
+}
+
+/// **A RETIRED INDEX THE HOST WILL NOT REMOVE REFUSES THE APPEND THAT RETIRED
+/// IT, BEFORE ANY BAR IS WRITTEN.**
+///
+/// Kills `replace match guard gone.kind() == ErrorKind::NotFound with true` in
+/// `remove_index`, which would take any refusal for "already gone" and let
+/// the append go on with a `.tix` still claiming the month. The month's
+/// directory may be read but not written (mode 0555), so the unlink is
+/// refused: the append is refused naming the `.tix`, and the month still
+/// holds its ten bars. Run where the mode bits bind (D-0995).
+fn a_retired_index_that_cannot_be_removed_refuses_the_append_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use store::file::BarFile;
+    use store::path::FileKind;
+    let root = scratch("tix-retire-refused");
+    let days = daily_month_with_a_legacy_index(&root);
+    let tix = daily_month(FileKind::TimeIndex).to_path_buf(&root);
+    let folder = tix.parent().unwrap().to_path_buf();
+    let mut writer = BarFile::open_or_create(&root, daily_month(FileKind::Bars), 11).unwrap();
+    let second = store::format::Bar {
+        ts_micros: days[9].ts_micros + 3_600_000_000,
+        ..days[9]
+    };
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+    let answer = writer.append(&[second]);
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+    let refusal = answer.unwrap_err();
+    assert!(
+        refusal.to_string().contains(&tix.display().to_string()),
+        "{refusal}"
+    );
+    assert!(tix.exists(), "the .tix is still there");
+    drop(writer);
+    let reader = BarFile::open_existing(&root, daily_month(FileKind::Bars), 11).unwrap();
+    assert_eq!(
+        reader.first_at_or_after(i64::MAX).unwrap(),
+        10,
+        "no bar written"
+    );
+    drop(reader);
+    let _ignored = fs::remove_dir_all(&root);
+}
