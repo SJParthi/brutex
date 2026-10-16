@@ -3161,4 +3161,121 @@ mod cloud_mutant_tests {
         close_run(&mut audit, &mut day, &mut open, 1);
         assert_eq!(day.longest, Some((300, 11)));
     }
+
+    fn subject(
+        segment: &str,
+        contract: Option<&str>,
+        timeframe: store::path::Timeframe,
+    ) -> Addressed {
+        Addressed {
+            vendor: Vendor::Gdfl,
+            month: month(2026, 8),
+            timeframe,
+            contract: contract
+                .map(|text| brutex_core::instrument::Contract::parse(text).expect("a contract")),
+            exchange: "NSE".to_owned(),
+            segment: segment.to_owned(),
+            symbol: "NIFTY".to_owned(),
+        }
+    }
+
+    /// **A VOTE THAT COULD NOT READ EVERY CENSUS IS ANSWERED AND NEVER KEPT**
+    /// (DB-N19): it names the unreadable feed, and the next audit reads again.
+    /// With every census readable the same vote may be kept. Kills `&& with
+    /// ||` in `peer_vote_reading`'s `keep`, which kept a vote that named an
+    /// unreadable feed for as long as the stamps did not move.
+    #[test]
+    fn a_vote_that_could_not_read_every_census_is_never_kept() {
+        let root = crate::server::tests::store_root("cloud-gaps-unkept");
+        let masters = crate::server::tests::masters("cloud-gaps-unkept", None, None);
+        let manifest = pull::manifest::manifest_path(&root, Vendor::Groww);
+        std::fs::create_dir_all(manifest.parent().expect("a manifest directory"))
+            .expect("the manifest directory");
+        std::fs::write(&manifest, b"these bytes are no census").expect("a refused manifest");
+        let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+        let site = Site::load(&masters, &root);
+        let (keep, vote) = peer_vote_reading(&site, &asked, census_now_stamped);
+        assert_eq!(vote.unreadable, vec!["groww".to_owned()], "named");
+        assert!(
+            keep.is_none(),
+            "a vote naming an unreadable feed is not kept"
+        );
+
+        std::fs::remove_file(&manifest).expect("the refused manifest goes");
+        let site = Site::load(&masters, &root);
+        let (keep, vote) = peer_vote_reading(&site, &asked, census_now_stamped);
+        assert!(vote.unreadable.is_empty(), "{:?}", vote.unreadable);
+        assert!(keep.is_some(), "a whole read may be kept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A ONE-SECOND OPTION IS AUDITED ON THE DERIVATIVES VENUE'S HOURS**
+    /// (hunt-pull-1, D-1529): from 2026-08-03 its session runs to 15:39, so a
+    /// day it printed only at the open owes nothing it lacks and lists a
+    /// `no-print` run to minute 939. `== with !=` in `audit_one` sent every
+    /// trade-driven series that is NOT cash to the cash calendar instead, and
+    /// its runs stopped at 15:29 (minute 929): no test audited an option on
+    /// a day those hours differ.
+    #[tokio::test]
+    async fn a_one_second_option_is_audited_on_the_derivatives_hours() {
+        let root = crate::server::tests::store_root("cloud-gaps-option-hours");
+        let contract = "2026-08-27-2500000-CE";
+        let tuesday = epoch_day(2026, 8, 4);
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "FNO",
+            symbol: "NIFTY",
+            contract: brutex_core::instrument::Contract::parse(contract),
+            timeframe: store::path::Timeframe::SECOND_1,
+            month: month(2026, 8),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(&root, path, id).expect("a file");
+        let print = store::format::Bar {
+            ts_micros: (tuesday * 86_400 - 19_800 + 33_300) * 1_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        file.append(&[print]).expect("one print at 09:15:00");
+        drop(file);
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-option-hours", None, None),
+            &root,
+        ));
+        let uri: axum::http::Uri = format!(
+            "/gaps.json?feed=gdfl&exchange=NSE&segment=FNO&symbol=NIFTY&contract={contract}\
+             &timeframe=1s&month=2026-08"
+        )
+        .parse()
+        .expect("a URI");
+        let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let audited = &body["month"][0];
+        assert_eq!(audited["trade_driven"], true, "{audited}");
+        let runs = audited["gaps"].as_array().expect("runs");
+        let tuesday_runs: Vec<(i64, &str)> = runs
+            .iter()
+            .filter(|run| run["day"] == tuesday)
+            .map(|run| {
+                (
+                    run["to"].as_i64().expect("a minute"),
+                    run["reason"].as_str().expect("a word"),
+                )
+            })
+            .collect();
+        assert!(
+            tuesday_runs.contains(&(939, "no-print")),
+            "the derivatives session runs to 15:39: {tuesday_runs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
