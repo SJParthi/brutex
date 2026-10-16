@@ -5546,6 +5546,11 @@ pub fn json_string(value: &str) -> String {
 /// Tests written to kill mutants a cloud mutation pass left alive in this
 /// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a fixture that cannot be planted is a test that cannot run, and \
+              must fail loudly"
+)]
 mod cloud_mutant_tests {
     use super::*;
     use crate::audit::Drops;

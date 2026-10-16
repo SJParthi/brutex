@@ -849,8 +849,8 @@ mod cloud_mutant_tests {
     }
 
     /// **AN EVENT THAT CARRIED NO UNSCALED OPEN INTEREST (`oi_until == 0`)
-    /// LABELS NO BAR, EVEN ONE STAMPED AT OR BEFORE THE EPOCH.** Kills `> with
-    /// >=` in `oi_unadjusted`, which read `0` as "unscaled up to the epoch"
+    /// LABELS NO BAR, EVEN ONE STAMPED AT OR BEFORE THE EPOCH.** Kills
+    /// `> with >=` in `oi_unadjusted`, which read `0` as "unscaled up to the epoch"
     /// and labelled a January-1970 bar (the store's months start at
     /// 1970-01-01 00:00 IST, before the epoch).
     #[test]
