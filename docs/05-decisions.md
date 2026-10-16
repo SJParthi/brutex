@@ -69290,3 +69290,50 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 **Rejected.** A third format for bars (zstd-in-blocks): measured above.
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
+
+### D-4969 — R3-05: the operator's settings live in the store as append-only generations, settings format v1 — 2026-10-16
+
+**Decision.** The operator's window, the view `/db` opens on, the rows every
+picker always shows and the two source folders are kept in the store, in the
+format `docs/02-store-format.md` §41 defines, and served by `/settings.json`
+and saved by `POST /settings` (R3-05). Before, each was a literal in a crate
+or a page, or an environment value of the start script, so a change needed a
+rebuild or a restart and nothing recorded who made it or why. The locked
+choices:
+
+1. **The whole settings in every generation**, never a difference: the
+   generation in force is one read, and any one file is the complete answer
+   for its moment.
+2. **Text with a CRC-32C line** over every byte before it: readable by eye,
+   damage detected, and a file that fails the checksum or the grammar is a
+   named fault — the newest generation that reads stays in force, loudly,
+   and no default silently replaces it.
+3. **Published by hard link** from a temporary created by
+   `store::staging::create`: a hard link refuses an existing name, so of two
+   writers that read generation `n` exactly one lands `n + 1` and the other is
+   refused stale with nothing written. No file at a final name is ever torn,
+   rewritten or removed (`CLAUDE.md` §3 rule 8); the generations are the
+   audit.
+4. **Once the link succeeds, the save has landed and is answered saved**
+   (R3-05 repair 5, the second agent's blocking 1). A later generation another
+   writer landed between the link and the read-back is named beside the
+   success (`superseded_by`), and a read-back that faults is a warning on the
+   success. Before, both were answered `400 invalid saved:false`, and
+   `/audit` recorded a landed change as refused.
+5. **Ten keys and their checks**, each applied when a value is saved and again
+   when it is read back: `window.from`, `window.to` (a civil day, 1990 to
+   2100, `from` not after `to`), `open.feed`, `open.instrument`,
+   `open.segment`, `open.timeframe`, `open.order`, `always.shown` (at most 64
+   symbols, none twice), `source.gdfl`, `source.masters` (an absolute folder
+   that exists when saved). A new key is a new format version.
+6. **Environment values are the named fallback**, never a silent one: while
+   no generation sets `source.masters`, the start script's `BRUTEX_MASTERS`
+   answers it and the answer says so; every other unset key is answered by its
+   caller's default, also named.
+
+**Rejected.** A database or a single mutable settings file (a torn or
+half-written file at the one name a reader opens, and no history); a
+difference per generation (the newest needs every earlier file); a rename
+publish (`rename` replaces an existing name, so two racing writers would both
+"land" and one would vanish); answering a save from the read-back alone (a
+successor writer's generation made a landed save look refused).

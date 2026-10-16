@@ -17389,7 +17389,11 @@ span and the process aborted). REPAIR 4: a closed line for a day after today
 today, `imported_to` walks the journal newest first from today to the first
 closed row of the kind — O(rows between that row and today), once per
 request, and only while the journal names a future day, which an import
-never writes on its own. `ImportReach::not_imported` finds a day among the
+never writes on its own. REPAIR 5: `/feeds.json`'s `archive` journal evidence does the same
+for the last WRITTEN day (`feeds_route::written_at_or_before`): while that
+day is after today it walks the journal's rows newest first to the first
+written row at or before today, O(rows after that row), once per request,
+and only while the journal names a future day. `ImportReach::not_imported` finds a day among the
 open days by a bisection of at most 31 entries (gate 11 rule 1, allowlisted
 with that bound).
 

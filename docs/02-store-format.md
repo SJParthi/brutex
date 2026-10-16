@@ -4173,3 +4173,111 @@ rewritten. Every outcome is one line of the root's append-only
 `tickstore-write.log` naming the writer, the commit and the run. Invariants
 TSW-01 to TSW-17 in `docs/04-invariants.md`; limits L-TSW-1 to L-TSW-9 in
 `docs/06-limits.md`.
+
+## §41 — Settings generations, format v1 (D-4969)
+
+**What it holds.** The operator's settings (R3-05): the window, the view
+`/db` opens on, the rows every picker always shows and the two source
+folders. One file per generation; each file is the WHOLE settings at that
+generation, never a difference, so the generation in force is one read.
+`crates/store/src/settings.rs` writes and reads it; `/settings.json` serves
+it and `POST /settings` saves through it.
+
+**Path.**
+
+```text
+<store>/settings/v1/<generation>.settings
+```
+
+`<generation>` is the generation number, decimal, zero-padded to exactly 20
+digits (`00000000000000000001.settings` is the first; `u64::MAX` is the
+largest a name can spell). Any other name in the directory — a temporary
+included — is not a generation and no reader opens it.
+
+**Grammar.** UTF-8 text, LF line ends, one field per line, in this order and
+no other:
+
+| Line | Form | Rule |
+|---|---|---|
+| 1 | `brutex-settings 1` | the magic word and the format version; another version is a fault ("this build reads version 1 only") |
+| 2 | `generation <n>` | decimal `u64`; must equal the number the file's name spells |
+| 3 | `changed_at_micros <t>` | decimal `i64`, UNIX microseconds of the save |
+| 4 | `changed_by <text>` | who saved it: one line, 1 to 240 bytes, no control character |
+| 5 | `reason <text>` | why, in the saver's words: the same rule |
+| 6 | `changed <k>,<k>,…` | the keys whose value differs from the generation before, comma-separated, in key order; empty after the space when none |
+| 7 … | `set <key> <value>` | one line for each key this generation sets, in key order; a key it does not set has no line; a key set twice is a fault |
+| last | `crc32c <8 hex digits>` (written lowercase) | CRC-32C (Castagnoli) of every byte before this line, from the first byte of line 1 to the LF that ends the line before it |
+
+The ten keys, and the check every value passes when it is saved AND when it
+is read back (a value that fails, or is not written exactly as a save writes
+it, makes the file a fault):
+
+| Key | Value |
+|---|---|
+| `window.from`, `window.to` | a civil day `YYYY-MM-DD`, year 1990 to 2100, a real day of its month; with both set, `from` is not after `to` |
+| `open.feed` | a feed's wire word: 1 to 16 lowercase ASCII letters (the route also refuses a feed the server does not offer) |
+| `open.instrument` | a store symbol (`core::symbol::Symbol`) |
+| `open.segment` | `INDEX`, `CASH` or `FNO` |
+| `open.timeframe` | a store rung (`store::path::Timeframe::KNOWN`) or `finest` |
+| `open.order` | `newest` or `oldest` |
+| `always.shown` | 1 to 64 store symbols, comma-separated, none twice |
+| `source.gdfl`, `source.masters` | an absolute path of at most 1,024 bytes with no `..`; a save requires it to be a directory that exists, a read checks its shape only (a folder that moved since is the route's to report, not a damaged file) |
+
+A key no generation sets is answered by its named fallback: `source.masters`
+by the start script's `BRUTEX_MASTERS`, every other key by its caller's own
+default — and every answer says which.
+
+**Size.** A file larger than 64 KiB (`MAX_FILE_BYTES`, 65,536 bytes) is a
+fault; a reader takes at most that many bytes plus one even from a file that
+grows while it is read.
+
+**Publish rule.** A save of generation `n + 1`:
+
+1. lists the directory (a generation above the one the saver read refuses the
+   save as stale; a hole is named);
+2. writes the whole file to a temporary name in the same directory,
+   `.<n+1, 20 digits>.<pid>-<counter>-<nanos>.tmp`, created by
+   `store::staging::create` (never opening a name already there), and syncs
+   it;
+3. HARD-LINKS the temporary to the final name. A hard link refuses a name that
+   exists, so of two writers that both read generation `n` exactly one lands
+   `n + 1`; the other is refused stale with nothing written;
+4. removes the temporary name, then syncs the settings directory, its parent
+   and the store root (the first save creates the first two);
+5. reads back. **Once the link succeeded the save has landed and is answered
+   saved**, whatever the read-back finds: a later generation another writer
+   landed in the meantime is named beside the success (`superseded_by`), and a
+   read-back that faults or cannot look is a warning on the success, never a
+   refusal.
+
+A file at its final name is therefore never torn: a writer killed before the
+link leaves only a temporary no reader opens, one killed after it leaves a
+complete generation. A generation is never rewritten, renamed or removed;
+every earlier one stays on disk as the audit.
+
+**What a reader does.**
+
+- *A fault* — any file at a generation name that does not read: not a regular
+  file (a pipe, a link, a directory: named, never waited on), over the size
+  cap, not UTF-8, a failed checksum, a line out of the grammar, a value that
+  fails its check. The fault is named with its path and reason and the newest
+  generation that does read stays in force; the fault is never read as
+  settings and never silently replaced by a default. A reader keeps at most 16
+  faults, newest first, and reads each again on every refresh.
+- *A hole* — a number missing below the highest on disk (a file was removed,
+  or one was written past the next number). A listing names the missing
+  numbers; a reader that only steps `n + 1` cannot see past a hole until it
+  lists again (at its next save, or a restart) — `docs/06-limits.md`
+  L-R305-6. A save never lands in a hole.
+- *`u64::MAX`* — a generation at that name has no successor. A refresh steps
+  to it once and names the exhaustion; a save is refused `Io` with that reason
+  and writes nothing.
+
+**Cost.** A refresh after the first is one `lstat` of the next generation's
+name when nothing changed: O(1), independent of how many generations exist.
+The first refresh and every save list the directory, O(generations), a count
+that grows only when the operator saves (`docs/06-limits.md` L-R305-6).
+`?history=N` reads N files, N at most 50 (L-R305-1).
+
+**Version 1 is frozen** once it lands (`CLAUDE.md` §3 rule 8): a change to any
+line above is a `v2` directory beside this one, never a rewrite of `v1`.

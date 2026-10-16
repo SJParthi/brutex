@@ -1195,6 +1195,67 @@ fn not_after_today(evidence: Evidence, today: Option<i64>) -> Evidence {
     }
 }
 
+/// Where the journal's archive evidence is read, said on its row.
+const JOURNAL_SOURCE: &str = "the GDFL import journal: the first and last day an import wrote \
+                              bars on, from that day's delivered files";
+
+/// The import journal's evidence for `/feeds.json`'s archive: its written
+/// span bounded at today ([`written_at_or_before`]), or why it shows none.
+fn journal_evidence(root: &std::path::Path, today: Option<i64>) -> Evidence {
+    let journal_source = JOURNAL_SOURCE;
+    match crate::server::import_journal::snapshot(root) {
+        Ok(snapshot) => {
+            let written = journal_reach(root, &snapshot).written;
+            match written_at_or_before(&snapshot.parsed, written, today) {
+                Some(Ok((first, last, passed_over))) => Evidence {
+                    by: "journal",
+                    span: Ok(DaySpan {
+                        first: i64::from(first.days_from_epoch()),
+                        last: i64::from(last.days_from_epoch()),
+                    }),
+                    source: passed_over.map_or_else(
+                        || journal_source.to_owned(),
+                        |future| {
+                            format!(
+                                "{journal_source}, at or before today; a line that wrote bars \
+                                 on {future}, after today, is not evidence of a delivery and \
+                                 was passed over"
+                            )
+                        },
+                    ),
+                },
+                Some(Err(why)) => Evidence {
+                    by: "journal",
+                    span: Err(why),
+                    source: journal_source.to_owned(),
+                },
+                None => Evidence {
+                    by: "journal",
+                    span: Err(if snapshot.present {
+                        "the journal names no day an import wrote bars on".to_owned()
+                    } else {
+                        "no import has run against this store: the journal is absent".to_owned()
+                    }),
+                    source: journal_source.to_owned(),
+                },
+            }
+        }
+        Err(why) => Evidence {
+            by: "journal",
+            span: Err(format!("the GDFL import journal cannot be read: {why}")),
+            source: journal_source.to_owned(),
+        },
+    }
+}
+
+/// The first written day, the furthest written day at or before today, and
+/// the passed-over last day when it was after today.
+type WrittenSpan = (
+    pull::session::Day,
+    pull::session::Day,
+    Option<pull::session::Day>,
+);
+
 /// The import journal's written span (`JournalReach::written`) bounded at
 /// `today` (IST epoch days): the first written day and the FURTHEST WRITTEN
 /// DAY AT OR BEFORE TODAY, with the passed-over last day when it was after
@@ -1215,7 +1276,7 @@ fn written_at_or_before(
     parsed: &crate::server::import_journal::Parsed,
     written: Option<(pull::session::Day, pull::session::Day)>,
     today: Option<i64>,
-) -> Option<Result<(pull::session::Day, pull::session::Day, Option<pull::session::Day>), String>> {
+) -> Option<Result<WrittenSpan, String>> {
     let (first, last) = written?;
     let epoch = |day: pull::session::Day| i64::from(day.days_from_epoch());
     let Some(now) = today.filter(|&now| epoch(last) > now) else {
@@ -1310,51 +1371,7 @@ fn archive_json(
             source: "the store's census".to_owned(),
         },
     };
-    let journal_source = "the GDFL import journal: the first and last day an import wrote bars \
-                          on, from that day's delivered files";
-    let journal = match crate::server::import_journal::snapshot(root) {
-        Ok(snapshot) => {
-            let written = journal_reach(root, &snapshot).written;
-            match written_at_or_before(&snapshot.parsed, written, today) {
-                Some(Ok((first, last, passed_over))) => Evidence {
-                    by: "journal",
-                    span: Ok(DaySpan {
-                        first: i64::from(first.days_from_epoch()),
-                        last: i64::from(last.days_from_epoch()),
-                    }),
-                    source: passed_over.map_or_else(
-                        || journal_source.to_owned(),
-                        |future| {
-                            format!(
-                                "{journal_source}, at or before today; a line that wrote bars \
-                                 on {future}, after today, is not evidence of a delivery and \
-                                 was passed over"
-                            )
-                        },
-                    ),
-                },
-                Some(Err(why)) => Evidence {
-                    by: "journal",
-                    span: Err(why),
-                    source: journal_source.to_owned(),
-                },
-                None => Evidence {
-                    by: "journal",
-                    span: Err(if snapshot.present {
-                        "the journal names no day an import wrote bars on".to_owned()
-                    } else {
-                        "no import has run against this store: the journal is absent".to_owned()
-                    }),
-                    source: journal_source.to_owned(),
-                },
-            }
-        }
-        Err(why) => Evidence {
-            by: "journal",
-            span: Err(format!("the GDFL import journal cannot be read: {why}")),
-            source: journal_source.to_owned(),
-        },
-    };
+    let journal = journal_evidence(root, today);
     let journal = not_after_today(journal, today);
     let census = not_after_today(census, today);
     let all = [&descriptor, &journal, &census];

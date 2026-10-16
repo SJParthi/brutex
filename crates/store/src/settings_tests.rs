@@ -83,7 +83,8 @@ fn a_setting_round_trips_and_every_generation_is_kept() {
         ),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(first.number, 1);
     assert_eq!(first.changed, vec![Key::WindowFrom, Key::WindowTo]);
     let first_bytes = std::fs::read(path_of(&root, 1)).unwrap();
@@ -93,7 +94,8 @@ fn a_setting_round_trips_and_every_generation_is_kept() {
         &change(1, &[(Key::WindowTo, "2026-10-31")]),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(second.number, 2);
     assert_eq!(second.changed, vec![Key::WindowTo]);
     assert_eq!(second.settings.get(Key::WindowFrom), Some("2018-01-01"));
@@ -161,7 +163,8 @@ fn a_bad_path_is_refused_before_it_is_saved() {
         &change(0, &[(Key::SourceGdfl, &good)]),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(saved.settings.get(Key::SourceGdfl), Some(good.as_str()));
 }
 
@@ -391,7 +394,8 @@ fn a_damaged_generation_is_a_named_fault_and_never_read_as_settings() {
             &change(2, &[(Key::OpenOrder, "oldest")]),
             no_extra,
         )
-        .unwrap().generation;
+        .unwrap()
+        .generation;
         assert_eq!(saved.number, 3, "{what}");
     }
 
@@ -431,7 +435,8 @@ fn a_writer_killed_mid_write_leaves_nothing_a_reader_opens() {
         &change(0, &[(Key::OpenOrder, "newest")]),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(saved.number, 1);
 }
 
@@ -763,7 +768,9 @@ fn a_generation_name_that_is_not_a_regular_file_is_a_named_fault_never_a_wait() 
             assert!(listed[1].is_ok(), "{label}: {listed:?}");
             // A SAVE STEPS PAST THE ODD NAME, never stuck as stale at it,
             // and leaves it as it is.
-            let saved = save(reader, &change(2, &[(Key::OpenFeed, "gdfl")]), no_extra).unwrap().generation;
+            let saved = save(reader, &change(2, &[(Key::OpenFeed, "gdfl")]), no_extra)
+                .unwrap()
+                .generation;
             assert_eq!(saved.number, 3, "{label}");
             assert!(reader.last_cleared().is_none(), "{label}");
             assert!(
@@ -797,7 +804,8 @@ fn a_fault_is_reread_and_a_live_reader_agrees_with_a_fresh_one() {
         &change(2, &[(Key::OpenOrder, "oldest")]),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(saved.number, 3);
     let mut fresh = Reader::new(&below);
     fresh.refresh().unwrap();
@@ -987,7 +995,8 @@ fn a_hole_in_the_generation_numbers_is_named_and_a_save_never_lands_in_it() {
         &change(5, &[(Key::OpenOrder, "oldest")]),
         no_extra,
     )
-    .unwrap().generation;
+    .unwrap()
+    .generation;
     assert_eq!(saved.number, 6);
 }
 
@@ -1116,7 +1125,11 @@ fn under_a_real_successor_race_no_landed_save_is_answered_refused() {
                 std::hint::spin_loop();
             }
             let mut reader = Reader::new(&racer);
-            Some(save(&mut reader, &change_by(2, "B", "2026-11-30"), no_extra))
+            Some(save(
+                &mut reader,
+                &change_by(2, "B", "2026-11-30"),
+                no_extra,
+            ))
         });
         let mut reader = Reader::new(&root);
         reader.refresh().unwrap();
@@ -1124,12 +1137,20 @@ fn under_a_real_successor_race_no_landed_save_is_answered_refused() {
         let a = save(&mut reader, &change_by(1, "A", "2026-10-31"), no_extra);
         let b = b.join().unwrap().expect("generation 2 appeared");
         let on_disk = history(&root, 3, 3);
-        assert_eq!(on_disk[1].as_ref().unwrap().changed_by, "A", "trial {trial}");
+        assert_eq!(
+            on_disk[1].as_ref().unwrap().changed_by,
+            "A",
+            "trial {trial}"
+        );
         let a = a.unwrap_or_else(|why| panic!("trial {trial}: A landed and was refused: {why}"));
         assert_eq!(a.generation.number, 2, "trial {trial}");
         let b = b.unwrap_or_else(|why| panic!("trial {trial}: B landed and was refused: {why}"));
         assert_eq!(b.generation.number, 3, "trial {trial}");
-        assert_eq!(on_disk[0].as_ref().unwrap().changed_by, "B", "trial {trial}");
+        assert_eq!(
+            on_disk[0].as_ref().unwrap().changed_by,
+            "B",
+            "trial {trial}"
+        );
         // A's answer is in force or superseded by B's, never neither.
         assert!(
             a.superseded_by == Some(3) || a.in_force == Some(2),

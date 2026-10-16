@@ -746,7 +746,7 @@ fn a_landed_save_superseded_or_unread_is_answered_saved_never_refused() {
             read_back: None,
         },
         1,
-        Vec::new(),
+        &[],
         None,
     );
     assert_eq!(superseded["saved"], true, "{superseded}");
@@ -768,7 +768,7 @@ fn a_landed_save_superseded_or_unread_is_answered_saved_never_refused() {
             read_back: Some("saved as X, and it did not read back".to_owned()),
         },
         1,
-        vec![serde_json::json!({"generation": 9, "path": "p", "why": "w"})],
+        &[serde_json::json!({"generation": 9, "path": "p", "why": "w"})],
         None,
     );
     assert_eq!(unread["saved"], true, "{unread}");
@@ -797,7 +797,7 @@ fn a_landed_save_superseded_or_unread_is_answered_saved_never_refused() {
             read_back: None,
         },
         0,
-        Vec::new(),
+        &[],
         None,
     );
     assert!(clean["warning"].is_null(), "{clean}");
@@ -844,7 +844,10 @@ fn under_a_successor_race_a_landed_post_is_answered_saved() {
         assert!(second.contains("changed_by A\n"), "trial {trial}: {second}");
         assert_eq!(status, StatusCode::OK, "trial {trial}: {answer}");
         assert_eq!(answer["saved"], true, "trial {trial}: {answer}");
-        assert_eq!(answer["generation"]["generation"], 2, "trial {trial}: {answer}");
+        assert_eq!(
+            answer["generation"]["generation"], 2,
+            "trial {trial}: {answer}"
+        );
         assert_eq!(b_status, StatusCode::OK, "trial {trial}: {b_answer}");
         assert_eq!(b_answer["generation"]["generation"], 3, "trial {trial}");
     }

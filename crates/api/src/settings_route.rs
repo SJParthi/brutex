@@ -798,7 +798,7 @@ fn parse_change(body: &str) -> Result<Change, String> {
 fn saved_answer(
     saved: &settings::Saved,
     built_on: u64,
-    over_faults: Vec<serde_json::Value>,
+    over_faults: &[serde_json::Value],
     cleared: Option<(&Path, u64)>,
 ) -> serde_json::Value {
     let generation = &saved.generation;
@@ -882,7 +882,7 @@ pub fn change(root: &Path, body: &str) -> (StatusCode, serde_json::Value) {
         match settings::save(reader, &parsed, |result| server_check(result, &parsed)) {
             Ok(saved) => (
                 StatusCode::OK,
-                saved_answer(&saved, built_on, over_faults, reader.last_cleared()),
+                saved_answer(&saved, built_on, &over_faults, reader.last_cleared()),
             ),
             Err(refusal) => {
                 let (status, code, key) = match &refusal {

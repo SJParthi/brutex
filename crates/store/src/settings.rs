@@ -1014,12 +1014,17 @@ pub fn history(root: &Path, from: u64, limit: usize) -> Vec<Result<Generation, F
 
 // -- saving ------------------------------------------------------------------
 
+/// A test's step between a save's hard link and its read-back: it is handed
+/// the store root and the generation number just linked.
+#[cfg(test)]
+pub(crate) type AfterLink = Box<dyn FnOnce(&Path, u64)>;
+
 #[cfg(test)]
 thread_local! {
     /// A test's step between a save's hard link and its read-back, run once
     /// and only on the thread that set it: the window in which another
     /// writer can land the next generation, made deterministic.
-    pub(crate) static AFTER_LINK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path, u64)>>> =
+    pub(crate) static AFTER_LINK: std::cell::RefCell<Option<AfterLink>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1243,6 +1248,25 @@ pub fn save(
         }
         Err(why) => return Err(io_refusal(&target, &why)),
     }
+    Ok(landed(
+        reader,
+        &dir,
+        Generation {
+            number,
+            settings: after,
+            changed_at_micros: change.at_micros,
+            changed_by: change.changed_by.clone(),
+            reason: change.reason.clone(),
+            changed,
+            path: target,
+        },
+    ))
+}
+
+/// The answer to a save whose hard link SUCCEEDED: `generation` is on disk,
+/// built here from the bytes the save wrote, and the answer is [`Saved`]
+/// whatever the read-back finds.
+fn landed(reader: &mut Reader, dir: &Path, generation: Generation) -> Saved {
     // THE NEW NAME IS DURABLE ONLY WHEN EVERY DIRECTORY ON ITS PATH IS:
     // `create_dir_all` may have made `settings/` and `settings/v<N>/` on the
     // first save, and their own entries live in their parents. Each of the
@@ -1251,7 +1275,7 @@ pub fn save(
     // synced, so a crash could lose the whole directory a save reported).
     // A sync the host refuses is tidiness lost, never the save: the
     // generation's own bytes were synced before it was linked.
-    for synced in [Some(dir.as_path()), dir.parent(), Some(reader.root())]
+    for synced in [Some(dir), dir.parent(), Some(reader.root())]
         .into_iter()
         .flatten()
     {
@@ -1259,6 +1283,7 @@ pub fn save(
             let _ = handle.sync_all();
         }
     }
+    let number = generation.number;
     #[cfg(test)]
     if let Some(step) = AFTER_LINK.with(|slot| slot.borrow_mut().take()) {
         step(reader.root(), number);
@@ -1273,15 +1298,8 @@ pub fn save(
     // `Invalid` "the reader did not take it" — 100 of 100 trials on the
     // operator's volume. The generation answered is built from the bytes this
     // save wrote, never from what a later read happens to find.
-    let generation = Arc::new(Generation {
-        number,
-        settings: after,
-        changed_at_micros: change.at_micros,
-        changed_by: change.changed_by.clone(),
-        reason: change.reason.clone(),
-        changed,
-        path: target.clone(),
-    });
+    let generation = Arc::new(generation);
+    let target = &generation.path;
     let mut read_back = reader.refresh().err().map(|fault| {
         format!(
             "saved as {}; the reader could not look for it afterwards ({}): {}",
@@ -1293,23 +1311,24 @@ pub fn save(
     let in_force = reader.newest().map(|newest| newest.number);
     let superseded_by = in_force.filter(|&newest| newest > number);
     if read_back.is_none() && in_force.is_none_or(|newest| newest < number) {
+        // WHY IT DID NOT READ is this generation's own file read once more,
+        // never a search of the reader's fault list: one read, O(1).
+        let why = match read_one(reader.root(), number) {
+            Err(fault) => fault.why,
+            Ok(_) => "it reads when read again, and the refresh did not step to it".to_owned(),
+        };
         read_back = Some(format!(
-            "saved as {}, and it did not read back, so the generation in force is {}: {}",
+            "saved as {}, and it did not read back, so the generation in force is {}: {why}",
             target.display(),
             in_force.map_or_else(|| "none".to_owned(), |newest| newest.to_string()),
-            reader
-                .faults()
-                .iter()
-                .find(|fault| fault.generation == number)
-                .map_or("no fault was recorded for it", |fault| fault.why.as_str())
         ));
     }
-    Ok(Saved {
+    Saved {
         generation,
         in_force,
         superseded_by,
         read_back,
-    })
+    }
 }
 
 #[cfg(test)]
