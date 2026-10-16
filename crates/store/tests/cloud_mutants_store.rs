@@ -481,3 +481,261 @@ fn the_rebuild_door_names_each_way_an_index_fails_its_month() {
     let _ignored = fs::remove_dir_all(&root);
     let _ignored = fs::remove_dir_all(&other);
 }
+
+/// **A SMALL MONTH'S MISSING TIME INDEX IS SAID AS THE RULE, NOT AS DAMAGE.**
+///
+/// Covers `time_index::Why::BelowThreshold`'s text: the reason a reader
+/// prints for a month under `INDEX_MIN_ROWS` bars names the threshold, the
+/// rule and its bound, so an operator does not take it for a lost `.tix`.
+#[test]
+fn a_small_months_missing_time_index_is_said_as_the_rule() {
+    assert_eq!(store::time_index::INDEX_MIN_ROWS, 1_024);
+    assert_eq!(
+        store::time_index::Why::BelowThreshold.to_string(),
+        "the month holds fewer than 1024 bars, so by the small-month rule it keeps no .tix \
+         time index and a lookup bisects in at most ten bar reads (D-4933)"
+    );
+}
+
+/// **EVERY VERDICT REFUSAL HAS ITS WORD, ITS EXACT SENTENCE, AND ITS CAUSE
+/// ONLY WHEN IT HAS ONE.**
+///
+/// The verdict store's refusals are what an operator reads in a `store.verdict`
+/// event and on the CLI; each variant's word and text is pinned here,
+/// exactly, with the variables it names. `source` is the host's error for
+/// `io` and the staging refusal for a staging word, and nothing for the
+/// rest.
+#[test]
+fn every_verdict_refusal_has_its_word_its_sentence_and_its_cause() {
+    use std::error::Error as _;
+    use store::verdict::VerdictError as V;
+    let p = || PathBuf::from("/nonexistent/cloud/2031.vdi");
+    let image = PathBuf::from("/nonexistent/cloud/2031-03-04.g0000000002.vdt");
+    let table: Vec<(V, &str, String)> =
+        vec![
+        (
+            V::KeyTooLong { len: 65 },
+            "key_too_long",
+            "key_too_long: an instrument key of 65 bytes does not fit the 64-byte key field, \
+             and a key is never cut"
+                .to_owned(),
+        ),
+        (
+            V::KeyInvalid,
+            "key_invalid",
+            "key_invalid: a key is empty or holds a NUL byte".to_owned(),
+        ),
+        (
+            V::DuplicateKey {
+                key: "ZZCLOUD".to_owned(),
+            },
+            "duplicate_key",
+            "duplicate_key: one generation names ZZCLOUD twice".to_owned(),
+        ),
+        (
+            V::TableTooLarge { records: 9 },
+            "table_too_large",
+            "table_too_large: no table of at most 1048576 slots holds 9 keys within 8 slots of \
+             home with no repeated tag (format version 1's record ceiling); nothing was written \
+             and the day's verdict is pending"
+                .to_owned(),
+        ),
+        (
+            V::RunIdOverflow { run: 1 << 33 },
+            "run_id_overflow",
+            "run_id_overflow: run id 8589934592 does not fit a record's u32 run field".to_owned(),
+        ),
+        (
+            V::GenerationCollision { path: image.clone() },
+            "generation_collision",
+            "generation_collision: 16 generations up to \
+             /nonexistent/cloud/2031-03-04.g0000000002.vdt were all already linked; none is \
+             overwritten"
+                .to_owned(),
+        ),
+        (
+            V::FlagUnknown { bits: 0x300 },
+            "flag_unknown",
+            "flag_unknown: flag bits 0x300 are not named by format version 1, and a writer \
+             never writes a fact it cannot name"
+                .to_owned(),
+        ),
+        (
+            V::DetailInvalid { kind: 0, len: 3 },
+            "detail_invalid",
+            "detail_invalid: a detail of kind 0 and 3 bytes (kind 0 is unset; a payload holds at \
+             most 65535 bytes)"
+                .to_owned(),
+        ),
+        (
+            V::DayOutOfRange {
+                day: store::provenance::Day::new(1969, 12, 31).unwrap(),
+            },
+            "day_out_of_range",
+            "day_out_of_range: 1969-12-31 is before 1970-01-01, which a day field cannot hold"
+                .to_owned(),
+        ),
+        (
+            V::FeedUnknown { feed: "cloudfeed" },
+            "feed_unknown",
+            "feed_unknown: vendor cloudfeed is not in the store's vendor table".to_owned(),
+        ),
+        (
+            V::LockStalled {
+                path: p(),
+                waited_ms: 30_000,
+                tries: 3_001,
+            },
+            "lock_stalled",
+            "lock_stalled: /nonexistent/cloud/2031.vdi stayed held through 3001 tries over 30000 \
+             ms; the commit was not made"
+                .to_owned(),
+        ),
+        (
+            V::Unknown {
+                path: p(),
+                what: "codec",
+                value: 7,
+            },
+            "written_by_newer_build",
+            "written_by_newer_build: /nonexistent/cloud/2031.vdi holds codec 7, which this build \
+             does not know"
+                .to_owned(),
+        ),
+        (
+            V::IndexShort { path: p(), len: 9 },
+            "index_short",
+            "index_short: /nonexistent/cloud/2031.vdi is 9 bytes, shorter than the 32768 a year \
+             index is born with"
+                .to_owned(),
+        ),
+        (
+            V::IndexUnreadable { path: p() },
+            "index_unreadable",
+            "index_unreadable: neither slot of /nonexistent/cloud/2031.vdi is a valid year-index \
+             slot"
+                .to_owned(),
+        ),
+        (
+            V::IndexMissing {
+                path: p(),
+                image: Some(image.clone()),
+                seen: 2,
+            },
+            "index_missing",
+            "index_missing: /nonexistent/cloud/2031.vdi is absent, but \
+             /nonexistent/cloud/2031-03-04.g0000000002.vdt is a day image of its year (2 name(s) \
+             looked at); the year is not born again empty over it"
+                .to_owned(),
+        ),
+        (
+            V::IndexMissing {
+                path: p(),
+                image: None,
+                seen: 1_024,
+            },
+            "index_missing",
+            "index_missing: /nonexistent/cloud/2031.vdi is absent and its year directory holds \
+             1024 or more names, none of the first 1024 a day image; no image could be ruled \
+             out, so the year is not born again"
+                .to_owned(),
+        ),
+        (
+            V::OrdinalPastRecords {
+                path: image.clone(),
+                ordinal: 5,
+                records: 2,
+            },
+            "ordinal_past_records",
+            "ordinal_past_records: record 5 was asked of \
+             /nonexistent/cloud/2031-03-04.g0000000002.vdt, which holds 2 record(s)"
+                .to_owned(),
+        ),
+        (
+            V::ImageMissing {
+                path: image.clone(),
+            },
+            "image_missing",
+            "image_missing: the year index commits \
+             /nonexistent/cloud/2031-03-04.g0000000002.vdt, which does not exist"
+                .to_owned(),
+        ),
+        (
+            V::ImageCorrupt {
+                path: image.clone(),
+                why: "the header's magic".to_owned(),
+            },
+            "image_corrupt",
+            "image_corrupt: /nonexistent/cloud/2031-03-04.g0000000002.vdt: the header's magic"
+                .to_owned(),
+        ),
+        (
+            V::TrailerMismatch {
+                path: image.clone(),
+            },
+            "trailer_mismatch",
+            "trailer_mismatch: /nonexistent/cloud/2031-03-04.g0000000002.vdt does not hash to \
+             its BLAKE3 trailer; a byte changed after it was linked"
+                .to_owned(),
+        ),
+        (
+            V::RecordCorrupt {
+                path: image.clone(),
+                ordinal: 4,
+            },
+            "record_corrupt",
+            "record_corrupt: record 4 of /nonexistent/cloud/2031-03-04.g0000000002.vdt fails its \
+             CRC-32C"
+                .to_owned(),
+        ),
+        (
+            V::Symlinked { path: p() },
+            "symlinked",
+            "symlinked: /nonexistent/cloud/2031.vdi is a symbolic link, which the verdict store \
+             never follows"
+                .to_owned(),
+        ),
+        (
+            V::NotRegular {
+                path: p(),
+                found: store::safe_open::Found::Pipe,
+            },
+            "not_regular",
+            "not_regular (pipe): /nonexistent/cloud/2031.vdi is a pipe (FIFO), not a regular \
+             file; the verdict store reads and writes nothing else, and nothing waited on it"
+                .to_owned(),
+        ),
+    ];
+    for (refusal, word, text) in &table {
+        assert_eq!(refusal.word(), *word, "{refusal:?}");
+        assert_eq!(&refusal.to_string(), text, "{refusal:?}");
+        assert!(refusal.source().is_none(), "{refusal:?}");
+    }
+    let io = V::Io {
+        path: p(),
+        action: "read",
+        source: std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+    };
+    assert_eq!(io.word(), "io");
+    assert_eq!(
+        io.to_string(),
+        "io: read /nonexistent/cloud/2031.vdi: unexpected end of file"
+    );
+    assert_eq!(
+        io.source().map(ToString::to_string).as_deref(),
+        Some("unexpected end of file")
+    );
+    let staging = V::Staging(store::staging::StagingError::Contended {
+        path: PathBuf::from("/nonexistent/cloud/2031.vdi.1-1.tmp"),
+    });
+    assert_eq!(staging.word(), "staging_contended");
+    assert_eq!(
+        staging.to_string(),
+        "staging_contended: /nonexistent/cloud/2031.vdi.1-1.tmp existed again after it was \
+         cleared; another writer is using the name"
+    );
+    assert_eq!(
+        staging.source().map(ToString::to_string),
+        Some(staging.to_string())
+    );
+}
