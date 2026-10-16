@@ -3250,8 +3250,9 @@ mod cloud_mutant_tests {
     /// and highest values. Pages at the start, the middle and the end are
     /// the brute force, and the report names its column. Kills `page_once`'s
     /// `delete field max` on a cut run's `ColumnInfo` (it made `0` the top of
-    /// the domain, which leaves out every value above the lowest) and
-    /// `delete field column` on the report.
+    /// the domain, which leaves out every value above the lowest),
+    /// `delete field column` on the report, and the cut arm's
+    /// `indexed_runs += 1` → `*=` (a cut run then counted as no run used).
     #[test]
     fn a_page_from_cut_runs_alone_is_the_brute_force() {
         let root = scratch("cut-runs-alone");
@@ -3284,9 +3285,14 @@ mod cloud_mutant_tests {
                 let report = got.sort_index.expect("a value sort says what it used");
                 assert_eq!(report.column, Column::Close.as_str());
                 assert_eq!(
-                    (report.cut_runs, report.indexed_rows, report.scanned_rows),
-                    (2, 120, 0),
-                    "every kept row is ordered from the two cut runs"
+                    (
+                        report.cut_runs,
+                        report.indexed_runs,
+                        report.indexed_rows,
+                        report.scanned_rows
+                    ),
+                    (2, 2, 120, 0),
+                    "every kept row is ordered from the two cut runs, and each is an index run used"
                 );
             }
         }
