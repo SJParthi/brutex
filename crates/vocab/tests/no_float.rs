@@ -29,9 +29,10 @@ use std::collections::BTreeSet;
 
 /// Every source file in the crate, by hand because `include_str!` takes a
 /// literal, and closed against `lib.rs` and the directory below.
-const SOURCES: [(&str, &str); 8] = [
+const SOURCES: [(&str, &str); 9] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("error.rs", include_str!("../src/error.rs")),
+    ("fib_cube.rs", include_str!("../src/fib_cube.rs")),
     ("expression.rs", include_str!("../src/expression.rs")),
     (
         "expression_search.rs",

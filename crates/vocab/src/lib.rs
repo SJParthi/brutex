@@ -15,6 +15,7 @@
 //! | [`error`] | every refusal the table and tolerance can produce |
 //! | [`expression`] | versioned AND/OR/NOT programs over live positions, with unknown kept distinct |
 //! | [`expression_search`] | the resumable, checkpointed enumeration of that grammar |
+//! | [`fib_cube`] | the FIB cube schema v1 (24 rows, 90 values): a namespace separate from the condition table (D-5301) |
 //! | [`implication`] | which positions restate or exclude another, exactly |
 //!
 //! # The three rules this crate exists to keep
@@ -48,6 +49,8 @@ pub mod error;
 pub mod expression;
 /// Resumable exhaustive enumeration of the fixed expression wire language.
 pub mod expression_search;
+/// The FIB cube schema v1: a separate namespace, never the condition table.
+pub mod fib_cube;
 /// Which condition positions say something another position already said.
 pub mod implication;
 pub mod mask;
@@ -146,7 +149,7 @@ mod tests {
             .filter_map(|line| line.strip_prefix("pub mod "))
             .map(|rest| rest.trim_end_matches(';'))
             .collect();
-        assert_eq!(modules.len(), 7, "{modules:?}");
+        assert_eq!(modules.len(), 8, "{modules:?}");
         for module in modules {
             assert!(
                 header.contains(&format!("| [`{module}`] |")),
