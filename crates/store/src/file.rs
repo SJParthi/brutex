@@ -7135,6 +7135,29 @@ mod tests {
         );
     }
 
+    /// THE KERNEL'S OWN `ENOSPC`, not a scripted host's. `/dev/full` answers
+    /// every write with `ENOSPC`, so this is the one full disk a test can
+    /// produce without privileged mounting, and it measures what the test
+    /// above can only assume: that the real error kind reaches `classify` as
+    /// `StorageFull` and leaves as `DiskFull` by name, returned and never
+    /// signalled (cloud-attack-law-20261016, lens 8).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernels_own_enospc_from_dev_full_is_disk_full_by_name() {
+        let at = Path::new("/dev/full");
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open(at)
+            .expect("Linux has /dev/full");
+        assert_eq!(
+            write_fully(&full, at, 0, &[0xAB; 4_096]),
+            Err(StoreError::DiskFull {
+                path: at.to_path_buf(),
+                action: Action::Write,
+            })
+        );
+    }
+
     #[test]
     fn an_empty_write_touches_the_host_at_all() {
         let host = Script::new(&[]);
