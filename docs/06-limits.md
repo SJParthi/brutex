@@ -11934,6 +11934,35 @@ would close this.
   that sweep is still running. The log cannot say, so this is the refusal, not
   a defect; it is reached when more than 4 MiB of other records followed the
   newest sweep's marker.
+- **The 4 MiB walk now runs only when the CLI log changed (AF-06, D-4966).**
+  `/backtest/run.json` remembers the last walk's evidence under the stamp of
+  every file in the log's set: device, inode, length, modification and change
+  time, eight `stat`s. An unchanged log is judged again at the poll's own
+  `now` without a read, and the answer's `cli_log.answered_from` says
+  `memory`. A grown, rolled, truncated or replaced log is walked again under
+  the same cap, so a miss still costs up to `SCAN_BYTES`, the handler time
+  measured beside the invocation journal's own entry below. Two bounds are
+  stated rather than closed. First, a
+  same-length rewrite in place landing on the same modification and change
+  time to the nanosecond would be served from memory. The CLI log is
+  append-only and rolls by rename, so it never does this. `REWALK_AFTER`
+  re-walks an unchanged log every 5 minutes on the monotonic clock, which
+  caps such a miss at 5 minutes and costs at most 12 walks an hour per
+  process. Second, the memory holds one directory's walk, so two stores'
+  polls alternating would walk every time. This process serves one store.
+  Launch admission (`claim_execution`) still walks afresh on purpose.
+  Polls that miss at the same moment make one walk, not one each: a miss
+  takes a walk gate and looks at the memory again under a fresh stamp before
+  it walks, so the polls queued behind the first walk are answered from it,
+  and a poll that hits memory never takes the gate
+  (`concurrent_polls_after_a_change_make_one_walk`: eight polls that all
+  missed, one walk, seven answers from memory). A missing poll waits for at
+  most the walks queued ahead of it, each capped at `SCAN_BYTES`.
+  Measured on 15 Oct 2026 by the method in the invocation journal's entry
+  below: a poll answered
+  from memory has a handler p50 of 0.26 ms, p99 5.73 ms and max 8.80 ms
+  (n = 200). A walk, cold or after `REWALK_AFTER`, still took 47.52 to
+  71.68 ms. Those were 3 of the 223 polls that shadow server answered.
 - **Admission latency is unchanged; who waits for it changed.** Admission
   still does file-system work with no constant bound (canonicalization, the
   lease, a log walk of up to 8 MiB, launch preparation, an audit `begin` with
@@ -12227,6 +12256,101 @@ rule 6); every bound is read from the source.
   load rather than later. Before D-1445 the terminal was refused, the dropped
   attempt wrote `Cancelled` with status 0 synchronously on a Tokio worker, and
   the handler's real answer was replaced by a 503.
+- **Timed for the first time (AF-06, D-4966, 15 Oct 2026), and still NOT
+  DONE.** Measured on two private shadows of the real store, back to back,
+  release builds, load average 34 to 67 on the shared Mac. One shadow ran
+  the build before AF-06, whose answer has no `cli_log` member; the other
+  ran the AF-06 build. Each route got n = 200 sequential GETs with `curl`.
+  Each request was joined to its own journal file by the
+  `x-brutex-request-audit` header. The handler time is the terminal's
+  `elapsed_micros`; the rest is client time minus handler time, which is the
+  journal's begin and terminal syncs plus HTTP. Percentiles are
+  nearest-rank, in ms:
+
+  | Route | Build | client p50 / p99 / max | handler p50 / p99 / max | journal + HTTP p50 / p99 / max |
+  |---|---|---|---|---|
+  | `/backtest/run.json` | before | 48.23 / 105.01 / 141.58 | 16.51 / 34.51 / 45.25 | 30.78 / 77.81 / 112.63 |
+  | `/backtest/run.json` | AF-06 | 66.09 / 128.39 / 182.46 | 0.26 / 5.73 / 8.80 | 64.88 / 127.64 / 182.22 |
+  | `/live.json` | before | 28.93 / 71.83 / 112.62 | 0.11 / 6.07 / 17.39 | 28.17 / 71.69 / 95.23 |
+  | `/live.json` | AF-06 | 63.74 / 149.81 / 284.12 | 0.13 / 4.20 / 5.98 | 63.12 / 147.34 / 283.96 |
+  | `/backtest.json` | before | 31.83 / 85.00 / 99.82 | 0.09 / 3.60 / 7.61 | 31.63 / 77.38 / 99.56 |
+  | `/backtest.json` | AF-06 | 51.52 / 111.73 / 151.72 | 0.09 / 0.74 / 1.40 | 51.30 / 111.62 / 151.64 |
+  | `/backtest/run.json` | AF-06 r1 | 7.98 / 18.17 / 30.96 | 0.20 / 0.58 / 1.77 | 7.78 / 17.92 / 29.18 |
+  | `/live.json` | AF-06 r1 | 7.95 / 20.95 / 35.18 | 0.09 / 1.10 / 3.36 | 7.86 / 20.88 / 35.10 |
+  | `/backtest.json` | AF-06 r1 | 7.91 / 14.42 / 23.09 | 0.06 / 0.35 / 0.48 | 7.84 / 14.35 / 22.61 |
+
+  AF-06 changed only the `/backtest/run.json` handler: p50 16.51 to 0.26 ms
+  and p99 34.51 to 5.73 ms. The client time did not fall. The journal part
+  was slower in the second window, when the api test suite was compiling on
+  the same machine, and AF-06 does not touch the journal. On these three
+  routes the journal is now nearly the whole cost of a poll. The AF-06 r1
+  rows were taken later the same day (load average 50) on a fresh shadow
+  over feat/db-fix 023d6ab8 with the r1 build (single-flight walk gate in
+  place): the memory path stays under a millisecond at p99, and the journal
+  part was about 8 ms at p50 in that window. The journal's own time moves
+  with the machine's load and the journal's code, which AF-06 does not
+  change.
+
+  **Still NOT DONE, owner R3-14:** taking these three polled read-only GETs
+  out of the per-request journal. It needs `operation_audit.rs`'s `AUDITED`
+  array, which R3-05 is editing, and R3-14's per-route minute line. Until
+  then the journal part above is the floor of every poll. AF-06 lowers how
+  many polls one open `/backtest` tab makes. Two headless Chrome tabs were
+  opened on `/backtest`, one per shadow, over the same 720 s (01:23:31Z to
+  01:35:31Z). The status was `unknown` throughout. Journal files added:
+
+  | Build | Journal files | `/backtest/run.json` among them | Rate |
+  |---|---|---|---|
+  | before | 354 | 352, every 2.0 to 2.3 s | 1,770 an hour, for as long as the tab is open |
+  | AF-06 | 12 | 10, at 0, 2, 6, 14, 30, 62, 122, 182, 242 and 302 s, then stopped | 12 per page load, none after 302 s |
+
+  The other two files on each side are the page's one-time `/backtest.json`
+  and `/engine/boolean-launch.json`. After the tenth unchanged `unknown`, the
+  AF-06 page shows the server's reason and a Refresh control. The status was
+  `unknown` for the whole window, so the AF-06 r1 repair (2 s kept while a
+  sweep is in flight, a flipping lease still counted towards the stop) does
+  not change these rows; while a sweep runs, a tab polls every 2 s exactly as
+  the before build did. Chrome's
+  `--dump-dom` with `--virtual-time-budget=420000` shows that note
+  (`data-status-poll="stopped"`).
+
+  **Re-measured on 16 Oct 2026 with the final AF-06 build** (its server
+  code is the r1 repair's; only the page and these ledgers changed after
+  it) against the before build of the r1 report, which has no AF-06 code.
+  Each ran on its own fresh private shadow of the real store, at load
+  average 94 to 120 on the shared Mac. The method is the one above: n = 200
+  sequential GETs per route, each joined to its journal record by
+  `x-brutex-request-audit` and read back through `/backtest/audit.json`
+  pages, nearest-rank, in ms, 0 unjoined, every answer 200:
+
+  | Route | Build | client p50 / p99 / max | handler p50 / p99 / max | journal + HTTP p50 / p99 / max |
+  |---|---|---|---|---|
+  | `/backtest/run.json` | before | 38.26 / 72.09 / 102.95 | 18.16 / 35.56 / 61.45 | 19.98 / 41.50 / 51.65 |
+  | `/backtest/run.json` | AF-06 | 14.49 / 50.18 / 69.99 | 0.15 / 4.21 / 47.65 | 14.27 / 32.48 / 48.69 |
+  | `/live.json` | before | 15.47 / 30.23 / 36.46 | 0.10 / 2.99 / 4.23 | 15.40 / 28.84 / 33.47 |
+  | `/live.json` | AF-06 | 16.00 / 42.92 / 47.96 | 0.11 / 2.88 / 3.69 | 15.84 / 41.89 / 47.62 |
+  | `/backtest.json` | before | 10.42 / 36.71 / 58.27 | 0.06 / 0.34 / 0.56 | 10.21 / 36.63 / 57.96 |
+  | `/backtest.json` | AF-06 | 14.41 / 20.39 / 31.78 | 0.07 / 0.66 / 2.74 | 14.34 / 19.94 / 29.12 |
+
+  The AF-06 `/backtest/run.json` max is the one walk in that window:
+  `REWALK_AFTER` had passed, and `cli_log.walks` went from 3 to 4 while the
+  other polls were answered from memory. One headless Chrome tab per shadow
+  stayed on `/backtest` for 600 s, with the status `unknown` throughout.
+  Before: 291 journal files, 289 of them `/backtest/run.json`, about every
+  2.07 s (1,734 an hour). AF-06: 11 files, 9 of them `/backtest/run.json`
+  at 9.6, 13.7, 21.7, 37.8, 69.9, 129.9, 189.9, 250.0 and 310.0 s after the
+  tab opened, then none.
+
+  The page's first status read at load is missing from both journals, and
+  that comes from this journal, not from AF-06. The page sends
+  `/backtest.json`, `/backtest/run.json` and `/engine/boolean-launch.json`
+  at once on load. Sent at once 15 times on the AF-06 shadow, 11 of those
+  45 GETs were answered 429 with `invocation audit busy: another operation
+  holds the journal lock`, 3 of them `/backtest/run.json`. The page takes a
+  refused read as an `unknown` answer and counts it towards the stop. So a
+  tab whose first read was refused stops after 9 journaled reads, not 10.
+  This refusal is R3-14's and R3-05's to remove with the rest of the
+  per-request journal on polled reads.
 
 ## The store admits a bar by month and grid, not by session — D-0915, 2 October 2026
 
@@ -15821,6 +15945,44 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a run would need the attempt's origin, which the handler does not receive.
 - **Not timed.** No bench measures a log walk. The 4 MiB per half is the
   configured cap, not a measurement, and the time it takes is UNVERIFIED.
+- **The backtest page's 2-second poll is no longer a fixed 2 s for ever
+  (AF-06, D-4966).** `web/src/lib/status-poll.js` keeps the page's own 2 s
+  while a sweep is in flight, makes the next check 2 s after any change of
+  answer, doubles the wait to 60 s while a settled, idle or `unknown` answer
+  is unchanged, sends nothing while the tab is hidden, and stops after 10
+  `unknown` answers in a row (a lease that flips between them still counts)
+  with the reason and a Refresh control. That stop is shown on the page
+  only. **NOT DONE, owner R3-14:** nothing on the server records that a tab
+  stopped asking, because a stop is the absence of a request and the api
+  has no route for a page's own events; R3-14's per-route minute line would
+  show it as the route's count falling to zero. The `/backtest/run.json` CLI-log
+  walk it triggers is now remembered while the log is unchanged (D-0954,
+  above). The `/logs.json` walk the page makes while a sweep runs
+  (`fetchLive`) is NOT remembered and is still O(file) per call. It runs
+  only while a sweep is `running`, every 2 s, as it did before AF-06: the
+  rung progress, the best rows so far and the finish are read on that tick,
+  and a browser sweep's status body does not change until the run ends, so
+  backing off there made the live view and the finish up to 60 s old (the
+  AF-06 r1 blocking finding, repaired). Its cost is bounded by the run: a
+  browser sweep ends with its task, and a CLI sweep silent for
+  `STALE_AFTER_MILLIS` (15 min) is answered `unknown`, which backs off and
+  stops. Measured on the AF-06 shadow on 15 Oct 2026 with one headless
+  Chrome tab on `/backtest` while a CLI sweep ran (a `command started`
+  marker appended to the shadow's cloned CLI log, its `command finished`
+  appended 70 s later): `/backtest/run.json` was asked 34 times, every 2.0
+  to 2.1 s, and `/live.json` 32 times; the first check after the finish came
+  0.48 s after it, and the page stopped asking at 72.5 s, because it does not
+  re-poll a finished run. The helper before this repair, given the same
+  constant answer, asks at 0, 2, 6, 14, 30, 62 and 122 s (the node probe in
+  the AF-06 r1 report), so that finish would have been seen about 52 s late.
+  The price is the old one: 66 journal files in those 70 s, about 3,400 an
+  hour per open tab while a CLI sweep runs (a browser sweep adds one
+  `/logs.json` per tick); taking them out of the journal is R3-14's
+  (D-1445, below).
+  The first timing of a CLI-log walk on the real log is under D-1445: the
+  `/backtest/run.json` handler, which is that walk plus a constant, had p50
+  16.51 ms and p99 34.51 ms before AF-06 (n = 200). Answered from memory,
+  it had p50 0.26 ms and p99 5.73 ms.
 
 ## GDFL import at one second (D-2802 to D-2806)
 
