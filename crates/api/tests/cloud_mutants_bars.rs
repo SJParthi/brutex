@@ -1246,6 +1246,154 @@ mod bars_rs {
         assert_eq!(rest.len(), 10);
     }
 
+    /// One generated month of TESTSEG `symbol` on Dhan: each
+    /// `(day, minutes after 09:15 IST, close)` is a bar.
+    fn testseg_month(root: &std::path::Path, symbol: &str, m: u8, rows: &[(u8, i64, i64)]) {
+        let rows: Vec<(i64, i64)> = rows
+            .iter()
+            .map(|&(d, minute, close)| (open_of(m, d) + minute * 60, close))
+            .collect();
+        write_month(
+            root,
+            "TESTSEG",
+            symbol,
+            Timeframe::MINUTE_1,
+            month(m),
+            &rows,
+        );
+    }
+
+    /// 09:20 to 09:21 IST, inclusive: the time-of-day bound both tests below
+    /// keep.
+    const NINE_TWENTY: (u32, u32) = (33_600, 33_660);
+
+    /// The change and its reason of every row a time-ordered page serves.
+    fn changes(got: &Window) -> Vec<(i64, Option<i64>, &'static str)> {
+        got.bars
+            .iter()
+            .map(|row| (row.bar.close, row.chg, row.chg_why))
+            .collect()
+    }
+
+    /// **A ROW'S PREDECESSOR IS THE ROW BEFORE IT IN ITS FILE, NOT THE LAST
+    /// ROW THE PAGE SERVED.** Under a time-of-day bound the page serves runs
+    /// with unkept rows between them: in one month (day 2's window, then day
+    /// 5's after an unkept 09:15) and across two (May's last row, then June's
+    /// window after two unkept rows). Each run's first row measures against
+    /// the row just before it in its own file. Kills `behind_of`'s `== with
+    /// !=` on both halves of the one-read shortcut (the slot and the row).
+    #[test]
+    fn bars_a_row_measures_against_the_row_before_it_in_its_file() {
+        let scratch = Scratch::new("bars-behind-shortcut");
+        testseg_month(
+            scratch.root(),
+            "BEHIND",
+            5,
+            &[(2, 5, 1_000), (2, 6, 1_010), (6, 0, 2_000), (6, 5, 3_000)],
+        );
+        testseg_month(
+            scratch.root(),
+            "BEHIND",
+            6,
+            // FOUR UNKEPT ROWS, so June's window opens at row 4 — one past
+            // May's last row served, row 3: the shortcut's row test alone
+            // would pass, and only its slot test refuses it.
+            &[
+                (2, 0, 1_400),
+                (2, 1, 1_450),
+                (2, 2, 1_500),
+                (2, 3, 2_000),
+                (2, 5, 3_000),
+                (2, 6, 3_030),
+            ],
+        );
+        let mut asked = query(
+            vec![SeriesKey::new("NSE", "TESTSEG", "BEHIND", None)],
+            month(5),
+            month(6),
+        );
+        asked.filter.tod = Some(NINE_TWENTY);
+        let got = read(scratch.root(), &asked);
+        assert_eq!(
+            changes(&got),
+            vec![
+                (1_000, None, "no_earlier_stored_bar"),
+                (1_010, Some(100), ""),
+                (3_000, Some(5_000), ""),
+                (3_000, Some(5_000), ""),
+                (3_030, Some(100), ""),
+            ],
+            "day 6's 09:20 against its 09:15, June's 09:20 against its 09:18 — \
+             never against the last row served"
+        );
+    }
+
+    /// **A TIME-OF-DAY ORDER COUNTS THE ROWS IT READ, NOT THEIR PLACES.**
+    /// Under a 09:20–09:21 bound the scan reads two day windows of one
+    /// month, the second starting at row 4: `scan_rows` is the four kept
+    /// rows. Kills `scan`'s `- with +` on a run's length, which counts the
+    /// second window as its end plus its start.
+    #[test]
+    fn bars_a_time_of_day_scan_counts_the_rows_of_each_window() {
+        let scratch = Scratch::new("bars-tod-count");
+        testseg_month(
+            scratch.root(),
+            "TODCOUNT",
+            5,
+            &[
+                (2, 5, 100),
+                (2, 6, 101),
+                (5, 0, 200),
+                (5, 1, 201),
+                (5, 5, 300),
+                (5, 6, 301),
+            ],
+        );
+        let mut asked = query(
+            vec![SeriesKey::new("NSE", "TESTSEG", "TODCOUNT", None)],
+            month(5),
+            month(5),
+        );
+        asked.sort = SortKey::TimeOfDay;
+        asked.filter.tod = Some(NINE_TWENTY);
+        let got = read(scratch.root(), &asked);
+        let closes: Vec<i64> = got.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(closes, vec![100, 300, 101, 301]);
+        assert_eq!((got.total, got.scan_rows), (4, 4));
+    }
+
+    /// **WITHOUT THE LOOKBACK, A MONTH'S FIRST ROW AFTER AN UNKEPT ROW OF A
+    /// MONTH IN THE REQUEST IS FIRST IN ITS WINDOW**, not a month left unread:
+    /// May is read, its last row is outside 09:20–09:21, so June's first row
+    /// has nothing kept behind it inside the request. Kills `behind_of`'s
+    /// `slot_of(before).is_some()` guard → `false`.
+    #[test]
+    fn bars_without_lookback_a_month_after_an_unkept_row_is_first_in_window() {
+        let scratch = Scratch::new("bars-behind-unkept");
+        testseg_month(
+            scratch.root(),
+            "UNKEPT",
+            5,
+            &[(2, 5, 1_000), (2, 15, 1_100)],
+        );
+        testseg_month(scratch.root(), "UNKEPT", 6, &[(2, 5, 3_000)]);
+        let mut asked = query(
+            vec![SeriesKey::new("NSE", "TESTSEG", "UNKEPT", None)],
+            month(5),
+            month(6),
+        );
+        asked.filter.tod = Some(NINE_TWENTY);
+        asked.lookback = false;
+        let got = read(scratch.root(), &asked);
+        assert_eq!(
+            changes(&got),
+            vec![
+                (1_000, None, "no_earlier_stored_bar"),
+                (3_000, None, "first_bar_in_window"),
+            ]
+        );
+    }
+
     /// **A BAR THAT DID NOT MOVE IS UNSIGNED**: its change is `0.00`, never
     /// `+0.00`. Kills `> with >=` on `table`'s sign.
     #[test]

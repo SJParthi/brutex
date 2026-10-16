@@ -3992,6 +3992,27 @@ mod window_tests {
 mod cloud_mutant_tests {
     use super::*;
 
+    /// **A PAGE THAT IS EVERY ROW, FROM THE FIRST, IS ONLY ORDERED.** At
+    /// offset zero there is nothing before the page to partition away, and
+    /// when the page is every row there is nothing after it: one ordering of
+    /// 100 already-ordered rows is 99 comparisons. A partition at either end
+    /// costs at least 99 more. Kills `page_of`'s `> with >=` on the offset
+    /// and `< with <=` on the limit, which each add that partition.
+    #[test]
+    fn a_page_of_every_row_from_the_first_is_only_ordered() {
+        let rows: Vec<u32> = (0..100).collect();
+        let mut comparisons = 0_usize;
+        let page = page_of(rows.clone(), 0, rows.len(), |a, b| {
+            comparisons += 1;
+            a.cmp(b)
+        });
+        assert_eq!(page, rows);
+        assert!(
+            comparisons < 2 * (rows.len() - 1),
+            "{comparisons} comparisons: the page was partitioned as well as ordered"
+        );
+    }
+
     fn bar(ts_micros: i64, low: i64, high: i64, close: i64, volume: i64) -> Bar {
         Bar {
             ts_micros,
