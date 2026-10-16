@@ -816,6 +816,11 @@ struct JournalRows {
     /// the commit it was built from, oldest first. A logged refusal is
     /// attributed to the run that was running when it was logged (DB-B45).
     runs: Vec<RunLine>,
+    /// Each day's closing runs: the `run=` of every row of the kind and day,
+    /// under ANY filter, the instrument's or not. A logged refusal is a
+    /// close's only before the next of these started (AF-02 repair 2): a later
+    /// list close's refusal is never an earlier close's.
+    closers: HashMap<String, Vec<u64>>,
 }
 
 /// One `run` line of the import journal, as a refusal's attribution needs it.
@@ -872,6 +877,7 @@ fn journal_rows(
     let mut journal = Value::Null;
     let mut last_day = None;
     let mut runs = Vec::new();
+    let mut closers: HashMap<String, Vec<u64>> = HashMap::with_capacity(PAGE_DAYS as usize);
     loop {
         let asked = super::imports::Asked {
             from: Some(first),
@@ -909,6 +915,14 @@ fn journal_rows(
             ) else {
                 continue;
             };
+            // EVERY CLOSE BOUNDS THE ONE BEFORE IT, whichever filter wrote it
+            // (AF-02 repair 2): at most the handful of runs that closed a day.
+            if let Some(run) = row.get("run").and_then(Value::as_u64) {
+                let ids = closers.entry(day.to_owned()).or_default();
+                if !ids.contains(&run) {
+                    ids.push(run);
+                }
+            }
             // THE NEWEST CLOSE THAT COVERS THE INSTRUMENT IS WHERE IT STANDS.
             // A run given symbols journals their day under its list of names
             // (`BANKNIFTY,NIFTY`, the 277-name key), and a list naming this
@@ -943,6 +957,7 @@ fn journal_rows(
         last_day,
         journal,
         runs,
+        closers,
     })
 }
 
@@ -1057,6 +1072,23 @@ struct Refusals {
     superseded: Vec<Superseded>,
     /// How many distinct refusals earlier runs logged.
     superseded_count: usize,
+    /// How many distinct refusals a LATER run that closed the same kind-day
+    /// logged: that run's, never this close's (AF-02 repair 2).
+    later_count: usize,
+    /// How many of those are about this instrument: logged in a later
+    /// closing run's window whose filter does not name it, so no close of
+    /// the day owns them (`/imports.json` keeps their log-only `*` row).
+    later_this_count: usize,
+    /// The first of those.
+    later_this_first: Option<(String, String)>,
+}
+
+/// The second run `id` started, as its `run` line names it, else the id
+/// itself (a run's id is the second it started, D-3317).
+fn start_of(runs: &[RunLine], id: u64) -> u64 {
+    runs.iter()
+        .find(|run| run.id == id)
+        .map_or(id, |run| run.started)
 }
 
 /// One refusal an earlier run logged, attributed to its run where the
@@ -1094,18 +1126,33 @@ struct Superseded {
 /// 1791602895: the current reason is the filing, and the calendar refusal is
 /// history. A row with no `run=` (a line written before D-3317) keeps every
 /// refusal current: nothing says which run logged it.
-fn refusals_of(row: &Value, inst: &Instrument, day: Day, runs: &[RunLine]) -> Refusals {
+///
+/// # Bounded by the next close (AF-02 repair 2)
+///
+/// A refusal logged at or after `next_s`, the start of the next run that
+/// closed the same kind-day under any filter ([`JournalRows::closers`]), is
+/// that run's and never this close's: a later `ABCAPITAL,RELIANCE` run's
+/// refusal is not the first of an earlier `BANKNIFTY,NIFTY` close. It is
+/// counted as `later_count` and named nowhere else. The placing is
+/// `/imports.json`'s own ([`super::imports::placed`]), so the two routes
+/// cannot disagree about whose a refusal is.
+fn refusals_of(
+    row: &Value,
+    inst: &Instrument,
+    day: Day,
+    runs: &[RunLine],
+    next_s: Option<u64>,
+) -> Refusals {
     let mut distinct: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
     let mut history: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
+    let mut later: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     let mut out = Refusals::default();
-    let started_ms = row.get("run").and_then(Value::as_u64).map(|id| {
-        runs.iter()
-            .find(|run| run.id == id)
-            .map_or(id, |run| run.started)
-            .saturating_mul(1_000)
-    });
+    let started_s = row
+        .get("run")
+        .and_then(Value::as_u64)
+        .map(|id| start_of(runs, id));
     for logged in row
         .get("logged")
         .and_then(Value::as_array)
@@ -1121,8 +1168,23 @@ fn refusals_of(row: &Value, inst: &Instrument, day: Day, runs: &[RunLine]) -> Re
         };
         let pair = (text("about"), text("why"));
         let at_ms = logged.get("at_ms").and_then(Value::as_u64);
-        let earlier = matches!((started_ms, at_ms), (Some(start), Some(at)) if at < start);
-        if earlier {
+        let placed = super::imports::placed(at_ms, started_s, next_s);
+        if placed == super::imports::Placed::After {
+            if later.insert(pair.clone()) {
+                out.later_count = out.later_count.saturating_add(1);
+                // ONE ABOUT THIS INSTRUMENT is said, never dropped: a later
+                // run closed the day for other files, and this refusal is in
+                // its window (an attempt that left no line naming this one).
+                if about_this(&pair.0, inst, day) {
+                    out.later_this_count = out.later_this_count.saturating_add(1);
+                    if out.later_this_first.is_none() {
+                        out.later_this_first = Some(pair);
+                    }
+                }
+            }
+            continue;
+        }
+        if placed == super::imports::Placed::Before {
             if !history.insert(pair.clone()) {
                 continue;
             }
@@ -1176,13 +1238,23 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
             "from": null, "line": null, "late": null, "max_back_s": null,
             "refusals": {
                 "this": [], "this_count": 0, "other_count": 0, "other_first": null,
-                "superseded": [], "superseded_count": 0,
+                "superseded": [], "superseded_count": 0, "later_count": 0,
+                "later_this_count": 0, "later_this_first": null,
             },
         });
     };
     let field = |key: &str| row.get(key).cloned().unwrap_or(Value::Null);
     let recounted = row.get("recounted").and_then(Value::as_bool) == Some(true);
-    let refusals = refusals_of(row, inst, day, &rows.runs);
+    // THE CLOSE'S OWN WINDOW: from its run's start to the start of the next
+    // run that closed the same kind-day, under any filter (AF-02 repair 2).
+    let next_s = row.get("run").and_then(Value::as_u64).and_then(|id| {
+        let ids = rows.closers.get(&day.to_string())?;
+        super::imports::next_start(
+            start_of(&rows.runs, id),
+            ids.iter().map(|other| start_of(&rows.runs, *other)),
+        )
+    });
+    let refusals = refusals_of(row, inst, day, &rows.runs, next_s);
     // A DAY THE LOG ALONE NAMES, AND NOTHING IN IT ABOUT THIS INSTRUMENT:
     // a run refused other files of the day and left no journal line (DB-025's
     // shape), and nothing says this instrument's day was refused. It reads
@@ -1228,6 +1300,9 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
                 "why": old.why,
             })).collect::<Vec<_>>(),
             "superseded_count": refusals.superseded_count,
+            "later_count": refusals.later_count,
+            "later_this_count": refusals.later_this_count,
+            "later_this_first": refusals.later_this_first.as_ref().map(pair),
         },
     })
 }
@@ -1778,6 +1853,12 @@ struct GapLine {
     why: String,
     run: u64,
     line: u64,
+    /// Whether a missing minute may be one nobody traded (D-3321): the line
+    /// says `absence=may_be_no_trade`, or its key names a segment where a
+    /// minute has a bar only when somebody trades
+    /// (`pull::ingest::repair_plan::absence_may_be_no_trade`, the fold's one
+    /// rule). The store cannot tell such a minute from a vendor hole.
+    may_be_no_trade: bool,
 }
 
 impl GapLine {
@@ -1795,6 +1876,7 @@ impl GapLine {
             "why": self.why,
             "run": self.run,
             "line": self.line,
+            "absence": self.may_be_no_trade.then_some("may_be_no_trade"),
         })
     }
 }
@@ -1945,6 +2027,13 @@ fn parse_gap(number: u64, text: &str) -> Result<(String, u32, GapLine), String> 
         why: why.to_owned(),
         run: count_field("run", value(10))?,
         line: number,
+        may_be_no_trade: text
+            .split(' ')
+            .any(|word| word == "absence=may_be_no_trade")
+            || key
+                .split('-')
+                .nth(1)
+                .is_some_and(pull::ingest::repair_plan::absence_may_be_no_trade),
     };
     Ok((key.to_owned(), day.days_from_epoch(), line))
 }
@@ -4159,45 +4248,148 @@ fn other_first(import: &Value) -> Option<String> {
         })
 }
 
+/// The directories this route reads the importer's refusals from, as a
+/// sentence names them: `logs/cli`, then each GDFL kind's and the store
+/// lock's (`crate::logs::import_dirs`).
+fn logs_read() -> String {
+    crate::logs::import_dirs()
+        .map(|dir| format!("logs/{dir}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A close's `failures` against the refusals the logs this route reads
+/// place in its own window ([`refusals_of`]): this instrument's and other
+/// files'.
+///
+/// AF-02 repair 2: "none about this instrument" is said only when those
+/// number at least the close's `failures`. A `cli` given `BRUTEX_LOG_DIR`
+/// logs where it was told (`logs/cli-batch` for the operator's batch
+/// script), so a close can count refusals that no directory read holds;
+/// then the sentence says how many it holds and where it looked, and never
+/// that none was this instrument's.
+#[derive(Debug, Clone, Copy)]
+struct Tally {
+    /// The close's own count.
+    failures: u64,
+    /// Distinct refusals in its window about this instrument.
+    this: u64,
+    /// Distinct refusals in its window about another file of the kind-day.
+    other: u64,
+}
+
+impl Tally {
+    fn of(import: &Value) -> Self {
+        let refusals = |key: &str| {
+            import
+                .get("refusals")
+                .and_then(|r| r.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        Self {
+            failures: import.get("failures").and_then(Value::as_u64).unwrap_or(0),
+            this: refusals("this_count"),
+            other: refusals("other_count"),
+        }
+    }
+
+    /// The refusals the logs read place in the close's window.
+    fn seen(self) -> u64 {
+        self.this.saturating_add(self.other)
+    }
+
+    /// Whether the logs read hold every one the close counts.
+    fn whole(self) -> bool {
+        self.seen() >= self.failures
+    }
+
+    /// The ones the close counts that no directory read holds, and where it
+    /// looked.
+    fn unseen(self) -> String {
+        let missing = self.failures.saturating_sub(self.seen());
+        format!(
+            "{missing} of them {} in none of the logs this route reads ({})",
+            if missing == 1 { "is" } else { "are" },
+            logs_read()
+        )
+    }
+}
+
+/// A refusal about this instrument logged in a LATER closing run's window
+/// (AF-02 repair 2): never this close's, and never dropped. `None` when the
+/// later windows hold none about it.
+fn later_phrase(import: &Value) -> Option<String> {
+    let refusals = import.get("refusals")?;
+    let count = refusals
+        .get("later_this_count")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)?;
+    let field = |key: &str| {
+        refusals
+            .get("later_this_first")
+            .and_then(|first| first.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    Some(format!(
+        "the importer's log holds {count} refusal(s) about this instrument logged after a \
+         later run closed this day for other files; the first is {}",
+        cut(&format!("{}: {}", field("about"), field("why")))
+    ))
+}
+
 /// What a `done` or `done_with_refusals` close says of its refusals.
 ///
 /// * A CLOSE WHOSE REFUSALS ARE ALL ANOTHER FILE'S says so, as an incomplete
 ///   one does (DB-G69): the 277-name key's ten refusals on 2026-04-16 were
 ///   about other underlyings, and NIFTY's own contracts were imported
-///   (AF-02, ingest-6).
+///   (AF-02, ingest-6). Only when the logs read hold all of them ([`Tally`]).
 /// * A CLOSE WITH REFUSALS OF THIS INSTRUMENT'S OWN names how many and the
 ///   first, as a refused or incomplete one does: the phantom `*` row used to
-///   name it, and the close it gave way to must not say less (AF-02).
+///   name it, and the close it gave way to must not say less (AF-02). When
+///   the logs read hold fewer than the close counts, the count is "at least".
+/// * A CLOSE WHOSE REFUSALS THE LOGS READ DO NOT HOLD says how many are
+///   missing and where it looked (AF-02 repair 2), never "none about this
+///   instrument", and never another run's refusal as its first: the window
+///   ends at the next closing run's start ([`refusals_of`]).
 /// * A CLEAN CLOSE NEVER LEAVES THIS INSTRUMENT'S OWN REFUSALS UNSAID (AF-02
-///   repair round 1): a refusal of the day about this instrument not dated
-///   before the close's run (a close with no run id cannot place it before
-///   itself) is said, never left in the JSON only.
+///   repair round 1): a refusal of the day about this instrument that no
+///   other run's window holds (a close with no run id cannot place it
+///   elsewhere) is said, never left in the JSON only.
 fn closed_phrase(import: &Value, outcome: &str, first_refusal: Option<&str>) -> Option<String> {
-    let count = |key: &str| import.get(key).and_then(Value::as_u64).unwrap_or(0);
-    let this_count = import
-        .get("refusals")
-        .and_then(|r| r.get("this_count"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let failures = count("failures");
+    let tally = Tally::of(import);
     if outcome == "done" {
         return first_refusal.map(|first| {
             format!(
-                "closed done, yet the importer's log holds {this_count} refusal(s) of this day \
-                 about this instrument not dated before this run; the first is {first}"
+                "closed done, yet the importer's log holds {} refusal(s) of this day about this \
+                 instrument not placed in another run; the first is {first}",
+                tally.this
             )
         });
     }
+    let head = format!("imported with {} vendor refusal(s)", tally.failures);
     Some(match (first_refusal, other_first(import)) {
+        (Some(first), _) if tally.whole() => format!(
+            "{head}, {} about this instrument; the first is {first}",
+            tally.this
+        ),
         (Some(first), _) => format!(
-            "imported with {failures} vendor refusal(s), {this_count} about this instrument; \
-             the first is {first}"
+            "{head}, at least {} about this instrument; the first is {first}; {}",
+            tally.this,
+            tally.unseen()
         ),
+        (None, Some(other)) if tally.whole() => {
+            format!("{head}, none about this instrument; the first is {other}")
+        }
         (None, Some(other)) => format!(
-            "imported with {failures} vendor refusal(s), none about this instrument; the first \
-             is {other}"
+            "{head}; {} of them in the logs this route reads, none of those about this \
+             instrument; the first is {other}; {}",
+            tally.seen(),
+            tally.unseen()
         ),
-        (None, None) => format!("imported with {failures} vendor refusal(s)"),
+        (None, None) if tally.whole() => head,
+        (None, None) => format!("{head}; {}", tally.unseen()),
     })
 }
 
@@ -4342,7 +4534,6 @@ impl Says<'_> {
     fn import_phrases(&self, out: &mut Vec<String>) {
         let Some(import) = self.import else { return };
         let text = |key: &str| import.get(key).and_then(Value::as_str);
-        let count = |key: &str| import.get(key).and_then(Value::as_u64);
         let first_refusal = import
             .get("refusals")
             .and_then(|r| r.get("this"))
@@ -4373,14 +4564,25 @@ impl Says<'_> {
                 // WHAT FAILED, AND WHETHER IT WAS THIS INSTRUMENT'S FILE: a day
                 // incomplete for another contract still holds this one's bars
                 // (DB-G69).
+                // "NONE ABOUT THIS INSTRUMENT" ONLY WHEN THE LOGS READ HOLD
+                // EVERY FAILURE, each placed in this close's own window (AF-02
+                // repair 2, [`Tally`]).
                 let other_first = other_first(import);
+                let tally = Tally::of(import);
                 let mut parts: Vec<String> =
                     text("reason").map(str::to_owned).into_iter().collect();
                 match (first_refusal, other_first) {
                     (Some(first), _) => parts.push(first),
-                    (None, Some(other)) => parts.push(format!(
+                    (None, Some(other)) if tally.whole() => parts.push(format!(
                         "{} failure(s), none about this instrument; the first is {other}",
-                        count("failures").unwrap_or(0)
+                        tally.failures
+                    )),
+                    (None, Some(other)) => parts.push(format!(
+                        "{} failure(s); {} of them in the logs this route reads, none of those \
+                         about this instrument; the first is {other}; {}",
+                        tally.failures,
+                        tally.seen(),
+                        tally.unseen()
                     )),
                     (None, None) => {}
                 }
@@ -4425,6 +4627,7 @@ impl Says<'_> {
             }
             _ => {}
         }
+        out.extend(later_phrase(import));
         Self::history_and_late_phrases(import, out);
     }
 
@@ -4529,13 +4732,36 @@ impl Says<'_> {
 
     fn gap_phrases(&self, out: &mut Vec<String>) {
         if let Some(gap) = self.gap {
+            // A SHARE'S MISSING MINUTE MAY BE ONE NOBODY TRADED (D-3321), said
+            // wherever the line is shown: the store cannot tell it from a
+            // vendor hole, and a repair lands only what the feed serves.
+            let caveat = if gap.may_be_no_trade {
+                "; these may be minutes nobody traded: the store cannot tell a no-trade minute from a vendor hole (D-3321), and a repair or a pull lands only the minutes the feed serves"
+            } else {
+                ""
+            };
             out.push(match gap.why.as_str() {
                 "vendor_empty" => format!(
-                    "Zerodha minute gap: {} of {} owed minute(s) missing, the longest run {} from {}",
+                    "Zerodha minute gap: {} of {} owed minute(s) missing, the longest run {} from {}{caveat}",
                     gap.missing,
                     gap.owed,
                     gap.longest,
                     gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60))
+                ),
+                // A LINE FOUND FROM THE STORED MONTH, NOT FROM A PULL (R3-18,
+                // `cli zerodha-gaps`): the store was read, the vendor was not,
+                // so no vendor reason is claimed.
+                "stored_short" => format!(
+                    "Zerodha minute gap found in the stored month (no vendor call, R3-18): {} of {} owed minute(s) missing, the longest run {} from {}{}",
+                    gap.missing,
+                    gap.owed,
+                    gap.longest,
+                    gap.longest_at.map_or_else(|| "-".to_owned(), |m| hm(m / 60)),
+                    if gap.may_be_no_trade {
+                        caveat
+                    } else {
+                        "; a versioned repair or a pull fills it"
+                    }
                 ),
                 "withheld_unmeasured_session" => {
                     "Zerodha withheld the day: a session of unmeasured length".to_owned()
@@ -5422,14 +5648,14 @@ mod tests {
             ],
         });
         let inst = instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
-        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs);
+        let split = refusals_of(&row, &inst, day("2024-03-02"), &runs, None);
         assert_eq!(split.this, vec![("calendar".to_owned(), "new".to_owned())]);
         assert_eq!(split.superseded.len(), 1);
         assert_eq!(split.superseded[0].run, Some(10));
         assert_eq!(split.superseded[0].commit.as_deref(), Some("aaa"));
         // A row with no `run=` keeps every refusal current: nothing says which run logged it.
         let unrun = json!({ "logged": [{ "about": "calendar", "why": "old", "at_ms": 15_000 }] });
-        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs);
+        let kept = refusals_of(&unrun, &inst, day("2024-03-02"), &runs, None);
         assert_eq!(kept.this_count, 1);
         assert_eq!(kept.superseded_count, 0);
     }
@@ -5986,6 +6212,88 @@ mod tests {
             record(&got, "2021-05-24"),
             "63 late row(s) deferred to a later second, at most 19800 s back; 19800 s is exactly \
              IST's offset from UTC",
+        );
+    }
+
+    /// **A STORED-MONTH GAP LINE IS A REASON, NOT "ZERODHA LEDGER: <CODE>"**
+    /// (R3-18): `cli zerodha-gaps` writes `why=stored_short` with `fill=` and
+    /// `source=` after D-3335's fields; the day band parses it, ignores the
+    /// two trailing fields by name, and says the store was read, not the
+    /// vendor.
+    #[test]
+    fn a_stored_month_gap_line_is_said_as_a_reason() {
+        let root = root_of("stored-short");
+        write(
+            &gaps_path(&root),
+            "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run=0 fill=interior source=store\n",
+        );
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2019-09-23"),
+        );
+        let gap = record(&got, "2019-09-23");
+        assert_eq!(gap["gaps"]["why"], "stored_short", "{got:#}");
+        assert_eq!(gap["gaps"]["missing"], 14);
+        says_has(
+            gap,
+            "Zerodha minute gap found in the stored month (no vendor call, R3-18): 14 of 375 owed minute(s) missing, the longest run 14 from 15:15; a versioned repair or a pull fills it",
+        );
+    }
+
+    /// **A SHARE'S STORED-MONTH GAP CARRIES THE NO-TRADE CAVEAT** (D-3321,
+    /// verify-R3-18-r1): an `NSE-CASH` line, labelled or not, never says a
+    /// repair "fills it" — the store cannot tell a minute nobody traded from a
+    /// vendor hole, and a repair lands only what the feed serves. An index's
+    /// line keeps its plain sentence and carries no label.
+    #[test]
+    fn a_shares_stored_month_gap_says_the_minutes_may_be_untraded() {
+        let root = root_of("stored-short-cash");
+        write(
+            &gaps_path(&root),
+            "gap NSE-CASH-ZZSHARE 2019-05-02 v=1 rung=1min owed=375 held=0 missing=375 first_missing=09:15 runs=1 longest=375 longest_at=09:15 why=stored_short run=0 fill=interior source=store absence=may_be_no_trade\n\
+             gap NSE-CASH-ZZOTHER 2019-05-02 v=1 rung=1min owed=375 held=370 missing=5 first_missing=10:00 runs=1 longest=5 longest_at=10:00 why=vendor_empty run=4\n\
+             gap NSE-INDEX-NIFTY 2019-05-02 v=1 rung=1min owed=375 held=361 missing=14 first_missing=15:15 runs=1 longest=14 longest_at=15:15 why=stored_short run=0 fill=interior source=store\n",
+        );
+        let caveat = "these may be minutes nobody traded: the store cannot tell a no-trade minute from a vendor hole (D-3321), and a repair or a pull lands only the minutes the feed serves";
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-CASH-ZZSHARE&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert_eq!(gap["gaps"]["absence"], "may_be_no_trade", "{got:#}");
+        says_has(
+            gap,
+            &format!(
+                "Zerodha minute gap found in the stored month (no vendor call, R3-18): 375 of 375 owed minute(s) missing, the longest run 375 from 09:15; {caveat}"
+            ),
+        );
+        assert!(
+            !gap["says"].to_string().contains("fills it"),
+            "a share's line never promises a fill: {got:#}"
+        );
+        // A vendor line for a share, unlabelled: the key's segment says it.
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-CASH-ZZOTHER&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert_eq!(gap["gaps"]["absence"], "may_be_no_trade", "{got:#}");
+        says_has(
+            gap,
+            &format!(
+                "Zerodha minute gap: 5 of 375 owed minute(s) missing, the longest run 5 from 10:00; {caveat}"
+            ),
+        );
+        // An index: computed every minute, no caveat, no label.
+        let got = answer(
+            &root,
+            &ask("feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2019-05-02"),
+        );
+        let gap = record(&got, "2019-05-02");
+        assert!(gap["gaps"]["absence"].is_null(), "{got:#}");
+        says_has(
+            gap,
+            "Zerodha minute gap found in the stored month (no vendor call, R3-18): 14 of 375 owed minute(s) missing, the longest run 14 from 15:15; a versioned repair or a pull fills it",
         );
     }
 

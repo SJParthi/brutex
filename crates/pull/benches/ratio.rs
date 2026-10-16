@@ -51,6 +51,11 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+/// C-TSW-01 and C-TSW-02: the tick-store writer per member and a written
+/// day's lookup, flat at 1x, 10x and 100x (R4-08, E2E-02).
+#[path = "ratio/tickstore_write.rs"]
+mod tickstore_write;
+
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
@@ -1109,6 +1114,7 @@ fn main() {
     let (alert_root, alert_stores) = alert_queues();
     ok &= alert_put_is_flat(&alert_stores);
     ok &= alert_window_is_flat(&alert_stores);
+    ok &= tickstore_write::tickstore_write_is_flat_per_member();
     let _cleanup = std::fs::remove_dir_all(&alert_root);
     if ok {
         println!("all ratios within the ceiling");

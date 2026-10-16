@@ -2396,7 +2396,16 @@ pub async fn run_json(
     let dir = crate::logs::cli_log_dir();
     let root = site.store_root.clone();
     match crate::detail::run(move || {
-        observed_status_with_admission(&root, local.as_ref(), dir.as_deref(), now_micros() / 1_000)
+        // THE POLL IS ANSWERED FROM MEMORY WHILE THE CLI LOG IS UNCHANGED
+        // (p99-7, AF-06): see `CliLogMemory`.
+        observed_status_remembered(
+            &CLI_LOG_MEMORY,
+            &root,
+            local.as_ref(),
+            dir.as_deref(),
+            now_micros() / 1_000,
+            std::time::Instant::now(),
+        )
     })
     .await
     {
@@ -2476,13 +2485,42 @@ fn observed_status(local: Option<&Progress>, external: ExternalObservation) -> S
     external.body
 }
 
-fn observed_status_with_admission(
+/// [`observed_status_with_admission`], with the CLI log's evidence taken from
+/// `memory` while the log is unchanged, and a `cli_log` member saying which.
+///
+/// `/backtest/run.json` is the one polled status route whose handler had a
+/// real cost: the capped CLI-log walk, measured on 14 Oct 2026 at a handler
+/// p50 of about 21 ms, p99 63 ms and a cold 548 ms (p99-7). An open
+/// `/backtest` tab asked every 2 s, and the log it walked had not changed.
+/// Now an unchanged log costs eight `stat`s and a lock. The `cli_log` member
+/// makes the difference visible on every answer, so a second agent can see
+/// with one `curl` whether a poll read the log. AF-06.
+fn observed_status_remembered(
+    memory: &CliLogMemory,
     root: &std::path::Path,
     local: Option<&Progress>,
     dir: Option<&std::path::Path>,
     now: i64,
+    at: std::time::Instant,
 ) -> String {
-    let external = external_observation(dir, now);
+    let (external, answer) = match dir {
+        None => (external_observation(None, now), None),
+        Some(dir) => {
+            let (evidence, answer) = memory.evidence(dir, at, now);
+            (judge(&evidence, now), Some(answer))
+        }
+    };
+    let mut body = admitted_status(root, local, external);
+    body.pop();
+    let _ = write!(body, r#","cli_log":{}}}"#, cli_log_json(answer.as_ref()));
+    body
+}
+
+fn admitted_status(
+    root: &std::path::Path,
+    local: Option<&Progress>,
+    external: ExternalObservation,
+) -> String {
     let (available, why) = match cli::execution_lease::probe(root) {
         Err(why) => (false, why.to_string()),
         Ok(()) if !external.launch_clear => match ended_without_terminal(root, &external) {
@@ -2829,7 +2867,25 @@ fn status_tail(
 /// that instant. At most two bounded reads.
 fn settled_tail(read: impl Fn() -> telemetry::Tail) -> telemetry::Tail {
     let first = read();
-    if first.partial_tail { read() } else { first }
+    count_walked(first.bytes_read);
+    if first.partial_tail {
+        let second = read();
+        count_walked(second.bytes_read);
+        second
+    } else {
+        first
+    }
+}
+
+thread_local! {
+    /// Every byte the CLI-log walks on this thread have read since
+    /// [`read_evidence`] last began: the read counter AF-06's tests assert on.
+    /// A walk runs on one thread from start to finish, so the count is exact.
+    static WALKED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_walked(bytes: u64) {
+    WALKED_BYTES.with(|walked| walked.set(walked.get().saturating_add(bytes)));
 }
 
 fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
@@ -2929,6 +2985,43 @@ fn newest_sweep_marker(dir: &std::path::Path) -> (telemetry::Tail, Option<usize>
 }
 
 fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
+    judge(&read_evidence(dir).evidence, now)
+}
+
+/// What the CLI log said, before `now` is applied to it: everything
+/// [`observe_elsewhere`] reads off disk, and nothing that depends on the
+/// clock. Split out so an unchanged log can be judged again at a later `now`
+/// without being read again (AF-06). The judgement is [`judge`].
+#[derive(Debug, Clone, PartialEq)]
+enum Evidence {
+    /// The lifecycle window could hide a newer marker: the fault, in words.
+    Damaged(String),
+    /// A clean window with no sweep marker in it, and the legacy sweep
+    /// target's newest record.
+    Unmarked {
+        lifecycle: telemetry::Tail,
+        legacy: telemetry::Tail,
+    },
+    /// The newest sweep marker, and that run's newest activity.
+    Marked {
+        marker: Box<telemetry::Record>,
+        activity: telemetry::Tail,
+    },
+}
+
+/// One walk of the CLI log: its evidence and every byte it read for it.
+#[derive(Debug)]
+struct Walk {
+    evidence: Evidence,
+    bytes_read: u64,
+}
+
+/// Read the CLI log's evidence, at most the walks [`observe_elsewhere`] has
+/// always made: the lifecycle window (and its narrower re-walk), then either
+/// the legacy target or the marker's own activity, each capped at
+/// `logs::SCAN_BYTES`.
+fn read_evidence(dir: &std::path::Path) -> Walk {
+    WALKED_BYTES.with(|walked| walked.set(0));
     // Durable run/probe evidence uses this same target. Its completion cannot
     // replace a whole-command marker, nor can its uncorrelated token refresh
     // that command's activity. Search a bounded retained window explicitly.
@@ -2937,38 +3030,66 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // A marker found inside the scanned window is the newest one, so the scan
     // cap cannot hide a newer one. With no marker found the cap is still the
     // answer: the latest sweep's marker may lie in the bytes it left unread.
-    if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
-        return uncertain_observation(None, &why);
-    }
-    let Some(marker) = marker else {
-        let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
-        let fault = tail_fault(&legacy);
-        let launch_clear = fault.is_none();
-        let why = fault.or_else(|| legacy.records.first().map(|record| {
-            format!("latest CLI event: {}. The bounded 256-event lifecycle window has no authoritative sweep-command marker; completion and current activity are unknown", record.message)
-        }));
-        return ExternalObservation {
-            at_millis: legacy.records.first().map(|record| record.at_unix_millis),
-            uncertain: why.is_some(),
-            in_flight: false,
-            launch_clear,
-            unterminated: None,
-            // CLEAN BOTH WAYS, or nothing is concluded from the silence.
-            quiet: if launch_clear {
-                Quiet::of(&lifecycle, legacy.records.first())
-            } else {
-                None
-            },
-            body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
-        };
+    let evidence = if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
+        Evidence::Damaged(why)
+    } else if let Some(marker) = marker {
+        Evidence::Marked {
+            activity: status_tail(dir, CLI_SWEEP_TARGET, Some(marker.run), 1),
+            marker: Box::new(marker.clone()),
+        }
+    } else {
+        Evidence::Unmarked {
+            legacy: status_tail(dir, CLI_SWEEP_TARGET, None, 1),
+            lifecycle,
+        }
     };
-    let activity = status_tail(dir, CLI_SWEEP_TARGET, Some(marker.run), 1);
+    Walk {
+        evidence,
+        bytes_read: WALKED_BYTES.with(std::cell::Cell::get),
+    }
+}
+
+/// What the evidence means at `now`. Reads nothing.
+fn judge(evidence: &Evidence, now: i64) -> ExternalObservation {
+    let (marker, activity) = match evidence {
+        Evidence::Damaged(why) => return uncertain_observation(None, why),
+        Evidence::Unmarked { lifecycle, legacy } => return unmarked(lifecycle, legacy),
+        Evidence::Marked { marker, activity } => (marker.as_ref(), activity),
+    };
+    marked(marker, activity, now)
+}
+
+/// A clean lifecycle window with no sweep marker: the legacy target decides.
+fn unmarked(lifecycle: &telemetry::Tail, legacy: &telemetry::Tail) -> ExternalObservation {
+    let fault = tail_fault(legacy);
+    let launch_clear = fault.is_none();
+    let why = fault.or_else(|| legacy.records.first().map(|record| {
+        format!("latest CLI event: {}. The bounded 256-event lifecycle window has no authoritative sweep-command marker; completion and current activity are unknown", record.message)
+    }));
+    ExternalObservation {
+        at_millis: legacy.records.first().map(|record| record.at_unix_millis),
+        uncertain: why.is_some(),
+        in_flight: false,
+        launch_clear,
+        unterminated: None,
+        // CLEAN BOTH WAYS, or nothing is concluded from the silence.
+        quiet: if launch_clear {
+            Quiet::of(lifecycle, legacy.records.first())
+        } else {
+            None
+        },
+        body: why.map_or_else(|| NO_SWEEP.to_owned(), |why| unknown_status(&why)),
+    }
+}
+
+/// The newest sweep marker and its run's newest activity, judged at `now`.
+fn marked(marker: &telemetry::Record, activity: &telemetry::Tail, now: i64) -> ExternalObservation {
     // ANSWERED BY THE MARKER when the walk found no activity. The marker lies
     // inside the window this walk also reads from its newest end, and a run's
     // activity follows its `command started`, so any activity newer than the
     // marker is found before the cap. Reaching the cap empty-handed means none
     // is newer, and `last` falls back to the marker, the newest fact there is.
-    if let Some(why) = tail_fault_unless_answered(&activity, true) {
+    if let Some(why) = tail_fault_unless_answered(activity, true) {
         return uncertain_observation(Some(marker.at_unix_millis), &why);
     }
     let last = activity.records.first().unwrap_or(marker);
@@ -3026,6 +3147,297 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
         unterminated,
         quiet: None,
         body,
+    }
+}
+
+/* ==================================================================
+THE CLI LOG, REMEMBERED WHILE IT IS UNCHANGED (p99-7, AF-06)
+================================================================== */
+
+/// How long one walk's evidence may be reused, however unchanged the files
+/// look, measured on the monotonic clock.
+///
+/// The stamp below is every file's device, inode, length, modification time
+/// and change time. The CLI log is append-only and rolls by rename, so every
+/// write changes a length and every roll an inode. The one change the stamp
+/// could miss is a same-length rewrite in place that lands on the same
+/// modification AND change time to the nanosecond — on a filesystem with
+/// coarse timestamps, within one tick. This bound caps how long such a miss
+/// could be served: at most one re-walk per process every five minutes,
+/// which is 12 an hour against the 1,800 the 2 s poll made. Named in
+/// `docs/06-limits.md` beside D-0954.
+const REWALK_AFTER: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// One file of the CLI log's set, as `stat` sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileStamp {
+    /// No such file: the set is sparse until it has rolled.
+    Absent,
+    Present {
+        dev: u64,
+        ino: u64,
+        len: u64,
+        modified: (i64, i64),
+        changed: (i64, i64),
+    },
+}
+
+/// Every file the walk could read, newest first, or `None` when one of them
+/// could not be `stat`ed for a reason other than being absent — a log that
+/// cannot be described is never remembered, so every poll of it walks again
+/// and reports the walk's own error.
+///
+/// `telemetry::paths_newest_first` is the walk's own list, so the stamp and
+/// the walk cannot disagree about which files make up the log. Eight `stat`s
+/// at `telemetry::DEFAULT_KEEP_FILES`: constant per poll.
+fn log_stamp(dir: &std::path::Path) -> Option<Vec<FileStamp>> {
+    use std::os::unix::fs::MetadataExt as _;
+    telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES)
+        .iter()
+        .map(|path| match std::fs::metadata(path) {
+            Ok(meta) => Some(FileStamp::Present {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                len: meta.len(),
+                modified: (meta.mtime(), meta.mtime_nsec()),
+                changed: (meta.ctime(), meta.ctime_nsec()),
+            }),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => Some(FileStamp::Absent),
+            Err(_) => None,
+        })
+        .collect()
+}
+
+/// Where one poll's CLI-log evidence came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answered {
+    /// Every file is where the remembered walk left it: no byte was read.
+    Memory,
+    /// The log was walked, and the walk is remembered for the next poll.
+    Walk,
+    /// The log was walked and NOT remembered: it changed while it was read,
+    /// or one of its files could not be described.
+    WalkNotKept,
+}
+
+impl Answered {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Walk => "walk",
+            Self::WalkNotKept => "walk-not-kept",
+        }
+    }
+
+    const fn why(self) -> &'static str {
+        match self {
+            Self::Memory => {
+                "Every file of the CLI log has the device, inode, length, modification time and change time the remembered walk saw, so that walk's evidence was judged again at this request's time without reading the log."
+            }
+            Self::Walk => {
+                "The CLI log changed since the remembered walk, or none was remembered, so it was walked again; this walk is remembered until a file of the log changes."
+            }
+            Self::WalkNotKept => {
+                "The CLI log was walked and the walk was not remembered: a file of the log changed while it was read, or could not be described by stat. The next poll walks again."
+            }
+        }
+    }
+}
+
+/// What one poll's `cli_log` member reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogAnswer {
+    answered: Answered,
+    /// Bytes this poll read off the log: zero from memory.
+    bytes_read: u64,
+    /// When the walk whose evidence answered was taken.
+    walked_at_unix_millis: i64,
+    /// Walks this process has made, and polls it answered from memory.
+    walks: u64,
+    from_memory: u64,
+}
+
+/// The walk a poll may reuse.
+#[derive(Debug)]
+struct Remembered {
+    dir: std::path::PathBuf,
+    stamp: Vec<FileStamp>,
+    evidence: std::sync::Arc<Evidence>,
+    walked: std::time::Instant,
+    walked_at_unix_millis: i64,
+}
+
+/// The CLI log's last walk, kept while every file of the log is unchanged.
+///
+/// # Why (p99-7, AF-06)
+///
+/// Every `/backtest/run.json` poll walked the CLI log up to
+/// `logs::SCAN_BYTES` (4 MiB) to find the newest sweep marker: a handler p50
+/// of about 21 ms, p99 63 ms and a cold 548 ms over the 14 Oct 2026 journal,
+/// for a log that had not changed between two polls 2 s apart. Now a poll
+/// `stat`s the log's files (constant: `DEFAULT_KEEP_FILES` of them) and, when
+/// every one is unchanged, judges the remembered evidence at its own `now`.
+/// A grown, rolled, truncated or replaced log is walked again, still capped at
+/// `SCAN_BYTES`, so the miss costs what every poll cost before.
+///
+/// The judgement is NOT remembered: `now` decides whether a quiet sweep is
+/// still `running` or has gone stale, and each poll applies its own.
+///
+/// One entry, keyed on the directory as well as the stamp. The `kept` lock is
+/// held to compare or to replace the entry, never across a walk.
+///
+/// # One walk per change, not one per poll (AF-06 r1 follow-up)
+///
+/// Polls that miss at the same moment — several open tabs, right after the
+/// CLI wrote — each walked the log, so one change cost up to one 4 MiB walk
+/// per concurrent poll. A miss now takes `walking` and looks again under a
+/// fresh stamp before it walks: the first poll walks, and every poll that was
+/// waiting behind it is answered from that walk's memory. A poll that hits
+/// memory never touches `walking`. The bound: a missing poll waits for at most
+/// the walks queued ahead of it, each capped at `SCAN_BYTES`; walks are kept
+/// unless the log changed under them, so the queue drains on the first walk
+/// that held still.
+#[derive(Debug)]
+struct CliLogMemory {
+    kept: std::sync::Mutex<Option<Remembered>>,
+    /// Held across a walk, so concurrent misses make one walk.
+    walking: std::sync::Mutex<()>,
+    walks: std::sync::atomic::AtomicU64,
+    from_memory: std::sync::atomic::AtomicU64,
+}
+
+/// The process's one memory of the CLI log, used by `/backtest/run.json`.
+static CLI_LOG_MEMORY: CliLogMemory = CliLogMemory::new();
+
+impl CliLogMemory {
+    const fn new() -> Self {
+        Self {
+            kept: std::sync::Mutex::new(None),
+            walking: std::sync::Mutex::new(()),
+            walks: std::sync::atomic::AtomicU64::new(0),
+            from_memory: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// The log's evidence at monotonic instant `at`; `now` is the wall clock
+    /// stamped on a fresh walk.
+    fn evidence(
+        &self,
+        dir: &std::path::Path,
+        at: std::time::Instant,
+        now: i64,
+    ) -> (std::sync::Arc<Evidence>, LogAnswer) {
+        self.evidence_by(dir, at, now, read_evidence)
+    }
+
+    /// [`Self::evidence`], with the walk supplied: the seam a test uses to
+    /// change the log in the middle of one.
+    fn evidence_by(
+        &self,
+        dir: &std::path::Path,
+        at: std::time::Instant,
+        now: i64,
+        walk: impl FnOnce(&std::path::Path) -> Walk,
+    ) -> (std::sync::Arc<Evidence>, LogAnswer) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if let Some(hit) = self.remembered(dir, log_stamp(dir).as_ref(), at) {
+            return hit;
+        }
+        // SINGLE FLIGHT: wait for any walk in progress, then look again under
+        // a fresh stamp — that walk may have answered this poll too.
+        let _walking = self
+            .walking
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = log_stamp(dir);
+        if let Some(hit) = self.remembered(dir, before.as_ref(), at) {
+            return hit;
+        }
+        let Walk {
+            evidence,
+            bytes_read,
+        } = walk(dir);
+        let evidence = std::sync::Arc::new(evidence);
+        let walks = self.walks.fetch_add(1, Relaxed).saturating_add(1);
+        // KEPT ONLY WHEN THE LOG HELD STILL FOR THE WHOLE WALK. A write that
+        // lands mid-walk leaves the stamps unequal, and that walk answers this
+        // poll alone.
+        let answered = match (before, log_stamp(dir)) {
+            (Some(before), Some(after)) if before == after => {
+                *self
+                    .kept
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Remembered {
+                    dir: dir.to_path_buf(),
+                    stamp: after,
+                    evidence: std::sync::Arc::clone(&evidence),
+                    walked: at,
+                    walked_at_unix_millis: now,
+                });
+                Answered::Walk
+            }
+            _ => Answered::WalkNotKept,
+        };
+        (
+            evidence,
+            LogAnswer {
+                answered,
+                bytes_read,
+                walked_at_unix_millis: now,
+                walks,
+                from_memory: self.from_memory.load(Relaxed),
+            },
+        )
+    }
+
+    /// The remembered walk, when it was taken of `dir` with exactly `stamp`
+    /// and is younger than `REWALK_AFTER` at `at`; `None` for a log that
+    /// cannot be described.
+    fn remembered(
+        &self,
+        dir: &std::path::Path,
+        stamp: Option<&Vec<FileStamp>>,
+        at: std::time::Instant,
+    ) -> Option<(std::sync::Arc<Evidence>, LogAnswer)> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let stamp = stamp?;
+        let kept = self
+            .kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = kept.as_ref().filter(|entry| {
+            entry.dir == dir
+                && entry.stamp == *stamp
+                && at.saturating_duration_since(entry.walked) < REWALK_AFTER
+        })?;
+        let from_memory = self.from_memory.fetch_add(1, Relaxed).saturating_add(1);
+        Some((
+            std::sync::Arc::clone(&entry.evidence),
+            LogAnswer {
+                answered: Answered::Memory,
+                bytes_read: 0,
+                walked_at_unix_millis: entry.walked_at_unix_millis,
+                walks: self.walks.load(Relaxed),
+                from_memory,
+            },
+        ))
+    }
+}
+
+/// The `cli_log` member of a `/backtest/run.json` answer.
+fn cli_log_json(answer: Option<&LogAnswer>) -> String {
+    match answer {
+        None => r#"{"schema_version":1,"answered_from":"not-configured","bytes_read":0,"why":"The CLI telemetry directory is not configured, so no log was read."}"#.to_owned(),
+        Some(answer) => format!(
+            r#"{{"schema_version":1,"answered_from":"{}","bytes_read":{},"walked_at_unix_millis":{},"walks":{},"answered_from_memory":{},"rewalk_after_millis":{},"why":{}}}"#,
+            answer.answered.word(),
+            answer.bytes_read,
+            answer.walked_at_unix_millis,
+            answer.walks,
+            answer.from_memory,
+            REWALK_AFTER.as_millis(),
+            crate::render::json_string(answer.answered.why()),
+        ),
     }
 }
 
@@ -4010,9 +4422,32 @@ pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHead
     crate::topjson::top_json(uri).await
 }
 
+/// The status document with its admission member, the CLI log walked afresh.
+/// The route answers through [`observed_status_remembered`]; this uncached
+/// door is what the admission and status tests drive. AF-06.
+///
+/// It lives HERE, below the file's first column-zero `#[cfg(test)]`, on
+/// purpose: the source-shape tests (`all_three_browser_engine_tasks_…`,
+/// `strict_and_ordinary_commands_share_…`) take everything above that line
+/// as the production source, and a test-only item placed above it cut their
+/// census short.
+#[cfg(test)]
+fn observed_status_with_admission(
+    root: &std::path::Path,
+    local: Option<&Progress>,
+    dir: Option<&std::path::Path>,
+    now: i64,
+) -> String {
+    admitted_status(root, local, external_observation(dir, now))
+}
+
 #[cfg(test)]
 #[path = "sweeprun_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "sweeprun_status_cache_tests.rs"]
+mod status_cache_tests;
 
 #[cfg(test)]
 #[expect(

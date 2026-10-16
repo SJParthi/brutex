@@ -458,3 +458,226 @@ fn an_unread_directory_beside_read_ones_under_their_parent_is_named() {
         "{says}"
     );
 }
+
+/// **WHAT THE WALK COULD NOT SEE IS SAID** (AF-02 repair round 2, the
+/// second agent's follow-up): a link to a directory under `logs` is named
+/// like the directory it reaches (the attack's `logs/zz-link`); a `logs`
+/// that is there and cannot be listed is named with the error, never read
+/// as "nothing unread"; and a run id the import journal holds no `run` line
+/// of says so, while one it holds does not.
+#[test]
+fn a_linked_directory_an_unlistable_logs_and_an_unknown_run_are_each_said() {
+    let run_line = "run 1791943060 source=zip archive=/zz/a.zip archive_bytes=7 commit=abc \
+         started=1791943060 archive_cd_blake3=00\n";
+    let mut journal = run_line.to_owned();
+    journal.push_str(&filtered_day());
+    let root = store("linked", &journal, "");
+    std::fs::create_dir_all(root.join("logs").join("cli-batch")).expect("mkdir");
+    std::os::unix::fs::symlink("cli-batch", root.join("logs").join("zz-link")).expect("link");
+    std::os::unix::fs::symlink("nowhere", root.join("logs").join("zz-dangling")).expect("link");
+    let got = answer(&root, &ask("feed=gdfl&run=1791943060")).expect("reads");
+    let lifecycle = &got["run"]["lifecycle"];
+    assert_eq!(
+        lifecycle["not_read"],
+        json!(["logs/cli-batch", "logs/zz-link"]),
+        "{got:#}"
+    );
+    assert_eq!(lifecycle["not_read_total"], 2);
+    let says = lifecycle["says"].as_str().expect("a sentence");
+    assert!(!says.contains("no `run` line"), "{says}");
+    assert!(!says.contains("could not be"), "{says}");
+
+    // `logs` IS THERE AND IS NOT A DIRECTORY: said, with the error.
+    let root = store("unlistable", &journal, "");
+    std::fs::write(root.join("logs"), "zz").expect("a file where logs belongs");
+    let got = answer(&root, &ask("feed=gdfl&run=1791943060")).expect("reads");
+    let lifecycle = &got["run"]["lifecycle"];
+    assert_eq!(lifecycle["not_read"], json!([]), "{got:#}");
+    let says = lifecycle["says"].as_str().expect("a sentence");
+    assert!(says.contains("; logs ("), "{says}");
+    assert!(says.contains(") could not be listed"), "{says}");
+
+    // AN ID THE JOURNAL DOES NOT HOLD.
+    let got = answer(&root, &ask("feed=gdfl&run=1791943061")).expect("reads");
+    assert_eq!(got["run"]["journal_lines"], json!([]), "{got:#}");
+    let says = got["run"]["lifecycle"]["says"]
+        .as_str()
+        .expect("a sentence");
+    assert!(
+        says.contains("the import journal holds no `run` line of this id"),
+        "{says}"
+    );
+}
+
+// ══ AF-02 repair 2: a close owns only what it names, in its own run ═════════
+
+/// The run that closes the earlier lines of the repair-2 fixtures.
+const RUN_A: u64 = 1_792_100_000;
+/// A later run, closing the same kind-days under another list.
+const RUN_B: u64 = 1_792_100_600;
+/// The importer's words for an invented malformed row.
+const WHY: &str = "line 4: not ten well-formed fields";
+
+/// A `run` line as the importer writes it, started at its id.
+fn run_line(id: u64) -> String {
+    format!("run {id} source=zip archive=/zz/invented archive_bytes=1 commit=zzzz started={id}\n")
+}
+
+/// One options `refused` event at epoch millisecond `ms`.
+fn refusal_at(seq: u32, day: &str, about: &str, why: &str, stage: &str, ms: u64) -> String {
+    format!(
+        "{{\"seq\":{seq},\"ts\":\"2026-10-17T00:00:00.000Z\",\"ms\":{ms},\"level\":\"error\",\
+         \"target\":\"gdfl.import\",\"msg\":\"refused\",\"fields\":{{\"kind\":\"options\",\
+         \"day\":\"{day}\",\"about\":\"{about}\",\"why\":\"{why}\",\"stage\":\"{stage}\"}}}}\n"
+    )
+}
+
+/// **A REFUSAL NO CLOSE OF THE DAY OWNS KEEPS ITS LOG-ONLY ROW** (AF-02
+/// repair 2, the second agent's blocking item 2): AF-02's first answer let
+/// a line under ANY filter suppress DB-025's `*` row, so a whole-day refusal
+/// of an earlier attempt vanished from `/imports.json` and `/audit.json` once
+/// a list closed the day (`counts.refused` 0 at 9cb9de51). A close owns a
+/// refusal when its filter names the refusal's subject and the refusal is
+/// not in a later closing run's window; one that no close owns keeps its
+/// row, counted once:
+///
+/// * 2018-08-20, the blocking item's fixture: B's refusal is owned by B's
+///   `ABCAPITAL,RELIANCE` close, by time: its dated spelling of a 2018
+///   share is no ticker the decoder reads (shares were monthly until
+///   2019-02-01), so it is about no instrument and any close in whose window
+///   it falls owns it: no row (the phantom stays gone);
+/// * 2018-08-21: a calendar refusal before A's list close: only `*` names a
+///   whole day, so its row stays, `failures` 1;
+/// * 2018-08-22: the same refusal before a `*` close (the 2024-03-02 shape):
+///   owned, history beside that close, no row;
+/// * 2018-08-23: an ABCAPITAL file (its 2018 monthly spelling) during A's
+///   `BANKNIFTY,NIFTY` run: no close names ABCAPITAL, so its row stays;
+/// * 2018-08-24: a NIFTY file (the monthly spelling: index weeklies are read
+///   in the day form only from 2018-09-03, `pull::gdfl_nfo::
+///   INDEX_WEEKLY_FROM_DAYS`) before A's naming close: owned (history);
+/// * 2018-08-27: a NIFTY file in B's window, after A's naming close: B does
+///   not name NIFTY and A's window ended, so its row stays, and the
+///   kind-day's two other refusals (each owned) are not counted in it;
+/// * 2018-08-30: the same NIFTY file logged in BOTH runs: once unowned is
+///   unowned, counted once.
+#[test]
+fn a_refusal_no_close_of_the_day_owns_keeps_its_log_only_row() {
+    let stats = |n: u32, run: u64| {
+        format!("failures={n} vendor_refused={n} reason=malformed_row run={run}")
+    };
+    let mut journal = run_line(RUN_A);
+    for (day, filter, n) in [
+        ("2018-08-20", "BANKNIFTY,NIFTY", 1),
+        ("2018-08-21", "BANKNIFTY,NIFTY", 0),
+        ("2018-08-22", "*", 0),
+        ("2018-08-23", "BANKNIFTY,NIFTY", 0),
+        ("2018-08-24", "BANKNIFTY,NIFTY", 0),
+        ("2018-08-27", "BANKNIFTY,NIFTY", 1),
+        ("2018-08-30", "BANKNIFTY,NIFTY", 1),
+    ] {
+        journal.push_str(&closed("options", day, filter, &stats(n, RUN_A)));
+    }
+    journal.push_str(&run_line(RUN_B));
+    for day in ["2018-08-20", "2018-08-27", "2018-08-30"] {
+        journal.push_str(&closed(
+            "options",
+            day,
+            "ABCAPITAL,RELIANCE",
+            &stats(1, RUN_B),
+        ));
+    }
+    let in_a = RUN_A * 1_000 + 100_000;
+    let in_b = RUN_B * 1_000 + 100_000;
+    let before = RUN_A * 1_000 - 1_000_000;
+    let calendar = "the calendar says ZzInvented, not a regular session";
+    let abc = "ABCAPITAL30AUG1899999CE";
+    let nifty = "NIFTY18AUG9999CE";
+    let ring: String = [
+        refusal_at(1, "2018-08-20", abc, WHY, "vendor", in_b),
+        refusal_at(2, "2018-08-21", "calendar", calendar, "calendar", before),
+        refusal_at(3, "2018-08-22", "calendar", calendar, "calendar", before),
+        refusal_at(4, "2018-08-23", "ABCAPITAL18AUG9999CE", WHY, "vendor", in_a),
+        refusal_at(5, "2018-08-24", nifty, WHY, "vendor", before),
+        refusal_at(6, "2018-08-27", nifty, WHY, "vendor", in_a),
+        refusal_at(7, "2018-08-27", "NIFTY18AUG9998CE", WHY, "vendor", in_b),
+        refusal_at(8, "2018-08-27", abc, WHY, "vendor", in_b),
+        refusal_at(9, "2018-08-30", nifty, WHY, "vendor", in_a),
+        refusal_at(10, "2018-08-30", nifty, WHY, "vendor", in_b),
+    ]
+    .concat();
+    let root = store("unowned", &journal, &ring);
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&kind=options&from=2018-08-20&to=2018-08-31&order=asc"),
+    )
+    .expect("reads");
+    let logged_only: Vec<(&str, u64)> = rows(&got)
+        .iter()
+        .filter(|row| row["outcome_from"] == "log")
+        .map(|row| {
+            assert_eq!(row["filter"], "*", "{row:#}");
+            assert_eq!(row["outcome"], "refused", "{row:#}");
+            (
+                row["day"].as_str().unwrap(),
+                row["failures"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        logged_only,
+        [
+            ("2018-08-21", 1),
+            ("2018-08-23", 1),
+            ("2018-08-27", 1),
+            ("2018-08-30", 1)
+        ],
+        "{got:#}"
+    );
+    assert_eq!(got["counts"]["refused"], 4, "{}", got["counts"]);
+    // THE AUDIT SUMMARY WALKS THE SAME MERGE: the same rows, counted once.
+    let summary = summary(&root);
+    assert_eq!(summary["counts"]["refused"], 4, "{summary:#}");
+    let whole = answer(&root, &ask("feed=gdfl")).expect("reads");
+    assert_eq!(summary["counts"], whole["counts"]);
+}
+
+/// **WHERE A REFUSAL FALLS AGAINST A CLOSE** ([`placed`], [`next_start`]):
+/// at the run's start is the run's own; a millisecond before is an earlier
+/// attempt's; at the next closing run's start is that run's; a close with
+/// no run, or a refusal with no time, cannot be placed and keeps it; two
+/// runs that started in the same second share one window; and the
+/// milliseconds of a second near `u64::MAX` saturate rather than wrap.
+#[test]
+fn a_refusal_is_placed_by_its_close_and_the_next_closing_run() {
+    let start = 1_792_100_000;
+    let next = 1_792_100_600;
+    assert_eq!(
+        placed(Some(start * 1_000), Some(start), Some(next)),
+        Placed::Within
+    );
+    assert_eq!(
+        placed(Some(start * 1_000 - 1), Some(start), Some(next)),
+        Placed::Before
+    );
+    assert_eq!(
+        placed(Some(next * 1_000 - 1), Some(start), Some(next)),
+        Placed::Within
+    );
+    assert_eq!(
+        placed(Some(next * 1_000), Some(start), Some(next)),
+        Placed::After
+    );
+    assert_eq!(placed(Some(u64::MAX), Some(start), None), Placed::Within);
+    assert_eq!(placed(None, Some(start), Some(next)), Placed::Within);
+    assert_eq!(placed(Some(0), None, Some(next)), Placed::Within);
+    assert_eq!(
+        placed(Some(u64::MAX - 1), Some(u64::MAX), None),
+        Placed::Before
+    );
+    assert_eq!(
+        next_start(start, [start, next, next + 5, start - 9]),
+        Some(next)
+    );
+    assert_eq!(next_start(start, [start, start]), None, "the same second");
+    assert_eq!(next_start(start, std::iter::empty()), None);
+}

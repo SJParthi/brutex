@@ -578,7 +578,7 @@ fn a_done_close_with_this_instruments_own_logged_refusal_says_it() {
     assert!(
         said.iter().any(|s| s
             == "closed done, yet the importer's log holds 1 refusal(s) of this day about \
-                this instrument not dated before this run; the first is \
+                this instrument not placed in another run; the first is \
                 NIFTY27MAR2599999PE: line 2: not ten well-formed fields"),
         "{said:?}"
     );
@@ -593,4 +593,289 @@ fn a_done_close_with_this_instruments_own_logged_refusal_says_it() {
         "{:?}",
         says(&bank)
     );
+}
+
+// ══ AF-02 repair 2: a close owns only its own run's refusals ════════════════
+
+/// The run that closes the earlier lines of the repair-2 fixtures.
+const RUN_A: u64 = 1_792_100_000;
+/// A later run, closing the same kind-days under another list.
+const RUN_B: u64 = 1_792_100_600;
+/// The importer's words for an invented malformed row.
+const WHY: &str = "line 4: not ten well-formed fields";
+/// The directories this route reads refusals from, as its sentences name
+/// them (`logs_read`, pinned by [`the_logs_read_are_named_in_their_order`]).
+const LOGS_READ: &str =
+    "logs/cli, logs/gdfl/indices, logs/gdfl/stocks, logs/gdfl/options, logs/gdfl/store";
+
+/// A `run` line as the importer writes it, started at its id.
+fn run_line(id: u64) -> String {
+    format!("run {id} source=zip archive=/zz/invented archive_bytes=1 commit=zzzz started={id}\n")
+}
+
+/// The importer's `refused` events, each at its own epoch millisecond, as
+/// the directory `logs/<dir>` holds them: `(day, about, why, stage, ms)`,
+/// all options.
+fn ring_at(root: &Path, dir: &str, refusals: &[(&str, &str, &str, &str, u64)]) {
+    let mut text = String::new();
+    for (seq, (on, about, why, stage, ms)) in refusals.iter().enumerate() {
+        writeln!(
+            text,
+            "{{\"seq\":{seq},\"ts\":\"2026-10-17T00:00:00.000Z\",\"ms\":{ms},\"level\":\"error\",\
+             \"target\":\"gdfl.import\",\"msg\":\"refused\",\"fields\":{{\"kind\":\"options\",\
+             \"day\":\"{on}\",\"about\":\"{about}\",\"why\":\"{why}\",\"stage\":\"{stage}\"}}}}"
+        )
+        .expect("a String takes any text");
+    }
+    write(&root.join("logs").join(dir).join("events.ndjson"), &text);
+}
+
+/// A later run's file: refused in run B's window, B's `ABCAPITAL,RELIANCE`
+/// close's own.
+const ABC: &str = "ABCAPITAL30AUG1899999CE";
+
+/// The fixture of the second agent's blocking item 1, widened: run A closed
+/// 2018-08-20 under `BANKNIFTY,NIFTY` with one vendor refusal, logged to
+/// `logs/cli-batch` (a `cli` given `BRUTEX_LOG_DIR`), which this route does
+/// not read; run B closed the same day under `ABCAPITAL,RELIANCE`, and its
+/// refusal is in `logs/cli`. 2018-08-27 holds one NIFTY refusal in A's
+/// window and one in B's; 2018-08-28 and 2018-08-29 are A's `incomplete`
+/// closes with B's refusals beside them.
+fn later_runs_store(name: &str) -> PathBuf {
+    let root = root_of(name);
+    let stats = |n: u32, run: u64| {
+        format!("failures={n} vendor_refused={n} reason=malformed_row run={run}")
+    };
+    let mut journal = run_line(RUN_A);
+    for (on, n) in [("2018-08-20", 1), ("2018-08-27", 2)] {
+        journal.push_str(&closed("done", on, "BANKNIFTY,NIFTY", &stats(n, RUN_A)));
+    }
+    for (on, n) in [("2018-08-28", 1), ("2018-08-29", 2)] {
+        journal.push_str(&closed(
+            "incomplete",
+            on,
+            "BANKNIFTY,NIFTY",
+            &format!("failures={n} stage=file reason=filing run={RUN_A}"),
+        ));
+    }
+    journal.push_str(&run_line(RUN_B));
+    for on in ["2018-08-20", "2018-08-27", "2018-08-28", "2018-08-29"] {
+        journal.push_str(&closed("done", on, "ABCAPITAL,RELIANCE", &stats(1, RUN_B)));
+    }
+    write(&pull::gdfl_import::journal_path(&root), &journal);
+    let in_a = RUN_A * 1_000 + 100_000;
+    let in_b = RUN_B * 1_000 + 100_000;
+    ring_at(
+        &root,
+        "cli",
+        &[
+            ("2018-08-20", ABC, WHY, "vendor", in_b),
+            ("2018-08-27", "NIFTY18AUG9999CE", WHY, "vendor", in_a),
+            ("2018-08-27", "NIFTY18AUG9998CE", WHY, "vendor", in_b),
+            ("2018-08-27", ABC, WHY, "vendor", in_b),
+            ("2018-08-28", ABC, WHY, "vendor", in_b),
+            ("2018-08-29", "ABCAPITAL30AUG1899998CE", WHY, "vendor", in_a),
+            ("2018-08-29", ABC, WHY, "vendor", in_b),
+        ],
+    );
+    ring_at(
+        &root,
+        "cli-batch",
+        &[("2018-08-20", "NIFTY18AUG9999CE", WHY, "vendor", in_a)],
+    );
+    root
+}
+
+/// The words for `n` of a close's refusals that no directory read holds.
+fn unread(n: u32) -> String {
+    format!(
+        "{n} of them {} in none of the logs this route reads ({LOGS_READ})",
+        if n == 1 { "is" } else { "are" }
+    )
+}
+
+/// What `record` says, asserted to name nothing of run B's and never "none
+/// about this instrument".
+fn never_b(record: &Value) -> Vec<String> {
+    let said = says(record);
+    assert!(
+        !said
+            .iter()
+            .any(|s| s.contains(ABC) || s.contains("none about this instrument")),
+        "{said:?}"
+    );
+    said
+}
+
+/// **A LATER LIST RUN'S REFUSAL IS NEVER AN EARLIER CLOSE'S OWN** (AF-02
+/// repair 2, the second agent's blocking item 1, its fixture,
+/// [`later_runs_store`]). At 9cb9de51 NIFTY read "imported with 1 vendor
+/// refusal(s), none about this instrument; the first is ABCAPITAL…": B's
+/// file named as A's first, and A's own refusal turned into "none".
+///
+/// The same window bounds "K about this instrument" (2018-08-27), and a
+/// refusal about this instrument in B's window is said as a later one,
+/// never dropped.
+#[test]
+fn a_later_list_runs_refusal_is_never_an_earlier_closes_own() {
+    let root = later_runs_store("later-run");
+
+    // THE FIXTURE OF THE BLOCKING ITEM.
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-20");
+    assert_eq!(
+        nifty["import"]["outcome"], "done_with_refusals",
+        "{nifty:#}"
+    );
+    assert_eq!(nifty["import"]["run"], RUN_A);
+    assert_eq!(nifty["import"]["refusals"]["this_count"], 0);
+    assert_eq!(nifty["import"]["refusals"]["other_count"], 0);
+    assert_eq!(nifty["import"]["refusals"]["later_count"], 1);
+    assert_eq!(nifty["import"]["refusals"]["later_this_count"], 0);
+    let said = never_b(&nifty);
+    let want = format!("imported with 1 vendor refusal(s); {}", unread(1));
+    assert!(said.contains(&want), "{said:?}");
+    // B'S OWN CLOSE still names its refusal, for an instrument it names.
+    let reliance = day_of(&root, "NSE-FNO-RELIANCE", "2018-08-20");
+    assert_eq!(reliance["import"]["run"], RUN_B, "{reliance:#}");
+    let want = format!(
+        "imported with 1 vendor refusal(s), none about this instrument; the first is {ABC}: \
+         {WHY}"
+    );
+    assert!(says(&reliance).contains(&want), "{:?}", says(&reliance));
+
+    // "K ABOUT THIS INSTRUMENT" IS BOUNDED TOO, and the later one is said.
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-27");
+    assert_eq!(nifty["import"]["refusals"]["this_count"], 1, "{nifty:#}");
+    assert_eq!(nifty["import"]["refusals"]["later_count"], 2);
+    assert_eq!(nifty["import"]["refusals"]["later_this_count"], 1);
+    let said = never_b(&nifty);
+    let want = format!(
+        "imported with 2 vendor refusal(s), at least 1 about this instrument; the first is \
+         NIFTY18AUG9999CE: {WHY}; {}",
+        unread(1)
+    );
+    assert!(said.contains(&want), "{said:?}");
+    let want = format!(
+        "the importer's log holds 1 refusal(s) about this instrument logged after a later run \
+         closed this day for other files; the first is NIFTY18AUG9998CE: {WHY}"
+    );
+    assert!(said.contains(&want), "{said:?}");
+}
+
+/// **THE INCOMPLETE ARM IS BOUNDED BY THE NEXT CLOSING RUN TOO** (AF-02
+/// repair 2, the second agent's follow-up on DB-G69's arm,
+/// [`later_runs_store`]): nothing of B's is named for A's `incomplete`
+/// closes, and "none about this instrument" is said only when the logs read
+/// hold every failure.
+#[test]
+fn the_incomplete_arm_is_bounded_by_the_next_closing_run() {
+    let root = later_runs_store("later-run-incomplete");
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-28");
+    assert_eq!(nifty["import"]["outcome"], "incomplete", "{nifty:#}");
+    assert_eq!(nifty["import"]["refusals"]["later_count"], 1);
+    let said = never_b(&nifty);
+    assert!(
+        said.contains(&"incomplete at import (file): filing".to_owned()),
+        "{said:?}"
+    );
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-29");
+    let said = never_b(&nifty);
+    let want = format!(
+        "incomplete at import (file): filing; 2 failure(s); 1 of them in the logs this route \
+         reads, none of those about this instrument; the first is ABCAPITAL30AUG1899998CE: \
+         {WHY}; {}",
+        unread(1)
+    );
+    assert!(said.contains(&want), "{said:?}");
+}
+
+/// **A WHOLE-DAY REFUSAL NO CLOSE OWNS REACHES EVERY INSTRUMENT IT IS
+/// ABOUT** (AF-02 repair 2, the second agent's blocking item 2, its
+/// fixture): an earlier attempt's calendar refusal of 2018-08-21 left no
+/// line (DB-025's shape), and run A later closed the day under
+/// `BANKNIFTY,NIFTY`. At 9cb9de51 RELIANCE read `none`, "no import journal
+/// line for this day": the refusal was hidden from every instrument the
+/// list does not name. NIFTY reads its list close, with the calendar
+/// refusal as history (DB-B45).
+///
+/// Beside it: a `*` close after the same refusal (the 2024-03-02 shape)
+/// owns it, so no log-only row and `done` for all; and a file of an
+/// underlying the day's only list does not name (ABCAPITAL during A) reads
+/// `refused` for ABCAPITAL and nothing for NIFTY.
+#[test]
+fn a_whole_day_refusal_no_close_owns_reaches_every_instrument_it_is_about() {
+    let root = root_of("unowned");
+    let clean = format!("failures=0 run={RUN_A}");
+    let mut journal = run_line(RUN_A);
+    journal.push_str(&closed("done", "2018-08-21", "BANKNIFTY,NIFTY", &clean));
+    journal.push_str(&closed("done", "2018-08-22", "*", &clean));
+    journal.push_str(&closed("done", "2018-08-23", "BANKNIFTY,NIFTY", &clean));
+    write(&pull::gdfl_import::journal_path(&root), &journal);
+    let before = RUN_A * 1_000 - 1_000_000;
+    let calendar = "the calendar says ZzInvented, not a regular session";
+    ring_at(
+        &root,
+        "cli",
+        &[
+            ("2018-08-21", "calendar", calendar, "calendar", before),
+            ("2018-08-22", "calendar", calendar, "calendar", before),
+            (
+                "2018-08-23",
+                "ABCAPITAL18AUG9999CE",
+                WHY,
+                "vendor",
+                RUN_A * 1_000 + 5_000,
+            ),
+        ],
+    );
+
+    let reliance = day_of(&root, "NSE-FNO-RELIANCE", "2018-08-21");
+    assert_eq!(reliance["import"]["outcome"], "refused", "{reliance:#}");
+    assert_eq!(reliance["import"]["from"], "log");
+    let said = says(&reliance);
+    assert!(
+        said.iter()
+            .any(|s| s.starts_with("refused at import (calendar)")),
+        "{said:?}"
+    );
+    assert!(
+        !said
+            .iter()
+            .any(|s| s == "no import journal line for this day"),
+        "{said:?}"
+    );
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-21");
+    assert_eq!(nifty["import"]["outcome"], "done", "{nifty:#}");
+    assert_eq!(nifty["import"]["from"], "journal");
+    assert_eq!(nifty["import"]["refusals"]["superseded_count"], 1);
+
+    for instrument in ["NSE-FNO-RELIANCE", "NSE-FNO-NIFTY"] {
+        let whole = day_of(&root, instrument, "2018-08-22");
+        assert_eq!(
+            whole["import"]["outcome"], "done",
+            "{instrument}: {whole:#}"
+        );
+        assert_eq!(whole["import"]["from"], "journal");
+    }
+
+    let abcapital = day_of(&root, "NSE-FNO-ABCAPITAL", "2018-08-23");
+    assert_eq!(abcapital["import"]["outcome"], "refused", "{abcapital:#}");
+    assert_eq!(abcapital["import"]["refusals"]["this_count"], 1);
+    assert!(
+        says(&abcapital)
+            .iter()
+            .any(|s| s.starts_with("refused at import (vendor): ABCAPITAL18AUG9999CE")),
+        "{:?}",
+        says(&abcapital)
+    );
+    let nifty = day_of(&root, "NSE-FNO-NIFTY", "2018-08-23");
+    assert_eq!(nifty["import"]["outcome"], "done", "{nifty:#}");
+    assert_eq!(nifty["import"]["refusals"]["this_count"], 0);
+}
+
+/// The sentence's list of directories is the route's own reads, in order:
+/// the `cli` ring, each GDFL kind's directory, the store lock's.
+#[test]
+fn the_logs_read_are_named_in_their_order() {
+    assert_eq!(logs_read(), LOGS_READ);
 }
