@@ -161,9 +161,23 @@ pulled before an action and one pulled after it may sit here on different
 bases with nothing to tell them apart. numeric-pass16 p16num-2, D-1969.
 
 **`i64::MIN` is the open-interest null sentinel.** Zero means zero. Spot
-indices carry no open interest and store the sentinel; conflating that with a
-genuine zero would make a derivative series and an index series indistinguish-
-able on a field that matters.
+indices and shares carry no open interest; conflating a null with a genuine
+zero would make a derivative series and an index series indistinguishable on a
+field that matters.
+
+**What the store actually holds for them is two things, by landing date.** Rows
+landed since D-3322 (the Kite decode's `withhold`, `crates/pull/src/fetch.rs`,
+pinned by `an_index_or_a_share_is_filed_with_the_null_and_a_contract_keeps_its_interest`)
+store the sentinel, as GDFL's always did. Rows the Zerodha landing filed before
+it store **0**: measured on the operator's store, every NIFTY `1min` bar
+(796,027) and `1day` bar (2,911) holds 0, and the derived rungs folded from
+them inherit it (DB-A08, DB-A14). Those months are not rewritten in place
+(§3 rule 8 of `CLAUDE.md`); a re-landing is a new generation. So a stored 0 on
+an `INDEX` or `CASH` series is NOT a measured zero, and every read says so:
+`/bars.json` and `/bars/window.json` serve `"oi": null` with
+`"oichg_why": "not_a_derivative"` for those segments whatever is stored
+(D-3322 item 2). This sentence used to say spot indices store the sentinel,
+which no Zerodha month landed before D-3322 does (R3-18).
 
 **A record has no structure that a lost write violates.** An all-zero record is
 a legal flat bar whose open interest is a real zero. Nothing about the record

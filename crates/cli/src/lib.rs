@@ -97,6 +97,9 @@ mod series_identity;
 mod srt_builder;
 /// `cli tix-rebuild`: the `.tix` time index for named months of one series (D-3340).
 mod tix_rebuilder;
+/// `cli zerodha-gaps`: the gap ledger for Zerodha months already stored, from
+/// the store and the calendar with no vendor call (R3-18).
+mod zerodha_gaps_command;
 /// `cli zerodha-repair`: the Zerodha month holes, planned read-only, counted
 /// for every series, or repaired to a new generation from bars another store
 /// holds (D-3350, WP-13c).
@@ -575,6 +578,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    their own day's range) and the months that
                                    hold them. ALL prints one line per series
                                    and names each with no minute rung (WP-13d).
+       cli zerodha-gaps INSTRUMENT|ALL FROM TO [--segment INDEX|CASH] [--apply]
+                                   the gap ledger for stored Zerodha 1min months
+                                   (FROM, TO are YYYY-MM-DD), from the store and
+                                   the calendar with no vendor call: one
+                                   why=stored_short line per session held short
+                                   that the ledger does not name. Nothing is
+                                   written without --apply (R3-18).
        cli zerodha-repair INSTRUMENT|ALL FROM TO [--segment INDEX|CASH]
                           [--rung RUNG] [--from-store ROOT --reason TEXT]
                                    the Zerodha month holes (FROM, TO are
@@ -2716,6 +2726,9 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["srt-build", arguments @ ..] if !arguments.is_empty() => {
             srt_builder::command(arguments, out)
         }
+        ["zerodha-gaps", arguments @ ..] if !arguments.is_empty() => {
+            zerodha_gaps_command::command(arguments, out)
+        }
         ["zerodha-repair", arguments @ ..] if !arguments.is_empty() => {
             zerodha_repair::command(arguments, out)
         }
@@ -2793,7 +2806,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 47] = [
+const COMMANDS: [&str; 48] = [
     "alerts",
     "audit",
     "audit-audited-range",
@@ -2840,6 +2853,7 @@ const COMMANDS: [&str; 47] = [
     "tix-rebuild",
     "top",
     "verify",
+    "zerodha-gaps",
     "zerodha-repair",
 ];
 

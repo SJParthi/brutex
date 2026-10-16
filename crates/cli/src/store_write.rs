@@ -68,7 +68,7 @@ pub fn unstamped_write_refusal(commit: Option<&str>, allow: Option<&OsStr>) -> O
 /// `alerts` is one in two of its forms (IA-11a, merged in beside this table):
 /// `--ack` appends an acknowledgement to `audit/alerts` and `--replace-damaged`
 /// puts a new queue in its place. Its listings read and write nothing.
-pub(crate) const WRITERS: [&str; 10] = [
+pub(crate) const WRITERS: [&str; 11] = [
     "alerts",
     "census-migrate",
     "census-recount",
@@ -78,6 +78,7 @@ pub(crate) const WRITERS: [&str; 10] = [
     "scrub-blocks",
     "srt-build",
     "tix-rebuild",
+    "zerodha-gaps",
     "zerodha-repair",
 ];
 
@@ -85,7 +86,8 @@ pub(crate) const WRITERS: [&str; 10] = [
 ///
 /// A verb in [`WRITERS`] writes unless its arguments choose its read-only
 /// form: `tix-rebuild ... --dry-run`, `srt-build ... --dry-run`, `gdfl-rekey`
-/// without `--apply`, and `zerodha-repair` without `--from-store` each state
+/// without `--apply`, `zerodha-gaps` without `--apply`, and `zerodha-repair`
+/// without `--from-store` each state
 /// in their own module that they write nothing; `alerts` writes only as
 /// `alerts --ack <n>` and `alerts --replace-damaged`, the flag first, which is
 /// the one place its own parse takes it.
@@ -94,7 +96,7 @@ pub(crate) fn writes_the_store(verb: &str, arguments: &[&str]) -> bool {
     match verb {
         "alerts" => matches!(arguments.first(), Some(&("--ack" | "--replace-damaged"))),
         "srt-build" | "tix-rebuild" => !arguments.contains(&"--dry-run"),
-        "gdfl-rekey" => arguments.contains(&"--apply"),
+        "gdfl-rekey" | "zerodha-gaps" => arguments.contains(&"--apply"),
         "zerodha-repair" => arguments.contains(&"--from-store"),
         other => WRITERS.contains(&other),
     }
@@ -303,6 +305,16 @@ mod tests {
                 false,
             ),
             (
+                "zerodha-gaps",
+                &["NIFTY", "2024-01-01", "2024-01-31"],
+                false,
+            ),
+            (
+                "zerodha-gaps",
+                &["ALL", "2024-01-01", "2024-01-31", "--apply"],
+                true,
+            ),
+            (
                 "zerodha-repair",
                 &[
                     "NIFTY",
@@ -354,7 +366,7 @@ mod tests {
         }
         let shadowed = || Ok(shadow.clone());
         let owned = || Ok(real.clone());
-        let writing: [(&str, &[&str]); 10] = [
+        let writing: [(&str, &[&str]); 11] = [
             ("alerts", &["--ack", "1"]),
             ("census-migrate", &["gdfl"]),
             ("census-recount", &["gdfl"]),
@@ -364,6 +376,7 @@ mod tests {
             ("scrub-blocks", &[]),
             ("srt-build", &[]),
             ("tix-rebuild", &[]),
+            ("zerodha-gaps", &["--apply"]),
             ("zerodha-repair", &["--from-store"]),
         ];
         assert_eq!(writing.map(|(verb, _)| verb), WRITERS, "every writer, once");
@@ -389,6 +402,7 @@ mod tests {
             ("gdfl-rekey", &["--plan"][..]),
             ("srt-build", &["--dry-run"][..]),
             ("tix-rebuild", &["--dry-run"][..]),
+            ("zerodha-gaps", &[][..]),
             ("zerodha-repair", &[][..]),
             ("top", &[][..]),
         ] {
