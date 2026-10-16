@@ -10404,6 +10404,23 @@ released while counting; both count the same snapshot. Not timed.
 
 ## A sorted or extremes window reads every bar in its range — D-0733, 29 September 2026
 
+**Superseded: the read this section describes is no longer in the code
+(AF-05, p99-11, D-4972).** The quotes below are `bars::window` as D-0733 found
+it on 29 September. Since then it has changed in two steps:
+- D-3326 (WP-31) replaced the whole-window read. A sorted window streams
+  each kept row once and holds at most `offset + limit` rows, refused past
+  its budget.
+- D-3349 (WP-39) serves a value sort and `extremes=1` from the months'
+  `.srt` sort indexes and their run summaries. Neither reads a row that an
+  index run orders.
+
+`reserved_window`, `read_in_time` and `seek_page` are gone, and
+`api::bars::tests::the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source`
+fails if any of them comes back. What still grows with the range is a month
+with no `.srt`, and the time-of-day sort, which reads every kept row and is
+refused past `MAX_SCAN_BARS` = 24,000,000. W1-api5-4 under D-1446 states
+both, with the latency measured on 16 October 2026.
+
 **This was stated only in code comments (W1-api1-3).** `GET /bars/window.json`
 ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
 `bars::window`. Quoted from that function:
@@ -10443,9 +10460,16 @@ comparisons instead.
 compares every offset from 0 to past the end against sorting everything and
 slicing, over primary values each repeated three times.
 
-**Not changed, and why.** The reads, the resident rows and the partition stay
-proportional to the range: no store index answers "the largest closes", and
-`total`, `extremes_of` and the change fold each need every row. Not timed.
+**Not changed then, and why — no longer true (AF-05).** This said: "The
+reads, the resident rows and the partition stay proportional to the range:
+no store index answers 'the largest closes', and `total`, `extremes_of` and
+the change fold each need every row. Not timed." That reason went away when
+the `.srt` sort index came in (D-3349). It now answers the largest closes and
+the extremes from its runs.
+On the 16 October store, a value sort over a range whose months all have a
+`.srt` reads no row by row. Over the 97-month NIFTY one-second range, where
+12 months have no `.srt`, it reads 5,092,020 rows at p50 381 ms. W1-api5-4
+holds the table.
 ### Unpinned saved-ranking requests discover their checkpoint every time (D-0904)
 
 An `/index-stop-ranking.json` request without a pinned checkpoint cannot
@@ -12083,13 +12107,17 @@ read from the source.
 
 An audit (cluster B6) found eleven paths in `crates/api` whose cost grows with
 the store or the universe and which this register did not name. Three were
-changed. The rest are written here, each with the function that pays it.
+changed then. Two more changed later and are under **Changed** now:
+W1-api5-3 (D-3327) and W1-api5-8 (D-4972). The rest are written here, each
+with the function that pays it.
 `api::server::cost_limits_tests` reads every bullet below and checks that the
 code still has the shape the bullet describes, so a bullet goes stale only
 with a failing build. Notation: `E` is census entries across every vendor,
 `E_v` one vendor's, `U` the merged universe (about 2,780 keys), `n` bars in
-the range a request names. **No latency below is measured** (`CLAUDE.md` §3
-rule 6); every bound is read from the source.
+the range a request names. **No latency below is measured unless its bullet
+gives the measurement** (`CLAUDE.md` §3 rule 6). AF-05 measured W1-api5-3,
+W1-api5-4 and W1-api5-8 on 16 October 2026; every other bound is read from
+the source.
 
 ### Changed
 
@@ -12112,18 +12140,176 @@ rule 6); every bound is read from the source.
   an offset at or past the end compares nothing. Before, it partitioned at
   `offset + limit` and ordered everything before that; the query string does
   not cap `offset`. `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`
-  counts the comparisons. **What remains:** a request whose sort is not `ts`,
-  or that asks `extremes=1`, still reads every bar in its month range (one
-  `read_record` per bar), folds the change over them, and holds them all in
-  memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
-  `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
-  without extremes is the bounded seek path and is unchanged.
+  counts the comparisons.
+
+  **What remains, rewritten to what the code does and measured (AF-05,
+  p99-11, D-4972).** This said that a sort other than `ts`, or `extremes=1`,
+  "still reads every bar in its month range ... O(n) reads and O(n) memory".
+  Three changes made that untrue:
+  - D-3326 (WP-31) streams a non-time sort once and holds at most
+    `offset + limit` rows.
+  - D-3349 (WP-39) serves a VALUE sort (`o h l c v oi`) from the months'
+    `.srt` sort indexes (`sort::page`).
+  - The same package serves `extremes=1` from the indexes' run summaries
+    (`sort::extremes_of`).
+
+  So neither a value sort nor `extremes=1` reads a row that an index run
+  orders. When every month in the range has a `.srt`, the answer reports
+  `scan_rows` 0. The 14 October assurance run read that over 44,102,990 rows
+  in 101 runs.
+
+  Two cases still read rows:
+  - **A month with no `.srt`**, or the rows appended after its `.srt`, is read
+    row by row through `scan`. The answer's `scanned_why` names each such
+    month, and its `build` field names the `cli srt-build` command that would
+    index them. See L-WP81-8, L-SC-3 and the D-4933 small-month section.
+  - **The time-of-day sort** (`sort=tod`) reads every kept row through
+    `scan`: O(n) reads, with memory bounded by the page's depth. Past
+    `MAX_SCAN_BARS` = 24,000,000 rows it is refused by name with
+    `scan_budget_exceeded`, before any row is read.
+
+  The `ts` sort without extremes is the bounded seek path and is unchanged.
+  The figure this bullet gave, "about 1.9 million at `MAX_WINDOW_MONTHS` =
+  240", is for a one-minute range. A one-second range of 97 months is about
+  44 million rows.
+
+  The measurements below were taken on 16 October 2026:
+  - **Store:** a shadow of the operator's store, with its bars linked
+    read-only.
+  - **Build:** the release `api` of feat/db-fix 4756cce0.
+  - **Request:** `/bars/window.json?feed=gdfl&timeframe=1s&key=NSE-INDEX-NIFTY&limit=200`.
+  - **Method:** n = 200 sequential GETs per row, on a host shared with other
+    agents' builds.
+
+  | Ask | Rows in range | Read row by row | p50 | p99 | max |
+  |---|---|---|---|---|---|
+  | `sort=c`, 2018-09..2026-09 | 44,032,544 | 5,092,020 | 381.46 ms | 498.69 ms | 666.75 ms |
+  | `sort=v`, same | 44,032,544 | 5,092,020 | 366.13 ms | 668.43 ms | 1,014.76 ms |
+  | `sort=c&extremes=1`, same | 44,032,544 | 5,092,020 | 446.58 ms | 816.12 ms | 1,291.30 ms |
+  | `sort=ts&extremes=1`, same | 44,032,544 | 0 | 2.64 ms | 9.57 ms | 14.48 ms |
+  | `sort=tod`, 2026-08..2026-09 | 944,941 | 944,941 | 69.29 ms | 112.93 ms | 144.51 ms |
+  | `sort=tod`, 2018-09..2026-09 (n = 20) | 44,032,544 | 0: 400 `scan_budget_exceeded` | 2.26 ms | 8.37 ms | 8.37 ms |
+
+  **The value-sort rows are not O(1) today, and the reason is in the store,
+  not in the code.** On 16 October, 12 of the 97 months have no `.srt` on disk:
+  2018-11, 2019-10, 2020-11, 2021-02, 2021-11, 2022-03, 2022-10, 2023-11,
+  2024-03, 2024-05, 2024-11 and 2025-10. The answer names all twelve. Those
+  5,092,020 rows are read whole on every request, and that read is the 381 ms.
+  Building the twelve indexes is a store write: `cli srt-build gdfl
+  NSE/INDEX/NIFTY 1s 2018-11 2025-10`, which is the command the answer's
+  `build` field gives.
 * **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
   from `Site::series` and its cells from `Site::censuses`, both read at boot.
   It now builds the axis with `census::held_series` over the request's fresh
   census, so a `show=gaps` request pays O(keys log keys) for the axis, the cost
   §32 records for startup, on top of `census_now`'s. The default held-only view
   does not pay it.
+
+* **W1-api5-3 — `instruments_json`, kept per census read (D-3327; rewritten
+  and measured by AF-05, p99-11, D-4972).** This bullet described the route
+  as it was before D-3327. On every request it ran a filter over the merged
+  universe (O(U)), then `census_now`, then `bars_by_symbol`, which walked
+  every entry of every vendor's census (O(E)), then a sort (O(T log T)).
+  D-3327 (WP-30) changed the route, but the bullet stayed as it was. What
+  the route does now:
+  - It builds the body once per (feed census read, universe parse), on the
+    store-read pool, and keeps it (`site.census_wire.kept`).
+  - That build filters the universe (O(U)). It counts each listing's held
+    months from the facet index: `held_by_listing` reads `facets::index`,
+    which keeps one node per instrument. It then sorts the tracked listing
+    (O(T log T), with T about 800).
+  - A request whose census and universe have not moved is served the kept
+    body. `bars_by_symbol`, the per-request walk, is gone.
+
+  **What remains:** the first request after the census or the universe moves
+  rebuilds the body. The facet index also pays for the entries appended since
+  it last moved, O(log) each. A cold index makes one pass over the segment's
+  keys, once per whole census read.
+
+  Measured warm on 16 October 2026: a shadow of the operator's store, the
+  release `api` of 4756cce0, n = 200 sequential GETs per feed.
+
+  | Feed | Census entries (E) | Body | p50 | p99 | max |
+  |---|---|---|---|---|---|
+  | default | — | 229,630 bytes | 1.06 ms | 1.76 ms | 1.83 ms |
+  | gdfl | E = 2,098,428 | 103,414 bytes | 1.05 ms | 1.69 ms | 2.03 ms |
+  | zerodha | E = 251,270 | 278,516 bytes | 1.02 ms | 1.88 ms | 2.63 ms |
+
+  The warm cost is flat across an 8.4x difference in E. A second run later the
+  same day, n = 200 rounds of one GET to this build and one to the AF-05 build
+  in turn, gave p50 1.92-2.39 ms and p99 13.82-19.64 ms on every feed and on
+  both builds alike: the host was busier, and E still made no difference. A
+  rebuild, the first request after a census move, is not timed here.
+* **W1-api5-8 — `bars_json` past the last bar: one record (AF-05, p99-8,
+  D-4972, narrowing D-1446).** When `from=` lies after the month's last
+  stored bar, the time lookup returns `n_valid`. That landing used to fall
+  back to reading the whole month to answer `[]`: O(n_valid) reads, which is
+  517,373 records on gdfl NIFTY 1s 2026-07. Now `past_the_last_bar` reads the
+  last record, once. If that record is the header's last bar (its stamp is
+  non-zero and equal to `last_ts_micros`) and it is older than `from`, the
+  answer is `[]` with no further read. The total cost is the lookup plus one
+  record. Through a ready `.tix` the lookup reads nothing for a stamp past the
+  header's (D-2329); through the bisection it reads O(log n_valid) records.
+  Why one record is enough: every batch the writer commits begins after the
+  header's last stamp (`Header::advance`), so no record can be later.
+
+  The full read, at O(n_valid) reads, is kept only for a tail that does not
+  read back as the header's last bar:
+  - zero-filled records from a newly allocated extent (stamp 0);
+  - a record its checksum refuses.
+
+  For those files, reading the month is what answers correctly and what names
+  the faults. A file cut short of what its header names is not read at all:
+  the store refuses it at the open, and the route answers 400 naming it. `api::server::bars_route::tests::a_window_past_the_last_bar_reads_one_record`
+  counts one record read and no record range.
+  `a_zero_filled_tail_still_takes_the_full_read` shows a zeroed tail starting
+  the full read and answering 206, and a cut file refused at the open.
+
+  Measured on 16 October 2026 on two shadows of the operator's store, each
+  with its bars linked read-only: before is the release `api` of feat/db-fix
+  4756cce0, after is this change. Method: n = 200 rounds of one GET to each
+  build in turn (n = 20 for `limit=2`, whose before answer is 71 MB), on a
+  host shared with other agents' builds. Every month is `/bars.json` with the
+  named `from=` and `to=`; the answers are byte for byte the same on both
+  builds except the two refusals.
+
+  | Selection | Answer | before p50 / p99 / max | after p50 / p99 / max |
+  |---|---|---|---|
+  | gdfl NIFTY 1s 2026-07, past the end (2026-08-01) | `[]` | 41.35 / 59.88 / 73.76 ms | 1.06 / 5.05 / 6.29 ms |
+  | gdfl NIFTY 1s 2026-07, past the end (2030-01-01) | `[]` | 40.75 / 57.08 / 72.72 ms | 1.12 / 2.56 / 3.36 ms |
+  | gdfl NIFTY 1s 2026-07, before the start (2026-06-30) | `[]` | 1.07 / 2.13 / 2.95 ms | 1.07 / 1.95 / 2.40 ms |
+  | gdfl NIFTY 1s 2026-07, one day (2026-07-15) | 3,105,001 bytes | 5.71 / 8.21 / 9.07 ms | 5.65 / 8.30 / 9.19 ms |
+  | gdfl NIFTY 1s 2026-07, the last day (2026-07-31) | 3,105,001 bytes | 5.90 / 9.94 / 14.97 ms | 5.87 / 9.36 / 10.37 ms |
+  | gdfl NIFTY 2020-09-24 11500 CE 1s, the day after expiry | `[]` | 17.50 / 29.01 / 35.65 ms | 1.24 / 5.88 / 8.73 ms |
+  | gdfl NIFTY 2020-09-24 11500 CE 1s, expiry day | 363,592 bytes | 2.47 / 8.48 / 24.66 ms | 2.54 / 8.95 / 11.71 ms |
+  | gdfl NIFTY 2018-09-27 10000 CE 1s (illiquid), the day after expiry | `[]` | 1.79 / 13.75 / 28.77 ms | 1.26 / 10.15 / 15.60 ms |
+  | gdfl BANKNIFTY 1s 2026-07, past the end | `[]` | 38.48 / 66.11 / 82.43 ms | 1.29 / 7.88 / 12.65 ms |
+  | gdfl RELIANCE CASH 1s 2026-07, past the end | `[]` | 24.85 / 43.39 / 48.59 ms | 1.53 / 9.51 / 13.31 ms |
+  | zerodha NIFTY 1min 2026-07, whole month | 1,190,251 bytes | 3.11 / 5.71 / 10.11 ms | 3.01 / 7.77 / 8.36 ms |
+  | zerodha NIFTY 1min 2026-07, past the end | `[]` | 1.51 / 3.37 / 5.86 ms | 0.92 / 3.73 / 3.93 ms |
+  | zerodha NIFTY 1day 2026-07, past the end | `[]` | 1.00 / 12.67 / 19.59 ms | 1.00 / 8.31 / 21.07 ms |
+  | gdfl NIFTY 1s 2026-07, `limit=2` (n = 20) | before 200, 71,397,475 bytes; after 400 by name | 114.55 / 146.16 / 146.16 ms | 0.86 / 1.35 / 1.35 ms |
+
+  Past the end now lands at the before-the-start figure (p50 1.06-1.53 ms
+  against 1.07 ms), on every feed, rung and segment above. The one-day and
+  whole-month answers are unchanged: their cost is the rows they carry. The
+  same run timed `/bars/window.json` with `from=2024-3&to=2024-003`: 200 with
+  6,855 rows before, 400 `"2024-3" is not a YYYY-MM month for "from"` after
+  (D-4973).
+
+  Repeated the same afternoon on two FRESH shadows, with the final build of
+  this change against the same before build, by the same method (n = 200
+  rounds; n = 20 for `limit=2`). Past the end: gdfl NIFTY 1s 2026-07 p50
+  0.72 ms and 0.61 ms (2026-08-01, 2030-01-01) against 37.32 ms and
+  32.24 ms before; the 11500 CE day after expiry 0.82 ms against 14.90 ms;
+  BANKNIFTY 1.27 ms against 40.16 ms; RELIANCE 0.69 ms against 22.07 ms.
+  Before the start: 0.58 ms on both builds. Every past-end p99 was at or
+  under 16.47 ms after, against up to 62.16 ms before. On the small zerodha
+  months (1min and 1day, NIFTY 2026-07) the two builds are within this
+  host's noise: p50 1.19 and 1.18 ms after against 2.24 and 1.17 ms before,
+  p99 12.41 and 11.54 ms after against 7.95 and 9.32 ms before. `limit=2` answered 400 in
+  1.06 ms p50, against 200 with 71,397,475 bytes in 155.94 ms before. Every
+  answer other than the refusals was byte for byte the same on both builds.
 
 ### Documented, not changed
 
@@ -12143,10 +12329,6 @@ rule 6); every bound is read from the source.
   section says this is paid "once per manifest change". **While a pull is
   landing, that is every request:** each body rewrites a manifest, so every
   census-backed route a console polls during a backfill misses.
-* **W1-api5-3 — `instruments_json`.** Per request: a filter over every key of
-  the merged universe (O(U)), `census_now`, then `bars_by_symbol`, which
-  walks every entry of every vendor's census (O(E)) into a map pre-sized to
-  that count, then a sort of the tracked listing (O(T log T), T about 800).
 * **W1-api5-5 — `calendar_json`.** Per request, both branches:
   `held_entries` over the asked feed's census (O(E_v log E_v)); the exchange
   branch then does, per spot series, one `calendar_of::cached` probe, three
@@ -12161,13 +12343,6 @@ rule 6); every bound is read from the source.
   bar file per held entry, reading its header and two records: O(E_v) file
   opens per request. The route doc said "O(1) per entry ... nothing is read
   whole"; corrected to name the log walk.
-* **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
-  month's last stored bar, the bisection returns `n_valid` and the fallback
-  reads the whole month to answer `[]`: O(n_valid) reads instead of
-  O(log n_valid). It is kept because the same landing is how a header naming
-  zero-filled records shows itself, and reading the month is what answers
-  that file correctly; a cheaper test that tells the two apart needs a
-  monotonicity proof the record cannot give.
 * **W1-api5-9 — `indexmap_json`.** Per request: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
   universe is filtered to the index symbols: O(file bytes + U).
@@ -13707,13 +13882,17 @@ a mute button.
                 reproducibility — an unordered backfill resumes
                 somewhere different after every restart. The sort
                 is not the cost of that function.
-    server.rs   instruments_json sorts per request, over the
-                TRACKED universe (~800 by decision) and not the
-                master, which its own comment states and which the
-                type-ahead's bound depends on. It is the one entry
-                here that is per request and not the layer-12
-                exception, and it is the one to look at first if
-                this list is ever audited again.
+    instruments_route.rs  instruments_json sorts the TRACKED
+                universe (~800 by decision), not the master, and
+                since D-3327 only when its kept body is rebuilt:
+                once per (feed census read, universe parse). A
+                request whose census and universe have not moved
+                is served the kept body and sorts nothing. Measured
+                warm by AF-05 on 16 October 2026: p50 about 1.05 ms
+                and p99 under 1.9 ms on every feed (D-1446,
+                W1-api5-3). This line said "sorts per request" and
+                called it the one per-request entry here; that
+                stopped being true with D-3327.
 `select_nth_unstable`, `BinaryHeap` and `collect::<BTreeSet/Map>` were
 outside rule 4 and are the same class: a selection, a heap and an ordered
 collect each cost at least O(n) in what they consume. All three have zero
