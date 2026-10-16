@@ -4969,4 +4969,74 @@ mod cloud_mutant_tests {
             format!("record {refused} is not where its probe window finds it")
         );
     }
+
+    /// **A DAY WHOSE GENERATION COUNTER IS AT ITS END IS REFUSED, NEVER
+    /// WRAPPED.**
+    ///
+    /// Covers `publish`'s exhausted counter: a year index whose day has
+    /// committed generation `u32::MAX` (written here as a valid next slot) has
+    /// no next generation, so the commit is refused `image_corrupt` naming the
+    /// year index, and no image is linked.
+    #[test]
+    fn a_day_at_the_last_generation_is_refused_never_wrapped() {
+        use super::{Cost, SLOT_STRIDE_U64, day_of_year, encode_slot, read_year};
+        use std::os::unix::fs::FileExt as _;
+        let root = std::env::temp_dir().join(format!(
+            "brutex-verdict-cloud-exhausted-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let day = Day::new(2031, 3, 4).unwrap();
+        let generation = Generation {
+            day,
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::Match),
+            day_details: Vec::new(),
+            entries: vec![Entry {
+                key: Key::instrument("ZZA").unwrap(),
+                facts: Facts::of(Code::Match),
+                details: Vec::new(),
+            }],
+            carry: Carry::WholeDay,
+        };
+        commit(&series, &generation).unwrap();
+        let path = series.year_index(2031);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut year = read_year(&file, &path, 2031, &mut Cost::default()).unwrap();
+        year.days[day_of_year(day)].generation = u32::MAX;
+        let next = year.commit + 1;
+        file.write_all_at(
+            &encode_slot(2031, next, &year.days),
+            (next % 2) * SLOT_STRIDE_U64,
+        )
+        .unwrap();
+        drop(file);
+        assert_eq!(
+            corrupt_why(commit(&series, &generation)),
+            "the generation counter is exhausted"
+        );
+        let images: Vec<_> = std::fs::read_dir(series.dir().join("2031"))
+            .unwrap()
+            .map(|name| name.unwrap().file_name())
+            .collect();
+        assert_eq!(images.len(), 1, "only generation 1: {images:?}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
 }

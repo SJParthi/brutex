@@ -1940,3 +1940,55 @@ fn a_records_details_after_another_records_are_read_entry_by_entry() {
     assert_eq!(walked, 1, "exactly one record's entries follow another's");
     let _ignored = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves() {
+    support::where_permission_binds(
+        "an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves",
+        an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves_body,
+    );
+}
+
+/// **A NEXT GENERATION WHOSE TEMPORARY THE HOST WILL NOT CREATE IS REFUSED
+/// AS THE CREATE, AND THE DAY STAYS AT ITS COMMITTED GENERATION.**
+///
+/// Covers `write_durable`'s own reading of `staging::create`'s host refusal
+/// (`io`, never `staging`): the year directory may be read and searched but
+/// not written (mode 0555), so the image temporary cannot be born. The
+/// refusal names the temporary and the host's `PermissionDenied`, and a
+/// reader still finds generation 1. Run where the mode bits bind (D-0995).
+fn an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use store::verdict::{Code, Reader, VerdictError, commit};
+    let root = scratch("verdict-tmp-refused");
+    let series = verdict_series(&root);
+    let first = commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    )
+    .unwrap();
+    let year = series.dir().join("2031");
+    let mut second = verdict_generation(&[("ZZB", Code::Match, Vec::new())]);
+    second.run = 2;
+    fs::set_permissions(&year, fs::Permissions::from_mode(0o555)).unwrap();
+    let answer = commit(&series, &second);
+    fs::set_permissions(&year, fs::Permissions::from_mode(0o755)).unwrap();
+    let refusal = answer.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            VerdictError::Io { path, action: "create", source }
+                if path.parent() == Some(year.as_path())
+                    && path.extension().is_some_and(|ext| ext == "tmp")
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "{refusal:?}"
+    );
+    let index = Reader::new().year(&series, 2031).unwrap().unwrap();
+    assert_eq!(
+        index.entry(verdict_day()).generation,
+        first.generation,
+        "still generation 1"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
