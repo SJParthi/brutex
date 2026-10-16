@@ -1444,3 +1444,40 @@ mod tests;
 #[cfg(test)]
 #[path = "gdfl_nfo_attack_tests.rs"]
 mod attack_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod cloud_mutant_tests {
+    //! Mutant kills for the options decoder's private quote count (cloud
+    //! mutation round, 2026-10-16).
+
+    use super::{HEADER_OPEN_INTEREST, decode};
+    use crate::session::Day;
+
+    /// A row is quoted when its bid or its ask is not zero, and a zero is
+    /// every digit `0`, written with places or without. Six quote-only rows
+    /// (no traded quantity), four quoted: both sides `0`, both `0.00`, a zero
+    /// bid with a live ask, a live bid with a zero ask, prices with no `0`
+    /// digit at all, and prices holding zeros that are not zero. Invented.
+    #[test]
+    fn a_row_is_quoted_when_its_bid_or_its_ask_is_not_zero() {
+        let stem = "ZZOPT04APR2422000CE.NFO";
+        // Built, not written: a bare digit literal is gate 1d's shape.
+        let whole = 15.to_string();
+        let quotes = [
+            ("0", "0"),
+            ("0.00", "0.00"),
+            ("0", "12.50"),
+            ("12.05", "0"),
+            (whole.as_str(), whole.as_str()),
+            ("10.50", "10.50"),
+        ];
+        let body: String = core::iter::once(format!("{HEADER_OPEN_INTEREST}\n"))
+            .chain(quotes.iter().enumerate().map(|(second, (bid, ask))| {
+                format!("{stem},02/04/2024,09:15:{second:02},10.05,{bid},75,{ask},75,0,300\n")
+            }))
+            .collect();
+        let got = decode(body.as_bytes(), stem, Day::new(2024, 4, 2).unwrap()).unwrap();
+        assert_eq!((got.rows.len(), got.quoted_rows), (6, 4));
+    }
+}
