@@ -2266,8 +2266,10 @@ impl NotHeld {
         }
     }
 
-    /// Count a refused month's days, log its refusal, and hand it back.
-    fn month(
+    /// Count a refused month's days, log its refusal, and hand it back. Named
+    /// `note_*` because it logs: gate 19 reads a `note_*` call beside a
+    /// recorded failure as that failure's event.
+    fn note_month(
         &mut self,
         refused: Failure,
         slice: &[store::format::Bar],
@@ -2935,7 +2937,7 @@ fn one(
             Err(refused) => {
                 refused_bars = refused_bars.saturating_add(slice.len());
                 let at = (store_root, month_parts(plan, &identity, timeframe, *ym));
-                failures.push(not_held.month(refused, slice, at, symbol_id));
+                failures.push(not_held.note_month(refused, slice, at, symbol_id));
                 continue;
             }
         };

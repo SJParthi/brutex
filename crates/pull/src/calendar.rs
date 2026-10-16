@@ -1272,7 +1272,9 @@ pub const SHORT_DAYS: [ShortDay; 2] = [
 ];
 
 /// The [`ShortDay`] on `epoch_day`, if one was recorded. A walk of the
-/// two-entry [`SHORT_DAYS`]: O(1), no allocation.
+/// two-entry [`SHORT_DAYS`]: O(1), no allocation. The table's length is held
+/// at two by
+/// `pull::calendar::tests::the_measured_short_days_are_recorded_and_still_owe_their_minutes`.
 #[must_use]
 pub fn short_day_on(epoch_day: i64) -> Option<ShortDay> {
     SHORT_DAYS
@@ -2141,6 +2143,11 @@ mod tests {
                     .days_from_epoch(),
             )
         };
+        assert_eq!(
+            SHORT_DAYS.len(),
+            2,
+            "short_day_on walks this table and calls the walk O(1)"
+        );
         let august = short_day_on(at(2019, 8, 2)).expect("2019-08-02 is recorded");
         assert_eq!(august.nifty_absent, Window { from: 839, to: 839 }, "13:59");
         assert!(august.gdfl_checked);

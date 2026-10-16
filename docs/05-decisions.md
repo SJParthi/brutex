@@ -69207,3 +69207,50 @@ by a gate.
 
 **Rejected.** *Gate 10's allowlist.* It exempts a row from the check, which
 would leave sixteen false or unproven rows looking proven.
+
+### D-5255 — Gates 12 and 19 and gate 11's rule 5c are cleared by naming proofs and moving events and allows to where the gates read them; no behaviour changes — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+All three were red on `feat/db-fix` at `4756cce0` on its own.
+
+**Gate 12 (every cost claim names its proof).** Five doc blocks claimed a
+bound and named nothing. Each now names the test or bench that bears on it:
+`bars_change::master` names `api::bars::change::tests::a_failed_masters_load_is_not_remembered`
+(a refused day read once per request, not once per bar); `month_of_text`
+names `api::server::bars_page_tests::the_one_month_parser_takes_exactly_four_digits_a_dash_and_two`;
+`short_day_on` names `pull::calendar::tests::the_measured_short_days_are_recorded_and_still_owe_their_minutes`,
+which now also asserts `SHORT_DAYS.len() == 2`, the walk the claim calls
+O(1); `cash_session_cache::hold` names
+`pull::cash_session_cache::lock_tests::a_reader_beside_an_installer_waits_then_answers_or_names_the_wait`;
+and `store`'s `benches/ratio/safe_files.rs` names its bench root,
+`crates/store/benches/ratio.rs`, and its figures in `docs/06-limits.md`
+L-R316-06.
+
+**Gate 19 (a failure the receipt shows is a failure the log records).** Four
+`failures.push` sites in `crates/pull` were refused. Two already logged, out of
+the gate's sight, inside the callee: `NotHeld::month` (renamed `note_month`,
+the repository's name for a helper that logs, which is what it does) and
+`gdfl_import`'s `provenance` (it now hands its refusal back un-noted and the
+caller notes it with the same `note_staged` call, as it records it). Two
+logged further from the push than the gate's twelve lines:
+`request_minutes::report` builds its event first and emits it on the line
+above the push, and `stop_at_census` emits its one `error` event before the
+push and the day's close instead of after them — `close_day` reads `report`
+and never moves `days_imported`, so the event's fields are unchanged. No event
+is added, dropped or doubled.
+
+**Gate 11 rule 5c (a local allow is a panic the lint table cannot show).**
+`census.rs` and `facets.rs` put their test modules' panic-lint allows on the
+`mod` line of a production file. They now sit as `#![allow(..)]` at the top
+of `census_tail_tests.rs` and `facets_tests.rs`, the convention
+`sources_tests.rs` already follows, with the same lints and reason.
+
+**What stays red, said plainly.** Gate 11's rules 1, 2, 3, 4, 6 and 7 refuse
+about ninety file entries across `api`, `pull`, `cli`, `store`, `telemetry` and
+`costs` on the same base: constructs on the O(1) paths with no allowlist line
+and no reason in `docs/06-limits.md`. Each needs the construct removed or its
+bound argued; that is an O(1) audit of the code that added them, not an
+unblock, and none is decided here. Gate 23 refuses seven undeclared prints
+(`api/src/server.rs` 5, `store/src/sealed_tests.rs` 2, measurement output of
+hand-run and sealed-month tests); its declarations live in
+`.github/workflows/ci.yml`, which this change may not edit.
