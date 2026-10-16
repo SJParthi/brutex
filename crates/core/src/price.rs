@@ -8,10 +8,12 @@
 //!
 //! Two conversions take rupees to paisa, and both snap half-up once.
 //! [`Paisa::from_rupee_text_half_up`] reads decimal TEXT and is what `pull`
-//! uses for every vendor price: a JSON number is rendered back to its shortest
-//! round-tripping text and that text is read digit by digit. (The JSON parser
-//! itself does hold the number as an `f64` first; `docs/06-limits.md` D-1494
-//! states when that is exact.) [`Paisa::from_rupees_half_up`] takes an `f64`
+//! uses for every vendor price: a JSON number is read as the vendor's own
+//! digits (`serde_json` with `arbitrary_precision`, D-1570) and that text is
+//! read digit by digit, so no `f64` stands between the wire and the paisa.
+//! (This said the parser held the number as an `f64` first and rendered it
+//! back to its shortest round-tripping text, which D-1570 ended;
+//! cloud-attack-law-20261016.) [`Paisa::from_rupees_half_up`] takes an `f64`
 //! and is the only function in this crate that does; its one non-test caller is
 //! `lake`'s bar reader. This said the `f64` conversion was the one ingest
 //! conversion until D-1494 corrected it (GAP16-28).
@@ -27,11 +29,11 @@ pub const PAISA_PER_RUPEE: i64 = 100;
 /// The longest rupee text [`Paisa::from_rupee_text_half_up`] reads, in bytes,
 /// ASCII padding included.
 ///
-/// The widest price that fits `i64` paisa, `-92233720368547758.07`, is 21 bytes,
-/// and the shortest round-tripping text of any `f64` (what `pull` renders a JSON
-/// number back to) is at most 24. Sixty-four leaves room for padding and trailing
-/// zeros and still bounds the reader's cost by a constant. Longer text is refused
-/// with [`PriceError::TooLong`], never truncated.
+/// The widest price that fits `i64` paisa, `-92233720368547758.07`, is 21 bytes.
+/// Sixty-four leaves room for padding and trailing zeros and still bounds the
+/// reader's cost by a constant. Longer text — a vendor's own digits can be any
+/// length since D-1570 passes them through — is refused with
+/// [`PriceError::TooLong`], never truncated.
 pub const MAX_PRICE_TEXT: usize = 64;
 
 /// A price, as a count of paisa.
