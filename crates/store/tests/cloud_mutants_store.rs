@@ -1455,3 +1455,17 @@ fn the_open_is_555_minutes_past_ist_midnight_and_its_divisors_align() {
         assert_eq!(rung.aligns_with_the_open(), aligns, "{rung:?}");
     }
 }
+
+/// **A COMMIT IS NAMED NEAR THE CEILING AT HALF THE MEASURED PLACEMENT:
+/// 68,950 RECORDS.**
+///
+/// Kills `replace / with *` in `RECORDS_WATCH = RECORDS_PLACED / 2`, which
+/// would name nothing until a day held twice the most records ever placed,
+/// so the day that halves the margin (RA-261, D-4925) would pass unsaid. The
+/// tests that use the constant compare a commit against itself, so the
+/// number is pinned here as the decision states it.
+#[test]
+fn a_commit_is_named_near_the_ceiling_at_half_the_measured_placement() {
+    assert_eq!(store::verdict::RECORDS_PLACED, 137_900);
+    assert_eq!(store::verdict::RECORDS_WATCH, 68_950);
+}

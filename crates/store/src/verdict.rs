@@ -4776,4 +4776,20 @@ mod cloud_mutant_tests {
             "only owners with details are flagged"
         );
     }
+
+    /// **DAYS ARE COUNTED THE PROLEPTIC GREGORIAN WAY BEFORE YEAR 1 TOO.**
+    ///
+    /// Kills `replace - with +` and `replace - with /` in the era of a
+    /// negative year (`(y - 399) / 400`): `Day` begins at year 1, so only a
+    /// direct call reaches it, and the function's contract is the whole
+    /// proleptic calendar. 0000-03-01 is day -719,468 (the algorithm's own
+    /// anchor), year 0 is a leap year, and 400 years are 146,097 days.
+    #[test]
+    fn days_before_year_one_are_counted_the_proleptic_way() {
+        use super::days_from_civil;
+        assert_eq!(days_from_civil(0, 3, 1), -719_468);
+        assert_eq!(days_from_civil(0, 1, 1), -719_528, "Jan and a leap Feb");
+        assert_eq!(days_from_civil(-1, 12, 31), -719_529);
+        assert_eq!(days_from_civil(-400, 3, 1), -719_468 - 146_097);
+    }
 }
