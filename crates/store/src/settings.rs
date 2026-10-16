@@ -49,7 +49,7 @@
 //! generation may land the next one before this save reads back, and that is
 //! said as [`Saved::superseded_by`], not as a failure.
 //!
-//! The format is `docs/02-store-format.md` §41; its choices are D-4969.
+//! The format is `docs/02-store-format.md` §42; its choices are D-4974.
 //!
 //! The generations themselves are the audit: each records when, by whom,
 //! why and which keys changed, and every earlier generation is still on

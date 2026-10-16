@@ -69291,11 +69291,109 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
 
-### D-4969 — R3-05: the operator's settings live in the store as append-only generations, settings format v1 — 2026-10-16
+### D-4972 — `/bars.json` answers a window past the month's last bar from one record, the last; only a tail that is not the header's last bar keeps the full read (narrows D-1446, W1-api5-8) — 2026-10-16
+
+**Context** (AF-05, assurance finding p99-8, confirmed by two skeptics on 14
+October 2026). When `from=` lay after a month's last stored bar, the time
+lookup returned `n_valid`. `month_answer` treated that landing as "the lookup
+could not help" and read the whole month to answer `[]`. D-1446 kept that
+read on purpose. A header can name records whose bytes are zeros from a newly
+allocated extent, and an all-zero bar stamps 0, below every real `from`. So the
+lookup lands past the end for a window INSIDE the data too. The D-1446 bullet
+said "a cheaper test that tells the two apart needs a monotonicity proof the
+record cannot give". The cost was never measured. On gdfl NIFTY 1s 2026-07
+(517,373 bars) the answer `[]` took p50 35-44 ms past the end, against about
+1 ms before the first bar: the same empty answer, about 36 times dearer. The
+shipped pages never ask it (`/db` does not call `/bars.json`, and `/markets`
+sends no day window), so only a direct caller reaches it.
+
+**Decision.**
+
+1. ONE RECORD DECIDES. When the lookup for `from` lands at or past `n_valid`,
+   `bars_route::past_the_last_bar` reads the last record once. When that record
+   is the header's last bar (stamp non-zero and equal to `last_ts_micros`) and
+   is older than `from`, the answer is 200 `[]`, and no other record is read.
+2. WHY ONE RECORD IS ENOUGH. Every batch the writer commits begins after the
+   header's `last_ts_micros`: `store::header::Header::advance` refuses anything
+   else (`TimestampsOutOfOrder`). So when the last record equals the header's
+   last stamp, no record in the file holds a later stamp, and zero-filled
+   records stamp 0. That is the monotonicity proof D-1446 said was missing. It
+   is the writer's, not the record's.
+3. ONLY A TAIL THAT IS NOT THE HEADER'S LAST BAR KEEPS THE FULL READ, and
+   D-1446 is narrowed to exactly that case. The tail can be zero-filled (stamp
+   0), stamped differently from the header, or refused by its checksum. Each
+   one keeps the read D-1446 kept, because that read answers such a file
+   correctly and names its faults (206). The cost there stays O(n_valid)
+   reads, and `docs/06-limits.md` W1-api5-8 says so. A file cut short of its
+   header's count never gets this far: the store refuses it at the open
+   (`n_valid claims more records than the file holds`), and the route answers
+   400 with that sentence, before any record is read.
+4. MEASURED, not claimed: `docs/06-limits.md` W1-api5-8 gives p50, p99 and max
+   before and after, n = 200, on a shadow of the operator's store.
+
+**Rejected.** Answering `[]` from the header's `last_ts_micros` alone, with no
+read. It is correct for every well-formed file. But it would also answer a
+zero-filled tail without ever looking at it, and the finding's own correction
+asked that only a zero-filled tail keep the full read. Reading one record
+costs one `pread`, and it keeps damage visible.
+
+**Proof.** `api::server::bars_route::tests::a_window_past_the_last_bar_reads_one_record`,
+`a_zero_filled_tail_still_takes_the_full_read`,
+`a_window_before_the_first_bar_stays_one_bisection`, and
+`api::server::cost_limits_tests::w1_api5_8_a_window_past_the_last_bar_reads_one_record`.
+`docs/04-invariants.md` AF5-01 to AF5-03.
+
+### D-4973 — `/bars.json` refuses `limit`, `page` and `offset` by name; `/bars/window.json` takes one spelling of a month — 2026-10-16
+
+**Context** (AF-05, assurance findings p99-9 = RT-DB-11 and app-7, each
+confirmed by two skeptics on 14 October 2026). `/bars.json` has a day window
+(`from=`, `to=`) and no pager. It accepted `limit=` and `page=` and ignored
+them: `limit=2` answered 200 with the whole month, 71,397,475 bytes on gdfl
+NIFTY 1s 2026-07. A pager would have read that as its two rows, which is the
+hidden fallback `CLAUDE.md` §4 bans. The route's doc said "a month is at most
+375 × ~22 bars and is sent whole". That is a one-minute month; a one-second
+month is about 63 times larger. Separately, `/bars/window.json` parsed `from`
+and `to` by splitting on `-` and handing each half to `str::parse`, which
+accepts leading zeros and a `+`. So `2024-3`, `2024-003`, `2024-0003`,
+`02024-03` and the `%2B` forms all named March 2024. AF-04 (D-4962) made
+every other route take one spelling, and this was the last route that still
+accepted the others.
+
+**Decision.**
+
+1. `/bars.json` refuses a query that names `limit`, `page` or `offset`, with a
+   value, with an empty value or bare, with 400: `/bars.json takes no limit or
+   page; page with /bars/window.json or narrow with from and to ("limit" was
+   sent)`. It checks this before anything else, so the refusal does not
+   depend on the rest of the query. The route does not honour them, because
+   paging a month is `/bars/window.json`'s job, and that route already pages
+   any range and caps the page at `MAX_WINDOW_LIMIT`. A key that only begins
+   with one of the three names (`limited=`) is not one of them.
+2. The route's doc states the measured sizes: 517,373 bars and 71,397,475
+   bytes for the whole month, and 3,105,001 bytes for one day of it. It also
+   states the two bounds, the day window and the paged route. The blocking
+   pool comment that said "35 MB" says the same.
+3. `WindowAsk::parse` reads `from` and `to` through `bars::month_of_text`,
+   the one strict parser D-4962 made. Exactly four ASCII year digits, `-`,
+   then two ASCII month digits; anything else is refused by field.
+4. A row cap on `/bars.json` is not part of this decision, and it is not in
+   the code this decision lands on. R3-08 (RA-060) adds one
+   (`MAX_MONTH_ANSWER_ROWS` = 60,000, refused as `too_many_rows` in
+   `month_answer`) on its own branch, unmerged on 16 October 2026. A trial
+   merge of `fix/db-R3-08` 6e51b1a1 onto this change (`git merge-tree`) is
+   clean, and the past-the-end answer of D-4972 is decided before that cap,
+   so the two compose. Until it merges, a request with no day window gets
+   the whole month, and the route doc says so.
+
+**Proof.** `api::server::bars_route::tests::bars_json_refuses_limit_and_page_by_name`,
+`window_json_refuses_a_month_not_spelled_yyyy_mm`. `docs/04-invariants.md`
+AF5-04 and AF5-05.
+
+### D-4974 — R3-05: the operator's settings live in the store as append-only generations, settings format v1 — 2026-10-16
 
 **Decision.** The operator's window, the view `/db` opens on, the rows every
 picker always shows and the two source folders are kept in the store, in the
-format `docs/02-store-format.md` §41 defines, and served by `/settings.json`
+format `docs/02-store-format.md` §42 defines, and served by `/settings.json`
 and saved by `POST /settings` (R3-05). Before, each was a literal in a crate
 or a page, or an environment value of the start script, so a change needed a
 rebuild or a restart and nothing recorded who made it or why. The locked

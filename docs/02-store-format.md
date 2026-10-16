@@ -4174,7 +4174,7 @@ rewritten. Every outcome is one line of the root's append-only
 TSW-01 to TSW-17 in `docs/04-invariants.md`; limits L-TSW-1 to L-TSW-9 in
 `docs/06-limits.md`.
 
-## §41 — Settings generations, format v1 (D-4969)
+## §42 — Settings generations, format v1 (D-4974)
 
 **What it holds.** The operator's settings (R3-05): the window, the view
 `/db` opens on, the rows every picker always shows and the two source
