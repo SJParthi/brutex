@@ -5422,3 +5422,67 @@ mod tests {
 #[cfg(test)]
 #[path = "gdfl_cm_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+mod cloud_mutant_tests {
+    //! Mutant kills and coverage for the day admission rule (cloud mutation
+    //! round, 2026-10-16).
+
+    use super::{CmRefusal, admitted, landed};
+    use crate::calendar::{DayKind, Session, Window};
+    use crate::session::Day;
+
+    fn one_window(from: u16, to: u16) -> Session {
+        Session {
+            windows: [Window { from, to }, Window { from: 0, to: 0 }],
+            count: 1,
+        }
+    }
+
+    /// A regular session is read; a recorded special session the store's
+    /// session authority keeps is read inside its windows; one it keeps no
+    /// bar of (a window at midnight), or a session of no window at all, is
+    /// refused by name as landing nothing; an unmeasured day, a closed day
+    /// and a day of unmeasured length each refuse by their own name.
+    #[test]
+    fn a_day_is_admitted_only_where_its_windows_land() {
+        let day = Day::new(2024, 4, 2).unwrap();
+        assert_eq!(
+            admitted(day, DayKind::Open(Session::full())),
+            Ok(Session::full())
+        );
+        let muhurat = crate::calendar::special_session(17_842).unwrap();
+        let evening = Day::from_days(17_842).unwrap();
+        assert!(landed(evening, muhurat.session));
+        assert_eq!(
+            admitted(evening, DayKind::Open(muhurat.session)),
+            Ok(muhurat.session)
+        );
+        for stranded in [
+            one_window(0, 5),
+            Session {
+                count: 0,
+                ..one_window(555, 929)
+            },
+        ] {
+            assert!(!landed(day, stranded), "{stranded:?}");
+            assert_eq!(
+                admitted(day, DayKind::Open(stranded)),
+                Err(CmRefusal::CalendarWindowNotLanded {
+                    kind: DayKind::Open(stranded)
+                })
+            );
+        }
+        assert_eq!(
+            admitted(day, DayKind::Unmeasured),
+            Err(CmRefusal::CalendarUnmeasured)
+        );
+        for kind in [DayKind::Closed, DayKind::OpenLengthUnmeasured] {
+            assert_eq!(
+                admitted(day, kind),
+                Err(CmRefusal::CalendarNotRegular { kind })
+            );
+        }
+    }
+}

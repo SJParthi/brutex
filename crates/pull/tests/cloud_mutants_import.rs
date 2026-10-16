@@ -598,3 +598,299 @@ fn request_minutes_a_gap_line_names_the_sinks_run() {
     );
     std::fs::remove_dir_all(store).unwrap();
 }
+
+// ═══ a stored zip built here, for the archive and options readers ═════════
+
+/// A plain stored zip of `members`, in order (APPNOTE 4.3, no ZIP64).
+fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+    fn le16(out: &mut Vec<u8>, v: usize) {
+        out.extend_from_slice(&u16::try_from(v).unwrap().to_le_bytes());
+    }
+    fn le32(out: &mut Vec<u8>, v: u64) {
+        out.extend_from_slice(&u32::try_from(v).unwrap().to_le_bytes());
+    }
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in members {
+        let offset = u64::try_from(out.len()).unwrap();
+        let crc = u64::from(pull::gdfl_archive::crc32(data));
+        let len = u64::try_from(data.len()).unwrap();
+        le32(&mut out, 0x0403_4b50);
+        for v in [20, 0, 0] {
+            le16(&mut out, v);
+        }
+        le32(&mut out, 0);
+        le32(&mut out, crc);
+        le32(&mut out, len);
+        le32(&mut out, len);
+        le16(&mut out, name.len());
+        le16(&mut out, 0);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        le32(&mut central, 0x0201_4b50);
+        for v in [20, 20, 0, 0] {
+            le16(&mut central, v);
+        }
+        le32(&mut central, 0);
+        le32(&mut central, crc);
+        le32(&mut central, len);
+        le32(&mut central, len);
+        le16(&mut central, name.len());
+        for v in [0, 0, 0, 0] {
+            le16(&mut central, v);
+        }
+        le32(&mut central, 0);
+        le32(&mut central, offset);
+        central.extend_from_slice(name.as_bytes());
+    }
+    let at = u64::try_from(out.len()).unwrap();
+    out.extend_from_slice(&central);
+    le32(&mut out, 0x0605_4b50);
+    for v in [0, 0, members.len(), members.len()] {
+        le16(&mut out, v);
+    }
+    le32(&mut out, u64::try_from(central.len()).unwrap());
+    le32(&mut out, at);
+    le16(&mut out, 0);
+    out
+}
+
+mod zip_readers {
+    use super::{day, stored_zip};
+    use pull::gdfl_archive::{Archive, stored_span, zip_entries};
+    use pull::gdfl_cm::{CmKind, CmRefusal, CmScope, CmSource as _};
+    use std::sync::Arc;
+
+    /// An archive given a scope hands that scope to the caller and to every
+    /// day listing it builds.
+    #[test]
+    fn an_archive_given_a_scope_lists_its_days_under_it() {
+        let d = day(2024, 4, 1);
+        let inner = stored_zip(&[("GFDLCM_INDICES_TICK_01042024/NIFTY 50.NSE_IDX.csv", b"x")]);
+        let outer = stored_zip(&[(
+            "INDICES/2024/APR_2024/GFDLCM_INDICES_TICK_01042024.zip",
+            &inner,
+        )]);
+        let len = u64::try_from(outer.len()).unwrap();
+        let scope = Arc::new(CmScope::stored(std::iter::empty::<&str>()).unwrap());
+        let archive = Archive::from_source(outer, len)
+            .unwrap()
+            .with_scope(Arc::clone(&scope));
+        assert!(Arc::ptr_eq(&archive.scope(), &scope));
+        let listing = archive.day(CmKind::Indices, d).unwrap().unwrap();
+        assert!(listing.scope().is_stored());
+        assert_eq!(listing.entries().len(), 1);
+    }
+
+    /// A stored member whose local header has lost its signature has no
+    /// span: refused by name, never read from wherever the record points.
+    #[test]
+    fn a_stored_member_without_its_local_signature_has_no_span() {
+        let mut zip = stored_zip(&[("APR_2024/GFDLNFO_TICK_01042024.zip", b"inner bytes")]);
+        let len = u64::try_from(zip.len()).unwrap();
+        let entries = zip_entries(&zip, 0, len).unwrap();
+        let (at, n) = stored_span(&zip, &entries[0]).unwrap();
+        assert_eq!(n, 11);
+        assert_eq!(&zip[usize::try_from(at).unwrap()..][..11], b"inner bytes");
+        zip[0] ^= 0xff;
+        assert_eq!(
+            stored_span(&zip, &entries[0]),
+            Err(CmRefusal::ArchiveMalformed {
+                what: "a day zip's local header has no signature"
+            })
+        );
+    }
+
+    /// An options year zip naming one day zip twice refuses that day; one
+    /// that does not name the day answers no listing.
+    #[test]
+    fn an_options_year_zip_naming_a_day_twice_refuses_it_and_one_without_it_has_none() {
+        let d = day(2024, 4, 1);
+        let inner = stored_zip(&[(
+            "GFDLNFO_TICK_01042024\\Options\\NIFTY04APR2422000CE.NFO.csv",
+            b"x",
+        )]);
+        let name = "APR_2024/GFDLNFO_TICK_01042024.zip";
+        let twice = stored_zip(&[(name, &inner), (name, &inner)]);
+        let len = u64::try_from(twice.len()).unwrap();
+        assert_eq!(
+            pull::gdfl_nfo::listing_in(&Arc::new(twice), len, d).err(),
+            Some(CmRefusal::ArchiveDuplicateDay { day: d })
+        );
+        let other = stored_zip(&[("APR_2024/GFDLNFO_TICK_02042024.zip", &inner)]);
+        let len = u64::try_from(other.len()).unwrap();
+        assert!(
+            pull::gdfl_nfo::listing_in(&Arc::new(other), len, d)
+                .unwrap()
+                .is_none()
+        );
+        let once = stored_zip(&[(name, &inner)]);
+        let len = u64::try_from(once.len()).unwrap();
+        let listing = pull::gdfl_nfo::listing_in(&Arc::new(once), len, d)
+            .unwrap()
+            .unwrap();
+        assert_eq!(listing.entries().len(), 1);
+        assert_eq!(
+            listing.member_bytes(),
+            Some(u64::try_from(inner.len()).unwrap())
+        );
+    }
+}
+
+// ═══ gdfl_cm: the scope's edges, eligibility, and the trait's default ══════
+
+mod cm_scope_and_auction {
+    use super::{day, scratch};
+    use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
+    use brutex_core::symbol::Symbol;
+    use pull::gdfl_cm::{
+        Auction, CmKind, CmRefusal, CmScope, CmSource, DayListing, ListedFile, RowFault,
+    };
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    /// The stored scope skips an option underlying that is an index (the
+    /// index import files it through its alias row) and keeps a share; it
+    /// files trade-for-trade series, the swept scope does not.
+    #[test]
+    fn the_stored_scope_skips_an_index_underlying_and_files_series() {
+        let scope = CmScope::stored(["NIFTY", "ZZSHARE"]).unwrap();
+        assert!(scope.shares().iter().any(|s| &**s == "ZZSHARE"));
+        assert!(!scope.shares().iter().any(|s| &**s == "NIFTY"));
+        assert!(scope.files_series());
+        assert!(!CmScope::swept().files_series());
+    }
+
+    /// A futures key has no capital-market stem under the stored scope.
+    #[test]
+    fn a_futures_key_has_no_stem_under_the_stored_scope() {
+        let scope = CmScope::stored(std::iter::empty::<&str>()).unwrap();
+        let future = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("RELIANCE").unwrap(),
+            kind: Kind::Future {
+                expiry: Expiry::new(2031, 3, 27).unwrap(),
+            },
+        };
+        assert_eq!(scope.stem_for(&future, day(2031, 3, 3)), None);
+    }
+
+    /// Each row fault's log word.
+    #[test]
+    fn every_row_fault_has_its_word() {
+        assert_eq!(RowFault::ZeroLtp.code(), "zero_ltp");
+        assert_eq!(RowFault::OffGrid.code(), "off_grid");
+        assert_eq!(RowFault::Malformed.code(), "malformed");
+    }
+
+    fn isin(symbol: &str) -> &'static str {
+        let at = brutex_core::universe::FNO_INDEX.position(symbol).unwrap();
+        brutex_core::universe::FNO_UNDERLYINGS_ISIN[at]
+    }
+
+    fn master(root: &std::path::Path, d: pull::session::Day) {
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{},1\n1594,INFY,EQ,{},0\n",
+            isin("RELIANCE"),
+            isin("INFY")
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(csv.as_bytes()).unwrap();
+        pull::cash_session_cache::install(root, d, &gz.finish().unwrap()).unwrap();
+    }
+
+    /// A stocks day from 2026-08-03 answers each share's closing-auction
+    /// rule from its receipted master: flag 1 eligible, flag 0 not, a share
+    /// the master does not list unknown in the master's words, a share the
+    /// universe records no ISIN for unknown by name; an index listing is
+    /// never asked.
+    #[test]
+    fn a_receipted_master_answers_each_shares_auction_rule() {
+        let root = scratch("CmMaster");
+        let d = day(2026, 8, 4);
+        master(&root, d);
+        let scope = Arc::new(CmScope::swept().with_masters(root.clone()));
+        let listing = DayListing::<()>::scoped(CmKind::Stocks, d, Arc::clone(&scope));
+        let cash = |s: &str| InstrumentKey::cash(Exchange::Nse, s).unwrap();
+        assert_eq!(listing.auction_for(&cash("RELIANCE")), Auction::Eligible);
+        assert_eq!(listing.auction_for(&cash("INFY")), Auction::NotEligible);
+        assert!(
+            matches!(listing.auction_for(&cash("TCS")), Auction::Unknown(why) if !why.is_empty())
+        );
+        assert!(matches!(
+            listing.auction_for(&cash("ZZNOISIN")),
+            Auction::Unknown(why) if why.contains("records no ISIN")
+        ));
+        let index = DayListing::<()>::scoped(CmKind::Indices, d, scope);
+        assert_eq!(
+            index.auction_for(&InstrumentKey::index(Exchange::Nse, "NIFTY").unwrap()),
+            Auction::NotAsked
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Two listings are equal only when their eligibility sources are: two
+    /// reads of one receipted master are one; a master and no master, or
+    /// two different reasons for none, are not.
+    #[test]
+    fn listings_compare_by_their_eligibility_source() {
+        let root = scratch("CmMasterEq");
+        let d = day(2026, 8, 4);
+        master(&root, d);
+        let with = Arc::new(CmScope::swept().with_masters(root.clone()));
+        let none = Arc::new(CmScope::swept());
+        let elsewhere = Arc::new(CmScope::swept().with_masters(root.join("Absent")));
+        let listing =
+            |scope: &Arc<CmScope>| DayListing::<()>::scoped(CmKind::Stocks, d, Arc::clone(scope));
+        assert_eq!(listing(&with), listing(&with), "one master, read twice");
+        assert_eq!(listing(&none), listing(&none), "one reason for none");
+        assert_ne!(listing(&with), listing(&none));
+        assert_ne!(listing(&none), listing(&with));
+        assert_ne!(listing(&none), listing(&elsewhere), "two different reasons");
+        // One scope, read before its master is installed and after: the
+        // listings differ in nothing but where eligibility comes from.
+        let later = scratch("CmMasterLater");
+        let scope = Arc::new(CmScope::swept().with_masters(later.clone()));
+        let before = listing(&scope);
+        master(&later, d);
+        let after = listing(&scope);
+        assert_ne!(before, after, "no master, then a master");
+        assert_ne!(after, before);
+        assert_eq!(after, listing(&scope));
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(later).unwrap();
+    }
+
+    /// A source that does not say which scope it lists under lists under
+    /// the swept surface: the trait's default.
+    #[test]
+    fn a_source_that_names_no_scope_lists_under_the_swept_surface() {
+        struct Bare;
+        impl CmSource for Bare {
+            type Locator = ();
+            fn day(
+                &self,
+                _kind: CmKind,
+                _day: pull::session::Day,
+            ) -> Result<Option<DayListing<()>>, CmRefusal> {
+                Ok(None)
+            }
+            fn fetch(
+                &self,
+                _listing: &DayListing<()>,
+                _file: &ListedFile<()>,
+            ) -> Result<Vec<u8>, CmRefusal> {
+                Err(CmRefusal::NotSwept)
+            }
+        }
+        let scope = Bare.scope();
+        assert!(Arc::ptr_eq(&scope, &CmScope::swept_shared()));
+        assert!(!scope.is_stored());
+        assert!(
+            Bare.day(CmKind::Indices, day(2024, 4, 1))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
