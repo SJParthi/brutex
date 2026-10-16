@@ -2636,3 +2636,42 @@ fn a_damaged_index_over_bars_that_no_longer_index_is_removed_and_the_commit_land
     drop(writer);
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **THE SORT-INDEX REBUILD DOOR REFUSES A MONTH WHOSE BAR FILE DOES NOT
+/// VALIDATE, EXACTLY AS A READER DOES, AND WRITES NOTHING.**
+///
+/// Covers `BarFile::open_to_sort`'s validation refusal: the bar file is cut one
+/// record short of what its header commits, the door is refused with the
+/// refusal a reader's open gives the same bytes, and no `.srt` is written.
+#[test]
+fn the_sort_rebuild_door_refuses_a_month_that_does_not_validate() {
+    use store::file::BarFile;
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("srt-invalid-month");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let bar_path = bars.to_path_buf(&root);
+    let file = fs::OpenOptions::new().write(true).open(&bar_path).unwrap();
+    let len = file.metadata().unwrap().len();
+    file.set_len(len - 56).unwrap();
+    drop(file);
+    let read = format!(
+        "{:?}",
+        BarFile::open_existing(&root, bars, SYMBOL).map(|_| ())
+    );
+    let sorted = format!(
+        "{:?}",
+        BarFile::sort_index_existing(&root, bars, SYMBOL).map(|_| ())
+    );
+    assert!(read.starts_with("Err("), "{read}");
+    assert_eq!(sorted, read);
+    assert!(
+        !second_month(FileKind::SortIndex)
+            .to_path_buf(&root)
+            .exists()
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
