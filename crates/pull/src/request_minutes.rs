@@ -1672,4 +1672,168 @@ mod cloud_mutant_tests {
             [(d1, Why::RefusedFront, 0, 375), (d3, Why::Repaired, 375, 0)]
         );
     }
+
+    fn at_minute(day: Day, minute: i64) -> i64 {
+        i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + minute * 60
+    }
+
+    /// `report` hands an audited answer's gap to the receipt (one failure,
+    /// filed under its month and day) and to the ledger (one `gap` line),
+    /// and an unaudited answer to neither; a ledger that cannot be written is
+    /// a named receipt failure of its own. Kills `report` read as `()`.
+    #[test]
+    fn report_files_the_receipt_and_the_ledger_line_or_names_the_ledger_it_could_not_write() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let request = request_on(day, day);
+        let rows: Vec<RawRow> = (5..375)
+            .map(|minute| row(at_minute(day, 555 + minute)))
+            .collect();
+        let root = crate::gdfl_fixtures::scratch("CloudReport");
+        let mut done = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &root,
+            plan_at(&request, "NSE", "INDEX"),
+            &mut done,
+            &Refusals::default(),
+        );
+        let [failure] = done.failures.as_slice() else {
+            panic!("{:?}", done.failures);
+        };
+        assert_eq!(failure.instrument, "NIFTY");
+        assert!(
+            failure
+                .why
+                .starts_with("request minute coverage gap on 2022-10-03: 09:15–09:20 IST"),
+            "{}",
+            failure.why
+        );
+        assert_eq!(
+            (failure.day, failure.month),
+            (Some(day), day.year_month().ok())
+        );
+        let ledger = std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap();
+        let lines: Vec<&str> = ledger.lines().collect();
+        assert_eq!(lines.len(), 1, "{ledger}");
+        assert!(
+            lines[0].starts_with(
+                "gap NSE-INDEX-NIFTY 2022-10-03 v=1 rung=1min owed=375 held=370 missing=5 first_missing=09:15 runs=1 longest=5 longest_at=09:15 why=vendor_empty run="
+            ),
+            "{}",
+            lines[0]
+        );
+        // An answer the audit does not name is neither a failure nor a line.
+        let mut untouched = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &root,
+            plan_at(&request, "BSE", "INDEX"),
+            &mut untouched,
+            &Refusals::default(),
+        );
+        assert!(untouched.failures.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap(),
+            ledger
+        );
+        // A ledger whose directory is a file: the gap is still on the receipt,
+        // and the unwritten ledger is a failure of its own.
+        let blocked = crate::gdfl_fixtures::scratch("CloudReportBlocked");
+        std::fs::write(blocked.join("audit"), b"not a directory").unwrap();
+        let mut named = Ingested::default();
+        report(
+            &rows,
+            "NIFTY",
+            &blocked,
+            plan_at(&request, "NSE", "INDEX"),
+            &mut named,
+            &Refusals::default(),
+        );
+        assert_eq!(named.failures.len(), 2, "{:?}", named.failures);
+        assert!(
+            named.failures[1]
+                .why
+                .starts_with("the minute-gap ledger was not written (1 day line(s)):"),
+            "{}",
+            named.failures[1].why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(blocked).unwrap();
+    }
+
+    /// An unmeasured day after the calendar of record ends is a past-record
+    /// finding; one before it begins is an UNVERIFIED one. Kills the guard's
+    /// comparison mutated, and the guard forced either way.
+    #[test]
+    fn a_day_past_the_record_and_a_day_before_it_are_named_apart() {
+        let after = Day::new(2027, 1, 4).unwrap();
+        let before = Day::new(2017, 12, 29).unwrap();
+        for (day, why) in [(after, Why::PastRecord), (before, Why::Unverified)] {
+            let request = request_on(day, day);
+            let audit = audit_venue(&[], plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+            let [finding] = audit.findings.as_slice() else {
+                panic!("{day}: {:?}", audit.findings);
+            };
+            assert_eq!((finding.why, finding.day), (why, Some(day)), "{day}");
+            assert!(audit.days.is_empty(), "{day}");
+        }
+    }
+
+    /// From 2026-08-03 an index still owes 09:15 to 15:30 and needs no cash
+    /// schedule; a share eligible for the closing auction owes 09:15 to
+    /// 15:15 by its dated flag; a share with no flag is UNVERIFIED. Kills the
+    /// cash test's `&&` read as `||` and `==` read as `!=`, and the full
+    /// session's guard forced false.
+    #[test]
+    fn after_the_auction_change_the_index_owes_the_full_day_and_a_share_its_dated_close() {
+        let day = Day::new(2026, 8, 4).unwrap();
+        let request = request_on(day, day);
+        let index: Vec<RawRow> = (555..930)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&index, plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        assert!(
+            audit.findings.is_empty() && audit.days.is_empty(),
+            "{:?}",
+            audit.findings
+        );
+        let mut schedule = crate::cash_auction::Schedule::default();
+        schedule.insert(day, true).unwrap();
+        let share: Vec<RawRow> = (555..915)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let plan = Plan {
+            cash_schedule: Some(&schedule),
+            ..plan_at(&request, "NSE", "CASH")
+        };
+        let audit = audit_venue(&share, plan, Venue::NseCash);
+        assert!(
+            audit.findings.is_empty() && audit.days.is_empty(),
+            "{:?}",
+            audit.findings
+        );
+        let short: Vec<RawRow> = (555..914)
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&short, plan, Venue::NseCash);
+        assert_eq!(audit.days.len(), 1);
+        assert_eq!(
+            (
+                audit.days[0].owed,
+                audit.days[0].missing,
+                audit.days[0].first_missing
+            ),
+            (360, 1, Some(914))
+        );
+        let unflagged = audit_venue(&share, plan_at(&request, "NSE", "CASH"), Venue::NseCash);
+        let [finding] = unflagged.findings.as_slice() else {
+            panic!("{:?}", unflagged.findings);
+        };
+        assert_eq!(
+            (finding.why, finding.detail),
+            (Why::Unverified, "dated cash eligibility")
+        );
+    }
 }
