@@ -2920,3 +2920,49 @@ async fn a_stop_with_a_run_that_is_not_running_stops_nothing() {
         "a run that is not running is not marked stopping"
     );
 }
+
+/// With no run and no cell to name, the seat's holder is described by whether
+/// the autopilot is paused (kills the match guard `site.autopilot.is_paused()`
+/// turned to `false` in `seat_holder`).
+#[test]
+fn an_unnamed_seat_holder_is_described_by_whether_the_autopilot_is_paused() {
+    let fx = Fixture::new("seat-unnamed");
+    let site = fx.refused();
+    site.autopilot.pause();
+    let paused = seat_holder(&site, pull::vendor::Feed::Dhan);
+    assert!(
+        paused.starts_with(
+            "No run this server publishes names the holder: the autopilot is paused, "
+        ),
+        "{paused}"
+    );
+    site.autopilot.resume();
+    let running = seat_holder(&site, pull::vendor::Feed::Dhan);
+    assert!(running.contains("The autopilot is running"), "{running}");
+    assert_ne!(paused, running);
+}
+
+/// A repair reason of exactly the bound is taken and one byte more is refused
+/// before anything is asked (kills `>` turned to `>=` and to `==` in
+/// `pull_repair`'s length check).
+#[tokio::test]
+async fn a_repair_reason_of_exactly_the_bound_is_taken_and_one_byte_more_is_not() {
+    let fx = Fixture::new("repair-bound");
+    let site = Loaded::new(fx.refused());
+    let refusal = "a repair names why it is run";
+    let asked = |bytes: usize| format!("{DHAN_DAY}&repair_reason={}", "a".repeat(bytes));
+    let (code, _, axum::response::Html(page)) = pull_repair(
+        axum::extract::State(Loaded::clone(&site)),
+        asked(MAX_REPAIR_REASON),
+    )
+    .await;
+    assert_ne!(code, axum::http::StatusCode::BAD_REQUEST, "{page}");
+    assert!(!page.contains(refusal), "{page}");
+    let (code, _, axum::response::Html(page)) = pull_repair(
+        axum::extract::State(Loaded::clone(&site)),
+        asked(MAX_REPAIR_REASON + 1),
+    )
+    .await;
+    assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{page}");
+    assert!(page.contains(refusal), "{page}");
+}
