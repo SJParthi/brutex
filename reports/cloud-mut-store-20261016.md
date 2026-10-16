@@ -95,6 +95,8 @@ deadline is 20 s), all four are **caught**.
 | `verdict.rs:3080:21` guard → `true` / `false`, `3080:32` `!=` → `==` in `remove_tmp` | The same: every call removes a temporary this writer made, under the commit lock, in a directory it has just written. |
 | `verdict.rs:3102:21` guard → `true` / `false`, `3102:32` `==` → `!=` in `genesis` | The link runs under the commit lock straight after `open_existing` found no index, so `EEXIST` needs an actor that does not take the lock to create the index between two calls; any other link error (`EMLINK`, `EPERM`, `ENOSPC`) is a host fault no test-owned substitute produces on the same directory as a file just written. |
 | `verdict.rs:3277:25` guard → `true` in `publish` | The same as `genesis`: a link error other than `EEXIST`, under the lock, is a host fault. |
+| `sealed.rs:1504:32` `<` → `<=` in `Fold::push` (`table.len() < table_rows`) | At most one extra entry is pushed once the table is full, and `finish` resizes the table to exactly `table_rows`, cutting it off; nothing reads the table before `finish`. |
+| `sealed.rs:2352:35` guard `block > 0` → `true`, `2352:41` `>` → `>=` in `last_before` | The guard is evaluated only when `index >= 1`. Here `index = skip + at` and `block = lo + at`, where `skip` is 0 when `lo` is 0 and 1 otherwise, so `index >= 1` already implies `block >= 1`, and both forms are always true there. |
 
 ## Findings (not fixed; no production line changed)
 
@@ -102,6 +104,20 @@ deadline is 20 s), all four are **caught**.
   with **0** links ("one of 0 names of a file"): the `lstat` caught the inode
   mid-unlink. Safe (nothing removed, truncated or written) but misnamed.
   Observed by `a_leftover_that_vanishes_before_the_look_leaves_the_create_free`.
+- **`sealed::fold_extremes`' doc comment cites a test that does not exist**:
+  `sealed::the_head_extremes_are_the_sort_runs`. Nothing in this tree has
+  that name. The tie rule it names is now held by
+  `a_sealed_heads_extremes_name_the_earliest_bar_of_each_tie`.
+- **`staging_tests.rs`'s scratch directories are not hermetic**: `dir()`
+  names one `brutex-staging-<tag>-<pid>-<n>` and never clears it, and two of
+  its tests never delete it. Once pids wrap (`pid_max` is 32,768 here), a
+  later process meets an earlier one's leftovers:
+  `a_free_name_is_created_empty_and_nothing_is_cleared` then sees
+  `cleared: Some(9)` and
+  `a_symbolic_link_or_a_directory_at_a_staging_name_is_refused_and_left`
+  fails on `EEXIST`. Both failed this way in one coverage run here, after
+  about 10,000 test processes. This is a test defect, not a code defect.
+  This session's own tests clear their scratch directory first.
 
 ## Environment failures in the base suite (not caused by this branch)
 
