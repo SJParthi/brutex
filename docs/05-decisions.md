@@ -69389,6 +69389,222 @@ accepted the others.
 `window_json_refuses_a_month_not_spelled_yyyy_mm`. `docs/04-invariants.md`
 AF5-04 and AF5-05.
 
+### D-4974 — R3-05: the operator's settings live in the store as append-only generations, settings format v1 — 2026-10-16
+
+**Decision.** The operator's window, the view `/db` opens on, the rows every
+picker always shows and the two source folders are kept in the store, in the
+format `docs/02-store-format.md` §42 defines, and served by `/settings.json`
+and saved by `POST /settings` (R3-05). Before, each was a literal in a crate
+or a page, or an environment value of the start script, so a change needed a
+rebuild or a restart and nothing recorded who made it or why. The locked
+choices:
+
+1. **The whole settings in every generation**, never a difference: the
+   generation in force is one read, and any one file is the complete answer
+   for its moment.
+2. **Text with a CRC-32C line** over every byte before it: readable by eye,
+   damage detected, and a file that fails the checksum or the grammar is a
+   named fault — the newest generation that reads stays in force, loudly,
+   and no default silently replaces it.
+3. **Published by hard link** from a temporary created by
+   `store::staging::create`: a hard link refuses an existing name, so of two
+   writers that read generation `n` exactly one lands `n + 1` and the other is
+   refused stale with nothing written. No file at a final name is ever torn,
+   rewritten or removed (`CLAUDE.md` §3 rule 8); the generations are the
+   audit.
+4. **Once the link succeeds, the save has landed and is answered saved**
+   (R3-05 repair 5, the second agent's blocking 1). A later generation another
+   writer landed between the link and the read-back is named beside the
+   success (`superseded_by`), and a read-back that faults is a warning on the
+   success. Before, both were answered `400 invalid saved:false`, and
+   `/audit` recorded a landed change as refused.
+5. **Ten keys and their checks**, each applied when a value is saved and again
+   when it is read back: `window.from`, `window.to` (a civil day, 1990 to
+   2100, `from` not after `to`), `open.feed`, `open.instrument`,
+   `open.segment`, `open.timeframe`, `open.order`, `always.shown` (at most 64
+   symbols, none twice), `source.gdfl`, `source.masters` (an absolute folder
+   that exists when saved). A new key is a new format version.
+6. **Environment values are the named fallback**, never a silent one: while
+   no generation sets `source.masters`, the start script's `BRUTEX_MASTERS`
+   answers it and the answer says so; every other unset key is answered by its
+   caller's default, also named.
+
+**Rejected.** A database or a single mutable settings file (a torn or
+half-written file at the one name a reader opens, and no history); a
+difference per generation (the newest needs every earlier file); a rename
+publish (`rename` replaces an existing name, so two racing writers would both
+"land" and one would vanish); answering a save from the read-back alone (a
+successor writer's generation made a landed save look refused).
+
+---
+
+### D-4976 — The restart scan names every run left open, answers NOT KNOWN where its pairing of a close or a restated head is a guess, and says the archive-folder leg it cannot see — 2026-10-14, revised 2026-10-16
+
+**Implemented by** AG-01 (`api::pullrun::{walk, Walker, Guess, LeftOpen,
+AlsoOpen, Guessed, Interrupted::{open_count, also_open, runs_unread}, judged,
+decorate, guessed_answer, verdict, logged, surely_logged,
+unjournalled_feeds}`, `api::pullrun::Restart::{Guessed, words}`,
+`status_json`). **Number** provisional: first written D-4961 on 14 October,
+renumbered on 16 October above every number then in use on any branch
+(D-4975 in P-AH-02); A6 renumbers it at landing from the ledger's head.
+
+**What was observed** (the 14 October attack run, every finding confirmed by
+two skeptics; `state/assurance-20261014/confirmed-20261014b.json`):
+
+1. **code-3.** `walk` kept every run opened and never closed and returned only
+   the newest (`walker.open.pop()`). Two crashes in a row with different asks
+   (Zerodha alone, the skeptic's V3-3) hid the older run; two feeds cut short
+   in one crash hid one. `/pull/run.json`, its words and the ERROR line named
+   one run and never said another might be open.
+2. **code-4.** A close that does not directly follow a record of its run went
+   to the newest open run of its scope, window and source (`rposition`). Two
+   expired-F&O walks of one underlying and window on two feeds (the feed is in
+   the ask; the source is the underlying) read crosswise: the walk that
+   finished was reported cut short and the one cut short was hidden, and a
+   STORED close handed to the wrong walk superseded an older walk of THAT
+   walk's ask (V4b: two Dhan walks cut short read "clean"). The root, F&O walks
+   opening and closing with plain `journal.append` rather than through a
+   thread, is in `server.rs` and is not this decision.
+3. **code-7.** A head restated after a close of its scope, window and source
+   that ended no run read was dropped as closed, and the close was never used
+   up: a live run behind another run's close, its 800 failures inside the
+   scan, read "clean". Neither the close nor a restated head names an ask
+   (`audit::ask_of` is `None` for both), so this shape and the legitimate one
+   (a failure offered again behind its run's own close) are the same bytes.
+4. **code-2, its restart half.** An archive-folder spot leg (`Transport::
+   LocalArchive`: TrueData and GDFL today) lands through
+   `server::local_answer` and writes only its closing record
+   (`landed_answer(.., None)`), so one cut short is invisible to the scan,
+   while the scan's "clean" sentence and `docs/06-limits.md` said both pull
+   routes write an opening record.
+
+**Decided.**
+
+1. **Every run left open is on the document.** `Restart::Interrupted` keeps
+   the run whose records were read last exactly as before (every field, and
+   its sentence byte for byte when it is the only run open) and adds
+   `open_count` (`openCount`), `also_open` (`alsoOpen`: ordinal, scope,
+   window, source, ask, opened and last-record times, failures, and
+   `mayBeClosed` when a record after its opening would not decode or its close
+   may lie before an unreadable index) and `runs_unread`
+   (`runRecordsUnread`: run records the index names behind the 64 read). A
+   document names at most 64 runs (`OPEN_NAMED`); more are counted. The ERROR
+   line "a pull run has no closing record" is written once for each run named,
+   each with its own ordinal, and once more for those counted only.
+2. **A guess is not an answer.** A close that does not directly follow a
+   record of its run and matches more than one open run is paired by the
+   walk with the newest (so it can go on) but proves nothing: unless the
+   close names an ask one of them has (no build writes one yet), or every
+   candidate names one same ask and the close is not NOT STARTED (the same
+   pull finished, whichever it was), the answer is NOT KNOWN naming the close
+   and every candidate ("a close written without its run's thread could end
+   either run"), and the guessed close supersedes nothing. A close that
+   directly follows a record of an open run of its own, and one matching
+   exactly one open run, pair as before.
+3. **A restated head behind a close that ended no run read is OPENED, and
+   the pair is a guess**: NOT KNOWN, never "clean". A run meets such a close
+   with its first head read only; every later head rejoins it, so 800
+   restatements are one run with every failure counted. The close stays for
+   a head of another run of the same scope, window and source, since it may
+   be that run's close just as well (the attack's suggestion was to use it up
+   on the first head of any run, which would read the second run as surely
+   open when the close may be its own). The pinned test `unseen` in
+   `interleaved_restated_and_refused_records_are_told_apart` changes from
+   "no run open" to NOT KNOWN: the operator's journal (4,217,222 records, 39
+   run records, 0 restatements, measured 14 October) holds no such shape, so
+   this costs no real answer.
+4. **A guess decides the answer only while a run it could have left open IS
+   open** at the end of the walk. A pairing whose other candidates all ended
+   later by a close of their own, and a restated run that closed later, are
+   settled whichever way they went; a candidate only SUPERSEDED later did not
+   end by its own close (the guessed close may have been its close, leaving
+   the walk's pick open), so that guess still decides.
+5. **Every restart answer says what it cannot see**: its words end with a
+   sentence naming the archive-folder feeds (read from the vendor table, not
+   listed) whose spot leg writes no opening record, and `/pull/run.json`'s
+   `restart` object carries them as `unjournalledFeeds` (wire names).
+6. **The walk's own reading stays callable** (`interrupted_in`): it is what
+   the answer would be if every guess went the walk's way, and the tests of
+   the walk keep their meaning. `restart_scan` (and `restart_in`, the same
+   judgement over records in memory, for tests) is the answer. The attack's
+   A1 test asked `interrupted_in` to name walk D; nothing in those three
+   records says whether the close was G's or D's, so no reader of them can,
+   and the answer is NOT KNOWN naming both (7).
+7. **An expired-F&O walk's close proves nothing by position while two or
+   more walks of its scope, window and source are open** (second check of
+   15 October, blocking 1). An F&O walk opens and closes with a plain
+   `Journal::append`, so its close lands wherever the append lock let it:
+   directly behind ANOTHER walk's opening record as easily as behind its own
+   (the attack's A1: G opens, D opens, G's NOT STARTED close lands behind D's
+   opening record; by position the close was D's, G was reported cut short
+   and D hidden). Such a close goes to the candidates' rules of 2. With one
+   walk open it is that walk's either way, and a spot run's close, written
+   through its thread (`close_run`, under the append lock), still pairs by
+   position. Two walks of one ask behind which a close lands still pair (the
+   same walk finished, whichever it was).
+8. **A NOT KNOWN answer a guess decides still names and logs what is known**
+   (second check of 15 October, blocking 2). It was a bare `NotKnown(why)`:
+   every run the records surely leave open was dropped from the document and
+   had no ERROR line, and its headline, "NOT KNOWN whether a pull run was
+   left open", was said of records that surely leave runs open. It is now
+   `Restart::Guessed`, state `not_known` as before, carrying: the walk's
+   reading (`restart.reading`; never `interrupted`, which would name what may
+   be the wrong run); the runs a live guess names (`guessedRuns`); the runs
+   open whichever way the guesses go (`sureOpen`: no live guess names them,
+   no record after their opening record would not decode, and none is known
+   only through a restated head whose close may lie before an unreadable
+   index); and, for a pairing guess of k runs that is the first guess of its
+   scope, window and source, with no closing record of theirs after it, no
+   damaged record after the oldest of its runs' opening records and none of
+   its runs doubted by an unreadable index, the k − 1 runs it surely left
+   open (`leftOpen`; a close ends one run). `atLeastOpen` sums the two, and
+   when it is above 0 the headline reads "NOT KNOWN which pull runs were left
+   open, though at least N run(s) were". Each sure run gets the ERROR line
+   "a pull run has no closing record" and each counted pairing the ERROR line
+   "pull runs have no closing record, which of them is not known"; the WARN
+   line stays. A count is withheld rather than guessed where a later close of
+   the key could end or supersede one of its runs. No emit site is added: the
+   ERROR lines go through the one site `logged` already used.
+9. **Every run of a guessed answer's reading is said, and in exactly one
+   place** (16 October). A run of the reading that no guess names but that
+   something read may have closed (a record after its opening record that
+   would not decode, or a close that may lie before an unreadable index) was
+   in `restart.reading` only: the words never named it. It is now in
+   `doubtedOpen`, and the words name it with why it may be closed; it gets
+   no ERROR line, since it may not have been cut short. Every run of the
+   reading is in exactly one of `sureOpen`, `doubtedOpen` and `guessedRuns`,
+   or counted in `unnamed`; the run records the index names behind the scan
+   (`runRecordsUnread`) are said in the words as an interrupted answer says
+   them.
+
+**Not done here** (`docs/06-limits.md`): F&O walks opening and closing
+through `open_run`/`close_run` with their ask (code-4's root, `server.rs`,
+R4-02 after AF-04), and an opening record for an archive-folder spot leg
+(code-2's real fix, `server.rs`). Until then a close of two F&O walks of one
+underlying, window and source and two asks is NOT KNOWN rather than known
+(7), and an archive-folder leg cut short is not seen.
+
+**Proved by** `api::pullrun::restart_tests::{three_runs_left_open_are_all_named,
+two_crashes_in_a_row_with_different_asks_name_both,
+one_run_open_reads_as_before, the_open_list_stops_at_the_scan_bound_and_says_so,
+two_writers_of_one_journal_cut_short_are_both_named,
+damage_after_an_older_open_run_is_said_on_it,
+an_older_run_whose_close_may_lie_before_an_unreadable_index_is_doubted,
+a_close_that_could_end_two_walks_is_not_known,
+a_close_that_directly_follows_its_walk_still_pairs,
+a_fallback_close_never_supersedes_another_asks_cut_short_run,
+a_guess_both_of_whose_runs_close_later_is_settled,
+a_guess_whose_other_run_was_only_superseded_still_decides,
+out_of_order_ordinals_never_prove_a_pairing,
+an_unseen_close_never_drops_a_live_restated_run, an_unseen_close_is_consumed_once,
+restated_heads_that_were_right_stay_right, the_journals_own_extremes,
+the_restart_words_name_the_unjournalled_archive_leg,
+an_fno_close_behind_another_walks_opening_is_not_known,
+a_run_surely_open_beside_a_guess_is_named_and_logged,
+a_count_is_claimed_only_where_nothing_read_could_move_it,
+a_guessed_answer_names_every_run_of_its_reading}` and the changed
+`api::pullrun::tests::interleaved_restated_and_refused_records_are_told_apart`.
+
 ### D-4978 — A `/backtest/run.json` poll reads the CLI log only when the log changed, and the `/backtest` status poll backs off, pauses while the tab is hidden and stops out loud (AF-06, p99-7) — 2026-10-15
 
 The 14 Oct 2026 attack run confirmed p99-7 twice: the three status GETs the

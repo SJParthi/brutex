@@ -252,13 +252,13 @@ export const SEG_VIEW = [
   {
     key: 'futures-cut',
     name: 'Futures settled after the archive ended',
-    note: "settled before today but after the vendor archive's last day, so their last sessions are not held",
+    note: "settled before today but after the archive's measured last day, so their last sessions are not imported",
     always: false
   },
   {
     key: 'options-cut',
     name: 'Options settled after the archive ended',
-    note: "settled before today but after the vendor archive's last day, so their last sessions are not held",
+    note: "settled before today but after the archive's measured last day, so their last sessions are not imported",
     always: false
   },
   {

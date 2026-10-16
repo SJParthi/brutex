@@ -571,7 +571,7 @@ export function contractLife(life, ctx) {
   } else if (archive && life.expiry > archive.to) {
     out.push({
       code: 'archive_ended',
-      text: `the vendor archive ends ${archive.to}; the sessions from then to the ${life.expiry} expiry are not in it`
+      text: `the archive as measured reaches ${archive.to}; the sessions from then to the ${life.expiry} expiry are not imported`
     });
   } else if (ctx.importedTo && life.expiry > ctx.importedTo) {
     out.push({
