@@ -4004,3 +4004,72 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
         "the held name's next call met its answer"
     );
 }
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+
+/// A census reader that must never be asked: the guard answers first.
+#[allow(
+    clippy::panic,
+    reason = "being called at all is the failure this reader exists to report"
+)]
+fn census_never_read(_site: &Site) -> (CensusStamps, CensusNow) {
+    panic!("the census is read only for an NSE spot or cash one-minute window");
+}
+
+/// A window that is not an NSE spot or cash one-minute window derives no
+/// observation and never reads the census: another exchange, a contract,
+/// a derivatives segment, a day rung (kills each `||` of the guard turned
+/// to `&&`, which lets a single disqualifier through to the census).
+#[test]
+fn only_an_nse_spot_or_cash_minute_window_reads_the_census() {
+    let fixture = nifty_store("census-observation-guard");
+    let mut bse = landed_nifty();
+    bse.exchange = "BSE";
+    let mut contract = landed_nifty();
+    contract.contract =
+        brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future {
+            expiry: brutex_core::instrument::Expiry::new(2025, 5, 29).expect("an expiry"),
+        });
+    assert!(contract.contract.is_some(), "a future has a contract");
+    let mut futures = landed_nifty();
+    futures.segment = "FUTIDX";
+    let mut daily = landed_nifty();
+    daily.granularity = pull::vendor::Granularity::Day1;
+    for (why, landed) in [
+        ("another exchange", bse),
+        ("a contract", contract),
+        ("a derivatives segment", futures),
+        ("a day rung", daily),
+    ] {
+        assert!(
+            ingestion_observations_reading(&landed, &fixture.site, census_never_read).is_none(),
+            "{why}"
+        );
+    }
+    assert!(
+        ingestion_observations_reading(&landed_nifty(), &fixture.site, census_now_stamped)
+            .is_some(),
+        "the premise: NIFTY's own window observes the NIFTY store"
+    );
+}
+
+/// A BANKNIFTY index window observes BANKNIFTY's own months, and a NIFTY
+/// window over a store that holds only BANKNIFTY observes nothing (kills the
+/// symbol choice's `segment == "INDEX"` turned to `!=`, which reads NIFTY for
+/// an index BANKNIFTY window).
+#[test]
+fn a_banknifty_index_window_observes_banknifty() {
+    let fixture = Fixture::new("census-observation-banknifty");
+    fixture.publish(&[(Segment::Index, "BANKNIFTY")], 0);
+    fixture.bar(Vendor::Dhan, Segment::Index, "BANKNIFTY", 2);
+    cold(&fixture);
+    let mut landed = landed_nifty();
+    landed.instrument = "BANKNIFTY".to_owned();
+    let observed = ingestion_observations_reading(&landed, &fixture.site, census_now_stamped);
+    assert_eq!(observed.map(|calendar| calendar.sessions()), Some(1));
+    assert!(
+        ingestion_observations_reading(&landed_nifty(), &fixture.site, census_now_stamped)
+            .is_none(),
+        "no NIFTY month is held"
+    );
+}
