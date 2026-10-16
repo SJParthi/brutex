@@ -1545,7 +1545,9 @@ export function selectionState(db) {
       ? `This selection holds ${dayLabel(heldDays.lo)} to ${dayLabel(heldDays.hi)} (the census's first and last bar); days outside it are struck through because there is no bar there to show.`
       : era.from
         ? `Nothing in this selection is counted yet, so the fields are bounded by ${era.label}, ${dayLabel(era.from)} to ${dayLabel(era.to)}.`
-        : 'Nothing in this selection is counted yet, so there is no held range to bound these fields with.';
+        : era.kind === 'refused'
+          ? `Nothing in this selection is counted yet, and ${era.label}, so these fields are not bounded.`
+          : 'Nothing in this selection is counted yet, so there is no held range to bound these fields with.';
     const shut = calendar
       ? ` Days the exchange calendar of record marks closed (weekends and holidays, /calendar.json) are struck too and can still be picked.`
       : calWhy
@@ -1580,7 +1582,7 @@ export function selectionState(db) {
     if (span.hi && span.hi < expiry) {
       if (a?.to && expiry > a.to) {
         out.push(
-          `it expires ${dayLabel(expiry)}, after the vendor archive's last day (${dayLabel(a.to)}), so its final sessions are not in the archive`
+          `it expires ${dayLabel(expiry)}, after the archive's measured last day (${dayLabel(a.to)}), so its final sessions are not imported`
         );
       } else {
         out.push(

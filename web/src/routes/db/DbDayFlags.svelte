@@ -73,11 +73,16 @@
    * 2018-09-03 to 2026-09-24. `null` for a feed with none.
    *
    * @param {string} feed
-   * @returns {{ from: string, to: string } | null}
+   * Which ends BIND travels with it (R3-05 repair 3): a day before a binding
+   * first day is outside the vendor's archive, never "not imported".
+   *
+   * @returns {{ from: string, to: string, from_binds?: boolean, to_binds?: boolean } | null}
    */
   export function archiveOf(feed) {
     const a = /** @type {any} */ (feeds.all.find((f) => f.wire === feed))?.archive;
-    return a && typeof a.from === 'string' && typeof a.to === 'string' ? { from: a.from, to: a.to } : null;
+    return a && typeof a.from === 'string' && typeof a.to === 'string'
+      ? { from: a.from, to: a.to, from_binds: a.from_binds, to_binds: a.to_binds }
+      : null;
   }
 
   /**

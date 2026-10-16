@@ -254,13 +254,24 @@ pub(crate) struct Parsed {
 
 impl Parsed {
     /// Every row of `from..=to`, oldest day first. O(log n + rows in range).
+    ///
+    /// **A reversed span (`from` after `to`) is empty, never a panic.**
+    /// `BTreeMap::range` panics when its start is past its end, and the
+    /// release profile aborts on a panic: before this guard a `/gaps.json`
+    /// for a month that began two or more days past the import journal's
+    /// reach (`month=2026-11` on 15 October 2026, or any contract expiring
+    /// in November) asked for `1 Nov ..= 30 Sep` and took the whole API
+    /// process down (R3-05 repair 4, the second agent's blocking finding).
+    /// The start is clamped to the exclusive end, so `from > to` is the
+    /// empty range `end..end`.
     pub(crate) fn range(&self, from: Day, to: Day) -> impl DoubleEndedIterator<Item = &DayRow> {
-        let low = (from.days_from_epoch(), ImportKindOrder(0), String::new());
-        let high = (
-            to.days_from_epoch().saturating_add(1),
+        let end = to.days_from_epoch().saturating_add(1);
+        let low = (
+            from.days_from_epoch().min(end),
             ImportKindOrder(0),
             String::new(),
         );
+        let high = (end, ImportKindOrder(0), String::new());
         self.rows.range(low..high).map(|(_, row)| row)
     }
 
@@ -850,6 +861,41 @@ pub(crate) mod tests {
             snap.parsed.span(),
             Some((day("2018-11-06"), day("2022-03-07")))
         );
+    }
+
+    /// **A REVERSED RANGE IS EMPTY, NEVER A PANIC** (R3-05 repair 4).
+    /// Before: `range(from, to)` with `from` two or more days past `to`
+    /// handed `BTreeMap::range` a start past its end, which panics, and the
+    /// release profile aborts — one `/gaps.json` for a month past the import
+    /// reach took the API down. One day past is the boundary that already
+    /// held; two, a year and the whole calendar are the cases that did not.
+    #[test]
+    fn a_reversed_range_is_empty_never_a_panic() {
+        let root = journal("reversed", MIXED);
+        let snap = snapshot(&root).expect("reads");
+        for (from, to) in [
+            ("2019-11-14", "2019-11-13"),
+            ("2019-11-15", "2019-11-13"),
+            ("2022-03-07", "2018-11-06"),
+            ("2099-01-01", "2019-11-13"),
+        ] {
+            assert_eq!(
+                snap.parsed.range(day(from), day(to)).count(),
+                0,
+                "{from} ..= {to}"
+            );
+            assert!(
+                snap.parsed.range(day(from), day(to)).next_back().is_none(),
+                "{from} ..= {to} walked newest first"
+            );
+        }
+        // THE SAME MAP STILL ANSWERS A FORWARD RANGE AFTERWARDS.
+        let days: Vec<String> = snap
+            .parsed
+            .range(day("2019-11-13"), day("2019-11-15"))
+            .map(|row| row.day.to_string())
+            .collect();
+        assert_eq!(days, ["2019-11-13", "2019-11-14", "2019-11-15"]);
     }
 
     /// **A LINE THIS READER CANNOT NAME IS COUNTED AND NAMED, AND THE PAGE
