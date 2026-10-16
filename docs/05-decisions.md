@@ -69254,3 +69254,24 @@ unblock, and none is decided here. Gate 23 refuses seven undeclared prints
 (`api/src/server.rs` 5, `store/src/sealed_tests.rs` 2, measurement output of
 hand-run and sealed-month tests); its declarations live in
 `.github/workflows/ci.yml`, which this change may not edit.
+
+### D-5256 — The staging test holds the leftover open, because a host may reuse a freed inode number for the very next file — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 1e's `cargo test` stopped at
+`store::staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`
+on a GitHub runner: `assert_ne!(after.ino(), before)` saw `9707437` on both
+sides. Reproduced six times in six in this session's container. The test
+recorded the leftover's inode number, let `store::staging::create` unlink it,
+and compared that number with the new file's. Once the old file is unlinked and
+no handle holds it, ext4 hands its inode number to the next file created in
+the directory, so the numbers matched although the files are different. The
+code under test was right; the proof was not.
+
+**Decision.** The test opens the leftover before `create` and holds the handle
+across it, so the old inode cannot be freed or its number reused. Through that
+handle it now asserts what the test's name claims directly: the leftover's
+link count is 0 (it lost its name), its bytes are still `half a file` (it was
+replaced, never cut), and the new file at the path is a different inode and
+empty. Six runs in six pass. No production code changes.

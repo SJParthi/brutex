@@ -41,17 +41,32 @@ fn a_free_name_is_created_empty_and_nothing_is_cleared() {
     assert_eq!(fs::read(&path).unwrap(), b"synthetic");
 }
 
+/// The leftover is held open across `create`, so its inode stays alive: once
+/// unlinked and closed, a host may hand that inode number to the very next
+/// file it creates (ext4 does, measured on 16 Oct 2026 on a CI runner and in a
+/// container), and comparing numbers then proves nothing. The held handle
+/// shows what `create` did to the leftover itself: its name is gone and its
+/// bytes are untouched, so it was replaced, never cut (D-5256).
 #[test]
 fn a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported() {
     let dir = dir("leftover");
     let path = dir.join("a.tmp");
     fs::write(&path, b"half a file").unwrap();
-    let before = fs::metadata(&path).unwrap().ino();
+    let mut leftover = fs::File::open(&path).unwrap();
     let staged = create(&path).unwrap();
     assert_eq!(staged.cleared, Some(11), "the leftover's bytes are named");
     let after = fs::metadata(&path).unwrap();
     assert_eq!(after.len(), 0, "the new file is empty");
-    assert_ne!(after.ino(), before, "it is a new file, not the old one cut");
+    let old = leftover.metadata().unwrap();
+    assert_eq!(old.nlink(), 0, "the leftover lost its name");
+    assert_ne!(
+        after.ino(),
+        old.ino(),
+        "it is a new file, not the old one cut"
+    );
+    let mut kept = Vec::new();
+    std::io::Read::read_to_end(&mut leftover, &mut kept).unwrap();
+    assert_eq!(kept, b"half a file", "the leftover's bytes were never cut");
 }
 
 /// Every temporary name the tree spells today, as its writer builds it, and
