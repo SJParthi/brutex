@@ -2966,3 +2966,34 @@ async fn a_repair_reason_of_exactly_the_bound_is_taken_and_one_byte_more_is_not(
     assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{page}");
     assert!(page.contains(refusal), "{page}");
 }
+
+/// A store filter's symbol is upper-cased once, and an empty one narrows
+/// nothing (kills `delete !` in `store_filter`).
+#[test]
+fn a_store_filters_symbol_is_upper_cased_and_an_empty_one_narrows_nothing() {
+    assert_eq!(
+        store_filter("symbol=nifty").symbol.as_deref(),
+        Some("NIFTY")
+    );
+    assert_eq!(store_filter("feed=dhan").symbol, None);
+    assert_eq!(store_filter("symbol=").symbol, None);
+}
+
+/// A HELD STORE PAGE PAST THE LAST IS THE LAST PAGE. Two instruments are held
+/// (one page), so `?page=5` clamps to the first and renders exactly as it
+/// (kills `/` turned to `%` and to `*` in the held branch's last page).
+#[tokio::test]
+async fn a_held_store_page_past_the_last_is_the_last_page() {
+    let vendor = FakeVendor::answering(|_, _| (200, dhan_bar(AUG_03))).await;
+    let script = live(&vendor, "live");
+    let fx = Fixture::new("store-held-page");
+    let site = fx.serving(&script);
+    let run = broker_run(&spot(DHAN_DAY), &site, &[]).await;
+    assert_eq!(run.total.bars_committed, 2, "{run:?}");
+    let (first_code, first) = store_html(&site, aug_10(), 0, "feed=dhan");
+    let (past_code, past) = store_html(&site, aug_10(), 5, "feed=dhan");
+    assert_eq!(first_code, axum::http::StatusCode::OK);
+    assert_eq!(past_code, axum::http::StatusCode::OK);
+    assert!(first.contains("BANKNIFTY"), "{first}");
+    assert_eq!(past, first, "a page past the last renders as the last");
+}
