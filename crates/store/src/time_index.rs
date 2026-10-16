@@ -1335,3 +1335,77 @@ mod tests {
         );
     }
 }
+
+/// Mutation-survivor tests for this module's private items (cloud session
+/// 2026-10-16, report `reports/cloud-mut-store-20261016.md`). Both mutants
+/// below were caught before only by a test that timed out; these fail fast.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{Entry, Geometry, extend, split};
+    use crate::path::YearMonth;
+
+    /// **A SLOT IS ITS BUCKET AND ITS BIT: `slot / 64` AND `slot % 64`.**
+    ///
+    /// Kills `replace / with *` in `split`, which sends every lookup to an
+    /// entry 4,096 times further than its own.
+    #[test]
+    fn a_slot_is_its_bucket_and_its_bit() {
+        assert_eq!(split(0), (0, 0));
+        assert_eq!(split(63), (0, 63));
+        assert_eq!(split(64), (1, 0));
+        assert_eq!(split(130), (2, 2));
+    }
+
+    /// **A BAR SEVERAL BUCKETS ON IS REACHED, EACH BUCKET BETWEEN COUNTING
+    /// WHAT CAME BEFORE IT.**
+    ///
+    /// Kills `replace += with *=` in `extend`'s walk to the next bar's bucket
+    /// (`at` never advances, so the walk never ends): the walk runs on a
+    /// worker with a deadline, so that mutant fails here at once rather than
+    /// hanging the suite, and the entries are checked exactly.
+    #[test]
+    fn a_bar_several_buckets_on_is_reached_in_bounded_time() {
+        let geometry = Geometry::new(YearMonth::new(2031, 2).unwrap(), 1, 7);
+        let stamps = [
+            Ok(geometry.slot_start(0)),
+            Ok(geometry.slot_start(3 * 64 + 5)),
+        ];
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _receiver_gone = send.send(extend(&geometry, 0, Entry::EMPTY, 0, stamps));
+        });
+        let entries = answer
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("extend returned")
+            .unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                Entry {
+                    occupancy: 1,
+                    before: 0
+                },
+                Entry {
+                    occupancy: 0,
+                    before: 1
+                },
+                Entry {
+                    occupancy: 0,
+                    before: 1
+                },
+                Entry {
+                    occupancy: 1 << 5,
+                    before: 1
+                },
+            ]
+        );
+    }
+}

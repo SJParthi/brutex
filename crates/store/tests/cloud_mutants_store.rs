@@ -1390,3 +1390,43 @@ fn a_durable_batch_holds_a_directory_once_and_a_sealed_one_nothing() {
     assert!(!batch.defer_file(&file, &file_path).unwrap(), "sealed");
     let _ignored = fs::remove_dir_all(&dir);
 }
+
+/// **A TIME INDEX WHOSE LAST SLOT IS OCCUPIED AT ANOTHER RANK IS STALE, AND
+/// IS REBUILT.**
+///
+/// Covers the second half of `time_index::resume`'s check: the `.tix` of a
+/// month with every second from 09:15 is laid beside a month with the same
+/// last second and one second missing, so the last bar's slot is occupied
+/// but at a rank one past this month's last row. The index door names it
+/// stale and writes it from the bars.
+#[test]
+fn a_time_index_occupied_at_another_rank_is_stale_and_rebuilt() {
+    use store::file::{BarFile, Reindexed};
+    use store::path::FileKind;
+    use store::time_index::Why;
+    const SYMBOL: u32 = 11;
+    let whole = scratch("tix-rank-whole");
+    let gap = scratch("tix-rank-gap");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&whole, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    drop(writer);
+    let mut writer = BarFile::open_or_create(&gap, bars, SYMBOL).unwrap();
+    let missing_one: Vec<_> = (0..1_100)
+        .filter(|&i| i != 5)
+        .map(|i| second_bar(i, 0))
+        .collect();
+    writer.append(&missing_one).unwrap();
+    drop(writer);
+    let tix = second_month(FileKind::TimeIndex);
+    fs::copy(tix.to_path_buf(&whole), tix.to_path_buf(&gap)).unwrap();
+    let indexed = BarFile::index_existing(&gap, bars, SYMBOL).unwrap();
+    assert_eq!(indexed.n_valid, 1_099);
+    assert_eq!(indexed.outcome, Reindexed::Built(Why::Stale));
+    assert_eq!(
+        BarFile::index_existing(&gap, bars, SYMBOL).unwrap().outcome,
+        Reindexed::Kept
+    );
+    let _ignored = fs::remove_dir_all(&whole);
+    let _ignored = fs::remove_dir_all(&gap);
+}
