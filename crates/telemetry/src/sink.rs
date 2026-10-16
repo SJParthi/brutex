@@ -7852,3 +7852,97 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Mutation-survivor tests for this module's private items (cloud session
+/// 2026-10-16, report `reports/cloud-mut-store-20261016.md`). Each test names
+/// the mutants it kills and asserts the behaviour they break.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Pair, Rationed};
+
+    /// The key `Flood::admit` files a pair under, computed the same way.
+    fn key_of(target: &str, message: &str) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        target.hash(&mut hasher);
+        message.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// **A FULL FLOOD TABLE DROPS EXACTLY THE PAIRS WITH NOTHING TO SAY.**
+    ///
+    /// When a new pair meets a table of [`FLOOD_PAIRS`], the table keeps every
+    /// pair that still holds an unreported count (`held > 0`) or whose window
+    /// is still open (`at < start + FLOOD_WINDOW_MS`), and drops the rest. One
+    /// pair of each kind, plus one whose window closes exactly at `at`, pins
+    /// both halves of the predicate and its boundary. Kills the seven
+    /// mutants of `pair.held > 0 || at < pair.start.saturating_add(..)` in
+    /// `Flood::admit`: `||` to `&&`, `>` to `==`, `<` or `>=`, and `<` to
+    /// `==`, `>` or `<=`. Each keeps or drops a different set, and `>=` keeps
+    /// all of them, so the new pair goes unfollowed.
+    #[test]
+    fn a_full_flood_table_drops_exactly_the_pairs_with_nothing_to_say() {
+        let at = 10_000i64;
+        let (unreported, open, closed_at_the_edge) = (1u64, 2u64, 3u64);
+        let mut flood = Flood::default();
+        // Held back one line, its window long over: kept, its count unsaid.
+        flood.pairs.insert(
+            unreported,
+            Pair {
+                start: 0,
+                written: 3,
+                held: 1,
+            },
+        );
+        // Nothing held, its window one millisecond from closing: kept.
+        flood.pairs.insert(
+            open,
+            Pair {
+                start: at - FLOOD_WINDOW_MS + 1,
+                written: 1,
+                held: 0,
+            },
+        );
+        // Nothing held, its window closing exactly now: dropped.
+        flood.pairs.insert(
+            closed_at_the_edge,
+            Pair {
+                start: at - FLOOD_WINDOW_MS,
+                written: 1,
+                held: 0,
+            },
+        );
+        // Nothing held, long over: dropped.
+        for key in 4..=u64::try_from(FLOOD_PAIRS).unwrap() {
+            flood.pairs.insert(
+                key,
+                Pair {
+                    start: 0,
+                    written: 1,
+                    held: 0,
+                },
+            );
+        }
+        assert_eq!(flood.pairs.len(), FLOOD_PAIRS);
+        let new = key_of("cloud.flood", "a new pair");
+        assert!(!flood.pairs.contains_key(&new), "a fresh key");
+
+        let answer = flood.admit(5, "cloud.flood", "a new pair", at);
+
+        assert_eq!(answer, Rationed::Write { held_before: 0 });
+        let mut kept: Vec<u64> = flood.pairs.keys().copied().collect();
+        kept.sort_unstable();
+        let mut want = vec![unreported, open, new];
+        want.sort_unstable();
+        assert_eq!(kept, want, "the new pair is followed in the room made");
+        assert_eq!(flood.pairs[&new].written, 1, "and its first line counted");
+    }
+}
