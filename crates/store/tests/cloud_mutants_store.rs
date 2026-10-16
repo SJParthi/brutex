@@ -2925,3 +2925,40 @@ fn a_retired_index_that_cannot_be_removed_refuses_the_append_body() {
     drop(reader);
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **A TORN NEW MONTH WHOSE CHECKSUM SIDECAR CANNOT BE MEASURED IS REFUSED,
+/// NEVER RE-INITIALISED.**
+///
+/// Kills `replace match guard why.kind() == ErrorKind::NotFound with true` in
+/// `refuse_if_sealed`, which would take any refusal to measure the sidecar for
+/// "no sidecar" and re-initialise a month whose sidecar may prove committed
+/// records (D-1520). The bar file is an interrupted genesis (zeros, shorter
+/// than its region) and a link that points at itself stands at the
+/// sidecar's name, so measuring it fails `ELOOP`: the open is refused naming
+/// the sidecar, and the bar file is left byte for byte.
+#[test]
+fn a_torn_month_whose_sidecar_cannot_be_measured_is_refused() {
+    use store::file::{Action, BarFile, StoreError};
+    use store::path::FileKind;
+    let root = scratch("torn-sidecar-loop");
+    let bar_path = second_month(FileKind::Bars).to_path_buf(&root);
+    fs::create_dir_all(bar_path.parent().unwrap()).unwrap();
+    fs::write(&bar_path, [0u8; 100]).unwrap();
+    let sidecar = second_month(FileKind::Checksums).to_path_buf(&root);
+    std::os::unix::fs::symlink(&sidecar, &sidecar).unwrap();
+    let refusal = BarFile::open_or_create(&root, second_month(FileKind::Bars), 11)
+        .map(|_| ())
+        .unwrap_err();
+    // `ErrorKind::FilesystemLoop` is not a stable name, so it is matched as
+    // the kind the host's `ELOOP` is written as.
+    assert!(
+        matches!(
+            &refusal,
+            StoreError::Io { path, action: Action::Measure, kind, .. }
+                if *path == sidecar && format!("{kind:?}") == "FilesystemLoop"
+        ),
+        "{refusal:?}"
+    );
+    assert_eq!(fs::read(&bar_path).unwrap(), [0u8; 100], "left as it was");
+    let _ignored = fs::remove_dir_all(&root);
+}
