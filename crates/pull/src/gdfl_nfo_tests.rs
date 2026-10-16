@@ -842,7 +842,10 @@ fn a_row_of_many_fields_is_malformed_at_its_line() {
         Err(NfoRefusal::MalformedRow { line: 3 })
     );
     let bytes = csv(&rows(&[(33_299, "10", 1, 5), (33_300, "10", 1, 5)]));
-    assert_eq!(decode(&bytes, STEM, trade()).map(|file| file.rows.len()), Ok(2));
+    assert_eq!(
+        decode(&bytes, STEM, trade()).map(|file| file.rows.len()),
+        Ok(2)
+    );
 }
 
 #[test]

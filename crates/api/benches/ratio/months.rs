@@ -222,6 +222,25 @@ pub(crate) fn flat(label: &str, costs: &[u128]) -> bool {
     )
 }
 
+/// The three sizes' min-of-trials costs, printed as a cost PER UNIT of the
+/// size axis and the 1x -> 100x ratio, for a row whose own doc states it
+/// grows with that axis. Never gated: the figure is the finding.
+pub(crate) fn stated(label: &str, costs: &[u128]) {
+    let (Some(&base), Some(&big)) = (costs.first(), costs.get(2)) else {
+        refuse("three sizes measured");
+    };
+    let (Some(&small), Some(&large)) = (MONTH_COUNTS.first(), MONTH_COUNTS.get(2)) else {
+        refuse("three sizes named");
+    };
+    let per_unit = big.saturating_sub(base) / u128::try_from(large - small).unwrap_or(1).max(1);
+    let permille = if base == 0 { 0 } else { big * 1_000 / base };
+    println!(
+        "  {label:<52} {base:>12} ps -> {big:>13} ps  {}.{:03}x  {per_unit:>10} ps per extra unit  (stated, not gated)",
+        permille / 1_000,
+        permille % 1_000,
+    );
+}
+
 /// A window over every month of a `months`-month fixture series.
 fn query(months: usize, offset: Option<usize>, at: Option<i64>, sort: SortKey) -> WindowQuery {
     WindowQuery {
@@ -279,18 +298,25 @@ fn windows(roots: &[(usize, PathBuf)]) {
             costs.push(cost_ps(50, || page(black_box(root), black_box(&asked))));
         }
         // PRINTED, NOT ASSERTED: O(months) by the function's own doc.
-        let _stated = flat(&format!("{label} (O(months), unasserted)"), &costs);
+        stated(&format!("{label} (O(months))"), &costs);
     }
     let mut costs = Vec::with_capacity(roots.len());
     for (months, root) in roots {
         let middle = nth_month(months / 2);
-        let asked = query(*months, None, Some(stamp(middle, BARS_PER_MONTH / 2)), SortKey::Ts);
-        spread(&format!("window at=, {months} months"), SPREAD_CALLS, || {
-            page(black_box(root), black_box(&asked))
-        });
+        let asked = query(
+            *months,
+            None,
+            Some(stamp(middle, BARS_PER_MONTH / 2)),
+            SortKey::Ts,
+        );
+        spread(
+            &format!("window at=, {months} months"),
+            SPREAD_CALLS,
+            || page(black_box(root), black_box(&asked)),
+        );
         costs.push(cost_ps(50, || page(black_box(root), black_box(&asked))));
     }
-    let _stated = flat("window at= (O(months), unasserted)", &costs);
+    stated("window at= (O(months))", &costs);
 }
 
 /// `/verify.json`'s scrub over a census of 1, 10 and 100 held months.
@@ -313,13 +339,226 @@ fn verifies(roots: &[(usize, PathBuf)]) {
         spread(
             &format!("verify scrub, {months} months"),
             SPREAD_CALLS,
-            || api::verify::vendor(black_box(root), black_box(&census)).tally.agreed,
+            || {
+                api::verify::vendor(black_box(root), black_box(&census))
+                    .tally
+                    .agreed
+            },
         );
         costs.push(cost_ps(20, || {
-            api::verify::vendor(black_box(root), black_box(&census)).tally.agreed
+            api::verify::vendor(black_box(root), black_box(&census))
+                .tally
+                .agreed
         }));
     }
-    let _stated = flat("verify scrub (O(entries), unasserted)", &costs);
+    stated("verify scrub (O(entries))", &costs);
+}
+
+/// `/spot.json` at an instant of the series' LAST month, over 1, 10 and 100
+/// held months.
+///
+/// `SpotAsk::answer_with` opens exactly the one month file the question
+/// names, so the months beside it may not cost anything. ASSERTED: a ratio
+/// past the ceiling here is a spot read that walks the series.
+fn spots(roots: &[(usize, PathBuf)]) -> bool {
+    let mut costs = Vec::with_capacity(roots.len());
+    for (months, root) in roots {
+        let last = nth_month(months - 1);
+        let at = stamp(last, BARS_PER_MONTH / 2) / 1_000_000;
+        let query = format!(
+            "feed=gdfl&exchange=NSE&symbol=NIFTY&timeframe=1s&month={}-{:02}&t={at}",
+            last.year(),
+            last.month()
+        );
+        let (status, _, body) = api::server::spot::respond(root, &query);
+        if status != axum::http::StatusCode::OK || !body.contains(&format!("{at}")) {
+            refuse(&format!(
+                "the spot read of {months} months answered {status}: {body}"
+            ));
+        }
+        spread(
+            &format!("spot.json last month, {months} months"),
+            SPREAD_CALLS,
+            || {
+                api::server::spot::respond(black_box(root), black_box(&query))
+                    .2
+                    .len()
+            },
+        );
+        costs.push(cost_ps(200, || {
+            api::server::spot::respond(black_box(root), black_box(&query))
+                .2
+                .len()
+        }));
+    }
+    flat("spot.json last month (asserted)", &costs)
+}
+
+/// The `/store` page over a census of 1, 10 and 100 held months.
+///
+/// `store_html` reads the census through `census_now` (a hit stamps every
+/// vendor's manifest) and draws one bounded page. PRINTED, not asserted: the
+/// census it walks is the month count here, and the figure says whether a
+/// hit's cost moves with it.
+fn store_pages(roots: &[(usize, PathBuf)]) {
+    let Ok(today) = pull::session::Day::new(2026, 10, 16) else {
+        refuse("2026-10-16 is a day");
+    };
+    let mut costs = Vec::with_capacity(roots.len());
+    for (months, root) in roots {
+        let read = api::server::Read::new(
+            api::merge::Merged::default(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            0,
+            0,
+        );
+        let censuses = api::census::read_all(root);
+        let site = api::server::Site::new(read, censuses, root.clone());
+        let (status, html) = api::server::store_html(&site, today, 0, "feed=gdfl");
+        if status != axum::http::StatusCode::OK || !html.contains("NIFTY") {
+            refuse(&format!(
+                "the store page over {months} months answered {status}"
+            ));
+        }
+        spread(
+            &format!("store page, {months} months"),
+            SPREAD_CALLS,
+            || {
+                api::server::store_html(black_box(&site), today, 0, "feed=gdfl")
+                    .1
+                    .len()
+            },
+        );
+        costs.push(cost_ps(50, || {
+            api::server::store_html(black_box(&site), today, 0, "feed=gdfl")
+                .1
+                .len()
+        }));
+    }
+    stated("store page (rows drawn = months)", &costs);
+}
+
+/// Census entries for the census-size `/store` rows: 1x, 10x and 100x.
+const CENSUS_SIZES: [usize; 3] = [1_000, 10_000, 100_000];
+
+/// A store whose GDFL census holds `n` entries: the `n`th cash symbol's
+/// September 2026 one-minute month, no bar file behind any of them. The page
+/// reads the census, not the bars.
+fn census_store(n: usize) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-api-bench-census-page-{n}-{}",
+        std::process::id()
+    ));
+    let _ignored = std::fs::remove_dir_all(&root);
+    if let Err(why) = std::fs::create_dir_all(root.join("manifest")) {
+        refuse(&format!("the census page root would not create: {why}"));
+    }
+    let Ok(mut manifest) = Manifest::open(Vendor::Gdfl, &[], &[]) else {
+        refuse("a genesis census");
+    };
+    let Ok(month) = YearMonth::new(2026, 9) else {
+        refuse("September 2026");
+    };
+    for i in 0..n {
+        let Ok(symbol) = Symbol::new(&format!("S{i:07}")) else {
+            refuse("a synthetic symbol");
+        };
+        let entry = Entry {
+            key: api::census::Series {
+                contract: None,
+                exchange: Exchange::Nse,
+                segment: Segment::Cash,
+                symbol,
+                timeframe: Timeframe::MINUTE_1,
+            }
+            .at(month),
+            rows: 375,
+            first_ts_micros: 1_788_926_700_000_000,
+            last_ts_micros: 1_788_949_140_000_000,
+        };
+        if manifest.record(entry).is_err() {
+            refuse("a census entry");
+        }
+    }
+    let path = pull::manifest::manifest_path(&root, Vendor::Gdfl);
+    if let Err(why) = std::fs::write(&path, manifest.image()) {
+        refuse(&format!("the census page manifest would not write: {why}"));
+    }
+    root
+}
+
+/// The `/store` page over a census of 1,000, 10,000 and 100,000 entries,
+/// every size drawing the same full page of rows.
+///
+/// A warm request reads the census through `census_now`'s cache (a `stat`
+/// per vendor, D-0686) and draws one page of `PAGE_ROWS`; the order is built
+/// once per census read. ASSERTED: a ratio past the ceiling is a warm page
+/// whose cost tracks the census.
+fn store_pages_over_the_census() -> bool {
+    let Ok(today) = pull::session::Day::new(2026, 10, 16) else {
+        refuse("2026-10-16 is a day");
+    };
+    let mut costs = Vec::with_capacity(CENSUS_SIZES.len());
+    let mut roots = Vec::with_capacity(CENSUS_SIZES.len());
+    for n in CENSUS_SIZES {
+        let root = census_store(n);
+        let read = api::server::Read::new(
+            api::merge::Merged::default(),
+            Vec::new(),
+            Vec::new(),
+            0,
+            0,
+            0,
+        );
+        let site = api::server::Site::new(read, api::census::read_all(&root), root.clone());
+        let started = Instant::now();
+        let (status, html) = api::server::store_html(&site, today, 0, "feed=gdfl");
+        let first_us = started.elapsed().as_micros();
+        let drawn = html.matches("S00").count();
+        if status != axum::http::StatusCode::OK || drawn == 0 {
+            refuse(&format!(
+                "the store page over {n} entries answered {status}, {drawn} rows"
+            ));
+        }
+        println!(
+            "  store page first request, {n:>6} entries {first_us:>10} us  (census read once; {drawn} symbol cells drawn)"
+        );
+        spread(
+            &format!("store page warm, {n} entries"),
+            SPREAD_CALLS,
+            || {
+                api::server::store_html(black_box(&site), today, 0, "feed=gdfl")
+                    .1
+                    .len()
+            },
+        );
+        costs.push(cost_ps(50, || {
+            api::server::store_html(black_box(&site), today, 0, "feed=gdfl")
+                .1
+                .len()
+        }));
+        roots.push(root);
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (costs.first(), costs.get(1), costs.get(2)) else {
+        refuse("three sizes measured");
+    };
+    let ok = ratio(
+        "store page warm 1000->10000 entries",
+        base,
+        mid,
+        RATIO_CEILING_PERMILLE,
+    ) & ratio(
+        "store page warm 1000->100000 entries",
+        base,
+        big,
+        RATIO_CEILING_PERMILLE,
+    );
+    for root in roots {
+        let _ignored = std::fs::remove_dir_all(root);
+    }
+    ok
 }
 
 /// Every month-axis row. Run by `crates/api/benches/ratio.rs`'s `main`.
@@ -332,8 +571,11 @@ pub(crate) fn rows_are_measured() -> bool {
     );
     windows(&roots);
     verifies(&roots);
+    let mut ok = spots(&roots);
+    store_pages(&roots);
     for (_, root) in roots {
         let _ignored = std::fs::remove_dir_all(root);
     }
-    true
+    ok &= store_pages_over_the_census();
+    ok
 }
