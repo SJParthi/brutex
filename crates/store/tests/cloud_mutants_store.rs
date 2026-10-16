@@ -15,8 +15,10 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::too_many_lines,
     reason = "the same exception every test module in this workspace takes: a \
-              test that cannot panic cannot fail."
+              test that cannot panic cannot fail; a table test is as long as \
+              its table."
 )]
 
 mod support;
@@ -740,6 +742,24 @@ fn every_verdict_refusal_has_its_word_its_sentence_and_its_cause() {
     );
 }
 
+/// Each value of a one-byte enumeration is filed under its byte, read back as
+/// itself and says its word; a byte past the table is `None`.
+fn round<T: Copy + PartialEq + std::fmt::Debug>(
+    all: &[T],
+    code: fn(T) -> u8,
+    from: fn(u8) -> Option<T>,
+    word: fn(T) -> &'static str,
+    words: &[(u8, &str)],
+) {
+    assert_eq!(all.len(), words.len());
+    for (value, (byte, said)) in all.iter().zip(words) {
+        assert_eq!(code(*value), *byte, "{value:?}");
+        assert_eq!(from(*byte), Some(*value));
+        assert_eq!(word(*value), *said);
+    }
+    assert_eq!(from(200), None, "a byte this build does not know");
+}
+
 /// **EVERY VERDICT CODE AND ONE-BYTE ENUMERATION ROUND-TRIPS THROUGH ITS BYTE,
 /// AND SAYS ITS WORD.**
 ///
@@ -779,21 +799,6 @@ fn every_verdict_code_and_byte_enumeration_round_trips_and_says_its_word() {
     assert_eq!(Code::from_code(0), None, "unset");
     assert_eq!(Code::from_code(19), None, "a later build's");
 
-    fn round<T: Copy + PartialEq + std::fmt::Debug>(
-        all: &[T],
-        code: fn(T) -> u8,
-        from: fn(u8) -> Option<T>,
-        word: fn(T) -> &'static str,
-        words: &[(u8, &str)],
-    ) {
-        assert_eq!(all.len(), words.len());
-        for (value, (byte, said)) in all.iter().zip(words) {
-            assert_eq!(code(*value), *byte, "{value:?}");
-            assert_eq!(from(*byte), Some(*value));
-            assert_eq!(word(*value), *said);
-        }
-        assert_eq!(from(200), None, "a byte this build does not know");
-    }
     round(
         Mode::ALL,
         Mode::code,
