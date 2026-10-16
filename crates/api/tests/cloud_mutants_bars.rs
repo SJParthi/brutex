@@ -1686,6 +1686,139 @@ mod bars_series_rs {
         assert_eq!(future.text(), "NSE-FNO-NIFTY-2019-03-28-FUT");
     }
 
+    /// **A TAIL IS A CONTRACT ONLY WHEN EVERY FIELD HAS A CONTRACT'S SHAPE.**
+    /// Each text below fails exactly one of the shape's tests — a year, a
+    /// month or a day that is not its width of digits, a side that is not
+    /// `CE` or `PE`, a future's date or its `FUT` — and so reads back as a
+    /// symbol with no contract; a symbol with a dash still splits from a
+    /// real contract; and a key whose whole remainder is a contract has no
+    /// symbol to cut, so the remainder is the symbol. Kills `contract_shaped`'s
+    /// `&& with ||` mutants, its `-> true`, its `FUT` test and
+    /// `split_contract`'s `cut > 0` → `>= 0`.
+    #[test]
+    fn bars_series_a_tail_is_a_contract_only_by_its_shape() {
+        for symbol in [
+            "NIFTY-ABCD-EF-GH-100-CE",
+            "NIFTY-ABCD-03-28-100-CE",
+            "NIFTY-2019-EF-28-100-CE",
+            "NIFTY-ABCD-EF-28-100-CE",
+            "NIFTY-2019-3-28-100-CE",
+            "NIFTY-2019-03-28-1X0-CE",
+            "NIFTY-2019-03-28-100-XE",
+            "NIFTY-ABCD-EF-GH-FUT",
+            "NIFTY-2019-03-28-XYZ",
+            "2019-03-28-FUT",
+        ] {
+            let key = SeriesKey::parse(&format!("NSE-FNO-{symbol}")).expect("a key");
+            assert_eq!(
+                (key.symbol.as_str(), key.contract),
+                (symbol, None),
+                "{symbol}"
+            );
+        }
+        let dashed = SeriesKey::parse("NSE-FNO-BAJAJ-AUTO-2019-03-28-100-CE").expect("a key");
+        assert_eq!(dashed.symbol, "BAJAJ-AUTO");
+        assert_eq!(
+            dashed.contract.map(|c| c.to_string()),
+            Some("2019-03-28-100-CE".to_owned())
+        );
+    }
+
+    /// **A MONTH LISTED AFTER ITS DIRECTORY WAS FIRST READ IS SEEN.** The
+    /// listing of a rung directory is kept under the directory's stamp; a
+    /// month written since moves the stamp, so the next window lists again.
+    /// Kills `held_months`' `== with !=` on the stamp, which served the old
+    /// listing exactly when the directory had changed.
+    #[test]
+    fn bars_series_a_month_written_after_the_listing_is_seen() {
+        let scratch = Scratch::new("series-relist");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(4),
+            &[(open_of(4, 2), 10)],
+        );
+        let before = window(scratch.root(), &query(month(4), month(5))).expect("answers");
+        assert_eq!((before.total, before.months_read), (1, 1));
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[(open_of(5, 2), 20)],
+        );
+        let after = window(scratch.root(), &query(month(4), month(5))).expect("answers");
+        assert_eq!((after.total, after.months_read), (2, 2));
+    }
+
+    /// **A MONTH'S DAY WINDOWS, KEPT FROM ONE REQUEST, ARE FILED UNDER THE
+    /// NEXT REQUEST'S OWN SLOT.** June is slot 1 of an April-to-June request
+    /// and slot 0 of a June-only one; its day runs under a 09:20–09:21 bound
+    /// are memoised by file, so the second request reuses them, and must
+    /// read them from its own June. Kills `cut_days`' `delete field slot`.
+    #[test]
+    fn bars_series_kept_day_runs_are_read_from_this_requests_slot() {
+        let scratch = Scratch::new("series-day-runs-slot");
+        for (m, close) in [(5, 500), (6, 600)] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[
+                    (open_of(m, 2) + 300, close),
+                    (open_of(m, 2) + 360, close + 1),
+                ],
+            );
+        }
+        let mut asked = query(month(5), month(6));
+        asked.filter.tod = Some((33_600, 33_660));
+        let both = window(scratch.root(), &asked).expect("answers");
+        let closes: Vec<i64> = both.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(closes, vec![500, 501, 600, 601]);
+        asked.from = month(6);
+        let june = window(scratch.root(), &asked).expect("answers");
+        let closes: Vec<i64> = june.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(closes, vec![600, 601], "{:?}", june.faults);
+        assert!(june.faults.is_empty(), "{:?}", june.faults);
+    }
+
+    /// **AN EDGE MONTH A DAY BOUND LEAVES NO ROW OF IS NO RUN**, so the next
+    /// month's first row has no kept row behind it. April's only row is
+    /// before the 20th, the bound's first day: with the lookback off, May's
+    /// first row is the first in its window, never measured against April.
+    /// Kills `cut_months`' `end > start` → `>=`, which kept an empty April
+    /// run that made April's last row look kept.
+    #[test]
+    fn bars_series_an_edge_month_the_bound_empties_is_no_run() {
+        let scratch = Scratch::new("series-empty-edge");
+        for (m, close) in [(4, 100), (5, 200)] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[(open_of(m, 2), close)],
+            );
+        }
+        let mut asked = query(month(4), month(5));
+        asked.lookback = false;
+        asked.filter.from = Some((open_of(4, 20) - 33_300) * 1_000_000);
+        let got = window(scratch.root(), &asked).expect("answers");
+        let rows: Vec<(i64, Option<i64>, &str)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.chg, row.chg_why))
+            .collect();
+        assert_eq!(rows, vec![(200, None, "first_bar_in_window")]);
+        assert_eq!(got.total, 1);
+    }
+
     /// **A RUNG DIRECTORY THAT CANNOT BE ASKED ABOUT IS A REFUSAL, NOT AN
     /// EMPTY HISTORY.** The symbol's path is a file, so the rung directory
     /// beneath it is not a directory that is absent: it cannot be read.
