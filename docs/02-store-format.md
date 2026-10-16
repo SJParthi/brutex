@@ -4173,3 +4173,115 @@ rewritten. Every outcome is one line of the root's append-only
 `tickstore-write.log` naming the writer, the commit and the run. Invariants
 TSW-01 to TSW-17 in `docs/04-invariants.md`; limits L-TSW-1 to L-TSW-9 in
 `docs/06-limits.md`.
+
+## §41 — The GDFL import door: `imports/gdfl.sources` v1 and the run lock's holder record (D-4977)
+
+Written by `cli gdfl-import`'s door (`crates/cli/src/gdfl_import_guard.rs`,
+AF-01), never by the importer itself. Both live beneath `<store>/imports/`
+beside `gdfl.journal`; neither holds a bar. Both appear the first time
+`gdfl-import` runs on a build that carries the door.
+
+### The run lock and its holder record
+
+- **Name.** The lock `telemetry::run_dirs::for_gdfl` gives for the run's
+  kind on the store's census layout, as `pull::ingest::census_store::locate`
+  answers it: `imports/gdfl.<kind>.lock` on a partitioned (v4) census,
+  `imports/gdfl.lock` on a single (v3) one. A layout the census cannot
+  answer refuses the run (`run_lock_refused`); it is never guessed.
+- **Opening.** Read-write, created `0644` when absent, never truncated by the
+  open, with `O_NOFOLLOW | O_NONBLOCK`: a symbolic link at the name is
+  refused by name and never followed, a pipe cannot hold the open, and the
+  handle's `fstat` must say "regular file" (a directory or a special file is
+  refused by name) with exactly one name: a hard link at the lock's name is
+  refused before the record truncates or writes the other file. Only
+  `imports/` is made beneath the store root, never the root itself.
+- **Lock.** `flock(2)` exclusive, without waiting (`store::flock::Flock::try_lock`).
+  Held from before the importer's first journal line until the run's line
+  is appended to `gdfl.sources`. A second process of the same kind is
+  refused `run_busy`, naming the holder's pid and start; a run of another
+  kind on v4 holds its own lock and runs beside it.
+- **Record.** Written once, right after the lock is taken, at offset 0 after
+  `set_len(0)`, and made durable with `sync_data`. One line, ASCII,
+  space-separated `name=value` fields after a fixed prefix:
+
+  ```text
+  gdfl-lock v1 pid=<u32> run_started=<UNIX s> lock_taken_us=<UNIX µs> kind=<indices|stocks|options> layout=<v3|v4> verb=<escaped verb line>\n
+  ```
+
+  `run_started` is the run's `Origin::started`; the process's own start time
+  is not recorded (`std` exposes none and every crate root forbids `unsafe`).
+  `verb` is the verb line with `\`, tab, newline, carriage return and every
+  byte outside printable ASCII escaped (`\\`, `\t`, `\n`, `\r`, `\xHH`),
+  cut at 512 bytes and ended `...(+N bytes)` when longer. A reader reads at
+  most 4,096 bytes and prints them escaped the same way, whatever they are,
+  so foreign bytes at the name cannot forge a receipt line. A contender that
+  reads the record in the moment after a new holder took a dead one's lock,
+  before it rewrote the record, reads the dead holder's: `run_busy` says the
+  record is the holder's "as last written", never that the pid is alive.
+- **Release.** A run that ends (cleanly or refused) truncates the file to 0
+  bytes and then unlocks it; `Drop` truncates too on an early return. So a
+  record found by a process that has just taken the lock FREE is a holder
+  that died without releasing (killed, or the host stopped): the receipt
+  says `previous holder died`, naming its pid and start. The file itself is
+  never removed.
+
+### `imports/gdfl.sources`, format version 1
+
+Append-only, one line per run that took the lock, never rewritten. Opened
+`O_RDWR | O_APPEND | O_CREAT` with `O_NOFOLLOW | O_NONBLOCK` (read as well, for
+the one byte read at the append that decides whether the last line is torn,
+D-4977 item 11) and refused unless a
+regular file with exactly one name (a hard link at the ledger's name would
+carry the line into another file, so it is refused `sources_ledger_unwritten`
+before a byte is written); each line is written with one `write` call and made durable
+with `sync_data`. Ten tab-separated fields, the last two escaped as the
+holder record's `verb` is, so no field holds a tab or a newline:
+
+| # | Field | Value |
+|---|---|---|
+| 1 | version | `v1` |
+| 2 | started | the run's `Origin::started`, UNIX seconds |
+| 3 | kind | `indices`, `stocks` or `options` |
+| 4 | source | `tickstore` or `zip` (`SourceKind::as_str`) |
+| 5 | digest | `Origin::digest` as 64 lowercase hex digits, or `unmeasured` |
+| 6 | outcome | `ok`, or every door code the run ended with, then `source_changed_unchecked` when its source differed from the baseline but it skipped no day (so no `source_changed_since_last_run` was found), then the run's own end (`failed`, `refused`), joined by `+`, e.g. `no_file_read+failed`, `source_lost`, `source_changed_unchecked` |
+| 7 | days_skipped | days whose done data this run did not read again: skipped as already done, plus done days whose listing alone was read again for a wider scope (WP-12f's `days_widened`, D-4878) |
+| 8 | files | instrument files read |
+| 9 | key | the journal key's filter part: the run's symbols sorted, deduplicated and joined by `,`, or `*` |
+| 10 | path | the source root as the host resolves it (`realpath`: every link, `.`, `..` and doubled `/` resolved), escaped, so one archive reached by any spelling is one key; a root that cannot be resolved is refused `source_root_unknown` (or `source_lost` when it went) before the lock |
+
+- **Reading.** A run reads only the tail: at most the last 1,048,576 bytes,
+  in one read through `store::safe_open::open_read_len` (R3-16: never
+  through a link, never waiting on a pipe, the length from the same `fstat`
+  that proved it a regular file). When the
+  window starts inside the file its first partial line is dropped. Lines are
+  scanned newest first and the first one whose kind, source, key and path
+  equal the run's, whose digest is measured and whose outcome names no
+  unresolved change is the key's baseline (below). A
+  line that is not v1 (another version, a wrong field count, a digest that is
+  not 64 hex digits or `unmeasured`, a count that is not a number) is
+  counted unreadable and skipped; a run never panics on one.
+- **A torn last line** (bytes after the last newline, left by a killed
+  append) is skipped for comparison and named on the receipt. The next
+  append writes a newline first, so the torn bytes become a line of their
+  own (unreadable) and the new line is whole.
+- **What it decides.** For a `zip` source whose digest differs from the
+  key's baseline, with days skipped unread, the run ends
+  `source_changed_since_last_run`; with no day skipped it hid none, exits by
+  its own work, and writes `source_changed_unchecked`. The baseline is the
+  newest line of the key with a measured digest whose outcome names NEITHER
+  `source_changed_since_last_run` NOR `source_changed_unchecked` (whole `+`
+  words; a word that merely begins alike is not one): such a line is counted
+  and passed over, so running again on the same changed archive, over the
+  same range or any other, names the change again (against the same old
+  digest) instead of accepting it, and only the original archive restored at
+  the path compares equal. Until IA-6 and R3-22/R4-21 build the accept and
+  restate doors, a grown or re-delivered archive therefore fails every run of
+  its key that skips a done day (`docs/06-limits.md` L-AF01-5). When every line of
+  the key in the window named a change, the run is `source_changed_since_last_run`
+  too, saying the baseline is older than the window. A `tickstore` source is never compared:
+  its digest is `FORMAT.md`'s and the `.bts` writer skips existing outputs
+  (FM-007).
+- **Not here.** A per-file comparison against `.prv`'s `source_crc32` (IA-6,
+  flag 7) and landing a corrected day as a new generation (R3-22's restate
+  door) read their own records, not this one.

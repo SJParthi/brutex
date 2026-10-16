@@ -17634,6 +17634,94 @@ Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 | L-AF4-02 | A contract asked for with `segment=` and `exchange=` omitted | placed by one census hash probe per exchange (`facets::EXCHANGES`, two today) of the asked feed's census — never the spot walk, which sorts the whole census | after: `/bars?feed=gdfl&symbol=NIFTY&contract=2024-03-07-2200000-CE&timeframe=1s&month=2024-03` p50 1.02 ms, p99 2.52 ms, max 3.21 ms (n=200). Before, the same URL took the spot walk and answered NIFTY INDEX's bars in p50 534.53 ms, p99 942.15 ms, max 1,132.80 ms. The spot walk itself is unchanged and still costs that for a SPOT name asked without `segment=` (pre-existing, D-0686's section); it grows with the census, and is not this package's | AF-04 |
 | L-AF4-03 | Months spelt otherwise on routes this change does not own | `/bars/window.json` (`bars_route.rs` `WindowAsk::parse`, AF-05's file), `sources.rs` `month_of_text` and `dayflags.rs` `bound` still split on `-` and parse each half: `bars_route.rs` checks no length, so `2024-3` and `02024-03` still read as March on `/bars/window.json`; the other two check the halves' lengths, so `2024-+3` still reads as March there | AF-05 switches `bars_route.rs` to `bars::month_of_text`; `sources.rs` and `dayflags.rs` have no owner named — one-line delegations to the same parser | AF-04 (named), AF-05 |
 
+## The GDFL import door: what one run of `cli gdfl-import` adds — D-4977, 14 October 2026
+
+`crates/cli/src/gdfl_import_guard.rs` (AF-01). The door runs once per run,
+never per day, per file or per bar: one source-root check, one lock take with
+its holder record, one tail read of `imports/gdfl.sources`, and at the end one
+root probe (two `stat` calls, at the end of EVERY run since the 15 October
+repair), one ledger append and one release.
+Measured by `cli::gdfl_import_command::guard::tests::door_costs_on_a_real_layout`
+(ignored; run by hand), release build, n = 200 sequential calls of each,
+`Instant` around each call, first on 14 October 2026 and again on 15 October
+2026 on the repaired build (the figures below are the 15 October run, log
+`tgt/p-AF-01/r2-bench.log`; the 14 October log is `tgt/p-AF-01/bench.log`),
+against the AF-01 shadow's `imports/` clone (`state/fix/shadow.sh AF-01`, the
+real store's census, v4) and the real source roots read-only: the tick store
+`/Volumes/WD_BLACK/brutex/tickstore-data`, the options folder
+`/Volumes/WD_BLACK/Options` (nine `<yyyy>.zip`) and the 128.9 GB
+capital-market outer zip. The machine was shared
+with other agents' builds; the figures are not from a quiet host.
+
+| Id | Operation | Why it is not a constant | Bound and measurement | Owner |
+|---|---|---|---|---|
+| L-AF01-1 | Source-root check, options folder | lists the folder until the first regular `<yyyy>.zip` | O(entries before the first year zip), one directory; a folder of junk with no year zip is listed whole before it is refused. Measured p50 17 µs, p99 220 µs, max 741 µs | AF-01 |
+| L-AF01-2 | Source-root check, capital-market outer zip | reads the archive's central directory once (`pull::gdfl_archive::zip_entries`), as `Origin::measure` already does a moment earlier | O(members), at most 64 MiB of central directory read (`pull::gdfl_archive`'s `CENTRAL_CAP`; a larger one is refused as malformed). Measured p50 285 µs, p99 497 µs, max 1,626 µs on the real archive. Tick store (one `FORMAT.md` metadata read): p50 3 µs, p99 7 µs, max 988 µs | AF-01 |
+| L-AF01-3 | Tail read of `imports/gdfl.sources` | scans the last window newest first until the key's baseline | at most `TAIL_WINDOW` = 1 MiB read and scanned (about five thousand lines), never the whole file, through `store::safe_open::open_read_len`; a key whose baseline is older than the window is named so on the receipt. Measured on a 2 MiB ledger whose window holds no line of the key (the worst case: the whole window scanned): p50 2,213 µs, p99 2,829 µs, max 3,354 µs | AF-01 |
+| L-AF01-4 | Run lock take, holder record written and made durable, released | one `open`, one `fstat` (regular file, one name), one `flock`, one `set_len` + `write` + `sync_data`, one census `locate` | constant per run; the `fsync` is the disk's. Measured p50 1,018 µs, p99 15,237 µs, max 25,154 µs (the p99 is the shared disk's `fsync` under other agents' builds). Ledger append + `sync_data`: p50 1,007 µs, p99 1,963 µs, max 2,952 µs. End probe of both roots (two `stat`s, now at the end of every run): p50 1 to 2 µs, p99 1 to 3 µs, max 4 to 6 µs | AF-01 |
+
+**Not bounded here, named for their owners.** The journal append lock, a run
+id chosen under a lock (FM-126) and the importer's O(journal) re-read after a
+foreign append are IA-2's. Which skipped days a changed archive changed needs
+a per-file comparison against `.prv`'s `source_crc32` (IA-6, IA-GV-24); the
+door's digest covers the whole archive, so a grown archive at the same path is
+named as changed too.
+
+| Id | Operation | Why it is not a constant | Bound and measurement | Owner |
+|---|---|---|---|---|
+| L-AF01-5 | A changed, grown or re-delivered archive (a wedge, not a cost) | the door compares one digest of the whole archive (for options, of every `<yyyy>.zip` in the folder) with the key's baseline, and no line of a run on a changed archive is ever the baseline (D-4977 item 5): there is no door yet that says which done days changed or accepts the new archive | until IA-6's per-file comparison against `.prv`'s `source_crc32` (IA-GV-24) or R3-22's restate door (R4-21) is built, every run of the key that skips a done day ends `FAILED` `source_changed_since_last_run`, loudly and on every run; runs over days not yet done still import and exit by their own work, writing `source_changed_unchecked`. The ledger keys on the source root as the host resolves it (`realpath`, D-4977 item 8), so a link or a doubled slash to the same archive is the same key (X7); a re-delivery at a NEW path (a new download folder) is a first run of a new key and compares with nothing, which is what IA-6's per-file comparison exists for. Only the original archive restored at the path clears it today. Not a time cost: nothing to measure | IA-6 · R3-22 · R4-21 |
+
+**Re-measured on 16 October 2026 on the door as first committed (its Rust before repair round 2; the round-2 figures are the paragraph after this one),** which
+adds one step the figures above do not hold: the ledger key is the source root
+as the host resolves it (one `canonicalize`, D-4977 item 8). Same method (the
+ignored `door_costs_on_a_real_layout`, release, n = 200 sequential calls of
+each, `Instant` around each call), against a fresh shadow
+(`state/fix/shadow.sh AF-01-r3`, census v4) and the same real source roots read
+only, on a host running about a dozen other agents' builds; log
+`tgt/p-AF-01/r3/bench2.log`. Key path resolved: tick store p50 5 µs, p99 9 µs,
+max 29 µs; options folder p50 4 µs, p99 7 µs, max 14 µs; capital-market zip
+p50 5 µs, p99 9 µs, max 30 µs (constant per run: one path walk). Root check:
+tick store p50 1 µs, p99 5 µs, max 29 µs; options folder p50 17 µs, p99 41 µs,
+max 975 µs; capital-market zip p50 335 µs, p99 2,413 µs, max 2,605 µs. End
+probe of both roots: p50 1 µs, p99 1 µs, max 4 to 7 µs. Lock take + record +
+release: p50 4,315 µs, p99 16,068 µs, max 18,098 µs. Ledger tail read of a
+2 MiB ledger whose 1 MiB window holds no line of the key: p50 2,641 µs, p99
+32,678 µs, max 59,449 µs (the window bound is unchanged; the p99 against the
+15 October 2,829 µs is the loaded host's page cache and disk, not more bytes
+read). Ledger append + `sync_data`: p50 4,454 µs, p99 11,838 µs, max
+14,672 µs. Every figure is once per run, never per day, file or bar.
+
+**Re-measured on 16 October 2026 after repair round 2** (verify-AF-01-r2),
+whose Rust adds two steps to the append and none to any other row: the
+ledger is opened to read as well as to append, and one `fstat` and a
+one-byte `pread` of its last byte decide at the append whether it ends torn
+(D-4977 item 11); the tail read also names a window of 1 MiB with no
+newline as one torn line, which reads no more bytes. Same method (the
+ignored `door_costs_on_a_real_layout`, release, n = 200 sequential calls of
+each, `Instant` around each call), against a fresh shadow
+(`state/fix/shadow.sh AF-01`, census v4, so the lock is
+`imports/gdfl.options.lock`) and the same real source roots read only, on a
+host running other agents' builds; log `tgt/p-AF-01/r6/bench.log`.
+Lock take, record and release: p50 1,194 µs, p99 6,028 µs, max 6,262 µs. Root check:
+tick store p50 1 µs, p99 11 µs, max 1,513 µs; options folder p50 17 µs, p99
+110 µs, max 2,005 µs; capital-market zip p50 333 µs, p99 603 µs, max
+1,681 µs. Key path resolved: p50 4 to 5 µs, p99 13 to 29 µs, max 18 to
+106 µs. End probe of both roots: p50 1 µs, p99 1 to 18 µs, max 2 to 24 µs.
+Ledger tail read of a 2 MiB ledger whose 1 MiB window holds no line of the
+key: p50 2,478 µs, p99 2,946 µs, max 3,676 µs. Ledger append (the one-byte
+read included) + `sync_data`: p50 1,089 µs, p99 3,379 µs, max 3,787 µs.
+That build differs from the committed one only by two edits clippy asked
+for (`Finding::new` skips the copy when nothing needs escaping; a byte-string
+comparison). The committed build was measured again the same way (log
+`tgt/p-AF-01/r7/bench.log`) while the cli test suite compiled beside it:
+lock take, record and release p50 3,055 µs, p99 12,236 µs, max 22,532 µs;
+capital-market zip root check p50 331 µs, p99 1,700 µs, max 45,446 µs; tail
+read p50 2,426 µs, p99 66,949 µs, max 103,804 µs; append p50 1,447 µs, p99
+9,872 µs, max 20,670 µs; every other row within the figures above. The
+bytes each step reads are unchanged and capped (the tail at the window);
+the wider spread is the loaded host's disk. Every figure is once per run,
+never per day, file or bar.
+
 ## Cash-session masters: shared readers, a named wait, a decode per request — D-4963, 14 October 2026
 
 `pull::cash_session_cache` and `api`'s bars window (AF-03, finding p99-2). A
