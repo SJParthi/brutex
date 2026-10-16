@@ -3017,3 +3017,59 @@ fn two_writers_making_one_new_directory_chain_at_once_both_open() {
         let _ignored = fs::remove_dir_all(&root);
     }
 }
+
+/// **A CONFIRMED MONTH IS ITS REGULAR FILES ALONE, AND A MONTH WHOSE FILES
+/// CANNOT BE MEASURED IS REFUSED, NEVER TAKEN FOR ABSENT.**
+///
+/// Kills `replace match guard meta.is_file() with true` and `replace match
+/// guard gone.kind() == ErrorKind::NotFound with true` in
+/// `DurableBatch::confirm_month`. A directory standing at the month's
+/// `.tix` name is not the month's file, so the batch flushes exactly the
+/// month's regular files (counted here by `lstat`, never following a link).
+/// And a month whose own directory is a regular file cannot have its
+/// siblings measured (`ENOTDIR`): the confirmation is refused naming the
+/// first sibling, where "nothing there" would leave a month an earlier
+/// process wrote unflushed.
+#[test]
+fn a_confirmed_month_is_its_regular_files_and_an_unmeasurable_one_is_refused() {
+    use store::file::{Action, BarFile, BatchFlush, DurableBatch, StoreError};
+    use store::path::FileKind;
+    let root = scratch("confirm-kinds");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let _absent = fs::remove_file(&tix);
+    fs::create_dir(&tix).unwrap();
+    let regular = FileKind::ALL
+        .into_iter()
+        .filter(|&kind| kind != FileKind::Lock)
+        .filter(|&kind| {
+            fs::symlink_metadata(second_month(kind).to_path_buf(&root))
+                .is_ok_and(|meta| meta.is_file())
+        })
+        .count();
+    assert!(regular >= 2, "the bars and their checksums");
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.confirm_month(&root, bars).unwrap());
+    let made = batch.make_durable(1).unwrap();
+    assert_eq!(made.confirmed, regular, "{made:?}");
+
+    let other = scratch("confirm-unmeasurable");
+    let month_dir = bars.to_path_buf(&other).parent().unwrap().to_path_buf();
+    fs::create_dir_all(month_dir.parent().unwrap()).unwrap();
+    fs::write(&month_dir, b"a file where the month's directory belongs").unwrap();
+    let refusal = DurableBatch::new(BatchFlush::EveryFile)
+        .confirm_month(&other, bars)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            StoreError::NotADirectory { path, action: Action::Measure } if *path == bars.to_path_buf(&other)
+        ),
+        "{refusal:?}"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+    let _ignored = fs::remove_dir_all(&other);
+}
