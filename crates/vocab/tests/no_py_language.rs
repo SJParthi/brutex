@@ -303,6 +303,17 @@ fn contents(root: &Path, relative: &str) -> Option<Vec<u8>> {
     Some(std::fs::read(&path).expect("a listed file is readable as bytes, and a directory is not"))
 }
 
+/// Files every walk of this repository reads. The count alone cannot say a
+/// walk was real: CI gate 1e tests a copy of the tree with `web/` moved aside,
+/// where `git ls-files` still lists those files and fewer than half are on
+/// disk. A walk that misses one of these did not read this repository.
+const ANCHORS: [&str; 4] = [
+    "CLAUDE.md",
+    "Cargo.toml",
+    "docs/05-decisions.md",
+    "crates/vocab/tests/no_py_language.rs",
+];
+
 /// What one walk of a tree found.
 #[derive(Debug)]
 struct Audit {
@@ -310,6 +321,8 @@ struct Audit {
     how: String,
     /// Files read.
     read: usize,
+    /// How many of [`ANCHORS`] were read.
+    anchors: usize,
     /// Files listed and absent from the working tree.
     absent: Vec<String>,
     /// Every refusal, `path: kind: masked evidence`, one a line.
@@ -322,6 +335,7 @@ fn audit(root: &Path) -> Audit {
     let mut audit = Audit {
         how,
         read: 0,
+        anchors: 0,
         absent: Vec::new(),
         refused: Vec::new(),
     };
@@ -331,6 +345,9 @@ fn audit(root: &Path) -> Audit {
             continue;
         };
         audit.read += 1;
+        if ANCHORS.contains(&file.as_str()) {
+            audit.anchors += 1;
+        }
         let found = scan(&file, &bytes);
         for (breach, evidence) in found.breaches {
             audit
@@ -369,15 +386,23 @@ fn no_tracked_file_is_runs_or_names_the_py_language() {
     if !found.absent.is_empty() {
         println!(
             "{} listed file(s) absent from the working tree, so nothing of theirs was \
-             read: {:?}",
+             read; the first ten: {:?}",
             found.absent.len(),
-            found.absent
+            found.absent.iter().take(10).collect::<Vec<_>>()
         );
     }
+    let listed = found.read + found.absent.len();
     assert!(
-        found.read > 1_000,
-        "read {} file(s), which is not this repository. A silent near-zero is not a \
-         pass ({})",
+        listed > 1_000,
+        "listed {listed} file(s), which is not this repository. A silent near-zero is not \
+         a pass ({})",
+        found.how
+    );
+    assert_eq!(
+        found.anchors,
+        ANCHORS.len(),
+        "the walk read {} file(s) and missed one of {ANCHORS:?}, so it did not read this \
+         repository ({})",
         found.read,
         found.how
     );
