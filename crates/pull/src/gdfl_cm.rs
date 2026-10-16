@@ -5527,4 +5527,31 @@ mod cloud_mutant_tests {
             }
         );
     }
+
+    /// A run whose lowest value is not positive has no spread in basis
+    /// points of it, so it is never counted however wide it is, and the run
+    /// after it still is. Invented values.
+    #[test]
+    fn a_run_with_no_positive_low_is_never_counted() {
+        use super::{DualSpread, SpreadRun};
+        let mut run = SpreadRun::default();
+        let mut out = DualSpread::default();
+        for (sod, ltp) in [
+            (33_300, 0),
+            (33_300, 50_000),
+            (33_301, 100_000),
+            (33_301, 100_100),
+        ] {
+            run.observe(sod, ltp, &mut out);
+        }
+        run.finish(&mut out);
+        assert_eq!(
+            out,
+            DualSpread {
+                seconds: 1,
+                max_bps: 10,
+                max_at: Some(33_301)
+            }
+        );
+    }
 }
