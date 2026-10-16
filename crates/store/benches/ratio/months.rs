@@ -212,11 +212,9 @@ fn single_bar_commits_have_a_p99() {
     for n in MONTH_SIZES {
         let root = root_of(&format!("append-{n}"));
         let mut file = write_month(&root, month, n);
-        let mut next = n;
         let mut ns: Vec<u128> = Vec::with_capacity(usize::try_from(COMMITS).unwrap_or(0));
-        for _ in 0..COMMITS {
+        for next in n..n + u64::from(COMMITS) {
             let one = [bar(month, next)];
-            next += 1;
             let start = Instant::now();
             if let Err(why) = file.append(&one) {
                 refuse(&format!("a one-bar commit was refused: {why}"));

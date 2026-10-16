@@ -233,7 +233,7 @@ pub(crate) fn stated(label: &str, costs: &[u128]) {
         refuse("three sizes named");
     };
     let per_unit = big.saturating_sub(base) / u128::try_from(large - small).unwrap_or(1).max(1);
-    let permille = if base == 0 { 0 } else { big * 1_000 / base };
+    let permille = (big * 1_000).checked_div(base).unwrap_or(0);
     println!(
         "  {label:<52} {base:>12} ps -> {big:>13} ps  {}.{:03}x  {per_unit:>10} ps per extra unit  (stated, not gated)",
         permille / 1_000,
