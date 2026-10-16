@@ -1430,3 +1430,28 @@ fn a_time_index_occupied_at_another_rank_is_stale_and_rebuilt() {
     let _ignored = fs::remove_dir_all(&whole);
     let _ignored = fs::remove_dir_all(&gap);
 }
+
+/// **THE NSE OPEN IS 09:15 IST: 555 MINUTES PAST MIDNIGHT, AND THE RUNGS THAT
+/// DIVIDE IT ALIGN WITH IT.**
+///
+/// Kills `replace * with /` in `OPEN_MINUTES_PAST_IST_MIDNIGHT = 9 * 60 +
+/// 15`, which makes the open 00:15: the rungs that divide 555 and 15 are the
+/// same, so no alignment answer tells them apart, but every session offset
+/// computed from the constant moves by nine hours.
+#[test]
+fn the_open_is_555_minutes_past_ist_midnight_and_its_divisors_align() {
+    use store::path::Timeframe;
+    assert_eq!(Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT, 555);
+    for (rung, aligns) in [
+        (Timeframe::MINUTE_1, true),
+        (Timeframe::MINUTE_2, false),
+        (Timeframe::MINUTE_3, true),
+        (Timeframe::MINUTE_5, true),
+        (Timeframe::MINUTE_10, false),
+        (Timeframe::MINUTE_15, true),
+        (Timeframe::MINUTE_30, false),
+        (Timeframe::MINUTE_60, false),
+    ] {
+        assert_eq!(rung.aligns_with_the_open(), aligns, "{rung:?}");
+    }
+}
