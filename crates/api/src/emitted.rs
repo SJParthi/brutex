@@ -1860,7 +1860,20 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 22 -> 23 at D-3349 (WP-39; DB-N15): `api.bars request abandoned; work
     // stopped`, driven through `note_cancelled` and read back by
     // `server::bars_route::tests::an_abandoned_request_is_named_once`.
-    const REACHED_IN_SERVER_TESTS: usize = 23;
+    // 23 -> 26 at WP-62: `api.pull instrument withheld by the pull order`
+    // (DB-B27), read back by `server::tests::
+    // an_instrument_with_a_daily_hole_is_withheld_alone_and_the_rest_are_pulled`;
+    // `api.pull window runs past the calendar of record` (DB-B25), read back
+    // by `server::tests::a_runs_retry_class_and_its_one_line_past_the_calendar`;
+    // and `pull.run a pull run has no closing record` (DB-B34; it said
+    // "was interrupted by a restart", which blames a restart for what may be
+    // another process's run still in flight), whose
+    // site is in `pullrun` and is read back by `server::tests::
+    // a_run_cut_short_by_a_restart_is_logged_when_it_is_found`.
+    // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open
+    // is not known` (DB-B34), the scan's third answer, whose site is in
+    // `pullrun` and is read back by the same test.
+    const REACHED_IN_SERVER_TESTS: usize = 27;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -2007,11 +2020,18 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 72 -> 73 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, driven
     // in the table above.
     //
-    // 73 -> 74 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
-    // `api.recovery recovery not resumed`, reached in recovery tests.
+    // 73 -> 76 at WP-62 (DB-B25, DB-B27, DB-B34): the three sites named above
+    // `REACHED_IN_SERVER_TESTS`.
+    //
+    // 76 -> 77 at WP-62 repair 1 (DB-B34): the restart scan's NOT KNOWN
+    // line, named above `REACHED_IN_SERVER_TESTS`.
+    //
+    // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
+    // `api.recovery recovery not resumed`, reached in recovery tests. (That
+    // branch counted 73 -> 74; the two packages' sites are added here.)
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 74,
+        lib_sites, 78,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

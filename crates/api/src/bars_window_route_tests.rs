@@ -67,6 +67,13 @@ impl Fixture {
                 })
                 .collect();
             file.append(&rows).expect("complete generated records");
+            // The run the writer kept before the small-month rule (D-4933).
+            crate::scratch::plant_pre_rule_sort_index(
+                &path.to_path_buf(&fixture.root),
+                &store::sort_index::Shape::of(path.month(), 60, symbol),
+                &rows,
+                rows.len(),
+            );
             fixture.paths.push(path.to_path_buf(&fixture.root));
         }
         fixture
@@ -637,6 +644,15 @@ impl Store {
                 .expect("owned generated bar writer");
             file.append(&rows[at..end])
                 .expect("generated records append");
+            // The run the writer kept before the small-month rule (D-4933),
+            // for a month this call made; a month a planted run already
+            // covers was kept in step by the writer itself.
+            crate::scratch::plant_pre_rule_sort_index(
+                &path.to_path_buf(&self.root),
+                &store::sort_index::Shape::of(month, timeframe.secs(), symbol_id),
+                &rows[at..end],
+                end - at,
+            );
             at = end;
         }
     }

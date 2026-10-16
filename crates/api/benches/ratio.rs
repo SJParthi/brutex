@@ -153,10 +153,20 @@ fn refuse(what: &str) -> ! {
 
 /// The three month sizes the route rows time, in bars: 1x / 10x / 100x.
 ///
-/// One-second bars, because 100,000 of them fit one month (under 28 hours) and
+/// One-second bars, because 102,400 of them fit one month (under 29 hours) and
 /// a one-minute month holds at most 44,640: the store's month admission
 /// refuses the rest (D-0915).
-const MONTH_SIZES: [usize; 3] = [1_000, 10_000, 100_000];
+///
+/// **1x is the smallest month the store indexes**,
+/// `store::time_index::INDEX_MIN_ROWS` bars (D-4933). A month under it is
+/// given no `.tix` and no `.srt`: its seek bisects and its value sort orders
+/// its own rows, which are not the paths these rows time. At 1,000, this
+/// array's first size before that rule, the 1x month took those paths while
+/// 10x and 100x read the indexes, so every ratio compared a bisection or an
+/// in-memory sort with an index read and passed whatever the index cost.
+/// [`month_file`] refuses a month that is not indexed, so a threshold raised
+/// past these sizes stops the bench rather than re-routing it.
+const MONTH_SIZES: [usize; 3] = [1_024, 10_240, 102_400];
 
 /// 2024-06-01 00:00 IST in epoch microseconds, where every fixture bar starts.
 const JUNE_2024_IST_START: i64 = 1_717_180_200_000_000;
@@ -229,6 +239,18 @@ fn month_file(name: &str, n: usize) -> (store::file::BarFile, std::path::PathBuf
         .collect();
     if let Err(why) = file.append(&batch) {
         refuse(&format!("the bench month would not fill: {why}"));
+    }
+    // BOTH INDEXES OR NO MEASUREMENT (D-4933): a month the store gave no
+    // `.tix` or no `.srt` would time the bisection or the in-memory sort.
+    let lookup = file.time_lookup();
+    let srt = path
+        .with_file(store::path::FileKind::SortIndex)
+        .to_path_buf(&root);
+    if lookup != store::file::TimeLookup::Indexed || !srt.is_file() {
+        refuse(&format!(
+            "a {n}-bar bench month with its .tix and .srt (found {lookup:?}, .srt {})",
+            if srt.is_file() { "present" } else { "absent" }
+        ));
     }
     (file, root)
 }

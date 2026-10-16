@@ -137,12 +137,28 @@
 //! # The closing auction's print is kept apart from trades (D-3320)
 //!
 //! From 2026-08-03, for a share the day's NSE security master flags
-//! closing-auction eligible, a row in `[15:15:00, 15:30:00)` whose bid and
+//! closing-auction eligible, a row in `[15:15:00, 15:35:00)` (the auction's
+//! phases through order matching, [`AUCTION_BAND_END`]) whose bid and
 //! ask are both zero and whose LTQ is positive is an auction observation: it
 //! is diverted to [`CmFile::auction`], never a row the fold sees, and the
 //! import files it in the month's `.auc` sidecar ([`auction`]). An eligible
 //! file with such a row whose eligibility is unknown is refused by name
 //! ([`CmRefusal::AuctionEligibilityUnknown`]), never guessed either way.
+//!
+//! The auction's match itself is stamped in the match band
+//! `[15:28:00, 15:35:00)` ([`AUCTION_MATCH_FROM`]: the order entry closes at
+//! random from 15:28 and every order matches at one equilibrium price,
+//! charter §9), and the vendor often states it with a book beside it (on 40
+//! of 133 measured share-sessions no row there had a zero bid and ask,
+//! SC-CLOSE-6). So when every traded row of an eligible file in the match
+//! band is at one price, the booked ones are prints too. At two prices or
+//! more the band is not the auction alone and no source says which booked
+//! row is its: they stay ordinary rows of phase `cas`, counted in
+//! [`CmFile::auction_band_unattributed`] and named by the import (1 of 133,
+//! RELIANCE 2026-08-31, measured 13 Oct 2026). A share whose eligibility is
+//! unknown and whose band traded at one price with a booked row is refused by
+//! name as a candidate row is: eligible, that row is the print, and nothing
+//! says which.
 //!
 //! # Same-second dual values are counted, never altered (D-3335, DB-G96)
 //!
@@ -777,6 +793,9 @@ pub enum PriceRule {
 pub struct CmScope {
     /// Whether anything beyond the swept surface is filed.
     stored: bool,
+    /// Whether a share's trade-for-trade series file ([`SHARE_SERIES`]) is
+    /// filed under the share's own key (WP-12f, DB-B06).
+    series: bool,
     /// The applied index rows beyond NIFTY and BANKNIFTY, in table order.
     indices: Vec<&'static IndexRow>,
     /// The stored share symbols beyond the F&O list, in the order given.
@@ -799,6 +818,7 @@ impl CmScope {
     pub fn swept() -> Self {
         Self {
             stored: false,
+            series: false,
             indices: Vec::new(),
             shares: Vec::new(),
             share_at: HashMap::new(),
@@ -830,6 +850,7 @@ impl CmScope {
     {
         let mut scope = Self {
             stored: true,
+            series: true,
             indices: Vec::new(),
             ..Self::swept()
         };
@@ -983,6 +1004,12 @@ impl CmScope {
                     .and_then(|(_, row)| InstrumentKey::index(Exchange::Nse, row.store_key).ok())
             })),
             CmKind::Stocks => {
+                // A trade-for-trade spell's file is the share's own day
+                // (WP-12f, DB-B06): filed under the key its share is.
+                let name = match series_of(name) {
+                    Some((share, _)) if self.series => share,
+                    _ => name,
+                };
                 if name.len() > SYMBOL_CAPACITY || !self.files_share(name) {
                     return Ok(None);
                 }
@@ -1028,6 +1055,96 @@ impl CmScope {
         }
     }
 
+    /// Whether a share's trade-for-trade series file is filed under the
+    /// share's key (WP-12f, DB-B06): the stored scope does, the swept one
+    /// keeps skipping it.
+    #[must_use]
+    pub const fn files_series(&self) -> bool {
+        self.series
+    }
+
+    /// The stem of the share a series stem of tree `kind` belongs to
+    /// (`ADANIPOWER.BE.NSE` is `ADANIPOWER.NSE`), when this scope files the
+    /// series; `None` for every other stem. One split of the name and a
+    /// compare against [`SHARE_SERIES`]' two entries.
+    #[must_use]
+    pub fn series_base(&self, kind: CmKind, stem: &str) -> Option<String> {
+        if kind != CmKind::Stocks || !self.series {
+            return None;
+        }
+        let suffix = STOCKS.stem_suffix;
+        let (share, _) = series_of(stem.strip_suffix(suffix)?)?;
+        Some(format!("{share}{suffix}"))
+    }
+
+    /// THE MEMBER a stem of tree `kind` is to this scope (WP-12f, D-4878),
+    /// `None` for a stem the scope files nothing of: `NSE-INDEX-<store key>`
+    /// for an index, `NSE-CASH-<the stem's own symbol>` for a share, its
+    /// series kept (`NSE-CASH-ADANIPOWER.BE`). A member is named by the
+    /// vendor's STEM, not by the key the stem is filed under: an old symbol
+    /// (`TATAMOTORS`) and a trade-for-trade spell (`ADANIPOWER.BE`) are each
+    /// their own member, because each is a file a narrower scope never read.
+    /// Never holds a space or a `+`, so it is one field of a journal key.
+    ///
+    /// Bounded as [`CmScope::filing`] is: one resolve, then for an index a
+    /// walk of the alias table's rows, for a share one hash probe.
+    #[must_use]
+    pub fn member_of(&self, kind: CmKind, stem: &str) -> Option<String> {
+        let name = stem.strip_suffix(kind.descriptor().stem_suffix)?;
+        match kind {
+            CmKind::Indices => match resolve(kind, stem) {
+                Resolution::Swept(key) => Some(index_member(key.underlying.as_str())),
+                _ if self.stored => self
+                    .index_row(name)
+                    .map(|(_, row)| index_member(row.store_key)),
+                _ => None,
+            },
+            CmKind::Stocks => {
+                let share = match series_of(name) {
+                    Some((share, _)) if self.series => share,
+                    _ => name,
+                };
+                (share.len() <= SYMBOL_CAPACITY && self.files_share(share))
+                    .then(|| share_member(name))
+            }
+        }
+    }
+
+    /// EVERY MEMBER this scope files of tree `kind` (WP-12f, D-4878), sorted
+    /// and without repeats: what a run under it is asked to read, recorded
+    /// with each close so a later, wider scope knows which members a done day
+    /// never covered. Built once per run, O(the F&O list + the scope's own
+    /// names), each share once per series the scope files.
+    #[must_use]
+    pub fn members(&self, kind: CmKind) -> Vec<String> {
+        let mut out = std::collections::BTreeSet::new();
+        match kind {
+            CmKind::Indices => {
+                for (_, symbol) in InstrumentKey::SWEPT {
+                    out.insert(index_member(symbol));
+                }
+                for row in &self.indices {
+                    out.insert(index_member(row.store_key));
+                }
+            }
+            CmKind::Stocks => {
+                let swept = brutex_core::universe::FNO_UNDERLYINGS
+                    .iter()
+                    .copied()
+                    .filter(|name| self.files_share(name));
+                for name in swept.chain(self.shares.iter().map(|name| &**name)) {
+                    out.insert(share_member(name));
+                    if self.series {
+                        for series in SHARE_SERIES {
+                            out.insert(share_member(&format!("{name}.{series}")));
+                        }
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// How `key`'s LTPs become paisa: [`PriceRule::HalfUp`] for a reference
     /// only index row of the stored scope, [`PriceRule::Exact`] for every
     /// other series.
@@ -1049,6 +1166,66 @@ impl CmScope {
     pub fn masters(&self) -> Option<&std::path::Path> {
         self.masters.as_deref()
     }
+}
+
+/// The equity series, beside a share's own, whose day file is the share's
+/// own trading day (WP-12f, DB-B06): `BE` and `BZ`, the exchange's
+/// trade-for-trade series. UNVERIFIED against an NSE circular: no charter row
+/// names the series codes. What is measured (the audit of DB-B06, over the
+/// vendor's 2,001 stock days): no day holds both a share's own file and its
+/// `.BE` or `.BZ` file, and the price across each switch stays inside the
+/// day's band. Should a day ever hold both, both are refused by name
+/// ([`CmRefusal::AmbiguousCaseTwins`]) and neither is filed. A compiled list
+/// of two, because the dated security masters that name a symbol's series
+/// start in 2026 and the spells start in 2018 (`docs/06-limits.md`).
+pub const SHARE_SERIES: [&str; 2] = ["BE", "BZ"];
+
+/// A share name split into the share and its trade-for-trade series
+/// (`ADANIPOWER.BE` is `ADANIPOWER`, `BE`); `None` for a name with no such
+/// series. One split and at most two compares.
+fn series_of(name: &str) -> Option<(&str, &'static str)> {
+    let (share, series) = name.rsplit_once('.')?;
+    for one in SHARE_SERIES {
+        if one == series {
+            return Some((share, one));
+        }
+    }
+    None
+}
+
+/// The trade-for-trade series a day file named `name` is of (`BE` for
+/// `ADANIPOWER.BE.NSE.csv`), `None` for a share's own file and for every
+/// other name. What the import says beside a file it files under the share's
+/// key, so the day's series is never silent (DB-B06).
+#[must_use]
+pub fn series_file(name: &str) -> Option<&'static str> {
+    let (stem, _) = split_name(name).ok()?;
+    series_of(stem.strip_suffix(STOCKS.stem_suffix)?).map(|(_, series)| series)
+}
+
+/// An index member's name (D-4878): its store key behind the instrument id's
+/// own prefix.
+fn index_member(store_key: &str) -> String {
+    format!("NSE-INDEX-{store_key}")
+}
+
+/// The instrument id's own prefix a share member's name carries.
+const SHARE_MEMBER_PREFIX: &str = "NSE-CASH-";
+
+/// A share member's name (D-4878): the stem's own symbol, series and all,
+/// behind the instrument id's own prefix.
+fn share_member(name: &str) -> String {
+    format!("{SHARE_MEMBER_PREFIX}{name}")
+}
+
+/// The share whose months a share member ([`share_member`]) is filed in: its
+/// symbol less the prefix and less a trade-for-trade series, since a `.BE`
+/// or `.BZ` day file is the share's own day (D-4878 item 8). A name without
+/// the prefix is read as the symbol. One prefix strip and one
+/// [`series_of`].
+pub(crate) fn member_share(member: &str) -> &str {
+    let name = member.strip_prefix(SHARE_MEMBER_PREFIX).unwrap_or(member);
+    series_of(name).map_or(name, |(share, _series)| share)
 }
 
 /// `day` as `core::alias` dates a symbol change.
@@ -1126,10 +1303,20 @@ impl<T> SlotTable<T> {
     /// The slot a stem takes: its swept slot, or [`TICKER_SLOTS`] plus its
     /// scope's extra slot.
     fn slot_of(&self, stem: &str) -> Option<usize> {
-        stem_slot(self.kind, stem).or_else(|| {
+        let own = |stem: &str| {
+            stem_slot(self.kind, stem).or_else(|| {
+                self.scope
+                    .extra_slot(self.kind, stem)
+                    .map(|at| at + TICKER_SLOTS)
+            })
+        };
+        // A trade-for-trade series file takes its share's slot (WP-12f,
+        // DB-B06): on a day that holds both, the two are twins and both are
+        // refused by name, never mixed.
+        own(stem).or_else(|| {
             self.scope
-                .extra_slot(self.kind, stem)
-                .map(|at| at + TICKER_SLOTS)
+                .series_base(self.kind, stem)
+                .and_then(|share| own(&share))
         })
     }
 
@@ -1475,6 +1662,12 @@ impl<L> DayListing<L> {
         self.scope.filing(self.kind(), stem, self.day)
     }
 
+    /// The member `stem` is to this listing's scope ([`CmScope::member_of`]).
+    #[must_use]
+    pub fn member(&self, stem: &str) -> Option<String> {
+        self.scope.member_of(self.kind(), stem)
+    }
+
     /// The file holding `stem`, if the day has one: one slot index.
     ///
     /// # Errors
@@ -1526,6 +1719,14 @@ pub trait CmSource {
     /// The source's own refusals: it cannot be read, or what it holds is not
     /// what it must be.
     fn day(&self, kind: CmKind, day: Day) -> Result<Option<DayListing<Self::Locator>>, CmRefusal>;
+
+    /// The scope this source's day listings are built under (D-3333): the
+    /// swept surface unless the source was given another. An import records
+    /// it with every close (WP-12f, D-4878), so it must be the scope
+    /// [`CmSource::day`]'s listings carry.
+    fn scope(&self) -> Arc<CmScope> {
+        CmScope::swept_shared()
+    }
 
     /// The bytes of `file`, one of `listing`'s entries, unverified: the
     /// caller checks them against `file.len` and `file.crc32`. A source may
@@ -1582,7 +1783,9 @@ pub enum Auction {
     Eligible,
     /// Flag 0: a candidate row is an ordinary row.
     NotEligible,
-    /// No flag could be read, and why: a candidate row refuses the file.
+    /// No flag could be read, and why: a candidate row refuses the file, and
+    /// so does a match band that traded at one price with a booked row
+    /// (SC-CLOSE-6: eligible, it is the auction's print; nothing says which).
     Unknown(String),
 }
 
@@ -1808,6 +2011,10 @@ pub struct CmFile {
     /// The closing-auction prints diverted from `rows` (D-3320), in file
     /// order, identical consecutive rows merged with their count.
     pub auction: Vec<auction::Print>,
+    /// An eligible share's booked traded rows in the match band left in
+    /// `rows` because the band traded at two prices or more, so no source
+    /// says which is the auction's (SC-CLOSE-6); zero otherwise.
+    pub auction_band_unattributed: u32,
     /// The file's length in bytes.
     pub source_len: u64,
     /// CRC-32 (the zip polynomial) of the file's bytes, which the archive
@@ -1885,12 +2092,87 @@ fn session_bounds(session: Session) -> (u32, u32) {
     (first * 60, last * 60)
 }
 
+/// Minute-of-day the closing auction's last phase, order matching, ends:
+/// **15:35** (SC-CLOSE-5). Charter §9, "The auction's phases and where its
+/// band ends": the dated notice §7 cites gives four five-minute phases from
+/// 15:15, matching from 15:30 to 15:35 (UNVERIFIED against an NSE page, which
+/// did not answer). The vendor stamped 9 of 145 measured closing prints
+/// 15:30:00..15:30:02, which a band ending at 15:30 lost; no zero-book traded
+/// row was measured from 15:35:00 to 15:49:59, and the post-close session's
+/// zero-book rows from 15:50 stay out of the band.
+pub const AUCTION_BAND_END: u16 = 15 * 60 + 35;
+
+/// Minute-of-day the closing auction's order entry can first close:
+/// **15:28** (SC-CLOSE-6). Charter §9, "The auction's phases and where its
+/// band ends": the third phase "closes randomly between 3:28 pm and 3:30 pm",
+/// then "all orders match at the equilibrium price", which becomes the
+/// official close, in the matching phase that ends at [`AUCTION_BAND_END`].
+/// So the auction's match is stamped in `[15:28:00, 15:35:00)` and at ONE
+/// price: the match band.
+pub const AUCTION_MATCH_FROM: u16 = 15 * 60 + 28;
+
+const _: () = assert!(
+    crate::calendar::CAS_CONTINUOUS_CLOSE < AUCTION_MATCH_FROM
+        && AUCTION_MATCH_FROM < crate::calendar::CAS_SESSION_END
+        && crate::calendar::CAS_SESSION_END < AUCTION_BAND_END
+);
+
 /// Whether a kept stock row is a closing-auction candidate (D-3320 item 3):
-/// in `[15:15:00, 15:30:00)`, bid and ask both zero, LTQ positive.
+/// in `[15:15:00, 15:35:00)` ([`AUCTION_BAND_END`]), bid and ask both zero,
+/// LTQ positive.
 fn auction_candidate(parsed: &Parsed) -> bool {
     let from = u32::from(crate::calendar::CAS_CONTINUOUS_CLOSE) * 60;
-    let to = u32::from(crate::calendar::CAS_SESSION_END) * 60;
+    let to = u32::from(AUCTION_BAND_END) * 60;
     parsed.row.sod >= from && parsed.row.sod < to && parsed.quotes_zero && parsed.row.ltq > 0
+}
+
+/// Whether a traded stock row is stamped in the match band,
+/// `[15:28:00, 15:35:00)` ([`AUCTION_MATCH_FROM`], [`AUCTION_BAND_END`]).
+fn in_match_band(row: &CmRow) -> bool {
+    let from = u32::from(AUCTION_MATCH_FROM) * 60;
+    let to = u32::from(AUCTION_BAND_END) * 60;
+    row.ltq > 0 && row.sod >= from && row.sod < to
+}
+
+/// Where a kept row stands against the day's windows (D-3319): before the
+/// first window opens, inside one, or after. One rule for [`Reading::keep`]
+/// counting a row in and [`Reading::settle_auction`] counting a booked print
+/// back out, so the two can never disagree (a special session opening after
+/// the match band would otherwise have its taken rows subtracted from the
+/// wrong count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Before the day's first window.
+    Pre,
+    /// Inside one of the day's windows.
+    InSession,
+    /// After the first window opened, outside every window.
+    Post,
+}
+
+/// The prices a closing-auction share's file traded at in the match band,
+/// zero-book or booked (SC-CLOSE-6): tracked when the share is eligible, and
+/// when its eligibility is unknown (a booked match at one price then refuses
+/// the file, [`Reading::settle_auction`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchBand {
+    /// No traded row in the band.
+    Empty,
+    /// Every traded row in the band at this one price.
+    One(i64),
+    /// Traded rows in the band at two prices or more: not one auction alone.
+    Many,
+}
+
+impl MatchBand {
+    /// One more traded row in the band, at `price`.
+    fn observe(self, price: i64) -> Self {
+        match self {
+            Self::Empty => Self::One(price),
+            Self::One(held) if held == price => self,
+            Self::One(_) | Self::Many => Self::Many,
+        }
+    }
 }
 
 /// The running state of one decode: the file being built, and what the
@@ -1914,6 +2196,15 @@ struct Reading<'r> {
     first_refusal: Option<CmRefusal>,
     /// The run of rows sharing one second, for the spread count.
     spread: SpreadRun,
+    /// An eligible share's auction prints as read, unmerged and in file
+    /// order; merged into [`CmFile::auction`] at the file's end.
+    prints: Vec<CmRow>,
+    /// The prices the share traded at in the match band, watched when it is
+    /// eligible or its eligibility is unknown.
+    band: MatchBand,
+    /// How many traded rows in the match band carry a book and are kept in
+    /// `rows` so far, for a watched share (SC-CLOSE-6).
+    booked: u32,
 }
 
 impl Reading<'_> {
@@ -1924,6 +2215,18 @@ impl Reading<'_> {
         self.first_refusal.get_or_insert(refusal);
     }
 
+    /// Where a row stamped `sod` stands against the day's windows ([`Place`]).
+    fn place(&self, sod: u32) -> Place {
+        let minute = u16::try_from(sod / 60).unwrap_or(u16::MAX);
+        if sod < self.open_sod {
+            Place::Pre
+        } else if self.rules.session.expects(minute) {
+            Place::InSession
+        } else {
+            Place::Post
+        }
+    }
+
     /// One parsed row: an eligible share's auction print is diverted
     /// (D-3320), a candidate row of an unknown eligibility refuses the file,
     /// and every other row is classified against the day's windows and kept.
@@ -1931,10 +2234,17 @@ impl Reading<'_> {
         if parsed.snapped {
             self.file.rows_snapped = self.file.rows_snapped.saturating_add(1);
         }
+        // The match band is watched wherever a booked row there could be the
+        // auction's: an eligible share, and one whose eligibility is unknown.
+        let watched = self.kind == CmKind::Stocks
+            && matches!(self.rules.auction, Auction::Eligible | Auction::Unknown(_));
         if self.kind == CmKind::Stocks && auction_candidate(&parsed) {
             match &self.rules.auction {
                 Auction::Eligible => {
-                    auction::merge(&mut self.file.auction, parsed.row);
+                    if in_match_band(&parsed.row) {
+                        self.band = self.band.observe(parsed.row.ltp);
+                    }
+                    self.prints.push(parsed.row);
                     self.usable = self.usable.saturating_add(1);
                     return Ok(());
                 }
@@ -1945,20 +2255,20 @@ impl Reading<'_> {
             }
         }
         let row = parsed.row;
+        let place = self.place(row.sod);
         let file = &mut self.file;
-        let minute = u16::try_from(row.sod / 60).unwrap_or(u16::MAX);
-        if row.sod < self.open_sod {
-            file.rows_pre = file.rows_pre.saturating_add(1);
-        } else if self.rules.session.expects(minute) {
-            file.rows_in_session = file.rows_in_session.saturating_add(1);
-            if self.kind == CmKind::Indices || row.ltq > 0 {
-                self.usable = self.usable.saturating_add(1);
+        match place {
+            Place::Pre => file.rows_pre = file.rows_pre.saturating_add(1),
+            Place::InSession => {
+                file.rows_in_session = file.rows_in_session.saturating_add(1);
+                if self.kind == CmKind::Indices || row.ltq > 0 {
+                    self.usable = self.usable.saturating_add(1);
+                }
+                if self.kind == CmKind::Indices {
+                    self.spread.observe(row.sod, row.ltp, &mut file.dual_spread);
+                }
             }
-            if self.kind == CmKind::Indices {
-                self.spread.observe(row.sod, row.ltp, &mut file.dual_spread);
-            }
-        } else {
-            file.rows_post = file.rows_post.saturating_add(1);
+            Place::Post => file.rows_post = file.rows_post.saturating_add(1),
         }
         if row.ltq == 0 {
             file.ltq_zero_rows = file.ltq_zero_rows.saturating_add(1);
@@ -1967,13 +2277,92 @@ impl Reading<'_> {
         // at the end it is the stamp of the last in-order row.
         file.max_sod = file.max_sod.max(row.sod);
         file.rows.push(row);
+        if watched && in_match_band(&row) {
+            self.band = self.band.observe(row.ltp);
+            self.booked = self.booked.saturating_add(1);
+        }
         Ok(())
     }
 
-    /// The checks at the file's end, in order: too many refused rows
-    /// (D-3318), a file that kept nothing names its first refused row, no
-    /// session row, and an index file that ends before `end_sod`.
+    /// SC-CLOSE-6: an eligible share's match band holds the auction's match,
+    /// at one price whatever the book beside it (charter §9: the order entry
+    /// closes at random from 15:28, all orders match at the equilibrium
+    /// price, matching ends at 15:35). When every traded row in the band is
+    /// at one price, the booked ones are prints too: taken out of `rows`
+    /// (their counts with them) and merged with the zero-book prints in file
+    /// order. At two prices or more the band is not the auction alone and no
+    /// source says which booked row is its; those stay ordinary rows of
+    /// phase `cas`, counted in [`CmFile::auction_band_unattributed`], and the
+    /// zero-book prints stay prints (D-3320 item 3). O(rows), once a file.
+    ///
+    /// A share whose eligibility is unknown is refused by name when its band
+    /// traded at one price with a booked row: eligible, those rows are the
+    /// auction's print; not, they are trades; nothing says which, and a
+    /// guess either way is the silent choice D-3320 forbids (a zero-book
+    /// candidate already refused it at its row). At two prices the booked
+    /// rows are rows either way, so nothing is guessed and the file is kept.
+    fn settle_auction(&mut self) -> Result<(), CmRefusal> {
+        if let Auction::Unknown(why) = &self.rules.auction {
+            if matches!(self.band, MatchBand::One(_)) && self.booked > 0 {
+                return Err(CmRefusal::AuctionEligibilityUnknown { why: why.clone() });
+            }
+            return Ok(());
+        }
+        let mut taken = Vec::new();
+        match self.band {
+            MatchBand::One(_) if self.booked > 0 => {
+                self.file.rows.retain(|row| {
+                    let print = in_match_band(row);
+                    if print {
+                        taken.push(*row);
+                    }
+                    !print
+                });
+                // Each taken row leaves the count `keep` put it in, and a
+                // print is usable wherever it is stamped.
+                for row in &taken {
+                    let place = self.place(row.sod);
+                    let file = &mut self.file;
+                    match place {
+                        Place::Pre => file.rows_pre = file.rows_pre.saturating_sub(1),
+                        Place::InSession => {
+                            file.rows_in_session = file.rows_in_session.saturating_sub(1);
+                            continue;
+                        }
+                        Place::Post => file.rows_post = file.rows_post.saturating_sub(1),
+                    }
+                    self.usable = self.usable.saturating_add(1);
+                }
+                self.file.max_sod = self.file.rows.iter().map(|r| r.sod).max().unwrap_or(0);
+            }
+            MatchBand::Many => self.file.auction_band_unattributed = self.booked,
+            MatchBand::Empty | MatchBand::One(_) => {}
+        }
+        // Both runs are in file order already, so one merge by line keeps the
+        // file's order with no search and no sort.
+        let mut zero = core::mem::take(&mut self.prints).into_iter().peekable();
+        let mut booked = taken.into_iter().peekable();
+        loop {
+            let next = match (zero.peek(), booked.peek()) {
+                (Some(a), Some(b)) if a.line <= b.line => zero.next(),
+                (_, Some(_)) => booked.next(),
+                (Some(_), None) => zero.next(),
+                (None, None) => break,
+            };
+            if let Some(row) = next {
+                auction::merge(&mut self.file.auction, row);
+            }
+        }
+        Ok(())
+    }
+
+    /// The checks at the file's end, in order: the auction's match band
+    /// settled (SC-CLOSE-6; an unknown eligibility it cannot settle refuses
+    /// first, as a candidate row does), too many refused rows (D-3318), a
+    /// file that kept nothing names its first refused row, no session row,
+    /// and an index file that ends before `end_sod`.
     fn finish(mut self, end_sod: u32) -> Result<CmFile, CmRefusal> {
+        self.settle_auction()?;
         self.spread.finish(&mut self.file.dual_spread);
         let file = self.file;
         let refused = file.refused.total();
@@ -2024,6 +2413,7 @@ fn empty_file(bytes: &[u8], header: HeaderVariant, final_newline: bool) -> CmFil
         rows_snapped: 0,
         dual_spread: DualSpread::default(),
         auction: Vec::new(),
+        auction_band_unattributed: 0,
         source_len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         source_digest: brutex_core::blake3::hash(bytes),
         source_crc32: crate::gdfl_archive::crc32(bytes),
@@ -2063,6 +2453,9 @@ fn decode_ruled(
         read: 0,
         first_refusal: None,
         spread: SpreadRun::default(),
+        prints: Vec::new(),
+        band: MatchBand::Empty,
+        booked: 0,
     };
     let mut index = 0_usize;
     while let Some(raw) = lines.next() {
@@ -2547,11 +2940,16 @@ pub fn read_listed<S: CmSource>(
         price: listing.scope().price_rule(key),
         auction: listing.auction_for(key),
     };
+    // The rows carry the HELD file's own stem: a trade-for-trade spell's file
+    // (`<share>.BE.NSE`) sits in its share's slot and names itself in every
+    // row (WP-12f, DB-B06). Only the share's own stem or one of its series
+    // stems reaches that slot, by exact bytes (`SlotTable::slot_of`).
+    let held = split_name(file.name()).map_or(stem.as_str(), |(own, _)| own);
     let decoded = decode_with(
         &bytes,
         &Expect {
             kind,
-            stem: &stem,
+            stem: held,
             day: listing.day(),
         },
         &rules,
@@ -4601,7 +4999,7 @@ mod tests {
             Err(CmRefusal::CalendarUnmeasured)
         );
         assert_eq!(
-            session_gate(day(2026, 10, 5)),
+            session_gate(day(2027, 1, 4)),
             Err(CmRefusal::CalendarUnmeasured)
         );
     }

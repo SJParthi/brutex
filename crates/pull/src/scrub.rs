@@ -41,6 +41,15 @@
 //! `CLAUDE.md` §4's "degrade loudly and name the reason" wants the reason
 //! surfaced rather than swallowed by a fix.
 //!
+//! **An index is not a finding (D-4933).** A month that holds fewer than
+//! 1,024 bars has no `.tix` time index and no `.srt` sort index by the
+//! small-month rule (`store::time_index::INDEX_MIN_ROWS`), and a month at or
+//! past it may be one whose index a rebuild still owes. Neither is a
+//! disagreement between the counter and the bars, so this module never asks
+//! for either sidecar: the bars and their header are the whole comparison.
+//! `a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold` holds
+//! that.
+//!
 //! It is also not a directory walk. The caller supplies the keys it cares
 //! about — the census's own entries, a universe, one instrument — so this
 //! module never scans the store and its cost is the caller's list, not the
@@ -528,6 +537,88 @@ mod tests {
         assert!(!tally.clean(), "a month not checked is not clean");
         drop(writer);
         assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// **A MONTH WITHOUT ITS INDEXES AGREES (D-4933).** One-second months of
+    /// 1,023 and 1,024 bars: the first is given no `.tix` and no `.srt` by the
+    /// small-month rule, the second has both and then loses its `.tix`; the
+    /// scrub reads neither sidecar and both entries agree.
+    #[test]
+    fn a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-scrub-Small-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ignored = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let open = i64::from(crate::session::Day::new(2031, 5, 5)?.days_from_epoch())
+            * 86_400_000_000
+            + 13_500_000_000;
+        for (month, rows) in [(5_u8, 1_023_u64), (6, 1_024)] {
+            let month = YearMonth::new(2031, month)?;
+            let first = if month.month() == 5 {
+                open
+            } else {
+                open + 31 * 86_400_000_000
+            };
+            let bars: Vec<Bar> = (0..i64::try_from(rows)?)
+                .map(|k| Bar {
+                    ts_micros: first + k * 1_000_000,
+                    open: 55_555,
+                    high: 55_565,
+                    low: 55_545,
+                    close: 55_560,
+                    volume: 1,
+                    open_interest: OI_NULL,
+                })
+                .collect();
+            let path = StorePath::new(PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: Timeframe::SECOND_1,
+                month,
+                file: FileKind::Bars,
+            })?;
+            let mut writer = BarFile::open_or_create(&root, path, 7)?;
+            writer.append(&bars)?;
+            drop(writer);
+            let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root);
+            let srt = path.with_file(FileKind::SortIndex).to_path_buf(&root);
+            let indexed = rows >= store::time_index::INDEX_MIN_ROWS;
+            assert_eq!(
+                (tix.exists(), srt.exists()),
+                (indexed, indexed),
+                "{rows} bars"
+            );
+            if indexed {
+                fs::remove_file(&tix)?;
+            }
+            let entry = Entry {
+                key: crate::manifest::EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment: Segment::Index,
+                    symbol: Symbol::new("NIFTY")?,
+                    timeframe: Timeframe::SECOND_1,
+                    month,
+                },
+                rows,
+                first_ts_micros: first,
+                last_ts_micros: first + (i64::try_from(rows)? - 1) * 1_000_000,
+            };
+            assert_eq!(
+                one(&entry, &root, Vendor::Gdfl, 7),
+                Finding::Agrees,
+                "{rows} bars"
+            );
+        }
         fs::remove_dir_all(&root)?;
         Ok(())
     }

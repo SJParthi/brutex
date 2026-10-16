@@ -3602,6 +3602,20 @@ fn calendar_json(
         "owed_minutes": open.then(|| phases.minutes(Phase::Continuous)),
         "halted_minutes": phases.minutes(Phase::Halted).saturating_add(phases.minutes(Phase::ReopeningAuction)),
         "unverified_minutes": open.then(|| phases.minutes(Phase::Unverified)),
+        // A MEASURED, UNEXPLAINED SHORT DAY (WP-62 repair 3; DB-G47): the
+        // vendors' own answers lack minutes the session owes. It classifies
+        // nothing -- `owed_minutes` is unchanged -- and says what was read.
+        // THE OBSERVATION IS THE MARKET'S, NOT THIS INSTRUMENT'S (the fourth
+        // check's follow-up): the minutes were found missing from NIFTY's
+        // answers, and the same object is on every instrument's day, a stock's
+        // and an option's too. `observed_on` says whose minutes they were.
+        "short_day": record.short.map(|short| json!({
+            "standing": "measured; cause UNVERIFIED; the minutes stay owed",
+            "observed_on": "market-wide: NIFTY's minutes (NSE-INDEX-NIFTY), not this instrument's own",
+            "nifty_absent": { "from": hm(u32::from(short.nifty_absent.from)), "to": hm(u32::from(short.nifty_absent.to)) },
+            "gdfl_checked": short.gdfl_checked,
+            "evidence": short.evidence,
+        })),
     });
     let halt = record.halt.map(|halt| {
         let seconds = halt.seconds(venue);
@@ -4715,6 +4729,45 @@ mod tests {
     // EVERY FIXTURE BELOW IS INVENTED. Prices are a few rupees, volumes are
     // small round numbers, and no row is a vendor's: the shapes are the
     // findings', the numbers are not the market's.
+
+    /// **A MEASURED SHORT DAY IS SAID, AND STILL OWES ITS MINUTES** (WP-62
+    /// repair 3; DB-G47): 2019-08-02 and 2022-03-07 read as plain sessions
+    /// with no word. The day's calendar object now carries the calendar of
+    /// record's entry and its evidence; `owed_minutes` is the full session's.
+    #[test]
+    fn a_measured_short_day_is_on_the_calendar_object_and_still_owes_its_minutes() {
+        let day = |y, m, d| i64::from(Day::new(y, m, d).expect("a day").days_from_epoch());
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2019, 8, 2)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"]["nifty_absent"]["from"], "13:59");
+        assert_eq!(calendar["short_day"]["gdfl_checked"], true);
+        assert_eq!(calendar["owed_minutes"], 375);
+        // Whose minutes they were, on any instrument's day.
+        assert!(
+            calendar["short_day"]["observed_on"]
+                .as_str()
+                .is_some_and(|said| said.starts_with("market-wide: NIFTY's minutes")),
+            "{calendar}"
+        );
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2022, 3, 7)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"]["nifty_absent"]["to"], "10:24");
+        assert_eq!(calendar["short_day"]["gdfl_checked"], true);
+        assert_eq!(calendar["short_day"]["nifty_absent"]["from"], "10:22");
+        assert_eq!(calendar["owed_minutes"], 375);
+        let (calendar, _) = calendar_json(
+            &pull::calendar::record_of(day(2022, 3, 8)),
+            Venue::NseIndex,
+            (Vendor::Zerodha, None),
+        );
+        assert_eq!(calendar["short_day"], Value::Null);
+    }
 
     /// A store root of its own.
     fn root_of(name: &str) -> PathBuf {
@@ -6007,7 +6060,11 @@ mod tests {
             ("2020-03-13", "H"),
             ("2020-03-23", "H"),
             ("2017-12-29", "-"),
-            ("2026-10-05", "-"),
+            // The record runs to 2026-12-31 (DB-B41): the first weekday past
+            // its old end is a session, and the first past its new end is not
+            // answered.
+            ("2026-10-05", "X"),
+            ("2027-01-04", "-"),
         ] {
             let epoch_day = i64::from(day(on).days_from_epoch());
             assert_eq!(day_code(epoch_day).0.to_string(), code, "{on}");
@@ -7230,8 +7287,13 @@ mod tests {
     /// checksum block is refused, and takes the month's time index away, so
     /// each lookup is the plain bisection whose probes the tests below count.
     fn spoil_block_of(root: &Path, series: (Vendor, &str, Timeframe), on: &str, row: u64) {
-        std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex))
-            .expect("the month's time index");
+        // A month under the small-month threshold has none to take away
+        // (D-4933); one past it does.
+        match std::fs::remove_file(month_file(root, series, on, FileKind::TimeIndex)) {
+            Ok(()) => {}
+            Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => {}
+            Err(other) => panic!("the month's time index: {other}"),
+        }
         let path = month_file(root, series, on, FileKind::Bars);
         let mut bytes = std::fs::read(&path).expect("the month's bars");
         let at = usize::try_from(store::format::HEADER_LEN + row * store::format::RECORD_STRIDE)

@@ -49,6 +49,9 @@ mod series;
 #[path = "bars_sort.rs"]
 mod sort;
 use series::SeriesPlan;
+/// The one `YYYY-MM` parser every route's `month`, `from` and `to` go through
+/// (app-7, AF-04). Re-exported because `series` is private to this module.
+pub(crate) use series::month_of_text;
 pub use series::{Filter, MAX_SERIES, SeriesKey};
 pub use sort::SortReport;
 
@@ -2883,6 +2886,20 @@ mod window_tests {
             })
             .collect();
         file.append(&rows).expect("the batch appends");
+        drop(file);
+        // THE MONTH AS THE WRITER LEFT IT BEFORE THE SMALL-MONTH RULE
+        // (D-4933): its time index and its sort run. These tests are about a
+        // month that has both, the shape of every month on disk from before
+        // the rule; without the time index a row the sort run names is found
+        // by bisecting the bars, which reads across the very blocks some of
+        // these tests damage.
+        crate::scratch::plant_pre_rule_time_index(root, path, symbol_id);
+        crate::scratch::plant_pre_rule_sort_index(
+            &path.to_path_buf(root),
+            &store::sort_index::Shape::of(month, 60, symbol_id),
+            &rows,
+            rows.len(),
+        );
     }
 
     /// Midnight UTC on the first of a month, in micros.
@@ -3822,15 +3839,15 @@ mod window_tests {
             (0, 127, 73)
         );
         assert_eq!(read.unread_months, 1);
+        // A MONTH OF 200 ROWS WITHOUT ITS `.srt` IS THE SMALL-MONTH RULE'S
+        // (D-4933): the reason says so, and no command is offered for it,
+        // because `cli srt-build` would answer `small` and write nothing.
         assert!(
-            read.scanned_why[0].contains("no .srt sort index"),
+            read.scanned_why[0].contains("by the small-month rule it has no .srt"),
             "{:?}",
             read.scanned_why
         );
-        assert_eq!(
-            read.build,
-            ["cli srt-build dhan NSE/TESTSEG/WINDOWTEST 1min 2026-01 2026-01"]
-        );
+        assert!(read.build.is_empty(), "{:?}", read.build);
 
         let _ = std::fs::remove_dir_all(&root);
     }

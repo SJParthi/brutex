@@ -170,12 +170,12 @@ fn each_commit_appends_one_run_over_exactly_its_rows() {
         !root.file(FileKind::SortIndex).exists(),
         "an empty month orders nothing and writes nothing"
     );
-    append(&mut writer, &bars(0, 1_000));
-    append(&mut writer, &bars(1_000, 1_001));
-    append(&mut writer, &bars(1_001, 2_600));
+    append(&mut writer, &bars(0, 1_100));
+    append(&mut writer, &bars(1_100, 1_101));
+    append(&mut writer, &bars(1_101, 2_600));
     let index = root.index().unwrap();
     let spans: Vec<(u64, u64)> = index.runs().iter().map(|r| (r.start, r.end)).collect();
-    assert_eq!(spans, vec![(0, 1_000), (1_000, 1_001), (1_001, 2_600)]);
+    assert_eq!(spans, vec![(0, 1_100), (1_100, 1_101), (1_101, 2_600)]);
     assert_eq!(index.coverage(), 2_600);
     let kinds: Vec<RunKind> = index.runs().iter().map(|run| run.kind).collect();
     assert_eq!(
@@ -185,13 +185,13 @@ fn each_commit_appends_one_run_over_exactly_its_rows() {
     );
     for column in Column::ALL {
         let got = served(&index, column);
-        assert_eq!(got[0], brute(0, 1_000, column), "{}", column.as_str());
-        assert_eq!(got[1], brute(1_000, 1_001, column), "{}", column.as_str());
-        assert_eq!(got[2], brute(1_001, 2_600, column), "{}", column.as_str());
+        assert_eq!(got[0], brute(0, 1_100, column), "{}", column.as_str());
+        assert_eq!(got[1], brute(1_100, 1_101, column), "{}", column.as_str());
+        assert_eq!(got[2], brute(1_101, 2_600, column), "{}", column.as_str());
     }
     // A re-run of the same batch is already present and adds no run.
     assert!(matches!(
-        writer.append(&bars(1_001, 2_600)),
+        writer.append(&bars(1_101, 2_600)),
         Ok(Appended::AlreadyPresent { .. })
     ));
     assert_eq!(root.index().unwrap().runs().len(), 3);
@@ -250,8 +250,8 @@ fn a_run_lost_after_its_commit_is_appended_at_the_next_open() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 400));
-        append(&mut writer, &bars(400, 900));
+        append(&mut writer, &bars(0, 1_100));
+        append(&mut writer, &bars(1_100, 1_600));
     }
     let index = root.index().unwrap();
     let cut = index.runs()[1].offset;
@@ -263,17 +263,17 @@ fn a_run_lost_after_its_commit_is_appended_at_the_next_open() {
     srt.set_len(cut + 100).unwrap();
     drop(srt);
     let torn = root.index().unwrap();
-    assert_eq!(torn.coverage(), 400, "the torn run is not read as a run");
+    assert_eq!(torn.coverage(), 1_100, "the torn run is not read as a run");
     assert!(torn.torn().is_some());
     drop(torn);
     drop(root.writer());
     let index = root.index().unwrap();
     let spans: Vec<(u64, u64)> = index.runs().iter().map(|r| (r.start, r.end)).collect();
-    assert_eq!(spans, vec![(0, 400), (400, 900)]);
+    assert_eq!(spans, vec![(0, 1_100), (1_100, 1_600)]);
     assert!(index.torn().is_none(), "the torn bytes were cut, not kept");
     assert_eq!(
         served(&index, Column::Volume)[1],
-        brute(400, 900, Column::Volume)
+        brute(1_100, 1_600, Column::Volume)
     );
 }
 
@@ -283,29 +283,30 @@ fn a_run_lost_after_its_commit_is_appended_at_the_next_open() {
 fn a_month_appended_past_the_compaction_bound_is_written_as_one_run() {
     let root = Root::new();
     let mut writer = root.writer();
-    let appends = i64::try_from(COMPACT_AT).unwrap() + 8;
+    // THE FIRST COMMIT REACHES THE SMALL-MONTH THRESHOLD (D-4933) and
+    // writes the month whole; every later one appends ten rows.
+    let base = 1_024_i64;
+    append(&mut writer, &bars(0, base));
+    let compact = i64::try_from(COMPACT_AT).unwrap();
+    let appends = compact + 7;
     for k in 0..appends {
-        append(&mut writer, &bars(k * 10, k * 10 + 10));
+        append(&mut writer, &bars(base + k * 10, base + k * 10 + 10));
         let runs = root.index().unwrap().runs().len();
         assert!(runs < COMPACT_AT, "{runs} runs after append {k}");
     }
+    // The whole run and `COMPACT_AT - 2` appended runs, then the append that
+    // would reach `COMPACT_AT` writes the month whole, and eight more follow.
+    let whole = base + (compact - 1) * 10;
     let index = root.index().unwrap();
-    assert_eq!(index.coverage(), u64::try_from(appends * 10).unwrap());
+    assert_eq!(
+        index.coverage(),
+        u64::try_from(base + appends * 10).unwrap()
+    );
     assert_eq!(index.runs().len(), 9);
     assert_eq!(index.runs()[0].start, 0);
-    assert_eq!(
-        index.runs()[0].end,
-        u64::try_from(i64::try_from(COMPACT_AT).unwrap() * 10).unwrap()
-    );
+    assert_eq!(index.runs()[0].end, u64::try_from(whole).unwrap());
     let all = served(&index, Column::OpenInterest);
-    assert_eq!(
-        all[0],
-        brute(
-            0,
-            i64::try_from(COMPACT_AT).unwrap() * 10,
-            Column::OpenInterest
-        )
-    );
+    assert_eq!(all[0], brute(0, whole, Column::OpenInterest));
 }
 
 /// An index that does not describe the bars — a file for another symbol
@@ -355,8 +356,8 @@ fn the_rebuild_door_rebuilds_a_whole_run_whose_body_is_damaged() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 500));
-        append(&mut writer, &bars(500, 1_200));
+        append(&mut writer, &bars(0, 1_100));
+        append(&mut writer, &bars(1_100, 1_200));
     }
     let first = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
     assert!(matches!(first.outcome, Resorted::Built(_)));
@@ -415,8 +416,8 @@ fn the_rebuild_door_writes_one_run_and_keeps_it_on_a_rerun() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 500));
-        append(&mut writer, &bars(500, 1_200));
+        append(&mut writer, &bars(0, 1_100));
+        append(&mut writer, &bars(1_100, 1_200));
     }
     let bars_before = root.digest(FileKind::Bars);
     let crc_before = root.digest(FileKind::Checksums);
@@ -469,8 +470,8 @@ fn a_torn_last_run_is_walked_past_and_appended_again() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 900));
-        append(&mut writer, &bars(900, 1_700));
+        append(&mut writer, &bars(0, 1_100));
+        append(&mut writer, &bars(1_100, 1_700));
     }
     let srt = root.file(FileKind::SortIndex);
     let len = fs::metadata(&srt).unwrap().len();
@@ -478,7 +479,7 @@ fn a_torn_last_run_is_walked_past_and_appended_again() {
     std::os::unix::fs::FileExt::write_all_at(&file, &[0u8; 512], len - 512).unwrap();
     drop(file);
     let index = root.index().unwrap();
-    assert_eq!(index.coverage(), 900, "the torn run is not read");
+    assert_eq!(index.coverage(), 1_100, "the torn run is not read");
     assert!(
         index
             .torn()
@@ -489,10 +490,10 @@ fn a_torn_last_run_is_walked_past_and_appended_again() {
     drop(root.writer());
     let index = root.index().unwrap();
     let spans: Vec<(u64, u64)> = index.runs().iter().map(|r| (r.start, r.end)).collect();
-    assert_eq!(spans, vec![(0, 900), (900, 1_700)]);
+    assert_eq!(spans, vec![(0, 1_100), (1_100, 1_700)]);
     assert!(index.torn().is_none());
     for column in Column::ALL {
-        assert_eq!(served(&index, column)[1], brute(900, 1_700, column));
+        assert_eq!(served(&index, column)[1], brute(1_100, 1_700, column));
     }
 }
 
@@ -537,7 +538,7 @@ fn the_rebuild_door_follows_no_link_below_the_root() {
     let real = Root::new();
     {
         let mut writer = real.writer();
-        append(&mut writer, &bars(0, 400));
+        append(&mut writer, &bars(0, 1_100));
     }
     fs::remove_file(real.file(FileKind::SortIndex)).unwrap();
     let before: Vec<(String, Vec<u8>)> = {
@@ -618,7 +619,7 @@ fn the_rebuild_door_sorts_the_served_generation() {
         open_interest: OI_NULL,
         ..bar(day * 100 + i)
     };
-    let held: Vec<Bar> = (0..60).map(|i| on(17, i)).collect();
+    let held: Vec<Bar> = (0..1_100).map(|i| on(17, i)).collect();
     let leading: Vec<Bar> = [3, 4]
         .iter()
         .flat_map(|&day| (0..40).map(move |i| on(day, i)))
@@ -645,23 +646,23 @@ fn the_rebuild_door_sorts_the_served_generation() {
     assert!(revision_srt.is_file(), "the revision is born sorted");
     let shape = Shape::of(month(), 1, SYMBOL);
     let born = SortIndex::open(&revision_srt, &shape).unwrap();
-    assert_eq!(born.coverage(), 140, "every row of the served generation");
+    assert_eq!(born.coverage(), 1_180, "every row of the served generation");
 
     let kept = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
-    assert_eq!(kept.n_valid, 140, "the served generation's rows");
+    assert_eq!(kept.n_valid, 1_180, "the served generation's rows");
     // One run, as a single commit of the revision leaves it.
     assert_eq!(kept.outcome, Resorted::Kept);
 
     fs::remove_file(&revision_srt).unwrap();
     let built = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
-    assert_eq!(built.n_valid, 140);
+    assert_eq!(built.n_valid, 1_180);
     assert!(
         matches!(&built.outcome, Resorted::Built(why) if why.contains("no .srt")),
         "{:?}",
         built.outcome
     );
     let index = SortIndex::open(&revision_srt, &shape).unwrap();
-    assert_eq!((index.runs().len(), index.coverage()), (1, 140));
+    assert_eq!((index.runs().len(), index.coverage()), (1, 1_180));
     let fences = index.fences(0, Column::Close).unwrap();
     let closes: Vec<Entry> = (0..index.runs()[0].column(Column::Close).blocks)
         .flat_map(|block| index.block(0, Column::Close, block, &fences).unwrap())
@@ -776,7 +777,7 @@ fn a_writer_open_never_writes_through_a_hard_link_at_the_staging_name() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 900));
+        append(&mut writer, &bars(0, 1_100));
     }
     let index = root.file(FileKind::SortIndex);
     fs::remove_file(&index).unwrap();
@@ -795,10 +796,10 @@ fn a_writer_open_never_writes_through_a_hard_link_at_the_staging_name() {
     assert_ne!(fs::metadata(&index).unwrap().ino(), victim_ino);
     let held = root.index().unwrap();
     assert_eq!(held.runs().len(), 1);
-    assert_eq!(held.coverage(), 900);
+    assert_eq!(held.coverage(), 1_100);
     assert_eq!(
         served(&held, Column::Close),
-        vec![brute(0, 900, Column::Close)]
+        vec![brute(0, 1_100, Column::Close)]
     );
 }
 
@@ -814,14 +815,14 @@ fn an_index_with_a_second_name_is_written_whole_never_appended_in_place() {
     use std::os::unix::fs::MetadataExt as _;
     let root = Root::new();
     let mut writer = root.writer();
-    append(&mut writer, &bars(0, 600));
+    append(&mut writer, &bars(0, 1_100));
     let index = root.file(FileKind::SortIndex);
     let other = index.with_file_name("kept-by-somebody.copy");
     fs::hard_link(&index, &other).unwrap();
     let before = fs::read(&other).unwrap();
     let other_ino = fs::metadata(&other).unwrap().ino();
 
-    append(&mut writer, &bars(600, 1_000));
+    append(&mut writer, &bars(1_100, 1_500));
 
     assert_eq!(
         fs::read(&other).unwrap(),
@@ -831,19 +832,19 @@ fn an_index_with_a_second_name_is_written_whole_never_appended_in_place() {
     assert_eq!(fs::metadata(&other).unwrap().nlink(), 1);
     assert_ne!(fs::metadata(&index).unwrap().ino(), other_ino);
     let held = root.index().unwrap();
-    assert_eq!(held.coverage(), 1_000, "every committed row is ordered");
+    assert_eq!(held.coverage(), 1_500, "every committed row is ordered");
     assert_eq!(held.runs().len(), 1, "written whole, as one run");
     assert_eq!(held.runs()[0].kind, RunKind::Whole);
     for column in Column::ALL {
         assert_eq!(
             served(&held, column),
-            vec![brute(0, 1_000, column)],
+            vec![brute(0, 1_500, column)],
             "{}",
             column.as_str()
         );
     }
     // The next commit finds an index with one name and appends as usual.
-    append(&mut writer, &bars(1_000, 1_100));
+    append(&mut writer, &bars(1_500, 1_600));
     let held = root.index().unwrap();
     assert_eq!(held.runs().len(), 2);
     assert_eq!(held.runs()[1].kind, RunKind::Appended);
@@ -858,7 +859,7 @@ fn a_staging_name_that_is_not_a_regular_file_is_refused_by_name() {
     let root = Root::new();
     {
         let mut writer = root.writer();
-        append(&mut writer, &bars(0, 300));
+        append(&mut writer, &bars(0, 1_100));
     }
     let index = root.file(FileKind::SortIndex);
     fs::remove_file(&index).unwrap();
@@ -903,5 +904,5 @@ fn a_staging_name_that_is_not_a_regular_file_is_refused_by_name() {
     // CLEARED: the month builds.
     let built = BarFile::sort_index_existing(&root.0, path(FileKind::Bars), SYMBOL).unwrap();
     assert!(matches!(built.outcome, Resorted::Built(_)));
-    assert_eq!(root.index().unwrap().coverage(), 300);
+    assert_eq!(root.index().unwrap().coverage(), 1_100);
 }

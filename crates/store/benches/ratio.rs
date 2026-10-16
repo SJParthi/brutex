@@ -53,11 +53,17 @@
 //! and the process's peak resident set is read where the host keeps one
 //! (D-4875 (1), D-4898; `docs/06-limits.md` L-IA-26).
 //!
+//! C-SF-01 to C-SF-03 time R3-16's two shared file doors, the reading door
+//! and the staging create, in `ratio/safe_files.rs`.
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 
 use std::hint::black_box;
 use std::time::Instant;
+
+#[path = "ratio/safe_files.rs"]
+mod safe_files;
 
 use brutex_core::vendor::Vendor;
 use store::block;
@@ -488,8 +494,13 @@ fn tix_stamps(n: u64) -> [i64; COLD_BLOCKS] {
 /// [`tix_stamps`]. Each stamp is a bar's own, so each lookup is the index's
 /// common case: one 16-byte entry `pread` and no bar read.
 fn tix_ps(file: &BarFile, n: u64) -> u128 {
-    if file.time_lookup() != store::file::TimeLookup::Indexed {
-        refuse("the bench month has no ready time index; the row would time the bisection");
+    let lookup = file.time_lookup();
+    if lookup != store::file::TimeLookup::Indexed {
+        refuse(&format!(
+            "the bench month of {} bars has no ready time index ({lookup:?}); the row would \
+             time the bisection",
+            file.records()
+        ));
     }
     let at = tix_stamps(n);
     let mut next = 0usize;
@@ -507,21 +518,32 @@ fn tix_ps(file: &BarFile, n: u64) -> u128 {
 /// index it is one entry read. Timed at 1x, 10x and 100x the record count on
 /// the one-second rung; a bisection would be visibly slower at 100x, a scan
 /// a hundred times slower.
+///
+/// **1x is the smallest month that has a `.tix`,** not a round number: a
+/// month under [`store::time_index::INDEX_MIN_ROWS`] bars is given none by the
+/// small-month rule (D-4933) and its lookups bisect, which is not what this
+/// row times. The 1,000-bar month this row used to start from is such a month
+/// since that rule, and [`tix_ps`] refused it, so the row and every row after
+/// it never ran. The sizes follow the threshold, so they cannot fall under it
+/// again: 1,024, 10,240 and 102,400 one-second bars today, all inside June.
 fn time_lookup_is_flat_in_the_file() -> bool {
-    let (small, _d1) = loaded("tix-small", 1_000);
-    let (medium, _d2) = loaded("tix-medium", 10_000);
-    let (large, _d3) = loaded("tix-large", 100_000);
-    let base = tix_ps(&small, 1_000);
+    let one = store::time_index::INDEX_MIN_ROWS;
+    let ten = one.saturating_mul(10);
+    let hundred = one.saturating_mul(100);
+    let (small, _d1) = loaded("tix-small", one);
+    let (medium, _d2) = loaded("tix-medium", ten);
+    let (large, _d3) = loaded("tix-large", hundred);
+    let base = tix_ps(&small, one);
     let mut ok = true;
     ok &= ratio(
         "C-TIX-01 first_at_or_after, 10x file",
         base,
-        tix_ps(&medium, 10_000),
+        tix_ps(&medium, ten),
     );
     ok &= ratio(
         "C-TIX-01 first_at_or_after, 100x file",
         base,
-        tix_ps(&large, 100_000),
+        tix_ps(&large, hundred),
     );
     ok
 }
@@ -1460,6 +1482,7 @@ fn main() {
     ok &= year_index_read_is_flat();
     ok &= generation_write_stays_n_log_n();
     ok &= month_repair_is_linear_and_leaves_the_month_indexed();
+    ok &= safe_files::run();
     if ok {
         println!("all ratios within the ceiling");
     } else {

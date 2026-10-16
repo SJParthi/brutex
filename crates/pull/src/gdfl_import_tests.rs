@@ -169,8 +169,9 @@ fn an_option_second_carries_the_open_interest_of_its_last_row_traded_or_not() {
     .unwrap();
     assert_eq!(spot.seconds[0].open_interest, OI_NULL);
     assert_eq!(
-        BAR_DEFINITION, 3,
-        "D-3342 changed the bars an option file builds"
+        BAR_DEFINITION, 4,
+        "D-3342 changed the bars an option file builds (3), and the closing \
+         auction's band an eligible share's from 2026-08-03 (4, D-4878 item 10)"
     );
 }
 
@@ -901,7 +902,7 @@ fn a_calendar_refused_day_and_a_missing_day_each_leave_a_refused_line() {
     assert_eq!(unmeasured.days_refused, 1);
     assert_eq!(
         without_run(&line_of(&store, "stocks", "2011-01-03")),
-        "refused stocks 2011-01-03 * definition=3 stage=calendar reason=calendar_unmeasured \
+        "refused stocks 2011-01-03 * definition=4 stage=calendar reason=calendar_unmeasured \
          failures=1"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -1156,22 +1157,46 @@ fn a_days_close_follows_its_failures() {
          max_back_s=4"
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Done, &counts),
+        closing_line("k 1 *", Close::Done, &counts, ""),
         format!("done k 1 * {stats}")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::WithRefusals("price_refused"), &counts),
+        closing_line("k 1 *", Close::WithRefusals("price_refused"), &counts, ""),
         format!("done k 1 * {stats} vendor_refused=1 reason=price_refused")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Incomplete(copy.cause), &counts),
+        closing_line("k 1 *", Close::Incomplete(copy.cause), &counts, ""),
         format!("incomplete k 1 * {stats} stage=vendor reason=source_crc_mismatch")
     );
     assert_eq!(
-        closing_line("k 1 *", Close::Refused(calendar.cause), &counts),
+        closing_line("k 1 *", Close::Refused(calendar.cause), &counts, ""),
         format!(
             "refused k 1 * definition={BAR_DEFINITION} stage=calendar reason=expiry_passed failures=1"
         )
+    );
+    // A RECORDED RUN'S SCOPE FOLLOWS THE COUNTS (WP-12f, D-4878), so the
+    // `stage=`, `reason=` and `run=` every reader knows keep their places.
+    assert_eq!(
+        closing_line("k 1 *", Close::Done, &counts, " scope=ab12"),
+        format!("done k 1 * {stats} scope=ab12")
+    );
+    assert_eq!(
+        closing_line(
+            "k 1 *",
+            Close::WithRefusals("price_refused"),
+            &counts,
+            " scope=ab12"
+        ),
+        format!("done k 1 * {stats} scope=ab12 vendor_refused=1 reason=price_refused")
+    );
+    assert_eq!(
+        closing_line(
+            "k 1 *",
+            Close::Incomplete(copy.cause),
+            &counts,
+            " scope=ab12"
+        ),
+        format!("incomplete k 1 * {stats} scope=ab12 stage=vendor reason=source_crc_mismatch")
     );
 }
 
@@ -1559,11 +1584,12 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
         lines[0],
         format!(
             "run 1750000000 source=tickstore archive={} archive_bytes={} commit={COMMIT} \
-             started=1750000000 format_sha256=unmeasured",
+             started=1750000000 format_sha256=unmeasured definition={BAR_DEFINITION}",
             encoded(ts.as_os_str().as_encoded_bytes()),
             origin.archive_bytes
         ),
-        "the world's tick store has no FORMAT.md: unmeasured, named"
+        "the world's tick store has no FORMAT.md: unmeasured, named; the run line ends \
+         with the bar definition its days are built under (D-4878 item 10)"
     );
     assert!(origin.archive_bytes > 0);
     assert!(lines[1].starts_with("begin stocks 2024-04-01 *"));
@@ -1591,7 +1617,10 @@ fn every_line_a_run_closes_carries_its_run_and_the_run_line_names_the_origin() {
         second.contains(" source=zip ")
             && second.contains(" commit=unstamped ")
             && second.contains(" started=1750000000 ")
-            && second.ends_with(&format!(" archive_cd_blake3={}", zips.digest_hex())),
+            && second.ends_with(&format!(
+                " archive_cd_blake3={} definition={BAR_DEFINITION}",
+                zips.digest_hex()
+            )),
         "{second}"
     );
     assert_eq!(zips.fault, None, "{zips:?}");
@@ -1984,7 +2013,9 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
     }
     // The import files through the store's one writer, so every one-second
     // month it lands carries the `.tix` time index that writer keeps on each
-    // append (D-2329): no side door leaves a month the index does not cover.
+    // append (D-2329) — exactly when it holds 1,024 bars or more, the
+    // small-month rule (D-4933): no side door leaves a month the index does
+    // not cover, and none gives a small month one.
     let months: Vec<_> = files
         .keys()
         .filter(|p| p.starts_with("bars") && p.to_string_lossy().ends_with(".bin"))
@@ -1992,9 +2023,14 @@ fn every_kind_lands_at_one_second_and_both_sources_leave_the_same_store() {
     assert!(!months.is_empty(), "the import landed no bar month");
     for bin in months {
         let tix = bin.with_extension("tix");
-        assert!(
+        let records = files.get(bin).map_or(0, |bytes| {
+            (u64::try_from(bytes.len()).unwrap() - store::format::HEADER_LEN)
+                / store::format::RECORD_STRIDE
+        });
+        assert_eq!(
             files.get(&tix).is_some_and(|bytes| !bytes.is_empty()),
-            "{} has no time index beside it",
+            !store::time_index::below_threshold(records),
+            "{} holds {records} bars",
             bin.display()
         );
     }
@@ -3202,12 +3238,12 @@ fn index_shapes(on: Day) -> Vec<(String, Vec<u8>)> {
 
 /// The two index lines [`index_shapes`] makes, from the tick store.
 const INDEX_SHAPE_LINES: [&str; 2] = [
-    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=3 member_bytes=0 late=12 \
+    "flags indices 2019-05-30 BANKNIFTY v=1 src=import definition=4 member_bytes=0 late=12 \
      max_back_s=19799 deferred_s=1 rows_refused=1 rows=22468 seconds=22454 session_s=22500 \
      ss_distinct=60 holes_5s=2 hole_max_s=34 hole_max_at=12:21:40 dual_spread_s=1 \
      dual_spread_max_bps=20 zero_ltp_rows=1 halt_s=0 halt_held_s=0 flat_max_s=1 \
      flat_max_at=09:15:00 max_defer_s=19812 member_src=none",
-    "flags indices 2019-05-30 NIFTY v=1 src=import definition=3 member_bytes=0 late=0 \
+    "flags indices 2019-05-30 NIFTY v=1 src=import definition=4 member_bytes=0 late=0 \
      max_back_s=0 deferred_s=0 rows_refused=0 rows=376 seconds=375 session_s=22500 \
      ss_distinct=1 holes_5s=375 hole_max_s=59 hole_max_at=09:15:00 dual_spread_s=0 \
      dual_spread_max_bps=0 zero_ltp_rows=0 halt_s=0 halt_held_s=0 flat_max_s=1 \
@@ -3401,12 +3437,12 @@ fn the_day_ledger_counts_late_first_trades_shared_holes_and_new_untraded_prices(
     assert_eq!(
         flags_lines(&store),
         [
-            "flags stocks 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+            "flags stocks 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=10 files_traded=10 \
              first_trade_p50=11:57:48 shared_holes=1 shared_hole_max_s=9768 \
              shared_hole_max_at=09:15:00 ltq0_new_ltp_rows=10 auction_prints=0 halt_s=0 \
              halt_held_s=0 max_defer_s=0 member_src=none",
-            "flags stocks 2022-03-07 * v=1 src=import definition=3 member_bytes=0 late=0 \
+            "flags stocks 2022-03-07 * v=1 src=import definition=4 member_bytes=0 late=0 \
              max_back_s=0 deferred_s=0 rows_refused=0 files=11 files_traded=11 \
              first_trade_p50=09:15:00 shared_holes=1 shared_hole_max_s=1359 \
              shared_hole_max_at=09:16:44 ltq0_new_ltp_rows=0 auction_prints=0 halt_s=0 \
@@ -3518,7 +3554,7 @@ fn the_day_ledger_counts_zero_quote_files_and_leading_marker_rows() {
         false,
     );
     assert!(got.failures.is_empty(), "{:?}", got.failures);
-    let want = "flags options 2019-05-30 * v=1 src=import definition=3 member_bytes=0 late=0 \
+    let want = "flags options 2019-05-30 * v=1 src=import definition=4 member_bytes=0 late=0 \
                 max_back_s=0 deferred_s=0 rows_refused=0 files=5 files_traded=4 \
                 zero_quote_files=3 ltq1_lead_files=3 ltq1_lead_rows=6 ltq0_new_ltp_rows=1 \
                 first_trade_p50=09:15:30 halt_s=0 halt_held_s=0 max_defer_s=0 \
@@ -4933,6 +4969,46 @@ fn a_kill_at_any_point_leaves_no_half_month_and_the_resume_lands_the_same_store(
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// ═══ The summary events a run tells (D-3317, D-4878) ════════════════════
+
+/// One summary event as [`note_day`] built it: its words, its level and the
+/// text fields it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Summary {
+    pub(super) words: String,
+    pub(super) warn: bool,
+    pub(super) text: BTreeMap<String, String>,
+}
+
+thread_local! {
+    /// Every summary event the runs of THIS thread told, in order. A run
+    /// closes its days on the thread that called it and each test runs on a
+    /// thread of its own, so a test reads only its own runs' events.
+    static SUMMARIES: std::cell::RefCell<Vec<Summary>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keeps `event` for the test on this thread ([`summaries_taken`]).
+pub(super) fn summary_emitted(event: &telemetry::Event<'_>) {
+    let text = event
+        .fields()
+        .iter()
+        .filter_map(|(name, value)| Some(((*name).to_owned(), value.as_str()?.to_owned())))
+        .collect();
+    SUMMARIES.with_borrow_mut(|kept| {
+        kept.push(Summary {
+            words: event.message().to_owned(),
+            warn: event.level() == telemetry::Level::Warn,
+            text,
+        });
+    });
+}
+
+/// The summary events told on this thread since the last call, in order.
+pub(super) fn summaries_taken() -> Vec<Summary> {
+    SUMMARIES.with_borrow_mut(std::mem::take)
+}
+
 // ═══ WP-16: the day made durable (D-3353) ═══════════════════════════════
 
 /// What a test asks of each flush a day's batch issues under its store: run
@@ -5698,6 +5774,11 @@ fn a_back_fill_is_published_outside_the_days_batch_and_leaves_one_workers_store(
 
 #[path = "gdfl_backfill_tests.rs"]
 mod backfill;
+
+/// The scope a close records and the days a wider scope reads again
+/// (WP-12f, D-4878), over this module's invented worlds.
+#[path = "gdfl_scope_tests.rs"]
+mod scope_reopen;
 
 // ── WP-11c (DB-A04, DB-A07): a halt's seconds, the flat run, the sampled day ─
 
