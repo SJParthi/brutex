@@ -970,7 +970,10 @@ mod bars_rs {
             .append(&rows)
             .expect("generated records");
         let mut asked = query(
-            vec![index("NIFTY"), SeriesKey::new("NSE", "TESTSEG", "OITEST", None)],
+            vec![
+                index("NIFTY"),
+                SeriesKey::new("NSE", "TESTSEG", "OITEST", None),
+            ],
             month(5),
             month(5),
         );
