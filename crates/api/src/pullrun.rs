@@ -8604,4 +8604,32 @@ mod cloud_mutant_tests {
         assert_eq!(run.ordinal, 10);
         assert!(run.older_unread.is_some());
     }
+
+    /// A run record AT the scan's first record is the scan's, not one of the
+    /// [`INTERRUPTED_RUNS`] the index supplies: with exactly 64 run records
+    /// before the scan the walk still begins at record 0, so a damaged
+    /// record between the first two is inside it and named (kills the index
+    /// partition's `ordinal < scan_first` turned to `<=`, which would take
+    /// the scan's own run record as the 64th and push the walk past the
+    /// damage).
+    #[test]
+    fn a_run_record_at_the_scans_first_record_does_not_shift_the_walk() {
+        let mut images = vec![closed(100).image(), GARBAGE];
+        images.extend((0..63).map(|k| closed(110 + k).image()));
+        images.push(closed(500).image());
+        images.extend(failures(1_000, INTERRUPTED_SCAN - 1));
+        assert_eq!(
+            images.len() as u64 - INTERRUPTED_SCAN,
+            65,
+            "the scan begins at 65"
+        );
+        let journal = journal_of_images("run-at-scan-first", &images);
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(
+            why.starts_with("1 of the journal records the scan read"),
+            "{why}"
+        );
+        assert!(why.contains("record 1 ("), "{why}");
+    }
 }
