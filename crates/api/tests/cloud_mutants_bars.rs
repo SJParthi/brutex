@@ -1141,3 +1141,298 @@ mod bars_rs {
         assert!(!html.contains("+0.00"), "{html}");
     }
 }
+
+/// `bars_series.rs`: series keys, and the plan a window reads by.
+mod bars_series_rs {
+    use super::{Scratch, symbol_id, write_month};
+    use api::bars::{Filter, SeriesKey, SortKey, WindowQuery, window};
+    use brutex_core::vendor::Vendor;
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+
+    /// A segment no NSE venue answers to, so these tests read the plan alone:
+    /// the D-3325 change rules a real segment brings have their own tests.
+    const SEGMENT: &str = "TESTSEG";
+    const SYMBOL: &str = "WINDOWTEST";
+
+    fn month(m: u8) -> YearMonth {
+        YearMonth::new(2025, m).expect("a month")
+    }
+
+    /// The UTC second of 09:15 IST on day `d` of 2025-`m`.
+    fn open_of(m: u8, d: u8) -> i64 {
+        i64::from(
+            pull::session::Day::new(2025, m, d)
+                .expect("a day")
+                .days_from_epoch(),
+        ) * 86_400
+            + 13_500
+    }
+
+    fn fixture() -> SeriesKey {
+        SeriesKey::new("NSE", SEGMENT, SYMBOL, None)
+    }
+
+    fn query(from: YearMonth, to: YearMonth) -> WindowQuery {
+        WindowQuery {
+            vendor: Vendor::Dhan,
+            timeframe: Timeframe::MINUTE_1,
+            series: vec![fixture()],
+            from,
+            to,
+            sort: SortKey::Ts,
+            desc: false,
+            offset: Some(0),
+            limit: 50,
+            want_extremes: false,
+            at: None,
+            filter: Filter::default(),
+            lookback: true,
+            coverage: false,
+        }
+    }
+
+    /// The bar file of the fixture series' minute month `m`.
+    fn month_path(root: &std::path::Path, m: u8) -> std::path::PathBuf {
+        StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: SEGMENT,
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(m),
+            file: FileKind::Bars,
+        })
+        .expect("a legal path")
+        .to_path_buf(root)
+    }
+
+    /// A month file that exists and holds no record.
+    fn empty_month(root: &std::path::Path, m: u8) {
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: SEGMENT,
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(m),
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        drop(store::file::BarFile::open_or_create(root, path, symbol_id(SYMBOL)).expect("a file"));
+    }
+
+    /// **A CENSUS KEY READS BACK ONLY WHEN EVERY PART OF IT IS THERE, AND A
+    /// TAIL IS A CONTRACT ONLY WHEN IT HAS A CONTRACT'S SHAPE AND PARSES AS
+    /// ONE.** Runs `SeriesKey::parse`'s empty-part and empty-symbol refusals,
+    /// the shape test's refusal and a well-shaped tail that is no contract.
+    #[test]
+    fn bars_series_a_key_reads_back_only_when_whole() {
+        for text in [
+            "-INDEX-NIFTY",
+            "NSE--NIFTY",
+            "NSE-INDEX-",
+            "NSE-FNO--2019-03-28-FUT",
+        ] {
+            assert_eq!(SeriesKey::parse(text), None, "{text}");
+        }
+        let odd = SeriesKey::parse("NSE-CASH-X-1-2-3-4").expect("a key");
+        assert_eq!((odd.symbol.as_str(), odd.contract), ("X-1-2-3-4", None));
+        let unparsed =
+            SeriesKey::parse("NSE-FNO-NIFTY-2019-03-28-99999999999999-CE").expect("a key");
+        assert_eq!(
+            (unparsed.symbol.as_str(), unparsed.contract),
+            ("NIFTY-2019-03-28-99999999999999-CE", None),
+            "a tail longer than any contract is no contract"
+        );
+        let future = SeriesKey::parse("NSE-FNO-NIFTY-2019-03-28-FUT").expect("a key");
+        assert_eq!(future.symbol, "NIFTY");
+        assert_eq!(future.text(), "NSE-FNO-NIFTY-2019-03-28-FUT");
+    }
+
+    /// **A RUNG DIRECTORY THAT CANNOT BE ASKED ABOUT IS A REFUSAL, NOT AN
+    /// EMPTY HISTORY.** The symbol's path is a file, so the rung directory
+    /// beneath it is not a directory that is absent: it cannot be read.
+    #[test]
+    fn bars_series_a_rung_directory_that_cannot_be_read_is_refused() {
+        let scratch = Scratch::new("series-not-a-dir");
+        let symbol_dir = month_path(scratch.root(), 5)
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the symbol directory")
+            .to_path_buf();
+        std::fs::create_dir_all(symbol_dir.parent().expect("its parent")).expect("parents");
+        std::fs::write(&symbol_dir, b"a file where a directory should be").expect("a file");
+        let why = window(scratch.root(), &query(month(5), month(5))).expect_err("refused");
+        assert!(why.starts_with("cannot read "), "{why}");
+    }
+
+    /// **A MONTH LISTED AND GONE BEFORE ITS STAT IS AN ABSENCE, AND A HELD
+    /// MONTH WITH NO RECORD KEEPS NOTHING AND COVERS NO DAY.** A dangling link
+    /// stands in for a file removed between the listing and the stat. Runs
+    /// the plan's gone-file count, its skip of an empty month (with and
+    /// without a time-of-day bound), the empty month's zero coverage and the
+    /// coverage memo's hit.
+    #[test]
+    fn bars_series_a_gone_month_is_absent_and_an_empty_one_keeps_nothing() {
+        let scratch = Scratch::new("series-gone-empty");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(4),
+            &[(open_of(4, 2), 10)],
+        );
+        empty_month(scratch.root(), 5);
+        let june = month_path(scratch.root(), 6);
+        std::os::unix::fs::symlink(scratch.root().join("nowhere.bin"), &june)
+            .expect("a dangling link");
+        let mut asked = query(month(4), month(6));
+        asked.coverage = true;
+        for _ in 0..2 {
+            let got = window(scratch.root(), &asked).expect("answers");
+            assert_eq!(got.total, 1);
+            assert_eq!(got.months_read, 2, "April and the empty May");
+            assert_eq!(got.months_outside_life, 1, "June went before its stat");
+            let covered: Vec<(u8, u64, u32)> = got
+                .coverage
+                .iter()
+                .map(|one| (one.month.month(), one.rows, one.days_covered))
+                .collect();
+            assert_eq!(covered, vec![(4, 1, 1), (5, 0, 0)]);
+        }
+        asked.coverage = false;
+        asked.filter.tod = Some((33_300, 33_400));
+        let got = window(scratch.root(), &asked).expect("answers");
+        assert_eq!(
+            got.total, 1,
+            "the empty month keeps nothing under a bound either"
+        );
+    }
+
+    /// **WITH THE LOOKBACK OFF, A MONTH'S FIRST ROW IS MEASURED AGAINST THE
+    /// MONTH BEFORE WHEN THAT MONTH IS KEPT WHOLE, AND A DAY'S FIRST ROW
+    /// UNDER A TIME-OF-DAY BOUND IS NOT.** Runs `previous_is_kept` across a
+    /// month boundary and inside one file.
+    #[test]
+    fn bars_series_the_lookback_measures_only_against_a_kept_row() {
+        let scratch = Scratch::new("series-kept-previous");
+        for (m, close) in [(4, 100), (5, 110)] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[(open_of(m, 2), close), (open_of(m, 2) + 60, close + 1)],
+            );
+        }
+        let mut asked = query(month(4), month(5));
+        asked.lookback = false;
+        let got = window(scratch.root(), &asked).expect("answers");
+        let mays_first = &got.bars[2];
+        assert_eq!(mays_first.bar.close, 110);
+        assert_eq!(mays_first.chg, Some(891), "110 against April's last, 101");
+
+        // Two days of one month under a bound keeping 09:15 alone: the second
+        // day's 09:15 follows the first day's 09:16, which is not kept.
+        let scratch = Scratch::new("series-kept-tod");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[
+                (open_of(5, 2), 100),
+                (open_of(5, 2) + 60, 101),
+                (open_of(5, 5), 102),
+            ],
+        );
+        let mut asked = query(month(5), month(5));
+        asked.lookback = false;
+        asked.filter.tod = Some((33_300, 33_300));
+        let got = window(scratch.root(), &asked).expect("answers");
+        let closes: Vec<(i64, &str)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.chg_why))
+            .collect();
+        assert_eq!(
+            closes,
+            vec![(100, "no_earlier_stored_bar"), (102, "first_bar_in_window")]
+        );
+    }
+
+    /// **A ROW'S PREDECESSOR IS THE LAST RECORD BEFORE IT, WALKING BACK PAST
+    /// HELD MONTHS THAT HOLD NOTHING**, inside the range or outside it. Runs
+    /// `last_before`'s empty-month walk.
+    #[test]
+    fn bars_series_the_predecessor_walks_back_past_empty_months() {
+        let scratch = Scratch::new("series-walk-back");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(3),
+            &[(open_of(3, 3), 100)],
+        );
+        empty_month(scratch.root(), 4);
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[(open_of(5, 2), 105)],
+        );
+        // April outside the range, and inside it.
+        for from in [month(5), month(4)] {
+            let got = window(scratch.root(), &query(from, month(5))).expect("answers");
+            let may = got.bars.last().expect("May's row");
+            assert_eq!(may.bar.close, 105);
+            assert_eq!(may.chg, Some(500), "105 against March's 100: {from}");
+        }
+    }
+
+    /// **`at` NAMES THE GLOBAL INDEX OF AN INSTANT INSIDE A MONTH'S RECORDS,
+    /// OF ONE IN A LATER MONTH WITH NOTHING STORED, AND OF ONE PAST THE
+    /// RANGE.** Runs `rank`'s locate inside a run, its empty-bucket answer and
+    /// its past-the-last-bucket answer.
+    #[test]
+    fn bars_series_at_ranks_inside_after_and_past_the_rows() {
+        let scratch = Scratch::new("series-rank");
+        let rows: Vec<(i64, i64)> = (0..5).map(|i| (open_of(4, 2) + i * 60, 10 + i)).collect();
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(4),
+            &rows,
+        );
+        let at = |instant: i64| {
+            let mut asked = query(month(4), month(6));
+            asked.at = Some(instant);
+            asked.offset = None;
+            window(scratch.root(), &asked)
+                .expect("answers")
+                .at_index
+                .expect("an index")
+        };
+        assert_eq!(
+            at((open_of(4, 2) + 150) * 1_000_000),
+            3,
+            "between the third and fourth"
+        );
+        assert_eq!(at(open_of(5, 5) * 1_000_000), 5, "May holds nothing");
+        assert_eq!(
+            at(open_of(6, 2) * 1_000_000 + 40 * 86_400_000_000),
+            5,
+            "past June"
+        );
+    }
+}
