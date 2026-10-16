@@ -16335,7 +16335,7 @@ switch on the returned exception name."* A grep for `error_type` across
 
 **The pair that forced it.** `TokenException` and `PermissionException` are both
 answered under HTTP 403 — the first documented on the exceptions page, the
-second in the vendor's own Python SDK. On the status axis they are one event.
+second in the vendor's own SDK. On the status axis they are one event.
 They are not one event to an operator: the first is fixed by the credential
 somebody refreshes tonight, and the second is an API key with no
 historical-data subscription, which fails identically forever. The unentitled
@@ -69062,3 +69062,39 @@ rule that fails the build is not (D-0001). Gate 15's own comment lists what it
 cannot see — the interpreter's binary name and a shebang line — and a `.py`
 under `web/` passes gate 1, because `web/` is exempt from the extension
 allowlist. This gate closes all three under `cargo test`.
+
+### D-5251 — D-0207's one line naming the Py-language is redacted in place, on the operator's word; no exception remains, and `CLAUDE.md` §2 states the rule — 2026-10-16
+
+**Status: locked.** The operator, asked on 16 October 2026 whether to redact the
+one line D-5250 had kept, answered yes. This entry is that permission and
+supersedes D-5250 item 3 and its "What this does not change" bullet on
+`CLAUDE.md` §2.
+
+**Decision.**
+
+1. **One in-place edit of an old entry, and only this one.** D-0207's paragraph
+   headed **The pair that forced it.** (line 16338 at `4756cce0`) read "the
+   vendor's own" + the language's name + " SDK". It now reads *"the second in
+   the vendor's own SDK. On the status axis they are one event."* Nothing else
+   in D-0207, or in any other entry, is touched. The ledger's header rule —
+   *"Entries are never edited"* — stands for every other case; this is a named
+   exception granted by the operator for one word, in the same spirit as
+   D-0212's bracket and D-0215's repointing, and it grants nothing further.
+2. **The gate excuses nothing.** `crates/vocab/tests/no_py_language.rs` loses
+   its exception: no path, no line, no pattern. The line D-0207 used to hold is
+   kept in the test only as data, to prove it is now refused at any path
+   (`no_line_is_excused_not_even_the_one_d0207_held`, which also pins D-0207's
+   line as this entry left it). `NOPY-04` is restated to match.
+3. **`CLAUDE.md` §2 states the rule.** One paragraph under the `web/`
+   exception: the Py-language is never used anywhere, `web/` included, and its
+   name appears in no tracked file; it cites D-5250 and the gate. `CLAUDE.md`
+   and D-5250 no longer contradict each other for `web/`.
+
+**What it does not change.** CI gate 15's allowlist in
+`.github/workflows/ci.yml` still names four files; all four now hold no
+occurrence, so gate 15 reports four loose entries and passes. Emptying it is a
+workflow edit this change does not make.
+
+**Rejected.** *Keeping the exception after the operator allowed the edit.* An
+exception is a place the rule does not hold; with the reason for it gone, it is
+only a place a future occurrence could hide.

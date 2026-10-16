@@ -28,14 +28,14 @@
 //! is a superset of the tracked set, so it is stricter, never weaker. A `.git`
 //! that `git` cannot list is a failure, not a walk.
 //!
-//! # The one exception
+//! # No exception
 //!
-//! `docs/05-decisions.md` is append-only (its header: *"Entries are never
-//! edited"*), and no decision allows an editorial redaction of an old entry.
-//! D-0207 names the language once, in prose, as the language of the vendor's
-//! own SDK. That one line is exempt BY PATH AND BY ITS EXACT CONTENT, never by
-//! file or by pattern, and it must match exactly once: a second copy fails, and
-//! so does the line's disappearance, so the exemption cannot outlive its reason.
+//! There is none: not by file, not by pattern, not by line. D-5250 first kept
+//! one, D-0207's line naming the language of the vendor's own SDK, because the
+//! ledger is append-only and nothing then allowed an old entry to be edited.
+//! The operator allowed that one redaction on 16 October 2026 (D-5251), the
+//! line now says "the vendor's own SDK", and the line it used to be is refused
+//! here like any other (`no_line_is_excused_not_even_the_one_d0207_held`).
 //!
 //! # What it cannot see
 //!
@@ -62,12 +62,10 @@ const NEEDLE: &str = concat!("py", "thon");
 /// The tripwire for an edited half.
 const NEEDLE_LEN: usize = 6;
 
-/// The file holding the one line allowed to carry the name.
-const EXCEPTION_PATH: &str = "docs/05-decisions.md";
-
-/// That line, whole and exact: D-0207, the paragraph headed *"The pair that
-/// forced it"*. Assembled for the same reason [`NEEDLE`] is.
-const EXCEPTION_LINE: &str = concat!(
+/// The line D-0207 held until D-5251, whole: the last occurrence of the name in
+/// the tree, kept here only so a test can prove it is no longer excused.
+/// Assembled for the same reason [`NEEDLE`] is.
+const FORMER_EXCEPTION: &str = concat!(
     "second in the vendor's own Py",
     "thon SDK. On the status axis they are one event."
 );
@@ -100,8 +98,6 @@ enum Breach {
 struct Scan {
     /// Each refusal, with its evidence with the name masked out.
     breaches: Vec<(Breach, String)>,
-    /// How many lines the one exception excused.
-    exempt: usize,
 }
 
 impl Scan {
@@ -191,11 +187,7 @@ fn scan(path: &str, bytes: &[u8]) -> Scan {
     for (index, raw) in bytes.split(|b| *b == b'\n').enumerate() {
         let line = raw.strip_suffix(b"\r").unwrap_or(raw);
         if names_it(line) {
-            if path == EXCEPTION_PATH && line == EXCEPTION_LINE.as_bytes() {
-                out.exempt += 1;
-            } else {
-                out.breaches.push((Breach::Name(index + 1), masked(line)));
-            }
+            out.breaches.push((Breach::Name(index + 1), masked(line)));
         }
         if shebang_program(line).is_some_and(|p| runs_the_language(&p)) {
             out.breaches
@@ -322,8 +314,6 @@ struct Audit {
     absent: Vec<String>,
     /// Every refusal, `path: kind: masked evidence`, one a line.
     refused: Vec<String>,
-    /// Lines the one exception excused, across the tree.
-    exempt: usize,
 }
 
 /// Read every file `files_to_read` names under `root`, and scan each.
@@ -334,7 +324,6 @@ fn audit(root: &Path) -> Audit {
         read: 0,
         absent: Vec::new(),
         refused: Vec::new(),
-        exempt: 0,
     };
     for file in files {
         let Some(bytes) = contents(root, &file) else {
@@ -343,7 +332,6 @@ fn audit(root: &Path) -> Audit {
         };
         audit.read += 1;
         let found = scan(&file, &bytes);
-        audit.exempt += found.exempt;
         for (breach, evidence) in found.breaches {
             audit
                 .refused
@@ -373,7 +361,7 @@ fn plant(dir: &Path, relative: &str, text: &[u8]) {
 // ---------------------------------------------------------------- the gate --
 
 /// THE GATE. No tracked file is the language's, runs its interpreter, or
-/// names it, the one recorded line aside, which must match exactly once.
+/// names it. Nothing is excused (D-5251).
 #[test]
 fn no_tracked_file_is_runs_or_names_the_py_language() {
     let found = audit(&root());
@@ -402,12 +390,6 @@ fn no_tracked_file_is_runs_or_names_the_py_language() {
          masked below so this message is not the leak:\n{}",
         found.refused.join("\n")
     );
-    assert_eq!(
-        found.exempt, 1,
-        "the one recorded exception, `{EXCEPTION_PATH}` D-0207's line, must match exactly \
-         once: zero means the line changed or went (remove the exception here, in \
-         `docs/04-invariants.md` and in D-5250's record), two means it was copied"
-    );
 }
 
 // ------------------------------------------------------------- its proofs --
@@ -421,16 +403,6 @@ fn the_needle_is_six_letters_and_this_file_never_spells_it() {
     assert!(!names_it(me), "this file spells the name it refuses");
     let found = scan("crates/vocab/tests/no_py_language.rs", me);
     assert!(found.breaches.is_empty(), "{:?}", found.breaches);
-    assert_eq!(found.exempt, 0);
-    // The exception's own line holds the name exactly once, so excusing it
-    // excuses nothing else on it.
-    assert!(names_it(EXCEPTION_LINE.as_bytes()));
-    assert_eq!(
-        masked(EXCEPTION_LINE.as_bytes())
-            .matches("[THE NAME]")
-            .count(),
-        1
-    );
 }
 
 /// A planted name is refused in any case, mid-word, after a CR, beside a NUL
@@ -460,7 +432,6 @@ fn a_planted_name_is_refused_in_any_case_and_any_bytes() {
             Some(&Breach::Name(line)),
             "{found:?}"
         );
-        assert_eq!(found.exempt, 0);
         for (_, evidence) in &found.breaches {
             assert!(
                 !names_it(evidence.as_bytes()),
@@ -474,42 +445,39 @@ fn a_planted_name_is_refused_in_any_case_and_any_bytes() {
     assert!(scan("docs/x.md", b"").breaches.is_empty());
 }
 
-/// The exception is one path and one exact line. The same line elsewhere, the
-/// line with one byte changed, and the name on another line of the same file
-/// are each refused; the line twice is counted twice.
+/// Nothing is excused. D-0207's former line, in the ledger itself and anywhere
+/// else, with CRLF or not, is refused at its line; the line as D-5251 left it
+/// passes. The ledger is read like every other file.
 #[test]
-fn the_one_exception_is_an_exact_path_and_line_and_nothing_wider() {
-    let exact = format!("before\n{EXCEPTION_LINE}\r\nafter\n");
-    let found = scan(EXCEPTION_PATH, exact.as_bytes());
-    assert!(found.breaches.is_empty(), "{:?}", found.breaches);
-    assert_eq!(found.exempt, 1);
-
-    for other in [
+fn no_line_is_excused_not_even_the_one_d0207_held() {
+    assert!(names_it(FORMER_EXCEPTION.as_bytes()));
+    let former = format!("before\n{FORMER_EXCEPTION}\r\nafter\n");
+    for path in [
+        "docs/05-decisions.md",
         "docs/04-invariants.md",
-        "x/docs/05-decisions.md",
-        "docs/05-decisions.MD",
+        "crates/pull/src/kite.rs",
     ] {
-        let found = scan(other, exact.as_bytes());
-        assert_eq!(found.kinds(), [Breach::Name(2)], "{other}");
-        assert_eq!(found.exempt, 0);
+        let found = scan(path, former.as_bytes());
+        assert_eq!(found.kinds(), [Breach::Name(2)], "{path}");
+        assert!(!names_it(found.breaches[0].1.as_bytes()));
     }
-    for edited in [
-        format!("{EXCEPTION_LINE} "),
-        format!(" {EXCEPTION_LINE}"),
-        EXCEPTION_LINE.replace("SDK", "sdk"),
-        EXCEPTION_LINE.replace("Py", "PY"),
-    ] {
-        let found = scan(EXCEPTION_PATH, edited.as_bytes());
-        assert_eq!(found.kinds(), [Breach::Name(1)], "{edited:?}");
-        assert_eq!(found.exempt, 0);
-    }
-    let beside = format!("{EXCEPTION_LINE}\nthe {NEEDLE} again\n");
-    let found = scan(EXCEPTION_PATH, beside.as_bytes());
-    assert_eq!(found.kinds(), [Breach::Name(2)]);
-    assert_eq!(found.exempt, 1);
-
-    let twice = format!("{EXCEPTION_LINE}\n{EXCEPTION_LINE}\n");
-    assert_eq!(scan(EXCEPTION_PATH, twice.as_bytes()).exempt, 2);
+    let redacted = format!(
+        "before\n{}\nafter\n",
+        FORMER_EXCEPTION.replace(concat!("Py", "thon "), "")
+    );
+    assert!(redacted.contains("the vendor's own SDK. On the status axis"));
+    let found = scan("docs/05-decisions.md", redacted.as_bytes());
+    assert!(found.breaches.is_empty(), "{:?}", found.breaches);
+    let ledger = include_str!("../../../docs/05-decisions.md");
+    assert!(
+        ledger.contains("second in the vendor's own SDK. On the status axis they are one event."),
+        "D-0207's line is not the one D-5251 left; read it before changing this test"
+    );
+    assert!(
+        scan("docs/05-decisions.md", ledger.as_bytes())
+            .breaches
+            .is_empty()
+    );
 }
 
 /// Every extension of the language's own files is refused, in any case and as
