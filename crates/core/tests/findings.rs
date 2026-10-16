@@ -455,6 +455,96 @@ fn every_refuted_finding_carries_its_reason() {
     }
 }
 
+/// Whether history can be asked about in the tree whose root is `root`.
+///
+/// THE SKIP STORE ALREADY NARROWED, CARRIED HERE (P1-14-04). The three history
+/// tests below skipped whenever `git rev-parse --git-dir` failed, so a tree
+/// whose `.git` git cannot read -- a `GIT_DIR` naming nothing, or a `.git` file
+/// or symlink pointing nowhere -- printed SKIPPING and passed with every `FIXED`
+/// sha unread. D-0693 item 8 fixed that in `store/tests/cited_commits.rs`; this
+/// is the same rule. It skips only where `git` cannot be run and where `root`
+/// holds no `.git` (by `symlink_metadata`, so a dangling symlink is present).
+/// Anywhere else a failed `rev-parse` fails the test with git's own words. The
+/// call is fenced by `GIT_CEILING_DIRECTORIES` so git cannot walk up past an
+/// unreadable `.git` to a repository enclosing `root`.
+fn history_is_at(root: &std::path::Path) -> bool {
+    if let Err(why) = std::process::Command::new("git").arg("--version").output() {
+        println!("SKIPPING: `git` cannot be run here ({why}), so no commit can be resolved.");
+        return false;
+    }
+    let absent = matches!(
+        std::fs::symlink_metadata(root.join(".git")),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound
+    );
+    if absent {
+        println!(
+            "SKIPPING: {} holds no `.git`, so no commit can be resolved. This is \
+             what `cargo-mutants` looks like -- it copies the tree without `.git`.",
+            root.display()
+        );
+        return false;
+    }
+    let mut ask = std::process::Command::new("git");
+    ask.arg("-C").arg(root).args(["rev-parse", "--git-dir"]);
+    if let Some(above) = root.parent() {
+        ask.env("GIT_CEILING_DIRECTORIES", above);
+    }
+    let asked = ask.output().expect("`git` ran a moment ago");
+    assert!(
+        asked.status.success(),
+        "{} holds a `.git`, and `git rev-parse --git-dir` failed there, so no commit \
+         can be resolved and a skip would pass every history check unread: {}",
+        root.display(),
+        String::from_utf8_lossy(&asked.stderr).trim()
+    );
+    true
+}
+
+/// A tree with no `.git` skips; a `.git` git cannot read fails, not skips.
+#[test]
+fn only_a_tree_with_no_git_dir_skips_the_history() {
+    let scratch = |tag: &str| {
+        let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("findings-history-{tag}-{}", std::process::id()));
+        let _stale = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        root
+    };
+    let bare = scratch("bare");
+    assert!(
+        !history_is_at(&bare),
+        "a tree with no `.git` has no history"
+    );
+    std::fs::remove_dir_all(&bare).expect("the scratch root is removed");
+
+    let broken = scratch("broken");
+    std::fs::write(
+        broken.join(".git"),
+        format!("gitdir: {}\n", broken.join("nowhere").display()),
+    )
+    .expect("a `.git` file");
+    let refused = std::panic::catch_unwind(|| history_is_at(&broken))
+        .expect_err("a `.git` git cannot read must fail, not skip");
+    let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(
+        said.contains("holds a `.git`, and `git rev-parse --git-dir` failed there"),
+        "{said}"
+    );
+    std::fs::remove_dir_all(&broken).expect("the scratch root is removed");
+
+    let dangling = scratch("dangling");
+    std::os::unix::fs::symlink(dangling.join("nowhere"), dangling.join(".git"))
+        .expect("a `.git` symlink naming nothing");
+    let refused = std::panic::catch_unwind(|| history_is_at(&dangling))
+        .expect_err("a `.git` symlink naming nothing must fail, not skip");
+    let said = refused.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(
+        said.contains("holds a `.git`, and `git rev-parse --git-dir` failed there"),
+        "{said}"
+    );
+    std::fs::remove_dir_all(&dangling).expect("the scratch root is removed");
+}
+
 /// Every commit a row names actually exists in this repository.
 ///
 /// `FIXED deadbeef` passed every other test. `git rev-parse --verify` is the only thing that
@@ -494,12 +584,7 @@ fn every_named_commit_exists() {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if git(&["rev-parse", "--git-dir"]).is_none() {
-        println!(
-            "SKIPPING: {} is not a git work tree, so no commit can be resolved. This is \
-             what `cargo-mutants` looks like -- it copies the tree without `.git`.",
-            repo.display()
-        );
+    if !history_is_at(&repo) {
         return;
     }
     assert_ne!(
@@ -598,12 +683,7 @@ fn every_named_commit_is_in_this_branchs_history() {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if git(&["rev-parse", "--git-dir"]).is_none() {
-        println!(
-            "SKIPPING: {} is not a git work tree, so no commit can be resolved. This is \
-             what `cargo-mutants` looks like -- it copies the tree without `.git`.",
-            repo.display()
-        );
+    if !history_is_at(&repo) {
         return;
     }
     assert_ne!(
@@ -685,12 +765,7 @@ fn every_named_commit_is_on_main() {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
     };
-    if git(&["rev-parse", "--git-dir"]).is_none() {
-        println!(
-            "SKIPPING: {} is not a git work tree, so no commit can be resolved. This is \
-             what `cargo-mutants` looks like -- it copies the tree without `.git`.",
-            repo.display()
-        );
+    if !history_is_at(&repo) {
         return;
     }
     assert_ne!(

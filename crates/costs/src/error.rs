@@ -244,6 +244,20 @@ pub enum CostError {
         /// The low that was offered, in paisa.
         low: i64,
     },
+    /// A bar's open was outside its own `low..=high` range.
+    ///
+    /// Distinct from [`Self::InvertedBar`]: the high and the low are in order,
+    /// and it is the open that sits outside them. Refused rather than filled
+    /// at, because a fill anchored on the open would be a price the bar says
+    /// never traded.
+    OpenOutsideBar {
+        /// The open that was offered, in paisa.
+        open: i64,
+        /// The high that was offered, in paisa.
+        high: i64,
+        /// The low that was offered, in paisa.
+        low: i64,
+    },
     /// A round trip whose exit day precedes its entry day.
     ///
     /// Not a costing question — it is two dates in the wrong order, and the
@@ -253,6 +267,19 @@ pub enum CostError {
         entry: TradeDay,
         /// The exit day, which is earlier.
         exit: TradeDay,
+    },
+    /// A contract's lot was asked for on a trade day after the contract's
+    /// expiry (DB-B04).
+    ///
+    /// A contract does not trade after it expires, so the question has no
+    /// answer and the circular in force that day says nothing about it. When
+    /// the name states an expiry the exchange re-dated to a LATER day, the
+    /// settled day is the one to ask with.
+    ExpiryBeforeTrade {
+        /// The expiry that was given.
+        expiry: TradeDay,
+        /// The trade day, which is later.
+        day: TradeDay,
     },
     /// The trade outcome is one this crate does not price.
     ///
@@ -332,10 +359,21 @@ impl fmt::Display for CostError {
                 "a bar's low {low} is above its high {high}; \
                  it is refused rather than silently swapped"
             ),
+            Self::OpenOutsideBar { open, high, low } => write!(
+                f,
+                "a bar's open {open} is outside its own range {low}..={high}; \
+                 it is refused rather than filled at"
+            ),
             Self::ExitBeforeEntry { entry, exit } => write!(
                 f,
                 "the exit day {exit} is before the entry day {entry}; \
                  a round trip does not close before it opens"
+            ),
+            Self::ExpiryBeforeTrade { expiry, day } => write!(
+                f,
+                "the expiry {expiry} is before the trade day {day}; a contract has no lot \
+                 after it expires (for an expiry the exchange re-dated later, ask with the \
+                 settled day)"
             ),
             Self::UnsupportedOutcome { outcome } => write!(
                 f,
@@ -575,6 +613,15 @@ mod tests {
             "a bar's low 101 is above its high 100; it is refused rather than silently swapped"
         );
         assert_eq!(
+            CostError::OpenOutsideBar {
+                open: 98,
+                high: 101,
+                low: 99
+            }
+            .to_string(),
+            "a bar's open 98 is outside its own range 99..=101; it is refused rather than filled at"
+        );
+        assert_eq!(
             CostError::ExitBeforeEntry {
                 entry: day(2026, 5, 15),
                 exit: day(2026, 5, 14),
@@ -582,6 +629,16 @@ mod tests {
             .to_string(),
             "the exit day 2026-05-14 is before the entry day 2026-05-15; \
              a round trip does not close before it opens"
+        );
+        assert_eq!(
+            CostError::ExpiryBeforeTrade {
+                expiry: day(2020, 1, 1),
+                day: day(2024, 12, 10),
+            }
+            .to_string(),
+            "the expiry 2020-01-01 is before the trade day 2024-12-10; a contract has no lot \
+             after it expires (for an expiry the exchange re-dated later, ask with the \
+             settled day)"
         );
         assert_eq!(
             CostError::UnsupportedOutcome {

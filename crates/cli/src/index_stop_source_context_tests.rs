@@ -607,15 +607,34 @@ fn original_context_partial_torn_and_changed_archives_never_supply_candles() -> 
         &reader.metadata().source_context_identity,
     ));
     let path = directory.join("body.bin");
-    let mut body = fs::read(&path).map_err(display)?;
+    let original = fs::read(&path).map_err(display)?;
+    let mut body = original.clone();
     let last = body.last_mut().ok_or("generated source body")?;
     *last ^= 1;
-    fs::write(path, body).map_err(display)?;
+    fs::write(&path, body).map_err(display)?;
     assert!(reader.require_current().is_err());
     assert!(reader.window(0, 0, 0).is_err());
     assert!(open(&fixture, &saved, 0, bounds()).is_err());
+
+    // THE PARTIAL CASE RUNS ON AN INTACT BODY (P1-11-03). It ran on the body
+    // flipped above, which `open` already refuses, so a reader that ignored a
+    // missing receipt still failed here and the case could not. The byte is
+    // restored and the archive proven readable first, so the only defect left
+    // when `complete.bin` goes is the missing receipt, and the refusal must
+    // come from it.
+    fs::write(&path, &original).map_err(display)?;
+    drop(open(&fixture, &saved, 0, bounds())?);
     fs::remove_file(directory.join("complete.bin")).map_err(display)?;
-    assert!(open(&fixture, &saved, 0, bounds()).is_err());
+    let why = open(&fixture, &saved, 0, bounds())
+        .err()
+        .ok_or("an archive with no completion receipt must not open")?;
+    // The refusal does not name the file; it carries the host's "not found".
+    // The open just above, on the same archive with the receipt present, is
+    // what pins the receipt as the cause.
+    assert!(
+        why.starts_with("original_context_refused") && why.contains("os error 2"),
+        "{why}"
+    );
     Ok(())
 }
 

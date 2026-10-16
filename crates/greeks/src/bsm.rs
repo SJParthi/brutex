@@ -79,11 +79,18 @@ pub const MAX_YEARS: f64 = 100.0;
 /// discount factor infinite. Measured, not reasoned: at `r = -7.0` the factor is
 /// 1.01e304 and prices; at `r = -7.1` it is `inf`.
 ///
-/// What contains it is on the way OUT. [`Contract::greeks`] checks every field of the
-/// result and returns [`GreeksError::NotRepresentable`] rather than a number, which is
-/// the §4-correct shape: refuse loudly rather than hand back a plausible wrong price.
-/// `a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out` pins both
-/// sides of that boundary.
+/// The same holds for the carry, and with either factor still finite the product
+/// with a spot or strike up to [`MAX_UNDERLYING`] can overflow on its own.
+///
+/// What contains it is on the way IN. `Contract::check`, which every path passes
+/// through, refuses with [`GreeksError::NotRepresentable`] when `e^-qT`, `S·e^-qT` or
+/// `K·e^-rT` is not finite. It used to be on the way OUT, in [`Contract::greeks`]'s
+/// check of its own result, and that missed the solver: `implied_volatility` reads the
+/// arbitrage bounds before it evaluates the model, so an overflowing put came back as
+/// `PriceBelowIntrinsic { intrinsic: inf }`. [`Contract::greeks`] still checks its
+/// result, for the overflows no input check sees. D-0920.
+/// `a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in` pins
+/// every path and both sides of the boundary.
 pub const MAX_RATE: f64 = 10.0;
 
 /// The largest volatility this crate will price at.
@@ -225,7 +232,9 @@ pub(crate) struct Checked {
 }
 
 impl Contract {
-    /// Validates every bound once and takes the two discount factors.
+    /// Validates every bound once and takes the two discount factors, refusing
+    /// with [`GreeksError::NotRepresentable`] when a factor or its product with
+    /// the spot or strike is not finite.
     pub(crate) fn check(&self) -> Result<Checked, GreeksError> {
         let spot = positive_bounded(self.spot, "spot", MAX_UNDERLYING)?;
         let strike = positive_bounded(self.strike, "strike", MAX_UNDERLYING)?;
@@ -245,6 +254,24 @@ impl Contract {
         let rate = signed_bounded(self.rate, "rate", MAX_RATE)?;
         let carry = signed_bounded(self.carry, "carry", MAX_RATE)?;
         let carry_discount = (-carry * years).exp();
+        let forward = spot * carry_discount;
+        let discounted_strike = strike * (-rate * years).exp();
+        // Contained on the way IN. Every input above is inside its bound and
+        // each of these can still be infinite: `MAX_RATE * MAX_YEARS` is 1000
+        // against `ln(f64::MAX)` = 709.78, and with the factor finite the
+        // product with a spot or strike up to `MAX_UNDERLYING` can overflow on
+        // its own. Every consumer -- the closed form, the arbitrage bounds the
+        // solver reads before it evaluates anything, the price scale -- reads
+        // these three, so refusing here is the one place that covers all of
+        // them. `carry_discount` is listed although an infinite one always
+        // makes `forward` infinite too (`spot > 0`): it is read on its own by
+        // gamma and delta, and the list names what is read. D-0920.
+        if ![carry_discount, forward, discounted_strike]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(GreeksError::NotRepresentable);
+        }
         Ok(Checked {
             spot,
             strike,
@@ -252,8 +279,8 @@ impl Contract {
             rate,
             carry,
             root_years: years.sqrt(),
-            forward: spot * carry_discount,
-            discounted_strike: strike * (-rate * years).exp(),
+            forward,
+            discounted_strike,
             carry_discount,
         })
     }
@@ -482,44 +509,103 @@ pub(crate) mod tests {
         out
     }
 
-    /// `MAX_RATE` bounds the input's plausibility, NOT `e^-rT`.
+    /// `MAX_RATE` bounds the input's plausibility, NOT `e^-rT`, and what contains the
+    /// overflow is `Contract::check`, on the way IN.
     ///
-    /// `MAX_RATE`'s doc said "the bound exists so that `e^-rT` cannot overflow". That is
-    /// measurably false: `MAX_RATE * MAX_YEARS` is 1000 and `ln(f64::MAX)` is 709.78, so a
-    /// contract at `rate = -7.1, years_to_expiry = 100` -- both inside every accepted bound
-    /// -- makes `e^-rT` infinite.
+    /// `MAX_RATE * MAX_YEARS` is 1000 and `ln(f64::MAX)` is 709.78, so `rate = -7.1` or
+    /// `carry = -7.1` at `years_to_expiry = 100` -- every value inside every accepted
+    /// bound -- makes a discount factor infinite. And with the factor still finite,
+    /// `spot` or `strike` at `MAX_UNDERLYING` makes the PRODUCT infinite: `e^700` is
+    /// 1.01e304 and `1e12` times it is past `f64::MAX`.
     ///
-    /// What contains it is on the way OUT: `greeks` checks every output and returns
-    /// `NotRepresentable` rather than a number. This test pins that, and pins the boundary,
-    /// so the corrected doc has a mechanism behind it rather than a second sentence.
+    /// This used to be contained on the way OUT, by `greeks` checking its result. That
+    /// covered `price` and `greeks` and missed the solver: `implied_volatility` reads
+    /// `no_arbitrage_bounds` BEFORE it evaluates the model, so a put at `S = K = 100,
+    /// T = 100, r = -7.1` quoted at 10 came back as `PriceBelowIntrinsic { intrinsic:
+    /// inf }` -- a named, plausible-looking refusal carrying an infinity, instead of
+    /// `NotRepresentable`. W1-greeks1-0, D-0920.
+    ///
+    /// Every path -- `check`, `price`, `greeks`, and `implied_volatility` for both kinds
+    /// -- is asserted on every overflowing input, and the inputs just inside the edge
+    /// are asserted to price AND to solve, so the refusal cannot be satisfied by a crate
+    /// that refuses everything.
     #[test]
-    fn a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out() {
-        let at = |rate: f64| Contract {
-            spot: 100.0,
-            strike: 100.0,
+    fn a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in() {
+        let contract = |spot: f64, strike: f64, rate: f64, carry: f64| Contract {
+            spot,
+            strike,
             years_to_expiry: MAX_YEARS,
             rate,
-            carry: 0.0,
+            carry,
         };
-        // The input bound admits both of these, which is the whole point.
-        assert!(
-            (-7.1_f64).abs() <= MAX_RATE && MAX_YEARS <= MAX_YEARS,
-            "the witness must sit inside the accepted box or it proves nothing"
-        );
-        // `ln(f64::MAX) / MAX_YEARS` is 7.0978..., so the boundary sits between these two.
-        assert!(
-            at(-7.0).greeks(0.2, OptionKind::Call).is_ok(),
-            "at r = -7.0 and T = 100 the discount factor is 1.01e304, which is finite, so \
-             this must price rather than refuse -- otherwise the assertion below could pass \
-             on a crate that refuses everything"
-        );
-        assert_eq!(
-            at(-7.1).greeks(0.2, OptionKind::Call),
-            Err(GreeksError::NotRepresentable),
-            "at r = -7.1 and T = 100 the discount factor is infinite, and both values are \
-             INSIDE every accepted bound. The refusal happens on the way out, in `greeks`, \
-             not on the way in via MAX_RATE."
-        );
+        // Each witness sits inside the accepted box, or it proves nothing.
+        const { assert!(7.1 <= MAX_RATE && 1e12 <= MAX_UNDERLYING) };
+        // `e^700` is finite and `MAX_UNDERLYING` times it is not: the product overflow
+        // is reachable with the factor itself finite, so checking the factor alone
+        // would not be enough.
+        assert!((7.0_f64 * MAX_YEARS).exp().is_finite());
+        assert!(!(MAX_UNDERLYING * (7.0_f64 * MAX_YEARS).exp()).is_finite());
+        let overflowing = [
+            ("e^-rT", contract(100.0, 100.0, -7.1, 0.0)),
+            ("e^-qT", contract(100.0, 100.0, 0.0, -7.1)),
+            ("S * e^-qT", contract(MAX_UNDERLYING, 100.0, 0.0, -7.0)),
+            ("K * e^-rT", contract(100.0, MAX_UNDERLYING, -7.0, 0.0)),
+        ];
+        for (what, witness) in overflowing {
+            assert_eq!(
+                witness.check().map(|_| ()),
+                Err(GreeksError::NotRepresentable),
+                "{what} overflowed and `check` let it through"
+            );
+            for kind in [OptionKind::Call, OptionKind::Put] {
+                assert_eq!(
+                    witness.price(0.2, kind),
+                    Err(GreeksError::NotRepresentable),
+                    "{what} {kind:?} price"
+                );
+                assert_eq!(
+                    witness.greeks(0.2, kind).map(|out| out.price),
+                    Err(GreeksError::NotRepresentable),
+                    "{what} {kind:?} greeks"
+                );
+                // A quote of 10 is the one the audit used. Before the fix the put under
+                // rate overflow, and the call under carry overflow, came back as
+                // `PriceBelowIntrinsic { intrinsic: inf }`.
+                assert_eq!(
+                    witness
+                        .implied_volatility(10.0, kind)
+                        .map(|out| out.volatility),
+                    Err(GreeksError::NotRepresentable),
+                    "{what} {kind:?} implied volatility"
+                );
+            }
+        }
+
+        // Just inside the edge: `ln(f64::MAX) / MAX_YEARS` is 7.0978, so `-7.0` keeps
+        // every factor finite. Alone, the rate and the carry each still price.
+        for inside in [
+            contract(100.0, 100.0, -7.0, 0.0),
+            contract(100.0, 100.0, 0.0, -7.0),
+        ] {
+            for kind in [OptionKind::Call, OptionKind::Put] {
+                let out = inside.greeks(0.2, kind);
+                assert!(out.is_ok(), "{inside:?} {kind:?} refused: {out:?}");
+            }
+        }
+        // And SOLVES. Rate and carry both at -7.0 put both legs near 1.01e306 with
+        // `r - q = 0`, so the quote determines a volatility: the overflowing inputs
+        // above are refused for overflowing, not for being near it.
+        let both = contract(100.0, 100.0, -7.0, -7.0);
+        for kind in [OptionKind::Call, OptionKind::Put] {
+            let quoted = both.price(0.2, kind).expect("priced just inside the edge");
+            let solved = both
+                .implied_volatility(quoted, kind)
+                .map(|out| out.volatility);
+            assert!(
+                solved.is_ok_and(|volatility| (volatility / 0.2 - 1.0).abs() < 1e-9),
+                "{kind:?} just inside the edge did not solve back to 0.2: {solved:?}"
+            );
+        }
     }
 
     #[test]

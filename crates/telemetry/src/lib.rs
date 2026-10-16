@@ -55,7 +55,17 @@
 //!
 //! * A file rolls at [`DEFAULT_MAX_FILE_BYTES`] — 8 MiB, roughly 33,000 events.
 //! * [`DEFAULT_KEEP_FILES`] files are kept — 8, including the one being
-//!   written. **The whole crate therefore occupies at most 64 MiB, forever.**
+//!   written. **The whole set therefore occupies about 64 MiB while rotation
+//!   works** — each file at most its bound, or one line past it when a single
+//!   line is wider than the bound itself (a 1 KiB `MIN_FILE_BYTES` file and a
+//!   41 KB line).
+//! * **Not forever.** The first failed roll stops rotation for the life of
+//!   the sink (`Sink`'s `rotation_broken`, which keeps the retained files from
+//!   being emptied one per event), and from then on the current file grows
+//!   without a bound until the process restarts. That is counted in
+//!   [`Health::rotation_failures`], visible in [`Health::current_bytes`] and
+//!   makes [`Health::is_loud`] true. This line used to say "at most 64 MiB,
+//!   forever", which no path in `sink` enforces. D-1324.
 //! * One event carries at most [`MAX_FIELDS`] fields; text past its ceiling is
 //!   cut on a character boundary and the line says `"cut":true`.
 //! * A tail query returns at most [`MAX_LIMIT`] events and reads at most
@@ -117,6 +127,7 @@ mod event;
 mod json;
 mod level;
 mod record;
+pub mod run_dirs;
 mod sink;
 mod tail;
 mod value;
@@ -129,8 +140,15 @@ pub use crate::json::LineFault;
 pub use crate::level::{LEVELS, Level};
 pub use crate::record::Record;
 pub use crate::sink::{
-    BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
-    Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
+    AUDIT_ACCESS_SEGMENT, AUDIT_BASENAME, AUDIT_DIMENSIONS, AUDIT_DIMS_FILE,
+    AUDIT_FIRST_DIMENSIONS, AUDIT_INDEX_DIR, AUDIT_KEEP_FILES, AUDIT_LIFECYCLE_WORDS,
+    AUDIT_MAX_FILE_BYTES, AUDIT_MAX_POSTING_NAME, AUDIT_POINTER_BYTES, AuditHealth, AuditLine,
+    AuditPointer, BASENAME, Config, DEFAULT_FLOOD_LINES, DEFAULT_KEEP_FILES,
+    DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FLOOD_MESSAGE, FLOOD_WINDOW_MS, FileTarget, Health,
+    MAX_TARGET_LEVELS, MIN_FILE_BYTES, PostingAt, Postings, PostingsPage, Sink, Target,
+    audit_coverage, audit_current_path, audit_generation_path, audit_path_for, audit_posting_path,
+    audit_postings, audit_postings_before, audit_read, audit_rolled_path, audit_serial,
+    audit_serial_path, audit_state, current_path, dir_beneath_store, is_audited,
     paths_newest_first, rotated_path,
 };
 pub use crate::tail::{
@@ -142,6 +160,9 @@ use std::sync::OnceLock;
 
 /// The process-wide sink, once something installs one.
 static GLOBAL: OnceLock<Sink> = OnceLock::new();
+
+/// Held across every [`install`], so two never interleave. See there.
+static INSTALLING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Installs the process-wide sink.
 ///
@@ -164,6 +185,19 @@ pub fn install(config: &Config) -> Result<&'static Sink, String> {
     if let Some(why) = config.refusal() {
         return Err(why);
     }
+    // ONE INSTALL AT A TIME. Two installs racing on one directory used to
+    // interleave so that the second's `Sink::open` met the first's directory
+    // lock and was refused with THAT reason while the first had not yet
+    // stored its sink: the loser then found no global sink at all, and a
+    // caller that adopts the winner (`api::emitted::sink`) panicked. Opening
+    // a sink grew a few syscalls with the audit stream (D-3341 item 3), which
+    // widened the window enough to be seen. Serialised, the loser waits and
+    // is refused as "already installed", naming the winner. Every write to
+    // `GLOBAL` happens under this lock, so `get_or_init` below always stores
+    // the sink this call opened.
+    let _one = INSTALLING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(existing) = GLOBAL.get() {
         return Err(format!(
             "a telemetry sink is already installed, writing {}",
@@ -171,24 +205,7 @@ pub fn install(config: &Config) -> Result<&'static Sink, String> {
         ));
     }
     let sink = Sink::open(config)?;
-    let wanted = sink.path();
-    let installed = GLOBAL.get_or_init(|| sink);
-    if installed.path() == wanted {
-        return Ok(installed);
-    }
-    // ANOTHER THREAD WON THE RACE between the `get` above and this
-    // `get_or_init`, with a different path. The sink this call built has been
-    // dropped and the caller is told which one is live rather than handed one
-    // that is not writing where it asked for. NO TEST DRIVES THIS ARM: it
-    // needs two `install` calls to interleave inside a window of a few
-    // instructions, and `OnceLock` is per process so a test could not retry.
-    // Named here rather than left for a coverage report to find, per
-    // `CLAUDE.md` §3 rule 6.
-    Err(format!(
-        "a telemetry sink was installed concurrently, writing {}; {} is not it",
-        installed.path().display(),
-        wanted.display()
-    ))
+    Ok(GLOBAL.get_or_init(|| sink))
 }
 
 /// The process-wide sink, if one is installed.
@@ -329,6 +346,99 @@ mod tests {
         ONCE.call_once(|| {
             sweep_stale_scratch_in(&std::env::temp_dir(), std::time::SystemTime::now());
         });
+    }
+
+    /// Runs `body` in a process whose permission bits are enforced, even when
+    /// this one runs as root.
+    ///
+    /// **Why.** A test that closes a file or a directory with `chmod` and
+    /// expects the host to refuse proves nothing as root: root bypasses the mode
+    /// bits (`CAP_DAC_OVERRIDE`), the call succeeds, the refusal under test never
+    /// runs, and the test fails on its own premise. CI and the operator's machine
+    /// run as an ordinary user; a cloud container runs as root. Skipping there
+    /// would leave the refusal unexercised on exactly that host, and `CLAUDE.md`
+    /// §4 bans a test that asserts nothing. D-0995.
+    ///
+    /// **How.** The named test is re-run, alone, in a child of this test binary.
+    /// As root the child gets uid 65534 (`nobody`): `setuid` away from root
+    /// drops every capability, so the mode bits decide again and the SAME
+    /// production refusal runs under the SAME assertions. As anyone else the
+    /// child keeps the parent's own uid. Either way the same lines run, so none
+    /// of this is reachable only as root and gate 20's non-root profile covers
+    /// it. The child sees the marker and runs the body; the parent asserts the
+    /// child passed AND ran exactly one test, because `--exact` with a name that
+    /// matches nothing exits zero having run nothing. The environment is
+    /// inherited, so a coverage run's `LLVM_PROFILE_FILE` reaches the child.
+    ///
+    /// `test` is the harness's name for the caller: its full module path.
+    /// Held for WRITING while `where_permission_binds` runs a child, and for
+    /// READING by every test that drops a sink and opens another on the same
+    /// directory.
+    ///
+    /// **Why.** The sink's one-writer lock (D-1537) is an `flock` on
+    /// `events.lock`, and an `flock` belongs to the open file description,
+    /// which `fork` shares with the child. `.uid(..)` makes `std` fork and then
+    /// exec, so a child forked while another test's sink is alive holds that
+    /// sink's lock from the fork until its exec closes the descriptor. A test
+    /// that drops its sink and reopens it inside that window is refused with
+    /// "another sink ... holds this telemetry directory". PR #74 run 1263 hit
+    /// exactly that. Readers never wait on each other; only a child's spawn
+    /// waits for them, and they for it. D-1462.
+    pub(crate) static FORK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// A reader's hold on [`FORK_GATE`], for a test that reopens a sink.
+    pub(crate) fn no_fork_in_flight() -> std::sync::RwLockReadGuard<'static, ()> {
+        FORK_GATE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn where_permission_binds(test: &str, body: impl FnOnce()) {
+        use std::os::unix::process::CommandExt as _;
+        const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
+        const NOBODY: u32 = 65_534;
+        if std::env::var_os(CHILD).is_some() {
+            body();
+            return;
+        }
+        let uid = Some(effective_uid())
+            .filter(|&uid| uid != 0)
+            .unwrap_or(NOBODY);
+        let _no_sink_alive = FORK_GATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .uid(uid)
+            .output()
+            .expect("the child test process starts");
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let ran = output.status.success() && stdout.contains("1 passed");
+        // Formatted unconditionally, so no line is reached only when the child fails.
+        let said = format!("child {test} (uid {uid}) failed or ran no test:\n{stdout}\n{stderr}");
+        assert!(ran, "{said}");
+    }
+
+    /// This process's effective uid, read as the owner of a file it just made.
+    ///
+    /// `std` has no `geteuid` and every crate here denies `unsafe`, so the
+    /// kernel is asked the portable way: a new file belongs to its creator.
+    fn effective_uid() -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let probe =
+            std::env::temp_dir().join(format!("brutex-uid-probe-{}-{serial}", std::process::id()));
+        let file = std::fs::File::create_new(&probe).expect("a probe file");
+        let uid = file.metadata().expect("the probe's own status").uid();
+        drop(file);
+        let _removed = std::fs::remove_file(&probe);
+        uid
     }
 
     /// Sweeps test scratch with explicit directory and clock inputs, so fresh

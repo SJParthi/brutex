@@ -1,4 +1,4 @@
-# 02 — Store format, version 2
+# 02 — Store format, versions 2 and 3
 
 Bytes on disk. This document is the authority; the code follows it.
 
@@ -8,6 +8,10 @@ place — `CLAUDE.md` §3 rule 8.
 
 **Version 1 is retired.** §10 says what it was and why it is refused rather
 than decoded. Its number is never reused.
+
+**Version 3 is the version written since D-1571.** It is version 2's geometry
+byte for byte; what it adds is that block checksums are mandatory (§2.1).
+Version 2 files stay readable at their own row and are never rewritten as 3.
 
 ---
 
@@ -61,10 +65,10 @@ differently on each (§3 rule 5).
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
-| 0 | 8 | `magic` | `b"BRUTEXB2"` |
-| 8 | 2 | `format_version` | `2` |
+| 0 | 8 | `magic` | `b"BRUTEXB3"` (version 3) or `b"BRUTEXB2"` (version 2) |
+| 8 | 2 | `format_version` | `3`, or `2` for a file written before D-1571 |
 | 10 | 2 | `record_stride` | `56`. Read it; never assume it. |
-| 12 | 4 | `flags` | bit 0: block checksums present |
+| 12 | 4 | `flags` | bit 0: block checksums present. Every other bit is zero; a set one is refused on read and on commit (D-1354) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | **the commit counter.** See §5. |
 | 32 | 8 | `first_ts_micros` | of record 0. Meaningful only when `n_valid > 0`. |
@@ -72,7 +76,11 @@ differently on each (§3 rule 5).
 | 48 | 4 | `symbol_id` | resolved from the path; a cross-check, not the index |
 | 52 | 4 | `timeframe_secs` | 60 for 1-minute |
 | 56 | 4 | `slot_crc` | CRC-32C over bytes 0..56 **and** 60..64 |
-| 60 | 4 | reserved | zero |
+| 60 | 4 | reserved | zero; a non-zero value is refused (D-1353) |
+
+**Every integer in the slot is little-endian**, whatever the host: the
+encoder writes each field with `to_le_bytes` and the decoder reads it with
+`from_le_bytes` (tests-docs-security-pass14 P14-03, D-1959).
 
 The checksum covers every byte of the slot except the four it occupies, so a
 flipped bit anywhere in the 64 is detected — there is no window a corruption
@@ -84,6 +92,35 @@ a **new version**, never by reinterpreting version 2.
 The 64-byte slot size and the 16384-byte slot spacing are **family** constants:
 every version uses them, which is what lets a reader locate the slots before it
 knows which version the file is.
+
+### 2.1 Version 3 — block checksums are mandatory (D-1571)
+
+At version 2, bit 0 of `flags` decides whether a month is verified. Clearing it
+in both slots and recomputing their CRCs turned verification off for a sealed
+month, and the `.crc` beside it was ignored (audit-20261003 attackdata-8);
+random rot cannot do it, because the slot CRC covers the flag, but a deliberate
+rewrite can.
+
+Version 3 closes that without touching version 2's bytes:
+
+- **Same geometry.** Header region, slot offsets, 56-byte stride, 73-record
+  blocks and the `.crc` sidecar are version 2's exactly. Only `magic`
+  (`BRUTEXB3`), `format_version` (`3`) and one rule differ.
+- **The rule.** A version-3 slot whose `flags` lacks bit 0 is refused on read
+  (`FormatError::ChecksumsRequired(3)`) and is never committed. A version-3
+  month is therefore always verified, and a sealed month whose `.crc` is
+  missing is refused as `ChecksumsMissing`, as at version 2.
+- **Written.** `store::layout::Layout::CURRENT` is version 3, so every month
+  created from D-1571 on is born at it.
+- **Version 2 stays readable.** A `.bin` resolves against both rows; a
+  version-2 month is opened, appended to and sealed at version 2 for its whole
+  life, flag optional as before. No file is upgraded in place (`CLAUDE.md`
+  §3 rule 8).
+- **What it does not close.** The CRC is integrity, not authentication. An
+  actor who rewrites `magic` and `format_version` back to version 2 in both
+  slots and recomputes their CRCs can still present an unsealed version-2
+  month; one who can do that can equally rewrite the `.crc`. Stated in
+  `docs/06-limits.md`.
 
 ---
 
@@ -105,9 +142,23 @@ const _: () = assert!(size_of::<Bar>() == 56);
 const _: () = assert!(align_of::<Bar>() == 8);
 ```
 
+**On disk the seven fields are little-endian `i64`s at offsets 0, 8, 16, 24,
+32, 40 and 48**, written by `Bar::image` with `to_le_bytes`. The `#[repr(C)]`
+above fixes the field *order*, not the byte order: the record is not a
+native-endian memory image, and a reader on a big-endian host still decodes it
+little-endian (P14-03, D-1959).
+
 **Prices are paisa integers.** Never a float, at any layer, for any reason.
 A float price is how a rounding difference becomes a divergent result set six
 months later.
+
+**The prices are the vendor's, as served.** The store snaps each price to the
+paisa grid at the write boundary and changes nothing else: it applies no split,
+bonus, dividend or other corporate-action adjustment, and it records no
+adjustment basis. Whether a vendor's cash-equity candles arrive already
+adjusted is UNVERIFIED for every feed (`docs/00-charter.md` §4), so a month
+pulled before an action and one pulled after it may sit here on different
+bases with nothing to tell them apart. numeric-pass16 p16num-2, D-1969.
 
 **`i64::MIN` is the open-interest null sentinel.** Zero means zero. Spot
 indices carry no open interest and store the sentinel; conflating that with a
@@ -121,12 +172,18 @@ it is why the checksum flag is not decoration.
 
 ---
 
-## 4. Reading — read-only mapping
+## 4. Reading — one positional read, no mapping
 
-The file is mapped **read-only**. Reads are pointer arithmetic against
-resident pages.
+**No crate maps a bar file.** This section used to say the file was mapped
+read-only and that a read was pointer arithmetic over resident pages. No build
+has done that: `crates/store/src/lib.rs` carries `#![forbid(unsafe_code)]`,
+which a memory mapping needs, and `crates/store/Cargo.toml` does not name
+`memmap2`. A read is `BarFile::read_record` → `read_row` → `read_fully` →
+`Positional::get`, which is `FileExt::read_at` — one `pread` of one record's
+bytes. `store::docs::section_4_names_the_positional_read_and_claims_no_mapping`
+reads this paragraph and those source lines together. D-0790.
 
-**Writes never go through the mapping.** They use positional writes
+**Writes never go through a mapping either.** They use positional writes
 (`pwrite`), which return an error on a full disk.
 
 This is not a preference. A writable mapping that runs out of space raises
@@ -137,8 +194,7 @@ halted correctly on a full disk; a naive port to a writable mapping would have
 been strictly worse, and that is the single most valuable thing the failure
 audit produced.
 
-A header decoder over a shared mapping copies its 64 bytes **once** before it
-checks anything, so the checksum covers exactly the bytes the decoded header
+`Header::decode` copies a slot's 64 bytes **once** before it checks anything, so the checksum covers exactly the bytes the decoded header
 carries. A copy that caught a concurrent `pwrite` mid-flight fails that
 checksum rather than returning half of each image.
 
@@ -150,9 +206,18 @@ checksum rather than returning half of each image.
 1. pwrite the new records at offset  32768 + n_valid * 56
 2. fsync the data, through Commit::durable_through
 3. pwrite the affected block checksums into the .crc sidecar, then fsync it
+3b. pwrite the time-index entries the batch touches into the .tix, then fsync it
 4. pwrite the 64-byte header slot for generation g   <- one write
 5. fsync the header
 ```
+
+Step 3b is D-2329's and §8.1 describes it. Like step 3 it lands before the
+slot that commits the bars it describes, so a committed bar is never missing
+from the index; a crash between 3b and 5 leaves index entries AHEAD of the
+commit, which the next append masks off and overwrites (§8.1). A batch the
+index cannot hold — a second daily bar on one IST day — is admitted exactly as
+before; the `.tix` is removed before step 1 and the month bisects, loudly
+(D-2330).
 
 **This list used to put the sidecar before the data `fsync`.** The writer has
 always done it in the order above (`BarFile::append`: records, `sync_all`,
@@ -167,6 +232,22 @@ sidecar, which it does only for a stream with no committed records. The
 sidecar's own `fsync` makes its bytes durable, not its name, and a sealed month
 that loses the name after its first commit is refused forever: a writer may
 not recreate proof for existing records (§8). D-0688.
+
+**And every directory the writer creates has its entry flushed in its parent**
+(D-1522). Creating a month can make up to six directories below the store root
+(vendor .. rung); before D-1522 only the month's own directory was synced, so a
+crash could lose a directory whose month had returned `Committed`. **The store
+root itself is never created by the writer**: a missing root is refused by
+name, so a store on an unmounted volume cannot silently grow a second root on
+the parent filesystem (D-1522, the bar-writer half of D-0954).
+
+**A month whose header region is gone is re-initialised only when nothing was
+ever committed** (D-1520, D-1521). The writer repairs a file of at most 32,768
+bytes whose bytes past the first slot are zero and whose first slot does not
+decode — what an interrupted `initialise` leaves, all zeros or a torn genesis
+slot — and only when the checksum sidecar beside it is absent or empty. A
+sidecar with entries proves an append committed records, so such a file is
+refused as `CommittedRecordsLost` instead of being reopened empty.
 
 Consequences:
 
@@ -184,10 +265,19 @@ Consequences:
   64-byte unit, into the slot that does *not* hold the previous commit. A crash
   during it leaves a slot that fails its own checksum, and the reader takes the
   previous generation.
-* **A header that outran its data loses the tail, not the file.** If the slot
+* **A header that outran its data is refused, not served short.** If the slot
   becomes durable and the records do not, the counter names records the length
-  cannot support; the reader falls back to the previous generation rather than
-  refusing the whole file.
+  cannot support. `Header::read_region` walks back to an older generation, and
+  `BarFile::validated` — which every open door goes through — then compares
+  that generation's counter with the highest counter any surviving slot still
+  decodes, and refuses with `FormatError::CounterExceedsFile` when a slot
+  claims more. This bullet used to promise the fallback: that the file would
+  open one generation short. `append` makes records durable before it writes
+  a slot that names them, so the case needs a truncation or a lost write, and
+  opening short would drop committed bars without a word.
+  `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+  and `store::write::a_counter_behind_its_bytes_opens_and_a_counter_ahead_of_them_is_refused`
+  assert the refusal. D-0790.
 
 `Commit::durable_through` is the byte offset step 2 must cover. **It states the
 offset; `crates/store/src/file.rs` issues the barrier** — `sync_all` on the
@@ -204,6 +294,15 @@ enforce that — an exclusive lock is I/O" stood in front of that sentence and
 contradicted it; the lock is real, and what it does *not* provide is
 cross-machine exclusion on a network filesystem, which is the honest limit and
 the one worth stating.
+
+**A stamp the path rules out is refused before step 1 (D-0915).** The path's
+`<yyyy-mm>` and `<tf>` segments bind the records: every offered stamp must lie
+in `[00:00 IST on the 1st, 00:00 IST on the 1st of the next month)` and on the
+rung's grid — intraday rungs anchored at 09:15 IST as `pull::fold` cuts them,
+the `1day` rung any whole second. A refusal (`OutsideMonth`, `OffGrid`) writes
+nothing. Session hours are not part of this check; `docs/06-limits.md` records
+why. No byte of the format changes, and files written before the check are
+read exactly as before.
 
 ---
 
@@ -280,6 +379,26 @@ bars/groww/NSE/INDEX/NIFTY/1min/2024-03.crc
 
 The sidecar is indexed by `i / 73`, not by `(32768 + i*56) / 4096`.
 
+**The sidecar's bytes.** `.crc`, `.ovl.crc` and `.grk.crc` share one layout,
+each at its own family's records per block (73 bars, 170 overlay rows, 51 Greek
+rows):
+
+| Property | Value |
+|---|---|
+| Header, magic, version | none. The file is entries only. |
+| Entry for block *b* | 4 bytes at byte offset `4·b` |
+| Entry encoding | `u32`, little-endian |
+| Entry value | CRC-32C of the block's **covered** bytes: from the block start (`32768 + b · block_len`) for the committed records only, so a partial tail block covers `(n_valid mod records_per_block) · stride` bytes (§6 above) |
+| CRC-32C parameters | Castagnoli polynomial, reflected form `0x82F63B78`; register initialised to `0xFFFFFFFF` and the result inverted (`xorout 0xFFFFFFFF`); check value `0xE3069283` for `b"123456789"` (`store::crc::CHECK_VALUE`) |
+| Blocks a reader consults | `0 .. blocks_for(n_valid)`, the blocks the header's commit counter reaches. Bytes past the last of them are not read. |
+
+The writer seals each block an append reached with one 4-byte positional write
+at `4·b` (`store::file`, "FOUR BYTES AT `block * 4`"); the reader verifies one
+block with one 4-byte positional read at the same offset. Until
+tests-docs-security-pass14 P14-02 (D-1959) these facts were stated only in
+Rust comments, and this document named the checksum and nothing about where an
+entry is or how it is encoded.
+
 **Why this is not optional.** A flipped bit in a raw `i64` price produces a
 different price — a *plausible* one. There is no structure to violate, no
 parse to fail. Without a checksum the corruption is silent and permanent, and
@@ -290,9 +409,13 @@ A file whose `flags` bit 0 is clear carries no sidecar, and a verification
 request against it is **refused** rather than answered — "verified" and "there
 was nothing to verify against" are different answers.
 
-Verification is O(1) per read: one block CRC, not a file scan. Enforced by
-`docs/04-invariants.md` C-07 — sealing one block costs the same at 1×, 10× and
-100× the file's record count.
+Verification on the read path is one block CRC per read, not a file scan:
+`read_row` calls `verify_block_of` for the record's own block. What C-07
+measures is `block::seal` over a block held in memory — sealing one block
+costs the same at 1×, 10× and 100× the file's record count. This paragraph used
+to cite C-07 as enforcing the per-read bound; C-07 does not read a file, so the
+read path's check is the source's shape, and C-28 and C-29 time
+`read_record` end to end. D-0790.
 
 **Read "O(1)" precisely.** The *operation* is constant because a block is a
 fixed 4,088 bytes; the CRC inside it still reads every one of them, and always
@@ -306,14 +429,19 @@ states what is not claimed.
 ## 7. Opening — boundary check
 
 ```
-if (len - 32768) % 56 != 0 {
-    // truncate to the last whole record, log loudly, continue
+if len > offset_of(n_valid) {
+    // bytes past the commit: log loudly with the count, open, do NOT truncate
 }
 ```
 
-A file whose length does not divide by the stride was interrupted. The tail is
-truncated to the last whole record and the event is logged with the byte count
-discarded. Never silently, never by ignoring the remainder.
+A file holding bytes past the extent its commit counter covers — a ragged
+record, or whole records an append wrote before it died — was interrupted. The
+month opens, and the event is logged (`store.open`, "bytes past the commit
+counter") with the byte count discarded. **The file is not truncated** (D-0189):
+no reader can reach those bytes, and the next append writes at exactly
+`offset_of(n_valid)` and overwrites them, so a destructive write at open buys
+nothing. Never silently, never by counting the remainder as records. This
+section said "truncated" until D-1527 corrected it to what D-0189 decided.
 
 A file shorter than the header region is all tail, and is reported as such.
 
@@ -334,7 +462,11 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.ovl.crc` | overlay block checksums, using the overlay's own geometry |
 | `.grk` | computed Greeks and their provenance, 80-byte records, version 8 |
 | `.grk.crc` | Greek block checksums, using the Greek file's own geometry |
+| `.tix` | the bar file's time index, version 1 (§8.1, D-2329) |
+| `.prv` | where the month's bars came from, one record per landing, version 1 (§8.3, D-3334) |
+| `.srt` | the bar file's sort index: rows ordered by each sortable column, in runs, version 1 (§8.4, D-3349) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
+| `.sbar` | the sealed form of a closed month: every committed record, the committed header and the `.prv` image in one file written once, version 1 (§8.5, D-4965) |
 
 ```
 bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.bin
@@ -344,6 +476,47 @@ bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.grk
 
 This keeps the base stride constant forever. A base file written in year one
 is readable in year ten by arithmetic that has not changed.
+
+`.ovl` and `.grk` are the bar file's header region and slot (§2) with their own
+magic, version and stride: the same 32,768-byte header region, the same
+64-byte slot, the same commit counter, and blocks of whole records anchored at
+byte 32,768. Their block checksums are optional as at bar version 2 (`flags`
+bit 0), and when present live in `.ovl.crc` / `.grk.crc` (§6's sidecar layout).
+Neither is in `store::layout::Layout::KNOWN`, the bar versions a `.bin` resolves
+against. Every integer and float is little-endian. Until P14-03 (D-1959) this
+section gave only each record's width and version.
+
+### 8.1 `.ovl` — overlay record, 24 bytes
+
+Magic `BRUTEXB9`, version `9`, stride `24`, **170** records per block
+(`24 × 170 = 4,080`). Written by `store::format::Overlay::image`.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `ts_micros` | `i64`, the open of the bar it overlays; joined to the bar by value, not by position |
+| 8 | 8 | `spot` | `i64` paisa, or `i64::MIN` when the vendor stated none |
+| 16 | 8 | `iv_micros` | `i64` millionths of implied volatility (`125000` is 0.125), or `i64::MIN` when absent |
+
+### 8.2 `.grk` — computed Greeks record, 80 bytes
+
+Magic `BRUTEXB8`, version `8`, stride `80`, **51** records per block
+(`80 × 51 = 4,080`). Written by `store::format::Greek::image`.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `ts_micros` | `i64`, the open of the bar it prices |
+| 8 | 8 | `spot` | `i64` paisa, the underlying level used |
+| 16 | 8 | `volatility` | `f64` decimal (`0.1425`, not `14.25`) |
+| 24 | 8 | `delta` | `f64`, scale-free |
+| 32 | 8 | `gamma` | `f64`, **per paisa** |
+| 40 | 8 | `vega` | `f64`, per `1.00` of volatility, **per paisa** |
+| 48 | 8 | `theta` | `f64`, per year, **per paisa** |
+| 56 | 8 | `rho` | `f64`, per `1.00` of rate, **per paisa** |
+| 64 | 8 | `rate` | `f64`, the continuously-compounded rate priced under |
+| 72 | 8 | `provenance` | `i64`, packed: bits `0..8` volatility source (`0` solved, `1` vendor); bits `8..16` rate source (`0` charter, `1` operator, `2` solved); bit `16` below the validated band; bits `32..64` signed `i32` moneyness steps (sign-extend when reading) |
+
+The `f64` fields keep full precision (`CLAUDE.md` §7: a greek is a statistic,
+not a price); the two `i64` fields that are prices are paisa.
 
 Each record family owns its checksum file (D-0667). Sharing `.crc` between
 different strides overwrote the source bars' integrity evidence when an overlay
@@ -355,21 +528,579 @@ proof. Writers may create a checksum sibling only for a stream with no
 committed records; a missing proof for existing sealed records refuses before
 creation. This change does not repair or reseal previously damaged history.
 
+### 8.1 The time index — `.tix`, version 1 (D-2329, D-2330)
+
+`BarFile::first_at_or_after` — the first committed bar stamped at or after a
+timestamp — was a bisection over the records (D-1434). The header names the
+timeframe and the path names the IST month, so a timestamp's SLOT on the
+rung's grid is arithmetic; but a month has nights, holidays and missing
+minutes, so the slot is not the row, and no field of the bar header recovers
+the row from it. The slot-to-row table is therefore this new file at its own
+version and stride; the `.bin`, `.crc` and every existing version are
+untouched (`CLAUDE.md` §3 rule 8, §4).
+
+**The small-month rule (D-4933).** A month whose committed bars are fewer
+than 1,024 (`store::time_index::INDEX_MIN_ROWS`) and that has no `.tix` is
+given none: the writer's open creates no file and an append computes no
+entries. Its lookups are the D-1434 bisection, at most ten bar reads, and a
+reader names the reason `BelowThreshold` without the `store.tix` warning,
+because it is the rule and not a fault. The commit that brings the month to
+1,024 bars or more writes the `.tix` WHOLE — every committed bar and the
+batch, into a new inode, entries then header, each synced — before its
+records are written, the position an append's entries take, so no header
+slot ever commits a bar the index lacks. A threshold write the host refuses
+takes back the file it made and refuses the append before any record is
+written. A `.tix` already beside a small month (every month written before
+D-4933 has one) is kept in step as this section describes; only a name that
+is not there at all is excused, and nothing is deleted.
+
+**Slots.** One slot is one timeframe. Intraday slots start on the grid §5's
+admission uses — `(ts + anchor) mod width == 0`, anchored at 09:15 IST — so
+slot 0 starts at the last grid point at or before 00:00 IST on the 1st (that
+instant itself for 1s, 1, 3, 5 and 15 minutes; earlier for 2, 10, 30 and 60
+minutes), and every admitted intraday stamp is a slot's first instant. Daily
+slots are IST days, slot 0 starting 00:00 IST on the 1st. A month has
+`slot_count = (until − 1 − origin) / width + 1` slots: 44,640 at one minute
+and 2,678,400 at one second in a 31-day month.
+
+**At most one bar per slot, and an intraday bar AT its slot's start.** Every
+intraday stamp the writer admits is a grid point (D-0915), so it is the first
+instant of its slot and two strictly increasing ones are two slots: every
+intraday rung holds this for free, and only a month written before D-0915 can
+break it (such a month gets no index; see below). The daily rung
+admits any whole second (D-0915), so it can hold a second bar on one IST day.
+That bar is still admitted, because D-2329 does not narrow what the writer
+accepts. Before any byte of that append is written the `.tix` is removed and
+its directory synced, and from then on the month bisects with the `store.tix`
+warning. A later writer open retries the rebuild, meets the same bar, and warns
+again (D-2330).
+
+**Header, 64 bytes at offset 0, little-endian:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXT1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | entry stride `16` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 8 | origin: the first instant of slot 0, epoch microseconds, `i64` |
+| 24 | 8 | slot width, microseconds, `i64` |
+| 32 | 8 | slot count, `u64` |
+| 40 | 4 | symbol id, as the bar header |
+| 44 | 16 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+A reader recomputes all of it from the path and the bar header and refuses
+any difference: a header that fails its checksum, a magic that is not
+`BRUTEXT1`, a version that is not 1, or a geometry that is not this month's.
+
+**Entry *b*, 16 bytes at `64 + 16·b`,** one per 64 slots `64b .. 64b+63`:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | occupancy, `u64`: bit `j` set when a bar lies in slot `64b + j` |
+| 8 | 4 | before, `u32`: bars in every slot below `64b` |
+| 12 | 4 | CRC-32C over bytes `0..12` followed by `b` as 8 little-endian bytes |
+
+The checksum binds an entry to its position, so an entry copied to another
+bucket or a run shifted by a lost write fails it. Entries exist from bucket 0
+through the bucket of the last committed bar, and the file ends there: an
+empty month's `.tix` is the 64-byte header alone; a full one-minute month's
+is `64 + 698·16` bytes, a full one-second month's `64 + 41,850·16`.
+
+**The lookup.** For `ts` at or before the header's `first_ts_micros` the
+answer is 0, and after its `last_ts_micros` it is `n_valid`, with no read.
+Otherwise `ts` lies in slot `q` no later than the last bar's, and one entry
+read gives
+
+```
+row = before[q/64] + popcount(occupancy[q/64] & ((1 << (q mod 64)) − 1))
+```
+
+the row of the first bar in slot `q` or later. When slot `q` is empty, or
+`ts` is its first instant, that is the answer. Otherwise `ts` is strictly
+inside an occupied slot. On an intraday rung the bar in it IS the slot's first
+instant — the index holds no other (below) — so it is before `ts` and the
+answer is `row + 1`. On the daily rung the bar may sit anywhere in its day,
+and one read of bar `row` decides between `row` and `row + 1`. **At most one
+entry read and, on the daily rung only, one bar read, whatever `n_valid` is.** A read
+handle decides once, at its first lookup, whether the index is usable: one
+open, the 64-byte header, and the two entries holding the bars the header
+stamps first and last, which must be rows `0` and `n_valid − 1` in their
+slots.
+
+**The writer keeps it in step.** `BarFile::append` computes the entries a
+batch touches before writing anything — one entry read, the one holding the
+last committed bar, with every bit above that bar cleared — and writes them
+at step 3b, cutting the file to end after them. A crash between 3b and 5
+leaves entries for bars that never committed; every reader ignores them
+(the lookup never consults a slot past the last committed bar), and the next
+append clears them by the same masking. Re-offering held bars
+(`AlreadyPresent`) writes nothing. The same bars written in any batching give
+the same `.tix`, byte for byte.
+
+**A month without a usable index is served loudly, never silently.** A `.tix`
+that is absent (a month written before D-2329, or by a writer that does not go
+through `BarFile::append`), refused, or not describing the committed bars
+leaves the handle on the D-1434 bisection: the same answers, at
+`ceil(log2(n_valid + 1))` record reads, with one `store.tix` warning per
+handle naming the reason (`BarFile::time_lookup` reports it). A read door
+never writes a `.tix`. The writer door — `BarFile::open_or_create` — rebuilds
+one from the committed bars when it finds none it can confirm: O(`n_valid`)
+verified record reads, once per month, logged as a `store.tix` info line. That
+open IS the explicit migration path for existing months. When the bars cannot
+be indexed (a block that fails its checksum, two bars in one slot, an intraday
+bar off the grid, a bar outside the month) the writer leaves no `.tix`, the
+month still opens and appends exactly as before, and its lookups bisect,
+saying why.
+
+**What the reader's confirmation does not prove.** It checks the header and
+the two entries holding the first and last bars, not every entry between: an
+index rewritten by hand, or one left by a writer that replaced the month's
+bars with others that happen to start and end in the same slots at the same
+rows, would pass it. `docs/06-limits.md` (D-2329) states the residue. A writer
+that changes a `.bin` other than through `BarFile::append` must delete the
+`.tix` beside it.
+
 Every one of those names is rendered by `store::path::StorePath` and nothing
 else. The vendor is the first segment (D-0019); every segment is
 case-canonical, because two segments differing only in case are two files on
 ext4 and one file on APFS.
 
+### 8.3 `.prv` — provenance sidecar, version 1 (D-3334)
+
+**Why it exists.** A bar record has no field saying where it came from, and
+nothing else in the store did either: no row could be audited back to its GDFL
+archive member or its Zerodha pull, and a month built from the GDFL zip looked
+exactly like one built from the tick store, although the two sources differ
+(DB-078, DB-G56). The record cannot widen (§3 is 56 bytes forever), so this is a
+new sibling at its own version, written by `store::provenance` and nothing else.
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2019-03.prv
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2019-03.prv
+```
+
+**One record per landing.** A landing is one `BarFile::append` that committed
+bars to the month — a GDFL import of one day's file, one Zerodha request window.
+An append that answered `AlreadyPresent` wrote nothing and is not a landing.
+
+**Bar files are never touched.** Writing a record opens the `.prv` and nothing
+else; the `.bin`, `.crc`, `.tix` and `.lock` are byte-identical before and after
+(`the_bar_files_are_byte_identical_after_a_record` for a month under the
+small-month threshold, which has no `.tix` and is given none by a record, and
+`an_indexed_months_time_index_is_byte_identical_after_a_record` for a month
+past it, whose `.tix` is compared; both in
+`crates/store/tests/provenance.rs`, D-4933).
+
+**Commit order: the bars first, the record after.** `provenance::record` takes
+the writer's open `BarFile` and the `Appended::Committed` its last append
+returned, refuses one that is not the handle's newest commit, and takes the
+generation from the handle. A crash between the two leaves bars no record names
+— reported as unrecorded and rebuilt from the journal by `/provenance.json`
+(WP-38b), labelled reconstructed — never a record naming bars that do not exist.
+
+Magic `BRUTEXP1`, version `1`, stride `256`, at most **1024** records, so a
+`.prv` is never longer than **262,208** bytes. Every integer is little-endian.
+
+**Header, 64 bytes at offset 0:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXP1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | record stride `256` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 4 | symbol id, as the bar header |
+| 20 | 2 | year of the month |
+| 22 | 1 | month |
+| 23 | 1 | reserved, zero |
+| 24 | 8 | vendor, its store name zero-padded (`gdfl`, `zerodha`) |
+| 32 | 24 | the first 24 bytes of BLAKE3 over the bar file's store path, `bars/<vendor>/…/<yyyy-mm>.bin` |
+| 56 | 4 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+A reader recomputes the vendor, timeframe, month and path digest from the path
+it was asked for and refuses any difference by name, so a sidecar copied beside
+another month or another instrument is refused, not read. The writer also
+refuses a header whose symbol id is not its bar file's.
+
+**Record *n*, 256 bytes at `64 + 256·n`:**
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `vendor` | equal to the header's; another vendor is refused |
+| 8 | 1 | `source_kind` | `1` `archive_member`, `2` `tickstore_day`, `3` `vendor_endpoint`; any other byte is refused |
+| 9 | 1 | `flags` | bit 0: the build carried a commit stamp; bit 1: `source_name` is a prefix; other bits zero |
+| 10 | 2 | `name_len` | bytes of `source_name` kept, 1 to 128 |
+| 12 | 4 | `bar_definition` | the D-2822 definition that built the bars; `0` where none applies (vendor-built bars) |
+| 16 | 8 | `source_bytes` | the member's uncompressed size from the archive's directory, the tick-store file's length, or the response body's |
+| 24 | 4 | `source_crc32` | the member's CRC-32 from the archive's directory; `0` for the other kinds |
+| 28 | 4 | `ist_day` | `yyyymmdd`: the day the journal keys the landing by — the GDFL trading day of the imported file, or the IST day a pull ran |
+| 32 | 32 | `source_name_blake3` | BLAKE3 of the whole source name |
+| 64 | 8 | `first_index` | the first bar this landing appended |
+| 72 | 8 | `n_bars` | how many it appended; never zero |
+| 80 | 8 | `journal_ordinal` | the line of `imports/gdfl.journal`, or the record of `audit/pull.journal`, the landing wrote |
+| 88 | 8 | `bar_file_generation` | the bar file's commit generation that published these bars |
+| 96 | 8 | `landed_at` | when the record was written, UTC epoch microseconds, `i64`, positive |
+| 104 | 20 | `commit` | the build commit's SHA-1 object name; all zero when flag bit 0 is clear |
+| 124 | 128 | `source_name` | UTF-8, zero-padded past `name_len` |
+| 252 | 4 | `record_crc` | CRC-32C over bytes `0..252` followed by *n* as 8 little-endian bytes |
+
+**The source name.** D-3334 names the digest, `source_name_blake3`; this
+format also keeps the name itself (`source_name`, `name_len`, and flag bit 1),
+so a record says where its bars came from without a journal beside it. An
+archive member is named by the archives that hold it,
+outermost first, each followed by `!`, then the member's name as the innermost
+archive's directory spells it. A tick-store day is its path below the tick-store
+root. An endpoint is its path alone; a name of that kind holding `?` is refused,
+because a query string is not part of the path and can carry credentials. A name
+longer than 128 bytes keeps its longest prefix that ends on a character boundary
+(so at least 125 bytes), sets flag bit 1, and is still identified exactly by
+`source_name_blake3`; a whole name must hash to it, or the record is refused.
+
+**Which records count.** The checksum binds a record to its position. The
+records are the longest run from ordinal 0 that each pass it; everything after
+them is the **tail**: an append that was interrupted, or a last record damaged
+after it was written — this format cannot tell those two apart, so the reader
+never serves either and reports the tail's length. The next append writes at
+the end of the run, over the tail, as a bar file's next append writes over the
+bytes past its commit counter (§7). A record that fails while a later one
+passes was damaged in place, and the whole sidecar is refused naming it. A
+record that passes its checksum with an impossible field (an unknown kind, a
+flag, a `name_len`, a day that is no date, `n_bars` zero, a commit without its
+flag) is refused naming the field. Consecutive records must be in bar order —
+each starts at or after the end of the one before, at a later generation — or
+the sidecar is refused: a sidecar whose ranges overlap could not say which
+landing wrote a bar.
+
+**Created on the first landing.** The header is written, `fdatasync`ed and its
+directory synced before any record. A `.prv` shorter than its header, or nothing
+but zeros, is **unborn**: its creator died before its first record, it holds
+none, and the next landing writes the header again.
+
+**One writer at a time.** An append takes an exclusive advisory lock on the
+`.prv` itself (never the month's `.lock`, which the bar writer holds) and
+refuses by name when another holds it. A reader takes none: a record still
+being written is tail, not a record.
+
+**Reading is a path probe.** `store::provenance::read` is one `open` (never
+through a final symlink), one `fstat` and one positional read of at most 262,208
+bytes. `Sidecar::covering(i)` answers the record that appended bar `i` by a
+binary search over at most 1024 records, or none for a bar no landing recorded.
+Both are bounded by constants, not by the store, the month's bar count or the
+number of months (`CLAUDE.md` §3 rule 4). `Sidecar::check_bars` refuses a
+sidecar with a record past the bar file's commit counter.
+
+**What it costs on disk.** A month of daily landings holds about 21 records:
+`64 + 21·256` = 5,440 bytes. **UNVERIFIED as a measured total** across the
+store: it is one more small file per month written after D-3334.
+
+**What it does not prove.** The CRC-32C is integrity, not authentication; a
+record rewritten by hand with a recomputed checksum is read as written. A record
+says what its writer stated about the source; nothing here re-reads the archive
+or the endpoint. A month written before D-3334 has no `.prv` until its next
+landing, and its earlier bars stay unrecorded.
+
 ---
+
+### 8.4 `.srt` — sort index, version 1 (D-3349)
+
+**Why it exists.** `/bars/window.json` ordered by a price, the volume or the
+open interest read every kept row: 43,942,544 bars for one-second NIFTY over
+97 months, seconds and gigabytes a request, then a refusal past 24 million rows
+(DB-N14). The store is indexed by time and nothing could answer "the fifty
+largest closes" without reading them all. This sibling is that index, one per
+month, written by `store::sort_index` and `store::file`'s writer step, and read
+by `api`'s window.
+
+**Only for months of 1,024 bars or more (D-4933).** A month under
+`store::time_index::INDEX_MIN_ROWS` with no `.srt` is given no run: a sorted
+page orders its at most 1,023 rows itself, by the path that already serves
+rows no run covers. The commit that brings it to the threshold finds no
+index and writes the month whole, as one run. A `.srt` already beside a small
+month is kept in step as below.
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2019-03.srt
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2019-03.srt
+```
+
+**Runs over a prefix of the month.** After a 64-byte header come one or more
+runs. A run orders a contiguous range of committed rows `[start, end)`; the
+first starts at row 0 and each later one where the one before ended, so the
+runs cover a prefix of the month (its *coverage*). A writer appends one run
+after every commit — exactly the rows it committed — and, at open, one over
+any rows an earlier writer committed and no run covers. A month whose index is
+absent, damaged, not these bars', or would reach 32 runs with the next
+append is written WHOLE as one run into `<yyyy-mm>.new.srt`, synced, and
+renamed over the name; a file is never edited in place, and the only bytes an
+append may overwrite are those past the last valid run, which no reader used.
+**The staging file is always a new inode**: whatever already holds the staging
+name is never opened and never cut — a regular file there has its *name*
+removed (`unlink`, which changes no byte behind it), anything else is refused
+by name, and the file is created with `O_CREAT | O_EXCL`. Cutting an existing
+staging file wrote the index through a hard link into the file behind it. For
+the same reason an append asks the open `.srt` for its link count and, when
+the inode has a second name, writes the month whole instead; both cases are a
+`store.srt` WARN naming the file and the count, since the store publishes by
+rename and makes no second name itself.
+`cli srt-build` writes named months whole the same way, beside the generation
+every reader opens (D-3350). **It keeps a month as it is only after reading
+its run's body against the body checksum in the run header** (one read of the
+file, about 20 MB for a one-second month): a walk reads headers, so a flipped
+byte in a fence table or a block passes a walk, and a month kept on its
+headers alone would be reported indexed while every reader that reached the
+byte set it aside. A month whose body fails is written whole again, its
+`store.srt` line saying so; `--dry-run` makes the same check and writes
+nothing. A `<yyyy-mm>.new.srt` a dead build left beside a kept index is
+removed under the month's lock. A failed run never refuses the commit before it:
+it is a `store.srt` warning, and a reader reads the uncovered rows itself.
+
+**Only the last appended run can be torn, and every walk checks it.** An
+appended run is written, then synced once; the writer begins the next run only
+after that sync returned, and cuts a run whose write or sync failed. So a crash
+can tear only the last run — and can leave its header on disk over entries that
+are not. Each run header therefore carries the CRC-32C of its body and its
+*kind*: a walk checks the body of the last run when it is an appended one, and
+a run that fails is torn (never read; the next writer appends over it). A whole
+image is synced before its rename, so its body is not read on a walk; a block
+that later rots is refused when it is read, and the reader sets that month
+aside and reads it (`api`, D-3349).
+
+**Bound to the bars, checked on every read.** Each run records the stamps of
+its first and last rows; a reader compares them with the bar file's (the
+header's own first and last stamps answer the two ends) and refuses runs that
+disagree. Every row a reader serves is read from the `.bin` and checked
+against the entry that named it.
+
+Magic `BRUTEXS1`, version `1`, six columns, fence stride `256`, at most 64
+runs. Every integer is little-endian.
+
+**Header, 64 bytes at offset 0:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXS1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | columns `6` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 4 | symbol id, as the bar header |
+| 20 | 4 | fence stride `256` |
+| 24 | 8 | second 0 of the month: 00:00 IST on its first day, UTC micros |
+| 32 | 28 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+**Run header, 512 bytes:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXSR` |
+| 8 | 8 | first row |
+| 16 | 8 | one past the last row |
+| 24 | 8 | stamp of the first row |
+| 32 | 8 | stamp of the last row |
+| 40 | 8 | the run's length in bytes, this header included |
+| 48 | 6 × 48 | per column (open, high, low, close, volume, open interest): entry width (1; 8 or 12), 7 zero, null count (8), smallest value (8), largest value (8), section offset from the run's start (8), blocks (8) |
+| 336 | 6 × 16 | extremes, each value then the stamp of the EARLIEST bar holding it: close max, close min, high max, low min, widest `high − low`, heaviest volume |
+| 432 | 4 | CRC-32C over every byte after the run header, keyed by the first row (its eight bytes lead the checksummed run) |
+| 436 | 1 | kind: `0` appended after a commit, `1` a whole image written by rename; any other value is not a run |
+| 437 | 71 | reserved, zero; a set byte is not a run |
+| 508 | 4 | CRC-32C over bytes `0..508` |
+
+**Column section**, at its offset from the run's start: the fence table (the
+first entry of every 256-entry block), each block's CRC-32C (4 bytes each,
+over the block's entries, keyed by the run's first row, the column and the
+block number), the CRC-32C of those two tables (keyed by the run's first row
+and the column), then the entries. An entry is the value and the second of the
+month its bar opens at: narrow (8 bytes: the value less the column's smallest,
+`u32`, then the second, `u32`) when the column's span fits four bytes, wide
+(12 bytes: the value, `i64`, then the second) otherwise. Entries are ordered by
+`(value, second)`; open interest's null (`i64::MIN`) entries come first, in
+time order, and carry no value. A bar's stamp must be a whole second of its
+month; a run over one that is not is not written, and readers read that month.
+
+**Size.** About 48 bytes a bar (four more per wide column): the 97 months of
+one-second NIFTY hold 2.0 GB of `.srt` beside 2.3 GB of `.bin`.
+
+**A disk that will not take a run.** The bars are committed before any run is
+written, so a run never refuses them. An appended run whose write or sync
+fails is cut off again — the file ends where the last synced run ended — and
+a whole image whose write or sync fails stays in `<yyyy-mm>.new.srt` and is
+never renamed into place; the next writer step removes that staging name and
+writes the image again into a new file. Either way the writer says so once (`store.srt`,
+WARN) and a reader reads the rows no run orders, named on the wire.
+
+**What it does not prove.** The checksums are integrity, not authentication.
+The header binds a file to its rung, symbol id and month, and each run's end
+stamps bind it to the rows it orders; no digest of the bars is kept. A `.srt`
+built from another series of the same symbol, rung and month whose runs have
+the same row counts and end stamps — two contracts of one underlying, copied
+across directories by hand — therefore binds. It still serves no value the
+bars do not hold: every row a reader serves is read from the `.bin` and
+checked against the entry that named it, and each place of a page that
+disagrees is a named fault carrying the command that rebuilds the index.
+
+### 8.5 `.sbar` — sealed month, version 1 (D-4965)
+
+**Why it exists.** A closed month never changes, and its raw form keeps 56
+bytes a bar beside a `.crc`, a `.tix` and a `.srt`. The sealed form holds the
+same records bit for bit in codec 1 frames (§39, D-4939) of 256 bars, about
+3 to 8 bytes a bar, behind a head that answers the month's counts, stamps,
+ranges and extremes with no further read. It is a **form** of a month, not a
+generation: the generation pointer (D-3350) still says which content is
+served, and inside the served directory the form says how it is stored. It is
+a sibling kind (`store::path::FileKind::SealedBars`), not a bar `Layout`: it
+has no stride, so `32768 + i·56` is never asked of it, and a build that
+predates it refuses a `.sbar` opened as bars by its magic (`BRUTEXC1` shares
+no prefix with `BRUTEXB`).
+
+```
+bars/<vendor>/NSE/INDEX/NIFTY/1s/2020-03.sbar
+bars/<vendor>/NSE/FNO/<underlying>/<contract>/1s/2020-03.sbar
+```
+
+Written by `store::sealed::Builder` (bytes only; publishing them by rename is
+the sealer's, SC-6) and read by `store::sealed::SealedMonth` (the read door
+that opens it in place of the `.bin`, SC-3, is not in this version of the
+code: until it lands nothing writes or opens a `.sbar`). **It is a pure
+function** of the month's committed records, its committed header, its path,
+its `.prv` image and the month summary handed in: no time, no ordinal, no
+build stamp. The same month built twice, on any host, is the same bytes.
+Every integer is little-endian; every checksum is CRC-32C (§6's parameters).
+No mapping; every read is positional; the file is never opened for writing
+once published.
+
+```
+0        512             table_off        prv_off          sum_off         blocks_off       file_len
+├─ HEAD ──┼─ DIRECTORY ────┼─ TIME TABLE ────┼─ PROVENANCE ───┼─ SUMMARY ──────┼─ FRAMES ────────┤
+           24 × n_blocks    8 × (entries+1)   packed .prv      version + bytes  codec 1, back to back
+```
+
+**Head, 512 bytes.** Bytes 0 to 63 have a bar header slot's shape (§2), so the
+version is found before the layout is known and `Head::bar_header` gives
+`generation::Pointer::describes` the raw month's header unchanged.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 8 | magic `BRUTEXC1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | record stride `56`: what a frame decodes to |
+| 12 | 4 | flags: bit 0 time table present, bit 1 provenance present, bit 2 month summary present; any other bit is refused |
+| 16 | 8 | `generation` of the raw month's committed header, copied |
+| 24 | 8 | `n_valid` |
+| 32 | 8 | `first_ts_micros`, copied |
+| 40 | 8 | `last_ts_micros`, copied |
+| 48 | 4 | `symbol_id` |
+| 52 | 4 | `timeframe_secs` |
+| 56 | 4 | CRC-32C over bytes `0..56` and `60..64`, as every slot |
+| 60 | 4 | zero |
+| 64 | 2 | `block_rows`: 256 as written; a reader takes 1 to 256 and never assumes it |
+| 66 | 2 | codec `1` |
+| 68 | 2 | directory entry length `24` |
+| 70 | 2 | the raw bar version sealed: `3` (version 2 holds no block checksums, so nothing proves its bytes: `unverified_source`) |
+| 72 | 4 | `n_blocks` = `ceil(n_valid / block_rows)` |
+| 76 | 4 | rung slots a table entry spans, `4096` |
+| 80 | 4 | `table_entries`: the table holds `table_entries + 1`; zero when absent |
+| 84 | 4 | `prv_packed_len`, the checksum after it not counted |
+| 88 | 4 | `prv_raw_len`, the `.prv` image's length, at most 262,208 |
+| 92 | 2 | year; 94: month `u8`; 95: zero |
+| 96 | 8 | `table_off` = 512 + 24 · `n_blocks` |
+| 104 | 8 | `prv_off` = `table_off` + 8 · (`table_entries` + 1) when the table is present |
+| 112 | 8 | `blocks_off`: after the provenance and the summary |
+| 120 | 8 | `blocks_len`: every frame's bytes, at most `n_blocks` · 14,508 and `u32::MAX` |
+| 128 | 8 | `file_len` = `blocks_off` + `blocks_len`; a file of another length is refused |
+| 136 | 8 | `origin_micros`: 00:00 IST on the 1st of the month |
+| 144 | 8 | `sum_off`; 152: `sum_len` `u32`; 156: zero. Both zero when flag bit 2 is clear |
+| 160 | 32 | BLAKE3 of the `n_valid × 56` record bytes exactly as the raw month held them |
+| 192 | 4 | CRC-32C of the raw month's `.crc` image (§6) over blocks `0..blocks_for(n_valid)`, regenerated from the records; 196: zero |
+| 200 | 24 | the first 24 bytes of BLAKE3 over the month's `.bin` store path (the `.prv` header's digest, §8.3) |
+| 224 | 6 × 24 | column ranges, open, high, low, close, volume, open interest: nulls `u64`, smallest `i64`, largest `i64` (only open interest has a null; both zero when every row is null) |
+| 368 | 6 × 16 | extremes, each a value and the stamp of the EARLIEST bar holding it: close max, close min, high max, low min, widest `high − low`, heaviest volume (the `.srt` run header's six, §8.4) |
+| 464 | 44 | reserved, zero; a set byte is refused |
+| 508 | 4 | CRC-32C over bytes `0..508` |
+
+A reader checks, in this order: the length (at least 512), the magic, the
+version, the head's CRC, the slot's CRC, the stride, the flags, every reserved
+byte, `block_rows`, the codec, the entry length, the raw version, the table's
+slots; then derives every offset and count again from the head's own counts
+(`n_blocks`, the table flag, `table_entries`, each offset, the provenance and
+summary lengths, `blocks_len` and `file_len`) and refuses any difference by
+field; then the stamps (inside the month, first ≤ last), the column ranges and
+the extremes (each equal to its column's range and stamped inside the month);
+then against its path: symbol id, rung, year and month, path digest, and the
+file's length. Each refusal has its own name (`store::sealed::SealedError::reason`)
+and is one `store.sealed` error on the log.
+
+**Directory, 24 bytes a block.** Block `k` holds rows
+`k·block_rows .. min((k+1)·block_rows, n_valid)`.
+
+| Offset | Size | Field |
+|---|---:|---|
+| 0 | 4 | `end`: where frame `k` ends, from `blocks_off`; it starts at entry `k−1`'s `end`, or 0 |
+| 4 | 4 | CRC-32C of the frame's bytes |
+| 8 | 8 | stamp of the block's first row |
+| 16 | 4 | zero |
+| 20 | 4 | CRC-32C over bytes `0..20` followed by `k` as 8 bytes |
+
+Row to block is a division; entries `k−1` and `k` are one read of 48 bytes. The
+keyed checksum binds an entry to its place, so a reader verifies exactly the
+entries it reads and never the whole directory. A frame whose span runs
+backwards, past `blocks_len`, past 14,508 bytes, or (the last) short of
+`blocks_len` is `entry_order`; one that fails its CRC or codec 1 is `frame`;
+one that decodes to another row count or first stamp is `frame_rows` or
+`first_stamp`.
+
+**Time table**, present exactly when `n_blocks > 64`: `table_entries + 1`
+entries of 8 bytes, a block number `u32` then CRC-32C over it followed by the
+entry's index as 8 bytes. Entry `s` is the block holding the first row stamped
+at or after `origin + s · 4096 · timeframe`, or `n_blocks`; `table_entries` is
+`ceil(month span / (4096 · timeframe))`: 633 for a thirty-day one-second month,
+654 for a thirty-one-day one. `first_at_or_after(ts)` answers 0 at or before
+the first stamp and `n_valid` after the last, from the head; otherwise it
+reads table entries `s, s+1`, the directory entries between them in one read
+(at most 64 at a time; a range wider than that, possible only for a month
+holding two bars in one slot, written before D-0915, is bisected one entry a
+step), and one frame's stamps. Without a table the whole directory is at most
+64 entries, one read. Equal stamps answer the first of them.
+
+**Provenance.** The month's `.prv` image (§8.3) byte for byte, packed: each
+byte combined by XOR with the byte 256 before it, then each run of 1 to 256
+zeros as `(0x00, run − 1)` and every other byte as itself; then the CRC-32C of
+the packed bytes. At most twice the image; an image of 64 bytes or more must
+carry this month's `.prv` header (`provenance_foreign` otherwise), and a
+shorter one (a sidecar whose header write was cut) is carried as it is.
+
+**Month summary** (round 3, amendment A4): a summary's own version `u16` (at
+least 1), two zero bytes, its bytes (at most 1 MiB), and a CRC-32C over
+everything before it. The format carries R3-06's bytes and never reads them: a
+new summary version is a new number in this section, not a new `.sbar`
+version.
+
+**Frames.** Codec 1 (§39), back to back from `blocks_off`.
+
+**An empty month is the head alone**, 512 bytes (with its provenance after it
+when it has one).
+
+**Kept and not kept.** Kept bit for bit: every committed record (the head's
+BLAKE3), the committed header's fields, every provenance byte. Not kept as
+bytes, because they are derived or are not data: the superseded header slot,
+bytes past the commit counter, the `.crc` (its image's CRC is in the head, and
+every frame has its own), the `.tix` (the time table replaces it) and the
+`.srt` v1. `SealedMonth::audit` decodes the whole month and checks every entry,
+frame, the stamps' order, the BLAKE3, the regenerated `.crc` image, the
+ranges, the extremes, the table, the provenance and the summary against the
+head: O(the month), once, for a seal and a scrub, never for a request
+(`docs/06-limits.md` L-SC-16).
 
 ## 9. What this format does not solve
 
 | Hazard | Position |
 |---|---|
 | Page fault on a network mount that has gone away | Uninterruptible. Keep the store on local disk. This is an operational rule, not an architectural fix. |
-| Two writers on one file | Not supported. One writer per file, enforced by an advisory lock on the `.lock` sibling, and the lock is a leaf — never held while acquiring another. Nothing in `crates/store` can check it. |
+| Two writers on one file | Not supported. One writer per file, enforced by `store::flock`: the writer takes an exclusive `try_lock` (`flock(2)`) on the `.lock` sibling at open and refuses when another holder has it (§5). The lock is a leaf — never held while acquiring another. What it does not cover: it is **advisory**, so a process that writes the month without taking it is not stopped; and it is not relied on across hosts on a network filesystem, where `flock` semantics are the filesystem's and not this crate's. (This row said "Nothing in `crates/store` can check it", which §5 and `BarFile`'s open contradicted; tests-docs-security-pass14 P14-04, D-1959.) |
 | A failure coarser than 16384 bytes | Takes both header slots. No arrangement inside one file survives a dead device. |
-| A symlink at a path component | Defeats vendor-prefix isolation, which is a **lexical** property of `StorePath`, not a filesystem one. The writer must open with `openat` + `O_NOFOLLOW` per component and halt naming the linked component. |
+| A symlink at a path component | Defeats vendor-prefix isolation, which is a **lexical** property of `StorePath`, not a filesystem one. The writer asks every existing component below the store root with `symlink_metadata` before it creates anything, opens the month file, its `.lock` and its `.crc` with `O_NOFOLLOW`, and halts with `StoreError::Symlinked` naming the linked component (CE-62, D-2686). The remaining window: a directory link swapped in between that walk and the open is followed, because per-component `openat` is not available in `std` without `unsafe`. The store root itself may be a link; it is the operator's to place. |
 | A wrong value that is well-formed | Out of scope here. Range validation happens at the ingest boundary, before a byte is written. |
 
 ---
@@ -401,13 +1132,19 @@ way this build could misread one if that assumption is ever wrong.
 
 ---
 
-## 11. The census file — `BRUTEXM`, versions 1 and 2
+## 11. The census file — `BRUTEXM`, versions 1, 2, 3 and 4
 
 Everything above is a **bar** file. The per-vendor census at
 `manifest/<vendor>.man` is a different format in the same store, and until
 D-0067 its only description was a module comment in `crates/pull/src/manifest.rs`
 — which made a Rust comment the authority for bytes on a disk. This section is
 the authority now.
+
+Versions 1 to 3 are **one file per vendor**. Version 4 (§11.7, D-3316) is **one
+directory of epochs per (vendor, segment)** at
+`manifest/v4/<vendor>/<SEGMENT>/<epoch>.man`, with each epoch's capacity in its
+own header and compaction into the next epoch (§11.8). A vendor moves from the
+first shape to the second only through `cli census-migrate` (§11.9).
 
 ### 11.1 What is shared with the bar format, and what is not
 
@@ -436,28 +1173,40 @@ byte 0                 32768                                       EOF
 a constant on the read path. 32768 divides by both strides, so an entry is
 64-byte aligned at either one and never straddles a cache line.
 
-### 11.3 One header slot — 64 bytes, both versions
+### 11.3 One header slot — 64 bytes, every version
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
-| 0 | 8 | `magic` | `b"BRUTEXM1"` or `b"BRUTEXM2"` — the last byte is the version |
-| 8 | 2 | `format_version` | `1` or `2`. **Selects the geometry.** |
-| 10 | 2 | `entry_stride` | `64` at version 1, `128` at version 2. Read it; never assume it, and check it against what the version declares. |
+| 0 | 8 | `magic` | `b"BRUTEXM1"` at version 1, `b"BRUTEXM2"` at versions 2, 3 and 4 — the magic names the GEOMETRY, not the version |
+| 8 | 2 | `format_version` | `1`, `2`, `3` or `4`. **Selects the geometry and the meaning of reserved bytes.** |
+| 10 | 2 | `entry_stride` | `64` at version 1, `128` at versions 2 to 4. Read it; never assume it, and check it against what the version declares. |
+| 12 | 4 | reserved | written zero at versions 1 to 3; `capacity` at version 4 (§11.7) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | the commit counter: entries readable |
 | 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
 | 40 | 8 | `total_rows` | bars held across every distinct key |
-| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name |
-| 54 | 6 | reserved | zero |
+| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name. All eight bytes are the vendor's: `truedata` fills them and `zerodha` uses seven |
+| 56 | 4 | reserved | written zero at versions 1 to 3; `segment` and three refused-if-not-zero bytes at version 4 (§11.7) |
 | 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
 
-The slot layout is **identical across both versions**: only the magic, the
-version and the stride differ, which is why one decoder reads both and dispatch
-is a table lookup rather than a second parser.
+All integers are little-endian. **At versions 1 to 3 the two reserved runs are
+written zero and are not checked individually**: the decoder reads neither `12..16` nor
+`56..60`, so a non-zero byte there is caught only by the slot's `crc`, which
+covers both. (The bar slot refuses a non-zero reserved field by name, D-1353;
+this one does not.) This table put a reserved row at `54..60` over the last two
+bytes of `vendor` and gave no row for `12..16` until tests-docs-security-pass14
+P14-01 (D-1959).
 
-A slot whose magic and version field disagree is refused **by version**. There
-is no way to tell which of the two is the lie, and the version field is the
-thing that selects the geometry.
+The slot layout is **identical across versions 1 to 3**: only the magic, the
+version and the stride differ, which is why one decoder reads them all and
+dispatch is a table lookup rather than a second parser. Version 4 keeps the
+same offsets and gives the two reserved runs meaning (§11.7).
+
+A slot whose magic is not the one its version declares (`BRUTEXM1` for 1,
+`BRUTEXM2` for 2, 3 and 4) is refused **by version**. There is no way to tell which
+of the two is the lie, and the version field is the thing that selects the
+geometry. This table said the magic's last byte is the version until P1-16-01
+(D-1763); a version-3 slot begins `BRUTEXM2`.
 
 ### 11.4 Entry, version 1 — 64 bytes
 
@@ -518,8 +1267,30 @@ and it is refused rather than half-believed. A negative close that is not the
 sentinel is refused for the same reason: the sentinel must be one value, not a
 range.
 
-Reserved bytes are zero and stay zero. A future field takes reserved space in a
-**new version**, never by reinterpreting version 2 — §2's rule, unchanged.
+Reserved bytes are zero and stay zero at version 2. A future field takes
+reserved space in a **new version**, never by reinterpreting version 2 — §2's
+rule, unchanged. Version 3 is that new version.
+
+### 11.5a Entry, version 3 — 128 bytes, the contract in reserved space
+
+Version 3 is version 2's geometry with the derivative contract written into
+bytes the closes half reserved. The magic stays `BRUTEXM2`, because the stride
+and every version-2 field are unchanged; the version field is what separates
+them. A spot row leaves the contract bytes zero, so a version-3 spot row is
+byte-identical to its version-2 image, and only option and futures rows differ.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 64 | a version-1 entry image | its own CRC at 60 |
+| 64 | 8 | `first_close_paisa` | as version 2 |
+| 72 | 8 | `last_close_paisa` | as version 2 |
+| 80 | 24 | `contract` | ASCII contract text (`core::instrument::Contract`), zero-padded; all zero for spot |
+| 104 | 1 | `contract_len` | `0` for spot, otherwise `1..=24` |
+| 105 | 19 | reserved | zero |
+| 124 | 4 | `crc` | CRC-32C over bytes `64..124` |
+
+A length past 24, or text that does not parse as a contract, is not read as a
+shorter or different contract: a truncated contract is a different series.
 
 ### 11.6 Old files stay readable, and the upgrade is a rewrite
 
@@ -530,8 +1301,11 @@ steps would decode every second entry as the tail of the one before it and
 return plausible integers, which is §9's "a wrong value that is well-formed"
 arriving through the front door.
 
-This build **writes** version 2 only. A census loaded from a version-1 file is
-published at version 2, and because the two strides disagree from the first
+For a single file this build **writes** version 3 only (`Layout::CURRENT`;
+this said version 2 until P1-16-01, D-1763), and a partition at version 4 only
+(`Layout::PARTITION`, §11.7). A single file is never promoted to a partition by
+a write. A census loaded from a version-1 file is published at
+version 3, and because the two strides disagree from the first
 entry onward, the publish is a whole-file rewrite rather than a positional
 append — the same path a repair and a first write already take. It is checked
 after the "nothing moved" gate, so a run that records nothing leaves a version-1
@@ -544,6 +1318,234 @@ re-ingested — the census's equality probe covers the closes, so a month whose
 rows have not moved but whose closes have just been read for the first time is a
 change and is recorded, and once recorded it compares equal and the file stops
 moving.
+
+**A single file is bound by `MAX_ENTRIES` = 2,097,152, compiled into every
+reader and writer, and its entry region is an append LOG** — one entry per write,
+not per month. That bound was sized on "~248,000 files" and the log outran it:
+on 6 Oct 2026 `gdfl.man` held 2,096,855 entries over 246,147 keys (8.5 per key)
+and refused every options day from 2019-11-14 while the bars kept landing
+(DB-058, DB-G05, DB-G49). Version 4 exists because of that measurement.
+
+### 11.7 Version 4 — one directory of epochs per (vendor, segment), capacity in the header (D-3316)
+
+```
+manifest/v4/<vendor>/INDEX/000001.man   spot indices, epoch 1
+manifest/v4/<vendor>/INDEX.lock         the INDEX census's lock, beside its directory
+manifest/v4/<vendor>/CASH/000001.man    cash equities
+manifest/v4/<vendor>/FNO/000001.man     option and future contracts
+manifest/v4/<vendor>/FNO/000002.man     the FNO census's next epoch, after a compaction
+manifest/v4/<vendor>/FNO/000003.man.tmp an epoch being written: never read
+manifest/v4/<vendor>/MIGRATED           the migration receipt (§11.9)
+manifest/v4/<vendor>/SEALED             the seal receipt (§11.9, DB-B68)
+```
+
+**A vendor is version 4 exactly when `manifest/v4/<vendor>/` is a directory.**
+A reader then reads only it, and `manifest/<vendor>.man` otherwise (D-3316
+item 7). A Zerodha write never opens a GDFL file, and option contracts are a
+census of their own.
+
+**The current epoch of a segment is the highest-numbered `<epoch>.man` in its
+directory**, `<epoch>` six decimal digits from `000001`. A `*.man.tmp` is
+incomplete and is never read; any other name is not an epoch. An older epoch is
+an immutable generation: it is never written again and never deleted
+(`CLAUDE.md` §3 rule 8).
+
+**The entry is version 3's, byte for byte** (§11.5a): 128 bytes, two 64-byte
+halves, the contract in the closes half. One decoder serves both versions.
+
+**The header slot keeps §11.3's geometry and spends its two reserved runs:**
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `magic` | `b"BRUTEXM2"` — the slot and entry strides did not change, so neither did the magic |
+| 8 | 2 | `format_version` | `4`: what tells a reader the two runs below hold fields |
+| 10 | 2 | `entry_stride` | `128` |
+| 12 | 4 | `capacity` | `u32`: the most entries this file may hold, `1..=4,294,967,295`. **Reserved at versions 1 to 3** |
+| 16 | 8 | `generation` | as §11.3; it keeps rising across epochs |
+| 24 | 8 | `n_valid` | as §11.3; at most `capacity` |
+| 32 | 8 | `n_keys` | as §11.3 |
+| 40 | 8 | `total_rows` | as §11.3 |
+| 48 | 8 | `vendor` | as §11.3 |
+| 56 | 1 | `segment` | the entry segment code of §11.4: INDEX 1, CASH 2, FNO 3 — a cross-check against the path. **Reserved at versions 1 to 3** |
+| 57 | 3 | reserved | zero, and **refused by name** when not (unlike §11.3's runs, which nothing reads) |
+| 60 | 4 | `crc` | CRC-32C over bytes `0..60` |
+
+**The reader is bound by the file, not by its build** (DB-G08). It reads the
+header region, takes the largest `capacity` any valid version-4 slot declares,
+and reads at most `32,768 + capacity × 128` bytes, refusing a longer file by
+name. A capacity of zero is refused; every other value the 32-bit field carries
+is admitted, and the read is bounded by the file's real length, so a large
+declared capacity is never an allocation. Every entry must carry the header's
+segment; a row of another segment is refused (`ForeignSegment`), and a file in
+a segment's directory whose header is a single file's or another segment's is
+refused (`PartitionMismatch`). An empty epoch file is refused, never read as a
+fresh census: an epoch is installed whole.
+
+**An epoch's capacity** (`pull::manifest::epoch_capacity`) is the larger of its
+segment's floor and twice its key count. Floors: `FNO` 2²³ = 8,388,608, more
+than twice the about 2.2 million option contract-months the audit estimates for
+the GDFL archive 2018-09..2026-09 (DB-G05, DB-G60; an estimate, not a count
+this build made); `INDEX` and `CASH` 2²⁰ = 1,048,576 (the whole Zerodha census
+held 204,249 keys on 6 Oct 2026). A segment with no epoch yet is a census of
+zero entries at its floor.
+
+**Appending is §11.6's**, into the current epoch: one entry at
+`32,768 + n_valid × 128`, a barrier, one slot write, alternating slots. A batch
+is probed first. A single file without room refuses before recording a row,
+naming its own `n_valid`, its capacity, the free slots and the batch size, and
+states that nothing was published (DB-G10); a single file is never compacted
+by a write, because its readers include builds that know no version past 3.
+
+### 11.8 Compaction — the next epoch, installed by rename (D-3316)
+
+A partition is compacted when a batch does not fit its current epoch's
+capacity — once per fill — or when the epoch loaded degraded, so its recovered
+prefix is published as a new epoch rather than over the damaged one. The
+compacted epoch holds **the newest entry of every key, in key order** (the
+derived order of the entry key); `n_valid` becomes `n_keys`, `n_keys` and
+`total_rows` do not move, `generation` advances by the key count, and the
+capacity is recomputed as §11.7 says. If even the compacted epoch has no room
+for the batch, the batch is refused with the numbers above and **no epoch is
+installed**.
+
+The install, under the segment's lock:
+
+1. the compacted image is written to `<epoch+1>.man.tmp` and flushed;
+2. it is renamed to `<epoch+1>.man`, and the directory is flushed;
+3. the batch is appended to the new epoch as §11.6 says.
+
+**A recount publishes its next epoch whole** (§11.9) whenever it changes
+anything: the newest entry of every key, the recounted rows among them, by the
+same rename. A recount offers every month of its span at once, and an append
+costs two flushes per entry (§11.6), so one whole write replaces hundreds of
+thousands of them. The bytes are a compaction's, so a reader needs no rule of
+its own; a recount that changes nothing installs no epoch. An import day still
+appends.
+
+A name already holding `<epoch+1>.man` is refused, never replaced. A crash
+before 2 leaves the old epoch current and a `.tmp` nobody reads; a crash after
+it leaves the new epoch current with the totals the old one held. No epoch's
+bytes are ever rewritten. Compaction costs one pass over the keys and one sort,
+O(keys · log keys), once per fill — about one in every `capacity − keys`
+appends; an old epoch keeps its bytes.
+
+**What an epoch weighs, as arithmetic, not a measurement of the store.** An
+epoch is `32,768 + n_valid × 128` bytes, so a FULL options epoch at the
+`FNO` floor is `32,768 + 8,388,608 × 128` = 1,073,774,592 bytes (1 GiB), and
+that is what each replaced full epoch keeps on disk. A compacted epoch holds
+one entry per key: at the about 2.2 million option contract-months the audit
+estimates, `32,768 + 2,200,000 × 128` = 281,632,768 bytes. A writer's load
+and a reader's whole read of the current epoch are bounded by its `capacity`,
+not by the history of writes: up to 1 GiB for an options epoch just before it
+compacts, against the single file's 268 MB ceiling. D-3316's own "about 280 MB
+for a full options epoch" is the compacted figure, not the full one.
+
+### 11.9 Migration and recount — `cli census-migrate`, `cli census-recount` (D-3316)
+
+**`cli census-migrate VENDOR`** takes the single file's lock (the one every
+pre-version-4 writer takes), refuses a census that loaded degraded, splits it
+by segment with the newest row per key, checks the split's keys and rows equal
+the single file's, writes `<SEGMENT>/000001.man` for every segment — an empty
+segment is an empty epoch at its floor — and the receipt into
+`manifest/v4/<vendor>.staging/`, reads every epoch back, renames the staging
+directory to `manifest/v4/<vendor>/`, and flushes `manifest/v4/`. Each
+partition's `generation` continues the single file's — the single file's
+generation plus the partition's keys — so no reader keyed on a generation sees
+the vendor's census go backwards across the migration. **The single
+file's bytes are not touched** (its name is sealed; see below). The receipt is `key=value` lines —
+`format=census-migration-v1`, `legacy=`, `legacy_version=`,
+`legacy_generation=`, `legacy_entries=`, `legacy_bytes=`, then one
+`partition=<SEGMENT> epoch=000001.man keys= rows= capacity=` line each — so a
+reader can tell with one `stat` whether a pre-version-4 writer has appended to
+the single file since (`pull::ingest::census_store::legacy_drift`).
+
+Run it only after the API serving the store reads version 4 (WP-30): a reader
+built before version 4 reads the single file and nothing else. Until a vendor is
+migrated its single file is read and written exactly as before.
+
+**The seal (DB-B68, WP-81).** Once the partitions are in place, the migration
+seals the single file (`census_store::seal_legacy`; `cli census-migrate VENDOR
+--seal` for a vendor migrated before the seal existed). Under the single file's
+lock it writes a stub to `manifest/<vendor>.man.seal.tmp`, hard-links the single
+file to `manifest/<vendor>.man.v3-superseded` — the same inode, so its bytes are
+the history they were and none is copied or rewritten — and renames the stub
+over `manifest/<vendor>.man`, so the name is never absent (an absent census
+reads as an empty one). The stub is exactly one header region, 32,768 bytes:
+each of the two slots begins `BRUTEXMS` and carries format version `65535`
+(`census_store::SEALED_VERSION`, reserved, never a geometry) at byte 8,
+followed at byte 64 by a sentence naming the version-4 directory, the
+superseded file and the first version-4 reader; every other byte is zero. Every
+reader resolves a version through `Layout::for_version`, so a reader built
+before version 4 refuses the stub as `unknown manifest version 65535` instead of
+serving the superseded census as the whole of it. The seal then writes
+`manifest/v4/<vendor>/SEALED`: `format=census-seal-v1`, `superseded=`,
+`superseded_bytes=` (the receipt's `legacy_bytes`), `stub_version=65535`,
+`reader_since=<commit>`. The receipt is written to `SEALED.tmp`, flushed and
+renamed to its name, and the directory flushed: the name never holds half a
+receipt. A re-run reads it (`census_store::seal_receipt`): whole, it is left;
+absent, it is written; bytes no seal finished writing are renamed to
+`SEALED.torn-<unix seconds>` and a whole receipt written; a whole `format=`
+line of another format is refused by name. A sealed vendor's `legacy_drift`
+checks the superseded file's length against the receipt and that the name
+still holds the stub.
+
+**`manifest/REQUIRES` — what a store requires of its reader (DB-B68).** The
+stub refuses the readers that already exist; this file refuses every reader
+from here on. It is append-only text of `\n`-terminated lines, the first
+`format=store-requires-v1`, then one per format change:
+`requires=<feature> vendor=<vendor|*> since=<40-hex commit> at=<unix seconds>`.
+A line is in force once its newline is written; bytes after the last newline
+are an append that did not finish and are not read, and the next writer ends
+them with ` #void` and a newline (a line ending in that word is skipped).
+`census_store::reader_refusal` is asked before a census is located, by the API
+and by every CLI census reader: the file is opened without following a final
+link and without blocking, must be a regular file of at most 65,536 bytes,
+and every line binding the vendor must name a feature in
+`census_store::READER_FEATURES` (today `census-v4`). Otherwise the vendor's
+census is refused by name — the file, the line, the feature — and is never
+read in the shape the build happens to know. An absent file requires nothing.
+`seal_legacy` and `migrate` append the vendor's `census-v4` line once.
+
+**A bar month is opened only as the month its `.prv` names (DB-B65).** The
+bar header's cross-check is the symbol hash and the bar length, which an
+index, each of its option contracts and both vendors share. Before a bar door
+validates a month it reads the 64-byte header of the `.prv` beside it
+(`provenance::written_for`): a header that passes its own checksum, magic and
+version and names another store path refuses the open as
+`StoreError::Misfiled`. A month with no `.prv`, or one whose header fails its
+own checks, is `Unrecorded` and opens as before; `cli scrub-blocks` counts
+those months as `unbound`.
+
+**`cli census-recount VENDOR --from DAY [--to DAY]`** rebuilds census rows
+from the bar files' own headers — `n_valid`, the first and last stamp — and
+records `0` and `n_valid − 1` for the closes, for every `.bin` month under
+`bars/<vendor>/` that the days overlap. No vendor file is read. Bar files are
+opened read-only under a shared lock, so a month a writer holds is refused by
+name. A row already exact changes nothing; a row that grew is recorded; a row
+the census refuses is named and skipped. A migrated vendor's partition takes
+the recount as its next epoch, whole (§11.8); an unmigrated single file is
+appended to, and refuses up front when the batch does not fit. Each directory is walked in name
+order, so two recounts of one store publish identical bytes: O(files · log d)
+for the walk, `d` the widest directory.
+
+For the `gdfl` feed it then closes the span's census-refused import days in
+`imports/gdfl.journal` (D-3317 item 5): every key whose last line is
+`incomplete`, whose day is in the span and whose line names no `stage=` other
+than `census`, once no file of the day's month was unreadable, no row of it was
+refused, no directory entry under `bars/<vendor>/` went unnamed, and at least one
+instrument-month of the day's own segment (`options` is `FNO`, `indices`
+`INDEX`, `stocks` `CASH`) spans the day. The recount read every bar file of the
+day's month, and a day's bars are filed in its own month, so that is every
+month the day touched. The day's `files=` decides nothing: the import counts
+every file it converted, including one that wrote no bar that day (measured on
+2020-01-01: 3,633 files, 3,632 option months spanning the day, the difference
+one file that wrote no bar), so the receipt prints the comparison and the
+`recounted` line carries `months=`. It appends one `run <id> source=recount
+commit=<sha> started=<unix_s> from=<day> to=<day|open>` line and one
+`recounted <kind> <day> <filter> definition=<n> months=<n> run=<id>` line per
+day, after closing a torn last line (D-2814); it writes nothing when no day
+closes. `--from` is required: the span is what excludes days refused for any
+other reason (2018-11-06 and 2018-11-09).
 
 ---
 
@@ -673,15 +1675,22 @@ realised fills or MAE/MFE that the row does carry.
 
 ---
 
-## 13. Ranked frontier — `results/frontier.bin`, version 4
+## 13. Ranked frontier — `results/frontier.bin`, version 7
 
 The ranked frontier is append-only and fixed-stride. Its 16-byte header is
-`BRUTEXFR` at bytes `0..8`, little-endian version `4` at `8..12`, and four
+`BRUTEXFR` at bytes `0..8`, little-endian version `7` at `8..12`, and four
 reserved zero bytes at `12..16`. A non-zero reserved header byte is an unknown
 schema and is refused; the reader does not wait for it to affect a later field
 before noticing it.
 
-Each row is 272 bytes. All integer fields are little-endian:
+Each row is 280 bytes. All integer fields are little-endian. Versions 4 to 6
+are refused by version, never reread under version 7 meanings: version 5 took
+byte 195 for the protective-exit rule, version 6 took `196..200` for the
+fill-headroom rule, and version 7 widened the row by eight bytes for the
+average-payoff floor and moved the seal to `272..280`. This section described
+version 4 (272-byte rows, a reserve at `195..200`, the seal at `264`) until
+P1-16-02 (D-1763).
+
 
 | Offset | Size | Field |
 |---:|---:|---|
@@ -703,7 +1712,8 @@ Each row is 272 bytes. All integer fields are little-endian:
 | 178 | 8 | gross winning paisa, `i64` |
 | 186 | 8 | gross losing paisa, `i64` |
 | 194 | 1 | direction: `0=long`, `1=short`; every other byte is refused |
-| 195 | 5 | reserved, all zero; any non-zero byte is refused |
+| 195 | 1 | `require_protective_exits`: `0=off`, `1=required`; every other byte is refused |
+| 196 | 4 | `min_fill_headroom_bp`, `i32`; a negative value is refused |
 | 200 | 8 | `max_mae_ppm`, `i64` |
 | 208 | 8 | `min_rr_bp`, `i64` |
 | 216 | 8 | `min_win_rate_bp`, `i64` |
@@ -712,10 +1722,12 @@ Each row is 272 bytes. All integer fields are little-endian:
 | 240 | 8 | `min_ret_over_dd_bp`, `i64` |
 | 248 | 8 | `min_trades`, `u64` |
 | 256 | 8 | `top`, `u64` on disk and saturated to the target `usize` on read |
-| 264 | 8 | first eight BLAKE3 bytes over `0..264` |
+| 264 | 8 | `min_avg_rr_bp`, `i64` |
+| 272 | 8 | first eight BLAKE3 bytes over `0..272` |
 
 The seal detects accidental byte damage; it does not assign meaning. A sealed
-row with an unknown direction or non-zero reserve is therefore still refused.
+row with an unknown direction, an undefined protective-exit byte or a negative
+fill headroom is therefore still refused.
 Its sealed identity remains usable only as the block-index key, so an interrupted
 exact rerun finds the invalid prepared block and refuses instead of appending a
 second block around it. No invalid row reaches a public frontier response.
@@ -888,27 +1900,37 @@ its fixed payload followed by a full 32-byte BLAKE3 seal of that payload.
 
 | Path | Magic | Payload | Stride |
 |---|---:|---:|---:|
-| `results/execution-parameters-v1.bin` | `BRUTXEP1` | 608 | 640 |
+| `results/execution-parameters-v1.bin` | `BRUTXEP1` | 616 | 648 |
 | `results/execution-percentiles-v1.bin` | `BRUTXEG1` | 96 | 128 |
 | `results/execution-capabilities-v1.bin` | `BRUTXEC1` | 288 | 320 |
 | `results/execution-capability-completions-v1.bin` | `BRUTXEF1` | 384 | 416 |
 
-The 608-byte parameter payload is:
+The 616-byte parameter payload is:
 
 | Payload offset | Size | Field |
 |---:|---:|---|
 | 0 | 192 | parameter, population, Population V4, policy, expected-resolution and training digests; six 32-byte values |
-| 192 | 155 | exact evaluation-spec fingerprint |
-| 347 | 9 | direction, family, execution/range/selector/forced-stop, next-minute-entry and forced-exit tags; one reserved zero byte |
-| 356 | 24 | signal rung, horizon, execution seconds and stop/target/trail atom counts; six `u32`s |
-| 380 | 2 | entry delay, exactly one minute |
-| 382 | 2 | forced-exit IST minute, exactly `910` (15:10) |
-| 384 | 40 | four runner parameters and maximum levels per axis; five `u64`s |
-| 424 | 16 | minimum and maximum reward/risk hundredths; two `i64`s |
-| 440 | 64 | ratio-pair/cell bounds, forced-stop ppm, ambiguity/gap bounds, training count and training endpoints |
-| 504 | 96 | ordered-percentile, cost-model and exact-execution-law digests |
-| 600 | 8 | reserved, zero |
-| 608 | 32 | BLAKE3 seal over payload `0..608` |
+| 192 | 163 | exact evaluation-spec fingerprint |
+| 355 | 9 | direction, family, execution/range/selector/forced-stop, next-minute-entry and forced-exit tags; one reserved zero byte |
+| 364 | 24 | signal rung, horizon, execution seconds and stop/target/trail atom counts; six `u32`s |
+| 388 | 2 | entry delay, exactly one minute |
+| 390 | 2 | forced-exit IST minute, exactly `910` (15:10) |
+| 392 | 40 | four runner parameters and maximum levels per axis; five `u64`s |
+| 432 | 16 | minimum and maximum reward/risk hundredths; two `i64`s |
+| 448 | 64 | ratio-pair/cell bounds, forced-stop ppm, ambiguity/gap bounds, training count and training endpoints |
+| 512 | 96 | ordered-percentile, cost-model and exact-execution-law digests |
+| 608 | 8 | reserved, zero |
+| 616 | 32 | BLAKE3 seal over payload `0..616` |
+
+**This record grew in place, and that is a recorded breach of §2, not a
+second geometry this reader accepts.** The evaluation-spec fingerprint widened
+from 155 to 163 bytes when the charter gained its ninth non-regular day, and
+the record went from 608/640 to 616/648 bytes while the magic stayed
+`BRUTXEP1` and the version stayed `1`. The header's own stride field is what
+separates the two, so a file whose header says 640 is refused by name: its
+records carry the eight-day calendar's fingerprint and name runs no current
+build reproduces. A 648-byte file is read. This table showed the 608/640
+layout until P1-16-03 (D-1763).
 
 Dynamic rung arrays are not truncated into the scalar record. Each 96-byte
 percentile payload stores parameter id `0..32`, population id `32..64`, axis
@@ -1135,13 +2157,14 @@ stride, then four reserved zero bytes.
 
 | Path | Magic | Payload | Stride |
 |---|---:|---:|---:|
-| `results/execution-disposition-parameters-v2.bin` | `BRUX2PR1` | 608 | 640 |
+| `results/execution-disposition-parameters-v2.bin` | `BRUX2PR1` | 616 | 648 |
 | `results/execution-disposition-percentiles-v2.bin` | `BRUX2PC1` | 96 | 128 |
 | `results/execution-row-dispositions-v2.bin` | `BRUTXED2` | 480 | 512 |
 | `results/execution-capability-completions-v2.bin` | `BRUTXEF2` | 512 | 544 |
 
 The first two files reuse the exact sealed V1 scalar-parameter and percentile
-record codecs. One 480-byte row payload stores thirteen 32-byte digests at
+record codecs, so the parameter file grew from 640 to 648 bytes with them and a
+640-byte one is refused by name, as §17 says. One 480-byte row payload stores thirteen 32-byte digests at
 `0..416`: disposition, population, Population V4 completion, admission
 completion, population-row payload, strategy, sparse capability, dynamic
 parameter, runner disposition, training resolution, training run, complete
@@ -1167,7 +2190,11 @@ the completion is appended and synced last. The semantic completion identity
 excludes physical first offsets, so a valid crash orphan remains evidence but
 does not re-key an exact retry. Reopen validates every record and reconstructs
 the parameter blocks, exact row order, row count, sparse-capability/refusal
-partition, admission marginals, 4×2 matrix and ordered digests before indexing.
+partition, 4×2 matrix and ordered digests before indexing. Admission marginals
+are proven once, at preparation, where `from_ledgers` holds the admission
+ledger (`require_admission_marginals`); reopen is given no admission ledger, so
+it proves the matrix consistent with the rows it holds, not with admission
+(Z1-slice17-F2, D-1771).
 Missing rows, foreign authority, torn or corrupt records, a semantically
 resealed matrix redistribution and same-length post-open mutation all refuse.
 Pages are limited to 256 rows. Preparation and reopen are O(rows); only an
@@ -1219,13 +2246,18 @@ D-0461, IS-01 and limits §146 define that boundary.
 
 Candidate Universe V1 is the first durable object in the selection-independent
 Step-3 successor path. Its codec encodes closed-mask/grid-cell source terms and
-raw direct-cell fields; production derivation of those terms is not yet proved.
-It contains no assurance, admission verdict, ranking score, selected rank or
-final Population identity. The current public surface is deliberately
-**audit only**: it can reopen, validate and page already existing V1 bytes, but
-there is no public production constructor or writer. Until the typed
-closed-frontier/full-grid producer exists, this format cannot authorize a live
-run merely because controlled fixture bytes pass its codec.
+raw direct-cell fields. It contains no assurance, admission verdict, ranking
+score, selected rank or final Population identity.
+
+**It has a production writer.** `cli::candidate_universe::produce_candidate_universe_v1`
+derives the rows from a naturally-extinct sweep, and
+`append_and_reopen` → `append_produced_candidate_universe_v1` commits them
+receipt-last and reopens them. Both are `pub(crate)` and are reached from
+`step3_orchestrator::commit_candidate_family_guarded_v6`, which the operator
+command `cli ledger-v6` (`ledger_v6::ledger_v6`) drives. This section called the
+format "audit only" with "no public production constructor or writer" until
+tests-docs-security-pass14 P14-06 (D-1959); "public" was true and the
+conclusion was not.
 
 The three paths are:
 
@@ -1470,6 +2502,919 @@ dependent. D-0476, CO-01..CO-03 and limits §157 define the semantic and honest
 complexity boundary; D-0473/limits §155 still govern physical-volume identity
 and hot unplug.
 
+## 27. Run ledger — `results/runs.bin`, versions 2 and 3
+
+`runs.bin` is the ledger §12.3 calls the public commit marker: one fixed-stride
+record per finished run. This section was absent until P1-16-04 (D-1940); the
+offsets below are counted from `cli::results::Record::to_bytes`, not from its
+comments. All integers are little-endian.
+
+The 16-byte header is `BRUTEXRS` at `0..8`, the version as a `u32` at `8..12`,
+and four bytes at `12..16` that the writer leaves zero. The reader checks the
+magic and the version only; it does not check those four bytes. A fresh ledger
+is written at version `3`. Version `2` is READ and never appended to, and every
+other version is refused. A length that is not `16 + n*stride` is refused.
+
+Each version-3 record is 261 bytes. Version 2 is the same record without the
+mask: 213 bytes, a 205-byte payload and the seal at `205..213`. Every version-2
+offset below `205` is the version-3 offset; a version-2 record is checked
+against its own seal and then read with six zero mask words.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | nine-term run identity |
+| 32 | 8 | finish time, UTC microseconds, `i64` |
+| 40 | 16 | feed word, zero-padded |
+| 56 | 16 | instrument, zero-padded |
+| 72 | 16 | signal rung, zero-padded |
+| 88 | 2 | first year, `u16` |
+| 90 | 1 | first month |
+| 91 | 2 | last year, `u16` |
+| 93 | 1 | last month |
+| 94 | 4 | months asked, `u32` |
+| 98 | 4 | months found, `u32` |
+| 102 | 8 | signal bars swept, `u64` |
+| 110 | 8 | support threshold, `u64` |
+| 118 | 8 | combinations produced, `u64` |
+| 126 | 4 | deepest level, `u32` |
+| 130 | 1 | halted: `1` when a budget stopped the walk |
+| 131 | 8 | trades of the chosen combination, `u64` |
+| 139 | 8 | pessimistic total paisa, `i64` |
+| 147 | 8 | optimistic total paisa, `i64` |
+| 155 | 8 | worst trade paisa, `i64` |
+| 163 | 8 | maximum drawdown paisa, `i64` |
+| 171 | 8 | winners' adverse excursion ppm, `i64` |
+| 179 | 8 | winners' favourable excursion ppm, `i64` |
+| 187 | 8 | every trade's adverse excursion ppm, `i64` |
+| 195 | 10 | five exit rungs, `i16` each, `-1` for none: stop, target, TSL, TTP arm, TTP trail |
+| 205 | 48 | six condition-mask `u64` words (version 3 only) |
+| 253 | 8 | first eight BLAKE3 bytes over `0..253` |
+
+The seal is an accident detector, not a security claim. The test
+`cli::results::tests::the_store_format_doc_states_the_ledger_this_build_writes`
+binds this section's magic, versions, strides and seal row to the constants.
+
+## 28. Population rows — `results/population-v1.bin`, version 1
+
+The population row file holds one fixed-stride row per expanded strategy. Its
+receipt files (`population-completions-v2.bin` to `-v4.bin`) are separate; §14
+describes the version-4 receipt. Offsets are counted from
+`cli::population::PopulationRowV1::payload_bytes` (D-1940). All integers are
+little-endian.
+
+The 16-byte header is `BRUTEXPP` at `0..8`, version `1` at `8..12`, and four
+reserved bytes at `12..16` that must be zero. A wrong magic, another version,
+a non-zero reserved byte or a length that is not `16 + n*312` is refused.
+
+Each row is 312 bytes: a 304-byte payload and an 8-byte seal.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | population identity |
+| 32 | 8 | row sequence, `u64` |
+| 40 | 32 | strategy digest |
+| 72 | 48 | six condition-mask `u64` words; all zero is refused |
+| 120 | 1 | direction: `1=long`, `2=short` |
+| 121 | 1 | instrument family: `1=NIFTY`, `2=BANKNIFTY` |
+| 122 | 1 | closure: `1=closed`, `2=redundant`, `3=unknown` |
+| 123 | 1 | admission status: `0=admitted`, `1=rejected`, `2=unmeasured`, `3=refused` |
+| 124 | 4 | signal rung seconds, `u32` |
+| 128 | 8 | support hits, `u64` |
+| 136 | 20 | stop, target, TSL, TTP-arm, TTP-trail indices, `u32` each; absent is `u32::MAX`, and TTP is wholly present or wholly absent |
+| 156 | 4 | reserved, zero |
+| 160 | 8 | drawdown, `u64` |
+| 168 | 8 | worst loss, `u64` |
+| 176 | 8 | losing rate ppm, `u64` |
+| 184 | 8 | losing trades, `u64` |
+| 192 | 16 | loss ratio ppm: tag byte (`0` absent, `1` present), seven zero bytes, `u64` value (zero when absent) |
+| 208 | 8 | pessimistic profit, `i64` |
+| 216 | 8 | winning trades, `u64` |
+| 224 | 8 | win rate ppm, `u64` |
+| 232 | 16 | reward-to-risk ppm, the same tagged shape as the loss ratio |
+| 248 | 8 | average win, `u64` |
+| 256 | 8 | average loss, `u64` |
+| 264 | 8 | assurance ppm, `u64` |
+| 272 | 32 | admission reasons, failed, unmeasured and refused bit sets, `u64` each |
+| 304 | 8 | first eight BLAKE3 bytes over `0..304` |
+
+A row whose seal, tag, rate or mask fails its check is refused, not skipped.
+`cli::population::tests::the_store_format_doc_states_the_population_row_this_build_writes`
+binds this section to the constants.
+
+## 29. Live top-N — `results/live/<identity>.bin`, version 2
+
+A live file is not history. It is the in-flight top-N of one run, named by the
+64 lowercase hex characters of its run identity, replaced whole by write, sync
+and rename, and removed when the run finishes. A killed run leaves its file
+behind; `cli::live` says why that cannot be fixed from the reader. Offsets are
+from `cli::live::Live::publish` (D-1940). All integers are little-endian.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | `BRUTEXLV` |
+| 8 | 4 | version `2`, `u32` |
+| 12 | 4 | row count, `u32` |
+| 16 | 8 | trials weighed so far, `u64` |
+| 24 | 8 | the `\|t\|` bar in thousandths, `i64` |
+| 32 | 8 | candidates priced, `u64` |
+| 40 | `count * 280` | rows, each a §13 frontier row of the same 280 bytes |
+
+The reader skips, rather than refuses, a file with the wrong magic, another
+version, a short header or a length that is not `40 + count*280`: a half-written
+file is an ordinary state here. There is no older version to read, because a
+live file from an older build belongs to a process that has stopped.
+`cli::live::tests::the_store_format_doc_states_the_live_file_this_build_writes`
+binds this section to the constants.
+
+## 30. Pre-Admission Data audit ledger — version 2
+
+`pre-admission-data-v2.bin` and `pre-admission-data-v2.lock` are the successor
+of §24. Version 1 bytes are not reinterpreted. Version 2 repeats every version-1
+source field and adds the Candidate Universe reconciliation, and it may carry
+zero Candidate rows only when the Candidate commit proves natural extinction.
+Offsets are from `encode_v2_core`, `encode_v2_reconciliation` and `header_v2` in
+`cli::pre_admission_data` (D-1940). All integers are little-endian.
+
+The 64-byte header is `BTX-PREADMIT-V2\0` at `0..16`, version `2` at `16..20`,
+kind `2` at `20..24`, stride `812` as a `u64` at `24..32`, and a 32-byte BLAKE3
+seal over `0..32` under the domain `brutex-pre-admission-header-v2\0` at
+`32..64`.
+
+Each 812-byte record is a 780-byte payload and a 32-byte domain-separated
+BLAKE3 seal. As in §24, each logical entry is a Data record (kind `1`) synced
+first and a Completion record (kind `2`) synced last; only the kind differs.
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | record version `2`, `u32` |
+| 4 | 4 | kind: `1=Data`, `2=Completion`, `u32` |
+| 8 | 8 | canonical sequence, `u64` |
+| 16 | 96 | Pre-Admission identity, Candidate Universe identity, Candidate completion digest |
+| 112 | 8 | Candidate row count, `u64` |
+| 120 | 1 | instrument family: `1=NIFTY`, `2=BANKNIFTY` |
+| 121 | 3 | reserved, zero |
+| 124 | 4 | signal rung seconds, `u32` |
+| 128 | 4 | one-minute horizon bars, `u32` |
+| 132 | 4 | reserved, zero |
+| 136 | 20 | canonical requested month span |
+| 156 | 128 | feed, source commit, calendar policy and daily-reference policy digests |
+| 284 | 40 | exact signal stream: count `u64`, digest |
+| 324 | 56 | complete one-minute context: count, first and last timestamp `i64`, digest |
+| 380 | 40 | exact execution subslice: count `u64`, digest |
+| 420 | 56 | prior-day daily stream: count, first and last timestamp `i64`, digest |
+| 476 | 88 | eligibility: count, eligible count, excluded-day count, eligibility digest, excluded-days digest |
+| 564 | 56 | signal calendar: rung `u32`, four zero bytes, first and last day `i64`, digest |
+| 620 | 56 | one-minute calendar, the same shape |
+| 676 | 24 | signal, minute-context and daily stored-load ceilings, `u64` each |
+| 700 | 8 | execution start index inside the minute context, `u64` |
+| 708 | 64 | reconciliation: sweep trials, frequent, infrequent, closed, redundant and unknown-closure itemsets, long and short exit cells per mask, `u64` each |
+| 772 | 4 | extinction depth, `u32` |
+| 776 | 1 | extinction complete, `0` or `1` |
+| 777 | 1 | closure complete, `0` or `1` |
+| 778 | 2 | reserved, zero |
+| 780 | 32 | seal over payload `0..780`, domain `brutex-pre-admission-record-v2\0` |
+
+`0..708` is the §24 payload with the version field reading `2`; a `const`
+assertion in the module holds the two widths equal.
+`cli::pre_admission_data::tests::the_store_format_doc_states_the_pre_admission_v2_this_build_writes`
+binds this section to the constants.
+
+## 31. Execution V3 authority — record layout 5
+
+Execution V3 is four append-only fixed-record files and one lock, beside each
+other in the root the ledger is opened on:
+
+| File | Magic (16 bytes) | Domain | Stride |
+|---|---|---:|---:|
+| `execution-parameters-v3.bin` | `BTX-EXV3-PARAM\0\0` | 1 | 1,024 |
+| `execution-percentiles-v3.bin` | `BTX-EXV3-PCTL\0\0\0` | 2 | 128 |
+| `execution-dispositions-v3.bin` | `BTX-EXV3-DISP\0\0\0` | 3 | 1,024 |
+| `execution-completions-v3.bin` | `BTX-EXV3-CMPL\0\0\0` | 4 | 1,024 |
+| `execution-v3.lock` | none; must be empty | — | — |
+
+The files have no file header. A length that is not a whole number of strides
+is refused. The semantic seam is V3; the record layout written in every record
+is `5`, and layout-4 bytes are refused rather than reinterpreted. Parameters,
+percentile atoms and dispositions are synced in that order, then one
+Completion is appended and synced last. Offsets are counted from the four
+`encode` functions in `cli::execution_v3` (D-1940). All integers are
+little-endian. Every record starts with the same 24 bytes and ends with a full
+32-byte BLAKE3 seal over its payload, under a per-kind domain
+`brutex-execution-v3-layout-5-<kind>-seal\0`:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | magic |
+| 16 | 4 | layout `5`, `u32` |
+| 20 | 4 | domain, `u32` |
+| stride − 32 | 32 | seal |
+
+Every byte between the last field below and the seal is zero, and is checked.
+
+**Parameter, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 512 | sixteen digests: parameter core ID, parameter ID, population ID, population ordered digest, source finalization ID and completion ID, policy, resolution, training, instrument, feed, commit, calendar, percentile digests, cost-model ID, execution-law digest |
+| 536 | 163 | evaluation fingerprint |
+| 699 | 5 | family (`1=NIFTY`, `2=BANKNIFTY`), direction (`1=long`, `2=short`), range-policy, selector-policy and forced-stop-policy tags |
+| 704 | 3 | reserved, zero |
+| 707 | 24 | rung, horizon bars, execution resolution seconds, entry delay minutes, forced-exit IST minute, forced-stop index (`u32::MAX` for none), `u32` each |
+| 731 | 32 | four run parameters, `u64` each |
+| 763 | 16 | ratio minimum and maximum, hundredths, `i64` each |
+| 779 | 88 | maximum levels, maximum ratio pairs, policy maximum cells, resolved stop, target, trail, ratio-pair and cell counts, maximum ambiguity bars, maximum gap bars, training bars, `u64` each |
+| 867 | 24 | forced-stop ppm, training first and last timestamp, `i64` each |
+| 891 | 16 | percentile offset and count, `u64` each |
+| 907 | 85 | reserved, zero |
+
+**Percentile atom, 128 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 32 | parameter core ID |
+| 56 | 1 | axis: `1=stop`, `2=target`, `3=trail` |
+| 57 | 3 | reserved, zero |
+| 60 | 12 | ordinal, numerator, denominator, `u32` each |
+| 72 | 24 | reserved, zero |
+
+**Disposition, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 512 | sixteen digests: disposition ID, population ID, population row ID, candidate semantic ID, candidate base-row ID, admission decision ID, finalization row ID and completion ID, parameter ID, execution-run ID, evaluated-grid, resolution, column, context, runner-disposition and selected-exit digests |
+| 536 | 40 | global sequence, family sequence, cell ordinal, support hits, refusal bits, `u64` each |
+| 576 | 4 | family, direction, admission status (`1=admitted` … `4=refused`), terminal (`1=authorized`, `2=policy refused`) |
+| 580 | 4 | reserved, zero |
+| 584 | 28 | rung, horizon bars, stop, target, TSL, TTP-arm and TTP-trail indices, `u32` each; absent index is `u32::MAX` |
+| 612 | 380 | reserved, zero |
+
+**Completion, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 56 | block sequence, first parameter record, parameter count, first percentile record, percentile count, first disposition record, disposition count, `u64` each |
+| 80 | 480 | fifteen digests: completion ID, population ID, population ordered digest, source finalization ID and completion ID, source admission block ID and completion ID, execution-law digest, ordered parameter, percentile and disposition digests, NIFTY and BANKNIFTY disposition digests, NIFTY and BANKNIFTY authority IDs |
+| 560 | 128 | four parameter-ID slots |
+| 688 | 40 | row, NIFTY, BANKNIFTY, authorized and policy-refused counts, `u64` each |
+| 728 | 4 | rung, `u32` |
+| 732 | 4 | reserved, zero |
+| 736 | 32 | four admission-status counts, `u64` each |
+| 768 | 128 | sixteen terminal-matrix cells, `u64` each |
+| 896 | 96 | reserved, zero |
+
+A decoded record is re-encoded and compared byte for byte; a record that
+decodes but is not canonical is refused.
+`cli::execution_v3::tests::the_store_format_doc_states_the_execution_v3_layout_this_build_writes`
+binds the magics, layout, domains and strides of this section to the
+constants.
+
+## 32. Execution V4 authority — version 4
+
+Execution V4 is an independent successor of §31 after Population V6. No V3 byte
+is accepted. It has the same four-files-and-a-lock shape, the same 24-byte
+record prefix (magic, version `4`, domain) and the same trailing 32-byte seal,
+under the domains `brutex-execution-v4-<kind>-seal\0`. Offsets are from the four
+`encode` functions in `cli::execution_v4` (D-1940).
+
+| File | Magic (16 bytes) | Domain | Stride |
+|---|---|---:|---:|
+| `execution-parameters-v4.bin` | `BTX-EXV4-PARAM\0\0` | 1 | 1,280 |
+| `execution-percentiles-v4.bin` | `BTX-EXV4-PCTL\0\0\0` | 2 | 128 |
+| `execution-dispositions-v4.bin` | `BTX-EXV4-DISP\0\0\0` | 3 | 1,024 |
+| `execution-completions-v4.bin` | `BTX-EXV4-CMPL\0\0\0` | 4 | 1,280 |
+| `execution-v4.lock` | none; must be empty | — | — |
+
+A naturally extinct family writes no parameter and no disposition; its
+terminal is kept in the Completion.
+
+**Parameter, 1,280 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 608 | nineteen digests: the sixteen of §31 with population completion ID after population ID, and source admission block ID and completion ID after the source finalization pair |
+| 632 | 163 | evaluation fingerprint |
+| 795 | 5 | family, direction, range-policy, selector-policy and forced-stop-policy tags |
+| 800 | 3 | reserved, zero |
+| 803 | 24 | the six `u32` of §31 |
+| 827 | 32 | four run parameters, `u64` each |
+| 859 | 16 | ratio minimum and maximum, `i64` each |
+| 875 | 88 | the eleven `u64` of §31 |
+| 963 | 24 | forced-stop ppm, training first and last timestamp, `i64` each |
+| 987 | 16 | percentile offset and count, `u64` each |
+| 1003 | 245 | reserved, zero |
+| 1248 | 32 | seal |
+
+**Percentile atom, 128 bytes.** The §31 layout, with version `4`.
+
+**Disposition, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 640 | twenty digests: disposition ID, population ID, population completion ID, population family-row ID, population row ID, candidate semantic ID, candidate base-row ID, base-evidence ID, admission decision ID, finalization family-row ID, finalization row ID, finalization completion ID, parameter ID, execution-run ID, evaluated-grid, resolution, column, context, runner-disposition and selected-exit digests |
+| 664 | 40 | global sequence, family sequence, cell ordinal, support hits, refusal bits, `u64` each |
+| 704 | 4 | family, direction, admission status, terminal |
+| 708 | 4 | reserved, zero |
+| 712 | 28 | rung, horizon bars and five exit indices, `u32` each |
+| 740 | 252 | reserved, zero |
+| 992 | 32 | seal |
+
+**Completion, 1,280 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 56 | block sequence and the first/count pairs for parameters, percentiles and dispositions, `u64` each |
+| 80 | 640 | twenty digests: completion ID, population ID, population completion ID, population ordered digest, NIFTY and BANKNIFTY population family-row IDs, NIFTY and BANKNIFTY finalization family-row IDs, source finalization ID and completion ID, source admission block ID and completion ID, execution-law digest, ordered parameter, percentile and disposition digests, NIFTY and BANKNIFTY disposition digests, NIFTY and BANKNIFTY authority IDs |
+| 720 | 128 | four parameter-ID slots |
+| 848 | 88 | row, evaluated and decision counts; the same three for NIFTY and for BANKNIFTY; authorized and policy-refused counts; `u64` each |
+| 936 | 8 | rung and horizon bars, `u32` each |
+| 944 | 2 | NIFTY and BANKNIFTY family terminal: `1=evaluated`, `2=naturally extinct` |
+| 946 | 2 | reserved, zero |
+| 948 | 32 | four admission-status counts, `u64` each |
+| 980 | 128 | sixteen terminal-matrix cells, `u64` each |
+| 1108 | 140 | reserved, zero |
+| 1248 | 32 | seal |
+
+`cli::execution_v4::tests::the_store_format_doc_states_the_execution_v4_records_this_build_writes`
+binds this section to the constants.
+
+## 33. Global Replay V3 — version 3
+
+Global Replay V3 is five append-only fixed-record files and one lock. It never
+opens V1 or V2 replay records. One commit appends witnesses, candidates,
+decisions and money rows, each file synced, and then one Completion last.
+Offsets are from the five `encode` functions in `cli::global_replay_v3`
+(D-1940). All integers are little-endian.
+
+| File | Magic (16 bytes) | Stride |
+|---|---|---:|
+| `global-replay-witnesses-v3.bin` | `BTX-GRV3-WIT\0\0\0\0` | 512 |
+| `global-replay-candidates-v3.bin` | `BTX-GRV3-CAN\0\0\0\0` | 512 |
+| `global-replay-decisions-v3.bin` | `BTX-GRV3-DEC\0\0\0\0` | 384 |
+| `global-replay-money-v3.bin` | `BTX-GRV3-MNY\0\0\0\0` | 512 |
+| `global-replay-completions-v3.bin` | `BTX-GRV3-CMP\0\0\0\0` | 1,024 |
+| `global-replay-v3.lock` | none | — |
+
+There is no file header and no domain field. Every record starts with the
+16-byte magic and version `3` as a `u32` at `16..20`, and ends with a 32-byte
+BLAKE3 seal over the payload under `brutex-global-replay-v3-<kind>-seal\0`. The
+bytes between the last field and the seal are zero and checked. Family is
+`1=NIFTY`, `2=BANKNIFTY`; direction `1=long`, `2=short`; feed `1=groww`,
+`2=dhan`, `3=truedata`, `4=gdfl`, `5=zerodha`; path `1=priceable`,
+`2=block-only`, `3=crossing refused`, `4=both`.
+
+A **trade row** is 88 bytes: signal, entry and exit bar as `u64`, then best,
+worst, entry and exit time, adverse, adverse paisa, favourable and favourable
+paisa as `i64`. A **VIX stamp** is 64 bytes: tag `0` and 63 zero bytes when
+absent, or tag `1`, seven zero bytes and the seven `i64` of the India VIX
+candle (time, open, high, low, close, volume, open interest).
+
+**Witness, 512 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 288 | nine digests: witness, selection, row, selected exit, universe, run, feed, strategy, ordered candidates |
+| 308 | 48 | six condition-mask `u64` words |
+| 356 | 24 | first candidate, candidate count, pricing-refused count, `u64` each |
+| 380 | 4 | rung seconds, `u32` |
+| 384 | 2 | rank, `u16` |
+| 386 | 3 | family, direction, feed |
+| 389 | 91 | reserved, zero |
+| 480 | 32 | seal |
+
+**Candidate, 512 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 160 | five digests: candidate, witness, selection, row, strategy |
+| 180 | 2 | stream ordinal, `u16` |
+| 182 | 32 | candidate ordinal, signal bar, entry bar, occupied-through bar, `u64` each |
+| 214 | 24 | signal, entry and occupied-through time, `i64` each |
+| 238 | 1 | path |
+| 239 | 89 | price: tag `0` and 88 zero bytes, or tag `1` and a trade row |
+| 328 | 16 | ambiguous bars, gap fills, `u64` each |
+| 344 | 4 | rung seconds, `u32` |
+| 348 | 2 | rank, `u16` |
+| 350 | 3 | family, direction, feed |
+| 353 | 127 | reserved, zero |
+| 480 | 32 | seal |
+
+**Decision, 384 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 128 | four digests: decision, candidate, witness, strategy |
+| 148 | 8 | sequence, `u64` |
+| 156 | 2 | stream ordinal, `u16` |
+| 158 | 8 | candidate ordinal, `u64` |
+| 166 | 16 | entry and occupied-through time, `i64` each |
+| 182 | 4 | rung seconds, `u32` |
+| 186 | 2 | rank, `u16` |
+| 188 | 3 | family, direction, path |
+| 191 | 1 | disposition: `1=admitted`, `2=blocked occupied`, `3=blocked simultaneous`, `4=unreachable`, `5=refused` |
+| 192 | 8 | occupied-through time, `i64`; zero for tags 3 to 5 |
+| 200 | 32 | the admitted decision for tag 3; zero otherwise |
+| 232 | 120 | reserved, zero |
+| 352 | 32 | seal |
+
+**Money, 512 bytes.** Written only for a globally admitted, priceable decision.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 160 | five digests: money, decision, candidate, witness, strategy |
+| 180 | 8 | decision sequence, `u64` |
+| 188 | 2 | stream ordinal, `u16` |
+| 190 | 4 | rung seconds, `u32` |
+| 194 | 2 | rank, `u16` |
+| 196 | 3 | family, direction, feed |
+| 199 | 88 | trade row |
+| 287 | 64 | India VIX stamp at entry |
+| 351 | 64 | India VIX stamp at exit |
+| 415 | 65 | reserved, zero |
+| 480 | 32 | seal |
+
+**Completion, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 96 | completion, replay and publication IDs |
+| 116 | 256 | eight selection IDs, one per rung |
+| 372 | 128 | ordered witness, candidate, decision and money digests |
+| 500 | 64 | first and count for witnesses, candidates, decisions and money, `u64` each |
+| 564 | 48 | offered, admitted, blocked-occupied, blocked-simultaneous, unreachable and refused counts, `u64` each |
+| 612 | 24 | pricing-refused candidates, admitted pricing-refused, block sequence, `u64` each |
+| 636 | 356 | reserved, zero |
+| 992 | 32 | seal |
+
+India VIX is stamped after admission and never changes selection, execution,
+P&L or the replay identity (`CLAUDE.md` §1). It is hashed into each money id
+(`money_id` hashes the entry and exit stamps after the trade row), and so into
+the ordered money digest, the publication identity and the completion identity:
+a VIX backfill or correction changes those four and no other (numeric-pass19
+p19num-1, D-1957). This said VIX "never changes ... money ... identity", which
+contradicted the code and the V1 statement in §18.
+
+No production command writes Global Replay V3. Nothing outside
+`cli::global_replay_v3` names the module; the Step-3 orchestrator writes Global
+Replay V4 instead (`ledger_v6`). This section describes the format the V3 code
+and its tests define (crash-edge-pass20 CE-95, D-1956).
+`cli::global_replay_v3::tests::the_store_format_doc_states_the_global_replay_v3_this_build_writes`
+binds this section to the constants.
+
+## 34. Population Statistics audit ledger — version 3
+
+`population-statistics-v3-audit.bin` and its lock are the mixed-family
+successor of §25. Version 2 bytes are unchanged and are not read here. One
+block is Data, `Family(NIFTY)`, `Family(BANKNIFTY)`, every candidate statistic
+in family order, then Completion last; everything before Completion is synced
+first. Offsets are from `encode_manifest`, `encode_family`, `encode_candidate`
+and `header` in `cli::population_statistics_v3` (D-1940). All integers are
+little-endian.
+
+The 64-byte header is `BTX-POPSTATS-V3\0` at `0..16`, version `3` at `16..20`,
+kind `1` at `20..24`, stride `1,024` as a `u64` at `24..32`, and a 32-byte
+BLAKE3 seal over `0..32` under `brutex-population-statistics-v3-header\0`.
+
+Every record is a 992-byte payload and a 32-byte seal over it under
+`brutex-population-statistics-v3-record\0`. Every payload starts with:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | record version `3`, `u32` |
+| 4 | 4 | kind: `1=Data`, `2=Family`, `3=Candidate`, `4=Completion`, `u32` |
+| 8 | 8 | physical record sequence, `u64` |
+| 16 | 32 | authority identity |
+
+**Data and Completion** carry the same manifest; only the kind differs.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 32 | logical sequence, bootstrap draws, seed, block length, `u64` each |
+| 80 | 8 | rung seconds and horizon bars, `u32` each |
+| 88 | 16 | requested span: from year, from month, to year, to month, `u32` each |
+| 104 | 160 | feed, source commit, calendar policy, daily-reference policy and statistics policy digests |
+| 264 | 64 | NIFTY and BANKNIFTY family identities |
+| 328 | 32 | ordered candidate digest |
+| 360 | 8 | candidate count, `u64` |
+| 368 | 624 | reserved, zero |
+
+**Family.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 4 | family: `1=NIFTY`, `2=BANKNIFTY`, `u32` |
+| 52 | 4 | terminal: `1=evaluated`, `2=insufficient for CSCV`, `3=naturally extinct`, `u32` |
+| 56 | 16 | Pre-Admission sequence and record index, `u64` each |
+| 72 | 320 | ten digests: Pre-Admission authority, Candidate universe, Candidate completion, observation authority, observation identity, observation policy, observation data, observation completion, accepted sessions, CSCV layout |
+| 392 | 24 | candidate, period and split counts, `u64` each |
+| 416 | 4 | segment count, `u32` |
+| 420 | 4 | presence flags: bit 0 White, bit 1 SPA, bit 2 Romano–Wolf, bit 3 PBO; other bits refused |
+| 424 | 64 | White: statistic bits, probability bits, exact probability numerator and denominator, `u64` each, family digest; zero when absent |
+| 488 | 64 | SPA, the same shape |
+| 552 | 32 | Romano–Wolf family digest; zero when absent |
+| 584 | 48 | PBO: contributing, bottom-half and unrankable splits, probability bits, numerator, denominator, `u64` each; zero when absent |
+| 632 | 128 | ordered candidate, period and split digests, family identity |
+| 760 | 232 | reserved, zero |
+
+**Candidate.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 8 | global sequence, `u64` |
+| 56 | 4 | family, `u32` |
+| 60 | 4 | reserved, zero |
+| 64 | 8 | family sequence, `u64` |
+| 72 | 64 | candidate semantic digest, Pre-Admission authority |
+| 136 | 80 | trades, wins, Wilson lower bits, Romano–Wolf statistic bits, rank, strict exceedances, initial numerator and denominator, adjusted numerator and denominator, `u64` each |
+| 216 | 64 | ordered period and split digests |
+| 280 | 712 | reserved, zero |
+
+A naturally extinct family has no candidate rows and no numeric statistic.
+`cli::population_statistics_v3::tests::the_store_format_doc_states_the_statistics_v3_this_build_writes`
+binds this section to the constants.
+
+## 35. Verdict store — `verify/`, day image version 1 and year index version 1 (D-4808, D-4844, D-4865)
+
+What automatic verification found, per (feed, instrument, day, timeframe):
+one fixed 160-byte record per key verified that day, in an immutable **day
+image** per (feed, exchange, segment, timeframe, day, generation), under a
+**year index** per (feed, exchange, segment, timeframe, year) that commits
+through two slots.
+`store::verdict` writes and reads every byte below; D-4808 is the store,
+D-4844 the format (its codes, flags, the no-record answer, the record ceiling
+and the month answers a staleness probe hands a lookup), D-4865 the crash
+rules, D-4809 the append-only numbering and D-4879 code 18 `owed`. The
+staleness rule and the month probe that computes it are IA-6's, and land with
+it. The writers are `pull::gdfl_verify` and `pull::zerodha_verify`
+(ingest-automation packages IA-6, IA-7, IA-9); the readers are `/verify` and
+`/dayflags.json` (IA-10b). Nothing in this family is an input to any bar
+reader, writer or bar-serving route (D-4807).
+
+Every layout is packed **little-endian** with the explicit offsets below; no
+field relies on alignment.
+
+### 35.1 Paths
+
+```
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi                             year index
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>.vdi.lock                        commit lock
+<store>/verify/<feed>/<EXCHANGE>/<SEGMENT>/<tf>/<yyyy>/<yyyy-mm-dd>.g<NNNNNNNNNN>.vdt   day image, one per generation
+```
+
+The four levels are the bar store's own, in its order
+(`bars/<vendor>/<exchange>/<segment>/…/<timeframe>/`, §2). `<feed>` is a
+`core::vendor::Vendor` segment (`gdfl`, `zerodha`, and any vendor `Vendor::ALL`
+gains), `<EXCHANGE>` is `NSE` or `BSE`, `<SEGMENT>` is `INDEX`, `CASH` or
+`FNO`, and `<tf>` is a `store::path::Timeframe` word (`1s`, `1min` … `60min`,
+`1day`). Two exchanges keep two calendars, so one day is two day records in
+two directories, never one shared between them (D-4923; the rules audit of
+11 October 2026, RA-243). The verdict store holds no list of feeds, exchanges
+or timeframes of its own: a feed is its position in `Vendor::ALL`, an exchange
+and a segment are `core`'s enums matched exhaustively (a new variant does not
+compile until it has a byte), and a timeframe is its own number of seconds.
+Every segment comes from a closed set, so no path can leave `<store>/verify/`. `NNNNNNNNNN` is the u32 generation in
+decimal, zero-padded to 10 digits, the width of `u32::MAX` (4,294,967,295), so
+every generation has exactly one name and one day's names sort in generation
+order. A writer's temporary is `<final name>.<pid>-<run>.tmp`; **no reader
+ever opens a `.tmp`**, and **no writer opens one that already exists**: it is
+born by `store::staging::create` (`O_CREAT | O_EXCL`), so a name that is
+already there is looked at without following it and never truncated. A regular
+file with one name (a dead writer's leftover) loses that name and the create is
+tried once more, counted in the commit's `staging_cleared`; a file with more
+than one name (a hard link planted there) is refused `staging_linked`, a
+symbolic link, directory or special file `staging_not_regular`, and a name
+that exists again after its one removal `staging_contended`, each with
+nothing written and the file behind the name untouched (D-4922; RA-290). A Zerodha run's spool (`verify/spool/<run>/…`) and its
+merge log are IA-9's subsection of this section (D-4881), written with IA-9;
+the rest of §35 is IA-5's.
+
+### 35.2 Day image, version 1 (magic `BRUTEXVD`)
+
+Never opened for writing once linked into place.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXVD` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | record stride = 160 |
+| 12 | 1 | feed: one more than the vendor's position in `Vendor::ALL`, for every vendor of that table (`gdfl` 4, `zerodha` 5); a vendor outside it is refused `feed_unknown`. The byte is computed without a search: the position is the vendor's own discriminant, read back through one indexed `get` of the table |
+| 13 | 1 | segment (`INDEX` 1, `CASH` 2, `FNO` 3) |
+| 14 | 1 | exchange (`NSE` 1, `BSE` 2) |
+| 15 | 1 | unit of every count: the largest of day, minute and second that divides the timeframe (0 second for `1s`, 1 minute for the minute rungs, 2 day for `1day`) |
+| 16 | 4 | day, as days since 1970-01-01 (a day before it is refused `day_out_of_range`) |
+| 20 | 4 | generation (≥ 1) |
+| 24 | 4 | records n |
+| 28 | 4 | table capacity c: a power of two, ≥ 2n, ≥ 16, ≤ 2^20; the table holds c + 7 slots |
+| 32 | 96 | records per verdict code 0..23 (24 × u32; code 0 and codes 19..23 are zero; code 18 is `owed`) |
+| 128 | 8 | run id of this generation |
+| 136 | 8 | written at (unix s; excluded from every byte-identity test) |
+| 144 | 2 | verifier version |
+| 146 | 1 | mode (1 inline, 2 cold, 3 completeness, 4 deferred, 5 unverified import, 6 Zerodha merge, 7 Zerodha cold) |
+| 147 | 1 | the day's rule set (0 = not applicable) |
+| 148 | 4 | previous generation: the one the carry read (0 = none) |
+| 152 | 4 | records carried unchanged from it |
+| 156 | 16 | origin digest prefix |
+| 172 | 4 | detail section offset (absolute; 0 = none) |
+| 176 | 4 | detail section bytes |
+| 180 | 4 | detail entries |
+| 184 | 4 | timeframe seconds: the timeframe's own length (`1s` 1, `1min` 60, `15min` 900, `1day` 86,400), read back through `Timeframe::from_secs`, so a rung the store learns later needs no row here; a value this build's `Timeframe::KNOWN` does not hold is refused `written_by_newer_build` |
+| 188 | 64 | reserved, zero |
+| 252 | 4 | header CRC-32C over bytes 0..252 |
+| 256 | 256 | day block (§35.2a) |
+| 512 | 8(c + 7) | hash table (§35.4) |
+| 512 + 8(c + 7) | 160n | records (§35.3), sorted by (code, key text, key hash) |
+| after the records | detail bytes | detail section (§35.5) |
+| end | 32 | BLAKE3 of every byte before it (§35.9) |
+
+A version, or a code or enumeration byte this build does not know, is refused
+`written_by_newer_build`, never read as something else. A flag bit is the one
+exception: it is kept (§35.6).
+
+#### 35.2a Day block (256 bytes; offsets from its start)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | calendar kind (the calendar's own code; opaque to `store`) |
+| 1 | 1 | source held (0 no, 1 yes, 2 unknown) |
+| 2 | 1 | `_v3` manifest (0 absent or its variable unset, 1 agrees, 2 disagrees, 3 unverified) |
+| 3 | 1 | journal outcome (0 none, 1 done, 2 done with refusals, 3 incomplete, 4 refused) |
+| 4 | 1 | day state (0 complete, 1 stopped, 2 `source_lost`, 3 `disk_full`, 4 census, 5 `held_back_cap`, 6 not imported, 7 verify off) |
+| 5 | 1 | worst code over the day's own findings and every record; for states 1..5 at least `day_partial` (D-4854) |
+| 6 | 2 | the journal close's reason (`pull`'s `REASONS`; opaque to `store`) |
+| 8 | 8 | day flags (§35.6), `details_capped` included when the cap was reached |
+| 16 | 4 | listing entries |
+| 20 | 4 | files read |
+| 24 | 4 | skipped |
+| 28 | 4 | refused |
+| 32 | 4 | not reached (wanted files the run never read) |
+| 36 | 32 | skip census, 8 × u32 |
+| 68 | 8 | journal seconds (the close's own filter) |
+| 76 | 8 | stored seconds (the same scope) |
+| 84 | 8 | oracle seconds |
+| 92 | 4 | shares absent |
+| 96 | 156 | reserved, zero |
+| 252 | 4 | CRC-32C over the block's bytes 0..252 |
+
+### 35.3 Record, version 1 (160 bytes)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | key hash: BLAKE3 of the **whole** key text, first 8 bytes |
+| 8 | 64 | key text, UTF-8, zero-padded; never empty, never holding NUL |
+| 72 | 1 | verdict code (§35.6) |
+| 73 | 1 | rule set (0 = not applicable) |
+| 74 | 2 | reason (`pull`'s `REASONS`; an opaque u16 to `store`) |
+| 76 | 4 | run id that wrote this record (a carried record keeps its own) |
+| 80 | 8 | flags (§35.6) |
+| 88 | 4 | source units |
+| 92 | 4 | store units |
+| 96 | 4 | missing |
+| 100 | 4 | extra |
+| 104 | 4 | value diff |
+| 108 | 4 | volume diff |
+| 112 | 4 | OI diff |
+| 116 | 4 | first differing unit of the day (`u32::MAX` = none) |
+| 120 | 4 | this record's first detail entry's offset in the section, plus 1 (0 = none) |
+| 124 | 4 | the month generation read (0 = the original file) |
+| 128 | 4 | the day's first stored row in the month (`u32::MAX` = none) |
+| 132 | 4 | the day's stored row count |
+| 136 | 4 | first stored unit of the day (`u32::MAX` = none) |
+| 140 | 4 | last stored unit of the day (`u32::MAX` = none) |
+| 144 | 12 | reserved, zero |
+| 156 | 4 | CRC-32C over bytes 0..156 |
+
+**Keys.** An instrument key is at most 64 bytes; a longer one is refused
+`key_too_long`, never cut. A refused file whose name resolves to no
+instrument is keyed by its stem as listed; a stem over 64 bytes keeps its
+first bytes up to a character boundary, its record carries `name_cut`, and
+its whole name is the record's first detail entry, kind 1 (`name`) — the one
+detail kind `store` writes itself. The hash is of the whole name, so two
+stems that share their first 64 bytes are two keys. A lookup matches both the
+hash and the kept text. One generation naming a key twice is refused
+`duplicate_key`. A run id past `u32::MAX` is refused `run_id_overflow`.
+
+### 35.4 The table, the probe and the record ceiling
+
+Each of the c + 7 slots is 8 bytes: {u32 record ordinal + 1 (0 = empty), u32
+tag = bits 32..63 of the key hash}. A key's home slot is `hash & (c − 1)`; its
+record sits within `MAX_PROBE` = 8 slots of home, and the 7 slots after slot
+c − 1 are overflow, so a probe window never wraps. The builder places the
+records in ordinal order by linear probing, starting at c = max(16, the
+power of two ≥ 2n), and doubles c until every key sits within its window
+**and** no other occupied slot of its window carries its tag; past c = 2^20 it
+refuses `table_too_large` by name and writes nothing. So the first slot of a
+key's window that carries its tag is the key's record, or the key has none.
+
+**The record ceiling is a measured limit, not a proof (L-IA-33).** With an
+8-slot window and no repeated tag the table needs about 3n to 10n slots, not
+2n. Measured by `crates/store/benches/ratio.rs` (C-VD-01, C-VD-04) on
+synthetic keys, 10 Oct 2026: 2,758 records take c = 8,192 (image 507,416
+bytes); 10,428 (the design's average options day) c = 65,536 (2,193,368
+bytes); 26,820 (the largest options day the design measured) c = 262,144
+(6,388,952 bytes); 137,900 c = 2^20 (30,453,208 bytes). So the table is
+about a third of the largest day's image (L-IA-7). Format version 1 placed
+137,900 records (50x a 2,758-record day) and refuses 275,800 (100x)
+`table_too_large`; whether a given key set between them fits depends on its
+hashes: a simulation of the placement with uniform random hashes (5 seeds
+each, 10 Oct 2026, the tag rule left out, since two equal 32-bit tags in one
+window are a one-in-many-million event) placed 150,000 at c = 2^20 in 5 of 5,
+175,000 in 4 of 5 and 200,000 in 1 of 5. The largest real day, 26,820 records, is 5.1x
+under the measured 137,900. `crates/store/tests/verdict.rs` writes 137,900
+and pins the 100x refusal. A day over the ceiling is never cut: its commit is
+refused by name with nothing written, the day's journal close stands, and the
+day reads "verdict pending" until a later format holds it.
+
+### 35.5 Detail section
+
+Entries of {u32 owner: record ordinal + 1, or 0 for the day; u16 kind
+(`pull`'s `DETAILS`, never 0, any other u16); u16 length (0 to 65,535);
+payload}, packed, the day's first and then each record's in ordinal order, so
+a record's entries are consecutive and its offset (record offset 120) points
+at the first. The section is at most 4 MiB. Each owner's entries are kept all
+or nothing: once one owner does not fit, it and every later owner keep their
+counts only, each such record carries `details_capped`, and so does the day.
+A detail of kind 0, or longer than 65,535 bytes, is refused `detail_invalid`.
+A record's details are read entry by entry (its 8-byte head, then its
+payload), so a reader reads its own entries and one more head, never the rest
+of the section. `Reader::details` is asked by record ordinal: an ordinal the
+generation does not hold is refused `ordinal_past_records`, and a record
+whose detail offset is past the section or is not its own entry is refused
+`image_corrupt`; neither is ever answered with an empty list (D-4927).
+
+### 35.6 Codes, flags and their order
+
+Verdict codes (byte, word, severity rank; 1 is the worst): 9
+`store_unreadable` 1, 2 `value_mismatch` 2, 3 `missing_in_store` 3, 4
+`extra_in_store` 4, 7 `store_without_source` 5, 8 `absent_from_store` 6, 5
+`count_mismatch` 7, 16 `day_partial` 8, 18 `owed` 9, 6 `source_refused` 10, 12
+`source_lacks_day` 11, 13 `vendor_hole` 12, 14 `withheld_by_rule` 13, 17
+`no_ledger` 14, 15 `built_under_earlier_rule` 15, 10 `no_response_kept` 16, 11
+`not_compared` 17, 1 `match` 18. Code 0 is unset and never written. Code 18
+`owed` (D-4879) is a unit the source holds and today's scope owes that no
+import has landed yet: never green and never a store defect;
+`missing_in_store` keeps only the unexplained absence. The "mismatches" are
+codes 2, 3, 4, 5, 7, 8 and 9; under the (code, key) order they are two slices
+of an image (codes 2..5 and 7..9), because code 6 sits between them, and each
+code's slice is located from the header's counts.
+
+Flags, u64, bit order: 0 `tix_absent`, 1 `spot_missing`, 2
+`after_index_close`, 3 `spot_unavailable`, 4 `peer_minute_absent`, 5
+`peer_unavailable`, 6 `body_not_kept`, 7 `source_changed_since_import`, 8
+`archive_day_on_closed_day`, 9 `v3_manifest_disagrees`, 10
+`lineage_unrecorded`, 11 `details_capped`, 12 `name_cut`, 13 `dup_minutes`,
+14 `vendor_revised`, 15 `expiry_after_close`, 16 `quality_differs`, 17
+`deferred_pending`, 18 `daycheck_differs`, 19 `serve_path_differs`, 20
+`lineage_unchecked`, 21 `source_crc_unrecorded`: 22 of 64 bits.
+
+**Unnamed bits.** Version 1 names bits 0 to 21 and no others. **A writer
+refuses a record or a day block carrying any bit it does not name**
+(`flag_unknown`, nothing written), so no build can write a fact it cannot
+name. **A reader never refuses or drops a bit it does not name**: an image a
+later build wrote with bit 22 or above reads whole, the bit is shown as
+`flag_<n>` (never omitted, never read as 0), and a carry copies it whole,
+because bits are appended and a newer image must stay readable by an older
+reader. A later bit is appended to `flags::ALL` by the package that first sets
+it, in the same change. Codes, bits, detail kinds and reasons are appended and
+never renamed or reused (D-4809).
+
+### 35.7 Year index, version 1 (magic `BRUTEXVI`)
+
+32,768 bytes: two slots, at 0 and at 16,384 (the bar file's slot stride).
+Each slot uses 8,812 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXVI` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | reserved, zero |
+| 12 | 2 | year |
+| 14 | 2 | reserved, zero |
+| 16 | 8 | commit generation |
+| 24 | 8,784 | 366 day entries of 24 bytes, 1 January first: {u32 day generation (0 = never verified), u8 worst code, u8 day state, u16 verifier version, u32 records, u32 mismatches, u64 flags (the OR of the day's record and day flags)} |
+| 8,808 | 4 | CRC-32C over bytes 0..8,808 |
+
+Commit g writes slot g mod 2 and makes it durable. A reader takes the valid
+slot (magic, version, year and CRC-32C) with the highest commit generation,
+slot 0 on a tie; with no valid slot it refuses `index_unreadable`, and a file
+shorter than 32,768 bytes is refused `index_short` (no file this protocol
+links is). `/verify/days.json` reads everything it shows from the `.vdi`.
+
+**A lost index is refused, never born again empty** (D-4926). A `.vdi` is
+born before its year's first image is linked (35.8), so a year directory
+that holds a `.vdt` while `<yyyy>.vdi` is absent has LOST its index; it is
+never a year in the making. A commit refuses it `index_missing` under the
+lock, before it builds, bears or links anything; a reader (`lookup`, `page`,
+`year`) refuses it the same way, where "no generation" would be a wrong
+answer. Both name the absent index and an image found. Only a year whose
+directory is absent, or holds no image, has no generation and may have its
+index born. The look is made only when the index is absent: one directory
+open and at most `ORPHAN_SCAN` + 1 = 1,025 names; a directory with more
+names than that and no image among the first 1,025 is refused `index_missing`
+too (no image named), never listed to its end (L-IA-43). A reader that finds
+an image beside an absent index looks for the index once more before it
+refuses, because a first writer may have borne it between the two looks.
+Rebuilding a lost index from the images' own day blocks is IA-6's command
+(RA-303); until it exists the repair is to put the `.vdi` back, and the
+images are never touched by the refusal.
+
+### 35.8 Genesis and the commit protocol (D-4865)
+
+**Genesis.** A `.vdi` is born whole: both slots (commit generation 0, every
+entry zero) are written to `<yyyy>.vdi.<pid>-<run>.tmp`, made durable, and
+linked into place with `hard_link`, which fails if the file exists; the
+temporary is removed and the directory made durable. The loser of a creation
+race reads the winner's file. Nothing opens a `.vdi` with create.
+
+**Commit.** One generation per (feed, exchange, segment, timeframe, day) per run
+(D-4808). Every refusal comes before anything is published. The inputs
+are checked before any file is touched (`run_id_overflow`, `flag_unknown`,
+`detail_invalid`, `day_out_of_range`, `feed_unknown`), and a whole-day
+generation is also planned and built then (`duplicate_key`,
+`table_too_large`), so a refused whole-day commit writes nothing at all; a
+carrying generation is planned and built under the lock (step 3), so its
+refusal leaves at most the series' directories and the lock file, never a
+year index or an image. The commit lock (`<yyyy>.vdi.lock`, exclusive) is
+held across the whole write. It is never waited for without a bound: the
+writer tries it in a counted loop of 10 ms steps for at most `LOCK_WAIT` =
+30 s and then refuses `lock_stalled` with nothing published, so a holder that
+hangs on a stalled drive is a named refusal and never a writer that does not
+return (`commit_within` takes another wait; D-4924, which adopts the critic's
+D-4906 for this lock). The lock file is opened without truncation and never
+written:
+
+1. read the year index and take the day's committed generation g;
+2. for a run that verified only some keys (a Zerodha window, a filtered
+   run), read image g whole and carry every record whose key the run did not
+   verify, with its own run, flags and details (the header counts them); a
+   whole-day run carries nothing;
+3. build the image (the one sort, O(n log n)); a day over the record ceiling
+   is refused `table_too_large` with nothing written; a year index the
+   series does not have yet is born now (genesis, above), once the image is
+   built;
+4. write it to `<day>.g<g'>.vdt.<pid>-<run>.tmp` and make it durable, then
+   publish it with `hard_link` as g' = g + 1; a link that meets an existing
+   image (one a crash left linked and uncommitted) removes the temporary and
+   tries g' + 1, at most 16 times, then refuses `generation_collision` with
+   nothing committed (L-IA-45); a write or a sync the host refuses (a full
+   disk) removes the temporary just made, the index's or the image's, before
+   the commit answers the host's `io`, so a refused commit leaves no partial
+   file (D-4927; only a KILLED writer leaves one, L-IA-42);
+5. remove the temporary and make the directory durable;
+6. write the next slot of the year index and make it durable.
+
+So a crash between the link and the slot leaves an uncommitted image that is
+**kept**, never overwritten, and the next writer steps past it; two writers
+on one day never both carry from g. Three `sync_all`s per generation (on
+macOS, `F_FULLFSYNC`), and genesis's two more on a year's first commit. Every image ever linked is kept: re-verification is a
+new generation and the old one stays byte for byte.
+
+### 35.9 Lookup, the no-record answer, staleness and the trailer
+
+**Lookup** (`store::verdict::Reader::lookup`): 2 positional reads of the
+`.vdi`'s slots, 1 read of the image's 512-byte header and day block, 1 read
+of the 64-byte probe window at `512 + 8 × home`, and, when a slot carries the
+key's tag, 1 read of the 160-byte record (its CRC-32C checked, its hash and
+text compared): **at most 5 reads and 2 opens**, whatever the day size, the
+year or the history. A bounded cache of 64 handles, least recently used out,
+holds the `.vdi` and `.vdt` handles; images are immutable and the slots are
+re-read on every lookup, so a cached handle never serves a stale commit.
+
+**A key with no record** gets its own answer from the day block's state,
+**never the day block's worst code** (D-4844), so a share absent from the
+source on a day another share is `value_mismatch` never shows that mismatch.
+Checked in this order: day state 1..5 → `day_partial` (D-4854); source held
+= no → `source_lacks_day`; not imported → `owed (not_imported)`; verify off →
+`not_compared (verify_off)`; a complete day → the lookup answer `no_record`,
+shown as "not in this day's verification" (the source listed no file for the
+key that day, or the key is outside the scope verified). None of them is
+green and none reads more than the day block already read.
+
+**Staleness** is computed at lookup, never stored; its rule and the month
+probe are IA-6's. `store::verdict::Answer::staleness` compares what the
+probe hands it with the record, in this order: an image written by an older
+verifier (header offset 144); a record carrying `deferred_pending`; and the
+month, whose (generation, day's first row, day's row count) now differ from
+the record's offsets 124..135 (a resume appended the rest of a day, a repair
+published a generation, or a re-key moved the contract). A month with no
+`.tix` reads `stale: unknown (no .tix)`, and a month a writer holds reads
+`stale: unknown (month busy)` (`MonthNow::Busy`: the probe's shared lock
+failed at once, and a page lookup never waits or retries); neither is ever
+fresh. A check the caller did not make is named, and such an answer is never
+fresh. There is no check of the day's definition: a later close that changed
+the stored bars is caught by the month, and one that did not leaves the
+verdict true.
+
+**The trailer** has one reader, `store::verdict::check_trailer` (WP-81's
+store scrub calls it over `verify/`). It reads an image whole and checks the
+BLAKE3 trailer first, so one byte changed anywhere is refused
+`trailer_mismatch`; then both CRC-32Cs of the header and day block, every
+record's CRC-32C, the (code, key) order, the per-code counts, that the table
+finds every record where a lookup would and holds nothing else, and the
+detail section's shape. A lookup never reads the trailer. A file longer than
+any image can be (`MAX_IMAGE_LEN` = 180,355,672 bytes: the prefix, the
+largest table, a record for each of its 2^20 slots, the 4 MiB detail section
+and the trailer) is refused `image_corrupt` by its length alone, before a
+byte is read or allocated for (D-4927).
+
 ## Dated NSE cash-session cache (D-0519)
 
 Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact
@@ -1493,7 +3438,9 @@ signature or an independently embedded trade date. No candle format changes.
 ## Explicit bar repair V1 (not transparently promoted)
 
 `crates/store/REPAIR.md` specifies the additive revision protocol and exact
-144-byte completion receipt. Original V2 bar geometry is unchanged. Revisions
+144-byte completion receipt. The bar geometry (versions 2 and 3 share it) is
+unchanged; a revision file is born at `Layout::CURRENT`, version 3 since D-1571,
+whatever its source's version (P14-05, D-1959). Revisions
 live below `bar-revisions-v1/<ordinal>/` with their own bar/CRC/lock pair,
 create-once `.reserved-v1` marker, and completion-last `.repair-v1` receipt.
 Ordinary readers and census paths still select the original data. Missing or
@@ -1890,6 +3837,16 @@ body is additive; no original candidate, source or qualification stride changes.
 | Month, 72 bytes plus reason | Year8, month8, validated-snapshot flag8, original row count8, snapshot digest32, reason byte length8, then bounded UTF-8 diagnostic bytes. A validated month has no reason; an unavailable month has no row count or snapshot digest. |
 | Trade annotation, 240 bytes each | Original local ordinal8, run32, original native trade digest32, entry/exit-bar/exit-from/exit-until timestamps32, month index8, then two 64-byte stamps. Each stamp is state8 and seven i64 candle fields56. Absent and unavailable states require zero payload padding. |
 
+**Units of the stamped candle.** The seven `i64` candle fields are the stored
+`NSE-INDIAVIX` bar: time in microseconds, then open, high, low and close in
+**hundredths of an India VIX index point** (the price write path's ×100
+scale; VIX is a volatility index in points, not a price in rupees), then volume
+and open interest (`i64::MIN` when absent). `/index-stop-vix.json` serves the
+four price-path fields as `open_paisa` .. `close_paisa`; those names are the
+shared path's and are frozen, and the response's `policy` text states the unit
+(`api::indexstopvixjson::CANDLE_UNIT`). A `close_paisa` of `1345` is VIX 13.45,
+not ₹13.45. numeric-pass19 p19num-2, D-1968.
+
 The body order is header, settings, months and their reasons, then annotations.
 `brutex-index-stop-vix-reference-lookup-v1\0` binds catalog identity and pin.
 `brutex-index-stop-vix-publication-v1\0` hashes the body except its own
@@ -1902,3 +3859,192 @@ month availability, disagreement between repeated references to the same minute,
 foreign extents, tails and insufficient whole-publication admission refuse.
 The independent reference pins never become a source/run,
 search, qualification or ranking identity.
+
+## §38 — The alert queue, format v1 (D-4883, D-4893, D-4895)
+
+`<store>/audit/alerts`. One file, append-only, little-endian, packed (no field
+relies on alignment). Written and read by `pull::alerts` and by nothing else.
+Format v1 is written once: a change is a new version in the header, never a
+new meaning for a byte below.
+
+**Header, 64 bytes at offset 0.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXAL` |
+| 8 | 2 | version = 1 |
+| 10 | 2 | record stride = 128 |
+| 12 | 2 | header length = 64 |
+| 14 | 2 | reserved, zero |
+| 16 | 8 | created at (unix seconds) |
+| 24 | 36 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes 0..60 |
+
+**Record, 128 bytes.** Ordinal k ≥ 1 sits at 64 + 128 × (k − 1); the file's
+length alone says how many whole records it holds.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | type: 1 alert, 2 acknowledgement |
+| 1 | 1 | kind (the table below; 0 for an acknowledgement) |
+| 2 | 1 | flags: bit 0 `text_cut`; bits 1–7 zero |
+| 3 | 1 | reserved, zero |
+| 4 | 4 | day (days since 1970-01-01; 0 = none) |
+| 8 | 8 | run id (0 = none) |
+| 16 | 8 | put at (unix seconds) |
+| 24 | 16 | the first 16 bytes of the BLAKE3 of the de-duplication key (zero for an acknowledgement) |
+| 40 | 4 | the acknowledged ordinal (type 2; 0 for an alert) |
+| 44 | 4 | **open after**: the count of unacknowledged alerts in the file once this record is counted |
+| 48 | 1 | text length in bytes (≤ 75) |
+| 49 | 75 | text, UTF-8, whole characters, zero-padded. An alert's text says what happened; an acknowledgement's says who acknowledged (`cli`, `api`) |
+| 124 | 4 | CRC-32C over bytes 0..124 |
+
+**Kinds** (append-only; a number is never renamed or reused). 1 to 12 are the
+ingest design's; 13 to 20 were added before the format was first written, for
+the conditions the rules audit of 11 October 2026 found unalerted. The writer
+refuses a kind outside this table (`alert_kind_unknown`); a reader shows a
+number it cannot name as `kind_<n>` and a record type it cannot name as
+"unknown", never dropping either.
+
+| Kind | Word | | Kind | Word |
+|---|---|---|---|---|
+| 1 | `interrupted_twice` | | 11 | `verdict_refused` |
+| 2 | `store_lost` | | 12 | `queue_replaced` |
+| 3 | `build_skew` | | 13 | `run_ended_early` |
+| 4 | `calendar_horizon` | | 14 | `interrupted` |
+| 5 | `disk_full` | | 15 | `stalled` |
+| 6 | `hole` | | 16 | `autopilot_stalled` |
+| 7 | `store_damaged` | | 17 | `disk_low` |
+| 8 | `runs_ledger_damaged` | | 18 | `file_shrank` |
+| 9 | `mismatch` | | 19 | `month_damaged` |
+| 10 | `spool_damaged` | | 20 | `index_refused` |
+
+**Sibling names in `<store>/audit/`.**
+
+| Name | What it is |
+|---|---|
+| `alerts.lock` | The lock file. Writers hold it exclusive, readers shared, for one operation. It holds no data |
+| `alerts.<pid>.tmp` | A new queue before it has its name. Genesis: the header is written here, synced, hard-linked to `alerts` (the link fails if a queue exists) and removed. A replacement: the header and the first record are written here, synced, and the name is renamed over `alerts`. One left by a killed process is never read; the same process id removes it before writing its own |
+| `alerts.reserve` | 65,536 written zero bytes (512 records' worth). A put that meets a full disk deletes it and tries once more, so `disk_full`'s own alert has room; the next put that finds room writes it again |
+| `alerts.damaged-<unix_s>` (`.2`, `.3`, … for a second replacement in one second) | A damaged queue kept by `cli alerts --replace-damaged`. Never edited, never deleted, never written over |
+
+**Rules.**
+
+- *Born whole.* A file shorter than 64 bytes, or whose header fails its CRC,
+  magic, stride or header length, cannot come from genesis and is refused
+  `alerts_damaged{offset: 0}`. A header that passes its CRC with another
+  version is refused `alerts_version_unknown`, never replaced.
+- *The tail rule is length-based and checks only the last whole record.* Bytes
+  past the last whole record are a torn append and the next append writes over
+  them. A last whole record that fails its CRC is an append whose sync never
+  finished: the next append writes over it, takes "open after" from the record
+  before it, and an error event names the offset. Two failing records at the
+  tail refuse every write, `alerts_damaged{offset}`. No record whose CRC
+  passes is ever written over.
+- *De-duplication.* A put whose key hash equals that of an **unacknowledged**
+  alert among the newest 1,024 records writes nothing. An acknowledged key, or
+  one older than the window, is put again.
+- *An acknowledgement* is appended only for an alert that no later
+  acknowledgement names, so "open after" never goes below zero.
+- *Readers* take one read of at most 1,024 records under the lock held shared
+  and list the alerts in it that no acknowledgement in it names, newest first;
+  a record that fails its CRC is listed as damaged. The count of older
+  unacknowledged alerts is the newest good record's "open after" less the
+  alerts listed. For the newest page that is exact. A page before the newest
+  is exact only once the records after it are read too, because an
+  acknowledgement is always a later record: `alerts::page_settled` (`cli
+  alerts --before <n>`) reads them, drops every alert one of them names and
+  takes one off the older count for each that names an alert older than the
+  page (D-4895, `docs/06-limits.md` L-IA-34). A reader that takes more than
+  one read (`page_settled`, `older`) takes them all through the one file its
+  first read opened, so its answer is one queue's even when a replacement
+  puts a new file on the name meanwhile, and it returns every record it
+  could not read (by ordinal) beside the alerts.
+- *A damaged queue is replaced, never repaired, and the replacement is all or
+  nothing.* Under the lock held exclusive, each step durable before the next:
+  (1) the file is given its kept name `alerts.damaged-<unix_s>` by a hard link
+  (which fails rather than write over an earlier kept file) and the directory
+  is synced; (2) the new queue, header **and** first record, is written whole
+  to `alerts.<pid>.tmp` and synced; (3) that name is renamed over `alerts`,
+  which the host does atomically, and the directory is synced; (4) the
+  reserve is made. The first record is a `queue_replaced` alert naming the
+  kept file and the open count it held (its newest good record's "open
+  after"; `unknown` only when no record of its window passes its CRC, so a
+  failed header alone does not make it unknown). At every moment, and after a
+  kill at any step, `alerts` is the damaged queue or the new queue already
+  holding that record: there is never no queue, nor a queue that does not say
+  what it replaced. A replacement stopped before step 3 leaves the damaged
+  queue with two names; the next one finds the kept name by device and inode
+  and uses it, so one damaged file is kept once (D-4883).
+
+## §39 — Sealed month frame, codec 1 (D-4939)
+
+One frame of a sealed month: at most `block_rows` bars (256 for every month the
+sealer writes; a reader passes what the month's head states, never a constant)
+as seven bit-packed column streams after a varint row 0. Written and read by
+`store::sealed_codec` and by nothing else. This section is the frame alone: the
+`.sbar` file around it (head, directory with each frame's CRC-32C, time table,
+provenance) is SC-2's and gets its own section when it lands. Codec 1 is
+written once: a change is a new codec byte, never a new meaning for a byte
+below. Little-endian; varints are unsigned LEB128 of at most ten bytes, the
+tenth carrying bit 63 alone; signed values are zigzag-mapped; every arithmetic
+step wraps, so any seven `i64` (`i64::MIN` open interest, a jump from
+`i64::MAX` to `i64::MIN`, a high below its open, a negative volume) come back
+bit for bit.
+
+**Frame.**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | codec = 1 |
+| 1 | 1 | flags. bit 0: row 0's stamp is a whole number of seconds after the month's origin (00:00 IST on the 1st); bit 1: row 0's open interest is `i64::MIN` and no varint carries it. Any other bit is refused |
+| 2 | 2 | rows `m`, 1 to `block_rows` |
+| 4 | … | row 0, zigzag varints in this order: `(ts − origin) / unit` (unit 1,000,000 under flag bit 0, else 1), close, open − close, high − close, low − close, volume, open interest (absent under flag bit 1) |
+| … | … | seven streams, in the order ts, close, open, high, low, volume, open interest; each carries the `m − 1` residuals of rows 1 to `m − 1` |
+
+**Stream.**
+
+| Size | Field |
+|---|---|
+| 1 | bit 7: predictor mode; bits 0 to 6: width `w`, 0 to 64 |
+| varint | `n_exc`, the number of exceptions, at most `m − 1` |
+| 1 | `e`, the exception width, 0 to 64; present only when `n_exc > 0` |
+| varint | base |
+| varint | gcd, 1 to 2^62 − 1 |
+| `ceil((m − 1) · w / 8)` | packed values, `w` bits each, least significant bit first, zero padding |
+| `ceil(n_exc · p / 8)` | exception positions, strictly increasing, `p = max(1, bit length of m − 2)` bits each |
+| `ceil(n_exc · e / 8)` | exception values, `e` bits each |
+
+A residual is the packed value, or the exception value at an exception's
+position; plus base; zigzag undone; times gcd. The column is the residual plus
+its predictor:
+
+| Column | Mode 0 predictor | Mode 1 predictor |
+|---|---|---|
+| ts | previous row's ts | refused |
+| close | previous row's close | refused |
+| open | previous row's close | this row's close |
+| high | `max(open, close)` of this row | refused |
+| low | `min(open, close)` of this row | refused |
+| volume | zero | previous row's volume |
+| open interest | previous row's open interest | zero |
+
+**Bounds.** The encoder writes, for each column, the shortest stream over each
+mode the column has and every width from 0 to its widest value, ties to mode 0
+and then to the smaller width; plain packing is a candidate, so a stream is at
+most 2,062 bytes at 256 rows and a frame at most 14,508 (`MAX_FRAME_LEN` =
+`4 + 70 + 7 × 2,062`; `max_frame_len(block_rows)` for any other geometry). The
+same rows give the same bytes on any host.
+
+**Refusals.** The frame's CRC-32C is checked before any byte is read; then,
+each by its own name and never by a panic, with nothing appended to the
+caller's rows: `codec`, `flags`, `rows` (0 or above `block_rows`),
+`truncated`, `varint_too_long`, `width`, `mode`, `exception_count`,
+`exception_width`, `gcd`, `exception_position` (at or past `m − 1`),
+`exception_order`, `trailing_bytes`. `decode_stamps` makes every check
+`decode_frame` makes and unpacks only the ts stream. Every check, the
+trailing bytes included, is made before the caller's buffer grows: a refused
+frame reserves nothing, and an accepted one reserves its head's rows once
+(FM-284). Invariants SC1-01 to
+SC1-09 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
+`docs/06-limits.md`.

@@ -97,7 +97,7 @@ use brutex_core::price::Paisa;
 use crate::day::TradeDay;
 use crate::error::{CostError, Refusal};
 use crate::fill::{Bar, Direction, Fills, worst_case_fills};
-use crate::lot::{contract_quantity, lot_size_on};
+use crate::lot::{contract_quantity, lot_size_of, lot_size_on};
 use crate::money::{levy_ceiling, narrow, statutory_levy};
 use crate::rate::{
     BpsX100, Broker, GST_ON_FEE_BASE, OrderSide, SEBI_TURNOVER_FEE, brokerage_per_order, ipft,
@@ -170,16 +170,41 @@ impl core::fmt::Display for Outcome {
 pub struct Contract {
     underlying: SweptSlot,
     segment: Segment,
+    /// The contract's expiry, when the caller knows it (DB-B04).
+    expiry: Option<TradeDay>,
 }
 
 impl Contract {
-    /// A contract on a swept underlying.
+    /// A contract on a swept underlying, its expiry not stated. A lot-sized
+    /// trip of it is sized by the trade-day lot, which is every contract's
+    /// lot except while a revision is in transition; state the expiry with
+    /// [`Self::expiring`] wherever it is known.
     #[must_use]
     pub const fn new(underlying: SweptSlot, segment: Segment) -> Self {
         Self {
             underlying,
             segment,
+            expiry: None,
         }
+    }
+
+    /// A contract on a swept underlying that expires on `expiry` (the day
+    /// its name states or the day it settled). NSE revises a lot per
+    /// contract, so [`RoundTrip::in_lots`] sizes it by
+    /// [`crate::lot::lot_size_of`] (DB-B04).
+    #[must_use]
+    pub const fn expiring(underlying: SweptSlot, segment: Segment, expiry: TradeDay) -> Self {
+        Self {
+            underlying,
+            segment,
+            expiry: Some(expiry),
+        }
+    }
+
+    /// The expiry, when stated.
+    #[must_use]
+    pub const fn expiry(self) -> Option<TradeDay> {
+        self.expiry
     }
 
     /// Which of `core`'s swept underlyings this is.
@@ -333,10 +358,13 @@ impl Rates {
 
     /// The rate set in force at `exchange` on `day`.
     ///
-    /// The **entry** day, always: the predecessor's `DEC-COST-002` fixes the
-    /// regime key at the entry date, so a round trip that straddles a boundary
-    /// is priced at the regime it opened under. [`price`] passes the entry day
-    /// and never the exit day.
+    /// The day of ONE leg. [`price`] resolves the entry day's set for the entry
+    /// leg and the exit day's set for the exit leg, so each charge is priced at
+    /// the regime in force on the day that leg traded. It used to key the whole
+    /// trip to the entry day (the predecessor's `DEC-COST-002`), which priced
+    /// the sell-side transaction tax of a long trip straddling 2026-04-01 at the
+    /// old 0.10% and under-charged it by a third (audit-20261003 hunt-costs-1,
+    /// D-1535).
     ///
     /// # Errors
     ///
@@ -580,7 +608,13 @@ impl RoundTrip {
                 segment: contract.segment().as_str(),
             });
         }
-        let lot_size = lot_size_on(contract.underlying(), entry.day())?;
+        // The lot is the CONTRACT's (DB-B04): a revision leaves the
+        // contracts that already existed on the previous lot, so the entry
+        // day alone mis-sized them by up to three times.
+        let lot_size = match contract.expiry() {
+            Some(expiry) => lot_size_of(contract.underlying(), expiry, entry.day())?.lot,
+            None => lot_size_on(contract.underlying(), entry.day())?,
+        };
         let quantity = contract_quantity(lots, lot_size)?;
         Self::new(contract, direction, broker, outcome, entry, exit, quantity)
     }
@@ -916,8 +950,11 @@ fn position(fills: Fills, quantity: i64) -> Result<Position, CostError> {
     let sell_notional = leg_notional(fills.sell(), quantity, "the sell notional")?;
 
     // Both notionals are in `[0, i64::MAX]`: a `Fills` has no public
-    // constructor, so its buy leg is at least two ticks and its sell leg at
-    // least one, the quantity is strictly positive, and the multiplications
+    // constructor, so its buy leg is at least one tick (two on the worst case)
+    // and its sell leg at least one on every anchor -- the printed-extreme
+    // anchor only since D-1192, before which a negative low reached here and
+    // `i64::MIN` overflowed this subtraction -- the quantity is strictly
+    // positive, and the multiplications
     // above already refused anything that left `i64`. The difference of two
     // values in `[0, i64::MAX]` is in `[-i64::MAX, i64::MAX]`, so this
     // subtraction cannot overflow and there is no branch pretending it can.
@@ -968,13 +1005,17 @@ fn leg_notional(fill: Paisa, quantity: i64, operation: &'static str) -> Result<P
 /// Never the other way round. The predecessor's `COSTS_VERIFIED` §5 Example 1
 /// gives 502 paisa because it is `228 + 274`; ceiling the combined notional
 /// once gives 501, and the difference compounds over a sweep.
-fn both_legs(
+///
+/// Each leg at its own day's rate: the buy notional at `buy`, the sell notional
+/// at `sell` (D-1535). A trip within one regime passes the same rate twice.
+fn per_leg(
     position: &Position,
-    rate: BpsX100,
+    buy: BpsX100,
+    sell: BpsX100,
     operation: &'static str,
 ) -> Result<Paisa, CostError> {
-    let buy_leg = levy_ceiling(position.buy_notional, rate)?;
-    let sell_leg = levy_ceiling(position.sell_notional, rate)?;
+    let buy_leg = levy_ceiling(position.buy_notional, buy)?;
+    let sell_leg = levy_ceiling(position.sell_notional, sell)?;
     narrow(
         i128::from(buy_leg.raw()) + i128::from(sell_leg.raw()),
         operation,
@@ -1026,28 +1067,57 @@ fn both_legs(
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn charge_stack(fills: Fills, quantity: i64, rates: &Rates) -> Result<Charges, CostError> {
+    charge_stack_legs(fills, quantity, rates, rates)
+}
+
+/// [`charge_stack`] with the buy leg priced at `buy` and the sell leg at
+/// `sell` — each leg at the regime of the day it traded (D-1535).
+///
+/// The transaction tax is the sell leg's, at the sell day's rate; the stamp
+/// duty is the buy leg's, at the buy day's rate; the three per-leg levies take
+/// each leg at its own rate. Brokerage and GST are flat in this crate's tables
+/// and taken from the buy set; GST is taken as the larger of the two in case a
+/// dated GST ever lands, so a straddling trip is never charged the lower one.
+fn charge_stack_legs(
+    fills: Fills,
+    quantity: i64,
+    buy: &Rates,
+    sell: &Rates,
+) -> Result<Charges, CostError> {
     let position = position(fills, quantity)?;
 
     // Brokerage: per executed ORDER, flat, both legs. It does not scale with
     // the quantity and nothing below multiplies it.
-    let brokerage = rates.brokerage_round_trip();
+    let brokerage = buy.brokerage_round_trip();
 
-    // The transaction tax: the SELL notional, and only it. Not both legs, and
-    // not the strike.
-    let stt = statutory_levy(position.sell_notional, rates.stt())?;
+    // The transaction tax: the SELL notional, and only it, at the SELL day's
+    // rate. Not both legs, and not the strike.
+    let stt = statutory_levy(position.sell_notional, sell.stt())?;
 
-    // The three per-leg levies: ceiled to the paisa on each leg, then summed.
-    let exchange = both_legs(
+    // The three per-leg levies: each leg at its own day's rate, ceiled to the
+    // paisa on each leg, then summed.
+    let exchange = per_leg(
         &position,
-        rates.exchange(),
+        buy.exchange(),
+        sell.exchange(),
         "the exchange transaction charge",
     )?;
-    let sebi = both_legs(&position, rates.sebi(), "the SEBI turnover fee")?;
-    let ipft = both_legs(&position, rates.ipft(), "the investor protection fund")?;
+    let sebi = per_leg(&position, buy.sebi(), sell.sebi(), "the SEBI turnover fee")?;
+    let ipft = per_leg(
+        &position,
+        buy.ipft(),
+        sell.ipft(),
+        "the investor protection fund",
+    )?;
 
-    // Stamp duty: the BUY notional, at the buy-side rate. The sell side's rate
+    // Stamp duty: the BUY notional, at the buy day's rate. The sell side's rate
     // is zero by construction, so there is nothing to charge there and no call.
-    let stamp = statutory_levy(position.buy_notional, rates.stamp())?;
+    let stamp = statutory_levy(position.buy_notional, buy.stamp())?;
+    let gst_rate = if sell.gst().get() > buy.gst().get() {
+        sell.gst()
+    } else {
+        buy.gst()
+    };
 
     // GST: 18% on the services base, which is the sum of the ALREADY-ROUNDED
     // service components. The transaction tax and the stamp duty are taxes, not
@@ -1059,7 +1129,7 @@ pub fn charge_stack(fills: Fills, quantity: i64, rates: &Rates) -> Result<Charge
             + i128::from(ipft.raw()),
         "the GST base",
     )?;
-    let gst = statutory_levy(gst_base, rates.gst())?;
+    let gst = statutory_levy(gst_base, gst_rate)?;
 
     let total = narrow(
         i128::from(brokerage.raw())
@@ -1135,13 +1205,13 @@ fn signal_only(fills: Fills, quantity: i64) -> Result<Charges, CostError> {
 ///
 /// The whole of stages one, two and three in one call. It resolves the fills,
 /// the segment's costability and — for a cost-bearing segment — the rate set in
-/// force on the **entry** day, then runs [`charge_stack`].
+/// force on EACH leg's day, then prices each leg at its own day's set (D-1535).
 ///
 /// # Errors
 ///
 /// * [`CostError::UnsupportedOutcome`] for anything but a normal close.
-/// * [`CostError::Unverified`] when the regime in force on the entry day has no
-///   verified rate. **The whole round trip refuses.** No component is priced at
+/// * [`CostError::Unverified`] when the regime in force on either leg's day has
+///   no verified rate. **The whole round trip refuses.** No component is priced at
 ///   zero, no current rate is applied backwards, and there is no argument that
 ///   changes it.
 /// * Everything [`charge_stack`] can return, and [`CostError::Overflow`] from
@@ -1189,12 +1259,16 @@ pub fn price(trip: &RoundTrip) -> Result<Charges, CostError> {
     if is_cost_free(trip.contract().segment()) {
         return signal_only(fills, trip.quantity());
     }
-    let rates = Rates::resolve(
-        trip.broker(),
-        trip.contract().exchange(),
-        trip.entry().day(),
-    )?;
-    charge_stack(fills, trip.quantity(), &rates)
+    let exchange = trip.contract().exchange();
+    let entry = Rates::resolve(trip.broker(), exchange, trip.entry().day())?;
+    let exit = Rates::resolve(trip.broker(), exchange, trip.exit().day())?;
+    // The direction decides which leg sells: a long exits by selling, a short
+    // enters by selling.
+    let (buy, sell) = match trip.direction() {
+        Direction::Long => (&entry, &exit),
+        Direction::Short => (&exit, &entry),
+    };
+    charge_stack_legs(fills, trip.quantity(), buy, sell)
 }
 
 #[cfg(test)]
@@ -1578,6 +1652,72 @@ mod tests {
         assert_eq!(charges.total_charges().raw(), 235_11);
     }
 
+    /// A straddling trip whose two days carry DIFFERENT rate sets: each per-leg
+    /// levy takes its own leg's rate, and GST is the larger of the two in
+    /// either argument order (D-1535). Every shipped `Rates::new` set carries
+    /// the same GST and no verified boundary moves the exchange, SEBI or IPFT
+    /// rate, so only sets minted with `Rates::with_all` can tell the legs
+    /// apart. (P10-01: `sell.gst() > buy.gst()` mutated to `<` survived every
+    /// other test, as did pricing the sell leg at the buy set's rates.)
+    #[test]
+    fn a_straddling_trip_takes_each_legs_own_levies_and_the_larger_gst() {
+        let low = Rates::with_all(
+            Broker::Groww,
+            BpsX100::new(15_000),
+            BpsX100::new(100_000),
+            BpsX100::new(10_000),
+            BpsX100::new(50_000),
+            stamp_duty(OrderSide::Buy),
+            GST_ON_FEE_BASE,
+        );
+        let high = Rates::with_all(
+            Broker::Groww,
+            BpsX100::new(15_000),
+            BpsX100::new(300_000),
+            BpsX100::new(70_000),
+            BpsX100::new(200_000),
+            stamp_duty(OrderSide::Buy),
+            BpsX100::new(GST_ON_FEE_BASE.get() * 2),
+        );
+        let fills = flat_fills(100_00, 120_00, Direction::Long);
+
+        for (buy, sell) in [(&low, &high), (&high, &low)] {
+            let charges = charge_stack_legs(fills, 65, buy, sell).expect("in range");
+            let leg = |rate_of: fn(&Rates) -> BpsX100| {
+                levy_ceiling(charges.buy_notional(), rate_of(buy))
+                    .expect("in range")
+                    .raw()
+                    + levy_ceiling(charges.sell_notional(), rate_of(sell))
+                        .expect("in range")
+                        .raw()
+            };
+            assert_eq!(charges.exchange().raw(), leg(|r| r.exchange()));
+            assert_eq!(charges.sebi().raw(), leg(|r| r.sebi()));
+            assert_eq!(charges.ipft().raw(), leg(|r| r.ipft()));
+
+            // The buy leg's notional differs from the sell leg's, so taking
+            // either leg at the other's rate moves the figure.
+            let swapped = levy_ceiling(charges.buy_notional(), sell.exchange())
+                .expect("in range")
+                .raw()
+                + levy_ceiling(charges.sell_notional(), buy.exchange())
+                    .expect("in range")
+                    .raw();
+            assert_ne!(charges.exchange().raw(), swapped);
+
+            let base = Paisa::from_raw(
+                charges.brokerage().raw()
+                    + charges.exchange().raw()
+                    + charges.sebi().raw()
+                    + charges.ipft().raw(),
+            );
+            let larger = statutory_levy(base, high.gst()).expect("in range");
+            let lower = statutory_levy(base, low.gst()).expect("in range");
+            assert_ne!(larger, lower, "the two GST rates must be told apart");
+            assert_eq!(charges.gst(), larger, "never the lower GST");
+        }
+    }
+
     #[test]
     fn the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays() {
         // Trap 4. Everything else scales; this does not.
@@ -1642,57 +1782,64 @@ mod tests {
     // Regimes, dates and the entry-day key
     // -----------------------------------------------------------------------
 
+    /// audit-20261003 hunt-costs-1 (D-1535). Each leg's charge is priced at the
+    /// regime in force on THAT leg's day. The transaction tax is a sell-side
+    /// levy, so a long position that buys on 2026-03-31 and sells on
+    /// 2026-04-01 pays the 0.15% in force on the day it sold, not the 0.10% it
+    /// opened under. Keying the whole trip to the entry day under-charged that
+    /// tax by a third, against `docs/06-limits.md` §27's "always over-charges".
+    /// This test replaces `the_regime_is_the_entry_days_and_the_exit_day_never_moves_it`,
+    /// which pinned the under-charge as intended.
     #[test]
-    fn the_regime_is_the_entry_days_and_the_exit_day_never_moves_it() {
-        // A round trip opened on 2026-03-31 and closed on 2026-04-01 straddles
-        // the Finance Act 2026 boundary that lifts the tax from 0.10% to 0.15%.
-        // It is priced at the regime it OPENED under.
+    fn each_legs_charge_is_priced_at_its_own_days_regime() {
         let before = day(2026, 3, 31);
         let on = day(2026, 4, 1);
         let contract = option_contract("NIFTY");
-
-        let straddling = RoundTrip::new(
-            contract,
-            Direction::Long,
-            Broker::Groww,
-            Outcome::NormalClose,
-            leg(before, 100_00),
-            leg(on, 120_00),
-            65,
-        )
-        .expect("well formed");
-        let opened_after = RoundTrip::new(
-            contract,
-            Direction::Long,
-            Broker::Groww,
-            Outcome::NormalClose,
-            leg(on, 100_00),
-            leg(on, 120_00),
-            65,
-        )
-        .expect("well formed");
-
-        let straddling = price(&straddling).expect("verified");
-        let opened_after = price(&opened_after).expect("verified");
-
-        // The rates themselves, so the assertion is about the tax and not
-        // about some other charge moving.
+        let trip = |direction, entry, exit| {
+            RoundTrip::new(
+                contract,
+                direction,
+                Broker::Groww,
+                Outcome::NormalClose,
+                leg(entry, 100_00),
+                leg(exit, 120_00),
+                65,
+            )
+            .expect("well formed")
+        };
         assert_eq!(rates_on(Exchange::Nse, before).stt().get(), 10_000);
         assert_eq!(rates_on(Exchange::Nse, on).stt().get(), 15_000);
 
-        // 0.10% of 779,675 paisa floors to 779, which ceils to ₹8.
-        assert_eq!(straddling.stt().raw(), 8_00);
-        // 0.15% of the same notional is ₹12 — the exit day's regime, which is
-        // NOT what the straddling trip paid.
-        assert_eq!(opened_after.stt().raw(), 12_00);
-        assert_ne!(straddling.stt(), opened_after.stt());
-        // Every other charge is identical, so the tax is the only difference.
-        assert_eq!(straddling.exchange(), opened_after.exchange());
-        assert_eq!(straddling.gross_pnl(), opened_after.gross_pnl());
+        // LONG: the exit sells, on 2026-04-01, so the tax is 0.15% — exactly
+        // what a trip opened and closed on 2026-04-01 pays.
+        let long_straddling = price(&trip(Direction::Long, before, on)).expect("verified");
+        let long_after = price(&trip(Direction::Long, on, on)).expect("verified");
+        assert_eq!(long_after.stt().raw(), 12_00);
         assert_eq!(
-            opened_after.total_charges().raw() - straddling.total_charges().raw(),
-            4_00
+            long_straddling.stt(),
+            long_after.stt(),
+            "the sell leg is on 2026-04-01 and pays that day's rate"
         );
+
+        // SHORT: the entry sells, on 2026-03-31, so the tax is that day's
+        // 0.10% even though the trip closes after the change.
+        let short_straddling = price(&trip(Direction::Short, before, on)).expect("verified");
+        let short_before = price(&trip(Direction::Short, before, before)).expect("verified");
+        assert_eq!(
+            short_straddling.stt(),
+            short_before.stt(),
+            "the sell leg is on 2026-03-31 and pays that day's rate"
+        );
+        assert_ne!(short_straddling.stt(), long_straddling.stt());
+
+        // The exchange charge is unchanged across this boundary, so it is the
+        // same on every trip; the tax is the only difference.
+        assert_eq!(long_straddling.exchange(), long_after.exchange());
+
+        // AND A LEG ON AN UNVERIFIED DAY REFUSES THE WHOLE TRIP, whichever leg
+        // it is: the exit day's regime is now read, so it must be verified.
+        let refused = price(&trip(Direction::Long, day(2024, 9, 30), day(2024, 10, 1)));
+        assert!(refused.is_err(), "the entry leg's day has no exchange rate");
     }
 
     #[test]
@@ -1737,6 +1884,57 @@ mod tests {
         let refusal = refusal_of(refused).expect("a lot-size refusal carries its window");
         assert_eq!(refusal.charge(), "options lot size (NIFTY)");
         assert!(refusal.remediation().contains("crates/costs/src/lot.rs"));
+    }
+
+    /// DB-B04. A contract that states its expiry is sized by ITS lot. On
+    /// 2024-12-10 the NIFTY January monthly (listed before the revision)
+    /// carried 25 and the 2-Jan weekly 75; sized by the entry day alone both
+    /// read 75, three times the January contract's quantity and every charge
+    /// that scales with it.
+    #[test]
+    fn a_contract_that_states_its_expiry_is_sized_by_its_own_lot() {
+        let on = day(2024, 12, 10);
+        let sized = |contract: Contract, lots: i64| {
+            RoundTrip::in_lots(
+                contract,
+                Direction::Long,
+                Broker::Groww,
+                Outcome::NormalClose,
+                leg(on, 100_00),
+                leg(on, 120_00),
+                lots,
+            )
+            .expect("well formed")
+        };
+        let expiring = |underlying: &str, y, m, d| {
+            Contract::expiring(slot(underlying), Segment::IndexOption, day(y, m, d))
+        };
+        let january = expiring("NIFTY", 2025, 1, 30);
+        assert_eq!(january.expiry(), Some(day(2025, 1, 30)));
+        assert_eq!(option_contract("NIFTY").expiry(), None);
+        assert_eq!(sized(january, 1).quantity(), 25);
+        assert_eq!(sized(january, 4).quantity(), 100);
+        assert_eq!(sized(expiring("NIFTY", 2025, 1, 2), 1).quantity(), 75);
+        assert_eq!(sized(expiring("BANKNIFTY", 2025, 1, 29), 1).quantity(), 15);
+        assert_eq!(sized(expiring("BANKNIFTY", 2025, 2, 26), 1).quantity(), 30);
+        // The unstated contract is the trade-day row, as before.
+        assert_eq!(sized(option_contract("NIFTY"), 1).quantity(), 75);
+        // The mis-sizing the entry-day key made: three times the charges.
+        let right = sized(january, 1);
+        let wrong = sized(option_contract("NIFTY"), 1);
+        assert_eq!(wrong.quantity(), 3 * right.quantity());
+        // A stated expiry does not rescue a pre-history entry.
+        let refused = RoundTrip::in_lots(
+            expiring("NIFTY", 2021, 1, 28),
+            Direction::Long,
+            Broker::Groww,
+            Outcome::NormalClose,
+            leg(day(2020, 12, 31), 100_00),
+            leg(day(2020, 12, 31), 120_00),
+            1,
+        )
+        .expect_err("the pre-history window has no lot size");
+        assert!(refusal_of(refused).is_some());
     }
 
     #[test]
@@ -2234,6 +2432,46 @@ mod tests {
             BpsX100::new(exchange),
             BpsX100::new(ipft_rate),
         )
+    }
+
+    /// D-1192. Every anchor, every constructible degenerate low, both
+    /// directions, a range of quantities: `charge_stack` answers `Ok` or a
+    /// named `Err` and never panics. Before D-1192 a printed-extreme sell at
+    /// `i64::MIN` panicked in `position` with "attempt to subtract with
+    /// overflow", and a low of -100 priced a sell fill at -₹1.00.
+    #[test]
+    fn no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill() {
+        use crate::fill::{Anchor, fills_at};
+        let tame = minted(15_000, 3_503, 50);
+        let lows = [i64::MIN, i64::MIN + 1, -100, -1, 0, 1, 4, 5, 9_000];
+        let mut checked = 0_u32;
+        for low in lows {
+            let odd = Bar::new(
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(low),
+            )
+            .expect("Bar::new admits any low");
+            let normal = Bar::flat(Paisa::from_raw(10_000)).expect("legal");
+            for anchor in [Anchor::Open, Anchor::AdverseExtreme, Anchor::PrintedExtreme] {
+                for direction in [Direction::Long, Direction::Short] {
+                    for (entry, exit) in [(normal, odd), (odd, normal), (odd, odd)] {
+                        let Ok(fills) = fills_at(entry, exit, direction, anchor) else {
+                            continue;
+                        };
+                        assert!(fills.sell() >= TICK_HELPER, "a sell below a tick priced");
+                        assert!(fills.buy() >= TICK_HELPER, "a buy below a tick priced");
+                        for quantity in [1, 65, i64::MAX] {
+                            // Ok or a named refusal; reaching the next line is
+                            // the assertion that nothing panicked.
+                            let _ = charge_stack(fills, quantity, &tame);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]
@@ -2924,5 +3162,51 @@ mod tests {
         assert!(!charge_set.insert(charges));
         assert_eq!(charge_set.len(), 1);
         assert!(format!("{charges:?}").starts_with("Charges {"));
+    }
+
+    /// W3-costs1-1: a printed-extreme sell anchored on a low far below zero
+    /// used to reach [`position`] as a negative notional, and the gross
+    /// subtraction its comment calls unable to overflow left `i64`. D-0771
+    /// floored the sell at one tick; the merged tree refuses it by name instead
+    /// (D-1192), so it never reaches [`position`], and the worst case on the
+    /// same bars still absorbs it with its floor and prices without overflow.
+    #[test]
+    fn a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow() {
+        let entry = Bar::flat(Paisa::from_raw(100_00)).expect("legal");
+        let exit = Bar::new(
+            Paisa::from_raw(-i64::MAX),
+            Paisa::from_raw(100_00),
+            Paisa::from_raw(-i64::MAX),
+        )
+        .expect("Bar::new admits a low below zero");
+        assert_eq!(
+            crate::fill::fills_at(
+                entry,
+                exit,
+                Direction::Long,
+                crate::fill::Anchor::PrintedExtreme
+            ),
+            Err(CostError::BelowTick {
+                quantity: "sell printed-extreme fill",
+                value: -i64::MAX,
+            })
+        );
+        // The worst case on the same bars answers `Ok` or a named refusal, and
+        // where it prices, its sell is the one-tick floor and the charge stack
+        // computes without leaving `i64`.
+        match crate::fill::fills_at(
+            entry,
+            exit,
+            Direction::Long,
+            crate::fill::Anchor::AdverseExtreme,
+        ) {
+            Ok(fills) => {
+                assert_eq!(fills.sell(), TICK_HELPER);
+                let charges = charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day()))
+                    .expect("in range");
+                assert_eq!(charges.sell_notional(), TICK_HELPER);
+            }
+            Err(refused) => assert!(matches!(refused, CostError::Overflow { .. })),
+        }
     }
 }

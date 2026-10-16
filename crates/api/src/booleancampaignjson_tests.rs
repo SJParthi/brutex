@@ -386,3 +386,31 @@ fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campa
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// **The qualified campaign route walks its whole history on every GET, and
+/// that is stated.** W1-api1-4, D-1444.
+///
+/// No cache is added: the route serves a mutable latest snapshot. The bullet
+/// must name the walk, its bound and the absence of a cache, and the source
+/// must still be the uncached open the bullet describes.
+#[test]
+fn the_qualified_campaign_history_walk_per_request_is_stated() {
+    let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-4");
+    for word in [
+        "booleancampaignjson::render_qualified",
+        "QualifiedCampaign",
+        "O(H)",
+        "2H decodes",
+        "DIRECTORY_LIMIT",
+        "1,000,000",
+        "detail::MAX_SCAN_BYTES",
+        "no cache",
+    ] {
+        assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    }
+    let source = include_str!("booleancampaignjson.rs");
+    let body = source.split_once("\nfn render_qualified(").unwrap().1;
+    let body = &body[..body.find("\n}\n").unwrap()];
+    assert!(body.contains("cli::boolean_evidence::QualifiedCampaign::open(root,asked.identity,crate::detail::MAX_SCAN_BYTES)"));
+    assert!(!source.contains("static CACHE"), "the route holds no cache");
+}

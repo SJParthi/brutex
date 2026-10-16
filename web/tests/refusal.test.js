@@ -1,0 +1,77 @@
+// CE-83, D-1789: four readers printed only the HTTP status and dropped the
+// api's named reason; the unknown-feed refusal's `refused` key was read by none.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { reasonOf, refusalFrom, refusalOf, refusalSentence } from '../src/lib/refusal.js';
+import { readCalendar } from '../src/lib/calendar-owed.js';
+import { censusFailure, createCensusLoader } from '../src/lib/store-census.js';
+
+/** @param {string} path */
+const source = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+
+test('all three refusal keys on the wire are read, in one order', () => {
+  assert.equal(refusalOf({ error: 'calendar derivation not admitted; retry' }), 'calendar derivation not admitted; retry');
+  assert.equal(refusalOf({ refused: 'this build reads no feed called that', feed: 'nope' }), 'this build reads no feed called that');
+  assert.equal(refusalOf({ masters: [], refusal: 'neither BRUTEX_MASTERS nor HOME is set' }), 'neither BRUTEX_MASTERS nor HOME is set');
+  assert.equal(refusalOf({ error: 'first', refused: 'second' }), 'first');
+  for (const body of [null, undefined, [], 'text', 7, {}, { error: '' }, { error: '   ' }, { error: 3 }]) {
+    assert.equal(refusalOf(body), null, JSON.stringify(body));
+  }
+});
+
+test('a body is read for its reason and never throws', async () => {
+  assert.equal(await reasonOf(Response.json({ refused: 'unknown feed' }, { status: 400 })), 'unknown feed');
+  assert.equal(await reasonOf(new Response('upstream said no', { status: 502 })), 'upstream said no');
+  assert.equal(await reasonOf(new Response('', { status: 503 })), null);
+  assert.equal(await reasonOf(Response.json([], { status: 503 })), null);
+  const long = 'x'.repeat(2000);
+  assert.equal((await reasonOf(new Response(long, { status: 500 })))?.length, 501);
+  const used = new Response('gone', { status: 500 });
+  await used.text();
+  assert.equal(await reasonOf(used), null);
+});
+
+test('the sentence carries the route, the status and the reason, or says none was named', async () => {
+  assert.equal(refusalSentence('/logs.json', 503, 'logging is not installed'), '/logs.json answered HTTP 503: logging is not installed');
+  assert.equal(refusalSentence('/logs.json', 503, null), '/logs.json answered HTTP 503 and named no reason');
+  assert.equal(await refusalFrom('/indexmap.json', Response.json({ refused: 'no feed called x', feed: 'x' }, { status: 400 })),
+    '/indexmap.json answered HTTP 400: no feed called x');
+});
+
+test('/calendar.json: a refusal is an empty calendar that names the server reason', async () => {
+  const calendar = await readCalendar('dhan', async () => Response.json(
+    { error: 'calendar derivation not admitted: too many in flight; retry' }, { status: 429 }), new AbortController().signal);
+  assert.equal(calendar.owed.size, 0);
+  assert.equal(calendar.why, '/calendar.json answered HTTP 429: calendar derivation not admitted: too many in flight; retry');
+  const unknown = await readCalendar('nope', async () => Response.json({ refused: 'no such feed', feed: 'nope' }, { status: 400 }),
+    new AbortController().signal);
+  assert.match(unknown.why, /HTTP 400: no such feed/);
+});
+
+test('/store.json: a refused census names the body error, else the census note header', async () => {
+  const busy = createCensusLoader(async () => Response.json({ error: 'census read unavailable: Saturated' }, { status: 429 }));
+  const saturated = await busy.load('dhan', 0);
+  assert.equal(saturated.ok, false);
+  assert.equal(censusFailure(saturated), '/store.json answered HTTP 429: census read unavailable: Saturated');
+  const damaged = createCensusLoader(async () => Response.json([], {
+    status: 503, headers: { 'x-brutex-census-state': 'unreadable', 'x-brutex-census-note': 'dhan: UNREADABLE manifest checksum failed' }
+  }));
+  const unreadable = await damaged.load('dhan', 0);
+  assert.equal(censusFailure(unreadable), '/store.json answered HTTP 503: dhan: UNREADABLE manifest checksum failed');
+  const silent = createCensusLoader(async () => new Response('', { status: 500 }));
+  assert.equal(censusFailure(await silent.load('dhan', 0)), '/store.json answered HTTP 500 and named no reason');
+});
+
+test('each of the four readers goes through the named-reason helper', () => {
+  const store = source('../src/lib/store.svelte.js');
+  assert.match(store, /Promise\.reject\(new Error\(censusFailure\(r\)\)\)/);
+  assert.doesNotMatch(store, /`HTTP \$\{r\.status\} from \/store\.json`/);
+  assert.match(source('../src/lib/calendar-owed.js'), /refusalFrom\('\/calendar\.json', response\)/);
+  const backtest = source('../src/routes/backtest/+page.svelte');
+  assert.match(backtest, /refusalFrom\('\/logs\.json', response\)/);
+  assert.match(backtest, /censusFailure\(response\)/);
+  const mapping = source('../src/routes/mapping/+page.svelte');
+  assert.match(mapping, /refusalFrom\('\/indexmap\.json', response\)/);
+  assert.doesNotMatch(mapping, /body\?\.error/);
+});

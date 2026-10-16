@@ -18,9 +18,11 @@
 //!
 //! `/frontier.json` calls `Row::derived()` and `Row::verdict()` and serves a
 //! `meets` block. This must not, and the reason is not style: a live row is
-//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`, `wins`,
-//! `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`, `gross_win` and
-//! `gross_loss` are all structural zeros. A win rate computed from them is 0%, a
+//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`,
+//! `cell_wins`, `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`,
+//! `gross_win` and `gross_loss` are all structural zeros. (`wins` is NOT one of
+//! them: it is the sweep's own count, `scored.edge.wins`, real at publish time
+//! and served as `edge_wins`.) A win rate computed from them is 0%, a
 //! reward-to-risk is 0.00x, and a verdict is FAIL — three figures nobody
 //! measured, wearing the shape of three that somebody did. `CLAUDE.md` §4 bans
 //! exactly that.
@@ -191,13 +193,13 @@ fn write_run(out: &mut String, run: &cli::live::Run) {
         if nth > 0 {
             out.push(',');
         }
-        write_row(out, row, run.summary.bar_milli);
+        write_row(out, row, &run.summary);
     }
     let _ = std::fmt::Write::write_fmt(out, format_args!(r#"],"kept":{}}}"#, run.rows.len()));
 }
 
 /// One ranked row, in the eight fields that are REAL before the grid runs.
-fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
+fn write_row(out: &mut String, row: &cli::frontier::Row, summary: &cli::live::Summary) {
     let _ = std::fmt::Write::write_fmt(
         out,
         format_args!(
@@ -226,7 +228,23 @@ fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
             // removes the chance of two integers on different scales being
             // eyeballed against each other. `t_milli` can be negative for a
             // short's evidence; the bar is on |t|.
-            row.t_milli.saturating_abs() >= bar_milli,
+            //
+            // STRICTLY ABOVE. `t_milli` is rounded and `bar_milli` is the
+            // ceiling of the bar, so `t_milli > bar_milli` is the comparison
+            // that cannot call a |t| below the bar a clearance: |t| is at least
+            // `t_milli - 0.5` thousandths, which is at least `bar_milli + 0.5`
+            // and above the bar. `>=` read a |t| up to 1.5 milli short as
+            // clearing it (CE-7, D-1769).
+            //
+            // AND ONLY A JUDGEABLE ROW. The end-of-run report refuses a verdict
+            // below thirty observations; this served `true` for a
+            // five-observation row the report calls TOO FEW (xcut-1, D-1991).
+            // AND AGAINST THE ROW'S OWN STUDENT-T TAIL, which the report now
+            // also requires (p8num-1, D-2725). One function holds all three
+            // conditions so the page and the report cannot drift apart again.
+            // A mispaired row never reaches here: `publish_ranked` refuses to
+            // write one.
+            cli::live::clears_bar(row, summary),
         ),
     );
 }
@@ -292,6 +310,131 @@ mod tests {
             !body.contains(r#""stale""#) && !body.contains(r#""strays""#),
             "and no count is served for a directory that was never opened: {body}"
         );
+    }
+
+    /// A |t| whose rounded thousandths EQUAL the ceilinged bar is not called a
+    /// clearance, and one a milli above it is; the sign of `t` does not matter
+    /// (CE-7, D-1769).
+    #[test]
+    fn a_t_at_the_rounded_bar_does_not_clear_it_and_one_above_does() {
+        let row = |t_milli: i64| cli::frontier::Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: 30,
+            n: 30,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: cli::frontier::Direction::Long,
+            rules: cli::Rules::elite(400, 25),
+        };
+        // bar 5.6735 at 3,572,851 trials is carried as 5674; t 5.6735 rounds
+        // to 5674 and is not above it. A row of a billion observations, so the
+        // Student-t tail (p8num-1, D-2725) is the normal one to well inside a
+        // milli and this pins the rounding rule alone.
+        let wide = cli::live::Summary {
+            trials: 3_572_851,
+            bar_milli: 5_674,
+            priced: 0,
+        };
+        for (t_milli, clears) in [
+            (5_674, false),
+            (-5_674, false),
+            (5_675, true),
+            (-5_675, true),
+        ] {
+            let mut out = String::new();
+            let many = cli::frontier::Row {
+                n: 1_000_000_000,
+                ..row(t_milli)
+            };
+            super::write_row(&mut out, &many, &wide);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "{t_milli}: {out}"
+            );
+        }
+        // xcut-1, D-1991: below the report's thirty observations no |t| clears,
+        // however far past the bar; at thirty the same |t| does.
+        let thousand = cli::live::Summary {
+            trials: 1_000,
+            bar_milli: 4_055,
+            priced: 0,
+        };
+        for (n, clears) in [(5, false), (29, false), (30, true)] {
+            let mut out = String::new();
+            let few = cli::frontier::Row { n, ..row(9_000) };
+            super::write_row(&mut out, &few, &thousand);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "n {n}: {out}"
+            );
+        }
+    }
+
+    /// A ROW AT THIRTY OBSERVATIONS IS HELD TO ITS STUDENT-T TAIL. p8num-1, D-2725.
+    ///
+    /// At 3,689 trials the normal Bonferroni bar is 4.351 and the Student-t
+    /// bar at 29 degrees of freedom is 5.225. `clears_bar` served `true` for
+    /// a thirty-observation row at t = 5.000, which spends about eleven times
+    /// its share of the family-wise budget; it now serves `false`, and the
+    /// same t clears at a thousand observations, where the two bars meet.
+    #[test]
+    fn a_thirty_observation_row_is_judged_against_its_student_t_tail() {
+        let summary = cli::live::Summary {
+            trials: 3_689,
+            bar_milli: 4_352,
+            priced: 0,
+        };
+        let row = |n: u64, t_milli: i64| cli::frontier::Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: n,
+            n,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: cli::frontier::Direction::Long,
+            rules: cli::Rules::elite(400, 25),
+        };
+        for (n, t_milli, clears) in [
+            (30, 5_000, false),
+            (30, -5_000, false),
+            (30, 5_300, true),
+            (1_000, 5_000, true),
+        ] {
+            let mut out = String::new();
+            super::write_row(&mut out, &row(n, t_milli), &summary);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "n {n} t {t_milli}: {out}"
+            );
+            assert_eq!(
+                cli::live::clears_bar(&row(n, t_milli), &summary),
+                clears,
+                "n {n} t {t_milli}"
+            );
+        }
     }
 
     /// A published run is served with its bar, and the rows are NOT judged.

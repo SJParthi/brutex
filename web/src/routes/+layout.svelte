@@ -26,8 +26,15 @@
    * animating over a dead request.
    */
   import '$lib/theme.css';
+  import { untrack } from 'svelte';
   import { page } from '$app/state';
   import { feeds, loadFeeds, selectFeed } from '$lib/feeds.svelte.js';
+  // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14, commit 1ac13ae8): a
+  // feed whose store holds bars is selectable whatever its ingest readiness,
+  // and only the operator's feeds are offered (D-3338).
+  import { feedPickerRow, offeredFeeds } from '$lib/feed-row.js';
+  import { survey, surveyStores } from '$lib/store.svelte.js';
+  import { group } from '$lib/money.js';
   import { loadCatalogue } from '$lib/index.svelte.js';
   // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
   //
@@ -43,7 +50,10 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { watchVisible } from '$lib/page-requests.js';
+  import { firstCheck, apiTitle } from '$lib/api-status.js';
   import { runtimeInspection, loadInspection } from '$lib/runtime-inspection.svelte.js';
+  import { buildLabel } from '$lib/runtime-inspection.js';
+  import CopyAlert from '$lib/CopyAlert.svelte';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
    *
@@ -145,6 +155,15 @@
     // beside it and NO page -- so nothing on the server can shadow this path
     // and a click, a reload and a bookmark all render the same application.
     { href: '/backtest', label: 'Backtest' },
+    // THE COMMITTED SELECTION V6 WINNERS. `ledger-v6` wrote them and only its
+    // own terminal text showed them (audit-20261003 gaps-10, D-1578). NO
+    // `reload`: `src/routes/selection/` IS a Svelte route and the server
+    // registers only `/selection-v6.json` beside it, as `/backtest` above.
+    {
+      href: '/selection',
+      label: 'Selection',
+      why: 'The per-rung Top-25 ledger-v6 committed to Selection V6, read from each sealed block. Index families only; no equity enters Selection V6.'
+    },
     // THE TERMINAL, AND IT SHIPPED UNREACHABLE -- THE DEFECT THE ENTRY BELOW
     // IS A 26-LINE ESSAY ABOUT, REPEATED IMMEDIATELY UNDERNEATH IT.
     //
@@ -296,7 +315,10 @@
 
      Prefix-matched with `current()` so `/ingest/anything` and `/db/anything`
      are covered by the same entries, for the same reason the nav is. ==== */
-  const FEED_OWNED = ['/ingest', '/db', '/backtest'];
+  /* `/terminal` JOINED (DB-G32): it draws its own feed control, so a second
+     one here was two controls for one value, and its select skipped
+     `selectFeed`. One control per value per route. */
+  const FEED_OWNED = ['/ingest', '/db', '/backtest', '/terminal'];
   const feedInBar = $derived(!FEED_OWNED.some(current));
 
   /* ====================================================================
@@ -411,7 +433,17 @@
   /** @type {Array<HTMLDivElement | null>} */
   let optEls = $state([]);
 
-  const options = $derived(feeds.all ?? []);
+  const options = $derived(offeredFeeds(feeds.all ?? []));
+  /* ONE HEADER READ PER FEED, deduped per store generation by `surveyStores`:
+     what the held-or-ready rule needs, never a whole census. */
+  $effect(() => {
+    const list = options;
+    if (list.length > 0) untrack(() => void surveyStores(list));
+  });
+  /** The picker row per wire, from the shared rule. */
+  const rowOf = $derived(
+    new Map(options.map((f) => [f.wire, feedPickerRow(f, survey.byFeed.get(f.wire), group)]))
+  );
   const active = $derived(options.find((f) => f.wire === feeds.active) ?? null);
   const activeIndex = $derived(options.findIndex((f) => f.wire === feeds.active));
 
@@ -422,7 +454,9 @@
      a feed the server marked unready. */
   /** @param {Feed | undefined} f */
   function usable(f) {
-    return f?.ready === true;
+    if (!f) return false;
+    const row = rowOf.get(f.wire);
+    return row ? !row.disabled : f.ready === true;
   }
 
   function openList() {
@@ -677,16 +711,22 @@
     }
   }
 
+  /* THE FIRST CHECK RUNS AT LOAD EVEN IN A TAB THAT IS NOT YET VISIBLE
+     (DB-N01): `watchVisible` alone skipped it, and the button read "Checking
+     API…" until clicked. See `$lib/api-status.js`. */
   $effect(() => {
-    const watching = watchVisible(probe, PROBE_MS, {
+    const options = {
       visible: () => document.visibilityState === 'visible',
+      /** @param {() => void} wake */
       listen: (wake) => {
         document.addEventListener('visibilitychange', wake);
         return () => document.removeEventListener('visibilitychange', wake);
       }
-    });
+    };
+    const watching = watchVisible(probe, PROBE_MS, options);
+    const first = firstCheck(probe, options);
     refreshProbe = watching.refresh;
-    return () => { watching(); refreshProbe = () => {}; };
+    return () => { watching(); first(); refreshProbe = () => {}; };
   });
 
   /* ====================================================================
@@ -897,9 +937,7 @@
       class:bad={api.state === 'down'}
       type="button"
       onclick={() => refreshProbe()}
-      title={api.state === 'down'
-        ? `Probing /feeds.json failed: ${api.why}`
-        : `Round trip to /feeds.json. Checked ${stampLabel(api.at)}. Click to re-check.`}
+      title={apiTitle(api, stampLabel)}
     >
       <span
         class="dot"
@@ -980,10 +1018,10 @@
               aria-disabled={!usable(f)}
               data-hi={hi === i}
               title={!usable(f)
-                ? (f.why ?? `${f.display} is not available.`)
+                ? (rowOf.get(f.wire)?.title ?? f.why ?? `${f.display} is not available.`)
                 : f.wire === feeds.active
                   ? `${f.display} is the chosen feed. Choosing it again clears the selection, and every page then shows what it shows with no feed scoped.`
-                  : `Scope every page to ${f.display}.`}
+                  : `Scope every page to ${f.display}. ${rowOf.get(f.wire)?.title ?? ''}`}
               onclick={() => commit(i)}
               onpointerdown={(e) => e.preventDefault()}
               onpointerenter={() => usable(f) && (hi = i)}
@@ -991,10 +1029,11 @@
               <span class="tick" aria-hidden="true">{f.wire === feeds.active ? '✓' : ''}</span>
               <span class="name">{f.display}</span>
               <span class="side"
-                >{f.kind_label ?? 'kind not stated'}{usable(f) ? '' : ' · unavailable'}</span
+                >{f.kind_label ?? 'kind not stated'} · {rowOf.get(f.wire)?.detail ??
+                  (usable(f) ? 'not surveyed' : 'unavailable')}</span
               >
-              {#if f.why}
-                <span class="why">{f.why}</span>
+              {#if rowOf.get(f.wire)?.why ?? f.why}
+                <span class="why">{rowOf.get(f.wire)?.why ?? f.why}</span>
               {/if}
             </div>
           {/each}
@@ -1067,10 +1106,28 @@
   <main class="main" id="main" tabindex="-1">
     <div class="inspection-banner" role="status">
       <span>{runtimeInspection.value.why}</span>
+      <!-- WHICH BUILD ANSWERED (DB-B71): the commit the API was compiled from,
+           so a number on any page can be traced to the code that produced it,
+           and a rollback is visible. -->
+      <span class="build" class:unstamped={runtimeInspection.value.build === 'unstamped'}
+        title={runtimeInspection.value.build ?? 'This server did not send x-brutex-build'}
+        >{buildLabel(runtimeInspection.value.build)}</span>
       {#if runtimeInspection.value.phase === 'failed'}
         <button class="btn ghost" onclick={() => { void loadInspection(); }}>Recheck server mode</button>
       {/if}
     </div>
+    <!-- NO COPY OF THIS STORE IS SAID ON EVERY PAGE (rules audit RA-163). -->
+    <CopyAlert />
+    <!-- AN ADDRESS NAMING A FEED THAT DOES NOT EXIST IS SAID ON EVERY PAGE
+         (WP-61 repair): `?feed=nosuch` opened the saved or default feed with no
+         word. In <main>, not in the picker's list, because the picker is closed
+         until opened and is not drawn at all on the pages that own their feed
+         control. Cleared by any explicit pick (`lib/feed-startup.js`). -->
+    {#if feeds.notice}
+      <div class="inspection-banner" role="alert" data-feed-notice>
+        <span><strong>The address's feed was not followed.</strong> {feeds.notice}</span>
+      </div>
+    {/if}
     {@render children()}
   </main>
 </div>
@@ -1090,6 +1147,13 @@
     line-height: 1.5;
   }
   .inspection-banner button { flex-shrink: 0; }
+  .inspection-banner .build {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink-3, var(--ink-2));
+  }
+  .inspection-banner .build.unstamped { color: var(--bad, var(--ink-2)); }
 
   /* A narrow window gives navigation its own full-width row. Keeping it in
      the desktop flex row can squeeze its hit area beneath the status buttons.

@@ -145,11 +145,28 @@ impl Selection {
     /// next instrument's. A month-major order would open and close every bar
     /// file once per month instead of once, which is the same bars through
     /// hundreds of times more file handles.
+    ///
+    /// # A repeated month is one month
+    ///
+    /// Each month appears once, at its first position, however often `months`
+    /// repeats it. The duplicate [`Self::of`] removes from the instrument axis
+    /// would otherwise come back on the month axis: the same cell twice, the
+    /// same window pulled twice, and the second write refused as not following
+    /// the first. D-0967.
     #[must_use]
     pub fn cells(&self, months: &[YearMonth], timeframe: Timeframe) -> Vec<Cell> {
-        let mut out = Vec::with_capacity(self.names.len().saturating_mul(months.len()));
+        // Reserved from `months.len()`, a bound known before the walk, and
+        // one probe per month: O(months), paid once rather than per name.
+        let mut seen = HashSet::with_capacity(months.len());
+        let mut distinct = Vec::with_capacity(months.len());
+        for month in months {
+            if seen.insert(*month) {
+                distinct.push(*month);
+            }
+        }
+        let mut out = Vec::with_capacity(self.names.len().saturating_mul(distinct.len()));
         for name in &self.names {
-            for month in months {
+            for month in &distinct {
                 out.push(Cell {
                     instrument: name.clone(),
                     month: *month,
@@ -222,7 +239,8 @@ impl Work {
         self.missing.is_empty()
     }
 
-    /// Requested cells, held plus missing.
+    /// Distinct requested cells, held plus missing. A cell the request
+    /// repeated is counted once — see [`gaps`].
     #[must_use]
     pub fn requested(&self) -> usize {
         self.held.saturating_add(self.missing.len())
@@ -238,8 +256,16 @@ impl Work {
 ///
 /// # Cost
 ///
-/// One pass with one hash probe per requested cell. **O(requested)**, never
-/// O(store), and no directory is listed.
+/// One pass with two hash probes per requested cell — one against the cells
+/// already seen, one against `held`. **O(requested)**, never O(store), and no
+/// directory is listed.
+///
+/// # A repeated cell is one cell
+///
+/// A cell `requested` names twice is counted once: listed in
+/// [`Work::missing`] at its first position, or counted once in [`Work::held`].
+/// Listing it twice would pull one window twice and refuse the second write;
+/// counting it twice would report more held than the store holds. D-0967.
 ///
 /// # Examples
 ///
@@ -275,7 +301,11 @@ pub fn gaps<S: core::hash::BuildHasher>(requested: &[Cell], held: &HashSet<Cell,
         missing: Vec::with_capacity(requested.len()),
         held: 0,
     };
+    let mut seen: HashSet<&Cell> = HashSet::with_capacity(requested.len());
     for cell in requested {
+        if !seen.insert(cell) {
+            continue;
+        }
         if held.contains(cell) {
             work.held += 1;
         } else {
@@ -283,4 +313,73 @@ pub fn gaps<S: core::hash::BuildHasher>(requested: &[Cell], held: &HashSet<Cell,
         }
     }
     work
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod tests {
+    use super::*;
+
+    fn month(m: u8) -> YearMonth {
+        YearMonth::new(2025, m).expect("a real month")
+    }
+
+    /// **A month the caller repeats is one month.** D-0967.
+    ///
+    /// `Selection::of` removes a repeated instrument; `cells` repeated every
+    /// cell whose month was repeated, and `gaps` then listed the same window
+    /// twice. The order is still instrument-major and first-seen.
+    #[test]
+    fn a_repeated_month_yields_each_cell_once_in_first_seen_order() {
+        let months = [month(7), month(6), month(7), month(6), month(8)];
+        let cells = Selection::of(["AAA", "BBB"]).cells(&months, Timeframe::MINUTE_1);
+        let got: Vec<(&str, YearMonth)> = cells
+            .iter()
+            .map(|c| (c.instrument.as_str(), c.month))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("AAA", month(7)),
+                ("AAA", month(6)),
+                ("AAA", month(8)),
+                ("BBB", month(7)),
+                ("BBB", month(6)),
+                ("BBB", month(8)),
+            ],
+            "two instruments x three distinct months, each once"
+        );
+        assert!(cells.iter().all(|c| c.timeframe == Timeframe::MINUTE_1));
+    }
+
+    /// **A cell the request repeats is listed once and held once.** D-0967.
+    #[test]
+    fn a_repeated_cell_is_missing_once_and_held_once() {
+        let cell = |name: &str, m: u8| Cell {
+            instrument: name.to_owned(),
+            month: month(m),
+            timeframe: Timeframe::MINUTE_1,
+        };
+        let requested = [
+            cell("AAA", 6),
+            cell("BBB", 6),
+            cell("AAA", 6),
+            cell("BBB", 6),
+            cell("CCC", 7),
+        ];
+        let held: HashSet<Cell> = [cell("BBB", 6)].into_iter().collect();
+        let work = gaps(&requested, &held);
+        assert_eq!(
+            work.missing,
+            vec![cell("AAA", 6), cell("CCC", 7)],
+            "each missing cell once, at its first position"
+        );
+        assert_eq!(work.held, 1, "BBB is held once, however often it is asked");
+        assert_eq!(work.requested(), 3, "three distinct cells were asked for");
+    }
 }

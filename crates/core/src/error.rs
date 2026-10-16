@@ -35,6 +35,12 @@ pub enum PriceError {
     /// vendor that sends a price as TEXT has not lost any precision yet, and routing it
     /// through a binary float is what loses it.
     NotDecimal,
+    /// The text is longer than [`crate::price::MAX_PRICE_TEXT`] bytes.
+    ///
+    /// Raised by [`crate::price::Paisa::from_rupee_text_half_up`] before it reads a
+    /// byte, so that reader's cost is bounded by that constant and not by whatever
+    /// a caller hands it.
+    TooLong,
 }
 
 impl fmt::Display for PriceError {
@@ -44,6 +50,7 @@ impl fmt::Display for PriceError {
             Self::OutOfRange => "price does not fit in i64 paisa",
             Self::Overflow => "price arithmetic would overflow i64",
             Self::NotDecimal => "price text is not a decimal number",
+            Self::TooLong => "price text is longer than any price this build reads",
         };
         f.write_str(msg)
     }
@@ -158,6 +165,7 @@ mod tests {
             PriceError::OutOfRange,
             PriceError::Overflow,
             PriceError::NotDecimal,
+            PriceError::TooLong,
         ];
         let rendered: Vec<String> = all.iter().map(ToString::to_string).collect();
         for (i, a) in rendered.iter().enumerate() {

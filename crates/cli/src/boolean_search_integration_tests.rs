@@ -85,13 +85,11 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
     let mut command = std::process::Command::new(std::env::current_exe().map_err(display)?);
     command.args(["--exact", TEST, "--nocapture", "--test-threads=1"]);
     command.env_clear();
-    // Instrumented complete-calendar replay exceeded the ordinary deadline on
-    // the Linux CI runner. Keep the same assertions and finite log bound.
-    let timeout = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
-        std::time::Duration::from_mins(15)
-    } else {
-        std::time::Duration::from_mins(6)
-    };
+    // No wall-clock bound: how long the child runs measures machine load,
+    // so a fixed one could fail Gate 1e's test clause and the Tests step with
+    // nothing they check changed (D-0911). The 8MiB log bound below stays; a
+    // child that never exits is left to the CI job's own time limit, and
+    // D-0911 and docs/06-limits.md name what that costs.
     if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
         command.env("LLVM_PROFILE_FILE", profile);
     }
@@ -113,13 +111,12 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
         .stderr(file)
         .spawn()
         .map_err(display)?;
-    let started = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(display)? {
             break status;
         }
         let log_bytes = fs::metadata(&log).map_err(display)?.len();
-        if started.elapsed() > timeout || log_bytes > 8 * 1024 * 1024 {
+        if log_bytes > 8 * 1024 * 1024 {
             child.kill().map_err(display)?;
             child.wait().map_err(display)?;
             let detail = if fs::metadata(&log).map_err(display)?.len() <= 8 * 1024 * 1024 {
@@ -128,9 +125,7 @@ fn run_fixture_child(fixture: &Fixture, selected: bool) -> Result<(), String> {
                 "child log exceeded 8MiB; refusing to load it".into()
             };
             return Err(format!(
-                "generated search child exceeded its {}s/8MiB bound after {:.1}s ({log_bytes} bytes): {detail}",
-                timeout.as_secs(),
-                started.elapsed().as_secs_f64()
+                "generated search child exceeded its 8MiB log bound ({log_bytes} bytes): {detail}"
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -923,5 +918,83 @@ fn search_settlement_retains_acknowledged_completion_and_names_late_failure() ->
     assert!(!why.contains("refusal recorded"), "{why}");
     same_record(&before, &journal.latest(bytes)?.ok_or("completion lost")?);
     assert_eq!(journal.next_sequence(), before.sequence + 1);
+    Ok(())
+}
+
+/// The child's supervision is bounded by its log, never by elapsed time: a
+/// wall-clock deadline measures how loaded the machine is, so it could fail
+/// Gate 1e's test clause and the `Tests` step when nothing they check had
+/// changed (D-0911). The wait loop is pinned whole, so no clock can enter it,
+/// and the body names no clock, thread or deadline around it.
+#[test]
+fn the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock() -> Result<(), String> {
+    let source = include_str!("boolean_search_integration_tests.rs");
+    let start = source
+        .find("\nfn run_fixture_child(")
+        .ok_or("run_fixture_child is not defined in this file")?;
+    let rest = &source[start + 1..];
+    let end = rest
+        .find("\nfn ")
+        .ok_or("no function follows run_fixture_child")?;
+    let body = &rest[..end];
+    for clock in [
+        "Instant",
+        "SystemTime",
+        "elapsed",
+        "now(",
+        "duration_since",
+        "from_mins",
+        "from_secs",
+        "timeout",
+        "deadline",
+        "thread::spawn",
+        "const ",
+        "static ",
+    ] {
+        assert!(
+            !body.contains(clock),
+            "run_fixture_child names `{clock}`:\n{body}"
+        );
+    }
+    assert_eq!(body.matches("Duration::").count(), 1, "{body}");
+    // The whole wait loop, exactly: the log's own length is the only thing it
+    // reads, and passing 8MiB is the only thing that kills the child.
+    let wait = "    let status = loop {
+        if let Some(status) = child.try_wait().map_err(display)? {
+            break status;
+        }
+        let log_bytes = fs::metadata(&log).map_err(display)?.len();
+        if log_bytes > 8 * 1024 * 1024 {
+            child.kill().map_err(display)?;
+            child.wait().map_err(display)?;
+            let detail = if fs::metadata(&log).map_err(display)?.len() <= 8 * 1024 * 1024 {
+                fs::read_to_string(&log).map_err(display)?
+            } else {
+                \"child log exceeded 8MiB; refusing to load it\".into()
+            };
+            return Err(format!(
+                \"generated search child exceeded its 8MiB log bound ({log_bytes} bytes): {detail}\"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+";
+    assert_eq!(body.matches(wait).count(), 1, "{body}");
+    assert_eq!(body.matches("child.kill()").count(), 1, "{body}");
+    assert_eq!(body.matches("loop {").count(), 1, "{body}");
+    // After the loop the child has exited: only its log and status are read.
+    let after = &body[body.find(wait).ok_or("wait loop absent")? + wait.len()..];
+    assert_eq!(
+        after,
+        "    if fs::metadata(&log).map_err(display)?.len() > 8 * 1024 * 1024 {
+        return Err(\"generated search child exceeded its 8MiB log bound\".into());
+    }
+    let output = fs::read_to_string(&log).map_err(display)?;
+    assert!(status.success(), \"{output}\");
+    assert!(output.contains(\"1 passed\"), \"{output}\");
+    Ok(())
+}
+"
+    );
     Ok(())
 }

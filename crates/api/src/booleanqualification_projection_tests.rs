@@ -49,3 +49,53 @@ fn measured_and_nonpositive_classes_keep_exact_subfamily_indices_and_numeric_bit
     assert!(romano([0; 12]).is_err());
     assert!(romano([2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
 }
+
+/// **A QUALIFICATION ROW MUST NAME THE ORIGINAL ROW BESIDE IT.** Each of the
+/// three coordinates alone refuses; all three equal is the only acceptance
+/// (GAP14-58, D-0731).
+#[test]
+fn a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match() {
+    let original = cli::boolean_evidence::StatisticsRow {
+        source: 3,
+        coordinate: 7,
+        identity: [9; 32],
+        period_digest: [0; 32],
+        run: [0; 32],
+        program_index: 0,
+        side: "long",
+        ordinal: 0,
+        execution_refusal_bits: 0,
+        trades: 0,
+        wins: 0,
+        return_paisa: 0,
+        wilson_lower_bits: 0,
+        romano_availability: 1,
+        romano: None,
+    };
+    assert_eq!(same_coordinate([9; 32], 3, 7, &original), Ok(()));
+    for (identity, family, coordinate) in [([8; 32], 3, 7), ([9; 32], 4, 7), ([9; 32], 3, 6)] {
+        assert_eq!(
+            same_coordinate(identity, family, coordinate, &original),
+            Err("qualification row differs from original coordinate".to_owned()),
+            "{family} {coordinate}"
+        );
+    }
+}
+
+/// **`project` RUNS THE CROSS-CHECK ON EVERY ROW, BEFORE IT RENDERS IT.** No
+/// api test can build a saved qualification (the fixture is `cli`'s own
+/// `#[cfg(test)]` code), so the call is pinned in the source: inside `project`'s
+/// row loop, `same_coordinate` is called with the row's three coordinates and
+/// `?`, ahead of the first rendered field (GAP14-58, D-0731).
+#[test]
+fn project_cross_checks_each_row_before_rendering_it() {
+    let source = include_str!("booleanqualification_projection.rs");
+    let from = source.find("pub(super) fn project(").unwrap();
+    let body = &source[from..from + source[from..].find("\n}\n").unwrap()];
+    let row_loop = &body[body.find("for (n, (row, original)) in").unwrap()..];
+    let check = row_loop
+        .find("same_coordinate(row.original, row.family, row.coordinate, original)?;")
+        .unwrap();
+    let render = row_loop.find("admission_projection::row(").unwrap();
+    assert!(check < render, "the check runs before the row is rendered");
+}

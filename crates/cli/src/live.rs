@@ -206,6 +206,31 @@ const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
 /// than measured. `CLAUDE.md` §3 rule 6.
 pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 
+/// The fewest observations a live row may be judged against the bar with.
+///
+/// The end-of-run report's own floor, carried so `/live.json` cannot call a row
+/// clear that the report refuses to judge (xcut-1, D-1991). `api` does not
+/// name `runner`, so the figure reaches it through this crate.
+pub const MIN_JUDGEABLE_OBSERVATIONS: u64 = runner::report::MIN_OBSERVATIONS;
+
+/// Whether one live row clears its run's bar, by the rule the end-of-run
+/// report applies to the same row.
+///
+/// Three conditions, all required: at least [`MIN_JUDGEABLE_OBSERVATIONS`]
+/// (xcut-1, D-1991); `|t_milli|` strictly above the normal bar carried as its
+/// ceiling (CE-7, D-1769); and the Student-t tail at the row's own `n - 1`
+/// degrees of freedom within the Bonferroni share of `trials`. The last is new:
+/// at a Bonferroni tail the normal bar understates a Student-t one badly even
+/// at thirty observations, and `/live.json` called such a row clear while the
+/// report, which now holds it to the Student-t tail, does not (p8num-1,
+/// D-2725). `api` does not name `runner`, so the rule reaches it through here.
+#[must_use]
+pub fn clears_bar(row: &Row, summary: &Summary) -> bool {
+    row.n >= MIN_JUDGEABLE_OBSERVATIONS
+        && row.t_milli.saturating_abs() > summary.bar_milli
+        && runner::significance::clears_bonferroni_milli(row.t_milli, row.n, summary.trials)
+}
+
 /// What a run has found so far, and what it must clear.
 ///
 /// # Why the bar travels with the rows
@@ -1023,7 +1048,12 @@ fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
     // than normalising it: this directory's filenames are written by
     // `Live::path` and nothing else, so a name that is not lowercase hex was not
     // written by this program.
-    if !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+    //
+    // LOWERCASE, and `is_ascii_hexdigit` is not that check either: it admits
+    // `b'A'..=b'F'`, and `from_str_radix` parses `"AA"` to the byte `"aa"` does,
+    // so a foreign `AA..AA.bin` reported the identity `aa..aa.bin` names.
+    // W2-cli9-6, D-0931.
+    if !stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     let mut out = [0_u8; 32];
@@ -1103,6 +1133,72 @@ mod tests {
     };
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
+
+    /// `docs/02-store-format.md` §29 states the live file this build writes:
+    /// its magic, version, count slot, summary width and row stride.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_live_file_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 29. Live top-N")
+            .expect("the live-file section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/live/<identity>.bin`, version {VERSION}\n"
+        )));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!("| 0 | 8 | `{magic}` |")));
+        assert!(section.contains(&format!("| 8 | 4 | version `{VERSION}`, `u32` |")));
+        assert!(section.contains(&format!("| {} | 4 | row count, `u32` |", super::COUNT_AT)));
+        assert!(section.contains(&format!(
+            "| {ROWS_AT} | `count * {STRIDE_BYTES}` | rows, each a §13 frontier row of the same \
+             {STRIDE_BYTES} bytes |"
+        )));
+        assert!(section.contains(&format!("`{ROWS_AT} + count*{STRIDE_BYTES}`")));
+        assert_eq!(super::HEADER_BYTES + super::SUMMARY_BYTES, ROWS_AT);
+    }
+
+    /// An upper-case hex name is not an identity, because `Live::path` writes
+    /// `{byte:02x}` and nothing else writes this directory.
+    ///
+    /// `u8::is_ascii_hexdigit` admits `b'A'..=b'F'` and `from_str_radix` parses
+    /// `"AA"` to the same byte as `"aa"`, so before this row a foreign
+    /// `AA..AA.bin` parsed to `[0xAA; 32]`, the identity `aa..aa.bin` already
+    /// names. W2-cli9-6, D-0931.
+    #[test]
+    fn an_upper_case_hex_name_is_not_an_identity() {
+        let root = std::path::Path::new("/nonexistent-brutex-root");
+        let written = Live::path(root, &[0xAA; 32]);
+        assert_eq!(
+            super::identity_from_name(&written),
+            Some([0xAA; 32]),
+            "the name the only writer produces parses to its identity"
+        );
+        let mut every_digit = [0_u8; 32];
+        for (slot, byte) in every_digit.iter_mut().zip((0_u8..=0xff).step_by(9)) {
+            *slot = byte;
+        }
+        assert_eq!(
+            super::identity_from_name(&Live::path(root, &every_digit)),
+            Some(every_digit),
+            "every lowercase digit the writer can emit, 0-9 and a-f, is admitted"
+        );
+        let upper = Live::dir(root).join(format!("{}.bin", "AA".repeat(32)));
+        assert_eq!(
+            super::identity_from_name(&upper),
+            None,
+            "a name that is not lowercase hex was not written by this program"
+        );
+        let mixed = Live::dir(root).join(format!("{}Aa.bin", "aa".repeat(31)));
+        assert_eq!(
+            super::identity_from_name(&mixed),
+            None,
+            "one upper-case digit is enough to refuse the name"
+        );
+    }
 
     /// One file name of the only shape the reader admits: sixty-four hex
     /// characters and `.bin`, the byte repeated thirty-two times.

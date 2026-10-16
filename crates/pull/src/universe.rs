@@ -375,20 +375,163 @@ enum Slot<'a> {
 /// behaviour, and `the_symbol_index_is_reserved_from_the_master_not_the_survivors`
 /// asserts both halves so a future edit cannot buy the capacity by dropping the
 /// filter.
-fn symbol_index<'a>(master: &[VendorInstrument<'a>]) -> HashSet<&'a str> {
-    let mut symbols: HashSet<&'a str> = HashSet::with_capacity(master.len());
+fn symbol_index<'a>(master: &[VendorInstrument<'a>]) -> HashMap<&'a str, usize> {
+    let mut symbols: HashMap<&'a str, usize> = HashMap::with_capacity(master.len());
     // A BLANK SYMBOL IS AN ABSENCE, NOT A NAME — the same rule the key index
     // above applies to a blank ISIN. Indexing it would make every row that
     // carries no symbol answer "yes, this feed lists it" for a published name
     // that is itself blank, which is the confusion `VendorHasNoIsin` exists to
     // keep apart from a real listing.
-    symbols.extend(
-        master
-            .iter()
-            .map(|row| row.trading_symbol)
-            .filter(|symbol| !symbol.is_empty()),
-    );
+    //
+    // THE VALUE IS HOW MANY ROWS CARRY THE SYMBOL, not a presence flag. It is
+    // what lets [`MasterIndex::resolve`] count `extra` from the index's own
+    // names instead of walking the master once per index. D-0966.
+    for symbol in master
+        .iter()
+        .map(|row| row.trading_symbol)
+        .filter(|symbol| !symbol.is_empty())
+    {
+        *symbols.entry(symbol).or_insert(0) += 1;
+    }
     symbols
+}
+
+/// One feed's master, indexed **once** for a whole crawl pass.
+///
+/// # Why this is a value and not a step inside [`resolve`]
+///
+/// [`crate::resolve::crawl`] joins every constituent file of a pass against
+/// the same master. When the join built its own key map and symbol set on
+/// every call, and then walked the master again to count `extra`, each index
+/// cost O(master) and a pass cost O(indices x master) — while `crawl`'s own
+/// `# Cost` section said the master was indexed once for the pass. D-0966.
+///
+/// Built once with [`Self::new`], this is then probed by [`Self::resolve`]
+/// once per index, and that call touches only the index's own names.
+#[derive(Debug)]
+pub struct MasterIndex<'a> {
+    key: JoinKey,
+    /// The join key's value to the one row carrying it, or [`Slot::Many`].
+    by_key: HashMap<&'a str, Slot<'a>>,
+    /// Rows per non-blank trading symbol — see `symbol_index`.
+    by_symbol: HashMap<&'a str, usize>,
+    /// How many rows carry a non-blank trading symbol.
+    symbolled: usize,
+}
+
+impl<'a> MasterIndex<'a> {
+    /// Index `master` on `key`: one pass for the key map, one for the symbol
+    /// counts. O(master), paid once per pass rather than once per index.
+    #[must_use]
+    pub fn new(master: &[VendorInstrument<'a>], key: JoinKey) -> Self {
+        // A REPEATED KEY BECOMES `Many` RATHER THAN OVERWRITING. `insert`
+        // returning the previous value is what makes a duplicate visible at
+        // all — without this the second row would silently win and the name
+        // would resolve to whichever the master happened to list last.
+        let mut by_key: HashMap<&'a str, Slot<'a>> = HashMap::with_capacity(master.len());
+        for row in master {
+            let field = match key {
+                JoinKey::Isin => row.isin,
+                JoinKey::TradingSymbol => row.trading_symbol,
+            };
+            // An empty key joins nothing. Indexing it would make every row with
+            // a blank ISIN collide with every other, which reads as ambiguity
+            // where the truth is absence — the exact confusion `VendorHasNoIsin`
+            // exists to prevent.
+            if field.is_empty() {
+                continue;
+            }
+            by_key
+                .entry(field)
+                .and_modify(|held| *held = Slot::Many)
+                .or_insert(Slot::One(*row));
+        }
+
+        // Needed by the ISIN key to answer "does this feed list the symbol at
+        // all", which is what separates a vendor that has never heard of an
+        // instrument from one that lists it without an identity, and by every
+        // key to count `extra`. Reserved from `master.len()` rather than
+        // collected — see `symbol_index`.
+        let by_symbol = symbol_index(master);
+        let symbolled = by_symbol.values().sum();
+        Self {
+            key,
+            by_key,
+            by_symbol,
+            symbolled,
+        }
+    }
+
+    /// Resolve one index's published names against the indexed master.
+    ///
+    /// # Cost
+    ///
+    /// One probe per published name for its verdict, and one more per distinct
+    /// published symbol for `extra`: O(published), independent of the master's
+    /// row count.
+    #[must_use]
+    pub fn resolve(
+        &self,
+        index: &str,
+        feed: &str,
+        published: &[Constituent<'_>],
+    ) -> IndexResolution {
+        let mut rows = Vec::with_capacity(published.len());
+        for row in published {
+            let probe = match self.key {
+                JoinKey::Isin => row.isin,
+                JoinKey::TradingSymbol => row.symbol,
+            };
+            let (verdict, vendor_id) = match self.by_key.get(probe) {
+                Some(Slot::One(found)) => (Verdict::Matched, Some(found.vendor_id.to_owned())),
+                Some(Slot::Many) => (Verdict::Ambiguous, None),
+                // NOT FOUND ON THE KEY — and the reason splits in two.
+                //
+                // On an ISIN join, a feed that lists the SYMBOL but carries no
+                // ISIN for it has not failed to hold the instrument; it has
+                // failed to publish its identity, and NSE issues no ISIN for an
+                // index at all. Calling that `Lacks` blames the vendor for a
+                // cell the exchange never filled. On a symbol join there is no
+                // second field to fall back to, so absence is absence.
+                None => match self.key {
+                    JoinKey::Isin if self.by_symbol.contains_key(row.symbol) => {
+                        (Verdict::VendorHasNoIsin, None)
+                    }
+                    JoinKey::Isin | JoinKey::TradingSymbol => (Verdict::Lacks, None),
+                },
+            };
+            rows.push(Resolved {
+                symbol: row.symbol.to_owned(),
+                isin: row.isin.to_owned(),
+                verdict,
+                vendor_id,
+            });
+        }
+
+        // ROWS THE FEED HOLDS THAT THIS INDEX DOES NOT NAME. Counted against
+        // the published SYMBOL set whichever key was joined on, because "is
+        // this name in the index" is a question about the index's membership
+        // and the index names its members by symbol.
+        //
+        // Every non-blank-symbol row minus the rows carrying a name this index
+        // publishes — each DISTINCT name once, so a name the file repeats is
+        // not subtracted twice. The same count the master walk gave, from the
+        // index's side of the join. D-0966.
+        let named: HashSet<&str> = published.iter().map(|c| c.symbol).collect();
+        let covered: usize = named
+            .iter()
+            .map(|symbol| self.by_symbol.get(symbol).copied().unwrap_or(0))
+            .sum();
+        let extra = self.symbolled.saturating_sub(covered);
+
+        IndexResolution {
+            index: index.to_owned(),
+            feed: feed.to_owned(),
+            key: self.key,
+            rows,
+            extra,
+        }
+    }
 }
 
 /// Resolve one index's published names against one feed's master.
@@ -405,6 +548,11 @@ fn symbol_index<'a>(master: &[VendorInstrument<'a>]) -> HashSet<&'a str> {
 ///
 /// One pass to index the master, one probe per published name. Resolving 750
 /// names against 204,819 rows is 205,569 operations, not 153 million.
+///
+/// **For one index.** A caller joining many indices against one master builds
+/// one [`MasterIndex`] and calls [`MasterIndex::resolve`] per index, as
+/// [`crate::resolve::crawl`] does; calling this in a loop re-indexes the master
+/// every time. D-0966.
 #[must_use]
 pub fn resolve(
     index: &str,
@@ -413,83 +561,7 @@ pub fn resolve(
     published: &[Constituent<'_>],
     master: &[VendorInstrument<'_>],
 ) -> IndexResolution {
-    // THE MASTER IS INDEXED ONCE, AND A REPEATED KEY BECOMES `Many` RATHER THAN
-    // OVERWRITING. `insert` returning the previous value is what makes a
-    // duplicate visible at all — without this the second row would silently win
-    // and the name would resolve to whichever the master happened to list last.
-    let mut by_key: HashMap<&str, Slot<'_>> = HashMap::with_capacity(master.len());
-    for row in master {
-        let field = match key {
-            JoinKey::Isin => row.isin,
-            JoinKey::TradingSymbol => row.trading_symbol,
-        };
-        // An empty key joins nothing. Indexing it would make every row with a
-        // blank ISIN collide with every other, which reads as ambiguity where
-        // the truth is absence — the exact confusion `VendorHasNoIsin` exists
-        // to prevent.
-        if field.is_empty() {
-            continue;
-        }
-        by_key
-            .entry(field)
-            .and_modify(|held| *held = Slot::Many)
-            .or_insert(Slot::One(*row));
-    }
-
-    // Only needed for the ISIN key: it answers "does this feed list the symbol
-    // at all", which is what separates a vendor that has never heard of an
-    // instrument from one that lists it without an identity. Reserved from
-    // `master.len()` rather than collected — see `symbol_index`.
-    let by_symbol: HashSet<&str> = symbol_index(master);
-
-    let mut rows = Vec::with_capacity(published.len());
-    for row in published {
-        let probe = match key {
-            JoinKey::Isin => row.isin,
-            JoinKey::TradingSymbol => row.symbol,
-        };
-        let (verdict, vendor_id) = match by_key.get(probe) {
-            Some(Slot::One(found)) => (Verdict::Matched, Some(found.vendor_id.to_owned())),
-            Some(Slot::Many) => (Verdict::Ambiguous, None),
-            // NOT FOUND ON THE KEY — and the reason splits in two.
-            //
-            // On an ISIN join, a feed that lists the SYMBOL but carries no ISIN
-            // for it has not failed to hold the instrument; it has failed to
-            // publish its identity, and NSE issues no ISIN for an index at all.
-            // Calling that `Lacks` blames the vendor for a cell the exchange
-            // never filled. On a symbol join there is no second field to fall
-            // back to, so absence is absence.
-            None => match key {
-                JoinKey::Isin if by_symbol.contains(row.symbol) => (Verdict::VendorHasNoIsin, None),
-                JoinKey::Isin | JoinKey::TradingSymbol => (Verdict::Lacks, None),
-            },
-        };
-        rows.push(Resolved {
-            symbol: row.symbol.to_owned(),
-            isin: row.isin.to_owned(),
-            verdict,
-            vendor_id,
-        });
-    }
-
-    // ROWS THE FEED HOLDS THAT THIS INDEX DOES NOT NAME. Counted against the
-    // published SYMBOL set whichever key was joined on, because "is this name in
-    // the index" is a question about the index's membership and the index names
-    // its members by symbol.
-    let named: HashSet<&str> = published.iter().map(|c| c.symbol).collect();
-    let extra = master
-        .iter()
-        .filter(|row| !row.trading_symbol.is_empty())
-        .filter(|row| !named.contains(row.trading_symbol))
-        .count();
-
-    IndexResolution {
-        index: index.to_owned(),
-        feed: feed.to_owned(),
-        key,
-        rows,
-        extra,
-    }
+    MasterIndex::new(master, key).resolve(index, feed, published)
 }
 
 /// How far a resolution may shrink before it is refused rather than published,
@@ -710,10 +782,13 @@ mod tests {
             "a blank symbol is an absence and is not indexed as a name"
         );
         for symbol in ["AAA", "BBB", "CCC"] {
-            assert!(index.contains(symbol), "{symbol} is listed by the master");
+            assert!(
+                index.contains_key(symbol),
+                "{symbol} is listed by the master"
+            );
         }
         assert!(
-            !index.contains(""),
+            !index.contains_key(""),
             "the blank must not become a name every symbol-less row answers to"
         );
         assert!(
@@ -804,6 +879,81 @@ mod tests {
             "extra counts rows on the OTHER side and is not part of the partition"
         );
         assert!(out.is_sound());
+    }
+
+    /// **`extra` counts the same rows whether the master is walked per index or
+    /// read from the index's own names.** D-0966.
+    ///
+    /// The count moved from a walk of the master to "rows with a symbol, minus
+    /// the rows carrying a name this index publishes". The two agree only if a
+    /// symbol the master lists twice is subtracted twice, a name the file
+    /// repeats is subtracted once, and a blank on either side is subtracted not
+    /// at all — so this master and file carry all three.
+    #[test]
+    fn extra_counts_every_unnamed_row_once_through_repeats_and_blanks() {
+        let master = vendor(&[
+            ("1", "AAA", "INE000A01001"),
+            ("2", "AAA", "INE000A01002"),
+            ("3", "BBB", "INE000B01002"),
+            ("4", "", ""),
+            ("8", "ZZZ", "INE000Z01009"),
+            ("6", "YYY", "INE000Y01008"),
+        ]);
+        let mut named = published();
+        named.truncate(1); // AAA only
+        named.push(named[0]); // the file repeats AAA
+        named.push(Constituent {
+            company: "Nobody Ltd.",
+            industry: "Fin",
+            symbol: "",
+            series: "EQ",
+            isin: "",
+        });
+
+        // The walk the count used to be, spelled out beside the answer.
+        let walked = master
+            .iter()
+            .filter(|row| !row.trading_symbol.is_empty())
+            .filter(|row| !named.iter().any(|c| c.symbol == row.trading_symbol))
+            .count();
+        assert_eq!(walked, 3, "BBB, ZZZ and YYY: the two AAA rows are named");
+
+        for key in [JoinKey::Isin, JoinKey::TradingSymbol] {
+            let out = resolve("Nifty Test", "groww", key, &named, &master);
+            assert_eq!(
+                out.extra, walked,
+                "{key:?}: a repeated name is subtracted once, a repeated \
+                 symbol in the master twice, and a blank never"
+            );
+        }
+    }
+
+    /// **One index, many resolutions, no state carried between them.** The
+    /// crawl builds one [`MasterIndex`] per pass and resolves every index
+    /// against it, so a resolution must not depend on which index went first.
+    #[test]
+    fn one_master_index_answers_each_index_as_a_fresh_join_would() {
+        let master = vendor(&[
+            ("1", "AAA", "INE000A01001"),
+            ("2", "BBB", ""),
+            ("9", "ZZZ", "INE000Z01009"),
+        ]);
+        let first = published();
+        let mut second = published();
+        second.truncate(2);
+        let joined = MasterIndex::new(&master, JoinKey::Isin);
+        for (name, names) in [("one", &first), ("two", &second), ("one", &first)] {
+            let shared = joined.resolve(name, "groww", names);
+            let fresh = resolve(name, "groww", JoinKey::Isin, names, &master);
+            assert_eq!(shared.index, name);
+            assert_eq!(shared.key, JoinKey::Isin);
+            assert_eq!(shared.rows, fresh.rows);
+            assert_eq!(shared.extra, fresh.extra);
+        }
+        let again = joined.resolve("two", "groww", &second);
+        assert_eq!(again.count(Verdict::Matched), 1);
+        assert_eq!(again.count(Verdict::VendorHasNoIsin), 1);
+        assert_eq!(again.extra, 1, "ZZZ is the one row the second index omits");
     }
 
     #[test]

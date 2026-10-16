@@ -908,3 +908,51 @@ fn a_header_whose_advertised_range_runs_backwards_is_refused() {
     };
     assert_eq!(empty.validate(Layout::V2, file_len(10)), Ok(()));
 }
+
+/// Both slots decode, both fail [`Header::validate`] for different reasons,
+/// and the read reports the NEWEST slot's refusal, as `read_region`'s own
+/// documentation states (W3-store1-9, D-1515). The loop used to overwrite the
+/// refusal on every candidate, so the older slot's reason came back instead.
+/// Both assignments of the two refusals to the two generations are walked, so
+/// a reader that favoured one refusal kind would fail one of them.
+#[test]
+fn when_both_slots_decode_and_fail_the_newest_slots_refusal_is_reported() {
+    let overcount = |generation: u64| Header {
+        generation,
+        n_valid: 1_000_000,
+        first_ts_micros: T0,
+        last_ts_micros: T0,
+        ..Header::genesis(7, 60, FLAG_CHECKSUMS)
+    };
+    let backwards = |generation: u64| Header {
+        generation,
+        n_valid: 1,
+        first_ts_micros: 10,
+        last_ts_micros: 5,
+        ..Header::genesis(7, 60, FLAG_CHECKSUMS)
+    };
+    let counter = FormatError::CounterExceedsFile;
+    let order = FormatError::TimestampsOutOfOrder {
+        previous: 10,
+        next: 5,
+    };
+    for (older, older_refusal, newer, newer_refusal) in [
+        (backwards(1), order, overcount(2), counter),
+        (overcount(1), counter, backwards(2), order),
+    ] {
+        // Each refusal is what `validate` alone says of that slot.
+        assert_eq!(older.validate(Layout::V2, file_len(1)), Err(older_refusal));
+        assert_eq!(newer.validate(Layout::V2, file_len(1)), Err(newer_refusal));
+        let old = older.commit().expect("v2");
+        let new = newer.commit().expect("v2");
+        // Generation 1 lands in slot 1 and generation 2 in slot 0.
+        assert_eq!((old.slot, new.slot), (1, 0));
+        let mut region = vec![0u8; REGION_LEN];
+        apply(&mut region, &old, SLOT_LEN);
+        apply(&mut region, &new, SLOT_LEN);
+        assert_eq!(
+            Header::read_region(&region, file_len(1)),
+            Err(newer_refusal)
+        );
+    }
+}

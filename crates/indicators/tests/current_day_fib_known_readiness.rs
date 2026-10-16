@@ -40,10 +40,11 @@ fn sample(day: i64, minute: i64, high: i64, low: i64, close: i64) -> Sample {
 
 fn evaluator(fib: Tolerance) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
+        Widths::new(
             fib,
-            pivot: vocab::tolerance::pinned_pivot().expect("pinned pivot width"),
-        },
+            vocab::tolerance::pinned_pivot().expect("pinned pivot width"),
+        )
+        .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         Calendar::all_regular(),
@@ -252,18 +253,14 @@ fn unknown_bands_and_zero_ranges_never_satisfy_negation() {
         pinned(),
         Tolerance::from_milli_on(Base::SessionRange, 0).expect("equality tolerance"),
         Tolerance::from_milli_on(Base::SessionRange, i64::MAX).expect("finite maximum width"),
-        vocab::tolerance::pinned_pivot().expect("wrong base"),
-        Tolerance::from_milli(10).expect("missing base"),
     ] {
         for [false_count, true_count, unknown_count] in verify(&samples, tolerance) {
-            let expected = if tolerance.base() == Some(Base::SessionRange) {
-                (1, 4)
-            } else {
-                (0, 5)
-            };
-            assert_eq!((false_count + true_count, unknown_count), expected);
+            assert_eq!((false_count + true_count, unknown_count), (1, 4));
         }
     }
+    // A wrong or missing base cannot reach an evaluator at all (D-1553); the
+    // degraded path is proved inside the crate.
+    refused_widths();
 }
 
 #[test]
@@ -284,5 +281,35 @@ fn extension_overflow_withholds_only_unrepresentable_rungs_on_the_emitted_leg() 
         for [false_count, true_count, unknown_count] in counts {
             assert_eq!(false_count + true_count + unknown_count, 3);
         }
+    }
+}
+
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
     }
 }

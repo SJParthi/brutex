@@ -342,8 +342,8 @@ pub(crate) fn conduct(
     progress.index_stop = Some(Box::new(status));
     progress.finished_micros = Some(started);
     match result {
-        Ok(report) => progress.report = Some(report),
-        Err(why) => progress.refusal = Some(why),
+        Ok(report) => progress.report = Some(report.into()),
+        Err(why) => progress.refusal = Some(why.into()),
     }
     progress
 }

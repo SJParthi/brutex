@@ -53,6 +53,7 @@
    * struck through and are not clickable, and typing one leaves `aria-invalid`
    * on the input with the bound stated under the grid.
    */
+  import { untrack } from 'svelte';
   import { MON, istMonth } from '$lib/dates.js';
 
   let {
@@ -72,6 +73,23 @@
      * the caller is the only thing that knows it.
      */
     boundsReason = '',
+    /**
+     * Which days the exchange did not trade, by the caller's calendar:
+     * `(iso) => true` closed, `false` a session, `null` unknown. A closed day
+     * is STRUCK in the grid and stays pickable — a window may start on a
+     * Sunday — so the struck days match the sentence that says closed days
+     * are struck (DB-N04). Omitted, nothing is marked closed.
+     * @type {((iso: string) => boolean | null) | null}
+     */
+    closed = null,
+    /**
+     * Which days carry a day flag (WP-54, DB-025): `(iso) => text` names
+     * why — refused or incomplete at import, a degraded vendor day, a halt —
+     * and `null` leaves the day unmarked. Only days a band has read are
+     * marked; an unmarked day is unread or ordinary, never "clean".
+     * @type {((iso: string) => string | null) | null}
+     */
+    flagged = null,
     disabled = false
   } = $props();
 
@@ -199,8 +217,70 @@
     else if (iso !== '' && inRange(iso)) onchange?.(iso);
   }
 
-  /** Typing ends at blur; the field re-renders whatever the caller holds. */
-  const settle = () => (typing = null);
+  /**
+   * TYPING ENDS AT BLUR — BUT TEXT THAT WAS NOT APPLIED IS NEVER SILENTLY
+   * THROWN AWAY (DB-N03, DB-N13).
+   *
+   * Blur used to drop whatever was typed and re-render the old value: text
+   * appended to "01 Jan 2015" (or a day outside the bounds) vanished with no
+   * word, and a 56-month query went on running when one month was asked for.
+   * Now a blur keeps unread or out-of-range text in the box, with
+   * `aria-invalid` and the sentence under it saying it was NOT applied and
+   * what the field still holds. Escape puts the held value back; text that
+   * did apply simply re-renders in the field's own format.
+   */
+  function settle() {
+    if (typing === null) return;
+    const iso = parse(typing);
+    if (typing.trim() === '' || (iso !== '' && inRange(iso))) typing = null;
+  }
+
+  /* A VALUE SET FROM OUTSIDE (a reset, a link, the other field) replaces
+     unapplied text: the box shows what the window now is. Text that parses to
+     the new value is the reader's own typing and is left alone. */
+  let lastValue = /** @type {string | null} */ (null);
+  $effect(() => {
+    const v = value;
+    untrack(() => {
+      if (v === lastValue) return;
+      lastValue = v;
+      if (typing !== null && parse(typing) !== v) typing = null;
+    });
+  });
+
+  /** Enter applies what is typed (or says why not); Escape restores. */
+  /** @param {KeyboardEvent} e */
+  function onInputKey(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (typing !== null) {
+        type(typing);
+        settle();
+      }
+    } else if (e.key === 'Escape' && typing !== null) {
+      e.preventDefault();
+      e.stopPropagation();
+      typing = null;
+    }
+  }
+
+  /**
+   * A CLICK INTO THE FIELD SELECTS ITS TEXT, so typing a date replaces the
+   * one shown instead of appending to it ("01 Jan 201502 Mar 2020", the
+   * first try in DB-N03). The mouseup that follows a focusing press would put
+   * the caret back and undo the selection, so that one mouseup is told not to.
+   */
+  let selectOnUp = false;
+  /** @param {FocusEvent & {currentTarget: HTMLInputElement}} e */
+  function onFocus(e) {
+    e.currentTarget.select();
+    selectOnUp = true;
+  }
+  /** @param {MouseEvent} e */
+  function onUp(e) {
+    if (selectOnUp) e.preventDefault();
+    selectOnUp = false;
+  }
 
   /* ---- the grid -------------------------------------------------------- */
 
@@ -264,7 +344,14 @@
       if (n < 1) iso = `${prev}-${String(prevLen + n).padStart(2, '0')}`;
       else if (n > len) iso = `${addMonths(shown, 1)}-${String(n - len).padStart(2, '0')}`;
       else iso = isoOf(y, m, n);
-      out.push({ iso, day: +iso.slice(8, 10), other: n < 1 || n > len, ok: inRange(iso) });
+      out.push({
+        iso,
+        day: +iso.slice(8, 10),
+        other: n < 1 || n > len,
+        ok: inRange(iso),
+        shut: closed ? closed(iso) === true : false,
+        flag: flagged ? flagged(iso) : null
+      });
     }
     return out;
   });
@@ -358,6 +445,21 @@
   /** @type {HTMLDivElement | null} */
   let panel = $state(null);
 
+  /**
+   * WHICH EDGE THE CALENDAR HANGS FROM (DB-N04). Anchored `left: 0` it ran
+   * past the window on the right-hand field — measured x 1223..1543 on a
+   * 1440px window, with Saturday, Sunday, the Forward arrow and Close
+   * off-screen. Measured when it opens, the same test `Picker` uses: it hangs
+   * from the right edge when the left would overflow.
+   */
+  let alignRight = $state(false);
+  $effect(() => {
+    if (!open || !panel) return;
+    const host = panel.parentElement?.getBoundingClientRect();
+    if (!host) return;
+    alignRight = host.left + panel.offsetWidth > window.innerWidth - 12;
+  });
+
   function toggle() {
     if (disabled) return;
     if (open) {
@@ -420,6 +522,9 @@
       value={text}
       oninput={(e) => type(e.currentTarget.value)}
       onblur={settle}
+      onkeydown={onInputKey}
+      onfocus={onFocus}
+      onmouseup={onUp}
     />
     <button
       type="button"
@@ -468,6 +573,9 @@
       {:else}
         Outside the range this field accepts.
       {/if}
+      {#if typing !== null}
+        Not applied: the field still holds <b>{render(value) || 'no bound'}</b>. Escape restores it.
+      {/if}
     </p>
   {/if}
 
@@ -483,6 +591,7 @@
          reported against this tree. -->
     <div
       class="cal"
+      class:right={alignRight}
       role="dialog"
       tabindex="-1"
       aria-label={`Choose ${label.toLowerCase()}`}
@@ -576,9 +685,17 @@
                 class:other={c.other}
                 class:on={c.iso === value}
                 class:no={!c.ok}
+                class:shut={c.ok && c.shut}
+                class:flag={c.flag !== null}
                 disabled={!c.ok}
                 aria-current={c.iso === value ? 'date' : undefined}
-                title={c.ok ? undefined : boundsReason || 'Outside what this field may take.'}
+                title={c.ok
+                  ? c.flag !== null
+                    ? `Flagged: ${c.flag}`
+                    : c.shut
+                      ? 'A closed day on the exchange calendar of record: no session, so no bar. It can still be picked; the window then starts or ends on it.'
+                      : undefined
+                  : boundsReason || 'Outside what this field may take.'}
                 onclick={() => pick(c.iso)}>{c.day}</button
               >
             {/each}
@@ -718,6 +835,11 @@
     border-radius: var(--r3);
     padding: var(--s4);
     box-shadow: var(--e3);
+  }
+  /* HANGS FROM THE RIGHT EDGE WHEN THE LEFT WOULD OVERFLOW (DB-N04). */
+  .cal.right {
+    left: auto;
+    right: 0;
   }
   .cal-h {
     display: flex;
@@ -892,6 +1014,15 @@
     color: var(--faint);
     text-decoration: line-through;
     cursor: not-allowed;
+  }
+  /* A CLOSED DAY: struck like an out-of-range day, and still pickable. */
+  /* A FLAGGED DAY (WP-54): a dot under the number, the reason on hover. */
+  .day.flag {
+    box-shadow: inset 0 -3px 0 var(--warn);
+  }
+  .day.shut {
+    color: var(--faint);
+    text-decoration: line-through;
   }
   .day.on {
     background: var(--acc);

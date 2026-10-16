@@ -13,11 +13,12 @@
 //! # This is a READER. The writer is `cli`, and there is exactly one
 //!
 //! The byte layout below is re-declared rather than imported, and that is a
-//! deliberate choice with a cost. `api`'s dependency set is `core, pull, store,
-//! telemetry`; taking `cli` to borrow one struct would pull `engine`,
-//! `indicators`, `vocab`, `costs` and `runner` behind it — five crates this
-//! surface never calls, into the crate that must build fastest because every
-//! page waits on it.
+//! deliberate choice with a cost. `api` now depends on `cli` and `vocab` too
+//! (`CLAUDE.md` §5, D-0288), and this reader still re-declares the layout
+//! rather than importing it from `cli::results`, so the cost below and the
+//! three checks that contain it still apply. (This paragraph said `api`'s set
+//! was `core, pull, store, telemetry` and that the `cli` arrow was avoided;
+//! both stopped being true — Z1-slice11, D-1762.)
 //!
 //! The cost is that two files now state one layout, and a format with two
 //! statements of itself is a format that can diverge. Three things hold it
@@ -476,10 +477,11 @@ pub struct Run {
     /// version travels with the ledger and the page says "this ledger predates
     /// the mask" for the one and "no combination was recorded" for the other.
     ///
-    /// Not decoded to condition names here: that needs `vocab`, and `api` does
-    /// not depend on it. Adding the arrow to render a field would be a §5 crate
-    /// graph change made for a convenience, so the words are served raw and the
-    /// front end names them.
+    /// Not decoded to condition names here, although `api` does depend on
+    /// `vocab`: decoding per record would repeat the vocabulary on every run of
+    /// every page, so the words are served raw and `/vocab.json` serves the
+    /// table once for the front end to name them (`CLAUDE.md` §5, D-0288). This
+    /// doc said `api` does not depend on `vocab` (Z1-slice11, D-1762).
     pub mask_words: [u64; 6],
     /// Whether the record's own `blake3` seal matches the bytes read back.
     ///
@@ -523,9 +525,13 @@ impl Run {
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
-        reason = "every index is a constant offset into a fixed-size array \
-                  whose length is const-asserted against the field sum by \
-                  FIELD_SUM, so no offset here can be out of bounds"
+        reason = "every `take` width is a literal and `raw` is a fixed-size \
+                  array. FIELD_SUM restates those widths BY HAND and is \
+                  const-asserted equal to PAYLOAD_BYTES, but nothing ties this \
+                  `take` sequence to FIELD_SUM at compile time: the bound is \
+                  held by every_field_lands_where_the_writer_put_it and \
+                  a_record_survives_a_round_trip_through_its_own_index, which \
+                  decode a whole record and would panic on an overrun"
     )]
     fn from_bytes(index: u64, raw: &[u8; STRIDE_BYTES], sealed: bool) -> Self {
         let mut at = 0_usize;
@@ -914,7 +920,11 @@ impl Ledger {
         let _ = write!(
             out,
             r#","appendable":{}"#,
-            self.version == VERSION && self.refusal.is_none()
+            // A RAGGED TAIL IS NOT APPENDABLE. `cli::results` refuses a ledger
+            // whose payload is not a whole number of strides, so a page that
+            // said `true` here sent the operator into a sweep whose every
+            // recording was refused (Z1-slice11-F1, D-1762).
+            self.version == VERSION && self.refusal.is_none() && !self.partial_tail
         );
         // THE SECOND THING A RUN NEEDS, AND IT IS A FACT ABOUT THE BINARY.
         //
@@ -1279,12 +1289,32 @@ fn respond(
 /// Clamped rather than refused: a bookmarked `?limit=99999` is not an error, it
 /// is an operator who wants everything, and the honest answer is everything up
 /// to the ceiling plus the flag that says the ceiling was reached. An
-/// unparseable value takes [`DEFAULT_LIMIT`] for the same reason.
-fn limit_asked(raw: &str) -> usize {
+/// unparseable value takes [`DEFAULT_LIMIT`] for the same reason, AND SAYS SO:
+/// one `api.backtest` Warn naming what was asked, the same bargain
+/// `audit_json`'s `page ignored` strikes. It answered byte-identically to an
+/// intentional default with nothing emitted (P1-01-03, D-1765).
+pub(crate) fn limit_asked(raw: &str) -> usize {
+    if let Some(asked) = unparseable_limit(raw) {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.backtest", "limit ignored")
+                .with("param", telemetry::Value::Str("limit"))
+                .with("asked", telemetry::Value::Str(&asked))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a whole number; answered the default page"),
+                ),
+        );
+    }
     crate::server::param(raw, "limit")
         .parse::<usize>()
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_RUNS)
+}
+
+/// The `limit` text when it is present and is not a whole number.
+fn unparseable_limit(raw: &str) -> Option<String> {
+    let asked = crate::server::param(raw, "limit");
+    (!asked.is_empty() && asked.parse::<usize>().is_err()).then_some(asked)
 }
 
 #[cfg(test)]
@@ -1841,6 +1871,21 @@ mod tests {
         assert!(ledger.runs.is_empty(), "nothing is parsed from it");
     }
 
+    /// An unparseable `limit` is named for the Warn, a whole one is not, and
+    /// both still answer a bounded page (P1-01-03, D-1765).
+    #[test]
+    fn an_unparseable_limit_is_named_and_a_whole_one_is_not() {
+        for raw in ["limit=all", "limit=-1", "limit=1e3"] {
+            let asked = raw.split_once('=').map(|(_, v)| v.to_owned());
+            assert_eq!(super::unparseable_limit(raw), asked, "{raw}");
+            assert_eq!(super::limit_asked(raw), super::DEFAULT_LIMIT, "{raw}");
+        }
+        for raw in ["", "limit=7", "other=x"] {
+            assert_eq!(super::unparseable_limit(raw), None, "{raw}");
+        }
+        assert_eq!(super::limit_asked("limit=7"), 7);
+    }
+
     #[test]
     fn a_ragged_tail_is_named_and_the_whole_records_are_still_served() {
         let mut bytes = file(VERSION, &[record(1, false, 10), record(2, false, 20)]);
@@ -1850,6 +1895,9 @@ mod tests {
         assert_eq!(ledger.total, 2, "only whole records are counted");
         assert_eq!(ledger.runs.len(), 2, "and they are still served");
         assert_eq!(ledger.refusal, None, "a ragged tail is not fatal");
+        let json = ledger.to_json();
+        assert!(json.contains(r#""appendable":false"#), "{json}");
+        assert!(json.contains(r#""partial_tail":true"#), "{json}");
     }
 
     #[test]

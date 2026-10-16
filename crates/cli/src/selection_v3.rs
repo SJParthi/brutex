@@ -55,7 +55,7 @@ use crate::population::{
 };
 use crate::selection::{
     SELECTED_ENTRY_CANONICAL_LEN_V1, SHARED_COHORT_CANONICAL_LEN_V2, SelectedEntryV1,
-    SharedCohortIdentityV2,
+    SharedCohortIdentityV2, require_indexed_records_unchanged,
 };
 
 /// Operator-facing refusal from V3 selection derivation or persistence.
@@ -1253,6 +1253,17 @@ impl SelectionLedgerV3 {
     /// Refuses read-only use, invalid or duplicate bytes, stale/replaced file
     /// generation, a caller bound, arithmetic failure, or any I/O/lock error.
     pub fn append(&mut self, receipt: &SelectionReceiptV3) -> Result<(), SelectionV3Refusal> {
+        self.append_with(receipt, std::io::Write::write_all)
+    }
+
+    /// [`Self::append`] with the receipt write supplied, so a test can inject a
+    /// short write. A failed write is truncated back to the scanned end, so the
+    /// file stays whole and the next append lands on a record boundary (D-1850).
+    fn append_with(
+        &mut self,
+        receipt: &SelectionReceiptV3,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), SelectionV3Refusal> {
         if !self.writable {
             return Err("a read-only selection V3 ledger cannot append".to_owned());
         }
@@ -1293,12 +1304,22 @@ impl SelectionLedgerV3 {
                 format!("selection V3 latest index could not reserve one slot: {why}")
             })?;
             let raw = receipt.to_bytes()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .map_err(|why| format!("selection V3 ledger could not seek to append: {why}"))?;
-            self.file
-                .write_all(&raw)
-                .map_err(|why| format!("selection V3 receipt could not be appended: {why}"))?;
+            if let Err(why) = crate::append_rollback::append_with(
+                &mut self.file,
+                &raw,
+                "selection V3 receipt",
+                write,
+            ) {
+                // The rollback restored exactly the scanned bytes under this
+                // handle's lock; retain that generation as a successful append
+                // retains its own, so this handle stays usable (D-1850). A failed
+                // rollback leaves the length wrong, the generation stale, and the
+                // next append refuses.
+                if let Ok(generation) = validated_generation(&self.file, &self.path, self.scanned) {
+                    self.generation = generation;
+                }
+                return Err(why);
+            }
             self.file
                 .sync_all()
                 .map_err(|why| format!("selection V3 receipt could not be synced: {why}"))?;
@@ -1349,6 +1370,14 @@ impl SelectionLedgerV3 {
             self.generation = observed;
             return Ok(());
         }
+        require_indexed_records_unchanged(
+            &mut self.file,
+            HEADER,
+            &self.path,
+            &self.order,
+            &self.receipts,
+            SelectionReceiptV3::to_bytes,
+        )?;
         let held = self.order.len();
         let new_count = total
             .checked_sub(held)
@@ -2386,6 +2415,39 @@ mod tests {
         cleanup(&root);
     }
 
+    #[test]
+    fn a_failed_append_truncates_back_and_the_same_handle_appends_next() {
+        let root = root("append-rollback");
+        let first = receipt(12, 60, 2);
+        let second = receipt(13, 60, 2);
+        let mut ledger = SelectionLedgerV3::open(&root, 4).expect("create rollback fixture");
+        ledger.append(&first).expect("append first");
+        let path = SelectionLedgerV3::path(&root);
+        let before = std::fs::read(&path).expect("V3 bytes");
+        let why = ledger
+            .append_with(&second, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed V3 write refuses");
+        assert!(
+            why.contains("selection V3 receipt: injected short write; truncated back"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&path).expect("V3 bytes"), before);
+        ledger
+            .append(&second)
+            .expect("the same handle appends next");
+        drop(ledger);
+        let reopened = SelectionLedgerV3::open_read(&root, 4).expect("V3 reopen");
+        assert_eq!(
+            reopened.selection_ids(),
+            &[first.selection_id(), second.selection_id()]
+        );
+        drop(reopened);
+        cleanup(&root);
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn same_length_external_mutation_makes_writable_handle_stale() {
@@ -2412,6 +2474,78 @@ mod tests {
             "unexpected stale refusal: {refusal}"
         );
         drop(ledger);
+        cleanup(&root);
+    }
+
+    /// W2-cli14-5: a second handle rewrites an already-indexed record AND
+    /// appends a valid one; growth must not absorb the rewrite.
+    #[test]
+    fn rewrite_plus_append_of_an_indexed_record_refuses_before_append() {
+        let root = root("rewrite-plus-append");
+        let first = receipt(10, 60, 2);
+        let second = receipt(11, 60, 2);
+        let third = receipt(12, 60, 2);
+        let mut ledger = SelectionLedgerV3::open(&root, 4).expect("create rewrite fixture");
+        ledger.append(&first).expect("append first");
+
+        let path = SelectionLedgerV3::path(&root);
+        let original = std::fs::read(&path).expect("V3 bytes");
+        let offset = HEADER + 100;
+        let index = usize::try_from(offset).expect("offset fits usize");
+        let changed = original.get(index).copied().expect("indexed V3 byte") ^ 1;
+        let appended = third.to_bytes().expect("canonical third V3 receipt");
+        let mut external = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open external writer");
+        external
+            .seek(SeekFrom::Start(offset))
+            .expect("seek rewrite");
+        external.write_all(&[changed]).expect("in-place rewrite");
+        external.seek(SeekFrom::End(0)).expect("seek end");
+        external.write_all(&appended).expect("external append");
+        external.sync_all().expect("sync external");
+        drop(external);
+        let grown = std::fs::metadata(&path).expect("grown V3 metadata").len();
+
+        let refusal = ledger
+            .append(&second)
+            .expect_err("a rewritten indexed V3 record must not be absorbed");
+        assert!(
+            refusal.contains("rewrote already-indexed"),
+            "unexpected rewrite refusal: {refusal}"
+        );
+        assert_eq!(std::fs::metadata(&path).expect("V3 metadata").len(), grown);
+        drop(ledger);
+        cleanup(&root);
+    }
+
+    /// W2-cli14-5 control: an honest append by another V3 handle is still
+    /// absorbed, in file order, after the indexed-record recheck.
+    #[test]
+    fn honest_growth_by_another_handle_is_absorbed_in_file_order() {
+        let root = root("honest-growth");
+        let first = receipt(13, 60, 2);
+        let second = receipt(14, 60, 2);
+        let third = receipt(15, 60, 2);
+        let mut ledger = SelectionLedgerV3::open(&root, 4).expect("V3 writer");
+        let mut other = SelectionLedgerV3::open(&root, 4).expect("other V3 writer");
+        ledger.append(&first).expect("append first");
+        other.append(&second).expect("other handle absorbs first");
+        ledger
+            .append(&third)
+            .expect("first handle absorbs the other handle's append");
+        let expected = [
+            first.selection_id(),
+            second.selection_id(),
+            third.selection_id(),
+        ];
+        assert_eq!(ledger.selection_ids(), &expected);
+        drop(ledger);
+        drop(other);
+        let reopened = SelectionLedgerV3::open_read(&root, 4).expect("V3 reopen");
+        assert_eq!(reopened.selection_ids(), &expected);
+        drop(reopened);
         cleanup(&root);
     }
 }

@@ -64,9 +64,15 @@ pub mod catalog;
 pub mod census;
 pub mod constituents;
 pub mod coverage;
+/// `CLAUDE.md` §8 on the shipped pull: one re-read per rejection, compared by
+/// fingerprint, and a loud halt when the value did not change. D-0948.
+pub mod credential_law;
 /// The shared blocking-work, concurrency and byte/row/page bounds for result details.
 pub mod detail;
 pub mod expressionsearchjson;
+/// Unreadable records coalesced into runs and capped, so a damaged month costs
+/// an answer a constant number of bytes (DB-B75, WP-81).
+pub mod fault_log;
 pub mod folder;
 /// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
 /// into figures. `runs.bin` records totals; this records the round trips
@@ -98,17 +104,22 @@ pub mod master;
 /// are stale.
 ///
 /// Separate from `/pull/*` on purpose: that moves BARS and spends the vendor's
-/// quota per instrument-month; this moves four files, three of them free public
-/// CDN downloads. `Site::load` parses the masters once at startup with no reload
-/// path, so this also answers whether a restart is required. D-0308.
+/// quota per instrument-month; this moves five files, four of them free public
+/// downloads. A refresh re-parses the masters in place through
+/// `Site::reparse`; this also answers whether a restart is still required.
+/// D-0308, D-1762.
 pub mod mastersrun;
 pub mod merge;
+/// `cash_identity=zerodha_nse_checked`: a Zerodha NSE EQ row confirmed
+/// against NSE's own ISIN-bearing Total Market file. D-3314.
+pub mod nse_identity;
 pub mod operation_audit;
 pub mod pullrun;
 pub(crate) mod recovery;
 pub(crate) mod recovery_control;
 pub(crate) mod recovery_journal;
 pub mod render;
+pub mod selectionv6json;
 pub mod server;
 pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was

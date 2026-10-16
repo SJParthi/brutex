@@ -18,6 +18,61 @@ pub const MAX_SOURCE_BYTES: usize = 4096;
 /// Fixed serialized width, including version, count and zeroed padding.
 pub const ENCODED_LEN: usize = 4 + MAX_INSTRUCTIONS * 3;
 const MAX_NESTING: u16 = 32;
+/// Scratch width for programs of at most 15 instructions.
+const SHALLOW_SLOTS: usize = 8;
+/// Scratch width for programs of at most 127 instructions.
+const MIDDLE_SLOTS: usize = 64;
+/// Scratch width for every longer program: the deepest stack any program of
+/// [`MAX_INSTRUCTIONS`] can reach. A height of `h` needs `h` leaves and `h - 1`
+/// joins to come back to one value, so `2h - 1 <= MAX_INSTRUCTIONS`.
+const DEEP_SLOTS: usize = MAX_INSTRUCTIONS.div_ceil(2);
+
+/// The three scratch-stack widths [`Expression::evaluate`] dispatches on.
+///
+/// AN ENUM, NOT A MATCH ON THE WIDTH (D-1455). `evaluate` matched a `usize`
+/// width, computed from the length, against `SHALLOW_SLOTS`, `MIDDLE_SLOTS`
+/// and a `_` arm. Deleting either named arm sent that program to the deep stack, which
+/// answers identically and only clears more slots, so Gate 18 reported two
+/// survivors no output could kill. An exhaustive match on this enum has no
+/// wildcard to fall into, and each arm takes its width from [`Tier::slots`],
+/// so an arm and the width it runs are one fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    /// [`SHALLOW_SLOTS`].
+    Shallow,
+    /// [`MIDDLE_SLOTS`].
+    Middle,
+    /// [`DEEP_SLOTS`].
+    Deep,
+}
+
+impl Tier {
+    /// The smallest tier no reachable stack height of a `len`-instruction
+    /// program exceeds.
+    ///
+    /// A program of `len` instructions can stack at most `(len + 1) / 2`
+    /// values, by the same leaves-and-joins count as [`DEEP_SLOTS`]. Each tier
+    /// starts past the previous one's reach, so the width is at most
+    /// `4.5 * len + 8`.
+    const fn of(len: usize) -> Self {
+        if len < 2 * SHALLOW_SLOTS {
+            Self::Shallow
+        } else if len < 2 * MIDDLE_SLOTS {
+            Self::Middle
+        } else {
+            Self::Deep
+        }
+    }
+
+    /// The scratch slots this tier clears before a walk.
+    const fn slots(self) -> usize {
+        match self {
+            Self::Shallow => SHALLOW_SLOTS,
+            Self::Middle => MIDDLE_SLOTS,
+            Self::Deep => DEEP_SLOTS,
+        }
+    }
+}
 
 /// Strong Kleene truth: only `True` admits a signal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,9 +260,30 @@ impl Expression {
 
     /// Evaluate one bar in bounded space/time with no heap allocation.
     /// `known` must come from the evaluator's actual availability evidence.
+    ///
+    /// # Cost per bar
+    ///
+    /// Θ(`len`): one step per instruction, at most [`MAX_INSTRUCTIONS`]. This is
+    /// not O(1) in the program, and cannot be: every instruction can change the
+    /// answer. The scratch stack is [`Tier::of`] the length, at
+    /// [`Tier::slots`] wide: 8, 64 or 576 slots, so the slots cleared before the walk are at most
+    /// `4.5 * len + 8` and never the full wire capacity for a short rule.
+    /// Proved by
+    /// `vocab::expression::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
     #[must_use]
     pub fn evaluate(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
-        let mut stack = [Truth::Unknown; MAX_INSTRUCTIONS];
+        match Tier::of(self.len) {
+            Tier::Shallow => self.run::<{ Tier::Shallow.slots() }>(truth, known),
+            Tier::Middle => self.run::<{ Tier::Middle.slots() }>(truth, known),
+            Tier::Deep => self.run::<{ Tier::Deep.slots() }>(truth, known),
+        }
+    }
+
+    /// The postfix walk over a scratch stack of `SLOTS` truths. A stack that
+    /// would overflow answers [`Truth::Unknown`], so an undersized stack can
+    /// only refuse a signal, never create one.
+    fn run<const SLOTS: usize>(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
+        let mut stack = [Truth::Unknown; SLOTS];
         let mut used = 0_usize;
         for instruction in self.code.iter().take(self.len) {
             match instruction {
@@ -307,8 +383,11 @@ impl Expression {
 
 impl std::fmt::Display for Expression {
     /// Canonical fully parenthesized numeric infix, rendered iteratively.
-    /// The fixed wire grammar can exceed the source parser's nesting/byte
-    /// limits; display is lossless human text, not a promise to bypass them.
+    /// Display is lossless human text, not a parser round trip (D-0751): each
+    /// NOT renders as `!(`, two parser nesting levels, and each binary node
+    /// adds one level and five bytes, so even a program [`Self::parse`]
+    /// accepted can render past its nesting or byte limit. The exact round
+    /// trip is [`Self::encode`] and [`Self::decode`].
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         render_program(self, &render_children(self)?, f)
     }
@@ -558,12 +637,7 @@ impl Parser<'_> {
         let bit = token
             .parse::<u16>()
             .ok()
-            .or_else(|| {
-                table::TABLE
-                    .iter()
-                    .find(|row| row.name == token)
-                    .map(|row| row.index)
-            })
+            .or_else(|| table::index_of(token))
             .ok_or(Refusal::UnavailableBit)?;
         let definition = table::definition(bit).ok_or(Refusal::UnavailableBit)?;
         if definition.status != table::BitStatus::Live {
@@ -585,6 +659,82 @@ mod invariant_tests {
         };
         expression.code[..code.len()].copy_from_slice(code);
         expression
+    }
+
+    /// The deepest stack a program of `len` instructions can reach: every leaf
+    /// first, then every join, then a `Not` if `len` is even.
+    fn deepest(len: usize) -> Expression {
+        let leaves = len.div_ceil(2);
+        let mut code = vec![Instruction::Bit(0); leaves];
+        code.extend(std::iter::repeat_n(Instruction::And, leaves - 1));
+        if len.is_multiple_of(2) {
+            code.push(Instruction::Not);
+        }
+        assert_eq!(code.len(), len);
+        program(&code)
+    }
+
+    /// THE SCRATCH STACK IS SIZED TO THE PROGRAM, AND THE DEEPEST PROGRAM OF
+    /// EVERY TIER STILL EVALUATES. Audit o1engine-22.
+    ///
+    /// `evaluate` cleared a 1,151-slot stack on every bar, even for a
+    /// one-condition rule. It now picks 8, 64 or 576 slots from the length. The
+    /// width must never be below the height a program of that length can reach
+    /// (an undersized stack answers `Unknown`, refusing a real signal), and must
+    /// stay within `4.5 * len + 8`. At each tier's boundary the deepest program
+    /// is evaluated: all-true leaves give `True` (or `False` under the trailing
+    /// `Not`), a false leaf gives the opposite, and an unknown one `Unknown`.
+    #[test]
+    fn the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates() {
+        assert_eq!(Tier::of(0).slots(), 8);
+        assert_eq!(Tier::of(1).slots(), 8);
+        assert_eq!(Tier::of(15).slots(), 8);
+        assert_eq!(Tier::of(16).slots(), 64);
+        assert_eq!(Tier::of(127).slots(), 64);
+        assert_eq!(Tier::of(128).slots(), 576);
+        assert_eq!(Tier::of(MAX_INSTRUCTIONS).slots(), 576);
+        for len in 1..=MAX_INSTRUCTIONS {
+            let slots = Tier::of(len).slots();
+            assert!(slots >= len.div_ceil(2), "len {len} can stack past {slots}");
+            assert!(2 * slots <= 9 * len + 16, "len {len} clears {slots} slots");
+        }
+        let known = ConditionMask::ZERO.with_bit(0);
+        for len in [
+            1,
+            2,
+            15,
+            16,
+            17,
+            127,
+            128,
+            129,
+            MAX_INSTRUCTIONS - 1,
+            MAX_INSTRUCTIONS,
+        ] {
+            let expression = deepest(len);
+            let (yes, no) = if len.is_multiple_of(2) {
+                (Truth::False, Truth::True)
+            } else {
+                (Truth::True, Truth::False)
+            };
+            assert_eq!(expression.evaluate(known, known), yes, "len {len}");
+            assert_eq!(
+                expression.evaluate(ConditionMask::ZERO, known),
+                no,
+                "len {len}"
+            );
+            assert_eq!(
+                expression.evaluate(known, ConditionMask::ZERO),
+                Truth::Unknown,
+                "len {len}"
+            );
+        }
+        // One leaf past a tier's reach overflows that tier and is refused, never
+        // read as a signal: 9 bare leaves fit 15 instructions and stack 9 deep.
+        assert_eq!(
+            program(&[Instruction::Bit(0); 9]).evaluate(known, known),
+            Truth::Unknown
+        );
     }
 
     #[test]

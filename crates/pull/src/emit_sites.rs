@@ -520,15 +520,11 @@ static SITES: &[Site] = &[
         ),
         drive: |scratch| drive_bad_candles(scratch, true),
     },
+    // The `pull.file` "not filed" row `request_minutes.rs` had here is gone
+    // with its emit: that was the second event for one gap (OD-2, D-2371). The
+    // row below is the one event, now at `Error`.
     Site {
-        at: "request_minutes.rs incomplete coverage refusal",
-        target: "pull.file",
-        message: "not filed",
-        says: ("stage", Says::Holds("minute coverage")),
-        drive: drive_request_minutes,
-    },
-    Site {
-        at: "crates/pull/src/ingest.rs — from_window request coverage warning",
+        at: "crates/pull/src/ingest.rs — from_window request coverage gap",
         target: "pull.request_minutes",
         message: "request minute coverage incomplete",
         says: ("reason", Says::Holds("375 missing scheduled minutes")),
@@ -773,18 +769,25 @@ static SITES: &[Site] = &[
         drive: drive_rate,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Ok arm)",
+        at: "crates/pull/src/config.rs:274 (Ok arm)",
         target: "pull.config",
         message: "loaded",
         says: ("file", Says::Holds("CREDENTIALS")),
         drive: drive_config_loaded,
     },
     Site {
-        at: "crates/pull/src/config.rs:271 (Err arm)",
+        at: "crates/pull/src/config.rs:274 (Err arm)",
         target: "pull.config",
         message: "refused",
         says: ("vendors", Says::Signs(0)),
         drive: drive_config_refused,
+    },
+    Site {
+        at: "crates/pull/src/config.rs:274 (Err arm, file never read)",
+        target: "pull.config",
+        message: "refused",
+        says: ("file", Says::Holds("ABSENT-CONFIGURATION")),
+        drive: drive_config_absent,
     },
     Site {
         at: "crates/pull/src/session.rs:1136",
@@ -843,6 +846,15 @@ static SITES: &[Site] = &[
         message: "file refused",
         says: ("fields", Says::Signs(5)),
         drive: drive_csv_refused,
+    },
+    Site {
+        at: "crates/pull/src/masters.rs — note_index_skips",
+        target: "pull.masters",
+        message: "index entries skipped",
+        // THE CATEGORY BY NAME (CE-58): a category whose value is not a list
+        // of names is skipped under MR-04, and the skip is the line.
+        says: ("category", Says::Holds("Thematic")),
+        drive: drive_index_skipped,
     },
     Site {
         at: "crates/pull/src/archive.rs:278",
@@ -940,6 +952,58 @@ static SITES: &[Site] = &[
         message: "vendor answered",
         says: ("status", Says::Signs(503)),
         drive: drive_http,
+    },
+    // THE ALERT QUEUE'S SEVEN EVENTS (D-4893, IA-11a), each driven through the
+    // shipped `crate::alerts` function and found in the file. `alerts::EVENTS`
+    // and IA-AL-15 prove each is AUDITED; these rows prove each is EMITTED.
+    Site {
+        at: "crates/pull/src/alerts.rs — note_created",
+        target: "pull.alerts.lifecycle",
+        message: "alert queue created",
+        says: ("path", Says::Holds("audit/alerts")),
+        drive: drive_alert_put,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_put",
+        target: "pull.alerts.lifecycle",
+        message: "alert put",
+        says: ("kind", Says::Holds("hole")),
+        drive: drive_alert_put,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_acked",
+        target: "pull.alerts.lifecycle",
+        message: "alert acknowledged",
+        says: ("by", Says::Holds("cli")),
+        drive: drive_alert_acked,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_written_over",
+        target: "pull.alerts.lifecycle",
+        message: "alert record written over",
+        says: ("offset", Says::Signs(64)),
+        drive: drive_alert_written_over,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_replaced",
+        target: "pull.alerts.lifecycle",
+        message: "alert queue replaced",
+        says: ("open", Says::Holds("unknown")),
+        drive: drive_alert_replaced,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_reserve_spent",
+        target: "pull.alerts.lifecycle",
+        message: "alert reserve spent",
+        says: ("bytes", Says::Signs(65_536)),
+        drive: drive_alert_reserve_spent,
+    },
+    Site {
+        at: "crates/pull/src/alerts.rs — note_not_saved",
+        target: "pull.alerts.lifecycle",
+        message: "alert not saved",
+        says: ("code", Says::Holds("alert_kind_unknown")),
+        drive: drive_alert_not_saved,
     },
 ];
 
@@ -1107,18 +1171,32 @@ fn drive_config_loaded(scratch: &Scratch) {
 
 /// A configuration file that is there and does not parse.
 ///
-/// **Not a missing file, deliberately.** `CredentialConfig::load` returns on
-/// the read before `note_load` is ever called, so an absent file leaves no line
-/// here — the refusal an operator sees for that one is the `Unreadable` error
-/// itself. What this row proves is the other half: a file that was read and
-/// whose contents were refused, which is the case that used to reach an HTML
-/// page and nothing else.
+/// The half of the refusal that reads the file. [`drive_config_absent`] is the
+/// other half, a file that was never read.
 fn drive_config_refused(scratch: &Scratch) {
     let path = scratch.root.join("HALF-A-CONFIGURATION");
     fs::write(&path, "org    = \"orgone\"\n").expect("a scratch configuration");
     assert!(
         CredentialConfig::load(&path).is_err(),
         "a configuration naming no vendor halts, and never defaults"
+    );
+}
+
+/// A configuration file that is not there — P-07's headline case.
+///
+/// `CredentialConfig::load` used to return on the read before `note_load` ran,
+/// so the absent file, the unreadable one, the FIFO, the oversized one and the
+/// non-UTF-8 one each left NO line, while `note_load`'s own doc promised the
+/// log could tell "the file is missing" from "the file names no vendor".
+/// D-1393.
+fn drive_config_absent(scratch: &Scratch) {
+    let path = scratch.root.join("ABSENT-CONFIGURATION");
+    assert!(
+        matches!(
+            CredentialConfig::load(&path),
+            Err(crate::config::ConfigError::Unreadable { .. })
+        ),
+        "a configuration that is not there halts, and never defaults"
     );
 }
 
@@ -1203,6 +1281,14 @@ fn drive_census_imaged(scratch: &Scratch) {
 fn drive_csv_decoded(_scratch: &Scratch) {
     let rows = crate::csv::decode(BODY, Columns::TrueDataIndex).expect("five fields, no header");
     assert_eq!(rows.len(), 3, "three rows in, three rows out");
+}
+
+/// An index document with one category that is not a list and one element
+/// that is not a name. Both are skipped (MR-04) and the good name converts.
+fn drive_index_skipped(_scratch: &Scratch) {
+    let csv = crate::masters::nse_index_csv(r#"{"Broad":["NIFTY 50",42],"Thematic":"NIFTY X"}"#)
+        .expect("the good name still converts");
+    assert!(csv.contains("NIFTY 50,Broad\n"), "{csv}");
 }
 
 /// A CSV row that is two fields where five are required.
@@ -1457,6 +1543,14 @@ fn newer(dir: &Path, sink: &Sink, since: u64, target: &str) -> Vec<Record> {
 /// until this test nothing read it.
 #[test]
 fn every_emit_site_in_this_crate_reaches_a_file() {
+    crate::support::where_permission_binds(
+        "emit_sites::every_emit_site_in_this_crate_reaches_a_file",
+        every_emit_site_in_this_crate_reaches_a_file_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn every_emit_site_in_this_crate_reaches_a_file_body() {
     // Declared first so it is dropped LAST, and a [`Scratch`] rather than a
     // bare path so a row that fails still takes its sink's directory with it —
     // a panicking test must not leave the log it was reading behind.
@@ -1836,4 +1930,78 @@ fn drive_bars_not_counted(scratch: &Scratch) {
         "and the run says which instrument holds bars nothing counts: {:?}",
         done.failures
     );
+}
+
+/// An invented alert of `kind` under `key`.
+fn invented_alert(kind: u8, key: &str) -> crate::alerts::NewAlert<'_> {
+    crate::alerts::NewAlert {
+        kind,
+        key,
+        day: 0,
+        run: 7,
+        text: "an invented alert",
+    }
+}
+
+/// A store root of its own under the scratch directory.
+fn alert_store(scratch: &Scratch) -> PathBuf {
+    let store = scratch.root.join("alert-store");
+    std::fs::create_dir_all(&store).expect("a scratch store root");
+    store
+}
+
+/// Flips one byte of each of the queue's first `records` records.
+fn spoil_alerts(store: &Path, records: u64) {
+    let queue = crate::alerts::Names::under(store).queue;
+    let mut bytes = std::fs::read(&queue).expect("the queue");
+    for ordinal in 1..=records {
+        let at = usize::try_from(crate::alerts::offset_of(ordinal)).expect("an offset") + 50;
+        let byte = bytes.get_mut(at).expect("a byte of the record");
+        *byte ^= 0xFF;
+    }
+    std::fs::write(&queue, bytes).expect("the spoiled queue");
+}
+
+/// The first put on a fresh store: the queue is created and the alert put.
+fn drive_alert_put(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+}
+
+fn drive_alert_acked(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::ack(&store, 1, "cli", crate::alerts::Scope::Whole).expect("an ack");
+}
+
+/// A last record that fails its CRC is written over, at offset 64.
+fn drive_alert_written_over(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    spoil_alerts(&store, 1);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:y")).expect("the put over it");
+}
+
+/// Two bad records at the tail: the operator's replacement.
+fn drive_alert_replaced(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:y")).expect("a put");
+    spoil_alerts(&store, 2);
+    crate::alerts::replace_damaged(&store).expect("a replacement");
+}
+
+/// One write meets a full disk: the reserve is spent and the put lands.
+fn drive_alert_reserve_spent(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    crate::alerts::put(&store, &invented_alert(6, "hole:7:x")).expect("a put");
+    crate::alerts::FULL_WRITES.with(|left| left.set(1));
+    crate::alerts::put(&store, &invented_alert(5, "disk_full:7")).expect("the put after it");
+}
+
+/// A put the queue refuses says so in the log: kind 0 is in no table.
+fn drive_alert_not_saved(scratch: &Scratch) {
+    let store = alert_store(scratch);
+    let refused = crate::alerts::put(&store, &invented_alert(0, "nothing:7"));
+    assert_eq!(refused.expect_err("a refusal").code(), "alert_kind_unknown");
 }

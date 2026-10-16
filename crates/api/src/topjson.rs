@@ -108,7 +108,17 @@ fn parse(query: &str) -> Result<Option<(String, String)>, String> {
     let underlying = crate::server::param(query, "underlying");
     match (feed.is_empty(), underlying.is_empty()) {
         (true, true) if seen.is_empty() => Ok(None),
-        (false, false) => Ok(Some((feed, underlying))),
+        // THE FEED IS READ, NOT COPIED. The ledger keys runs by the feed's
+        // wire name, so `Zerodha` or a typo used to miss every row and answer
+        // 200 with a sentence about runs that halted or traded nothing --
+        // runs that do not exist. Parsed the way every other route parses a
+        // feed and looked up by its wire name (P1-02-06, D-1765).
+        (false, false) => match crate::ingest::parse_feed(&feed) {
+            Some(named) => Ok(Some((named.wire().to_owned(), underlying))),
+            None => Err(format!(
+                "{feed:?} is not a feed this build has; the top run is looked up by feed"
+            )),
+        },
         _ => Err(
             "`feed` and `underlying` filter together: give both nonempty values or neither"
                 .to_owned(),
@@ -360,6 +370,18 @@ mod tests {
             parse("feed=zerodha&underlying=NIFTY"),
             Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
         );
+        // A feed is canonicalised to the wire name the ledger keys by, and a
+        // feed this build does not have is refused rather than answered with
+        // a sentence about runs that do not exist (P1-02-06, D-1765).
+        assert_eq!(
+            parse("feed=Zerodha&underlying=NIFTY"),
+            Ok(Some(("zerodha".to_owned(), "NIFTY".to_owned())))
+        );
+        let typo = parse("feed=zerodah&underlying=NIFTY");
+        assert!(
+            typo.as_ref().is_err_and(|why| why.contains("zerodah")),
+            "{typo:?}"
+        );
         let dir = crate::scratch::path("top-absent-store");
         let _ = std::fs::remove_dir_all(&dir);
         let (status, _, body) = respond(Ok(dir.clone()), None);
@@ -416,5 +438,72 @@ mod tests {
         assert_eq!(report(&dir, None), Ok(canonical.clone()));
         assert_eq!(report(&dir, None), Ok(canonical));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A refusal that persists costs a cold open on every request, and
+    /// that is stated.** W1-api6-3, D-1444.
+    ///
+    /// `with_verified` drops a handle whose refresh refuses and caches no
+    /// refusal, so while the damage stays on disk each request runs `open`
+    /// again and answers its error. Driven here over 100 requests with an
+    /// `open` that always refuses: 100 opens, 100 identical refusals, and the
+    /// first open after the damage is repaired is served. Caching the refusal
+    /// would have made that last request refuse too, which is why the cost is
+    /// stated rather than removed.
+    #[test]
+    fn a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated() {
+        let cache = crate::detail::Cached::<u32>::new();
+        let root = std::path::Path::new("/top-persistent-refusal");
+        assert_eq!(
+            cache.with_verified(root, || Ok(1), |_| Ok(()), |v| *v),
+            Ok(1)
+        );
+        assert_eq!(
+            cache.with_verified(root, || Ok(2), |_| Err("seal damaged".to_owned()), |v| *v),
+            Err("seal damaged".to_owned()),
+            "the refresh refusal is the response and the handle is dropped"
+        );
+        let mut opens = 0;
+        for _ in 0..100 {
+            let answer = cache.with_verified(
+                root,
+                || {
+                    opens += 1;
+                    Err::<u32, _>("seal damaged".to_owned())
+                },
+                |_| Ok(()),
+                |v| *v,
+            );
+            assert_eq!(answer, Err("seal damaged".to_owned()));
+        }
+        assert_eq!(
+            opens, 100,
+            "every request while the damage persists is cold"
+        );
+        assert_eq!(
+            cache.with_verified(root, || Ok(3), |_| Ok(()), |v| *v),
+            Ok(3),
+            "the first request after a repair is served"
+        );
+
+        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api6-3");
+        for word in [
+            "topjson::report",
+            "SELECTION.with_verified",
+            "does not cache the",
+            "Selection::open",
+            "O(history)",
+            "MAX_SCAN_BYTES",
+            "every request while a refusal",
+        ] {
+            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+        }
+        let source = include_str!("topjson.rs");
+        assert!(source.contains("let selected = SELECTION.with_verified("));
+        let detail = include_str!("detail.rs");
+        let verified = detail.split_once("pub fn with_verified<R>(").unwrap().1;
+        assert!(
+            verified.contains("*held = None;\n                }\n                return Err(why);")
+        );
     }
 }

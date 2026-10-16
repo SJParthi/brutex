@@ -408,7 +408,7 @@ fn boolean_terminal_audit_failure_refuses_success_without_erasing_saved_evidence
                 assert!(progress.report.is_none());
                 let why = progress.refusal.unwrap();
                 assert!(why.contains("terminal audit is missing"));
-                assert!(why.contains(&prior));
+                assert!(why.contains(&*prior));
             }
         }
     }

@@ -1,10 +1,10 @@
 //! Indian F&O statutory rates: the dated regime table, and the refusal that
 //! stands where a rate was never verified.
 //!
-//! This is stage 1 of the cost calculator: **the rates and the refusal
-//! contract**. It answers "what rate was in force" and "is that rate
-//! citation-grounded". It does not yet compute a charge, a GST total or a
-//! net P&L — those are later stages, and nothing here guesses at them.
+//! Stage 1 of the cost calculator is **the rates and the refusal contract**:
+//! "what rate was in force" and "is that rate citation-grounded". Stages two
+//! and three, below, compute the charges, the GST total and the net P&L on top
+//! of it (`trip::price`, `trip::charge_stack`); nothing guesses at a rate.
 //!
 //! # The one idea this crate exists to preserve
 //!
@@ -62,7 +62,7 @@
 //! language without exception, and `deny.toml` lists `pyo3` by name. The
 //! arithmetic was lifted; the binding was left behind.
 //!
-//! See `docs/05-decisions.md` D-0039.
+//! See `docs/05-decisions.md` D-0041.
 //!
 //! # Stage two: the option arithmetic
 //!

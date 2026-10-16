@@ -272,6 +272,7 @@ impl Columns {
         // happen here — and a branch no test can enter is a branch nobody has
         // checked. `option_side` chains in only for the vendor that has one.
         [
+            self.vendor_id,
             self.segment,
             self.trading_symbol,
             self.instrument_type,
@@ -315,6 +316,53 @@ pub const MAX_MASTER_BYTES: u64 = 256 * 1024 * 1024;
 /// unreadable row — never dropped, never truncated and read anyway.
 pub const MAX_ROW_BYTES: usize = 4096;
 
+/// The master's text, read through one handle and capped (CE-65, D-2684).
+///
+/// `metadata(path).len()` is 0 for a FIFO or a device, so the size check
+/// passed and `read_to_string` by path then blocked on a FIFO or read
+/// `/dev/zero` without end. One open that does not wait on a FIFO, one `fstat`
+/// of that handle, a refusal by name for anything that is not a regular file,
+/// and a read that stops one byte past [`MAX_MASTER_BYTES`]: the shape
+/// `census::sized` has (P-19).
+fn read_capped(path: &std::path::Path) -> Result<String, String> {
+    let unreadable = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = crate::census::open_without_waiting(path).map_err(unreadable)?;
+    let meta = file.metadata().map_err(unreadable)?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: not a regular file (a {}); a master is one, and this reader \
+             neither waits on a FIFO nor reads a device",
+            path.display(),
+            if meta.is_dir() {
+                "directory"
+            } else {
+                crate::census::kind_of(meta.file_type())
+            }
+        ));
+    }
+    let size = meta.len();
+    if size > MAX_MASTER_BYTES {
+        return Err(format!(
+            "{}: {size} bytes; this reader holds at most {MAX_MASTER_BYTES}",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, MAX_MASTER_BYTES.saturating_add(1)),
+        &mut text,
+    )
+    .map_err(unreadable)?;
+    if text.len() as u64 > MAX_MASTER_BYTES {
+        return Err(format!(
+            "{}: grew past {MAX_MASTER_BYTES} bytes while it was read; this \
+             reader holds at most {MAX_MASTER_BYTES}",
+            path.display()
+        ));
+    }
+    Ok(text)
+}
+
 /// Reads a vendor master and decodes every row.
 ///
 /// # Errors
@@ -328,16 +376,9 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
     // can report -- it is an allocator failure or an OOM kill, and neither
     // reaches the operator as "the master is too big". One `metadata` call is
     // the difference between a named refusal and a dead process.
-    let size = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    if size > MAX_MASTER_BYTES {
-        return Err(format!(
-            "{}: {size} bytes; this reader holds at most {MAX_MASTER_BYTES}",
-            path.display()
-        ));
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    //
+    // AND THE SIZE IS THE HANDLE'S, AND THE READ IS CAPPED: `read_capped`.
+    let text = read_capped(path)?;
     let mut lines = text.lines();
     let header = lines.next().ok_or_else(|| "file is empty".to_owned())?;
     // THE HEADER IS A ROW, AND IT WAS THE ONE ROW WITH NO BOUND.
@@ -658,22 +699,21 @@ mod zerodha_master_tests {
             got.declined.len(),
             got.errors
         );
-        // THE TWO `NFO` ROWS, AND THIS ASSERTION USED TO SAY "foreign exchange".
+        // THE TWO `NFO` ROWS, AND THIS ASSERTION HAS SAID BOTH THINGS.
         //
-        // `Exchange::parse` knows `NSE` and `BSE` and nothing else, so `NFO`
-        // returns `Err` rather than a venue this build declines to store. Those
-        // are two different facts and they were one outcome: a code the engine
-        // CANNOT PARSE and a venue it CHOOSES NOT TO STORE both read as routine,
-        // so `NSE` drifting to `NSE_EQ` would decline every row of both masters
-        // while the report printed `ok` and exited zero. D-0329 separated them,
-        // and this assertion is the one that had pinned the conflation.
-        //
-        // A real `BSE` row still reads as `foreign exchange`, which is what
-        // makes the distinction worth having rather than a rename.
+        // It said "foreign exchange" while an unparseable code and a venue we
+        // choose not to store were one outcome; D-0329 separated them and it
+        // said "unrecognised exchange". That was right about the separation
+        // and wrong about `NFO`: Kite's own instruments page files NIFTY
+        // derivatives under `NFO` (charter §4z), so it is a code this vendor is
+        // KNOWN to write, and treating it as unreadable refused the whole live
+        // Kite master at line 2 on 6 Oct 2026. D-3310 names it as a known,
+        // routine decline for this vendor only. `NSE_EQ` drift is still
+        // unrecognised -- `core::vendor` pins that.
         assert_eq!(
             got.skipped_by_reason(),
-            vec![("unrecognised exchange", 2)],
-            "the two NFO rows: a code no decoder parses is not a venue"
+            vec![("foreign exchange", 2)],
+            "the two NFO rows: a code Kite is known to write, declined by code"
         );
         assert!(
             got.errors.is_empty(),
@@ -926,13 +966,34 @@ mod tests {
         // can ever cover it.
         let reason = &got.errors[0].1;
         assert!(
-            reason.contains("row has 5 field(s)") && reason.contains("run to 9"),
+            reason.contains("row has 5 field(s)") && reason.contains("run to 10"),
             "got {reason}"
         );
         assert!(
             got.skipped.is_empty(),
             "a truncated share is not a routine decline: {:?}",
             got.skipped
+        );
+    }
+
+    #[test]
+    fn a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall() {
+        // `widest` once left the vendor-id column out, so a row cut just
+        // before a right-most `groww_symbol` slipped the gate, decoded an
+        // empty id, and was filed as a routine skip rather than unreadable.
+        let body = "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,expiry_date,strike_price,groww_symbol\nNSE,CASH,,CHOLAFIN,EQ,EQ,INE121A01024,,\n";
+        let got = load(&tmp("cut-vendor-id", body), Vendor::Groww).expect("loads");
+        assert!(got.kept.is_empty());
+        assert!(
+            got.skipped.is_empty(),
+            "not a routine skip: {:?}",
+            got.skipped
+        );
+        assert_eq!(got.errors.len(), 1);
+        let reason = &got.errors[0].1;
+        assert!(
+            reason.contains("row has 9 field(s)") && reason.contains("run to 10"),
+            "got {reason}"
         );
     }
 
@@ -956,7 +1017,7 @@ mod tests {
             vec![
                 ("malformed instrument identifier", 2, 2),
                 (
-                    "row has 2 field(s); the columns this vendor needs run to 9",
+                    "row has 2 field(s); the columns this vendor needs run to 10",
                     1,
                     3
                 ),
@@ -987,6 +1048,39 @@ mod tests {
             .write_all(&[0xFF, 0xFE, 0x00, 0x41])
             .expect("write");
         assert!(load(&raw, Vendor::Groww).is_err());
+    }
+
+    /// **CE-65. A MASTER PATH THAT IS NOT A REGULAR FILE IS REFUSED UNREAD,
+    /// AND A FIFO THERE NEVER HOLDS THE LOAD.** `metadata().len()` is 0 for a
+    /// FIFO or a device, so the size bound passed and `read_to_string` by path
+    /// then blocked on a FIFO or read `/dev/zero` without end.
+    #[test]
+    fn a_master_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
+        let fifo = crate::scratch::path("master-fifo.csv");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(load(&fifo, Vendor::Groww).map(|_| ()));
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        let _ = reader.join();
+        let why = read
+            .expect("a FIFO at the master path must not hold the load")
+            .expect_err("refused");
+        assert!(why.contains("not a regular file"), "{why}");
+        let _ = std::fs::remove_file(&fifo);
     }
 
     #[test]

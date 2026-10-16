@@ -448,12 +448,13 @@ impl Granularity {
         clippy::match_same_arms,
         reason = "the two `None` arms return the same value and state DIFFERENT facts, which \
                   is the whole point of naming every arm. `Minute30 | Hour1` is 'crates/store \
-                  ships a directory and the fold would file a stub into it'; `Tick | Second1 \
-                  | Second5 | Week1` is 'crates/store ships no directory at all'. Merging them \
-                  would put a rung refused for arithmetic beside four refused for absence, and \
-                  the next reader deciding whether a rung can be enabled would have to \
-                  re-derive which kind each one is — the exact question the `_` arm this \
-                  function replaced made unanswerable. D-0132."
+                  ships a directory, and a VENDOR's bar at this rung sits on a grid nothing \
+                  here has captured' (D-1447); `Tick | Second5 | Week1` is 'crates/store \
+                  ships no directory at all'. Merging them would put a rung refused for an \
+                  unverified vendor grid beside three refused for absence, and the next \
+                  reader deciding whether a rung can be enabled would have to re-derive \
+                  which kind each one is — the exact question the `_` arm this function \
+                  replaced made unanswerable. D-0132."
     )]
     pub const fn store_timeframe(self) -> Option<Timeframe> {
         match self {
@@ -461,37 +462,45 @@ impl Granularity {
             Self::Minute3 => Some(Timeframe::MINUTE_3),
             Self::Minute5 => Some(Timeframe::MINUTE_5),
             Self::Minute15 => Some(Timeframe::MINUTE_15),
-            // THIRTY AND SIXTY ARE REFUSED, AND IT IS THE STUB, NOT THE
-            // DIRECTORY.
+            // THIRTY AND SIXTY ARE REFUSED HERE, AND IT IS NOT THE FOLD.
             //
-            // Both have a directory. What they do not have is a bar that means
-            // what its stamp says. `crate::fold`'s grid is anchored at IST
-            // MIDNIGHT (`fold.rs`, `IST_ANCHOR_MICROS`) and the NSE open is 555
-            // minutes past it. 555 is divisible by 1, 3, 5 and 15 and not by 30
-            // (18.5) or 60 (9.25) — so a 30-minute session folds to a first
-            // record stamped **09:00**, holding only 09:15–09:29: fifteen
-            // minutes of trade, filed in a file whose header says 1,800
-            // seconds, which every later reader takes as the whole
-            // [09:00, 09:30) bar. Its `open` is the 09:15 print presented as
-            // the 09:00 print. At sixty it is worse — a 45-minute first bar and
-            // a 30-minute last one.
+            // This comment used to say the refusal was the opening STUB of a
+            // fold grid anchored at IST midnight. That stopped being true when
+            // `crate::fold` moved an intraday rung's anchor to the OPEN: every
+            // intraday rung's first folded bar now begins at 09:15, and
+            // `pull::ingest::derive_all` files 30min and 60min bars folded from
+            // the minute without ever asking this function. The const block
+            // that was meant to notice the move kept passing, because it
+            // asserted the 555-minute arithmetic and not the fold. D-1447.
             //
-            // That is silent wrong data in an append-only store: the file is
-            // well formed, the checksum is right, the count is accurate, and
-            // the month cannot be prepended or rewritten. `CLAUDE.md` §4 ranks
-            // a loud refusal above exactly this.
+            // WHAT THIS FUNCTION STILL DECIDES is whether a bar a VENDOR served
+            // at this rung may be filed as it arrived (`pull::ingest::Plan`).
+            // For such a bar the stamp is the vendor's, not the fold's, and two
+            // grids are plausible: one counted from IST midnight and one counted
+            // from the 09:15 open. At 1, 3, 5 and 15 minutes the two are the
+            // SAME grid — 555 divides by each — so a vendor bar lands on a
+            // stored edge whichever convention the vendor uses. At 30 and 60
+            // they differ (555 / 30 = 18.5, 555 / 60 = 9.25): a midnight-counted
+            // vendor would stamp its first bar 09:00, and filing it under a grid
+            // whose first edge is 09:15 would present fifteen (or forty-five)
+            // minutes of trade as a whole bar, silently, in an append-only
+            // store.
             //
-            // THE PREDICATE IS THE STORE'S OWN AND THIS IS ITS FIRST CALLER.
-            // `Timeframe::aligns_with_the_open` has existed since D-0077, which
-            // says in as many words that it exposes the stub "so a caller can
-            // refuse rather than discover it" — and it had no production caller
-            // at all. Asking it here rather than listing the two rungs by hand
-            // means a rung added to the ladder is judged by the arithmetic
-            // instead of by whoever remembers this comment.
+            // Which grid any vendor uses at 30 or 60 minutes is UNVERIFIED:
+            // `docs/00-charter.md` records that Kite publishes `30minute` and
+            // `60minute` and that Groww's interval table runs `2minute`…`4hour`,
+            // and neither it nor
+            // `docs/08-vendor-samples.md` records where one of those bars is
+            // stamped. No feed declares either rung today, so this refusal is
+            // reached by no shipped request; it is the guard that makes a
+            // future declaration bring a captured sample with it.
             //
-            // Restoring them is not a table edit: it needs the fold grid
-            // anchored at the session open rather than at IST midnight, which
-            // changes what a bar IS at every rung and is a D-entry of its own.
+            // THE PREDICATE IS THE STORE'S OWN. `Timeframe::aligns_with_the_open`
+            // answers "does the midnight-counted grid land on 09:15", which is
+            // exactly "do the two plausible grids coincide". Asking it rather
+            // than listing the two rungs by hand means a rung added to the
+            // ladder is judged by the arithmetic. Pinned against the fold's real
+            // first-bar stamp by `pull::anchor::store_timeframe_follows_the_fold_anchor`.
             Self::Minute30 if Timeframe::MINUTE_30.aligns_with_the_open() => {
                 Some(Timeframe::MINUTE_30)
             }
@@ -633,14 +642,18 @@ rung_matches_store! {
     Hour1    <=> MINUTE_60,
 }
 
-// THE NAMES AGREE FOR ALL SIX ABOVE. WHETHER A RUNG IS WRITABLE IS A DIFFERENT
-// QUESTION, AND THIS PINS THE ANSWER SO IT CANNOT DRIFT EITHER WAY.
+// THE NAMES AGREE FOR ALL SIX ABOVE. WHETHER A VENDOR'S BAR AT A RUNG IS
+// FILABLE IS A DIFFERENT QUESTION, AND THIS PINS THE ARITHMETIC IT RESTS ON.
 //
-// `store_timeframe` refuses `Minute30` and `Hour1` because their opening bar is
-// a stub — see that function. The arithmetic behind the refusal is asserted here
-// rather than left implicit, so a change to the fold anchor that made them align
-// would fail this block and force the refusal to be revisited, instead of
-// leaving two rungs refused for a reason that had stopped being true.
+// `store_timeframe` refuses a vendor-served `Minute30` and `Hour1` because the
+// grid counted from IST midnight and the grid counted from the 09:15 open are
+// different grids at those two rungs, and which one a vendor stamps on is
+// UNVERIFIED — see that function. The block below asserts only the 555-minute
+// arithmetic: which rungs the two grids agree on. It says NOTHING about
+// `crate::fold`, whose intraday anchor is the open, and it did not fire when
+// that anchor moved — which is why the fold's real first-bar stamp is pinned by
+// a test that runs the fold, `pull::anchor::store_timeframe_follows_the_fold_anchor`,
+// rather than by a `const` that cannot. D-1447.
 const _: () = {
     assert!(Timeframe::MINUTE_1.aligns_with_the_open());
     assert!(Timeframe::MINUTE_3.aligns_with_the_open());
@@ -649,34 +662,22 @@ const _: () = {
     // 555 / 30 = 18.5 and 555 / 60 = 9.25.
     assert!(!Timeframe::MINUTE_30.aligns_with_the_open());
     assert!(!Timeframe::MINUTE_60.aligns_with_the_open());
-    // 555 / 2 = 277.5 and 555 / 10 = 55.5 — the two derive-only rungs answer
-    // the same way, which is why they are derive-only.
+    // 555 / 2 = 277.5 and 555 / 10 = 55.5. The two derive-only rungs have no
+    // `Granularity` at all, so no vendor bar at them can reach the store; the
+    // fold files them on the open grid.
     assert!(!Timeframe::MINUTE_2.aligns_with_the_open());
     assert!(!Timeframe::MINUTE_10.aligns_with_the_open());
 };
 
-// ══ AND THE ANCHOR MOVED, SO READ THE FOUR `false`s ABOVE CORRECTLY ══
-//
-// The block above still holds and still says what it always said: those four
-// rungs do not divide 555, so a grid anchored at IST MIDNIGHT gives each of
-// them an opening stub. That was the whole reason `store_timeframe` refused
-// thirty and sixty.
-//
-// `crate::fold` no longer anchors an intraday rung at midnight. It anchors at
-// the OPEN, so every intraday rung's first bar of the day begins at 09:15 by
-// construction and the predicate above has stopped being the question that
-// decides whether a rung is safe to file. What decides it now is whether the
-// SESSION divides evenly — 375 minutes — and the answer is ragged for the same
-// four, at the other end:
-//
-//   1min 375  3min 125  5min 75  15min 25    tile the session exactly
-//   2min 187.5  10min 37.5  30min 12.5  60min 6.25    short LAST bar
-//
-// A trailing stub is a different object from a leading one. The last bar covers
-// 15:15-15:30, is stamped correctly and holds the trades that happened in it; a
-// leading stub was stamped before the open and mislabelled. `store_timeframe`
-// is therefore free to file all of them, and this comment is here so the four
-// `false`s above are not read as a refusal they no longer imply.
+// A `false` ABOVE IS NOT A STUB IN ANYTHING THE FOLD WRITES. `crate::fold`
+// anchors every intraday rung at the open, so each one's first folded bar
+// begins at 09:15. Where a rung leaves a short bar it is the LAST one of the
+// session, and which rungs do that depends on the VENUE's session length, not
+// on the rung alone — 375 minutes for the index, 385 for equity derivatives
+// from 2026-08-03, and 360 for the continuous session of a cash security
+// eligible for the closing auction from that day. `pull::fold::complete_minutes_for_venue` derives it from the venue
+// row; `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session` pins
+// it. D-1447.
 
 // THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
 //
@@ -891,6 +892,43 @@ impl Venue {
         self.table().hours_on(day)
     }
 
+    /// The continuous session in force on `day` for ONE instrument of this
+    /// venue, given its dated closing-auction eligibility (D-3320).
+    ///
+    /// For the cash venue from 2026-08-03 the answer is the share's, not the
+    /// venue's: an eligible share ends continuous trading at **15:15**
+    /// ([`NSE_CASH_CAS_ELIGIBLE_SESSIONS`], charter §9), an ineligible one keeps
+    /// **15:30** ([`NSE_CASH_SESSIONS`]), and a share whose flag is not held is
+    /// refused by name — never answered as either, because a missing row must
+    /// never become flag 0 (charter §9). Before 2026-08-03, and for the index
+    /// and derivative venues on any day, `cas` is not read and the answer is
+    /// [`Self::hours_on`]'s.
+    ///
+    /// The same constant work as [`Self::hours_on`]: one date comparison, one
+    /// match, and one walk of a fixed-length table.
+    ///
+    /// # Errors
+    ///
+    /// [`ShareHoursRefusal::Session`] where the row in force carries no verified
+    /// hours, and [`ShareHoursRefusal::EligibilityUnknown`] for a cash share
+    /// from 2026-08-03 with no dated flag.
+    pub fn share_hours_on(
+        self,
+        day: Day,
+        cas: crate::calendar::CasEligibility,
+    ) -> Result<Session, ShareHoursRefusal> {
+        use crate::calendar::CasEligibility;
+        if !matches!(self, Self::NseCash) || !cash_auction_eligibility_required(day) {
+            return self.hours_on(day).map_err(ShareHoursRefusal::Session);
+        }
+        let table = match cas {
+            CasEligibility::Eligible => &NSE_CASH_CAS_ELIGIBLE_SESSIONS,
+            CasEligibility::NotEligible => &NSE_CASH_SESSIONS,
+            CasEligibility::Unknown => return Err(ShareHoursRefusal::EligibilityUnknown { day }),
+        };
+        table.hours_on(day).map_err(ShareHoursRefusal::Session)
+    }
+
     /// This venue's table. A `match`, so a new venue with no table does not
     /// compile.
     const fn table(self) -> &'static SessionTable {
@@ -915,6 +953,33 @@ impl Venue {
 impl fmt::Display for Venue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
+    }
+}
+
+/// Why [`Venue::share_hours_on`] could not answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShareHoursRefusal {
+    /// The venue's dated row carries no verified hours.
+    Session(SessionRefusal),
+    /// A cash share on or after 2026-08-03 whose dated closing-auction flag is
+    /// not held, so its continuous close is 15:15 or 15:30 and nothing here
+    /// says which.
+    EligibilityUnknown {
+        /// The day that was asked about.
+        day: Day,
+    },
+}
+
+impl fmt::Display for ShareHoursRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Session(refusal) => refusal.fmt(f),
+            Self::EligibilityUnknown { day } => write!(
+                f,
+                "NSE cash has no continuous close for this share on {day}: no dated \
+                 closing-auction eligibility flag is held for it — {CAS_FLAG_MISSING}"
+            ),
+        }
     }
 }
 
@@ -1406,7 +1471,24 @@ const CAS_CASH_CIRCULAR: &str = "NSE/CMTR/74466 §A, retrieved 2026-08-07. A sha
      contract is not CAS eligible and keeps its 15:30 continuous close, so \
      this row restates the anchor rather than moving it. Written as a row \
      rather than omitted because \"unchanged\" is a finding that needs a \
-     citation exactly as much as a change does.";
+     citation exactly as much as a change does. It is the INELIGIBLE share's \
+     row: an eligible share's 15:15 close is NSE_CASH_CAS_ELIGIBLE_SESSIONS, \
+     chosen per share by Venue::share_hours_on from its dated flag.";
+
+/// The citation an eligible share's 2026-08-03 row carries.
+const CAS_ELIGIBLE_CIRCULAR: &str = "NSE/CMTR/73845 Annexure A and NSE/CMTR/74466 §A and page 6, \
+     docs/00-charter.md §9 and §7: a share whose dated NSE security master carries the \
+     ElgbltyClsgAuctnSsn flag 1 ends continuous trading at 15:15 from 2026-08-03 and closes in \
+     the closing auction; the charter verifies the scheduled continuous close, 15:15 eligible \
+     and 15:30 ineligible. Measured 7 Oct 2026 (charter §4z and §9): Zerodha RELIANCE holds \
+     360 minute bars on 2026-09-24, 09:15 to 15:14. The auction band itself is \
+     calendar::Phase::ClosingAuction, never continuous trading (D-3320).";
+
+/// Why a cash share's hours cannot be answered without its dated flag.
+const CAS_FLAG_MISSING: &str = "docs/00-charter.md §9: the dated NSE security master's \
+     ElgbltyClsgAuctnSsn flag decides a share's continuous close from 2026-08-03 (15:15 \
+     eligible, 15:30 ineligible), and a missing row must never become flag 0. Supply that \
+     day's master.";
 
 const FNO_EXTENSION_CIRCULAR: &str = "NSE/FAOP/74467, retrieved 2026-08-07: equity derivatives extended ten \
      minutes to 15:40, so positions can be adjusted against the closing \
@@ -1510,6 +1592,58 @@ const NSE_DERIVATIVES_SESSIONS: SessionTable = SessionTable {
         None,
     ],
 };
+
+/// A CLOSING-AUCTION-ELIGIBLE share's continuous session (D-3320).
+///
+/// # Why a second cash table and not a fourth venue
+///
+/// The 2026-08-03 cash change is per SHARE, not per venue: NSE/CMTR/73845's
+/// dated flag puts an eligible share's continuous close at 15:15 and leaves an
+/// ineligible one at 15:30, so no single venue row can be right for both.
+/// [`NSE_CASH_SESSIONS`] stays the ineligible share's — the one every
+/// share-blind reader (`session::Window::verdict`, `request_minutes`) keeps
+/// asking, because cutting an ineligible share at 15:15 drops real trades
+/// (DALBHARAT, flag 0, still prints after 15:16). This table is the eligible
+/// share's, and [`Venue::share_hours_on`] is the one door that picks between
+/// the two from the dated flag. A fourth `Venue` would have widened every
+/// `match` in the crate for a distinction that lives in a flag.
+///
+/// The auction band 15:15–15:29 is not a row here: it is
+/// `crate::calendar::Phase::ClosingAuction`, and the auction print is kept
+/// apart from trades (D-3320). The anchor is the charter's session, exactly
+/// like the other three tables, so nothing before 2026-08-03 moves.
+const NSE_CASH_CAS_ELIGIBLE_SESSIONS: SessionTable = SessionTable {
+    venue: Venue::NseCash,
+    anchor: SessionRow::verified(
+        EPOCH_DAY,
+        SESSION_OPEN_MINUTE,
+        SESSION_CLOSE_MINUTE,
+        SessionKind::Continuous,
+        CHARTER_SESSION,
+    ),
+    later: [
+        Some(SessionRow::verified(
+            AUG_3_2026,
+            SESSION_OPEN_MINUTE,
+            CAS_ELIGIBLE_CONTINUOUS_CLOSE,
+            SessionKind::Continuous,
+            CAS_ELIGIBLE_CIRCULAR,
+        )),
+        None,
+    ],
+};
+
+/// An eligible share's exclusive continuous close from 2026-08-03: 15:15.
+const CAS_ELIGIBLE_CONTINUOUS_CLOSE: u32 = 15 * 60 + 15;
+
+// ONE MINUTE, TWO SPELLINGS, HELD TOGETHER. `crate::calendar` names the same
+// 15:15 as the start of its closing-auction band; if the two ever disagreed a
+// minute would be both continuous here and auction there.
+const _: () =
+    assert!(CAS_ELIGIBLE_CONTINUOUS_CLOSE == crate::calendar::CAS_CONTINUOUS_CLOSE as u32);
+const _: () = assert!(NSE_CASH_CAS_ELIGIBLE_SESSIONS.is_shipping_shape());
+const _: () = assert!(NSE_CASH_CAS_ELIGIBLE_SESSIONS.anchor_matches_session_constants());
+const _: () = assert!(CAS_ELIGIBLE_CONTINUOUS_CLOSE < SESSION_CLOSE_MINUTE);
 
 const _: () = assert!(NSE_INDEX_SESSIONS.is_shipping_shape());
 const _: () = assert!(NSE_CASH_SESSIONS.is_shipping_shape());
@@ -1687,7 +1821,8 @@ pub struct Auth {
 /// Groww — correct for exactly one class each, wrong for the other. Measured
 /// consequence: every one of the 750 NIFTY-Total-Market equities was asked for
 /// inside Dhan's INDEX segment, and the broker answered no window for all of
-/// them. Groww is hardcoded the opposite way and cannot address an index.
+/// them. Groww was hardcoded the opposite way and could not address an index;
+/// its descriptor now carries a row for every class.
 ///
 /// The class is a property of the INSTRUMENT, not of the feed, so it is named
 /// once here and each descriptor maps it to its own words. `CLAUDE.md` §5:
@@ -1739,6 +1874,19 @@ impl Listing {
             // on the far side of that boundary, invisibly, which is exactly
             // the failure `SessionTable` exists to prevent.
             Self::Derivative => Venue::NseDerivatives,
+        }
+    }
+
+    /// The store segment this listing class is filed under: an index under
+    /// `INDEX`, a share under `CASH`, a contract under `FNO`. Total by the
+    /// closed enum, so the landing asks [`open_interest_applies`] of the same
+    /// segment the bar's path will carry (D-3322).
+    #[must_use]
+    pub const fn segment(self) -> Segment {
+        match self {
+            Self::Index => Segment::Index,
+            Self::Equity => Segment::Cash,
+            Self::Derivative => Segment::Fno,
         }
     }
 }
@@ -3153,13 +3301,18 @@ impl HttpSpec {
     /// This feed's words for a listing class, or `None` when it records none.
     ///
     /// `None` is the honest answer for a class this feed has never been
-    /// verified against. Groww's documentation states `CASH` and `FNO` for
-    /// `segment` and says nothing about an index, so an index request is
-    /// refused by name rather than sent a guessed word — `CLAUDE.md` §3 rule 1.
+    /// verified against: a class with no row is refused by name rather than
+    /// sent a guessed word — `CLAUDE.md` §3 rule 1. (Groww was the example
+    /// here, and it no longer is: `docs/00-charter.md` records its live-data
+    /// page giving `CASH` for an index as well as a stock, and its descriptor
+    /// carries all three classes.)
     ///
-    /// CONSTANT WORK, not a scan. The table's length is the number of listing
-    /// classes — two — so this costs the same against a universe of 800 as
-    /// against one. Same shape as [`Self::granularity_token`] above.
+    /// CONSTANT WORK, not a scan. The table holds at most one row per
+    /// [`Listing`] variant — THREE: `Index`, `Equity`, `Derivative` (this read
+    /// "two" while Groww shipped three rows; D-1447) — so this costs the same
+    /// against a universe of 800 as against one. The bound is pinned by
+    /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`.
+    /// Same shape as [`Self::granularity_token`] above.
     #[must_use]
     pub fn listing_words(&self, listing: Listing) -> Option<ListingWords> {
         self.listings
@@ -3838,6 +3991,460 @@ impl BarConvention {
     }
 }
 
+// ---------------------------------------------------------------------------
+// what is offered, what is held, and on what basis (D-3322, D-3323, D-3324,
+// D-3338)
+// ---------------------------------------------------------------------------
+
+/// The day the operator removed Dhan, Groww and `TrueData` from every picker.
+const OPERATOR_EXCLUSION_DAY: Day = day_const(2026, 10, 6);
+
+/// Why the three excluded feeds are listed nowhere, in the operator's terms.
+const OPERATOR_EXCLUSION: &str = "the operator, 6 Oct 2026: only Zerodha and GDFL are used, and \
+     Dhan, Groww and TrueData are removed from every picker. The descriptor, its decoder and \
+     its tests stay, and nothing already filed under its prefix is touched. D-3338.";
+
+/// Whether the operator's pickers list a feed (D-3338).
+///
+/// # Excluded is not deleted
+///
+/// The operator uses Zerodha and GDFL only. The other three keep their row,
+/// their decoder and their tests: a removed row would orphan every month
+/// already filed under its prefix and leave its refusals unreadable. What
+/// changes is that no picker lists them, and the reason travels with the row,
+/// so a page that names one at all can say who excluded it and when instead
+/// of drawing a control that does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Offer {
+    /// Listed on every picker.
+    Offered,
+    /// Kept in the build and listed on no picker.
+    Excluded {
+        /// Who excluded it.
+        by: ClaimStanding,
+        /// The day it was excluded.
+        on: Day,
+        /// Where the exclusion is recorded, in words an operator can check.
+        source: &'static str,
+    },
+}
+
+impl Offer {
+    /// Whether a picker lists this feed.
+    #[must_use]
+    pub const fn is_offered(self) -> bool {
+        matches!(self, Self::Offered)
+    }
+}
+
+/// Who states a dated span of data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpanStanding {
+    /// Measured from the operator's store; `Span::source` names the date and
+    /// the path.
+    Measured,
+    /// The operator's own window: what he wants held, which is not a claim
+    /// about what the vendor holds.
+    Operator,
+}
+
+/// A dated span of data, both ends inclusive, with who states it and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Span {
+    /// The first day, inclusive.
+    pub from: Day,
+    /// The last day, inclusive.
+    pub to: Day,
+    /// Who states it.
+    pub standing: SpanStanding,
+    /// Where it was read or measured.
+    pub source: &'static str,
+}
+
+impl Span {
+    /// Whether `day` falls inside the span. Two integer comparisons.
+    #[must_use]
+    pub const fn holds(self, day: Day) -> bool {
+        day.days_from_epoch() >= self.from.days_from_epoch()
+            && day.days_from_epoch() <= self.to.days_from_epoch()
+    }
+
+    /// Whether the span is ordered and cites something.
+    const fn is_well_shaped(self) -> bool {
+        self.from.days_from_epoch() <= self.to.days_from_epoch() && has_content(self.source)
+    }
+}
+
+/// What one feed's prices ARE, per segment (D-3323).
+///
+/// # Why this is a field and not a footnote
+///
+/// For 101 of 208 F&O shares the same day reads at two prices that differ by a
+/// constant factor across the two feeds — HDFCBANK 2019-06-03 opens at ₹606.80
+/// on Zerodha and ₹2,427.00 on GDFL — and nothing on either row said which one
+/// had been rewritten. Both are correct answers to different questions; the
+/// basis is the question. Charter §4z holds the measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PriceBasis {
+    /// As traded on the exchange: GDFL's capital-market and options prints.
+    Raw,
+    /// An index level as the exchange published it. An index is not adjusted
+    /// for its constituents' corporate actions, on either feed.
+    AsPublished,
+    /// Back-adjusted by the vendor for later corporate actions, as of the day
+    /// each month was pulled: Zerodha's shares, every rung. Which actions the
+    /// vendor applied is UNVERIFIED (charter §4z).
+    VendorAdjusted,
+}
+
+impl PriceBasis {
+    /// What a page prints beside the price.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Raw => "raw, as traded",
+            Self::AsPublished => "as published, an index level",
+            Self::VendorAdjusted => "back-adjusted by the vendor as of the pull date",
+        }
+    }
+
+    /// Whether the price was rewritten as of the day its month was pulled, so
+    /// the pull date is part of what the number means (D-3334 records it).
+    #[must_use]
+    pub const fn adjusted_as_of_pull_date(self) -> bool {
+        matches!(self, Self::VendorAdjusted)
+    }
+}
+
+/// What one feed's volume IS, per segment (D-3323).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VolumeBasis {
+    /// The traded quantity as the exchange printed it.
+    Raw,
+    /// The vendor's own basis: measured on 45 Zerodha shares as neither the raw
+    /// quantity nor scaled with the price beside it, so price × volume on an
+    /// adjusted span is not a traded value (charter §4z).
+    VendorOwn,
+    /// Nothing trades: an index has no volume (D-2802, D-3322).
+    NotTraded,
+}
+
+impl VolumeBasis {
+    /// What a page prints beside the volume.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Raw => "raw, the traded quantity",
+            Self::VendorOwn => "the vendor's own basis, not scaled with its price",
+            Self::NotTraded => "none, an index has no traded volume",
+        }
+    }
+}
+
+/// What a bar's close IS (D-3324).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CloseSemantics {
+    /// The exchange's official close of the session. Zerodha's day bar,
+    /// measured: it differs from the last minute's close on 2,081 of 2,126
+    /// NIFTY days (charter §4z). How the exchange forms it is not sourced.
+    Official,
+    /// The last print inside the bar.
+    LastPrint,
+}
+
+impl CloseSemantics {
+    /// What a page prints beside the close.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Official => "official close",
+            Self::LastPrint => "last print",
+        }
+    }
+}
+
+/// Whether open interest applies to a bar of `segment` — on EVERY feed, and
+/// that is the point (D-3322).
+///
+/// An index and a share have no open interest. Zerodha answered `0` for both
+/// and stored it, while GDFL stored the null sentinel for the same
+/// instruments, so one fact read `0` on one feed and a dash on the other, and
+/// every Zerodha row's change read `previous_oi_zero`. `CLAUDE.md` §7: the null
+/// is `i64::MIN` and zero means zero — a zero nobody measured is not a zero.
+///
+/// One `matches!`; this is the one authority the landing (`crate::fetch`) and
+/// `/feeds.json` both read.
+#[must_use]
+pub const fn open_interest_applies(segment: Segment) -> bool {
+    matches!(segment, Segment::Fno)
+}
+
+/// One segment's price and volume basis on one feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SegmentBasis {
+    /// Which segment.
+    pub segment: Segment,
+    /// What its prices are.
+    pub price: PriceBasis,
+    /// What its volume is.
+    pub volume: VolumeBasis,
+    /// Where both were measured or decided.
+    pub source: &'static str,
+}
+
+/// What a feed's day bar's close is, and whether it is a fold of its minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DayClose {
+    /// What the close is.
+    pub close: CloseSemantics,
+    /// Whether the day bar equals a fold of the same feed's minutes. `false`
+    /// for Zerodha: the day bar is served, never folded (D-3001, D-3347), and
+    /// nothing may present a fold of minutes as equal to it.
+    pub is_fold: bool,
+}
+
+/// A feed's basis, or the admission that nobody measured it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Basis {
+    /// Measured or decided, with its sources.
+    Measured {
+        /// One row per segment the store holds from this feed, by any door —
+        /// which for GDFL is wider than the archive spec's `segments`, because
+        /// `cli gdfl-import` files capital-market and index trees beside the
+        /// options archive (D-2802, D-2804).
+        segments: &'static [SegmentBasis],
+        /// The close of every intraday bar, served or derived.
+        intraday_close: CloseSemantics,
+        /// The day bar's close, `None` where this feed's store holds no day
+        /// bar.
+        day: Option<DayClose>,
+        /// Where the close semantics rest.
+        close_source: &'static str,
+    },
+    /// No measurement exists. The words say so and say why; a basis is never
+    /// guessed for a feed nobody measured (D-1969 stands for it).
+    Unverified(&'static str),
+}
+
+impl Basis {
+    /// The row for `segment`, or `None` where this feed holds nothing in that
+    /// segment or was never measured. A walk of at most three rows: the
+    /// segment set is closed.
+    #[must_use]
+    pub fn segment(&self, segment: Segment) -> Option<&'static SegmentBasis> {
+        match *self {
+            Self::Measured { segments, .. } => segments.iter().find(|row| row.segment == segment),
+            Self::Unverified(_) => None,
+        }
+    }
+
+    /// What the close of a bar is, for a daily or an intraday bar — or `None`
+    /// where the feed holds no such bar or was never measured.
+    #[must_use]
+    pub const fn close_of(&self, daily: bool) -> Option<CloseSemantics> {
+        match *self {
+            Self::Measured {
+                intraday_close,
+                day,
+                ..
+            } => {
+                if daily {
+                    match day {
+                        Some(day) => Some(day.close),
+                        None => None,
+                    }
+                } else {
+                    Some(intraday_close)
+                }
+            }
+            Self::Unverified(_) => None,
+        }
+    }
+
+    /// Whether every source this basis rests on says something.
+    const fn is_well_shaped(&self) -> bool {
+        match *self {
+            Self::Measured {
+                segments,
+                close_source,
+                ..
+            } => {
+                // Slice patterns rather than indexing, as `has_content` does,
+                // so the walk needs no lint exception.
+                let mut remaining = segments;
+                while let [first, rest @ ..] = remaining {
+                    if !has_content(first.source) {
+                        return false;
+                    }
+                    remaining = rest;
+                }
+                has_content(close_source)
+            }
+            Self::Unverified(why) => has_content(why),
+        }
+    }
+}
+
+/// Where the share basis of Zerodha rests.
+const ZERODHA_SHARE_BASIS: &str = "docs/00-charter.md §4z, the rows on cash-equity adjustment, \
+     non-proportional and quantised runs, and volume basis, measured 6-7 Oct 2026 over the \
+     operator's store: 101 of 208 F&O shares back-adjusted by the vendor as of the pull date, \
+     45 of them with volume on its own basis. D-3323.";
+
+/// Where an index level's basis rests, on either feed.
+const INDEX_LEVEL_BASIS: &str = "docs/00-charter.md §4g, the alignment rows, measured 7 Oct 2026: \
+     NIFTY open, high and low agree across Zerodha and GDFL on every day of 2019-03 and on \
+     2026-09-24, so an index level is not adjusted; an index has no traded volume (D-2802, \
+     D-3322). D-3323.";
+
+/// Where GDFL's raw share and option basis rests.
+const GDFL_RAW_BASIS: &str = "docs/00-charter.md §4z and the GDFL capital-market and options \
+     tick-file sections: GDFL rows are the vendor's per-second snapshots of the exchange's prices, \
+     filed unadjusted at one second (D-2802), and the 6 Oct 2026 scan reads every Zerodha share \
+     factor against them. D-3323.";
+
+/// Where Zerodha's close semantics rest.
+const ZERODHA_CLOSE: &str = "docs/00-charter.md §4z, the day close row, measured 7 Oct 2026: \
+     NIFTY day close differs from the last minute close on 2,081 of 2,126 common days of \
+     2018-01..2026-09, so the day bar carries the official close and is not a fold of its \
+     minutes (D-3001, D-3347); a minute bar and every rung derived from it closes on its last \
+     print. D-3324.";
+
+/// Where GDFL's close semantics rest.
+const GDFL_CLOSE: &str = "D-2802: a GDFL one-second bar closes on the last kept row of its \
+     second, in file order; GDFL is filed at one second only, so its store holds no day bar. \
+     D-3324.";
+
+/// Why three feeds carry no basis.
+const BASIS_UNMEASURED: &str = "UNVERIFIED: no measurement of this feed's price, volume or close \
+     basis exists. D-3323 measured Zerodha and GDFL only, and D-1969 stands for every other \
+     feed.";
+
+/// The first day the store holds from the GDFL archive.
+const GDFL_ARCHIVE_FROM: Day = day_const(2018, 9, 3);
+/// The last day the store holds from the GDFL archive.
+const GDFL_ARCHIVE_TO: Day = day_const(2026, 9, 24);
+/// Where the GDFL archive's span was measured.
+const GDFL_ARCHIVE: &str = "docs/00-charter.md, GDFL capital-market tick files, the row on what \
+     the store holds from the archive: one second only (D-2802), 2018-09-03 to 2026-09-24, the \
+     first and last stored NIFTY bars, 97 month files each for NIFTY and BANKNIFTY, read 7 Oct \
+     2026 from the operator's store. Imported by cli gdfl-import (D-2804), not read from a \
+     folder by this server. D-3338.";
+
+/// The first day of the operator's Zerodha window.
+const ZERODHA_WINDOW_FROM: Day = day_const(2018, 1, 1);
+/// The last day of the operator's Zerodha window.
+const ZERODHA_WINDOW_TO: Day = day_const(2026, 9, 30);
+/// Where the operator's Zerodha window is recorded.
+const ZERODHA_WINDOW: &str = "the operator: Zerodha is held for 2018-01-01 to 2026-09-30. A \
+     month outside it (115 indices hold 82,079 1day bars dated before 2018-01-01 from an \
+     earlier run) is hidden by default and shown on a visible toggle labelled outside your \
+     window; nothing is deleted. D-3338.";
+
+/// What a feed does with a CAS-eligible share's closing auction from
+/// 2026-08-03 (D-3320; DB-034, DB-G42).
+///
+/// # Why a field, when the session tables already hold the 15:15
+///
+/// The tables say WHEN an eligible share's continuous trading ends; they do
+/// not say what each feed's store holds after it, and the two feeds differ.
+/// The /db audit read Zerodha's minutes stopping at 15:14 and GDFL's 15:28
+/// print as a "15:15-15:28 market-wide vendor gap" because nothing said either
+/// was by design. Each handling below is a decision or a measurement already
+/// recorded, cited in its row, so a page can say it without a literal of its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuctionHandling {
+    /// The feed's minute candles of an eligible share end at 15:14: the
+    /// landing drops bars from 15:15 (`fetch::cash_close_verdict`), and its
+    /// day close is the closing-auction price. Zerodha, measured (charter §4z).
+    MinutesEndBeforeAuction,
+    /// The auction print is kept, labelled, and never folded into a trade bar;
+    /// months imported before that rule hold it as an ordinary bar until they
+    /// are re-imported. GDFL, decided (D-3320).
+    PrintKeptApart,
+}
+
+impl AuctionHandling {
+    /// What a page prints beside an eligible share's bars from 2026-08-03.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MinutesEndBeforeAuction => {
+                "minute bars of a closing-auction-eligible share end at 15:14 by design; \
+                 the day close is the auction price"
+            }
+            Self::PrintKeptApart => {
+                "the closing-auction print is kept apart from trades; months imported \
+                 before that rule hold it as an ordinary one-second bar until re-imported"
+            }
+        }
+    }
+}
+
+/// One feed's closing-auction note: from when, the eligible share's
+/// continuous close, what the feed does, and where that rests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AuctionNote {
+    /// The first day the closing auction runs: the cash change day.
+    pub from: Day,
+    /// An eligible share's exclusive continuous close from `from`, in IST
+    /// minutes — the same constant the eligible share's session table holds.
+    pub continuous_close_minute: u32,
+    /// What this feed's store holds for the auction.
+    pub handling: AuctionHandling,
+    /// Where the handling is measured or decided.
+    pub source: &'static str,
+}
+
+/// Where Zerodha's auction handling rests.
+const ZERODHA_AUCTION: &str = "docs/00-charter.md §4z, the row on minute candles of a \
+     CAS-eligible share from 2026-08-03, measured 7 Oct 2026: RELIANCE holds 360 minute bars on \
+     2026-09-24 (09:15-15:14) and 375 on 2026-07-31; the day close that day is the auction \
+     price. Charter §9 and D-3320.";
+
+/// Where GDFL's auction handling rests.
+const GDFL_AUCTION: &str = "D-3320 point 3 and 4: from 2026-08-03 a CAS-eligible share's row at \
+     or after 15:15:00 with bid and ask both zero and LTQ positive is an auction observation, \
+     filed apart from trades and never folded into a one-second bar; GDFL CASH 2026-08 and \
+     2026-09 were imported before that rule and hold it as an ordinary bar until re-imported.";
+
+/// The one note both offered feeds share the dates of.
+const fn auction_note(handling: AuctionHandling, source: &'static str) -> AuctionNote {
+    AuctionNote {
+        from: AUG_3_2026,
+        continuous_close_minute: CAS_ELIGIBLE_CONTINUOUS_CLOSE,
+        handling,
+        source,
+    }
+}
+
+// EVERY DATE ABOVE ROUND-TRIPS, so a typo in `day_const` collapses to the
+// epoch and fails here rather than shipping 1970 as a boundary.
+const _: () = assert!(
+    OPERATOR_EXCLUSION_DAY.year() == 2026
+        && OPERATOR_EXCLUSION_DAY.month() == 10
+        && OPERATOR_EXCLUSION_DAY.day() == 6
+);
+const _: () = assert!(
+    GDFL_ARCHIVE_FROM.year() == 2018
+        && GDFL_ARCHIVE_FROM.month() == 9
+        && GDFL_ARCHIVE_FROM.day() == 3
+);
+const _: () = assert!(
+    GDFL_ARCHIVE_TO.year() == 2026 && GDFL_ARCHIVE_TO.month() == 9 && GDFL_ARCHIVE_TO.day() == 24
+);
+const _: () = assert!(
+    ZERODHA_WINDOW_FROM.year() == 2018
+        && ZERODHA_WINDOW_FROM.month() == 1
+        && ZERODHA_WINDOW_FROM.day() == 1
+);
+const _: () = assert!(
+    ZERODHA_WINDOW_TO.year() == 2026
+        && ZERODHA_WINDOW_TO.month() == 9
+        && ZERODHA_WINDOW_TO.day() == 30
+);
+
 /// One feed, entirely as data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Descriptor {
@@ -3908,6 +4515,22 @@ pub struct Descriptor {
     pub segments: SegmentSet,
     /// Which exchange its rows belong to.
     pub exchange: Exchange,
+    /// Whether the operator's pickers list this feed. D-3338.
+    pub offer: Offer,
+    /// The span a bought archive covers, as measured from the store. `None`
+    /// for a REST feed, and for an archive nobody has measured — never a span
+    /// guessed from a folder name.
+    pub archive: Option<Span>,
+    /// The operator's own window for this feed: what he wants held, which is
+    /// not what the vendor holds (`history` is that). A month outside it is
+    /// hidden by default and labelled, never deleted. D-3338.
+    pub window: Option<Span>,
+    /// What its prices, volumes and closes ARE, per segment and rung. D-3323,
+    /// D-3324.
+    pub basis: Basis,
+    /// What its store holds for a CAS-eligible share's closing auction from
+    /// 2026-08-03, or `None` for a feed nobody measured. D-3320.
+    pub closing_auction: Option<AuctionNote>,
 }
 
 impl Descriptor {
@@ -3953,7 +4576,9 @@ impl Descriptor {
     /// than the floor" is `<` on two bytes. The bound does not move when the
     /// ladder grows to twenty rungs or the feed table to forty rows.
     /// `pull::vendor::every_feed_answers_every_rung_with_one_of_two_verdicts`
-    /// walks the whole 4 × 11 matrix, and
+    /// walks the whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11
+    /// today, and that test pins both numbers so this sentence cannot go stale
+    /// again (it said 4 × 11 after Zerodha made five; D-1447) — and
     /// `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer`
     /// proves the ordering the single comparison rests on.
     ///
@@ -4580,6 +5205,16 @@ const DHAN: Descriptor = Descriptor {
         .with(Segment::Cash)
         .with(Segment::Fno),
     exchange: Exchange::Nse,
+    // LISTED ON NO PICKER, AND KEPT. D-3338.
+    offer: Offer::Excluded {
+        by: ClaimStanding::OperatorObservation,
+        on: OPERATOR_EXCLUSION_DAY,
+        source: OPERATOR_EXCLUSION,
+    },
+    archive: None,
+    window: None,
+    basis: Basis::Unverified(BASIS_UNMEASURED),
+    closing_auction: None,
 };
 
 const GROWW: Descriptor = Descriptor {
@@ -4674,9 +5309,15 @@ const GROWW: Descriptor = Descriptor {
         auth: Auth {
             header: "Authorization",
             scheme: AuthScheme::Bearer,
-            // One secret, behind a fixed prefix. The `api-key` this vendor
-            // also issues is spent by `pull::totp` to MINT the daily token and
-            // never travels in this header — see docs/00-charter.md §4, Auth.
+            // One secret, behind a fixed prefix: the daily `access-token`.
+            // The charter records that token as TOTP-derived and lists
+            // `api-key` and `totp-secret` beside it (docs/00-charter.md, Groww,
+            // Auth and Credentials). This build reads NEITHER of those two:
+            // `key_field` is `None`, so only `access-token` is fetched, and the
+            // token is minted outside this repository — `CLAUDE.md` §8.
+            // `pull::totp` computes a code and is wired to no token exchange;
+            // `pull::totp::no_path_outside_this_module_computes_a_code`
+            // pins that. D-1447.
             key_field: None,
         },
         date_format: DateFormat::DashedYmdMidnight,
@@ -4726,10 +5367,10 @@ const GROWW: Descriptor = Descriptor {
         // and was carried in prose here; it is now in the KEY, which is the
         // only place it binds.
         //
-        // The day row is absent for the same reason as the vendor above: the
-        // charter records no day-level cap for this feed either. UNVERIFIED,
-        // and absent rather than guessed.
-        // BOTH ROWS THE VENDOR PUBLISHES, and the daily one was missing.
+        // BOTH ROWS THE VENDOR PUBLISHES, and the daily one was missing. (Three
+        // lines above this said the day row was "absent rather than guessed";
+        // they contradicted the row below and were deleted by
+        // tests-docs-security-pass17 P17-05, D-1963.)
         //
         // `Groww Docs/11-backtesting.md`, "Backtesting Data Limits":
         //
@@ -4744,10 +5385,15 @@ const GROWW: Descriptor = Descriptor {
         // files two rungs, and a cap for a rung nothing can request is a fact
         // with nowhere to apply.
         //
-        // It changes no request today — `split_window` binds the MONTH at every
-        // rung and a month is never 180 days — but a declared cap that is
-        // absent reads as "this vendor published none", which is a different
-        // claim about the vendor and the wrong one.
+        // It changes requests: `split_window` ends a capped chunk at the cap,
+        // not at the month end (D-0320, D-1370), so Groww's daily pass over
+        // the 80 months from 2020-01 to 2026-08 is 14 requests, not 80
+        // (`api::server::tests::each_rung_is_split_by_the_cap_its_own_vendor_published`).
+        // This said "It changes no request today — `split_window` binds the
+        // MONTH at every rung", D-0055's rule; tests-docs-security-pass18
+        // P18-03, D-1962. And a declared cap that is absent reads as "this
+        // vendor published none", which is a different claim about the vendor
+        // and the wrong one.
         window_caps: &[(Granularity::Minute1, 30), (Granularity::Day1, 180)],
         // The one rung this feed's wire word is recorded for. Read first-hand
         // from groww.in/trade-api/docs/curl/historical-data, which is where
@@ -4895,6 +5541,16 @@ const GROWW: Descriptor = Descriptor {
         .with(Segment::Cash)
         .with(Segment::Fno),
     exchange: Exchange::Nse,
+    // LISTED ON NO PICKER, AND KEPT. D-3338.
+    offer: Offer::Excluded {
+        by: ClaimStanding::OperatorObservation,
+        on: OPERATOR_EXCLUSION_DAY,
+        source: OPERATOR_EXCLUSION,
+    },
+    archive: None,
+    window: None,
+    basis: Basis::Unverified(BASIS_UNMEASURED),
+    closing_auction: None,
 };
 
 /// `TrueData`'s observed index layout: `20221003,09:07:41,38444.90,0,0`.
@@ -5041,6 +5697,17 @@ const TRUE_DATA: Descriptor = Descriptor {
     granularity_floor: TRUEDATA_FLOOR,
     segments: SegmentSet::EMPTY.with(Segment::Index),
     exchange: Exchange::Nse,
+    // LISTED ON NO PICKER, AND KEPT. D-3338. Its archive was sampled, never
+    // bought, so no span is measured for it.
+    offer: Offer::Excluded {
+        by: ClaimStanding::OperatorObservation,
+        on: OPERATOR_EXCLUSION_DAY,
+        source: OPERATOR_EXCLUSION,
+    },
+    archive: None,
+    window: None,
+    basis: Basis::Unverified(BASIS_UNMEASURED),
+    closing_auction: None,
 };
 
 /// GDFL's observed header, character for character:
@@ -5062,7 +5729,8 @@ const GDFL_FNO: ColumnLayout = ColumnLayout {
     shape: Columns::Gdfl,
 };
 
-const GDFL_HEADER: &str = "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
+// The one spelling lives beside the decoder that checks it. D-1360.
+pub(crate) const GDFL_HEADER: &str = crate::csv::GDFL_HEADER;
 
 const GDFL: Descriptor = Descriptor {
     // As TRUE_DATA: a local archive of vendor files, so the bar is whatever
@@ -5093,22 +5761,65 @@ const GDFL: Descriptor = Descriptor {
         date_format: DateFormat::SlashedDmy,
         prices: PriceScale::Rupees,
     }),
-    // AS THE ARCHIVE ABOVE: one input, and the rung says what is FILED.
+    // ONE SECOND, AND NOTHING COARSER (D-2802), BACK TO WHERE IT STARTED.
     //
-    // This declared `Second1` alone, so `served()` refused both a minute and a
-    // day of a folder `crate::fold` folds to either from the same bytes. The
-    // fold width comes off the store timeframe and nothing about it is
-    // vendor-specific — a folder of one-second snapshots is a folder of
-    // one-second snapshots whichever of the two archives wrote it. D-0141.
-    granularities: GranularitySet::EMPTY
-        .with(Granularity::Second1)
-        .with(Granularity::Minute1)
-        .with(Granularity::Day1),
-    // Empty for the reason the archive above is empty.
+    // This declared `Second1` alone, then gained `Minute1` and `Day1` because
+    // `crate::fold` can fold a folder of one-second snapshots to either (D-0141).
+    // The operator's rule of 4 Oct 2026 withdrew both for this feed: GDFL
+    // supplies the one-second rung only, minutes and every higher rung come
+    // from Zerodha's pulls, and `ingest::derives_for(Vendor::Gdfl)` is false.
+    // A rung listed here that no door ever files was a capability advertised
+    // on `/feeds.json` as `served: true` (DB-051, DB-G24); `TrueData`'s row
+    // keeps D-0141's three because no such rule covers it.
+    granularities: GranularitySet::EMPTY.with(Granularity::Second1),
+    // Empty for the reason the archive above is empty. What the store holds
+    // from it is `archive` below, measured, not a vendor-stated floor.
     history: &[],
     granularity_floor: GDFL_FLOOR,
     segments: SegmentSet::EMPTY.with(Segment::Fno),
     exchange: Exchange::Nse,
+    offer: Offer::Offered,
+    // WHAT THE STORE HOLDS FROM THE ARCHIVE, MEASURED — NOT A FOLDER PROBE.
+    // The first and last stored GDFL NIFTY bars are 2018-09-03 09:15:00 and
+    // 2026-09-24 15:29:59, in 97 month files (charter, GDFL capital-market
+    // tick files, read 7 Oct 2026). The tick store also holds four later days
+    // the zip lacks (DB-G56); the store's months stop at 2026-09-24. A life
+    // that begins on `from` with open interest above zero began before the
+    // archive (DB-G68).
+    archive: Some(Span {
+        from: GDFL_ARCHIVE_FROM,
+        to: GDFL_ARCHIVE_TO,
+        standing: SpanStanding::Measured,
+        source: GDFL_ARCHIVE,
+    }),
+    window: None,
+    basis: Basis::Measured {
+        segments: &[
+            SegmentBasis {
+                segment: Segment::Index,
+                price: PriceBasis::AsPublished,
+                volume: VolumeBasis::NotTraded,
+                source: INDEX_LEVEL_BASIS,
+            },
+            SegmentBasis {
+                segment: Segment::Cash,
+                price: PriceBasis::Raw,
+                volume: VolumeBasis::Raw,
+                source: GDFL_RAW_BASIS,
+            },
+            SegmentBasis {
+                segment: Segment::Fno,
+                price: PriceBasis::Raw,
+                volume: VolumeBasis::Raw,
+                source: GDFL_RAW_BASIS,
+            },
+        ],
+        intraday_close: CloseSemantics::LastPrint,
+        // ONE SECOND ONLY (D-2802): no day bar is filed from a GDFL bar.
+        day: None,
+        close_source: GDFL_CLOSE,
+    },
+    closing_auction: Some(auction_note(AuctionHandling::PrintKeptApart, GDFL_AUCTION)),
 };
 
 /// Every feed, indexed by its own discriminant.
@@ -5535,6 +6246,45 @@ const ZERODHA: Descriptor = Descriptor {
     // spot, and an expired contract goes through a different route.
     segments: SegmentSet::EMPTY.with(Segment::Index).with(Segment::Cash),
     exchange: Exchange::Nse,
+    offer: Offer::Offered,
+    archive: None,
+    // THE OPERATOR'S WINDOW, BESIDE THE VENDOR'S REACH AND NOT INSTEAD OF IT.
+    // `history` says how far back the vendor answers and is what a pull clamps
+    // to; this says what the operator wants held. 115 indices hold 1day bars
+    // dated 2015-2017 from an earlier run: they stay, hidden by default and
+    // labelled outside the window on a visible toggle. D-3338.
+    window: Some(Span {
+        from: ZERODHA_WINDOW_FROM,
+        to: ZERODHA_WINDOW_TO,
+        standing: SpanStanding::Operator,
+        source: ZERODHA_WINDOW,
+    }),
+    basis: Basis::Measured {
+        segments: &[
+            SegmentBasis {
+                segment: Segment::Index,
+                price: PriceBasis::AsPublished,
+                volume: VolumeBasis::NotTraded,
+                source: INDEX_LEVEL_BASIS,
+            },
+            SegmentBasis {
+                segment: Segment::Cash,
+                price: PriceBasis::VendorAdjusted,
+                volume: VolumeBasis::VendorOwn,
+                source: ZERODHA_SHARE_BASIS,
+            },
+        ],
+        intraday_close: CloseSemantics::LastPrint,
+        day: Some(DayClose {
+            close: CloseSemantics::Official,
+            is_fold: false,
+        }),
+        close_source: ZERODHA_CLOSE,
+    },
+    closing_auction: Some(auction_note(
+        AuctionHandling::MinutesEndBeforeAuction,
+        ZERODHA_AUCTION,
+    )),
 };
 
 /// Every feed, indexed by its own [`Feed`] discriminant.
@@ -5792,6 +6542,59 @@ const _: () = {
     ));
 };
 
+// THE OPERATOR'S ALLOW-LIST, AS A BUILD FAILURE (D-3338).
+//
+// Zerodha and GDFL are offered and the other three are not. A sixth row, or
+// a row whose `offer` flips, has to change this block too — which is where the
+// decision is visible from the code rather than from a page.
+const _: () = {
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
+    assert!(zerodha.offer.is_offered() && gdfl.offer.is_offered());
+    assert!(!dhan.offer.is_offered() && !groww.offer.is_offered() && !truedata.offer.is_offered());
+};
+
+// EVERY EXCLUSION, SPAN AND BASIS CITES SOMETHING, AND EVERY SPAN IS ORDERED.
+//
+// The same `has_content` the session rows and the granularity floors get: a
+// blank citation is a row with no citation wearing one.
+const _: () = {
+    let mut rows: &[&Descriptor] = &DESCRIPTORS;
+    while let [row, rest @ ..] = rows {
+        if let Offer::Excluded { source, .. } = row.offer {
+            assert!(has_content(source));
+        }
+        if let Some(span) = row.archive {
+            assert!(span.is_well_shaped());
+        }
+        if let Some(span) = row.window {
+            assert!(span.is_well_shaped());
+        }
+        assert!(row.basis.is_well_shaped());
+        if let Some(note) = row.closing_auction {
+            assert!(has_content(note.source));
+        }
+        rows = rest;
+    }
+};
+
+// AN ARCHIVE SPAN IS MEASURED AND A WINDOW IS THE OPERATOR'S, and only a
+// folder feed has an archive. The two fields answer different questions —
+// what was bought against what is wanted — and a row that swapped them would
+// put the operator's wish on a page as a measurement.
+const _: () = {
+    let mut rows: &[&Descriptor] = &DESCRIPTORS;
+    while let [row, rest @ ..] = rows {
+        if let Some(span) = row.archive {
+            assert!(matches!(span.standing, SpanStanding::Measured));
+            assert!(matches!(row.transport.kind(), SourceKind::Folder));
+        }
+        if let Some(span) = row.window {
+            assert!(matches!(span.standing, SpanStanding::Operator));
+        }
+        rows = rest;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -6016,14 +6819,16 @@ mod tests {
                 // would have agreed with it.
                 //
                 //   1. `Timeframe::KNOWN` holds no directory for the rung, or
-                //   2. it does, and the rung's opening bar would be a STUB —
-                //      `aligns_with_the_open` is false, so a fold anchored at
-                //      IST midnight would file 15 minutes of trade as the
-                //      [09:00, 09:30) bar.
+                //   2. it does, and the grid counted from IST midnight and the
+                //      grid counted from the 09:15 open disagree at it —
+                //      `aligns_with_the_open` is false — so a VENDOR's bar at
+                //      that rung sits on a grid nothing here has captured
+                //      (UNVERIFIED; see `store_timeframe`, D-1447). It is not a
+                //      fold stub: `crate::fold` anchors at the open.
                 //
                 // The second arm is asserted through the store's predicate, not
-                // by naming 30min and 60min, so a change to the fold anchor
-                // that made them align turns this into a failure that says so.
+                // by naming 30min and 60min, so a rung whose two grids agree
+                // can never be refused by it.
                 None => {
                     if let Some(known) = Timeframe::KNOWN
                         .iter()
@@ -6033,9 +6838,10 @@ mod tests {
                             !known.aligns_with_the_open(),
                             "a None is a refusal at the write boundary, never a \
                              substitution — and crates/store ships a directory \
-                             for {rung} whose bars DO align with the 09:15 open, \
-                             so refusing it strikes a rung off the operator's \
-                             form that the store can file correctly"
+                             for {rung} whose midnight and open grids coincide, \
+                             so a vendor's bar there lands on a stored edge \
+                             whatever its convention, and refusing it strikes a \
+                             rung off the operator's form for nothing"
                         );
                     }
                 }
@@ -6086,28 +6892,29 @@ mod tests {
                 "{name} is a store directory no rung names"
             );
         }
-        // THE STUB RUNGS ARE REFUSED, AND THE COUNT IS PINNED so this test
-        // cannot pass by refusing everything.
-        // THE MIDNIGHT-STUB RUNGS ARE PINNED so this test cannot pass by
-        // refusing everything — and there are FOUR of them now, not two.
+        // THE UNFILABLE-FROM-A-VENDOR COUNT IS PINNED so this test cannot pass
+        // by refusing everything — and it is FOUR, for two different reasons.
         //
-        // It said two, and named 30min and 60min. Two and ten minutes joined
-        // `KNOWN` for the derive ladder and answer `aligns_with_the_open` the
-        // same way — 555/2 = 277.5, 555/10 = 55.5 — so the count is four.
+        // 2min and 10min have no `Granularity` at all: nothing can ask a
+        // vendor for them, and `pull::ingest::derive_all` files them from the
+        // minute. 30min and 60min have one and `store_timeframe` refuses it,
+        // because the midnight-counted and open-counted grids disagree there
+        // and the vendor's choice is UNVERIFIED (D-1447). All four are the rungs
+        // that do not divide 555.
         //
-        // WHAT THE COUNT MEANS HAS ALSO MOVED, and the old wording said "the
-        // fold cannot align with the open" which is no longer true of any of
-        // them: `crate::fold` anchors an intraday rung AT the open, so every
-        // one begins the day at 09:15 by construction. These four are the rungs
-        // that do not divide 555, which is now a statement about the MIDNIGHT
-        // grid the daily rung still uses and about nothing else. Their
-        // raggedness moved to a short LAST bar, which is stamped correctly.
+        // NONE OF THE FOUR IS A FOLD STUB. This comment used to call them
+        // "midnight-stub rungs". `crate::fold` anchors an intraday rung AT the
+        // open, so every one begins the day at 09:15; a short bar, where a
+        // rung leaves one, is the session's LAST, and which rungs leave one is
+        // set by the venue's session length —
+        // `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`.
         assert_eq!(
             Timeframe::KNOWN.len() - expected.len(),
             4,
             "2min, 10min, 30min and 60min are the rungs that do not divide the \
-             555 minutes from IST midnight to the open; if that set changed, \
-             the fold's anchor and store_timeframe must both be revisited"
+             555 minutes from IST midnight to the open, so the midnight and \
+             open grids disagree on them; if that set changed, store_timeframe's \
+             refusal must be revisited (D-1447)"
         );
         // Coarsest last, which is the order `Granularity::ALL` walks and the
         // order a backfill lands them in.
@@ -7343,6 +8150,14 @@ mod tests {
         // build folds to minutes from the same bytes. Both archives now declare
         // the three rungs `store::path::Timeframe` and the fold can between
         // them, and the rule is asserted rather than the old absence. D-0141.
+        //
+        // GDFL IS THE EXCEPTION, BY THE OPERATOR'S RULE AND NOT BY THE FOLD
+        // (D-2802, D-3338): it is filed at one second only, minutes and every
+        // higher rung come from Zerodha, and `ingest::derives_for(Gdfl)` is
+        // false. Its row declared `Minute1` and `Day1` anyway, and `/feeds.json`
+        // advertised both as `served: true` for rungs no door ever files
+        // (DB-051, DB-G24). TrueData keeps D-0141's three: no such rule covers
+        // it.
         for archive in [Feed::TrueData, Feed::Gdfl] {
             assert_eq!(
                 archive.source_kind(),
@@ -7353,6 +8168,14 @@ mod tests {
                 archive.serves(Granularity::Second1),
                 "{archive} reads one-second files, so it serves the rung it IS"
             );
+        }
+        for folded in [Granularity::Minute1, Granularity::Day1] {
+            assert!(
+                !Feed::Gdfl.serves(folded),
+                "GDFL is filed at one second only, so {folded} is not served (D-2802)"
+            );
+        }
+        for archive in [Feed::TrueData] {
             for folded in [Granularity::Minute1, Granularity::Day1] {
                 assert!(
                     archive.serves(folded),
@@ -8286,13 +9109,16 @@ mod tests {
 
     /// EVERY FEED ANSWERS EVERY RUNG, AND THE ANSWER IS ONE OF TWO VERDICTS.
     ///
-    /// The whole 4 × 11 matrix, because a capability with a hole in it is a
+    /// The whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11, pinned
+    /// below (it read 4 × 11 after a fifth feed landed; D-1447) — because a
+    /// capability with a hole in it is a
     /// capability a caller has to guess at. Two verdicts: the vendor refuses
     /// the rung outright, or it does not — and the second splits into the one
     /// rung that IS the floor and the rungs above it, which is where the
     /// tick-versus-conflated answer lives.
     #[test]
     fn every_feed_answers_every_rung_with_one_of_two_verdicts() {
+        let mut cells = 0_usize;
         for feed in Feed::ALL {
             let floor = feed.descriptor().granularity_floor;
             let mut refused = 0_usize;
@@ -8359,7 +9185,68 @@ mod tests {
                 floor.finest,
                 "{feed} disagrees with its own row about its finest rung"
             );
+            cells += refused + at_floor + coarser;
         }
+        // THE MATRIX THE DOCS NAME IS THE MATRIX WALKED. `granularity_verdict`'s
+        // doc, this test's doc and docs/04-invariants.md GF-03 all said 4 × 11
+        // for as long as there were five feeds. They now say 5 × 11, and this
+        // is what fails when a sixth feed or a twelfth rung makes that false.
+        // D-1447.
+        assert_eq!(
+            (Feed::ALL.len(), FEED_COUNT, GRANULARITY_COUNT),
+            (5, 5, 11),
+            "the docs name a 5 × 11 matrix; update them with the counts"
+        );
+        assert_eq!(cells, FEED_COUNT * GRANULARITY_COUNT, "every cell answered");
+    }
+
+    /// **EVERY LISTING TABLE HOLDS AT MOST ONE ROW PER CLASS — THREE.**
+    ///
+    /// `HttpSpec::listing_words`'s O(1) argument is that its table cannot
+    /// outgrow the number of [`Listing`] classes. Its doc said that number was
+    /// two while Groww shipped three rows. The class count is taken from an
+    /// exhaustive `match`, so a fourth variant fails to compile here rather
+    /// than leaving the bound's premise stale again. This test,
+    /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`, is
+    /// the proof that doc names. D-1447.
+    #[test]
+    fn every_listing_table_holds_at_most_one_row_per_class() {
+        const fn slot(listing: Listing) -> usize {
+            match listing {
+                Listing::Index => 0,
+                Listing::Equity => 1,
+                Listing::Derivative => 2,
+            }
+        }
+        const CLASSES: usize = 3;
+        let mut widest = 0_usize;
+        for feed in Feed::ALL {
+            let Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let mut seen = [false; CLASSES];
+            for row in spec.listings {
+                let at = slot(row.listing);
+                assert!(!seen[at], "{feed}: two rows for {:?}", row.listing);
+                seen[at] = true;
+                assert_eq!(
+                    spec.listing_words(row.listing),
+                    Some(*row),
+                    "{feed}: the lookup finds the row it holds"
+                );
+            }
+            assert!(spec.listings.len() <= CLASSES, "{feed}");
+            widest = widest.max(spec.listings.len());
+        }
+        assert_eq!(widest, CLASSES, "Groww carries a row for every class");
+        let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
+            panic!("Groww is an HTTP feed");
+        };
+        assert_eq!(
+            groww.listings.len(),
+            CLASSES,
+            "the feed the old doc's \"two\" was wrong about"
+        );
     }
 
     /// NO FEED IN THIS BUILD SERVES A PRINT STREAM, AND THAT IS PERMANENT.
@@ -8599,5 +9486,431 @@ mod tests {
         }
         assert_eq!(reasons.len(), FEED_COUNT);
         assert_eq!(sources.len(), FEED_COUNT);
+    }
+
+    // -- what is offered, what is held, and on what basis --------------------
+    // D-3322, D-3323, D-3324, D-3338. Every literal below is a date or a
+    // number, so nothing here is shaped like a parameter-path segment.
+
+    /// **ONLY ZERODHA AND GDFL ARE OFFERED; THE OTHER THREE SAY WHO EXCLUDED
+    /// THEM, WHEN, AND WHERE IT IS RECORDED** (D-3338; DB-051, DB-G24).
+    ///
+    /// The pickers offered Dhan, Groww and `TrueData`, which the operator does
+    /// not use, and `/feeds.json` called two of them ready. Excluded is not
+    /// deleted: each row keeps its decoder, so the exclusion is a field, and
+    /// this pins it by equality on the whole value rather than by a pattern
+    /// that could leave a field unread.
+    #[test]
+    fn only_zerodha_and_gdfl_are_offered_and_the_rest_say_who_excluded_them() {
+        let excluded = Offer::Excluded {
+            by: ClaimStanding::OperatorObservation,
+            on: day(2026, 10, 6),
+            source: OPERATOR_EXCLUSION,
+        };
+        for (feed, offer) in [
+            (Feed::Dhan, excluded),
+            (Feed::Groww, excluded),
+            (Feed::TrueData, excluded),
+            (Feed::Gdfl, Offer::Offered),
+            (Feed::Zerodha, Offer::Offered),
+        ] {
+            assert_eq!(feed.descriptor().offer, offer, "{feed}");
+            assert_eq!(
+                feed.descriptor().offer.is_offered(),
+                matches!(feed, Feed::Gdfl | Feed::Zerodha),
+                "{feed}: a picker lists it only when it is offered"
+            );
+        }
+        assert!(
+            OPERATOR_EXCLUSION.contains("D-3338") && OPERATOR_EXCLUSION.contains("6 Oct 2026"),
+            "the reason names its decision and its day: {OPERATOR_EXCLUSION}"
+        );
+        assert_eq!(
+            Feed::ALL
+                .iter()
+                .filter(|feed| feed.descriptor().offer.is_offered())
+                .count(),
+            2,
+            "two feeds, and no third slipped in"
+        );
+    }
+
+    /// **GDFL CARRIES THE ARCHIVE ITS STORE HOLDS, 2018-09-03 TO 2026-09-24, AT
+    /// ONE SECOND ONLY; ZERODHA CARRIES THE OPERATOR'S WINDOW, 2018-01-01 TO
+    /// 2026-09-30** (D-2802, D-3338; DB-051, DB-G24, DB-G68).
+    ///
+    /// `/feeds.json` had GDFL's history from `null` and its 1min and 1day rungs
+    /// served, so /db could not tell a contract's first stored day from the
+    /// archive's, and the 2015-2017 Zerodha index bars read as ordinary months.
+    #[test]
+    fn gdfl_carries_its_measured_archive_and_zerodha_the_operators_window() {
+        let gdfl = Feed::Gdfl.descriptor();
+        let archive = gdfl.archive.expect("GDFL's archive span is measured");
+        assert_eq!(
+            (archive.from, archive.to, archive.standing),
+            (day(2018, 9, 3), day(2026, 9, 24), SpanStanding::Measured)
+        );
+        assert!(archive.source.contains("D-2802") && archive.source.contains("D-3338"));
+        assert_eq!(gdfl.window, None, "the operator stated no window for GDFL");
+        for (inside, held) in [
+            (day(2018, 9, 2), false),
+            (day(2018, 9, 3), true),
+            (day(2022, 6, 15), true),
+            (day(2026, 9, 24), true),
+            (day(2026, 9, 25), false),
+        ] {
+            assert_eq!(archive.holds(inside), held, "{inside}");
+        }
+        for rung in Granularity::ALL {
+            assert_eq!(
+                Feed::Gdfl.serves(rung),
+                rung == Granularity::Second1,
+                "{rung}: GDFL is filed at one second and at nothing coarser"
+            );
+        }
+
+        let zerodha = Feed::Zerodha.descriptor();
+        let window = zerodha.window.expect("the operator's Zerodha window");
+        assert_eq!(
+            (window.from, window.to, window.standing),
+            (day(2018, 1, 1), day(2026, 9, 30), SpanStanding::Operator)
+        );
+        assert!(window.source.contains("D-3338") && window.source.contains("82,079"));
+        assert_eq!(zerodha.archive, None, "a REST feed holds no bought archive");
+        for (asked, held) in [
+            (day(2015, 1, 1), false),
+            (day(2017, 12, 31), false),
+            (day(2018, 1, 1), true),
+            (day(2026, 9, 30), true),
+            (day(2026, 10, 1), false),
+        ] {
+            assert_eq!(
+                window.holds(asked),
+                held,
+                "{asked}: in the operator's window"
+            );
+        }
+        for feed in [Feed::Dhan, Feed::Groww, Feed::TrueData] {
+            assert_eq!(feed.descriptor().archive, None, "{feed}: nothing measured");
+            assert_eq!(feed.descriptor().window, None, "{feed}: no window stated");
+        }
+        // A SPAN THAT IS BACKWARDS, OR CITES NOTHING, IS NOT WELL SHAPED — the
+        // check the const block runs on every row, driven here on both arms.
+        let backwards = Span {
+            from: day(2026, 9, 24),
+            to: day(2018, 9, 3),
+            ..archive
+        };
+        assert!(archive.is_well_shaped() && !backwards.is_well_shaped());
+        assert!(
+            !Span {
+                source: " ",
+                ..archive
+            }
+            .is_well_shaped()
+        );
+    }
+
+    /// **EACH FEED SAYS WHAT ITS PRICES, VOLUMES AND CLOSES ARE** (D-3323,
+    /// D-3324; DB-017, DB-033, DB-035, DB-G43, DB-G58, DB-G75).
+    ///
+    /// HDFCBANK opened 2019-06-03 at ₹606.80 on Zerodha and ₹2,427.00 on GDFL,
+    /// and nothing on either row said which had been rewritten; a Zerodha day
+    /// close is the official close while its minutes close on the last print.
+    #[test]
+    fn each_feed_says_what_its_prices_volumes_and_closes_are() {
+        let zerodha = Feed::Zerodha.descriptor().basis;
+        let cash = zerodha
+            .segment(Segment::Cash)
+            .expect("Zerodha holds shares");
+        assert_eq!(
+            (cash.price, cash.volume),
+            (PriceBasis::VendorAdjusted, VolumeBasis::VendorOwn),
+            "Zerodha's shares are back-adjusted, and their volume is on its own basis"
+        );
+        assert!(cash.price.adjusted_as_of_pull_date());
+        assert!(cash.source.contains("D-3323") && cash.source.contains("101 of 208"));
+        let index = zerodha
+            .segment(Segment::Index)
+            .expect("Zerodha holds indices");
+        assert_eq!(
+            (index.price, index.volume),
+            (PriceBasis::AsPublished, VolumeBasis::NotTraded)
+        );
+        assert!(!index.price.adjusted_as_of_pull_date());
+        assert_eq!(
+            zerodha.segment(Segment::Fno),
+            None,
+            "Zerodha holds no contract"
+        );
+        assert_eq!(zerodha.close_of(true), Some(CloseSemantics::Official));
+        assert_eq!(zerodha.close_of(false), Some(CloseSemantics::LastPrint));
+        assert!(
+            matches!(
+                zerodha,
+                Basis::Measured {
+                    day: Some(DayClose {
+                        close: CloseSemantics::Official,
+                        is_fold: false
+                    }),
+                    close_source: ZERODHA_CLOSE,
+                    ..
+                }
+            ),
+            "the day bar is the official close and not a fold of its minutes"
+        );
+
+        let gdfl = Feed::Gdfl.descriptor().basis;
+        for segment in [Segment::Cash, Segment::Fno] {
+            let row = gdfl
+                .segment(segment)
+                .expect("GDFL holds shares and options");
+            assert_eq!((row.price, row.volume), (PriceBasis::Raw, VolumeBasis::Raw));
+            assert!(!row.price.adjusted_as_of_pull_date());
+        }
+        let index = gdfl
+            .segment(Segment::Index)
+            .expect("GDFL holds index files");
+        assert_eq!(
+            (index.price, index.volume),
+            (PriceBasis::AsPublished, VolumeBasis::NotTraded)
+        );
+        assert_eq!(gdfl.close_of(true), None, "one second only: no day bar");
+        assert_eq!(gdfl.close_of(false), Some(CloseSemantics::LastPrint));
+
+        for feed in [Feed::Dhan, Feed::Groww, Feed::TrueData] {
+            let basis = feed.descriptor().basis;
+            assert_eq!(basis, Basis::Unverified(BASIS_UNMEASURED), "{feed}");
+            for segment in [Segment::Index, Segment::Cash, Segment::Fno] {
+                assert_eq!(basis.segment(segment), None, "{feed}: never guessed");
+            }
+            assert_eq!(basis.close_of(true), None);
+            assert_eq!(basis.close_of(false), None);
+        }
+        assert!(BASIS_UNMEASURED.starts_with("UNVERIFIED"));
+    }
+
+    /// The words a page prints for a basis are distinct and non-empty, and a
+    /// basis that cites nothing is not well shaped, on every arm (D-3323,
+    /// D-3324).
+    #[test]
+    fn every_basis_word_is_distinct_and_every_basis_cites_something() {
+        /// One row whose source is blank.
+        const BLANK: [SegmentBasis; 1] = [SegmentBasis {
+            segment: Segment::Cash,
+            price: PriceBasis::Raw,
+            volume: VolumeBasis::Raw,
+            source: "",
+        }];
+        let zerodha = Feed::Zerodha.descriptor().basis;
+        let gdfl = Feed::Gdfl.descriptor().basis;
+
+        // THE WORDS A PAGE PRINTS ARE DISTINCT AND NON-EMPTY, per enum.
+        let prices = [
+            PriceBasis::Raw.label(),
+            PriceBasis::AsPublished.label(),
+            PriceBasis::VendorAdjusted.label(),
+        ];
+        let volumes = [
+            VolumeBasis::Raw.label(),
+            VolumeBasis::VendorOwn.label(),
+            VolumeBasis::NotTraded.label(),
+        ];
+        let closes = [
+            CloseSemantics::Official.label(),
+            CloseSemantics::LastPrint.label(),
+        ];
+        for words in [&prices[..], &volumes[..], &closes[..]] {
+            let distinct: HashSet<&str> = words.iter().copied().collect();
+            assert_eq!(distinct.len(), words.len(), "{words:?}");
+            assert!(words.iter().all(|word| has_content(word)), "{words:?}");
+        }
+        assert!(PriceBasis::VendorAdjusted.label().contains("pull date"));
+        assert_eq!(CloseSemantics::Official.label(), "official close");
+        assert_eq!(CloseSemantics::LastPrint.label(), "last print");
+
+        // AND A BASIS THAT CITES NOTHING IS NOT WELL SHAPED, on every arm.
+        assert!(zerodha.is_well_shaped() && gdfl.is_well_shaped());
+        assert!(!Basis::Unverified("").is_well_shaped());
+        let measured = |segments: &'static [SegmentBasis], close_source: &'static str| {
+            Basis::Measured {
+                segments,
+                intraday_close: CloseSemantics::LastPrint,
+                day: None,
+                close_source,
+            }
+            .is_well_shaped()
+        };
+        assert!(
+            measured(&[], GDFL_CLOSE),
+            "no rows and a cited close is shaped"
+        );
+        assert!(!measured(&[], " "), "a close that cites nothing is not");
+        assert!(
+            !measured(&BLANK, GDFL_CLOSE),
+            "nor is a row that cites nothing"
+        );
+    }
+
+    /// **OPEN INTEREST APPLIES TO A CONTRACT AND TO NOTHING ELSE, ON EVERY
+    /// FEED** (D-3322; DB-036, DB-G28, DB-G44, DB-G100).
+    ///
+    /// Zerodha stored `0` for every index and share, GDFL the null, so one
+    /// fact read `0` on one feed and a dash on the other. The landing asks
+    /// this of the segment a listing is filed under.
+    #[test]
+    fn open_interest_applies_to_a_contract_and_to_nothing_else() {
+        assert!(open_interest_applies(Segment::Fno));
+        assert!(!open_interest_applies(Segment::Index));
+        assert!(!open_interest_applies(Segment::Cash));
+        for (listing, segment) in [
+            (Listing::Index, Segment::Index),
+            (Listing::Equity, Segment::Cash),
+            (Listing::Derivative, Segment::Fno),
+        ] {
+            assert_eq!(listing.segment(), segment, "{listing:?}");
+        }
+    }
+
+    /// **A CLOSING-AUCTION-ELIGIBLE SHARE ENDS CONTINUOUS TRADING AT 15:15
+    /// FROM 2026-08-03; AN INELIGIBLE ONE KEEPS 15:30; AN UNKNOWN ONE IS
+    /// REFUSED BY NAME** (D-3320, charter §9; DB-034, DB-G42).
+    ///
+    /// `NSE_CASH_SESSIONS` kept 15:30 for every share, so a 15:28 auction
+    /// print of RELIANCE sat inside "continuous" trading.
+    #[test]
+    fn an_eligible_share_ends_continuous_trading_at_15_15_from_3_aug_2026() {
+        use crate::calendar::CasEligibility;
+        let hours = |venue: Venue, on: Day, cas: CasEligibility| {
+            venue
+                .share_hours_on(on, cas)
+                .map(|session| (session.open_minute(), session.close_minute()))
+        };
+        let (open, eligible_close, regular_close) = (9 * 60 + 15, 15 * 60 + 15, 15 * 60 + 30);
+        for cas in [
+            CasEligibility::Eligible,
+            CasEligibility::NotEligible,
+            CasEligibility::Unknown,
+        ] {
+            // BEFORE THE CHANGE THE FLAG IS NOT READ, and every share closes
+            // its continuous session at 15:30.
+            for before in [day(2018, 9, 3), day(2026, 7, 31), day(2026, 8, 2)] {
+                assert_eq!(
+                    hours(Venue::NseCash, before, cas),
+                    Ok((open, regular_close)),
+                    "{before} {cas:?}"
+                );
+            }
+            // AND AN INDEX OR A CONTRACT NEVER READS IT: their answer is the
+            // venue's, on every day.
+            for venue in [Venue::NseIndex, Venue::NseDerivatives] {
+                for on in [day(2026, 7, 31), day(2026, 8, 3), day(2026, 9, 24)] {
+                    assert_eq!(
+                        venue.share_hours_on(on, cas),
+                        venue.hours_on(on).map_err(ShareHoursRefusal::Session),
+                        "{venue} {on} {cas:?}"
+                    );
+                }
+            }
+        }
+        for after in [day(2026, 8, 3), day(2026, 9, 24)] {
+            assert_eq!(
+                hours(Venue::NseCash, after, CasEligibility::Eligible),
+                Ok((open, eligible_close)),
+                "{after}: an eligible share's continuous trading ends at 15:15"
+            );
+            assert_eq!(
+                hours(Venue::NseCash, after, CasEligibility::NotEligible),
+                Ok((open, regular_close)),
+                "{after}: an ineligible share keeps 15:30"
+            );
+            let refused = Venue::NseCash
+                .share_hours_on(after, CasEligibility::Unknown)
+                .expect_err("a missing flag is never answered as either");
+            assert_eq!(
+                refused,
+                ShareHoursRefusal::EligibilityUnknown { day: after }
+            );
+            let said = refused.to_string();
+            assert!(
+                said.contains(&after.to_string()) && said.contains("15:15") && said.contains("§9"),
+                "the refusal names the day and the rule: {said}"
+            );
+        }
+        // THE VENUE'S OWN TABLE IS UNCHANGED: a share-blind reader keeps the
+        // ineligible share's 15:30, which drops no real trade.
+        assert_eq!(
+            Venue::NseCash
+                .hours_on(day(2026, 9, 24))
+                .map(Session::close_minute),
+            Ok(regular_close)
+        );
+        // A SESSION REFUSAL CROSSES UNCHANGED, words and all.
+        let inner = SessionRefusal {
+            venue: Venue::NseCash,
+            day: day(2030, 6, 1),
+            row_start: day(2030, 1, 1),
+            verified_from: None,
+            source: SOURCE,
+        };
+        assert_eq!(
+            ShareHoursRefusal::Session(inner).to_string(),
+            inner.to_string()
+        );
+    }
+
+    /// **EACH OFFERED FEED SAYS WHAT ITS STORE HOLDS FOR THE CLOSING AUCTION,
+    /// FROM THE SAME DAY AND THE SAME 15:15 THE ELIGIBLE SHARE'S TABLE HOLDS**
+    /// (D-3320; DB-034, DB-G42).
+    ///
+    /// The /db audit read Zerodha's minutes ending at 15:14 and GDFL's 15:28
+    /// print as a market-wide vendor gap, because nothing said either was by
+    /// design.
+    #[test]
+    fn each_offered_feed_says_what_it_holds_for_the_closing_auction() {
+        use crate::calendar::CasEligibility;
+        for (feed, handling) in [
+            (Feed::Zerodha, AuctionHandling::MinutesEndBeforeAuction),
+            (Feed::Gdfl, AuctionHandling::PrintKeptApart),
+        ] {
+            let note = feed
+                .descriptor()
+                .closing_auction
+                .expect("an offered feed's auction handling is recorded");
+            assert_eq!(note.handling, handling, "{feed}");
+            assert_eq!(note.from, day(2026, 8, 3), "{feed}");
+            assert_eq!(note.continuous_close_minute, 15 * 60 + 15, "{feed}");
+            assert_eq!(
+                Venue::NseCash
+                    .share_hours_on(note.from, CasEligibility::Eligible)
+                    .map(Session::close_minute),
+                Ok(note.continuous_close_minute),
+                "{feed}: one 15:15, read from the eligible share's table"
+            );
+            assert!(cash_auction_eligibility_required(note.from));
+            assert!(!cash_auction_eligibility_required(day(2026, 8, 2)));
+            assert!(note.source.contains("D-3320"), "{feed}: {}", note.source);
+        }
+        assert!(
+            AuctionHandling::MinutesEndBeforeAuction
+                .label()
+                .contains("15:14")
+        );
+        assert!(
+            AuctionHandling::PrintKeptApart
+                .label()
+                .contains("kept apart")
+        );
+        assert_ne!(
+            AuctionHandling::MinutesEndBeforeAuction.label(),
+            AuctionHandling::PrintKeptApart.label()
+        );
+        for feed in [Feed::Dhan, Feed::Groww, Feed::TrueData] {
+            assert_eq!(
+                feed.descriptor().closing_auction,
+                None,
+                "{feed}: never guessed"
+            );
+        }
     }
 }

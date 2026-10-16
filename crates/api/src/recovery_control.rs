@@ -51,6 +51,29 @@ pub(crate) fn clear_stop(site: &Site, id: [u8; 32]) -> Result<(), String> {
     persist(site, id, Status::Queued)
 }
 
+/// [`is_stopped`] for a server that writes nothing (DB-B79, DB-B71): the same
+/// answer and the same refusals, read through `recovery_journal::snapshot` —
+/// a shared lock on a read-only handle — where [`is_stopped`] reopens the
+/// journal for append and may sync it.
+pub(crate) fn is_stopped_unopened(site: &Site, id: [u8; 32]) -> Result<bool, String> {
+    let _active = site
+        .recovery_active
+        .lock()
+        .map_err(|_| "recovery active-plan lock is poisoned".to_owned())?;
+    require_store(site)?;
+    let path = path(site, id);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err("recovery STOP path is not a regular file".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    let history = crate::recovery_journal::snapshot(&path).map_err(|error| error.to_string())?;
+    state_of(&history.latest, id)?
+        .map(|status| status == Status::Blocked)
+        .ok_or_else(|| "existing recovery STOP journal is empty; intent is unverified".to_owned())
+}
+
 /// Check persisted intent before resuming. Missing STOP history means false;
 /// missing stores, empty existing journals, corruption and busy locks refuse.
 pub(crate) fn is_stopped(site: &Site, id: [u8; 32]) -> Result<bool, String> {
@@ -129,14 +152,21 @@ fn record(id: [u8; 32], status: Status) -> Record {
 }
 
 fn state(journal: &Journal, id: [u8; 32]) -> Result<Option<Status>, String> {
-    if journal.latest.is_empty() {
+    state_of(&journal.latest, id)
+}
+
+/// [`state`] over the latest records of a STOP history, however they were read.
+fn state_of(
+    latest: &std::collections::HashMap<[u8; 32], Record>,
+    id: [u8; 32],
+) -> Result<Option<Status>, String> {
+    if latest.is_empty() {
         return Ok(None);
     }
-    if journal.latest.len() != 1 {
+    if latest.len() != 1 {
         return Err("recovery STOP journal contains foreign plan keys".to_owned());
     }
-    let row = journal
-        .latest
+    let row = latest
         .get(&id)
         .ok_or("recovery STOP journal plan identity mismatch")?;
     if !matches!(row.status, Status::Queued | Status::Blocked) || *row != record(id, row.status) {
@@ -343,7 +373,9 @@ mod tests {
         activate(&site, id);
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":true}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], true, "{body}");
+        assert_eq!(json["what"], "run", "{body}");
         assert!(site.run.lock().unwrap().as_ref().unwrap().stopping);
         let restarted = Site::load(&root.join("missing-masters"), &root);
         assert!(is_stopped(&restarted, id).unwrap());
@@ -379,11 +411,15 @@ mod tests {
         let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":false}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], false, "{body}");
+        assert_eq!(json["what"], "nothing", "{body}");
         *site.run.lock().unwrap() = Some(Progress::claimed());
         let (status, _, body) = crate::server::pull_run_stop(State(Loaded::clone(&site))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "{\"stopping\":true}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["stopping"], true, "{body}");
+        assert_eq!(json["what"], "run", "{body}");
         assert!(!root.exists());
     }
 }

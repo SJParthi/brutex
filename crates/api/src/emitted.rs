@@ -218,7 +218,23 @@ struct Case {
 /// all three browser engine entry points. The marker is driven directly here;
 /// proving an audit site must not require launching the expensive sweep it
 /// brackets.
-const ROWS: usize = 30;
+/// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
+/// span whose daily rung was not read, driven over two daily bars on disk.
+/// 31 -> 33 at D-1765: `api.backtest limit ignored`, an unparseable `limit`,
+/// and `api.logs filter ignored`, a `level` or `run` that could not be read.
+/// 33 -> 34 at D-3341: `api.audit whole note not appended`, a member
+/// failure whose whole reason could not be kept beside the journal.
+/// 34 -> 35 at WP-36 (DB-N19): `api.calendar warmed`, the one line the served
+/// process writes when its start-up census read and calendar builds end.
+/// 35 -> 37 at WP-33c: `api.audit journal index build finished`, the pull
+/// journal's index built by the first append to a journal with none, and
+/// `api.access read refused`, a refused `/db` read's access record.
+/// 37 -> 38 at D-3349 (WP-39; DB-N17): `api.bars window range holds months
+/// not stored`, one line per window request with holes, driven over a store
+/// holding January and March only.
+/// 38 -> 39 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, the hand
+/// runs' own stop generation moving on the operator's Stop.
+const ROWS: usize = 39;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -284,6 +300,83 @@ fn cases() -> Vec<Case> {
             }),
         });
     }
+
+    // crates/api/src/calendar_of.rs — a month inside the span whose daily
+    // rung was not read is withheld, and said so once per derivation. D-1443.
+    {
+        let root = fixture("emit-calendar-withheld");
+        cases.push(Case {
+            site: "calendar_of.rs api.calendar withheld",
+            target: "api.calendar",
+            message: "withheld",
+            level: telemetry::Level::Warn,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    use crate::calendar_of::tests::{OPEN, epoch_day, stamp, write_bars_for};
+                    let month = |m| store::path::YearMonth::new(2026, m).expect("a real month");
+                    let (january, february, march) = (month(1), month(2), month(3));
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        january,
+                        &[stamp(epoch_day(2026, 1, 6), OPEN)],
+                    );
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        march,
+                        &[stamp(epoch_day(2026, 3, 2), OPEN)],
+                    );
+                    let derived = crate::calendar_of::cached(
+                        &crate::calendar_of::Cache::default(),
+                        &root,
+                        Vendor::Zerodha,
+                        "NSE",
+                        "INDEX",
+                        "EMITWITHHELD",
+                        None,
+                        &[january, february, march],
+                        |_, _| false,
+                    );
+                    assert!(derived.unopened.is_empty(), "nothing held failed to open");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "symbol", "EMITWITHHELD") && counts(record, "months_withheld", 1)
+            }),
+        });
+    }
+
+    // crates/api/src/calendar_build.rs — the start-up warm's one line: what
+    // it read and built, and how long each part took. WP-36, DB-N19.
+    cases.push(Case {
+        site: "calendar_build.rs api.calendar warmed",
+        target: "api.calendar",
+        message: "warmed",
+        level: telemetry::Level::Info,
+        drive: Box::new(|| {
+            let _noted = crate::calendar_of::build::Warmed {
+                feeds: vec![Vendor::Gdfl, Vendor::Zerodha],
+                census_ms: 7,
+                built: 3,
+                refused: 1,
+                unqueued: 0,
+                building_ms: 11,
+                journal: Err("EMITWARMED journal fixture".to_owned()),
+                total_ms: 19,
+            }
+            .note();
+        }),
+        mine: Box::new(|record| {
+            says(record, "journal_error", "EMITWARMED")
+                && says(record, "feeds", "gdfl,zerodha")
+                && counts(record, "built", 3)
+                && counts(record, "refused", 1)
+        }),
+    });
 
     // crates/api/src/master.rs — one line for a file of ~100,000 rows.
     {
@@ -452,6 +545,40 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    {
+        // A DIRECTORY WHERE THE NOTES FILE HAS TO BE (D-3341, DB-G23). The
+        // member record still lands, cut, and the line names why its whole
+        // reason did not.
+        let root = fixture("emit-journal-whole-note");
+        std::fs::create_dir_all(root.join("audit").join("pull.notes"))
+            .expect("a directory in the notes file's place");
+        cases.push(Case {
+            site: "audit.rs api.audit whole note not appended",
+            target: "api.audit",
+            message: "whole note not appended",
+            level: telemetry::Level::Error,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    let why = "emit-site-probe: a reason longer than the sixty bytes a \
+                               member record's note field keeps, so its whole is kept apart";
+                    let day = pull::session::Day::new(2020, 11, 14).expect("a real day");
+                    let record = crate::audit::Record::member_failure(
+                        crate::audit::Scope::Spot,
+                        std::time::SystemTime::UNIX_EPOCH,
+                        "EMITWHOLE",
+                        pull::session::Window::new(day, day).expect("one day"),
+                        why,
+                    );
+                    crate::audit::Journal::at(&root)
+                        .append_member(&record, why)
+                        .expect("the record itself still lands");
+                })
+            },
+            mine: Box::new(|record| says(record, "instrument", "EMITWHOLE")),
+        });
+    }
+
     // crates/api/src/bars.rs — a refused read, and a page that lost records.
     {
         let root = fixture("emit-bar-missing");
@@ -497,6 +624,49 @@ fn cases() -> Vec<Case> {
                 says(record, "file", "emit-bar-short")
                     && counts(record, "faults", 1)
                     && counts(record, "rows", 0)
+            }),
+        });
+    }
+
+    // crates/api/src/bars.rs — a window whose range holds a hole, named once
+    // per request with its count, never once per month (DB-N17).
+    {
+        let root = fixture("emit-bar-holes");
+        cases.push(Case {
+            site: "bars.rs api.bars window range holds months not stored",
+            target: "api.bars",
+            message: "window range holds months not stored",
+            level: telemetry::Level::Info,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    for month in [1, 3] {
+                        write_one_bar(&root, "EMITHOLE", YearMonth::new(2026, month).expect("m"));
+                    }
+                    let answer = crate::bars::window(
+                        &root,
+                        &crate::bars::WindowQuery::single(
+                            Vendor::Dhan,
+                            crate::bars::SeriesKey::new("NSE", "INDEX", "EMITHOLE", None),
+                            Timeframe::MINUTE_1,
+                            YearMonth::new(2026, 1).expect("m"),
+                            YearMonth::new(2026, 3).expect("m"),
+                            crate::bars::SortKey::Ts,
+                            true,
+                            0,
+                            5,
+                            false,
+                        ),
+                    )
+                    .expect("a legal window");
+                    assert_eq!(answer.missing_months, ["2026-02"]);
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "key", "EMITHOLE")
+                    && says(record, "first", "2026-02")
+                    && says(record, "last", "2026-02")
+                    && counts(record, "months", 1)
             }),
         });
     }
@@ -635,6 +805,25 @@ fn cases() -> Vec<Case> {
         }),
         mine: Box::new(|record| counts(record, "epoch", 0)),
     });
+    // WP-61 (DB-B28, DB-B29): the hand runs' own stop generation. Stop moves
+    // it and the autopilot's is untouched.
+    cases.push(Case {
+        site: "autopilot.rs hand runs asked to stop",
+        target: "api.pull",
+        message: "hand runs asked to stop",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let control = crate::autopilot::Control::new();
+            let at = control.epoch_for(crate::autopilot::Driver::Hand);
+            assert_eq!(control.stop_hand(), 1, "the hand generation moved");
+            assert!(
+                control.stopped_for(crate::autopilot::Driver::Hand, at),
+                "a hand run that captured the old value stops"
+            );
+            assert_eq!(control.epoch(), 0, "and the autopilot's did not move");
+        }),
+        mine: Box::new(|record| counts(record, "hand_epoch", 1)),
+    });
 
     // crates/api/src/audit_json.rs — two refusals a status code cannot carry.
     {
@@ -761,7 +950,7 @@ fn cases() -> Vec<Case> {
                 2,
             );
             progress.finished_micros = Some(2);
-            progress.refusal = Some("no result was recorded".to_owned());
+            progress.refusal = Some("no result was recorded".into());
             crate::sweeprun::emit_completion(&progress, "sweep", 1);
         }),
         mine: Box::new(|record| {
@@ -1063,6 +1252,96 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/backtest.rs — an unparseable `limit` answered the default
+    // page and said nothing (P1-01-03, D-1765).
+    cases.push(Case {
+        site: "backtest.rs api.backtest limit ignored",
+        target: "api.backtest",
+        message: "limit ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            assert_eq!(
+                crate::backtest::limit_asked("limit=emit-site-probe"),
+                crate::backtest::DEFAULT_LIMIT
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "limit")
+        }),
+    });
+
+    // crates/api/src/logs.rs — a `level` or `run` filter that could not be read
+    // answered the unfiltered tail as if it were the filtered one (P1-01-02,
+    // D-1765).
+    cases.push(Case {
+        site: "logs.rs api.logs filter ignored",
+        target: "api.logs",
+        message: "filter ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let (status, _headers, body) = block_on(crate::logs::logs_json(
+                "/logs.json?level=emit-site-probe&limit=1"
+                    .parse()
+                    .expect("a real uri"),
+            ));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(body.contains("emit-site-probe"), "{body}");
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "level")
+        }),
+    });
+
+    // crates/api/src/audit.rs — the pull journal's index, built from scratch
+    // by the first append to a journal that has none (WP-33c; DB-A32).
+    {
+        let root = fixture("emit-journal-index");
+        cases.push(Case {
+            site: "audit.rs api.audit journal index build finished",
+            target: "api.audit",
+            message: "journal index build finished",
+            level: telemetry::Level::Info,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    crate::audit::Journal::at(&root)
+                        .append(&crate::audit::Record::refused(
+                            crate::audit::Scope::Spot,
+                            crate::audit::Outcome::Failed,
+                            std::time::SystemTime::UNIX_EPOCH,
+                            "emit-site-probe source",
+                            "emit-site-probe",
+                        ))
+                        .expect("the record lands, and the index is built behind it");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "path", "emit-journal-index") && counts(record, "runs", 1)
+            }),
+        });
+    }
+
+    // crates/api/src/logs.rs — a refused `/db` read's access record, which the
+    // durable audit stream keeps (WP-33c; DB-A42).
+    cases.push(Case {
+        site: "logs.rs api.access read refused",
+        target: "api.access",
+        message: "read refused",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            crate::logs::note_access(
+                "/bars.json",
+                (404, 7),
+                &[("feed", "emit-site-probe-access".to_owned())],
+                true,
+                1,
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "feed", "emit-site-probe-access") && counts(record, "status", 404)
+        }),
+    });
+
     cases
 }
 
@@ -1121,7 +1400,9 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1158,7 +1439,7 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 
     let (rows, faults) = crate::bars::page(&reader, 0, 1);
     assert!(rows.is_empty(), "a record that will not read is not a row");
-    assert_eq!(faults.len(), 1, "and the page names the gap");
+    assert_eq!(faults.records(), 1, "and the page names the gap");
 }
 
 /// **EVERY EMIT SITE THIS BINARY CAN REACH PUTS A RECORD IN THE FILE.**
@@ -1174,6 +1455,12 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
 /// defect this whole module exists to remove.
 #[test]
 fn every_reachable_emit_site_puts_a_record_in_the_file() {
+    // APART FROM THE TESTS THAT HOLD EVERY ADMISSION SLOT. Several rows below
+    // drive an audited route and assert its own answer (a 400, a 200); a test
+    // that saturates the process-wide pool at that instant turned the answer
+    // into the pool's refusal — `left: 503, right: 400`, one run of the suite
+    // in five on 2026-10-11. Those tests take this guard; so does this one.
+    let _apart = crate::detail::apart_from_slot_owners_blocking();
     let sink = sink();
     assert_eq!(
         sink.health().dropped,
@@ -1330,6 +1617,37 @@ fn the_silent_arms_stay_silent() {
     }
 }
 
+/// One invented one-minute INDEX bar for `symbol` on the 2nd of `month`,
+/// 09:15 IST, through the store's writer.
+fn write_one_bar(root: &std::path::Path, symbol: &str, month: YearMonth) {
+    let symbol_id = u32::try_from(brutex_core::universe::fnv1a(symbol) & 0xFFFF_FFFF)
+        .expect("the low half of a 64-bit fold fits a u32");
+    let path = StorePath::new(PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol,
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month,
+        file: FileKind::Bars,
+    })
+    .expect("a well-formed store path");
+    let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
+    let ts_micros = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+    writer
+        .append(&[Bar {
+            ts_micros,
+            open: 2_450_000,
+            high: 2_451_000,
+            low: 2_449_000,
+            close: 2_450_500,
+            volume: 0,
+            open_interest: OI_NULL,
+        }])
+        .expect("one legal bar");
+}
+
 /// A month with one bar, read back whole. The premise of the silence above.
 fn clean_month_reads_every_row(root: &std::path::Path) {
     const SYMBOL: &str = "EMITCLEAN";
@@ -1350,7 +1668,9 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1528,11 +1848,40 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `server::census_request_tests::an_absence_its_stamps_contradict_is_logged_at_warn`.
     // Four additional refusal sites are read back by the partial/interrupted
     // broker basket, recovery resume refusal, and partial cash replay tests.
-    const REACHED_IN_SERVER_TESTS: usize = 19;
+    // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
+    // driven and read back by `server::credential_law_tests::
+    // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
+    // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
+    // could not be stamped`, driven through `note_unstamped_lock` and read back
+    // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
+    // 21 -> 22 at D-3313: `pull.spot empty chunks before the series' first
+    // bar`, driven through `before_first_bar_line` and read back by
+    // `server::tests::a_before_first_bar_note_is_a_named_receipt_line`.
+    // 22 -> 23 at D-3349 (WP-39; DB-N15): `api.bars request abandoned; work
+    // stopped`, driven through `note_cancelled` and read back by
+    // `server::bars_route::tests::an_abandoned_request_is_named_once`.
+    // 23 -> 26 at WP-62: `api.pull instrument withheld by the pull order`
+    // (DB-B27), read back by `server::tests::
+    // an_instrument_with_a_daily_hole_is_withheld_alone_and_the_rest_are_pulled`;
+    // `api.pull window runs past the calendar of record` (DB-B25), read back
+    // by `server::tests::a_runs_retry_class_and_its_one_line_past_the_calendar`;
+    // and `pull.run a pull run has no closing record` (DB-B34; it said
+    // "was interrupted by a restart", which blames a restart for what may be
+    // another process's run still in flight), whose
+    // site is in `pullrun` and is read back by `server::tests::
+    // a_run_cut_short_by_a_restart_is_logged_when_it_is_found`.
+    // 26 -> 27 at WP-62 repair 1: `pull.run whether a pull run was left open
+    // is not known` (DB-B34), the scan's third answer, whose site is in
+    // `pullrun` and is read back by the same test.
+    const REACHED_IN_SERVER_TESTS: usize = 27;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
-    const REACHED_IN_RECOVERY_TESTS: usize = 2;
+    // 2 -> 3 at WP-81 repair 2 (DB-B79, DB-B71): `api.recovery recovery not
+    // resumed` of a start that writes nothing, driven through
+    // `server::recovery_at_start` and read back by recovery::tests::
+    // a_start_that_refuses_writes_names_the_plan_in_flight_and_claims_nothing.
+    const REACHED_IN_RECOVERY_TESTS: usize = 3;
     /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
     /// named here rather than quietly counted: `pull.roll walk starting`,
     /// `pull.roll group starting` and `pull.roll walk finished`. They report a
@@ -1604,10 +1953,29 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
+    /// ONE THAT LEFT THIS LIST, added with D-1481 (v3b-2) and moved to
+    /// `REACHED_IN_SERVER_TESTS` by P1-17-02 (D-1920): `api.serve the serve
+    /// lock is held but could not be stamped`. It fires only when writing the
+    /// stamp fails while emptying the same file succeeds, a split no fixture
+    /// produces on one descriptor. The report step now lives in
+    /// `note_unstamped_lock`, which
+    /// `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// calls directly with the warning `stamp_outcome` produced, and reads the
+    /// event back.
+    ///
     /// The rows of the table above, every one of them struck through — plus
     /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 8;
+    ///
+    /// AND TWO MORE, added with D-1582 and D-1583 (audit-20261003):
+    /// `api.main engine tasks abandoned at shutdown`, whose arm
+    /// `sweeprun::tests::stopping_does_not_wait_out_a_running_engine_task`
+    /// drives, but which only ever writes into the sink of a process that is
+    /// ending; and `api.request failed-request lines suppressed in the
+    /// previous window`, which needs more than fifty cross-site failures and
+    /// then a minute's wait — the ration it reports is proven by
+    /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
+    const UNREACHABLE: usize = 10;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1620,9 +1988,50 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 57 -> 58 at D-0695's ninth repair: a census row served unreadable
     // because its stamps contradict its absence, driven in `server`'s census
     // request tests.
+    //
+    // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
+    //
+    // 59 -> 60 at D-1443: `api.calendar withheld`, driven in the table above.
+    //
+    // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
+    // unreachable list above.
+    //
+    // 61 -> 63 at D-1765: `api.backtest limit ignored` and `api.logs filter
+    // ignored`, both driven in the table above.
+    //
+    // 63 -> 65 at D-1582 and D-1583, merged in: the two unreachable sites
+    // named above.
+    //
+    // 65 -> 66 at D-3313: the before-first-bar note, reached in server tests.
+    //
+    // 66 -> 67 at D-3341: `api.audit whole note not appended`, driven in the
+    // table above.
+    //
+    // 67 -> 68 at WP-36 (DB-N19): `api.calendar warmed`, driven in the table
+    // above.
+    //
+    // 68 -> 70 at WP-33c: `audit::note_index` and `logs::note_access`, both
+    // driven in the table above.
+    //
+    // 70 -> 72 at D-3349 (WP-39): the window's one hole line (DB-N17), driven
+    // in the table above, and the abandoned-request line (DB-N15), reached in
+    // server tests.
+    //
+    // 72 -> 73 at WP-61 (DB-B28): `api.pull hand runs asked to stop`, driven
+    // in the table above.
+    //
+    // 73 -> 76 at WP-62 (DB-B25, DB-B27, DB-B34): the three sites named above
+    // `REACHED_IN_SERVER_TESTS`.
+    //
+    // 76 -> 77 at WP-62 repair 1 (DB-B34): the restart scan's NOT KNOWN
+    // line, named above `REACHED_IN_SERVER_TESTS`.
+    //
+    // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
+    // `api.recovery recovery not resumed`, reached in recovery tests. (That
+    // branch counted 73 -> 74; the two packages' sites are added here.)
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 58,
+        lib_sites, 78,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

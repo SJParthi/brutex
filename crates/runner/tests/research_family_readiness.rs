@@ -6,6 +6,7 @@ use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionSeriesV1, ExitGridErrorV1, ExitGridPolicyV1,
     ExitGridSelectorV1, ForcedStopV1, InstrumentFamilyV1, RangeResolutionV1, RatioLimitsV1,
     RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+    printed_ohlcv_cost_model_id_v2,
 };
 use runner::research_family::{
     RESEARCH_FAMILY_BYTES_V1, RESEARCH_FAMILY_CAPACITY_V1, ResearchFamilyErrorV1, ResearchFamilyV1,
@@ -232,6 +233,15 @@ fn policy_with_forced(
     cells: u64,
     forced: ForcedStopV1,
 ) -> Result<ExitGridPolicyV1, ExitGridErrorV1> {
+    policy_with_model(side, cells, forced, printed_ohlcv_cost_model_id_v2())
+}
+
+fn policy_with_model(
+    side: Side,
+    cells: u64,
+    forced: ForcedStopV1,
+    cost_model: [u8; 32],
+) -> Result<ExitGridPolicyV1, ExitGridErrorV1> {
     let half = RationalPercentileV1::new(1, 2)?;
     let full = RationalPercentileV1::new(1, 1)?;
     ExitGridPolicyV1::new(
@@ -242,7 +252,7 @@ fn policy_with_forced(
         RatioLimitsV1::new(100, 1_000, 16)?,
         cells,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v1(),
+        cost_model,
         forced,
         3,
         2,
@@ -342,7 +352,10 @@ fn cash_uses_identical_observed_levels_without_becoming_a_legacy_index() -> Test
 fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> TestResult {
     // Captured from the prior compiled runner9d3d9971a1dd87bf, not calculated
     // through the new resolver. Ignored baseline helper/log records all inputs.
-    let expected = [
+    // These are cost model V1 identities and stay as that record: D-1514 made
+    // the grid cost model V2, the policy digest hashes the model, so a V1
+    // policy is now refused by name and these values are never produced again.
+    let recorded_v1 = [
         (
             "NIFTY",
             Side::Long,
@@ -376,13 +389,53 @@ fn legacy_resolution_identity_matches_the_recorded_pre_extraction_library() -> T
             ],
         ),
     ];
+    // The same four resolutions under cost model V2, pinned from this build at
+    // D-1514 (not an independent capture). Only the model term changed, so
+    // each differs from its V1 record above.
+    let expected_v2: [[u8; 32]; 4] = [
+        [
+            242, 239, 165, 44, 219, 143, 118, 70, 240, 4, 246, 50, 233, 77, 122, 103, 72, 235, 46,
+            162, 148, 193, 127, 68, 172, 156, 69, 182, 84, 179, 77, 0,
+        ],
+        [
+            28, 113, 71, 223, 92, 254, 33, 215, 42, 36, 245, 109, 209, 227, 232, 246, 222, 221,
+            209, 253, 174, 197, 177, 31, 218, 244, 90, 160, 50, 57, 210, 133,
+        ],
+        [
+            111, 222, 3, 157, 209, 41, 75, 127, 129, 15, 29, 150, 216, 112, 49, 222, 166, 215, 243,
+            152, 27, 178, 141, 1, 124, 170, 167, 49, 235, 133, 227, 236,
+        ],
+        [
+            17, 139, 116, 92, 224, 19, 129, 104, 71, 186, 192, 5, 70, 117, 247, 132, 229, 23, 51,
+            156, 226, 235, 200, 45, 23, 216, 49, 88, 83, 224, 137, 59,
+        ],
+    ];
     let bars = training();
-    for (name, side, expected) in expected {
+    for ((name, side, v1), v2) in recorded_v1.into_iter().zip(expected_v2) {
         let key = InstrumentKey::index(Exchange::Nse, name)?;
         let series =
             ExecutionSeriesV1::new(&key, "generated-test", "generated-build", [7; 32], &bars)?;
         let resolved = policy(side, 10_000)?.resolve_attested(series)?;
-        assert_eq!(resolved.digest(), expected, "{name} {side:?}");
+        assert_eq!(resolved.digest(), v2, "{name} {side:?}");
+        assert_ne!(
+            v2, v1,
+            "{name} {side:?}: the cost model is part of the identity"
+        );
+        let series =
+            ExecutionSeriesV1::new(&key, "generated-test", "generated-build", [7; 32], &bars)?;
+        let old = policy_with_model(
+            side,
+            10_000,
+            ForcedStopV1::Disabled,
+            printed_ohlcv_cost_model_id_v1(),
+        )?;
+        assert!(
+            matches!(
+                old.resolve_attested(series),
+                Err(ExitGridErrorV1::SupersededCostModelIdV1)
+            ),
+            "{name} {side:?}: a V1 policy is refused by name"
+        );
     }
     Ok(())
 }

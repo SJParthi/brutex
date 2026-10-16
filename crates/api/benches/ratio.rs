@@ -31,6 +31,30 @@
 //!
 //! See `crates/store/benches/ratio.rs` for why there is no benchmarking
 //! framework and why every ratio here is integer arithmetic.
+//!
+//! # One sub-module per route family, each owned by the package that builds it
+//!
+//! The pages above are this file's own. The /db routes get a file each under
+//! `benches/ratio/`, called from [`main`]: `census` (the census probe, WP-30),
+//! `window` (the `/bars/window.json` seek, WP-31), `spot` (the `/spot.json`
+//! probe, WP-32) and `sources` (the All sources routes, WP-37, not built yet
+//! and said so). The WP-01 seam created them so each package adds its rows to
+//! its own file and never to this one. The month fixture they share is below.
+//!
+//! Each is mounted by `#[path]`: this file is the bench's crate root, and a
+//! crate root's bare `mod census;` resolves beside it, to `benches/census.rs`,
+//! where cargo would also take it for a bench target of its own.
+
+#[path = "ratio/census.rs"]
+mod census;
+#[path = "ratio/logs_dirs.rs"]
+mod logs_dirs;
+#[path = "ratio/sources.rs"]
+mod sources;
+#[path = "ratio/spot.rs"]
+mod spot;
+#[path = "ratio/window.rs"]
+mod window;
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -125,6 +149,110 @@ fn ratio(label: &str, base_ps: u128, at_ps: u128, ceiling: u128) -> bool {
 fn refuse(what: &str) -> ! {
     println!("  {what} was refused — the bench measured nothing");
     std::process::exit(1);
+}
+
+/// The three month sizes the route rows time, in bars: 1x / 10x / 100x.
+///
+/// One-second bars, because 102,400 of them fit one month (under 29 hours) and
+/// a one-minute month holds at most 44,640: the store's month admission
+/// refuses the rest (D-0915).
+///
+/// **1x is the smallest month the store indexes**,
+/// `store::time_index::INDEX_MIN_ROWS` bars (D-4933). A month under it is
+/// given no `.tix` and no `.srt`: its seek bisects and its value sort orders
+/// its own rows, which are not the paths these rows time. At 1,000, this
+/// array's first size before that rule, the 1x month took those paths while
+/// 10x and 100x read the indexes, so every ratio compared a bisection or an
+/// in-memory sort with an index read and passed whatever the index cost.
+/// [`month_file`] refuses a month that is not indexed, so a threshold raised
+/// past these sizes stops the bench rather than re-routing it.
+const MONTH_SIZES: [usize; 3] = [1_024, 10_240, 102_400];
+
+/// 2024-06-01 00:00 IST in epoch microseconds, where every fixture bar starts.
+const JUNE_2024_IST_START: i64 = 1_717_180_200_000_000;
+
+/// The month every route fixture is filed under.
+fn bench_month() -> store::path::YearMonth {
+    match store::path::YearMonth::new(2024, 6) {
+        Ok(month) => month,
+        Err(_) => refuse("June 2024 is a real month"),
+    }
+}
+
+/// The stamp of fixture bar `i`: one second apart from the month's start.
+fn second(i: usize) -> i64 {
+    let raw = i64::try_from(i).unwrap_or(i64::MAX);
+    JUNE_2024_IST_START.saturating_add(raw.saturating_mul(1_000_000))
+}
+
+/// One one-second month of `n` bars on disk -- GDFL, NSE INDEX NIFTY, June
+/// 2024 -- opened for reading, and the store root that owns it.
+///
+/// The root is returned so it outlives the file, and each caller removes it
+/// when it is done. Appended in one batch, so the setup is out of every figure.
+fn month_file(name: &str, n: usize) -> (store::file::BarFile, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-api-bench-{name}-{n}-{}",
+        std::process::id()
+    ));
+    let _ignored = std::fs::remove_dir_all(&root);
+    if let Err(why) = std::fs::create_dir_all(&root) {
+        refuse(&format!("the bench store root would not create: {why}"));
+    }
+    let Ok(path) = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: store::path::Timeframe::SECOND_1,
+        month: bench_month(),
+        file: store::path::FileKind::Bars,
+    }) else {
+        refuse("the bench path is a legal one")
+    };
+    // THE ID `pull::ingest` STAMPS AND `api::bars::open` CHECKS: the low 32
+    // bits of the symbol's 64-bit FNV-1a. A month created under any other id is
+    // refused by every reader on reopen, so the window seek would time a
+    // refusal rather than a page.
+    let Ok(symbol_id) = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+    else {
+        refuse("the low 32 bits of a hash fit 32 bits")
+    };
+    let mut file = match store::file::BarFile::open_or_create(&root, path, symbol_id) {
+        Ok(file) => file,
+        Err(why) => refuse(&format!("the bench month would not open: {why}")),
+    };
+    let batch: Vec<store::format::Bar> = (0..n)
+        .map(|i| {
+            let raw = i64::try_from(i).unwrap_or(0);
+            store::format::Bar {
+                ts_micros: second(i),
+                open: 2_000_000 + raw,
+                high: 2_000_100 + raw,
+                low: 1_999_900 + raw,
+                close: 2_000_050 + raw,
+                volume: 1_000,
+                open_interest: store::format::OI_NULL,
+            }
+        })
+        .collect();
+    if let Err(why) = file.append(&batch) {
+        refuse(&format!("the bench month would not fill: {why}"));
+    }
+    // BOTH INDEXES OR NO MEASUREMENT (D-4933): a month the store gave no
+    // `.tix` or no `.srt` would time the bisection or the in-memory sort.
+    let lookup = file.time_lookup();
+    let srt = path
+        .with_file(store::path::FileKind::SortIndex)
+        .to_path_buf(&root);
+    if lookup != store::file::TimeLookup::Indexed || !srt.is_file() {
+        refuse(&format!(
+            "a {n}-bar bench month with its .tix and .srt (found {lookup:?}, .srt {})",
+            if srt.is_file() { "present" } else { "absent" }
+        ));
+    }
+    (file, root)
 }
 
 /// One synthetic instrument key.
@@ -463,6 +591,11 @@ fn main() {
     ok &= every_order_and_pill_is_flat(&f);
     ok &= the_hatch_and_the_last_page_are_flat(&f);
     search_is_measured_and_named(&f);
+    ok &= census::probes_are_flat();
+    ok &= window::seeks_are_flat();
+    ok &= spot::probes_are_flat();
+    ok &= sources::pages_are_flat();
+    ok &= logs_dirs::reads_are_flat("C-LG-01", "C-LG-02");
     if ok {
         println!("all ratios within the ceiling");
     } else {

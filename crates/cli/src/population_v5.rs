@@ -12,24 +12,22 @@
 //! before a separate Completion, and a commit becomes authority only after a
 //! fresh read-only reopen reproduces every prepared byte.
 //!
-//! Sequential codec, hashing and persistence work is O(C) in Candidate count.
-//! Duplicate/index operations use `HashSet`/`HashMap`, so their stated cost is
-//! expected/amortized O(C), with a conservative O(C²) collision worst case;
-//! retained row and uniqueness state is O(C).  Fixed-record offset arithmetic
+//! Preparing, encoding and row-seal hashing the C new rows is O(C) in
+//! Candidate count. Persistence also rescans the whole ledger, decoding and
+//! seal-checking every one of its R rows, which is O(R); see
+//! `commit_population_v5`. Duplicate/index operations use
+//! `HashSet`/`HashMap`, so their stated cost is expected/amortized O(C), with
+//! a conservative O(C²) collision worst case; retained row and uniqueness
+//! state is O(C).  Fixed-record offset arithmetic
 //! alone is O(1). Generation validation hashes bounded files and is not O(1).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "Population V5 and its Execution V3 successor remain crate-private until the all-rung coordinator consumes their authenticated authorities"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -88,10 +86,8 @@ const COMPLETION_FILE: &str = "population-completions-v5.bin";
 const LOCK_FILE: &str = "population-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_ROW_BYTES);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_COMPLETION_BYTES);
@@ -285,196 +281,508 @@ impl PopulationV5FinalizationProjection {
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn finalization_id(&self) -> [u8; 32] {
         self.finalization_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn candidate_universe_id(&self) -> [u8; 32] {
         self.candidate_universe_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn candidate_completion_digest(&self) -> [u8; 32] {
         self.candidate_completion_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn candidate_semantic_id(&self) -> [u8; 32] {
         self.candidate_semantic_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn candidate_row_digest(&self) -> [u8; 32] {
         self.candidate_row_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn pre_admission_authority_id(&self) -> [u8; 32] {
         self.pre_admission_authority_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn statistics_audit_id(&self) -> [u8; 32] {
         self.statistics_audit_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn statistics_completion_digest(&self) -> [u8; 32] {
         self.statistics_completion_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn statistics_period_digest(&self) -> [u8; 32] {
         self.statistics_period_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn statistics_split_digest(&self) -> [u8; 32] {
         self.statistics_split_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_pair_id(&self) -> [u8; 32] {
         self.search_pair_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_member_id(&self) -> [u8; 32] {
         self.search_member_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_signal_digest(&self) -> [u8; 32] {
         self.search_signal_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_signal_bars(&self) -> u64 {
         self.search_signal_bars
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_signal_first_ts_micros(&self) -> i64 {
         self.search_signal_first_ts_micros
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_signal_last_ts_micros(&self) -> i64 {
         self.search_signal_last_ts_micros
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_signal_column_digest(&self) -> [u8; 32] {
         self.search_signal_column_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_policy_id(&self) -> [u8; 32] {
         self.search_policy_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_full_grid_id(&self) -> [u8; 32] {
         self.search_full_grid_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_long_policy_id(&self) -> [u8; 32] {
         self.search_long_policy_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_long_resolution_id(&self) -> [u8; 32] {
         self.search_long_resolution_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_short_policy_id(&self) -> [u8; 32] {
         self.search_short_policy_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_short_resolution_id(&self) -> [u8; 32] {
         self.search_short_resolution_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_family_id(&self) -> [u8; 32] {
         self.search_family_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_walk_id(&self) -> [u8; 32] {
         self.search_walk_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_fold_count(&self) -> u64 {
         self.search_fold_count
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_decided_folds(&self) -> u64 {
         self.search_decided_folds
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_profitable_oos_folds(&self) -> u64 {
         self.search_profitable_oos_folds
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_aggregate_oos_paisa(&self) -> i64 {
         self.search_aggregate_oos_paisa
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn search_evaluated_population_count(&self) -> u64 {
         self.search_evaluated_population_count
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn paired_base_id(&self) -> [u8; 32] {
         self.paired_base_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn base_completion_id(&self) -> [u8; 32] {
         self.base_completion_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn base_evidence_id(&self) -> [u8; 32] {
         self.base_evidence_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_block_id(&self) -> [u8; 32] {
         self.admission_block_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_completion_id(&self) -> [u8; 32] {
         self.admission_completion_id
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_runner_decision_digest(&self) -> [u8; 32] {
         self.admission_runner_decision_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_evidence_digest(&self) -> [u8; 32] {
         self.admission_evidence_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_verdict_digest(&self) -> [u8; 32] {
         self.admission_verdict_digest
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_decision_id(&self) -> [u8; 32] {
         self.admission_decision_id
     }
@@ -1830,11 +2138,27 @@ impl PopulationV5StructuralReceipt {
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn block_sequence(self) -> u64 {
         self.block_sequence
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn first_row_record(self) -> u64 {
         self.first_row_record
     }
@@ -1855,6 +2179,11 @@ impl PopulationV5StructuralReceipt {
     }
 
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn completion_id(self) -> [u8; 32] {
         self.completion_id
     }
@@ -1870,6 +2199,14 @@ impl PopulationV5StructuralReceipt {
     }
 
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn source_finalization_ordered_row_digest(self) -> [u8; 32] {
         self.source_finalization_ordered_row_digest
     }
@@ -2404,6 +2741,14 @@ impl PopulationV5Ledger {
         combine_lock_result(result, released)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     fn authenticated_row(
         &mut self,
         receipt: &PopulationV5StructuralReceipt,
@@ -2583,6 +2928,14 @@ impl PopulationV5Authority {
     }
 
     /// Reads one fixed-offset row after validating every retained generation.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -2641,6 +2994,29 @@ impl CommittedStoredPopulationV5 {
     /// Revalidates the complete live upstream source and V5 generations before
     /// returning one exact row. No embedded or detached identity can mint this
     /// capability.
+    ///
+    /// # Cost
+    ///
+    /// Each call prepares the whole Population from the live upstream source
+    /// twice, before and after its one row read: each preparation joins every
+    /// upstream input and derives every one of the C rows, and one of them is
+    /// compared. One row read is therefore Θ(C) row derivation twice, plus
+    /// the upstream joins and the V5 generation hashing, not O(1).
+    /// The one row read goes through `PopulationV5Authority::authenticated_row`
+    /// to the ledger's fixed-offset `authenticated_row`, not through the
+    /// whole-block `authenticated_rows`.
+    /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
+    /// files per call".
+    /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+    /// cost.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) fn authenticated_row(
         &mut self,
         global_sequence: u64,
@@ -2752,6 +3128,28 @@ impl CommittedStoredPopulationV5 {
 /// C Candidates. Hash-backed duplicate/index work is expected/amortized O(C),
 /// with a conservative O(C²) collision worst case. The operation is
 /// intentionally not described as O(1).
+///
+/// The file bytes above include the whole V5 ledger, and not once. The ledger
+/// is scanned, every row decoded, three times per written commit: `open_write`
+/// scans it, `finish_written` scans it again after the Completion, and the
+/// fresh `open_read` scans it a third time; a reused Population is scanned
+/// twice, because `reuse_existing` neither scans nor calls `finish_written`.
+/// Each scan decodes every row of every Population already in the ledger,
+/// and decoding a row validates it, re-encodes it (which validates it again),
+/// and `validate_complete_block` validates it once more, so the V5 ledger
+/// work of one commit is O(R) in the ledger's total rows R, not O(C).
+/// Separately, every generation check hashes the lock, row and Completion
+/// files whole, each of them twice; this counts scans, not those hashes.
+/// On top of the ledger work, `PreparedPopulationV5::from_authority` runs
+/// twice, before the write and after the reopen, and each run joins every
+/// upstream input: `population_v5_inputs` calls `ordered_row_projections`,
+/// which hashes the Finalization V3 files whole, and
+/// `ordered_successor_projections`. One commit is therefore O(R) plus two
+/// whole upstream joins, not O(R) alone.
+/// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole files
+/// per call".
+/// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+/// cost.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
@@ -3108,10 +3506,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Population V5 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationV5Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Population V5 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root_directory(
@@ -3554,6 +3953,7 @@ mod tests {
         PopulationV5AdmissionFixtureRequest, population_v5_test_admission_fixture_for,
         verify_population_v5_canonical_record as verify_admission_fixture,
     };
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -4683,6 +5083,45 @@ mod tests {
                 completed_receipt
             );
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        let prepared = prepared(1, 1);
+        create_empty_files(root.path());
+        let row_path = root.path().join(ROW_FILE);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&row_path)
+            .expect("open orphan row file");
+        append_raw(
+            &mut file,
+            &prepared.rows[0].encode().expect("encode orphan row"),
+        )
+        .expect("append orphan row");
+        drop(file);
+        for (name, width) in [
+            (ROW_FILE, POPULATION_V5_ROW_BYTES),
+            (COMPLETION_FILE, POPULATION_V5_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let commit = PopulationV5Ledger::open_write(root.path(), bounds())
+            .expect("the rolled-back prefix is still recoverable")
+            .append(&prepared)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(commit.was_written());
+        let mut expected_rows = Vec::new();
+        for row in &prepared.rows {
+            expected_rows.extend_from_slice(&row.encode().expect("encode expected row"));
+        }
+        assert_eq!(std::fs::read(&row_path).expect("read rows"), expected_rows);
     }
 
     #[test]

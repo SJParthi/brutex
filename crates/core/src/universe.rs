@@ -1147,6 +1147,15 @@ pub const FNO_UNDERLYINGS: [&str; 213] = [
 /// five now. `NIFTY` and `BANKNIFTY` stay on the surface through the index
 /// arm, as [`InstrumentKey::SWEPT`], which is the shape they actually have.
 /// D-0682.
+///
+/// # Not the option-underlying segment authority
+///
+/// These are TODAY's index underlyings. The store also holds options on
+/// NIFTYIT and NIFTYCPSE (2019 to 2020) and NIFTYFPI (2026), and resolving an
+/// option's underlying from these five read those as shares (DB-G54). Which
+/// segment and key an option's underlying lives under is
+/// [`crate::alias::option_underlying`]'s answer, from the sourced table every
+/// one of these five has a row in (D-3332).
 pub const FNO_INDEX_UNDERLYINGS: [&str; 5] =
     ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "NIFTYNXT50"];
 
@@ -4489,9 +4498,14 @@ impl<const N: usize> MemberIndex<N> {
 /// engine builds for.
 ///
 /// `n` must be a power of two — `hash & (n - 1)` is the modulo `n` a probe
-/// needs only then, and it is `0` for `n = 0` after the subtraction wraps.
-/// [`MemberIndex::build`] asserts that for every table, and this function is
-/// `pub(crate)` and reached from nowhere that does not go through one.
+/// needs only then. `n = 0` does NOT wrap: `n as u64 - 1` underflows, and
+/// with overflow checks on — the `dev` and `release` profiles both keep them
+/// (`Cargo.toml`) — that is a panic at run time and a compile error in a
+/// `const` context. It is unreachable rather than tolerated:
+/// [`MemberIndex::build`] asserts `is_power_of_two` for every table, which
+/// `0` is not, and this function is `pub(crate)` and reached from nowhere
+/// that does not go through one. (This said "it is `0` for `n = 0` after the
+/// subtraction wraps"; crash-edge-pass20 row 200, D-1955.)
 ///
 /// `pub(crate)` for the same reason [`MemberIndex::slots`] is: a probe-length
 /// test in another module of this crate must start where `contains` starts,
@@ -4608,10 +4622,29 @@ pub static NIFTY_50_INDEX: MemberIndex<256> = MemberIndex::build(&NIFTY_50);
 /// `an_index_is_its_own_universe_and_a_live_derivative_is_in_none` asserts the
 /// answer it produces. Being the underlying of a contract and being a
 /// constituent of an index are different facts, read from different files.
+///
+/// # An index is asked under its F&O symbol, not its store key
+///
+/// The store keys an index on its own name -- `NIFTYFINSERVICE`, from NSE's
+/// `NIFTY FIN SERVICE` -- while [`FNO_UNDERLYINGS`] names the same index by its
+/// derivatives symbol, `FINNIFTY`. Asked under the store key, the F&O list
+/// answered no, so three of the five F&O index underlyings carried `INDEX`
+/// alone and `/db`'s F&O universe showed two of five (DB-040). The index arm
+/// now asks under [`crate::alias::IndexRow::listed_as`]: the row's F&O symbol,
+/// or the store key itself for an index with none (INDIA VIX) or a key the
+/// table does not name. One more probe, of a compile-time table. D-3332.
+///
+/// This changes no membership the lists state: `FINNIFTY` is in
+/// [`FNO_UNDERLYINGS`] already, and the alias only says which store key it is.
 #[must_use]
 pub fn of_instrument(key: &InstrumentKey) -> Universe {
     match key.kind {
-        Kind::Index => Universe::INDEX.union(of_equity(key.underlying.as_str())),
+        Kind::Index => {
+            let stored = key.underlying.as_str();
+            let listed =
+                crate::alias::index_by_store_key(stored).map_or(stored, |row| row.listed_as());
+            Universe::INDEX.union(of_equity(listed))
+        }
         Kind::Equity => of_equity(key.underlying.as_str()),
         // A live derivative is never stored, so it never reaches a universe.
         // Saying `NONE` is accurate; inventing membership for it would not be.
@@ -5681,6 +5714,45 @@ mod tests {
                 "{sme} is an SME listing and is in neither universe"
             );
         }
+    }
+
+    /// **ALL FIVE F&O INDEX UNDERLYINGS ARE F&O UNDER THE KEYS THE STORE
+    /// FILES THEM UNDER (DB-040).** FINNIFTY, MIDCPNIFTY and NIFTYNXT50 are
+    /// stored as NIFTYFINSERVICE, NIFTYMIDSELECT and NIFTYNEXT50; asked under
+    /// those keys the F&O list said no. Indices with derivatives that are not
+    /// in today's list (NIFTYIT, NIFTYCPSE, NIFTYFPI150), INDIA VIX and an
+    /// index the table does not name stay `INDEX` alone: the alias names the
+    /// key, and the list still decides membership.
+    #[test]
+    fn an_fno_index_is_fno_under_its_store_key_and_no_other_index_becomes_one() {
+        use crate::instrument::Exchange;
+        for key in [
+            "NIFTY",
+            "BANKNIFTY",
+            "NIFTYFINSERVICE",
+            "NIFTYMIDSELECT",
+            "NIFTYNEXT50",
+        ] {
+            let index = InstrumentKey::index(Exchange::Nse, key).expect("valid");
+            let u = of_instrument(&index);
+            assert!(u.contains(Universe::INDEX), "{key}");
+            assert!(u.contains(Universe::FNO), "{key} is an F&O underlying");
+            assert!(!u.contains(Universe::TOTAL_MARKET), "{key}");
+        }
+        for key in [
+            "NIFTYIT",
+            "NIFTYCPSE",
+            "NIFTYFPI150",
+            "INDIAVIX",
+            "NIFTY100",
+        ] {
+            let index = InstrumentKey::index(Exchange::Nse, key).expect("valid");
+            assert_eq!(of_instrument(&index), Universe::INDEX, "{key}");
+        }
+        // The SHARE arm is untouched: a cash key named after an index is
+        // asked under its own name, exactly as before.
+        let cash = InstrumentKey::cash(Exchange::Nse, "NIFTYFINSERVICE").expect("valid");
+        assert_eq!(of_instrument(&cash), Universe::NONE);
     }
 
     #[test]

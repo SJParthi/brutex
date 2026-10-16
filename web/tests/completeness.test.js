@@ -1,11 +1,19 @@
-// THE TWO /db COMPLETENESS DEFECTS, EACH WITH THE STATE THAT PRODUCED IT.
+// COVERAGE AGAINST THE CALENDAR OF RECORD (WP-54; D-3336, D-3320, D-3319).
 //
-// `node --test web/tests/` — the runner is node's own, so this costs no
-// dependency and no toolchain. It runs the same module `routes/db/+page.svelte`
-// imports; nothing here is a copy of the page's arithmetic.
+// `node --test web/tests/` — node's own runner, no dependency. This drives the
+// module the /db coverage grid imports, `$lib/completeness.js`, over ledgers
+// built by `$lib/calendar-owed.js` from synthetic `/calendar.json` bodies in
+// the server's own shape (`crates/api/src/calendar_record.rs`). The day strings
+// and counts are invented; the ARITHMETIC they exercise is the one each
+// finding measured on the operator's store:
 //
-// Both cases below were REPRODUCED against the shipped page before the fix, by
-// running its own expressions over these exact rows.
+//   DB-014 / DB-G34  a hole every series shares read "full" against the
+//                    fullest peer; a CAS-eligible share read short against the
+//                    index; NIFTY 1s 2018-09 read "full 100.00%" at 4,00,200
+//                    bars against 18 x 22,500 = 4,05,000 owed.
+//   DB-G63           a trade-driven option read 0.0065% covered.
+//   DB-012           absent months were never drawn.
+//   DB-013 / DB-G35  a derived rung behind its 1min source read as ordinary.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,155 +22,365 @@ import {
   denominators,
   denomKey,
   isSole,
+  judgeRow,
+  absentMonths,
   rollUpMonths,
-  monthVerdict
+  monthVerdict,
+  isTradeDriven,
+  segmentOfKey,
+  derivedPartial,
+  istDayOf,
+  peersAtMost,
+  STORE_WIDE_SHARE
 } from '../src/lib/completeness.js';
+import { owedLedger, epochDayOfIso } from '../src/lib/calendar-owed.js';
 
 /**
- * One decorated row, the way `deco` builds it, given the denominators.
+ * A synthetic `/calendar.json` body over `from` with the given day codes.
  *
- * @param {import('../src/lib/completeness.js').Row & { instrument?: string }} row
- * @param {{ fullest: Map<string, number>, support: Map<string, number> }} d
+ * @param {{ from: string, days: string, regular: number, cas?: number | null, special?: any[], held?: string | null, series?: { symbol: string, segment: string } | null, rung?: string }} o
  */
-function deco(row, { fullest, support }) {
-  const denom = fullest.get(denomKey(row.month, row.timeframe)) ?? row.rows;
-  const sole = isSole(support, row);
+function body(o) {
   return {
-    ...row,
-    denom,
-    sole,
-    short: Math.max(0, denom - row.rows),
-    pct: sole ? null : denom > 0 ? row.rows / denom : 1
+    status: 'ok',
+    feed: 'zerodha',
+    rung: o.rung ?? '1min',
+    from: epochDayOfIso(o.from),
+    days: o.days,
+    held: o.held ?? null,
+    heldBy: o.series ? [o.series.symbol] : ['BANKNIFTY', 'NIFTY'],
+    target: o.series ? { kind: 'series', exchange: 'NSE', ...o.series } : { kind: 'exchange' },
+    owed: { rung: o.rung ?? '1min', regular: o.regular, casEligible: o.cas ?? null },
+    special: o.special ?? [],
+    halts: []
   };
 }
 
-/**
- * @param {(import('../src/lib/completeness.js').Row & { instrument?: string })[]} rows
- */
-function decorate(rows) {
-  const d = denominators(rows);
-  return rows.map((r) => deco(r, d));
+/** A census row of one instrument-month. */
+function row(/** @type {Partial<import('../src/lib/completeness.js').Judgeable> & { instrument: string, month: string, rows: number }} */ r) {
+  return {
+    timeframe: '1min',
+    firstAt: null,
+    lastAt: null,
+    expiry: null,
+    strike: null,
+    underlying: r.instrument.split('-').slice(2).join('-'),
+    ...r
+  };
 }
 
-/**
- * The one `find` result a test may use, and it is not the same as `find`.
- *
- * `Array.prototype.find` returns `T | undefined`, so every `assert.equal` on the
- * result below reads a property off a possibly-absent object. When the row IS
- * absent the test still fails — but with "cannot read property of undefined",
- * which names the assertion's own bug rather than the fixture's. This turns the
- * absence into its own failure, with the key that was missing in the message.
- *
- * @template T
- * @param {T[]} rows
- * @param {(row: T) => boolean} match
- * @param {string} what
- * @returns {T}
- */
-function pick(rows, match, what) {
-  const found = rows.find(match);
-  assert.ok(found, `the fixture holds no ${what}`);
-  return found;
-}
+// 2024-11-01 (a Friday) to 2024-11-30: the 1st a Muhurat (P), weekends
+// closed, two weekday holidays — 19 sessions, as the record has it.
+const NOV_CODES = 'P..RRRRR..RRRR...RRRR..RRRRR..';
 
-test('a month held at two rungs reads the same whichever row arrives first', () => {
-  // 2021-08 holding NIFTY@1day=23, NIFTY@1min=8,625 and BANKNIFTY@1min=8,625.
-  // Every row IS the fullest at its own rung, so the month is genuinely
-  // complete — `routes/+page.svelte` states outright that a month held at two
-  // rungs is "a legitimate state of the store, not a fault".
-  const daily = { instrument: 'NSE-INDEX-NIFTY', month: '2021-08', timeframe: '1day', rows: 23 };
-  const minute = { instrument: 'NSE-INDEX-NIFTY', month: '2021-08', timeframe: '1min', rows: 8625 };
-  const bank = { instrument: 'NSE-INDEX-BANKNIFTY', month: '2021-08', timeframe: '1min', rows: 8625 };
-
-  const dailyFirst = rollUpMonths(decorate([daily, minute, bank]))[0];
-  const minuteFirst = rollUpMonths(decorate([minute, bank, daily]))[0];
-
-  // THE DEFECT: `fullest` was snapshot from the first row of the month and
-  // multiplied by the row count, so the daily-first order gave 17,273 / (3 ×
-  // 23) = 25,033.33% and the minute-first order gave 66.75%.
-  assert.equal(dailyFirst.pct, minuteFirst.pct, 'the same month, two row orders, one answer');
-  assert.equal(dailyFirst.pct, 1, 'and the answer is that the month is complete');
-  assert.equal(dailyFirst.state, 'full');
-  assert.equal(minuteFirst.state, 'full');
-  assert.equal(dailyFirst.owed, 23 + 8625 + 8625, 'each row against its OWN rung');
-  assert.equal(dailyFirst.missing, 0);
-  // AND THE MONTH HOLDS TWO RUNGS, so there is no single "fullest" figure and
-  // no single session size. `tf === false` is what the page draws a dash from.
-  assert.equal(dailyFirst.tf, false);
-  assert.equal(minuteFirst.tf, false);
+test('a hole every series shares is a store-wide hole, never "full" (DB-012, DB-014, DB-G34)', () => {
+  const held = NOV_CODES.split('').map((c, i) => (c !== '.' && i >= 3 && i < 8 ? '1' : '0')).join('');
+  const L = owedLedger(
+    body({
+      from: '2024-11-01',
+      days: NOV_CODES,
+      regular: 375,
+      cas: 360,
+      special: [{ day: epochDayOfIso('2024-11-01'), code: 'P', owed: 60, indexOwed: 60 }],
+      held,
+      series: { symbol: 'NIFTY', segment: 'INDEX' }
+    })
+  );
+  const nifty = row({ instrument: 'NSE-INDEX-NIFTY', month: '2024-11', rows: 1875 });
+  const bank = row({ instrument: 'NSE-INDEX-BANKNIFTY', month: '2024-11', rows: 1875 });
+  // BEFORE: the peer denominator. Both rows are the fullest at (2024-11,
+  // 1min), so each was "short by 0" — "full".
+  const peer = denominators([nifty, bank]);
+  assert.equal(peer.fullest.get(denomKey('2024-11', '1min')), 1875);
+  // AFTER: the calendar owes 18 x 375 + 60 = 6,810 over 19 sessions.
+  const c = judgeRow(nifty, { ledger: L, fullest: 1875, support: 2, peers: { n: 2, atMost: 2 } });
+  assert.equal(c.basis, 'calendar');
+  assert.equal(c.sessions, 19);
+  assert.equal(c.owed, 6810);
+  assert.equal(c.missing, 6810 - 1875);
+  assert.equal(c.state, 'gap');
+  assert.ok(c.notes.includes('store_wide'), 'the fullest peer is short too: the hole is the store\'s');
+  assert.ok(c.notes.includes('special'), 'the Muhurat is owed by its window');
+  // The series' own held digits: the days, not the bars.
+  assert.equal(c.heldExact, true);
+  assert.equal(c.heldSessions, 5);
+  // A second series not short of the calendar keeps the hole from being store-wide.
+  const alone = judgeRow(nifty, { ledger: L, fullest: 6810, support: 2 });
+  assert.ok(!alone.notes.includes('store_wide'));
+  // One series alone has nothing to share a hole with.
+  assert.ok(!judgeRow(nifty, { ledger: L, fullest: 1875, support: 1 }).notes.includes('store_wide'));
+  // ONE LATE-PULLED SERIES DOES NOT HIDE IT: 271 of 272 series hold no more
+  // than 1,875 (Zerodha 2024-11, where one share pulled later holds 4,093).
+  const sorted = [...Array(271).fill(1875), 4093];
+  assert.deepEqual(peersAtMost(sorted, 1875), { n: 272, atMost: 271 });
+  const outlier = judgeRow(nifty, { ledger: L, fullest: 4093, support: 272, peers: peersAtMost(sorted, 1875) });
+  assert.ok(outlier.notes.includes('store_wide'));
+  assert.ok(271 >= STORE_WIDE_SHARE * 272);
+  // A row short by more than the minute every series lacks owns the rest.
+  const own = judgeRow({ ...nifty, rows: 6000 }, { ledger: L, fullest: 6809, support: 3, peers: { n: 3, atMost: 1 } });
+  assert.ok(own.notes.includes('store_wide_part'));
+  assert.equal(own.sharedMissing, 1);
 });
 
-test('a month whose only row is short is not full — it is not comparable', () => {
-  // The store holds 2026-07 1min = 8,250 (complete) and 2026-08 1min = 1 bar:
-  // the month a backfill is landing in, or the first month ever pulled.
-  const rows = [
-    { instrument: 'NSE-INDEX-NIFTY', month: '2026-07', timeframe: '1min', rows: 8250 },
-    { instrument: 'NSE-INDEX-BANKNIFTY', month: '2026-07', timeframe: '1min', rows: 8250 },
-    { instrument: 'NSE-INDEX-NIFTY', month: '2026-08', timeframe: '1min', rows: 1 }
-  ];
-  const decorated = decorate(rows);
-  const august = pick(decorated, (r) => r.month === '2026-08', 'row for 2026-08');
-
-  // THE DEFECT: denom = its own 1 row, short = 0, state = 'full', pct = 100%.
-  assert.equal(august.sole, true);
-  assert.equal(august.short, 0, 'it is still not short of anything — that is the point');
-  assert.equal(august.pct, null, 'and there is no ratio to print');
-
-  const cards = rollUpMonths(decorated);
-  const augustCard = pick(cards, (m) => m.month === '2026-08', 'card for 2026-08');
-  assert.equal(augustCard.state, 'sole', 'not `full`');
-  assert.equal(augustCard.pct, null, 'not 100.00%');
-  assert.equal(augustCard.full, 0, 'and it is counted as complete nowhere');
-  assert.equal(augustCard.unverified, 1);
-
-  // THE CORROBORATED MONTH IS UNAFFECTED.
-  const july = pick(cards, (m) => m.month === '2026-07', 'card for 2026-07');
-  assert.equal(july.state, 'full');
-  assert.equal(july.pct, 1);
-  assert.equal(july.full, 2);
+test('a CAS-eligible share owes 360 a session from 2026-08-03 and reads full at 7,560 (DB-G34, D-3320)', () => {
+  // 21 auction days in a 30-day month (weekends closed).
+  const days = 'XX..XXXXX..XXXXX..XXXXX..XXXX.';
+  const L = owedLedger(body({ from: '2026-09-01', days, regular: 375, cas: 360 }));
+  const share = row({ instrument: 'NSE-CASH-RELIANCE', month: '2026-09', rows: 21 * 360 });
+  const c = judgeRow(share, { ledger: L });
+  assert.equal(c.sessions, 21);
+  assert.equal(c.auctionDays, 21);
+  assert.equal(c.owed, 7560);
+  assert.equal(c.owedAlt, 7875, 'the ineligible count is named beside it');
+  assert.equal(c.state, 'full');
+  assert.ok(c.notes.includes('cas'));
+  // An index on the same days owes 375: it has no auction phase.
+  const index = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', rows: 7875 }), { ledger: L });
+  assert.equal(index.owed, 7875);
+  assert.equal(index.state, 'full');
+  assert.ok(!index.notes.includes('cas'));
+  // A share at the ineligible count is full too; between the two it cannot be told.
+  assert.equal(judgeRow({ ...share, rows: 7875 }, { ledger: L }).state, 'full');
+  assert.ok(judgeRow({ ...share, rows: 7700 }, { ledger: L }).notes.includes('cas_unresolved'));
+  // Short of the eligible count is short.
+  const short = judgeRow({ ...share, rows: 7560 - 360 }, { ledger: L });
+  assert.equal(short.missing, 360);
+  assert.equal(short.state, 'near', 'one session short is under one session of 375');
 });
 
-test('a store holding one bar does not report itself complete', () => {
-  const [only] = decorate([
-    { instrument: 'NSE-INDEX-NIFTY', month: '2026-08', timeframe: '1min', rows: 1 }
-  ]);
-  assert.equal(only.sole, true);
-  assert.equal(only.pct, null);
-  const [card] = rollUpMonths([only]);
-  assert.equal(card.state, 'sole');
-  assert.equal(card.pct, null);
-  assert.equal(card.full, 0);
+test('NIFTY 1s 2018-09 is 98.81% of 18 x 22,500, not "full 100.00%" (DB-014)', () => {
+  // 18 sessions in September 2018 from the 3rd (the archive's first day).
+  const days = 'RRRRR..RRRR...RRRR..RRRR..R...';
+  const L = owedLedger(body({ from: '2018-09-03', days, regular: 22500, rung: '1s' }));
+  const r = row({ instrument: 'NSE-INDEX-NIFTY', month: '2018-09', timeframe: '1s', rows: 400200 });
+  const c = judgeRow(r, { ledger: L });
+  assert.equal(c.sessions, 18);
+  assert.equal(c.owed, 405000);
+  assert.equal(c.missing, 4800);
+  assert.equal(c.ratio?.toFixed(4), '0.9881');
+  assert.equal(c.state, 'near', '4,800 missing bars are less than one 22,500-bar session');
 });
 
-test('two instruments in one month at one rung are still judged against each other', () => {
-  // The control case: this was already caught before the fix and must stay
-  // caught. 8,250 against 1 is a hole, not an unknown.
-  const decorated = decorate([
-    { instrument: 'NSE-INDEX-NIFTY', month: '2026-08', timeframe: '1min', rows: 8250 },
-    { instrument: 'NSE-INDEX-BANKNIFTY', month: '2026-08', timeframe: '1min', rows: 1 }
-  ]);
-  const short = pick(decorated, (r) => r.instrument === 'NSE-INDEX-BANKNIFTY', 'BANKNIFTY row');
-  assert.equal(short.sole, false);
-  assert.equal(short.short, 8249);
-  // `pct` IS `number | null` AND THE NULL IS THE OTHER TEST'S SUBJECT. A `<`
-  // against null coerces to 0 and passes, so the comparison alone would hold
-  // for the very state — a sole row with nothing to compare against — that this
-  // case exists to distinguish from a hole. The type is asserted first.
-  assert.equal(typeof short.pct, 'number', 'a corroborated row HAS a ratio');
-  assert.ok(Number(short.pct) < 0.001);
-  const [card] = rollUpMonths(decorated);
-  assert.equal(card.state, 'gap');
-  assert.equal(card.unverified, 0);
+test('trade-driven series owe no count: a one-second share or an option at any rung (DB-G63, D-3336 §2)', () => {
+  const L = owedLedger(body({ from: '2019-06-03', days: 'RRRRR..RRRRR..RRRRR..RRRRR', regular: 22500, rung: '1s' }));
+  for (const r of [
+    row({ instrument: 'NSE-FNO-NIFTY-2023-12-28-1270000-PE', month: '2019-06', timeframe: '1s', rows: 11, strike: 1270000, expiry: '2023-12-28' }),
+    row({ instrument: 'NSE-CASH-RELIANCE', month: '2019-06', timeframe: '1s', rows: 200000 })
+  ]) {
+    const c = judgeRow(r, { ledger: L, fullest: 405647, support: 9 });
+    assert.equal(c.basis, 'trade');
+    assert.equal(c.state, 'trade');
+    assert.equal(c.owed, null, 'never 0.0065% of an index every second');
+    assert.equal(c.missing, null);
+    assert.equal(c.sessions, 20);
+    assert.ok(c.notes.includes('trade_driven'));
+  }
+  // A MONTH A TRADE-DRIVEN SERIES DOES NOT HOLD is a month nothing traded, not a hole.
+  const quiet = judgeRow(
+    row({ instrument: 'NSE-FNO-NIFTY-2023-12-28-1270000-PE', month: '2019-06', timeframe: '1s', rows: 0, strike: 1270000, absent: true }),
+    { ledger: L }
+  );
+  assert.equal(quiet.basis, 'trade');
+  assert.equal(quiet.state, 'absent');
+  assert.equal(quiet.missing, null, 'owed nothing, so missing nothing');
+  assert.ok(quiet.notes.includes('no_trade_month'));
+  const hole = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2019-06', timeframe: '1s', rows: 0, absent: true }), { ledger: L });
+  assert.equal(hole.missing, 450000, 'an index month with no file misses everything owed');
+  assert.ok(!hole.notes.includes('no_trade_month'));
+  assert.equal(isTradeDriven('1s', 'INDEX', null), false, 'an index is computed every second');
+  assert.equal(isTradeDriven('1min', 'FNO', 1270000), true);
+  assert.equal(isTradeDriven('1min', 'FNO', null), false, 'a future is not an option');
+  assert.equal(segmentOfKey('NSE-FNO-NIFTY-2023-12-28-1270000-PE'), 'FNO');
 });
 
-test('a month verdict over an empty set claims nothing', () => {
-  // Unreachable from the roll-up — a card exists because a row made it — and
-  // written down anyway: no row is no evidence, which is `sole` and a dash,
-  // never `full` and 100%.
-  assert.deepEqual(monthVerdict({ n: 0, bars: 0, owed: 0, missing: 0, unverified: 0 }), {
-    pct: null,
-    state: 'sole'
+test("a series' first month is owed from its first bar, a halt's minutes neither owed nor missing", () => {
+  // March 2020: the 13th is a suspected halt day owing 316 minutes.
+  const days = '.RRRRR..RRRRH..RRRRR..RRRR...RR';
+  const L = owedLedger(
+    body({
+      from: '2020-03-01',
+      days,
+      regular: 375,
+      special: [{ day: epochDayOfIso('2020-03-13'), code: 'H', owed: 316, indexOwed: 316 }]
+    })
+  );
+  const full = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2020-03', rows: 21 * 375 - 59 }), { ledger: L });
+  assert.equal(full.owed, 21 * 375 - 59);
+  assert.equal(full.state, 'full');
+  assert.ok(full.notes.includes('halt'));
+  // A share listed on the 16th owes from the 16th only, and says so.
+  const listed = judgeRow(row({ instrument: 'NSE-CASH-NEWCO', month: '2020-03', rows: 11 * 375 }), {
+    ledger: L,
+    seriesFirstDay: epochDayOfIso('2020-03-16')
   });
-  assert.deepEqual(rollUpMonths([]), []);
-  assert.deepEqual(rollUpMonths(undefined), []);
+  assert.equal(listed.sessions, 11);
+  assert.equal(listed.state, 'full');
+  assert.ok(listed.notes.includes('series_start'));
+});
+
+test('a day of unknown length is owed nothing and named; an outage day has no index count (D-0420)', () => {
+  const days = 'RRUR';
+  const L = owedLedger(
+    body({
+      from: '2021-02-22',
+      days: 'RRPR',
+      regular: 375,
+      special: [{ day: epochDayOfIso('2021-02-24'), code: 'P', owed: 220, indexOwed: null }]
+    })
+  );
+  const index = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2021-02', rows: 3 * 375 }), { ledger: L });
+  assert.equal(index.owed, 3 * 375, 'the outage day owes the index no count');
+  assert.equal(index.unknownDays, 1);
+  assert.ok(index.notes.includes('unknown_days'));
+  const share = judgeRow(row({ instrument: 'NSE-CASH-AXISBANK', month: '2021-02', rows: 3 * 375 + 220 }), { ledger: L });
+  assert.equal(share.owed, 3 * 375 + 220);
+  assert.equal(share.state, 'full');
+  const U = owedLedger(body({ from: '2021-02-22', days, regular: 375 }));
+  assert.equal(judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2021-02', rows: 1125 }), { ledger: U }).unknownDays, 1);
+});
+
+test('no ledger is "not measured" with its reason, never a verdict', () => {
+  const c = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2024-11', rows: 1875 }), {
+    ledger: null,
+    ledgerWhy: 'the server is still building this calendar'
+  });
+  assert.equal(c.basis, 'none');
+  assert.equal(c.state, 'unmeasured');
+  assert.equal(c.owed, null);
+  assert.match(c.why, /still building/);
+});
+
+test('a derived rung behind or short of its 1min source says so (DB-013, DB-G12, DB-G35)', () => {
+  const days = 'RR..RRRRR..RRRRR..RRRRR..RRRR.';
+  const one = owedLedger(body({ from: '2026-09-01', days, regular: 375 }));
+  const five = owedLedger(body({ from: '2026-09-01', days, regular: 75, rung: '5min' }));
+  const ms = (/** @type {string} */ iso) => Date.parse(`${iso}T09:59:00Z`);
+  const src = row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', rows: 21 * 375, lastAt: ms('2026-09-30') });
+  const srcCover = judgeRow(src, { ledger: one });
+  const derived = row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', timeframe: '5min', rows: 4 * 75, lastAt: ms('2026-09-04') });
+  const c = judgeRow(derived, {
+    ledger: five,
+    derived: true,
+    source: { rows: src.rows, lastAt: src.lastAt, cover: srcCover },
+    rungMs: 300_000
+  });
+  assert.ok(c.notes.includes('derived'));
+  assert.ok(c.notes.includes('derived_behind'));
+  assert.ok(c.notes.includes('derived_partial'));
+  assert.equal(c.owed, 21 * 75);
+  assert.equal(derivedPartial(c, srcCover), true);
+  const caught = judgeRow({ ...derived, rows: 21 * 75, lastAt: ms('2026-09-30') }, {
+    ledger: five,
+    derived: true,
+    source: { rows: src.rows, lastAt: src.lastAt, cover: srcCover },
+    rungMs: 300_000
+  });
+  assert.ok(!caught.notes.includes('derived_behind'));
+  assert.ok(!caught.notes.includes('derived_partial'));
+  assert.ok(judgeRow(derived, { ledger: five, derived: true, source: null }).notes.includes('derived_no_source'));
+  // DAYS HELD CANNOT SEE A WITHHELD BUCKET (DB-G36): 360ONE 60min 2023-02
+  // holds 126 of 140 hourly buckets on all 20 days while its 1min month misses
+  // 30 of 7,500 minutes — 840 minutes withheld against 30 lost.
+  const cover = (/** @type {number} */ owed, /** @type {number} */ missing) =>
+    /** @type {any} */ ({ owed, missing, heldSessions: 20 });
+  assert.equal(derivedPartial(cover(140, 14), cover(7500, 30)), true);
+  assert.equal(derivedPartial(cover(1500, 6), cover(7500, 30)), false, 'within one bucket of what the source lost');
+  assert.equal(derivedPartial(cover(1500, 8), cover(7500, 30)), true);
+  assert.equal(derivedPartial(/** @type {any} */ ({ owed: null, missing: null }), cover(7500, 30)), false);
+});
+
+test('absent months between a series\' two ends are listed and owed in full (DB-012)', () => {
+  assert.deepEqual(absentMonths('2020-10', '2021-01', new Set(['2020-10', '2021-01'])), ['2020-11', '2020-12']);
+  assert.deepEqual(absentMonths('2024-12', '2025-01', new Set(['2024-12', '2025-01'])), []);
+  assert.deepEqual(absentMonths('', '2025-01', new Set()), []);
+  const L = owedLedger(body({ from: '2023-10-01', days: '.RRRRR..RRRRR..RRRRR..RRRRR..RR', regular: 375 }));
+  const c = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2023-10', rows: 0, absent: true }), { ledger: L });
+  assert.equal(c.state, 'absent');
+  assert.equal(c.missing, c.owed);
+  assert.equal(c.ratio, 0);
+});
+
+test('a month outside the operator window is marked, and judged all the same (DB-052)', () => {
+  const L = owedLedger(body({ from: '2015-01-01', days: 'RR..RRRRR', regular: 1, rung: '1day' }));
+  const c = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2015-01', timeframe: '1day', rows: 7 }), {
+    ledger: L,
+    window: { from: '2018-01-01', to: '2026-09-30' }
+  });
+  assert.ok(c.notes.includes('outside_window'));
+  assert.ok(c.notes.includes('outside_span'), 'January past the 9th is outside this ledger');
+  assert.equal(c.state, 'full');
+});
+
+test('the month roll-up sums calendar owed per row, order-independent, and leaves trade rows unmeasured', () => {
+  const L = owedLedger(body({ from: '2021-08-02', days: 'RRRRR', regular: 375 }));
+  const D = owedLedger(body({ from: '2021-08-02', days: 'RRRRR', regular: 1, rung: '1day' }));
+  const minute = row({ instrument: 'NSE-INDEX-NIFTY', month: '2021-08', rows: 5 * 375 });
+  const daily = row({ instrument: 'NSE-INDEX-NIFTY', month: '2021-08', timeframe: '1day', rows: 5 });
+  const items = [
+    { ...minute, cover: judgeRow(minute, { ledger: L }) },
+    { ...daily, cover: judgeRow(daily, { ledger: D }) }
+  ];
+  const a = rollUpMonths(items)[0];
+  const b = rollUpMonths([...items].reverse())[0];
+  assert.deepEqual(a, b);
+  assert.equal(a.owed, 5 * 375 + 5);
+  assert.equal(a.state, 'full');
+  assert.equal(a.pct, 1);
+  const opt = row({ instrument: 'NSE-FNO-NIFTY-2021-08-26-1600000-CE', month: '2021-08', timeframe: '1s', rows: 9, strike: 1600000 });
+  const t = rollUpMonths([{ ...opt, cover: judgeRow(opt, { ledger: L }) }])[0];
+  assert.equal(t.state, 'trade');
+  assert.equal(t.pct, null);
+  assert.deepEqual(monthVerdict({ n: 2, owed: 750, bars: 375, missing: 375, trade: 0, unmeasured: 0, absent: 1 }), { pct: 0.5, state: 'gap' });
+});
+
+test('the peer helpers that stay are corroboration only', () => {
+  const rows = [
+    { month: '2024-11', timeframe: '1min', rows: 1875 },
+    { month: '2024-11', timeframe: '1min', rows: 1800 }
+  ];
+  const d = denominators(rows);
+  assert.equal(d.support.get(denomKey('2024-11', '1min')), 2);
+  assert.equal(isSole(d.support, rows[0]), false);
+  assert.equal(istDayOf(Date.parse('2024-11-04T18:29:59Z')), epochDayOfIso('2024-11-04'));
+  assert.equal(istDayOf(Date.parse('2024-11-04T18:30:00Z')), epochDayOfIso('2024-11-05'));
+});
+
+test("the store's reach bounds the month; a series that stops short of it owes the rest; one that ended earlier says so", () => {
+  // 2026-09: 21 regular sessions (weekends closed), the exchange's calendar.
+  const days = 'RR..RRRRR..RRRRR..RRRRR..RRRR.';
+  const exchange = owedLedger(body({ from: '2026-09-01', days, regular: 375 }));
+  // NIFTY's own calendar at this rung holds the days it holds, to its last bar (the 4th).
+  const mine = owedLedger(
+    body({ from: '2026-09-01', days: days.slice(0, 4), regular: 375, held: '1100', series: { symbol: 'NIFTY', segment: 'INDEX' } })
+  );
+  const at = (/** @type {string} */ iso) => epochDayOfIso(iso);
+  const stale = row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', rows: 2 * 375 });
+  // BEFORE: measured over the series' own calendar alone, a pull that stopped on the 2nd read full.
+  const own = judgeRow(stale, { ledger: mine });
+  assert.equal(own.state, 'full', 'the series-span calendar cannot see the tail');
+  // AFTER: the exchange owes the month to the store's reach (the 30th); the series' digits count its days.
+  const c = judgeRow(stale, { ledger: exchange, held: mine, seriesLastDay: at('2026-09-02'), storeLastDay: at('2026-09-30') });
+  assert.equal(c.sessions, 21);
+  assert.equal(c.owed, 21 * 375);
+  assert.equal(c.missing, 19 * 375);
+  assert.equal(c.state, 'gap');
+  assert.equal(c.heldSessions, 2, 'two days held, counted from its own digits');
+  assert.ok(!c.notes.includes('series_end'), 'the store reaches this month: the tail is a hole');
+  // GDFL's archive ends on the 24th: the days after it are not owed.
+  const archive = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', rows: 17 * 375 }), {
+    ledger: exchange,
+    seriesLastDay: at('2026-09-24'),
+    storeLastDay: at('2026-09-24')
+  });
+  assert.equal(archive.sessions, 17);
+  assert.equal(archive.state, 'full');
+  // A series whose last month is earlier than the store's last month ENDED: measured to its last bar, and named.
+  const ended = judgeRow(row({ instrument: 'NSE-INDEX-NIFTY', month: '2026-09', rows: 2 * 375 }), {
+    ledger: exchange,
+    seriesLastDay: at('2026-09-02'),
+    storeLastDay: at('2026-10-30')
+  });
+  assert.equal(ended.sessions, 2);
+  assert.equal(ended.state, 'full');
+  assert.ok(ended.notes.includes('series_end'));
 });

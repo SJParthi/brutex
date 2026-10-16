@@ -13,7 +13,10 @@ pub(super) fn plan_identity(
     bounds: GlobalReplayV4Bounds,
 ) -> Result<[u8; 32], String> {
     let mut hash = brutex_core::blake3::Hasher::new();
-    hash.update(b"brutex-global-replay-v4-plan-v1\0");
+    // v2: the plan now runs under the frozen per-stream quality ceilings
+    // (GAP15-19, D-1643), so an attempt recorded under the old rule keeps
+    // its own identity instead of sharing one with a different outcome.
+    hash.update(b"brutex-global-replay-v4-plan-v2\0");
     hash.update(&super::codec::header(request)?);
     for snapshot in snapshots {
         hash.update(&snapshot.identity);

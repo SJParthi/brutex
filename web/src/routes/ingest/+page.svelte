@@ -10,7 +10,7 @@
    *
    * 2. A run that refused 407 of 785 instruments showed ONE reason. The
    *    receipt renders `done.failures.iter().take(5)` — five, and the run's
-   *    own `Members failed` count is beside it, so the page can SEE that it
+   *    own `Failure diagnostics` count is beside it, so the page can SEE that it
    *    was truncated and say so instead of implying the list is complete.
    *
    * 3. The bar length was not askable. `api::ingest::parse_spot` has read a
@@ -41,6 +41,7 @@
   import { cashIdentityFor, DEFAULT_ZERODHA_CASH_IDENTITY } from '$lib/cash-identity.js';
   import { singleMemberBody } from '$lib/row-pull.js';
   import Picker from '$lib/Picker.svelte';
+  import DiskTile from '$lib/DiskTile.svelte';
   import { catalogue } from '$lib/index.svelte.js';
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
   // `untrack`, because one effect on this page must react to a FEED CHANGE and
@@ -55,16 +56,23 @@
   // `FeedHolding` per feed already folded and stamped with the feed list it
   // answered for. Importing it here adds a READER, not a fetch, and the call
   // below is a no-op whenever that answer is already held.
+  // `watchStore` IS NOT IMPORTED ANY MORE (WP-61, DB-B53). It re-read the WHOLE
+  // census every five seconds for as long as a run lasted: 16.1 MB for Zerodha
+  // and 33.3 MB for GDFL per changed poll, per tab, plus a parse and a refold
+  // of every row. A run's progress now comes from the two small documents the
+  // server keeps for exactly that (`/pull/run.json`, 148 bytes idle, and
+  // `/ingest/status.json`, about 1 KB), and the census is read ONCE when the
+  // run starts and ONCE when it ends, which is when its answer is used.
   import {
     store,
     survey,
     surveyStores,
     syncStore,
     refreshStore,
-    watchStore,
-    foldMonths
+    foldMonths,
+    cellKey
   } from '$lib/store.svelte.js';
-  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  import { failureCount, notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
   // `readFolder` declares its own `const ask` for probing folder segments. A
@@ -90,7 +98,35 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
-  import { foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { createCalendarLoader, emptyCalendar, foldMinuteOwed } from '$lib/calendar-owed.js';
+  import {
+    emptyPilot, failedPilot, foldIngestStatus, pilotNotice,
+    busyNotice, flightMonth, flightOf, flightPace, flightRow, progressKey, spanText, stallVerdict
+  } from '$lib/ingest-status.js';
+  import { feedMeter, landedOf } from '$lib/run-card.js';
+  // WHAT THE PAGE SAYS ABOUT A RUN IT WATCHES, AND HOW IT JUDGES A MONTH (WP-61).
+  // Both are pure modules with their own tests; this file lays them out.
+  import { adoptRun, adoptedSentence, isAskTimeout, lastRun, stopSaid, waitedOut } from '$lib/ingest-run.js';
+  import {
+    VERDICT_ORDER, archiveLane, defaultWindow, emptySeen, feedSpan, monthVerdict, outsideSpan,
+    refusalBatches, refusalErrorsSentence, refusalIndex, refusalJoin, refusalSentence, refusedMonth, seriesVerdict, unsettledSpans,
+    verdictWords, wholeUnlisted, settledMonth
+  } from '$lib/ingest-months.js';
+  // THE HELD-MONTHS JOIN (R4-01, V1): census readiness, the per-feed rung
+  // filing, and the contract fold once per census stamp.
+  import { censusKey, censusReadiness, censusStamp, createHeldJoin, foldDerivatives, heldMonth, rungStored, stopFold } from '$lib/ingest-held.js';
+  import { inSlices } from '$lib/census-worker.js';
+  // THE PANEL REGISTRY (R4-01): every file in ./panels/ mounts below, by its
+  // exported `order`, with no edit of this page.
+  import { panelRegistry, refusedLine } from '$lib/ingest-panels.js';
+  import IngestPanelSlot from '$lib/IngestPanelSlot.svelte';
+  // THE HELD-OR-READY RULE /db ALREADY APPLIES (DB-G14): a feed whose store
+  // holds bars is selectable whatever its ingest readiness, and only the
+  // operator's feeds are offered (D-3338).
+  import { feedPickerRow, offeredFeeds } from '$lib/feed-row.js';
+  // THE GDFL IMPORT, FROM ITS OWN JOURNAL (DB-G22, DB-A51).
+  import ImportPanel from '$lib/ImportPanel.svelte';
+  import { readImportExtras } from '$lib/import-panel.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -269,9 +305,16 @@
    * `dir`, `label` and `phrase` are three fields and never one.
    *
    * @typedef {{
-   *   dir: string, label: string, phrase: string, stored: boolean,
+   *   dir: string, label: string, phrase: string,
    *   per: number | null
    * }} Rung
+   */
+  /**
+   * A RUNG AS THE SELECTED FEED FILES IT (R4-01, V1): `stored` and `storedWhy`
+   * are `$lib/ingest-held.js` `rungStored` over `/feeds.json`'s `rungs` and
+   * `derived_rungs`; `null` when this server sent no `rungs`.
+   *
+   * @typedef {Rung & { stored: boolean | null, storedWhy: string }} FeedRung
    */
 
   /**
@@ -285,13 +328,18 @@
    */
 
   /**
-   * THE SEVEN VERDICTS, AS A TYPE. It is the key of `VERDICT`, the member of
+   * THE VERDICTS, AS A TYPE. It is the key of `VERDICT`, the member of
    * `VORDER`, the field a census row and a census month each carry, and the
    * value the pill filter holds — one name for all five, so a verdict added to
    * the table and forgotten in the order is a build failure rather than a row
    * that silently sorts last.
    *
-   * @typedef {'fail' | 'never' | 'short' | 'retry' | 'unknown' | 'beyond' | 'ok'} Verdict
+   * NINE NOW, AND THEY LIVE IN `$lib/ingest-months.js` (WP-61): `refused`
+   * (requested and refused, DB-G23), `partial` (partly never pulled, DB-B38)
+   * and `flight` (in flight, on the exact row only; it was `retry`, DB-G20)
+   * joined the six that stay.
+   *
+   * @typedef {import('$lib/ingest-months.js').Verdict} Verdict
    */
 
   /**
@@ -305,9 +353,13 @@
    *   per: number | null,
    *   months: {
    *     month: string, sessions: number, exp: number | null,
-   *     got: number | null, k: Verdict
+   *     got: number | null, k: Verdict,
+   *     why: import('$lib/ingest-months.js').MonthRefusal | null,
+   *     unread: string,
+   *     flight: boolean
    *   }[],
    *   got: number, exp: number, unproved: number, missing: number,
+   *   held: number, stale: number, loadingWhy: string, loadingWord: string, noSpot: boolean,
    *   state: Verdict
    * }} CensusRow
    */
@@ -477,14 +529,12 @@
    * so; a hardcoded pair would not, and would be the second copy of a vendor
    * fact that D-0126, D-0131 and D-0138 each deleted from this page.
    *
-   * `stored` is `Granularity::store_timeframe().is_some()`. It is FALSE on `1s`,
-   * and that is the honest state of a tick pull today: the request parses, the
-   * feed declares the rung, and `pull::ingest::Plan::timeframe` then refuses it
-   * BY NAME at the write boundary because `crates/store` ships no `1s`
-   * directory. The row says so before it is ticked. The fold that makes those
-   * same archive seconds storable already exists — `pull::fold`, one-second
-   * buckets, first/max/min/last in file order — and it runs when these two feeds
-   * are asked for `1min`.
+   * `stored` IS NOT A FIELD OF THIS LIST ANY MORE (R4-01, V1). It said `false`
+   * on `1s` for every feed — "the store has no directory for it" — which has
+   * been false since D-2802 filed the GDFL archive's seconds under `1s`, and it
+   * is a fact about a FEED, not about a rung. `rungsHere` below reads it per
+   * feed from `/feeds.json`'s `rungs` and `derived_rungs`
+   * (`$lib/ingest-held.js` `rungStored`), so no feed is named in this file.
    *
    * `per` is BARS PER NSE SESSION, and `null` where this page cannot state one
    * from a verified fact. 09:15 to 15:30 is 375 minutes, so a full minute
@@ -495,9 +545,9 @@
    */
   /** @type {Rung[]} */
   const RUNGS = [
-    { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
-    { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
+    { dir: '1s', label: 'Ticks', phrase: 'one second', per: null },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', per: 375 },
+    { dir: '1day', label: '1 day', phrase: 'one day', per: 1 }
   ];
 
   // ───────────────────── HOW FINE EACH FEED CAN EVER ANSWER ─────────────────
@@ -1028,90 +1078,37 @@
   /**
    * The exchange calendar, as the store knows it.
    *
-   * @type {{
-   *   first: string, last: string,
-   *   owed: Map<string, number|null>,
-   *   indexOwed: Map<string, number|null>,
-   *   from: string[], clashes: number, why: string
-   * }}
+   * @type {import('$lib/calendar-owed.js').Calendar}
    */
-  let calendar = $state({
-    first: '',
-    last: '',
-    owed: new Map(),
-    indexOwed: new Map(),
-    from: [],
-    clashes: 0,
-    why: ''
-  });
+  let calendar = $state(emptyCalendar(''));
 
-  /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
-  /** @param {number} day */
-  function isoOfEpochDay(day) {
-    return new Date(day * 86_400_000).toISOString().slice(0, 10);
-  }
-
-  /** @param {string|null} feed */
-  async function loadCalendar(feed) {
-    if (!feed) return;
-    try {
-      const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store'
-      });
-      if (!response.ok) {
-        calendar = {
-          first: '',
-          last: '',
-          owed: new Map(),
-          indexOwed: new Map(),
-          from: [],
-          clashes: 0,
-          why: `/calendar.json answered ${response.status}`
-        };
-        return;
-      }
-      const body = await response.json();
-      /** @type {Map<string, number|null>} */
-      const owed = new Map();
-      /** @type {Map<string, number|null>} */
-      const indexOwed = new Map();
-      for (const entry of body?.days ?? []) {
-        const day = isoOfEpochDay(entry.day);
-        owed.set(day, entry.owed ?? null);
-        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
-        // carry the index-specific field and therefore cannot prove a common
-        // index denominator on the systems-outage day. Falling back to `owed`
-        // would silently restore the false 166-hole claim D-0420 refuses.
-        indexOwed.set(day, entry.indexOwed ?? null);
-      }
-      calendar = {
-        first: owed.size ? isoOfEpochDay(body.firstDay) : '',
-        last: owed.size ? isoOfEpochDay(body.lastDay) : '',
-        owed,
-        indexOwed,
-        from: body?.derivedFrom ?? [],
-        clashes: (body?.disagreements ?? []).length,
-        why: owed.size ? '' : 'the store holds no bars for this feed'
-      };
-    } catch (error) {
-      calendar = {
-        first: '',
-        last: '',
-        owed: new Map(),
-        indexOwed: new Map(),
-        from: [],
-        clashes: 0,
-        why:
-          error instanceof Error
-            ? `the calendar request failed (${error.message})`
-            : 'the calendar request failed'
-      };
+  // THE READ IS TICKETED (CE-71, D-2732). It had no request token: a slower
+  // answer for the previous feed replaced the current feed's calendar, and the
+  // previous calendar stood under the new feed (or under no feed) while nothing
+  // had answered. `createCalendarLoader` clears to "not loaded" on every feed
+  // change and lands an answer only while its ticket is current.
+  const calendarRequests = createPageRequests();
+  /* THE CALENDAR OF RECORD'S WHOLE SPAN, NOT ONLY THE DAYS THE STORE HOLDS
+     (WP-61, DB-B42). The held-span answer ended at the feed's last bar, so
+     every later weekday was "ASSUMED to be a session": 02 Oct 2026 (Gandhi
+     Jayanti) was offered as a trading day in GDFL's To popup, and the record's
+     2018-01..08 days were dropped for it. `span: 'record'` asks
+     `/calendar.json?span=record`, which carries the record's own day code for
+     every day of its span and leaves what the feed HOLDS as a separate
+     field. */
+  const calendarLoader = createCalendarLoader({
+    request,
+    requests: calendarRequests,
+    span: 'record',
+    apply: (next) => {
+      calendar = next;
     }
-  }
+  });
+  onDestroy(() => calendarRequests.dispose());
 
   $effect(() => {
     const feed = feeds.active;
-    untrack(() => loadCalendar(feed));
+    untrack(() => void calendarLoader.load(feed));
   });
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -1145,7 +1142,28 @@
   /** Whether the derived calendar actually covers a day, or the page is guessing weekends. */
   /** @param {string} isoDay */
   function holidaysKnownFor(isoDay) {
-    return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
+    return (
+      calendar.owed.size > 0 &&
+      isoDay >= calendar.first &&
+      isoDay <= calendar.last &&
+      !calendar.withheld.has(isoDay)
+    );
+  }
+  /** Whether `/calendar.json` withheld this day: inside its span, never proved shut. D-1507. */
+  /** @param {string} isoDay */
+  function isWithheld(isoDay) {
+    return calendar.withheld.has(isoDay);
+  }
+  /**
+   * WHY THIS DAY'S SESSION IS A GUESS, for the day it is asked about. A withheld
+   * day is inside the measured span, so the span sentence would be false for it.
+   *
+   * @param {string} isoDay
+   */
+  function calendarGapFor(isoDay) {
+    return isWithheld(isoDay)
+      ? `the exchange calendar WITHHOLDS ${dayLabel(isoDay)}: this feed's daily bars for its month were not read or failed their checks, so whether NSE traded is unknown — a weekday is ASSUMED to be a session, and it is not shown as a holiday`
+      : calendarGap;
   }
 
   /**
@@ -1174,7 +1192,9 @@
     return (
       calendar.owed.size > 0 &&
       ym >= calendar.first.slice(0, 7) &&
-      ym <= calendar.last.slice(0, 7)
+      ym <= calendar.last.slice(0, 7) &&
+      // A month with a withheld day has no measured denominator. D-1507.
+      !calendar.withheldMonths.has(ym)
     );
   }
 
@@ -1193,7 +1213,7 @@
    */
   const calendarGap = $derived(
     calendarSpan
-      ? `the exchange calendar this feed's own bars measure covers ${calendarSpan} only, so a weekday outside it is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
+      ? `the calendar this page holds (the exchange calendar of record, and before it the days this feed's bars were observed on) covers ${calendarSpan} only, so a weekday outside it is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
       : `no measured calendar is available — ${calendar.why || 'it has not loaded yet'} — so a weekday is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
   );
 
@@ -1468,6 +1488,51 @@
   // ------------------------------------------------------------------- feed
 
   const active = $derived(feeds.all.find((f) => f.wire === feeds.active));
+
+  /**
+   * THE LADDER AS THE SELECTED FEED FILES IT (R4-01, V1): whether the store
+   * files each rung for THIS feed, read off `/feeds.json` — never a constant.
+   * @type {FeedRung[]}
+   */
+  const rungsHere = $derived(
+    RUNGS.map((r) => {
+      const s = rungStored(/** @type {any} */ (active), r.dir);
+      return { ...r, stored: s.stored, storedWhy: s.why };
+    })
+  );
+
+  /* ─────────────────────────── THE PANELS (R4-01) ───────────────────────────
+     Every `./panels/*.svelte` is mounted at the foot of the page by its own
+     exported `order`, ties by file name. A panel that breaks the contract
+     (`$lib/ingest-panels.js`) is named in one line and on the console and is
+     still mounted, last: never dropped. Each owns its fetches; it is handed
+     only the selected feed. */
+  const panels = panelRegistry(import.meta.glob('./panels/*.svelte', { eager: true }));
+  const panelsRefused = refusedLine(panels.refused);
+  const panelCtx = $derived({ feed: feeds.active, row: active ?? null });
+  onMount(() => {
+    for (const r of panels.refused) console.error(`/ingest panel ${r.file}: ${r.why}`);
+  });
+
+  /**
+   * THE SPAN THE FEED'S OWN DESCRIPTOR STATES (WP-61; DB-B38, DB-B46), read
+   * off `/feeds.json` and nothing else: an archive vendor's measured span
+   * (`archive`; both ends BIND, because no file exists outside it) or the
+   * operator's window for a pulled feed (`window`; it sets where the form
+   * opens and binds nothing). `$lib/ingest-months.js` `feedSpan`.
+   *
+   * This page read only `history`, which states nothing for an archive vendor,
+   * so GDFL was judged over 2015-01..2026-10 and all 142 months read "Pull".
+   */
+  const activeSpan = $derived(feedSpan(/** @type {any} */ (active)));
+  /**
+   * AN IMPORTED FEED IS NOT PULLED. A feed whose descriptor states an
+   * `archive` got its bars from an import run (journalled, and served by
+   * `/imports.json`), not from a request this page can send; its rows offer no
+   * Pull, and its import panel is drawn. Read off the wire's own field, never
+   * a vendor name in this file.
+   */
+  const isImported = $derived(activeSpan.kind === 'archive');
 
   // -------------------------------------------------------------- source kind
   //
@@ -2011,7 +2076,7 @@
    */
   let rungTouched = $state(false);
   /** The ticked rungs, in the ladder's order. Never the tick order. */
-  const rungsChosen = $derived(RUNGS.filter((r) => rungSet.has(r.dir)));
+  const rungsChosen = $derived(rungsHere.filter((r) => rungSet.has(r.dir)));
   /**
    * THE FIRST TICKED RUNG, for the things that can only be about one: the
    * header chip and the feed floor's own sentence. Every COUNT reads
@@ -2064,7 +2129,7 @@
    *   can the VENDOR ever serve it   `/feeds.json` `finest` — and this is the
    *                                  only one that disables a row
    *   does this BUILD fetch it       `/feeds.json` `history[].served`
-   *   can the STORE file it          `RUNGS.stored`
+   *   can the STORE file it          `rungsHere.stored`
    *
    * ONLY THE FIRST DISABLES, and the rule is worth stating because the other
    * two are tempting: a row is drawn dead only where nothing anybody could ever
@@ -2085,7 +2150,7 @@
   const rungRows = $derived.by(() => {
     const wire = feeds.active ?? '';
     const name = feedName(wire);
-    return RUNGS.map((r) => {
+    return rungsHere.map((r) => {
       const v = floorVerdict(wire, r.dir);
       const fetches = feedFetches(r.dir);
       const says = [];
@@ -2143,23 +2208,24 @@
           `${name} does not declare this rung: crates/api's served() refuses the POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would be answered with a DIFFERENT bar length and filed under the one you asked for. Fixable, and not from here: record the endpoint in pull::vendor.`
         );
       }
-      if (!r.stored) {
-        long.push(
-          'The store has no directory for it, and the refusal is at the WRITE boundary rather than here: store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so pull::vendor::Granularity::store_timeframe answers None and pull::ingest::Plan::timeframe refuses the bar BY NAME rather than filing it under a rung it is not. That is a store-format limit and not a vendor one — the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.'
-        );
-      }
+      // WHETHER THIS FEED'S BARS ARE FILED AT THIS RUNG, per feed off
+      // `/feeds.json` (R4-01, V1). It said "the store has no directory" on the
+      // second rung of every feed, false for an archive feed since D-2802.
+      if (r.stored !== true) long.push(r.storedWhy);
 
       const status = v.permanent
         ? 'never served'
-        : fetches === false && !r.stored
-          ? 'not fetched · no store dir'
+        : fetches === false && r.stored === false
+          ? 'not fetched · not filed'
           : fetches === false
             ? 'not fetched by this build'
-            : !r.stored
-              ? 'no store directory'
-              : r.per === null
-                ? 'no session count'
-                : `${n(r.per)} bar(s) per session`;
+            : r.stored === false
+              ? 'not filed for this feed'
+              : r.stored === null
+                ? 'filing not stated'
+                : r.per === null
+                  ? 'no session count'
+                  : `${n(r.per)} bar(s) per session`;
 
       return {
         key: r.dir,
@@ -2262,7 +2328,7 @@
     for (const row of rungRows) {
       if (row.disabled) dead += 1;
       if (row.fetches === false) unfetched += 1;
-      if (!row.stored) unstored += 1;
+      if (row.stored === false) unstored += 1;
     }
     // `dead` IS NOW ALWAYS ZERO and the field stays, because the two callers
     // read it to decide whether to say anything at all — and a feed whose floor
@@ -2543,7 +2609,7 @@
    * The walk backwards is bounded by construction: at most three non-sessions
    * can sit in a row here — a long weekend — and the loop is capped anyway.
    */
-  const maxDay = $derived.by(() => {
+  const clockCeiling = $derived.by(() => {
     let d = istToday;
     if (isSession(d) && istMin >= CLOSE_MIN) return d;
     for (let i = 0; i < 10; i += 1) {
@@ -2553,14 +2619,29 @@
     return d;
   });
   /**
+   * AN ARCHIVE'S LAST DAY IS A CEILING TOO (WP-61, DB-B46). The clock's
+   * ceiling is the newest session that has closed; an archive vendor holds
+   * nothing after the last day its archive measures, so a day past that can be
+   * typed and can never be imported. The To field stopped eleven sessions past
+   * GDFL's last day. `archiveCeils` is what `ceilReason` reads to say which of
+   * the two ceilings is binding.
+   */
+  const archiveCeils = $derived(
+    activeSpan.binds && activeSpan.to !== null && activeSpan.to < clockCeiling
+  );
+  const maxDay = $derived(archiveCeils ? /** @type {string} */ (activeSpan.to) : clockCeiling);
+  /**
    * WHY THE CEILING IS WHERE IT IS. One sentence, one definition, read by the
    * calendar footer, the ceiling day's own tooltip and the refusal for any day
    * after it — three places that must not be able to say different things.
    */
   const ceilReason = $derived.by(() => {
     const today = istToday;
+    if (archiveCeils) {
+      return `${feedName(feeds.active)} is imported from an archive that ends ${dayLabel(maxDay)} (${activeSpan.source || '/feeds.json states its span and no source'}), so that is the newest day that can be asked of it. The newest NSE session that has closed is ${dayLabel(clockCeiling)}; nothing after ${dayLabel(maxDay)} exists in the archive to import.`;
+    }
     const guessing = !holidaysKnownFor(today)
-      ? ` Note that ${calendarGap}.`
+      ? ` Note that ${calendarGapFor(today)}.`
       : '';
     if (isSession(today) && istMin < CLOSE_MIN) {
       return `Today, ${dayLabel(today)}, is a trading session and it has not closed yet — NSE closes 15:30 IST and it is ${pad(Math.floor(istMin / 60))}:${pad(istMin % 60)} — so no feed has a final bar for it. The newest day that can be asked for is ${dayLabel(maxDay)}, the last session that closed.${guessing}`;
@@ -2662,12 +2743,33 @@
    */
   let windowTouched = $state(false);
 
+  /* THE DEFAULT IS THE FEED'S OWN STATED SPAN, NOT 2015 (WP-61; DB-B38,
+     DB-B46). This seeded 01 Jan 2015 for every feed: 36 months outside the
+     operator's Zerodha window (2018-01-01) counted "never pulled" on every
+     row, and 45 months GDFL's archive cannot hold counted against it.
+     `defaultWindow` opens the window at the feed's stated first day and, for
+     an archive, ends it at the archive's last.
+
+     `windowTouched` IS NOW ONLY THE OPERATOR'S: a typed day, a picked day or a
+     window in the address. This effect used to set it itself, so the default
+     was pinned to whichever feed was active first. An untouched window follows
+     the feed (a default is not a decision he made); a touched one is never
+     moved, and months outside the feed's span are then drawn `out of reach`
+     rather than hidden. It waits for `/feeds.json`, because the descriptor is
+     what decides the default. */
   $effect(() => {
     if (windowTouched || !isValidIso(maxDay) || !isValidIso(minDay)) return;
-    windowTouched = true;
-    setDay('from', minDay);
-    setDay('to', maxDay);
+    if (feeds.all.length === 0) return;
+    const opens = defaultWindow(activeSpan, { floor: minDay, ceiling: maxDay });
+    untrack(() => {
+      if (fromDay !== opens.from) setDay('from', opens.from);
+      if (toDay !== opens.to) setDay('to', opens.to);
+    });
   });
+  /** Why the window opened where it did, for the date control's caption. */
+  const windowOpensWhy = $derived(
+    windowTouched ? '' : defaultWindow(activeSpan, { floor: minDay, ceiling: maxDay }).why
+  );
   /**
    * The refusal, naming the FEED, the TIMEFRAME and the day it starts at.
    *
@@ -2723,7 +2825,12 @@
    * away with the rest.
    */
   const outsideHolidayTable = $derived(
-    windowOk && (!holidaysKnownFor(from) || !holidaysKnownFor(to))
+    windowOk &&
+      (!holidaysKnownFor(from) ||
+        !holidaysKnownFor(to) ||
+        // A withheld day INSIDE the window is a guess too. One step per
+        // withheld day, never per window day. D-1507.
+        [...calendar.withheld].some((d) => d >= from && d <= to))
   );
 
   /**
@@ -3245,7 +3352,15 @@
       // `known` is carried so the lane can draw the third state instead of
       // rounding it to the friendlier of the other two.
       const known = pairFloor(leg.vendor, leg.dir).known;
+      /* AN ARCHIVE'S MEASURED SPAN IS A REACH THAT WAS STATED (WP-61 repair).
+         A feed with no per-rung floor read "reach not stated" while its own
+         descriptor on /feeds.json states the archive's first and last day.
+         Read off that field of the leg's own feed, never a vendor name. */
+      const archive = known
+        ? null
+        : archiveLane(feedSpan(/** @type {any} */ (feeds.all.find((f) => f.wire === leg.vendor))), from, to);
       return {
+        archive,
         key: `${leg.vendor}·${leg.dir}`,
         wire: leg.vendor,
         feed: feedName(leg.vendor),
@@ -3432,9 +3547,8 @@
     // THREE SENTENCES, BECAUSE THERE ARE THREE REFUSALS AND THEY ARE FIXED BY
     // THREE DIFFERENT THINGS. See `finestByWire` above for why one word
     // standing for all of them is the failure §4 names.
-    const unstored = rungsChosen.filter((x) => !x.stored);
+    const unstored = rungsChosen.filter((x) => x.stored === false);
     if (unstored.length > 0) {
-      const many = unstored.length > 1;
       out.push(
         // `phrase`, NOT `label` — see `RUNGS`. "The store has no directory for
         // ticks" is a sentence about the STORE, and the store has never heard
@@ -3445,7 +3559,10 @@
         // `Timeframe::KNOWN` has held seven entries since D-0054 and
         // `store_timeframe` answers for five of them. The true fact for the one
         // rung that can reach this line is that nothing below a minute is filed.
-        `The store has no directory for ${unstored.map((x) => x.phrase).join(', ')}. store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so ${many ? 'these rungs are' : 'this rung is'} refused at the WRITE boundary by pull::ingest::Plan::timeframe — expect a refusal rather than bars. That is a store-format limit and not a vendor one: the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.`
+        // R4-01 (V1): THE SENTENCE IS THE FEED'S OWN, per rung, off
+        // `/feeds.json` — it said nothing below a minute is stored, which has
+        // been false for an archive feed since D-2802.
+        unstored.map((x) => x.storedWhy).join(' ')
       );
     }
     const unfetched = rungsChosen.filter((x) => feedFetches(x.dir) === false);
@@ -3972,11 +4089,8 @@
     return head + un + em;
   });
 
-  /** The census spells an instrument `EXCHANGE-SEGMENT-SYMBOL`. */
-  /** @param {CatalogueRow} row */
-  function censusKey(row) {
-    return `${row.exchange}-${row.segment}-${row.symbol}`;
-  }
+  /* `censusKey` — the census's `EXCHANGE-SEGMENT-SYMBOL` — is
+     `$lib/ingest-held.js`'s, with the rest of the held join (R4-01). */
 
   // ------------------------------------------------- what this feed is MISSING
   //
@@ -4514,27 +4628,17 @@
      COUNTED FROM THE CENSUS ALREADY IN MEMORY. `store.rows` is the whole feed;
      `heldHere` is what the chosen universe accounts for. No request is added.
      --------------------------------------------------------------------- */
+  /* NO LOOP OVER THE CENSUS (WP-61, DB-B55). This walked every row of the
+     feed on every reading to learn two totals the shared fold already holds
+     (`store.bars`, `store.cells`) and one the census table already computes
+     (what the chosen rows hold). The question it answers is unchanged: the
+     feed holds bars, and none of them is in what this page is asking about. */
   const feedHoldsElsewhere = $derived.by(() => {
     if (!storeMine || store.state !== 'ready') return null;
-    const all = store.rows ?? [];
-    if (all.length === 0) return null;
-    /* THE NAMES THIS UNIVERSE PUTS ON THE WIRE, as symbols the census keys on.
-       `members` is the same list the tick control draws from, so the two can
-       never disagree about who is in. */
-    const mine = new Set(members.map((m) => String(m.symbol ?? m).toUpperCase()));
-    let barsHere = 0;
-    let barsTotal = 0;
-    for (const r of all) {
-      const n = Number(r.rows) || 0;
-      barsTotal += n;
-      /* `NSE-INDEX-BANKNIFTY` -> `BANKNIFTY`: the census spells the series
-         Exchange-Segment-Symbol and the universe lists bare symbols. */
-      const parts = String(r.instrument ?? '').split('-');
-      const sym = parts.length > 2 ? parts.slice(2).join('-') : String(r.instrument ?? '');
-      if (mine.has(sym.toUpperCase())) barsHere += n;
-    }
-    if (barsHere > 0 || barsTotal === 0) return null;
-    return { barsTotal, cells: all.length };
+    if (store.cells === 0 || store.bars === 0) return null;
+    if (censusRows.length === 0) return null;
+    for (const row of censusRows) if (row.got > 0) return null;
+    return { barsTotal: store.bars, cells: store.cells };
   });
   const storeRead = $derived({
     at: storeMine && store.state === 'ready' ? (store.at ?? 0) : 0,
@@ -4569,51 +4673,109 @@
    * contract of that underlying, because one (name, segment, rung, month) row
    * on the census is many keys in the store — 26 of them here.
    */
-  const barsBySeg = $derived.by(() => {
-    /** @type {Map<string, number>} */
-    const by = new Map();
-    if (!storeMine) return by;
-    for (const c of store.readable) {
-      const p = parseKey(c.instrument);
-      const seg = segmentOf(p);
-      if (seg === null || p.underlying === null) continue;
-      const k = `${p.underlying}|${seg}|${c.timeframe}|${c.month}`;
-      by.set(k, (by.get(k) ?? 0) + c.rows);
-    }
-    return by;
+  /* THE EAGER WHOLE-CENSUS FOLD IS GONE (WP-61, DB-B55).
+   *
+   * `barsBySeg` walked EVERY readable cell of the feed and parsed its key, on
+   * every reading, to fill a map the default page (Spot) reads fifty rows of:
+   * 385,442 keys parsed for GDFL, and /ingest held about 250 MB more heap than
+   * /db over the same census (592 MB against 342 MB, measured 11 Oct 2026 on a
+   * shadow of the operator's store). Two facts make the walk unnecessary:
+   *
+   *   SPOT      a spot row's store key IS `censusKey(m)`, so its bars are one
+   *             probe of the shared `store.byCell` — the index the shared fold
+   *             already built. O(1), no second fold, and exact: the probe
+   *             names the row's own exchange and segment, where the old map
+   *             keyed on the bare symbol.
+   *   CONTRACTS a derivative row sums every contract of its underlying, which
+   *             no shared index holds. That fold is still needed, so it runs
+   *             ONLY when a derivative segment is ticked and reachable, and it
+   *             keeps only the ticked underlyings' sums.
+   */
+  /* THE JOIN IS `$lib/ingest-held.js` (R4-01, V1), and it is read through
+     three things:
+
+       census    whether the census on hand is THIS feed's. Until it is, every
+                 month is `loading` — never "never imported", never a 0. The
+                 operator's screen read "0 / unverified · NEVER IMPORTED" over
+                 97 held months of every GDFL share for exactly that window.
+       spot      one probe of the shared `store.byCell` index, as before.
+       contract  the derivative fold, ONCE PER CENSUS STAMP and in slices: it
+                 sums every underlying, so ticking another name never walks the
+                 census again (it did, on every tick change, as a `$derived`
+                 over the ticked set), and no slice holds the page. */
+  const censusNow = $derived(
+    censusReadiness({ feed: feeds.active, storeFeed: store.feed, state: store.state, error: store.error })
+  );
+  const heldJoin = createHeldJoin();
+  /** Bumped when the contract fold publishes, so the census re-reads it. */
+  let heldTick = $state(0);
+  const wantsContracts = $derived(segmentsReached.some((seg) => seg.key !== 'spot'));
+  $effect(() => {
+    if (!storeMine || !wantsContracts || store.state === 'none') return;
+    // THE CENSUS'S OWN GENERATION, when the answer named it: a re-read of an
+    // unchanged census is the same stamp and walks nothing (R4-01 round 1).
+    const stamp = censusStamp({ feed: store.feed, generation: store.generation, at: store.at, server: store.lag?.generation ?? null, epoch: store.lag?.epoch ?? null });
+    // NO ABORT ON RE-RUN: a newer stamp cancels the walk inside the join, and
+    // leaving the page does (`onDestroy` below). See `foldDerivatives`.
+    void foldDerivatives(heldJoin, stamp, store.readable, {
+      parse: parseKey,
+      segmentOf,
+      slices: (count, work, signal) => inSlices(count, work, signal)
+    }).then((walked) => {
+      if (walked) heldTick += 1;
+    });
   });
+  onDestroy(() => stopFold(heldJoin));
+
+  /**
+   * The bars one (instrument, segment, rung, month) holds, and whether it has
+   * been looked up at all. See `$lib/ingest-held.js` `heldMonth`.
+   *
+   * @param {CatalogueRow} m @param {string} seg @param {string} dir @param {string} ym
+   */
+  function heldBars(m, seg, dir, ym) {
+    void heldTick;
+    return heldMonth(heldJoin, (i, t, y) => store.byCell.get(cellKey(i, t, y)), censusNow, m, seg, dir, ym);
+  }
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   /**
+   * THE FOLD IS `$lib/ingest-status.js` (CE-79, D-1787): a refused or failed
+   * read clears the flight and the halts rather than keeping the previous
+   * answer, the 503's `error` is named, and `surveyed` / `blocked_by` are
+   * carried so an empty list is never read as "nothing halted".
    * @type {{
    *   at: number,
    *   inFlight: PilotFlight | null,
    *   feeds: PilotFeed[],
    *   state: string,
+   *   surveyed: boolean | null,
+   *   blockedBy: string | null,
    *   error: string | null,
-   *   busy: boolean
+   *   busy: boolean,
+   *   seat: string | null,
+   *   paused: boolean | null
    * }}
    */
-  let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
+  let pilot = $state(emptyPilot());
   let pilotAsked = false;
+  const pilotSays = $derived(pilotNotice(pilot));
 
   async function readPilot() {
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
       const r = await request('/ingest/status.json');
-      if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
-      const j = await r.json();
-      pilot = {
-        at: Date.now(),
-        inFlight: j.in_flight ?? null,
-        feeds: Array.isArray(j.waiting_on) ? j.waiting_on : [],
-        state: String(j.state ?? ''),
-        error: null,
-        busy: false
-      };
+      /** @type {unknown} */
+      let body;
+      try {
+        body = await r.json();
+      } catch {
+        body = undefined;
+      }
+      pilot = foldIngestStatus(r.status, body, Date.now());
     } catch (why) {
-      pilot = { ...pilot, busy: false, error: String(why) };
+      pilot = failedPilot(`/ingest/status.json could not be read: ${why instanceof Error ? why.message : String(why)}`);
     }
   }
 
@@ -4687,47 +4849,17 @@
    * here moves its own rank with it rather than dropping silently to the bottom
    * of a table that still carries the old spelling.
    */
-  /** @type {Record<Verdict, [string, string, string]>} */
-  const VERDICT = {
-    fail: [
-      'down',
-      'failed',
-      'The sweep ladder for this feed has HALTED and this series still has month files that are empty or short. Attempts have stopped — the halt reason is on the strip above, and a retry on its own will not help.'
-    ],
-    never: [
-      'warn',
-      'never pulled',
-      'At least one month file in this window has no entry in /store.json at all. Nothing has asked the vendor for it yet — a pull IS warranted and will very likely settle it.'
-    ],
-    short: [
-      'warn',
-      'short',
-      'Every month file in this window has been written, and at least one holds fewer bars than the NSE calendar expects for the days inside the window.'
-    ],
-    retry: [
-      'info',
-      'retrying',
-      '/ingest/status.json names this instrument in flight right now. Nothing is waiting on you; it settles into verified, short or failed on its own.'
-    ],
-    unknown: [
-      'info',
-      'no yardstick',
-      'This timeframe has no bars-per-session this page can state, so what is stored cannot be compared with the calendar. The bars are counted; the verdict is withheld rather than guessed.'
-    ],
-    beyond: [
-      'info',
-      'out of reach',
-      'Every month file in this window is older than this feed answers for at this timeframe. No attempt was made and none would help — move the from date, the feed or the timeframe.'
-    ],
-    ok: [
-      'up',
-      'verified',
-      'Every month file in the window holds at least the bars the NSE calendar expects for the days inside it.'
-    ]
-  };
+  /* THE TABLE AND ITS ORDER ARE `$lib/ingest-months.js`'s (WP-61), where a
+     test reads every label: `in flight` (never `retrying`, DB-G20), `requested
+     and refused` (DB-G23), `partly never pulled` (DB-B38). */
+  /* IN THE FEED'S OWN WORDS (WP-61 repair): an imported feed's rows read
+     "partly never pulled … the row's Pull asks for exactly those" on rows that
+     offer no Pull. `verdictWords` keeps the keys, tones and order and words
+     the pull verdicts as imports for a feed whose descriptor states an
+     archive. */
+  const VERDICT = $derived(verdictWords(isImported));
   /** Worst first, and the order is a claim about what the reader has to DO. */
-  /** @type {Verdict[]} */
-  const VORDER = ['fail', 'never', 'short', 'retry', 'unknown', 'beyond', 'ok'];
+  const VORDER = VERDICT_ORDER;
   const VRANK = new Map(VORDER.map((k, i) => [k, i]));
 
   /**
@@ -4796,18 +4928,27 @@
    * Cost: O(months) per row, computed once per view in `cells` below. The read
    * at draw time is one `Map.get` and one string — see §3 rule 4.
    *
+   * A RUN OF `refused` MONTHS CARRIES THE JOURNAL'S OWN WORDS (DB-G23): `said`
+   * is the refusal of the run's first month, as journalled, so the band's
+   * title reads "requested and refused" with the reason and never "never
+   * pulled". `flying` counts the run's months inside the window the cell in
+   * flight is fetching (DB-G20).
+   *
    * @param {CensusRow['months']} months
-   * @returns {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number }[]}
+   * @returns {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number, said: string, flying: number }[]}
    */
   function coverageOf(months) {
     const total = months.length;
     if (total === 0) return [];
-    /** @type {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number }[]} */
+    /** @type {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number, said: string, flying: number }[]} */
     const out = [];
     let start = 0;
     for (let i = 1; i <= total; i += 1) {
       if (i === total || months[i].k !== months[start].k) {
         const k = months[start].k;
+        const why = months[start].why;
+        let flying = 0;
+        for (let j = start; j < i; j += 1) if (months[j].flight) flying += 1;
         out.push({
           k,
           tone: VERDICT[k][0],
@@ -4816,13 +4957,117 @@
           to: months[i - 1].month,
           n: i - start,
           a: (start / total) * 100,
-          b: (i / total) * 100
+          b: (i / total) * 100,
+          said: why
+            ? refusalSentence(why, (secs) => `${stampLabel(secs * 1000)} IST`)
+            : months[start].unread
+              ? `refusals unread — ${months[start].unread}. Whether these months were asked for and refused is not known.`
+              : '',
+          flying
         });
         start = i;
       }
     }
     return out;
   }
+
+  /* ══════════ THE PULL JOURNAL'S REFUSALS, JOINED TO THE MONTHS ══════════
+     (WP-61, DB-G23)
+
+     The census alone cannot tell "nobody asked" from "asked, and refused": a
+     month with no file read `never pulled — nothing has asked the vendor for
+     it yet` while the journal held that instrument's refusal for a day in that
+     very month. `/ingest/refusals.json` serves the journal's refusals folded
+     by month, read through the journal's own per-symbol index (O(that
+     instrument's refusals), never the journal's 4.2 million records).
+
+     ASKED FOR THE TICKED INSTRUMENTS, in batches the route accepts, once per
+     (feed, ticked set, store reading). A feed the route does not journal
+     answers 400 with its reason, which is kept and shown once (`unsupported`):
+     that is a fact about the feed, not a failure of this page. A read that
+     fails is `error`, named, and every row then says the join is unknown
+     rather than reading "never pulled" as if the journal had been asked. */
+  /**
+   * @type {{
+   *   feed: string | null, state: 'idle' | 'reading' | 'ready' | 'unsupported' | 'error',
+   *   bySymbol: Map<string, import('$lib/ingest-months.js').SymbolRefusals>,
+   *   errors: Map<string, string>, why: string | null, rungNote: string, asked: number
+   * }}
+   */
+  let refusals = $state.raw({ feed: null, state: 'idle', bySymbol: new Map(), errors: new Map(), why: null, rungNote: '', asked: 0 });
+  const refusalRequests = createPageRequests();
+  onDestroy(() => refusalRequests.dispose());
+
+  /** The ticked spot symbols, as one stable string: the refusals read's key. */
+  const refusalAsk = $derived(
+    isBroker && segmentsReached.some((seg) => seg.key === 'spot')
+      ? ticked.map((m) => m.symbol).join(',')
+      : ''
+  );
+
+  $effect(() => {
+    const feed = feeds.active;
+    const ask = refusalAsk;
+    // RE-READ WHEN THE STORE WAS RE-READ: a run that just ended wrote the
+    // records this join is about.
+    const reading = storeRead.at;
+    untrack(() => {
+      refusalRequests.cancel();
+      if (!feed || ask === '' || reading === 0) {
+        refusals = { feed, state: 'idle', bySymbol: new Map(), errors: new Map(), why: null, rungNote: '', asked: 0 };
+        return;
+      }
+      void refusalRequests.run(async (ticket) => {
+        const batches = refusalBatches(ask.split(','));
+        /** @type {Map<string, import('$lib/ingest-months.js').SymbolRefusals>} */
+        const bySymbol = new Map();
+        /** @type {Map<string, string>} */
+        const errors = new Map();
+        let rungNote = '';
+        refusals = { ...refusals, feed, state: 'reading', why: null };
+        try {
+          for (const batch of batches) {
+            const url = `/ingest/refusals.json?feed=${encodeURIComponent(feed)}&symbols=${batch.map(encodeURIComponent).join(',')}`;
+            const r = await request(url, { signal: ticket.signal });
+            /** @type {any} */
+            let body = null;
+            try {
+              body = await r.json();
+            } catch {
+              body = null;
+            }
+            if (!ticket.current()) return;
+            if (r.status === 400) {
+              refusals = { feed, state: 'unsupported', bySymbol: new Map(), errors: new Map(), why: String(body?.error ?? 'the server refused the question and named no reason'), rungNote: '', asked: 0 };
+              return;
+            }
+            if (!r.ok || body === null) {
+              throw new Error(String(body?.error ?? `HTTP ${r.status} with no readable body`));
+            }
+            const folded = refusalIndex(body);
+            for (const [symbol, held] of folded.bySymbol) bySymbol.set(symbol, held);
+            for (const [symbol, why] of folded.errors) errors.set(symbol, why);
+            rungNote = folded.rungNote || rungNote;
+          }
+          if (!ticket.current()) return;
+          refusals = { feed, state: 'ready', bySymbol, errors, why: null, rungNote, asked: ask.split(',').length };
+        } catch (why) {
+          if (!ticket.current()) return;
+          refusals = {
+            feed, state: 'error', bySymbol: new Map(), errors: new Map(), rungNote: '', asked: 0,
+            why: `/ingest/refusals.json could not be read: ${why instanceof Error ? why.message : String(why)}`
+          };
+        }
+      });
+    });
+  });
+
+  /** How many ticked instruments the journal holds at least one refusal for. */
+  const refusedInstruments = $derived.by(() => {
+    let count = 0;
+    for (const held of refusals.bySymbol.values()) if (held.count > 0) count += 1;
+    return count;
+  });
 
   /**
    * EVERY SERIES IN THE WINDOW, MEASURED. Ticked instruments × reached
@@ -4833,19 +5078,48 @@
     /** @type {CensusRow[]} */
     const out = [];
     if (!reachKnown || !windowOk || windowMonths.length === 0) return out;
-    const flight = pilot.inFlight;
+    /* THE CELL IN FLIGHT, AND ONLY THE ROW IT NAMES (WP-61, DB-G20). This
+       matched on the instrument alone, so every row of that symbol was marked
+       "retrying" in every segment, every ticked rung and every feed, on a
+       first attempt too. `flightRow` asks all four: this feed, this rung, the
+       spot segment, this instrument. */
+    const flight = flightOf(pilot.inFlight);
+    const feedNow = feeds.active;
+    const refused = refusals.feed === feedNow ? refusals.bySymbol : null;
     for (const m of ticked) {
       const key = censusKey(m);
-      const named =
-        flight != null && (flight.instrument === key || flight.instrument === m.key || flight.instrument === m.symbol);
+      /* WHETHER THE JOURNAL ANSWERED FOR THIS INSTRUMENT (WP-61 repair). A
+         per-symbol read failure arrives in a 200 answer's `errors`; it was
+         stored and never read, so the month fell to "never pulled — nothing
+         has asked the vendor for it". `refusalJoin` says read or unread with
+         the reason, and an unread instrument's open months are `unread`.
+         Asked only of a pulled feed: an imported feed has no pull journal to
+         have refused anything. */
+      const join = isBroker ? refusalJoin(refusals, feedNow, m.symbol) : { read: true, why: '' };
       for (const s of segmentsReached) {
         for (const r of rungsChosen) {
+          const inFlight = flightRow(flight, { feed: feedNow, seg: s.key, tf: r.dir, sym: m.symbol, key, mkey: m.key });
           const months = [];
           let got = 0;
           let exp = 0;
           let unproved = 0;
           let missing = 0;
-          const seen = { fail: 0, never: 0, short: 0, retry: 0, unknown: 0, beyond: 0, ok: 0 };
+          /* MONTHS THAT HOLD BARS, counted for every row (R4-01, V1): at a rung
+             with no yardstick it is the only thing a month can be said to be. */
+          let heldCount = 0;
+          // Months counted from the PREVIOUS census while a newer one is
+          // walked (`heldMonth` `stale`): shown, and labelled so.
+          let staleCount = 0;
+          const seen = emptySeen();
+          /* WHY THIS ROW'S MONTHS ARE NOT LOOKED UP, when they are not: the
+             census of this feed, or for a contract segment the fold of it. */
+          const loadingWhy = !censusNow.ready
+            ? censusNow.why
+            : s.key !== 'spot' && !heldJoin.ready
+              ? heldJoin.error
+                ? `The contract segments could not be summed from the census: ${heldJoin.error}. No contract month is judged.`
+                : 'The contract segments are being summed from the census, once per reading; no contract month is judged until it lands.'
+              : '';
           for (const ym of windowMonths) {
             const sessions = sessionsByMonth.get(ym) ?? 0;
             /* SPOT ONLY. A DERIVATIVE MONTH HAS NO DERIVABLE EXPECTATION.
@@ -4903,8 +5177,9 @@
                   : sessions * r.per;
             // WITH `s.key` IN IT. Without the segment this probe answered
             // the same number for every segment in the loop.
-            const held = barsBySeg.get(`${m.symbol}|${s.key}|${r.dir}|${ym}`);
-            const bars = held === undefined ? null : held;
+            const held = heldBars(m, s.key, r.dir, ym);
+            const bars = held.bars;
+            if (held.stale) staleCount += 1;
             // A MONTH THE FEED CANNOT REACH IS NOT A GAP. The floor is the
             // same one the date control refuses a day with.
             // ONE READ, ONE NAME. `feedFloor.at` is `string | null`, and
@@ -4914,48 +5189,65 @@
             // `Boolean(…) &&` already meant for a string: empty and null both
             // answer false, and nothing else changes.
             const floorAt = feedFloor.at;
-            const beyond = floorAt ? monthLastDay(ym) < floorAt : false;
-            /** @type {Verdict} */
-            let k;
-            if (beyond) k = 'beyond';
-            else if (bars === null) k = 'never';
-            else if (expect === null) k = 'unknown';
-            else if (bars >= expect) k = 'ok';
-            else k = 'short';
+            /* OR OUTSIDE THE SPAN THE FEED'S ARCHIVE MEASURES (DB-B46): no
+               file for such a month can exist, so it is out of reach, not a
+               gap. 45 of GDFL's 142 default months were counted against it. */
+            const beyond =
+              (floorAt ? monthLastDay(ym) < floorAt : false) || outsideSpan(activeSpan, ym, monthLastDay);
+            /* THE PULL JOURNAL'S REFUSAL FOR THIS INSTRUMENT IN THIS MONTH, when
+               it holds one (DB-G23). Spot only: a journal member names a spot
+               pull's instrument, and a contract segment's months are not what
+               it refused. */
+            const why = refused !== null && s.key === 'spot' ? refusedMonth(refused, m.symbol, ym) : null;
+            /* A WHOLE-WINDOW REFUSAL THE SERVER COUNTED AND DID NOT LIST may
+               cover this month (it lists the newest few, `whole_count` counts
+               all). With any unlisted, "no refusal names this month" cannot be
+               said of a month no listed refusal covers: it is unread, with the
+               count, never "never pulled". */
+            const unlisted = why === null && join.read && refused !== null && s.key === 'spot' ? wholeUnlisted(refused, m.symbol) : 0;
+            const unreadWhy = !join.read
+              ? join.why
+              : unlisted > 0
+                ? `the pull journal holds ${n(unlisted)} more whole-window refusal(s) of this instrument than /ingest/refusals.json lists, and one of them may cover this month`
+                : '';
+            const k = monthVerdict({
+              beyond, bars, expect, sessions, refused: why !== null, unread: s.key === 'spot' && unreadWhy !== '',
+              // NOT LOOKED UP IS NOT ABSENT, AND A SECOND HAS NO YARDSTICK
+              // (R4-01, V1): see `$lib/ingest-months.js`.
+              loading: held.loading,
+              // A CONTRACT SEGMENT HAS NO DERIVABLE EXPECTATION EITHER (see
+              // `derivable` above): its held months are counted the same way.
+              countOnly: r.per === null || !derivable
+            });
             got += bars ?? 0;
             exp += expect ?? 0;
-            if (k !== 'ok' && k !== 'beyond') unproved += 1;
-            if (k === 'never' || k === 'short') missing += 1;
+            if ((bars ?? 0) > 0) heldCount += 1;
+            if (!settledMonth(k) && k !== 'loading') unproved += 1;
+            if (k === 'never' || k === 'short' || k === 'refused' || k === 'unread') missing += 1;
             seen[k] += 1;
-            months.push({ month: ym, sessions, exp: expect, got: bars, k });
+            months.push({
+              month: ym, sessions, exp: expect, got: bars, k,
+              why: k === 'refused' ? why : null,
+              unread: k === 'unread' ? unreadWhy : '',
+              flight: inFlight && !settledMonth(k) && flightMonth(flight, ym)
+            });
           }
           // The series verdict, worst first, and every branch has evidence
           // behind it: a halt from the ladder route, a flight from the same
-          // route, a missing row from the store, a floor from the feed.
-          /** @type {Verdict} */
-          let state;
-          if (seen.beyond === months.length) state = 'beyond';
-          else if (named) state = 'retry';
-          else if (feedHalt && missing > 0) state = 'fail';
-          /* `never` MEANS NOTHING LANDED, NOT "A MONTH IS MISSING".
-             This read `seen.never > 0`, so ONE empty month labelled the whole
-             series NEVER PULLED. Measured on a real store: BANKNIFTY drew
-             `6,23,498 / 11,07,375 — 78/140 — NEVER PULLED`, a series holding
-             six hundred thousand bars reported as never pulled, on the same
-             row that printed the count.
-             It is not an edge case. The window opens at 2015-01 and Zerodha's
-             minute history starts 2019-12, so fifty-nine months are legitimately
-             empty on the very first honest pull — the verdict was wrong for the
-             NORMAL case, and an operator reading it would re-run a pull that had
-             already worked.
-             `got` is the bars this series actually holds. Zero of them is
-             `never`; any of them with months still missing is `short`, which is
-             what `short` already means everywhere else on this page — has bars,
-             not all of them. */
-          else if (seen.never > 0 && got === 0) state = 'never';
-          else if (seen.never > 0 || seen.short > 0) state = 'short';
-          else if (seen.unknown > 0) state = 'unknown';
-          else state = 'ok';
+          // route, a missing row from the store, a refusal from the pull
+          // journal, a floor or a span from the feed. The rule is
+          // `$lib/ingest-months.js` `seriesVerdict`, where a test drives every
+          // branch: `never` means NOTHING landed and nothing was refused, and
+          // a series with bars and unwritten months is `partial`, never
+          // `short`, whose text says every month file has been written
+          // (DB-B38).
+          const state = seriesVerdict({
+            seen,
+            months: months.length,
+            got,
+            inFlight,
+            halted: Boolean(feedHalt)
+          });
           out.push({
             id: `${key}|${s.key}|${r.dir}`,
             // TWO KEYS, AND THEY ARE NOT THE SAME KEY. `key` is the STORE's
@@ -4978,6 +5270,15 @@
             exp,
             unproved,
             missing,
+            held: heldCount,
+            stale: staleCount,
+            loadingWhy,
+            // A READ THAT FAILED IS NOT ONE STILL RUNNING: the word says which.
+            loadingWord: censusNow.word === 'failed' || (s.key !== 'spot' && heldJoin.error) ? 'census not read' : 'census loading',
+            // AN UNDERLYING THIS FEED HOLDS OPTIONS OF AND NO SPOT SERIES FOR
+            // (`/instruments.json` files it under FNO with `spot: false`): its
+            // spot row says so, its option rows count their months (R4-01).
+            noSpot: s.key === 'spot' && /** @type {any} */ (m).spot === false,
             state
           });
         }
@@ -5290,7 +5591,7 @@
    * timeframe and no attempt would help. Everything else is work.
    */
   const verdictSettled = $derived(
-    verdictTally.reduce((sum, seg) => (seg.k === 'ok' || seg.k === 'beyond' ? sum + seg.n : sum), 0)
+    verdictTally.reduce((sum, seg) => (settledMonth(seg.k) ? sum + seg.n : sum), 0)
   );
 
   /**
@@ -5379,13 +5680,10 @@
    * older than the first unsettled month.
    */
   /** @param {CensusRow} row */
-  function shortSpan(row) {
-    const open = row.months.filter((x) => x.k !== 'ok' && x.k !== 'beyond');
-    if (open.length === 0) return null;
-    const firstDay = `${open[0].month}-01`;
-    const lastDay = monthLastDay(open[open.length - 1].month);
-    return { from: firstDay > from ? firstDay : from, to: lastDay < to ? lastDay : to };
+  function rowSpans(row) {
+    return windowOk ? unsettledSpans(row.months, from, to, monthLastDay) : [];
   }
+
 
   /**
    * PULL ONE ROW. The same wire shape the main submit sends — `target`,
@@ -5397,11 +5695,20 @@
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
-    if (phase === 'running') return;
-    const span = shortSpan(row);
-    if (!span) return;
+    if (phase === 'running' || pressing) return;
+    /* EACH RUN OF UNSETTLED MONTHS, NEVER THE SETTLED MONTHS BETWEEN (WP-61,
+       DB-B38). "Pull 63" said "over the 63 unsettled month file(s)" and
+       POSTed the row's whole span, all 142 months. One request per run of
+       consecutive unsettled months, sent one after another on the feed's one
+       seat; the button's title lists them. */
+    const spans = rowSpans(row);
+    if (spans.length === 0) return;
     await runPull(
-      [{ dir: row.tf, label: row.tfLabel, body: singleMemberBody(wireBodyFor(row.tf, span.from, span.to), row.sym) }],
+      spans.map((span) => ({
+        dir: row.tf,
+        label: spans.length === 1 ? row.tfLabel : `${row.tfLabel} · ${span.from} to ${span.to}`,
+        body: singleMemberBody(wireBodyFor(row.tf, span.from, span.to), row.sym)
+      })),
       // THE MASTER'S KEY, because that is what `classifyBuild` compares on.
       new Set([row.mkey])
     );
@@ -5413,6 +5720,15 @@
   // decides what the right-hand column shows.
 
   let phase = $state('idle');
+  /**
+   * HELD FROM THE PRESS UNTIL `phase` IS SET, synchronously, before the first
+   * `await`. `phase` turns `running` only after the pre-run census, which takes
+   * hundreds of milliseconds, so a guard on `phase` alone let a second press
+   * through: two snapshots and either a false pre-run error or two
+   * `POST /pull/run`, the loser of which set `done` over a live run and hid
+   * Stop. conc18-1.
+   */
+  let pressing = $state(false);
   let startedAt = $state(0);
   let finishedAt = $state(0);
   /**
@@ -5511,10 +5827,31 @@
    * what a waiting governor looks like from outside, and also what a slow
    * vendor looks like. It is named as an inference, not as a reading.
    */
-  const stalledSecs = $derived(
-    phase === 'running' && lastGrowthAt > 0 ? Math.round((nowMs - lastGrowthAt) / 1000) : 0
+  /* DECLARED BEFORE THEIR FIRST READER. Both stood 1,700 lines below the two
+     deriveds that read them; a derived is lazy, so that held only while
+     nothing read `stall` during the script's first run, and the checker
+     reported both as used before assigned. */
+  /** The cell in flight, normalised; `null` when the server names none. */
+  const flight = $derived(flightOf(pilot.inFlight));
+  /** When anything the server reports last moved (DB-B39). */
+  let lastMoveAt = $state(0);
+  /* JUDGED AGAINST THE RUN'S OWN MEASURED CADENCE (WP-61, DB-B39). This was
+     `stalledSecs >= 20`, reset only by census growth, and a 1min stock leg
+     lands once per INSTRUMENT at about 45 s each, so a healthy pull read
+     "stalled" most of the time. Progress is now anything the server reports
+     moving (`progressKey`: the instrument in flight, its position, a leg, a
+     landed row), and the threshold is `stallVerdict`'s: three measured
+     instruments, never under two minutes. */
+  const sinceProgressMs = $derived(
+    phase === 'running' && Math.max(lastGrowthAt, lastMoveAt) > 0
+      ? Math.max(0, nowMs - Math.max(lastGrowthAt, lastMoveAt))
+      : 0
   );
-  const stalled = $derived(phase === 'running' && stalledSecs >= 20);
+  const stall = $derived(
+    stallVerdict({ sinceProgressMs, perInstrumentMs: flight?.perInstrumentMs ?? null })
+  );
+  const stalledSecs = $derived(Math.round(sinceProgressMs / 1000));
+  const stalled = $derived(phase === 'running' && stall.stalled);
   /**
    * WHETHER ANYTHING HAS ACTUALLY LANDED. Without this the panel read "Bars are
    * landing" three seconds into a run that had written nothing — a claim with
@@ -5683,11 +6020,9 @@
 
   /** Every `Failed` row the receipt carried — the server sends at most five. */
   const namedFailures = $derived((receipt?.facts ?? []).filter((f) => f.k === 'Failed'));
-  const failedCount = $derived.by(() => {
-    const raw = factValue.get('Members failed');
-    const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
+  // `Failure diagnostics`, through `$lib/receipt.js`: the key the server
+  // emits, pinned against `server.rs` by `tests/receipt.test.js` (P17-01).
+  const failedCount = $derived(failureCount(receipt?.facts ?? []));
   /**
    * THE TRUNCATION, STATED. `landed_answer` writes
    * `for f in done.failures.iter().take(5)`, so a run with 407 failures puts
@@ -5846,7 +6181,7 @@
         group = GROUP.silent;
         reason =
           hiddenFailures > 0
-            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failed member(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
+            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failure diagnostic(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
             : 'The run reported no failure for this instrument and the store gained nothing for it. It was named by the universe and is not accounted for.';
         tone = 'warn';
       }
@@ -6287,7 +6622,7 @@
     // end, and past that the page says so rather than projecting.
     const approx = holidaysKnownFor(isoDay)
       ? ''
-      : ` · ${calendarGap}`;
+      : ` · ${calendarGapFor(isoDay)}`;
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
@@ -6595,24 +6930,29 @@
     }
     if (doc?.running !== true) return;
 
+    /* THE RUN'S OWN START AND ASK, NOT THIS TAB'S (WP-61, DB-B32). The
+       elapsed clock restarted at the reload and the card measured the run
+       against this tab's feed and selection: a Zerodha run watched with GDFL
+       active read "Reading Global Datafeeds" over GDFL's census. `adoptRun`
+       reads what `/pull/run.json` now carries; a run whose ask is known is
+       shown as the run's and NOT measured against this form, and only a
+       server older than those fields falls back to this tab's clock, said. */
+    const run = adoptRun(doc);
+    adopted = run;
     runState = doc;
     phase = 'running';
-    startedAt = Date.now();
-    lastGrowthAt = startedAt;
+    startedAt = run.startedAtMs ?? Date.now();
+    lastGrowthAt = Date.now();
     finishedAt = 0;
+    stopNote = '';
     releaseWatch?.();
+    releaseWatch = null;
     seenRead = store.reads;
-    releaseWatch = watchStore(5000);
-    try {
-      const measured = await snapshot();
-      if (!ticket.current()) return;
-      baseline = measured;
-      live = measured;
-    } catch {
-      /* Without a baseline the card cannot show a difference, but the run is
-         real and worth watching; the census table reads the store on its own
-         clock either way. */
-    }
+    /* NO BASELINE IS TAKEN OVER THIS TAB'S SELECTION: it is not the run's, and
+       a census read here was 16 to 33 MB to measure the wrong thing. The card
+       shows the run's own legs, start and cell in flight. */
+    baseline = null;
+    live = null;
     if (ticket.current()) await watchRun();
   }
 
@@ -6624,7 +6964,7 @@
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
-    if (problems.length > 0 || phase === 'running') return;
+    if (problems.length > 0 || phase === 'running' || pressing) return;
 
     /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
      *
@@ -6667,11 +7007,16 @@
     aborted = false;
     passSummary = null;
     runState = null;
+    adopted = null;
+    stopNote = '';
     askedKeys = new Set(ticked.map((m) => m.key));
     sent = { done: 0, of: bodies.length, label: bodies[0].label };
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
     // card shows is a difference against it.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6680,6 +7025,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -6687,8 +7034,8 @@
     finishedAt = 0;
     phase = 'running';
     releaseWatch?.();
+    releaseWatch = null;
     seenRead = store.reads;
-    releaseWatch = watchStore(5000);
     controller = new AbortController();
 
     try {
@@ -6710,6 +7057,12 @@
           `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
         phase = 'done';
         finishedAt = Date.now();
+        /** @type {(() => void) | null} */ (releaseWatch)?.();
+        releaseWatch = null;
+        /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
+           must show it, not a finished card with Stop gone: pick it up exactly
+           as a page load does. The refusal stays in `netError`. conc18-1. */
+        if (r.status === 409) await resumeRun();
         return;
       }
     } catch (why) {
@@ -6854,10 +7207,12 @@
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
-    if (bodies.length === 0 || phase === 'running') return;
+    if (bodies.length === 0 || phase === 'running' || pressing) return;
 
     receipt = null;
     receipts = [];
+    adopted = null;
+    stopNote = '';
     askedKeys = asked;
     sent = { done: 0, of: bodies.length, label: bodies[0].label };
     netError = null;
@@ -6870,6 +7225,9 @@
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
     // subtract and the page would have to guess.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6878,17 +7236,20 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
     lastGrowthAt = startedAt;
     finishedAt = 0;
     phase = 'running';
-    // HELD, NOT OWNED. One five-second clock for the whole product, released
-    // the moment this run stops needing it.
+    // NO CENSUS ON A TIMER (WP-61, DB-B53): the reading above is the before,
+    // the one after the answer is the after, and what happens between comes
+    // from /ingest/status.json (about 1 KB), never 16 to 33 MB every 5 s.
     releaseWatch?.();
+    releaseWatch = null;
     seenRead = store.reads;
-    releaseWatch = watchStore(5000);
 
     controller = new AbortController();
     // CAPTURED ONCE, AND THAT IS WHAT MAKES IT TYPE. `controller` is a
@@ -6970,7 +7331,7 @@
             // its own ceiling rather than the 15 s every other read gets. The
             // operator's Cancel signal below still applies: `ask` answers to
             // both.
-            ms: 120_000,
+            ms: PULL_WAIT_MS,
             method: 'POST',
             headers: { 'content-type': 'application/x-www-form-urlencoded' },
             body: b.body,
@@ -6998,6 +7359,22 @@
           if (controller?.signal.aborted) {
             aborted = true;
             return;
+          }
+          /* THIS PAGE STOPPED WAITING; THE PULL WAS NOT CANCELLED (WP-61,
+             DB-B31). `ask` throws its own ceiling as "timed out and was
+             cancelled", and the card said so while `detached_pull` kept
+             pulling and writing; the after-reading was then taken mid-pull and
+             a re-press met the seat's 409. The truthful sentence is
+             `waitedOut`'s, and the chain WAITS for the cell in flight to clear
+             before it measures anything or sends this feed's next request. */
+          if (isAskTimeout(why)) {
+            if (!netError) netError = waitedOut(b.route ?? '/pull/spot', PULL_WAIT_MS, b.label);
+            await untilPullClears(signal);
+            if (signal.aborted) {
+              aborted = true;
+              return;
+            }
+            continue;
           }
           if (!netError) netError = String(why);
           /* CONTINUE, DO NOT ABANDON THE REST OF THIS FEED'S CHAIN.
@@ -7054,7 +7431,7 @@
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
-    releaseWatch?.();
+    /** @type {(() => void) | null} */ (releaseWatch)?.();
     releaseWatch = null;
 
     // THE AFTER READING. Taken even when the request failed — a run that
@@ -7082,9 +7459,9 @@
    * backfill instead of ending it, which is worse than no button. So the server
    * is told first, and a failure to tell it is REPORTED rather than swallowed.
    *
-   * The server stops at the next leg boundary and not inside one: a leg that
-   * has already asked the vendor for bars must be allowed to write them, or
-   * pressing Stop would throw away answers that were already paid for.
+   * The server stops at the next INSTRUMENT (WP-61, DB-B28), not the next leg:
+   * the instrument being fetched writes its bars first, so answers already
+   * paid for are kept, and the wait is seconds where a leg was hours.
    */
   /**
    * WHY THIS READS THE ANSWER NOW, AND DID NOT BEFORE.
@@ -7120,6 +7497,8 @@
       said = await r.json();
     } catch (why) {
       stopAsked = false;
+      // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
+      aborted = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
       return;
     }
@@ -7128,14 +7507,178 @@
        is watching one that is not in the slot. Either way the operator must be
        told, because the alternative is a button that reports success for having
        done nothing. */
-    if (said?.stopping !== true) {
+    /* WHAT IT STOPPED AND WHEN THAT BITES ARE THE SERVER'S WORDS (WP-61;
+       DB-B28, DB-B30). A per-row pull holds no /pull/run slot, and this page
+       said "Nothing was stopped: the server reports no run in progress" while
+       it ran; the route now names `run`, `hand_pull` or `nothing`, and both
+       stop at the next INSTRUMENT, not the next leg. */
+    const heard = stopSaid(said);
+    if (!heard.stopped) {
       stopAsked = false;
-      pollError =
-        'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
+      aborted = false;
+      pollError = heard.text;
       return;
     }
-    controller?.abort();
+    stopNote = heard.text;
+    /* A SINGLE HAND PULL'S REQUEST IS LEFT OPEN: the server ends it at its
+       next instrument and answers with the receipt of what landed, which an
+       abort here would throw away. A run's own request returned long ago. */
+    if (heard.what !== 'hand_pull') controller?.abort();
   }
+
+  /* ══════ WHAT THE SERVER SAYS IS GOING ON, WHOEVER STARTED IT ══════
+     (WP-61; DB-G21, DB-B29, DB-B31, DB-B32, DB-B39, DB-B53)
+
+     Two small documents carry it: `/ingest/status.json` (the cell in flight
+     with its feed, rung, position, measured pace and the server's own ETA,
+     about 1 KB) and `/pull/run.json` (148 bytes idle). They are read every
+     two seconds while this page shows a run and every fifteen when it shows
+     none, only while the tab is visible. Nothing here reads the census. */
+
+  /** How long this page waits for one answer from a pull route. */
+  const PULL_WAIT_MS = 120_000;
+  /** How often an idle page asks whether a pull is going on the server. */
+  const IDLE_POLL_MS = 15_000;
+
+  /** Its position, measured pace and labelled ETA. */
+  const pace = $derived(flightPace(flight));
+  /** `/pull/run.json` as the idle poll last read it. */
+  let serverRun = $state(/** @type {any} */ (null));
+  /** The run this tab picked up rather than started (DB-B32), or `null`. */
+  let adopted = $state(/** @type {ReturnType<typeof adoptRun> | null} */ (null));
+  /** What the last Stop said it stopped, in the server's words. */
+  let stopNote = $state('');
+  let lastMoveKey = '';
+
+  $effect(() => {
+    const key = `${phase}|${progressKey(flight, runState)}`;
+    untrack(() => {
+      if (key === lastMoveKey) return;
+      lastMoveKey = key;
+      lastMoveAt = Date.now();
+    });
+  });
+
+  $effect(() => {
+    const running = phase === 'running';
+    return untrack(() =>
+      watchVisible(
+        async (ticket) => {
+          await readPilot();
+          /* WHILE A RUN IS SHOWN ITS OWN WATCH READS /pull/run.json. */
+          if (!ticket.current() || running) return;
+          try {
+            const r = await request('/pull/run.json', { ms: 15_000, signal: ticket.signal });
+            if (!ticket.current() || !r.ok) return;
+            const doc = await r.json();
+            if (!ticket.current()) return;
+            serverRun = doc;
+            /* AN IDLE TAB LEARNS OF A RUN IT DID NOT START (DB-B29) and shows
+               it as that run, with its Stop, rather than an idle form whose
+               Pull the server would refuse. */
+            if (doc?.running === true && phase !== 'running' && !pressing) void resumeRun();
+          } catch {
+            /* A status this tab could not read is not "idle"; the next poll
+               asks again and nothing on screen is changed by the failure. */
+          }
+        },
+        running ? POLL_MS : IDLE_POLL_MS,
+        {
+          visible: () => document.visibilityState === 'visible',
+          listen: (wake) => {
+            document.addEventListener('visibilitychange', wake);
+            return () => document.removeEventListener('visibilitychange', wake);
+          }
+        }
+      )
+    );
+  });
+
+  /**
+   * Resolves when the server names no cell in flight and its pull seat is
+   * free, or the operator stops, or this page goes away (DB-B31). One
+   * `/ingest/status.json` read per `POLL_MS`; an unreadable status is not
+   * "clear", so the wait goes on and the status error is on screen.
+   *
+   * @param {AbortSignal} signal
+   */
+  async function untilPullClears(signal) {
+    for (;;) {
+      if (!viewAlive || signal.aborted) return;
+      await readPilot();
+      if (pilot.error === null && pilot.at > 0 && flightOf(pilot.inFlight) === null && pilot.seat !== 'held') return;
+      await new Promise((done) => setTimeout(done, POLL_MS));
+    }
+  }
+
+  /** Whoever is pulling on this server when this page is not (DB-B29). */
+  const busy = $derived(phase === 'running' ? null : busyNotice(pilot, serverRun, feeds.active, feedName));
+  /** The feeds the run on screen is asking, in its own words (DB-B32). */
+  const runFeedsLabel = $derived(
+    adopted?.known && adopted.vendors.length > 0
+      ? adopted.vendors.map((wire) => feedName(wire)).join(', ')
+      : feedName(feeds.active)
+  );
+
+  /* ══════ THE LAST RUN'S OUTCOME, AND THE IMPORT, FROM THE JOURNALS ══════
+     (WP-61; DB-G21, DB-G22, DB-A51)
+
+     `/audit.json?feed=` names the newest run records (`last_runs`, O(1)
+     whatever follows them) and, for an imported feed, the import journal's
+     summary (`imports`) with the census capacity beside it (`store`). Read
+     when the feed is chosen and again when a run on this page ends: never on
+     a timer. The import's not-done days are `/imports.json` pages. */
+  /**
+   * @type {{
+   *   feed: string | null, state: 'idle' | 'reading' | 'ready' | 'error', body: any, why: string | null, at: number,
+   *   extras: { notDone: any[] | null, notDoneError: string | null, optionsLeft: number | null, more: number } | null
+   * }}
+   */
+  let journals = $state.raw({ feed: null, state: 'idle', body: null, why: null, at: 0, extras: null });
+  const journalRequests = createPageRequests();
+  onDestroy(() => journalRequests.dispose());
+
+  $effect(() => {
+    const feed = feeds.active;
+    // RE-READ WHEN A RUN ON THIS PAGE ENDS: it wrote the records this shows.
+    const ended = finishedAt;
+    untrack(() => {
+      journalRequests.cancel();
+      if (!feed) {
+        journals = { feed: null, state: 'idle', body: null, why: null, at: 0, extras: null };
+        return;
+      }
+      void ended;
+      void journalRequests.run(async (ticket) => {
+        journals = { ...journals, feed, state: 'reading', why: null, body: journals.feed === feed ? journals.body : null, extras: journals.feed === feed ? journals.extras : null };
+        try {
+          const r = await request(`/audit.json?feed=${encodeURIComponent(feed)}`, { ms: 30_000, signal: ticket.signal });
+          const body = await r.json();
+          if (!ticket.current()) return;
+          if (!r.ok) throw new Error(String(body?.error ?? `HTTP ${r.status}`));
+          journals = { feed, state: 'ready', body, why: null, at: Date.now(), extras: null };
+          if (body?.imports && typeof body.imports === 'object') {
+            const extras = await readImportExtras(request, body.imports, ticket.signal);
+            if (!ticket.current()) return;
+            journals = { feed, state: 'ready', body, why: null, at: Date.now(), extras };
+          }
+        } catch (why) {
+          if (!ticket.current()) return;
+          journals = {
+            feed, state: 'error', body: null, at: 0, extras: null,
+            why: `/audit.json?feed=${feed} could not be read, so the last run's outcome and the import journal are unknown, not empty: ${why instanceof Error ? why.message : String(why)}`
+          };
+        }
+      });
+    });
+  });
+
+  /** The last run of this feed, as the pull journal names it (DB-G21). */
+  const lastRunSays = $derived(journals.feed === feeds.active && journals.state === 'ready' ? lastRun(journals.body) : null);
+  /** The import journal's summary, when this feed has one (DB-G22). */
+  const importSummary = $derived(
+    journals.feed === feeds.active && journals.state === 'ready' && journals.body?.imports ? journals.body.imports : null
+  );
 
 
   function reset() {
@@ -7148,12 +7691,15 @@
     sent = { done: 0, of: 0, label: '' };
     askedKeys = new Set();
     netError = null;
+    pollError = null;
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
     live = null;
     samples = [];
     aborted = false;
+    adopted = null;
+    stopNote = '';
     /* CLEARED WITH THE REST, or the next run's Stop button is born saying
        "Stopping…" for a run nobody has stopped. */
     stopAsked = false;
@@ -7290,16 +7836,18 @@
       // into `pullFeeds`, ran on ONE, and went on writing both to the address
       // bar: the URL and the run disagreed permanently.
       if (named.length > 1) {
-        // A REAL FAN-OUT, which is a decision and therefore touched.
-        selectFeed(named[0]);
+        // A REAL FAN-OUT, which is a decision and therefore touched. THE FEED
+        // CAME FROM THE ADDRESS, so it is shown and NOT saved (WP-61, DB-B54):
+        // opening /ingest?feed=gdfl rewrote the feed every other tab opens on.
+        selectFeed(named[0], { persist: false });
         pullFeeds = new Set(named);
         feedsTouched = true;
       } else if (named.length === 1) {
         // ONE NAMED FEED IS THE SCOPE FEED AND NOT A FAN-OUT. `pullFeeds`
         // empty plus `feedsTouched` false means "follows the scope", so
         // seeding it with a single entry would say the same thing twice and
-        // drift from `feeds.active`.
-        selectFeed(named[0]);
+        // drift from `feeds.active`. From the address: shown, not saved (DB-B54).
+        selectFeed(named[0], { persist: false });
         pullFeeds = new Set();
         feedsTouched = false;
       } else if (wantFeeds.size === 0) {
@@ -7390,6 +7938,9 @@
          The run status and the link to /audit stay: neither is a restatement,
          and the status is the only thing on the page that says a pull is on the
          wire while you are looking somewhere else. -->
+    <!-- FREE SPACE, STORE SIZE, CENSUS KEPT, AND WHETHER A COPY EXISTS
+         (DB-B73, DB-B59): one drive held everything and no page said so. -->
+    <DiskTile />
     <span class="spacer"></span>
     {#if phase === 'running'}
       <span class="status busy" aria-live="polite">
@@ -7439,11 +7990,30 @@
   {:else if archiveHidden}
     <div class="blank">
       <h2 title="This is an archive feed: it reads CSV files that have to be bought first. Buy the archive and give the feed a store prefix, or select a broker feed below. The folder form appears here the day this feed reports itself ready — nothing on this page names a vendor.">
-        {active.display} has nothing to ingest yet
+        {#if (survey.byFeed.get(active.wire)?.cells ?? 0) > 0}
+          <!-- TWO FACTS, SAID APART (WP-61, DB-G14): the folder this feed is
+               imported from cannot be read right now, AND its store holds
+               bars. The heading said "nothing to ingest yet" over 3.26
+               billion stored rows. -->
+          {active.display} cannot be imported from its folder right now — its {n(survey.byFeed.get(active.wire)?.cells ?? 0)} stored instrument-month(s) are untouched and readable on /db
+        {:else}
+          {active.display} has nothing to ingest yet
+        {/if}
       </h2>
       <!-- THE SERVER'S OWN WORDS SURVIVE EVERY CUT. A refusal paraphrased is a
            refusal the operator cannot act on, and §4 requires it named. -->
       <p class="warn mono">{active.why}</p>
+      {#if importSummary}
+        <ImportPanel
+          summary={importSummary}
+          store={journals.body?.store ?? null}
+          archiveTo={activeSpan.kind === 'archive' ? activeSpan.to : null}
+          optionsLeft={journals.extras?.optionsLeft ?? null}
+          notDone={journals.extras?.notDone ?? null}
+          notDoneError={journals.extras?.notDoneError ?? null}
+          now={nowMs}
+        />
+      {/if}
       <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else}
@@ -7615,9 +8185,11 @@
                       <span class="note quiet">reading {active.display}'s folder…</span>
                     {:else if c.state === 'halted'}
                       <span class="note wrap warn" title={c.why}>
-                        the folder could not be read{c.path ? ` — ${c.path}` : ''}. This is a HALT
-                        and not an empty folder: nothing was counted, so nothing below is a census
-                        of anything.
+                        the vendor folder could not be read{c.why ? `: ${c.why}` : c.path ? ` — ${c.path}` : ''}. This
+                        is a HALT and not an empty folder: nothing in the FOLDER was counted, so
+                        this line says nothing about what is waiting to be imported. The rows below
+                        are not the folder's: they are the bars the STORE already holds for this
+                        feed, counted from the store.
                       </span>
                     {:else if c.state === 'days'}
                       <span
@@ -8136,7 +8708,7 @@
                           aria-haspopup="dialog"
                           aria-expanded={cal.field === 'to'}
                           aria-label="Choose the last day"
-                          title={`Newest day that can be asked for: ${dayLabel(maxDay)}. ${ceilReason}`}
+                          title={`Newest day that can be asked for: ${dayLabel(maxDay)}. ${ceilReason}${windowOpensWhy ? ` The window opened where it did because ${windowOpensWhy}.` : ''}`}
                           onclick={() => openCal('to')}>▦</button
                         >
                       </div>
@@ -8291,13 +8863,23 @@
                           <span
                             class="ltrack"
                             role="img"
-                            aria-label={!lane.known
+                            aria-label={lane.archive
+                              ? `${lane.feed} is imported from an archive that /feeds.json measures from ${dayLabel(lane.archive.from)} to ${dayLabel(lane.archive.to)}: ${Math.round(lane.archive.livePct)}% of the window. Nothing outside that span can be imported.`
+                              : !lane.known
                               ? `${lane.feed} states no reach at ${lane.rung}. This is a folder of bought files, so what it covers is whatever is in it — not a claim this page can make for it.`
                               : lane.whole
                                 ? `${lane.feed} at ${lane.rung} answers for the whole window.`
                                 : `${lane.feed} at ${lane.rung} answers for ${Math.round(lane.livePct)}% of the window, from ${dayLabel(lane.at)}. The earlier ${Math.round(lane.deadPct)}% returns nothing.`}
                           >
-                            {#if !lane.known}
+                            {#if lane.archive}
+                              {#if lane.archive.beforePct > 0}
+                                <i class="ldead" style="width:{lane.archive.beforePct}%"></i>
+                              {/if}
+                              <i class="llive" style="width:{lane.archive.livePct}%"></i>
+                              {#if lane.archive.afterPct > 0}
+                                <i class="ldead" style="width:{lane.archive.afterPct}%"></i>
+                              {/if}
+                            {:else if !lane.known}
                               <!-- NEITHER GREEN NOR RED. A green track would
                                    assert a reach the vendor never claimed; a red
                                    one would assert a refusal nobody made. The
@@ -8311,8 +8893,10 @@
                               <i class="llive" style="width:{lane.livePct}%"></i>
                             {/if}
                           </span>
-                          <span class="lat" class:dim={lane.whole || !lane.known}>
-                            {!lane.known
+                          <span class="lat" class:dim={lane.whole || (!lane.known && !lane.archive)} data-lane-reach={lane.archive ? 'archive' : lane.known ? 'floor' : 'unstated'}>
+                            {lane.archive
+                              ? `archive ${dayLabel(lane.archive.from)} – ${dayLabel(lane.archive.to)}`
+                              : !lane.known
                               ? 'reach not stated'
                               : lane.whole
                                 ? 'whole window'
@@ -8366,10 +8950,11 @@
                     <span class="lab">Stock identity verification</span>
                     <select class="din" aria-label="Zerodha cash identity" bind:value={zerodhaCashIdentity}>
                       <option value="isin">Vendor-supplied ISIN — unavailable in Zerodha master</option>
+                      <option value="zerodha_nse_checked">Token + symbol checked against NSE's own ISIN file — Zerodha only, no other vendor</option>
                       <option value="zerodha_cross_checked">Token + independent ISIN cross-check (recommended)</option>
                       <option value="zerodha_symbol">Exact token only — NOT ISIN-verified</option>
                     </select>
-                    <span class="note quiet wrap full">Zerodha does not supply ISINs. The cross-check requires an exact NSE cash listing and a separate, unambiguous ISIN-bearing master matching the exchange table. Missing or conflicting evidence is refused. This is current-snapshot evidence, not proof of historical renames or membership.</span>
+                    <span class="note quiet wrap full">Zerodha does not supply ISINs. The NSE check requires exactly one Zerodha NSE EQ row for the symbol, and NSE's own Total Market file (landed the same day as the Zerodha dump by Refresh masters) mapping that symbol to the member's ISIN; no other vendor is read. The cross-check instead requires a separate, unambiguous ISIN-bearing Groww or Dhan master matching the exchange table. Missing or conflicting evidence is refused. This is current-snapshot evidence, not proof of historical renames or membership.</span>
                   </div>
                 {/if}
                 {#if isFolderFeed}
@@ -8513,7 +9098,9 @@
             {/if}
 
             <div class="actions">
-              <button class="btn primary" type="submit" disabled={phase === 'running'}>
+              <button class="btn primary" type="submit" disabled={phase === 'running' || pressing || busy?.blocksPull === true}
+                title={busy?.blocksPull ? `${busy.head}. ${busy.text}` : undefined}
+              >
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
@@ -8539,8 +9126,9 @@
                      `stopWatching` existed before this and had NO call site —
                      harmless while the run lived in this tab, because closing
                      the tab ended it. The run is a task on the server now, and
-                     a failed pass retries WITHOUT limit, so without this button
-                     the only way to end one is to restart the process.
+                     a failed pass is retried up to the run's pass ceiling
+                     (400), so without this button the only way to end one
+                     early is to restart the process.
                      It tells the server BEFORE it stops watching: aborting the
                      poll alone would end the looking and leave the run going,
                      which is worse than offering no button at all. -->
@@ -8553,10 +9141,12 @@
                      `Stop`, the progress bar kept climbing, and the run went on
                      until its next leg boundary, which is exactly what a
                      control that did nothing would look like.
-                     A stop is not instant BY DESIGN — `pull_run_stop` sets a
-                     flag and the loop reads it between legs, because a leg that
-                     has already asked the vendor for bars must be allowed to
-                     write them rather than throw away answers already paid for.
+                     A stop is not instant BY DESIGN — `pull_run_stop` moves
+                     the hand runs' stop generation and the instrument loop
+                     reads it per instrument (it read a flag between legs
+                     until WP-61, DB-B28), because the instrument being fetched
+                     must be allowed to write its bars rather than throw away
+                     answers already paid for.
                      That is right, and it is precisely why the press has to be
                      acknowledged the moment it happens: the delay is legitimate
                      and invisible, so the only thing that can distinguish
@@ -8566,8 +9156,9 @@
                   type="button"
                   disabled={stopAsked}
                   title={stopAsked
-                    ? 'The server has been told. It stops at the next leg boundary — a leg that has already asked the vendor for bars is allowed to write them first, so this is not instant.'
-                    : 'Stops the run at its next leg boundary. Bars already fetched are still written.'}
+                    ? stopNote ||
+                      'The server has been told. The pull in flight stops at its next instrument: the instrument it is fetching writes its bars first, so this takes seconds, not a leg.'
+                    : 'Stops the hand run, or the single hand pull, in flight at its next INSTRUMENT, not its next leg. Bars already fetched are still written. The autopilot is not touched by this: it is paused at /autopilot.'}
                   onclick={stopWatching}>{stopAsked ? 'Stopping…' : 'Stop'}</button
                 >
               {/if}
@@ -8576,6 +9167,25 @@
               {/if}
 
             </div>
+
+            <!-- THE RUN'S OWN REFUSALS, SAID OUT LOUD. `netError` (a refused or
+                 unreachable `/pull/run`, a pre-run census that failed, a dropped
+                 leg) and `pollError` (an unreadable run status, a Stop the
+                 server never took, a census poll that failed) were written by
+                 every handler and rendered nowhere, so a press that failed
+                 looked like a press that did nothing. Shown whatever `phase`
+                 is. conc18-2, CLAUDE.md §4. -->
+            {#if netError}
+              <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if pollError}
+              <p class="note wrap warn" role="alert" data-run-error="poll">
+                {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
+              </p>
+            {/if}
+            {#if phase === 'done' && aborted && !netError}
+              <p class="note wrap" data-run-error="stopped">Stopped at your request. What landed before the stop is counted below.</p>
+            {/if}
 
             <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
 
@@ -8603,7 +9213,60 @@
 
                  IT SURVIVES INTO `done` DELIBERATELY. A bar that vanishes at the
                  moment it completes is a bar nobody sees finish. -->
-            {#if phase !== 'idle' && expectedUnits > 0}
+            {#if phase !== 'idle' && adopted}
+              <!-- THE RUN'S OWN FEED, RUNGS, WINDOW AND START (WP-61, DB-B32).
+                   A run this tab picked up is shown as the run /pull/run.json
+                   describes, never measured against this tab's feed and
+                   selection: its legs done, its start, and what it asked. -->
+              <div class="prog" class:stall={stalled} data-run-adopted={adopted.known ? 'known' : 'unknown'}>
+                <div class="prog-h">
+                  <span class="prog-t">
+                    {#if phase === 'running'}
+                      <span class="dot {stopAsked ? 'warn' : 'acc'} live" aria-hidden="true"></span>
+                      {stopAsked ? 'stopping' : 'pulling'} {runFeedsLabel}{stopAsked ? ' at its next instrument' : ''}
+                    {:else}
+                      {runFeedsLabel} · done
+                    {/if}
+                  </span>
+                  <span
+                    class="prog-n mono"
+                    title="Legs finished against legs in the run, and the pass it is on, as /pull/run.json counts them. The run's elapsed time counts from the start the server recorded."
+                  >
+                    {n(sent.done)}/{n(sent.of)} leg(s) · pass {n(Number(runState?.passes ?? 0))} · {clockOf(elapsedMs)}
+                  </span>
+                </div>
+                <p class="note wrap" style="margin:6px 0 0">{adoptedSentence(adopted, feedName)}</p>
+                {#if stalled}
+                  <div class="prog-f"><span class="warn" title={stall.why}>stalled {n(stalledSecs)}s</span></div>
+                {/if}
+              </div>
+            {/if}
+            {#if phase === 'running' && pace}
+              <!-- THE CELL IN FLIGHT, ITS MEASURED PACE, AND AN ETA THAT SAYS
+                   IT IS ONE (WP-61, DB-G21). Read from /ingest/status.json
+                   every two seconds while a run is on screen. -->
+              <p
+                class="note wrap"
+                data-run-flight="named"
+                title="Read from /ingest/status.json every 2 s while this run is on screen: the cell the server is fetching, its position in its leg, the time per instrument the server has measured, and the server's own extrapolation of what is left of this leg."
+              >
+                <b>In flight:</b>
+                <span class="mono">{flight?.feed ? `${feedName(flight.feed)} · ${flight.timeframe} · ` : ''}{pace.where}</span>
+                {#if pace.pace}· {pace.pace}{/if}
+                {#if pace.eta}· <b>{pace.eta}</b>{/if}
+                {#if !pace.labelled}
+                  <span class="warn">· this server does not name the cell's feed or timeframe, so no row below is marked in flight</span>
+                {/if}
+              </p>
+            {:else if phase === 'running'}
+              <p class="note wrap dim" data-run-flight="none">
+                /ingest/status.json names no instrument in flight right now: the run is between two instruments or legs, or has not reached the vendor yet.
+              </p>
+            {/if}
+            {#if stopNote && phase !== 'idle'}
+              <p class="note wrap" data-run-stop>{stopNote}</p>
+            {/if}
+            {#if phase !== 'idle' && expectedUnits > 0 && !adopted}
               <div class="prog" class:stall={stalled}>
                 <div class="prog-h">
                   <span class="prog-t">
@@ -8614,12 +9277,12 @@
                            climbing under the word `Pulling` is the whole reason
                            a stop looks ignored. -->
                       <span class="dot warn live" aria-hidden="true"></span>
-                      stopping {feedName(feeds.active)} at the next leg
+                      stopping {runFeedsLabel} at its next instrument
                     {:else if phase === 'running'}
                       <span class="dot acc live" aria-hidden="true"></span>
-                      {Verb}ing {feedName(feeds.active)}
+                      {Verb}ing {runFeedsLabel}
                     {:else}
-                      {feedName(feeds.active)} · done
+                      {runFeedsLabel} · done
                     {/if}
                   </span>
                   <!-- THE FRACTION IN WORDS, BESIDE THE SAME FRACTION AS A
@@ -8660,7 +9323,7 @@
                          reader who wants to know WHY will look. -->
                     <span
                       class="warn"
-                      title="The request is still open. That is what a waiting rate governor looks like from outside, and also what a slow vendor looks like — this page cannot tell them apart, so it names the observation rather than the cause."
+                      title={stall.why}
                       >stalled {n(stalledSecs)}s</span
                     >
                   {:else if everGrew}
@@ -8679,8 +9342,8 @@
                   {:else if phase === 'running'}
                     <span
                       class="dim"
-                      title="Nothing has landed yet — the first leg is still on the wire. This line is drawn only until the store first grows, because a panel that says `bars are landing` before any have is a claim with no measurement under it."
-                      >nothing landed yet</span
+                      title="The store is read once when this run starts and once when it ends (WP-61, DB-B53): re-reading the whole census every five seconds cost 16 to 33 MB per poll. What the run is doing right now is the In flight line above, from /ingest/status.json; the bars it landed are counted against the store when it ends."
+                      >landed bars are counted when the run ends</span
                     >
                   {/if}
                 </div>
@@ -8706,9 +9369,11 @@
                  with nothing behind it in the other direction, and it is the
                  first thing an operator asks about. -->
             {#if runState && (runState.running || runState.passes > 0)}
+              <!-- NEVER A DELTA FROM A NULL OR A NEGATIVE ONE (CE-81): see `landedOf`. -->
+              {@const landed = landedOf(runState.rowsAtStart, runState.rowsNow)}
               <div class="runcard">
                 <div class="runtop">
-                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span title={landed.why}>{#if landed.count === null}{landed.lead}{:else}<b>{n(landed.count)}</b>{/if} bar(s) {landed.kind === 'dropped' ? 'FEWER than at the start — the census total fell, so nothing is claimed as landed' : 'landed'}</span>
                   <span>pass <b>{n(runState.passes)}</b></span>
                   {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
                   <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>
@@ -8716,6 +9381,7 @@
                 <table class="runfeeds">
                   <tbody>
                     {#each runState.feeds ?? [] as f (f.vendor)}
+                      {@const meter = feedMeter(f)}
                       <tr>
                         <td class="rf-v">{feedName(f.vendor)}</td>
                         <!-- ══ THE FEED'S OWN PROGRESS, AS A LENGTH ══
@@ -8741,13 +9407,16 @@
                               aria-hidden="true"
                               ><i
                                 class="fill"
-                                class:up={f.finished || (f.legsDone ?? 0) >= (f.legs ?? 0)}
+                                class:up={meter.up}
+                                class:halt={meter.halted}
                                 style="width:{Math.min(100, ((f.legsDone ?? 0) / f.legs) * 100)}%"
                               ></i></i
                             >
                           {/if}
                         </td>
-                        <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
+                        <!-- `skipped` IS RENDERED NOW (CE-81). A halted feed finishes with
+                             `skipped = legs - legsDone`; '—' there read as done. -->
+                        <td class="rf-d">{#if meter.skipped > 0}<span class="rf-halt">halted · {n(meter.skipped)} leg(s) skipped</span>{:else}{f.finished ? '—' : (f.doing || 'waiting for its turn')}{/if}</td>
                         <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
                              This read `retrying after a failure` for EVERY
                              `lastError`, and threw the error itself away.
@@ -8979,6 +9648,87 @@
              The DOT carries that (tone + `live`), the timestamp carries when,
              and the word is drawn only when it is not `measured` — i.e. only
              when something is wrong and the reader must be told in words. -->
+        <!-- THE LADDER'S OWN STATE, WHEN IT CANNOT BE TRUSTED (CE-79). The
+             fail and retry verdicts below are read from /ingest/status.json;
+             a refused read or a survey that has not happened is said here,
+             in the server's words, rather than left as "no halt". -->
+        {#if pilotSays}
+          <p class="caution" class:loud={pilotSays.tone === 'bad'} role="alert">
+            <span class="tag {pilotSays.tone === 'bad' ? 'down' : 'warn'}">{pilotSays.head}</span>
+            <span class="msg">{pilotSays.text}</span>
+          </p>
+        {/if}
+        <!-- A PULL THIS TAB DID NOT START (WP-61, DB-B29): who drives it, where
+             it is, its measured pace, and what stops it. An idle tab offered a
+             Pull the server then refused with a 409. -->
+        {#if busy}
+          <p class="caution" role="status" data-ingest-busy={busy.driver}>
+            <span class="tag warn">{busy.head}</span>
+            <span class="msg"
+              >{busy.text}{pace?.pace ? ` Measured: ${pace.pace}.` : ''}{pace?.eta ? ` ${pace.eta}.` : ''}</span
+            >
+          </p>
+        {/if}
+        <!-- THE LAST RUN'S OUTCOME, FROM THE PULL JOURNAL (WP-61, DB-G21). -->
+        {#if journals.state === 'error' && journals.feed === feeds.active}
+          <p class="caution loud" role="alert" data-ingest-last-run="unread">
+            <span class="tag down">journals unread</span>
+            <span class="msg">{journals.why}</span>
+          </p>
+        {:else if lastRunSays && !(isImported && lastRunSays.state === 'none')}
+          <p class="caution" class:loud={lastRunSays.tone === 'down'} data-ingest-last-run={lastRunSays.state}>
+            <span class="tag {lastRunSays.tone === 'up' ? 'up' : lastRunSays.tone === 'down' ? 'down' : 'warn'}"
+              >last run{lastRunSays.outcome ? ` · ${lastRunSays.outcome}` : ''}</span
+            >
+            <span class="msg"
+              >{lastRunSays.sentence}
+              <a href={`/audit?feed=${encodeURIComponent(feeds.active ?? '')}`}>Every record is on /audit.</a></span
+            >
+          </p>
+        {/if}
+        <!-- THE PULL JOURNAL'S REFUSALS, JOINED TO THE MONTHS BELOW (DB-G23). -->
+        {#if refusals.feed === feeds.active && refusals.state === 'error'}
+          <p class="caution loud" role="alert" data-ingest-refusals="unread">
+            <span class="tag down">refusals unread</span>
+            <span class="msg"
+              >{refusals.why} A missing or short month reads "refusals unread" below: whether it was asked for and refused is not known, and "never pulled" is not claimed.</span
+            >
+          </p>
+        {:else if refusals.feed === feeds.active && refusals.state === 'unsupported'}
+          <p class="caution loud" role="alert" data-ingest-refusals="unsupported">
+            <span class="tag down">refusals unread</span>
+            <span class="msg"
+              >/ingest/refusals.json refused the question for this feed: {refusals.why} A missing or short month reads "refusals unread" below, and "never pulled" is not claimed.</span
+            >
+          </p>
+        {:else if refusals.feed === feeds.active && refusals.state === 'ready' && refusals.errors.size > 0}
+          <p class="caution loud" role="alert" data-ingest-refusals="unread-symbols" data-count={refusals.errors.size}>
+            <span class="tag down">refusals unread</span>
+            <span class="msg">{refusalErrorsSentence(refusals.errors)}</span>
+          </p>
+        {/if}
+        {#if refusals.feed === feeds.active && refusals.state === 'ready' && refusedInstruments > 0}
+          <p class="caution" data-ingest-refusals="joined">
+            <span class="tag warn">requested and refused</span>
+            <span class="msg"
+              >The pull journal holds a refusal for {n(refusedInstruments)} of the {n(refusals.asked)} ticked instrument(s). A month it names is drawn "requested and refused" with the journal's own reason, never "never pulled". {refusals.rungNote}</span
+            >
+          </p>
+        {/if}
+        <!-- THE IMPORT, FROM ITS OWN JOURNAL (WP-61; DB-G22, DB-A51): kinds
+             done, options progress with a labelled ETA, every not-done day
+             with its reason, and the census capacity used and left. -->
+        {#if importSummary}
+          <ImportPanel
+            summary={importSummary}
+            store={journals.body?.store ?? null}
+            archiveTo={activeSpan.kind === 'archive' ? activeSpan.to : null}
+            optionsLeft={journals.extras?.optionsLeft ?? null}
+            notDone={journals.extras?.notDone ?? null}
+            notDoneError={journals.extras?.notDoneError ?? null}
+            now={nowMs}
+          />
+        {/if}
         <div class="prov" aria-live="polite" title={provenance.detail}>
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
           {#if provenance.tone !== 'up'}
@@ -9385,14 +10135,25 @@
                       {/if}
                       <td
                         class="num mono"
-                        title={!c?.expectedKnown
+                        title={r.state === 'loading'
+                          ? r.loadingWhy
+                          : !c?.expectedKnown
                           ? `${n(r.got)} stored bar(s). The expected total is unverified because the timeframe or at least one reachable month's calendar expectation is unknown.`
                           : `${n(r.got)} stored against ${n(r.exp)} expected — ${n(windowSessions)} NSE session(s) inside the window × ${n(r.per)} bar(s) per session, over ${n(r.months.length)} month file(s).`}
                       >
+                        <!-- NOT LOOKED UP IS NOT ZERO (R4-01, V1): before the
+                             census lands this cell read `0 / unverified` over a
+                             share holding 3.6 crore one-second bars. -->
+                        {#if r.state === 'loading'}
+                          <span class="dim">{r.loadingWord}</span>
+                        {:else if r.noSpot}
+                          <span class="warn" title={`${feedName(feeds.active)} holds options on ${r.sym} and no spot series: /instruments.json lists it under FNO with spot false. Its option rows count their months; the spot has to be imported or pulled before a spot month or a greek can be read.`}>spot not stored</span>
+                        {:else}
                         <span class:up={c?.expectedKnown && r.got >= r.exp} class:warn={c?.expectedKnown && r.got < r.exp}
                           >{n(r.got)}</span
                         >
                         / {!c?.expectedKnown ? 'unverified' : n(r.exp)}
+                        {/if}
                         <!-- THE RATIO THE TWO NUMBERS ALREADY STATE, AS A
                              LENGTH. `0 / 11,29,875` and `11,04,320 / 11,29,875`
                              are both two long tabular numbers, and telling them
@@ -9435,11 +10196,24 @@
                         class="num mono"
                         class:warn={r.unproved > 0}
                         class:up={r.unproved === 0}
-                        title={r.unproved > 0
-                          ? `${n(r.unproved)} of the ${n(r.months.length)} month file(s) in the window are not settled: ${r.months.filter((m) => m.k !== 'ok' && m.k !== 'beyond').map((m) => `${monthLabel(m.month)} ${VERDICT[m.k][1]}`).join(', ')}.`
-                          : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, or out of this feed's reach.`}
+                        title={r.state === 'loading'
+                          ? r.loadingWhy
+                          : r.unproved > 0
+                          ? `${n(r.unproved)} of the ${n(r.months.length)} month file(s) in the window are not settled: ${r.months.filter((m) => !settledMonth(m.k)).map((m) => `${monthLabel(m.month)} ${VERDICT[m.k][1]}${m.why ? ` (${m.why.days.join(', ') || 'whole window'})` : ''}`).join(', ')}.${r.held > 0 ? ` ${n(r.held)} month file(s) hold bars.` : ''}`
+                          : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, held at a rung with no yardstick (counted, not compared), or out of this feed's reach. ${n(r.held)} of them hold bars.`}
                       >
-                        {n(r.unproved)}/{n(r.months.length)}
+                        <!-- R4-01 (V1): `census loading` until the census
+                             lands, never `97/97`; and at a rung with no
+                             yardstick the months that HOLD bars, `97/97 held`,
+                             because "unproved" is all such a month can never
+                             stop being. -->
+                        {#if r.state === 'loading'}
+                          <span class="dim">{r.loadingWord}</span>
+                        {:else if r.per === null || r.seg !== 'spot'}
+                          {n(r.held)}/{n(r.months.length)} held{r.unproved > 0 ? ` · ${n(r.unproved)} open` : ''}{#if r.stale > 0}<span class="dim" title="These counts are the previous census's of this feed; a newer census is being counted and replaces them when it is done."> · previous census, re-counting</span>{/if}
+                        {:else}
+                          {n(r.unproved)}/{n(r.months.length)}
+                        {/if}
                         <!-- THE COMPLEMENT, AS A LENGTH. `140/140` and `2/140`
                              are the same shape and opposite news; this is the
                              SETTLED share, so a full bar is a finished series
@@ -9475,7 +10249,7 @@
                             title={c.runs
                               .map(
                                 (u) =>
-                                  `${monthLabel(u.from)}${u.n > 1 ? ` – ${monthLabel(u.to)}` : ''} — ${u.n} month file(s), ${u.label}.`
+                                  `${monthLabel(u.from)}${u.n > 1 ? ` – ${monthLabel(u.to)}` : ''} — ${u.n} month file(s), ${u.label}.${u.said ? ` ${monthLabel(u.from)}: ${u.said}.` : ''}${u.flying > 0 ? ` ${u.flying} of them inside the window the pull in flight is fetching.` : ''}`
                               )
                               .join('\n')}
                             aria-label={`Coverage of ${n(r.months.length)} month file(s), oldest to newest: ${c.runs
@@ -9513,14 +10287,14 @@
                         </span>
                       </td>
                       <!-- THE ONLY ROW WITH A REAL COUNT IS THE ONE THE SWEEP IS
-                           HOLDING. `r.state === 'retry'` is set from
-                           /ingest/status.json naming this instrument in flight,
+                           HOLDING. `r.state === 'flight'` is set from
+                           /ingest/status.json naming exactly this row in flight,
                            and the same answer carries `attempts` and
                            `attempts_max` for the feed it is on — so where the
                            count exists it is READ, and where it does not the
                            cell says why instead of drawing a dash. -->
                       <td class="mono">
-                        {#if r.state === 'retry' && feedLadder}
+                        {#if r.state === 'flight' && feedLadder}
                           <!-- THE LADDER, WHERE A LADDER EXISTS. `attempts` of
                                `attempts_max` is a proportion and it is the one
                                number on this column that differs per row, so it
@@ -9574,20 +10348,35 @@
                             >—</span
                           >
                         {:else}
-                          {@const sp = shortSpan(r)}
-                          <button
-                            class="btn sm"
-                            type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
-                            title={phase === 'running'
-                              ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
-                              : problems.length > 0
-                                ? `The request above has ${n(problems.length)} thing(s) to fix first: ${problems[0].why}`
-                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, member=${r.sym}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. Retries only ${r.sym}, over the ${n(r.unproved)} unsettled month file(s), clipped to your selected window. Identity verification is preserved. Existing interior gaps may require versioned repair; a retry does not certify completeness.`}
-                            onclick={() => pullRow(r)}
-                          >
-                            Pull {n(r.unproved)}
-                          </button>
+                          {@const spans = rowSpans(r)}
+                          {#if isImported}
+                            <!-- AN IMPORTED FEED IS NOT PULLED (WP-61, DB-B46).
+                                 Its next step is its import, journalled and
+                                 drawn in the import panel above; a Pull
+                                 button here asked a vendor that has no pull. -->
+                            <span
+                              class="dash"
+                              data-next-step="import"
+                              title={`${feedName(feeds.active)} is imported from its archive by the import run its panel above journals, not pulled by a request this page can send. The ${n(r.unproved)} unsettled month file(s) of ${r.sym} are settled by that import: its panel lists every day it has not finished, with the stage and the reason.`}
+                              >Import</span
+                            >
+                          {:else}
+                            <button
+                              class="btn sm"
+                              type="button"
+                              disabled={phase === 'running' || pressing || problems.length > 0 || spans.length === 0 || busy?.blocksPull === true}
+                              title={phase === 'running'
+                                ? 'A pull is already on the wire: this page sends one at a time, and Stop above ends it at its next instrument.'
+                                : busy?.blocksPull
+                                  ? `${busy.head}. ${busy.text}`
+                                  : problems.length > 0
+                                    ? `The request above has ${n(problems.length)} thing(s) to fix first: ${problems[0].why}`
+                                    : `POST /pull/spot — target=${target}, vendor=${feeds.active}, member=${r.sym}, granularity=${r.tf}: ${n(spans.length)} request(s), one per run of unsettled months — ${spans.map((sp) => `${sp.from} to ${sp.to} (${n(sp.months)} month file(s))`).join('; ')}. Settled months between them are not asked again. Retries only ${r.sym}, clipped to your selected window. Identity verification is preserved. Existing interior gaps may require versioned repair; a retry does not certify completeness.`}
+                              onclick={() => pullRow(r)}
+                            >
+                              Pull {n(r.unproved)}
+                            </button>
+                          {/if}
                         {/if}
                       </td>
                     </tr>
@@ -9681,6 +10470,16 @@
       {/if}
     </div>
   {/if}
+
+  <!-- THE PANEL REGISTRY (R4-01): ./panels/*.svelte, by exported `order`. -->
+  <section class="panels" aria-label="Panels">
+    {#if panelsRefused}<p class="warn mono panels-refused">{panelsRefused}</p>{/if}
+    <!-- EACH PANEL IN ITS OWN ERROR BOUNDARY: one that throws is one named
+         line, never a blank page (R4-01 repair round 1). -->
+    {#each panels.panels as p (p.file)}
+      <IngestPanelSlot panel={p} ctx={panelCtx} />
+    {/each}
+  </section>
 </div>
 
 <!-- ===================================================================== -->
@@ -9825,23 +10624,23 @@
           ? feedName(feedsChosen[0])
           : `${n(feedsChosen.length)} feeds · ${n(allBodies.length)} request(s)`}
       title={`Everything below is this feed's answer — ${scopeNote}. Which vendors this run asks: ${n(wireBodies.length)} spot request(s) — ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) — plus ${n(fnoBodies.length)} expired-derivative request(s), ${n(allBodies.length)} in all, each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
-      rows={feeds.all.map((f) => ({
-        key: f.wire,
-        name: f.display,
-        detail: f.ready === true
-          ? (f.kind_label ?? 'kind not stated')
-          : `${f.kind_label ?? 'kind not stated'} · unavailable`,
-        disabled: f.ready !== true,
-        /* NOT `skipBulk`. A ready feed is a feed "Select all" may tick: unlike
-           the two segments that answer 503, every ready feed here can be sent. */
-        why: f.ready === true
-          ? undefined
-          : (f.why ??
-            'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
-        title: f.ready === true
-          ? `Adds ${f.display} to this run. Its bars are pulled from ${f.display} alone and filed under it — nothing is merged with another feed.`
-          : `${f.display} is refused by the server: ${f.why ?? 'no reason stated.'}`
-      }))}
+      rows={offeredFeeds(feeds.all).map((f) => {
+        /* HELD OR READY (WP-61, DB-G14): the rule /db applies. A feed whose
+           store holds bars is selectable whatever its ingest readiness; one
+           that is not ready and holds nothing stays drawn, disabled, with the
+           server's reason. Only the operator's feeds are offered (D-3338). */
+        const rule = feedPickerRow(/** @type {any} */ (f), survey.byFeed.get(f.wire), n);
+        return {
+          key: f.wire,
+          name: f.display,
+          detail: `${f.kind_label ?? 'kind not stated'} · ${rule.detail}`,
+          disabled: rule.disabled,
+          why: rule.why,
+          title: rule.disabled
+            ? rule.title
+            : `Scopes this page to ${f.display}. Its bars are filed under it alone — nothing is merged with another feed. ${rule.title}`
+        };
+      })}
       selected={new Set(feedsChosen)}
       onchange={(/** @type {Set<string>} */ sel) => {
         /* BACK TO FOLLOWING THE PAGE WHEN THE PICK IS JUST THE SCOPE FEED, so
@@ -9850,7 +10649,15 @@
            see the note on `feedsChosen`. Clearing every feed also empties the
            set, and the two must not be read as one thing: cleared is a
            decision and stays. */
-        const justScope = sel.size === 1 && [...sel][0] === feeds.active;
+        /* ONE FEED PICKED IS THE SCOPE, NOT A FAN-OUT OF ONE (WP-61, DB-G14).
+           This control is the only feed control /ingest draws, and a single
+           pick other than the scope only changed which vendor the run asked:
+           the page went on showing the old feed's census, so GDFL "could not
+           be chosen again" once switched away from. The address effect already
+           reads one named feed as the scope; this does the same, through
+           `selectFeed`, so the choice is the operator's and is remembered. */
+        if (sel.size === 1 && [...sel][0] !== feeds.active) selectFeed([...sel][0]);
+        const justScope = sel.size === 1;
         feedsTouched = !justScope;
         pullFeeds = justScope ? new Set() : new Set(sel);
         /* WITH NO SCOPE, THE FIRST PICK BECOMES IT — otherwise this control is
@@ -10103,6 +10910,7 @@
             class:cursor={d === cal.cursor}
             class:oth={d.slice(0, 7) !== calView}
             class:nos={noSessionWhy(d) !== null}
+            class:unk={isWithheld(d)}
             class:now={d === maxDay}
             onclick={() => commit(d)}
           >
@@ -10202,6 +11010,18 @@
 {/snippet}
 
 <style>
+  /* THE PANEL STACK (R4-01): one column, the page's own gap, never wider
+     than the page at 375 px. */
+  .panels {
+    display: grid;
+    gap: 12px;
+    margin-top: 16px;
+    min-width: 0;
+  }
+  .panels-refused {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
   /* Everything below is built from the tokens in $lib/theme.css. No colour,
      radius, duration or step is spelled twice — a hex code here would be a
      second theme that the toggle does not reach. */
@@ -11305,6 +12125,13 @@
     color: var(--dim);
     font-weight: var(--w-mid);
   }
+  /* WITHHELD IS NEITHER A SESSION NOR A HOLIDAY. `/calendar.json` could not
+     speak for the day, so it carries a dotted underline — a mark of its own,
+     not the light "no session" one — and its tooltip says why. D-1507. */
+  .cday.unk {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
   .cday:disabled {
     /* --faint, which is now AA in its own right. Genuinely inactive, and the
        line-through remains the primary mark rather than the colour. */
@@ -11956,6 +12783,10 @@
   .cscroll td .meter .fill.up,
   td.rf-n .meter .fill.up {
     background: var(--up);
+  }
+  /* A HALTED FEED'S PARTIAL BAR IS NOT SUCCESS AND NOT MERELY PENDING (CE-81). */
+  td.rf-n .meter .fill.halt {
+    background: var(--down);
   }
   /* The cell that holds a fill is its own containing block — see the single
      `.cscroll td.num` rule further down, which now carries `position: relative`

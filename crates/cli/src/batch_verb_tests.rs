@@ -64,7 +64,7 @@ fn dispatch_refusals() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = words.iter().map(ToString::to_string).collect();
         let mut page = String::new();
         let status = crate::dispatch(&args, &mut page);
-        assert_eq!(status, crate::MISUSED, "{words:?}: {page}");
+        assert_eq!(status, crate::FAILED, "{words:?}: {page}");
         assert!(page.starts_with("refused: "), "{page}");
         assert!(crate::carries_refusal(&page), "{page}");
         assert!(!page.contains(crate::STORED_PROVENANCE), "{page}");
@@ -104,7 +104,7 @@ fn dispatch_refusals() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(status, crate::OK, "a feed with no holdings: {page}");
             assert!(!crate::carries_refusal(&page), "{page}");
         } else {
-            assert_eq!(status, crate::MISUSED, "{page}");
+            assert_eq!(status, crate::FAILED, "{page}");
             assert!(page.starts_with("refused: this build carries no verified commit stamp"));
         }
     }
@@ -127,5 +127,10 @@ fn sweep_all_keeps_the_column_zero_refusal_and_dispatch_status() {
         arm.contains("let text = batch::sweep_all(vendor, rung, h);"),
         "{arm}"
     );
-    assert!(arm.contains("let refused = carries_refusal(&text);\n            out.push_str(&text);\n            if refused { MISUSED } else { OK }"), "{arm}");
+    assert!(
+        arm.contains(
+            "let code = work_exit(&text);\n            out.push_str(&text);\n            code"
+        ),
+        "{arm}"
+    );
 }

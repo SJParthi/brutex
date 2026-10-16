@@ -60,8 +60,13 @@
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
-/// Seconds per step. RFC 6238 §4 default, and what every broker documented in
-/// `docs/00-charter.md` uses.
+/// Seconds per step. RFC 6238 §4's default (`X = 30`).
+///
+/// It used to add *"and what every broker documented in `docs/00-charter.md`
+/// uses"*. The charter records no step length for any broker — its only TOTP
+/// row is Groww's *"TOTP-derived daily token, reset 06:00 IST"* — so that half
+/// was a vendor claim with no source, which `CLAUDE.md` §3 rule 1 forbids.
+/// Whether a given broker uses 30 s is **UNVERIFIED** here. D-1374.
 pub const STEP_SECONDS: u64 = 30;
 
 /// Digits in the code. RFC 6238 §5.3 default.
@@ -89,6 +94,18 @@ pub enum TotpError {
     NotBase32 {
         /// The offending byte, as it was written.
         byte: u8,
+    },
+    /// The secret's bits do not end on a whole byte. h-pull-2, D-2271.
+    ///
+    /// RFC 4648 base32 packs 5 bits per character, so a secret of 1, 3 or 6
+    /// characters past a group of 8 is no base32 length at all, and in a legal
+    /// length the bits past the last whole byte must be zero. Either was
+    /// dropped, so a secret with an extra or mis-keyed last character decoded
+    /// to the same key as the right one and minted a valid-looking code.
+    TrailingBits {
+        /// How many base32 characters arrived, separators and padding not
+        /// counted. A count, not a value.
+        data_chars: usize,
     },
     /// The HMAC construction refused the decoded key.
     ///
@@ -124,6 +141,19 @@ impl core::fmt::Display for TotpError {
                 f,
                 "the shared secret holds byte {byte:#04x}, outside RFC 4648 base32 (A-Z, 2-7)"
             ),
+            Self::TrailingBits { data_chars } => {
+                if matches!(data_chars % 8, 1 | 3 | 6) {
+                    write!(
+                        f,
+                        "the shared secret is {data_chars} base32 characters, which is no base32 length (RFC 4648: 1, 3 or 6 past a group of 8 cannot occur)"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "the shared secret's last base32 character carries non-zero bits past its last whole byte; RFC 4648 requires them to be zero"
+                    )
+                }
+            }
             Self::HmacRefusedTheKey => f.write_str(
                 "the HMAC construction refused the decoded secret, which RFC 2104 \
                  says it cannot do for any key length — treat this as a broken \
@@ -139,8 +169,9 @@ impl core::error::Error for TotpError {}
 ///
 /// # Why hand-written
 ///
-/// One alphabet, one bit-packing loop, and no padding to handle — a shared
-/// secret is written without `=`. A dependency for twenty lines is the trade
+/// One alphabet and one bit-packing loop. A shared secret is usually written
+/// without `=`; trailing RFC 4648 padding is accepted and skipped, and a `=`
+/// anywhere but the tail is refused (D-1373). A dependency for twenty lines is the trade
 /// `CLAUDE.md` §2's spirit refuses, and `crates/pull` already hand-rolls `SigV4`
 /// for the same reason.
 ///
@@ -152,8 +183,10 @@ impl core::error::Error for TotpError {}
 ///
 /// # Errors
 ///
-/// [`TotpError`] for an empty secret, one past [`MAX_SECRET_LEN`], or one
-/// holding a character the alphabet does not contain.
+/// [`TotpError`] for an empty secret, one past [`MAX_SECRET_LEN`], one
+/// holding a character the alphabet does not contain, or one whose bits do not
+/// end on a whole byte: a length RFC 4648 cannot produce, or non-zero bits past
+/// the last whole byte (D-2271).
 pub fn base32_decode(secret: &str) -> Result<Vec<u8>, TotpError> {
     let decoded = decode_alphabet(secret);
     if let Err(why) = &decoded {
@@ -193,6 +226,7 @@ fn note_refusal(why: &TotpError, len: usize) {
         TotpError::Empty => "empty",
         TotpError::TooLong { .. } => "too-long",
         TotpError::NotBase32 { .. } => "not-base32",
+        TotpError::TrailingBits { .. } => "trailing-bits",
         // NOT A SECRET FAULT AT ALL, and the word says so. The other three name
         // something the operator can fix in their own configuration; this one
         // says the build is wrong, and sending an operator to re-read their
@@ -224,11 +258,29 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
     let mut out = Vec::with_capacity(secret.len() * 5 / 8 + 1);
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
+    // Whether padding has begun. RFC 4648 §6 padding is a TAIL: once a `=` has
+    // been read, only more `=` (or a display separator) may follow.
+    let mut padded = false;
+    // Base32 characters read, separators and padding not counted.
+    let mut data_chars: usize = 0;
 
     for byte in secret.bytes() {
-        // Separators as displayed. `=` is padding and carries no bits.
-        if matches!(byte, b' ' | b'-' | b'=') {
+        // Separators as displayed.
+        if matches!(byte, b' ' | b'-') {
             continue;
+        }
+        // `=` is padding and carries no bits — at the END. It used to be
+        // skipped wherever it stood, so `GEZD=GNBV` decoded to the same key as
+        // `GEZDGNBV` and produced a valid-looking code from a secret that was
+        // mis-transcribed: the exact failure `a_bad_character_is_refused_and_
+        // not_skipped` names. A data character after padding is refused, and
+        // the byte reported is the `=` that broke the tail. D-1373.
+        if byte == b'=' {
+            padded = true;
+            continue;
+        }
+        if padded {
+            return Err(TotpError::NotBase32 { byte: b'=' });
         }
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
@@ -238,6 +290,7 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
         };
         acc = (acc << 5) | u32::from(value);
         bits += 5;
+        data_chars += 1;
         if bits >= 8 {
             bits -= 8;
             // The cast is safe: the shift leaves exactly the low 8 bits.
@@ -245,6 +298,15 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
         }
     }
 
+    // THE BITS PAST THE LAST WHOLE BYTE. They were dropped, so `GEZDGNBVA`
+    // and `GEZDGNBV7` decoded to the key of `GEZDGNBV`: an extra or mis-keyed
+    // last character minted a valid-looking code, the class D-1373 closed for
+    // `=`. Five or more left over is a whole spare character, which RFC 4648
+    // makes impossible (1, 3 or 6 past a group of 8); fewer must all be zero.
+    // `bits` is at most 7 here, so the mask cannot overflow. h-pull-2, D-2271.
+    if bits >= 5 || acc & ((1 << bits) - 1) != 0 {
+        return Err(TotpError::TrailingBits { data_chars });
+    }
     if out.is_empty() {
         return Err(TotpError::Empty);
     }
@@ -524,6 +586,125 @@ mod tests {
         assert!(base32_decode("GEZD0GNBV").is_err());
     }
 
+    /// Padding is a tail, never a separator.
+    ///
+    /// Before D-1373 a `=` was skipped wherever it stood, so a secret with one
+    /// mis-keyed into its middle decoded to a shorter, DIFFERENT key and
+    /// produced a valid-looking code — refused at the vendor with nothing
+    /// here to say why.
+    #[test]
+    fn padding_inside_the_secret_is_refused_and_only_a_tail_is_skipped() {
+        for inside in [
+            "GEZD=GNBV",
+            "=GEZDGNBV",
+            "GEZDGNBV=A",
+            "GEZDGNBV==A==",
+            "GE=-ZD",
+        ] {
+            assert_eq!(
+                base32_decode(inside),
+                Err(TotpError::NotBase32 { byte: b'=' }),
+                "{inside:?} has data after padding"
+            );
+            assert!(code_at(inside, 59).is_err(), "{inside:?} mints no code");
+        }
+        // A tail of padding, with or without display separators after it, is
+        // still the canonical secret.
+        let canonical = base32_decode("GEZDGNBV").expect("legal");
+        for tail in ["GEZDGNBV=", "GEZDGNBV======", "GEZDGNBV== ", "GEZDGNBV=-="] {
+            assert_eq!(
+                base32_decode(tail).expect("legal tail"),
+                canonical,
+                "{tail:?}"
+            );
+        }
+        // And a secret that is ALL padding carries no key.
+        assert_eq!(base32_decode("===="), Err(TotpError::Empty));
+    }
+
+    /// The bits left over after the last whole byte are refused unless they
+    /// are a legal RFC 4648 tail of zeros. h-pull-2, D-2271.
+    ///
+    /// They used to be dropped, so a secret one character too long, or with a
+    /// last character mis-keyed in its spare bits, decoded to the SAME key as
+    /// the right one: `GEZDGNBV`, `GEZDGNBVA` and `GEZDGNBV7` all produced
+    /// one key and one code. The class D-1373 closed for `=`.
+    ///
+    /// Every length class is walked on an all-`A` secret (whose spare bits are
+    /// zero): 1, 3 and 6 characters past a group of 8 cannot be base32 at any
+    /// value, and 0, 2, 4, 5 and 7 can. Each legal class is then walked with
+    /// its last character carrying a spare bit (`B`) and carrying none.
+    #[test]
+    fn leftover_bits_past_the_last_whole_byte_are_refused_not_dropped() {
+        for (bad, data_chars) in [("GEZDGNBVA", 9), ("GEZDGNBV7", 9), ("GEZD GNBV A=", 9)] {
+            assert_eq!(
+                base32_decode(bad),
+                Err(TotpError::TrailingBits { data_chars }),
+                "{bad:?} is not the secret GEZDGNBV"
+            );
+            assert!(code_at(bad, 59).is_err(), "{bad:?} mints no code");
+        }
+        assert_eq!(
+            base32_decode("GEZDGNBV").expect("legal"),
+            b"12345".to_vec(),
+            "the control still decodes"
+        );
+
+        for n in 1..=24_usize {
+            let all_a = "A".repeat(n);
+            let got = base32_decode(&all_a);
+            if matches!(n % 8, 1 | 3 | 6) {
+                assert_eq!(
+                    got,
+                    Err(TotpError::TrailingBits { data_chars: n }),
+                    "{n} characters is no base32 length"
+                );
+            } else {
+                assert_eq!(
+                    got.expect("a legal length of zeros").len(),
+                    n * 5 / 8,
+                    "{n} characters"
+                );
+            }
+        }
+
+        // Per legal class: `B` (value 1) sets the lowest spare bit; the zero
+        // spelling sets every key bit of the last character and no spare one.
+        for (n, zero_tail) in [(2_usize, 'E'), (4, 'Q'), (5, 'C'), (7, 'I')] {
+            for prefix in ["", "GEZDGNBV"] {
+                let head = format!("{prefix}{}", "A".repeat(n - 1));
+                let spare = format!("{head}B");
+                assert_eq!(
+                    base32_decode(&spare),
+                    Err(TotpError::TrailingBits {
+                        data_chars: prefix.len() + n
+                    }),
+                    "{spare:?} carries a non-zero bit past its last byte"
+                );
+                let clean = format!("{head}{zero_tail}");
+                assert!(base32_decode(&clean).is_ok(), "{clean:?} is legal");
+            }
+        }
+
+        // The two messages say which of the two faults it was, and neither
+        // reads like another refusal.
+        let length = TotpError::TrailingBits { data_chars: 9 }.to_string();
+        let spare = TotpError::TrailingBits { data_chars: 10 }.to_string();
+        assert!(length.contains("9 base32 characters"), "{length}");
+        assert!(length.contains("no base32 length"), "{length}");
+        assert!(spare.contains("non-zero"), "{spare}");
+        for other in [
+            TotpError::Empty,
+            TotpError::TooLong { len: 9 },
+            TotpError::NotBase32 { byte: b'A' },
+            TotpError::HmacRefusedTheKey,
+        ] {
+            assert_ne!(other.to_string(), length);
+            assert_ne!(other.to_string(), spare);
+        }
+        assert_ne!(length, spare);
+    }
+
     /// The length bound is checked BEFORE a character is decoded, which is what
     /// makes the only loop here bounded by a constant.
     ///
@@ -556,6 +737,83 @@ mod tests {
             key.len(),
             MAX_SECRET_LEN * 5 / 8,
             "128 base32 characters are 80 key bytes"
+        );
+    }
+
+    /// **NO PATH OUTSIDE THIS MODULE COMPUTES A CODE.** D-1447.
+    ///
+    /// Two comments said otherwise: `pull::vendor`'s Groww `Auth` row said the
+    /// vendor's `api-key` "is spent by `pull::totp` to MINT the daily token",
+    /// and CI's group-18 note said this module exists "so a stale broker token
+    /// can be RECOGNISED". Neither was ever wired. `CLAUDE.md` §8 forbids the
+    /// first outright, and a stale token is re-read from Parameter Store, not
+    /// recognised by a code. This walks every `.rs` file under `crates/*/src`
+    /// and fails on any that names this module's two code functions or
+    /// glob-imports it, so the day something trades a code for a token it has
+    /// to delete this test, in the open, to do it.
+    ///
+    /// Strict on purpose: it does not try to tell a `#[cfg(test)]` module from
+    /// production code. A test elsewhere that needs a code computes it here.
+    #[test]
+    fn no_path_outside_this_module_computes_a_code() {
+        use std::path::{Path, PathBuf};
+
+        // Upper-case and lowered at run time so this file adds no lower-case
+        // segment-shaped literal to `crates/pull` (CI gate 1d).
+        let needle = "CODE_AT".to_ascii_lowercase();
+        let glob = "TOTP::*".to_ascii_lowercase();
+        let source = "SRC".to_ascii_lowercase();
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates = manifest.parent().expect("crates/pull sits under crates/");
+        let workspace = crates
+            .parent()
+            .expect("crates/ sits under the workspace root");
+        let this = workspace.join(file!());
+        assert!(this.is_file(), "file!() resolves from the workspace root");
+
+        let mut stack: Vec<PathBuf> = std::fs::read_dir(crates)
+            .expect("crates/ is readable")
+            .map(|entry| entry.expect("a directory entry").path().join(&source))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let mut scanned = 0_usize;
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a source directory is readable") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("RS"))
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a source file is UTF-8");
+                if path == this {
+                    // The module's own text is the control: it must contain the
+                    // needle, or the needle is wrong and the walk proves nothing.
+                    assert!(
+                        text.contains(&needle),
+                        "the needle names this module's functions"
+                    );
+                    continue;
+                }
+                scanned += 1;
+                if text.contains(&needle) || text.contains(&glob) {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        // Not vacuous: thirteen crates' sources were read, not an empty walk.
+        assert!(scanned > 100, "only {scanned} source files were read");
+        assert!(
+            offenders.is_empty(),
+            "a TOTP code is computed outside pull::totp — CLAUDE.md section 8 \
+             forbids minting a token here, and nothing else needs one: {offenders:?}"
         );
     }
 }

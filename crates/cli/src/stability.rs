@@ -175,7 +175,13 @@ pub struct Bucket {
     /// How many made money under the pessimistic reading.
     pub wins: u64,
     /// Total paisa per unit, pessimistic.
-    pub net: i64,
+    ///
+    /// `i128`, not `i64`: an `i64` total was `saturating_add`ed, so a sum past
+    /// either end was reported as `i64::MAX` or `i64::MIN` as if it were the
+    /// period's real net (h-cli-3). Each addend is an `i64`, and at most
+    /// `usize::MAX` of them cannot leave `i128`'s range, so this total is exact
+    /// for any slice (D-1852).
+    pub net: i128,
     /// The furthest ANY trade in this period ran against entry, in ppm.
     ///
     /// A maximum and not a mean, for the reason `Cell::worst_mae` is: a stop is
@@ -229,7 +235,7 @@ impl Stability {
 
     /// The worst single period's total.
     #[must_use]
-    pub fn worst_period(&self) -> i64 {
+    pub fn worst_period(&self) -> i128 {
         self.buckets.iter().map(|b| b.net).min().unwrap_or(0)
     }
 
@@ -280,7 +286,8 @@ pub fn at(rows: &[TradeRow], grain: Grain) -> Stability {
         if row.worst > 0 {
             b.wins = b.wins.saturating_add(1);
         }
-        b.net = b.net.saturating_add(row.worst);
+        // Unreachable saturation: see `Bucket::net`.
+        b.net = b.net.saturating_add(i128::from(row.worst));
         if row.adverse > b.worst_adverse {
             b.worst_adverse = row.adverse;
         }
@@ -458,7 +465,7 @@ mod tests {
         let (a, b) = (at(&died, Grain::Year), at(&steady, Grain::Year));
 
         // The totals do not separate them -- both are positive.
-        let total = |s: &super::Stability| s.buckets.iter().map(|x| x.net).sum::<i64>();
+        let total = |s: &super::Stability| s.buckets.iter().map(|x| x.net).sum::<i128>();
         assert!(total(&a) > 0 && total(&b) > 0, "both make money overall");
 
         // The per-year record does, completely.
@@ -466,6 +473,39 @@ mod tests {
         assert_eq!(b.positive_share_bp(), 10_000, "every year");
         assert_eq!(a.worst_period(), -20_000);
         assert_eq!(b.worst_period(), 3_200);
+    }
+
+    /// h-cli-3, D-1852: a period's net past either end of `i64` is the exact
+    /// sum, not `i64::MAX` or `i64::MIN` passed off as the period's real total.
+    #[test]
+    fn a_period_net_past_i64_is_exact_not_clamped() {
+        let gains = vec![
+            trade(2020, 6, 1, i64::MAX),
+            trade(2020, 6, 2, i64::MAX),
+            trade(2020, 6, 3, 1),
+        ];
+        let up = at(&gains, Grain::Year);
+        assert_eq!(up.buckets.len(), 1);
+        assert_eq!(up.worst_period(), 2 * i128::from(i64::MAX) + 1);
+        assert_eq!(up.positive(), 1);
+
+        let losses = vec![
+            trade(2021, 6, 1, i64::MIN),
+            trade(2021, 6, 2, i64::MIN),
+            trade(2021, 6, 3, i64::MIN),
+            trade(2022, 6, 1, i64::MIN),
+            trade(2022, 6, 2, i64::MAX),
+        ];
+        let down = at(&losses, Grain::Year);
+        assert_eq!(down.buckets.len(), 2);
+        assert_eq!(down.worst_period(), 3 * i128::from(i64::MIN));
+        // i64::MIN + i64::MAX is -1: a loss, exactly, where a clamp at either
+        // end would have read 0 or a full i64 swing.
+        assert_eq!(
+            down.buckets.iter().map(|b| b.net).collect::<Vec<_>>(),
+            [3 * i128::from(i64::MIN), -1]
+        );
+        assert_eq!(down.positive(), 0);
     }
 
     /// AN EMPTY PERIOD IS ABSENT, NOT A LOSING ONE.

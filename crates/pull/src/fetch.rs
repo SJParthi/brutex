@@ -635,7 +635,8 @@ impl BarSource for FakeSource {
 pub struct Landed {
     /// Bars inside the window, ready for the store.
     pub bars: Vec<Bar>,
-    /// Every DISCARDED row, by reason. The total equals rows in minus bars out.
+    /// Every DISCARDED row, by reason. The total equals rows in minus bars out
+    /// minus the rows of [`Self::refused_days`], which are refused, not dropped.
     ///
     /// **Session reasons reach it too, and this said they did not.** The doc
     /// here read "only window reasons reach it now. A row outside the published
@@ -661,15 +662,186 @@ pub struct Landed {
     /// prompted the reversal: Dhan sends NSE index bars through 15:38 while
     /// Groww and Zerodha stop at 15:29, against a published close of 15:30.
     pub outside_session: u32,
+    /// The days whose minute bars were REFUSED, each with how many rows it
+    /// carried: a day the exchange calendar records as a traded session of
+    /// unmeasured length (`calendar::DayKind::OpenLengthUnmeasured`, the five
+    /// pre-2025 Muhurats), on which no bar can be judged in or out of session
+    /// (`session::SessionError::SessionLengthUnmeasured`, D-2670).
+    ///
+    /// **The day, never the window (D-3344).** That refusal used to end the
+    /// whole landing with `FetchError::TimestampRefused`, so ONE Muhurat bar in
+    /// a 60-day Zerodha minute answer refused all 60 days: measured on the
+    /// operator's store on 6 Oct 2026, 202 sessions of every instrument in five
+    /// windows, and six whole months (2020-11, 2021-11, 2022-11, 2023-10,
+    /// 2023-11, 2024-10). The refused rows are neither stored nor counted in
+    /// [`Self::census`]: they are not a drop, and the caller names each day as
+    /// a failure. At most one entry per day the calendar lists as
+    /// length-unmeasured, so the list is bounded by that table's compile-time
+    /// length (five), never by the window.
+    pub refused_days: Vec<RefusedDay>,
+    /// Every OTHER row [`land_rows`] refused, by cause and day: a stamp the
+    /// calendar cannot judge, a share's closing-auction eligibility unknown on
+    /// its day, a price that does not fit the paisa grid (D-3351, DB-N23).
+    ///
+    /// **The row, never the answer.** Each of these refused the whole window
+    /// with `?`, so one bad candle in a 60-day Zerodha minute answer refused
+    /// all 60 days — and when the next answer landed, the month between them
+    /// was opened part-way and its first days could never be appended
+    /// (DB-N20). Now each refused row is counted against its (cause, day),
+    /// the first is named in its own words, and every other row lands. Neither
+    /// stored nor counted in [`Self::census`]; the caller names each group.
+    pub refused: Refused,
+}
+
+/// Why a row of a vendor answer was refused by name rather than landed
+/// (D-3351). The codes are the receipt's and the log's; never renamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowCause {
+    /// A stamp the session calendar cannot judge, other than a day of
+    /// unmeasured length (which is [`Landed::refused_days`]).
+    Timestamp,
+    /// A share's closing-auction eligibility is not known for its day (D-3320).
+    CashEligibility,
+    /// A price that does not land on the paisa grid after conversion.
+    Price,
+    /// A broker candle that does not start on the requested grid.
+    OffGrid,
+    /// Two candles at one stamp with different values: neither is kept.
+    Conflicting,
+    /// A minute on a day before the first day bar the series was served: not
+    /// listed yet, or a day pass that has not reached it
+    /// ([`crate::series_identity`], WP-13d, DB-B08).
+    BeforeFirstDayBar,
+    /// A minute whose whole range lies outside its own served day's range by
+    /// more than [`crate::series_identity::FOREIGN_BAND_BPS`]: another
+    /// instrument's, another index's or another price basis (WP-13d, DB-B07,
+    /// DB-B10, DB-B60).
+    ForeignLevel,
+}
+
+impl RowCause {
+    /// The code a receipt line and a log event carry.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Timestamp => "timestamp_refused",
+            Self::CashEligibility => "cash_eligibility_unknown",
+            Self::Price => "price_off_grid",
+            Self::OffGrid => "off_grid_candle",
+            Self::Conflicting => "conflicting_candles",
+            Self::BeforeFirstDayBar => "before_first_day_bar",
+            Self::ForeignLevel => "foreign_level",
+        }
+    }
+}
+
+/// One group of refused rows: one cause on one IST day, the first named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRows {
+    /// Why.
+    pub cause: RowCause,
+    /// The IST day, as days from the epoch, when the stamp names one.
+    pub day: Option<u32>,
+    /// Rows of this cause on this day.
+    pub rows: u32,
+    /// The first such row's position in the answer.
+    pub first_row: usize,
+    /// Its stamp, in the vendor's encoding.
+    pub first_raw: i64,
+    /// The first row's refusal, in its own words.
+    pub why: String,
+}
+
+/// The rows of one answer refused by name (D-3351): groups for the receipt,
+/// and every refused row's IST-local second for the gap ledger, which must
+/// count those minutes as missing from the store and say why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refused {
+    /// One entry per (cause, day), in first-occurrence order.
+    pub groups: Vec<RefusedRows>,
+    /// IST-local epoch seconds of every refused row, in answer order.
+    pub local_seconds: Vec<i64>,
+}
+
+impl Refused {
+    /// Count one refused row. The group is found among the last groups of the
+    /// same day — rows arrive in time order, and a day has at most one group
+    /// per [`RowCause`] — so this is O(1) per row; only a group's first row
+    /// pays for its sentence.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
+    pub fn note(
+        &mut self,
+        cause: RowCause,
+        (row, raw): (usize, i64),
+        local_second: i64,
+        why: impl FnOnce() -> String,
+    ) {
+        let day = u32::try_from(local_second.div_euclid(86_400)).ok();
+        self.local_seconds.push(local_second);
+        for group in self.groups.iter_mut().rev() {
+            if group.day != day {
+                break;
+            }
+            if group.cause == cause {
+                group.rows = group.rows.saturating_add(1);
+                return;
+            }
+        }
+        self.groups.push(RefusedRows {
+            cause,
+            day,
+            rows: 1,
+            first_row: row,
+            first_raw: raw,
+            why: why(),
+        });
+    }
+
+    /// Fold another answer's refusals into these.
+    pub fn absorb(&mut self, other: Self) {
+        self.groups.extend(other.groups);
+        self.local_seconds.extend(other.local_seconds);
+    }
+
+    /// How many rows were refused.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.local_seconds.len()
+    }
+}
+
+/// One day [`land_rows`] refused, and how many of the window's rows fell on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedDay {
+    /// The IST day, as days from the epoch.
+    pub day: u32,
+    /// Rows on that day, none of which was stored.
+    pub rows: u32,
+}
+
+/// Count one refused row against its day: a walk of at most as many entries
+/// as the calendar has length-unmeasured days (five), so O(1) per row.
+/// **UNVERIFIED as a gated measurement**: timed once with `land_rows` in a
+/// throwaway release run (`docs/06-limits.md`, D-3344), by no bench.
+fn note_refused(days: &mut Vec<RefusedDay>, day: u32) {
+    match days.iter_mut().find(|held| held.day == day) {
+        Some(held) => held.rows = held.rows.saturating_add(1),
+        None => days.push(RefusedDay { day, rows: 1 }),
+    }
 }
 
 /// Converts a vendor price to paisa.
 ///
 /// A vendor quoting rupees is multiplied by 100; one already quoting paisa is
-/// taken as is. **There is no rounding here and that is deliberate** —
-/// `CLAUDE.md` §7 puts the single snap on the tick grid at the write boundary,
-/// and a second rounding site is a second answer.
-const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
+/// taken as is. **There is no rounding here and that is deliberate.** The
+/// single half-up snap onto the tick grid (`CLAUDE.md` §7) has already happened
+/// where the vendor's text was decoded — `http::one_price` and `rolling`'s
+/// `paisa`, through `Paisa::from_rupee_text_half_up` — and a second rounding
+/// site here would be a second answer. (This said the snap was at the write
+/// boundary until D-1494; the store's append snaps nothing.)
+pub(crate) const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
     match scale {
         PriceScale::Paisa => Some(raw),
         PriceScale::Rupees => raw.checked_mul(100),
@@ -744,57 +916,59 @@ pub fn land_with_cash_schedule(
     scale: PriceScale,
     cash_schedule: Option<&crate::cash_auction::Schedule>,
 ) -> Result<Landed, FetchError> {
-    let mut bars = Vec::with_capacity(raw.rows.len());
+    land_rows(&raw.rows, request, encoding, scale, cash_schedule)
+}
+
+/// [`land_with_cash_schedule`] over BORROWED rows, for a caller that holds
+/// them somewhere other than a [`RawWindow`].
+///
+/// # Why it exists
+///
+/// `crate::ingest` holds each fetched member's rows in its own `Member`, and
+/// used to clone the whole vector into a `RawWindow` only to hand this
+/// function a reference to it — one full copy of every row of every member,
+/// made and dropped within the same call. o1api-36, D-1203. Every landing path
+/// now runs through this one body, so the two entry points cannot drift.
+///
+/// # Errors
+///
+/// None today: every refusal is a ROW's (D-3351). A bar on a day of unmeasured
+/// session length refuses that day ([`Landed::refused_days`], D-3344); a stamp
+/// the calendar cannot judge, a share's closing-auction eligibility unknown on
+/// its day and a price off the paisa grid each refuse that row by name
+/// ([`Landed::refused`]), and every other row lands. The `Result` is kept for
+/// the callers that match on it.
+pub fn land_rows(
+    rows: &[RawRow],
+    request: &BarRequest,
+    encoding: TimestampEncoding,
+    scale: PriceScale,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<Landed, FetchError> {
+    let mut bars = Vec::with_capacity(rows.len());
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
+    let mut refused_days = Vec::new();
+    let mut refused = Refused::default();
+    // OPEN INTEREST APPLIES TO A CONTRACT AND TO NOTHING ELSE (D-3322). Asked
+    // once per window, of the segment these bars are filed under, so the loop
+    // below reads one `bool` per row.
+    let interest_applies = crate::vendor::open_interest_applies(request.listing.segment());
+    let mut interest = InterestWithheld::default();
 
-    for (i, row) in raw.rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
         // stamping IST wall-clock seconds into a field read as UTC epoch
         // produced 45 bars at wrong timestamps that passed every check and
         // were written to disk — the only fault in this pipeline that STORED a
         // wrong answer instead of refusing.
-        let epoch_utc = match encoding {
-            // ALREADY UTC — AND THE THIRD SPELLING IS HERE FOR A REASON, NOT
-            // FOR TIDINESS.
-            //
-            // `IsoDateTimeOffset` carries its own zone (`…T09:15:00+0530`) and
-            // `crate::http::one_stamp` has already applied it, because that is
-            // the only place the offset is visible. Subtracting
-            // `IST_OFFSET_SECS` here as well — which is what the text arm below
-            // does, correctly, for a value that states no zone — would put
-            // every bar 5h30m early. 03:45 on a trading day passes every
-            // validation below this line and writes to disk looking exactly
-            // like a real bar: the **W1 fault** this module's header describes,
-            // the one class of timestamp error that stores instead of refusing.
-            //
-            // It sits WITH the epoch arms rather than below them because "the
-            // value already means UTC" is precisely what all three say, and one
-            // arm is one place to be wrong instead of two. D-0135.
-            TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
-                row.timestamp
-            }
-            TimestampEncoding::EpochMillisUtc => row.timestamp.div_euclid(1_000),
-            // The vendor's value is already IST-based, so the offset this
-            // build would add has already been added by the vendor. Subtract it
-            // back out before the shared conversion, rather than teaching that
-            // conversion a second mode.
-            // BOTH TEXT SPELLINGS, ONE BEHAVIOUR. The decoder has already
-            // turned `2026-08-04 09:15:00` and `2026-08-04T09:15:00` into
-            // IST-based seconds — the separator differs on the wire and the
-            // meaning does not — so the offset the vendor already added comes
-            // back out here. Joined rather than written twice, because two arms
-            // doing the same thing is two places for one of them to drift.
-            TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
-                row.timestamp - crate::session::IST_OFFSET_SECS
-            }
-        };
+        let epoch_utc = epoch_utc(row.timestamp, encoding);
 
         // `verdict` does the conversion itself and refuses a timestamp that is
         // not one. A drop is a bar this engine DECLINED; a timestamp it could
         // not read is the vendor or the decoder being wrong, and those are
         // different answers.
-        let mut verdict = request
+        let mut verdict = match request
             .window
             // THE VENUE DECIDES THE HOURS, and the listing decides the venue.
             // NSE's 2026-08-03 CAS change put the index close at 15:15 and left
@@ -804,14 +978,57 @@ pub fn land_with_cash_schedule(
                 epoch_utc,
                 request.granularity.cadence(),
                 request.listing.venue(),
-            )
-            .map_err(|why| FetchError::TimestampRefused {
-                row: i,
-                raw: row.timestamp,
-                why,
-            })?;
+            ) {
+            Ok(verdict) => verdict,
+            // A DAY WHOSE SESSION LENGTH WAS NEVER MEASURED REFUSES ITSELF,
+            // NOT THE WINDOW (D-3344). The bar cannot be judged in or out of
+            // that session (D-2670), and nothing about it says anything about
+            // the other days of the answer. Not stored, not a drop; counted
+            // against its day for the caller to name.
+            Err(crate::session::SessionError::SessionLengthUnmeasured { days }) => {
+                note_refused(&mut refused_days, days);
+                continue;
+            }
+            // ANY OTHER STAMP THE CALENDAR CANNOT JUDGE REFUSES ITS ROW, by
+            // name, and the rest of the answer lands (D-3351, DB-N23). It
+            // refused the whole answer, and a whole answer refused while the
+            // next landed is how a month was opened part-way for ever.
+            Err(why) => {
+                let why = FetchError::TimestampRefused {
+                    row: i,
+                    raw: row.timestamp,
+                    why,
+                };
+                refused.note(
+                    RowCause::Timestamp,
+                    (i, row.timestamp),
+                    local_second(epoch_utc),
+                    || why.to_string(),
+                );
+                continue;
+            }
+        };
         if verdict.is_none() {
-            verdict = cash_close_verdict(epoch_utc, request, cash_schedule)?;
+            // A SHARE'S CLOSE UNKNOWN ON ITS DAY REFUSES THAT ROW, not the
+            // answer (D-3351): the day's eligibility is the day's fact.
+            match cash_close_verdict(epoch_utc, request, cash_schedule) {
+                Ok(close) => verdict = close,
+                Err(why) => {
+                    refused.note(
+                        RowCause::CashEligibility,
+                        (i, row.timestamp),
+                        local_second(epoch_utc),
+                        || format!("row {i}: {why}"),
+                    );
+                    continue;
+                }
+            }
+        }
+        // KEPT ON A DAY THE CALENDAR CANNOT CLASSIFY, AND COUNTED BY NAME
+        // (P-03, D-2673). Dropping it would invent a closed day; keeping it
+        // uncounted would be the silent keep `CLAUDE.md` §4 bans.
+        if verdict.is_none() && crate::session::on_unclassified_day(epoch_utc) {
+            census.count_unclassified_kept();
         }
         // A SESSION-HOURS VERDICT IS COUNTED AND KEPT. A WINDOW ONE IS DROPPED.
         //
@@ -889,21 +1106,22 @@ pub fn land_with_cash_schedule(
             continue;
         }
 
-        let price = |raw: i64, field: &'static str| {
-            to_paisa(raw, scale).ok_or(FetchError::PriceRefused { row: i, field, raw })
+        // A STAMP OR A PRICE THAT CANNOT BE HELD REFUSES ITS ROW (D-3351).
+        let (ts_micros, [open, high, low, close]) = match held_values(row, i, epoch_utc, scale) {
+            Ok(held) => held,
+            Err((why, cause)) => {
+                refused.note(cause, (i, row.timestamp), local_second(epoch_utc), || {
+                    why.to_string()
+                });
+                continue;
+            }
         };
         let bar = Bar {
-            ts_micros: epoch_utc
-                .checked_mul(1_000_000)
-                .ok_or(FetchError::TimestampRefused {
-                    row: i,
-                    raw: row.timestamp,
-                    why: SessionError::TimestampOutOfRange { secs: epoch_utc },
-                })?,
-            open: price(row.open, "open")?,
-            high: price(row.high, "high")?,
-            low: price(row.low, "low")?,
-            close: price(row.close, "close")?,
+            ts_micros,
+            open,
+            high,
+            low,
+            close,
             volume: row.volume,
             // ABSENT IS NOT ZERO. `i64::MIN` is the null sentinel; a vendor
             // sending a literal 0 means zero open interest, which is a
@@ -935,7 +1153,18 @@ pub fn land_with_cash_schedule(
             // so a caller assembling one by hand — a test double, a decoder in
             // another crate — can still hand this line `Some(i64::MIN)` and
             // have it stored as the null. No shipped decoder can.
-            open_interest: row.open_interest.unwrap_or(i64::MIN),
+            //
+            // AND AN INDEX OR A SHARE CARRIES NONE AT ALL (D-3322). Kite's
+            // `oi=1` answer puts a `0` in the seventh cell of every index and
+            // share candle, and it was stored, so a Zerodha index read `0` where
+            // GDFL's read the null for the same instrument. The cell is
+            // withheld here — the one landing every REST feed goes through —
+            // and counted, never stored as a measurement nobody took.
+            open_interest: if interest_applies {
+                row.open_interest.unwrap_or(i64::MIN)
+            } else {
+                interest.withhold(row.open_interest)
+            },
         };
         bars.push(bar);
     }
@@ -947,13 +1176,200 @@ pub fn land_with_cash_schedule(
     // pays no call per row. `DropCensus` counted every rejection in a plain
     // integer, and this is that count, once, where the window closes.
     //
-    // The four reasons are named separately rather than summed, because
+    // The reasons are named separately rather than summed, because
     // "outside the window" and "outside the session" send an operator to two
     // different places — the caller's chunking and the vendor's clock.
+    emit_landed(rows.len(), bars.len(), &census, interest);
+    interest.warn_if_measured(request);
+    note_refused_rows(&refused);
+    Ok(Landed {
+        bars,
+        census,
+        outside_session,
+        refused_days,
+        refused,
+    })
+}
+
+/// The IST-local epoch second of a UTC epoch second: the space the gap
+/// ledger's minutes are counted in.
+const fn local_second(epoch_utc: i64) -> i64 {
+    epoch_utc.saturating_add(crate::session::IST_OFFSET_SECS)
+}
+
+/// A row's stamp in micros and its prices in paisa, or the refusal of the
+/// first that cannot be held, with its cause.
+fn held_values(
+    row: &RawRow,
+    i: usize,
+    epoch_utc: i64,
+    scale: PriceScale,
+) -> Result<(i64, [i64; 4]), (FetchError, RowCause)> {
+    let ts = epoch_utc.checked_mul(1_000_000).ok_or((
+        FetchError::TimestampRefused {
+            row: i,
+            raw: row.timestamp,
+            why: SessionError::TimestampOutOfRange { secs: epoch_utc },
+        },
+        RowCause::Timestamp,
+    ))?;
+    let ohlc = paisa_of(row, i, scale).map_err(|why| (why, RowCause::Price))?;
+    Ok((ts, ohlc))
+}
+
+/// A row's open, high, low and close in paisa, or the first that does not
+/// land on the grid, named by its field.
+fn paisa_of(row: &RawRow, i: usize, scale: PriceScale) -> Result<[i64; 4], FetchError> {
+    let price = |raw: i64, field: &'static str| {
+        to_paisa(raw, scale).ok_or(FetchError::PriceRefused { row: i, field, raw })
+    };
+    Ok([
+        price(row.open, "open")?,
+        price(row.high, "high")?,
+        price(row.low, "low")?,
+        price(row.close, "close")?,
+    ])
+}
+
+/// One `pull.land` warning per refused group, never per row: the first row
+/// named in its own words with the group's count. A window holds at most a
+/// few groups a day, so this is bounded by the window, not by its rows.
+fn note_refused_rows(refused: &Refused) {
+    for group in &refused.groups {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.land",
+                "rows refused by name; the rest of the answer lands",
+            )
+            .with("cause", telemetry::Value::Str(group.cause.code()))
+            .with("rows", telemetry::Value::Uint(u64::from(group.rows)))
+            .with("first_row", telemetry::Value::Uint(group.first_row as u64))
+            .with("first", telemetry::Value::Str(&group.why)),
+        );
+    }
+}
+
+/// Open-interest cells a vendor sent for a bar that carries none (D-3322).
+///
+/// # Why counted, and why only a non-zero one warns
+///
+/// Kite answers `oi=1` with a seventh cell on every candle, and for an index
+/// or a share that cell is `0` — on every one of 765,442 stored Zerodha `1day`
+/// bars (DB-036). That `0` is no measurement: an index and a share have no
+/// open interest, so [`land_rows`] files [`store::format::OI_NULL`] for every
+/// `INDEX` and `CASH` bar of every feed, and the routine zero is counted on the
+/// window's one `pull.land` event rather than warned about. A NON-ZERO cell on
+/// such a bar is not routine — no source says any vendor sends one — so it is
+/// counted apart and warned about once per window, naming the instrument.
+/// Neither is ever stored as open interest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InterestWithheld {
+    /// Cells holding a value, zero included, replaced by the null.
+    withheld: u32,
+    /// Of those, the cells whose value was not zero.
+    nonzero: u32,
+}
+
+impl InterestWithheld {
+    /// Count one cell, and answer the null the bar is filed with.
+    fn withhold(&mut self, cell: Option<i64>) -> i64 {
+        if let Some(value) = cell {
+            self.withheld = self.withheld.saturating_add(1);
+            if value != 0 {
+                self.nonzero = self.nonzero.saturating_add(1);
+            }
+        }
+        store::format::OI_NULL
+    }
+
+    /// One `warn` per window that withheld a non-zero cell, naming the
+    /// instrument as the vendor knows it, its listing, the rung and the window.
+    fn warn_if_measured(self, request: &BarRequest) {
+        if self.nonzero == 0 {
+            return;
+        }
+        let listing = format!("{:?}", request.listing);
+        let (from, to) = (
+            request.window.from().to_string(),
+            request.window.to().to_string(),
+        );
+        // EVERY KEY IS ONE GATE 1D ALREADY DECLARES: `oi` counts the non-zero
+        // cells and `rows` every cell withheld, zero included.
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn(
+                "pull.land",
+                "the vendor sent a non-zero open interest for an index or a share; \
+                 the bar is filed with the null sentinel (D-3322)",
+            )
+            .with("instrument", telemetry::Value::Str(&request.instrument_id))
+            .with("listing", telemetry::Value::Str(&listing))
+            .with("rung", telemetry::Value::Str(request.granularity.dir()))
+            .with("from", telemetry::Value::Str(&from))
+            .with("to", telemetry::Value::Str(&to))
+            .with("oi", telemetry::Value::Uint(u64::from(self.nonzero)))
+            .with("rows", telemetry::Value::Uint(u64::from(self.withheld))),
+        );
+    }
+}
+
+/// A vendor timestamp as UTC epoch seconds, by the descriptor's encoding.
+///
+/// W1 lives here: the encoding is dispatched, never assumed. A vendor stamping
+/// IST wall-clock seconds into a field read as UTC epoch produced 45 bars at
+/// wrong timestamps that passed every check and were written to disk — the
+/// only fault in this pipeline that STORED a wrong answer instead of refusing.
+///
+/// Lifted out of [`land_rows`] so `crate::http` names a row it refuses at the
+/// instant the landing would have filed it at — one conversion, two readers,
+/// and no second copy to drift. One match and at most one division.
+pub(crate) const fn epoch_utc(raw: i64, encoding: TimestampEncoding) -> i64 {
+    match encoding {
+        // ALREADY UTC — AND THE THIRD SPELLING IS HERE FOR A REASON, NOT
+        // FOR TIDINESS.
+        //
+        // `IsoDateTimeOffset` carries its own zone (`…T09:15:00+0530`) and
+        // `crate::http::one_stamp` has already applied it, because that is
+        // the only place the offset is visible. Subtracting
+        // `IST_OFFSET_SECS` here as well — which is what the text arm below
+        // does, correctly, for a value that states no zone — would put
+        // every bar 5h30m early. 03:45 on a trading day passes every
+        // validation below this line and writes to disk looking exactly
+        // like a real bar: the **W1 fault** this module's header describes,
+        // the one class of timestamp error that stores instead of refusing.
+        //
+        // It sits WITH the epoch arms rather than below them because "the
+        // value already means UTC" is precisely what all three say, and one
+        // arm is one place to be wrong instead of two. D-0135.
+        TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => raw,
+        TimestampEncoding::EpochMillisUtc => raw.div_euclid(1_000),
+        // The vendor's value is already IST-based, so the offset this
+        // build would add has already been added by the vendor. Subtract it
+        // back out before the shared conversion, rather than teaching that
+        // conversion a second mode.
+        // BOTH TEXT SPELLINGS, ONE BEHAVIOUR. The decoder has already
+        // turned `2026-08-04 09:15:00` and `2026-08-04T09:15:00` into
+        // IST-based seconds — the separator differs on the wire and the
+        // meaning does not — so the offset the vendor already added comes
+        // back out here. Joined rather than written twice, because two arms
+        // doing the same thing is two places for one of them to drift.
+        TimestampEncoding::IstDateTimeText | TimestampEncoding::IsoDateTimeText => {
+            raw - crate::session::IST_OFFSET_SECS
+        }
+    }
+}
+
+/// The row ledger for one landed window, as one aggregate event: rows in, bars
+/// out, and each drop reason by name, plus the bars kept on a day the exchange
+/// calendar cannot classify. Split out of [`land_rows`] so that body stays one
+/// readable loop; it emits once per window, never per row.
+fn emit_landed(rows_in: usize, bars_out: usize, census: &DropCensus, interest: InterestWithheld) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.land", "window decoded")
-            .with("rows_in", telemetry::Value::Uint(raw.rows.len() as u64))
-            .with("bars_out", telemetry::Value::Uint(bars.len() as u64))
+            .with("rows_in", telemetry::Value::Uint(rows_in as u64))
+            .with("bars_out", telemetry::Value::Uint(bars_out as u64))
+            // THE ROUTINE ZERO, COUNTED WHERE THE WINDOW CLOSES (D-3322): the
+            // open-interest cells an index or a share sent, filed as the null.
+            .with("oi", telemetry::Value::Uint(u64::from(interest.withheld)))
             .with(
                 "before_window",
                 telemetry::Value::Uint(u64::from(
@@ -977,13 +1393,18 @@ pub fn land_with_cash_schedule(
                 telemetry::Value::Uint(u64::from(
                     census.of(crate::session::DropReason::AtOrAfterSessionClose),
                 )),
+            )
+            .with(
+                "on_closed_day",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::OnClosedDay),
+                )),
+            )
+            .with(
+                "kept_unclassified_day",
+                telemetry::Value::Uint(u64::from(census.unclassified_kept())),
             ),
     );
-    Ok(Landed {
-        bars,
-        census,
-        outside_session,
-    })
 }
 
 /// Fetches one window and lands it, in one call.
@@ -1015,5 +1436,172 @@ pub fn wire_end(last: Day, end: crate::vendor::RangeEnd) -> Result<Day, SessionE
     match end {
         crate::vendor::RangeEnd::Inclusive => Ok(last),
         crate::vendor::RangeEnd::Exclusive => last.succ(),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod tests {
+    use super::*;
+    use crate::vendor::Listing;
+
+    /// 2022-10-03 09:15:00 IST, inside the regular session, as UTC seconds.
+    const AT: i64 = 1_664_768_700;
+
+    /// A one-minute request over 2022-10-03..04 for `listing`.
+    fn request(listing: Listing) -> BarRequest {
+        BarRequest {
+            instrument_id: "INVENTED ID".to_owned(),
+            listing,
+            window: Window::new(
+                Day::new(2022, 10, 3).expect("a real date"),
+                Day::new(2022, 10, 4).expect("a real date"),
+            )
+            .expect("a forward window"),
+            granularity: Granularity::Minute1,
+        }
+    }
+
+    /// One invented minute row, `minute` minutes after 09:15, carrying `oi`.
+    const fn row(minute: i64, oi: Option<i64>) -> RawRow {
+        RawRow {
+            timestamp: AT + minute * 60,
+            open: 4_100,
+            high: 4_130,
+            low: 4_090,
+            close: 4_120,
+            volume: 7,
+            open_interest: oi,
+        }
+    }
+
+    /// **AN INDEX OR A SHARE IS FILED WITH THE NULL, WHATEVER CELL THE VENDOR
+    /// SENT; A CONTRACT KEEPS ITS OPEN INTEREST, ZERO INCLUDED** (D-3322;
+    /// DB-036, DB-G28, DB-G44, DB-G100).
+    ///
+    /// Kite's `oi=1` answer puts a `0` in the seventh cell of every index and
+    /// share candle, and it was stored, so Zerodha NIFTY read `0` where GDFL
+    /// NIFTY read the null. The rows here are invented.
+    #[test]
+    fn an_index_or_a_share_is_filed_with_the_null_and_a_contract_keeps_its_interest() {
+        let rows = [row(0, Some(0)), row(1, Some(4_200)), row(2, None)];
+        for listing in [Listing::Index, Listing::Equity] {
+            let landed = land_rows(
+                &rows,
+                &request(listing),
+                TimestampEncoding::EpochSecondsUtc,
+                PriceScale::Paisa,
+                None,
+            )
+            .expect("three rows inside the window and the session");
+            assert_eq!(landed.bars.len(), 3, "{listing:?}: every row lands");
+            assert!(
+                landed
+                    .bars
+                    .iter()
+                    .all(|bar| bar.open_interest == store::format::OI_NULL),
+                "{listing:?}: a zero nobody measured is not stored as one: {:?}",
+                landed.bars
+            );
+            assert_eq!(
+                landed.bars[1].close, 4_120,
+                "{listing:?}: and nothing else about the bar moves"
+            );
+        }
+        let landed = land_rows(
+            &rows,
+            &request(Listing::Derivative),
+            TimestampEncoding::EpochSecondsUtc,
+            PriceScale::Paisa,
+            None,
+        )
+        .expect("the same rows, as a contract");
+        assert_eq!(
+            landed
+                .bars
+                .iter()
+                .map(|bar| bar.open_interest)
+                .collect::<Vec<_>>(),
+            vec![0, 4_200, store::format::OI_NULL],
+            "a contract's zero is a measurement, and an absent cell is the null"
+        );
+    }
+
+    /// The withheld cells are counted, a non-zero one apart, and every one is
+    /// answered with the null.
+    #[test]
+    fn withheld_interest_is_counted_and_only_a_nonzero_cell_is_counted_apart() {
+        let mut interest = InterestWithheld::default();
+        assert_eq!(interest.withhold(None), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld::default(),
+            "an absent cell withholds nothing"
+        );
+        assert_eq!(interest.withhold(Some(0)), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld {
+                withheld: 1,
+                nonzero: 0
+            }
+        );
+        assert_eq!(interest.withhold(Some(-3)), store::format::OI_NULL);
+        assert_eq!(interest.withhold(Some(9)), store::format::OI_NULL);
+        assert_eq!(
+            interest,
+            InterestWithheld {
+                withheld: 3,
+                nonzero: 2
+            }
+        );
+        // Both arms of the warning run: quiet for a routine zero, one line for
+        // a window that withheld a non-zero cell. The line's contents are the
+        // telemetry sink's to prove; here the arms are driven.
+        InterestWithheld {
+            withheld: 4,
+            nonzero: 0,
+        }
+        .warn_if_measured(&request(Listing::Index));
+        interest.warn_if_measured(&request(Listing::Equity));
+        // SATURATES rather than wraps.
+        let mut full = InterestWithheld {
+            withheld: u32::MAX,
+            nonzero: u32::MAX,
+        };
+        assert_eq!(full.withhold(Some(1)), store::format::OI_NULL);
+        assert_eq!(
+            full,
+            InterestWithheld {
+                withheld: u32::MAX,
+                nonzero: u32::MAX
+            }
+        );
+    }
+
+    /// The one conversion `crate::http` and the landing share: each encoding
+    /// to the same UTC second.
+    #[test]
+    fn every_encoding_reaches_the_same_utc_second() {
+        for (raw, encoding) in [
+            (AT, TimestampEncoding::EpochSecondsUtc),
+            (AT, TimestampEncoding::IsoDateTimeOffset),
+            (AT * 1_000 + 999, TimestampEncoding::EpochMillisUtc),
+            (
+                AT + crate::session::IST_OFFSET_SECS,
+                TimestampEncoding::IstDateTimeText,
+            ),
+            (
+                AT + crate::session::IST_OFFSET_SECS,
+                TimestampEncoding::IsoDateTimeText,
+            ),
+        ] {
+            assert_eq!(epoch_utc(raw, encoding), AT, "{encoding:?}");
+        }
     }
 }

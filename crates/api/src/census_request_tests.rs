@@ -61,6 +61,7 @@
     reason = "finite owned fixtures and exact response assertions"
 )]
 
+use super::census_cache::Cached;
 use super::*;
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -641,7 +642,7 @@ async fn a_rewrite_that_keeps_the_stamp_is_served_stale_until_the_stamp_moves() 
         .census
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((newer_stamps, older_censuses, older_entries));
+        Some(Cached::planted(newer_stamps, older_censuses, older_entries));
     assert_eq!(
         fixture.locate("RELIANCE"),
         None,
@@ -827,13 +828,17 @@ fn a_poisoned_census_lock_is_read_through_and_still_refreshed() {
     assert_eq!(fixture.reads(), reads + 1);
 }
 
-/// THE KEY IS THE WHOLE SET, SO ANOTHER FEED'S REWRITE RE-READS THIS ONE.
+/// ANOTHER FEED'S REWRITE LEAVES THIS FEED'S MANIFEST UNREAD (D-3327 item 1;
+/// DB-059, DB-G06, DB-G79).
 ///
-/// The cost `docs/06-limits.md`'s D-0686 section states: the first request
-/// after ANY vendor's stamp moves pays a whole `read_all`, the unchanged
-/// manifests included. Pinned so a change to that cost is a visible one.
+/// This pinned the opposite until D-3327: the cache was one key over every
+/// vendor's stamp, so the first request after ANY vendor's commit re-read every
+/// manifest, the unchanged ones included, and a Zerodha commit every half
+/// second made GDFL's 268 MB manifest a read per request. Each vendor now has
+/// its own cell, keyed on its own stamp: Zerodha's rewrite is read once, and
+/// Dhan's unchanged manifest is not read at all.
 #[test]
-fn another_feeds_rewrite_rereads_every_manifest_once() {
+fn another_feeds_rewrite_leaves_this_feeds_manifest_unread() {
     let fixture = Fixture::new("census-request-other-feed");
     fixture.publish(&[(Segment::Cash, "ADANIENT")], 0);
     assert!(fixture.locate("ADANIENT").is_some());
@@ -841,14 +846,27 @@ fn another_feeds_rewrite_rereads_every_manifest_once() {
     assert!(fixture.locate("ADANIENT").is_some());
     assert_eq!(fixture.reads(), reads, "warm");
     fixture.publish_for(Vendor::Zerodha, &[(Segment::Index, "NIFTY")], 0);
+    let zerodha = manifest_path(&fixture.root, Vendor::Zerodha);
+    let zerodha_reads = census::manifest_reads::of(&zerodha);
     assert!(fixture.locate("NIFTY").is_some());
     assert_eq!(
         fixture.reads(),
-        reads + 1,
-        "Dhan's unchanged manifest re-read"
+        reads,
+        "Dhan's unchanged manifest is not read again"
+    );
+    assert_eq!(
+        census::manifest_reads::of(&zerodha),
+        zerodha_reads + 1,
+        "Zerodha's rewrite is read, once"
     );
     assert!(fixture.locate("NIFTY").is_some());
-    assert_eq!(fixture.reads(), reads + 1, "and once only");
+    assert!(fixture.locate("ADANIENT").is_some());
+    assert_eq!(fixture.reads(), reads, "and still not");
+    assert_eq!(
+        census::manifest_reads::of(&zerodha),
+        zerodha_reads + 1,
+        "once only"
+    );
 }
 
 /// COLD, WARM AND COLD AGAIN ANSWER THE SAME BYTES. `CLAUDE.md` §3 rule 5.
@@ -875,6 +893,9 @@ async fn cold_warm_and_cold_again_calendars_are_byte_identical() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        // AND THE KEPT ANSWERS AND MONTH COUNTS (D-3336), or "cold" would be
+        // the answer kept by the warm request.
+        fixture.site.calendars.forget_answers();
     };
     for query in [
         "feed=dhan",
@@ -937,7 +958,7 @@ fn concurrent_installs_and_readers_never_see_a_torn_census() {
     assert!(looked.load(std::sync::atomic::Ordering::Relaxed) > 0);
     let (_, cached) = census_now(&fixture.site);
     let disk = census::held_entries(&census::read_all(&fixture.site.store_root));
-    assert_eq!(*cached, disk, "the cache converged on the disk");
+    assert_eq!(**cached, disk, "the cache converged on the disk");
     assert_eq!(cached.len(), 1);
 }
 
@@ -1037,8 +1058,11 @@ async fn query_edges_on_bars_and_calendar_are_pinned() {
 
     let (status, exchange) = fixture.calendar_answer("feed=dhan&symbol=").await;
     assert_eq!(status, axum::http::StatusCode::OK);
+    // THE EXCHANGE BRANCH, AND SINCE D-3336 A SHARE VOTES FOR NOTHING: only
+    // NIFTY and BANKNIFTY hold the exchange calendar (WP-35).
     assert!(
-        exchange.contains(r#""derivedFrom":["ADANIENT"]"#),
+        exchange.contains(r#""target":{"kind":"exchange"}"#)
+            && exchange.contains(r#""derivedFrom":[]"#),
         "{exchange}"
     );
     let (status, page) = fixture.bars("symbol=&vendor=dhan&month=2025-05");
@@ -1206,8 +1230,25 @@ fn past_a_ctime_tick(path: &Path, change: impl Fn()) {
 /// driven here. Like `folder`'s unreadable-folder test, this needs a process
 /// the permission binds, which a root process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+#[test]
+fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_manifest_directory_this_process_may_not_search_is_not_served_as_absent",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body() {
     let fixture = Fixture::new("census-request-manifest-unsearchable");
     let dir = fixture.root.join("manifest");
     fs::create_dir_all(&dir).expect("an empty manifest directory");
@@ -1495,8 +1536,25 @@ async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_na
 /// directory tests, this needs a process the permission binds, which a root
 /// process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+#[test]
+fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_permission_change_on_a_manifest_file_is_seen_on_the_next_request",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-manifest-file-mode");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -1944,11 +2002,13 @@ fn a_socket_is_bound_at_a_path_too_long_for_a_socket_address() {
 /// two a stamp decides (`EOPNOTSUPP` on this macOS host, which `std` calls
 /// `Unsupported`; the kind is not assumed here, only required to be neither).
 /// `read_vendor` must label it `Fault::Io` of that kind, and the cache must
-/// decline it: every request while the socket stays reads again, counted on
-/// Dhan's healthy manifest beside it, and nothing is cached. Once the socket
-/// is gone the next read is kept. A `read_vendor` that labelled every I/O
-/// error `Fault::Refused` had this socket kept, under a stamp that cannot say
-/// when the fault ends.
+/// decline it: while the socket stays, Groww's own cell keeps nothing and no
+/// all-vendor read is kept, so every request reads Groww again. Since D-3327
+/// the cache is per vendor, so Dhan's healthy manifest beside it is read once
+/// and kept in its own cell: a fault on one feed no longer makes every other
+/// feed's manifest a read per request. Once the socket is gone the next read
+/// is kept. A `read_vendor` that labelled every I/O error `Fault::Refused` had
+/// this socket kept, under a stamp that cannot say when the fault ends.
 ///
 /// The socket is bound through `SocketAt`, so a long `TMPDIR` still fits.
 #[cfg(unix)]
@@ -1982,12 +2042,29 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     let faulted = ["unreadable", "held", "absent", "absent", "absent"];
     cold(&fixture);
     let base = fixture.reads();
+    let kept = |vendor| {
+        fixture
+            .site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|cached| cached.keeps_vendor(vendor))
+    };
     for request in 1..=3 {
         assert_eq!(fixture.states(), faulted, "request {request}: served");
         assert_eq!(
             fixture.reads(),
-            base + request,
-            "request {request}: read again, not kept"
+            base + 1,
+            "request {request}: Dhan's healthy manifest was read once and kept"
+        );
+        assert!(
+            !kept(Vendor::Groww),
+            "request {request}: Groww's cell keeps nothing"
+        );
+        assert!(
+            kept(Vendor::Dhan),
+            "request {request}: Dhan's cell keeps its read"
         );
     }
     assert!(
@@ -1996,8 +2073,10 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Cached::kept_stamps)
             .is_none(),
-        "nothing is cached while the socket stays"
+        "no all-vendor read is cached while the socket stays"
     );
 
     drop(socket);
@@ -2009,21 +2088,21 @@ fn a_manifest_that_stats_but_will_not_open_is_not_cached() {
     assert_eq!(fixture.reads(), after, "and what it read is kept");
 }
 
-/// WHILE A FAULT THE CENSUS CACHE DECLINES LASTS, `/store.json` READS THE
-/// MANIFESTS AND ENCODES ITS BODY AGAIN ON EVERY REQUEST. D-0695.
+/// A FAULT ON ANOTHER FEED'S MANIFEST LEAVES THIS FEED'S `/store.json` BODY
+/// KEPT (D-3327 item 1; DB-G79).
 ///
-/// This pins a cost `docs/06-limits.md` states, not a behaviour anybody
-/// wants. `/store.json` keeps its encoded body in `store_wire::Cache`, keyed on
-/// the census it was built from. A read the census cache declines is a new
-/// census on every request, so that cache misses too. With a socket at
-/// Groww's manifest path, each of three `feed=dhan` requests reads Dhan's
-/// healthy manifest again and answers the same bytes from a new allocation.
-/// Once the socket is gone, the next request reads once, and the one after
-/// reads nothing and answers the same allocation. A cache that survived the
-/// declined read fails the first half, and must correct that section.
+/// This pinned a cost `docs/06-limits.md` stated, not a behaviour anybody
+/// wanted: `store_wire::Cache` kept the encoded body against the all-vendor
+/// census, and a read the census cache declined (a socket at Groww's manifest
+/// path) was a new census on every request, so `feed=dhan` read Dhan's healthy
+/// manifest and encoded its body again on every request. The body is now kept
+/// per (vendor, format) against that vendor's own cell, so Groww's fault does
+/// not reach it: the first request reads Dhan once and encodes, and every later
+/// one reads nothing and answers the same allocation, before and after the
+/// socket goes.
 #[cfg(unix)]
 #[test]
-fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() {
+fn a_fault_on_another_feeds_manifest_leaves_this_feeds_store_body_kept() {
     use axum::http::{HeaderMap, Method, StatusCode, Uri};
     let fixture = Fixture::new("cr-wire");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -2044,27 +2123,28 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
         let again = body();
         assert_eq!(
             fixture.reads(),
-            base + request,
-            "request {request}: read again"
+            base + 1,
+            "request {request}: not read again"
         );
         assert_eq!(again, first, "request {request}: the same answer");
-        assert_ne!(
+        assert_eq!(
             again.as_ptr(),
             first.as_ptr(),
-            "request {request}: encoded again"
+            "request {request}: the kept body, not encoded again"
         );
     }
 
     drop(socket);
     fs::remove_file(&groww).expect("take the socket away");
-    let kept = body();
-    let after = fixture.reads();
-    assert_eq!(after, base + 4, "its end is read");
-    let warm = body();
-    assert_eq!(fixture.reads(), after, "and kept");
+    let after = body();
     assert_eq!(
-        warm.as_ptr(),
-        kept.as_ptr(),
+        fixture.reads(),
+        base + 1,
+        "Groww's repair does not move Dhan's cell"
+    );
+    assert_eq!(
+        after.as_ptr(),
+        first.as_ptr(),
         "and its body is not encoded again"
     );
 }
@@ -2091,6 +2171,15 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
 #[cfg(unix)]
 #[test]
 fn a_fault_its_stamp_can_see_is_cached() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_fault_its_stamp_can_see_is_cached",
+        a_fault_its_stamp_can_see_is_cached_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_fault_its_stamp_can_see_is_cached_body() {
     use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-kept-faults");
@@ -2171,7 +2260,9 @@ fn a_census_is_kept_only_under_a_stamp_that_could_have_read_it() {
         fault,
     };
     let held = || Census::Held {
-        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+        manifest: census::Manifests::single(
+            Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest"),
+        ),
     };
     let io = |kind| unreadable(Fault::Io(kind));
     let not_a_directory = ManifestStamp::Faulted(ErrorKind::NotADirectory);
@@ -2277,7 +2368,9 @@ fn only_an_absence_its_stamp_contradicts_is_served_unreadable() {
         fault,
     };
     let held = || Census::Held {
-        manifest: Box::new(Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest")),
+        manifest: census::Manifests::single(
+            Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest"),
+        ),
     };
     // (the stamp, whether the root was a directory, what the read said,
     // served unreadable in its place)
@@ -2414,7 +2507,7 @@ fn kept_census(fixture: &Fixture) -> Option<CensusStamps> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
-        .map(|(at, _, _)| at.clone())
+        .and_then(Cached::kept_stamps)
 }
 
 /// Where the store root is when a miss that read an absence stamps again.
@@ -2806,10 +2899,11 @@ fn what_refusing_an_absence_costs_is_what_its_doc_says() {
             })
             .collect()
     }
-    let source = include_str!("server.rs");
+    // In `census_cache.rs` since WP-01 moved the census cache out of `server.rs`.
+    let source = include_str!("census_cache.rs");
     let (above, from) = source
-        .split_once("\nfn refuse_contradicted_absences(")
-        .expect("`refuse_contradicted_absences` is in server.rs");
+        .split_once("\npub(super) fn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in census_cache.rs");
     let body = from.split_once("\n}\n").expect("its body ends").0;
     let mut doc: Vec<&str> = above
         .lines()
@@ -2838,8 +2932,8 @@ fn what_refusing_an_absence_costs_is_what_its_doc_says() {
         "a row left unchanged costs the index and `stamp_could_read`: {before}"
     );
     let judge = source
-        .split_once("\nfn stamp_could_read(")
-        .expect("`stamp_could_read` is in server.rs")
+        .split_once("\npub(super) fn stamp_could_read(")
+        .expect("`stamp_could_read` is in census_cache.rs")
         .1
         .split_once("\n}\n")
         .expect("its body ends")
@@ -2935,7 +3029,7 @@ fn what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source() {
         (
             "Sink::emit_for_run",
             emit,
-            "let _terminated = inner.target.append(b\"\\n\");",
+            "inner.torn = inner.target.append(b\"\\n\").is_err();",
             &["ends the fragment"],
         ),
         (
@@ -3003,10 +3097,11 @@ fn method<'a>(source: &'a str, head: &str) -> &'a str {
 /// its doc as one line, and `docs/06-limits.md`'s "What that line costs"
 /// with every run of whitespace made one space.
 fn line_cost_texts() -> (&'static str, String, String) {
-    let server = include_str!("server.rs");
+    // In `census_cache.rs` since WP-01 moved the census cache out of `server.rs`.
+    let server = include_str!("census_cache.rs");
     let (above, from) = server
-        .split_once("\nfn refuse_contradicted_absences(")
-        .expect("`refuse_contradicted_absences` is in server.rs");
+        .split_once("\npub(super) fn refuse_contradicted_absences(")
+        .expect("`refuse_contradicted_absences` is in census_cache.rs");
     let body = from.split_once("\n}\n").expect("its body ends").0;
     let mut doc: Vec<&str> = above
         .lines()
@@ -3211,6 +3306,7 @@ fn landed_nifty() -> BrokerWindow {
         listing: pull::vendor::Listing::Index,
         contract: None,
         unfetched: None,
+        before_first_bar: None,
         instrument: "NIFTY".to_owned(),
         origin: "test only".to_owned(),
         spec,
@@ -3341,7 +3437,9 @@ fn kept_nifty(fixture: &Fixture) -> Option<(SystemTime, Arc<pull::calendar::Cale
         .map(|(at, calendar)| (*at, Arc::clone(calendar)))
 }
 
-/// Empty the calendar cache, as a server that has not yet derived one.
+/// Empty the calendar cache, as a server that has not yet derived one: the
+/// derived calendars, and since D-3336 the kept `/calendar.json` answers and
+/// month counts too.
 fn forget_calendars(fixture: &Fixture) {
     fixture
         .site
@@ -3349,6 +3447,53 @@ fn forget_calendars(fixture: &Fixture) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    fixture.site.calendars.forget_answers();
+}
+
+/// What one caller kept for Dhan's NIFTY, and under which stamp.
+///
+/// Since D-3336 `/calendar.json` keeps its whole ANSWER under the asked feed's
+/// stamp rather than a derived calendar per series (WP-35); the peer vote and
+/// the observation still keep NIFTY's derived calendar. Either way the rule
+/// these tests pin is the same: kept under Dhan's own modified time, and met by
+/// the next call.
+enum Kept {
+    /// A kept `/calendar.json` answer.
+    Answer(Arc<crate::calendar_of::KeptAnswer>),
+    /// A kept derived calendar.
+    Calendar(Arc<pull::calendar::Calendar>),
+}
+
+impl Kept {
+    /// Whether `other` is this very kept value, not an equal copy.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Answer(one), Self::Answer(two)) => Arc::ptr_eq(one, two),
+            (Self::Calendar(one), Self::Calendar(two)) => Arc::ptr_eq(one, two),
+            (Self::Answer(_), Self::Calendar(_)) | (Self::Calendar(_), Self::Answer(_)) => false,
+        }
+    }
+}
+
+/// What `caller` keeps for Dhan's NIFTY: see [`Kept`].
+fn kept_by(fixture: &Fixture, caller: Caller) -> Option<(SystemTime, Kept)> {
+    match caller {
+        Caller::Symbol | Caller::Exchange => {
+            let symbol = if matches!(caller, Caller::Symbol) {
+                "NIFTY"
+            } else {
+                ""
+            };
+            fixture
+                .site
+                .calendars
+                .kept_answer(&(Vendor::Dhan, None, symbol.to_owned()))
+                .map(|(at, kept)| (at, Kept::Answer(kept)))
+        }
+        Caller::Peer | Caller::Observation => {
+            kept_nifty(fixture).map(|(at, calendar)| (at, Kept::Calendar(calendar)))
+        }
+    }
 }
 
 /// A CALENDAR DERIVED FROM A CENSUS IS KEPT UNDER THAT CENSUS'S STAMP, NOT A
@@ -3440,7 +3585,7 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
     for caller in Caller::ALL {
         forget_calendars(&fixture);
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
-        let first = kept_nifty(&fixture);
+        let first = kept_by(&fixture, caller);
         assert_eq!(
             first.as_ref().map(|(at, _)| *at),
             Some(dhan),
@@ -3449,8 +3594,8 @@ fn every_caller_keeps_its_calendar_under_the_asked_feeds_own_modified_time() {
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
         assert!(
             first
-                .zip(kept_nifty(&fixture))
-                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+                .zip(kept_by(&fixture, caller))
+                .is_some_and(|((_, first), (_, second))| first.same(&second)),
             "{caller:?}: the second call met the kept calendar and kept no other"
         );
     }
@@ -3775,7 +3920,7 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
     for caller in Caller::ALL {
         forget_calendars(&fixture);
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: May");
-        let first = kept_nifty(&fixture);
+        let first = kept_by(&fixture, caller);
         assert_eq!(
             first.as_ref().map(|(at, _)| *at),
             Some(dhan),
@@ -3784,8 +3929,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
         assert_eq!(caller.sessions(&fixture.site), Some(1), "{caller:?}: again");
         assert!(
             first
-                .zip(kept_nifty(&fixture))
-                .is_some_and(|((_, first), (_, second))| Arc::ptr_eq(&first, &second)),
+                .zip(kept_by(&fixture, caller))
+                .is_some_and(|((_, first), (_, second))| first.same(&second)),
             "{caller:?}: the second call met the kept calendar and kept no other"
         );
     }
@@ -3795,6 +3940,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(Cached::kept_stamps)
             .is_none(),
         "no whole read was kept, so only the per-row rule kept each calendar"
     );
@@ -3817,6 +3964,8 @@ fn a_fault_on_another_feeds_manifest_leaves_this_feeds_calendar_kept() {
 #[tokio::test]
 async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
     let fixture = nifty_store("census-request-unheld-names");
+    // SINCE D-3336 THE ROUTE KEEPS ITS ANSWER, not a derived calendar
+    // (WP-35): what is counted is every calendar and every answer kept.
     let held = |fixture: &Fixture| {
         fixture
             .site
@@ -3824,12 +3973,13 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+            + fixture.site.calendars.kept_answers()
     };
     let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert!(body.contains(r#""sessions":1"#), "{body}");
-    let kept = kept_nifty(&fixture).expect("the held name's calendar is kept");
-    assert_eq!(held(&fixture), 1, "one held name, one calendar");
+    let kept = kept_by(&fixture, Caller::Symbol).expect("the held name's answer is kept");
+    assert_eq!(held(&fixture), 1, "one held name, one answer");
     let spellings = [
         "%20NIFTY",
         "NIFTY%20",
@@ -3850,7 +4000,7 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
     let (status, body) = fixture.calendar_answer("feed=dhan&symbol=NIFTY").await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert!(
-        kept_nifty(&fixture).is_some_and(|(_, again)| Arc::ptr_eq(&kept.1, &again)),
-        "the held name's next call met its calendar"
+        kept_by(&fixture, Caller::Symbol).is_some_and(|(_, again)| kept.1.same(&again)),
+        "the held name's next call met its answer"
     );
 }

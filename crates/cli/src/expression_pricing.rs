@@ -84,7 +84,7 @@ impl Plan {
     }
 }
 
-fn validate_overrides() -> Result<(), String> {
+pub(crate) fn validate_overrides() -> Result<(), String> {
     for name in [
         "BRUTEX_MAX_MAE_PPM",
         "BRUTEX_MIN_RR_BP",
@@ -97,18 +97,16 @@ fn validate_overrides() -> Result<(), String> {
         "BRUTEX_TOP",
     ] {
         if let Some(value) = crate::knobs::var(name) {
-            let valid = value
-                .parse::<i64>()
-                .ok()
-                .is_some_and(|n| n >= 0 && (name != "BRUTEX_MIN_WIN_RATE_BP" || n <= 10_000));
-            if !valid {
+            // The one rule `Rules::stated` also applies (P8-04, D-2723).
+            if crate::knobs::policy_floor(name, &value).is_none() {
                 return Err(format!(
                     "{name} is malformed or outside its nonnegative policy range; no default was substituted"
                 ));
             }
         }
     }
-    if crate::knobs::var("BRUTEX_PROTECTED_EXITS").is_some_and(|s| !matches!(s.as_str(), "0" | "1"))
+    if crate::knobs::var("BRUTEX_PROTECTED_EXITS")
+        .is_some_and(|s| crate::knobs::policy_floor("BRUTEX_PROTECTED_EXITS", &s).is_none())
     {
         return Err("BRUTEX_PROTECTED_EXITS must be exactly 0 or 1".to_owned());
     }
@@ -121,6 +119,9 @@ pub(crate) struct Prepared {
     pub plan: Plan,
     pub execution_note: String,
     facts: SliceFacts,
+    /// `runner::identity::data_digest(&bars)`, once. `Prepared` is only ever
+    /// lent immutably to the search, so the bars cannot change under it.
+    execution_digest: [u8; 32],
 }
 impl Prepared {
     pub(crate) fn new(
@@ -130,12 +131,14 @@ impl Prepared {
         execution_note: String,
     ) -> Self {
         let facts = SliceFacts::of(&bars, &column);
+        let execution_digest = runner::identity::data_digest(&bars);
         Self {
             bars,
             column,
             plan,
             execution_note,
             facts,
+            execution_digest,
         }
     }
     pub(crate) fn capture(
@@ -144,8 +147,14 @@ impl Prepared {
         attempt: &crate::sweep_evidence::Attempt,
         expression: &Expression,
     ) -> Result<(), String> {
-        let capture =
-            Capture::begin_expression(root, attempt, &self.bars, &self.column, expression)?;
+        let capture = Capture::begin_expression_with_digest(
+            root,
+            attempt,
+            &self.bars,
+            &self.column,
+            expression,
+            self.execution_digest,
+        )?;
         let tier = capture.tier(self.plan.tier())?;
         let mask = expression.referenced();
         for direction in [costs::fill::Direction::Long, costs::fill::Direction::Short] {

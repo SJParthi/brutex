@@ -72,11 +72,23 @@ impl Drop for Group {
     }
 }
 
-/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`.
+/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`, re-taken
+/// once for D-1542 and D-1543. `pinned_programs` reads positions 0 to 4, the
+/// EMA rows, so the evaluated conditions moved with the SMA seed and the
+/// classical candlestick shapes. With `trend.rs` and `pattern.rs` restored to
+/// their previous bytes this test passed on the previous pins, so nothing else
+/// moved them. The grouped and ungrouped producers still agree.
+///
+/// Re-taken again for D-1571: the fixture's bar months are now born at store
+/// format version 3, and the cold checksum audit's full-file digest hashes the
+/// header image, whose `magic` and `format_version` changed. Evaluated
+/// conditions and terminals did not move; the identity that names the source
+/// bytes did. At the tree before D-1571 was merged this test passed on the
+/// previous pins.
 const PINS: [&str; 3] = [
-    "35da362a7e9447ce690104094bc4581d63c66ee440cffea0ec72bde465a35fc1",
-    "b244ecba43067e3a89a68a9e46f262428089684faa7d17f1f59d6c40efaff63d",
-    "8106fa46e8728158036905540dca8ae37e0419454057e909aa560d1e9f888802",
+    "d155210e870779530659e7ce44fee9f43e4a0b09aafa271c383b23890cadd45a",
+    "733a085e817912c7f85d98d9618b8c115ceb8a955fb4a247e29b88578dacd2e6",
+    "7065fe2916044f03cd4f513e9c6f66cae8be6b968f7d4c4c9fe6bbf446a5be99",
 ];
 
 fn body_hex(fixture: &Fixture, identity: [u8; 32]) -> Result<String, String> {

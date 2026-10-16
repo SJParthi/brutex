@@ -46,16 +46,19 @@
 
 use brutex_core::vendor::Vendor;
 use std::collections::HashSet;
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::mem::discriminant;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pull::archive::{self, ArchiveError, MAX_MEMBERS};
+use pull::archive::{self, ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS};
 use pull::csv::{Columns, CsvError, decode};
 use pull::fetch::{
     self, BarRequest, BarSource, FakeSource, FetchError, MAX_ROWS, ParallelArrays, RawRow,
-    RawWindow,
+    RawWindow, RowCause,
 };
 use pull::fold::{Bucket, FoldError, fold};
 use pull::ingest::{Failure, Ingested, Plan};
@@ -148,7 +151,12 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
             members: 7,
             cap: MAX_MEMBERS,
         },
-        ArchiveError::PathEscapes { path },
+        ArchiveError::PathEscapes { path: path.clone() },
+        ArchiveError::MemberTooLarge {
+            path,
+            bytes: 9,
+            cap: 8,
+        },
     ];
 
     let mut sentences = HashSet::with_capacity(cases.len());
@@ -193,6 +201,15 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() {
+    support::where_permission_binds(
+        "a_directory_that_will_not_open_is_refused_with_the_operating_systems_words",
+        a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNLISTABLE");
@@ -231,6 +248,15 @@ fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() 
 #[cfg(unix)]
 #[test]
 fn a_member_that_will_not_open_stops_the_walk_and_names_the_member() {
+    support::where_permission_binds(
+        "a_member_that_will_not_open_stops_the_walk_and_names_the_member",
+        a_member_that_will_not_open_stops_the_walk_and_names_the_member_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_member_that_will_not_open_stops_the_walk_and_names_the_member_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNREADABLE");
@@ -320,6 +346,119 @@ fn a_directory_past_the_member_cap_is_refused_at_the_cap() {
     );
 }
 
+/// **A CENSUS COUNTS THE MEMBERS IT REJECTS AGAINST THE SAME CAP.** D-0725.
+///
+/// [`archive::read_dir_reporting`] keeps a member that will not decode as a
+/// finding and walks on. The cap compared only the members that had decoded,
+/// so a folder of malformed files was read to its end, past [`MAX_MEMBERS`],
+/// and kept one finding for every one of them.
+///
+/// Every even-numbered member is empty and decodes to no rows; every odd one
+/// is one field where five are declared, and is rejected. Either kind alone
+/// stays under the cap, so only a count of both reaches it. Which kind the
+/// walk meets first is the filesystem's order, and the number of members seen
+/// when the cap is reached does not depend on it.
+#[test]
+fn a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects() {
+    let scratch = Scratch::new("CENSUSCAP");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    for i in 0..=MAX_MEMBERS {
+        let body = if i % 2 == 0 { "" } else { "x\n" };
+        fs::write(dir.join(format!("F{i}.csv")), body).expect("a member");
+    }
+
+    let refused = match archive::read_dir_reporting(&dir, Columns::TrueDataIndex) {
+        Ok((members, rejected)) => panic!(
+            "the census walked past the cap: {} decoded and {} rejected, {} \
+             members against a cap of {MAX_MEMBERS}",
+            members.len(),
+            rejected.len(),
+            members.len() + rejected.len()
+        ),
+        Err(why) => why,
+    };
+    assert_eq!(
+        refused,
+        ArchiveError::TooManyMembers {
+            members: MAX_MEMBERS,
+            cap: MAX_MEMBERS,
+        },
+        "the census stops AT the bound, its rejected members counted with the \
+         ones that decoded"
+    );
+}
+
+/// **A CENSUS FINDING KEEPS AT MOST [`MAX_FINDING_BYTES`] OF ITS REFUSAL.**
+/// D-0725.
+///
+/// A refusal that quotes a field quotes it whole, and a field is as long as
+/// its line. A finding kept the decoder's sentence whole, so its length was
+/// bounded only by the file. The one here quotes a date field of 1,000,000
+/// bytes and keeps its first [`MAX_FINDING_BYTES`] bytes and a note of how
+/// many it did not keep. A refusal that fits is kept whole, in the decoder's
+/// own words.
+#[test]
+fn a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal() {
+    let scratch = Scratch::new("FINDING");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    let field = "A".repeat(1_000_000);
+    fs::write(dir.join("WIDE.csv"), format!("{field},09:15:01,1,0,0\n")).expect("a member");
+    fs::write(dir.join("SHORT.csv"), "20221003,09:15:01,38445.65\n").expect("three fields");
+
+    let (members, rejected) =
+        archive::read_dir_reporting(&dir, Columns::TrueDataIndex).expect("the census walks");
+    assert!(members.is_empty(), "neither member decodes");
+    assert_eq!(rejected.len(), 2, "both are findings");
+
+    let wide = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("WIDE.csv"))
+        .expect("the wide member is a finding");
+    let whole = CsvError::DateMalformed {
+        line: 1,
+        got: field,
+        format: DateFormat::CompactYmd,
+    }
+    .to_string();
+    let expected = format!(
+        "{} [trimmed: {} of {} bytes not kept]",
+        &whole[..MAX_FINDING_BYTES],
+        whole.len() - MAX_FINDING_BYTES,
+        whole.len()
+    );
+    // Compared without printing either side: a failure here is a sentence a
+    // million bytes long.
+    assert!(
+        wide.why == expected,
+        "the first {MAX_FINDING_BYTES} bytes of the sentence and a note of the \
+         rest; got {} bytes, ending {:?}",
+        wide.why.len(),
+        wide.why.get(wide.why.len().saturating_sub(48)..)
+    );
+    assert!(
+        wide.why.capacity() < 2 * MAX_FINDING_BYTES,
+        "and it holds no more than it shows: capacity {}",
+        wide.why.capacity()
+    );
+
+    let short = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("SHORT.csv"))
+        .expect("the short member is a finding");
+    assert_eq!(
+        short.why,
+        CsvError::FieldCount {
+            line: 1,
+            got: 3,
+            want: 5,
+        }
+        .to_string(),
+        "a refusal under the cap is kept whole, in the decoder's own words"
+    );
+}
+
 // ===========================================================================
 // crate::csv — the refusals, and the arms the shipped layouts do not take
 // ===========================================================================
@@ -349,6 +488,10 @@ fn every_csv_refusal_prints_a_sentence_of_its_own() {
         CsvError::TooManyRows {
             rows: MAX_ROWS,
             cap: MAX_ROWS,
+        },
+        CsvError::HeaderMismatch {
+            got: "NOT A HEADER".to_owned(),
+            want: pull::csv::GDFL_HEADER,
         },
     ];
 
@@ -758,10 +901,12 @@ fn every_timestamp_encoding_lands_the_same_instant() {
     );
 }
 
-/// A timestamp this build cannot hold refuses the whole window and names the
-/// row it came from.
+/// A timestamp this build cannot hold refuses ITS ROW, names the row it came
+/// from, and the rest of the window lands (D-3351, WP-13c; DB-N23). It
+/// refused the whole window, and one bad row in a 60-day Zerodha answer then
+/// lost all sixty days.
 #[test]
-fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
+fn a_timestamp_that_names_no_instant_refuses_its_row_and_the_window_lands() {
     let bad = RawRow {
         timestamp: i64::MIN,
         open: 1,
@@ -775,7 +920,7 @@ fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
         timestamp: 1_664_768_760,
         ..bad
     };
-    let refused = fetch::land(
+    let landed = fetch::land(
         &RawWindow {
             rows: vec![good, bad],
         },
@@ -783,21 +928,24 @@ fn a_timestamp_that_names_no_instant_refuses_the_whole_window() {
         TimestampEncoding::EpochSecondsUtc,
         PriceScale::Paisa,
     )
-    .expect_err("the second row names no instant");
+    .expect("one bad row never refuses the window");
+    assert_eq!(landed.bars.len(), 1, "the good row lands");
+    assert_eq!(landed.bars[0].ts_micros, good.timestamp * 1_000_000);
+    assert_eq!(landed.refused.rows(), 1, "and the bad one is refused");
+    let group = &landed.refused.groups[0];
     assert_eq!(
-        discriminant(&refused),
-        discriminant(&FetchError::TimestampRefused {
-            row: 0,
-            raw: 0,
-            why: SessionError::TimestampOutOfRange { secs: 0 },
-        }),
+        group.cause,
+        RowCause::Timestamp,
         "a timestamp this build cannot read is the vendor being wrong, not a \
-         bar this engine declined — got {refused}"
+         bar this engine declined"
     );
+    assert_eq!((group.first_row, group.first_raw), (1, i64::MIN));
     assert!(
-        refused.to_string().contains("row 1"),
-        "and the refusal names WHICH row — {refused}"
+        group.why.contains("row 1") && group.why.contains("before the Unix epoch"),
+        "and the refusal names WHICH row, in its own words — {}",
+        group.why
     );
+    assert_eq!(group.day, None, "a stamp before the epoch names no day");
 }
 
 // ===========================================================================
@@ -965,10 +1113,7 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
     );
 
     let with_failure = Ingested {
-        failures: vec![Failure {
-            instrument: "NIFTY".to_owned(),
-            why: "REFUSED".to_owned(),
-        }],
+        failures: vec![Failure::new("NIFTY", "REFUSED")],
         ..balanced.clone()
     };
     assert!(
@@ -1038,10 +1183,11 @@ fn a_member_that_is_not_text_is_refused_as_a_ghost_the_filter_missed() {
     );
 }
 
-/// A price that leaves the paisa grid on conversion refuses the whole window,
-/// and each of the four fields refuses in its own name.
+/// A price that leaves the paisa grid on conversion refuses ITS ROW, and each of
+/// the four fields refuses in its own name; the rest of the window lands
+/// (D-3351, WP-13c; DB-N23).
 #[test]
-fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
+fn a_price_that_leaves_the_paisa_grid_refuses_its_row_and_names_its_field() {
     // Fits an i64, and does not fit one once multiplied by a hundred.
     let too_big = i64::MAX / 50;
     let base = RawRow {
@@ -1074,23 +1220,30 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
 
     let mut sentences = HashSet::with_capacity(rows.len());
     for row in rows {
-        let refused = fetch::land(
-            &RawWindow { rows: vec![row] },
+        // THE BAD ROW AND A GOOD ONE A MINUTE LATER: the good one lands.
+        let good = RawRow {
+            timestamp: base.timestamp + 60,
+            ..base
+        };
+        let landed = fetch::land(
+            &RawWindow {
+                rows: vec![row, good],
+            },
             &request(),
             TimestampEncoding::EpochSecondsUtc,
             PriceScale::Rupees,
         )
-        .expect_err("a rupee price this large has no paisa");
+        .expect("one bad price never refuses the window");
+        assert_eq!(landed.bars.len(), 1, "the good row lands");
+        assert_eq!(landed.bars[0].open, 100, "one rupee is a hundred paisa");
+        let group = &landed.refused.groups[0];
         assert_eq!(
-            discriminant(&refused),
-            discriminant(&FetchError::PriceRefused {
-                row: 0,
-                field: "",
-                raw: 0,
-            }),
-            "refused on the grid, not rounded onto it — got {refused}"
+            (group.cause, group.rows, group.first_row),
+            (RowCause::Price, 1, 0),
+            "refused on the grid, not rounded onto it — got {}",
+            group.why
         );
-        let text = refused.to_string();
+        let text = group.why.clone();
         assert!(
             sentences.insert(text.clone()),
             "each field must refuse in its OWN name, or an operator cannot see \
@@ -1111,6 +1264,63 @@ fn a_price_that_leaves_the_paisa_grid_refuses_the_window_and_names_its_field() {
     )
     .expect("a vendor already quoting paisa is taken as is");
     assert_eq!(landed.bars[0].open, too_big);
+}
+
+/// **BORROWED ROWS LAND EXACTLY AS A WINDOW DOES.** o1api-36, D-1203.
+///
+/// `ingest` used to clone every member's rows into a `RawWindow` to call
+/// `land_with_cash_schedule`; it now hands the rows to `fetch::land_rows`
+/// borrowed. The three entry points must agree byte for byte on every outcome
+/// — bars kept, rows dropped and why, and a refusal — or the copy that was
+/// removed was carrying a behaviour.
+#[test]
+fn borrowed_rows_land_exactly_as_a_window_does() {
+    let at = |timestamp: i64, open: i64| RawRow {
+        timestamp,
+        open,
+        high: open,
+        low: open,
+        close: open,
+        volume: 3,
+        open_interest: Some(7),
+    };
+    // 2022-10-03 09:16 IST, as the encoding test above derives it.
+    let first = 1_664_768_760_i64;
+    let cases: [(Vec<RawRow>, PriceScale); 6] = [
+        (Vec::new(), PriceScale::Paisa),
+        (vec![at(first, 1)], PriceScale::Paisa),
+        // Three kept, one the same minute again, one before the open.
+        (
+            vec![
+                at(first, 10),
+                at(first + 60, 11),
+                at(first + 120, 12),
+                at(first + 120, 13),
+                at(first - 6 * 3_600, 14),
+            ],
+            PriceScale::Paisa,
+        ),
+        // Off the paisa grid once scaled: a refusal, through every entry.
+        (vec![at(first, i64::MAX / 50)], PriceScale::Rupees),
+        (vec![at(first, i64::MAX)], PriceScale::Paisa),
+        (vec![at(i64::MIN, 1), at(i64::MAX, 1)], PriceScale::Paisa),
+    ];
+    let request = request();
+    for (rows, scale) in cases {
+        let encoding = TimestampEncoding::EpochSecondsUtc;
+        let window = RawWindow { rows: rows.clone() };
+        let owned = format!("{:?}", fetch::land(&window, &request, encoding, scale));
+        let scheduled = format!(
+            "{:?}",
+            fetch::land_with_cash_schedule(&window, &request, encoding, scale, None)
+        );
+        let borrowed = format!(
+            "{:?}",
+            fetch::land_rows(&rows, &request, encoding, scale, None)
+        );
+        assert_eq!(owned, scheduled, "{rows:?}");
+        assert_eq!(owned, borrowed, "{rows:?}");
+    }
 }
 
 // ===========================================================================
@@ -1227,6 +1437,77 @@ fn a_member_that_cannot_be_stored_is_named_and_the_run_carries_on() {
         !done.balances(),
         "a run with a failed member does not balance, whatever the arithmetic \
          says"
+    );
+}
+
+/// **A MEMBER THAT WILL NOT DECODE REFUSES THE FOLDER BEFORE ANY BAR IS
+/// WRITTEN, EVEN WHEN IT SORTS LAST.** D-0720.
+///
+/// `archive::read_dir` holds every decoded member until it returns, and
+/// `ingest::from_dir` writes nothing until then. That is why a folder walk's
+/// memory is every row of the folder rather than one file's, and this is the
+/// property the accumulation pays for: a complete member that sorts FIRST is
+/// not written ahead of a malformed one that sorts LAST.
+///
+/// The second run, over the same folder with the malformed member removed,
+/// is the control. It stores the complete member's 375 bars, so the empty
+/// store in the first run is the refusal's doing and not the fixture's.
+#[test]
+fn a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written() {
+    use std::fmt::Write as _;
+
+    let scratch = Scratch::new("SORTSLAST");
+    let mut complete = String::new();
+    for minute in 555..930 {
+        writeln!(
+            complete,
+            "20221003,{:02}:{:02}:00,38445.65,0,0",
+            minute / 60,
+            minute % 60
+        )
+        .expect("fixture string");
+    }
+    let dir = folder_of(
+        &scratch,
+        &[
+            ("AAAA", &complete),
+            ("ZZZZ", "20221003,09:15:01,38445.65\n"),
+        ],
+    );
+    let store = store_of(&scratch);
+    let request = request();
+
+    let refused =
+        pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+            .expect_err("three fields is not five");
+    assert!(
+        matches!(refused, ArchiveError::MemberMalformed { ref path, .. }
+            if path.ends_with("ZZZZ.csv")),
+        "the refusal names the member that sorts last: {refused}"
+    );
+    let written: Vec<PathBuf> = fs::read_dir(&store)
+        .expect("the store root lists")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert!(
+        written.is_empty(),
+        "nothing reached the store, not even the member that sorts first: \
+         {written:?}"
+    );
+
+    fs::remove_file(dir.join("ZZZZ.csv")).expect("remove the malformed member");
+    let done = pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+        .expect("the complete member alone ingests");
+    assert_eq!(
+        done.bars_stored, 375,
+        "the control stores the complete member"
+    );
+    assert!(
+        fs::read_dir(&store)
+            .expect("the store root lists")
+            .next()
+            .is_some(),
+        "and the control writes into the store"
     );
 }
 

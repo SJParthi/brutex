@@ -93,8 +93,12 @@ const MASTERS: &str = "masters.js";
 const SOURCES: &str = "src";
 
 /// The front-end directory: [`WEB_ENV`], or `web/` beside this workspace.
-#[must_use]
-pub fn web_dir() -> PathBuf {
+///
+/// # Errors
+///
+/// [`WEB_ENV`] is set but empty, which would serve `./build` of the working
+/// directory as the front end (CE-37, D-1769).
+pub fn web_dir() -> Result<PathBuf, String> {
     web_dir_from(std::env::var_os(WEB_ENV))
 }
 
@@ -105,9 +109,8 @@ pub fn web_dir() -> PathBuf {
 /// cannot set an environment variable — `set_var` is `unsafe` under edition
 /// 2024, this crate forbids `unsafe`, and mutating process-wide state would
 /// race every other test in the binary.
-#[must_use]
-fn web_dir_from(value: Option<std::ffi::OsString>) -> PathBuf {
-    value.map_or_else(default_web_dir, PathBuf::from)
+fn web_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    Ok(brutex_core::knob::folder(WEB_ENV, value)?.unwrap_or_else(default_web_dir))
 }
 
 /// `web/` beside the workspace this binary was built from.
@@ -272,6 +275,22 @@ fn segments(raw: &str) -> Result<Vec<String>, Refusal> {
 fn looks_like_asset(segments: &[String]) -> bool {
     segments.first().is_some_and(|s| s == IMMUTABLE_DIR)
         || segments.last().is_some_and(|s| s.contains('.'))
+}
+
+/// How long a browser may keep a content-addressed bundle file.
+///
+/// audit-20261003 webcontract-5, D-1591. Nothing was cacheable, so every
+/// navigation re-downloaded every chunk (the backtest node alone is 716 KB)
+/// with a whole-file read on the server. A file under `_app/immutable/` carries
+/// a hash of its own content in its name — a changed file is a new URL — so it
+/// can be kept for a year with no revalidation. Everything else (the shell,
+/// `version.json`, the hand-written scripts) keeps no cache header and is
+/// fetched afresh, so a rebuild is seen on the next navigation.
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// Whether `segments` name a content-hashed bundle file.
+fn content_addressed(segments: &[String]) -> bool {
+    matches!(segments, [app, immutable, _, ..] if app == IMMUTABLE_DIR && immutable == "immutable")
 }
 
 /// The `Content-Type` for a file, decided by its extension and nothing else.
@@ -816,7 +835,14 @@ impl Assets {
         if let Some(real) = target
             && let Ok(bytes) = std::fs::read(&real)
         {
-            return answer(StatusCode::OK, content_type(&real), bytes);
+            let mut served = answer(StatusCode::OK, content_type(&real), bytes);
+            if content_addressed(&segments) {
+                served.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static(IMMUTABLE_CACHE),
+                );
+            }
+            return served;
         }
         if looks_like_asset(&segments) {
             return self.not_found(raw_path);
@@ -903,7 +929,7 @@ impl Assets {
                      <a href=\"/instruments\">/instruments</a>, \
                      <a href=\"/pull\">/pull</a>, \
                      <a href=\"/store\">/store</a>, \
-                     <a href=\"/audit\">/audit</a>.</p>",
+                     <a href=\"/audit/page\">/audit/page</a>.</p>",
                     crate::render::escape(INDEX),
                     crate::render::escape(&index.display().to_string()),
                     crate::render::escape(&e.to_string()),
@@ -1003,7 +1029,7 @@ impl Assets {
                  <a href=\"/instruments\">/instruments</a>, \
                  <a href=\"/pull\">/pull</a>, \
                  <a href=\"/store\">/store</a>, \
-                 <a href=\"/audit\">/audit</a>, \
+                 <a href=\"/audit/page\">/audit/page</a>, \
                  <a href=\"/autopilot.json\">/autopilot.json</a>.</p>",
                 crate::render::escape(&self.named.display().to_string()),
                 crate::render::escape(WEB_ENV),
@@ -1093,13 +1119,18 @@ mod tests {
     fn the_directory_is_the_environment_or_web_beside_the_workspace() {
         assert_eq!(
             web_dir_from(Some("/somewhere/else".into())),
-            PathBuf::from("/somewhere/else"),
+            Ok(PathBuf::from("/somewhere/else")),
             "the environment wins when it is set"
+        );
+        // CE-37, D-1769: set but empty is refused by name, never `./build`.
+        assert!(
+            web_dir_from(Some("".into()))
+                .is_err_and(|why| why.starts_with("BRUTEX_WEB is set but empty")),
         );
         // Compared against `default_web_dir` rather than only against
         // `web_dir_from(None)`, which calls it: a function compared only
         // against itself cannot be falsified.
-        assert_eq!(web_dir_from(None), default_web_dir());
+        assert_eq!(web_dir_from(None), Ok(default_web_dir()));
         assert!(
             default_web_dir().ends_with("web"),
             "the default names the front-end directory: {}",
@@ -1287,6 +1318,30 @@ mod tests {
     // 2. ROUTING ORDER, the half this module owns: a real asset, then the
     //    shell, then an honest 404.
     // ---------------------------------------------------------------------
+
+    /// audit-20261003 webcontract-5, D-1591: a content-hashed bundle file is
+    /// served cacheable as immutable; the shell and any other file are not.
+    #[tokio::test]
+    async fn only_content_hashed_files_are_served_immutable() {
+        let dir = furnished("cache");
+        put(&dir, "_app/version.json", "{}");
+        let assets = Assets::new(&dir);
+        let cache = |path: &str| {
+            assets
+                .respond(&axum::http::Method::GET, path)
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        assert_eq!(
+            cache("/_app/immutable/entry/app.js").as_deref(),
+            Some(IMMUTABLE_CACHE)
+        );
+        assert_eq!(cache("/"), None, "the shell must see a rebuild");
+        assert_eq!(cache("/backtest"), None);
+        assert_eq!(cache("/_app/version.json"), None);
+        assert_eq!(cache("/_app/immutable/nope"), None, "a 404 is not cached");
+    }
 
     #[tokio::test]
     async fn a_real_asset_is_served_and_a_missing_one_is_a_404_not_the_shell() {

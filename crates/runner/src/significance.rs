@@ -91,9 +91,9 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// It is **not** the whole search for anything chosen through
 /// [`crate::grid`]. There, each surviving combination is evaluated at up to
 /// [`crate::grid::variants`] stop/target/trail/arm settings and the best of them
-/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 325
-/// cells at the shipped four rungs. Selecting a maximum over 325 variants is 325
-/// more chances to look good by luck, per combination, and none of it entered
+/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 625
+/// cells at the shipped four rungs (`grid::variants(4, 4, 4)`, pinned below).
+/// Selecting a maximum over 625 variants is 625 more chances to look good by luck, per combination, and none of it entered
 /// the bar. An audit
 /// measured the omission and named the consequence exactly: the reported
 /// Bonferroni and Bailey figures understate the true search size by roughly the
@@ -306,6 +306,200 @@ pub fn bonferroni_t(n: u64) -> f64 {
     upper_tail_quantile(FWER / (2.0 * n_f))
 }
 
+/// Whether `t`, a Student-t statistic from `observations` observations, clears
+/// the two-sided Bonferroni bar for `trials` tests at [`FWER`].
+///
+/// # Why the reference distribution is Student-t and not the normal
+///
+/// [`bonferroni_t`] is a NORMAL quantile, and `Edge::t` is Student-t with
+/// `observations - 1` degrees of freedom. "The two converge by about thirty"
+/// holds at a 5% tail, not at a Bonferroni tail of `0.05 / (2N)`. At 29 degrees
+/// of freedom the normal bar is 4.351 for N = 3,689 and the Student-t bar is
+/// 5.225, so a row at the normal bar spent about eleven times its share of the
+/// family-wise budget; at N = 61,125,295 the two are 6.141 and 8.924
+/// (p8num-1, D-2725). So the verdict is taken against the row's OWN
+/// distribution: `t` clears when its two-sided Student-t tail probability is
+/// at most `FWER / trials`, which is the Bonferroni rule itself.
+///
+/// The Student-t tail is always heavier than the normal one, so this never
+/// admits a row [`bonferroni_t`] would refuse; it only refuses rows the normal
+/// bar admitted across two distributions.
+///
+/// Fewer than two observations have no degrees of freedom and never clear. A
+/// non-finite `t` other than an infinity never clears. No trials at all is the
+/// zero bar [`bonferroni_t`] already returns for that case.
+#[must_use]
+pub fn clears_bonferroni(t: f64, observations: u64, trials: u64) -> bool {
+    let Some(df) = observations.checked_sub(1).filter(|df| *df >= 1) else {
+        return false;
+    };
+    let tail = student_t_two_sided_tail(t, df);
+    if trials == 0 {
+        return !tail.is_nan();
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
+    )]
+    let budget = FWER / trials as f64;
+    tail <= budget
+}
+
+/// [`clears_bonferroni`] for a statistic carried in rounded thousandths, as
+/// `Edge::t_milli` and the live frontier rows carry it.
+///
+/// Judged at the SMALLEST `|t|` the rounded figure can stand for,
+/// `(|t_milli| - 0.5) / 1000`, so a rounded figure can never clear a bar the
+/// true statistic does not -- the same direction CE-7 (D-1769) took for the
+/// normal comparison.
+#[must_use]
+pub fn clears_bonferroni_milli(t_milli: i64, observations: u64, trials: u64) -> bool {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a t in thousandths is far below 2^53 for any statistic a run \
+                  produces; a saturated figure only grows the lower bound."
+    )]
+    let at_least = (t_milli.unsigned_abs() as f64 - 0.5).max(0.0) / 1_000.0;
+    clears_bonferroni(at_least, observations, trials)
+}
+
+/// The two-sided Bonferroni bar for `trials` tests on a Student-t statistic
+/// with `df` degrees of freedom: the `|t|` at which [`clears_bonferroni`] turns.
+///
+/// Found by bisection on [`student_t_two_sided_tail`], which is monotone in
+/// `|t|`, to well inside the two decimals a report prints. Returns 0 for no
+/// trials, as [`bonferroni_t`] does, and NaN for `df == 0`, where the
+/// distribution does not exist.
+#[must_use]
+pub fn bonferroni_t_student(trials: u64, df: u64) -> f64 {
+    if df == 0 {
+        return f64::NAN;
+    }
+    if trials == 0 {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
+    )]
+    let budget = FWER / trials as f64;
+    let mut high = bonferroni_t(trials).max(1.0);
+    while student_t_two_sided_tail(high, df) > budget {
+        high *= 2.0;
+    }
+    let mut low = 0.0;
+    for _ in 0..200 {
+        let mid = 0.5 * (low + high);
+        if student_t_two_sided_tail(mid, df) > budget {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    high
+}
+
+/// `P(|T| >= |t|)` for Student's t with `df` degrees of freedom.
+///
+/// Abramowitz & Stegun 26.7.1 gives the distribution as an incomplete beta
+/// function, so the two-sided tail is `I_x(df/2, 1/2)` with
+/// `x = df / (df + t^2)`. Computed in the tail itself rather than as one minus
+/// a CDF, so a tail of `1e-10` keeps its digits. NaN in, NaN out.
+#[must_use]
+pub fn student_t_two_sided_tail(t: f64, df: u64) -> f64 {
+    if t.is_nan() || df == 0 {
+        return f64::NAN;
+    }
+    if t.is_infinite() {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a degrees-of-freedom count is an observation count; 2^53 is \
+                  beyond any series this engine stores."
+    )]
+    let nu = df as f64;
+    let x = nu / (nu + t * t);
+    regularized_incomplete_beta(0.5 * nu, 0.5, x)
+}
+
+/// The regularized incomplete beta function `I_x(a, b)`, for `a, b > 0`.
+///
+/// The continued fraction of Abramowitz & Stegun 26.5.8, evaluated by the
+/// modified Lentz method, on the side of the symmetry
+/// `I_x(a, b) = 1 - I_{1-x}(b, a)` where it converges quickly. Returns NaN
+/// when the fraction has not converged, which every caller reads as "does not
+/// clear" rather than as a probability.
+fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let ln_front = a * x.ln() + b * (-x).ln_1p() - ln_beta(a, b);
+    if x < (a + 1.0) / (a + b + 2.0) {
+        ln_front.exp() * beta_continued_fraction(a, b, x) / a
+    } else {
+        1.0 - ln_front.exp() * beta_continued_fraction(b, a, 1.0 - x) / b
+    }
+}
+
+/// The continued fraction of A&S 26.5.8 by the modified Lentz method.
+fn beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
+    /// Below this a Lentz denominator is replaced, so a zero cannot divide.
+    const TINY: f64 = 1e-300;
+    /// Convergence: the last factor is within this of one.
+    const EPSILON: f64 = 1e-15;
+    /// Iterations before the fraction is declared not to converge. The tails
+    /// this crate asks for converge in tens of terms at any degrees of freedom.
+    const MAX_TERMS: u32 = 100_000;
+    let guard = |value: f64| if value.abs() < TINY { TINY } else { value };
+    let mut upper = 1.0;
+    let mut lower = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
+    let mut fraction = lower;
+    for term in 1..=MAX_TERMS {
+        let term = f64::from(term);
+        let even = term * (b - term) * x / ((a - 1.0 + 2.0 * term) * (a + 2.0 * term));
+        lower = 1.0 / guard(1.0 + even * lower);
+        upper = guard(1.0 + even / upper);
+        fraction *= lower * upper;
+        let odd = -(a + term) * (a + b + term) * x / ((a + 2.0 * term) * (a + 1.0 + 2.0 * term));
+        lower = 1.0 / guard(1.0 + odd * lower);
+        upper = guard(1.0 + odd / upper);
+        let step = lower * upper;
+        fraction *= step;
+        if (step - 1.0).abs() < EPSILON {
+            return fraction;
+        }
+    }
+    f64::NAN
+}
+
+/// `ln B(a, b) = ln Γ(a) + ln Γ(b) - ln Γ(a + b)`.
+fn ln_beta(a: f64, b: f64) -> f64 {
+    ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)
+}
+
+/// `ln Γ(x)` for `x > 0`: Stirling's series, Abramowitz & Stegun 6.1.41,
+/// after shifting `x` to at least 10 with `ln Γ(x) = ln Γ(x + 1) - ln x`. The
+/// first omitted term is below `1e-12` there.
+fn ln_gamma(x: f64) -> f64 {
+    let mut z = x;
+    let mut shift = 0.0;
+    while z < 10.0 {
+        shift += z.ln();
+        z += 1.0;
+    }
+    let inv = 1.0 / z;
+    let inv2 = inv * inv;
+    let series = inv * (1.0 / 12.0 - inv2 * (1.0 / 360.0 - inv2 * (1.0 / 1260.0 - inv2 / 1680.0)));
+    (z - 0.5) * z.ln() - z + 0.5 * core::f64::consts::TAU.ln() + series - shift
+}
+
 /// Two-sided p-value for a t-statistic, under the normal approximation.
 ///
 /// `2·(1 − Φ(|t|))`. The normal rather than Student's t because the samples
@@ -346,10 +540,27 @@ pub fn p_value(t: f64) -> f64 {
 ///
 /// Returns how many are rejected; the caller holds the ordering and can take
 /// that many from the front of its own sorted list.
+///
+/// # Refuses a value that is not a probability
+///
+/// Answers `None`, and leaves the slice unsorted, when any value is NaN of
+/// either sign, infinite, below zero or above one. Counting such a value
+/// broke the answer two ways (GAP5-53, D-0977): `f64::total_cmp` sorts `-NaN`
+/// first and `+NaN` last, so `[-NaN, 0.04]` rejected two while `[NaN, 0.04]`
+/// rejected none; and `-1` cleared every threshold, so `[-1, 0.9]` reported
+/// one finding. A p-value outside `[0, 1]` is a defect upstream, and a count
+/// that included it would be a fallback hiding that failure.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it,
+/// and [`p_value`]'s tail is too coarse to feed it at a search's scale
+/// (hunt-runner-3), so FDR control is not available to any report today.
 #[must_use]
-pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
+pub fn benjamini_hochberg(p_values: &mut [f64]) -> Option<usize> {
+    if p_values.iter().any(|p| !(0.0..=1.0).contains(p)) {
+        return None;
+    }
     if p_values.is_empty() {
-        return 0;
+        return Some(0);
     }
     p_values.sort_unstable_by(f64::total_cmp);
     #[allow(
@@ -373,7 +584,7 @@ pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
             largest = rank;
         }
     }
-    largest
+    Some(largest)
 }
 
 /// Standard normal CDF, from the error function's rational approximation.
@@ -504,7 +715,7 @@ fn tail_rational(tail: f64) -> f64 {
 /// # Not reachable at shipped defaults, and that is not the reason to fix it
 ///
 /// `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, so `trials` is bounded near
-/// `1.72e10`; times the 325-cell grid that is `5.58e12`, about **80x below the
+/// `1.72e10`; times the 625-cell grid that is `1.07e13`, about **40x below the
 /// cliff**. But `Ladder::with_pair_budget` is `pub` and takes any `u64`, and
 /// [`trials_with_grid`] is `pub` and takes a caller-supplied `u64`. Both return
 /// a wrong answer in the dangerous direction for inputs inside their declared
@@ -548,8 +759,10 @@ fn upper_tail_quantile(alpha: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        benjamini_hochberg, bonferroni_t, effective_trials, expected_max_bailey, expected_max_t,
-        inverse_normal_cdf, normal_cdf, p_value, trials, trials_with_grid,
+        benjamini_hochberg, bonferroni_t, bonferroni_t_student, clears_bonferroni,
+        clears_bonferroni_milli, effective_trials, expected_max_bailey, expected_max_t,
+        inverse_normal_cdf, normal_cdf, p_value, student_t_two_sided_tail, trials,
+        trials_with_grid,
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
@@ -586,7 +799,7 @@ mod tests {
     /// # Why each assertion is here
     ///
     /// The first pins the MULTIPLICATION, which is the whole point: a report
-    /// that ran a 325-way grid over every surviving combination searched 325
+    /// that ran a 625-way grid over every surviving combination searched 625
     /// times as much as `trials` alone reports, and a bar computed from the
     /// smaller number admits noise while looking like a family-wise correction.
     ///
@@ -668,6 +881,93 @@ mod tests {
             (t - 3.78).abs() < 0.01,
             "expected the published 3.78 for 316 tests, computed {t}"
         );
+    }
+
+    /// THE STUDENT-T TAIL MATCHES ITS CLOSED FORMS. p8num-1, D-2725.
+    ///
+    /// One and two degrees of freedom have exact tails: the Cauchy
+    /// `1 - (2/pi) atan(t)` and `1 - t / sqrt(2 + t^2)`. Checked relative to the
+    /// tail itself, far out where a one-minus-CDF form would have no digits
+    /// left.
+    #[test]
+    fn the_student_t_tail_matches_its_closed_forms() {
+        for t in [0.0_f64, 0.5, 1.0, 1.7, 2.0, 4.0, 9.0, 100.0, 1.0e4] {
+            let cauchy = 2.0 / core::f64::consts::PI * (1.0 / t).atan();
+            let one = student_t_two_sided_tail(t, 1);
+            if t > 0.0 {
+                assert!(
+                    ((one - cauchy) / cauchy).abs() < 1e-9,
+                    "df 1, t {t}: {one} vs {cauchy}"
+                );
+            }
+            let exact = 1.0 - t / (2.0 + t * t).sqrt();
+            let two = student_t_two_sided_tail(t, 2);
+            assert!(
+                ((two - exact) / exact).abs() < 1e-6,
+                "df 2, t {t}: {two} vs {exact}"
+            );
+            assert!(
+                (student_t_two_sided_tail(-t, 7) - student_t_two_sided_tail(t, 7)).abs() < 1e-15
+            );
+        }
+        assert!((student_t_two_sided_tail(0.0, 1) - 1.0).abs() < 1e-12);
+        assert!(student_t_two_sided_tail(f64::NAN, 29).is_nan());
+        assert!(student_t_two_sided_tail(1.0, 0).is_nan());
+        assert!(student_t_two_sided_tail(f64::INFINITY, 29).abs() < f64::MIN_POSITIVE);
+    }
+
+    /// THE NORMAL BAR IS NOT THE STUDENT-T BAR AT THIRTY OBSERVATIONS. p8num-1, D-2725.
+    ///
+    /// The audit's table at 29 degrees of freedom, reproduced: the normal
+    /// Bonferroni bar understates the Student-t one by 0.56 at 316 trials and
+    /// by 2.78 at 61,125,295. A row at t = 5.00 with thirty observations
+    /// cleared the normal bar of 3,689 trials (4.351) and must not clear the
+    /// Student-t one (5.225). With enough degrees of freedom the two meet.
+    #[test]
+    fn a_thirty_observation_row_is_held_to_the_student_t_bonferroni_bar() {
+        for (trials, normal, student) in [
+            (316, 3.778, 4.339),
+            (3_689, 4.351, 5.225),
+            (1_000_000, 5.451, 7.289),
+            (61_125_295, 6.141, 8.924),
+        ] {
+            let at_29 = bonferroni_t_student(trials, 29);
+            assert!(
+                (at_29 - student).abs() < 2e-3,
+                "{trials}: Student-t bar {at_29}, audit {student}"
+            );
+            assert!((bonferroni_t(trials) - normal).abs() < 2e-3, "{trials}");
+            assert!(at_29 > bonferroni_t(trials) + 0.5, "{trials}");
+            let wide = bonferroni_t_student(trials, 100_000_000);
+            assert!(
+                (wide - bonferroni_t(trials)).abs() < 1e-3,
+                "{trials}: {wide} at large df vs normal {}",
+                bonferroni_t(trials)
+            );
+        }
+        assert!(5.0 > bonferroni_t(3_689), "the normal bar admitted it");
+        assert!(!clears_bonferroni(5.0, 30, 3_689));
+        assert!(!clears_bonferroni(-5.0, 30, 3_689));
+        assert!(clears_bonferroni(5.3, 30, 3_689));
+        assert!(clears_bonferroni(5.0, 1_000, 3_689));
+        assert!(!clears_bonferroni_milli(5_000, 30, 3_689));
+        assert!(clears_bonferroni_milli(5_300, 30, 3_689));
+        // Rounded thousandths are judged at the smallest |t| they stand for.
+        let edge = bonferroni_t_student(3_689, 29);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a bar near five, in thousandths"
+        )]
+        let ceiling = (edge * 1_000.0).ceil() as i64;
+        assert!(!clears_bonferroni_milli(ceiling - 1, 30, 3_689));
+        assert!(clears_bonferroni_milli(ceiling + 1, 30, 3_689));
+        assert!(!clears_bonferroni(9.0, 1, 3_689), "no degrees of freedom");
+        assert!(!clears_bonferroni(9.0, 0, 3_689));
+        assert!(!clears_bonferroni(f64::NAN, 30, 3_689));
+        assert!(clears_bonferroni(f64::INFINITY, 30, 3_689));
+        assert!(clears_bonferroni(0.0, 30, 0), "no trials is the zero bar");
+        assert!(bonferroni_t_student(0, 29).abs() < f64::MIN_POSITIVE);
+        assert!(bonferroni_t_student(3_689, 0).is_nan());
     }
 
     #[test]
@@ -836,7 +1136,7 @@ mod tests {
         let mut p = [0.001, 0.015, 0.035, 0.039, 0.9];
         assert_eq!(
             benjamini_hochberg(&mut p),
-            4,
+            Some(4),
             "0.035 exceeds its own threshold of 0.03, but 0.039 clears 0.04 -- \
              so everything up to rank four is rejected"
         );
@@ -847,7 +1147,7 @@ mod tests {
         // The same p-values under both. BH must reject at least as many, or it
         // is not doing the job it exists for.
         let mut p: Vec<f64> = (1..=100).map(|i| f64::from(i) * 0.0004).collect();
-        let bh = benjamini_hochberg(&mut p);
+        let bh = benjamini_hochberg(&mut p).expect("every p is in [0, 1]");
         let bonferroni = p.iter().filter(|x| **x <= 0.05 / 100.0).count();
         assert!(
             bh > bonferroni,
@@ -859,12 +1159,50 @@ mod tests {
 
     #[test]
     fn benjamini_hochberg_rejects_nothing_when_nothing_deserves_it() {
-        assert_eq!(benjamini_hochberg(&mut []), 0, "no hypotheses, no findings");
+        assert_eq!(
+            benjamini_hochberg(&mut []),
+            Some(0),
+            "no hypotheses, no findings"
+        );
         let mut noise = [0.6_f64, 0.7, 0.8, 0.99];
-        assert_eq!(benjamini_hochberg(&mut noise), 0, "pure noise yields none");
+        assert_eq!(
+            benjamini_hochberg(&mut noise),
+            Some(0),
+            "pure noise yields none"
+        );
         // And everything, when everything deserves it.
         let mut strong = [1e-12_f64; 20];
-        assert_eq!(benjamini_hochberg(&mut strong), 20);
+        assert_eq!(benjamini_hochberg(&mut strong), Some(20));
+    }
+
+    /// GAP5-53: a value that is not a probability is refused, whatever its
+    /// sign, rather than counted or silently dropped (D-0977).
+    #[test]
+    fn benjamini_hochberg_refuses_a_value_that_is_not_a_probability() {
+        // Before the fix these answered 2, 0 and 1: the sign of a NaN decided
+        // whether it was counted, and a negative p cleared every threshold.
+        for bad in [
+            -f64::NAN,
+            f64::NAN,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            1.000_000_1,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let mut p = [0.9, bad, 0.04];
+            assert_eq!(
+                benjamini_hochberg(&mut p),
+                None,
+                "{bad} is not a probability and must be refused"
+            );
+            assert_eq!(p[0].to_bits(), 0.9_f64.to_bits(), "a refusal sorts nothing");
+            assert_eq!(p[1].to_bits(), bad.to_bits(), "a refusal sorts nothing");
+        }
+        // Both ends of [0, 1] are probabilities, and are answered.
+        assert_eq!(benjamini_hochberg(&mut [0.0, 0.04]), Some(2));
+        assert_eq!(benjamini_hochberg(&mut [1.0]), Some(0));
+        assert_eq!(benjamini_hochberg(&mut [0.05]), Some(1));
     }
 
     #[test]
@@ -1036,12 +1374,12 @@ mod tail_tests {
         }
 
         // THE SHIPPED CEILING, WHICH IS WHERE THIS ACTUALLY RUNS.
-        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 325
+        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 625
         // cells, so the largest family a default run can present is about
-        // 5.6e12 -- roughly 80x below where the old cliff sat. The fix is not
+        // 1.1e13 -- roughly 40x below where the old cliff sat. The fix is not
         // needed for the default path and is needed because both entry points
         // are `pub` and take any `u64`.
-        let shipped = (1_u64 << 34).saturating_mul(325);
+        let shipped = (1_u64 << 34).saturating_mul(625);
         let bar = bonferroni_t(shipped);
         assert!(
             bar > 7.0 && bar < 9.0,

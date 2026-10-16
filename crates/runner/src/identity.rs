@@ -29,10 +29,22 @@
 //! identity "names the exact column they came from". A term that is only
 //! incidentally distinguishing is not an identity term.
 //!
-//! Adding it re-keys every run that can be computed. That is affordable exactly
-//! now and will not stay affordable: **nothing persists a `RunId` yet** — it is
-//! formatted into a report string and never written to the store — so there is
-//! no recorded corpus to migrate. Invariant X-14.
+//! Adding it re-keyed every run that could be computed. When D-0225 made that
+//! change no run identity had been recorded yet, so there was no corpus to
+//! migrate. Invariant X-14.
+//!
+//! # A `RunId` is persisted now, so a new term is a migration (D-1142)
+//!
+//! **That is no longer true, and the sentence that said so was the one a
+//! maintainer reads before adding a term.** `cli::results::Record::identity`
+//! writes the `RunId` into the append-only results ledger and deduplicates
+//! reruns on it; sweep evidence attempts and the AND-checkpoint journal are
+//! keyed by it; frontier and trade rows carry it. Changing what [`run_id`]
+//! hashes therefore splits every recorded run from its own rerun, and the
+//! ledger files one computation twice under two identities. A new term must
+//! arrive as a new, versioned identity domain with its own decision entry --
+//! the way [`data_digest_with_execution`] re-keys only the runs whose answer
+//! acquired a second series -- never as an edit to the existing encoding.
 //!
 //! # Why every field is length-prefixed
 //!
@@ -315,13 +327,12 @@ pub struct Run<'a> {
     /// carries `vendor`, documented as "the first path segment, never inferred",
     /// and no production path read it.
     ///
-    /// # Adding a term re-keys every run, and that is affordable exactly now
+    /// # Adding a term re-keys every run, and that is now a migration
     ///
-    /// Any new term changes every `RunId` this workspace can compute. That is
-    /// normally expensive; here it costs nothing, because **nothing persists a
-    /// `RunId`**. It is formatted into a report string and never written to the
-    /// store, so there is no recorded corpus to invalidate. The same change made
-    /// after run results are stored would be a migration.
+    /// Any new term changes every `RunId` this workspace can compute. When this
+    /// term was added (D-0225) no `RunId` had been recorded, so it cost
+    /// nothing. Results now persist the `RunId` (`cli::results::Record`), so
+    /// the same change today is a migration; see the module doc and D-1142.
     pub feed: &'a str,
 }
 
@@ -332,6 +343,8 @@ pub struct Run<'a> {
 /// name, because either would let two different columns share an identity.
 #[must_use]
 pub fn data_digest(bars: &[Candle]) -> [u8; OUT_LEN] {
+    #[cfg(test)]
+    DATA_DIGESTS.with(|count| count.set(count.get().saturating_add(1)));
     let mut hasher = Hasher::new();
     // The bar COUNT first, so a column cannot be confused with a longer one that
     // happens to start with it. Framing, for the same reason every term below is
@@ -511,6 +524,18 @@ pub enum DailyBindingRefusal {
     },
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`data_digest_with_daily_reference`] calls on this
+    /// thread, so a test can prove a sealed
+    /// [`crate::exit_grid_policy::DailyReferenceRunSourceV1`] is minted once and
+    /// reused rather than re-hashing every stream per run. D-0990.
+    pub(crate) static DAILY_REFERENCE_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`data_digest`] passes taken on this thread, so a test can prove a
+    /// replay hashes its bars once (c4a-5, D-1495).
+    pub(crate) static DATA_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Bind the signal rung, exact one-minute path, stored one-day references,
 /// calendar/eligibility policy, and integrity evidence into one data term.
 ///
@@ -544,6 +569,8 @@ pub fn data_digest_with_daily_reference(
     const SWEPT_SERIES_CALENDAR_POLICY: u8 = 11;
     const DAILY_CHECKSUM_RECEIPT_V1: u8 = 12;
     const MINUTE_CHECKSUM_RECEIPT_V1: u8 = 13;
+    #[cfg(test)]
+    DAILY_REFERENCE_DIGESTS.with(|count| count.set(count.get().saturating_add(1)));
 
     if reference.daily_bars.len() != reference.eligibility.len() {
         return Err(DailyBindingRefusal::EligibilityLengthMismatch {
@@ -985,8 +1012,8 @@ mod tests {
             })
             .collect();
         let period = crate::resample::Period::minutes(15).expect("a coarse period");
-        let coarse_a = crate::resample::resample(&path_a, period);
-        let coarse_b = crate::resample::resample(&path_b, period);
+        let coarse_a = crate::resample::resample(&path_a, period).expect("market values resample");
+        let coarse_b = crate::resample::resample(&path_b, period).expect("market values resample");
         assert_eq!(
             coarse_a, coarse_b,
             "the signal bars must be byte-identical or this test does not isolate the hidden one-minute path"
@@ -1435,6 +1462,34 @@ mod tests {
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
         );
         assert_eq!(id.bytes().len(), 32);
+    }
+
+    /// D-1142. A `RunId` is persisted (`cli::results::Record::identity`), so
+    /// the encoding is a stored format: this pins one identity byte for byte.
+    /// If a change makes it fail, every recorded run just split from its rerun.
+    /// The answer is a new versioned identity domain with its own decision, not
+    /// re-taking this constant. A `vocab::VOCAB_VERSION` bump re-keys on
+    /// purpose and is the one change that legitimately re-takes it.
+    #[test]
+    fn a_persisted_run_identity_does_not_drift() {
+        let k = key();
+        let id = identity(&run_over(
+            &k,
+            [7_u8; 32],
+            ConditionMask::default().with_bit(3),
+        ));
+        assert_eq!(
+            id.hex(),
+            "d33cd3169acbb4104fbed7e3b3568824303b32d91f6a2386e7e66bfe6a420b28"
+        );
+        // And the module no longer tells a maintainer that adding a term is
+        // free. Split so this test does not match itself.
+        let source = include_str!("identity.rs");
+        let claim = concat!("nothing persists a", " `RunId`");
+        assert!(
+            !source.contains(claim),
+            "the doc must not claim RunIds are unpersisted: cli::results records them"
+        );
     }
 
     #[test]

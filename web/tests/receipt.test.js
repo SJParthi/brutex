@@ -112,3 +112,28 @@ test("the server's own receipt passes both tests untouched", () => {
     null
   );
 });
+
+// P17-01: THE PAGE COUNTED FAILURES UNDER A KEY THE SERVER NO LONGER EMITS.
+// `landed_answer` writes `Failure diagnostics` and at most five `Failed` rows;
+// the page read `Members failed`, so the count was always 0 and a run with six
+// failures said "no failure" for every instrument whose reason was truncated.
+test('the failure count is read from the key landed_answer actually writes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { FAILURE_COUNT_FACT, failureCount } = await import('../src/lib/receipt.js');
+  const server = readFileSync(new URL('../../crates/api/src/server.rs', import.meta.url), 'utf8');
+  assert.ok(
+    server.includes(`facts.push(("${FAILURE_COUNT_FACT}", done.failures.len().to_string()));`),
+    `server.rs must emit the ${FAILURE_COUNT_FACT} fact this page reads`
+  );
+  const facts = [
+    { k: 'Members read', v: '9' },
+    { k: FAILURE_COUNT_FACT, v: '7' },
+    ...Array.from({ length: 5 }, (_, i) => ({ k: 'Failed', v: `SYM${i} — refused` }))
+  ];
+  assert.equal(failureCount(facts), 7);
+  assert.equal(failureCount([{ k: 'Members failed', v: '7' }]), 0, 'the retired key is not a count');
+  assert.equal(failureCount([]), 0);
+  const page = readFileSync(new URL('../src/routes/ingest/+page.svelte', import.meta.url), 'utf8');
+  assert.match(page, /const failedCount = \$derived\(failureCount\(receipt\?\.facts \?\? \[\]\)\);/);
+  assert.doesNotMatch(page, /'Members failed'/);
+});

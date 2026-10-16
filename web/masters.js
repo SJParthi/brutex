@@ -1,4 +1,12 @@
 const say = (t) => { document.getElementById('say').textContent = t; };
+// EVERY STRING THAT REACHES innerHTML GOES THROUGH THIS. `detail` can carry up
+// to 500 characters of a vendor's own response body, `refusal` and `error` are
+// server sentences that quote vendor text, and `symbol` comes from vendor
+// instrument masters. Markup in any of them would run on this origin
+// (audit-20261003 webcontract-2, D-1585).
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
 const cell = (file, klass) => document.querySelector(`tr[data-file="${file}"] .${klass}`);
 
 const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
@@ -14,8 +22,8 @@ async function status() {
       const stale = m.newer_than_parse
         ? '<div class="sub bad">newer than this server’s parse — restart required</div>'
         : '';
-      c.innerHTML = `<span class="ok">present</span><div class="sub">${m.bytes} bytes</div>`
-        + `<div class="sub">${when(m.modified_unix_millis)}</div>${stale}`;
+      c.innerHTML = `<span class="ok">present</span><div class="sub">${esc(m.bytes)} bytes</div>`
+        + `<div class="sub">${esc(when(m.modified_unix_millis))}</div>${stale}`;
     }
   } catch (e) { say('Could not read what is on disk: ' + e); }
 }
@@ -29,14 +37,36 @@ function ledger(rows) {
     el.className = 'att';
     const steps = m.attempts.map(a => {
       const status = a.status === null ? 'no answer' : a.status;
-      const waited = a.waited_ms ? ` after waiting ${a.waited_ms} ms` : '';
-      const why = a.detail ? ` — ${a.detail}` : '';
-      return `<li>#${a.number} ${a.got} (${status})${waited}${why}</li>`;
+      const waited = a.waited_ms ? ` after waiting ${esc(a.waited_ms)} ms` : '';
+      const why = a.detail ? ` — ${esc(a.detail)}` : '';
+      return `<li>#${esc(a.number)} ${esc(a.got)} (${esc(status)})${waited}${why}</li>`;
     }).join('');
-    el.innerHTML = `<h3>${m.file} — ${m.attempts.length} step(s), `
-      + `${m.waited_ms} ms waited</h3><ol>${steps}</ol>`;
+    el.innerHTML = `<h3>${esc(m.file)} — ${m.attempts.length} step(s), `
+      + `${esc(m.waited_ms)} ms waited</h3><ol>${steps}</ol>`;
     box.appendChild(el);
   }
+}
+
+// WHAT THE REFRESH ACTUALLY DID, from the fields the route sends. The route
+// re-parses the masters into the running server (`reload`) and answers 502 with
+// `reloaded:false` and the refusal in `universe` when that re-parse fails; the
+// page used to read none of that and print "All four are on disk." over a
+// universe that was NOT replaced (audit-20261003 webcontract-3, D-1585).
+function outcome(r, d) {
+  const missing = d.missing || [];
+  const parts = [];
+  if (missing.length) parts.push(`${missing.length} master(s) still missing: ${missing.join(', ')}.`);
+  else parts.push('All four are on disk.');
+  if (d.reloaded === true) {
+    parts.push('The running server re-parsed them; every page now answers from the new masters.');
+  } else {
+    const why = typeof d.universe === 'string' && d.universe ? ` ${d.universe}` : '';
+    parts.push(`The running server did NOT re-parse them, so every page still answers from the previous parse.${why} Fix the cause and refresh again, or Restart the server once it is fixed.`);
+  }
+  if (!r.ok && d.reloaded === true && !missing.length) {
+    parts.push(`The refresh answered ${r.status}: at least one source was refused; see the rows above.`);
+  }
+  return parts.join(' ');
 }
 
 async function refresh() {
@@ -54,20 +84,15 @@ async function refresh() {
       if (!c) continue;
       if (m.written) {
         c.innerHTML = `<span class="ok">${m.changed ? 'updated' : 'unchanged'}</span>`
-          + `<div class="sub">${m.bytes} bytes</div>`;
+          + `<div class="sub">${esc(m.bytes)} bytes</div>`;
       } else if (m.skipped) {
-        c.innerHTML = `<span class="skip">skipped</span><div class="sub">${m.refusal || ''}</div>`;
+        c.innerHTML = `<span class="skip">skipped</span><div class="sub">${esc(m.refusal)}</div>`;
       } else {
-        c.innerHTML = `<span class="bad">refused</span><div class="sub">${m.refusal || ''}</div>`;
+        c.innerHTML = `<span class="bad">refused</span><div class="sub">${esc(m.refusal)}</div>`;
       }
     }
     ledger(rows);
-    const missing = d.missing || [];
-    say(missing.length
-      ? `${missing.length} master(s) still missing: ${missing.join(', ')}.`
-      : (d.restart_required
-          ? 'All four are on disk. Restart the server so the new masters are parsed.'
-          : 'All four are on disk.'));
+    say(outcome(r, d));
     await status();
   } catch (e) {
     say('The refresh call itself failed: ' + e);
@@ -95,23 +120,23 @@ async function verify() {
       const r = await fetch(`/indexmap.json?feed=${feed}`);
       const d = await r.json();
       if (d.error) {
-        parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${d.error}</td></tr>`);
+        parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${esc(d.error)}</td></tr>`);
         continue;
       }
       const refused = d.refused || 0;
       const names = (d.rows || [])
         .filter(x => x.nse === null || x.nse === undefined)
-        .map(x => x.symbol);
+        .map(x => esc(x.symbol));
       parts.push(
         `<tr><td><b>${feed}</b></td>`
-        + `<td>${d.published}</td><td>${d.listed}</td>`
-        + `<td class="ok">${d.resolved}</td>`
-        + `<td class="${refused ? 'bad' : 'ok'}">${refused}</td>`
+        + `<td>${esc(d.published)}</td><td>${esc(d.listed)}</td>`
+        + `<td class="ok">${esc(d.resolved)}</td>`
+        + `<td class="${refused ? 'bad' : 'ok'}">${esc(refused)}</td>`
         + `<td class="sub">${names.slice(0, 12).join(', ')}`
         + `${names.length > 12 ? ` … and ${names.length - 12} more` : ''}</td></tr>`
       );
     } catch (e) {
-      parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${e}</td></tr>`);
+      parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${esc(e)}</td></tr>`);
     }
   }
   box.innerHTML =

@@ -32,7 +32,8 @@
 //! Strikes arrive in **rupees** and are stored in **paisa**. `27000` in the
 //! master is `2_700_000` here. One missed multiplication makes every strike
 //! wrong by a factor of a hundred, so the conversion goes through
-//! [`Paisa::from_rupees_half_up`] like every other price.
+//! [`Paisa::from_rupee_text_half_up`], from the master's own text, as `pull`'s
+//! vendor prices do (D-1494).
 
 use crate::error::InstrumentError;
 use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
@@ -282,10 +283,21 @@ impl VendorId {
     /// `None` for an empty id — a row with no id cannot be requested — and for
     /// one past [`VENDOR_ID_CAPACITY`], which is a grammar this build has not
     /// seen and must not silently truncate into a different instrument.
+    ///
+    /// `None` as well for an id whose first or last character is whitespace
+    /// that `u8::is_ascii_whitespace` does not name, such as U+00A0, U+3000 or
+    /// the vertical tab U+000B. Only space, tab, line feed, form feed and
+    /// carriage return are trimmed: `str::trim` is Unicode-aware and turned
+    /// `"\u{a0}1333\u{3000}"` into `1333`, filing a row under an id its column
+    /// did not hold. D-0787.
     #[must_use]
     pub fn new(raw: &str) -> Option<Self> {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.len() > VENDOR_ID_CAPACITY {
+        let raw = raw.trim_ascii();
+        if raw.is_empty()
+            || raw.len() > VENDOR_ID_CAPACITY
+            || raw.starts_with(char::is_whitespace)
+            || raw.ends_with(char::is_whitespace)
+        {
             return None;
         }
         let mut bytes = [0_u8; VENDOR_ID_CAPACITY];
@@ -663,7 +675,9 @@ pub enum Skip {
     /// Not an exchange this engine stores. `docs/05-decisions.md` D-0017.
     ///
     /// Raised only for an exchange code this engine **recognises and does not
-    /// store** -- today that is `BSE`. A code it cannot parse at all gets
+    /// store** -- `BSE`, plus the per-vendor codes
+    /// [`Vendor::is_known_foreign_exchange`] names (`MCX`, and Kite's `NFO` and
+    /// kin; D-3310). Any other code it cannot parse gets
     /// [`Skip::UnrecognisedExchange`], for the same reason a bond and an
     /// unknown series code are different reasons.
     ForeignExchange,
@@ -806,6 +820,29 @@ impl Skip {
             self,
             Self::UnrecognisedListingClass | Self::UnrecognisedExchange
         )
+    }
+
+    /// The vendor's own code this decline could not read, taken from `row`, or
+    /// `None` for a decline that names no unread code.
+    ///
+    /// Exactly the non-routine reasons carry one, because those are the ones
+    /// an operator must act on and "unrecognised exchange" alone does not say
+    /// what arrived. Here rather than at a reporter for the reason
+    /// [`Skip::reason`] is: the match is exhaustive inside this crate, so a new
+    /// variant must decide whether it names a code. D-3310.
+    #[must_use]
+    pub const fn unread_code<'a>(self, row: &MasterRow<'a>) -> Option<&'a str> {
+        match self {
+            Self::UnrecognisedExchange => Some(row.exchange),
+            Self::UnrecognisedListingClass => Some(row.listing_class),
+            Self::NoVendorId
+            | Self::ForeignExchange
+            | Self::TestInstrument
+            | Self::ForeignSegment
+            | Self::LiveContract
+            | Self::NotEquityListing
+            | Self::SmeBoard => None,
+        }
     }
 
     /// Whether this decline judges the **paper** rather than the venue.
@@ -1137,8 +1174,11 @@ static NON_EQUITY_INDEX: MemberIndex<512> = MemberIndex::build(&NON_EQUITY_SERIE
 /// never confused with a bond.
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
-    // values costs nothing and cannot change a verdict.
-    let series = series.trim();
+    // values costs nothing and cannot change a verdict. ASCII whitespace only:
+    // `str::trim` also stripped U+00A0, so `"EQ\u{a0}"` was read as the main
+    // board. It is now a series this build has not seen, `Unrecognised`, and
+    // declined by name. D-0787.
+    let series = series.trim_ascii();
     // Hash, mask, probe — three times at most, each of them constant. The
     // tables are disjoint (asserted), so the order these are asked in cannot
     // change a verdict; it is the order of decreasing frequency, which is a
@@ -1333,6 +1373,66 @@ impl Vendor {
         }
     }
 
+    /// Whether `code` is an exchange code this vendor's master writes that this
+    /// engine **recognises and does not store**, beyond the `BSE` that
+    /// [`Exchange::parse`] already reads. A row carrying one is the routine
+    /// [`Skip::ForeignExchange`]; any other code [`Exchange::parse`] refuses
+    /// stays [`Skip::UnrecognisedExchange`], which is not routine. D-3310.
+    ///
+    /// # Why this exists, and what its absence cost
+    ///
+    /// On 6 Oct 2026 "Refresh all four" on `/masters` refused all three vendor
+    /// masters, Zerodha's at `line 2: unrecognised exchange`. Kite's `exchange`
+    /// column is not a venue alone: its own instruments sample files a NIFTY
+    /// future under `NFO` and a silver future under `MCX`
+    /// (`docs/00-charter.md` §4z), so every derivative, currency and commodity
+    /// row of the dump reached the exchange gate with a code `Exchange::parse`
+    /// cannot read, and `pull::masters::validate_rows` refuses a whole file on
+    /// the first non-routine decline. The segment decline list
+    /// (`NFO-FUT NFO-OPT MCX`) was never reached for those rows.
+    ///
+    /// # Why every code here is `ForeignExchange`, `NFO` included
+    ///
+    /// The reason judges the **code in the vendor's exchange column**, not the
+    /// legal entity behind it. The pages read name these codes and do not
+    /// expand most of them, so filing one under a venue or a segment would be
+    /// an invented meaning. Every one of them is declined either way; nothing
+    /// the engine stores is reachable through any of them.
+    ///
+    /// Not `Exchange` variants on purpose: that would widen the stored surface,
+    /// which `CLAUDE.md` §1 and D-0017 close.
+    ///
+    /// Matched exactly, like [`Vendor::segment_of`]: a padded, lower-cased or
+    /// renamed code is drift, not a known venue.
+    ///
+    /// **Constant time**: a `match` over string literals, not a scan.
+    #[must_use]
+    pub fn is_known_foreign_exchange(self, code: &str) -> bool {
+        match self {
+            // `MCX` is a venue CLAUDE.md §1 names as not stored (D-0017). At
+            // Groww and Dhan it is operator-measured in the `exchange` and
+            // `EXCH_ID` columns on 6 Oct 2026 (charter §4z, D-3310).
+            Self::Groww | Self::Dhan => code == "MCX",
+            // `NFO CDS BCD MCX`: Kite's orders page, "Name of the exchange (NSE,
+            // BSE, NFO, CDS, BCD, MCX)". `BFO`: the vendor's own SDK constant
+            // `EXCHANGE_BFO`. `NCO`: Zerodha staff on the Kite forum, April
+            // 2024, "the NSE-Commodity exchange". `NSEIX`: the live dump itself,
+            // line 25963 on 6 Oct 2026 (the refusal D-3310 made name it), and
+            // Zerodha staff on the forum, March 2025, "`NSEIX` for GIFT NIFTY"
+            // (D-3311). `GLOBAL`: the live dump, 12 rows all on segment
+            // `INDICES`, counted from the kept refused body at 11:07 IST on
+            // 6 Oct 2026 (D-3312). Declined HERE, before the segment gate, so
+            // a `GLOBAL` index is never promoted to an NSE index. All in
+            // charter §4z.
+            Self::Zerodha => matches!(
+                code,
+                "NFO" | "CDS" | "BCD" | "BFO" | "MCX" | "NCO" | "NSEIX" | "GLOBAL"
+            ),
+            // No master, so no exchange column to read.
+            Self::TrueData | Self::Gdfl => false,
+        }
+    }
+
     /// The exchange's canonical ticker for an index this vendor spells by NAME.
     ///
     /// # Why an alias is needed at all, and why it is not an invention
@@ -1361,6 +1461,18 @@ impl Vendor {
     /// `INDIA VIX` collapses to `INDIAVIX`, which is what Groww writes, so it needs
     /// no row here and does not get one. An alias that restates a collapse would be
     /// a second answer to a question the collapse already answers.
+    ///
+    /// # This is a projection of `crate::alias`, held to it by a test
+    ///
+    /// The sourced alias table (D-3332) names every index under every name,
+    /// the Kite tradingsymbol and the store key among them. These two arms
+    /// are exactly its rows whose Kite name, collapsed, is not the store key;
+    /// `core::alias`'s
+    /// `the_zerodha_rename_is_exactly_the_rows_whose_kite_name_is_not_the_key`
+    /// fails if a row is added there that this `match` does not rename, or the
+    /// reverse. Kept as a `match` because it runs on every master row decoded,
+    /// and it is the store key every Zerodha index is already filed under: a
+    /// change here re-keys stored series, which the table must not do silently.
     ///
     /// **Constant time.** A `match` over string literals switches on the length
     /// first and compares at most one arm.
@@ -1401,6 +1513,44 @@ impl Vendor {
             Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
         }
     }
+}
+
+/// The coded field [`decode_master_row`] could not read on this row, named
+/// with the vendor's own value, or `None` when no segment or instrument-type
+/// code is the reason.
+///
+/// # Why
+///
+/// `decode_master_row` refuses an unknown segment or type code as
+/// [`InstrumentError::Malformed`], a `Copy` error that cannot carry the text.
+/// So a master refused for one said `line N: malformed instrument
+/// identifier` and not which code arrived -- the same blindness D-3310 removed
+/// from the exchange gate. A refusal reporter asks this after a `Malformed`
+/// and appends the answer. D-3311.
+///
+/// It walks the gates in `decode_master_row`'s own order and answers only
+/// where that function would reach them: an over-wide row (refused by width
+/// before any code is read) and a row on any exchange but `NSE` (declined
+/// before the segment is read) answer `None`, so the field named is never one
+/// the decoder did not judge. Constant time: the same literal matches.
+#[must_use]
+pub fn unread_master_code<'a>(
+    vendor: Vendor,
+    row: &MasterRow<'a>,
+) -> Option<(&'static str, &'a str)> {
+    if row.over_wide().is_some() || Exchange::parse(row.exchange) != Ok(Exchange::Nse) {
+        return None;
+    }
+    if vendor.segment_of(row.segment).is_err() {
+        return Some(("segment", row.segment));
+    }
+    if vendor
+        .type_of(row.instrument_type, row.option_side)
+        .is_err()
+    {
+        return Some(("instrument type", row.instrument_type));
+    }
+    None
 }
 
 /// Reads one master row into a canonical key.
@@ -1449,9 +1599,17 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // exchange" decline. A master legitimately lists venues we do not store --
     // that is `Ok(Bse)` and it is routine. A code that does not parse is the
     // vendor having changed something under us, and it is not.
+    //
+    // A code `Exchange::parse` cannot read is still routine when this vendor is
+    // KNOWN to write it for rows we do not store -- Kite's `NFO` and `MCX`, for
+    // two. Matched exactly, like `segment_of`: a padded or renamed code is not
+    // a known one. D-3310.
     match Exchange::parse(row.exchange) {
         Ok(Exchange::Nse) => {}
         Ok(_) => return declined(Skip::ForeignExchange),
+        Err(_) if vendor.is_known_foreign_exchange(row.exchange) => {
+            return declined(Skip::ForeignExchange);
+        }
         Err(_) => return declined(Skip::UnrecognisedExchange),
     }
     let exchange = Exchange::Nse;
@@ -1500,7 +1658,16 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // `index_segment_word` is `None` for every vendor that already writes an
     // index code, so this cannot reclassify a Groww or Dhan row: the
     // comparison is against `None` and fails immediately.
+    //
+    // ONLY AN `EQ` ROW IS PROMOTED. The index rows this promotion was written
+    // for carry `EQ` in the type column; a `FUT`, `CE` or `PE` under `INDICES`
+    // is a shape this build has never read, and promoting it would file a
+    // contract as the spot index it names. It is refused instead, which is
+    // what `segment_of` and `type_of` do with every other unread shape. D-0785.
     let ty = if vendor.index_segment_word() == Some(row.segment) {
+        if ty != "EQ" {
+            return Err(InstrumentError::Malformed);
+        }
         "IDX"
     } else {
         ty
@@ -1732,7 +1899,8 @@ fn unsuffixed_key(
 ) -> Result<Option<InstrumentKey>, InstrumentError> {
     // Only a cash listing has a series. An empty class would make
     // `strip_suffix` succeed on every symbol, so it is excluded explicitly.
-    let class = class.trim();
+    // ASCII whitespace only, for the reason `board_of` gives. D-0787.
+    let class = class.trim_ascii();
     if key.kind != Kind::Equity || class.is_empty() {
         return Ok(None);
     }
@@ -1802,7 +1970,15 @@ fn parse_strike(text: &str) -> Result<Paisa, InstrumentError> {
     // across the 40,000 three-decimal strings from "0.000" to "39.999" -- "0.145" became 14
     // paisa where exact half-up is 15 -- always losing downward. The master file is text and
     // nothing has been lost yet when this is called.
-    Paisa::from_rupee_text_half_up(text).map_err(|_| InstrumentError::Malformed)
+    //
+    // AND A STRIKE IS POSITIVE (D-1311). Any decimal used to pass, so `-19450` and `0`
+    // validated and the row was declined as a routine live contract. No exchange lists a
+    // strike at or below zero; the snapped value is checked, so `0.004` (zero paisa) is
+    // refused as well.
+    match Paisa::from_rupee_text_half_up(text) {
+        Ok(strike) if strike > Paisa::ZERO => Ok(strike),
+        _ => Err(InstrumentError::Malformed),
+    }
 }
 
 #[cfg(test)]
@@ -1993,16 +2169,186 @@ mod tests {
         );
         assert!(Skip::ForeignExchange.is_routine());
 
-        // `MCX` is a code `Exchange::parse` cannot read at all. This test used
-        // to assert it was ALSO `ForeignExchange` -- it encoded the defect
-        // rather than catching it, which is why the defect survived a suite at
-        // 100% coverage. The two are now different reasons, and only one of
-        // them is routine.
+        // A code this vendor is not known to write is unreadable, not foreign.
+        // This test used to make that point with `MCX` and before that asserted
+        // `MCX` was ALSO `ForeignExchange` -- it encoded the conflation D-0329
+        // removed. `MCX` is now a code the masters are KNOWN to carry (D-3310,
+        // below), so the unreadable case is an invented code instead.
+        assert_eq!(
+            groww(row("XYZ", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
+                .expect("ok")
+                .skip(),
+            Some(Skip::UnrecognisedExchange)
+        );
+    }
+
+    #[test]
+    fn exactly_the_non_routine_declines_name_the_code_they_could_not_read() {
+        // D-3310: the refusal says WHAT arrived, from the column it judged.
+        let mut r = row("XYZ", "NSE", "RELIANCE", "EQ", "", "");
+        r.listing_class = "EQX";
+        assert_eq!(Skip::UnrecognisedExchange.unread_code(&r), Some("XYZ"));
+        assert_eq!(Skip::UnrecognisedListingClass.unread_code(&r), Some("EQX"));
+        for routine in [
+            Skip::NoVendorId,
+            Skip::ForeignExchange,
+            Skip::TestInstrument,
+            Skip::ForeignSegment,
+            Skip::LiveContract,
+            Skip::NotEquityListing,
+            Skip::SmeBoard,
+        ] {
+            assert!(routine.is_routine());
+            assert_eq!(routine.unread_code(&r), None, "{routine:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_segment_or_type_code_is_named_where_the_decoder_judged_it() {
+        // D-3311. Each named case IS a `Malformed` from the decoder, so the
+        // name is attached to exactly the refusal it explains.
+        let unknown_segment = row("NSE", "NSEZ", "NIFTY", "FUT", "2026-08-05", "");
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, unknown_segment),
+            Err(InstrumentError::Malformed)
+        );
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &unknown_segment),
+            Some(("segment", "NSEZ"))
+        );
+        let unknown_type = row("NSE", "NSE", "NIFTY", "SPOT", "", "");
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, unknown_type),
+            Err(InstrumentError::Malformed)
+        );
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &unknown_type),
+            Some(("instrument type", "SPOT"))
+        );
+
+        // Nothing is named where the decoder never read a code: a readable
+        // row, a row declined at the exchange gate, an over-wide row.
+        let readable = row("NSE", "NSE", "NIFTY", "FUT", "2026-08-05", "");
+        assert_eq!(unread_master_code(Vendor::Zerodha, &readable), None);
+        let foreign = row("NFO", "NSEZ", "NIFTY", "SPOT", "", "");
+        assert_eq!(unread_master_code(Vendor::Zerodha, &foreign), None);
+        let wide_value = "W".repeat(MAX_FIELD_BYTES + 1);
+        let mut wide = row("NSE", "NSEZ", "NIFTY", "SPOT", "", "");
+        wide.expiry = &wide_value;
+        assert!(decode_master_row(Vendor::Zerodha, wide).is_err());
+        assert_eq!(unread_master_code(Vendor::Zerodha, &wide), None);
+        // At exactly the bound it is not over-wide, so the segment is named.
+        let edge_value = "W".repeat(MAX_FIELD_BYTES);
+        wide.expiry = &edge_value;
+        assert_eq!(
+            unread_master_code(Vendor::Zerodha, &wide),
+            Some(("segment", "NSEZ"))
+        );
+    }
+
+    #[test]
+    fn every_known_non_nse_exchange_code_is_the_routine_foreign_decline() {
+        // D-3310. Kite's dump files derivatives under `NFO`, commodities under
+        // `MCX`, and so on; each of those rows refused the whole master as an
+        // UNRECOGNISED exchange at line 2. The type column is a valid `FUT` so
+        // the row would decode if the exchange gate let it through: only that
+        // gate can be the reason.
+        // The whole table, both ways: every listed code is known, and every
+        // code listed for ANY vendor is unknown at a vendor that does not
+        // list it -- so no arm can quietly grow or shrink.
+        let all = [
+            "NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "NSE", "BSE", "XYZ", "GLOBAL",
+        ];
+        let expected: [(Vendor, &[&str]); 5] = [
+            (Vendor::Groww, &["MCX"]),
+            (Vendor::Dhan, &["MCX"]),
+            (
+                Vendor::Zerodha,
+                &["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "GLOBAL"],
+            ),
+            (Vendor::TrueData, &[]),
+            (Vendor::Gdfl, &[]),
+        ];
+        for (vendor, codes) in expected {
+            for code in all {
+                assert_eq!(
+                    vendor.is_known_foreign_exchange(code),
+                    codes.contains(&code),
+                    "{vendor:?} {code}"
+                );
+            }
+        }
+        // D-3312: every `GLOBAL` row in the live dump is on `INDICES` with
+        // type `EQ` -- the exact shape an NSE index row has. It must be
+        // declined at the exchange gate and never promoted to an index.
+        let mut global = row("GLOBAL", "INDICES", "", "EQ", "", "");
+        global.trading_symbol = "INVENTED 30";
+        global.listing_class = "";
+        assert_eq!(
+            decode_master_row(Vendor::Zerodha, global)
+                .expect("a decline")
+                .skip(),
+            Some(Skip::ForeignExchange)
+        );
+        for code in ["NFO", "CDS", "BCD", "BFO", "MCX", "NCO", "NSEIX", "GLOBAL"] {
+            let decoded = decode_master_row(
+                Vendor::Zerodha,
+                row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
+            )
+            .expect("a decline, not an error");
+            assert_eq!(decoded.skip(), Some(Skip::ForeignExchange), "{code}");
+        }
         assert_eq!(
             groww(row("MCX", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
                 .expect("ok")
                 .skip(),
-            Some(Skip::UnrecognisedExchange)
+            Some(Skip::ForeignExchange)
+        );
+        assert_eq!(
+            decode_master_row(
+                Vendor::Dhan,
+                row("MCX", "M", "GOLD", "FUTCOM", "2026-08-05", "")
+            )
+            .expect("ok")
+            .skip(),
+            Some(Skip::ForeignExchange)
+        );
+
+        // Recognition is per vendor and exact. `NFO` is a Kite word, not a
+        // Groww one; a padded or lower-cased known code is drift, not a venue.
+        for (vendor, code) in [
+            (Vendor::Groww, "NFO"),
+            (Vendor::Dhan, "BFO"),
+            (Vendor::Zerodha, "nfo"),
+            (Vendor::Zerodha, " MCX"),
+            (Vendor::Zerodha, "MCX "),
+            (Vendor::Zerodha, "NSEIX-UNREAD"),
+            (Vendor::Zerodha, "nseix"),
+            (Vendor::Groww, "NSEIX"),
+            (Vendor::Zerodha, "global"),
+        ] {
+            let decoded = decode_master_row(
+                vendor,
+                row(code, "NFO-FUT", "NIFTY", "FUT", "2026-08-05", ""),
+            )
+            .expect("a decline, not an error");
+            assert_eq!(
+                decoded.skip(),
+                Some(Skip::UnrecognisedExchange),
+                "{vendor:?} {code:?}"
+            );
+        }
+
+        // And NSE still passes the gate at Kite: the row reaches the segment
+        // gate, which is what stores or declines it.
+        let mut cash = row("NSE", "NSE", "", "EQ", "", "");
+        cash.trading_symbol = "RELIANCE";
+        cash.listing_class = "";
+        assert!(
+            decode_master_row(Vendor::Zerodha, cash)
+                .expect("decodes")
+                .skip()
+                .is_none()
         );
     }
 
@@ -3382,5 +3728,149 @@ mod tests {
         assert_eq!(parse_expiry("2026-08-4"), Err(InstrumentError::Malformed));
         // Year two characters short.
         assert_eq!(parse_expiry("26-08-04"), Err(InstrumentError::Malformed));
+    }
+
+    // =======================================================================
+    // C4 core batch 1 — D-0785 onward
+    // =======================================================================
+
+    /// A Zerodha `INDICES` row is promoted to an index only when its type word
+    /// is `EQ`, which is how every index row in this module's fixtures and in
+    /// `tests/zerodha_index.rs` is spelled. A derivative type under `INDICES`
+    /// is a row this build has never read, and it is refused rather than
+    /// filed as an index.
+    #[test]
+    fn an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index() {
+        for ty in ["FUT", "CE", "PE"] {
+            let input = MasterRow {
+                vendor_id: "256265",
+                exchange: "NSE",
+                segment: "INDICES",
+                underlying: "",
+                trading_symbol: "NIFTY 50",
+                instrument_type: ty,
+                listing_class: "",
+                isin: "",
+                expiry: "2026-08-27",
+                strike_rupees: "24000",
+                option_side: "",
+            };
+            assert_eq!(
+                decode_master_row(Vendor::Zerodha, input),
+                Err(InstrumentError::Malformed),
+                "an INDICES row typed {ty} must be refused, not kept as an index"
+            );
+        }
+        // The control: the same row typed `EQ` is the vendor's index row.
+        let index = MasterRow {
+            vendor_id: "256265",
+            exchange: "NSE",
+            segment: "INDICES",
+            underlying: "",
+            trading_symbol: "NIFTY 50",
+            instrument_type: "EQ",
+            listing_class: "",
+            isin: "",
+            expiry: "",
+            strike_rupees: "",
+            option_side: "",
+        };
+        let kept =
+            listing(decode_master_row(Vendor::Zerodha, index).expect("decodes")).expect("kept");
+        assert_eq!(kept.key.kind, Kind::Index);
+        assert_eq!(kept.key.underlying.as_str(), "NIFTY");
+    }
+
+    /// Only ASCII whitespace is trimmed from the vendor id, the series and the
+    /// suffix class. Whitespace outside ASCII (U+00A0, U+3000) at an end of the
+    /// id refuses it, and in the series leaves a code no table holds. D-0787.
+    #[test]
+    fn whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class() {
+        // The id. Each end on its own, and both together.
+        for raw in [
+            "\u{a0}1333\u{3000}",
+            "\u{a0}1333",
+            "1333\u{3000}",
+            " \u{a0}1333 ",
+            "\u{b}1333",
+        ] {
+            assert_eq!(VendorId::new(raw), None, "{raw:?} must be refused");
+            let mut input = row("NSE", "CASH", "RELIANCE", "EQ", "", "");
+            input.vendor_id = raw;
+            assert_eq!(
+                groww(input).expect("explicit decline").skip(),
+                Some(Skip::NoVendorId),
+                "{raw:?} must be declined, not kept under 1333"
+            );
+        }
+        // Inside the id it is data, and ASCII padding is still trimmed.
+        assert_eq!(
+            VendorId::new(" \t\u{c}\r13\u{a0}33\n\r\u{c} ")
+                .expect("interior")
+                .as_str(),
+            "13\u{a0}33"
+        );
+
+        // The series. Groww's `EQ` with a trailing U+00A0 is not the main board.
+        assert_eq!(board_of("EQ\u{a0}"), EquityVerdict::Unrecognised);
+        assert_eq!(board_of("\u{3000}EQ"), EquityVerdict::Unrecognised);
+        assert_eq!(
+            groww(groww_cash("RELIANCE", "EQ\u{a0}", REAL_ISIN))
+                .expect("explicit decline")
+                .skip(),
+            Some(Skip::UnrecognisedListingClass)
+        );
+        assert_eq!(board_of(" \t\u{c}\rEQ\n\r"), EquityVerdict::MainBoard);
+        assert_eq!(board_of("\u{b}EQ"), EquityVerdict::Unrecognised);
+
+        // The suffix class. Only the row's own series, ASCII-trimmed, strips.
+        let l = listing(
+            groww(MasterRow {
+                vendor_id: "1333",
+                underlying: "",
+                trading_symbol: "BLUECHIP-BE",
+                listing_class: "BE",
+                isin: "INE657B01025",
+                ..row("NSE", "CASH", "BLUECHIP-BE", "EQ", "", "")
+            })
+            .expect("ok"),
+        )
+        .expect("kept");
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", "BE\u{a0}").expect("no error"),
+            None
+        );
+        assert_eq!(
+            unsuffixed_key(l.key, "BLUECHIP-BE", " BE\t")
+                .expect("no error")
+                .map(|k| k.underlying.as_str().to_owned()),
+            Some("BLUECHIP".to_owned())
+        );
+    }
+
+    /// core-01-b. An option strike must be a positive price. D-1311.
+    ///
+    /// `parse_strike` accepted any decimal, so `-19450` and `0` validated and the
+    /// row was declined as a routine live contract. No exchange lists a strike at
+    /// or below zero; such a row is malformed and must say so.
+    #[test]
+    fn a_strike_at_or_below_zero_is_malformed_not_a_live_contract() {
+        for strike in ["-19450", "0", "0.00", "-0", "0.004", "-0.004", "-0.01"] {
+            assert_eq!(
+                groww(row("NSE", "FNO", "NIFTY", "CE", "2026-08-04", strike)),
+                Err(InstrumentError::Malformed),
+                "strike {strike:?} is not a strike"
+            );
+            assert_eq!(parse_strike(strike), Err(InstrumentError::Malformed));
+        }
+        // The smallest positive strike, one paisa after the half-up snap, is still read.
+        assert_eq!(parse_strike("0.005").map(Paisa::raw), Ok(1));
+        assert_eq!(parse_strike("117.5").map(Paisa::raw), Ok(11_750));
+        assert_eq!(
+            groww(row("NSE", "FNO", "NIFTY", "PE", "2026-08-04", "0.01"))
+                .expect("ok")
+                .skip(),
+            Some(Skip::LiveContract)
+        );
     }
 }

@@ -366,6 +366,18 @@ fn all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte() 
             *corrupted.last_mut().expect("actual completion") ^= 1;
             fs::write(&completion, corrupted).map_err(|why| why.to_string())?;
             assert!(selection.require_live_topology().is_err());
+            // THE REPORT REFUSES THE SAME STALE AUTHORITY, AND SAYS SO. Gate 18
+            // found `render_winners` replaceable by `Ok(())`: no test had
+            // handed it a selection, so a report that printed its heading and
+            // then claimed success over a ledger that no longer authenticated
+            // was indistinguishable from a real one. It consumes the stale
+            // capability, which this branch was about to drop anyway. D-1456.
+            let mut report = String::new();
+            let refusal = crate::ledger_all::render_winners(&mut report, selection)
+                .expect_err("a selection that no longer authenticates renders no winners");
+            assert!(!refusal.is_empty());
+            assert!(report.starts_with("\nTOP 10 BY RUNG"), "{report}");
+            assert!(!report.contains("rank"), "{report}");
             fs::write(completion, saved).map_err(|why| why.to_string())?;
             // Restoring bytes does not restore the held file's mtime/ctime
             // epoch. Drop this stale capability before the fresh retry.

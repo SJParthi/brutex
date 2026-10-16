@@ -15,6 +15,10 @@
 //! | [`catalog`] | what the store HOLDS, walked back off the tree |
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //! | [`flock`] | the advisory-lock guard, released by unlock and never by close |
+//! | [`provenance`] | where a month's bars came from: the `.prv` sidecar (D-3334) |
+//! | [`sort_index`] | a month's rows ordered by each sortable column: the `.srt` sidecar (D-3349) |
+//! | [`verdict`] | what verification found: day images and year indexes (D-4808) |
+//! | [`staging`] | a writer's temporary, born without opening anything already there (D-4922) |
 //!
 //! # Seven properties the types enforce rather than document
 //!
@@ -31,7 +35,10 @@
 //!    offsets, the checksum and the block length all changed, so this is
 //!    format **version 2** with magic `BRUTEXB2`. Version 1's number is
 //!    retired, never reused — `CLAUDE.md` §3 rule 8. See
-//!    [`format::RETIRED_VERSIONS`].
+//!    [`format::RETIRED_VERSIONS`]. Version 3 (`BRUTEXB3`, D-1571) keeps
+//!    version 2's geometry byte for byte and makes block checksums
+//!    mandatory; it is the version written now, and a version-2 file is
+//!    still read and never rewritten.
 //! 4. **A header update is one write of one self-checked unit.** There is no
 //!    API that can update the counter, the timestamp and the checksum
 //!    separately, because [`header::Commit`] carries one offset and one
@@ -62,10 +69,37 @@ pub mod file;
 /// released by `File::unlock`, never by close (D-0693).
 pub mod flock;
 pub mod format;
+/// Which generation of a bar month every reader opens: the original, or a
+/// repair revision promoted by an append-only pointer (D-3350, WP-13c).
+pub mod generation;
 pub mod header;
 pub mod layout;
+/// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
+pub mod open_flags;
 pub mod path;
+/// Where a month's bars came from: one append-only `.prv` record per landing,
+/// written after the bars it names are committed and never touching them
+/// (D-3334; DB-078, DB-G56).
+pub mod provenance;
 pub mod repair;
+/// One way to open a file for reading (no link followed, never a wait,
+/// regular files only) and the writer's refusal of a store whose `bars` is a
+/// link (R3-16; RA-317, RA-298).
+pub mod safe_open;
+/// The sealed form of a closed month, `.sbar` version 1: a 512-byte head, a
+/// keyed block directory, a time table, the packed `.prv` image and codec 1
+/// frames, built once and read by position (D-4965, SC-2).
+pub mod sealed;
+/// Codec 1 of a sealed month: one frame of at most 256 bars as seven
+/// bit-packed column streams, bit for bit for any seven `i64` (D-4939, SC-1).
+pub mod sealed_codec;
+pub mod sort_index;
+/// A writer's temporary file, created `O_EXCL` so a name that already exists
+/// (a hard link planted there, a dead writer's leftover) is never opened,
+/// truncated or written through (RA-290, RA-287; D-4922).
+pub mod staging;
+pub mod time_index;
+pub mod verdict;
 
 /// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s
 /// unreleased-lock note among them (D-0693) — reach a file, driven
@@ -74,3 +108,9 @@ pub mod repair;
 /// and not of the store.
 #[cfg(test)]
 mod emits;
+
+/// Test-only: re-runs a test where the permission bits bind, even as root. The
+/// same file serves this crate's integration tests. D-0995, D-1485.
+#[cfg(all(test, unix))]
+#[path = "../tests/support/mod.rs"]
+mod support;

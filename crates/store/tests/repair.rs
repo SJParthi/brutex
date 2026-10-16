@@ -70,13 +70,17 @@ impl Drop for Fixture {
 }
 
 fn path() -> StorePath<'static> {
+    path_on(Timeframe::MINUTE_1)
+}
+
+fn path_on(timeframe: Timeframe) -> StorePath<'static> {
     StorePath::new(PathParts {
         vendor: Vendor::Groww,
         exchange: "NSE",
         segment: "INDEX",
         symbol: "NIFTY",
         contract: None,
-        timeframe: Timeframe::MINUTE_1,
+        timeframe,
         month: YearMonth::new(2024, 6).unwrap(),
         file: FileKind::Bars,
     })
@@ -246,23 +250,80 @@ fn exact_resource_boundaries_and_bar_only_contract() {
         Revision::new(MAX_REVISIONS).unwrap().ordinal(),
         MAX_REVISIONS
     );
-    let fixture = Fixture::new();
-    let expected = fixture.source(&[]);
-    let maximum = i64::try_from(MAX_ROWS).unwrap();
-    let mut rows: Vec<_> = (0..maximum).map(bar).collect();
-    rows.push(bar(maximum));
-    assert_eq!(fixture.publish(expected, &rows), Err(RepairError::RowLimit));
-    rows.pop();
+    // THE ROW CEILING IS THE MOST BARS THE PATH'S MONTH CAN HOLD ON ITS RUNG
+    // (D-4875 (1), D-4898, IA-17): June's 30 days of one-second bars here.
+    // `MAX_ROWS`, 31 days of them, is the largest any path has (DB-N26,
+    // WP-12d). It was 100,000, and a GDFL one-second month holds about
+    // 409,000 bars, so no such month could be repaired.
     assert_eq!(
-        fixture.publish(expected, &rows).unwrap(),
-        Published::Created
+        MAX_ROWS,
+        31 * 86_400 / usize::try_from(Timeframe::SECOND_1.secs()).unwrap()
     );
-    assert_eq!(fixture.read().unwrap().header().n_valid, MAX_ROWS as u64);
+    let fixture = Fixture::new();
+    let seconds = path_on(Timeframe::SECOND_1);
+    let second = |index: i64| Bar {
+        ts_micros: bar(0).ts_micros + index * 1_000_000,
+        ..bar(index)
+    };
+    let expected_seconds = BarFile::open_or_create(&fixture.0, seconds, 7)
+        .unwrap()
+        .header();
+    let ceiling = repair::row_ceiling(seconds);
+    assert_eq!(ceiling, 30 * 86_400);
+    let over = RepairError::RowLimit {
+        rows: ceiling + 1,
+        ceiling,
+    };
+    let maximum = i64::try_from(ceiling).unwrap();
+    let mut rows: Vec<_> = (0..=maximum).map(second).collect();
+    let publish_seconds =
+        |rows: &[Bar]| repair::publish(&fixture.0, seconds, 7, revision(), expected_seconds, rows);
+    assert_eq!(publish_seconds(&rows), Err(over.clone()));
+    let index = repair::Policy {
+        open_interest_applies: false,
+        basis_witness: false,
+    };
+    assert_eq!(
+        repair::repair_month(&fixture.0, seconds, 7, &rows, index),
+        Err(over)
+    );
+    // AT THE CEILING the count passes, and what refuses is the month
+    // admission (D-0915): June's whole count of seconds, begun on 2024-06-03,
+    // runs past June.
+    rows.pop();
+    assert!(matches!(
+        publish_seconds(&rows),
+        Err(RepairError::Store(StoreError::OutsideMonth { .. }))
+    ));
+    assert!(matches!(
+        repair::repair_month(&fixture.0, seconds, 7, &rows, index),
+        Err(RepairError::Store(StoreError::OutsideMonth { .. }))
+    ));
+    // A ONE-SECOND MONTH THE SIZE OF GDFL NIFTY 2018-11 publishes whole, and
+    // its revision opens: 409,224 rows, four times the old ceiling.
+    rows.truncate(409_224);
+    assert_eq!(publish_seconds(&rows).unwrap(), Published::Created);
+    assert_eq!(
+        RevisionReader::open(&fixture.0, seconds, 7, revision())
+            .unwrap()
+            .header()
+            .n_valid,
+        409_224
+    );
+    let expected = fixture.source(&[]);
     let mut too_many = expected;
-    too_many.n_valid = MAX_ROWS as u64 + 1;
+    // A SOURCE HEADER COUNTING MORE THAN ITS OWN MONTH HOLDS: 43,201 on the
+    // one-minute rung of a 30-day month, far under the flat `MAX_ROWS` this
+    // was compared against.
+    let minute_ceiling = repair::row_ceiling(path());
+    assert_eq!(minute_ceiling, 30 * 1_440);
+    too_many.n_valid = minute_ceiling + 1;
     assert_eq!(
         fixture.publish(too_many, &[bar(0)]),
-        Err(RepairError::RowLimit)
+        Err(RepairError::RowLimit {
+            rows: minute_ceiling + 1,
+            ceiling: minute_ceiling,
+        })
     );
     assert!(matches!(
         repair::publish(
@@ -443,4 +504,39 @@ fn competing_publishers_cannot_mix_rows_or_checksums() {
         revised.read_record(1).unwrap(),
     ];
     assert!(rows == [bar(0), bar(1)] || rows == [bar(1), bar(2)]);
+}
+
+#[test]
+fn a_revision_refuses_a_merged_bar_outside_the_month_or_off_the_grid() {
+    // A revision is a write boundary too: the admission `BarFile::append` asks
+    // (D-0915) is asked here, before anything is reserved or written.
+    let fixture = Fixture::new();
+    let expected = fixture.source(&[bar(1)]);
+    let before = fixture.images();
+    let july = Bar {
+        ts_micros: 1_719_772_200_000_000,
+        ..bar(2)
+    };
+    assert_eq!(
+        fixture.publish(expected, &[bar(1), july]),
+        Err(RepairError::Store(StoreError::OutsideMonth {
+            at: 1,
+            ts_micros: july.ts_micros,
+            month: YearMonth::new(2024, 6).unwrap(),
+        }))
+    );
+    let half_minute = Bar {
+        ts_micros: bar(1).ts_micros + 30_000_000,
+        ..bar(2)
+    };
+    assert_eq!(
+        fixture.publish(expected, &[bar(1), half_minute]),
+        Err(RepairError::Store(StoreError::OffGrid {
+            at: 1,
+            ts_micros: half_minute.ts_micros,
+            timeframe_secs: 60,
+        }))
+    );
+    assert_eq!(fixture.images(), before);
+    assert!(!fixture.0.join("bar-revisions-v1").exists());
 }

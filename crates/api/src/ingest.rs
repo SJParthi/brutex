@@ -83,12 +83,27 @@ pub const MAX_WINDOW_DAYS: u32 = 3_653;
 /// and the set's own size is the exchange's business rather than a caller's.
 pub const MAX_MEMBERS: usize = 2_000;
 
+/// The body `/pull/spot` and `/ingest/queue` read: room for [`MAX_MEMBERS`]
+/// `member` fields, each a symbol of at most
+/// `brutex_core::symbol::SYMBOL_CAPACITY` bytes percent-encoded at worst 3x,
+/// plus the other fields' ordinary [`crate::server::MAX_FORM_BYTES`].
+///
+/// 168,192 bytes. Under the shared 8 KiB bound, ticking all 750 of the widest
+/// set was a framework 413 and [`Refusal::TooManyMembers`] was unreachable
+/// (W1-api3-6, D-1499). Sized from `MAX_MEMBERS` so a request with one member
+/// too many reaches that named refusal rather than a 413.
+pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
+    + MAX_MEMBERS * ("member=".len() + 3 * brutex_core::symbol::SYMBOL_CAPACITY + 1);
+
 /// Which instruments a spot pull covers.
 ///
-/// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
-/// at two swept indices; the other six sets are stored and never swept, and
-/// saying which is which on the form is the difference between an operator
-/// knowing what a run will contain and guessing.
+/// Nine fixed sets ([`Self::ALL`]), not a free list. `CLAUDE.md` §1 fixes the engine surface
+/// at the two indices plus the 208 F&O shares as cash equities (D-0506,
+/// D-0682). A set is pulled and STORED whole; what the sweep then reads from it
+/// is decided per instrument by
+/// [`brutex_core::instrument::InstrumentKey::is_sweepable`], never by the set.
+/// Saying which sets overlap the surface on the form is the difference between
+/// an operator knowing what a run will contain and guessing.
 ///
 /// # PULLABLE IS NOT SWEPT, and appending here cannot make it so
 ///
@@ -100,14 +115,18 @@ pub const MAX_MEMBERS: usize = 2_000;
 /// the `target` field, so the page hardcoded a null and said so. That was a gap
 /// in the REQUEST vocabulary and in nothing else.
 ///
-/// A pull of `n500` therefore **stores** 500 instruments and **sweeps none of
-/// them**. Nothing in this enum is consulted by the sweep: what may be swept is
-/// [`brutex_core::instrument::InstrumentKey::is_sweepable`], a two-element table
-/// in `core`, and [`Self::Swept`] is the one variant that defers to it rather
-/// than keeping a second copy. Widening `CLAUDE.md` §1 is a
-/// `docs/05-decisions.md` entry against THAT table; a row here is not one and
-/// must never be read as one. `a_nifty_tier_target_stores_and_never_sweeps` is
-/// that sentence written as a test.
+/// A pull of `n500` therefore **stores** 500 instruments, and the sweep reads
+/// exactly those of them that are F&O shares — because `is_sweepable` says so
+/// for each, not because the tier was pulled. Nothing in this enum is consulted
+/// by the sweep: what may be swept is
+/// [`brutex_core::instrument::InstrumentKey::is_sweepable`] (the two indices in
+/// `InstrumentKey::SWEPT` and the F&O shares in `core::universe::FNO_INDEX`),
+/// and [`Self::Swept`] is the one variant that defers to it rather than keeping
+/// a second copy. Widening `CLAUDE.md` §1 is a `docs/05-decisions.md` entry
+/// against THAT predicate; a row here is not one and must never be read as
+/// one. `a_nifty_tier_target_stores_and_sweeps_exactly_its_fno_members` is that
+/// sentence written as a test. (This said a tier pull "sweeps none of them",
+/// true before D-0506; tests-docs-security-pass18 P18-05, D-1965.)
 ///
 /// # Why the slugs are the wire's own words
 ///
@@ -119,29 +138,37 @@ pub const MAX_MEMBERS: usize = 2_000;
 /// arriving from the other end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpotTarget {
-    /// `NSE-NIFTY` and `NSE-BANKNIFTY` — the only two the engine sweeps.
+    /// The engine surface this feed lists: `NSE-NIFTY`, `NSE-BANKNIFTY` and the
+    /// F&O shares as cash equities (D-0506, D-0682).
     Swept,
     /// Every NSE index series held for reference, including `NSE-INDIAVIX`.
     ///
     /// Stored and stamped onto trades; never in the condition vocabulary, never
     /// in ranking, never in run identity. `CLAUDE.md` §1.
     Indices,
-    /// The NIFTY Total Market constituents. Stored, never swept.
+    /// The NIFTY Total Market constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Equities,
-    /// The published NIFTY 500 constituents. Stored, never swept.
+    /// The published NIFTY 500 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty500,
-    /// The published NIFTY 200 constituents. Stored, never swept.
+    /// The published NIFTY 200 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty200,
-    /// The published NIFTY 100 constituents. Stored, never swept.
+    /// The published NIFTY 100 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     Nifty100,
-    /// The published NIFTY 50 constituents. Stored, never swept.
+    /// The published NIFTY 50 constituents. Stored; the members that are F&O
+    /// shares are swept (D-0506).
     ///
     /// Fifty EQUITIES, and not the index of the same name: `NSE-NIFTY` is the
     /// spot series [`Self::Swept`] names, and these are the companies underneath
     /// it. The two sets share a word and no member, which is precisely why both
     /// are spelled out on the form rather than left to be inferred.
     Nifty50,
-    /// The 213 F&O underlyings. Stored, never swept.
+    /// The 213 F&O underlyings. Stored; 208 of them are swept as cash
+    /// equities and NIFTY and BANKNIFTY as indices, while FINNIFTY, MIDCPNIFTY
+    /// and NIFTYNXT50 are swept in neither shape (D-0506, D-0682).
     ///
     /// Defined by a list this repository has already transcribed —
     /// `core::universe::FNO_UNDERLYINGS`, derived from the derivative rows of
@@ -157,7 +184,8 @@ pub enum SpotTarget {
     /// pairs and this target cannot add to it.
     Fno,
     /// Every instrument this build tracks — the reference index series and the
-    /// NIFTY Total Market constituents together. Stored, never swept.
+    /// NIFTY Total Market constituents together. Stored; the members on the
+    /// engine surface are swept, and pulling this set widens nothing.
     ///
     /// # The one target defined by a PREDICATE and not by a file
     ///
@@ -394,17 +422,36 @@ impl SpotTarget {
             Self::Swept => {
                 "NSE-NIFTY, NSE-BANKNIFTY and the F&O underlyings this feed lists — the sweep surface, D-0506"
             }
-            Self::Indices => "stored and stamped onto trades; never swept",
-            Self::Equities => "stored, never swept",
-            // EVERY TIER SAYS "never swept" IN THE SAME BREATH AS ITS COUNT.
-            // The count is the reason an operator picks the row and the four
-            // words after it are the reason picking it does not widen §1.
-            Self::Nifty500 => "the published 500 constituents — stored, never swept",
-            Self::Nifty200 => "the published 200 constituents — stored, never swept",
-            Self::Nifty100 => "the published 100 constituents — stored, never swept",
+            // THE TWO SWEPT INDICES ARE IN THIS SET. It is every series the
+            // vendor master calls an index, so it holds NSE-NIFTY and
+            // NSE-BANKNIFTY; "never swept" alone denied them (zero-findings
+            // flag, D-2690). Every other index is reference only.
+            Self::Indices => {
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and \
+                 stamped onto trades, never swept"
+            }
+            // EVERY EQUITY SET SAYS WHICH OF ITS MEMBERS ARE SWEPT, IN THE SAME
+            // BREATH AS ITS COUNT. These said "stored, never swept" until
+            // P18-05 (D-1965), which told an operator that RELIANCE, HDFCBANK
+            // and every other F&O share in a tier is not swept — false since
+            // D-0506. The set decides nothing; `is_sweepable` decides per
+            // member, and the note says so.
+            Self::Equities => "stored; members that are F&O shares are swept (D-0506)",
+            Self::Nifty500 => {
+                "the published 500 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
+            Self::Nifty200 => {
+                "the published 200 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
+            Self::Nifty100 => {
+                "the published 100 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)"
+            }
             Self::Nifty50 => {
-                "the published 50 constituents — stored, never swept; these are the \
-                 companies, not the NIFTY index"
+                "the published 50 constituents — stored; members that are F&O shares are \
+                 swept (D-0506); these are the companies, not the NIFTY index"
             }
             // BOTH WORDED LIKE `Indices`, NOT LIKE `Equities`, AND THE
             // DIFFERENCE IS FACTUAL.
@@ -415,11 +462,12 @@ impl SpotTarget {
             // the swept pair", which is false. So they say what `Indices`
             // says: the pull stores them, and the sweep surface is unchanged.
             Self::Fno => {
-                "the 213 F&O underlyings — stored, and swept as cash equities since D-0506"
+                "the 213 F&O underlyings — stored; 208 shares swept as cash equities, \
+                 NIFTY and BANKNIFTY as indices (D-0506, D-0682)"
             }
             Self::Everything => {
-                "every tracked series and constituent — stored; the sweep surface \
-                 is unchanged and never swept"
+                "every tracked series and constituent — stored; members on the sweep \
+                 surface are swept, and pulling this widens nothing"
             }
         }
     }
@@ -949,7 +997,7 @@ impl std::error::Error for Refusal {}
 
 fn cash_identity_refusal(got: &str) -> String {
     format!(
-        "REFUSED · cash_identity {got:?}: use isin, or explicitly use zerodha_cross_checked or zerodha_symbol with Zerodha. Native-only symbol mapping is not ISIN verification"
+        "REFUSED · cash_identity {got:?}: use isin, or explicitly use zerodha_nse_checked, zerodha_cross_checked or zerodha_symbol with Zerodha. Native-only symbol mapping is not ISIN verification"
     )
 }
 
@@ -970,6 +1018,11 @@ pub enum CashIdentity {
     /// Exact native token plus exchange ISIN corroborated by an independent master.
     /// The ISIN is never attributed to Zerodha's ISIN-less file.
     ZerodhaCrossChecked,
+    /// Exact native Zerodha NSE EQ token whose symbol NSE's own Total Market
+    /// file, landed the same IST day, maps to the member's ISIN. No other
+    /// vendor's master is read, and no ISIN is written into Zerodha's row.
+    /// A labelled assurance level of its own, not `isin`. D-3314.
+    ZerodhaNseChecked,
 }
 
 impl CashIdentity {
@@ -984,6 +1037,9 @@ impl CashIdentity {
             Self::ZerodhaCrossChecked => {
                 "Zerodha exact native token + NSE ISIN cross-check with independent master; current snapshot, not historical identity proof"
             }
+            Self::ZerodhaNseChecked => {
+                "Zerodha exact native NSE EQ token + symbol confirmed against NSE's own ISIN file (ind_niftytotalmarket_list.csv) landed the same day — NOT a vendor ISIN; no other vendor master; current snapshot, not historical identity proof"
+            }
         }
     }
 }
@@ -995,6 +1051,7 @@ fn parse_cash_identity(body: &str) -> Result<CashIdentity, Refusal> {
         [choice] if choice == "isin" => CashIdentity::Isin,
         [choice] if choice == "zerodha_symbol" => CashIdentity::ZerodhaSymbol,
         [choice] if choice == "zerodha_cross_checked" => CashIdentity::ZerodhaCrossChecked,
+        [choice] if choice == "zerodha_nse_checked" => CashIdentity::ZerodhaNseChecked,
         _ => {
             return Err(Refusal::InvalidCashIdentity {
                 got: choices.join(","),
@@ -1107,6 +1164,12 @@ pub struct SpotRequest {
     /// it, so the default is reached only by a hand-built request. Naming an
     /// unknown one still refuses: see [`parse_granularity`].
     pub granularity: pull::vendor::Granularity,
+    /// `Some(reason)` when this pull is a VERSIONED REPAIR (D-3350, WP-13c):
+    /// a month the append-only store refuses is published as a new
+    /// generation, journaled with this reason. Only `POST /pull/repair` sends
+    /// the field (`repair_reason`); `POST /pull/spot` refuses a body that
+    /// carries it, so an ordinary pull never repairs by accident.
+    pub repair: Option<String>,
 }
 
 /// One expired-derivative pull, validated.
@@ -1210,6 +1273,11 @@ pub fn parse_day(field: &'static str, text: &str) -> Result<Day, Refusal> {
     if y.len() != 4 || m.len() != 2 || d.len() != 2 {
         return Err(bad());
     }
+    // Digits only. `u8::from_str("+8")` is `Ok(8)`, so the widths alone let
+    // `2024-+8-+6` through as 2024-08-06. D-0905.
+    if !text.bytes().all(|b| b == b'-' || b.is_ascii_digit()) {
+        return Err(bad());
+    }
     let (Ok(year), Ok(month), Ok(day)) = (y.parse::<u16>(), m.parse::<u8>(), d.parse::<u8>())
     else {
         return Err(bad());
@@ -1272,7 +1340,14 @@ pub fn parse_day_field(body: &str, field: &'static str) -> Result<Day, Refusal> 
     // Padded so `8` and `08` mean the same August, then parsed by the one
     // parser. A piece that is not a number stays un-padded and fails the width
     // check inside `parse_day`, which is where a malformed date belongs.
+    // Digits only, and no wider than the field: `u16::from_str` also takes a
+    // leading `+` and leading zeros, so `from_m=+8` or `0008` once padded to
+    // `08` and walked past the strict-shape refusal D-0905 gives the ISO field
+    // (Z1-slice13-F2, D-1762).
     let pad = |text: &str, width: usize| -> String {
+        if text.len() > width || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return text.to_owned();
+        }
         text.parse::<u16>()
             .map_or_else(|_| text.to_owned(), |n| format!("{n:0width$}"))
     };
@@ -1483,6 +1558,11 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
             let raw = param(body, "granularity");
             parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
         },
+        // THE ROUTE DECIDES WHETHER THIS FIELD MAY BE PRESENT (D-3350): see
+        // `server::pull_repair` and `server::pull_spot`.
+        repair: Some(param(body, "repair_reason"))
+            .map(|reason| reason.trim().to_owned())
+            .filter(|reason| !reason.is_empty()),
     })
 }
 
@@ -1986,7 +2066,7 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
     let mut out = String::with_capacity(1024);
     let _ = write!(
         out,
-        r#"{{"surveyed":{},"state":{},"paused":{},"pull_seat":{},"blocked_by":{},"why":{},"cursor":{},"since_unix":{},"due_unix":{},"journal":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"in_flight":"#,
+        r#"{{"surveyed":{},"state":{},"paused":{},"pull_seat":{},"blocked_by":{},"why":{},"cursor":{},"since_unix":{},"due_unix":{},"journal":{},"target":{{"driver":"autopilot","from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"in_flight":"#,
         !status.feeds.is_empty(),
         js(status.state()),
         paused,
@@ -2007,19 +2087,55 @@ fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> 
         js(&status.target.timeframe),
         js(&status.target.feed),
     );
+    // THE CELL, AND THE RUN IT BELONGS TO, WITH EVERYTHING `/autopilot.json`
+    // ALREADY KNEW (D-3341, DB-G19). This printed instrument, month, index and
+    // of: no feed, no rung, no elapsed time, and a month that was the window's
+    // first for every instrument of a stock pass. So a page could not tell a
+    // Zerodha 1min pull from a GDFL view of the same symbol, and marked every
+    // row of that symbol "retrying" in every feed and rung (DB-G20).
+    //
+    // `run_target` IS THE RUN IN FLIGHT'S OWN TARGET, apart from `target`,
+    // which is the autopilot's: a paused autopilot's opening target (1day, no
+    // feed, 905 instruments) stood beside a hand run's 1min cell and described
+    // it with the wrong numbers.
+    let mut run_target = String::from("null");
     match status.now {
         None => out.push_str("null"),
         Some(ref now) => {
+            let elapsed = u64::try_from(now.since.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (run_elapsed, each, eta) = now.pace();
+            let some = |n: Option<u64>| n.map_or_else(|| "null".to_owned(), |n| n.to_string());
             let _ = write!(
                 out,
-                r#"{{"instrument":{},"month":{},"index":{},"of":{}}}"#,
+                r#"{{"instrument":{},"month":{},"window":{},"feed":{},"timeframe":{},"driver":{},"elapsed_ms":{},"index":{},"of":{},"run_elapsed_ms":{},"per_instrument_ms":{},"eta_ms":{},"eta_basis":{}}}"#,
                 js(&now.instrument),
                 js(&now.month),
+                now.window_json(),
+                js(&now.feed),
+                js(&now.timeframe),
+                js(now.driver.label()),
+                elapsed,
                 now.index,
-                now.of
+                now.of,
+                run_elapsed,
+                some(each),
+                some(eta),
+                js(crate::autopilot::ETA_BASIS),
+            );
+            run_target = format!(
+                r#"{{"driver":{},"feed":{},"timeframe":{},"from":{},"to":{},"instruments":{}}}"#,
+                js(now.driver.label()),
+                js(&now.feed),
+                js(&now.timeframe),
+                now.window
+                    .map_or_else(|| "null".to_owned(), |w| js(&w.from().to_string())),
+                now.window
+                    .map_or_else(|| "null".to_owned(), |w| js(&w.to().to_string())),
+                now.of,
             );
         }
     }
+    let _ = write!(out, r#","run_target":{run_target}"#);
     out.push_str(r#","waiting_on":["#);
     for (n, feed) in status.feeds.iter().enumerate() {
         if n > 0 {
@@ -2235,6 +2351,33 @@ pub const NO_QUEUE: &str = "REFUSED · the selection is legal and was understood
     clippy::panic
 )]
 mod tests {
+    /// The three-piece date spelling holds the same D-0905 line as the ISO
+    /// one: a signed piece is malformed, never padded into a real month
+    /// (Z1-slice13-F2, D-1762).
+    #[test]
+    fn a_signed_date_piece_is_refused_in_the_three_piece_spelling_too() {
+        use super::{Refusal, parse_day_field};
+        assert!(parse_day_field("from_y=2024&from_m=8&from_d=6", "from").is_ok());
+        assert!(parse_day_field("from_y=2024&from_m=08&from_d=06", "from").is_ok());
+        for body in [
+            "from_y=2024&from_m=%2B8&from_d=6",
+            "from_y=2024&from_m=8&from_d=%2B6",
+            "from_y=%2B2024&from_m=8&from_d=6",
+            "from_y=2024&from_m=-8&from_d=6",
+            "from_y=0002024&from_m=8&from_d=6",
+            "from_y=2024&from_m=008&from_d=6",
+            "from_y=2024&from_m=8&from_d=00006",
+        ] {
+            assert!(
+                matches!(
+                    parse_day_field(body, "from"),
+                    Err(Refusal::DateNotIso { field: "from", .. })
+                ),
+                "{body} must be refused as malformed"
+            );
+        }
+    }
+
     #[test]
     fn cash_identity_requires_explicit_valid_vendor_scoped_choice() {
         assert_eq!(
@@ -2253,6 +2396,10 @@ mod tests {
             parse_cash_identity("vendor=zerodha&cash_identity=zerodha_cross_checked").unwrap(),
             CashIdentity::ZerodhaCrossChecked
         );
+        assert_eq!(
+            parse_cash_identity("vendor=zerodha&cash_identity=zerodha_nse_checked").unwrap(),
+            CashIdentity::ZerodhaNseChecked
+        );
         for body in [
             "vendor=zerodha&cash_identity=",
             "vendor=zerodha&cash_identity=auto",
@@ -2262,6 +2409,11 @@ mod tests {
             "vendor=dhan&cash_identity=zerodha_cross_checked",
             "cash_identity=zerodha_cross_checked",
             "vendor=zerodha&cash_identity=zerodha_cross_checked&cash_identity=isin",
+            "vendor=dhan&cash_identity=zerodha_nse_checked",
+            "vendor=groww&cash_identity=zerodha_nse_checked",
+            "cash_identity=zerodha_nse_checked",
+            "vendor=zerodha&cash_identity=zerodha_nse_checked&cash_identity=zerodha_nse_checked",
+            "vendor=zerodha&cash_identity=ZERODHA_NSE_CHECKED",
         ] {
             assert!(
                 matches!(
@@ -2280,6 +2432,44 @@ mod tests {
             CashIdentity::ZerodhaCrossChecked
                 .label()
                 .contains("independent master")
+        );
+        let nse = CashIdentity::ZerodhaNseChecked.label();
+        assert!(nse.contains("NSE's own ISIN file"), "{nse}");
+        assert!(nse.contains("NOT a vendor ISIN"), "{nse}");
+        assert!(nse.contains("no other vendor master"), "{nse}");
+        assert!(nse.contains("same day"), "{nse}");
+        assert!(
+            cash_identity_refusal("auto").contains("zerodha_nse_checked"),
+            "the refusal names every accepted value"
+        );
+        // EVERY CHOICE THE /pull FORM OFFERS IS ONE THIS PARSER ACCEPTS, and
+        // the default it renders is `isin`. D-3314.
+        let offered: Vec<&str> = crate::render::CASH_IDENTITY_SELECT
+            .split("value=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                "isin",
+                "zerodha_nse_checked",
+                "zerodha_cross_checked",
+                "zerodha_symbol"
+            ]
+        );
+        for value in offered {
+            assert!(
+                parse_cash_identity(&format!("vendor=zerodha&cash_identity={value}")).is_ok(),
+                "{value}"
+            );
+        }
+        assert!(crate::render::CASH_IDENTITY_SELECT.contains("value=\"isin\" selected"));
+        assert_eq!(
+            crate::render::CASH_IDENTITY_SELECT
+                .matches(" selected")
+                .count(),
+            1
         );
     }
     use super::*;
@@ -2400,6 +2590,9 @@ mod tests {
             "2022-01-08-1", // one part too many
             "yyyy-mm-dd",   // not digits
             "-001-01-01",   // a sign is not a digit
+            "2024-+8-+6",   // right widths, and `u8::from_str` takes the `+`
+            "+024-01-08",   // nor is a plus sign, which `u16::from_str` takes
+            "2024-08-+6",   // one signed piece is enough to refuse (D-0905)
             "20220-1-08",   // right length, wrong widths
         ] {
             assert_eq!(
@@ -2525,6 +2718,44 @@ mod tests {
     }
 
     #[test]
+    fn only_the_reference_set_says_never_swept() {
+        // NO SET THAT HOLDS SWEPT MEMBERS MAY SAY "never swept". `CLAUDE.md` §1
+        // is enforced by `is_sweepable`, but an operator reads the note. The
+        // equity sets and `Everything` hold F&O shares, which D-0506 put on the
+        // surface, so their notes say which members are swept; these said
+        // "stored, never swept" until P18-05 (D-1965). `Indices` keeps its
+        // reference wording. `Swept` and `Fno` ARE the surface.
+        for target in SpotTarget::ALL {
+            if matches!(target, SpotTarget::Indices) {
+                assert!(
+                    target.note().contains("never swept"),
+                    "{} must say so on the form: {}",
+                    target.slug(),
+                    target.note()
+                );
+                continue;
+            }
+            assert!(
+                !target.note().contains("never swept"),
+                "{} holds swept members and must not disclaim them: {}",
+                target.slug(),
+                target.note()
+            );
+            if !matches!(target, SpotTarget::Swept) {
+                assert!(
+                    target.note().contains("swept"),
+                    "{} must say which of its members are swept: {}",
+                    target.slug(),
+                    target.note()
+                );
+            }
+        }
+        // The F&O note counts what D-0682 counted: 208 shares, two indices.
+        assert!(SpotTarget::Fno.note().contains("208 shares"));
+        assert!(SpotTarget::Fno.note().contains("D-0682"));
+    }
+
+    #[test]
     fn a_spot_request_names_its_target_or_is_refused() {
         for target in SpotTarget::ALL {
             let body = format!("target={}&from=2022-01-08&to=2022-02-08", target.slug());
@@ -2547,62 +2778,40 @@ mod tests {
             (
                 SpotTarget::Indices,
                 "Reference indices",
-                "stored and stamped onto trades; never swept",
+                "NSE-NIFTY and NSE-BANKNIFTY are swept; every other index is stored and stamped onto trades, never swept",
             ),
             (
                 SpotTarget::Equities,
                 "NIFTY Total Market equities",
-                "stored, never swept",
+                "stored; members that are F&O shares are swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty500,
                 "NIFTY 500 equities",
-                "the published 500 constituents — stored, never swept",
+                "the published 500 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty200,
                 "NIFTY 200 equities",
-                "the published 200 constituents — stored, never swept",
+                "the published 200 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty100,
                 "NIFTY 100 equities",
-                "the published 100 constituents — stored, never swept",
+                "the published 100 constituents — stored; members that are F&O shares are \
+                 swept (D-0506)",
             ),
             (
                 SpotTarget::Nifty50,
                 "NIFTY 50 equities",
-                "the published 50 constituents — stored, never swept; these are \
-                 the companies, not the NIFTY index",
+                "the published 50 constituents — stored; members that are F&O shares are \
+                 swept (D-0506); these are the companies, not the NIFTY index",
             ),
         ] {
             assert_eq!(target.label(), label);
             assert_eq!(target.note(), note);
-        }
-        // EVERY SET OFF THE SURFACE SAYS "never swept" IN THE TEXT THE FORM
-        // SHOWS. `CLAUDE.md` §1 is enforced by `is_sweepable`, but an operator
-        // reads the note, and a row that offered 500 instruments without that
-        // phrase is the row that gets mistaken for a widened engine surface.
-        // Two rows ARE the surface and say the opposite: `Swept` by definition,
-        // and `Fno` since D-0506 widened the surface to its 213 cash equities.
-        // The tiers stay "never swept" as SETS even though they overlap the
-        // F&O list — the tier decides nothing, `FNO_INDEX` does.
-        for target in SpotTarget::ALL {
-            if matches!(target, SpotTarget::Swept | SpotTarget::Fno) {
-                assert!(
-                    !target.note().contains("never swept"),
-                    "{} is on the surface and must not disclaim it: {}",
-                    target.slug(),
-                    target.note()
-                );
-                continue;
-            }
-            assert!(
-                target.note().contains("never swept"),
-                "{} must say so on the form: {}",
-                target.slug(),
-                target.note()
-            );
         }
         // Every set names ONE universe bit rather than sharing one. `Swept`
         // keeps the index bit: its membership is `is_sweepable`, not the bit.
@@ -4374,7 +4583,10 @@ mod route_tests {
             instrument: String::from("NSE-NIFTY"),
             month: String::from("2020-01"),
             timeframe: String::from("1min"),
-            feed: String::from("Groww"),
+            feed: String::from("groww"),
+            window: None,
+            driver: crate::autopilot::Driver::Autopilot,
+            run_since: std::time::Instant::now(),
             since: std::time::Instant::now(),
             index: 3,
             of: 9,
@@ -4387,6 +4599,100 @@ mod route_tests {
         assert!(json.contains(r#""instrument":"NSE-NIFTY""#), "{json}");
         assert!(json.contains(r#""index":3"#), "{json}");
         assert!(json.contains(r#""of":9"#), "{json}");
+    }
+
+    /// **THE HAND RUN IN FLIGHT IS DESCRIBED BY ITS OWN NUMBERS, APART FROM THE
+    /// PAUSED AUTOPILOT'S** (D-3341, DB-G19, DB-G20, DB-G21).
+    ///
+    /// The shape measured on 7 Oct: the autopilot paused on its opening target
+    /// (`2015-01-01..2026-10-05`, 905 instruments, `1day`, no feed) while an
+    /// operator's Zerodha 1min stock pass over `2018-01-01..2026-09-30` was on
+    /// instrument 45 of 208. `in_flight` said `CHOLAFIN`, `2018-01`, 45, 208 —
+    /// no feed, no rung, no elapsed time — and `target` described the
+    /// autopilot. Now the cell names its feed by wire key, its rung, its
+    /// window, who started it, its elapsed time and the run's measured pace,
+    /// and `run_target` is the run's own target beside the autopilot's.
+    #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "reads named fields of a parsed JSON fixture; a missing one is Null and fails the assertion"
+    )]
+    fn the_run_in_flight_carries_its_feed_rung_window_and_its_own_target() {
+        let mut status = surveyed(&[]);
+        status.target = crate::autopilot::Target {
+            from: String::from("2015-01-01"),
+            to: String::from("2026-10-05"),
+            instruments: 905,
+            timeframe: String::from("1day"),
+            feed: String::new(),
+        };
+        let window = pull::session::Window::new(
+            Day::new(2018, 1, 1).expect("a real day"),
+            Day::new(2026, 9, 30).expect("a real day"),
+        )
+        .expect("an ordered window");
+        status.now = Some(crate::autopilot::InFlight {
+            instrument: String::from("CHOLAFIN"),
+            month: crate::autopilot::months_of_window(window),
+            timeframe: String::from("1min"),
+            feed: String::from("zerodha"),
+            window: Some(window),
+            driver: crate::autopilot::Driver::Hand,
+            run_since: std::time::Instant::now(),
+            since: std::time::Instant::now(),
+            index: 45,
+            of: 208,
+        });
+        let json = waiting_json(&status, true, true);
+        let body: serde_json::Value = serde_json::from_str(&json).expect("one JSON object");
+
+        let cell = &body["in_flight"];
+        assert_eq!(cell["instrument"], "CHOLAFIN", "{json}");
+        assert_eq!(
+            cell["feed"], "zerodha",
+            "the wire key a row matches on: {json}"
+        );
+        assert_eq!(cell["timeframe"], "1min", "{json}");
+        assert_eq!(cell["driver"], "hand", "{json}");
+        assert_eq!(cell["window"]["from"], "2018-01-01", "{json}");
+        assert_eq!(cell["window"]["to"], "2026-09-30", "{json}");
+        assert_eq!(
+            cell["month"], "2018-01..2026-09",
+            "the whole window's span, never its first month: {json}"
+        );
+        assert!(cell["elapsed_ms"].is_u64(), "{json}");
+        assert!(cell["run_elapsed_ms"].is_u64(), "{json}");
+        assert!(
+            cell["eta_basis"]
+                .as_str()
+                .is_some_and(|basis| basis.starts_with("extrapolated")),
+            "an extrapolated finish is labelled as one: {json}"
+        );
+
+        let run = &body["run_target"];
+        assert_eq!(run["driver"], "hand", "{json}");
+        assert_eq!(run["feed"], "zerodha", "{json}");
+        assert_eq!(run["timeframe"], "1min", "{json}");
+        assert_eq!(run["from"], "2018-01-01", "{json}");
+        assert_eq!(run["to"], "2026-09-30", "{json}");
+        assert_eq!(run["instruments"], 208, "{json}");
+
+        let autopilot = &body["target"];
+        assert_eq!(autopilot["driver"], "autopilot", "{json}");
+        assert_eq!(
+            autopilot["instruments"], 905,
+            "the autopilot's own, unchanged: {json}"
+        );
+        assert_eq!(autopilot["timeframe"], "1day", "{json}");
+
+        // NOTHING IN FLIGHT, NO RUN TARGET: never the autopilot's restated.
+        status.now = None;
+        let idle: serde_json::Value =
+            serde_json::from_str(&waiting_json(&status, true, true)).expect("one JSON object");
+        assert!(
+            idle["in_flight"].is_null() && idle["run_target"].is_null(),
+            "{idle}"
+        );
     }
 }
 

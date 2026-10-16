@@ -64,7 +64,17 @@
   import { createPageRequests } from '$lib/page-requests.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import { parseKey } from '$lib/instrument.js';
-  import { monthVerdict, isWholeAudit } from '$lib/gap-verdict.js';
+  import { dbHref } from '$lib/urlstate.js';
+  import { monthVerdict, isWholeAudit, unreadablePeers, auditRung } from '$lib/gap-verdict.js';
+
+  /* A MONTH ROW OPENS THAT MONTH ON /db (D-3337 item 4): the same feed, the
+     series' own key and rung, and the month as the day window. */
+  /** @param {string} ym `YYYY-MM` */
+  const monthLink = (ym) => {
+    const [y, mo] = ym.split('-').map(Number);
+    const last = new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10);
+    return dbHref({ feed: feeds.active ?? '', key: symbol, tf: rung, from: `${ym}-01`, to: last });
+  };
 
   /** @typedef {{ day: number, from: number, to: number, minutes: number, reason: string }} Run */
   /**
@@ -96,10 +106,11 @@
    *     first: string | null,
    *     last: string | null,
    *     days: number,
-   *     source: 'peers' | 'table',
+   *     source: 'peers' | 'table' | 'record',
    *     stale: boolean,
    *     covers_span: boolean,
-   *     voted_by: string[]
+   *     voted_by: string[],
+   *     unreadable?: string[]
    *   },
    *   month: MonthVerdict[]
    * }} Answer
@@ -108,9 +119,15 @@
   /* The instrument and span are seeded from the census. A hardcoded
      default span once threw away 40 of 121 months and reported 81/81 with no
      hole — the answer looked complete because the question was small.
-     The endpoint audits only source minutes, so its timeframe is fixed. */
+     The endpoint audits only source minutes, so the rung is the census's,
+     never the operator's: the series' own 1min months when it holds any, else
+     its 1s months, which the server folds to minutes (D-3336 §4; GDFL holds
+     nothing else). A coarser rung cannot prove its source minutes and is never
+     offered. */
   let symbol = $state('');
-  const rung = '1min';
+  const rung = $derived(
+    store.feed === feeds.active ? (auditRung(store.rows ?? [], symbol) ?? '1min') : '1min'
+  );
   let from = $state('');
   let to = $state('');
 
@@ -316,7 +333,7 @@
   <header class="head">
     <h1>Completeness</h1>
     <p class="sub">
-      Whether a stored <b>1min</b> series is whole against the available dated session evidence.
+      Whether a stored <b>{rung}</b> series is whole against the available dated session evidence.
       <code>/db</code> compares each instrument-month to the fullest peer, which cannot see a gap
       shared by every instrument. Here, missing means an expected minute is absent; it does not
       prove provider fault. NSE cash needs the exact stock's dated closing-auction eligibility.
@@ -335,7 +352,7 @@
     <label class="f">
       <span class="fk">Rung</span>
       <select value={rung} disabled aria-describedby="minute-audit-note">
-        <option value="1min">1min</option>
+        <option value={rung}>{rung}</option>
       </select>
     </label>
     <label class="f">
@@ -357,7 +374,8 @@
   </div>
 
   <p class="whence" id="minute-audit-note">
-    This is a source-minute audit. Daily and coarser bars cannot prove their source minutes.
+    This is a source-minute audit. One-second bars are finer and are folded to minutes first;
+    daily and coarser bars cannot prove their source minutes.
   </p>
 
   {#if !hasMinuteSource}
@@ -367,8 +385,9 @@
       {:else if !feeds.active || store.feed !== feeds.active}
         Waiting for the selected feed's store census before a minute audit can be offered.
       {:else if symbol}
-        No 1min source is recorded for {symbol} in this feed's store census. Audit is disabled;
-        select a series with stored 1min bars. Other timeframes cannot substitute for them.
+        No 1min or 1s source is recorded for {symbol} in this feed's store census. Audit is
+        disabled; select a series with stored 1min or 1s bars. Coarser timeframes cannot
+        substitute for them.
       {:else}
         No stored series is available to select for a minute audit.
       {/if}
@@ -418,6 +437,9 @@
         {b.calendar.first} to {b.calendar.last}. The series being audited is not among them: a
         calendar derived from it would read every hole as the edge of a trading window and answer
         <em>no losses</em> for any input.
+      {:else if b.calendar?.source === 'record'}
+        the <b>calendar of record</b> (sourced sessions, special-session windows and halts),
+        {b.calendar.first} to {b.calendar.last}. No stored series votes on it.
       {:else}
         the <b>typed calendar table</b>, {b.calendar?.first} to {b.calendar?.last}.
       {/if}
@@ -426,6 +448,26 @@
       its full listing lifetime or guarantees that a provider can supply every expected minute.
     </p>
 
+    {@const unread = unreadablePeers(b.calendar)}
+    {#if unread === null}
+      <div class="refusal" role="alert">
+        <span class="rlabel">Peer readings unknown</span>
+        <p>
+          This answer does not say which peer readings could not be opened (<code>calendar.unreadable</code>
+          is missing or malformed), so it cannot show that every peer that might have voted was read.
+          The span is not called whole on an answer that did not say.
+        </p>
+      </div>
+    {:else if unread.length > 0}
+      <div class="refusal" role="alert">
+        <span class="rlabel">Peers that could not be read</span>
+        <p>
+          <b>{unread.length}</b> peer reading{unread.length === 1 ? '' : 's'} could not be opened and did
+          not vote: {unread.join(', ')}. The calendar above lacks whatever {unread.length === 1 ? 'it' : 'they'}
+          would have proved, so <em>none missing</em> here is not a whole span.
+        </p>
+      </div>
+    {/if}
     {#if b.calendar?.stale}
       <div class="refusal">
         <span class="rlabel">The table has run out</span>
@@ -478,7 +520,9 @@
         {#each b.month as m (m.month)}
           {@const v = monthVerdict(m)}
           <tr class={v.kind}>
-            <td class="mono">{m.month}</td>
+            <td class="mono">
+              <a href={monthLink(m.month)} title="Open this month of this series on /db">{m.month}</a>
+            </td>
             <td class="num mono">{fmt(m.held)}</td>
             <td class="num mono">{fmt(m.expected)}</td>
             <td class="num mono">{m.lost_minutes ? fmt(m.lost_minutes) : '—'}</td>

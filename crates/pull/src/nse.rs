@@ -772,9 +772,19 @@ pub fn constituents(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
 ///
 /// # Errors
 ///
-/// [`NseError::HeaderUnexpected`] naming the header that arrived, and then
-/// everything [`constituents`] refuses.
+/// [`NseError::TooLarge`] past [`MAX_DOCUMENT_BYTES`], checked before anything
+/// else as in [`constituents`]; then [`NseError::HeaderUnexpected`] naming the
+/// header that arrived; then everything [`constituents`] refuses.
 pub fn constituents_strict(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
+    // SIZE FIRST, as in [`constituents`]: the header refusal copies the first
+    // line, and on a body past the bound with no newline that line is the
+    // whole body. D-0960.
+    if body.len() > MAX_DOCUMENT_BYTES {
+        return Err(NseError::TooLarge {
+            bytes: body.len(),
+            cap: MAX_DOCUMENT_BYTES,
+        });
+    }
     if !looks_like_constituents(body) {
         return Err(NseError::HeaderUnexpected {
             got: first_line(body).trim_end_matches('\r').to_owned(),
@@ -990,6 +1000,31 @@ mod tests {
                 cap: MAX_DOCUMENT_BYTES,
             }
         );
+    }
+
+    /// W1-pull3-9 (D-0960). The strict entry point compared the header before
+    /// the size, so a body past the bound with no newline came back as
+    /// `HeaderUnexpected` whose `got` was the whole body. Matched rather than
+    /// compared with `assert_eq!` so a failure does not print that body.
+    #[test]
+    fn the_strict_decode_refuses_a_document_past_the_bound_before_its_header() {
+        let huge = "x".repeat(MAX_DOCUMENT_BYTES + 1);
+        let why = constituents_strict(&huge).expect_err("past the bound");
+        let shown = format!("{why:?}").len();
+        assert!(
+            matches!(
+                why,
+                NseError::TooLarge { bytes, cap }
+                    if bytes == MAX_DOCUMENT_BYTES + 1 && cap == MAX_DOCUMENT_BYTES
+            ),
+            "expected TooLarge, got a refusal whose Debug form is {shown} bytes"
+        );
+        // At the bound exactly, the header is what refuses it.
+        let at = "x".repeat(MAX_DOCUMENT_BYTES);
+        assert!(matches!(
+            constituents_strict(&at).expect_err("wrong header"),
+            NseError::HeaderUnexpected { got } if got.len() == MAX_DOCUMENT_BYTES
+        ));
     }
 
     // -- the directory crawl ------------------------------------------------

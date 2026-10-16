@@ -1829,6 +1829,17 @@ impl SelectionLedgerV4 {
     /// Refuses read-only use, invalid/duplicate bytes, a stale or replaced file,
     /// the caller's bound, arithmetic failure and every I/O or lock failure.
     pub fn append(&mut self, receipt: &SelectionReceiptV4) -> Result<(), SelectionV4Refusal> {
+        self.append_with(receipt, std::io::Write::write_all)
+    }
+
+    /// [`Self::append`] with the receipt write supplied, so a test can inject a
+    /// short write. A failed write is truncated back to the scanned end, so the
+    /// file stays whole and the next append lands on a record boundary (D-1850).
+    fn append_with(
+        &mut self,
+        receipt: &SelectionReceiptV4,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), SelectionV4Refusal> {
         if !self.writable {
             return Err("a read-only Selection V4 ledger cannot append".to_owned());
         }
@@ -1880,12 +1891,22 @@ impl SelectionLedgerV4 {
                 .try_reserve(1)
                 .map_err(|why| format!("Selection V4 latest-index reserve failed: {why}"))?;
             let raw = receipt.to_bytes()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .map_err(|why| format!("Selection V4 append seek failed: {why}"))?;
-            self.file
-                .write_all(&raw)
-                .map_err(|why| format!("Selection V4 receipt append failed: {why}"))?;
+            if let Err(why) = crate::append_rollback::append_with(
+                &mut self.file,
+                &raw,
+                "Selection V4 receipt",
+                write,
+            ) {
+                // The rollback restored exactly the scanned bytes under this
+                // handle's lock; retain that generation as a successful append
+                // retains its own, so this handle stays usable (D-1850). A failed
+                // rollback leaves the length wrong, the generation stale, and the
+                // next append refuses.
+                if let Ok(generation) = validated_generation(&self.file, &self.path, self.scanned) {
+                    self.generation = generation;
+                }
+                return Err(why);
+            }
             self.file
                 .sync_all()
                 .map_err(|why| format!("Selection V4 receipt sync failed: {why}"))?;
@@ -3131,6 +3152,35 @@ mod tests {
         assert!(file_error.contains("is not a directory"));
         assert!(file_root.is_file());
         std::fs::remove_file(file_root).expect("non-directory authority fixture removes");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_same_handle_appends_next() {
+        let root = TempRoot::new("append-rollback");
+        let first = receipt_with_salt(0);
+        let second = receipt_with_salt(30_000);
+        let mut ledger = SelectionLedgerV4::open(&root.path, 4).expect("V4 ledger creates");
+        ledger.append(&first).expect("first V4 receipt appends");
+        let path = SelectionLedgerV4::path(&root.path);
+        let before = std::fs::read(&path).expect("V4 bytes");
+        let why = ledger
+            .append_with(&second, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed V4 write refuses");
+        assert!(
+            why.contains("Selection V4 receipt: injected short write; truncated back"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&path).expect("V4 bytes"), before);
+        ledger
+            .append(&second)
+            .expect("the same handle appends next");
+        drop(ledger);
+        let reopened = SelectionLedgerV4::open_read(&root.path, 4).expect("ledger reopens");
+        assert_eq!(reopened.selections(), 2);
+        assert_eq!(reopened.receipt(&second.selection_id()), Some(&second));
     }
 
     #[test]

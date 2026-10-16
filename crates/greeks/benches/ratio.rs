@@ -12,7 +12,7 @@
 //! [`greeks::solver`] is **not** O(1) and its own header says so at length. It
 //! is a root find, and what it has instead is an ARITHMETIC ceiling:
 //! `BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS + FINAL_EVALUATION`
-//! = 2 + 8 + 64 + 1 = [`MAX_ITERATIONS`], with the bisection performing exactly
+//! = 2 + 8 + 75 + 1 = [`MAX_ITERATIONS`], with the bisection performing exactly
 //! [`BISECTION_STEPS`] halvings and no data-dependent stopping rule.
 //!
 //! So this file does NOT time an easy solve against a hard one and call the
@@ -20,7 +20,7 @@
 //! differ and is pinned by `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound`
 //! rather than by a stopwatch. What is measured here is the cost **per model
 //! evaluation**, which is the part that must be constant for the arithmetic
-//! ceiling to mean anything: 75 evaluations is a bound on cost only if an
+//! ceiling to mean anything: 86 evaluations is a bound on cost only if an
 //! evaluation costs the same on a hard input as on an easy one. A solver that
 //! did more work per step on a difficult quote would satisfy the iteration
 //! test and still be unbounded in time.

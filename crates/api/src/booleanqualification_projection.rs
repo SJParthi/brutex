@@ -24,12 +24,7 @@ pub(super) fn project(reader: &Qualification, asked: &Asked) -> Result<Value, St
     let mut rendered = Vec::new();
     for (n, (row, original)) in rows.iter().zip(&observations).enumerate() {
         let index = asked.offset + n;
-        if row.original != original.identity
-            || row.family != original.source
-            || row.coordinate != original.coordinate
-        {
-            return Err("qualification row differs from original coordinate".into());
-        }
+        same_coordinate(row.original, row.family, row.coordinate, original)?;
         let mut value = admission_projection::row(
             index,
             &AdmissionRow {
@@ -98,6 +93,27 @@ pub(super) fn project(reader: &Qualification, asked: &Asked) -> Result<Value, St
     )?;
     reader.require_current()?;
     Ok(body)
+}
+
+/// Refuses a qualification row that does not name the saved original row
+/// beside it: the same candidate identity, source family and grid coordinate.
+///
+/// Its own function so a test can reach it without a saved qualification: no
+/// api test renders a real `/boolean-qualification.json` page, and the check
+/// inverted inside `project` survived mutation (GAP14-58, D-0731).
+fn same_coordinate(
+    identity: [u8; 32],
+    family: usize,
+    coordinate: usize,
+    original: &cli::boolean_evidence::StatisticsRow,
+) -> Result<(), String> {
+    if identity != original.identity
+        || family != original.source
+        || coordinate != original.coordinate
+    {
+        return Err("qualification row differs from original coordinate".into());
+    }
+    Ok(())
 }
 
 fn row_detail(reader: &Qualification, row: &QualificationRow) -> Result<Value, String> {

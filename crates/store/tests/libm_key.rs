@@ -66,8 +66,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use brutex_core::vendor::Vendor;
 
-use store::file::{Appended, BarFile, StoreError};
-use store::format::{FormatError, Greek, RATE_FROM_OPERATOR, VOL_FROM_SOLVED};
+use store::file::{Appended, BarFile, Conflict, StoreError};
+use store::format::{Greek, RATE_FROM_OPERATOR, VOL_FROM_SOLVED};
 use store::layout::Layout;
 use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
@@ -198,13 +198,14 @@ fn image(root: &Path) -> Vec<u8> {
     fs::read(greeks_path().to_path_buf(root)).expect("the greeks file")
 }
 
-/// Whether `appended` is the refusal D-0692 describes: a timestamp fault, for
-/// timestamps the file already holds.
+/// Whether `appended` is the refusal D-0692 describes, for timestamps the file
+/// already holds. It was reported as a timestamp fault; since D-1525 it is
+/// named as what it is, a restatement of a held row.
 fn refused_as_a_timestamp_fault(appended: &Result<Appended, StoreError>) -> bool {
     matches!(
         appended,
-        Err(StoreError::Format {
-            source: FormatError::TimestampsOutOfOrder { .. },
+        Err(StoreError::OverlapDisagrees {
+            conflict: Conflict::Restated,
             ..
         })
     )
@@ -292,7 +293,7 @@ fn a_forward_append_under_another_libm_is_committed_and_names_no_build() {
 /// **AFTER A MIXED RESUME, NO ONE LIBM BUILD RE-FILES THE WHOLE MONTH.**
 ///
 /// Each build re-files the window it wrote as `AlreadyPresent`, and refuses
-/// the window the other wrote with `TimestampsOutOfOrder`, for timestamps the
+/// the window the other wrote as a restatement (`OverlapDisagrees`), for timestamps the
 /// file already holds. Offering the whole month is refused under either build,
 /// and a refused batch files none of the new days it carries.
 #[test]
@@ -815,7 +816,11 @@ fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
         "greeks/src/solver.rs",
         "greeks/tests/vendor_anchor.rs",
     ];
-    let mut expected = greeks.to_vec();
+    // `cli/src/live.rs` cites `docs/02-store-format.md` §29, the live-file
+    // layout D-1940 documented, not the libm register; read and listed
+    // (D-1769).
+    let mut expected = vec!["cli/src/live.rs"];
+    expected.extend(greeks);
     expected.push("store/tests/libm_key.rs");
     assert_eq!(
         sources_that(|text| mentions_section(text, "29")),

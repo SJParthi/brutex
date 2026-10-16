@@ -21,10 +21,10 @@
 //! thin adapter over it; the dependency is taken by the change that first makes
 //! a live call. See `crates/pull/Cargo.toml` and `docs/05-decisions.md` D-0035.
 //!
-//! **No trading calendar.** `docs/00-charter.md` records three special-session
-//! shapes and no holiday list, so `P-03` in `docs/04-invariants.md` keeps its
-//! `—` status rather than being satisfied by a weekend rule that would be
-//! wrong — 2025-02-01 was a Saturday and a full 375-bar session.
+//! **No weekday rule.** The trading calendar is [`calendar`], measured rather
+//! than computed from a day of the week — 2025-02-01 was a Saturday and a full
+//! 375-bar session. [`session::Window::verdict`] drops a bar on a day it
+//! records closed, which is `P-03` in `docs/04-invariants.md` (D-2673).
 //!
 //! **No concurrency wrapper around [`rate`].** [`rate::Governor`] takes
 //! `&mut self` and holds no interior mutability, so one governor cannot be
@@ -109,6 +109,7 @@ pub fn ensure_tls_provider() {
     });
 }
 
+pub mod alerts;
 pub mod archive;
 /// The NSE trading calendar, MEASURED from days that actually traded -- because
 /// `session` holds none, and without one every stored series reads SHORT for
@@ -124,6 +125,8 @@ pub mod cash_session_cache;
 pub mod chain;
 pub mod config;
 pub mod csv;
+/// The pulled day bar, checked against the days its minute bars fold to.
+pub mod daycheck;
 /// DhanHQ v2's TWO error vocabularies -- one vendor's row in `refusal`.
 ///
 /// `DH-902` "not subscribed" and `DH-901` "token expired" both arrive as
@@ -131,6 +134,9 @@ pub mod csv;
 /// alone, and an unsubscribed account was told to wait for tomorrow's
 /// credential.
 pub mod dhan;
+/// The day an option contract SETTLED when the vendor's name states another:
+/// measured re-datings and the calendar, one contract one series. D-3331.
+pub mod expiry_alias;
 pub mod fetch;
 pub mod fno;
 /// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
@@ -142,6 +148,32 @@ pub mod folder;
 /// WHY EVERY ABSENT BAR IS ABSENT -- classified into four states, of which only
 /// one is a loss. The store always knew; nothing asked it.
 pub mod gaps;
+/// The vendor's GDFL capital-market zips read in place, one `CmSource`:
+/// each member inflated in memory and held to its central record. D-0812,
+/// D-2800.
+pub mod gdfl_archive;
+/// GDFL capital-market tick files: day, file name, ticker and rows, read from
+/// a `CmSource` and checked before the one-second fold sees them. D-0808,
+/// D-2800.
+pub mod gdfl_cm;
+/// The common GDFL import runtime: indices, stocks and option contracts
+/// folded to one-second and one-minute bars through the one ingest door,
+/// incremental by day. D-2802.
+pub mod gdfl_import;
+/// Stock options across a corporate action, detected from the data: the
+/// inferred lot step, the renamed strikes and the vendor OI left unscaled.
+/// D-3331, D-3343.
+pub mod gdfl_lineage;
+/// GDFL NSE options tick files and the contract each ticker names, read from
+/// the yearly zips or the tick store. D-2806.
+pub mod gdfl_nfo;
+/// The re-key: stored GDFL option keys the current decoder files under
+/// another key (moved, as new files, the old key pointing at the new) or
+/// refuses (retired, by name). D-3331, D-3316; WP-12c.
+pub mod gdfl_rekey;
+/// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
+/// D-2801.
+pub mod gdfl_tickstore;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an
@@ -182,12 +214,19 @@ pub mod refusal;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// The risk-free rate as a dated series -- the RBI 91-day Treasury Bill
+/// cut-off yield, as of the latest release strictly before the trade day,
+/// read from a table the operator supplies by path. D-2810.
+pub mod riskfree;
 /// Dhan's ATM-relative expired-options driver — the shape `chain` is not.
 pub mod rolling;
 /// THE COUNTER, CHECKED AGAINST THE FILES IT COUNTS -- the one thing in this
 /// crate entitled to say a month is verified rather than merely counted.
 pub mod scrub;
 pub mod secret;
+/// Whose bars a minute answer holds: every minute judged against the day bar
+/// the same series was served (WP-13d).
+pub mod series_identity;
 pub mod session;
 pub mod ssm;
 pub mod tenor;
@@ -211,3 +250,13 @@ pub mod work;
 /// back. See its own header for what it drives and for the one site it cannot.
 #[cfg(test)]
 mod emit_sites;
+
+/// Test-only builders of invented GDFL zips, tick-store day files and rows.
+#[cfg(test)]
+mod gdfl_fixtures;
+
+/// Test-only: re-runs a test where the permission bits bind, even as root. The
+/// same file serves this crate's integration tests. D-0995.
+#[cfg(all(test, unix))]
+#[path = "../tests/support/mod.rs"]
+mod support;

@@ -27,6 +27,11 @@ const API = `http://127.0.0.1:${process.env.BRUTEX_API_PORT ?? 8080}`;
 // tidier; these routes are not under one.
 const ROUTES = [
 	'/inspection.json',
+	// FREE SPACE, STORE SIZE, CENSUS RETENTION AND THE BACKUP RECEIPT for the
+	// /ingest disk line (DB-B73, WP-81).
+	'/disk.json',
+	// WHAT THE FULL-BLOCK SCRUB FOUND IN THE SERIES /db SHOWS (DB-B74, WP-81).
+	'/scrub.json',
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',
@@ -55,7 +60,20 @@ const ROUTES = [
 	// it reports one gap per run, so a green suite after adding an entry is not
 	// evidence the list is complete.
 	'/indexmap.json',
+	// THE ALIAS TABLE /db's search reads (WP-51, D-3332): served by
+	// `crates/api/src/aliases.rs`; without it `npm run dev` answers the
+	// HTML fallback and the search says the alias table is not in force.
+	'/aliases.json',
+	// THE SELECTION V6 READER `web/src/lib/selection-v6.js` calls. Served by
+	// `crates/api/src/server.rs` and missing here, so `npm run dev` answered
+	// it with the HTML fallback; `tests/proxy.test.js` caught it (D-1934).
+	'/selection-v6.json',
 	'/store.json',
+	// THE SELECTION'S FACETS (D-3327 item 3, WP-30) and their `?since=`
+	// deltas, read by /db's census banner (WP-56) for what moved for the
+	// instrument on screen; and one underlying's months and rungs for
+	// /backtest's rung switcher, in place of the whole census (DB-B58, WP-81).
+	'/census/facets.json',
 	'/audit.json',
 	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
 	// Registered in `crates/api/src/server.rs` and missing from this list when
@@ -109,6 +127,14 @@ const ROUTES = [
 	'/engine/index-stop-launch.json',
 	'/index-stop.json',
 	'/index-stop-qualification.json',
+	// Five readers in `$lib` reached through an injected `request`, which the
+	// drift test could not see until P2-02-01 (D-1766) widened it to every
+	// absolute `.json` literal. Each is served by `crates/api`.
+	'/index-stop-vix.json',
+	'/index-stop-candles.json',
+	'/index-stop-ranking.json',
+	'/candidate-trades.json',
+	'/expression-search.json',
 	// ONE RUN'S ROUND TRIPS. The per-trade table on the backtest page rendered
 	// a padlock in every cell, because nothing wrote the file it reads and no
 	// route served it. `cli::trades` writes it now and `/trades.json` serves it,
@@ -159,8 +185,11 @@ const ROUTES = [
 	// The collision was real: both surfaces wanted the same path, and the
 	// Svelte one had no other source of data. `/audit.json` is what removed
 	// that — see `crates/api/src/audit_json.rs`. The page now owns `/audit`
-	// here, the Rust page still answers `/audit` on the API's own port, and
-	// nothing renders differently depending on how the operator arrived.
+	// here AND on the API's own port: removing it from this proxy fixed only
+	// development, because the binary registered `/audit` ahead of its
+	// front-end fallback and a reload there still got Rust (P3-02-01). The
+	// Rust page now answers `/audit/page` instead (D-1971), so nothing renders
+	// differently depending on how the operator arrived, in either place.
 	'/pull',
 	// THE AUTOPILOT. Four entries and NOT the `/autopilot` prefix, deliberately:
 	// `/autopilot` is a PAGE this app renders, and proxying that prefix would
@@ -196,6 +225,9 @@ const ROUTES = [
 	// producing a plausible error message about JSON.
 	'/folder.json',
 	'/ingest/status.json',
+	// Each row's pull refusals, joined to /ingest's month cells (WP-61, DB-G23;
+	// `crates/api/src/ingest_refusals.rs`).
+	'/ingest/refusals.json',
 	// THE FIFTH DRIFT, and the test above called its shot: it said a fifth
 	// would fail a test rather than produce a plausible error about JSON, and
 	// this is it. `/mapping` reads `/masters/status.json` to learn which
@@ -249,8 +281,42 @@ const ROUTES = [
 	// SILENTLY (`if (!response.ok) { sweptSurface = null; return; }` and a bare
 	// `catch {}`), so the swept-target sentence just vanishes.
 	'/calendar.json',
+	// THE DAY FLAGS AND THE IMPORT JOURNAL /db's day band, coverage calendar
+	// and contract-life marks read (WP-54; `crates/api/src/dayflags.rs`,
+	// `crates/api/src/imports.rs`). Without them `npm run dev` answers the
+	// HTML fallback and the band reports a JSON error for a routing gap.
+	'/dayflags.json',
+	'/imports.json',
 	'/vocab.json',
-	'/universes.json'
+	'/universes.json',
+	// THE OPTION BAR'S SPOT AND GREEKS `/db` reads per page of rows
+	// (`web/src/lib/moneyness.js`, `web/src/lib/greeks.js`). Served by
+	// `crates/api/src/server.rs` (D-2807, D-2830) and missing here when the
+	// GDFL line was merged onto the mainline, whose widened scanner in
+	// `tests/proxy.test.js` caught both.
+	'/spot.json',
+	'/greeks.json',
+	// EACH OPTION BAR'S RUNG at its own instant, over the strikes stored by
+	// then (`web/src/lib/moneyness.js` readRungs; `crates/api/src/chain.rs`,
+	// D-3329). WP-53.
+	'/chain.json',
+	// WHERE A BAR CAME FROM (WP-55, D-3334): the Source lines under /db's
+	// grid and their drawer read `/provenance.json` per month file and per
+	// bar, and `/sources/day.json` for a share's closing-auction record and
+	// last print (D-3320). The day route is listed EXACTLY and never as
+	// `/sources`: that path is where the All sources page goes (D-3339,
+	// WP-58), and a prefix claiming it would hand that page to Rust in
+	// development only — the `/audit` trap the notes above record.
+	'/provenance.json',
+	'/sources/day.json',
+	// THE ALL SOURCES PAGE'S OTHER TWO READS (WP-58, D-3339) AND THE /db CHART'S
+	// (WP-57, DB-080): `/sources.json` is the rung table, drawn by the All
+	// sources page and read by the chart's rung picker; `/sources/bars.json` is
+	// the tagged timeline and the page of a rung the server folds on request.
+	// Both EXACTLY, for the reason above: `/sources` itself is the All sources
+	// page and must stay with the dev server.
+	'/sources.json',
+	'/sources/bars.json'
 ];
 
 export default {

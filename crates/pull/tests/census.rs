@@ -625,6 +625,43 @@ fn a_segment_the_census_cannot_key_stores_no_bars() {
     assert!(!manifest_path(&store, VENDOR).exists());
 }
 
+/// **A PLAN NAMING BSE STORES NOTHING.** GAP2-41, D-0955.
+///
+/// `CLAUDE.md` §1: BSE is not swept and not pulled (D-0017). `identify` parsed
+/// any exchange the core enum knows, so this plan wrote BSE bars and a census
+/// row. Every segment is tried, because the refusal belongs to the exchange
+/// and must not depend on which segment came with it.
+#[test]
+fn a_plan_naming_bse_writes_no_bars_and_no_census_row() {
+    for segment in ["INDEX", "CASH", "FNO"] {
+        let scratch = Scratch::new("BSE");
+        let archive = scratch.archive(&[("NIFTY", body())]);
+        let store = scratch.store();
+        let request = request();
+        let plan = Plan {
+            exchange: "BSE",
+            ..plan_over(&request, segment)
+        };
+        let done = ingest::from_dir(&archive, &store, plan).expect("the folder itself is fine");
+
+        assert_eq!(done.bars_stored, 0, "{segment}: nothing was stored");
+        assert_eq!(done.bars_committed, 0, "{segment}");
+        assert_eq!(done.counted, 0, "{segment}");
+        assert_eq!(done.failures.len(), 1, "{segment}: {:?}", done.failures);
+        assert_eq!(done.failures[0].instrument, "NIFTY", "the member is named");
+        let why = &done.failures[0].why;
+        assert!(
+            why.contains("BSE") && why.contains("D-0017"),
+            "{segment}: the venue and the decision are named: {why}"
+        );
+        assert!(
+            !store.join(STORE_ROOT).exists(),
+            "{segment}: not one byte of bars reached the disk"
+        );
+        assert!(!manifest_path(&store, VENDOR).exists(), "{segment}");
+    }
+}
+
 // ===========================================================================
 // A census that will not open stops the run before it writes
 // ===========================================================================
@@ -673,15 +710,15 @@ fn a_census_that_cannot_be_read_is_not_treated_as_a_first_ingest() {
     let archive = scratch.archive(&[("NIFTY", body())]);
     let store = scratch.store();
     let path = manifest_path(&store, VENDOR);
-    // A directory where the census file goes: it has metadata, and reading it
-    // is refused by the host.
+    // A directory where the census file goes: it opens, and its handle is
+    // not a regular file, so it is refused unread (CE-64, D-2684).
     fs::create_dir_all(&path).expect("a directory at the census path");
 
     let done = run(&archive, &store, &request());
     assert_eq!(done.bars_stored, 0);
     assert_eq!(done.failures.len(), 1);
     assert!(
-        done.failures[0].why.contains("could not be read"),
+        done.failures[0].why.contains("is not a regular file"),
         "the host's refusal is carried — {}",
         done.failures[0].why
     );
@@ -1237,6 +1274,9 @@ fn write_version_1_census(path: &Path, entries: &[Entry]) {
         n_valid: entries.len() as u64,
         n_keys: entries.len() as u64,
         total_rows: entries.iter().map(|e| e.rows).sum(),
+        // A single file: the compiled ceiling, and no segment (D-3316).
+        capacity: pull::manifest::MAX_ENTRIES,
+        segment: None,
     };
     file[..64].copy_from_slice(&header.image());
     for entry in entries {

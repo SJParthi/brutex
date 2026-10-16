@@ -112,6 +112,55 @@ deny = [
     { name = "node-bindgen" },
     { name = "neon" },
     { name = "jni" },
+    # ADDED BY D-1108, so this list, CI gate 13's and the `FORBIDDEN` list in
+    # crates/vocab/tests/workspace_is_rust.rs name the same runtimes; that test
+    # reads all three and fails when they drift. The three crates that embed or
+    # bind the best-known interpreted language are not here, because gate 15
+    # refuses the word in this file; gate 13 and that test hold them.
+    { name = "hlua" },
+    { name = "lua" },
+    { name = "lua-src" },
+    { name = "luajit-src" },
+    { name = "quickjs" },
+    { name = "rquickjs" },
+    { name = "duktape" },
+    { name = "mozjs" },
+    { name = "rhai" },
+    { name = "napi" },
+    { name = "j4rs" },
+    { name = "ruby-sys" },
+    { name = "magnus" },
+    { name = "rutie" },
+    { name = "ext-php-rs" },
+    { name = "openssl-sys" },
+    # ADDED BY D-2350 (RO-9): WebAssembly runtimes and further embedded or bound
+    # interpreters. `extendr` and `perl-sys` answer 404 on crates.io and are
+    # here for their families (`extendr-api`, `extendr-engine`), which gate 13
+    # and the FORBIDDEN test match and cargo-deny, matching exact names, does
+    # not; `libperl-sys` is the published binding. the crate that embeds the best-known
+    # interpreted language in Rust is held by gate 13 and that test, because
+    # gate 15 refuses its word in this file.
+    { name = "wasmtime" },
+    { name = "wasmer" },
+    { name = "wasmi" },
+    { name = "deno_runtime" },
+    { name = "quick-js" },
+    { name = "rb-sys" },
+    { name = "extendr" },
+    { name = "extendr-api" },
+    { name = "extendr-engine" },
+    { name = "jlrs" },
+    { name = "starlark" },
+    { name = "rune" },
+    { name = "gluon" },
+    { name = "mun" },
+    { name = "koto" },
+    { name = "steel-core" },
+    { name = "piccolo" },
+    { name = "libR-sys" },
+    { name = "perl-sys" },
+    { name = "libperl-sys" },
+    { name = "tcl" },
     # ADDED BY D-0211, WHICH REMOVED `ring` FROM THE BUILD. The list above is
     # about interpreted runtimes; these three are C and assembly, and nothing
     # stopped them returning once the TLS feature that pulled them was changed.

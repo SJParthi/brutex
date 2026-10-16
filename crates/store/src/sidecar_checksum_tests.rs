@@ -159,8 +159,9 @@ fn a_replay_cannot_drop_more_old_rows_than_the_file_actually_holds() {
         let before = fs::read(&physical).expect("held bytes");
         assert!(matches!(
             file.append(&rows[..6]),
-            Err(StoreError::Format {
-                source: FormatError::TimestampsOutOfOrder { .. },
+            Err(StoreError::OverlapDisagrees {
+                at: 0,
+                conflict: crate::file::Conflict::NotHeld,
                 ..
             })
         ));
@@ -373,8 +374,33 @@ fn record_families_keep_independent_checksums_in_every_write_order_and_exact_rep
         fixture.check(Bars, &bars);
         fixture.check(Overlay, &overlays);
         fixture.check(Greeks, &greeks);
+        // Every sibling this fixture wrote. The provenance sidecar (D-3334)
+        // is written by a landing's writer, not by `BarFile::append`, and this
+        // fixture records no landing; its month is under the small-month
+        // threshold, so it has no `.tix` and no `.srt` either (D-4933); and
+        // a sealed `.sbar` is written only by the sealer, never by an append
+        // (D-4965).
+        for kind in [
+            FileKind::TimeIndex,
+            FileKind::SortIndex,
+            FileKind::SealedBars,
+        ] {
+            assert!(
+                !Fixture::path(kind).to_path_buf(&fixture.0).exists(),
+                "{kind:?} beside a small month"
+            );
+        }
         let before: Vec<_> = FileKind::ALL
             .into_iter()
+            .filter(|kind| {
+                !matches!(
+                    kind,
+                    FileKind::Provenance
+                        | FileKind::TimeIndex
+                        | FileKind::SortIndex
+                        | FileKind::SealedBars
+                )
+            })
             .map(|kind| {
                 let path = Fixture::path(kind).to_path_buf(&fixture.0);
                 (path.clone(), fs::read(path).expect("all sibling bytes"))

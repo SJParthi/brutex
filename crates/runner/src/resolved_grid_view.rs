@@ -170,6 +170,7 @@ impl ResolvedGridViewV1<'_> {
             horizon,
             column_digest,
             evaluation_spec,
+            facts: std::sync::Arc::new(crate::trade::SliceFacts::of(bars, column)),
         })
     }
     pub(crate) fn validate_complete_grid(&self, grid: &Grid) -> Result<(), ExitGridErrorV1> {

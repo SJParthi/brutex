@@ -25,8 +25,15 @@ and the production frontend build. The frontend test glob includes saved-trade
 joins, exact invocation IDs, failed-page retries and new tests added later; a
 hand-picked list cannot silently omit them.
 That named subset excludes the three full-workspace checks and does not clear
-their failures. `--purity` separately checks the extension boundary of tracked
-and nonignored untracked paths outside `web/`.
+their failures. Any other argument is refused. The language and extension
+boundary outside `web/` is checked by one checker, CI gate 1
+(`.github/gates_tree.rs gate-1`, with the scanner it runs); this verifier's
+former `--purity` mode was a second, weaker copy of that rule and was removed
+(D-2325).
+
+CI gate 6d builds this file with `--test` and runs its tests, which compiles
+the audit but does not start it, and builds and runs `probes/support_lanes.rs`
+and every other native root under `web/` it finds (D-2324).
 
 The full run executes each broad gate once: comparison consistency, workspace
 formatting, all workspace tests, all-target workspace Clippy, dependency policy,

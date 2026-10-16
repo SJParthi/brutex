@@ -18,6 +18,32 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let fixture = Self::minutes_only(60);
+        for rung in DERIVED_RUNGS {
+            let folded = pull::fold::fold(&fixture.minutes, store_bucket(rung).expect("bucket"))
+                .expect("generated fold");
+            fixture.write(rung, &folded);
+        }
+        fixture
+    }
+
+    /// The first `count` minutes from 09:15 and every rung exactly as derive
+    /// writes it from them, withheld buckets absent.
+    fn derived(count: i64) -> Self {
+        let fixture = Self::minutes_only(count);
+        for rung in DERIVED_RUNGS {
+            let (derived, _) = pull::fold::complete_minutes_for_venue(
+                &fixture.minutes,
+                store_bucket(rung).expect("bucket"),
+                pull::vendor::Venue::NseIndex,
+            )
+            .expect("derive policy folds the fixture");
+            fixture.write(rung, &derived);
+        }
+        fixture
+    }
+
+    fn minutes_only(count: i64) -> Self {
         let root = std::env::temp_dir().join(format!(
             "brutex-fold-audit-{}-{}",
             std::process::id(),
@@ -29,7 +55,7 @@ impl Fixture {
             key: InstrumentKey::index(brutex_core::instrument::Exchange::Nse, "NIFTY")
                 .expect("index key"),
             month: YearMonth::new(2024, 6).expect("month"),
-            minutes: (0..60)
+            minutes: (0..count)
                 .map(|minute| Bar {
                     ts_micros: 1_717_386_300_000_000 + minute * 60_000_000,
                     open: 100 + minute,
@@ -42,11 +68,6 @@ impl Fixture {
                 .collect(),
         };
         fixture.write(Timeframe::MINUTE_1, &fixture.minutes);
-        for rung in DERIVED_RUNGS {
-            let folded = pull::fold::fold(&fixture.minutes, store_bucket(rung).expect("bucket"))
-                .expect("generated fold");
-            fixture.write(rung, &folded);
-        }
         fixture
     }
 
@@ -58,6 +79,8 @@ impl Fixture {
     fn write(&self, rung: Timeframe, bars: &[Bar]) {
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let symbol = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        fs::create_dir_all(&self.root).expect("the store root");
         BarFile::open_or_create(&self.root, self.path(rung), symbol)
             .expect("fixture file")
             .append(bars)
@@ -207,6 +230,11 @@ fn assert_fold_command_case(case: &str) {
             "6 rung-month(s) agree, 1 DISAGREE, 0 unreadable",
             "4 more not named",
         ),
+        "withheld" => (
+            crate::OK,
+            "7 rung-month(s) agree, 0 DISAGREE, 0 unreadable",
+            "7 rung-month(s) carry buckets derive WITHHELD",
+        ),
         _ => unreachable!("unknown generated command case"),
     };
     assert!(text.contains(counts), "{case}: {text}");
@@ -224,9 +252,34 @@ fn assert_fold_command_case(case: &str) {
     );
     assert_eq!(
         text.contains("Every stored coarse bar equals"),
-        case == "clean",
+        matches!(case, "clean" | "withheld"),
         "only a complete agreeing comparison may claim agreement: {text}"
     );
+    // The span summary names withheld rung-months only when there are some:
+    // a clean or failing span must not print "0 rung-month(s) carry buckets
+    // derive WITHHELD", which reads as a finding where there is none.
+    assert_eq!(
+        text.contains("rung-month(s) carry buckets derive WITHHELD"),
+        case == "withheld",
+        "the withheld summary must appear exactly when derive withheld a bucket: {text}"
+    );
+    assert_eq!(
+        text.contains("WITHHELD by derive policy"),
+        case == "withheld",
+        "only buckets derive withheld are reported as withheld: {text}"
+    );
+    if case == "withheld" {
+        assert_eq!(
+            text.matches("WITHHELD by derive policy: 1 diagnostic(s)")
+                .count(),
+            7,
+            "one incomplete trailing bucket per rung: {text}"
+        );
+        assert!(
+            text.contains("incomplete or invalid minute coverage"),
+            "{text}"
+        );
+    }
     for (feed, symbol, from, to) in [
         ("unknown", "NIFTY", ("2024", "6"), ("2024", "6")),
         ("zerodha", "UNSWEPT", ("2024", "6"), ("2024", "6")),
@@ -316,4 +369,38 @@ fn fold_command_fails_on_unreadable_authority_and_retains_every_later_verdict() 
         fs::read(checksums).expect("checksums after audit"),
         saved_checksums
     );
+}
+
+/// GAP12-4, D-0912: a month derive wrote correctly, with one incomplete
+/// trailing bucket per rung withheld, passes the command and names each
+/// withheld bucket apart from the agreement count.
+#[test]
+fn fold_command_reports_withheld_buckets_apart_from_disagreements() {
+    // 119 minutes from 09:15: every rung holds at least one whole bucket
+    // and exactly one incomplete trailing bucket, which derive withholds.
+    let fixture = Fixture::derived(119);
+    let verdicts = fixture.audit().expect("stored audit");
+    for (rung, result) in DERIVED_RUNGS.into_iter().zip(verdicts) {
+        let verdict = result.expect("derived rung is readable");
+        assert!(verdict.agrees(), "{}", rung.as_str());
+        assert_eq!(verdict.withheld, 1, "{}", rung.as_str());
+    }
+    let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "fold_audit::io_tests::fold_command_fails_on_unreadable_authority_and_retains_every_later_verdict",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("BRUTEX_TEST_FOLD_AUDIT_CASE", "withheld")
+        .env("BRUTEX_STORE", &fixture.root)
+        .output()
+        .expect("isolated command environment");
+    assert!(
+        result.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
 }

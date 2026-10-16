@@ -533,11 +533,15 @@ fn plan(l: &DailyLevels) -> [(i64, Rel); 41] {
 ///
 /// # What it deliberately does not set
 ///
-/// * **63 `narrow_cpr_day`** — no tracked document says how narrow is narrow, and
-///   inventing a threshold is what `CLAUDE.md` §3 rule 1 forbids.
+/// (63 `narrow_cpr_day` was listed here as never set. It IS set, with 274 and
+/// 275, through [`bits_with`] at [`CprWidth::CLASSICAL`], whose cuts are declared
+/// UNVERIFIED there; p11num-3, D-1775.)
+///
 /// * **6 `near_pivot_p`** — a tombstone; the pivot's band is `inside_cpr` (62) by
 ///   the D-0079 identity, and that is the position set instead.
-/// * **71 `near_fib_424`** — an orphan: 4.24 sits on none of the four ladders.
+/// * **71 `near_fib_424`** — not set HERE: it is the 4.236 rung of
+///   `crate::fib::PREV_DAY_UP`, set with that ladder. It was called an orphan on
+///   no ladder (p11num-3, D-1775).
 #[must_use]
 pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> ConditionMask {
     bits_with(levels, close, tolerance, CprWidth::CLASSICAL)

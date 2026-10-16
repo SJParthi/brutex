@@ -113,14 +113,69 @@ struct Asked {
     target: String,
     /// The run the reader narrowed to, or zero for every run.
     run: u64,
+    /// Each filter the request carried that could not be read, by name, with
+    /// what it said. Such a filter is no narrowing, and the answer says so in
+    /// its JSON and with one Warn, rather than passing the unfiltered tail off
+    /// as the filtered one (P1-01-02, D-1765).
+    ignored: Vec<(&'static str, String)>,
+    /// The feed, instrument, day and contract asked for, answered through the
+    /// audit index (D-3341 item 3). Empty for a request that names none, which
+    /// is answered by the ring alone, exactly as before.
+    keys: Keys,
+    /// `ring=1`: a keyed answer also reads the newest [`SCAN_BYTES`] of each
+    /// ring, for lines no audit stream holds (WP-33c, DB-A44). Off by default:
+    /// those rows cannot be paged and move as the ring moves, so they are
+    /// asked for, never mixed in.
+    ring: bool,
+    /// `before=<cursor>`: the next page of a keyed answer, from the `next` a
+    /// previous page handed back (WP-33c, DB-A44).
+    before: Option<String>,
+}
+
+/// Every parameter `/logs.json` and `/logs` read. Any other is named under
+/// `ignored` and logged once, never dropped in silence (WP-33c, DB-A45).
+pub(crate) const PARAMS: [&str; 12] = [
+    "limit",
+    "level",
+    "target",
+    "run",
+    "feed",
+    "instrument",
+    "day",
+    "contract",
+    "code",
+    "ring",
+    "before",
+    "durable",
+];
+
+/// The names `query` carries that `known` does not hold, in the order sent,
+/// each once. A name is the text before its `=`, as [`crate::server::param`]
+/// matches it. O(query length).
+pub(crate) fn unknown_params(query: &str, known: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+        if !known.contains(&name) && !out.iter().any(|held| held == name) {
+            out.push(name.to_owned());
+        }
+    }
+    out
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
 ///
 /// Every parameter is **clamped rather than refused**. A log viewer that
 /// answers a mangled bookmark with a 400 is a log viewer an operator stops
-/// reaching for, and unlike a pull request nothing here can be made wrong by a
-/// bad number — the worst a bad `limit` can do is show a different count.
+/// reaching for, and the worst a bad `limit` can do is show a different count.
+///
+/// **A bad `level` or `run` is not a count.** It drops a narrowing, so the
+/// unfiltered tail would arrive looking like the filtered one. Each is still
+/// answered rather than refused, but it is NAMED: listed under `ignored` in the
+/// JSON, beside the filters that were applied, and reported by one
+/// `api.logs filter ignored` Warn — the bargain `audit_json`'s `page ignored`
+/// strikes (P1-01-02, D-1765). `run` must be a canonical unsigned integer;
+/// `+3`, `03` and `3.0` are not quietly read as some run.
 fn asked(raw: &str) -> Asked {
     // NOT THROUGH `render::query_value`. That is a percent-ENCODER, and
     // `param` has already decoded; encoding a decoded value and then parsing it
@@ -138,7 +193,70 @@ fn asked(raw: &str) -> Asked {
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run = crate::server::param(raw, "run").parse::<u64>().unwrap_or(0);
+    let run_word = crate::server::param(raw, "run");
+    let run = run_word
+        .parse::<u64>()
+        .ok()
+        .filter(|run| run.to_string() == run_word)
+        .unwrap_or(0);
+    let mut ignored = Vec::new();
+    if level.is_none() && !level_word.is_empty() {
+        ignored.push(("level", level_word));
+    }
+    if run == 0 && !run_word.is_empty() && run_word != "0" {
+        ignored.push(("run", run_word));
+    }
+    let mut keys = keys_of(raw, &mut ignored);
+    let flag = |name: &'static str, ignored: &mut Vec<(&'static str, String)>| {
+        let word = crate::server::param(raw, name);
+        match word.as_str() {
+            "" | "0" => false,
+            "1" => true,
+            _ => {
+                ignored.push((name, word));
+                false
+            }
+        }
+    };
+    let ring = flag("ring", &mut ignored);
+    // `durable=1` ASKS THE INDEX FOR A RUN OR A TARGET ALONE. `run=` without
+    // it stays the ring's filter it always was, because a page polls it for a
+    // live sweep and the durable stream does not hold progress lines.
+    if flag("durable", &mut ignored) {
+        if run != 0 {
+            keys.run = Some(run);
+        } else if !target.is_empty() {
+            keys.target = Some(target.clone());
+        } else {
+            ignored.push((
+                "durable",
+                "1 with no run, target or key to probe the index by".to_owned(),
+            ));
+        }
+    }
+    let before_word = crate::server::param(raw, "before");
+    let before = if before_word.is_empty() {
+        None
+    } else if keys.is_empty() {
+        ignored.push(("before", before_word));
+        None
+    } else {
+        Some(before_word)
+    };
+    for name in unknown_params(raw, &PARAMS) {
+        ignored.push(("unknown parameter", name));
+    }
+    for (param, word) in &ignored {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.logs", "filter ignored")
+                .with("param", telemetry::Value::Str(param))
+                .with("asked", telemetry::Value::Str(word))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a value this filter reads; answered without it"),
+                ),
+        );
+    }
 
     let mut query = telemetry::Query::last(limit);
     query.max_scan_bytes = SCAN_BYTES;
@@ -157,7 +275,63 @@ fn asked(raw: &str) -> Asked {
         level,
         target,
         run,
+        ignored,
+        keys,
+        ring,
+        before,
     }
+}
+
+/// The keyed filters a query names, each unreadable one pushed to `ignored`
+/// rather than read as no filter in silence (D-1765's rule, D-3341 item 3).
+/// `feed` must be a wire this build names; `instrument` an instrument as
+/// [`instrument_of`] reads one; `day` a `YYYY-MM-DD`; `contract` any text up
+/// to a store segment's length.
+fn keys_of(raw: &str, ignored: &mut Vec<(&'static str, String)>) -> Keys {
+    let mut keys = Keys::default();
+    let feed = crate::server::param(raw, "feed");
+    if !feed.is_empty() {
+        match brutex_core::vendor::Vendor::ALL
+            .into_iter()
+            .find(|vendor| vendor.as_str().eq_ignore_ascii_case(&feed))
+        {
+            Some(vendor) => keys.feed = Some(vendor.as_str().to_owned()),
+            None => ignored.push(("feed", feed)),
+        }
+    }
+    let instrument = crate::server::param(raw, "instrument");
+    if !instrument.is_empty() {
+        match instrument_of(&instrument) {
+            Some(named) => keys.instrument = Some(named),
+            None => ignored.push(("instrument", instrument)),
+        }
+    }
+    let day = crate::server::param(raw, "day");
+    if !day.is_empty() {
+        match crate::server::import_journal::parse_day(&day) {
+            Some(parsed) => keys.day = Some(parsed),
+            None => ignored.push(("day", day)),
+        }
+    }
+    let contract = crate::server::param(raw, "contract");
+    if !contract.is_empty() {
+        if contract.len() <= MAX_CONTRACT_ASKED && !contract.contains(['/', '\\']) {
+            keys.contract = Some(contract);
+        } else {
+            ignored.push(("contract", contract));
+        }
+    }
+    // A REFUSAL'S CODE (WP-33c, DB-A47): the `code` (or `reason`) a refusal
+    // logged, one posting of the index.
+    let code = crate::server::param(raw, "code");
+    if !code.is_empty() {
+        if code.len() <= MAX_CONTRACT_ASKED && !code.contains(['/', '\\']) {
+            keys.code = Some(code);
+        } else {
+            ignored.push(("code", code));
+        }
+    }
+    keys
 }
 
 /// `GET /logs.json` — the tail, and every honesty flag the walk carries.
@@ -178,26 +352,47 @@ pub async fn logs_json(
     // would see forever while a sweep wrote thousands of records to the `cli`
     // half. The server's own sink being absent says nothing about whether
     // `cli` events exist -- and 2,090 of them existed when this was measured.
-    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
-    let (first, second) = match (log_dir(), cli_dir) {
-        (Some(served), cli) => (Some(served), cli),
-        (None, Some(cli)) => (Some(cli), None),
-        (None, None) => (None, None),
-    };
-    let Some(dir) = first else {
+    // EVERY RUN DIRECTORY, NOT `logs/cli` ALONE (D-4862 round 6; IA-11r R5):
+    // a GDFL run of a kind logs to its own directory, and a page that read two
+    // of the eight would show none of its events.
+    let halves = halves_of(log_dir(), crate::server::store_dir().ok().as_deref());
+    if halves.is_empty() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json,
-            r#"{"error":"logging is not installed in this process and no store log directory could be resolved, so there is no log to read"}"#
-                .to_owned(),
+            NO_LOG_JSON.to_owned(),
         );
-    };
+    }
     let asked = asked(uri.query().unwrap_or(""));
-    (
-        axum::http::StatusCode::OK,
-        json,
-        json_over(&dir, second.as_deref(), &asked, sink_health().as_ref()),
-    )
+    let health = sink_health();
+    // OFF THE ASYNC WORKERS, AND ADMITTED. `json_over` walks up to two
+    // `SCAN_BYTES` halves and decodes every line it reads, and it ran inline
+    // on a Tokio worker with nothing capping how many did so at once -- while
+    // the backtest page polls this route every two seconds per running sweep
+    // with a `run=` filter one half can never match, so that half is read to
+    // its cap on every poll. It now runs in `detail`'s log-read pool, and a
+    // full pool is a named 429, never a queue. log-3, P1-04-02, D-2327.
+    // A KEYED REQUEST IS ANSWERED FROM THE AUDIT INDEX, then the ring; one
+    // that names no key reads the ring alone, exactly as it always did.
+    match crate::detail::run_log_read(move || {
+        if asked.keys.is_empty() {
+            json_across(&halves, &asked, health.as_ref())
+        } else {
+            keyed_json_across(&halves, &asked, health.as_ref())
+        }
+    })
+    .await
+    {
+        Ok(body) => (axum::http::StatusCode::OK, json, body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            (status, json, body)
+        }
+    }
 }
 
 /// The JSON body, over a directory a caller names.
@@ -206,14 +401,14 @@ pub async fn logs_json(
 /// REAL file, rather than needing the process-global one installed. The
 /// handler is then the one thing left untested here — resolving the directory
 /// — and that is a single `?` on `telemetry::global()`.
+#[cfg(test)]
 fn json_over(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let tail = both_halves(dir, cli_dir, &asked.query);
-    json_of(&tail, asked, health, (dir, cli_dir))
+    json_across(&two_halves(dir, cli_dir), asked, health)
 }
 
 /// Where `crates/cli` ACTUALLY writes, resolved from the STORE root.
@@ -283,7 +478,227 @@ pub fn quoted(raw: &str) -> String {
 /// which is NOT this one."* Its doc names the fix in the same breath — *"until
 /// it walks `logs/` and `logs/cli/` the page shows the server's half"* — and
 /// this is that walk.
-const CLI_SUBDIR: &str = "cli";
+const CLI_SUBDIR: &str = telemetry::run_dirs::CLI;
+
+/// The closed set of directories a run process logs to, under `<store>/logs`
+/// (D-4862): `cli` (every cli verb, and every run until the directory
+/// switch) and every row of `telemetry::run_dirs::ALL`, each of which
+/// belongs to the one lock that makes its writer alone there. With the
+/// server's own directory these are the 8 `/logs` reads.
+///
+/// **The table is `telemetry`'s, not this module's (D-4897).** The writers
+/// choose a run's directory through the same table, so a reader cannot look
+/// where no writer logs and a ninth writer is a row there, a lock, and
+/// `docs/06-limits.md` L-IA-13's bound recomputed.
+/// `the_readers_read_the_table_of_run_directories` holds this function to
+/// it, and `the_run_directories_name_every_import_kind` holds the table's
+/// three kinds to `pull::gdfl_import::ImportKind::ALL`.
+pub(crate) fn run_dirs() -> impl Iterator<Item = &'static str> {
+    std::iter::once(CLI_SUBDIR).chain(telemetry::run_dirs::ALL.iter().map(|dir| dir.sub))
+}
+
+/// Of [`run_dirs`], the five a GDFL run can write, so the five the
+/// importer's evidence is read from: for one kind `cli`, `gdfl/<kind>` and
+/// `gdfl/store` (`telemetry::run_dirs::gdfl_evidence`).
+pub(crate) fn import_dirs() -> impl Iterator<Item = &'static str> {
+    telemetry::run_dirs::gdfl_evidence_all()
+}
+
+/// Whether a directory a reader was asked to read could answer. A reader
+/// names every directory that is not [`Self::Read`], and says "none" only
+/// when all of them were read: an absent directory and an empty one are
+/// different facts, and so are an unreadable one and both (D-4862, the rule
+/// [`cli_half`]'s doc states for one directory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DirState {
+    /// It is there and was read.
+    Read,
+    /// It does not exist: no run that logs there has ever started.
+    Absent,
+    /// It is there and could not be read, in the failure's own words.
+    Unreadable(String),
+}
+
+impl DirState {
+    /// The state's word on the wire.
+    pub(crate) const fn word(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Absent => "absent",
+            Self::Unreadable(_) => "unreadable",
+        }
+    }
+
+    /// The state of `path`, asked of the disk and never of what this
+    /// process read before: one `metadata` call for the directory and, when
+    /// it is one, one for its current ring file BY NAME.
+    ///
+    /// # Why the second call
+    ///
+    /// `metadata` of a directory answers from its parent, so a directory
+    /// nobody may search (mode `000`, or one without its `x` bit) is "there,
+    /// and a directory" and used to read `read` while every file in it
+    /// answered `EACCES`: `/logs.json` named it `read` beside its own
+    /// `errors[]` saying `Permission denied`. A reader reaches a ring file by
+    /// its name, so that is what is asked: a name that is not there is a
+    /// directory that could answer and holds nothing, and any other failure
+    /// is the directory's, in the failure's own words (D-4862: `"none"` only
+    /// when every directory was read).
+    pub(crate) fn of(path: &std::path::Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => match std::fs::metadata(telemetry::current_path(path)) {
+                Ok(_) => Self::Read,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Read,
+                Err(e) => Self::Unreadable(e.to_string()),
+            },
+            Ok(_) => Self::Unreadable("it is there and is not a directory".to_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(e) => Self::Unreadable(e.to_string()),
+        }
+    }
+}
+
+/// One directory a `/logs` request reads: its name on the wire (`served` for
+/// the server's own, else one of [`run_dirs`]) and where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Half {
+    /// The name rows and postings carry.
+    pub(crate) name: &'static str,
+    /// The directory.
+    pub(crate) path: std::path::PathBuf,
+}
+
+/// Every directory a `/logs` request reads: the server's own, when its sink
+/// resolved one, then each of [`run_dirs`] under the store, when a store root
+/// resolved: 8 at most (D-4862). The two roots are resolved apart, for the
+/// reason [`cli_half`] gives.
+pub(crate) fn halves_of(
+    served: Option<std::path::PathBuf>,
+    store: Option<&std::path::Path>,
+) -> Vec<Half> {
+    served
+        .map(|path| Half {
+            name: "served",
+            path,
+        })
+        .into_iter()
+        .chain(run_dirs().filter_map(|name| {
+            store.map(|root| Half {
+                name,
+                path: root.join(telemetry::run_dirs::LOGS).join(name),
+            })
+        }))
+        .collect()
+}
+
+/// The first directory and the `cli` one, as [`json_of`] and [`page_of`]
+/// name them: the pair every answer has always carried.
+fn named_pair(halves: &[Half]) -> Option<(&std::path::Path, Option<&std::path::Path>)> {
+    let first = halves.first()?;
+    let cli = halves
+        .iter()
+        .skip(1)
+        .find(|half| half.name == CLI_SUBDIR)
+        .map(|half| half.path.as_path());
+    Some((first.path.as_path(), cli))
+}
+
+/// `"dirs":[...]`: every directory the request read, by name, with its state
+/// (`read`, `absent`, `unreadable` and why). At most two `metadata` calls
+/// each ([`DirState::of`]).
+fn dirs_json(halves: &[Half]) -> String {
+    let mut out = String::from("\"dirs\":[");
+    for (n, half) in halves.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let state = DirState::of(&half.path);
+        let _ = write!(
+            out,
+            r#"{{"half":{},"dir":{},"state":"{}","error":{}}}"#,
+            render::json_string(half.name),
+            render::json_string(&half.path.display().to_string()),
+            state.word(),
+            match &state {
+                DirState::Unreadable(why) => render::json_string(why),
+                DirState::Read | DirState::Absent => "null".to_owned(),
+            },
+        );
+    }
+    out.push(']');
+    out
+}
+
+/// `body`, a JSON object, with [`dirs_json`] as its last member.
+fn with_dirs(body: &str, halves: &[Half]) -> String {
+    let mut out = body.strip_suffix('}').unwrap_or(body).to_owned();
+    out.push(',');
+    out.push_str(&dirs_json(halves));
+    out.push('}');
+    out
+}
+
+/// The page's line naming every directory read and the state of each, so a
+/// run directory that does not exist yet reads `absent` and never as a
+/// directory that held nothing.
+fn dirs_note(halves: &[Half]) -> String {
+    let mut out = String::from("<p class=\"lead\">Directories read:");
+    for half in halves {
+        let state = DirState::of(&half.path);
+        let _ = write!(
+            out,
+            " <code>{}</code> {}{};",
+            render::escape(half.name),
+            state.word(),
+            match &state {
+                DirState::Unreadable(why) => format!(" ({})", render::escape(why)),
+                DirState::Read | DirState::Absent => String::new(),
+            },
+        );
+    }
+    out.push_str("</p>");
+    out
+}
+
+/// Every half of the log, merged newest-first: [`merged`] folded over each
+/// directory's own walk, so the limit, the caps and `missing` combine exactly
+/// as they did for two. At most 8 walks of at most [`SCAN_BYTES`] each.
+fn all_halves(halves: &[Half], query: &telemetry::Query) -> telemetry::Tail {
+    let mut walks = halves
+        .iter()
+        .map(|half| telemetry::tail(&half.path, telemetry::DEFAULT_KEEP_FILES, query));
+    let Some(first) = walks.next() else {
+        return telemetry::Tail::default();
+    };
+    walks.fold(first, |so_far, next| merged(so_far, next, query.limit))
+}
+
+/// [`json_over`] across every directory in `halves`.
+fn json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return NO_LOG_JSON.to_owned();
+    };
+    let tail = all_halves(halves, &asked.query);
+    with_dirs(&json_of(&tail, asked, health, pair), halves)
+}
+
+/// What a request answers when no directory resolved at all.
+const NO_LOG_JSON: &str = r#"{"error":"logging is not installed in this process and no store log directory could be resolved, so there is no log to read"}"#;
+
+/// The server's directory and, when given, the `cli` one, as halves: the
+/// two-directory form the tests of this module state their fixtures in.
+#[cfg(test)]
+fn two_halves(dir: &std::path::Path, cli_dir: Option<&std::path::Path>) -> Vec<Half> {
+    std::iter::once(Half {
+        name: "served",
+        path: dir.to_path_buf(),
+    })
+    .chain(cli_dir.map(|cli| Half {
+        name: CLI_SUBDIR,
+        path: cli.to_path_buf(),
+    }))
+    .collect()
+}
 
 /// Both halves of the log, merged newest-first.
 ///
@@ -322,6 +737,7 @@ const CLI_SUBDIR: &str = "cli";
 /// from a half means the question is unanswerable there — under a filter, or
 /// with no directory — and a half that cannot answer contributes nothing rather
 /// than a zero, because zero would read as "none lost".
+#[cfg(test)]
 fn both_halves(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
@@ -334,7 +750,16 @@ fn both_halves(
     let ran = cli_dir.map_or_else(telemetry::Tail::default, |d| {
         telemetry::tail(d, telemetry::DEFAULT_KEEP_FILES, query)
     });
+    merged(served, ran, query.limit)
+}
 
+/// The union of two walked halves, and the completeness flags merged in the
+/// direction that cannot over-promise (LG-05).
+///
+/// Split from [`both_halves`] so a test can hand it two walks it cannot cause
+/// from real files, such as a half that hit its scan cap beside one that did
+/// not (P12-02, D-1791). Behaviour is unchanged.
+fn merged(served: telemetry::Tail, ran: telemetry::Tail, limit: usize) -> telemetry::Tail {
     let mut records = served.records;
     records.extend(ran.records);
     records.sort_by(|left, right| {
@@ -346,7 +771,7 @@ fn both_halves(
     // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
     // this the page would return up to twice what was asked for -- and the
     // caller's `limit` is what bounds the response, not a suggestion.
-    records.truncate(query.limit);
+    records.truncate(limit);
 
     telemetry::Tail {
         records,
@@ -462,10 +887,55 @@ fn json_of(
         }
         out.push_str(&render::json_string(why));
     }
+    // THE FILTERS THIS ANSWER APPLIED, AND THE ONES IT COULD NOT. Without them
+    // `?level=eror` and no level at all answered byte-identically (D-1765).
+    // The run twice, as each record carries it: a number, and the exact
+    // decimal a JavaScript reader cannot round.
+    let (run, run_key) = if asked.run == 0 {
+        ("null".to_owned(), "null".to_owned())
+    } else {
+        (asked.run.to_string(), format!("\"{}\"", asked.run))
+    };
+    let _ = write!(
+        out,
+        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"ignored":["#,
+        asked.level.map_or_else(
+            || "null".to_owned(),
+            |level| render::json_string(level.label())
+        ),
+        if asked.target.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(&asked.target)
+        },
+    );
+    for (n, (param, word)) in asked.ignored.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"param":{},"asked":{}}}"#,
+            render::json_string(param),
+            render::json_string(word)
+        );
+    }
     out.push_str("],\"sink\":");
     out.push_str(&sink_json(health));
     out.push('}');
     out
+}
+
+/// Whether the banner and `/logs.json`'s `loud` must speak.
+///
+/// Wider than [`telemetry::Health::is_loud`], which stays "were events lost"
+/// because the dropped-events note keys on it. A held clock and a standing
+/// `last_error` lose no event, but each is something the operator must be told:
+/// `clock_held` was counted and rendered nowhere, so after a clock jump every
+/// event kept a frozen time while the page said "Sink healthy", and
+/// `last_error` was shown only beside a loss (conc9-3, D-1774).
+const fn banner_is_loud(h: &telemetry::Health) -> bool {
+    h.is_loud() || h.clock_held > 0 || h.last_error.is_some()
 }
 
 /// The WRITE side of the log, as JSON. `null` when this process has no sink.
@@ -476,14 +946,16 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"loud":{},"last_error":{}}}"#,
+        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"rationed":{},"loud":{},"last_error":{}}}"#,
         h.written,
         h.dropped,
         h.rotations,
         h.rotation_failures,
         h.current_bytes,
         h.next_seq,
-        h.is_loud(),
+        h.clock_held,
+        h.rationed,
+        banner_is_loud(h),
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
@@ -492,52 +964,57 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
 }
 
 /// `GET /logs` — the same tail, as a page.
-pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
+pub async fn logs_page(
+    uri: axum::http::Uri,
+) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let raw = uri.query().unwrap_or("");
-    let asked = asked(raw);
+    let asked = std::sync::Arc::new(asked(raw));
     // THE SECOND HALF IS RESOLVED FROM THE STORE, exactly as `logs_json` does
     // it. Bound to a local rather than written inline so the `Option<PathBuf>`
     // it borrows from plainly outlives the call -- and named `cli_dir` rather
     // than `cli`, which is a crate this one depends on.
-    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
-    // THE SERVER'S OWN SINK BEING ABSENT IS NOT "NOTHING TO READ".
-    //
-    // This bailed on `log_dir()` alone, BEFORE `cli_dir` was ever consulted --
-    // so a server started without telemetry installed rendered "No log" while
-    // the operator's sweep was writing thousands of records to the `cli` half
-    // beside it. MEASURED, 2026-09-03: `<store>/logs/cli/events.ndjson` held
-    // **2,090 records** from a running sweep and this page showed none of them,
-    // under a sentence saying there was nothing to read.
-    //
-    // That is the same defect `page_over`'s own doc records for 2026-09-01, in
-    // a different place: the page that exists to show `cli` events could not
-    // show them, and said so in words that read as "none were written". §4
-    // bans a fallback that hides a failure; this is its mirror, a refusal that
-    // hides an answer.
-    //
-    // The `cli` half becomes the FIRST half when there is no server half. The
-    // footer names the directory it actually read, so the page still says
-    // exactly where its records came from -- it is one directory rather than
-    // two, and reporting that honestly is the whole difference.
-    let (first, second) = match (log_dir(), cli_dir) {
-        (Some(served), cli) => (Some(served), cli),
-        (None, Some(cli)) => (Some(cli), None),
-        (None, None) => (None, None),
-    };
-    let Some(dir) = first else {
-        return axum::response::Html(page_shell(
-            &asked,
-            "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
-             process and no store log directory could be resolved, so there is \
-             nothing to read. The server names the reason on stdout at startup.</p>",
-        ));
-    };
-    axum::response::Html(page_over(
-        &dir,
-        second.as_deref(),
-        &asked,
-        sink_health().as_ref(),
-    ))
+    // EVERY RUN DIRECTORY, resolved from the store exactly as `logs_json`
+    // does it, and the server's own when its sink resolved one. A server
+    // started without telemetry still reads the store's directories: its own
+    // sink being absent is not "nothing to read" (MEASURED, 2026-09-03:
+    // `<store>/logs/cli/events.ndjson` held 2,090 records from a running
+    // sweep while this page said there was nothing to read).
+    let halves = halves_of(log_dir(), crate::server::store_dir().ok().as_deref());
+    if halves.is_empty() {
+        return (
+            axum::http::StatusCode::OK,
+            axum::response::Html(page_shell(
+                &asked,
+                "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
+                 process and no store log directory could be resolved, so there is \
+                 nothing to read. The server names the reason on stdout at startup.</p>",
+            )),
+        );
+    }
+    let health = sink_health();
+    let inside = std::sync::Arc::clone(&asked);
+    // OFF THE ASYNC WORKERS, AND ADMITTED, for the reason `logs_json` gives:
+    // the page runs the same two-half walk. A full pool is a 429 page that
+    // says so in words, with the form still on it. log-3, P1-04-02, D-2327.
+    match crate::detail::run_log_read(move || page_across(&halves, &inside, health.as_ref())).await
+    {
+        Ok(page) => (axum::http::StatusCode::OK, axum::response::Html(page)),
+        Err(why) => {
+            let (status, _json) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            let halt = format!(
+                "<p class=\"halt\"><b>Not admitted</b>This log read was refused \
+                 before it ran ({}): at most {} log reads run at once, off the \
+                 async workers. Nothing below was read; reload to retry.</p>",
+                render::escape(&format!("{why:?}")),
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+            );
+            (status, axum::response::Html(page_shell(&asked, &halt)))
+        }
+    }
 }
 
 /// The page body, over the directories a caller names — split for the reason
@@ -558,14 +1035,57 @@ pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
 /// `the_page_shows_the_cli_half_and_not_only_the_servers` is named for the page
 /// and drove `json_over`, which never had the defect. That is how this survived
 /// being written down twice; the test drives [`page_over`] now.
+///
+/// **A KEYED PAGE READS THE INDEX, AS `/logs.json` DOES** (WP-33c, DB-A45):
+/// `/logs?feed=gdfl&day=2022-03-07` was byte-identical to `/logs`, because
+/// this walked the ring with the keys dropped. It now answers through
+/// [`keyed_walk`], the same rows `/logs.json` gives for the same query, with
+/// a link to the next page when there is one.
+#[cfg(test)]
 fn page_over(
     dir: &std::path::Path,
     cli_dir: Option<&std::path::Path>,
     asked: &Asked,
     health: Option<&telemetry::Health>,
 ) -> String {
-    let tail = both_halves(dir, cli_dir, &asked.query);
-    page_of(&tail, asked, health, (dir, cli_dir))
+    page_across(&two_halves(dir, cli_dir), asked, health)
+}
+
+/// [`page_over`] across every directory in `halves`, each named with its
+/// state under the lead.
+fn page_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return page_shell(
+            asked,
+            "<p class=\"halt\"><b>No log</b>No log directory resolved, so there is nothing to \
+             read.</p>",
+        );
+    };
+    if asked.keys.is_empty() {
+        let tail = all_halves(halves, &asked.query);
+        let mut page = page_of(&tail, asked, health, pair);
+        page.push_str(&dirs_note(halves));
+        return page;
+    }
+    let (tail, _keyed, next) = keyed_walk(halves, asked);
+    let mut page = page_of(&tail, asked, health, pair);
+    page.push_str(&dirs_note(halves));
+    match next {
+        Some(cursor) => {
+            let _ = write!(
+                page,
+                "<p class=\"lead\">Read from the durable audit index, newest first. \
+                 <a href=\"/logs{}&amp;before={}\">Older matches</a></p>",
+                json_query(asked),
+                render::query_value(&cursor),
+            );
+        }
+        None => page.push_str(
+            "<p class=\"lead\">Read from the durable audit index: every match it holds is \
+             above.</p>",
+        ),
+    }
+    page
 }
 
 /// [`page_over`] over a walk a caller already has — split for [`json_of`]'s
@@ -793,14 +1313,30 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
                 server names the reason on stdout at startup.</p>"
             .to_owned();
     };
-    if !h.is_loud() {
+    if !banner_is_loud(h) {
         return format!(
             "<p class=\"lead\">Sink healthy · {} written · 0 dropped · {} \
              rotation(s) · {} byte(s) in the current file.</p>",
             h.written, h.rotations, h.current_bytes,
         );
     }
-    let mut out = String::from("<p class=\"halt\"><b>The log is incomplete</b>");
+    let mut out = String::from(if h.is_loud() {
+        "<p class=\"halt\"><b>The log is incomplete</b>"
+    } else if h.clock_held > 0 {
+        "<p class=\"halt\"><b>The log's clock is held</b>"
+    } else {
+        "<p class=\"halt\"><b>The sink reported a failure</b>"
+    });
+    if h.clock_held > 0 {
+        let _ = write!(
+            out,
+            "{} event(s) read a clock BEHIND the last one written and were \
+             stamped at that later instant instead, so their times on this page \
+             are not when they happened, and a stale-run check reading them \
+             may see a dead run as live. ",
+            h.clock_held,
+        );
+    }
     if h.dropped > 0 {
         let _ = write!(
             out,
@@ -812,8 +1348,16 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
     if h.rotation_failures > 0 {
         let _ = write!(
             out,
-            "{} roll(s) failed, so the current file is past its bound and the \
-             oldest events may already have been overwritten. ",
+            // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
+            // rotating for the life of the process (`Sink::rotation_broken`),
+            // so nothing is overwritten after the failure: the file GROWS. The
+            // banner said the opposite and never said a restart resumes
+            // rotation (CE-41, D-1769).
+            "{} roll(s) failed, so rotation has stopped for the life of this \
+             process: the current file is growing past its bound and no later \
+             event overwrites an older one. The failed roll itself may have \
+             removed the oldest retained file. Fix the cause named below and \
+             restart the server to resume rotation. ",
             h.rotation_failures,
         );
     }
@@ -922,6 +1466,29 @@ fn json_query(asked: &Asked) -> String {
     if asked.run != 0 {
         let _ = write!(q, "&run={}", asked.run);
     }
+    // THE KEYS RIDE ALONG (WP-33c, DB-A45), so the JSON link and the next
+    // page reproduce the page's own question.
+    let keys = &asked.keys;
+    for (name, value) in [
+        ("feed", keys.feed.clone()),
+        (
+            "instrument",
+            keys.instrument.as_ref().map(|i| i.asked.clone()),
+        ),
+        ("day", keys.day.map(|d| d.to_string())),
+        ("contract", keys.contract.clone()),
+        ("code", keys.code.clone()),
+    ] {
+        if let Some(value) = value {
+            let _ = write!(q, "&{name}={}", render::query_value(&value));
+        }
+    }
+    if keys.run.is_some() || keys.target.is_some() {
+        q.push_str("&durable=1");
+    }
+    if asked.ring {
+        q.push_str("&ring=1");
+    }
     q
 }
 
@@ -973,6 +1540,11 @@ fn page_shell(asked: &Asked, body: &str) -> String {
          <label>Level<select name=\"level\"><option value=\"\">every level</option>{levels}</select></label>\
          <label>Target<input type=\"text\" name=\"target\" value=\"{target}\" placeholder=\"pull, pull.member, api.serve\"></label>\
          <label>Run<input type=\"text\" name=\"run\" value=\"{run}\" placeholder=\"every run\"></label>\
+         <label>Feed<input type=\"text\" name=\"feed\" value=\"{feed}\" placeholder=\"gdfl, zerodha\"></label>\
+         <label>Instrument<input type=\"text\" name=\"instrument\" value=\"{instrument}\" placeholder=\"NSE-INDEX-NIFTY\"></label>\
+         <label>Day<input type=\"text\" name=\"day\" value=\"{day}\" placeholder=\"YYYY-MM-DD\"></label>\
+         <label>Contract<input type=\"text\" name=\"contract\" value=\"{contract}\"></label>\
+         <label>Code<input type=\"text\" name=\"code\" value=\"{code}\" placeholder=\"too_many_entries\"></label>\
          <label>Limit<input type=\"number\" name=\"limit\" min=\"1\" max=\"{max}\" value=\"{limit}\"></label>\
          <button type=\"submit\">Show</button>\
          <a href=\"/logs.json{q}\">as JSON</a>\
@@ -988,6 +1560,20 @@ fn page_shell(asked: &Asked, body: &str) -> String {
         max = PAGE_LIMIT,
         q = json_query(asked),
         body = body,
+        feed = render::escape(asked.keys.feed.as_deref().unwrap_or("")),
+        instrument = render::escape(
+            asked
+                .keys
+                .instrument
+                .as_ref()
+                .map_or("", |instrument| instrument.asked.as_str())
+        ),
+        day = asked
+            .keys
+            .day
+            .map_or_else(String::new, |day| day.to_string()),
+        contract = render::escape(asked.keys.contract.as_deref().unwrap_or("")),
+        code = render::escape(asked.keys.code.as_deref().unwrap_or("")),
     )
 }
 
@@ -1021,36 +1607,2749 @@ pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let from_another_site = cross_site(request.headers());
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
+    // A `/db` READ KEEPS ITS SELECTION (WP-33c, DB-A42): the names it read
+    // by, never the whole query, and only on a read route.
+    let selection = is_db_read(&path).then(|| selection_of(request.uri().query().unwrap_or("")));
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
 
-    let level = if status.is_server_error() {
+    let level = request_level(status);
+    // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
+    // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`]. A
+    // refused `/db` read's access record is under the same ration.
+    let mut admitted = true;
+    if level != telemetry::Level::Debug {
+        let admit = FAILED_LINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(from_another_site, now);
+        if let Some(suppressed) = admit.summary {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Warn,
+                    "api.request",
+                    suppression_message(from_another_site),
+                )
+                .with("suppressed", telemetry::Value::Uint(suppressed))
+                .with(
+                    "origin",
+                    telemetry::Value::Str(if from_another_site {
+                        "cross-site"
+                    } else {
+                        "same-origin"
+                    }),
+                )
+                .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
+            );
+        }
+        admitted = admit.write;
+    }
+    if let Some(ref selection) = selection
+        && !status.is_server_error()
+    {
+        note_access(&path, (status.as_u16(), micros), selection, admitted, now);
+        // A REFUSED READ'S LINE IS ITS ACCESS RECORD, which the audit stream
+        // keeps; a served one also leaves the `debug` request line below.
+        if status.is_client_error() {
+            return response;
+        }
+    }
+    if !admitted {
+        return response;
+    }
+    // A SERVER ERROR'S DURABLE COPY HAS ITS OWN RATION (WP-33c, DB-A52): the
+    // first [`AUDITED_ERRORS_PER_WINDOW`] a window are written at `error`,
+    // which the audit stream keeps; past it the line is still written, at
+    // `warn`, to the ring alone, saying so, and the next window's first says
+    // how many were kept out. A flood of 500s can no longer roll the stream.
+    let mut kept_out = None;
+    let mut durable = None;
+    let level = if level == telemetry::Level::Error {
+        let admit = AUDITED_ERRORS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(now);
+        kept_out = admit.summary;
+        durable = Some(admit.write);
+        if admit.write {
+            telemetry::Level::Error
+        } else {
+            telemetry::Level::Warn
+        }
+    } else {
+        level
+    };
+    let mut event = telemetry::Event::new(level, "api.request", "served")
+        .with("method", telemetry::Value::Str(&method))
+        .with("path", telemetry::Value::Str(&path))
+        .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+        .with("micros", telemetry::Value::Uint(micros));
+    if let Some(durable) = durable {
+        event = event.with("durable", telemetry::Value::Bool(durable));
+    }
+    if let Some(kept_out) = kept_out {
+        event = event.with("kept_out_of_audit_before", telemetry::Value::Uint(kept_out));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
+    response
+}
+
+/// The level a request's line is written at: `error` for a server error,
+/// `warn` for a client error, `debug` otherwise.
+///
+/// 501 IS A PLACEHOLDER, NOT A FAILURE (WP-33c, DB-A52): a route this build
+/// registers and has not built answers it by design, and one bench put 201 of
+/// them into the durable audit stream at `error`. It is a `warn` in the ring,
+/// rationed as every failed request is, and the audit stream never takes it.
+fn request_level(status: axum::http::StatusCode) -> telemetry::Level {
+    if status.is_server_error() && status != axum::http::StatusCode::NOT_IMPLEMENTED {
         telemetry::Level::Error
-    } else if status.is_client_error() {
+    } else if status.is_client_error() || status.is_server_error() {
         telemetry::Level::Warn
     } else {
         telemetry::Level::Debug
+    }
+}
+
+/// How many server-error request lines one window writes at `error`, where
+/// the durable audit stream keeps them (WP-33c, DB-A52). Past it a window's
+/// lines go to the ring at `warn`, each marked `durable: false`, and the next
+/// window's first line carries the count kept out.
+pub const AUDITED_ERRORS_PER_WINDOW: u64 = 20;
+
+/// The durable copy's ration, one window for every origin.
+static AUDITED_ERRORS: std::sync::Mutex<Ration> =
+    std::sync::Mutex::new(Ration::new(AUDITED_ERRORS_PER_WINDOW));
+
+// ---------------------------------------------------------------------------
+// /db READS, COUNTED AND SAMPLED (WP-33c, DB-A42)
+// ---------------------------------------------------------------------------
+//
+// # What was missing
+//
+// A served read was a `debug` line, dropped at the `info` floor, and every
+// `/db` data route is exempt from the invocation audit (D-0568, which this
+// does not change: that journal records sweep results and controls). A
+// refused read was a `warn` in the ring only. So "what did the operator read,
+// and what was refused" had no durable answer at all.
+//
+// # The rule (stated, because it bounds the durable stream)
+//
+// * EVERY read of a [`DB_READS`] route is COUNTED, per route, per
+//   [`ACCESS_WINDOW_MS`] window, served and refused apart, with its slowest
+//   time.
+// * The FIRST SERVED read of a route in a window is written whole, at `info`:
+//   `api.access read served`, with its route, status, time and the selection
+//   it named ([`ACCESS_KEYS`]: feed, instrument, symbol, day, month and the
+//   rest of a `/db` selection, never the whole query).
+// * EVERY REFUSED read is written, at `warn` (`api.access read refused`),
+//   under the failed-request ration every 4xx already had: 200 a minute from
+//   this console, 50 from another site, the rest counted and said.
+// * When a route's window closes, its next read first writes
+//   `api.access reads counted`: how many were served and refused in the
+//   window that closed, and the slowest.
+//
+// A target ending in `access` is audited (`telemetry::is_audited`), so all
+// three reach the durable stream and its index (feed, instrument, day, month):
+// `/logs.json?instrument=NIFTY` finds the operator's own NIFTY reads. Bound:
+// at most two lines per route a minute plus the rationed refusals, about
+// 1.6 MB a day for every route read continuously; a route nobody reads writes
+// nothing. A window's count rides on the route's next read, so the last
+// window before silence is counted in memory and said when the route is next
+// read: an honest limit, named.
+
+/// The routes a `/db` page reads its data from: each read is counted and
+/// sampled into the durable stream (WP-33c, DB-A42).
+pub const DB_READS: [&str; 16] = [
+    "/bars.json",
+    "/bars/window.json",
+    "/spot.json",
+    "/greeks.json",
+    "/chain.json",
+    "/calendar.json",
+    "/gaps.json",
+    "/instruments.json",
+    "/store.json",
+    "/dayflags.json",
+    "/imports.json",
+    "/provenance.json",
+    "/sources.json",
+    "/sources/bars.json",
+    "/sources/day.json",
+    "/census/facets.json",
+];
+
+/// The query names an access record keeps: the selection, never anything
+/// else a query may carry. At most [`telemetry::MAX_FIELDS`] less the four an
+/// access record always carries are kept, in this order: the names `/db`
+/// sends (`DbBarsGrid`'s window: feed, exchange, segment, symbol, contract,
+/// timeframe, from, to) first, so `symbol` is kept and the audit index files
+/// the read under its instrument.
+pub const ACCESS_KEYS: [&str; 12] = [
+    "feed",
+    "symbol",
+    "instrument",
+    "segment",
+    "exchange",
+    "contract",
+    "timeframe",
+    "month",
+    "day",
+    "from",
+    "to",
+    "key",
+];
+
+/// An access record's window.
+pub const ACCESS_WINDOW_MS: u64 = 60_000;
+
+/// Whether `path` is a `/db` read route.
+fn is_db_read(path: &str) -> bool {
+    DB_READS.contains(&path)
+}
+
+/// The selection a read named, from its query: each of [`ACCESS_KEYS`] it
+/// carries, decoded, in that order.
+fn selection_of(query: &str) -> Vec<(&'static str, String)> {
+    ACCESS_KEYS
+        .iter()
+        .filter_map(|name| {
+            let value = crate::server::param(query, name);
+            (!value.is_empty()).then_some((*name, value))
+        })
+        .take(telemetry::MAX_FIELDS.saturating_sub(4))
+        .collect()
+}
+
+/// One route's access window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccessWindow {
+    /// When it opened, ms.
+    opened_ms: u64,
+    /// Reads served in it.
+    served: u64,
+    /// Reads refused in it.
+    refused: u64,
+    /// The slowest read in it, microseconds.
+    slowest: u64,
+    /// Whether its served read was written.
+    sampled: bool,
+}
+
+/// What one read writes, decided by [`AccessWindows::account`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccessPlan {
+    /// The window that just closed, to be said first, when it held more than
+    /// the line it wrote.
+    pub(crate) closed: Option<AccessWindow>,
+    /// Whether this read is written whole.
+    pub(crate) sample: bool,
+}
+
+/// Every route's access window. O(1) a read: one probe of a table of at most
+/// [`DB_READS`] routes.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
+#[derive(Debug, Default)]
+pub(crate) struct AccessWindows {
+    routes: std::collections::HashMap<&'static str, AccessWindow>,
+}
+
+impl AccessWindows {
+    /// Accounts one read of `route`, `refused` or served, taking `micros`, at
+    /// `now_ms`.
+    pub(crate) fn account(
+        &mut self,
+        route: &'static str,
+        refused: bool,
+        micros: u64,
+        now_ms: u64,
+    ) -> AccessPlan {
+        let window = self.routes.entry(route).or_insert(AccessWindow {
+            opened_ms: now_ms,
+            ..AccessWindow::default()
+        });
+        let mut plan = AccessPlan::default();
+        if now_ms.saturating_sub(window.opened_ms) >= ACCESS_WINDOW_MS || now_ms < window.opened_ms
+        {
+            let reads = window.served.saturating_add(window.refused);
+            if reads > u64::from(window.sampled) {
+                plan.closed = Some(*window);
+            }
+            *window = AccessWindow {
+                opened_ms: now_ms,
+                ..AccessWindow::default()
+            };
+        }
+        if refused {
+            window.refused = window.refused.saturating_add(1);
+        } else {
+            window.served = window.served.saturating_add(1);
+            if !window.sampled {
+                window.sampled = true;
+                plan.sample = true;
+            }
+        }
+        window.slowest = window.slowest.max(micros);
+        plan
+    }
+}
+
+/// The access windows of this process.
+static ACCESS: std::sync::Mutex<Option<AccessWindows>> = std::sync::Mutex::new(None);
+
+/// Counts one `/db` read and writes what [`AccessWindows::account`] says to:
+/// the closed window's count, this read whole (a sampled served read, or a
+/// refused one the failed-request ration admits), or nothing.
+pub(crate) fn note_access(
+    path: &str,
+    (status, micros): (u16, u64),
+    selection: &[(&'static str, String)],
+    refusal_admitted: bool,
+    now_ms: u64,
+) {
+    let Some(route) = DB_READS.iter().copied().find(|route| *route == path) else {
+        return;
     };
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(level, "api.request", "served")
-            .with("method", telemetry::Value::Str(&method))
-            .with("path", telemetry::Value::Str(&path))
-            .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
-            .with("micros", telemetry::Value::Uint(micros)),
+    let refused = status >= 400;
+    let plan = ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(AccessWindows::default)
+        .account(route, refused, micros, now_ms);
+    let mut lines: Vec<telemetry::Event<'_>> = Vec::with_capacity(2);
+    if let Some(closed) = plan.closed {
+        lines.push(
+            telemetry::Event::info("api.access", "reads counted")
+                .with("route", telemetry::Value::Str(route))
+                .with("served", telemetry::Value::Uint(closed.served))
+                .with("refused", telemetry::Value::Uint(closed.refused))
+                .with("slowest_micros", telemetry::Value::Uint(closed.slowest))
+                .with("window_ms", telemetry::Value::Uint(ACCESS_WINDOW_MS)),
+        );
+    }
+    // A REFUSAL IS WRITTEN WHEN THE RATION EVERY FAILED REQUEST HAS ADMITS IT
+    // (`note_request` asked it, and said any count it held back).
+    let write = if refused {
+        refusal_admitted
+    } else {
+        plan.sample
+    };
+    if write {
+        let mut line = if refused {
+            telemetry::Event::warn("api.access", "read refused")
+        } else {
+            telemetry::Event::info("api.access", "read served")
+        }
+        .with("route", telemetry::Value::Str(route))
+        .with("status", telemetry::Value::Uint(u64::from(status)))
+        .with("micros", telemetry::Value::Uint(micros));
+        for (name, value) in selection {
+            line = line.with(name, telemetry::Value::Str(value));
+        }
+        lines.push(line);
+    }
+    for line in &lines {
+        let _dropped_when_filtered = telemetry::emit(line);
+    }
+}
+
+/// How many `api.request` lines at `Warn` or `Error` one window may write.
+///
+/// audit-20261003 hunt-api-3, D-1583. Every answer ≥ 400 was written, and a
+/// cross-site GET with a local `Host` is admitted to every non-journaled route
+/// by design — so any page the operator had open could loop `fetch(…,
+/// {mode:'no-cors'})` and roll the whole 64 MiB window away (100,000 requests
+/// in 29 s evicted a sentinel). Cross-site failures ([`cross_site`]) are now
+/// rationed per window, and what
+/// was held back is COUNTED and said in one line by the first failed request
+/// of a later window, so a flood is still visible as a flood. Honest limit: a
+/// count is said only once another cross-site request fails; a flood followed by silence
+/// until shutdown leaves its last window's count unsaid.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each — about 1.8 MB an hour at the worst, against a 64 MiB retained log.
+pub const FAILED_LINES_PER_WINDOW: u64 = 50;
+
+/// How many failed-request lines the operator's own pages and local tools may
+/// write in one window.
+///
+/// audit-20261003 hunt-api-3, D-1552. D-1583 rationed only requests another
+/// site sent, so a same-origin client (a page of this console stuck in a
+/// retry loop, a local script) still wrote one line per failed request and
+/// could roll the whole 64 MiB window away exactly as the cross-site flood
+/// did. This path now has its own ration, four times the cross-site one
+/// because it is the operator's own traffic, with the same counted summary:
+/// what is held back is said in one Warn line carrying `suppressed` = N, never
+/// dropped silently. A separate count, so a local flood cannot spend the
+/// cross-site lines and a cross-site flood cannot silence the operator's own
+/// failures.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each, about 7.4 MB an hour at the worst; with the cross-site ration, about
+/// 9.3 MB an hour, so a sustained flood of both still takes some seven hours
+/// to roll the 64 MiB retained log (`docs/06-limits.md`).
+pub const LOCAL_FAILED_LINES_PER_WINDOW: u64 = 200;
+
+/// The summary line's message for one origin class.
+pub(crate) const fn suppression_message(from_another_site: bool) -> &'static str {
+    if from_another_site {
+        "cross-site failed-request lines suppressed in the previous window"
+    } else {
+        "same-origin failed-request lines suppressed in the previous window"
+    }
+}
+
+/// Whether a request came from another site, by the browser's own
+/// `Sec-Fetch-Site`: anything but absent, `same-origin` or `none` (typed or
+/// bookmarked). These failed requests draw on [`FAILED_LINES_PER_WINDOW`];
+/// the operator's own pages and local tools draw on the separate
+/// [`LOCAL_FAILED_LINES_PER_WINDOW`] (D-1552). Every browser that sends a
+/// `no-cors` fetch sends this header with it.
+pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
+}
+
+/// The length of one rationing window, in milliseconds.
+pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
+
+/// The process's failed-request rations, one per origin class.
+static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
+
+/// Opens a fresh window on both rations, for a test that asserts on ONE
+/// failed-request line.
+///
+/// The rations are the PROCESS's, and a test binary is one process: every test
+/// that sends a request which fails draws on the same
+/// [`LOCAL_FAILED_LINES_PER_WINDOW`] lines a minute. The api suite sent 267
+/// such requests a run on 2026-10-11 (counted in its sink: 227 `Warn`, 40
+/// `Error`), so a run quick enough to fit one window held back the line of
+/// whichever test came late — correctly, and with no summary, because no
+/// later window opened to carry one. A test about its own line opens its own
+/// window first; a test about the ration itself builds its own [`Rations`].
+#[cfg(test)]
+pub(crate) fn fresh_failed_line_window() {
+    *FAILED_LINES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Rations::new();
+}
+
+/// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
+#[derive(Debug)]
+pub(crate) struct Rations {
+    /// Failed requests another site sent.
+    cross: Ration,
+    /// Failed requests from this console's own pages and local tools.
+    local: Ration,
+}
+
+impl Rations {
+    pub(crate) const fn new() -> Self {
+        Self {
+            cross: Ration::new(FAILED_LINES_PER_WINDOW),
+            local: Ration::new(LOCAL_FAILED_LINES_PER_WINDOW),
+        }
+    }
+
+    /// Accounts one failed request of its origin class at `now_ms`.
+    pub(crate) fn admit(&mut self, from_another_site: bool, now_ms: u64) -> Admit {
+        if from_another_site {
+            self.cross.admit(now_ms)
+        } else {
+            self.local.admit(now_ms)
+        }
+    }
+}
+
+/// A fixed-window count of failed-request lines. O(1) per request: three
+/// counters and no loop. The bound on lines written per window is proven by
+/// `api::logs::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`;
+/// the per-request time is by construction and UNVERIFIED by any measurement
+/// (`docs/06-limits.md`, D-1459).
+#[derive(Debug)]
+pub(crate) struct Ration {
+    /// When the current window opened.
+    opened_ms: u64,
+    /// Lines written in it.
+    written: u64,
+    /// Lines held back in it.
+    suppressed: u64,
+    /// Lines one window may write.
+    limit: u64,
+}
+
+/// What one failed request may write.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Admit {
+    /// Whether its own line is written.
+    pub(crate) write: bool,
+    /// How many lines the window that just closed held back, when non-zero.
+    pub(crate) summary: Option<u64>,
+}
+
+impl Ration {
+    pub(crate) const fn new(limit: u64) -> Self {
+        Self {
+            opened_ms: 0,
+            written: 0,
+            suppressed: 0,
+            limit,
+        }
+    }
+
+    /// Accounts one failed request at `now_ms`.
+    pub(crate) fn admit(&mut self, now_ms: u64) -> Admit {
+        let mut summary = None;
+        if now_ms.saturating_sub(self.opened_ms) >= FAILED_LINE_WINDOW_MS || now_ms < self.opened_ms
+        {
+            if self.suppressed > 0 {
+                summary = Some(self.suppressed);
+            }
+            self.opened_ms = now_ms;
+            self.written = 0;
+            self.suppressed = 0;
+        }
+        let write = self.written < self.limit;
+        if write {
+            self.written = self.written.saturating_add(1);
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+        }
+        Admit { write, summary }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KEYED READS: feed, instrument, day and contract (D-3341 item 3; DB-023,
+// DB-G88, DB-025)
+// ---------------------------------------------------------------------------
+//
+// # What this adds, and why the ring alone could not
+//
+// `/logs.json` filtered by level, target and run, over the newest 4 MiB of a
+// ring that held 4 to 12 minutes during a pull. "Why was NIFTY refused on
+// 2022-03-07" was a question it could answer only within those minutes, and
+// only by a caller who knew the target to ask for.
+//
+// A request naming a `feed`, an `instrument`, a `day` or a `contract` is
+// answered from the durable audit stream each sink keeps
+// (`telemetry::audit_postings`): ONE posting file per key, named by the key, in
+// each half (the server's directory and `cli`'s), and one positional read per
+// line it points at. Nothing is scanned to find them.
+//
+// Since WP-33c (DB-A44) that is the WHOLE answer by default, one page at a
+// time: the postings are merged newest first from a cursor (`before=`, the
+// `next` the previous page handed back), so every match can be reached, none
+// twice, and a page does not move when unrelated lines arrive. The ring is
+// read only when `ring=1` asks for it, on a first page, for lines no stream
+// holds (`warn` and `info` detail, and lines older than the stream): those
+// rows are labelled `source: ring`, are never paged, and move as the ring
+// rolls, which is why they are asked for and never mixed in. Before WP-33c
+// every keyed request read the newest 4 MiB of both rings (5,352,506 bytes on
+// the operator's store, p50 22-28 ms), and its count moved with the ring.
+//
+// # What "bears on" means
+//
+// A key matches an event that names it in a field (`feed`/`vendor`,
+// `instrument`/`symbol` with `segment` when both carry one, `day`, `contract`),
+// and three things it cannot match by field:
+//
+// * an event whose target names the feed (`gdfl.import` for `feed=gdfl`): the
+//   GDFL importer names its kind, day and file, never its feed;
+// * a GDFL importer refusal about a FILE: the file name is resolved through
+//   `pull::gdfl_cm::resolve` (`NIFTY 50.NSE_IDX.csv` is `NSE-INDEX-NIFTY`) and
+//   an option ticker through `pull::gdfl_nfo::decode_ticker`, the importer's
+//   own two readers, so the API cannot disagree with what was imported;
+// * a refusal of a WHOLE DAY (the calendar, the census, a listing) of a kind:
+//   it bears on every instrument of that kind's segment that day, and the
+//   record says so with `"scope":"day"`. An event about the month a day falls
+//   in carries `"scope":"month"`; an event naming the key itself, `"event"`.
+//
+// # Cost
+//
+// Per half: at most one `metadata` call per kept generation and one read per
+// probed posting (two for a day: the day and its month), then one positional
+// read per pointer read, at most [`MAX_KEYED_READS`] across the request; and
+// the ring's [`SCAN_BYTES`] only when `ring=1` asked for it. None of it grows
+// with the stream, the index or the store.
+
+/// The longest `contract` a keyed request reads: a store contract segment
+/// (`brutex_core::instrument::CONTRACT_CAPACITY`) or a vendor ticker, which
+/// can be longer.
+pub const MAX_CONTRACT_ASKED: usize = 64;
+
+/// The most audit lines one keyed request reads, both halves together. The
+/// answer says when pointers were left unread (`index.capped`).
+pub const MAX_KEYED_READS: usize = 2_000;
+
+/// What a keyed request narrows by.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Keys {
+    /// The feed's wire, as `Vendor::as_str` spells it.
+    pub(crate) feed: Option<String>,
+    /// The instrument.
+    pub(crate) instrument: Option<Instrument>,
+    /// The day.
+    pub(crate) day: Option<pull::session::Day>,
+    /// The contract, as the store names its segment, or a vendor ticker.
+    pub(crate) contract: Option<String>,
+    /// A refusal's code (WP-33c, DB-A47).
+    pub(crate) code: Option<String>,
+    /// A run, probed in the index's `run` posting: set by `durable=1`.
+    pub(crate) run: Option<u64>,
+    /// A target, probed in the index's `target` posting: set by `durable=1`
+    /// with no run.
+    pub(crate) target: Option<String>,
+}
+
+impl Keys {
+    /// Whether no key was asked for.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.feed.is_none()
+            && self.instrument.is_none()
+            && self.day.is_none()
+            && self.contract.is_none()
+            && self.code.is_none()
+            && self.run.is_none()
+            && self.target.is_none()
+    }
+}
+
+/// An instrument as a request names it: `NSE-INDEX-NIFTY`, `NSE-NIFTY` or
+/// `NIFTY`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Instrument {
+    /// The text asked.
+    pub(crate) asked: String,
+    /// The exchange, when named.
+    pub(crate) exchange: Option<String>,
+    /// The segment, when named.
+    pub(crate) segment: Option<String>,
+    /// The symbol.
+    pub(crate) symbol: String,
+}
+
+/// The instrument `text` names, or `None` when its symbol is not one the store
+/// files (`brutex_core::symbol::Symbol`).
+pub(crate) fn instrument_of(text: &str) -> Option<Instrument> {
+    use brutex_core::instrument::{Exchange, Segment};
+    let exchange = text
+        .split_once('-')
+        .filter(|(exchange, _)| Exchange::parse(exchange).is_ok());
+    let (exchange, segment, symbol) = match exchange {
+        Some((exchange, rest)) => match rest.split_once('-') {
+            Some((segment, symbol)) if Segment::parse(segment).is_ok() => {
+                (Some(exchange), Some(segment), symbol)
+            }
+            _ => (Some(exchange), None, rest),
+        },
+        None => (None, None, text),
+    };
+    brutex_core::symbol::Symbol::new(symbol).ok()?;
+    Some(Instrument {
+        asked: text.to_owned(),
+        exchange: exchange.map(str::to_owned),
+        segment: segment.map(str::to_owned),
+        symbol: symbol.to_owned(),
+    })
+}
+
+/// How an event bears on a request's keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// It names the key itself.
+    Event,
+    /// It refuses a whole day of a kind the key belongs to.
+    Day,
+    /// It is about the month the asked day falls in.
+    Month,
+}
+
+impl Scope {
+    /// The wire's word.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Event => "event",
+            Self::Day => "day",
+            Self::Month => "month",
+        }
+    }
+
+    /// The wider of two.
+    const fn widest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Month, _) | (_, Self::Month) => Self::Month,
+            (Self::Day, _) | (_, Self::Day) => Self::Day,
+            _ => Self::Event,
+        }
+    }
+}
+
+/// The text of one field.
+fn text_of<'r>(record: &'r telemetry::Record, key: &str) -> Option<&'r str> {
+    record.field(key).and_then(telemetry::OwnedValue::as_str)
+}
+
+/// What a GDFL importer event's `about` names, read with the importer's own
+/// readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum About {
+    /// A file of one instrument: its symbol, the segment its kind files it
+    /// under, and the contract an option ticker names.
+    File {
+        symbol: String,
+        segment: &'static str,
+        contract: Option<String>,
+    },
+    /// A file the importer does not file (a reference index, a series
+    /// variant): it bears on no swept instrument.
+    Unfiled,
+    /// The whole day of the kind: the calendar, the census, the listing.
+    WholeDay { segment: &'static str },
+}
+
+/// What `record`, a GDFL importer event, is about; `None` when it is not one
+/// or names no kind and day.
+fn gdfl_about(record: &telemetry::Record) -> Option<About> {
+    use pull::gdfl_cm::{CmKind, Resolution};
+    use pull::gdfl_import::ImportKind;
+    if record.target != pull::gdfl_import::TARGET {
+        return None;
+    }
+    let kind = ImportKind::parse(text_of(record, "kind")?).ok()?;
+    let segment = kind.segment();
+    let about = text_of(record, "about").unwrap_or("");
+    let cm = match kind {
+        ImportKind::Indices => Some(CmKind::Indices),
+        ImportKind::Stocks => Some(CmKind::Stocks),
+        ImportKind::Options => None,
+    };
+    if let Some(cm) = cm {
+        let Ok((stem, _)) = pull::gdfl_cm::split_name(about) else {
+            return Some(About::WholeDay { segment });
+        };
+        return Some(match pull::gdfl_cm::resolve(cm, stem) {
+            Resolution::Swept(key) => About::File {
+                symbol: key.underlying.as_str().to_owned(),
+                segment,
+                contract: None,
+            },
+            _ => About::Unfiled,
+        });
+    }
+    let day = text_of(record, "day").and_then(crate::server::import_journal::parse_day)?;
+    Some(match pull::gdfl_nfo::decode_ticker(about, day) {
+        Ok(ticker) => About::File {
+            symbol: ticker.underlying.as_str().to_owned(),
+            segment,
+            contract: Some(ticker.contract.to_string()),
+        },
+        // NOT A TICKER: the calendar, the census, the listing. A ticker the
+        // reader refused is still a file of one contract, and the event says
+        // so in `about`; it is matched by its text below.
+        Err(_) if !about.ends_with("CE") && !about.ends_with("PE") => About::WholeDay { segment },
+        Err(_) => About::Unfiled,
+    })
+}
+
+/// How `record` bears on `keys`, or `None` when it does not.
+pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
+    let mut scope = Scope::Event;
+    let about = gdfl_about(record);
+    if let Some(ref feed) = keys.feed {
+        let named = text_of(record, "feed")
+            .or_else(|| text_of(record, "vendor"))
+            .is_some_and(|wire| wire == feed);
+        let by_target = record.target.split('.').next() == Some(feed.as_str());
+        if !named && !by_target {
+            return None;
+        }
+    }
+    if let Some(day) = keys.day {
+        let asked = day.to_string();
+        if let Some(text) = text_of(record, "day") {
+            if text != asked {
+                return None;
+            }
+        } else if text_of(record, "month") == asked.get(..7) {
+            scope = scope.widest(Scope::Month);
+        } else {
+            return None;
+        }
+    }
+    if let Some(ref instrument) = keys.instrument {
+        scope = scope.widest(instrument_bears(record, about.as_ref(), instrument)?);
+    }
+    if let Some(ref contract) = keys.contract {
+        let named = text_of(record, "contract") == Some(contract.as_str())
+            || text_of(record, "about") == Some(contract.as_str());
+        let decoded = matches!(
+            about,
+            Some(About::File { contract: Some(ref held), .. }) if held == contract
+        );
+        if !named && !decoded {
+            return None;
+        }
+    }
+    if let Some(ref code) = keys.code {
+        let named = text_of(record, "code")
+            .or_else(|| text_of(record, "reason"))
+            .is_some_and(|held| held == code);
+        if !named {
+            return None;
+        }
+    }
+    if let Some(run) = keys.run
+        && run_of(record) != Some(run)
+    {
+        return None;
+    }
+    if let Some(ref target) = keys.target
+        && !target_admits(&record.target, target)
+    {
+        return None;
+    }
+    Some(scope)
+}
+
+/// The run a line belongs to: its top-level `run`, else a numeric `run`
+/// field (the GDFL importer's `run started` and `run finished`), as the
+/// index files it (`telemetry` `Keyed::run`).
+fn run_of(record: &telemetry::Record) -> Option<u64> {
+    if record.run != 0 {
+        return Some(record.run);
+    }
+    record
+        .field("run")
+        .and_then(telemetry::OwnedValue::as_u64)
+        .filter(|run| *run != 0)
+}
+
+/// Whether a line's target is `asked` or beneath it (`pull` covers
+/// `pull.http`, never `pullover`).
+fn target_admits(target: &str, asked: &str) -> bool {
+    target == asked
+        || target
+            .strip_prefix(asked)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// How `record` bears on one instrument.
+fn instrument_bears(
+    record: &telemetry::Record,
+    about: Option<&About>,
+    asked: &Instrument,
+) -> Option<Scope> {
+    let segment_fits = |segment: &str| {
+        asked
+            .segment
+            .as_deref()
+            .is_none_or(|wanted| wanted == segment)
+    };
+    if let Some(about) = about {
+        return match *about {
+            About::File {
+                ref symbol,
+                segment,
+                ..
+            } => (*symbol == asked.symbol && segment_fits(segment)).then_some(Scope::Event),
+            About::WholeDay { segment } => segment_fits(segment).then_some(Scope::Day),
+            About::Unfiled => None,
+        };
+    }
+    let named = text_of(record, "instrument")
+        .or_else(|| text_of(record, "symbol"))
+        .is_some_and(|name| name == asked.symbol || name == asked.asked);
+    let agrees = |field: &str, wanted: Option<&String>| {
+        wanted
+            .is_none_or(|wanted| text_of(record, field).is_none_or(|held| held == wanted.as_str()))
+    };
+    (named
+        && agrees("segment", asked.segment.as_ref())
+        && agrees("exchange", asked.exchange.as_ref()))
+    .then_some(Scope::Event)
+}
+
+/// The postings a keyed request probes: the most selective key it names.
+fn probes(keys: &Keys) -> Vec<(&'static str, String)> {
+    let gdfl = keys
+        .feed
+        .as_deref()
+        .is_none_or(|feed| feed == brutex_core::vendor::Vendor::Gdfl.as_str());
+    let mut out = Vec::with_capacity(3);
+    if let Some(day) = keys.day {
+        let text = day.to_string();
+        out.push(("month", text.get(..7).unwrap_or_default().to_owned()));
+        out.push(("day", text));
+    } else if let Some(ref contract) = keys.contract {
+        out.push(("contract", contract.clone()));
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    } else if let Some(ref instrument) = keys.instrument {
+        out.push(("instrument", instrument.symbol.clone()));
+        if instrument.asked != instrument.symbol {
+            out.push(("instrument", instrument.asked.clone()));
+        }
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    } else if let Some(ref code) = keys.code {
+        out.push(("code", code.clone()));
+    } else if let Some(run) = keys.run {
+        out.push(("run", run.to_string()));
+    } else if let Some(ref feed) = keys.feed {
+        out.push(("feed", feed.clone()));
+        if gdfl {
+            out.push(("target", pull::gdfl_import::TARGET.to_owned()));
+        }
+    } else if let Some(ref target) = keys.target {
+        out.push(("target", target.clone()));
+    }
+    out
+}
+
+/// One posting of one half, read newest first from a place (WP-33c, DB-A44).
+struct Stream<'d> {
+    half: &'static str,
+    dir: &'d std::path::Path,
+    /// The half's current serial, as the pointers were read.
+    serial: u64,
+    dimension: &'static str,
+    value: String,
+    /// The pointers fetched, newest first, strictly older than the cursor.
+    page: telemetry::PostingsPage,
+    /// The fetched pointer the stream stands at.
+    next: usize,
+    /// The place of the last pointer this page consumed.
+    last: Option<telemetry::PostingAt>,
+    /// The place this page started from.
+    from: Slot,
+    /// Whether the posting may hold pointers older than those fetched.
+    more: bool,
+    /// The stream's next line, read and not yet consumed.
+    head: Option<(telemetry::AuditPointer, telemetry::Record)>,
+    /// Pointers this page consumed.
+    read: usize,
+}
+
+/// Where one stream of a keyed answer stands, as a cursor names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Not started: from the newest pointer.
+    Newest,
+    /// After this place: the next page reads strictly older pointers.
+    At(telemetry::PostingAt),
+    /// Every pointer read.
+    Done,
+}
+
+impl Slot {
+    /// The cursor's text for one stream: `*`, `<serial>.<index>` or `-`.
+    fn text(self) -> String {
+        match self {
+            Self::Newest => "*".to_owned(),
+            Self::At(at) => format!("{}.{}", at.serial, at.index),
+            Self::Done => "-".to_owned(),
+        }
+    }
+
+    /// One stream's cursor text, or `None` when it is not one.
+    fn read(text: &str) -> Option<Self> {
+        match text {
+            "*" => Some(Self::Newest),
+            "-" => Some(Self::Done),
+            _ => {
+                let (serial, index) = text.split_once('.')?;
+                let number =
+                    |part: &str| part.parse::<u64>().ok().filter(|n| n.to_string() == part);
+                Some(Self::At(telemetry::PostingAt {
+                    serial: number(serial)?,
+                    index: number(index)?,
+                }))
+            }
+        }
+    }
+}
+
+/// The cursor a keyed answer hands back: one [`Slot`] per (half, posting),
+/// joined by `~`, in the order the halves and the probes are named. `None`
+/// when every stream is done: there is no next page.
+fn cursor_text(slots: &[Slot]) -> Option<String> {
+    slots.iter().any(|slot| *slot != Slot::Done).then(|| {
+        slots
+            .iter()
+            .map(|slot| slot.text())
+            .collect::<Vec<_>>()
+            .join("~")
+    })
+}
+
+impl Stream<'_> {
+    /// Reads the stream's next line into its head, consuming pointers whose
+    /// line has rolled off or will not read (each counted). One positional
+    /// read per pointer, each against `budget`.
+    fn fill(&mut self, budget: &mut usize, rolled_off: &mut u64, errors: &mut Vec<String>) {
+        while self.head.is_none() && *budget > 0 {
+            let Some(&(at, pointer)) = self.page.pointers.get(self.next) else {
+                return;
+            };
+            *budget = budget.saturating_sub(1);
+            match telemetry::audit_read(self.dir, self.serial, &pointer) {
+                telemetry::AuditLine::Found(record) => self.head = Some((pointer, record)),
+                telemetry::AuditLine::RolledOff => {
+                    *rolled_off = rolled_off.saturating_add(1);
+                    self.consume(at);
+                }
+                telemetry::AuditLine::Unreadable(why) => {
+                    errors.push(why);
+                    self.consume(at);
+                }
+            }
+        }
+    }
+
+    /// Steps past the pointer at `at`.
+    fn consume(&mut self, at: telemetry::PostingAt) {
+        self.next = self.next.saturating_add(1);
+        self.last = Some(at);
+        self.read = self.read.saturating_add(1);
+        self.head = None;
+    }
+
+    /// The place of the head, when there is one.
+    fn head_at(&self) -> Option<telemetry::PostingAt> {
+        self.head
+            .as_ref()
+            .and_then(|_| self.page.pointers.get(self.next).map(|(at, _)| *at))
+    }
+
+    /// Where the stream stands for the next page.
+    fn slot(&self) -> Slot {
+        if self.head.is_none() && self.next >= self.page.pointers.len() && !self.more {
+            return Slot::Done;
+        }
+        self.last.map_or(self.from, Slot::At)
+    }
+}
+
+/// What a keyed answer's index half found: its rows, in order, and how it
+/// read them.
+#[derive(Debug, Default)]
+struct Indexed {
+    /// `(half, scope, record)`, newest first.
+    rows: Vec<(&'static str, Scope, telemetry::Record)>,
+    /// The postings JSON, one object per (half, posting).
+    postings: Vec<String>,
+    /// The cursor for the next page, or `None` when every stream is done.
+    next: Option<String>,
+    /// Pointers left unread at [`MAX_KEYED_READS`].
+    capped: bool,
+    /// Pointers whose line has rolled out of the kept stream.
+    rolled_off: u64,
+    /// Lines read.
+    reads: usize,
+    /// A cursor that does not fit this request, named.
+    cursor_refused: Option<String>,
+    /// Failures, in their own words.
+    errors: Vec<String>,
+}
+
+/// The index half of a keyed answer: every (half, posting) stream merged
+/// newest first, read from the cursor, a line in two postings of one half
+/// shown once, until `limit` lines bear on the keys or [`MAX_KEYED_READS`]
+/// lines were read (WP-33c, DB-A44).
+///
+/// # Cost
+///
+/// Per stream: [`telemetry::audit_postings_before`] (O(generations) `metadata`
+/// calls and one read of at most [`MAX_KEYED_READS`] pointers at a computed
+/// offset), then one positional read per line, at most [`MAX_KEYED_READS`]
+/// across the request. No ring is read and nothing grows with the stream:
+/// the same request costs the same at any size, and a page past the first
+/// starts where the last one stopped, so every match can be reached and none
+/// is shown twice. Lines appended later are newer than every place already
+/// handed out, so they never shift a later page.
+fn index_rows(halves: &[(&'static str, &std::path::Path)], asked: &Asked) -> Indexed {
+    let mut out = Indexed::default();
+    let probes = probes(&asked.keys);
+    let wanted = halves.len().saturating_mul(probes.len());
+    let Some(slots) = cursor_slots(asked.before.as_deref(), wanted, &mut out) else {
+        return out;
+    };
+    let mut opened = open_streams(halves, &probes, &slots, &mut out);
+    let budget = merge_streams(&mut opened.streams, asked, &mut out);
+    out.reads = MAX_KEYED_READS.saturating_sub(budget);
+    let cursor: Vec<Slot> = opened
+        .slot_of
+        .iter()
+        .enumerate()
+        .map(|(index, held)| match *held {
+            Some(at) => opened.streams.get(at).map_or(Slot::Done, Stream::slot),
+            None => opened.fixed.get(index).copied().unwrap_or(Slot::Done),
+        })
+        .collect();
+    out.next = cursor_text(&cursor);
+    out.postings.extend(opened.streams.iter().map(posting_json));
+    out
+}
+
+/// The cursor a request carried, as one [`Slot`] per (half, posting), or
+/// every stream from its newest when it carried none. A cursor that is not
+/// one of this request's is refused by name in `out` and `None` answered: no
+/// page is read, never page one passed off as the next.
+fn cursor_slots(before: Option<&str>, wanted: usize, out: &mut Indexed) -> Option<Vec<Slot>> {
+    let Some(text) = before else {
+        return Some(vec![Slot::Newest; wanted]);
+    };
+    let read: Option<Vec<Slot>> = text.split('~').map(Slot::read).collect();
+    let fits = read.filter(|slots| slots.len() == wanted);
+    if fits.is_none() {
+        out.cursor_refused = Some(format!(
+            "before={text:?} is not a cursor of this request: it names {} place(s) and this \
+             request reads {wanted} posting(s); no page was read",
+            text.split('~').count()
+        ));
+    }
+    fits
+}
+
+/// The streams of one keyed request, and where each cursor slot stands.
+struct Opened<'d> {
+    streams: Vec<Stream<'d>>,
+    /// Per cursor slot, the stream reading it, or `None` for a slot no stream
+    /// reads (a half with no stream, a posting done, a read that failed).
+    slot_of: Vec<Option<usize>>,
+    /// Per cursor slot, what it stays when no stream reads it.
+    fixed: Vec<Slot>,
+}
+
+/// Opens one stream per (half, posting) the cursor has not finished: one
+/// [`telemetry::audit_postings_before`] each. A half with no audit stream is
+/// named in `out` (DB-A46), never read as one holding nothing.
+fn open_streams<'d>(
+    halves: &[(&'static str, &'d std::path::Path)],
+    probes: &[(&'static str, String)],
+    slots: &[Slot],
+    out: &mut Indexed,
+) -> Opened<'d> {
+    let mut opened = Opened {
+        streams: Vec::new(),
+        slot_of: Vec::new(),
+        fixed: Vec::new(),
+    };
+    for (h, &(half, dir)) in halves.iter().enumerate() {
+        let state = telemetry::audit_state(dir);
+        for (p, (dimension, value)) in probes.iter().enumerate() {
+            let from = slots
+                .get(h.saturating_mul(probes.len()).saturating_add(p))
+                .copied()
+                .unwrap_or(Slot::Done);
+            let serial = match state {
+                // NO STREAM IS NOT AN EMPTY STREAM (DB-A46): said by name,
+                // never `total: 0`.
+                Ok(None) => {
+                    out.postings.push(format!(
+                        r#"{{"half":{},"dimension":{},"value":{},"state":"no audit stream","total":null,"read":0}}"#,
+                        render::json_string(half),
+                        render::json_string(dimension),
+                        render::json_string(value),
+                    ));
+                    opened.slot_of.push(None);
+                    opened.fixed.push(Slot::Done);
+                    continue;
+                }
+                Err(ref why) => {
+                    out.errors.push(why.clone());
+                    opened.slot_of.push(None);
+                    opened.fixed.push(from);
+                    continue;
+                }
+                Ok(Some(serial)) => serial,
+            };
+            let before = match from {
+                Slot::At(at) => Some(at),
+                Slot::Newest => None,
+                Slot::Done => {
+                    opened.slot_of.push(None);
+                    opened.fixed.push(Slot::Done);
+                    continue;
+                }
+            };
+            match telemetry::audit_postings_before(dir, dimension, value, MAX_KEYED_READS, before) {
+                Ok(page) => {
+                    let more = page.pointers.len() >= MAX_KEYED_READS;
+                    opened.slot_of.push(Some(opened.streams.len()));
+                    opened.fixed.push(from);
+                    opened.streams.push(Stream {
+                        half,
+                        dir,
+                        serial,
+                        dimension,
+                        value: value.clone(),
+                        page,
+                        next: 0,
+                        last: None,
+                        from,
+                        more,
+                        head: None,
+                        read: 0,
+                    });
+                }
+                Err(why) => {
+                    out.errors.push(why);
+                    opened.slot_of.push(None);
+                    opened.fixed.push(from);
+                }
+            }
+        }
+    }
+    opened
+}
+
+/// Merges the streams newest first into `out.rows` until `asked.limit` rows
+/// bear on the keys or the read budget is spent; answers the budget left.
+fn merge_streams(streams: &mut [Stream<'_>], asked: &Asked, out: &mut Indexed) -> usize {
+    let mut budget = MAX_KEYED_READS;
+    while out.rows.len() < asked.limit {
+        for stream in streams.iter_mut() {
+            stream.fill(&mut budget, &mut out.rolled_off, &mut out.errors);
+        }
+        // A STREAM WITH POINTERS LEFT AND NO HEAD READ could hold the newest
+        // line: with the budget spent, the page stops rather than guess.
+        if streams
+            .iter()
+            .any(|s| s.head.is_none() && s.next < s.page.pointers.len())
+        {
+            out.capped = true;
+            break;
+        }
+        let best = streams
+            .iter()
+            .enumerate()
+            .filter_map(|(at, stream)| {
+                stream.head.as_ref().map(|(_, record)| {
+                    let half_rank = usize::from(stream.half != "served");
+                    (at, (record.at_unix_millis, half_rank, record.seq))
+                })
+            })
+            .max_by_key(|(_, key)| *key)
+            .map(|(at, _)| at);
+        let Some(chosen) = best.and_then(|best| streams.get_mut(best)) else {
+            break;
+        };
+        let half = chosen.half;
+        let (Some(at), Some((pointer, record))) = (chosen.head_at(), chosen.head.take()) else {
+            break;
+        };
+        chosen.consume(at);
+        // THE SAME LINE IN ANOTHER POSTING OF THIS HALF is the same line: it
+        // stands at every such stream's head now, and is consumed there too.
+        for other in streams.iter_mut() {
+            if other.half == half
+                && other.head.as_ref().is_some_and(|(held, _)| {
+                    held.serial == pointer.serial && held.offset == pointer.offset
+                })
+                && let Some(at) = other.head_at()
+            {
+                other.consume(at);
+            }
+        }
+        if let Some(scope) = bears(&record, &asked.keys)
+            && admitted(&record, asked)
+        {
+            out.rows.push((half, scope, record));
+        }
+    }
+    budget
+}
+
+/// One stream's posting, as `index.postings` carries it.
+fn posting_json(stream: &Stream<'_>) -> String {
+    let uncovered: Vec<String> = stream
+        .page
+        .uncovered
+        .iter()
+        .map(|(serial, from)| {
+            format!(
+                r#"{{"serial":{serial},"indexed_from_offset":{}}}"#,
+                from.map_or_else(|| "null".to_owned(), |from| from.to_string())
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"half":{},"dimension":{},"value":{},"state":"held","total":{},"read":{},"malformed":{},"uncovered":[{}]}}"#,
+        render::json_string(stream.half),
+        render::json_string(stream.dimension),
+        render::json_string(&stream.value),
+        stream.page.total,
+        stream.read,
+        stream.page.malformed,
+        uncovered.join(","),
+    )
+}
+
+/// Whether a record passes the request's level, target and run filters. A
+/// keyed request's run is the line's own run as the index files it: its
+/// top-level `run`, else its numeric `run` field (WP-33c, DB-A41).
+fn admitted(record: &telemetry::Record, asked: &Asked) -> bool {
+    asked.level.is_none_or(|level| record.level.at_least(level))
+        && (asked.target.is_empty() || target_admits(&record.target, &asked.target))
+        && (asked.run == 0 || run_of(record) == Some(asked.run))
+}
+
+/// What a bounded scan of one ring found.
+#[derive(Debug, Default)]
+struct Scanned {
+    found: Vec<(Scope, telemetry::Record)>,
+    bytes_read: u64,
+    files_read: u64,
+    hit_cap: bool,
+    errors: Vec<String>,
+}
+
+/// The newest `budget` bytes of the ring in `dir`, newest file first, keeping
+/// the records `keep` admits. A partial first line of a read is skipped, never
+/// guessed at; so is an unterminated last one.
+fn ring_scan(
+    dir: &std::path::Path,
+    budget: u64,
+    keep: impl Fn(&telemetry::Record) -> Option<Scope>,
+) -> Scanned {
+    use std::io::{Read as _, Seek as _};
+    let mut out = Scanned::default();
+    let mut left = budget;
+    for path in telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES) {
+        let len = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                out.errors.push(format!("{}: {e}", path.display()));
+                continue;
+            }
+        };
+        if len == 0 {
+            continue;
+        }
+        if left == 0 {
+            out.hit_cap = true;
+            break;
+        }
+        let take = len.min(left);
+        let from = len.saturating_sub(take);
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(from))?;
+            file.take(take).read_to_end(&mut bytes)
+        });
+        if let Err(e) = read {
+            out.errors.push(format!("{}: {e}", path.display()));
+            continue;
+        }
+        left = left.saturating_sub(take);
+        out.bytes_read = out.bytes_read.saturating_add(take);
+        out.files_read = out.files_read.saturating_add(1);
+        let mut lines: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
+        // The last piece is after the final newline: empty, or a line being
+        // written. The first is a partial line when the read began mid-file.
+        let _unterminated = lines.pop();
+        let skip_first = usize::from(from > 0);
+        for line in lines.iter().skip(skip_first).rev() {
+            if let Ok(record) = telemetry::Record::decode(line)
+                && let Some(scope) = keep(&record)
+            {
+                out.found.push((scope, record));
+            }
+        }
+        if from > 0 {
+            out.hit_cap = true;
+            break;
+        }
+    }
+    out
+}
+
+/// `/logs.json` for a request that names a key: the durable audit index of
+/// both halves, newest first, one page from the cursor ([`index_rows`]); and,
+/// only when `ring=1` asked for it on a first page, the newest [`SCAN_BYTES`]
+/// of each ring for lines no stream holds (WP-33c, DB-A44). Each record
+/// carries its half, its source and how it bears on the keys.
+#[cfg(test)]
+fn keyed_json(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+) -> String {
+    keyed_json_across(&two_halves(dir, cli_dir), asked, health)
+}
+
+/// [`keyed_json`] across every directory in `halves`: at most 8 directories
+/// times at most 3 probes, 24 posting streams, under the one line budget
+/// ([`MAX_KEYED_READS`]) the request has whatever the streams hold
+/// (`docs/06-limits.md` L-IA-13).
+fn keyed_json_across(halves: &[Half], asked: &Asked, health: Option<&telemetry::Health>) -> String {
+    let Some(pair) = named_pair(halves) else {
+        return NO_LOG_JSON.to_owned();
+    };
+    let (tail, keyed, _next) = keyed_walk(halves, asked);
+    let body = json_of(&tail, asked, health, pair);
+    let mut out = body.strip_suffix('}').unwrap_or(&body).to_owned();
+    out.push_str(&keyed);
+    out.push(',');
+    out.push_str(&dirs_json(halves));
+    let _ = write!(
+        out,
+        r#","audit_stream":{}}}"#,
+        audit_json_of(
+            telemetry::global()
+                .and_then(telemetry::Sink::audit_health)
+                .as_ref()
+        ),
     );
-    response
+    out
+}
+
+/// A keyed answer's records as a [`telemetry::Tail`] and its `keyed` object,
+/// shared by `/logs.json` and the `/logs` page.
+fn keyed_walk(named: &[Half], asked: &Asked) -> (telemetry::Tail, String, Option<String>) {
+    let halves: Vec<(&'static str, &std::path::Path)> = named
+        .iter()
+        .map(|half| (half.name, half.path.as_path()))
+        .collect();
+    let indexed = index_rows(&halves, asked);
+    let mut rows: Vec<(&'static str, &'static str, Scope, telemetry::Record)> = indexed
+        .rows
+        .iter()
+        .map(|(half, scope, record)| (*half, "audit", *scope, record.clone()))
+        .collect();
+    // THE RING, ONLY WHEN ASKED, ONLY ON A FIRST PAGE: its rows move as the
+    // ring moves and cannot be paged, so they are never mixed in unasked.
+    let scan_ring = asked.ring && asked.before.is_none();
+    let mut ring = (0u64, 0u64, false, Vec::new());
+    if scan_ring {
+        let mut seen: std::collections::HashSet<(&'static str, u64)> =
+            rows.iter().map(|row| (row.0, row.3.seq)).collect();
+        let mut found = Vec::new();
+        for &(half, at) in &halves {
+            let scanned = ring_scan(at, SCAN_BYTES, |record| {
+                bears(record, &asked.keys).filter(|_| admitted(record, asked))
+            });
+            ring.0 = ring.0.saturating_add(scanned.bytes_read);
+            ring.1 = ring.1.saturating_add(scanned.files_read);
+            ring.2 |= scanned.hit_cap;
+            ring.3.extend(scanned.errors);
+            for (scope, record) in scanned.found {
+                if seen.insert((half, record.seq)) {
+                    found.push((half, "ring", scope, record));
+                }
+            }
+        }
+        // AT MOST `limit` RING ROWS, beside at most `limit` index rows: the
+        // index rows of this page are never cut for a ring row, so the
+        // cursor never skips one.
+        found.sort_by(|left, right| {
+            right
+                .3
+                .at_unix_millis
+                .cmp(&left.3.at_unix_millis)
+                .then_with(|| right.3.seq.cmp(&left.3.seq))
+        });
+        found.truncate(asked.limit);
+        rows.extend(found);
+        rows.sort_by(|left, right| {
+            right
+                .3
+                .at_unix_millis
+                .cmp(&left.3.at_unix_millis)
+                .then_with(|| right.3.seq.cmp(&left.3.seq))
+        });
+    }
+    let tail = telemetry::Tail {
+        records: rows.iter().map(|row| row.3.clone()).collect(),
+        bytes_read: ring.0,
+        files_read: u32::try_from(ring.1).unwrap_or(u32::MAX),
+        malformed: 0,
+        hit_scan_cap: ring.2,
+        reached_oldest: indexed.next.is_none(),
+        partial_tail: false,
+        errors: indexed.errors.iter().cloned().chain(ring.3).collect(),
+        missing: None,
+    };
+    let mut keyed = String::new();
+    keyed_object(&mut keyed, asked, &rows, &indexed, scan_ring);
+    (tail, keyed, indexed.next)
+}
+
+/// The `keyed` object a keyed answer carries: the keys, the rows' half, source
+/// and scope in the records' order, the index's postings and counts, the
+/// cursor for the next page, and what the ring read when it was asked for.
+fn keyed_object(
+    out: &mut String,
+    asked: &Asked,
+    rows: &[(&'static str, &'static str, Scope, telemetry::Record)],
+    indexed: &Indexed,
+    scan_ring: bool,
+) {
+    let keys = &asked.keys;
+    let text = |value: Option<&str>| value.map_or_else(|| "null".to_owned(), render::json_string);
+    let _ = write!(
+        out,
+        r#","keyed":{{"feed":{},"instrument":{},"day":{},"contract":{},"code":{},"run":{},"target":{},"matched":{},"rows":["#,
+        text(keys.feed.as_deref()),
+        text(keys.instrument.as_ref().map(|i| i.asked.as_str())),
+        keys.day.map_or_else(
+            || "null".to_owned(),
+            |d| render::json_string(&d.to_string())
+        ),
+        text(keys.contract.as_deref()),
+        text(keys.code.as_deref()),
+        keys.run
+            .map_or_else(|| "null".to_owned(), |run| format!("\"{run}\"")),
+        text(keys.target.as_deref()),
+        rows.len(),
+    );
+    for (n, (half, source, scope, record)) in rows.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"seq":{},"half":{},"source":{},"scope":{}}}"#,
+            record.seq,
+            render::json_string(half),
+            render::json_string(source),
+            render::json_string(scope.as_str()),
+        );
+    }
+    let _ = write!(
+        out,
+        r#"],"index":{{"postings":[{}],"max_reads":{MAX_KEYED_READS},"reads":{},"capped":{},"rolled_off":{}}},"next":{},"more":{},"cursor_refused":{},"ring":{{"asked":{},"scanned":{scan_ring},"paged":false,"note":{}}}}}"#,
+        indexed.postings.join(","),
+        indexed.reads,
+        indexed.capped,
+        indexed.rolled_off,
+        indexed
+            .next
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        indexed.next.is_some(),
+        indexed
+            .cursor_refused
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        asked.ring,
+        render::json_string(if scan_ring {
+            "the newest bytes of each ring were read too, for lines no audit stream holds: those \
+             rows are this page's alone and move as the ring rolls"
+        } else {
+            "the audit index alone: every audited line, paged by `next`. Add ring=1 to a first \
+             page for the newest unaudited lines of each ring (warn and info detail)"
+        }),
+    );
+}
+
+/// The served sink's audit stream, as JSON; `null` when it keeps none.
+fn audit_json_of(health: Option<&telemetry::AuditHealth>) -> String {
+    let Some(h) = health else {
+        return "null".to_owned();
+    };
+    format!(
+        r#"{{"path":{},"serial":{},"current_bytes":{},"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"index_records":{},"index_failures":{},"unindexed":{},"seeded":{},"gone_waiting":{},"reaped":{},"reap_failures":{},"reaper_behind":{},"reap_error":{},"loud":{},"last_error":{},"max_file_bytes":{},"keep_files":{}}}"#,
+        render::json_string(&h.path.display().to_string()),
+        h.serial,
+        h.current_bytes,
+        h.written,
+        h.dropped,
+        h.rotations,
+        h.rotation_failures,
+        h.index_records,
+        h.index_failures,
+        h.unindexed,
+        h.seeded,
+        // THE REAPER'S SIDE (D-4838): index generations a roll renamed aside
+        // and the reaper has not deleted yet, what it deleted, what it could
+        // not, and whether more wait than the stream keeps files.
+        h.gone_waiting,
+        h.reaped,
+        h.reap_failures,
+        h.reaper_behind(),
+        h.reap_error
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        h.is_loud(),
+        h.last_error
+            .as_deref()
+            .map_or_else(|| "null".to_owned(), render::json_string),
+        telemetry::AUDIT_MAX_FILE_BYTES,
+        telemetry::AUDIT_KEEP_FILES,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// THE GDFL IMPORTER'S OWN REFUSALS, BY KIND AND DAY (DB-025, DB-G09, D-3317)
+// ---------------------------------------------------------------------------
+
+/// What the GDFL importer logged at `error`, by `(kind, day)`, read from the
+/// `cli` half: the evidence `/imports.json` names beside a journal line that
+/// carries no `stage=` (every line written before D-3317).
+///
+/// # Why from the log
+///
+/// The journal's own lines from before D-3317 say `failures=1` and nothing
+/// else, so a census refusal and a vendor's malformed row closed alike
+/// (DB-G09). The importer DID say which: its `refused` event names the day,
+/// the file (`about`) and the reason (`why`), and since D-3317 its `stage` and
+/// `code`. That event is the record; this reads it rather than re-deciding.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirRefusals {
+    /// The refusals, keyed `(day, kind)`: a day sorts as its text does, so a
+    /// range of days is a range of the map.
+    by_day: std::collections::BTreeMap<(String, String), Vec<telemetry::Record>>,
+    /// Per kind, the newest [`RATE_WINDOW`] `day imported` events' stamps, in
+    /// milliseconds, oldest first: what the import's pace is measured from.
+    imported: std::collections::HashMap<String, std::collections::VecDeque<i64>>,
+    /// Ring files read to build this.
+    pub(crate) files: u64,
+    /// Bytes read to build this, in all.
+    pub(crate) bytes: u64,
+    /// Lines that would not decode.
+    pub(crate) malformed: u64,
+    /// Files that could not be read, in their own words.
+    pub(crate) errors: Vec<String>,
+    /// The `cli` attempts each `(day, kind)`'s importer lines were logged
+    /// under, in log order, each once (WP-33c; DB-A41). See [`Attempt`].
+    attempts_of: std::collections::BTreeMap<(String, String), Vec<u64>>,
+    /// Every `cli` attempt whose `command started` the ring holds.
+    attempts: std::collections::BTreeMap<u64, Attempt>,
+    /// The attempt the fold is inside: the run of the last `command started`
+    /// whose `command finished` it has not read yet.
+    current: Option<u64>,
+}
+
+/// One `cli` command, as its two lifecycle lines in the `cli` ring name it,
+/// and the GDFL importer lines logged between them (WP-33c; DB-A41).
+///
+/// # Why an importer line can be filed under its attempt
+///
+/// `cli` stamps only its `command started` / `command finished` pair with the
+/// attempt id (`cli::run_with_sink`: "Lifecycle IDs affect these two events
+/// only"), so every importer line carries `run: 0`, and `/logs.json?run=4025`
+/// found one line of a run that logged thousands. But the `cli` half has ONE
+/// writer at a time: its sink holds `logs/cli/events.lock` for the life of the
+/// process (`telemetry::Sink::open`, D-1458), and one process runs one
+/// command. So every line between an attempt's `command started` and its
+/// `command finished` (or the next `command started`, for an attempt that was
+/// killed) is that attempt's, by position. That is read here; nothing is
+/// guessed from time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Attempt {
+    /// The command word.
+    pub(crate) command: String,
+    /// `command started`'s stamp, ms.
+    pub(crate) started_ms: i64,
+    /// `command finished`'s stamp, ms: `None` for an attempt the ring holds no
+    /// finish of (killed, or still running).
+    pub(crate) finished_ms: Option<i64>,
+    /// `command finished`'s `phase`.
+    pub(crate) phase: Option<String>,
+    /// The importer runs this attempt opened (`run started`'s `run` field).
+    pub(crate) importer_runs: Vec<u64>,
+    /// Importer lines logged under it.
+    pub(crate) lines: u64,
+}
+
+impl DirRefusals {
+    /// The refusals logged for one kind and day, oldest first.
+    pub(crate) fn of(&self, kind: &str, day: &str) -> &[telemetry::Record] {
+        self.by_day
+            .get(&(day.to_owned(), kind.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Every `(kind, day)` with a logged refusal in `from..=to`, both
+    /// `YYYY-MM-DD`, oldest first. O(log n + days in the range).
+    pub(crate) fn days(&self, from: &str, to: &str) -> impl Iterator<Item = (&str, &str)> {
+        let low = (from.to_owned(), String::new());
+        self.by_day
+            .range(low..)
+            .take_while(move |((day, _), _)| day.as_str() <= to)
+            .map(|((day, kind), _)| (kind.as_str(), day.as_str()))
+    }
+
+    /// The import's pace for one kind, from this directory's events alone:
+    /// see [`pace_of`].
+    #[cfg(test)]
+    pub(crate) fn pace(&self, kind: &str) -> Option<(usize, i64, i64)> {
+        let stamps = self.imported.get(kind)?;
+        let (front, back) = stamps.as_slices();
+        if back.is_empty() {
+            pace_of(front)
+        } else {
+            let whole: Vec<i64> = stamps.iter().copied().collect();
+            pace_of(&whole)
+        }
+    }
+
+    /// The stamp of a kind's newest `day imported` event.
+    #[cfg(test)]
+    pub(crate) fn newest_import(&self, kind: &str) -> Option<i64> {
+        self.imported.get(kind)?.back().copied()
+    }
+
+    /// The `cli` attempts a kind's day was logged under, oldest first.
+    pub(crate) fn attempts_of(&self, kind: &str, day: &str) -> &[u64] {
+        self.attempts_of
+            .get(&(day.to_owned(), kind.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// One `cli` attempt, by its id.
+    pub(crate) fn attempt(&self, id: u64) -> Option<&Attempt> {
+        self.attempts.get(&id)
+    }
+
+    /// The `cli` attempt that opened importer run `run`, when the ring names
+    /// one. O(attempts).
+    pub(crate) fn attempt_of_importer_run(&self, run: u64) -> Option<u64> {
+        self.attempts
+            .iter()
+            .find(|(_, attempt)| attempt.importer_runs.contains(&run))
+            .map(|(id, _)| *id)
+    }
+
+    /// A `cli.lifecycle` line: an attempt opens or closes.
+    fn lifecycle(&mut self, record: &telemetry::Record) {
+        match record.message.as_str() {
+            "command started" if record.run != 0 => {
+                self.current = Some(record.run);
+                let _replaced = self.attempts.insert(
+                    record.run,
+                    Attempt {
+                        command: text_of(record, "command").unwrap_or("").to_owned(),
+                        started_ms: record.at_unix_millis,
+                        ..Attempt::default()
+                    },
+                );
+            }
+            "command finished" if self.current == Some(record.run) => {
+                if let Some(attempt) = self.attempts.get_mut(&record.run) {
+                    attempt.finished_ms = Some(record.at_unix_millis);
+                    attempt.phase = text_of(record, "phase").map(str::to_owned);
+                }
+                self.current = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Files an importer line under the attempt the fold is inside.
+    fn file_under_attempt(&mut self, record: &telemetry::Record) {
+        let Some(id) = self.current else {
+            return;
+        };
+        if let Some(attempt) = self.attempts.get_mut(&id) {
+            attempt.lines = attempt.lines.saturating_add(1);
+            if record.message == "run started"
+                && let Some(run) = record.field("run").and_then(telemetry::OwnedValue::as_u64)
+                && !attempt.importer_runs.contains(&run)
+            {
+                attempt.importer_runs.push(run);
+            }
+        }
+        if let (Some(kind), Some(day)) = (text_of(record, "kind"), text_of(record, "day")) {
+            let filed = self
+                .attempts_of
+                .entry((day.to_owned(), kind.to_owned()))
+                .or_default();
+            if !filed.contains(&id) {
+                filed.push(id);
+            }
+        }
+    }
+
+    /// Folds one line in, when it is a GDFL importer event at `error`, one of
+    /// its `day imported` events, or a `cli` lifecycle line (WP-33c), and
+    /// files every importer line under its `cli` attempt.
+    fn fold(&mut self, line: &[u8]) {
+        // CHEAP FIRST: a line that cannot be the importer's or a lifecycle
+        // line is not decoded.
+        let wanted = br#""target":"gdfl.import""#;
+        let lifecycle = br#""target":"cli.lifecycle""#;
+        let importer = line.windows(wanted.len()).any(|window| window == wanted);
+        if !importer
+            && !line
+                .windows(lifecycle.len())
+                .any(|window| window == lifecycle)
+        {
+            return;
+        }
+        let Ok(record) = telemetry::Record::decode(line) else {
+            self.malformed = self.malformed.saturating_add(1);
+            return;
+        };
+        if !importer {
+            self.lifecycle(&record);
+            return;
+        }
+        self.file_under_attempt(&record);
+        if record.level == telemetry::Level::Info && record.message == "day imported" {
+            if let Some(kind) = text_of(&record, "kind") {
+                let stamps = self.imported.entry(kind.to_owned()).or_default();
+                stamps.push_back(record.at_unix_millis);
+                if stamps.len() > RATE_WINDOW {
+                    let _oldest = stamps.pop_front();
+                }
+            }
+            return;
+        }
+        if record.level != telemetry::Level::Error {
+            return;
+        }
+        let (Some(kind), Some(day)) = (text_of(&record, "kind"), text_of(&record, "day")) else {
+            return;
+        };
+        self.by_day
+            .entry((day.to_owned(), kind.to_owned()))
+            .or_default()
+            .push(record);
+    }
+}
+
+/// How many of a kind's newest `day imported` events its pace is measured
+/// over: 31 events, 30 gaps.
+pub(crate) const RATE_WINDOW: usize = 31;
+
+/// The import's pace, measured from the gaps between `day imported` stamps
+/// (milliseconds, oldest first): `(gaps, p50 ms, p90 ms)`, or `None` with
+/// fewer than two. A gap that spans a pause between runs is one of them,
+/// which is why the median is the figure to read. At most [`RATE_WINDOW`]
+/// stamps, so the one sort here is of at most 30 gaps.
+fn pace_of(stamps: &[i64]) -> Option<(usize, i64, i64)> {
+    let mut gaps: Vec<i64> = stamps
+        .iter()
+        .zip(stamps.iter().skip(1))
+        .map(|(earlier, later)| later.saturating_sub(*earlier).max(0))
+        .collect();
+    if gaps.is_empty() {
+        return None;
+    }
+    gaps.sort_unstable();
+    let at = |per_cent: usize| {
+        let rank = gaps
+            .len()
+            .saturating_mul(per_cent)
+            .div_ceil(100)
+            .saturating_sub(1);
+        gaps.get(rank).copied().unwrap_or(0)
+    };
+    Some((gaps.len(), at(50), at(90)))
+}
+
+/// What one `metadata` call said of a ring file.
+///
+/// # Why three answers and not two
+///
+/// The tail used to keep `(0, None)` for every failure, so "no such file"
+/// and "you may not look" were one remembered value. A directory first seen
+/// absent or empty and then made unreadable compared equal to what was
+/// remembered, was never read again, and kept answering "read, nothing
+/// held" for as long as the api process lived, while the same directory in
+/// the same state read `unreadable` after a restart. The failure is kept
+/// apart, in its own words, so the change is seen and the error is the
+/// directory's from that call on (D-4862).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    /// No such file.
+    Absent,
+    /// It is there: its length, its modification time, and its device and
+    /// inode.
+    There {
+        /// Bytes.
+        len: u64,
+        /// When it last changed, where the file system says.
+        modified: Option<std::time::SystemTime>,
+        /// `(dev, ino)`.
+        identity: (u64, u64),
+    },
+    /// The question itself failed, in the failure's own words.
+    Failed(String),
+}
+
+impl Seen {
+    /// One `metadata` call.
+    fn of(path: &std::path::Path) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::metadata(path) {
+            Ok(meta) => Self::There {
+                len: meta.len(),
+                modified: meta.modified().ok(),
+                identity: (meta.dev(), meta.ino()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(e) => Self::Failed(e.to_string()),
+        }
+    }
+
+    /// Its length; 0 for a file that is not there or could not be asked.
+    const fn len(&self) -> u64 {
+        match self {
+            Self::There { len, .. } => *len,
+            Self::Absent | Self::Failed(_) => 0,
+        }
+    }
+
+    /// The same file in the same readable-or-not state, whatever its length:
+    /// what the growing current file is compared by.
+    fn same_file(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::There { identity: mine, .. },
+                Self::There {
+                    identity: theirs, ..
+                },
+            ) => mine == theirs,
+            (mine, theirs) => mine == theirs,
+        }
+    }
+}
+
+/// What [`import_refusals`] keeps between calls for one directory.
+#[derive(Debug)]
+struct RefusalTail {
+    /// Every rolled ring file as last seen, oldest first.
+    rolled: Vec<Seen>,
+    /// The current file as last seen.
+    current: Seen,
+    /// The bytes of the current file parsed, through its last newline.
+    parsed: u64,
+    /// Whether the current file is counted among `built.files`.
+    counted: bool,
+    /// The failure of the last read of the current file's new bytes, as it
+    /// stands in `built.errors`: one slot, replaced and never appended to,
+    /// so a file that stays unreadable does not grow the list by one line a
+    /// request.
+    read_error: Option<String>,
+    built: std::sync::Arc<DirRefusals>,
+}
+
+/// Every `cli` directory read so far.
+fn refusal_tails()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, RefusalTail>> {
+    static TAILS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, RefusalTail>>,
+    > = std::sync::OnceLock::new();
+    TAILS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One directory of the importer's evidence, as one read found it.
+#[derive(Debug, Clone)]
+pub(crate) struct DirEvidence {
+    /// The directory's name under `logs/`: one of [`import_dirs`].
+    pub(crate) half: &'static str,
+    /// Where it is.
+    pub(crate) path: std::path::PathBuf,
+    /// Whether it could answer.
+    pub(crate) state: DirState,
+    /// What its ring holds.
+    held: std::sync::Arc<DirRefusals>,
+}
+
+impl DirEvidence {
+    /// Whether a run of `kind` can write here: `logs/cli` (every run before
+    /// the directory switch, and every cli verb that is not a run),
+    /// `logs/gdfl/store` (a v3 run, the census verbs) and the kind's own
+    /// `logs/gdfl/<kind>` (D-4862).
+    fn serves(&self, kind: &str) -> bool {
+        telemetry::run_dirs::gdfl_evidence(kind).any(|sub| sub == self.half)
+    }
+
+    /// The directory as `/imports.json` names it: `logs/<half>`.
+    pub(crate) fn name(&self) -> String {
+        format!("{}/{}", telemetry::run_dirs::LOGS, self.half)
+    }
+
+    /// Ring files read.
+    pub(crate) fn files(&self) -> u64 {
+        self.held.files
+    }
+
+    /// Ring bytes read, in all.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.held.bytes
+    }
+
+    /// Importer lines that would not decode.
+    pub(crate) fn malformed(&self) -> u64 {
+        self.held.malformed
+    }
+
+    /// Ring files that could not be read, in their own words.
+    pub(crate) fn errors(&self) -> &[String] {
+        &self.held.errors
+    }
+}
+
+/// The importer's evidence over every directory a GDFL run can log to
+/// ([`import_dirs`]), each read through its own tail and merged at the
+/// question (D-4862 round 6; IA-11r R5).
+///
+/// # Why merged, and why by kind
+///
+/// Until the directory switch every run logs to `logs/cli`. After it a run of
+/// a kind logs to `logs/gdfl/<kind>` and a v3 run to `logs/gdfl/store`, and a
+/// reader that still looked in `logs/cli` alone would answer `"none"` for
+/// every new run: the reader looking in the wrong place that [`cli_half`]'s
+/// own doc bans (F78). So a question about a kind reads the three directories
+/// a run of that kind can write, and names each one that could not answer
+/// ([`Self::unread`]): `"none"` is said only when all three were read.
+///
+/// # Identity
+///
+/// [`import_refusals`] returns the SAME `Arc` while no directory's read
+/// moved, so a caller keeps an answer against it by pointer, exactly as it
+/// did against the one `logs/cli` read (`imports::summary`,
+/// `store_route::behind`): the pointer stands for the tuple of the
+/// per-directory reads.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ImportRefusals {
+    /// One per directory of [`import_dirs`], in that order.
+    dirs: Vec<DirEvidence>,
+}
+
+/// What a kind's evidence for one day is, and where it was read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Logged<'e> {
+    /// The refusals, oldest first.
+    pub(crate) records: std::borrow::Cow<'e, [telemetry::Record]>,
+    /// The directories (`logs/<half>`) that held any of them.
+    pub(crate) from: Vec<String>,
+}
+
+/// A kind's pace and the directories its newest events were read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pace {
+    /// Gaps measured.
+    pub(crate) gaps: usize,
+    /// The median gap, ms.
+    pub(crate) p50: i64,
+    /// The 90th-percentile gap, ms.
+    pub(crate) p90: i64,
+    /// The newest `day imported` stamp, ms.
+    pub(crate) newest: Option<i64>,
+    /// The directories (`logs/<half>`) whose events are among those measured.
+    pub(crate) from: Vec<String>,
+}
+
+impl ImportRefusals {
+    /// Every directory read, in [`import_dirs`] order.
+    pub(crate) fn dirs(&self) -> &[DirEvidence] {
+        &self.dirs
+    }
+
+    /// The directories a run of `kind` can write, in read order: at most 3.
+    fn serving<'s>(&'s self, kind: &'s str) -> impl Iterator<Item = &'s DirEvidence> + 's {
+        self.dirs.iter().filter(move |dir| dir.serves(kind))
+    }
+
+    /// The directories a run of `kind` can write that could NOT answer, each
+    /// as `logs/<half> absent` or `logs/<half> unreadable: <why>`. Empty means
+    /// every one of them was read, the only case in which a reader may say
+    /// `"none"` (D-4862).
+    pub(crate) fn unread(&self, kind: &str) -> Vec<String> {
+        self.serving(kind)
+            .filter_map(|dir| match &dir.state {
+                DirState::Read => None,
+                DirState::Absent => Some(format!("{} absent", dir.name())),
+                DirState::Unreadable(why) => Some(format!("{} unreadable: {why}", dir.name())),
+            })
+            .collect()
+    }
+
+    /// The refusals logged for one kind and day, oldest first, from every
+    /// directory a run of that kind can write. At most three map probes; the
+    /// records are borrowed when one directory holds them all.
+    pub(crate) fn of(&self, kind: &str, day: &str) -> std::borrow::Cow<'_, [telemetry::Record]> {
+        self.logged(kind, day).records
+    }
+
+    /// [`Self::of`], with the directories the refusals were read from.
+    pub(crate) fn logged(&self, kind: &str, day: &str) -> Logged<'_> {
+        let held: Vec<(&DirEvidence, &[telemetry::Record])> = self
+            .dirs
+            .iter()
+            .filter(|dir| dir.serves(kind))
+            .map(|dir| (dir, dir.held.of(kind, day)))
+            .filter(|(_, records)| !records.is_empty())
+            .collect();
+        let from = held.iter().map(|(dir, _)| dir.name()).collect();
+        let records = match held.as_slice() {
+            [] => std::borrow::Cow::Borrowed(&[][..]),
+            [(_, only)] => std::borrow::Cow::Borrowed(*only),
+            several => {
+                let lists: Vec<&[telemetry::Record]> =
+                    several.iter().map(|(_, records)| *records).collect();
+                std::borrow::Cow::Owned(merged_oldest_first(&lists, |record| record.at_unix_millis))
+            }
+        };
+        Logged { records, from }
+    }
+
+    /// Every `(kind, day)` with a logged refusal in `from..=to`, both
+    /// `YYYY-MM-DD`, oldest first, each once whichever directories hold it.
+    /// O(log n + days in the range) per directory, merged without a sort:
+    /// each directory's range is already in `(day, kind)` order.
+    pub(crate) fn days(&self, from: &str, to: &str) -> Vec<(&str, &str)> {
+        let mut ranges: Vec<_> = self
+            .dirs
+            .iter()
+            .map(|dir| {
+                dir.held
+                    .days(from, to)
+                    .filter(move |(kind, _)| dir.serves(kind))
+                    .peekable()
+            })
+            .collect();
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        loop {
+            // THE SMALLEST HEAD, by (day, kind), over at most five ranges.
+            let next = ranges
+                .iter_mut()
+                .filter_map(|range| range.peek().copied())
+                .min_by_key(|(kind, day)| (*day, *kind));
+            let Some(next) = next else {
+                break;
+            };
+            for range in &mut ranges {
+                if range.peek() == Some(&next) {
+                    let _taken = range.next();
+                }
+            }
+            out.push(next);
+        }
+        out
+    }
+
+    /// The import's pace for one kind over its newest [`RATE_WINDOW`] `day
+    /// imported` events wherever they were logged, and the directories those
+    /// events were read from. `None` with fewer than two events.
+    pub(crate) fn pace(&self, kind: &str) -> Option<Pace> {
+        let held: Vec<(&DirEvidence, Vec<i64>)> = self
+            .serving(kind)
+            .filter_map(|dir| {
+                let stamps = dir.held.imported.get(kind)?;
+                Some((dir, stamps.iter().copied().collect::<Vec<i64>>()))
+            })
+            .collect();
+        let lists: Vec<&[i64]> = held.iter().map(|(_, stamps)| stamps.as_slice()).collect();
+        let all = merged_oldest_first(&lists, |stamp| *stamp);
+        let window = all.get(all.len().saturating_sub(RATE_WINDOW)..)?;
+        let (gaps, p50, p90) = pace_of(window)?;
+        let oldest = window.first().copied()?;
+        let from = held
+            .iter()
+            .filter(|(_, stamps)| stamps.last().is_some_and(|newest| *newest >= oldest))
+            .map(|(dir, _)| dir.name())
+            .collect();
+        Some(Pace {
+            gaps,
+            p50,
+            p90,
+            newest: window.last().copied(),
+            from,
+        })
+    }
+
+    /// The `cli` attempts a kind's day was logged under, oldest directory
+    /// first, each once.
+    pub(crate) fn attempts_of(&self, kind: &str, day: &str) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        for dir in self.serving(kind) {
+            for id in dir.held.attempts_of(kind, day) {
+                if !out.contains(id) {
+                    out.push(*id);
+                }
+            }
+        }
+        out
+    }
+
+    /// One `cli` attempt, by its id, and the directory (`logs/<half>`) whose
+    /// ring holds it.
+    pub(crate) fn attempt(&self, id: u64) -> Option<(String, &Attempt)> {
+        self.dirs
+            .iter()
+            .find_map(|dir| dir.held.attempt(id).map(|attempt| (dir.name(), attempt)))
+    }
+
+    /// The `cli` attempt that opened importer run `run`, when a ring names
+    /// one. O(attempts) per directory.
+    pub(crate) fn attempt_of_importer_run(&self, run: u64) -> Option<u64> {
+        self.dirs
+            .iter()
+            .find_map(|dir| dir.held.attempt_of_importer_run(run))
+    }
+
+    /// Whether `other` is the same reads: the same directories in the same
+    /// states holding the same tails, by pointer.
+    fn same_reads(&self, other: &[DirEvidence]) -> bool {
+        self.dirs.len() == other.len()
+            && self.dirs.iter().zip(other).all(|(mine, theirs)| {
+                mine.half == theirs.half
+                    && mine.state == theirs.state
+                    && std::sync::Arc::ptr_eq(&mine.held, &theirs.held)
+            })
+    }
+}
+
+/// Several lists, each already oldest first, as one list oldest first: at
+/// each step the list whose head is oldest gives it up, and an earlier list
+/// wins a tie, so the order is the same on every call. O(items × lists), with
+/// at most five lists here, and no sort.
+fn merged_oldest_first<T: Clone>(lists: &[&[T]], at: impl Fn(&T) -> i64) -> Vec<T> {
+    let mut heads = vec![0usize; lists.len()];
+    let mut out = Vec::with_capacity(lists.iter().map(|list| list.len()).sum());
+    loop {
+        let next = lists
+            .iter()
+            .zip(heads.iter())
+            .enumerate()
+            .filter_map(|(n, (list, head))| list.get(*head).map(|item| (at(item), n)))
+            .min();
+        let Some((_, n)) = next else {
+            return out;
+        };
+        if let (Some(list), Some(head)) = (lists.get(n), heads.get_mut(n)) {
+            if let Some(item) = list.get(*head) {
+                out.push(item.clone());
+            }
+            *head = head.saturating_add(1);
+        }
+    }
+}
+
+/// Each store's merged evidence as last answered, so the same reads are the
+/// same `Arc` again.
+fn evidence_kept() -> &'static std::sync::Mutex<
+    std::collections::HashMap<std::path::PathBuf, std::sync::Arc<ImportRefusals>>,
+> {
+    static KEPT: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<std::path::PathBuf, std::sync::Arc<ImportRefusals>>,
+        >,
+    > = std::sync::OnceLock::new();
+    KEPT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::with_capacity(2)))
+}
+
+/// The GDFL importer's evidence under `store_root`: every directory a GDFL
+/// run can log to ([`import_dirs`]: `logs/cli`, `logs/gdfl/<kind>` and
+/// `logs/gdfl/store`), each named `read`, `absent` or `unreadable`
+/// (D-4862 round 6; IA-11r R5; IA-LG-02).
+///
+/// # Cost
+///
+/// Per directory at most two `metadata` calls for its state
+/// ([`DirState::of`], asked of the disk on every call) and
+/// [`refusals_in`]'s tail: its whole ring once per api process, then only
+/// the bytes appended since. Five directories, so at most five rings of at
+/// most 64 MiB each read once (`docs/06-limits.md` L-IA-37), and a call that
+/// finds nothing new is at most 10 `metadata` calls per directory (2 for the
+/// state, one per ring file), five tail checks and one pointer comparison
+/// each. The merge happens at the question, never here.
+///
+/// # The state is the disk's, whatever this process read before
+///
+/// A directory first seen absent or empty and then made unreadable answers
+/// `unreadable` with the OS error on the next call, exactly as it does after
+/// a restart: the order production meets, since the api starts before any
+/// run creates its directory
+/// (`a_directory_that_turns_unreadable_is_never_answered_as_read`).
+pub(crate) fn import_refusals(store_root: &std::path::Path) -> std::sync::Arc<ImportRefusals> {
+    let read: Vec<DirEvidence> = import_dirs()
+        .map(|half| {
+            let path = store_root.join(telemetry::run_dirs::LOGS).join(half);
+            let held = refusals_in(&path);
+            // THE DISK'S ANSWER FIRST, then the tail's: a directory that can
+            // be searched whose ring file could not be read is unread in
+            // part, and cannot vouch for "none" either.
+            let state = match DirState::of(&path) {
+                DirState::Read => held
+                    .errors
+                    .first()
+                    .map_or(DirState::Read, |why| DirState::Unreadable(why.clone())),
+                other @ (DirState::Absent | DirState::Unreadable(_)) => other,
+            };
+            DirEvidence {
+                half,
+                path,
+                state,
+                held,
+            }
+        })
+        .collect();
+    let mut kept = evidence_kept()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(earlier) = kept.get(store_root)
+        && earlier.same_reads(&read)
+    {
+        return std::sync::Arc::clone(earlier);
+    }
+    let merged = std::sync::Arc::new(ImportRefusals { dirs: read });
+    let _replaced = kept.insert(store_root.to_path_buf(), std::sync::Arc::clone(&merged));
+    merged
+}
+
+/// One directory's importer evidence, read through its tail.
+///
+/// # Cost
+///
+/// The first call reads the directory's whole ring once (at most its 64 MiB
+/// ceiling; `logs/cli` held 1,158,202 bytes on the operator's store, 9 Oct
+/// 2026). After that, while only the current file grows, a call reads only
+/// the bytes appended since; a roll, a file replaced, or a file whose
+/// `metadata` answers differently (there, not there, or failing, in other
+/// words than before) reads the ring again. A line is decoded only when it
+/// names the importer's target. One `metadata` call per ring file per call
+/// (8). `docs/06-limits.md` L-IA-37.
+///
+/// # Errors are the read's, not the process's
+///
+/// `errors` names every ring file that could not be asked or read AS OF
+/// THIS CALL: a file that turns unreadable is a change the tail sees
+/// ([`Seen`]), a file that stays unreadable is named once however many
+/// calls find it so, and one that becomes readable again is read and its
+/// error dropped.
+fn refusals_in(dir: &std::path::Path) -> std::sync::Arc<DirRefusals> {
+    let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
+    let Some((current, rolled_paths)) = paths.split_first() else {
+        return std::sync::Arc::default();
+    };
+    // OLDEST FIRST, as the ring was written.
+    let rolled: Vec<(&std::path::PathBuf, Seen)> = rolled_paths
+        .iter()
+        .rev()
+        .map(|path| (path, Seen::of(path)))
+        .collect();
+    let now = Seen::of(current);
+    let len = now.len();
+    let mut held = refusal_tails()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tail = held
+        .entry(dir.to_path_buf())
+        .or_insert_with(RefusalTail::unread);
+    let fresh = !tail.rolled.iter().eq(rolled.iter().map(|(_, seen)| seen))
+        || !tail.current.same_file(&now)
+        || len < tail.parsed;
+    if fresh {
+        *tail = RefusalTail::read_ring(&rolled, current, now);
+    }
+    if len > tail.parsed {
+        tail.read_appended(current, len);
+    }
+    std::sync::Arc::clone(&tail.built)
+}
+
+impl RefusalTail {
+    /// A directory nothing has been read from yet: its first question reads
+    /// its ring.
+    fn unread() -> Self {
+        Self {
+            rolled: Vec::new(),
+            current: Seen::Absent,
+            parsed: 0,
+            counted: false,
+            read_error: None,
+            built: std::sync::Arc::default(),
+        }
+    }
+
+    /// The ring read afresh: every rolled file that is there, oldest first,
+    /// and the current file left for [`Self::read_appended`] to read from its
+    /// start. A file that could not be asked about, rolled or current, is
+    /// named in `errors` and not read.
+    fn read_ring(
+        rolled: &[(&std::path::PathBuf, Seen)],
+        current: &std::path::Path,
+        now: Seen,
+    ) -> Self {
+        let mut built = DirRefusals::default();
+        for (path, seen) in rolled {
+            match seen {
+                Seen::Absent => {}
+                Seen::Failed(why) => built.errors.push(format!("{}: {why}", path.display())),
+                Seen::There { .. } => match std::fs::read(path) {
+                    Ok(bytes) => {
+                        built.files = built.files.saturating_add(1);
+                        built.bytes = built
+                            .bytes
+                            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                        for line in bytes.split(|&byte| byte == b'\n') {
+                            built.fold(line);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => built.errors.push(format!("{}: {e}", path.display())),
+                },
+            }
+        }
+        if let Seen::Failed(why) = &now {
+            built.errors.push(format!("{}: {why}", current.display()));
+        }
+        Self {
+            rolled: rolled.iter().map(|(_, seen)| seen.clone()).collect(),
+            current: now,
+            parsed: 0,
+            counted: false,
+            read_error: None,
+            built: std::sync::Arc::new(built),
+        }
+    }
+
+    /// Reads the current file's bytes from [`Self::parsed`] to `len` and
+    /// folds its whole lines in. A read that fails is named in `errors` in
+    /// one slot, replaced and never appended to; one that succeeds drops it.
+    fn read_appended(&mut self, current: &std::path::Path, len: u64) {
+        use std::io::{Read as _, Seek as _};
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(current).and_then(|mut file| {
+            file.seek(std::io::SeekFrom::Start(self.parsed))?;
+            file.take(len.saturating_sub(self.parsed))
+                .read_to_end(&mut bytes)
+        });
+        let why = match read {
+            Ok(_) => None,
+            Err(e) => Some(format!("{}: {e}", current.display())),
+        };
+        if why.is_some() && why == self.read_error {
+            // THE SAME FAILURE AS LAST TIME: the same answer, by pointer.
+            return;
+        }
+        let built = std::sync::Arc::make_mut(&mut self.built);
+        if let Some(was) = self.read_error.take() {
+            built.errors.retain(|error| *error != was);
+        }
+        if let Some(why) = why {
+            built.errors.push(why.clone());
+            self.read_error = Some(why);
+            return;
+        }
+        if let Some(last) = bytes.iter().rposition(|&byte| byte == b'\n') {
+            for line in bytes
+                .get(..last)
+                .unwrap_or_default()
+                .split(|&byte| byte == b'\n')
+            {
+                built.fold(line);
+            }
+            self.parsed = self
+                .parsed
+                .saturating_add(u64::try_from(last).unwrap_or(u64::MAX))
+                .saturating_add(1);
+        }
+        // THE CURRENT FILE IS ONE FILE, counted the first time any of it is
+        // read, whether or not the ring was read afresh in this call: a ring
+        // first seen empty used to stay at 0 files while its bytes grew.
+        built.files = built.files.saturating_add(u64::from(!self.counted));
+        self.counted = true;
+        built.bytes = built
+            .bytes
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    }
+}
+
+/// `/logs.json`'s body over directories a caller names: the server's own
+/// (when it has one) and every run directory under `store_root`. The handler
+/// is this with the process's own two roots, off the async workers.
+///
+/// Public so `crates/api/benches/ratio/logs_dirs.rs` (C-LG-01) times what
+/// the route runs, the way `json_over` exists so a test can.
+#[must_use]
+pub fn logs_json_over(
+    served: Option<&std::path::Path>,
+    store_root: &std::path::Path,
+    query: &str,
+) -> String {
+    let halves = halves_of(served.map(std::path::Path::to_path_buf), Some(store_root));
+    let asked = asked(query);
+    if asked.keys.is_empty() {
+        json_across(&halves, &asked, None)
+    } else {
+        keyed_json_across(&halves, &asked, None)
+    }
+}
+
+/// How many refusals the importer's evidence holds for one kind and day
+/// under `store_root`: `(in the rings, in the audit streams)`. One read of
+/// each tail and one keyed probe of each of the kind's directories.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs` (C-LG-01), which times
+/// both readers behind `/imports.json`, `/dayflags.json` and `/store`.
+#[must_use]
+pub fn import_evidence_over(store_root: &std::path::Path, kind: &str, day: &str) -> (usize, usize) {
+    let ring = import_refusals(store_root).of(kind, day).len();
+    let audited = audited_import_refusals(store_root, kind, day).records.len();
+    (ring, audited)
+}
+
+/// `/imports.json`'s body over a store a caller names.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs` (C-LG-02): the route's
+/// module is private to the crate, and this one is where the importer's
+/// evidence is read.
+///
+/// # Errors
+///
+/// A query the route refuses, or a journal that cannot be read, in the
+/// route's own words.
+pub fn imports_json_over(store_root: &std::path::Path, query: &str) -> Result<String, String> {
+    let asked = crate::server::imports::asked(query)?;
+    crate::server::imports::answer(store_root, &asked).map(|body| body.to_string())
+}
+
+/// `/dayflags.json`'s body over a store a caller names.
+///
+/// Public for `crates/api/benches/ratio/logs_dirs.rs`, which times the day
+/// band's read of the import journal beside the runs page (C-LG-02): that
+/// read still decodes every `run` line per request, which is
+/// `docs/06-limits.md` L-IA-39 and is printed there, never gated.
+///
+/// # Errors
+///
+/// A query the route refuses, in the route's own words.
+pub fn dayflags_json_over(store_root: &std::path::Path, query: &str) -> Result<String, String> {
+    crate::server::imports::day_band_json(store_root, query)
+}
+
+/// What a keyed read of the importer's audit streams found, and what it
+/// could not read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Audited {
+    /// The lines, oldest first.
+    pub(crate) records: Vec<telemetry::Record>,
+    /// The directories (`logs/<half>`) that held any of them.
+    pub(crate) from: Vec<String>,
+    /// A stream that is there and could not be read, or lines of it that
+    /// could not, in the failure's own words. Never dropped: a reader that
+    /// found nothing and has words here did not read everything.
+    pub(crate) unread: Vec<String>,
+    /// Whether a posting held more pointers than one read takes
+    /// ([`MAX_KEYED_READS`]), so older lines exist that this did not read.
+    pub(crate) capped: bool,
+}
+
+/// One probe of `dimension = value` in the audit stream of every directory in
+/// `halves`, each line kept when `keep` says so: at most [`MAX_KEYED_READS`]
+/// pointers per directory, one positional read each. A directory with no
+/// audit stream holds nothing audited and is passed over; one that is there
+/// and cannot be read is named in `unread`.
+fn audited_in(
+    store_root: &std::path::Path,
+    halves: &[&'static str],
+    dimension: &str,
+    value: &str,
+    keep: impl Fn(&telemetry::Record) -> bool,
+) -> Audited {
+    let mut out = Audited::default();
+    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len());
+    for half in halves {
+        let dir = store_root.join("logs").join(half);
+        let serial = match telemetry::audit_state(&dir) {
+            Ok(Some(serial)) => serial,
+            Ok(None) => continue,
+            Err(why) => {
+                out.unread.push(format!("logs/{half} audit stream: {why}"));
+                continue;
+            }
+        };
+        let postings = match telemetry::audit_postings(&dir, dimension, value, MAX_KEYED_READS) {
+            Ok(postings) => postings,
+            Err(why) => {
+                out.unread.push(format!("logs/{half} audit stream: {why}"));
+                continue;
+            }
+        };
+        out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
+        let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
+        for pointer in &postings.pointers {
+            match telemetry::audit_read(&dir, serial, pointer) {
+                telemetry::AuditLine::Found(record) if keep(&record) => found.push(record),
+                telemetry::AuditLine::Found(_) | telemetry::AuditLine::RolledOff => {}
+                telemetry::AuditLine::Unreadable(why) => {
+                    out.unread.push(format!("logs/{half} audit stream: {why}"));
+                }
+            }
+        }
+        if !found.is_empty() {
+            // NEWEST FIRST AS READ; oldest first as answered.
+            found.reverse();
+            out.from.push(format!("logs/{half}"));
+            lists.push(found);
+        }
+    }
+    let lists: Vec<&[telemetry::Record]> = lists.iter().map(Vec::as_slice).collect();
+    out.records = merged_oldest_first(&lists, |record| record.at_unix_millis);
+    out
+}
+
+/// The directories a run of `kind` can write, of [`import_dirs`]: the
+/// table's own answer (`telemetry::run_dirs::gdfl_evidence`).
+fn import_dirs_of(kind: &str) -> Vec<&'static str> {
+    telemetry::run_dirs::gdfl_evidence(kind).collect()
+}
+
+/// The GDFL importer's refusals of one kind and day that the audit streams
+/// hold: one probe of the `day` posting of each directory a run of that kind
+/// can write (at most 3), for a day a ring has rolled away. O(pointers of
+/// that day), at most [`MAX_KEYED_READS`] per directory (D-4862 round 6).
+pub(crate) fn audited_import_refusals(
+    store_root: &std::path::Path,
+    kind: &str,
+    day: &str,
+) -> Audited {
+    audited_in(store_root, &import_dirs_of(kind), "day", day, |record| {
+        record.target == pull::gdfl_import::TARGET
+            && record.level == telemetry::Level::Error
+            && text_of(record, "kind") == Some(kind)
+    })
+}
+
+/// The target a GDFL run's lifecycle events carry, from `run claimed` to
+/// `finished` (the design's §7.1; D-4862). Every event of it at `info` or
+/// above is audited (`telemetry::is_audited`: a target ending `lifecycle`).
+pub(crate) const RUN_LIFECYCLE_TARGET: &str = "gdfl.import.lifecycle";
+
+/// One run's lifecycle events, oldest first: the `run` posting of every
+/// directory a GDFL run can log to (at most 5 probes, at most
+/// [`MAX_KEYED_READS`] pointers each), keyed, never a ring walk. A run from
+/// before those events existed has none, and its `cli` attempt answers
+/// instead (`imports::run_json`).
+pub(crate) fn run_lifecycle(store_root: &std::path::Path, run: u64) -> Audited {
+    audited_in(
+        store_root,
+        &import_dirs().collect::<Vec<_>>(),
+        "run",
+        &run.to_string(),
+        |record| record.target == RUN_LIFECYCLE_TARGET,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     // The same exceptions every test module in this workspace takes.
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
+
+    /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
+    /// WIPE THE LOG. 100,000 failed requests inside one window write at most
+    /// the ration, and the next window opens with one line counting the rest.
+    #[test]
+    fn a_flood_of_failed_requests_writes_a_bounded_number_of_lines() {
+        let mut ration = Ration::new(FAILED_LINES_PER_WINDOW);
+        let start = 1_000_000_u64;
+        let mut written = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = ration.admit(start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                written += 1;
+            }
+        }
+        assert_eq!(written, FAILED_LINES_PER_WINDOW);
+        let next = ration.admit(start + FAILED_LINE_WINDOW_MS);
+        assert!(next.write, "a new window writes again");
+        assert_eq!(
+            next.summary,
+            Some(100_000 - FAILED_LINES_PER_WINDOW),
+            "what was held back is counted, not lost"
+        );
+        // A quiet window that held nothing back says nothing extra.
+        let quiet = ration.admit(start + 3 * FAILED_LINE_WINDOW_MS);
+        assert_eq!(
+            quiet,
+            Admit {
+                write: true,
+                summary: None
+            }
+        );
+        // A clock that stepped backwards opens a window rather than wedging.
+        let back = ration.admit(start);
+        assert!(back.write);
+        // Only another site's requests are rationed.
+        let with = |value: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "sec-fetch-site",
+                axum::http::HeaderValue::from_static(value),
+            );
+            cross_site(&headers)
+        };
+        assert!(with("cross-site") && with("same-site"));
+        assert!(!with("same-origin") && !with("none"));
+        assert!(!cross_site(&axum::http::HeaderMap::new()));
+    }
+
+    /// audit-20261003 hunt-api-3, D-1552: A SAME-ORIGIN FLOOD IS BOUNDED TOO,
+    /// AND COUNTED. 100,000 failed same-origin requests in one window write at
+    /// most [`LOCAL_FAILED_LINES_PER_WINDOW`] lines and the next window names
+    /// the rest; the two classes draw on separate counts, so a same-origin
+    /// flood leaves the cross-site lines intact and the reverse.
+    #[test]
+    fn a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site() {
+        let mut rations = Rations::new();
+        let start = 5_000_000_u64;
+        let mut local = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = rations.admit(false, start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                local += 1;
+            }
+        }
+        assert_eq!(local, LOCAL_FAILED_LINES_PER_WINDOW);
+        // The cross-site lines of the same window were not spent by it.
+        let mut cross = 0_u64;
+        for i in 0..1_000_u64 {
+            if rations.admit(true, start + i).write {
+                cross += 1;
+            }
+        }
+        assert_eq!(cross, FAILED_LINES_PER_WINDOW);
+        let next_local = rations.admit(false, start + FAILED_LINE_WINDOW_MS);
+        assert!(next_local.write);
+        assert_eq!(
+            next_local.summary,
+            Some(100_000 - LOCAL_FAILED_LINES_PER_WINDOW),
+            "the same-origin lines held back are counted, not lost"
+        );
+        let next_cross = rations.admit(true, start + FAILED_LINE_WINDOW_MS);
+        assert_eq!(next_cross.summary, Some(1_000 - FAILED_LINES_PER_WINDOW));
+        // The summary line names its class and its count.
+        assert_eq!(
+            suppression_message(false),
+            "same-origin failed-request lines suppressed in the previous window"
+        );
+        assert_eq!(
+            suppression_message(true),
+            "cross-site failed-request lines suppressed in the previous window"
+        );
+    }
 
     /// A sink of our own, in a scratch directory — never the process global.
     ///
@@ -1378,6 +4677,48 @@ mod tests {
         }
     }
 
+    /// LG-05 (P12-02, D-1791): the completeness flags of two halves merge in
+    /// the direction that cannot over-promise. `hit_scan_cap` and
+    /// `partial_tail` OR, `reached_oldest` ANDs, and `missing` sums, with a
+    /// half that answers `None` contributing nothing rather than a zero. Every
+    /// one of the four input combinations of each flag is walked.
+    #[test]
+    fn completeness_flags_merge_in_the_direction_that_cannot_over_promise() {
+        let half = |cap: bool, torn: bool, oldest: bool, missing: Option<u64>| telemetry::Tail {
+            hit_scan_cap: cap,
+            partial_tail: torn,
+            reached_oldest: oldest,
+            missing,
+            ..telemetry::Tail::default()
+        };
+        for left in [false, true] {
+            for right in [false, true] {
+                let both = super::merged(
+                    half(left, left, left, None),
+                    half(right, right, right, None),
+                    10,
+                );
+                assert_eq!(both.hit_scan_cap, left || right, "cap {left} {right}");
+                assert_eq!(both.partial_tail, left || right, "torn {left} {right}");
+                assert_eq!(both.reached_oldest, left && right, "oldest {left} {right}");
+            }
+        }
+        for (served, ran, want) in [
+            (Some(2), Some(3), Some(5)),
+            (Some(2), None, Some(2)),
+            (None, Some(3), Some(3)),
+            (None, None, None),
+            (Some(u64::MAX), Some(1), Some(u64::MAX)),
+        ] {
+            let both = super::merged(
+                half(false, false, true, served),
+                half(false, false, true, ran),
+                10,
+            );
+            assert_eq!(both.missing, want, "{served:?} + {ran:?}");
+        }
+    }
+
     #[test]
     fn the_limit_bounds_the_union_and_not_each_half() {
         // Each half already honours the limit, so without a truncation on the
@@ -1627,6 +4968,55 @@ mod tests {
         );
     }
 
+    /// CE-41, D-1769: after a failed roll the banner says rotation STOPPED
+    /// and the file is growing, never that events were overwritten, and that a
+    /// restart resumes it.
+    #[test]
+    fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
+        let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(
+            page.contains("rotation has stopped for the life of this process"),
+            "{page}"
+        );
+        assert!(
+            page.contains("restart the server to resume rotation"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("may already have been overwritten"),
+            "{page}"
+        );
+        assert!(page.contains("rename refused"), "{page}");
+    }
+
+    /// conc9-3: a held clock and a standing last error each make the banner
+    /// and `/logs.json` speak, though no event was lost.
+    #[test]
+    fn a_held_clock_and_a_standing_error_are_shown() {
+        let mut held = health(0, 0, None);
+        held.clock_held = 3;
+        let page = health_banner(Some(&held));
+        assert!(
+            page.contains("clock is held") && page.contains("3 event(s)"),
+            "{page}"
+        );
+        assert!(!page.contains("Sink healthy"), "{page}");
+        let json = sink_json(Some(&held));
+        assert!(
+            json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+            "{json}"
+        );
+
+        let erred = health(0, 0, Some("floor resumed ahead of the clock"));
+        let page = health_banner(Some(&erred));
+        assert!(page.contains("reported a failure"), "{page}");
+        assert!(page.contains("floor resumed ahead of the clock"), "{page}");
+
+        let quiet = health(0, 0, None);
+        assert!(health_banner(Some(&quiet)).contains("Sink healthy"));
+        assert!(sink_json(Some(&quiet)).contains(r#""loud":false"#));
+    }
+
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {
         telemetry::Health {
             path: std::path::PathBuf::from("events.ndjson"),
@@ -1637,6 +5027,8 @@ mod tests {
             last_error: last_error.map(str::to_owned),
             current_bytes: 4_096,
             next_seq: 1_201,
+            clock_held: 0,
+            rationed: 0,
         }
     }
 
@@ -1881,6 +5273,55 @@ mod tests {
         );
     }
 
+    /// A filter that could not be read is named in the answer, and the filters
+    /// that were applied are echoed, so `?level=eror&run=12x` no longer answers
+    /// byte-identically to no filter at all (P1-01-02, D-1765).
+    #[test]
+    fn an_unreadable_filter_is_named_and_the_applied_ones_are_echoed() {
+        let bad = asked("level=eror&run=12x");
+        assert_eq!(bad.level, None);
+        assert_eq!(bad.run, 0);
+        assert_eq!(
+            bad.ignored,
+            vec![("level", "eror".to_owned()), ("run", "12x".to_owned())]
+        );
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, word) in [("%2B3", "+3"), ("03", "03"), ("3.0", "3.0"), ("-3", "-3")] {
+            let one = asked(&format!("run={wire}"));
+            assert_eq!(one.run, 0, "{word}");
+            assert_eq!(one.ignored, vec![("run", word.to_owned())], "{word}");
+        }
+        let json = json_of(
+            &walk(Vec::new()),
+            &bad,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":null,"target":null,"run":null,"run_key":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
+            ),
+            "{json}"
+        );
+
+        let good = asked("level=WARN&target=api.backtest&run=18446744073709551615");
+        assert!(good.ignored.is_empty());
+        let json = json_of(
+            &walk(Vec::new()),
+            &good,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","ignored":[],"sink":"#
+            ),
+            "{json}"
+        );
+        // Zero is "every run" and is not a mistake.
+        assert!(asked("run=0").ignored.is_empty());
+    }
+
     /// **EVERY WALK FLAG REACHES THE PAGE, AND EACH ONE ALONE.**
     ///
     /// `walk_notes` had six surviving mutants — including `-> vec![]`, which is
@@ -2122,6 +5563,8 @@ mod tests {
     /// an owner for its process global.
     #[tokio::test]
     async fn the_handlers_answer_over_the_installed_sink_and_carry_their_content_type() {
+        // Not while a test holds every log-read slot: that test expects 429s.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let sink = crate::emitted::sink();
         assert!(
             sink.emit(
@@ -2157,7 +5600,9 @@ mod tests {
         let uri: axum::http::Uri = "/logs?limit=50&target=api.handler&level=error"
             .parse()
             .expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let page = page.0;
         assert!(page.contains("handler-probe-marker"), "{page}");
         assert!(
             page.contains("<title>brutex · logs</title>"),
@@ -2177,6 +5622,7 @@ mod tests {
     /// `asked`, never through the door an operator's browser knocks on.
     #[tokio::test]
     async fn a_mangled_query_string_still_gets_an_answer_from_the_handler() {
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let _sink = crate::emitted::sink();
         let uri: axum::http::Uri = "/logs.json?limit=-9999999&level=NOPE&target="
             .parse()
@@ -2193,7 +5639,7 @@ mod tests {
         );
 
         let uri: axum::http::Uri = "/logs?limit=99999999".parse().expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let page = logs_page(uri).await.1.0;
         assert!(
             page.contains(&format!("value=\"{PAGE_LIMIT}\"")),
             "a limit past the page ceiling is clamped to it, and the form shows \
@@ -2322,6 +5768,1200 @@ mod tests {
         assert!(
             page_shell(&asked(""), "").contains(r#"name="run" value=""#),
             "and is empty when every run is shown"
+        );
+    }
+
+    /// **THE LOG ROUTES ARE ADMITTED, AND A FULL POOL IS A NAMED REFUSAL.**
+    /// log-3, P1-04-02, D-2327. Both handlers ran their two-half walk inline
+    /// on a Tokio worker with no admission, so they answered 200 whatever else
+    /// was walking. With every log-read slot held, each now answers 429 and
+    /// says which pool refused it and its bound, before reading a byte; with
+    /// the slots released, the same requests are answered again. A 429 can only
+    /// come from `crate::detail::run_log_read`, so this also proves both
+    /// handlers go through it.
+    #[tokio::test]
+    async fn the_log_routes_refuse_by_name_when_every_log_read_slot_is_held() {
+        let _sink = crate::emitted::sink();
+        let apart = crate::detail::apart_from_slot_owners().await;
+        let held = crate::detail::take_every_log_read_slot(&apart);
+        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(
+            body.contains("log read not admitted (Saturated): at most 4"),
+            "{body}"
+        );
+        assert!(!body.contains("records"), "nothing was read: {body}");
+
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(page.0.contains("<b>Not admitted</b>"), "{}", page.0);
+        assert!(page.0.contains("Saturated"), "{}", page.0);
+        assert!(page.0.contains("at most 4 log reads"), "{}", page.0);
+        assert!(
+            page.0.contains("<title>brutex · logs</title>"),
+            "the refusal is a whole page with its form"
+        );
+
+        drop(held);
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, _headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        assert_eq!(logs_page(uri).await.0, axum::http::StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // KEYED READS (D-3341 item 3; DB-023, DB-G88, DB-025)
+    // -----------------------------------------------------------------------
+
+    /// The importer's refusal of one index file, as `gdfl.import` writes it:
+    /// kind, day, file and reason, and no feed or instrument field.
+    fn index_refusal(file: &str, day: &str) -> telemetry::Event<'static> {
+        let file: &'static str = Box::leak(file.to_owned().into_boxed_str());
+        let day: &'static str = Box::leak(day.to_owned().into_boxed_str());
+        telemetry::Event::error("gdfl.import", "refused")
+            .with("kind", "indices")
+            .with("day", day)
+            .with("about", file)
+            .with(
+                "why",
+                "line 9: LTP is not a decimal of at most two decimal places",
+            )
+    }
+
+    /// The `/logs.json` body of a keyed request over `dir` alone.
+    fn keyed(dir: &std::path::Path, query: &str) -> serde_json::Value {
+        let asked = asked(query);
+        assert!(!asked.keys.is_empty(), "{query} names a key");
+        serde_json::from_str(&keyed_json(dir, None, &asked, None)).expect("JSON")
+    }
+
+    /// **THE OPERATOR'S CHECK: NIFTY'S REFUSAL ON 2022-03-07 IS FOUND BY
+    /// FEED, INSTRUMENT AND DAY THROUGH THE AUDIT INDEX**, and BANKNIFTY's
+    /// beside it is not; the GDFL importer names neither its feed nor its
+    /// instrument, and the API reads both from its target and its file name
+    /// with the importer's own resolver. The ring holds the line too, and it
+    /// is shown once.
+    #[test]
+    fn a_refusal_is_found_by_feed_instrument_and_day_through_the_index() {
+        let (dir, sink) = sink_in("keyed-nifty");
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&index_refusal("NIFTY BANK.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-08"));
+        let _ = sink.emit(
+            &telemetry::Event::error("pull.spot", "member did not land")
+                .with("instrument", "NIFTY")
+                .with("feed", "zerodha")
+                .with("month", "2022-03"),
+        );
+
+        let got = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        let records = got["records"].as_array().expect("records");
+        assert_eq!(records.len(), 1, "{got:#}");
+        assert_eq!(records[0]["fields"]["about"], "NIFTY 50.NSE_IDX.csv");
+        assert_eq!(got["keyed"]["rows"][0]["source"], "audit");
+        assert_eq!(got["keyed"]["rows"][0]["scope"], "event");
+        assert_eq!(got["keyed"]["matched"], 1);
+        let postings = got["keyed"]["index"]["postings"].as_array().unwrap();
+        assert!(
+            postings
+                .iter()
+                .any(|p| p["dimension"] == "day" && p["total"] == 2)
+        );
+
+        // BANKNIFTY ON THE SAME DAY IS ITS OWN ANSWER.
+        let bank = keyed(&dir, "instrument=NSE-INDEX-BANKNIFTY&day=2022-03-07");
+        assert_eq!(bank["records"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            bank["records"][0]["fields"]["about"],
+            "NIFTY BANK.NSE_IDX.csv"
+        );
+
+        // ZERODHA'S MONTH EVENT BEARS ON THE DAY BY ITS MONTH, AND ONLY UNDER
+        // ZERODHA: GDFL'S ANSWER ABOVE DID NOT CARRY IT.
+        let zerodha = keyed(&dir, "feed=zerodha&instrument=NIFTY&day=2022-03-07");
+        assert_eq!(
+            zerodha["records"].as_array().unwrap().len(),
+            1,
+            "{zerodha:#}"
+        );
+        assert_eq!(zerodha["keyed"]["rows"][0]["scope"], "month");
+
+        // AN INSTRUMENT ALONE PROBES ITS OWN POSTING AND THE IMPORTER'S TARGET:
+        // both of NIFTY's import refusals and Zerodha's month event, which names
+        // NIFTY and no segment that contradicts the index.
+        let all_days = keyed(&dir, "instrument=NSE-INDEX-NIFTY");
+        assert_eq!(
+            all_days["records"].as_array().unwrap().len(),
+            3,
+            "{all_days:#}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LINE WRITTEN BEFORE THE STREAM EXISTED IS FOUND IN THE RING**, with
+    /// `source: ring`: the `cli` log of 5 Oct 2026 holds such lines, and the
+    /// stream begins only when a build that keeps one next opens that sink.
+    #[test]
+    fn a_line_older_than_the_stream_is_found_in_the_ring() {
+        let dir = crate::scratch::path("logs-keyed-ring");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&dir).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        }
+        // THE INDEX ALONE BY DEFAULT (WP-33c, DB-A44): the half keeps no
+        // stream, said by name, and nothing is read from the ring unasked.
+        let index_only = keyed(&dir, "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07");
+        assert_eq!(index_only["records"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            index_only["keyed"]["index"]["postings"][0]["state"],
+            "no audit stream"
+        );
+        assert_eq!(
+            index_only["keyed"]["index"]["postings"][0]["total"],
+            serde_json::Value::Null,
+            "an absent stream is never `total: 0` (DB-A46)"
+        );
+        assert_eq!(index_only["keyed"]["ring"]["scanned"], false);
+        assert_eq!(index_only["bytes_read"], 0, "no ring byte was read");
+        let got = keyed(
+            &dir,
+            "feed=gdfl&instrument=NSE-INDEX-NIFTY&day=2022-03-07&ring=1",
+        );
+        assert_eq!(got["records"].as_array().unwrap().len(), 1, "{got:#}");
+        assert_eq!(got["keyed"]["rows"][0]["source"], "ring");
+        assert_eq!(got["keyed"]["ring"]["scanned"], true);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A REFUSAL OF A WHOLE DAY BEARS ON EVERY INSTRUMENT OF ITS SEGMENT**,
+    /// as `scope: day`; a file of another instrument, an unswept reference
+    /// file and another segment do not.
+    #[test]
+    fn a_whole_day_refusal_bears_on_its_segment_and_a_file_on_its_instrument() {
+        let record = |about: &str, kind: &str| {
+            telemetry::Record::decode(
+                format!(
+                    "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                     \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                     \"fields\":{{\"kind\":\"{kind}\",\"day\":\"2018-11-07\",\"about\":\"{about}\",\
+                     \"why\":\"x\"}}}}"
+                )
+                .as_bytes(),
+            )
+            .expect("a line")
+        };
+        let keys = |instrument: &str| Keys {
+            instrument: instrument_of(instrument),
+            ..Keys::default()
+        };
+        let calendar = record("calendar", "indices");
+        assert_eq!(bears(&calendar, &keys("NSE-INDEX-NIFTY")), Some(Scope::Day));
+        assert_eq!(bears(&calendar, &keys("NIFTY")), Some(Scope::Day));
+        assert_eq!(bears(&calendar, &keys("NSE-CASH-RELIANCE")), None);
+        let vix = record("INDIA VIX.NSE_IDX.csv", "indices");
+        assert_eq!(bears(&vix, &keys("NSE-INDEX-NIFTY")), None);
+        let stock = record("RELIANCE.NSE.csv", "stocks");
+        assert_eq!(
+            bears(&stock, &keys("NSE-CASH-RELIANCE")),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&stock, &keys("NSE-INDEX-RELIANCE")), None);
+        let day_only = Keys {
+            day: crate::server::import_journal::parse_day("2018-11-07"),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &day_only), Some(Scope::Event));
+        let feed_gdfl = Keys {
+            feed: Some("gdfl".to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &feed_gdfl), Some(Scope::Event));
+        let feed_zerodha = Keys {
+            feed: Some("zerodha".to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(bears(&calendar, &feed_zerodha), None);
+    }
+
+    /// **AN OPTION REFUSAL IS FOUND BY ITS CONTRACT AND ITS UNDERLYING**: the
+    /// ticker is read with the importer's own decoder, so the contract the
+    /// store names and the vendor's ticker both find it; the spot index does
+    /// not.
+    #[test]
+    fn an_option_refusal_is_found_by_its_contract_and_its_underlying() {
+        let ticker = "BANKNIFTY15NOV1826700CE";
+        let day = crate::server::import_journal::parse_day("2018-11-06").expect("a day");
+        let decoded = pull::gdfl_nfo::decode_ticker(ticker, day).expect("the importer reads it");
+        let record = telemetry::Record::decode(
+            format!(
+                "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                 \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                 \"fields\":{{\"kind\":\"options\",\"day\":\"2018-11-06\",\"about\":\"{ticker}\",\
+                 \"why\":\"line 9\"}}}}"
+            )
+            .as_bytes(),
+        )
+        .expect("a line");
+        let by = |contract: &str| Keys {
+            contract: Some(contract.to_owned()),
+            ..Keys::default()
+        };
+        assert_eq!(
+            bears(&record, &by(&decoded.contract.to_string())),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&record, &by(ticker)), Some(Scope::Event));
+        assert_eq!(bears(&record, &by("2018-11-15-2670000-PE")), None);
+        let under = |instrument: &str| Keys {
+            instrument: instrument_of(instrument),
+            ..Keys::default()
+        };
+        assert_eq!(
+            bears(&record, &under("NSE-FNO-BANKNIFTY")),
+            Some(Scope::Event)
+        );
+        assert_eq!(bears(&record, &under("BANKNIFTY")), Some(Scope::Event));
+        assert_eq!(bears(&record, &under("NSE-INDEX-BANKNIFTY")), None);
+    }
+
+    /// **AN INSTRUMENT IS READ IN EACH FORM A PAGE WRITES**, a symbol with a
+    /// hyphen included, and a malformed key is NAMED under `ignored` rather
+    /// than read as no filter.
+    #[test]
+    fn instruments_are_read_in_every_form_and_a_bad_key_is_named() {
+        let full = instrument_of("NSE-INDEX-NIFTY").expect("full");
+        assert_eq!(
+            (
+                full.exchange.as_deref(),
+                full.segment.as_deref(),
+                full.symbol.as_str()
+            ),
+            (Some("NSE"), Some("INDEX"), "NIFTY")
+        );
+        let short = instrument_of("NSE-NIFTY").expect("short");
+        assert_eq!((short.segment, short.symbol.as_str()), (None, "NIFTY"));
+        let hyphen = instrument_of("NSE-CASH-BAJAJ-AUTO").expect("hyphen");
+        assert_eq!(hyphen.symbol, "BAJAJ-AUTO");
+        assert_eq!(
+            instrument_of("NSE-BAJAJ-AUTO").expect("hy").symbol,
+            "BAJAJ-AUTO"
+        );
+        assert_eq!(instrument_of("NIFTY").expect("bare").exchange, None);
+        assert!(instrument_of("nifty 50").is_none());
+
+        let read =
+            asked("feed=nasdaq&day=2022-3-7&instrument=x%20y&contract=2019-03-28-1150000-CE");
+        let named: Vec<&str> = read.ignored.iter().map(|(param, _)| *param).collect();
+        assert_eq!(named, ["feed", "instrument", "day"]);
+        assert_eq!(read.keys.contract.as_deref(), Some("2019-03-28-1150000-CE"));
+        assert!(asked("").keys.is_empty());
+    }
+
+    /// **A KEYED ANSWER PAGES THROUGH EVERY MATCH FROM ITS CURSOR, NONE TWICE
+    /// AND NONE SKIPPED, AND A LINE WRITTEN BETWEEN PAGES DOES NOT MOVE THEM**
+    /// (WP-33c, DB-A44): seven refusals of one day, three a page; a line in two
+    /// postings of one half (a day's and its month's) is one row; the last
+    /// page hands back no cursor; no ring byte is read.
+    #[test]
+    fn a_keyed_answer_pages_every_match_from_its_cursor() {
+        let (dir, sink) = sink_in("keyed-pages");
+        for n in 0..7u32 {
+            let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07").with("n", n));
+        }
+        let page = |query: &str| keyed(&dir, query);
+        let first = page("day=2022-03-07&limit=3");
+        let mut seen: Vec<u64> = first["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["fields"]["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seen, [6, 5, 4], "{first:#}");
+        assert_eq!(first["keyed"]["more"], true);
+        assert_eq!(first["bytes_read"], 0, "no ring byte is read unasked");
+        // A LINE WRITTEN NOW IS NEWER THAN EVERY PLACE HANDED OUT.
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07").with("n", 99_u32));
+        let mut cursor = first["keyed"]["next"].as_str().unwrap().to_owned();
+        loop {
+            let next = page(&format!("day=2022-03-07&limit=3&before={cursor}"));
+            seen.extend(
+                next["records"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["fields"]["n"].as_u64().unwrap()),
+            );
+            let Some(more) = next["keyed"]["next"].as_str() else {
+                assert_eq!(next["keyed"]["more"], false);
+                assert_eq!(next["reached_oldest"], true);
+                break;
+            };
+            cursor = more.to_owned();
+        }
+        assert_eq!(
+            seen,
+            [6, 5, 4, 3, 2, 1, 0],
+            "every match, once, newest first"
+        );
+        // A CURSOR OF ANOTHER QUESTION IS REFUSED BY NAME, NEVER READ AS PAGE 1.
+        let wrong = page("day=2022-03-07&limit=3&before=1.2~3.4~5.6");
+        assert_eq!(wrong["records"], serde_json::json!([]));
+        assert!(
+            wrong["keyed"]["cursor_refused"]
+                .as_str()
+                .unwrap()
+                .contains("not a cursor of this request")
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A REFUSAL CODE AND A RUN ARE KEYS OF THE INDEX** (WP-33c; DB-A41,
+    /// DB-A47): `code=` finds every refusal that logged it; `run=` with
+    /// `durable=1` finds a run's lines in the index, its top-level run or the
+    /// numeric `run` field the importer writes; `run=` alone stays the ring's
+    /// filter a page polls.
+    #[test]
+    fn a_refusal_code_and_a_run_are_keys_of_the_index() {
+        let (dir, sink) = sink_in("keyed-code-run");
+        let _ = sink.emit(
+            &index_refusal("NIFTY 50.NSE_IDX.csv", "2020-01-01").with("code", "too_many_entries"),
+        );
+        let _ = sink.emit(
+            &index_refusal("NIFTY 50.NSE_IDX.csv", "2020-01-02").with("code", "price_refused"),
+        );
+        let _ = sink.emit(
+            &telemetry::Event::info("gdfl.import", "run started").with("run", 1_791_270_000_u64),
+        );
+        let _ = sink.emit_for_run(
+            4025,
+            &telemetry::Event::info("cli.lifecycle", "command started"),
+        );
+        let coded = keyed(&dir, "code=too_many_entries");
+        assert_eq!(coded["records"].as_array().unwrap().len(), 1, "{coded:#}");
+        assert_eq!(coded["records"][0]["fields"]["day"], "2020-01-01");
+        assert_eq!(coded["keyed"]["code"], "too_many_entries");
+        let importer = keyed(&dir, "run=1791270000&durable=1");
+        assert_eq!(
+            importer["records"].as_array().unwrap().len(),
+            1,
+            "{importer:#}"
+        );
+        assert_eq!(importer["records"][0]["message"], "run started");
+        let attempt = keyed(&dir, "run=4025&durable=1");
+        assert_eq!(attempt["records"][0]["message"], "command started");
+        assert!(
+            asked("run=4025").keys.is_empty(),
+            "run alone is the ring's filter"
+        );
+        let lone = asked("durable=1");
+        assert!(lone.keys.is_empty());
+        assert!(lone.ignored.iter().any(|(param, _)| *param == "durable"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A PARAMETER NO FILTER READS IS NAMED, NEVER DROPPED** (WP-33c,
+    /// DB-A45): `reason=`, `why=` and any other name come back under
+    /// `ignored`, and a cursor with no key to page is named too.
+    #[test]
+    fn a_parameter_no_filter_reads_is_named_never_dropped() {
+        let read = asked("reason=census&why=x&bogus=1&before=1.2");
+        let named: Vec<(&str, &str)> = read
+            .ignored
+            .iter()
+            .map(|(param, word)| (*param, word.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("before", "1.2"),
+                ("unknown parameter", "reason"),
+                ("unknown parameter", "why"),
+                ("unknown parameter", "bogus"),
+            ]
+        );
+        assert_eq!(unknown_params("limit=1&&level=x&x=1&x=2", &PARAMS), ["x"]);
+        assert!(asked("feed=gdfl&ring=1&limit=5").ignored.is_empty());
+        assert!(
+            asked("ring=yes")
+                .ignored
+                .iter()
+                .any(|(param, word)| *param == "ring" && word == "yes")
+        );
+    }
+
+    /// **THE PAGE ANSWERS A KEYED QUESTION AS THE JSON DOES** (WP-33c,
+    /// DB-A45): `/logs?feed=gdfl&day=...` is no longer `/logs` with its keys
+    /// dropped: it shows the day's refusal, the form keeps the keys, and the
+    /// JSON link carries them.
+    #[test]
+    fn the_page_answers_a_keyed_question_as_the_json_does() {
+        let (dir, sink) = sink_in("keyed-page");
+        let _ = sink.emit(&index_refusal("NIFTY 50.NSE_IDX.csv", "2022-03-07"));
+        let _ = sink.emit(&telemetry::Event::error("pull.spot", "member did not land"));
+        let plain = page_over(&dir, None, &asked(""), None);
+        let keyed_page = page_over(&dir, None, &asked("feed=gdfl&day=2022-03-07"), None);
+        assert_ne!(plain, keyed_page);
+        assert!(keyed_page.contains("NIFTY 50.NSE_IDX.csv"), "{keyed_page}");
+        assert!(!keyed_page.contains("member did not land"), "{keyed_page}");
+        assert!(
+            keyed_page.contains("value=\"2022-03-07\""),
+            "the form keeps the day"
+        );
+        assert!(
+            keyed_page.contains("/logs.json?limit=50&amp;feed=gdfl&amp;day=2022-03-07")
+                || keyed_page.contains("/logs.json?limit=50&feed=gdfl&day=2022-03-07"),
+            "the JSON link carries the keys: {keyed_page}"
+        );
+        assert!(keyed_page.contains("durable audit index"), "{keyed_page}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EVERY /db READ IS COUNTED, THE FIRST OF A WINDOW SAMPLED, AND A
+    /// WINDOW'S COUNT SAID WHEN IT CLOSES** (WP-33c, DB-A42); a lone sampled
+    /// read is no news; the selection kept is the selection's names only.
+    #[test]
+    fn every_db_read_is_counted_and_the_first_of_a_window_sampled() {
+        let mut windows = AccessWindows::default();
+        let first = windows.account("/bars.json", false, 10, 1_000);
+        assert_eq!(
+            first,
+            AccessPlan {
+                closed: None,
+                sample: true
+            }
+        );
+        assert!(!windows.account("/bars.json", false, 30, 2_000).sample);
+        assert!(!windows.account("/bars.json", true, 5, 3_000).sample);
+        assert!(
+            windows.account("/spot.json", false, 1, 3_000).sample,
+            "per route"
+        );
+        let next = windows.account("/bars.json", false, 7, 1_000 + ACCESS_WINDOW_MS);
+        assert!(next.sample, "a new window samples again");
+        let closed = next.closed.expect("the closed window is said");
+        assert_eq!((closed.served, closed.refused, closed.slowest), (2, 1, 30));
+        let lone = windows.account("/spot.json", false, 1, 3_000 + ACCESS_WINDOW_MS);
+        assert_eq!(lone.closed, None, "one sampled read is no news");
+        assert_eq!(
+            selection_of("feed=gdfl&instrument=NSE-INDEX-NIFTY&month=2019-03&token=secret&q=x%20y"),
+            [
+                ("feed", "gdfl".to_owned()),
+                ("instrument", "NSE-INDEX-NIFTY".to_owned()),
+                ("month", "2019-03".to_owned()),
+            ]
+        );
+        // THE WINDOW /db ASKS: its symbol is kept, so the index files the read
+        // under its instrument; the paging names are not a selection.
+        assert_eq!(
+            selection_of(
+                "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&contract=&timeframe=1s\
+                 &from=2022-03&to=2022-03&sort=ts&dir=desc&offset=0&limit=50&extremes=1"
+            ),
+            [
+                ("feed", "gdfl".to_owned()),
+                ("symbol", "NIFTY".to_owned()),
+                ("segment", "INDEX".to_owned()),
+                ("exchange", "NSE".to_owned()),
+                ("timeframe", "1s".to_owned()),
+                ("from", "2022-03".to_owned()),
+                ("to", "2022-03".to_owned()),
+            ]
+        );
+        assert!(is_db_read("/bars.json") && !is_db_read("/pull/spot"));
+    }
+
+    /// **A 501 IS A PLACEHOLDER, NOT A FAILURE THE AUDIT STREAM KEEPS**
+    /// (WP-33c, DB-A52), and a server error's durable copy has its own ration.
+    #[test]
+    fn a_501_is_a_warn_and_a_server_errors_durable_copy_is_rationed() {
+        use axum::http::StatusCode;
+        assert_eq!(
+            request_level(StatusCode::NOT_IMPLEMENTED),
+            telemetry::Level::Warn
+        );
+        assert_eq!(
+            request_level(StatusCode::INTERNAL_SERVER_ERROR),
+            telemetry::Level::Error
+        );
+        assert_eq!(
+            request_level(StatusCode::SERVICE_UNAVAILABLE),
+            telemetry::Level::Error
+        );
+        assert_eq!(request_level(StatusCode::NOT_FOUND), telemetry::Level::Warn);
+        assert_eq!(request_level(StatusCode::OK), telemetry::Level::Debug);
+        assert!(!telemetry::is_audited(
+            request_level(StatusCode::NOT_IMPLEMENTED),
+            "api.request",
+            "served"
+        ));
+        let mut ration = Ration::new(AUDITED_ERRORS_PER_WINDOW);
+        let admitted = (0..AUDITED_ERRORS_PER_WINDOW + 5)
+            .filter(|_| ration.admit(1_000).write)
+            .count();
+        assert_eq!(admitted as u64, AUDITED_ERRORS_PER_WINDOW);
+        assert_eq!(ration.admit(1_000 + FAILED_LINE_WINDOW_MS).summary, Some(5));
+    }
+
+    /// **THE IMPORT'S PACE IS THE MEDIAN GAP BETWEEN ITS NEWEST DAYS**, over
+    /// at most [`RATE_WINDOW`] events per kind, and none with fewer than two.
+    #[test]
+    fn the_import_pace_is_the_median_gap_between_its_newest_days() {
+        let mut refusals = DirRefusals::default();
+        let day = |ms: i64| {
+            format!(
+                "{{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"info\",\
+                 \"target\":\"gdfl.import\",\"msg\":\"day imported\",\"fields\":{{\"kind\":\"options\",\
+                 \"day\":\"2019-11-14\"}}}}"
+            )
+        };
+        refusals.fold(day(1_000).as_bytes());
+        assert_eq!(refusals.pace("options"), None);
+        // Gaps of 60 s, 59 s, 61 s and one pause of 600 s.
+        for at in [61_000, 120_000, 181_000, 781_000] {
+            refusals.fold(day(at).as_bytes());
+        }
+        assert_eq!(refusals.pace("options"), Some((4, 60_000, 600_000)));
+        assert_eq!(refusals.newest_import("options"), Some(781_000));
+        for n in 0..100 {
+            refusals.fold(day(1_000_000 + n * 1_000).as_bytes());
+        }
+        let (gaps, p50, _) = refusals.pace("options").expect("a pace");
+        assert_eq!((gaps, p50), (RATE_WINDOW - 1, 1_000));
+        assert_eq!(refusals.pace("stocks"), None);
+    }
+
+    /// **THE IMPORTER'S REFUSALS ARE READ ONCE, THEN BY THEIR TAIL**: a line
+    /// appended later is found without re-reading the file, and a line that
+    /// is not the importer's at `error` is never kept.
+    #[test]
+    fn the_importers_refusals_are_read_by_their_tail() {
+        use std::io::Write as _;
+        let dir = crate::scratch::path("logs-import-refusals");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let line = |seq: u32, level: &str, day: &str| {
+            format!(
+                "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+                 \"level\":\"{level}\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+                 \"fields\":{{\"kind\":\"options\",\"day\":\"{day}\",\"about\":\"census\",\
+                 \"why\":\"full\"}}}}\n"
+            )
+        };
+        let current = telemetry::current_path(&dir);
+        std::fs::write(
+            &current,
+            line(1, "error", "2019-11-14") + &line(2, "info", "2019-11-14"),
+        )
+        .expect("write");
+        let first = refusals_in(&dir);
+        assert_eq!(first.of("options", "2019-11-14").len(), 1);
+        let bytes = first.bytes;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&current)
+            .expect("open")
+            .write_all(line(3, "error", "2019-11-15").as_bytes())
+            .expect("append");
+        let second = refusals_in(&dir);
+        assert_eq!(second.of("options", "2019-11-15").len(), 1);
+        assert_eq!(
+            second.bytes - bytes,
+            line(3, "error", "2019-11-15").len() as u64,
+            "only the appended line was read"
+        );
+        assert!(second.of("options", "2019-11-16").is_empty());
+        // A ROLL READS THE RING AGAIN, oldest file first.
+        std::fs::rename(&current, telemetry::rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(&current, line(4, "error", "2019-11-18")).expect("write");
+        let third = refusals_in(&dir);
+        assert_eq!(third.of("options", "2019-11-14").len(), 1);
+        assert_eq!(third.of("options", "2019-11-18").len(), 1);
+        assert_eq!(third.files, 2);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // IA-11r, R5 (D-4862 round 6): EVERY RUN DIRECTORY IS READ, AND ONE THAT
+    // CANNOT ANSWER IS NAMED
+    // -----------------------------------------------------------------------
+
+    /// A sink on `dir`, made with its parents.
+    fn run_sink(dir: &std::path::Path) -> telemetry::Sink {
+        std::fs::create_dir_all(dir).expect("a run directory");
+        telemetry::Sink::open(&telemetry::Config::new(dir).with_min_level(telemetry::Level::Trace))
+            .expect("opens")
+    }
+
+    /// **THE CLOSED SET NAMES EVERY IMPORT KIND**: the table's three kind
+    /// directories are `ImportKind::ALL`'s names in its order, so a fourth
+    /// kind fails here until its directory is a row of
+    /// `telemetry::run_dirs`; every importer directory is a run directory;
+    /// and with the server's own there are 8 (D-4862, D-4897).
+    #[test]
+    fn the_run_directories_name_every_import_kind() {
+        let kinds: Vec<&str> = pull::gdfl_import::ImportKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        let own: Vec<&str> = telemetry::run_dirs::GDFL_KINDS
+            .iter()
+            .filter_map(|dir| dir.gdfl_kind)
+            .collect();
+        assert_eq!(own, kinds, "the table's kinds are the importer's, in order");
+        let read: Vec<&str> = run_dirs().collect();
+        assert!(import_dirs().all(|dir| read.contains(&dir)));
+        assert_eq!(read.len() + 1, 8, "the server's own and these");
+        for kind in pull::gdfl_import::ImportKind::ALL {
+            let word = kind.as_str();
+            assert_eq!(
+                import_dirs_of(word),
+                [
+                    CLI_SUBDIR.to_owned(),
+                    format!("gdfl/{word}"),
+                    "gdfl/store".to_owned(),
+                ],
+                "a kind's evidence is read from three directories"
+            );
+        }
+        let root = std::path::Path::new("/zz-no-such-store");
+        assert_eq!(halves_of(Some(root.join("logs")), Some(root)).len(), 8);
+        assert_eq!(halves_of(None, Some(root)).len(), 7, "no server sink");
+        assert!(halves_of(None, None).is_empty());
+    }
+
+    /// **THE READERS READ THE WRITERS' TABLE** (D-4897, which continues
+    /// D-4862): what `/logs` reads is `logs/`, `logs/cli/` and every row of
+    /// `telemetry::run_dirs::ALL`, in the table's order and nothing else;
+    /// the importer's evidence is read from a subset of it; and wherever the
+    /// table sends a GDFL run of a kind, on either layout, is one of the
+    /// directories that kind's evidence is read from. A directory added to
+    /// the table is read here without an edit, and one a reader spelt itself
+    /// fails the equality.
+    #[test]
+    fn the_readers_read_the_table_of_run_directories() {
+        let root = std::path::Path::new("/zz-no-such-store");
+        let read: Vec<std::path::PathBuf> = halves_of(Some(root.join("logs")), Some(root))
+            .into_iter()
+            .map(|half| half.path)
+            .collect();
+        let table: Vec<std::path::PathBuf> = [
+            root.join(telemetry::run_dirs::LOGS),
+            root.join(telemetry::run_dirs::LOGS)
+                .join(telemetry::run_dirs::CLI),
+        ]
+        .into_iter()
+        .chain(telemetry::run_dirs::ALL.iter().map(|dir| dir.beneath(root)))
+        .collect();
+        assert_eq!(read, table);
+
+        // THE EVIDENCE READ names the same directories the walk does.
+        let evidence = import_refusals(root);
+        let named: Vec<String> = evidence.dirs().iter().map(DirEvidence::name).collect();
+        let walked: Vec<String> = import_dirs().map(|dir| format!("logs/{dir}")).collect();
+        assert_eq!(named, walked);
+        assert_eq!(named.len(), 5);
+        for dir in evidence.dirs() {
+            assert!(
+                read.contains(&dir.path),
+                "{} is not a /logs read",
+                dir.name()
+            );
+            assert_eq!(dir.state, DirState::Absent, "{}", dir.name());
+        }
+
+        // WHERE A RUN LOGS IS WHERE ITS KIND IS READ, on both layouts.
+        for kind in pull::gdfl_import::ImportKind::ALL {
+            for layout in [
+                telemetry::run_dirs::GdflLayout::V3,
+                telemetry::run_dirs::GdflLayout::V4,
+            ] {
+                let written = telemetry::run_dirs::for_gdfl(kind.as_str(), layout)
+                    .expect("every import kind has a run directory");
+                assert!(
+                    import_dirs_of(kind.as_str()).contains(&written.sub),
+                    "a {layout:?} run of {} logs to {}, which its readers do not read",
+                    kind.as_str(),
+                    written.sub
+                );
+                assert!(
+                    evidence
+                        .unread(kind.as_str())
+                        .contains(&format!("{} absent", written.name())),
+                    "{}",
+                    written.name()
+                );
+            }
+        }
+    }
+
+    /// Makes `dir` unsearchable for the life of the guard and gives it back
+    /// its mode when dropped, so a failed assertion still cleans up.
+    struct Locked(std::path::PathBuf);
+
+    impl Locked {
+        fn new(dir: &std::path::Path) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))
+                .expect("a directory with no permissions");
+            // WHERE THE MODE BITS DO NOT BIND (a process that may read
+            // anything) this test cannot make its case, and says so rather
+            // than passing on nothing.
+            assert!(
+                std::fs::metadata(telemetry::current_path(dir))
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
+                "mode 000 does not stop this process from searching {}: run the tests as a \
+                 user the mode bits bind",
+                dir.display()
+            );
+            Self(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _restored =
+                std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// **A DIRECTORY THAT TURNS UNREADABLE IS NEVER ANSWERED AS `read`**,
+    /// whatever this process read before (D-4862; IA-LG-02). The api starts
+    /// before any run creates its directory, so the order production meets
+    /// is: first seen ABSENT, or first seen EMPTY, or first seen HOLDING A
+    /// REFUSAL, and only then unreadable. Each of the three read `read` with
+    /// no error, and the row said `"none"`, until the process restarted: the
+    /// tail remembered "no such file" and "permission denied" as one value.
+    /// Each must answer `unreadable` with the OS error on `/imports.json`'s
+    /// evidence and on `/logs.json`'s and `/logs`'s `dirs`, name the
+    /// directory in a kind's `unread`, and read again once it can be.
+    #[test]
+    fn a_directory_that_turns_unreadable_is_never_answered_as_read() {
+        let root = crate::scratch::path("logs-dir-turns-unreadable");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let logs = root.join("logs");
+        std::fs::create_dir_all(&logs).expect("mkdir");
+        let state_of = |half: &str| -> DirState {
+            import_refusals(&root)
+                .dirs()
+                .iter()
+                .find(|dir| dir.half == half)
+                .unwrap_or_else(|| panic!("{half} is not read"))
+                .state
+                .clone()
+        };
+        let denied = |state: &DirState, half: &str| {
+            let DirState::Unreadable(why) = state else {
+                panic!("{half} reads {state:?}, not unreadable");
+            };
+            assert!(why.contains("Permission denied"), "{half}: {why}");
+        };
+        let refusal = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"stocks\",\"day\":\"2019-11-13\",\"about\":\"ZZ FIXTURE.csv\",\
+             \"why\":\"a fixture\"}}\n";
+
+        // FIRST SEEN: absent, empty, and holding one refusal.
+        let absent_first = logs.join("gdfl").join("store");
+        let empty_first = logs.join("gdfl").join("options");
+        let held_first = logs.join("gdfl").join("stocks");
+        std::fs::create_dir_all(&empty_first).expect("mkdir");
+        std::fs::create_dir_all(&held_first).expect("mkdir");
+        std::fs::write(telemetry::current_path(&held_first), refusal).expect("a ring");
+        assert_eq!(state_of("gdfl/store"), DirState::Absent);
+        assert_eq!(state_of("gdfl/options"), DirState::Read);
+        assert_eq!(state_of("gdfl/stocks"), DirState::Read);
+        let before = import_refusals(&root);
+        assert_eq!(before.of("stocks", "2019-11-13").len(), 1);
+        assert_eq!(
+            before.unread("options"),
+            ["logs/cli absent", "logs/gdfl/store absent"]
+        );
+
+        // THEN UNREADABLE, in the same process.
+        std::fs::create_dir_all(&absent_first).expect("mkdir");
+        {
+            let _a = Locked::new(&absent_first);
+            let _b = Locked::new(&empty_first);
+            let _c = Locked::new(&held_first);
+            for half in ["gdfl/store", "gdfl/options", "gdfl/stocks"] {
+                denied(&state_of(half), half);
+            }
+            let after = import_refusals(&root);
+            assert!(
+                !std::sync::Arc::ptr_eq(&before, &after),
+                "an answer kept against the earlier read is not this one"
+            );
+            let unread = after.unread("stocks");
+            assert_eq!(unread.len(), 3, "{unread:?}");
+            assert_eq!(unread[0], "logs/cli absent");
+            for (said, dir) in unread[1..]
+                .iter()
+                .zip(["logs/gdfl/stocks", "logs/gdfl/store"])
+            {
+                assert!(
+                    said.starts_with(&format!("{dir} unreadable: "))
+                        && said.contains("Permission denied"),
+                    "{said}"
+                );
+            }
+            assert!(
+                after.of("stocks", "2019-11-13").is_empty(),
+                "what can no longer be read is not answered from memory"
+            );
+            for dir in after
+                .dirs()
+                .iter()
+                .filter(|dir| dir.half != CLI_SUBDIR && dir.half != "gdfl/indices")
+            {
+                assert!(!dir.errors().is_empty(), "{} names no error", dir.name());
+            }
+
+            // ASKED AGAIN, it is the same answer and the same errors: a
+            // directory that stays unreadable does not grow its list.
+            let errors = |evidence: &ImportRefusals| -> usize {
+                evidence.dirs().iter().map(|dir| dir.errors().len()).sum()
+            };
+            let again = import_refusals(&root);
+            assert!(std::sync::Arc::ptr_eq(&after, &again));
+            assert_eq!(errors(&after), errors(&again));
+        }
+
+        // READABLE AGAIN: read, the refusal back, the errors gone.
+        assert_eq!(state_of("gdfl/store"), DirState::Read);
+        assert_eq!(state_of("gdfl/options"), DirState::Read);
+        assert_eq!(state_of("gdfl/stocks"), DirState::Read);
+        let restored = import_refusals(&root);
+        assert_eq!(restored.of("stocks", "2019-11-13").len(), 1);
+        assert!(restored.dirs().iter().all(|dir| dir.errors().is_empty()));
+        assert_eq!(restored.unread("stocks"), ["logs/cli absent"]);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`/logs.json` AND `/logs` NAME AN UNREADABLE DIRECTORY TOO, FROM THE
+    /// DISK** (D-4862; IA-LG-04): their `dirs` asked `metadata` of the
+    /// directory alone, which a directory without search permission answers,
+    /// so it read `read` beside the same answer's `errors[]` saying
+    /// `Permission denied`. An absent one, an empty one and one holding a
+    /// ring each read `unreadable` with the OS error while they are, and
+    /// `read` once they are not.
+    #[test]
+    fn logs_names_a_directory_it_may_not_search() {
+        let root = crate::scratch::path("logs-dirs-unsearchable");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let logs = root.join("logs");
+        let locked = ["gdfl/store", "gdfl/options", "gdfl/stocks"];
+        for half in locked {
+            std::fs::create_dir_all(logs.join(half)).expect("mkdir");
+        }
+        std::fs::write(telemetry::current_path(&logs.join("gdfl/stocks")), "{}\n").expect("a ring");
+        let halves = halves_of(Some(logs.clone()), Some(&root));
+        assert!(!dirs_json(&halves).contains("unreadable"));
+        {
+            let _guards: Vec<Locked> = locked
+                .iter()
+                .map(|half| Locked::new(&logs.join(half)))
+                .collect();
+            let body: serde_json::Value =
+                serde_json::from_str(&format!("{{{}}}", dirs_json(&halves))).expect("json");
+            for half in ["gdfl/store", "gdfl/options", "gdfl/stocks"] {
+                let dir = body["dirs"]
+                    .as_array()
+                    .expect("dirs")
+                    .iter()
+                    .find(|dir| dir["half"] == half)
+                    .unwrap_or_else(|| panic!("{half} is not named"));
+                assert_eq!(dir["state"], "unreadable", "{dir:#}");
+                assert!(
+                    dir["error"]
+                        .as_str()
+                        .is_some_and(|why| why.contains("Permission denied")),
+                    "{dir:#}"
+                );
+                assert_eq!(DirState::of(&logs.join(half)).word(), "unreadable");
+            }
+            let note = dirs_note(&halves);
+            assert_eq!(
+                note.matches("unreadable (Permission denied").count(),
+                3,
+                "{note}"
+            );
+            assert!(note.contains("<code>served</code> read;"), "{note}");
+        }
+        let after = dirs_json(&halves);
+        assert!(!after.contains("unreadable"), "{after}");
+        assert_eq!(after.matches("\"state\":\"read\"").count(), 4, "{after}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RING FILE THAT CANNOT BE READ IS NAMED ONCE, AND COUNTED WHEN IT
+    /// CAN BE.** The directory is searchable and its current file is not
+    /// readable: every call used to append the same error again (one line a
+    /// request, for ever, and a new answer identity each time). And a ring
+    /// first seen empty stayed at 0 files while its bytes grew.
+    #[test]
+    fn a_ring_file_that_stays_unreadable_is_named_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::scratch::path("logs-ring-file-unreadable");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let empty = refusals_in(&dir);
+        assert_eq!((empty.files, empty.bytes), (0, 0));
+        let line = "{\"seq\":1,\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":1791171078967,\
+             \"level\":\"error\",\"target\":\"gdfl.import\",\"msg\":\"refused\",\
+             \"fields\":{\"kind\":\"options\",\"day\":\"2019-11-14\",\"about\":\"census\",\
+             \"why\":\"a fixture\"}}\n";
+        let current = telemetry::current_path(&dir);
+        std::fs::write(&current, line).expect("a ring");
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if std::fs::read(&current).is_ok() {
+            let _restored =
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
+            panic!("mode 000 does not stop this process from reading: run as a user it binds");
+        }
+        let first = refusals_in(&dir);
+        let second = refusals_in(&dir);
+        let third = refusals_in(&dir);
+        let _restored = std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644));
+        assert_eq!(first.errors.len(), 1, "{:?}", first.errors);
+        assert!(
+            first.errors[0].contains("Permission denied"),
+            "{:?}",
+            first.errors
+        );
+        assert_eq!(
+            third.errors, first.errors,
+            "named once, however often asked"
+        );
+        assert!(std::sync::Arc::ptr_eq(&second, &third), "and the same read");
+        assert_eq!(
+            DirState::of(&dir),
+            DirState::Read,
+            "the directory can be searched"
+        );
+
+        // READABLE: read, counted as one file, and the error dropped.
+        let readable = refusals_in(&dir);
+        assert!(readable.errors.is_empty(), "{:?}", readable.errors);
+        assert_eq!(readable.of("options", "2019-11-14").len(), 1);
+        assert_eq!(
+            (readable.files, readable.bytes),
+            (1, line.len() as u64),
+            "a ring first seen empty counts its file when it reads it"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store whose server logged to `logs/`, an older run to `logs/cli`
+    /// and an indices run (`run claimed`, then a refusal) to
+    /// `logs/gdfl/indices`, each through a real sink; `logs/verify` is a
+    /// FILE, so `logs/verify/zerodha` is neither there nor absent. Returns
+    /// the store's root and the indices run's id.
+    fn every_run_directory_store() -> (std::path::PathBuf, u64) {
+        let root = crate::scratch::path("logs-every-run-directory");
+        let _ignored = std::fs::remove_dir_all(&root);
+        let served_dir = root.join("logs");
+        let run = 1_791_700_000_u64;
+        {
+            let served = run_sink(&served_dir);
+            let cli = run_sink(&served_dir.join("cli"));
+            let indices = run_sink(&served_dir.join("gdfl").join("indices"));
+            assert!(
+                served
+                    .emit(&telemetry::Event::info("api.serve", "the server said this"))
+                    .is_written()
+            );
+            assert!(
+                cli.emit(
+                    &telemetry::Event::error("gdfl.import", "refused")
+                        .with("kind", "options")
+                        .with("day", "2019-11-14")
+                        .with("run", 4_025_u64)
+                )
+                .is_written()
+            );
+            assert!(
+                indices
+                    .emit(
+                        &telemetry::Event::info(RUN_LIFECYCLE_TARGET, "run claimed")
+                            .with("run", run)
+                            .with("kind", "indices")
+                    )
+                    .is_written()
+            );
+            assert!(
+                indices
+                    .emit(
+                        &telemetry::Event::error("gdfl.import", "refused")
+                            .with("run", run)
+                            .with("kind", "indices")
+                            .with("day", "2022-03-07")
+                            .with("code", "malformed_row")
+                    )
+                    .is_written()
+            );
+        }
+        // A DIRECTORY THAT CANNOT BE READ: `logs/verify` is a file, so
+        // `logs/verify/zerodha` is neither there nor absent.
+        std::fs::write(served_dir.join("verify"), b"not a directory").expect("a file");
+        (root, run)
+    }
+
+    /// **`/logs` READS EVERY RUN DIRECTORY** (IA-LG-02, IA-GR-24's reader
+    /// half): an indices run that logged to `logs/gdfl/indices` is on the
+    /// unkeyed page and found by `run=` through that directory's own index; a
+    /// directory no run has created reads `absent` and one that cannot be
+    /// read `unreadable` with its error, by name, never as a directory that
+    /// held nothing. The two-directory reader this replaces finds none of the
+    /// run's lines, which is the defect (F78).
+    #[test]
+    fn logs_reads_every_run_directory() {
+        let (root, run) = every_run_directory_store();
+        let served_dir = root.join("logs");
+        let halves = halves_of(Some(served_dir.clone()), Some(&root));
+        assert_eq!(halves.len(), 8);
+        let state_of = |body: &serde_json::Value, half: &str| -> (String, serde_json::Value) {
+            let dir = body["dirs"]
+                .as_array()
+                .expect("dirs")
+                .iter()
+                .find(|dir| dir["half"] == half)
+                .unwrap_or_else(|| panic!("{half} is not named: {body:#}"));
+            (
+                dir["state"].as_str().expect("a state").to_owned(),
+                dir["error"].clone(),
+            )
+        };
+
+        // UNKEYED: every directory's lines, and every directory named.
+        let unkeyed: serde_json::Value =
+            serde_json::from_str(&json_across(&halves, &asked(""), None)).expect("JSON");
+        let messages: Vec<&str> = unkeyed["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|record| record["message"].as_str().expect("a message"))
+            .collect();
+        assert_eq!(messages.len(), 4, "{unkeyed:#}");
+        assert!(messages.contains(&"run claimed"), "{messages:?}");
+        assert!(messages.contains(&"the server said this"), "{messages:?}");
+        assert_eq!(unkeyed["dirs"].as_array().expect("dirs").len(), 8);
+        assert_eq!(state_of(&unkeyed, "served").0, "read");
+        assert_eq!(state_of(&unkeyed, "cli").0, "read");
+        assert_eq!(state_of(&unkeyed, "gdfl/indices").0, "read");
+        for never_created in ["gdfl/stocks", "gdfl/options", "gdfl/store"] {
+            assert_eq!(
+                state_of(&unkeyed, never_created),
+                ("absent".to_owned(), serde_json::Value::Null),
+                "{never_created}"
+            );
+        }
+        let (state, error) = state_of(&unkeyed, "verify/zerodha");
+        assert_eq!(state, "unreadable");
+        assert!(error.is_string(), "its error is said: {error}");
+
+        // KEYED BY THE RUN: both of its audited lines, from its own directory.
+        let by_run = asked(&format!("run={run}&durable=1"));
+        assert!(!by_run.keys.is_empty(), "run= with durable=1 is a key");
+        let keyed: serde_json::Value =
+            serde_json::from_str(&keyed_json_across(&halves, &by_run, None)).expect("JSON");
+        let rows = keyed["keyed"]["rows"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2, "{keyed:#}");
+        assert!(
+            rows.iter()
+                .all(|row| row["half"] == "gdfl/indices" && row["source"] == "audit"),
+            "{rows:?}"
+        );
+        assert_eq!(state_of(&keyed, "gdfl/stocks").0, "absent");
+        assert_eq!(keyed["keyed"]["index"]["capped"], false);
+
+        // THE READER THIS REPLACES read the server's directory and `logs/cli`,
+        // and finds nothing of the run.
+        let two: serde_json::Value = serde_json::from_str(&keyed_json(
+            &served_dir,
+            Some(&served_dir.join("cli")),
+            &by_run,
+            None,
+        ))
+        .expect("JSON");
+        assert_eq!(two["keyed"]["matched"], 0, "{two:#}");
+
+        // THE PAGE names each directory with its state too.
+        let page = page_across(&halves, &asked(""), None);
+        assert!(page.contains("<code>gdfl/stocks</code> absent"), "{page}");
+        assert!(page.contains("<code>gdfl/indices</code> read"), "{page}");
+        assert!(
+            page.contains("<code>verify/zerodha</code> unreadable"),
+            "{page}"
+        );
+        let keyed_page = page_across(&halves, &by_run, None);
+        assert!(keyed_page.contains("run claimed"), "{keyed_page}");
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE AUDIT STREAM'S HEALTH NAMES THE REAPER** (D-4838): what waits
+    /// for deletion, what was deleted, what could not be, and `reaper_behind`
+    /// with `loud` once more than the stream keeps files wait.
+    #[test]
+    fn the_audit_health_names_the_reaper() {
+        let quiet = telemetry::AuditHealth {
+            gone_waiting: 1,
+            reaped: 7,
+            ..telemetry::AuditHealth::default()
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&audit_json_of(Some(&quiet))).expect("JSON");
+        assert_eq!(body["gone_waiting"], 1);
+        assert_eq!(body["reaped"], 7);
+        assert_eq!(body["reap_failures"], 0);
+        assert_eq!(body["reaper_behind"], false);
+        assert_eq!(body["reap_error"], serde_json::Value::Null);
+        assert_eq!(body["loud"], false);
+        let behind = telemetry::AuditHealth {
+            gone_waiting: u64::from(telemetry::AUDIT_KEEP_FILES) + 1,
+            reap_failures: 1,
+            reap_error: Some("ZZ: cannot delete".to_owned()),
+            ..telemetry::AuditHealth::default()
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&audit_json_of(Some(&behind))).expect("JSON");
+        assert_eq!(body["reaper_behind"], true);
+        assert_eq!(body["reap_failures"], 1);
+        assert_eq!(body["reap_error"], "ZZ: cannot delete");
+        assert_eq!(body["loud"], true);
+        assert_eq!(audit_json_of(None), "null");
+    }
+
+    /// **SEVERAL LISTS MERGE OLDEST FIRST, AN EARLIER LIST WINNING A TIE**:
+    /// empty lists, one list, equal stamps and interleaved ones.
+    #[test]
+    fn lists_merge_oldest_first_without_a_sort() {
+        let at = |item: &(i64, &str)| item.0;
+        let none: [&[(i64, &str)]; 0] = [];
+        assert!(merged_oldest_first(&none, at).is_empty());
+        assert!(merged_oldest_first(&[&[][..], &[][..]], at).is_empty());
+        let one = [(1, "a"), (2, "b")];
+        assert_eq!(merged_oldest_first(&[&one[..]], at), one);
+        let left = [(1, "l1"), (5, "l5"), (5, "l5b")];
+        let right = [(0, "r0"), (5, "r5"), (9, "r9")];
+        assert_eq!(
+            merged_oldest_first(&[&left[..], &[][..], &right[..]], at),
+            [
+                (0, "r0"),
+                (1, "l1"),
+                (5, "l5"),
+                (5, "l5b"),
+                (5, "r5"),
+                (9, "r9")
+            ]
         );
     }
 }

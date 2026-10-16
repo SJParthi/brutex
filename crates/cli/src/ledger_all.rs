@@ -63,7 +63,7 @@ use runner::admission::{AdmissionPolicyDraftV1, AdmissionPolicyV1};
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1,
-    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+    RatioLimitsV1, RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
 };
 use runner::outcome::Horizon;
 use runner::topn::{RankingPolicyV1, Weights};
@@ -282,7 +282,7 @@ fn exit_policy_with(side: Side, raw: Option<&str>) -> Result<ExitGridPolicyV1, S
         // refuses explicitly rather than losing cells to it.
         EXIT_CELL_CEILING,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v2(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,
@@ -756,7 +756,7 @@ pub(crate) fn stage_refused_event<'a>(
 pub(crate) fn rung_sized_event<'a>(
     verb: &'a str,
     rung: &'a str,
-    bars: usize,
+    bars: u64,
     min_hits: u64,
     support_ppm: u64,
 ) -> telemetry::Event<'a> {
@@ -823,7 +823,7 @@ pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Even
 /// rule 4 bounds five per-operation costs and this is none of them.
 pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
     let mut out = String::new();
-    out.push_str(crate::STORED_PROVENANCE);
+    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-ALL  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points",
@@ -954,14 +954,14 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// Refuses if the retained topology stops authenticating mid-visit -- the rows
 /// are read under the same reauthentication every other stage uses, so a
 /// partially-read set is a refusal rather than a short table.
-fn render_winners(
+pub(crate) fn render_winners(
     out: &mut String,
     selection: crate::all_rung_selection_v5::CommittedStoredAllRungSelectionV5,
 ) -> Result<(), String> {
     out.push_str(
         "\nTOP 10 BY RUNG -- paisa unless a column says ppm; profit is the PESSIMISTIC fill\n",
     );
-    let mut current = String::new();
+    let mut current: Option<(u32, Vec<(u32, runner::topn::Metrics)>)> = None;
     selection.into_successor_set()?.visit_canonical(|winner| {
         let row = winner.row();
         let rank = row.rank();
@@ -973,35 +973,81 @@ fn render_winners(
             return Ok(());
         }
         let rung = row.rung_seconds();
-        if current != rung.to_string() {
-            current = rung.to_string();
-            let _ = writeln!(
-                out,
-                "\n  {rung}s\n    {:>4}  {:>9}  {:>6}  {:>8}  {:>8}  {:>7}  {:>6}",
-                "rank", "profit", "win%", "worstLoss", "drawdown", "avgWin", "R:R"
-            );
+        match current {
+            Some((open, ref mut rows)) if open == rung => rows.push((rank, row.metrics())),
+            _ => {
+                if let Some((open, rows)) = current.take() {
+                    winners_table(out, open, &rows);
+                }
+                current = Some((rung, vec![(rank, row.metrics())]));
+            }
         }
-        let m = row.metrics();
-        let _ = writeln!(
-            out,
-            "    {:>4}  {:>9}  {:>5}.{}  {:>8}  {:>8}  {:>7}  {:>6}",
-            rank,
-            m.pessimistic_profit,
-            m.win_rate_ppm / 10_000,
-            (m.win_rate_ppm / 1_000) % 10,
-            m.worst_loss,
-            m.drawdown,
-            m.average_win,
-            // ABSENT, NOT ZERO. `reward_to_risk_ppm` is `None` when there is no
-            // losing trade to divide by, and printing that as 0.00 would read
-            // as the worst possible ratio when it is the best possible one.
-            m.reward_to_risk_ppm.map_or_else(
-                || "none".to_owned(),
-                |ppm| format!("{}.{:02}", ppm / 1_000_000, (ppm / 10_000) % 100)
-            ),
-        );
         Ok(())
-    })
+    })?;
+    if let Some((open, rows)) = current {
+        winners_table(out, open, &rows);
+    }
+    Ok(())
+}
+
+/// One rung's Top-10 block: its heading, the column header and one row per
+/// winner, in the order the selection visited them.
+fn winners_table(out: &mut String, rung: u32, rows: &[(u32, runner::topn::Metrics)]) {
+    use crate::columns::right;
+    let body = rows
+        .iter()
+        .map(|(rank, m)| {
+            vec![
+                rank.to_string(),
+                m.pessimistic_profit.to_string(),
+                format!(
+                    "{}.{}",
+                    m.win_rate_ppm / 10_000,
+                    (m.win_rate_ppm / 1_000) % 10
+                ),
+                m.worst_loss.to_string(),
+                m.drawdown.to_string(),
+                m.average_win.to_string(),
+                // ABSENT, NOT ZERO. `reward_to_risk_ppm` is `None` when there is
+                // no losing trade to divide by, and printing that as 0.00 would
+                // read as the worst possible ratio when it is the best possible
+                // one.
+                m.reward_to_risk_ppm.map_or_else(
+                    || "none".to_owned(),
+                    |ppm| format!("{}.{:02}", ppm / 1_000_000, (ppm / 10_000) % 100),
+                ),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420). `worstLoss` is nine characters and sat over
+    // an eight-character column, one place right of its own figures on every
+    // run; a paisa figure past its width pushed every later column off its
+    // header too.
+    let lines = crate::columns::with_header(
+        &[
+            right(4),
+            right(9).after(2),
+            right(7).after(2),
+            right(8).after(2),
+            right(8).after(2),
+            right(7).after(2),
+            right(6).after(2),
+        ],
+        &[
+            "rank",
+            "profit",
+            "win%",
+            "worstLoss",
+            "drawdown",
+            "avgWin",
+            "R:R",
+        ],
+        body,
+    );
+    let _ = writeln!(out, "\n  {rung}s");
+    for line in std::iter::once(&lines.header).chain(&lines.rows) {
+        let _ = writeln!(out, "    {line}");
+    }
 }
 
 /// Everything the Population V5 stage borrows for the length of its commit.
@@ -1345,20 +1391,38 @@ pub(crate) fn build_sweepers(
     verb: &str,
 ) -> Result<[Sweeper; 8], String> {
     let mut sweepers = Vec::with_capacity(LEDGER_RUNGS.len());
+    let bounds = candidate_bounds()?;
+    let evaluation = crate::candidate_universe::CandidateEvaluationInputsV1 {
+        widths: Widths::pinned().map_err(|why| format!("pinned tolerances: {why}"))?,
+        availability: Availability::Absent,
+        thresholds: Thresholds::CLASSICAL,
+    };
     for rung in LEDGER_RUNGS {
         // SIZED ON NIFTY'S BARS, and the pair is why that is not a narrowing.
         // Both families are swept at the same threshold, and the two share a
         // calendar and a session length, so either one answers "how many bars
         // does this rung hold over this span". NIFTY is the one the store
         // actually has.
-        let span = crate::stored::load_span(root, vendor, "NIFTY", rung, request.from, request.to)
-            .map_err(|why| {
-                let first = why.lines().next().unwrap_or("").to_owned();
-                let refusal = format!("{rung} span refused: {first}");
-                crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
-                refusal
-            })?;
-        let min_hits = crate::min_hits_for(span.bars.len(), request.support_ppm);
+        //
+        // SWEPT BARS, NOT RETAINED ONES (D-2103). The support denominator is
+        // the rows NIFTY's Candidate column sweeps, read from the very build
+        // its commit runs, so the warm-up rows no combination can hit do not
+        // raise the threshold.
+        let swept = crate::step3_orchestrator::stored_candidate_swept_v1(
+            root,
+            vendor,
+            ("NIFTY", rung),
+            (request.from, request.to),
+            bounds,
+            &evaluation,
+        )
+        .map_err(|why| {
+            let first = why.lines().next().unwrap_or("").to_owned();
+            let refusal = format!("{rung} span refused: {first}");
+            crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+            refusal
+        })?;
+        let min_hits = crate::min_hits_for_swept(swept, request.support_ppm);
         let ladder = crate::ladder_for(min_hits).map_err(|why| {
             let refusal = format!("{rung} ladder: {why}");
             crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
@@ -1367,7 +1431,7 @@ pub(crate) fn build_sweepers(
         crate::note(&rung_sized_event(
             verb,
             rung,
-            span.bars.len(),
+            swept,
             min_hits,
             request.support_ppm,
         ));
@@ -1889,5 +1953,51 @@ pub(crate) mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// D-1420: one rung's Top-10 block at the extremes its metrics can carry.
+    /// The header's `worstLoss` is nine characters over an eight-character
+    /// column, so it sat one character right of its own figures even at
+    /// ordinary values; `i64::MIN` paisa in the nine-character `profit`
+    /// column pushed every column after it off its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_top_ten_table_keeps_extreme_metrics_apart_and_under_their_headers() {
+        use crate::columns::Align::Right as R;
+        let metrics = |extreme: i64, count: u64| runner::topn::Metrics {
+            drawdown: count,
+            worst_loss: count,
+            losing_rate_ppm: count,
+            losing_trades: count,
+            loss_ratio_ppm: Some(count),
+            pessimistic_profit: extreme,
+            winning_trades: count,
+            win_rate_ppm: count,
+            reward_to_risk_ppm: Some(count),
+            average_win: count,
+            average_loss: count,
+            assurance_ppm: count,
+        };
+        let rows = [
+            (u32::MAX, metrics(i64::MIN, u64::MAX)),
+            (2, metrics(i64::MAX, 0)),
+            (3, metrics(-1, 1)),
+            (
+                4,
+                runner::topn::Metrics {
+                    reward_to_risk_ppm: None,
+                    ..metrics(5, 5)
+                },
+            ),
+        ];
+        let mut out = String::new();
+        super::winners_table(&mut out, 3_600, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[1], "  3600s", "{out}");
+        for row in &lines[3..] {
+            crate::columns::assert_under(lines[2], row, &[R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len(), 3 + rows.len(), "{out}");
     }
 }

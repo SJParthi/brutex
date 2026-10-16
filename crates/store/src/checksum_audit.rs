@@ -36,10 +36,8 @@ pub(crate) fn open_regular(path: &Path) -> std::io::Result<File> {
     ))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        let flags = 0x100 | 0x4;
-        #[cfg(target_os = "linux")]
-        let flags = 0x20_000 | 0x800;
+        // Per-architecture, not per-OS (D-0980).
+        let flags = crate::open_flags::O_NOFOLLOW_NONBLOCK;
         let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(flags)

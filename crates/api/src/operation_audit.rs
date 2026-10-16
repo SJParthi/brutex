@@ -43,35 +43,51 @@ fn read_failure(why: &str, busy: bool) -> Response {
     )
 }
 
-/// Only these fixed public route names enter audit labels. Unknown paths,
-/// assets, queries, request bodies and headers are never copied into records.
-/// The server's admission layer reads the same list, so a cross-site read of
-/// any of these is refused before [`note_request`] can journal it. D-0687.
+/// Every route the invocation journal records, and the only names that enter
+/// its labels. Unknown paths, assets, queries, request bodies and headers are
+/// never copied into records.
+///
+/// **One list, read by everything that must agree.** [`audited_route`] answers
+/// from it, the server's admission layer refuses a cross-site read of any path
+/// it holds before [`note_request`] can journal it (D-0687), and the tests read
+/// it to prove each entry is registered, journaled and refused cross-site. It
+/// used to be a `match` with 21 arms and a test that named 10 of them, so
+/// deleting the `/frontier.json` arm dropped both its audit record and its
+/// cross-site refusal and every `api` test still passed. The length is in the
+/// type: removing an entry without changing the count does not compile.
+/// D-1445.
+pub(crate) const AUDITED: [&str; 22] = [
+    "/backtest/run",
+    "/backtest/descend",
+    "/engine/command",
+    "/engine/boolean-launch.json",
+    "/backtest.json",
+    "/backtest/run.json",
+    "/trades.json",
+    "/frontier.json",
+    "/candidate-trades.json",
+    "/sweep-evidence.json",
+    "/boolean-candidates.json",
+    "/boolean-statistics.json",
+    "/boolean-admission.json",
+    "/boolean-qualification.json",
+    "/boolean-qualified-search.json",
+    "/boolean-campaign.json",
+    "/boolean-qualified-campaign.json",
+    "/boolean-oos.json",
+    "/selection-v6.json",
+    "/expression-search.json",
+    "/engine/top.json",
+    "/live.json",
+];
+
+/// The [`AUDITED`] entry equal to `path`, or `None`.
+///
+/// At most 22 whole-string comparisons, a bound fixed by the type of
+/// [`AUDITED`] and independent of the request; proven by
+/// `crate::operation_audit::tests::every_registered_route_is_audited_or_exempt_by_name`.
 pub(crate) fn audited_route(path: &str) -> Option<&'static str> {
-    match path {
-        "/backtest/run" => Some("/backtest/run"),
-        "/backtest/descend" => Some("/backtest/descend"),
-        "/engine/command" => Some("/engine/command"),
-        "/engine/boolean-launch.json" => Some("/engine/boolean-launch.json"),
-        "/backtest.json" => Some("/backtest.json"),
-        "/backtest/run.json" => Some("/backtest/run.json"),
-        "/trades.json" => Some("/trades.json"),
-        "/frontier.json" => Some("/frontier.json"),
-        "/candidate-trades.json" => Some("/candidate-trades.json"),
-        "/sweep-evidence.json" => Some("/sweep-evidence.json"),
-        "/boolean-candidates.json" => Some("/boolean-candidates.json"),
-        "/boolean-statistics.json" => Some("/boolean-statistics.json"),
-        "/boolean-admission.json" => Some("/boolean-admission.json"),
-        "/boolean-qualification.json" => Some("/boolean-qualification.json"),
-        "/boolean-qualified-search.json" => Some("/boolean-qualified-search.json"),
-        "/boolean-campaign.json" => Some("/boolean-campaign.json"),
-        "/boolean-qualified-campaign.json" => Some("/boolean-qualified-campaign.json"),
-        "/boolean-oos.json" => Some("/boolean-oos.json"),
-        "/expression-search.json" => Some("/expression-search.json"),
-        "/engine/top.json" => Some("/engine/top.json"),
-        "/live.json" => Some("/live.json"),
-        _ => None,
-    }
+    AUDITED.iter().copied().find(|route| *route == path)
 }
 
 fn public_method(method: &axum::http::Method) -> &'static str {
@@ -98,9 +114,47 @@ pub async fn note_request(
     let Some(route) = audited_route(request.uri().path()) else {
         return next.run(request).await;
     };
-    let label = format!("{} {route}", public_method(request.method()));
+    let method = public_method(request.method());
+    let label = format!("{method} {route}");
     let root = site.store_root.clone();
-    request_audited(root, label, next.run(request)).await
+    if matches!(method, "GET" | "HEAD") {
+        return request_audited(root, label, next.run(request)).await;
+    }
+    request_audited_detached(root, label, next.run(request)).await
+}
+
+/// [`request_audited`] on its own task, so a client that goes away cannot
+/// interrupt it. P3-01-03, D-1973.
+///
+/// # Why a write route is detached and a read is not
+///
+/// Dropping the connection drops the handler future. On a launch route
+/// (`/backtest/run`, `/backtest/descend`, `/engine/command`) the admission is
+/// a `spawn_blocking` closure, which a dropped `JoinHandle` does not cancel: it
+/// went on to take the lease and start the run while the armed attempt's
+/// `Drop` wrote `Cancelled`/0 -- a terminal saying the work was cancelled for
+/// work that was not. Run here, the handler and its true terminal finish
+/// whether or not anyone is still listening, so `Cancelled` is never written
+/// while the handler can still dispatch. A read dispatches nothing, so its
+/// cancellation is the truth and it stays bound to its connection.
+pub(crate) async fn request_audited_detached(
+    root: std::path::PathBuf,
+    label: String,
+    handler: impl std::future::Future<Output = axum::response::Response> + Send + 'static,
+) -> axum::response::Response {
+    match tokio::spawn(request_audited(root, label, handler)).await {
+        Ok(response) => response,
+        // A panic unwound inside the task, so the armed attempt's `Drop` ran
+        // while panicking and recorded `Failed`; this says so rather than
+        // answering as if the handler had returned.
+        Err(why) => failure(
+            &format!(
+                "the audited handler did not return ({why}); its invocation record holds the outcome"
+            ),
+            true,
+        )
+        .into_response(),
+    }
 }
 
 /// [`note_request`]'s journal around one handler, with the route label already
@@ -153,7 +207,12 @@ pub(crate) async fn request_audited(
     } else {
         Phase::Completed
     };
-    match crate::detail::run(move || {
+    // THE TERMINAL IS OWED, NOT ADMITTED. The handler has already run, so a
+    // full detail pool must not refuse this write: refusing dropped the armed
+    // attempt, whose `Drop` then wrote `Cancelled`/0 synchronously on this
+    // Tokio worker and replaced the handler's real answer with a 503. The owed
+    // slot still counts against new detail work. D-1445.
+    match crate::detail::run_owed(move || {
         let mut attempt = attempt;
         attempt.finish(phase, status.as_u16())
     })
@@ -221,7 +280,14 @@ fn parse(query: &str) -> Result<Asked, String> {
         if slot.is_some() {
             return Err("duplicate audit query field".to_owned());
         }
-        *slot = Some(integer(raw)?);
+        let value = integer(raw)?;
+        // Every durable id is above `ID_BASE`; one at or below it can never
+        // name a record, so it is the caller's error (400), not the 503 the
+        // journal's own refusal would map to (Z1-slice13-F3, D-1762).
+        if key != "limit" && value <= journal::ID_BASE {
+            return Err("audit IDs must lie in the durable invocation namespace".to_owned());
+        }
+        *slot = Some(value);
     }
     if let Some(id) = id {
         if before.is_some() || limit.is_some() {
@@ -310,4 +376,4 @@ pub(crate) fn persisted_status(root: &std::path::Path, id: u64) -> Result<Option
 
 #[cfg(test)]
 #[path = "operation_audit_tests.rs"]
-mod tests;
+pub(crate) mod tests;

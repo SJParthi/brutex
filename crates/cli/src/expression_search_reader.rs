@@ -591,9 +591,9 @@ mod tests {
         // Initial/final anchor and current/prior checkpoint for each of two
         // candidates; each child reserves all documented cold-read passes.
         let mut expected = 6 * CHECKPOINT_READ_MAX;
-        for state in [third, second] {
-            let child = state.last.ok_or("candidate")?;
-            let bytes = std::fs::metadata(candidate_path(&scratch.0, &child))
+        for state in [&third, &second] {
+            let child = state.last.as_ref().ok_or("candidate")?;
+            let bytes = std::fs::metadata(candidate_path(&scratch.0, child))
                 .map_err(debug)?
                 .len();
             expected += 4 * ATTEMPT_FILE_MAX + 3 * bytes + 2 * CAPTURE_FILE_MAX;

@@ -136,7 +136,9 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
     } else {
         evidence.depth_rows
     };
-    let window = crate::detail::window(
+    // SEEKED, NOT HELD: `ranked_page` and `depth_page` read one page at its
+    // offset, so the 4,096-row hold cap does not apply. W1-api6-5, D-0954.
+    let window = crate::detail::seek_window(
         usize::try_from(total).map_err(|why| why.to_string())?,
         asked.page,
     )?;
@@ -461,6 +463,170 @@ pub(crate) mod tests {
                 ),
                 "{kind}: the note beside the identity is the only thing a stock's page adds"
             );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn ranked(rank: u64) -> sweep_evidence::RankedRow {
+        sweep_evidence::RankedRow {
+            rank,
+            mask_words: [rank, 0, 0, 0, 0, 0],
+            hits: rank,
+            observations: rank,
+            mean_bits: 1.0_f64.to_bits(),
+            t_bits: 2.0_f64.to_bits(),
+            refused: 0,
+            mismatched: 0,
+            wins: 1,
+            losses: 0,
+            win_sum_bits: 1.0_f64.to_bits(),
+            loss_sum_bits: 0,
+            adverse_sum_bits: 0,
+            favourable_sum_bits: 0,
+        }
+    }
+
+    /// One ranked page of `id`, pinned to `token` past page zero.
+    fn ranked_page_of(
+        dir: &std::path::Path,
+        id: [u8; 32],
+        token: u64,
+        page: u64,
+        limit: u64,
+    ) -> (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        String,
+    ) {
+        let hex = crate::server::hex32(id);
+        let query = if page == 0 {
+            format!("identity={hex}&kind=ranked&limit={limit}")
+        } else {
+            format!("identity={hex}&kind=ranked&limit={limit}&page={page}&attempt={token}")
+        };
+        respond(
+            Ok(dir.to_path_buf()),
+            &Asked::parse(&query).expect("a valid query"),
+        )
+    }
+
+    /// The ranks a page carries, in order.
+    fn ranks(body: &str) -> Vec<u64> {
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+        parsed
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .expect("rows")
+            .iter()
+            .map(|row| {
+                row.get("rank")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|rank| rank.parse().ok())
+                    .expect("a rank")
+            })
+            .collect()
+    }
+
+    /// **Evidence larger than one request may HOLD is still pageable, because
+    /// a page is SEEKED, not held.** W1-api6-5, D-0954.
+    ///
+    /// An audit keeps `audit_keep()` ranked rows, 10,000 by default, and every
+    /// ranked page of that evidence, page 0 included, used to answer 503
+    /// because `detail::window` refused any total above `MAX_RESULT_ROWS`
+    /// before it looked at the page. Driven at 4,096 (the old cap), 4,097
+    /// (one past it) and 10,000 (the default keep): the first, a middle and
+    /// the last page each carry exactly the ranks they should, the page past
+    /// the end is still refused rather than empty, `limit=1` reaches row 4,096
+    /// at the largest page number the parser admits, and a limit too small to
+    /// page the result to its end is refused on page 0 with the limit that
+    /// would, not served with a `next_page` the parser would then refuse.
+    #[test]
+    fn ranked_evidence_above_the_hold_cap_is_paged_to_its_last_row() {
+        let dir = crate::scratch::path("sweep-evidence-http-above-cap");
+        let _ = std::fs::remove_dir_all(&dir);
+        for (byte, total) in [(0x41_u8, 4_096_u64), (0x42, 4_097), (0x43, 10_000)] {
+            let id = [byte; 32];
+            let attempt =
+                sweep_evidence::begin(&dir, id, sweep_evidence::Operation::Audit).expect("start");
+            attempt.level(level(1)).expect("one depth row");
+            let rows: Vec<_> = (1..=total).map(ranked).collect();
+            attempt.ranked(&rows).expect("every ranked row");
+            attempt
+                .finish(sweep_evidence::Completion::Completed)
+                .expect("durable finish");
+            let token = sweep_evidence::read(&dir, id, crate::detail::MAX_SCAN_BYTES)
+                .expect("read")
+                .expect("present")
+                .attempt;
+            let ask = |page: u64, limit: u64| ranked_page_of(&dir, id, token, page, limit);
+            let last = (total - 1) / 256;
+            for page in [0, last / 2, last] {
+                let (status, _, body) = ask(page, 256);
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::OK,
+                    "{total} page {page}: {body}"
+                );
+                let first = page * 256 + 1;
+                let through = (first + 255).min(total);
+                assert_eq!(
+                    ranks(&body),
+                    (first..=through).collect::<Vec<_>>(),
+                    "{total} page {page}"
+                );
+                assert!(
+                    body.contains(&format!(r#""total_count":"{total}""#)),
+                    "{body}"
+                );
+                let next = if page == last {
+                    "null".to_owned()
+                } else {
+                    (page + 1).to_string()
+                };
+                assert!(
+                    body.contains(&format!(r#""next_page":{next},"#)),
+                    "{total} page {page}: {body}"
+                );
+            }
+            let (status, _, past) = ask(last + 1, 256);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{past}"
+            );
+            assert!(past.contains("past this run's"), "{past}");
+            assert!(!past.contains(r#""rows":[{"#), "{past}");
+            let at_max_page = ask(crate::detail::MAX_PAGE, 1);
+            let narrow = ask(0, 1);
+            if total <= crate::detail::MAX_RESULT_ROWS {
+                assert_eq!(
+                    at_max_page.0,
+                    axum::http::StatusCode::OK,
+                    "{}",
+                    at_max_page.2
+                );
+                assert_eq!(ranks(&at_max_page.2), vec![4_096]);
+                assert!(at_max_page.2.contains(r#""next_page":null,"#));
+                assert_eq!(ranks(&narrow.2), vec![1]);
+            } else {
+                for (status, _, body) in [at_max_page, narrow] {
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "{body}"
+                    );
+                    let needed = total.div_ceil(crate::detail::MAX_PAGE + 1);
+                    assert!(body.contains(&format!("ask `limit={needed}`")), "{body}");
+                    assert!(!body.contains(r#""rows":[{"#), "{body}");
+                }
+                let (status, _, body) = ask(0, 3);
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::OK,
+                    "limit 3 reaches 12,288 rows: {body}"
+                );
+                assert_eq!(ranks(&body), vec![1, 2, 3]);
+            }
         }
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -2,7 +2,7 @@
 //!
 //! # What this is
 //!
-//! Eighty-one of the 238 live positions in [`crate::table`] are `near_*`
+//! Eighty-one of the 328 live positions in [`crate::table`] are `near_*`
 //! conditions: *is the close near the previous day's high*, *near the R2
 //! pivot*, *near the 61.8% rung*. Every one needs a band half-width, and
 //! `docs/00-charter.md`, `docs/03-vocabulary.md` and `docs/04-invariants.md`
@@ -46,12 +46,37 @@
 //! | R/50 | 23.40% | 5.99% | 0 |
 //! | R/15 | 74.19% | 20.19% | **1,997** |
 //!
-//! Two rungs can both fire only when their numerator gap is at most twice the
-//! scaled width, and the ladder's smallest gap is 118, so the at-most-one-rung
-//! property holds while the scaled width stays under 59. `R/100` scales to 10
-//! -- a 5.9x margin -- and the measured multi-fire count is 0 at every width
-//! inside that bound and 1,997 at the first width outside it. The algebra
-//! predicted where it breaks and the measurement found it there.
+//! On EXACT levels two rungs of one ladder can both fire only when their
+//! numerator gap is at most twice the scaled width, and the ladder's smallest
+//! gap is 118, so the at-most-one-rung property holds while the scaled width
+//! stays under 59. `R/100` scales to 10 -- a 5.9x margin -- and the measured
+//! multi-fire count is 0 at every width inside that bound and 1,997 at the
+//! first width outside it. The algebra predicted where it breaks and the
+//! measurement found it there.
+//!
+//! **Levels are whole paisa, so the property needs a range floor too, and it
+//! is [`RUNG_EXCLUSIVE_MIN_RANGE`] = 11 paisa (D-1861).** Every ladder floors
+//! `p * R / 1000` to a paisa, which moves a level by up to one paisa, and below
+//! 102 paisa the band `R/100` itself floors to a whole number of paisa. At a
+//! range of at most 10 paisa the band is zero and two rungs that floor to the
+//! same paisa fire together on a close at that price: a 1-paisa leg fires six
+//! rungs at once. Measured over every range 1..=2,000 paisa on all four ladder
+//! families (previous-day, five-session, current-day, gap): two rungs of one
+//! ladder fire together at ranges 1-6 and 8 paisa and never from 9 up.
+//! `indicators/tests/fib_rung_rounding.rs` pins it.
+//!
+//! **Across the two previous-day ladders the bound never held exactly either.**
+//! Down 23.6% from the high is up 76.4% from the low, 22 thousandths from the
+//! up ladder's 78.6% rung (and down 78.6% from up 23.6%): a margin of 2
+//! thousandths over the two bands' 20, which two one-paisa floors eat whenever
+//! `0.022 R - 2 <= 0.02 R`, that is `R <= 1,000` paisa. Measured: positions 20
+//! and 70, and 24 and 69, fire together at ranges 9 to 902 paisa. They are
+//! two ladders on one range, not two rungs of one, and the bound above never
+//! covered them; it is said here because the old text did not say so.
+//!
+//! **Nothing prunes on either property.** [`crate::implication`] screens only
+//! the pivot chain, so a sweep enumerates every Fibonacci pair that does fire
+//! (D-1861).
 //!
 //! `R/100` is chosen over the neighbouring widths because its busiest rung
 //! fires on about 3% of bars: often enough to carry information, rarely enough
@@ -240,11 +265,15 @@ const _: () = assert!(
 
 // THE AT-MOST-ONE-RUNG BOUND, enforced at COMPILE time rather than in a test.
 //
-// Two Fibonacci rungs can both fire on one bar only if their numerator gap is at
-// most twice the scaled width. The ladder's smallest gap is 118, so the property
-// holds while `2 * TOL_FIB_MILLI < 118`. At the pinned 10 that is a 5.9x margin,
-// and the sweep in the module documentation measured 0 multi-fires at every
-// width inside the bound and 1,997 at the first width outside it.
+// On EXACT levels two rungs of one Fibonacci ladder can both fire on one bar only
+// if their numerator gap is at most twice the scaled width. The ladder's smallest
+// gap is 118, so the property holds while `2 * TOL_FIB_MILLI < 118`. At the pinned
+// 10 that is a 5.9x margin, and the sweep in the module documentation measured 0
+// multi-fires at every width inside the bound and 1,997 at the first width
+// outside it.
+//
+// Levels are WHOLE PAISA, so this alone is not the whole bound: see
+// `RUNG_EXCLUSIVE_MIN_RANGE` below for the range floor the integer levels need.
 //
 // IT BINDS THE FIBONACCI WIDTH ONLY. Applying it to TOL_PIVOT_MILLI was the
 // defect D-0079 records: 500 exceeds the cap of 58, so the design source's own
@@ -258,6 +287,43 @@ const _: () = assert!(
     2 * TOL_FIB_MILLI < SMALLEST_LADDER_GAP,
     "TOL_FIB_MILLI is wide enough for two adjacent Fibonacci rungs to fire on one bar"
 );
+
+/// The smallest session range, in paisa, from which two rungs of ONE Fibonacci
+/// ladder provably cannot fire on the same bar once levels are whole paisa.
+///
+/// # The proof, and why it is the bound and not a measurement
+///
+/// Every ladder places rung `p` at `anchor ± ⌊p·s/1000⌋` with `|s| = R`, the
+/// same range the band is a fraction of (`indicators::fib::per_mille`; a
+/// negative `s` floors away from zero, which is a ceiling of `p·R/1000`). For
+/// two rungs `a < b` with `b - a >= g` ([`SMALLEST_LADDER_GAP`]) the two levels
+/// differ by at least `⌊g·R/1000⌋ > g·R/1000 - 1`, whichever way they round. A
+/// close is within the band of a level iff `|close - level| <= ⌊t·R/1000⌋`
+/// ([`Tolerance::covers`], `t` = [`TOL_FIB_MILLI`]), so one close covers both
+/// only if the levels differ by at most `2·⌊t·R/1000⌋ <= 2·t·R/1000`. Both
+/// cannot hold once `(g - 2t)·R >= 1000`, that is `(g - 2t)·R > 999`: at
+/// `g = 118`, `t = 10`, from `R = 11`.
+///
+/// Below it the bound genuinely fails: at `R <= 10` the band is zero paisa and
+/// two rungs flooring to the same paisa fire together on a close at that price
+/// (D-1861). Those bits are TRUE, not an artefact: the close sits exactly on
+/// both levels. They are left set, and nothing in the sweep prunes a Fibonacci
+/// pair, so no combination that fires is lost.
+pub const RUNG_EXCLUSIVE_MIN_RANGE: i64 = {
+    let margin = SMALLEST_LADDER_GAP - 2 * TOL_FIB_MILLI;
+    assert!(margin > 0, "the exact-level bound must hold first");
+    999 / margin + 1
+};
+
+// The proof's two inequalities, checked where the constant is defined: the
+// floor clears it, and one paisa less does not, so the constant is the SMALLEST
+// range the proof covers rather than merely a safe one.
+const _: () = {
+    let margin = SMALLEST_LADDER_GAP - 2 * TOL_FIB_MILLI;
+    assert!(margin * RUNG_EXCLUSIVE_MIN_RANGE > 999);
+    assert!(margin * (RUNG_EXCLUSIVE_MIN_RANGE - 1) <= 999);
+    assert!(RUNG_EXCLUSIVE_MIN_RANGE == 11);
+};
 
 // The pivot band has its own bound: a band wider than the whole CPR would swallow
 // tc and bc, making `inside` meaningless. Half the width is the design's value
@@ -478,6 +544,43 @@ pub const fn pinned_pivot() -> Result<Tolerance, VocabError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AHB-02 (D-1861). The proof behind [`RUNG_EXCLUSIVE_MIN_RANGE`], checked
+    /// by brute force on whole-paisa levels: for every pair of ladder rungs,
+    /// both roundings a ladder uses (floor up from an anchor, floor of a
+    /// negative step down from one), and every range 1..=20,000 paisa, no close
+    /// is inside both bands from the floor up. Below it a shared paisa does
+    /// occur, at 1 and 5 paisa, and 10 paisa is clear on this ladder.
+    #[test]
+    fn whole_paisa_rungs_of_one_ladder_never_share_a_close_from_the_floor_up() {
+        with_pin(pinned_fib(), |tol| {
+            let mut shared_below_floor = Vec::new();
+            for range in 1..=20_000_i64 {
+                for (i, a) in LADDER_NUMERATORS.iter().enumerate() {
+                    for b in LADDER_NUMERATORS.iter().skip(i + 1) {
+                        for sign in [1_i64, -1] {
+                            let la = (sign * a * range).div_euclid(1000);
+                            let lb = (sign * b * range).div_euclid(1000);
+                            let (lo, hi) = (la.min(lb), la.max(lb));
+                            let mid = lo + (hi - lo) / 2;
+                            let shared = [mid, mid + 1].into_iter().any(|close| {
+                                tol.covers(close, lo, range) && tol.covers(close, hi, range)
+                            });
+                            assert!(
+                                !(shared && range >= RUNG_EXCLUSIVE_MIN_RANGE),
+                                "rungs {a} and {b} share a close at range {range}"
+                            );
+                            if shared && !shared_below_floor.contains(&range) {
+                                shared_below_floor.push(range);
+                            }
+                        }
+                    }
+                }
+            }
+            shared_below_floor.sort_unstable();
+            assert_eq!(shared_below_floor, vec![1, 2, 3, 4, 5, 6, 8]);
+        });
+    }
 
     /// Hand `body` the tolerance `pin` carries, and fail naming the pin if it
     /// was refused.

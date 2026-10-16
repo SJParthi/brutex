@@ -6,8 +6,7 @@
 
 use super::{
     ExecutionSeriesV1, ExitGridErrorV1, ExitGridPolicyV1, Hasher, Ladder, Ppm, RatioPairV1,
-    ResolvedGridLevelsV1, ResolvedLaddersV1, hash, printed_ohlcv_cost_model_id_v1, put_i64,
-    put_levels, put_u64, put_usize,
+    ResolvedGridLevelsV1, ResolvedLaddersV1, hash, put_i64, put_levels, put_u64, put_usize,
 };
 use crate::research_family::ResearchFamilyV1;
 use brutex_core::instrument::InstrumentKey;
@@ -205,9 +204,7 @@ impl ResearchResolvedExitGridV1 {
         if !self.digest_is_valid() {
             return Err(ExitGridErrorV1::ResolutionDigestMismatch);
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        super::implemented_cost_model(self.policy.cost_model_id())?;
         Ok(())
     }
 }

@@ -549,3 +549,66 @@ fn a_stock_search_states_corporate_actions_are_unchecked_and_an_index_search_doe
     assert!(!index.contains("GROSS OF EVERY CHARGE"), "{index}");
     Ok(())
 }
+
+/// audit-20261003 hunt-cli-b-1: rerunning a search whose latest checkpoint
+/// already says it is exhausted publishes nothing. The loop takes no step, so
+/// there is nothing new to record, and the journal must not grow by one link
+/// per rerun (CLAUDE.md §3 rule 5).
+#[test]
+fn an_exhausted_rerun_publishes_no_further_checkpoint() -> Result<(), String> {
+    use indicators::evaluator::{Calendar, Evaluator, Widths};
+    let scratch = Scratch::new().map_err(debug)?;
+    let bars = runner::synthetic::sessions(2);
+    let mut evaluator = Evaluator::with_calendar(
+        Widths::pinned().map_err(debug)?,
+        indicators::vwap::Availability::Absent,
+        indicators::pattern::Thresholds::CLASSICAL,
+        Calendar::all_regular(),
+    );
+    let column = indicators::column::Column::build(&bars, &mut evaluator);
+    let cursor = Cursor::new(&[0, 369]).map_err(debug)?;
+    let key = brutex_core::instrument::InstrumentKey::index(
+        brutex_core::instrument::Exchange::Nse,
+        "NIFTY",
+    )
+    .map_err(debug)?;
+    let run = Run {
+        mask: cursor.alphabet(),
+        direction: Direction::Undirected,
+        instrument: &key,
+        timeframe: "synthetic",
+        params: Params::of(engine::Ladder::with_min_hits(1)),
+        data_digest: [7; 32],
+        commit: "generated-fixture",
+        feed: "synthetic",
+    };
+    let mut journal = Journal::open(
+        &scratch.0,
+        "expression-search-v1",
+        runner::expression::search_identity(&run, &cursor),
+    )?;
+    let mut finished = State::new(cursor);
+    finished.exhausted = true;
+    let previous = journal.publish(&finished.encode(), CHECKPOINT_MAX)?;
+    let state = execute(
+        &scratch.0,
+        &run,
+        &column,
+        &bars,
+        &mut journal,
+        finished,
+        previous,
+        (3, 10000),
+        None,
+    )?;
+    assert!(state.exhausted);
+    let latest = journal
+        .latest(CHECKPOINT_MAX)?
+        .ok_or("the checkpoint published before the rerun")?;
+    assert_eq!(
+        (latest.sequence, latest.seal),
+        previous,
+        "an exhausted rerun appended a checkpoint although nothing moved"
+    );
+    Ok(())
+}

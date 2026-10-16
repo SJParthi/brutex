@@ -98,6 +98,13 @@ impl core::fmt::Display for Segment {
 /// assert!(!is_cost_free(Segment::IndexOption));
 /// ```
 #[must_use]
+// NOT DUPLICATE ARMS, TWO REASONS WITH ONE ANSWER. The spot and the future
+// both answer `true`, for different reasons (see the arms), and merging them
+// put the future under the spot's reason. D-0944.
+#[allow(
+    clippy::match_same_arms,
+    reason = "same answer, different reasons -- see the arms"
+)]
 pub const fn is_cost_free(segment: Segment) -> bool {
     // AN EXHAUSTIVE MATCH, AND THE ARMS ARE THE POINT.
     //
@@ -121,7 +128,14 @@ pub const fn is_cost_free(segment: Segment) -> bool {
     match segment {
         // Not tradeable. An index level is a number, not an instrument: no
         // order can be placed on it, so nothing charges for one.
-        Segment::IndexSpot | Segment::IndexFuture => true,
+        Segment::IndexSpot => true,
+        // A future IS an exchange-traded contract and a real order on it
+        // pays charges; this zero is not a market fact. It is the operator
+        // rule DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001 (index spot and index
+        // futures are signal-only), and this crate holds no futures charge
+        // stack to price one with (`trip.rs` header; `docs/06-limits.md`
+        // §27). D-0944.
+        Segment::IndexFuture => true,
         // The whole subject of this crate.
         Segment::IndexOption => false,
     }
@@ -206,5 +220,51 @@ mod tests {
             ALL_SEGMENTS[2].as_str(),
         ];
         assert_eq!(names, ["index spot", "index future", "index option"]);
+    }
+
+    /// The index-FUTURE arm of `is_cost_free` must not borrow the index
+    /// SPOT's justification. A future is an exchange-traded contract that
+    /// really pays charges; its zero here is the operator rule
+    /// `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001`, and the comment over its arm
+    /// has to say that rather than "not tradeable". D-0944.
+    #[test]
+    fn the_index_future_arm_cites_the_operator_rule_not_untradeability() {
+        let source = include_str!("scope.rs");
+        let start = source
+            .find("pub const fn is_cost_free(")
+            .expect("is_cost_free is defined");
+        let end = source
+            .find("pub const fn is_cost_bearing(")
+            .expect("is_cost_bearing is defined");
+        let body = &source[start..end];
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        let arm = lines
+            .iter()
+            .position(|line| line.contains("Segment::IndexFuture =>"))
+            .expect("the future has an arm of its own");
+        // Alone on its arm: it does not share the spot's `|` pattern.
+        assert!(
+            !lines[arm].contains("IndexSpot"),
+            "the future shares the spot's arm: {}",
+            lines[arm]
+        );
+        // The comment block immediately above the arm.
+        let mut comment = String::new();
+        for line in lines[..arm].iter().rev() {
+            match line.strip_prefix("//") {
+                Some(text) => comment.insert_str(0, text),
+                None => break,
+            }
+        }
+        assert!(
+            comment.contains("DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001"),
+            "the future's arm does not cite the operator rule: {comment:?}"
+        );
+        assert!(
+            !comment.contains("Not tradeable"),
+            "the future's arm calls a future untradeable: {comment:?}"
+        );
+        // And the behaviour the rule fixes is unchanged.
+        assert!(is_cost_free(Segment::IndexFuture));
     }
 }

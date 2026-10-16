@@ -17,7 +17,7 @@
 //! `OPTIONAL`, so every column carries definition levels and any of them could
 //! in principle be null.
 
-use parquet::basic::Type as PhysicalType;
+use parquet::basic::{ConvertedType, LogicalType, TimeUnit, Type as PhysicalType};
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::error::{ColumnType, LakeError};
@@ -157,6 +157,46 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
                 got,
             });
         }
+        // THE TIMESTAMP'S UNIT AND ZONE ARE INVISIBLE TO THE PHYSICAL TYPE.
+        // Every timestamp is an INT64; only the logical type says whether it
+        // counts micro-, milli- or nanoseconds and whether it is UTC. One that
+        // is not UTC microseconds is refused rather than decoded wrong.
+        // hunt-store-5, D-1528.
+        //
+        // AND THE LOGICAL TYPE IS NOT THE ONLY PLACE A UNIT IS DECLARED. A
+        // legacy writer marks the unit with the converted type alone, and
+        // `parquet` never turns that into a logical type on read, so a
+        // `TIMESTAMP_MILLIS` with no logical type passed the check above and
+        // decoded 1000x too small. Both are read. h-pull-1, D-2270.
+        if s.name == "timestamp"
+            && let Some(declared) = misread_timestamp(col.logical_type_ref(), col.converted_type())
+        {
+            note_shape(
+                "the timestamp declares a unit or zone this build would misread",
+                s.name,
+                "TIMESTAMP(MICROS, adjusted to UTC) or none; converted NONE or TIMESTAMP_MICROS",
+                &declared,
+            );
+            return Err(LakeError::UnsupportedTimestamp { declared });
+        }
+        // THE INTEGER COLUMNS CARRY ANNOTATIONS TOO. An unsigned, decimal,
+        // date or time annotation on a count decodes as a different number
+        // than the plain signed integer this reader returns. h-pull-1, D-2270.
+        if s.name != "timestamp"
+            && got != ColumnType::Double
+            && let Some(declared) = misread_integer(col.logical_type_ref(), col.converted_type())
+        {
+            note_shape(
+                "an integer column declares a type this build would misread",
+                s.name,
+                "a signed integer annotation or none",
+                &declared,
+            );
+            return Err(LakeError::UnsupportedIntegerAnnotation {
+                name: s.name,
+                declared,
+            });
+        }
         // THE NESTING IS INVISIBLE TO EVERY CHECK ABOVE. `col.name()` is the
         // *leaf* name, so an `open_interest` wrapped in one optional group
         // presents as `open_interest` with the right physical type and passes
@@ -190,6 +230,69 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
         }
     }
     Ok(layout)
+}
+
+/// The rendered logical type of a `timestamp` leaf this reader would misread,
+/// or `None` when it is what the reader decodes: no logical type (the lake's
+/// plain INT64 microseconds) or `TIMESTAMP(MICROS)` adjusted to UTC.
+///
+/// That the real lake's files declare one of those two is UNVERIFIED in this
+/// tree; a real file declaring anything else is now refused by name rather
+/// than read at the wrong scale or zone.
+///
+/// The legacy converted type is read as well (h-pull-1, D-2270): only `NONE`
+/// and `TIMESTAMP_MICROS` are what the reader decodes. A logical type and a
+/// converted type that disagree never get here, because `parquet` refuses the
+/// pair when it builds the schema; were it ever to stop, a converted type
+/// other than those two is still refused here.
+fn misread_timestamp(logical: Option<&LogicalType>, converted: ConvertedType) -> Option<String> {
+    misread_timestamp_logical(logical).or_else(|| match converted {
+        ConvertedType::NONE | ConvertedType::TIMESTAMP_MICROS => None,
+        other => Some(format!("converted type {other}")),
+    })
+}
+
+/// The rendered annotation of an integer leaf this reader would misread, or
+/// `None` when it decodes as the plain signed integer: no logical type or a
+/// signed `Integer`, and converted type `NONE` or a signed `INT_*`.
+fn misread_integer(logical: Option<&LogicalType>, converted: ConvertedType) -> Option<String> {
+    let logical_signed = match logical {
+        None => true,
+        Some(LogicalType::Integer(int)) => int.is_signed,
+        Some(_) => false,
+    };
+    let converted_signed = matches!(
+        converted,
+        ConvertedType::NONE
+            | ConvertedType::INT_8
+            | ConvertedType::INT_16
+            | ConvertedType::INT_32
+            | ConvertedType::INT_64
+    );
+    (!(logical_signed && converted_signed))
+        .then(|| format!("logical type {logical:?}, converted type {converted}"))
+}
+
+/// The logical half of [`misread_timestamp`].
+fn misread_timestamp_logical(logical: Option<&LogicalType>) -> Option<String> {
+    match logical {
+        None => None,
+        Some(LogicalType::Timestamp(stamp)) => {
+            let unit = match stamp.unit {
+                TimeUnit::MICROS => None,
+                TimeUnit::MILLIS => Some("MILLIS"),
+                TimeUnit::NANOS => Some("NANOS"),
+            };
+            let zone = if stamp.is_adjusted_to_u_t_c {
+                "adjusted to UTC"
+            } else {
+                "not adjusted to UTC"
+            };
+            (unit.is_some() || !stamp.is_adjusted_to_u_t_c)
+                .then(|| format!("TIMESTAMP({}, {zone})", unit.unwrap_or("MICROS")))
+        }
+        Some(other) => Some(format!("{other:?}")),
+    }
 }
 
 /// Records one shape refusal, naming the column and the expected-versus-found.

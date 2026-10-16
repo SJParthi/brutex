@@ -216,6 +216,11 @@ pub(super) struct Boundary<'a> {
 }
 impl Boundary<'_> {
     pub(super) fn send(&self, stage: RungStage) -> Result<(), String> {
+        // A timeframe stage is a structural boundary; a stopping server is
+        // honoured here as an observer refusal is (hunt-api-2, D-1551).
+        crate::cancel::check(|| {
+            format!("single-stop timeframe {} at {}", self.rung, stage.as_str())
+        })?;
         if self.cancelled.load(Ordering::Acquire) {
             return Err("single-stop progress observer refused; no next stage starts".into());
         }

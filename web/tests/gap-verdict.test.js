@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'svelte/compiler';
-import { monthVerdict, isWholeAudit } from '../src/lib/gap-verdict.js';
+import { monthVerdict, isWholeAudit, peersAllRead, unreadablePeers } from '../src/lib/gap-verdict.js';
 import { createPageRequests } from '../src/lib/page-requests.js';
 
 /** @type {import('../src/lib/gap-verdict.js').MonthEvidence} */
@@ -32,7 +32,7 @@ function answer(month = [clean], overrides = {}) {
     months: month.length,
     months_absent: 0,
     truncated: false,
-    calendar: { covers_span: true, stale: false },
+    calendar: { covers_span: true, stale: false, unreadable: [] },
     month,
     ...overrides
   };
@@ -137,7 +137,7 @@ test('month faults block summary green even when the aggregate reports zero miss
 });
 
 test('a stale table can still support a fully covered historical span', () => {
-  assert.equal(isWholeAudit(answer([clean], { calendar: { stale: true, covers_span: true } })), true);
+  assert.equal(isWholeAudit(answer([clean], { calendar: { stale: true, covers_span: true, unreadable: [] } })), true);
 });
 
 const page = readFileSync(new URL('../src/routes/gaps/+page.svelte', import.meta.url), 'utf8');
@@ -150,13 +150,16 @@ test('the page uses the tested month and summary verdicts for green styling', ()
 });
 
 test('the minute audit cannot select or submit a coarser rung, and an absent source disables it', async () => {
-  assert.match(page, /const rung = '1min';/);
+  // THE RUNG IS THE CENSUS'S (D-3336 §4): 1min when held, else 1s, never
+  // coarser and never the operator's choice.
+  assert.match(page, /const rung = \$derived\(/);
+  assert.match(page, /auditRung\(store\.rows \?\? \[\], symbol\) \?\? '1min'/);
   assert.match(page, /if \(row\.timeframe !== rung\) continue;/);
   assert.match(page, /if \(store\.feed !== feeds\.active\) return \{ lo, hi \};/);
-  assert.match(page, /<select value=\{rung\} disabled[^>]*>\s*<option value="1min">1min<\/option>\s*<\/select>/);
+  assert.match(page, /<select value=\{rung\} disabled[^>]*>\s*<option value=\{rung\}>\{rung\}<\/option>\s*<\/select>/);
   assert.match(page, /timeframe=\$\{encodeURIComponent\(rung\)\}/);
   assert.match(page, /<button[\s\S]*?disabled=\{[^}]*!hasMinuteSource[^}]*\}/);
-  assert.match(page, /No 1min source is recorded/);
+  assert.match(page, /No 1min or 1s source is recorded/);
   assert.doesNotMatch(page, /bind:value=\{rung\}|rungs\[0\]/);
 
   // Execute the actual button entry point and owned request reader together.
@@ -205,4 +208,36 @@ test('the Where column names missing evidence and invalid stamps without hiding 
   assert.match(page, /\{dayLabel\(g\.day\)\}[\s\S]*?\{clock\(g\.from\)\}–\{clock\(g\.to\)\}/);
   assert.doesNotMatch(page, /losses\(m\)\.slice|and \{losses\(m\)\.length -/);
   assert.doesNotMatch(page, /size is\s+unknowable|Storing\s+a second feed's copy/);
+});
+
+test('an unreadable peer blocks the whole verdict and is named on the page (CE-80)', () => {
+  const unread = answer([clean], { calendar: { covers_span: true, stale: false, source: 'table', voted_by: [], unreadable: ['dhan', 'zerodha:NIFTY'] } });
+  assert.equal(isWholeAudit(unread), false);
+  assert.deepEqual(unreadablePeers(unread.calendar), ['dhan', 'zerodha:NIFTY']);
+  // An answer that does not carry the list is unknown, never "none".
+  for (const calendar of [{ covers_span: true }, { covers_span: true, unreadable: 'dhan' }, { covers_span: true, unreadable: [1] }]) {
+    assert.equal(isWholeAudit(answer([clean], { calendar })), false, JSON.stringify(calendar));
+    assert.equal(unreadablePeers(calendar), null);
+    assert.equal(peersAllRead(calendar), false);
+  }
+  assert.equal(peersAllRead({ unreadable: [] }), true);
+  assert.equal(isWholeAudit(answer([clean])), true);
+  assert.match(page, /unreadablePeers\(b\.calendar\)/);
+  assert.match(page, /Peers that could not be read/);
+  assert.match(page, /Peer readings unknown/);
+});
+
+test('a series is audited at its own minutes, else at its seconds, never coarser', async () => {
+  const { auditRung } = await import('../src/lib/gap-verdict.js');
+  const rows = [
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1day' },
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1s' },
+    { instrument: 'NSE-INDEX-NIFTY', timeframe: '1min' },
+    { instrument: 'NSE-INDEX-BANKNIFTY', timeframe: '1s' },
+    { instrument: 'NSE-CASH-RELIANCE', timeframe: '1day' }
+  ];
+  assert.equal(auditRung(rows, 'NSE-INDEX-NIFTY'), '1min', 'minutes first when held');
+  assert.equal(auditRung(rows, 'NSE-INDEX-BANKNIFTY'), '1s', 'GDFL holds only seconds');
+  assert.equal(auditRung(rows, 'NSE-CASH-RELIANCE'), null, 'a daily rung proves no minute');
+  assert.equal(auditRung([], 'NSE-INDEX-NIFTY'), null);
 });

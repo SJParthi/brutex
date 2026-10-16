@@ -41,6 +41,15 @@
 //! `CLAUDE.md` §4's "degrade loudly and name the reason" wants the reason
 //! surfaced rather than swallowed by a fix.
 //!
+//! **An index is not a finding (D-4933).** A month that holds fewer than
+//! 1,024 bars has no `.tix` time index and no `.srt` sort index by the
+//! small-month rule (`store::time_index::INDEX_MIN_ROWS`), and a month at or
+//! past it may be one whose index a rebuild still owes. Neither is a
+//! disagreement between the counter and the bars, so this module never asks
+//! for either sidecar: the bars and their header are the whole comparison.
+//! `a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold` holds
+//! that.
+//!
 //! It is also not a directory walk. The caller supplies the keys it cares
 //! about — the census's own entries, a universe, one instrument — so this
 //! module never scans the store and its cost is the caller's list, not the
@@ -115,6 +124,17 @@ pub enum Finding {
         /// What the file's own first and last record carry.
         held: (i64, i64),
     },
+    /// A writer holds the file's lock, so it was not checked (W1-api6-7,
+    /// D-1501).
+    ///
+    /// Neither agreement nor disagreement. This was reported as `Unreadable`,
+    /// and `api::verify` then told the operator the month "reads as held while
+    /// the disk says otherwise" about a month a pull was appending to at that
+    /// moment. The action is different: wait for the writer and scrub again.
+    Busy {
+        /// Where.
+        path: String,
+    },
     /// The file could not be read, and this is the host's reason verbatim.
     Unreadable {
         /// Where.
@@ -154,6 +174,10 @@ impl Finding {
                 "the counts agree and the bars do not: the counter spans \
                  {}..{} and the file spans {}..{} in epoch microseconds.",
                 counted.0, counted.1, held.0, held.1
+            ),
+            Self::Busy { path } => format!(
+                "{path} is held by a writer right now, so it was not checked. \
+                 That is not a disagreement: scrub again once the pull finishes."
             ),
             Self::Unreadable { path, why } => {
                 format!("{path} could not be read: {why}")
@@ -213,6 +237,10 @@ pub fn one(entry: &Entry, root: &Path, vendor: Vendor, symbol_id: u32) -> Findin
             // contain either of the old keywords without being absent.
             if matches!(why, StoreError::Missing { .. }) {
                 return Finding::Missing { path: shown };
+            }
+            // A LIVE WRITER IS NOT A FAULT EITHER (W1-api6-7, D-1501).
+            if matches!(why, StoreError::Locked { .. }) {
+                return Finding::Busy { path: shown };
             }
             return Finding::Unreadable {
                 path: shown,
@@ -281,6 +309,8 @@ pub struct Tally {
     pub bounds: u64,
     /// Entries that could not be read at all.
     pub unreadable: u64,
+    /// Entries a writer held, so not checked (D-1501).
+    pub busy: u64,
 }
 
 impl Tally {
@@ -297,24 +327,128 @@ impl Tally {
             Finding::Rows { .. } => self.rows += 1,
             Finding::Bounds { .. } => self.bounds += 1,
             Finding::Unreadable { .. } => self.unreadable += 1,
+            Finding::Busy { .. } => self.busy += 1,
         }
     }
 
     /// Every entry looked at.
     #[must_use]
     pub const fn seen(&self) -> u64 {
-        self.agreed + self.missing + self.rows + self.bounds + self.unreadable
+        self.agreed + self.missing + self.rows + self.bounds + self.unreadable + self.busy
+    }
+
+    /// Entries whose file disagrees with the counter or could not be read:
+    /// every entry seen that neither agreed nor was held by a writer.
+    #[must_use]
+    pub const fn disagreed(&self) -> u64 {
+        self.missing + self.rows + self.bounds + self.unreadable
     }
 
     /// Whether the counter told the truth about every entry scrubbed.
     ///
     /// **This is the only sentence in this product entitled to say a store is
     /// verified**, and it says it about the entries it was given rather than
-    /// about the store — a scrub of one month proves one month.
+    /// about the store — a scrub of one month proves one month. A month a
+    /// writer held was not checked, so it is not clean either (D-1501).
     #[must_use]
     pub const fn clean(&self) -> bool {
-        self.missing == 0 && self.rows == 0 && self.bounds == 0 && self.unreadable == 0
+        self.disagreed() == 0 && self.busy == 0
     }
+}
+
+// ═══ The full-block pass (DB-B74, WP-81) ═════════════════════════════════════
+
+/// One damaged block, found by reading it whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadBlock {
+    /// The block's index in the file.
+    pub block: u64,
+    /// The first record it holds.
+    pub first: u64,
+    /// The last committed record it holds.
+    pub last: u64,
+    /// The store's own refusal.
+    pub why: String,
+}
+
+/// What one pass over a span of a month's blocks found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlockPass {
+    /// Blocks the month's committed records span.
+    pub blocks: u64,
+    /// Blocks read whole in this pass.
+    pub checked: u64,
+    /// Where the next pass resumes, or `None` when the month is finished.
+    pub next: Option<u64>,
+    /// Every block that would not verify, in order.
+    pub bad: Vec<BadBlock>,
+    /// Why the month cannot be verified at all, when it cannot: born without
+    /// block checksums, or its `.crc` is gone.
+    pub unverifiable: Option<String>,
+}
+
+/// Reads blocks `from .. from + limit` of `file` WHOLE and checks each against
+/// its stored checksum (DB-B74, WP-81).
+///
+/// # The gap this closes
+///
+/// [`one`] reads a month's first and last record: O(1), and blind to the
+/// middle. One flipped byte in block 19 of a 3,503-bar GDFL index month left
+/// [`one`] answering `Agrees`, the census at 3,503 and coverage unchanged; 73
+/// bars were refused only to the reader who asked for that exact block. This
+/// reads every committed block — through [`BarFile::read_record`] of each
+/// block's first record, which verifies the block's whole covered range
+/// against the `.crc` before serving anything — so a rotted block is found by
+/// a pass, not by chance.
+///
+/// # Cost
+///
+/// O(blocks read): one covered range of at most 4,088 bytes and one 4-byte
+/// sidecar read per block. `limit` bounds a pass so a caller can rate-limit
+/// and resume at [`BlockPass::next`]. Nothing is written.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
+#[must_use]
+pub fn blocks(file: &BarFile, from: u64, limit: u64) -> BlockPass {
+    let held = file.records();
+    let per = file.layout().records_per_block().max(1);
+    let blocks = held.div_ceil(per);
+    let mut pass = BlockPass {
+        blocks,
+        ..BlockPass::default()
+    };
+    if !file.header().checksums_present() {
+        pass.unverifiable = Some(format!(
+            "{} was written without block checksums, so there is nothing to verify its \
+             records against",
+            file.path().display()
+        ));
+        return pass;
+    }
+    let end = from.saturating_add(limit).min(blocks);
+    for block in from..end {
+        let first = block.saturating_mul(per);
+        let last = first.saturating_add(per).min(held).saturating_sub(1);
+        match file.read_record(first) {
+            Ok(_) => pass.checked += 1,
+            Err(why @ StoreError::ChecksumsMissing { .. }) => {
+                pass.unverifiable = Some(why.to_string());
+                return pass;
+            }
+            Err(why) => {
+                pass.checked += 1;
+                pass.bad.push(BadBlock {
+                    block,
+                    first,
+                    last,
+                    why: why.to_string(),
+                });
+            }
+        }
+    }
+    pass.next = (end < blocks).then_some(end);
+    pass
 }
 
 /// A contract's own bars are addressed the same way; this exists so a caller
@@ -325,6 +459,10 @@ pub const fn contract_of(entry: &Entry) -> Option<Contract> {
 }
 
 #[cfg(test)]
+#[path = "scrub_blocks_tests.rs"]
+mod blocks_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use brutex_core::instrument::{Exchange, Segment};
@@ -332,6 +470,158 @@ mod tests {
     use std::fs;
     use store::format::{Bar, OI_NULL};
     use store::path::{Timeframe, YearMonth};
+
+    /// **A MONTH A WRITER HOLDS IS BUSY, NOT UNREADABLE (W1-api6-7, D-1501).**
+    ///
+    /// With the writer alive the scrub says `Busy` and the tally counts it as
+    /// neither agreement nor disagreement, and not clean; once the writer is
+    /// dropped the same entry agrees.
+    #[test]
+    fn a_month_a_writer_holds_is_busy_not_unreadable() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-scrub-Busy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ignored = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let ts = i64::from(crate::session::Day::new(2025, 5, 2)?.days_from_epoch())
+            * 86_400_000_000
+            + 21_600_000_000;
+        let entry = Entry {
+            key: crate::manifest::EntryKey {
+                contract: None,
+                exchange: Exchange::Nse,
+                segment: Segment::Index,
+                symbol: Symbol::new("NIFTY")?,
+                timeframe: Timeframe::DAY_1,
+                month: YearMonth::new(2025, 5)?,
+            },
+            rows: 1,
+            first_ts_micros: ts,
+            last_ts_micros: ts,
+        };
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::DAY_1,
+            month: entry.key.month,
+            file: FileKind::Bars,
+        })?;
+        let mut writer = BarFile::open_or_create(&root, path, 7)?;
+        writer.append(&[Bar {
+            ts_micros: ts,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: OI_NULL,
+        }])?;
+        let busy = one(&entry, &root, Vendor::Dhan, 7);
+        assert_eq!(
+            busy,
+            Finding::Busy {
+                path: path.to_path_buf(&root).display().to_string()
+            }
+        );
+        assert!(!busy.agrees());
+        assert!(busy.say().contains("held by a writer"), "{}", busy.say());
+        let mut tally = Tally::default();
+        tally.count(&busy);
+        assert_eq!((tally.busy, tally.unreadable, tally.disagreed()), (1, 0, 0));
+        assert_eq!(tally.seen(), 1);
+        assert!(!tally.clean(), "a month not checked is not clean");
+        drop(writer);
+        assert_eq!(one(&entry, &root, Vendor::Dhan, 7), Finding::Agrees);
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    /// **A MONTH WITHOUT ITS INDEXES AGREES (D-4933).** One-second months of
+    /// 1,023 and 1,024 bars: the first is given no `.tix` and no `.srt` by the
+    /// small-month rule, the second has both and then loses its `.tix`; the
+    /// scrub reads neither sidecar and both entries agree.
+    #[test]
+    fn a_month_without_its_indexes_agrees_on_both_sides_of_the_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-scrub-Small-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ignored = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let open = i64::from(crate::session::Day::new(2031, 5, 5)?.days_from_epoch())
+            * 86_400_000_000
+            + 13_500_000_000;
+        for (month, rows) in [(5_u8, 1_023_u64), (6, 1_024)] {
+            let month = YearMonth::new(2031, month)?;
+            let first = if month.month() == 5 {
+                open
+            } else {
+                open + 31 * 86_400_000_000
+            };
+            let bars: Vec<Bar> = (0..i64::try_from(rows)?)
+                .map(|k| Bar {
+                    ts_micros: first + k * 1_000_000,
+                    open: 55_555,
+                    high: 55_565,
+                    low: 55_545,
+                    close: 55_560,
+                    volume: 1,
+                    open_interest: OI_NULL,
+                })
+                .collect();
+            let path = StorePath::new(PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: Timeframe::SECOND_1,
+                month,
+                file: FileKind::Bars,
+            })?;
+            let mut writer = BarFile::open_or_create(&root, path, 7)?;
+            writer.append(&bars)?;
+            drop(writer);
+            let tix = path.with_file(FileKind::TimeIndex).to_path_buf(&root);
+            let srt = path.with_file(FileKind::SortIndex).to_path_buf(&root);
+            let indexed = rows >= store::time_index::INDEX_MIN_ROWS;
+            assert_eq!(
+                (tix.exists(), srt.exists()),
+                (indexed, indexed),
+                "{rows} bars"
+            );
+            if indexed {
+                fs::remove_file(&tix)?;
+            }
+            let entry = Entry {
+                key: crate::manifest::EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment: Segment::Index,
+                    symbol: Symbol::new("NIFTY")?,
+                    timeframe: Timeframe::SECOND_1,
+                    month,
+                },
+                rows,
+                first_ts_micros: first,
+                last_ts_micros: first + (i64::try_from(rows)? - 1) * 1_000_000,
+            };
+            assert_eq!(
+                one(&entry, &root, Vendor::Gdfl, 7),
+                Finding::Agrees,
+                "{rows} bars"
+            );
+        }
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
 
     #[test]
     fn actual_file_findings_use_typed_failures_and_never_diagnostic_keywords()

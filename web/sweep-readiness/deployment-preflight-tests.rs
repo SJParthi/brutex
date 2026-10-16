@@ -311,6 +311,27 @@ fn strict_report_json_keeps_byte_recursion_and_complete_input_bounds() {
 }
 
 #[test]
+fn report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers() {
+    let decoded = files::json(
+        br#"{"price":100.12499999999999999,"tiny":-1e-400}"#,
+        PLAN_BYTES,
+    )
+    .unwrap();
+    assert_eq!(decoded["price"].to_string(), "100.12499999999999999");
+    assert_eq!(decoded["tiny"].as_f64(), Some(-0.0));
+    for raw in [
+        r#"{"x":-1e999}"#,
+        r#"[1E+309]"#,
+        r#"{"$serde_json::private::Number":"abc"}"#,
+        r#"{"$serde_json::private::Number":"1","extra":2}"#,
+        r#"{"$serde_json::private::Number":"1e999"}"#,
+    ] {
+        assert!(files::json(raw.as_bytes(), PLAN_BYTES).is_err(), "{raw}");
+    }
+    assert_eq!(files::json(b"[{}]", PLAN_BYTES).unwrap(), json!([{}]));
+}
+
+#[test]
 fn duplicate_checks_and_status_fields_are_refused_without_observation() {
     let raw = String::from_utf8(proof()).unwrap();
     for (old, replacement) in [

@@ -4,18 +4,21 @@ A brute-force backtesting engine for Indian spot indices. It sweeps combinations
 of boolean market conditions over historical 1-minute bars and ranks what
 survives.
 
-**One language. No exceptions.** CI walks every tracked file and fails the build
-on any extension outside `.rs .toml .md .lock .html .css .yml`. There is no
-interpreted runtime, no build script that spawns a process, and no vendored
-binding to another language — including in the web UI, which is server-rendered
-HTML with zero JavaScript.
+**Rust is the only language, outside one directory.** CI walks every tracked
+file and fails the build on any extension outside `.rs .toml .md .lock .html
+.css .yml` (`.yml` only under `.github/`, `.json` only under `.claude/`). There
+is no interpreted runtime, no build script that spawns a process, and no
+vendored binding to another language. The one exception is a path: under `web/`
+the front end is unrestricted (D-0052, D-0053), and no crate may depend on its
+toolchain to build, test or run. `CLAUDE.md` §2 is the rule.
 
 ---
 
 ## What it is for
 
-Given six years of NSE minute bars, try every surviving combination of 74 market
-conditions and report which combinations made money. The search stops where the
+Given six years of NSE minute bars, try every surviving combination of the
+condition vocabulary (370 rows in `vocab::table::TABLE`) and report which
+combinations made money. The search stops where the
 frequent frontier empties — **there is no depth parameter**, not a default, not
 an environment override. The type does not carry the field.
 
@@ -30,10 +33,9 @@ can be set can be set wrongly and silently.
 
 | | |
 |---|---|
-| Swept | `NSE-NIFTY`, `NSE-BANKNIFTY` — exactly two |
-| Tracked equities | NIFTY Total Market constituents |
-| Indices | the NSE index series |
-| Stored, never swept | futures, options, single stocks |
+| Swept | `NSE-NIFTY`, `NSE-BANKNIFTY`, and the cash equities of the 208 F&O underlyings that are shares (D-0506, D-0682) |
+| Reference only | `NSE-INDIAVIX`: stored and stamped onto trades, never swept or ranked |
+| Stored, never swept | futures and options contracts, single stocks outside the F&O universe |
 | Never stored | currently-listed derivatives — history means *expired* contracts |
 | Purpose | backtesting only. No live trading, no order routing |
 
@@ -48,8 +50,10 @@ is constant, the number of steps is not, and the documents say so.
 floating-point conversion lives behind a private field and refuses NaN, infinity
 and out-of-range rather than saturating.
 
-**No look-ahead.** At bar *N* the engine may read bars 0..*N*, enforced by an
-index-guarded accessor rather than by review.
+**No look-ahead.** At bar *N* the engine may read bars 0..*N*. It holds by the
+shape of the fold: `Column::build` hands the evaluator one bar at a time, so a
+later bar is not in scope. `CLAUDE.md` §3 rule 7 says what that does and does
+not protect.
 
 **Append-only history.** Condition bits are never renumbered or reused. Store
 format versions are never mutated in place.
@@ -78,20 +82,12 @@ map would split in silence.
 
 ## Layout
 
-```
-core   (no dependencies at all)
- ├── store        fixed-stride bar files
- ├── indicators   bars in, condition bits out
- ├── vocab        the bit table and mask operations
- ├── engine       sweep, ranking
- ├── pull         vendor ingest
- ├── api          HTTP
- ├── web          browser UI, wasm32 — depends on core ONLY
- └── cli          operator entry point
-```
-
-`core` declaring a dependency, or `web` declaring anything but `core`, is a
-build failure rather than a review comment.
+Thirteen crates under `crates/`; the browser is `web/`, not a crate. The
+measured dependency graph is in `CLAUDE.md` §5 and the table in
+`docs/01-architecture.md`, which `core/tests/graph.rs` checks against every
+manifest. `core`, `vocab`, `greeks` and `telemetry` depend on nothing;
+`indicators` and `engine` depend on `vocab` alone (gate 22), and `runner` is
+where the two halves meet.
 
 ## Running it
 
@@ -113,16 +109,9 @@ that proves it · a decision-ledger entry for every locked choice.
 
 ## Documents
 
-| File | Authority over |
-|---|---|
-| `CLAUDE.md` | the rules above. If a document disagrees with it, it wins |
-| `docs/00-charter.md` | scope, verified external facts, prohibitions |
-| `docs/01-architecture.md` | crates, arrows, data flow |
-| `docs/02-store-format.md` | bytes on disk |
-| `docs/03-vocabulary.md` | condition bit table |
-| `docs/04-invariants.md` | what must hold, and its proof |
-| `docs/05-decisions.md` | append-only ledger |
-| `docs/06-limits.md` | what is **not** constant-time, and what is unmeasured |
+`CLAUDE.md` §10 lists every document with authority and what each governs. If
+a document disagrees with `CLAUDE.md`, `CLAUDE.md` wins — unless the document is
+gate-checked and `CLAUDE.md` is not, as §10 explains.
 
 `docs/06-limits.md` is the one to read if you want to know what this does not
 do. It is kept honest on purpose: a measurement nobody took is recorded as

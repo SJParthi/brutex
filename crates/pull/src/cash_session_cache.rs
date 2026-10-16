@@ -11,12 +11,12 @@
 //! and <https://nsearchives.nseindia.com/content/circulars/CMTR74466.zip>.
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::future::Future;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flate2::bufread::GzDecoder;
 use sha2::{Digest, Sha256};
@@ -72,6 +72,60 @@ impl VerifiedLifecycleMaster {
         &self.provenance
     }
 
+    /// This master's dated closing-auction flag for one exact EQ identity: the
+    /// same lookup the pull fold's `cash_auction::Schedule` is built from, so a
+    /// stored reader holds no second eligibility authority. `Ok(false)` is an
+    /// explicit zero in the master, not absent evidence. Expected O(1) plus
+    /// bounded key bytes, against the index parsed once at load.
+    ///
+    /// # Errors
+    /// Returns `UNVERIFIED` for an absent symbol, ISIN mismatch or invalid key.
+    pub fn eligibility(&self, symbol: &str, isin: &str) -> Result<bool, String> {
+        self.daily.eligibility(symbol, isin)
+    }
+
+    /// [`Self::eligibility`] as the calendar's phase input: flag 1 is
+    /// [`calendar::CasEligibility::Eligible`] and flag 0
+    /// [`calendar::CasEligibility::NotEligible`]. D-3320.
+    ///
+    /// # Errors
+    /// Returns the lookup's `UNVERIFIED` refusal unchanged, so an absent or
+    /// mismatched identity is never read as "not eligible" (charter §9:
+    /// "missing rows must never become flag 0").
+    pub fn cas_eligibility(
+        &self,
+        symbol: &str,
+        isin: &str,
+    ) -> Result<calendar::CasEligibility, String> {
+        self.daily.eligibility(symbol, isin).map(|eligible| {
+            if eligible {
+                calendar::CasEligibility::Eligible
+            } else {
+                calendar::CasEligibility::NotEligible
+            }
+        })
+    }
+
+    /// The cash session phases of this master's own day for one exact EQ
+    /// identity: continuous to 15:15 and the closing auction to 15:30 for an
+    /// eligible share, continuous to 15:30 for an ineligible one (charter
+    /// §9), on [`calendar::phases_of`]. The master's day is the day, so a
+    /// flag is never applied to a session it was not published for. D-3320.
+    ///
+    /// # Errors
+    /// The [`Self::cas_eligibility`] refusal. A caller that wants the day
+    /// anyway asks [`calendar::phases_of`] with
+    /// [`calendar::CasEligibility::Unknown`], whose 15:15–15:29 is
+    /// `Unverified` — a visible gap, never a guess.
+    pub fn cash_phases(&self, symbol: &str, isin: &str) -> Result<calendar::DayPhases, String> {
+        let cas = self.cas_eligibility(symbol, isin)?;
+        Ok(calendar::phases_of(
+            crate::vendor::Venue::NseCash,
+            i64::from(self.provenance.master_day.days_from_epoch()),
+            cas,
+        ))
+    }
+
     /// Inspect one exact EQ identity using the already parsed index.
     /// Expected O(1) plus bounded key bytes/three-field assessment. This does
     /// not scan the CSV, read disk or fetch metadata again for each symbol.
@@ -99,12 +153,26 @@ impl VerifiedLifecycleMaster {
 /// a historical event from one snapshot. Lifecycle dates are source assertions
 /// only: no pre-listing day, interruption or unexplained gap is exempted here.
 ///
+/// The lock is SHARED and waits at most [`LOCK_WAIT`] for an installer, so
+/// any number of readers in any number of processes answer at once and
+/// identically (AF-03, p99-2); it is released before the gzip is decoded.
+///
 /// # Errors
-/// Returns `UNVERIFIED` for absent/busy/nonregular locks, missing or corrupt
-/// cache evidence, unsupported receipts, bad gzip/CSV and filesystem failures.
+/// Returns `UNVERIFIED` for absent/nonregular locks, a lock an installer held
+/// past [`LOCK_WAIT`] (named with the wait, never "would block"), missing or
+/// corrupt cache evidence, unsupported receipts, bad gzip/CSV and filesystem
+/// failures.
 pub fn read_local_lifecycle(
     root: &Path,
     master_day: Day,
+) -> Result<VerifiedLifecycleMaster, String> {
+    read_local_lifecycle_within(root, master_day, LOCK_WAIT)
+}
+
+fn read_local_lifecycle_within(
+    root: &Path,
+    master_day: Day,
+    bound: Duration,
 ) -> Result<VerifiedLifecycleMaster, String> {
     let path = lock_path(root, master_day);
     if !regular_file(&path)? {
@@ -112,25 +180,22 @@ pub fn read_local_lifecycle(
             "UNVERIFIED local lifecycle master for {master_day}: existing cache lock is absent; no files created or download attempted"
         ));
     }
-    let lock = File::open(&path).map_err(|why| {
+    let file = File::open(&path).map_err(|why| {
         format!(
             "UNVERIFIED cannot open local lifecycle lock {}: {why}",
             path.display()
         )
     })?;
-    let lock = Flock::try_lock_shared(lock, path.clone()).map_err(|why| {
-        format!(
-            "UNVERIFIED local lifecycle lock {} unavailable: {why}",
-            path.display()
-        )
-    })?;
-    let bytes = read_entry(root, master_day)?.ok_or_else(|| {
+    still_regular(&path)?;
+    let lock = hold(&file, &path, Hold::Shared, bound)?;
+    let entry = read_entry(root, master_day)?;
+    lock.release().map_err(|u| format!("UNVERIFIED {u}"))?;
+    let bytes = entry.ok_or_else(|| {
         format!(
             "UNVERIFIED local lifecycle master for {master_day} is absent; no download attempted"
         )
     })?;
     let daily = decode(&bytes)?;
-    lock.release().map_err(|u| format!("UNVERIFIED {u}"))?;
     Ok(VerifiedLifecycleMaster {
         provenance: LifecycleProvenance {
             master_day,
@@ -240,11 +305,20 @@ fn is_required(day: Day, kind: DayKind) -> Result<bool, String> {
     }
 }
 
+/// The days of `window` whose dated master a full-window [`prepare`] needs.
+///
+/// **On the calendar of record, [`calendar::exchange_kind_of`] (D-3319),
+/// not the run-identity `kind_of`.** `kind_of` ends at 2026-09-04, so every
+/// window reaching 2026-09-07..=2026-09-30 refused "exceptional or unmeasured
+/// calendar day (Unmeasured)" although NSE/CMTR/71775 places every one of
+/// those days and the store's daily bars corroborate them (D-2805, D-3346).
+/// The masters are evidence, not run identity, so the wider authority is the
+/// right one; days past 2026-10-04 still refuse.
 fn required_days(window: Window) -> Result<Vec<Day>, String> {
     let mut days = Vec::new();
     for epoch in window.from().days_from_epoch()..=window.to().days_from_epoch() {
         let day = Day::from_days(epoch).map_err(|why| why.to_string())?;
-        if is_required(day, calendar::kind_of(i64::from(epoch)))? {
+        if is_required(day, calendar::exchange_kind_of(i64::from(epoch)))? {
             days.push(day);
         }
     }
@@ -267,14 +341,16 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
-        match read_entry(root, day)? {
+        let (path, file) = open_lock(root, day)?;
+        let lock = hold(&file, &path, Hold::Shared, LOCK_WAIT)?;
+        let entry = read_entry(root, day)?;
+        lock.release().map_err(|u| u.to_string())?;
+        match entry {
             Some(bytes) => {
                 result.insert(day.days_from_epoch(), decode(&bytes)?);
             }
             None => missing.push(day),
         }
-        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -311,8 +387,14 @@ where
         .map_err(|why| why.to_string())?;
     let mut missing = Vec::new();
     for day in days {
-        let lock = lock_day(root, day)?;
-        match read_entry(root, day)? {
+        // A READER SHARES THE DAY (AF-03, p99-2): it waits only for an
+        // installer, and releases before the decode, so identical requests in
+        // parallel give identical answers instead of "would block".
+        let (path, file) = open_lock(root, day)?;
+        let lock = hold(&file, &path, Hold::Shared, LOCK_WAIT)?;
+        let entry = read_entry(root, day)?;
+        lock.release().map_err(|u| u.to_string())?;
+        match entry {
             Some(bytes) => {
                 pending.insert(day.days_from_epoch(), decode(&bytes)?);
             }
@@ -324,7 +406,6 @@ where
             }
             None => missing.push(day),
         }
-        lock.release().map_err(|u| u.to_string())?;
     }
     for day in missing {
         let url = source_url(day);
@@ -367,15 +448,46 @@ fn receipt(day: Day, bytes: &[u8]) -> String {
     )
 }
 
-// Persistent advisory locks serialize cooperating readers and installers.
-// A busy entry refuses promptly; no async task waits on a filesystem lock.
-// Each is released by an explicit unlock, never by closing the descriptor, so
-// a duplicate left in a child another thread spawned cannot hold it (D-0693).
+// Persistent advisory locks keep readers off a half-published entry
+// (AF-03, p99-2). READERS SHARE a day: any number of them, in any number of
+// processes (/gaps.json, the pull, the recovery auditor, `/bars.json`, a GDFL
+// import, `cli`), hold it at once, and only to read and receipt-check the
+// bytes; the gzip decode runs after the release. AN INSTALLER HOLDS IT ALONE,
+// only to re-check and publish one entry. Either side waits at most
+// `LOCK_WAIT` for the other and then refuses BY NAME, with the wait; a busy
+// day is never "would block" and never read as absent. Each lock is released
+// by an explicit unlock, never by closing the descriptor, so a duplicate left
+// in a child another thread spawned cannot hold it (D-0693).
 fn lock_path(root: &Path, day: Day) -> PathBuf {
     root.join(format!(".{}.lock", filename(day)))
 }
 
-fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+/// The longest a reader waits for an installer's exclusive hold, and an
+/// installer for the readers ahead of it, before refusing by name. An
+/// installer holds the day only to write one master (at most
+/// `MAX_COMPRESSED` bytes), its receipt and three syncs, and a reader only to
+/// read and receipt-check them, so this is a ceiling for a stalled disk, not
+/// an expected wait. The wait sleeps its thread; on an async path it is the
+/// same bounded blocking as the file reads around it. docs/06-limits.md.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// The first pause between two attempts; it doubles to [`LOCK_PAUSE_MAX`].
+const LOCK_PAUSE_FIRST: Duration = Duration::from_millis(1);
+/// The longest pause between two attempts.
+const LOCK_PAUSE_MAX: Duration = Duration::from_millis(20);
+
+/// Which side of a day's lock a caller takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// A reader: shares the day with every other reader.
+    Shared,
+    /// An installer: holds the day alone.
+    Exclusive,
+}
+
+/// The day's lock file, created when absent (never truncated); a symbolic
+/// link or a directory at its path is refused by name, before and after the
+/// open.
+fn open_lock(root: &Path, day: Day) -> Result<(PathBuf, File), String> {
     fs::create_dir_all(root)
         .map_err(|why| format!("cannot create cash-session cache {}: {why}", root.display()))?;
     let path = lock_path(root, day);
@@ -387,12 +499,71 @@ fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
         .truncate(false)
         .open(&path)
         .map_err(|why| format!("cannot open cache lock {}: {why}", path.display()))?;
-    Flock::try_lock(file, path.clone()).map_err(|why| {
-        format!(
-            "cash-session cache lock {} unavailable: {why}",
+    still_regular(&path)?;
+    Ok((path, file))
+}
+
+/// Refuses a lock path that is no longer a regular file once opened.
+fn still_regular(path: &Path) -> Result<(), String> {
+    if regular_file(path)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "UNVERIFIED cache lock {} vanished while it was opened",
             path.display()
-        )
-    })
+        ))
+    }
+}
+
+/// Takes `hold` of an open lock file, waiting at most `bound`. Expected
+/// O(1): one attempt when nobody holds the other side; otherwise a bounded
+/// number of attempts, the pauses doubling from [`LOCK_PAUSE_FIRST`] to
+/// [`LOCK_PAUSE_MAX`].
+fn hold<'a>(
+    file: &'a File,
+    path: &'a Path,
+    side: Hold,
+    bound: Duration,
+) -> Result<Flock<&'a File, &'a Path>, String> {
+    let started = Instant::now();
+    let mut pause = LOCK_PAUSE_FIRST;
+    loop {
+        let taken = match side {
+            Hold::Shared => Flock::try_lock_shared(file, path),
+            Hold::Exclusive => Flock::try_lock(file, path),
+        };
+        match taken {
+            Ok(lock) => return Ok(lock),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(why)) => {
+                return Err(format!(
+                    "UNVERIFIED cash-session cache lock {} refused by the host: {why}",
+                    path.display()
+                ));
+            }
+        }
+        let waited = started.elapsed();
+        if waited >= bound {
+            let (holder, outcome) = match side {
+                Hold::Shared => (
+                    "an installer held it exclusively",
+                    "the master is not read, and not read as absent",
+                ),
+                Hold::Exclusive => (
+                    "readers or another installer held it",
+                    "nothing was installed",
+                ),
+            };
+            return Err(format!(
+                "UNVERIFIED cash-session cache lock {} unavailable: {holder} for the whole {} ms bound (waited {} ms); {outcome}",
+                path.display(),
+                bound.as_millis(),
+                waited.as_millis()
+            ));
+        }
+        std::thread::sleep(pause.min(bound.saturating_sub(waited)));
+        pause = pause.saturating_mul(2).min(LOCK_PAUSE_MAX);
+    }
 }
 
 fn regular_file(path: &Path) -> Result<bool, String> {
@@ -486,9 +657,12 @@ fn install_and_read(root: &Path, day: Day, bytes: &[u8]) -> Result<DailyEligibil
             "UNVERIFIED {day} precedes the 2026-08-03 cash-session identifier"
         ));
     }
-    // Validation precedes even creating the cache directory.
+    // Validation precedes even creating the cache directory, and the decode
+    // precedes the exclusive hold, so readers never wait through it.
     let eligibility = decode(bytes)?;
-    let lock = lock_day(root, day)?;
+    let (path, file) = open_lock(root, day)?;
+    let lock = hold(&file, &path, Hold::Exclusive, LOCK_WAIT)?;
+    // Re-checked under the hold: another installer may have published first.
     if let Some(existing) = read_entry(root, day)? {
         if existing != bytes {
             return Err(format!(
@@ -583,6 +757,10 @@ async fn download(url: String) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
+#[path = "cash_session_cache_lock_tests.rs"]
+mod lock_tests;
+
+#[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "tests fail immediately when fixture setup fails"
@@ -628,6 +806,11 @@ mod tests {
         let bytes = gzip(CSV.as_bytes());
         install(&temp.0, day(date), &bytes).expect("valid fixture installs");
         bytes
+    }
+    /// The day held alone, as an installer holds it mid-publication.
+    fn lock_day(root: &Path, day: Day) -> Result<Flock<File>, String> {
+        let (path, file) = open_lock(root, day)?;
+        Flock::try_lock(file, path).map_err(|why| why.to_string())
     }
 
     const LIFECYCLE_CSV: &str = "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n2029,IRFC,EQ,INE053F01010,1,1296345600,0,0\n";
@@ -803,11 +986,13 @@ mod tests {
         let temp = Temp::new();
         let bytes = seed(&temp, 3);
         let held = lock_day(&temp.0, day(3)).expect("exclusive publisher lock");
+        let why = read_local_lifecycle_within(&temp.0, day(3), Duration::from_millis(30))
+            .expect_err("an installer held past the bound");
         assert!(
-            read_local_lifecycle(&temp.0, day(3))
-                .expect_err("busy lock")
-                .contains("unavailable")
+            why.contains("unavailable") && why.contains("30 ms bound"),
+            "{why}"
         );
+        assert!(!why.contains("would block"), "{why}");
         drop(held);
         assert!(read_local_lifecycle(&temp.0, day(3)).is_ok());
         let lock = lock_path(&temp.0, day(3));
@@ -869,6 +1054,26 @@ mod tests {
     }
 
     #[test]
+    fn a_loaded_master_answers_the_dated_flag_its_index_holds_and_refuses_a_wrong_identity() {
+        let temp = Temp::new();
+        let csv = format!("{LIFECYCLE_CSV}2030,ZEROCO,EQ,INE000Z01019,0,1296345600,0,0\n");
+        install(&temp.0, day(3), &gzip(csv.as_bytes())).expect("fixture receipt installs");
+        let master = read_local_lifecycle(&temp.0, day(3)).expect("local master reads");
+        assert_eq!(master.eligibility("IRFC", "INE053F01010"), Ok(true));
+        assert_eq!(master.eligibility("ZEROCO", "INE000Z01019"), Ok(false));
+        for (symbol, isin) in [("IRFC", "INE000Z01019"), ("ABSENT", "INE053F01010")] {
+            let why = master
+                .eligibility(symbol, isin)
+                .expect_err("a wrong or absent identity is never a flag");
+            assert!(why.contains("UNVERIFIED"), "{why}");
+            assert_eq!(
+                master.eligibility(symbol, isin),
+                master.daily.eligibility(symbol, isin)
+            );
+        }
+    }
+
+    #[test]
     fn local_lifecycle_qualifies_invalid_conflicting_and_future_metadata_without_hiding_it() {
         use crate::cash_auction::{LifecycleField, LifecycleIssue, LifecycleQuality};
 
@@ -901,6 +1106,62 @@ mod tests {
             assert!(report.assessment.issues.contains(&issue));
             assert_eq!(master.daily.eligibility("IRFC", "INE053F01010"), Ok(true));
         }
+    }
+
+    /// **ON THE HELD MASTERS, EVERY CAS SESSION THROUGH 2026-09-30 IS
+    /// REQUIRED AND HELD, AND RELIANCE IS IN THE CLOSING AUCTION 15:15–15:29
+    /// ON EACH (D-3319, D-3320).** Read-only: shared locks on the existing
+    /// receipted masters, no fetch, no file created. Run against a copy of
+    /// the store's `session-masters` directory. Run on 9 Oct 2026 over a
+    /// shadow copy of the operator's 42 masters: RELIANCE is eligible on
+    /// every one, and DALBHARAT — the share DB-034 saw still trading after
+    /// 15:16 — is flag 0 on 2026-09-24, so its 15:15–15:29 is continuous.
+    #[test]
+    #[ignore = "requires BRUTEX_NSE_CASH_SAMPLE_DIR with the receipted 2026-08-03..2026-09-30 masters; read-only, no network"]
+    fn held_masters_give_every_cas_session_its_auction_band() -> Result<(), String> {
+        use brutex_core::universe::nse_isin;
+
+        let root = std::env::var_os("BRUTEX_NSE_CASH_SAMPLE_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or("BRUTEX_NSE_CASH_SAMPLE_DIR must name the receipted master directory")?;
+        let last = Day::new(2026, 9, 30).map_err(|why| why.to_string())?;
+        let days = required_days(Window::new(day(3), last).map_err(|why| why.to_string())?)?;
+        assert_eq!(days.len(), 42);
+        let reliance = nse_isin("RELIANCE").ok_or("RELIANCE has a cash ISIN")?;
+        for date in &days {
+            let master = read_local_lifecycle(&root, *date)?;
+            let phases = master.cash_phases("RELIANCE", reliance.as_str())?;
+            assert_eq!(phases.minutes(calendar::Phase::Continuous), 360, "{date}");
+            assert_eq!(
+                phases.phase_at(15 * 60 + 15),
+                calendar::Phase::ClosingAuction,
+                "{date}"
+            );
+            assert_eq!(
+                phases.phase_at(15 * 60 + 30),
+                calendar::Phase::PostClose,
+                "{date}"
+            );
+        }
+        let sept_24 = Day::new(2026, 9, 24).map_err(|why| why.to_string())?;
+        let master = read_local_lifecycle(&root, sept_24)?;
+        let dalbharat = nse_isin("DALBHARAT").ok_or("DALBHARAT has a cash ISIN")?;
+        assert_eq!(
+            master.cas_eligibility("DALBHARAT", dalbharat.as_str()),
+            Ok(calendar::CasEligibility::NotEligible)
+        );
+        let ineligible = master.cash_phases("DALBHARAT", dalbharat.as_str())?;
+        assert_eq!(ineligible.minutes(calendar::Phase::Continuous), 375);
+        assert_eq!(
+            ineligible.phase_at(15 * 60 + 15),
+            calendar::Phase::Continuous
+        );
+        eprintln!(
+            "{} receipted masters, 2026-08-03..=2026-09-30: RELIANCE continuous 09:15-15:14, closing auction 15:15-15:29 on each",
+            days.len()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1078,12 +1339,21 @@ mod tests {
         );
     }
 
+    /// An observed date no calendar attests may still acquire its master.
+    /// 2027-01-01 is past the calendar of record (`SOURCED_LAST_DAY` is
+    /// 2026-12-31, DB-B41); this test used 2026-09-11 and then 2026-10-05,
+    /// each of which a later extension of the record moved inside it.
     #[tokio::test]
-    async fn observed_unknown_sep11_loads_flag_without_attesting_a_session() {
+    async fn observed_unknown_date_loads_flag_without_attesting_a_session() {
         let temp = Temp::new();
-        let date = Day::new(2026, 9, 11).expect("unattested fixture date");
+        let date = Day::new(2027, 1, 1).expect("unattested fixture date");
         let epoch = date.days_from_epoch();
+        assert_eq!(i64::from(epoch), calendar::SOURCED_LAST_DAY + 1);
         assert_eq!(calendar::kind_of(i64::from(epoch)), DayKind::Unmeasured);
+        assert_eq!(
+            calendar::exchange_kind_of(i64::from(epoch)),
+            DayKind::Unmeasured
+        );
         let mut cache = HashMap::new();
         let mut requested = Vec::new();
         prepare_observed_with(&temp.0, &[date], &mut cache, |url| {
@@ -1094,7 +1364,7 @@ mod tests {
         .expect("an observed date may acquire eligibility evidence");
         assert_eq!(
             requested,
-            ["https://nsearchives.nseindia.com//content/cm/NSE_CM_security_11092026.csv.gz"]
+            ["https://nsearchives.nseindia.com//content/cm/NSE_CM_security_01012027.csv.gz"]
         );
         assert_eq!(cache.len(), 1);
         assert!(
@@ -1105,7 +1375,108 @@ mod tests {
                 .expect("fixture's explicit one")
         );
         assert_eq!(calendar::kind_of(i64::from(epoch)), DayKind::Unmeasured);
-        assert!(required_days(Window::new(date, date).expect("fixture window")).is_err());
+        assert!(
+            required_days(Window::new(date, date).expect("fixture window"))
+                .expect_err("past the calendar of record")
+                .contains("UNVERIFIED")
+        );
+    }
+
+    /// **A SEPTEMBER 2026 WINDOW NEEDS EVERY SESSION'S MASTER, AND REFUSES
+    /// NONE (D-3319).** `required_days` read the run-identity `kind_of`,
+    /// which ends on 2026-09-04, so any window reaching 2026-09-07 refused
+    /// whole as "exceptional or unmeasured calendar day (Unmeasured)". On the
+    /// calendar of record 2026-08-03..=2026-09-30 is 42 sessions: the 25 the
+    /// charter's masters cover and 17 more, without 2026-09-14 (Ganesh
+    /// Chaturthi, NSE/CMTR/71775) or a weekend.
+    #[tokio::test]
+    async fn september_2026_needs_every_session_master_on_the_calendar_of_record() {
+        let first = day(3);
+        let last = Day::new(2026, 9, 30).expect("test date");
+        let days = required_days(Window::new(first, last).expect("test window"))
+            .expect("every day of the window is answered");
+        assert_eq!(days.len(), 42);
+        assert_eq!(days.first(), Some(&first));
+        assert_eq!(days.last(), Some(&last));
+        let september = |date| Day::new(2026, 9, date).expect("test date");
+        for closed in [5, 6, 13, 14, 27] {
+            assert!(!days.contains(&september(closed)), "2026-09-{closed}");
+        }
+        for open in [4, 7, 11, 15, 25, 28] {
+            assert!(days.contains(&september(open)), "2026-09-{open}");
+        }
+        // The run-identity calendar is unchanged: it still cannot answer them.
+        assert_eq!(
+            calendar::kind_of(i64::from(september(7).days_from_epoch())),
+            DayKind::Unmeasured
+        );
+
+        // And a window of those days loads, one fetch per session.
+        let temp = Temp::new();
+        let mut requested = Vec::new();
+        let loaded = prepare_with(
+            &temp.0,
+            Window::new(september(7), september(15)).expect("test window"),
+            |url| {
+                requested.push(url);
+                std::future::ready(Ok(gzip(CSV.as_bytes())))
+            },
+        )
+        .await
+        .expect("a September window prepares");
+        assert_eq!(loaded.len(), 6, "7-11 and 15; 12-13 weekend, 14 holiday");
+        assert_eq!(requested.len(), 6);
+        assert!(!requested.contains(&source_url(september(14))));
+    }
+
+    /// **A MASTER'S FLAG IS THE CALENDAR'S PHASE INPUT, AND AN ABSENT ROW IS
+    /// NEVER FLAG 0 (D-3320).** HINDALCO (flag 1) trades continuously to
+    /// 15:14 and is in the closing auction 15:15–15:29; 20MICRONS (flag 0)
+    /// trades to 15:29; an identity the master does not hold refuses.
+    #[test]
+    fn a_master_flag_sets_the_closing_auction_band_and_an_absent_row_refuses() {
+        let temp = Temp::new();
+        seed(&temp, 3);
+        let master = read_local_lifecycle(&temp.0, day(3)).expect("local verified master");
+        assert_eq!(
+            master.cas_eligibility("HINDALCO", "INE038A01020"),
+            Ok(calendar::CasEligibility::Eligible)
+        );
+        assert_eq!(
+            master.cas_eligibility("20MICRONS", "INE144J01027"),
+            Ok(calendar::CasEligibility::NotEligible)
+        );
+        assert!(
+            master
+                .cas_eligibility("ABSENT", "INE000000000")
+                .expect_err("absent is not flag 0")
+                .contains("UNVERIFIED")
+        );
+        let eligible = master
+            .cash_phases("HINDALCO", "INE038A01020")
+            .expect("an eligible share's day");
+        let bands: Vec<_> = eligible
+            .bands()
+            .iter()
+            .map(|band| (band.phase, band.from, band.to))
+            .collect();
+        assert_eq!(
+            bands,
+            [
+                (calendar::Phase::BeforeOpen, 0, 539),
+                (calendar::Phase::PreOpen, 540, 554),
+                (calendar::Phase::Continuous, 555, 914),
+                (calendar::Phase::ClosingAuction, 915, 929),
+                (calendar::Phase::PostClose, 930, 1_439),
+            ]
+        );
+        assert_eq!(eligible.minutes(calendar::Phase::Continuous), 360);
+        let ineligible = master
+            .cash_phases("20MICRONS", "INE144J01027")
+            .expect("an ineligible share's day");
+        assert_eq!(ineligible.minutes(calendar::Phase::Continuous), 375);
+        assert_eq!(ineligible.minutes(calendar::Phase::ClosingAuction), 0);
+        assert!(master.cash_phases("ABSENT", "INE000000000").is_err());
     }
 
     #[tokio::test]
@@ -1370,8 +1741,10 @@ mod tests {
                 .contains("incomplete")
         );
         assert!(install(&temp.0, day(2), &bytes).is_err());
-        let future = Day::from_days(u32::try_from(calendar::LAST_DAY + 1).expect("positive day"))
-            .expect("future date");
+        // Past the calendar of record (D-3319), which `required_days` reads.
+        let future =
+            Day::from_days(u32::try_from(calendar::SOURCED_LAST_DAY + 1).expect("positive day"))
+                .expect("future date");
         assert!(
             required_days(Window::new(future, future).expect("future window"))
                 .expect_err("unmeasured date")

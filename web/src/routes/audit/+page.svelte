@@ -89,6 +89,14 @@
   // threaded through every call site.
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  import { mergePages, nextOrdinal, pageFor } from '$lib/audit-pages.js';
+  // THE JOURNALS' HALF OF THE PULSE, THE IMPORT PANEL AND THE LAST RUN (WP-61;
+  // DB-G07, DB-G21, DB-A51). The pulse read the census generation and bar
+  // count alone, so it said IDLE while an import wrote a million bars a minute
+  // into a census that was refusing them, and no page drew `imports`.
+  import ImportPanel from '$lib/ImportPanel.svelte';
+  import { journalStep, newestImportAt, readImportExtras } from '$lib/import-panel.js';
+  import { lastRun } from '$lib/ingest-run.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -96,8 +104,12 @@
 
   /** `docs/07-plan.md` R-2: the backfill window opens here. */
   const TARGET_FROM = '2020-01';
-  /** `crates/api/src/audit.rs`: the note field is 68 bytes. */
+  /** `crates/api/src/audit.rs`: a version-1 record's note was 68 bytes and a
+   *  version-2 record's is 60 (D-2673). Each record now states its own as
+   *  `note_capacity`; this is only the fallback for a reply that predates it. */
   const NOTE_BYTES = 68;
+  /** @param {any} r @returns {number} */
+  const noteCap = (r) => (typeof r.note_capacity === 'number' ? r.note_capacity : NOTE_BYTES);
   /** `crates/api/src/audit.rs`: `MAX_PAGE_RECORDS`. */
   const PAGE_ROWS = 200;
   /**
@@ -306,7 +318,8 @@
 
   /**
    * Growth samples. One per successful poll, bounded.
-   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>}[]}
+   * @type {{at:number, bars:number, im:number, gen:number, months:Map<string,number>,
+   *   journal:number|null, importLines:number|null, importAt:number|null}[]}
    */
   let samples = $state([]);
 
@@ -395,7 +408,13 @@
         bars: body.store.bars,
         im: body.store.instrument_months,
         gen: body.store.generation ?? 0,
-        months
+        months,
+        // THE JOURNALS' OWN COUNTERS (WP-61, DB-G07): the pull journal's
+        // records, the import journal's lines and the importer's newest
+        // event. `null` where the answer carries none, never a zero.
+        journal: Number.isSafeInteger(body.journal?.records) ? body.journal.records : null,
+        importLines: Number.isSafeInteger(body.imports?.journal?.lines) ? body.imports.journal.lines : null,
+        importAt: newestImportAt(body)
       };
       // The server's own clock decides the ordering. Two answers with the same
       // `at` are one sample: a rate over a zero-second window is a division by
@@ -422,8 +441,13 @@
   async function readOlder(ticket) {
     if (loadingOlder || pagesHeld >= Math.min(MAX_PAGES, payload?.journal?.pages ?? 1)) return;
     const feed = feeds.active;
-    const page = pagesHeld;
-    if (!feed) return;
+    // BY ORDINAL, NOT BY COUNT (P1-06-03, D-2663). `page = pagesHeld` was an
+    // offset from an end that moves while a pull appends; the page to read is
+    // the one that holds the newest missing ordinal, or the one just below
+    // the oldest held, for the total the server last reported.
+    const want = nextOrdinal(merged);
+    const page = want === null ? null : pageFor(want, payload?.journal?.records ?? 0, PAGE_ROWS);
+    if (!feed || page === null) return;
     loadingOlder = true;
     try {
       const got = await read(ticket, page, feed);
@@ -482,11 +506,18 @@
     const prev = samples.at(-2);
     const stepped = prev && last ? last.gen - prev.gen : 0;
     const steppedBars = prev && last ? last.bars - prev.bars : 0;
+    // THE JOURNALS MOVED (WP-61, DB-G07). A census held steady by a refusal
+    // while a pull or an import appends to its journal is MOVING: the pull
+    // journal's record count, the import journal's line count and the
+    // importer's newest event are compared between answers, as the census is.
+    const jStep = journalStep(prev, last);
+    const jSpan = journalStep(first, last);
+    const journalsMoved = jStep.moved || jSpan.moved;
 
     /** @type {'moving'|'fresh'|'still'|'unknown'} */
     let state = 'unknown';
     if (!store || store.state !== 'held') state = 'unknown';
-    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0) state = 'moving';
+    else if (stepped > 0 || steppedBars > 0 || dGen > 0 || dBars > 0 || journalsMoved) state = 'moving';
     else if (sinceCommit != null && sinceCommit <= FRESH_SECS) state = 'fresh';
     else state = 'still';
 
@@ -515,6 +546,7 @@
       barsPerMin,
       stepped,
       filling,
+      journals: { moved: journalsMoved, records: jSpan.journal, importLines: jSpan.importLines, importAt: jSpan.importAt ?? jStep.importAt, shrank: jStep.shrank || jSpan.shrank },
       sinceOpen: base && last ? { bars: last.bars - base.bars, im: last.im - base.im, gen: last.gen - base.gen, secs: last.at - base.at } : null
     };
   });
@@ -532,6 +564,44 @@
    * would have fired, forever.
    */
   const hot = $derived(pulse.moving);
+
+  /* THE IMPORT'S NOT-DONE DAYS (WP-61; DB-G07, DB-A51). Read when the answer
+     first carries an `imports` block for this feed and again only when its
+     journal's line count changes: `/imports.json` pages, never on the poll's
+     own clock. */
+  /** @type {{ key: string, notDone: any[] | null, notDoneError: string | null, optionsLeft: number | null }} */
+  let importExtras = $state.raw({ key: '', notDone: null, notDoneError: null, optionsLeft: null });
+  const importRequests = createPageRequests();
+  onDestroy(() => importRequests.dispose());
+  $effect(() => {
+    const feed = feeds.active;
+    const lines = payload?.imports?.journal?.lines;
+    const key = feed && Number.isSafeInteger(lines) ? `${feed}|${lines}` : '';
+    untrack(() => {
+      if (key === importExtras.key) return;
+      importRequests.cancel();
+      if (key === '') {
+        importExtras = { key: '', notDone: null, notDoneError: null, optionsLeft: null };
+        return;
+      }
+      const summary = payload?.imports;
+      void importRequests.run(async (ticket) => {
+        try {
+          const got = await readImportExtras(ask, summary, ticket.signal);
+          if (!ticket.current()) return;
+          importExtras = { key, notDone: got.notDone, notDoneError: got.notDoneError, optionsLeft: got.optionsLeft };
+        } catch (why) {
+          if (!ticket.current()) return;
+          importExtras = { key, notDone: null, optionsLeft: null, notDoneError: String(why instanceof Error ? why.message : why) };
+        }
+      });
+    });
+  });
+
+  /** The last run of this feed, as the pull journal names it (DB-G21). */
+  const lastRunSays = $derived(payload ? lastRun(payload) : null);
+  /** What the pull journal holds for this feed, in the server's words. */
+  const feedScope = $derived(payload?.journal?.feed_scope ?? null);
 
   let watchedFeed = /** @type {string|null|undefined} */ (undefined);
   $effect(() => {
@@ -693,7 +763,12 @@
      PRIORITIES 2 AND 4 — RUNS, CAUSES, AND THE REASONS THAT ARE NOT ON DISK
      ══════════════════════════════════════════════════════════════════════ */
 
-  const runs = $derived([...(payload?.runs ?? []), ...older]);
+  /* MERGED BY ORDINAL (P1-06-03, D-2663). Page 0 refreshes against a moving
+     end and older pages do not, so a positional concatenation dropped the
+     records that slid between them and repeated the ones two reads shared.
+     `mergePages` de-duplicates by the absolute ordinal and names every hole. */
+  const merged = $derived(mergePages(payload?.runs ?? [], older));
+  const runs = $derived(merged.runs);
 
   /**
    * Fold a note into a CAUSE.
@@ -784,7 +859,7 @@
       g.members += weight;
       g.first = Math.min(g.first, r.at);
       g.last = Math.max(g.last, r.at);
-      if (r.note_bytes > NOTE_BYTES) g.cut = true;
+      if (r.note_bytes > noteCap(r)) g.cut = true;
       const dash = (r.note ?? '').indexOf(' — ');
       if (dash > 0 && dash <= 24) g.examples.add(r.note.slice(0, dash));
       /* A MEMBER ROW NAMES ITS INSTRUMENT IN `source`, NOT IN `note`, so the
@@ -1073,16 +1148,27 @@
           </span>
         </div>
 
+        {#if pulse.journals.shrank}
+          <p class="why" role="alert" data-pulse-shrank>
+            <b>A JOURNAL GOT SHORTER</b> between two answers of this page: {pulse.journals.shrank}. Both
+            journals are append-only, so a smaller count is a truncated or replaced file, not a quiet one. Nothing
+            here counts it as "not moved".
+          </p>
+        {/if}
         <div class="verdict">
           {#if pulse.state === 'moving'}
             <span class="big up">
               <span class="beacon" aria-hidden="true"></span>RUNNING
             </span>
             <span class="sep">·</span>
-            <span>
+            <span data-pulse-from={pulse.journals.moved ? 'journals' : 'census'}>
               the manifest committed <b>{n0(pulse.dGen)}</b> time{pulse.dGen === 1 ? '' : 's'} and the
               store gained <b>{n0(pulse.dBars)}</b> bars in the last <b>{dur(pulse.span)}</b> — measured,
-              not timed
+              not timed{#if pulse.journals.moved}; the journals moved too: <b>{n0(pulse.journals.records)}</b>
+                pull-journal record(s) and <b>{n0(pulse.journals.importLines)}</b> import-journal line(s)
+                appended{pulse.journals.importAt ? `, the importer's newest event at ${stampLabel(pulse.journals.importAt)} IST` : ''}.
+                A journal that grows while the census stands still is a run whose landings are being
+                refused or are not committed yet{/if}
             </span>
           {:else if pulse.state === 'fresh'}
             <span class="big warn">JUST WROTE</span>
@@ -1095,9 +1181,10 @@
           {:else if pulse.state === 'still'}
             <span class="big">IDLE</span>
             <span class="sep">·</span>
-            <span>
-              the store has not been written for <b>{dur(pulse.sinceCommit ?? 0)}</b>. Nothing is
-              filing bars.
+            <span data-pulse-from="census-and-journals">
+              the store has not been written for <b>{dur(pulse.sinceCommit ?? 0)}</b>, and neither the
+              pull journal nor the import journal gained a record between this page's answers. Nothing
+              is filing bars.
             </span>
           {:else}
             <span class="big down">UNKNOWN</span>
@@ -1197,6 +1284,47 @@
           request has finished. Use <a href="/autopilot">Autopilot</a> for the pull scheduler's
           state and <a href="/backtest">Backtest</a> for sweep execution and saved outcomes.
         </p>
+      </section>
+
+      <!-- ══ THE JOURNALS: THE LAST RUN, WHAT THE PULL JOURNAL HOLDS FOR THIS
+           FEED, AND THE IMPORT (WP-61; DB-G07, DB-G21, DB-A51). `last_runs`
+           names the newest run records wherever their member failures put
+           them; `feed_scope` says whose records the journal holds; `imports`
+           is the import journal's own summary, drawn by the panel /ingest
+           draws. None of these was on any page. -->
+      <section class="card" aria-label="Journals" data-audit-journals={payload.store.feed}>
+        <div class="card-head">
+          <h2>Journals</h2>
+          <span class="spacer"></span>
+          <span class="fine">pull journal{payload.imports ? ' · import journal' : ''}</span>
+        </div>
+        {#if lastRunSays}
+          <p class="jline" class:down={lastRunSays.tone === 'down'} data-audit-last-run={lastRunSays.state}>
+            <b>Last run{lastRunSays.outcome ? ` · ${lastRunSays.outcome}` : ''}.</b>
+            {lastRunSays.sentence}
+          </p>
+        {/if}
+        {#if feedScope}
+          <p class="jline" data-audit-feed-scope={feedScope.feed}>
+            <b>Pull journal, this feed.</b>
+            {n0(feedScope.records ?? 0)} record(s) in {n0(feedScope.runs ?? 0)} run(s) are {feedScope.feed}'s;
+            {n0(feedScope.unattributed_records ?? 0)} record(s) in {n0(feedScope.unattributed_runs ?? 0)} run(s)
+            name no feed this build can attribute{feedScope.undecodable ? `; ${n0(feedScope.undecodable)} could not be decoded` : ''}.
+            {feedScope.holds ?? ''}
+            {#if feedScope.error}<span class="down">{feedScope.error}</span>{/if}
+          </p>
+        {/if}
+        {#if payload.imports}
+          <ImportPanel
+            summary={payload.imports}
+            store={payload.store}
+            archiveTo={payload.imports?.span?.to ?? null}
+            optionsLeft={importExtras.optionsLeft}
+            notDone={importExtras.notDone}
+            notDoneError={importExtras.notDoneError}
+            now={(payload.at ?? 0) * 1000}
+          />
+        {/if}
       </section>
 
       <!-- ════════════════════════════════════════════════════════════════
@@ -1346,7 +1474,7 @@
             {n0(faults.reasonsLost)} reasons were never written. This is not a rendering gap and no
             page can recover them: <code>crates/api/src/audit.rs</code> stores the failure COUNT and
             keeps <code>failures.first()</code> — one name, the alphabetically first — in a
-            {NOTE_BYTES}-byte field. The rest reach the POST's HTML reply
+            60-byte field (68 before record version 2). The rest reach the POST's HTML reply
             (<code>take(5)</code>) and are dropped when the run returns.
           </p>
         {/if}
@@ -1377,7 +1505,7 @@
                     </span>
                   {/if}
                   {#if g.cut}
-                    <span class="tag warn" title="The server cut this note at {NOTE_BYTES} bytes. Two long reasons sharing a prefix are indistinguishable here.">
+                    <span class="tag warn" title="The server cut this note to the record's note field (60 bytes; 68 in version-1 records). Two long reasons sharing a prefix are indistinguishable here.">
                       truncated at source
                     </span>
                   {/if}
@@ -1573,6 +1701,13 @@
         {/if}
 
         <div class="logfoot">
+          {#if merged.gaps.length > 0}
+            <span class="fine" role="alert">
+              NOT HELD: ordinal(s) {merged.gaps.map((g) => (g.from === g.to ? `${g.from}` : `${g.from}–${g.to}`)).join(', ')}
+              — the journal grew between two reads, so these rows are missing from the list below. The next load
+              reads the newest of them first.
+            </span>
+          {/if}
           {#if pagesHeld < Math.min(MAX_PAGES, payload.journal.pages)}
             <button class="btn" type="button" onclick={loadOlder} disabled={loadingOlder}>
               {loadingOlder ? 'Reading…' : `Load the previous ${PAGE_ROWS}`}
@@ -1641,10 +1776,10 @@
           </div>
           <h3>What it says</h3>
           <p class="note">{picked.note || '(no note)'}</p>
-          {#if picked.note_bytes > NOTE_BYTES}
+          {#if picked.note_bytes > noteCap(picked)}
             <p class="why">
-              The server had {n0(picked.note_bytes)} bytes to say and the record holds {NOTE_BYTES}.
-              The remaining {n0(picked.note_bytes - NOTE_BYTES)} bytes were never written to disk and
+              The server had {n0(picked.note_bytes)} bytes to say and the record holds {noteCap(picked)}.
+              The remaining {n0(picked.note_bytes - noteCap(picked))} bytes were never written to disk and
               cannot be recovered from here.
             </p>
           {/if}
@@ -1654,9 +1789,25 @@
           {:else}
             <ul class="drops">
               {#each picked.drops as d}
-                <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {#if d.rows === null}
+                  <!-- A version-1 record predates this reason: unknown, never a claimed zero. -->
+                  <li class="zero"><b>not counted</b> <span>{d.reason} (record version 1)</span></li>
+                {:else}
+                  <li class:zero={d.rows === 0}><b>{n0(d.rows)}</b> <span>{d.reason}</span></li>
+                {/if}
               {/each}
             </ul>
+          {/if}
+          {#if picked.kept_unclassified_day === null}
+            <p class="fine">
+              Rows kept on a day the exchange calendar has not measured: not counted (record version 1).
+            </p>
+          {:else if typeof picked.kept_unclassified_day === 'number' && picked.kept_unclassified_day > 0}
+            <p class="fine">
+              <b>{n0(picked.kept_unclassified_day)}</b> row(s) were KEPT on a day the exchange calendar
+              has not measured, so whether the exchange traded that day is unknown. They are stored,
+              not dropped, and counted here so the keep is not silent.
+            </p>
           {/if}
           <p class="fine">
             Asked for <code>{picked.source}</code>{picked.source_bytes > picked.source.length
@@ -2350,5 +2501,14 @@
         background: color-mix(in srgb, var(--acc) calc(var(--fill) * 72%), var(--well));
       }
     }
+  }
+  .jline {
+    margin: 8px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .jline.down b:first-child {
+    color: var(--down, inherit);
   }
 </style>

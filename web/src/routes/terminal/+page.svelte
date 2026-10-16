@@ -45,19 +45,37 @@
    * one. The layout is the fact; the dash is the honesty.
    */
 
-  import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
+  import { feeds, loadFeeds, selectFeed } from '$lib/feeds.svelte.js';
   import { store, syncStore } from '$lib/store.svelte.js';
   import {
-    tabsFrom,
+    tabsAndRest,
     quotesOn,
-    daysIn,
-    timesOn,
-    forgetQuotes,
-    DAY_BUDGET
+    spotsFor,
+    servedIndices,
+    stripOf,
+    behindSource,
+    marksOf,
+    daySpan,
+    monthSpan,
+    moveRange,
+    moveCell,
+    awaited,
+    spotMark,
+    windowLine,
+    copyName,
+    copyCell,
+    barHeader,
+    timeframeOrder,
+    timeframeSeconds,
+    traffic,
+    forgetQuotes
   } from '$lib/terminal.svelte.js';
+  import { SPOT_WHY } from '$lib/moneyness.js';
+  import { offeredFeeds, excludedSentence } from '$lib/feed-row.js';
+  import { barWhyText } from '$lib/db/notes-bars.js';
   import { parseKey, strikeExact } from '$lib/instrument.js';
   import { group, rupee } from '$lib/money.js';
-  import { monthLabel, dayLabel, MON } from '$lib/dates.js';
+  import { monthLabel, dayLabel, secondLabel, istDay, MON } from '$lib/dates.js';
 
   /* ==================================================================
      THE FEED, AND THE CENSUS UNDER IT
@@ -87,8 +105,16 @@
       @type {string[]} */
   const keys = $derived(/** @type {string[]} */ ([...store.byInstrument.keys()]).sort());
 
-  /** The tab strip, with each tab's rows decided by the store. */
-  const tabs = $derived(tabsFrom(keys));
+  /** The tab strip, with each tab's rows decided by the store; the INDEX keys
+      the strip draws; and the census keys that would not parse, which are
+      COUNTED AND NAMED under the grid instead of vanishing from every count
+      (DB-G32). One pass over the keys per census generation. */
+  const filed = $derived(tabsAndRest(keys));
+  const tabs = $derived(filed.tabs);
+  const unparsed = $derived(filed.unparsed);
+  /** Keys that parse and that no tab and not the strip takes: counted, named. */
+  const unplaced = $derived(filed.unplaced);
+  const indexKeys = $derived(filed.indices);
 
   /* STOCKS OPENS, because it is the tab the engine surface is ABOUT: section 1
      names the 213 F&O cash equities as the thing being swept, and a future or
@@ -119,13 +145,10 @@
   );
   const months = $derived([...store.byMonth.keys()].sort());
 
-  /** Timeframe order by duration, so `2min` sorts before `10min`, not after it.
-      @param {string} t @returns {number} */
-  function timeframeOrder(t) {
-    const m = String(t).match(/^(\d+)(min|day)$/);
-    if (!m) return Number.MAX_SAFE_INTEGER;
-    return Number(m[1]) * (m[2] === 'day' ? 1440 : 1);
-  }
+  /* `timeframeOrder` IS `$lib/terminal.svelte.js`'s: by duration, `1s` below
+     `1min` (DB-G32). The copy that lived here knew `min` and `day` only, so
+     `1s` sorted as the COARSEST rung and would have been the default beside
+     any minute rung. */
 
   /* THE YEAR IS A PICKER OF ITS OWN, AND IT IS FIRST, BECAUSE THIS IS A STORE
      OF HISTORY RATHER THAN A LIVE SESSION.
@@ -194,6 +217,8 @@
     void month;
     void timeframe;
     void segment;
+    void underlying;
+    void expiry;
     shown = PAGE;
   });
 
@@ -278,8 +303,40 @@
     if (expiry && expiries.length > 0 && !expiries.includes(expiry)) expiry = '';
   });
 
+  /* THE UNDERLYING, on the two tabs whose rows are contracts.
+     A stored month of options is thousands of rows in name order (13,975 for
+     GDFL in Nov 2019), so NIFTY's contracts sat some eight hundred "Show 17
+     more" presses down with no control to reach them. The list is the
+     underlyings this tab's own keys name: nothing is typed here, and a name
+     appears the day its first contract is stored. */
+  const underlyings = $derived(
+    hasExpiry
+      ? [
+          ...new Set(
+            (tab?.keys ?? []).map((k) => parseKey(k).underlying).filter((u) => typeof u === 'string')
+          )
+        ].sort()
+      : []
+  );
+  let underlying = $state('');
+  /** @param {string} key */
+  const inChosenUnderlying = (key) => !underlying || parseKey(key).underlying === underlying;
+  /* Like the expiry, it does not survive the tab or the feed that offered it. */
+  $effect(() => {
+    void activeTab;
+    void store.feed;
+    underlying = '';
+  });
+  $effect(() => {
+    if (underlying && underlyings.length > 0 && !underlyings.includes(underlying)) underlying = '';
+  });
+
   const matching = $derived(
-    (tab?.keys ?? []).filter(inChosenSegment).filter(inChosenExpiry).filter(holdsChosenCell)
+    (tab?.keys ?? [])
+      .filter(inChosenSegment)
+      .filter(inChosenUnderlying)
+      .filter(inChosenExpiry)
+      .filter(holdsChosenCell)
   );
   const totalRows = $derived(matching.length);
 
@@ -365,7 +422,14 @@
     if (on === 'name') return labelOf(key);
     const q = quotes.get(key);
     if (!q) return null;
-    if (on === 'chgAbs') return absMove(q);
+    // The middle of the range the stored pair allows; exact when the range is one figure.
+    if (on === 'chgAbs') return moveRange(q.close, q.chg)?.mid ?? null;
+    if (on === 'oichgAbs') return moveRange(q.oi, q.oichg)?.mid ?? null;
+    if (on === 'spot') return spots.get(key)?.close ?? null;
+    if (on === 'premium') {
+      const spot = spots.get(key)?.close ?? null;
+      return spot === null || q.close === null ? null : q.close - spot;
+    }
     /* READ THROUGH `any` FOR THE SAME REASON `cellOf` DOES: the field name
        comes from the column table, so the lookup is a fact about that table
        rather than about the wire. */
@@ -494,10 +558,17 @@
          Unknown is not false. It is the same rule the dashes keep in the grid
          and the same one `sortValue` keeps for ordering, where null sorts last
          rather than as zero. A row with no value yet is CARRIED, renders its
-         pending dot, and is filtered on the next pass once its quote lands. */
+         pending dot, and is filtered on the next pass once its quote lands.
+
+         NOT YET IS NOT THE SAME AS NEVER. That rule was written for a quote
+         still on its way, and it also carried a quote that had LANDED with
+         nothing in the field: OI Gainers listed 23 contracts with no OI change
+         beside the 7 that gained, as "17 of 30". A landed absence is not a
+         gainer. `awaited` tells the two apart, and `unranked` below counts
+         what the chip left out so the footer can say it. */
       base = base.filter((k) => {
         const v = sortValue(k, rule.by);
-        if (v === null) return true;
+        if (v === null) return awaited(quotes.get(k), rule.by, spots.has(k));
         return typeof v === 'number' && keep(v);
       });
     }
@@ -566,48 +637,36 @@
     return store.byCell.has(`${key}|${timeframe}|${month}`);
   }
 
-  /** How many bars the census says this cell holds. O(1) — one Map probe.
-      @param {string} key @returns {number} */
-  const cellBars = (key) => store.byCell.get(`${key}|${timeframe}|${month}`) ?? 0;
+  /** This instrument's census cell at the chosen (timeframe, month), or
+      `undefined`. A walk of ONE instrument's cells, for rows in view only.
+      @param {string} key */
+  const chosenCell = (key) =>
+    store.byInstrument.get(key)?.find((c) => c.month === month && c.timeframe === timeframe);
 
-  /* WHETHER A DAY CAN BE ASKED FOR AT ALL, DECIDED BEFORE ANYTHING IS FETCHED.
+  /* ANY DAY, AND ANY SECOND OF IT, ANSWERED WITH A SEEK (DB-G16, DB-G86).
      ------------------------------------------------------------------------
-     `/bars/window.json` takes a MONTH and has no day parameter, so answering
-     "what did this do on the 12th" means reading the month and looking. There
-     is no seek to a day, and multiplying a bars-per-day guess by a day index
-     would be arithmetic on an assumption — section 3 rule 1.
+     `/bars/window.json` takes `from_day`, `to_day` and `at=`, so "what did this
+     do on the 15th at 10:15:07" is ONE bar asked for by its own bounds: see
+     `windowUrl` in `$lib/terminal.svelte.js`. Until it did, this page read the
+     first 512 bars of the month and looked through them, refused the Date
+     control on every cell holding more than 512 bars, which is every `1min`
+     and `1s` month, and advised a timeframe the feed does not hold (GDFL
+     holds `1s` alone).
 
-     Reading a month costs what the month holds, and that spans three orders of
-     magnitude: ~21 bars at `1day`, ~150 at `60min`, ~8,000 at `1min`. The
-     census already carries that count per cell, so the decision is a Map probe
-     and the fetch never starts on the wrong side of it.
+     So nothing is read to OFFER a day. The Date control takes any day of the
+     chosen month, and a day that holds no bars (a weekend, a holiday, a day
+     never stored, a contract that had expired by then) answers per row with
+     that reason. What the first rows in view hold is said beside the control,
+     from the census, as a hint and not as a bound: two contracts of one month
+     need not cover the same days, and a bound taken from the first screen
+     would refuse a day the next screen holds.
 
-     `heaviest` is carried so the refusal can NAME the number. A control that
-     simply greys out teaches nothing; one that says "9,187 bars, over a budget
-     of 512" tells the operator to coarsen the timeframe. */
-  /* THE DAY SCOPE IS FOLDED OVER `matching`, NOT OVER `rows`, AND THAT IS A
-     CORRECTNESS FIX RATHER THAN A TIDY-UP.
-     ------------------------------------------------------------------------
-     `rows` comes from `sorted`, `sorted` reads `quotes`, and the quotes-
-     clearing effect depends on `day`. So folding the day list over `rows` made
-     the LIST depend on the SELECTION: choosing a date emptied the quote map,
-     which flattened the ranking to census order, which changed which
-     seventeen instruments were visible, which refolded `days` over a different
-     set — and the clamp below then cleared the date that had just been picked.
-     Nothing restored it when the quotes landed a round trip later.
-
-     The same loop moved `heaviest` and `dayCapable`, so a transient flip could
-     disable the Date control while the day it no longer showed was still being
-     applied to every quote on the page.
-
-     `matching` is the tab's keys filtered by segment and by the chosen cell.
-     It reads no quote, so it cannot move because of a selection — the list is
-     a property of the WINDOW, which is what a date picker's options should be.
-     Capped at the page size for the same reason the grid is: this is a fold
-     that costs one month read per key. */
+     The hint is folded over `matching`, not `rows`: `rows` depends on the
+     quotes and the quotes depend on the day. */
   const dayScope = $derived(matching.slice(0, PAGE));
-  const heaviest = $derived(dayScope.reduce((most, key) => Math.max(most, cellBars(key)), 0));
-  const dayCapable = $derived(dayScope.length > 0 && heaviest > 0 && heaviest <= DAY_BUDGET);
+  const dayBounds = $derived(dayScope.length > 0 ? monthSpan(month) : null);
+  const heldSpan = $derived(daySpan(dayScope.map(chosenCell)));
+  const dayCapable = $derived(dayBounds !== null);
 
   /** The chosen day, `YYYY-MM-DD`, or `''` for the month's last bar. */
   let day = $state('');
@@ -622,167 +681,32 @@
     void segment;
     day = '';
   });
-
-  /** The days the visible rows actually traded, ascending. */
-  let days = $state(/** @type {string[]} */ ([]));
-  /** The reason at least one series in view could not be read. */
-  let daysWhy = $state(/** @type {string|null} */ (null));
-  /** How many of the series in view failed to read, against how many were asked.
-      `daysWhy` alone cannot say whether the list below it is EMPTY or merely
-      SHORT, and those want opposite sentences. */
-  let daysFailed = $state(0);
-  let daysAsked = $state(0);
-
-  $effect(() => {
-    const feed = store.feed;
-    const want = dayScope;
-    const tf = timeframe;
-    const mo = month;
-    if (!feed || !tf || !mo || !dayCapable || want.length === 0) {
-      days = [];
-      daysWhy = null;
-      daysFailed = 0;
-      daysAsked = 0;
-      return;
-    }
-    let live = true;
-    /* CLEARED BEFORE THE READ, NOT AFTER IT.
-       This list survived until the new answers landed, so between changing the
-       month and the fetch resolving the picker went on offering the PREVIOUS
-       month's days — dates that are not in the month now selected. Picking one
-       in that window asks for a day the month does not contain and gets the
-       absence message for it, which blames the store for a list this page had
-       already replaced. An empty list for the width of a fetch is a control
-       that is briefly not ready; a wrong list is one that is confidently
-       wrong. */
-    days = [];
-    daysWhy = null;
-    daysFailed = 0;
-    daysAsked = 0;
-    /* THE UNION ACROSS THE VISIBLE ROWS, not one row's calendar. Instruments do
-       not all trade the same days — a halt, a listing, a suspension — and
-       taking the first row's days as the month's would hide every day the
-       others traded and it did not. */
-    Promise.all(want.map((key) => daysIn(feed, key, tf, mo))).then((answers) => {
-      if (!live) return;
-      days = [...new Set(answers.flatMap((a) => a.days))].sort();
-      /* A FAILED READ IS NOT AN EMPTY MONTH. `daysIn` now carries the reason
-         the month could not be read, and without it a transport error looked
-         exactly like a month that holds no days — a silently disabled Date
-         picker with nothing to explain it.
-         THE COUNT TRAVELS WITH IT, and that is the correction. `days` is a
-         UNION across the rows in view and this was `find` — a "some row
-         failed" test — so one bad series out of forty set a reason beside a
-         list that was populated from the other thirty-nine. The tooltip then
-         said no day could be offered while the picker was offering days. The
-         two reducers disagreed; the counts let the render site tell an empty
-         list from a short one. */
-      daysFailed = answers.filter((a) => a.why).length;
-      daysAsked = answers.length;
-      daysWhy = answers.find((a) => a.why)?.why ?? null;
-    });
-    return () => {
-      live = false;
-    };
-  });
-
-  /* A CHOSEN DAY MUST STILL BE ON OFFER, AND NOTHING CHECKED.
-     ------------------------------------------------------------------------
-     `day` was cleared only when the tab, year, month, timeframe or segment
-     changed. The option list is a fold over the VISIBLE rows, so it also moves
-     when the rows do — a chip filter, a sort, a segment narrowing, or the pager
-     — and none of those clears the day. The control then rendered BLANK, with
-     the picked date absent from its own list, while that same date was still
-     being applied to every quote on the page: a filter in force that the
-     control no longer showed.
-     Clearing is right rather than keeping: the day came from a list that no
-     longer contains it, so there is nothing to re-select. `days.length > 0`
-     guards the transient window where the list has not been folded yet, which
-     would otherwise clear a perfectly good day on every refetch. */
+  /* NOR A DAY OUTSIDE THE CHOSEN MONTH. A typed date is not held to the
+     control's `min` and `max` by every browser, and a filter in force that the
+     control cannot show is the defect this clamp exists to prevent. */
   $effect(() => {
     if (!day) return;
-    /* THE CASE THE GUARD USED TO EXCLUDE. When `dayCapable` goes false the days
-       effect sets `days = []`, and the old `days.length > 0` guard then BLOCKED
-       the clear — so the chosen day stayed in force against every quote on the
-       page while the Date control sat disabled and empty. That is exactly the
-       "a filter in force that the control no longer shows" defect this clamp
-       was added to prevent, reached through the clamp's own guard.
-       A window that cannot answer a day at all must not keep applying one. */
-    if (!dayCapable) {
-      day = '';
-      return;
-    }
-    if (days.length > 0 && !days.includes(day)) day = '';
+    if (!dayBounds || day < dayBounds.min || day > dayBounds.max) day = '';
   });
 
-  /** The chosen minute, `HH:MM` in IST, or `''` for the day's last bar. */
+  /** The chosen time, `HH:MM` or `HH:MM:SS` in IST, or `''` for the day's last
+      bar. A time answers with the last bar AT OR BEFORE it on that day, never
+      a later one; the row says when that bar is not stamped at the time asked. */
   let time = $state('');
-  /* THE MINUTE DOES NOT SURVIVE A CHANGE OF DAY, and clearing the day clears it
-     too — a time with no date is a minute of nothing. */
+  /* THE TIME DOES NOT SURVIVE A CHANGE OF DAY, and clearing the day clears it
+     too: a time with no date is a minute of nothing. */
   $effect(() => {
     void day;
     time = '';
   });
-
-  /** The minutes the visible rows are stamped with on the chosen day. */
-  let times = $state(/** @type {string[]} */ ([]));
-  /** The reason at least one series in view could not be read. */
-  let timesWhy = $state(/** @type {string|null} */ (null));
-  /** The same two counts, for the same reason the day list states. */
-  let timesFailed = $state(0);
-  let timesAsked = $state(0);
-
-  /* The same re-validation for the minute, for the same reason: its list is a
-     fold over the same moving set of rows. */
+  /** Seconds in one bar of the chosen timeframe, or `null`. */
+  const barSeconds = $derived(timeframeSeconds(timeframe));
+  /** A time can be chosen once a day is, on a timeframe with more than one bar a day. */
+  const timeCapable = $derived(day !== '' && barSeconds !== null && barSeconds < 86_400);
+  /* NOR A TIME THE CONTROL CANNOT SHOW: with no day, or one bar a day, the
+     control is disabled, and a time still in force would refuse every row. */
   $effect(() => {
-    if (!time) return;
-    // The same case, for the same reason: a minute cannot outlive the day it
-    // belongs to, nor a window that can no longer read one.
-    if (!day || !dayCapable) {
-      time = '';
-      return;
-    }
-    if (times.length > 0 && !times.includes(time)) time = '';
-  });
-
-  $effect(() => {
-    const feed = store.feed;
-    const want = dayScope;
-    const tf = timeframe;
-    const mo = month;
-    const on = day;
-    if (!feed || !tf || !mo || !on || !dayCapable || want.length === 0) {
-      times = [];
-      timesWhy = null;
-      timesFailed = 0;
-      timesAsked = 0;
-      return;
-    }
-    let live = true;
-    // Cleared before the read, for the reason the day list states — a stale
-    // minute list is worse here, because minutes look alike across days and
-    // nothing on screen would show it belonged to the previous one.
-    times = [];
-    timesWhy = null;
-    timesFailed = 0;
-    timesAsked = 0;
-    /* THE UNION AGAIN, for the reason the day list gives: two instruments need
-       not be stamped with the same minutes, and a series that halted at noon
-       would erase the afternoon from a picker built on it alone. */
-    Promise.all(want.map((key) => timesOn(feed, key, tf, mo, on))).then((answers) => {
-      if (!live) return;
-      times = [...new Set(answers.flatMap((a) => a.times))].sort();
-      /* THE `why` IS KEPT HERE TOO. `timesOn` returns it for exactly this
-         purpose and this caller was throwing it away, so a failed month read
-         disabled the Time picker with the words "a day holds one bar" —
-         a statement about the timeframe, made when nothing had been read. */
-      timesFailed = answers.filter((a) => a.why).length;
-      timesAsked = answers.length;
-      timesWhy = answers.find((a) => a.why)?.why ?? null;
-    });
-    return () => {
-      live = false;
-    };
+    if (time && !timeCapable) time = '';
   });
 
   /** key -> Quote, filled as the pool answers. */
@@ -816,11 +740,17 @@
     void day;
     void time;
     quotes = new Map();
+    spots = new Map();
   });
 
   $effect(() => {
     const feed = store.feed;
-    const want = [...new Set([...(quotesWidened ? matching : rows), ...indices])];
+    /* AN INDEX THE CENSUS SAYS HOLDS NO SUCH CELL IS NOT ASKED FOR. The strip
+       draws the F&O index underlyings even then, and names the absence from
+       the census it already holds: a request would only confirm it. */
+    const want = [
+      ...new Set([...(quotesWidened ? matching : rows), ...indices.filter(holdsChosenCell)])
+    ];
     const tf = timeframe;
     const mo = month;
     const on = day;
@@ -835,6 +765,9 @@
       at,
       controller.signal
     ).then((answers) => {
+      // Counted whether or not this view is still the live one: the requests were sent.
+      sentNow = traffic.sent;
+      peakNow = traffic.peak;
       if (!live) return;
       const next = new Map(quotes);
       for (const q of answers) next.set(q.key, q);
@@ -850,14 +783,134 @@
     };
   });
 
+  /* THE REQUESTS THIS PAGE HAS SENT, AND THE MOST IT HELD IN FLIGHT (DB-G86,
+     RA-143). Read off `$lib/terminal.svelte.js`'s one pool, which every quote
+     seek, spot join and the strip's order goes through, and printed under the
+     grid: the fan-out per screen is a number on the page, not an estimate. */
+  let sentNow = $state(0);
+  let peakNow = $state(0);
+
   /* ==================================================================
-     THE INDEX STRIP — the census's INDEX-segment instruments.
-     Five cells in the source terminal; here it is however many indices
-     this store holds, because inventing a sixth would be inventing a
-     market. ================================================================== */
-  const indices = $derived(
-    keys.filter((k) => parseKey(k).segment === 'INDEX' && holdsChosenCell(k)).slice(0, 6)
+     THE UNDERLYING'S SPOT, FOR THE CONTRACT ROWS (DB-G15)
+     ------------------------------------------------------------------
+     `/spot.json` joins a contract's bar to its underlying's series at the
+     bar's own instant, and `/db` has read it since D-2807. This page said
+     the store "does not join them" and drew Spot Price and Premium as
+     having no source.
+
+     One request per underlying and month for every row on screen, at most
+     400 instants each (`spotsFor`), asked once per batch of quotes: `quotes`
+     is replaced once when a batch lands, and that is what this reads.
+     ================================================================== */
+  /** key -> SpotAnswer, for the contracts on screen.
+      @type {Map<string, import('$lib/moneyness.js').SpotAnswer>} */
+  let spots = $state(new Map());
+  /** `exact`: the spot at the bar's own instant (D-2807). `prev`: the last
+      spot at or before it, shown with its age (D-3328).
+      @type {'exact'|'prev'} */
+  let spotAsof = $state('exact');
+
+  $effect(() => {
+    const feed = store.feed;
+    const tf = timeframe;
+    const asof = spotAsof;
+    const held = quotes;
+    if (!feed || !tf || !hasExpiry || held.size === 0) return;
+    let live = true;
+    const controller = new AbortController();
+    spotsFor(feed, [...held.values()], tf, controller.signal, asof)
+      .then((answers) => {
+        sentNow = traffic.sent;
+        peakNow = traffic.peak;
+        if (live) spots = answers;
+      })
+      .catch((error) => {
+        // Only cancellation is quiet; `spotsFor` files every other failure per row.
+        if (!controller.signal.aborted) throw error;
+      });
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  });
+
+  /* ==================================================================
+     THE INDEX STRIP — NIFTY, BANKNIFTY, THEN THE F&O INDEX UNDERLYINGS
+     ------------------------------------------------------------------
+     This was the first six INDEX names in alphabetical order out of 135:
+     BANKNIFTY, four bond indices and INDIAVIX on Zerodha's default view,
+     with NIFTY not shown (DB-G13). The order is now the SERVER'S:
+     `/aliases.json` lists the index names this store keys, the F&O index
+     underlyings first, and `stripOf` reads it. No name is typed here.
+
+     A failed read is not hidden: the strip falls back to name order and
+     `stripWhy` says so beside it.
+     ================================================================== */
+  /** `/aliases.json`'s index list, in its order. @type {{key: string, fno: boolean}[]} */
+  let stripServed = $state([]);
+  /** Why that list could not be read, when it could not. @type {string|null} */
+  let stripWhy = $state(null);
+  $effect(() => {
+    // Asked again on a census change only while the last read failed.
+    void store.generation;
+    let live = true;
+    servedIndices().then((answer) => {
+      sentNow = traffic.sent;
+      if (!live) return;
+      stripServed = answer.served;
+      stripWhy = answer.why;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  const indices = $derived(stripOf(indexKeys, holdsChosenCell, stripServed));
+
+  /* A RUNG BEHIND THE FINER RUNG IT IS FOLDED FROM (DB-G12).
+     Zerodha NIFTY 60min for Sep 2026 ended on the 4th while 1min reached the
+     30th, and this page printed the 4th's close as the month's last bar with
+     nothing to say it was old. The census carries every cell's last stamp, so
+     the comparison is free; it is made for the rows and indices on screen. */
+  const behind = $derived.by(() => {
+    /** @type {Map<string, NonNullable<ReturnType<typeof behindSource>>>} */
+    const out = new Map();
+    for (const key of [...rows, ...indices]) {
+      const b = behindSource(store.byInstrument.get(key), timeframe, month);
+      if (b) out.set(key, b);
+    }
+    return out;
+  });
+  /** Why an index on the strip shows a dash with no request behind it. */
+  const noCellWhy = $derived(
+    `The census holds no ${timeframe || 'such'} cell for this index in ${month ? monthLabel(month) : 'this month'}, so there is no bar to read. It is drawn because it is an F&O index underlying; nothing was asked for it.`
   );
+  /** @param {string} key */
+  const behindOf = (key) => behind.get(key) ?? null;
+
+  /* THE MARKS ONE FIGURE CARRIES, WHEREVER IT IS DRAWN. The lead ticker, the
+     strip and the grid row draw the same quote; `marksOf` decides the marks
+     once (behind its source, a bar older than the time asked, a window with
+     an unreadable record) and the `marks` snippet below is the only place
+     that draws them, so no surface can show the figure without them. */
+  /** @param {string} key */
+  const marksFor = (key) => marksOf(behindOf(key), quotes.get(key), { timeframe, day, time });
+
+  /* WHAT THE LIT FILTER LEFT OUT OR COULD NOT RANK, COUNTED. A chip drops a
+     row whose quote has landed with nothing in the ranked field; the Stocks
+     Gainers/Losers switch has no off position, so it carries those rows (they
+     sort last) rather than leave a tab empty with no control to bring it
+     back. Either way the footer prints the number: nothing leaves the grid,
+     or stays in it unranked, without the page saying so. */
+  const unranked = $derived.by(() => {
+    const rule = canSortByQuote ? chipRule() : null;
+    const by = rule?.keep ? rule.by : moverActive ? 'chg' : '';
+    if (!by) return { count: 0, by: '', dropped: false };
+    let count = 0;
+    for (const k of matching) {
+      if (sortValue(k, by) === null && !awaited(quotes.get(k), by, spots.has(k))) count += 1;
+    }
+    return { count, by, dropped: !!rule?.keep };
+  });
 
   /* ==================================================================
      THE COLUMN MODEL — per tab, exactly as the source terminal draws it.
@@ -867,10 +920,7 @@
         null      NO SOURCE IN THIS STORE — drawn, dashed, and explained.
      ================================================================== */
   const NO_SRC = {
-    spot: 'A spot price is the underlying’s level at this bar. This store files a contract’s own bars and does not join them to the underlying’s series, so nothing here has read one.',
-    oichg: 'Open-interest change needs the previous bar’s open interest. `/bars/window.json` carries a change field for price and none for OI, so this was never measured.',
-    value: 'Turnover in crore is price times quantity summed over the session. A bar file carries volume and close but not per-trade value, and multiplying the two would be an estimate presented as a measurement.',
-    premium: 'Premium is the contract’s price less the underlying’s level at the same bar. It needs both series joined, and this store files a contract’s own bars without that join — the same reason Spot Price beside it has no source. The two chips that rank by it are refused for exactly this.'
+    value: 'Turnover in crore is price times quantity summed over the session. A bar file carries volume and close but not per-trade value, and multiplying the two would be an estimate presented as a measurement.'
   };
 
   /**
@@ -891,52 +941,55 @@
    *           format nobody consulted were removed rather than left to imply
    *           a switch that does not exist.
    * @property {string} [why]    why there is no source, shown on hover
+   * @property {boolean} [bar]   the cell is the LAST BAR'S own move or volume at
+   *           the chosen timeframe, not the day's, and its header says so
+   *           through `barHeader` (DB-G17)
    */
 
+  /* `bar: true` MARKS A COLUMN WHOSE CELL IS ONE BAR'S (DB-G17). The headers
+     copy a broker terminal, where Change, Change % and Volume are the DAY's.
+     Here each is the last bar's at the chosen timeframe: on a `1s` rung,
+     RELIANCE's "Change %" was one bar against the stored bar before it and
+     its "Volume" one second's. The header now names the bar and the
+     timeframe; the figures are unchanged.
+
+     SPOT, PREMIUM AND THE TWO OI CHANGES HAVE A SOURCE (DB-G15): the bar's own
+     `oichg` on `/bars/window.json`, and `/spot.json` for the underlying at
+     the bar's instant. */
   /** @type {Record<string, Col[]>} */
   const COLUMNS = {
     stocks: [
       { h: 'Name', src: 'name', align: 'left' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right' },
-      { h: 'Change %', src: 'chg', align: 'right' },
+      { h: 'Change', src: 'chgAbs', bar: true, align: 'right' },
+      { h: 'Change %', src: 'chg', bar: true, align: 'right' },
       { h: 'Value (Cr.)', src: null, why: NO_SRC.value, align: 'right' },
-      { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
+      { h: 'Volume', src: 'volume', bar: true, align: 'right', kind: 'int' }
     ],
     options: [
       { h: 'Name', src: 'name', align: 'left' },
-      { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' },
+      { h: 'Spot Price', src: 'spot', align: 'right' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right' },
-      { h: 'Change %', src: 'chg', align: 'right' },
+      { h: 'Change', src: 'chgAbs', bar: true, align: 'right' },
+      { h: 'Change %', src: 'chg', bar: true, align: 'right' },
       { h: 'Open Interest', src: 'oi', align: 'right', kind: 'int' },
-      { h: 'OI Change', src: null, why: NO_SRC.oichg, align: 'right' },
-      { h: 'OI Change %', src: null, why: NO_SRC.oichg, align: 'right' },
-      { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
+      { h: 'OI Change', src: 'oichgAbs', bar: true, align: 'right' },
+      { h: 'OI Change %', src: 'oichg', bar: true, align: 'right' },
+      { h: 'Volume', src: 'volume', bar: true, align: 'right', kind: 'int' }
     ],
-    /* FUTURES CARRIES NO `Premium` AND NO `Spot Price` IN ITS BASE SET. Both
-       are inserted by `columnsFor` below, and only under the two chips that
-       show them. See the note there — this was measured wrong the first time. */
-    /* `Premium` AND `Spot Price` WERE MISSING FROM THIS ROW, and the capture is
-       what says so: the source's Futures grid reads Name · Premium · Spot Price
-       · LTP · Change · Change % · Open Interest · OI Change · OI Change % ·
-       Volume, and this table jumped from the name straight to the LTP. Both are
-       sourceless here for one reason — neither can be had without joining the
-       contract to its underlying — which is the same reason `Premium` and
-       `Discount` are the two refused chips on this tab. Stating them as columns
-       with that reason on hover is what makes the refusal legible; omitting the
-       columns hid a gap the source terminal shows plainly. */
+    /* `Premium` is the future's close less its underlying's close at the same
+       bar: both are read, and the difference is labelled as derived. */
     futures: [
       { h: 'Name', src: 'name', align: 'left' },
-      { h: 'Premium', src: null, why: NO_SRC.premium, align: 'right' },
-      { h: 'Spot Price', src: null, why: NO_SRC.spot, align: 'right' },
+      { h: 'Premium', src: 'premium', align: 'right' },
+      { h: 'Spot Price', src: 'spot', align: 'right' },
       { h: 'LTP', src: 'close', align: 'right', kind: 'price' },
-      { h: 'Change', src: 'chgAbs', align: 'right' },
-      { h: 'Change %', src: 'chg', align: 'right' },
+      { h: 'Change', src: 'chgAbs', bar: true, align: 'right' },
+      { h: 'Change %', src: 'chg', bar: true, align: 'right' },
       { h: 'Open Interest', src: 'oi', align: 'right', kind: 'int' },
-      { h: 'OI Change', src: null, why: NO_SRC.oichg, align: 'right' },
-      { h: 'OI Change %', src: null, why: NO_SRC.oichg, align: 'right' },
-      { h: 'Volume', src: 'volume', align: 'right', kind: 'int' }
+      { h: 'OI Change', src: 'oichgAbs', bar: true, align: 'right' },
+      { h: 'OI Change %', src: 'oichg', bar: true, align: 'right' },
+      { h: 'Volume', src: 'volume', bar: true, align: 'right', kind: 'int' }
     ]
   };
 
@@ -1024,7 +1077,7 @@
       @type {Record<string, string>} */
   const BAR_WHY = {
     'Option Chain':
-      'An option chain is every strike of one expiry laid out around the underlying’s level, with calls and puts facing each other. It needs the whole expiry’s contracts joined to the underlying’s series, and this store files each contract’s bars on their own — the same join that leaves Spot Price and Premium without a source in the grid above.',
+      'An option chain is every strike of one expiry laid out around the underlying’s level, with calls and puts facing each other. This page draws rows, not a chain: /db lays an expiry’s strikes around the underlying’s level from /chain.json, with moneyness, intrinsic, extrinsic, IV and greeks, and a second chain here would be a second copy of it.',
     Chart:
       'This page renders no chart. brutex draws one on /backtest, against a run’s own execution series, and it is not a price chart of an arbitrary instrument — pointing this button there would open something that does not show what was clicked.'
   };
@@ -1036,24 +1089,19 @@
      `Price Gainers` is "the ones that rose, biggest first" — two operations,
      not a label.
 
-     A quote carries `close`, `open`, `high`, `low`, `volume`, `oi` and `chg`.
-     Six of the source terminal's chips fall straight out of those. The rest
-     need something a bar file does not hold, and each is refused BY NAME
-     rather than left inert:
-
-       OI Gainers / OI Losers  need the CHANGE in open interest.
-         `/bars/window.json` carries a change field for price and none for OI,
-         so there is no second reading to difference against.
+     A quote carries `close`, `open`, `high`, `low`, `volume`, `oi`, `chg` and
+     `oichg`, and `/spot.json` gives a contract its underlying's close at the
+     same bar. Ten of the source terminal's chips fall out of those: the OI
+     Gainers and OI Losers rank on the bar's own `oichg`, and Premium and
+     Discount on the future's close less that spot (DB-G15). The rest need
+     something a bar file does not hold, and each is refused BY NAME rather
+     than left inert:
 
        Top Value / By Value    need turnover, which is price times quantity
          summed over the session. `close × volume` is a plausible-looking
          estimate and is not the same number — the `Value (Cr.)` column already
          refuses it for the same reason, and a chip that ranked on it would
          order the grid by a figure nobody measured.
-
-       Premium / Discount      need the underlying's bar joined to the
-         contract's at the same timestamp. This store files a contract's own
-         series and makes no such join.
 
        Extreme Openings        need the gap: this bar's open against the
          PREVIOUS bar's close. A single bar cannot answer it.
@@ -1083,6 +1131,12 @@
   /** @type {Record<string, ChipRule>} */
   const CHIP_RULES = {
     'Highest OI': { by: 'oi', dir: 'desc' },
+    // DB-G15: the bar's own `oichg`, over the quotes already fetched.
+    'OI Gainers': { by: 'oichg', dir: 'desc', keep: (v) => v > 0 },
+    'OI Losers': { by: 'oichg', dir: 'asc', keep: (v) => v < 0 },
+    // A future's close less its underlying's at the same bar, from `/spot.json`.
+    Premium: { by: 'premium', dir: 'desc', keep: (v) => v > 0 },
+    Discount: { by: 'premium', dir: 'asc', keep: (v) => v < 0 },
     'Top Volume': { by: 'volume', dir: 'desc' },
     'Price Gainers': { by: 'chg', dir: 'desc', keep: (v) => v > 0 },
     'Price Losers': { by: 'chg', dir: 'asc', keep: (v) => v < 0 },
@@ -1092,18 +1146,10 @@
 
   /** @type {Record<string, string>} */
   const CHIP_WHY = {
-    'OI Gainers':
-      'Ranking by a rise in open interest needs the CHANGE in open interest. /bars/window.json carries a change field for price and none for OI, so there is no second reading to difference against.',
-    'OI Losers':
-      'Ranking by a fall in open interest needs the CHANGE in open interest, and no endpoint here serves one — the same absence the OI Change column reports.',
     'Top Value':
       'Value is turnover: price times quantity, summed over the session. A bar carries close and volume but not per-trade value, and multiplying the two is an estimate rather than a measurement. The Value (Cr.) column refuses it for the same reason.',
     'By Value':
       'Value is turnover: price times quantity, summed over the session. A bar carries close and volume but not per-trade value, and ranking on their product would order this grid by a figure nobody measured.',
-    Premium:
-      'A future’s premium is its price minus its underlying’s at the same timestamp. This store files a contract’s own series and makes no join to the underlying, so there is nothing to rank.',
-    Discount:
-      'A future’s discount is its underlying’s price minus its own at the same timestamp. That join does not exist in this store.',
     'Extreme Openings':
       'An opening gap is this bar’s open against the PREVIOUS bar’s close. One bar cannot answer it, and /bars/window.json returns the window asked for rather than the bar before it.',
     Breakouts:
@@ -1191,12 +1237,27 @@
       barSaid = 'Nothing to copy — the grid is empty.';
       return;
     }
-    const lines = [cols.map((c) => c.h).join('\t')];
+    /* THE COPY SAYS WHICH WINDOW IT IS OF, AND KEEPS EVERY MARK THE SCREEN
+       SHOWS. It named neither the day, the time nor the spot rule, and it
+       dropped `behind`, `bar HH:MM:SS`, `partial` and a spot's age, so a
+       pasted stale or earlier figure read as a current one. */
+    const lines = [
+      windowLine({
+        feed: feedLabel,
+        tab: tab?.label ?? '',
+        timeframe,
+        month,
+        day,
+        time,
+        spot: hasExpiry ? spotAsof : ''
+      }),
+      cols.map(headOf).join('\t')
+    ];
     for (const key of take) {
       const q = quotes.get(key);
       lines.push(
         cols
-          .map((c) => (c.src === 'name' ? labelOf(key) : cellOf(q, c).text || '—'))
+          .map((c) => (c.src === 'name' ? copyName(labelOf(key), marksFor(key)) : copyCell(cellOf(q, c))))
           .join('\t')
       );
     }
@@ -1333,6 +1394,10 @@
 
   const columns = $derived(columnsFor(activeTab, activeChip));
 
+  /** A column's header as a reader should take it: a bar column names the
+      bar and the timeframe (DB-G17). @param {Col} c */
+  const headOf = (c) => (c.bar ? barHeader(c.h, timeframe) : c.h);
+
   /* ==================================================================
      RENDERING ONE CELL
      ------------------------------------------------------------------
@@ -1347,6 +1412,11 @@
       a field is added.
       @typedef {import('$lib/terminal.svelte.js').Quote} Quote */
 
+  /** A reason word off the wire as its sentence (`/db`'s own table, one
+      vocabulary for both pages), or `fallback` when the wire sent none.
+      @param {string|null|undefined} word @param {string} fallback */
+  const whyText = (word, fallback) => (word ? `${barWhyText(word)} (${word})` : fallback);
+
   /** A signed percentage from integer basis points, at 2dp, with the space
       before the sign the source terminal renders.
       @param {number} bps @returns {string} */
@@ -1355,82 +1425,31 @@
     return `${v >= 0 ? '' : '-'}${Math.abs(v).toFixed(2)} %`;
   }
 
-  /** The absolute move implied by a close and its change in basis points.
-      DERIVED, AND SAID TO BE: the wire carries the ratio and the close, not the
-      difference, so this is arithmetic on two measured numbers rather than a
-      third measurement. It is exact for the pair it is computed from.
-      @param {Quote|undefined} quote @returns {number|null} */
-  function absMove(quote) {
-    if (!quote || quote.close === null || quote.chg === null) return null;
-    /* -10000 BASIS POINTS IS -100%, AND THE DIVISOR IS EXACTLY ZERO THERE.
-       `close / (1 + chg / 10_000)` is a division by zero at that one input,
-       giving ±Infinity — or NaN when the close is also 0 — and the result
-       flowed on to `rupee`, which answers a non-safe-integer with an em dash.
-       So the cell rendered a plain dash carrying the DERIVATION tooltip, which
-       reads as "the store has no change here" when the truth is that the
-       previous close was zero and the move cannot be reconstructed from a
-       ratio at all.
-       It is not hypothetical on this data: a contract that fell to nothing is
-       exactly the `-100.00 %` row the source terminal prints all over its
-       Futures tab, and section 3 rule 1 forbids answering it with a number
-       nobody computed. `null` here reaches the named-absence branch instead. */
-    if (quote.chg === -10_000) return null;
-    const before = quote.close / (1 + quote.chg / 10_000);
-    if (!Number.isFinite(before)) return null;
-    return quote.close - before;
-  }
-
-  /** THE DERIVED ABSOLUTE MOVE, AS A RENDERED CELL — one spelling, three
-      surfaces.
+  /** THE DERIVED ABSOLUTE MOVE, AS A RENDERED CELL: one spelling, three
+      surfaces (the grid's Change column, the strip and the lead ticker).
       ------------------------------------------------------------------------
-      This was inline in `cellOf` and so belonged to the GRID alone, which is
-      why the strip and the lead ticker showed a percentage with no rupee move
-      beside it while the source terminal shows both everywhere it shows either.
-      Lifting it out is what lets those two render the same figure with the same
-      disclosure rather than a second, quieter version of this arithmetic.
-
-      THE FIGURE IS DERIVED AND SAYS SO ON HOVER — AND THE SLACK IS FAR LARGER
-      THAN THIS COMMENT FIRST CLAIMED. `chg` is INTEGER basis points and `close`
-      is a PAISA integer, so the reconstruction is quantised to about
-      `close / 10000` — and that quotient is in PAISA, not rupees. This block
-      used to read "roughly five paise of slack" for a ₹52,265 contract. The
-      arithmetic is 5,226,500 / 10,000 = 522.65 paisa, which is ₹5.23: the
-      estimate was wrong by a factor of a hundred, and the sentence that followed
-      it — "the last digit is arithmetic" — understated the reach by two more
-      places. On that price the RUPEES are uncertain, not the paise.
-
-      So the note states the slack in the same units it renders, and says which
-      digits it reaches. The figure is still not rounded away: a reader comparing
-      it against the percentage beside it should see a number consistent with
-      that percentage, and rounding to the honest precision would break the
-      correspondence. It is LABELLED instead.
+      The wire carries the close and its change against the previous stored bar
+      in WHOLE basis points, not the previous close. `moveCell` works out every
+      whole-paisa move that pair allows. Where that is one figure it is exact
+      and drawn plain; where it is a range the cell reads `≈` and the hover
+      gives both ends, so a reconstructed move is never drawn as a measured
+      one. On a ₹52,265 close the range is about ₹5 wide: the rupees are
+      uncertain, not the paise.
       @param {Quote} quote
       @returns {{text: string, why: string|null, dir: number}} */
   function absCell(quote) {
-    const v = absMove(quote);
-    if (v === null) {
-      return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
+    const cell = moveCell(quote.close, quote.chg, rupee, 'close');
+    if (cell === null) {
+      return { text: '—', why: whyText(quote.chgWhy, 'No change was recorded for this bar.'), dir: 0 };
     }
-    const slackPaisa = Math.max(1, Math.round((quote.close ?? 0) / 10_000));
-    return {
-      text: rupee(Math.round(v)),
-      dir: Math.sign(v),
-      why:
-        'Derived, not measured. The wire carries the close and the change as ' +
-        'integer basis points, not the previous close, so this move is ' +
-        'reconstructed from the two. Whole basis points leave about ' +
-        rupee(slackPaisa) +
-        ' of slack on this price, so the figure is uncertain from its ' +
-        (slackPaisa >= 100 ? 'rupees' : 'paise') +
-        ' down — it is shown at full precision only to stay consistent with ' +
-        'the change percentage beside it, which is the figure the store holds.'
-    };
+    return cell;
   }
 
   /** One rendered cell: its text, its direction for colour, and the reason it
       is a dash when it is one.
       @param {Quote|undefined} quote @param {Col} col
-      @returns {{text: string, why: string|null, dir: number, pending?: boolean}} */
+      `mark` is a second, smaller figure drawn beside the text (a spot's age).
+      @returns {{text: string, why: string|null, dir: number, pending?: boolean, mark?: string|null, markWhy?: string|null}} */
   function cellOf(quote, col) {
     if (col.src === null) return { text: '—', why: col.why ?? null, dir: 0 };
     if (!quote) return { text: '', why: null, dir: 0, pending: true };
@@ -1439,9 +1458,75 @@
     if (col.src === 'chgAbs') return absCell(quote);
     if (col.src === 'chg') {
       if (quote.chg === null) {
-        return { text: '—', why: quote.chgWhy ?? 'No change was recorded for this bar.', dir: 0 };
+        return { text: '—', why: whyText(quote.chgWhy, 'No change was recorded for this bar.'), dir: 0 };
       }
       return { text: pctText(quote.chg), dir: Math.sign(quote.chg), why: null };
+    }
+    if (col.src === 'oichg' || col.src === 'oichgAbs') {
+      if (quote.oichg === null) {
+        return {
+          text: '—',
+          why: whyText(quote.oichgWhy, 'No open-interest change was recorded for this bar.'),
+          dir: 0
+        };
+      }
+      if (col.src === 'oichg') {
+        return { text: pctText(quote.oichg), dir: Math.sign(quote.oichg), why: null };
+      }
+      /* A COUNT THAT IS NOT THE STORED DIFFERENCE IS NEVER DRAWN AS ONE.
+         This was `round(oi - oi / (1 + bps / 10000))` printed as an integer:
+         -77 on a row whose stored difference is -75, and 0 for any real
+         change under half a basis point. `moveCell` gives the plain count
+         only where the stored pair allows exactly one, and `≈` with both
+         ends of the range on hover everywhere else. */
+      const cell = moveCell(quote.oi, quote.oichg, group, 'open interest');
+      if (cell === null) {
+        return {
+          text: '—',
+          why: 'The open interest is absent or zero, or no whole count before it gives the stored change, so the count before it cannot be recovered from a ratio.',
+          dir: 0
+        };
+      }
+      return cell;
+    }
+    if (col.src === 'spot' || col.src === 'premium') {
+      const spot = spots.get(quote.key);
+      if (!spot) return { text: '', why: null, dir: 0, pending: true };
+      if (spot.close === null) {
+        const word = spot.why ?? 'spot_request_failed';
+        const said = /** @type {Record<string, string>} */ (SPOT_WHY)[word] ?? word;
+        return { text: '—', why: `No spot: ${said}${spot.detail ? ` (${spot.detail})` : ''}`, dir: 0 };
+      }
+      /* THE SPOT'S AGE IS IN THE CELL, NOT ONLY ON HOVER (D-3328, operator
+         answer 4: the opted-in rule "always shows the spot's age"). The cell
+         text of a spot from an earlier second was identical to an exact one.
+         `spotMark` is drawn beside the figure, and copied with it, for every
+         answer of the opted-in rule and for any answer older than its bar. */
+      const mark = spotMark(spot);
+      const aged =
+        spot.age !== null && spot.age > 0 && spot.spotT !== null
+          ? ` The underlying’s close at ${istDay(spot.spotT * 1000)} ${secondLabel(spot.spotT * 1000)}, ${group(spot.age)} s before this bar: the last spot at or before it. Never a later one.`
+          : ' The underlying’s close at this bar’s own instant.';
+      if (col.src === 'spot') {
+        return { text: rupee(spot.close), dir: 0, why: `From /spot.json.${aged}`, mark, markWhy: mark ? aged.trim() : null };
+      }
+      if (quote.close === null) return { text: '—', why: 'This bar has no close to measure a premium from.', dir: 0 };
+      const premium = quote.close - spot.close;
+      return {
+        text: rupee(premium),
+        dir: Math.sign(premium),
+        why: `Derived: this bar’s close less the underlying’s close.${aged}`,
+        mark,
+        markWhy: mark ? aged.trim() : null
+      };
+    }
+    if (col.src === 'volume' && quote.volume === null && quote.volumeWhy) {
+      // The server's own word for a volume that is not one (D-3322), shown as sent.
+      return {
+        text: '—',
+        why: `This bar has no traded volume (${quote.volumeWhy}); the stored figure is not a count of trades.`,
+        dir: 0
+      };
     }
     /* INDEXED THROUGH `any` DELIBERATELY, AND ONLY HERE. `col.src` is a field
        name chosen by the column table above, so the lookup is a fact about that
@@ -1565,6 +1650,7 @@
       feedLabel,
       day ? dayLabel(day) : monthLabel(month),
       time || null,
+      hasExpiry && underlying ? underlying : null,
       hasExpiry && expiry ? `${monthLabel(expiry)} expiry` : null,
       segment !== 'All' ? segment : null,
       timeframe
@@ -1601,6 +1687,20 @@
      THE CHROME. This page draws its own, and `+layout.svelte` stands its
      console bar down for exactly this route — see `BARE` there.
      ==================================================================== -->
+<!-- THE MARKS BESIDE A FIGURE, DRAWN IN ONE PLACE FOR ALL THREE SURFACES.
+     The lead ticker, each strip cell and each grid row render this snippet
+     and nothing else draws a `stale` or `lag` mark on a name, so a level can
+     not appear on one surface without the mark it carries on another. With a
+     Time chosen the row said `bar 10:08:00` while the lead and the strip drew
+     the same 112-minute-old level bare. -->
+{#snippet marks(/** @type {string} */ key)}
+  {#each marksFor(key) as m (m.kind)}<span
+      class:stale={m.kind === 'behind'}
+      class:lag={m.kind !== 'behind'}
+      title={m.why}>{m.text}</span
+    >{/each}
+{/snippet}
+
 <div class="term">
   <header class="tbar">
     <span class="mark" aria-hidden="true"></span>
@@ -1608,6 +1708,7 @@
       {@const lead = quotes.get(indices[0])}
       <span class="tick">
         <span class="tick-n">{labelOf(indices[0])}</span>
+        {@render marks(indices[0])}
         {#if lead?.close != null}
           <span class="tick-v">{rupee(lead.close)}</span>
           <!-- AN ABSENT CHANGE GETS THE SAME DASH THE STRIP GIVES IT. Neither
@@ -1645,7 +1746,11 @@
                one place a reader looks first. -->
           <span class="tick-w" title={lead.why}>—</span>
         {:else}
-          <span class="tick-w" title="Nothing has been asked for this index yet.">·</span>
+          {#if holdsChosenCell(indices[0])}
+            <span class="tick-w" title="Nothing has been asked for this index yet.">·</span>
+          {:else}
+            <span class="tick-w" title={noCellWhy}>—</span>
+          {/if}
         {/if}
       </span>
     {/if}
@@ -1690,6 +1795,7 @@
         {@const q = quotes.get(key)}
         <span class="tcell">
           <span class="c-n">{labelOf(key)}</span>
+          {@render marks(key)}
           {#if q?.close != null}
             <span class="c-v">{rupee(q.close)}</span>
             {#if q.chg != null}
@@ -1726,6 +1832,8 @@
             {/if}
           {:else if q?.why}
             <span class="c-w" title={q.why}>—</span>
+          {:else if !holdsChosenCell(key)}
+            <span class="c-w" title={noCellWhy}>—</span>
           {:else}
             <span class="c-w">·</span>
           {/if}
@@ -1774,6 +1882,17 @@
          other route in this app emits a `main` of its own. The class carries
          all the styling; the tag carried only the defect. -->
     <div class="tgrid">
+      <!-- THE CENSUS REFUSAL IS DRAWN HERE (CE-77, CE-83, D-1786, D-1789).
+           This page read `store` and never `store.error`, so a refused census
+           -- a degraded generation, an unreadable counter, a busy reader --
+           left an empty grid with no reason under it. The sentence is the
+           server's own, carried through `store.svelte.js`. -->
+      {#if store.state === 'error'}
+        <p class="tcensus" role="alert">
+          <b>The census was not read, so nothing below is the store.</b>
+          {store.error ?? '/store.json failed and named no reason'}
+        </p>
+      {/if}
       <div class="ttabs">
         {#each tabs as t (t.id)}
           <!-- `aria-pressed` CARRIES THE STATE THE GREEN PILL CARRIES.
@@ -1951,8 +2070,19 @@
                    feed dropped from the list reads as a feed that does not exist. -->
               <label class="tctl">
                 <span>Feed</span>
-                <select class="pill" bind:value={feeds.active}>
-                  {#each feeds.all as f (f.wire)}
+                <!-- ONE FEED CONTROL, AND IT GOES THROUGH `selectFeed` (DB-G32).
+                     This was bound straight to `feeds.active`, which changed
+                     the feed and skipped the one function that remembers the
+                     choice, so the terminal's pick was lost on the next page.
+                     `/terminal` is in `+layout.svelte`'s FEED_OWNED, so the
+                     top bar draws no second picker here. -->
+                <select
+                  class="pill"
+                  value={feeds.active}
+                  title={excludedSentence(feeds.all) || undefined}
+                  onchange={(e) => selectFeed(e.currentTarget.value)}
+                >
+                  {#each offeredFeeds(feeds.all) as f (f.wire)}
                     <option value={f.wire} disabled={!f.ready} title={f.why ?? undefined}>
                       {f.display}{f.ready ? '' : ' · unavailable'}
                     </option>
@@ -1971,54 +2101,42 @@
                   {#each monthsInYear as m (m)}<option value={m}>{monthLabel(m)}</option>{/each}
                 </select>
               </label>
-              <!-- THE DAY. Present only when the census says the month can be read
-                   within budget, and carrying the reason when it cannot — a control
-                   that greys out silently teaches nothing, while one that names the
-                   bar count tells the operator to coarsen the timeframe. -->
+              <!-- THE DAY (DB-G16). Any day the cells in view cover, on every
+                   timeframe: the quote is one bar asked for by the day's own
+                   bounds, so nothing is read to offer the control and no
+                   bar count refuses it. Empty is the month's last bar. -->
               <label class="tctl">
                 <span>Date</span>
-                <select
+                <input
                   class="pill"
+                  type="date"
                   bind:value={day}
-                  disabled={!dayCapable || days.length === 0}
-                  title={dayCapable
-                    ? daysWhy
-                      ? days.length === 0
-                        ? `No day can be offered — every series in view failed to read: ${daysWhy}`
-                        : `${daysFailed} of ${daysAsked} series in view could not be read, so this list may be short a day they traded: ${daysWhy}`
-                      : 'The last bar on the chosen day. “Month” is the month’s last bar.'
-                    : rows.length === 0
-                      ? 'There are no rows in view, so there is no month to read for a date. This is not a budget refusal — the grid is empty.'
-                      : `A day needs the month read, and the heaviest visible series holds ${heaviest.toLocaleString('en-IN')} ${timeframe} bars against a budget of ${DAY_BUDGET.toLocaleString('en-IN')}. Choose a coarser timeframe to pick a date.`}
-                >
-                  <option value="">Month</option>
-                  {#each days as d (d)}<option value={d}>{dayLabel(d)}</option>{/each}
-                </select>
+                  min={dayBounds?.min}
+                  max={dayBounds?.max}
+                  disabled={!dayCapable}
+                  title={dayBounds
+                    ? `The last bar on the chosen day of ${monthLabel(month)}. Empty is the month’s last bar. ${heldSpan ? `The first series in view hold ${heldSpan.min} to ${heldSpan.max}. ` : ''}A day with no bars says so on each row.`
+                    : 'There are no rows in view, so there is no span of days to choose from. The grid is empty; this is not a refusal.'}
+                />
               </label>
-              <!-- THE MINUTE. Only meaningful once a day is chosen, and only
-                   offers a choice when the timeframe puts more than one bar in a
-                   day: `1day` yields exactly one, and a picker with one option is
-                   a control that cannot be used. It says which of those it is
-                   rather than greying out for an unstated reason. -->
+              <!-- THE TIME. To the second on a rung finer than a minute. The
+                   answer is the last bar AT OR BEFORE this time on the chosen
+                   day, never a later one, and a row whose bar is stamped
+                   earlier than the time asked says by how much. -->
               <label class="tctl">
                 <span>Time</span>
-                <select
+                <input
                   class="pill"
+                  type="time"
                   bind:value={time}
-                  disabled={!day || times.length < 2}
+                  step={barSeconds !== null && barSeconds < 60 ? 1 : 60}
+                  disabled={!timeCapable}
                   title={!day
-                    ? 'Choose a date first — a time with no date is a minute of nothing.'
-                    : timesWhy
-                      ? times.length === 0
-                        ? `No minute can be offered — every series in view failed to read: ${timesWhy}`
-                        : `${timesFailed} of ${timesAsked} series in view could not be read, so this list may be short a minute they are stamped with: ${timesWhy}`
-                      : times.length < 2
-                        ? `At ${timeframe} a day holds ${times.length === 1 ? 'one bar' : 'no bars'}, so there is no minute to choose between. A finer timeframe puts more bars in the day.`
-                        : 'The bar stamped at this minute. “Close” is the day’s last bar.'}
-                >
-                  <option value="">Close</option>
-                  {#each times as t (t)}<option value={t}>{t}</option>{/each}
-                </select>
+                    ? 'Choose a date first: a time with no date is a minute of nothing.'
+                    : !timeCapable
+                      ? `At ${timeframe} a day holds one bar, so there is no time to choose.`
+                      : `IST. The last bar STAMPED at or before this time on the chosen day; a bar stamped later is never shown. A bar is named by its opening stamp${barSeconds !== null && barSeconds > 1 ? `, so at ${timeframe} its close can be up to one bar later than the time asked, and a row whose bar is stamped earlier says so beside its name` : ''}. Empty is the day’s last bar.`}
+                />
               </label>
               <!-- THE EXPIRY, on the two tabs that have one. Every option is an
                    expiry some contract on this tab actually carries, so the picker
@@ -2026,6 +2144,18 @@
                    holds no contracts at all it says that rather than sitting empty
                    and disabled with nothing to explain it. -->
               {#if hasExpiry}
+                <label class="tctl">
+                  <span>Underlying</span>
+                  <select
+                    class="pill"
+                    bind:value={underlying}
+                    disabled={underlyings.length === 0}
+                    title="Show only this underlying’s contracts. “All” keeps every underlying this tab holds."
+                  >
+                    <option value="">All</option>
+                    {#each underlyings as u (u)}<option value={u}>{u}</option>{/each}
+                  </select>
+                </label>
                 <label class="tctl">
                   <span>Expiry</span>
                   <select
@@ -2048,6 +2178,19 @@
                   {#each segments as s (s)}<option value={s}>{s}</option>{/each}
                 </select>
               </label>
+              {#if hasExpiry}
+                <!-- WHICH SPOT (D-2807, D-3328). The underlying's close at the
+                     bar's OWN second is the default. The other choice is the
+                     last spot at or before it, and a cell filled that way
+                     shows the spot's age. Never a later spot. -->
+                <label class="tctl">
+                  <span>Spot</span>
+                  <select class="pill" bind:value={spotAsof}>
+                    <option value="exact">At the bar’s own instant</option>
+                    <option value="prev">Last at or before it</option>
+                  </select>
+                </label>
+              {/if}
               <label class="tctl">
                 <span>Timeframe</span>
                 <select class="pill" bind:value={timeframe}>
@@ -2167,14 +2310,15 @@
                     title={c.src === null
                       ? c.why
                       : sortableCol(c)
-                        ? `Sort by ${c.h}`
+                        ? `Sort by ${headOf(c)}. This is the last bar’s own figure at ${timeframe || 'the chosen timeframe'}, not the day’s.`
                         : `Sorting by ${c.h} needs a price for every matching row, and this view holds ${totalRows.toLocaleString('en-IN')} of them against a budget of ${SORT_BUDGET.toLocaleString('en-IN')}. Narrow the segment, or sort by Name, which needs no price.`}
                     ><button
                       type="button"
                       class="sortbtn"
                       disabled={!sortableCol(c)}
                       onclick={() => toggleSort(c.src)}
-                      >{c.h}{#if c.src === null}<span class="nosrc" aria-hidden="true">*</span
+                      >{c.h}{#if c.bar}<small class="hbar">last bar ({timeframe})</small
+                        >{/if}{#if c.src === null}<span class="nosrc" aria-hidden="true">*</span
                         >{/if}{#if sortKey !== '' && sortKey === c.src}<span
                           class="sortmark"
                           aria-hidden="true">{sortDir === 'asc' ? '▲' : '▼'}</span
@@ -2211,7 +2355,9 @@
                           onchange={() => togglePick(key)}
                         />
                       </td>
-                      <th scope="row" class="nm">{labelOf(key)}</th>
+                      <th scope="row" class="nm"
+                        >{labelOf(key)}{@render marks(key)}</th
+                      >
                     {:else}
                       {@const cell = cellOf(q, c)}
                       <td
@@ -2221,7 +2367,10 @@
                         class:dim={cell.text === '—' || cell.pending}
                         title={cell.why ?? undefined}
                       >
-                        {cell.pending ? '·' : cell.text}
+                        {cell.pending ? '·' : cell.text}{#if cell.mark}<span
+                            class="lag"
+                            title={cell.markWhy ?? undefined}>{cell.mark}</span
+                          >{/if}
                       </td>
                     {/if}
                   {/each}
@@ -2304,6 +2453,54 @@
         {#if columns.some((c) => c.src === null)}
           <span><span class="nosrc" aria-hidden="true">*</span> no source in a bar store</span>
         {/if}
+        <!-- THE FAN-OUT, COUNTED (DB-G86, RA-143). One seek per series on
+             screen is what a screen costs; this is the number, and the most
+             this page ever held in flight against its cap. -->
+        <span
+          title="Every request this page makes goes through one pool: one /bars/window.json seek per series on screen, one /spot.json per underlying and month, one /aliases.json per load."
+        >
+          {sentNow.toLocaleString('en-IN')} requests sent by this page so far · at most {peakNow} in
+          flight (cap {traffic.cap})
+        </span>
+        {#if stripWhy}
+          <span class="warn" title={stripWhy}>
+            The index strip is in name order: /aliases.json could not be read.
+          </span>
+        {/if}
+        {#if unranked.count > 0}
+          <!-- WHAT THE LIT FILTER COULD NOT RANK, COUNTED. A landed quote with
+               nothing in the ranked field is not a gainer or a loser; a chip
+               leaves it out and the Stocks switch lists it last. -->
+          <span class="warn">
+            {unranked.count.toLocaleString('en-IN')} matching
+            {unranked.count === 1 ? 'row has' : 'rows have'} no figure to rank by
+            {#if unranked.dropped}
+              and {unranked.count === 1 ? 'is' : 'are'} left out by {activeChip}; clear the chip to
+              see {unranked.count === 1 ? 'it' : 'them'} and the reason on each dash
+            {:else}
+              and {unranked.count === 1 ? 'is' : 'are'} listed after the {mover}; each dash carries
+              its reason
+            {/if}
+          </span>
+        {/if}
+        {#if unplaced.count > 0}
+          <span class="warn" title={unplaced.sample.join(', ')}>
+            {unplaced.count.toLocaleString('en-IN')} census
+            {unplaced.count === 1 ? 'key is' : 'keys are'} of a segment or kind no tab lists: {unplaced.sample.join(
+              ', '
+            )}{unplaced.count > unplaced.sample.length ? ', …' : ''}
+          </span>
+        {/if}
+        {#if unparsed.count > 0}
+          <span class="warn" title={unparsed.sample.join(', ')}>
+            {unparsed.count.toLocaleString('en-IN')} census
+            {unparsed.count === 1 ? 'key' : 'keys'} would not parse and
+            {unparsed.count === 1 ? 'is' : 'are'} in no tab: {unparsed.sample.join(', ')}{unparsed.count >
+            unparsed.sample.length
+              ? ', …'
+              : ''}
+          </span>
+        {/if}
       </footer>
     </div>
   </div>
@@ -2374,7 +2571,11 @@
     position: absolute;
     inset: 0;
     display: grid;
-    grid-template-rows: var(--h-bar) var(--h-strip) 1fr;
+    /* FOUR ROWS FOR FOUR CHILDREN: the bar, the strip, the strip's handle and
+       the body. There were three, so the handle took the `1fr` and the body
+       an implicit `auto` row: on a tab with nothing to list the handle
+       stretched to fill the window and pushed the tabs to the bottom. */
+    grid-template-rows: var(--h-bar) var(--h-strip) auto minmax(0, 1fr);
     background: var(--ground);
     color: var(--ink);
     font:
@@ -3509,6 +3710,55 @@
   .bbar code {
     color: var(--ink);
   }
+  .bbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 44px;
+    row-gap: 4px;
+  }
+  /* A WARNING IN THE FOOTER AND A MARK ON A ROW. Amber, this page's own value:
+     the source terminal never says a figure is old, so there is nothing to
+     sample. It sits between `--dim` and `--down`: a caution, not a loss. */
+  .warn,
+  .stale {
+    color: #d9a441;
+  }
+  .stale,
+  .lag {
+    margin-left: 6px;
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 14px;
+    white-space: nowrap;
+    cursor: help;
+  }
+  .lag {
+    color: var(--dim);
+  }
+  /* The second line of a bar column's header: whose change or volume it is. */
+  .hbar {
+    display: block;
+    color: var(--dim);
+    font-size: 9px;
+    font-weight: 400;
+    line-height: 11px;
+    white-space: nowrap;
+  }
+  /* The Date and Time controls are native inputs wearing the pill: they carry
+     their own picker glyph, so the select's chevron is not drawn on them. */
+  input.pill {
+    background-image: none;
+    padding-right: 10px;
+    color-scheme: dark;
+    font-variant-numeric: tabular-nums;
+  }
+  input.pill:disabled {
+    color: var(--faint);
+    cursor: not-allowed;
+  }
 
   /* ---- narrow windows ---------------------------------------------------
      THERE IS NO BREAKPOINT, AND THE ONE THAT WAS HERE DID NOTHING.
@@ -3529,4 +3779,12 @@
      there is no `prefers-reduced-motion` block to write: a terminal that
      animates a number invites a reader to believe it just changed, and every
      number here is a bar that was filed months ago. */
+  .tcensus {
+    margin: 0 0 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--down);
+    border-radius: 6px;
+    color: var(--down);
+    font-size: 13px;
+  }
 </style>

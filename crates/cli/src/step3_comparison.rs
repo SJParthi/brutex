@@ -507,8 +507,8 @@ fn read_populations(
 ) -> StageProbe<Vec<PopulationFact>> {
     let expected = labeled_ids("population", &request.population_ids);
     let primary = PopulationLedger::receipt_v4_path(root);
-    if !primary.exists() {
-        return StageProbe::unmeasured(expected, format!("{} is absent", primary.display()));
+    if let Some(probe) = absent_or_uninspectable(&primary, &expected) {
+        return probe;
     }
     let ledger = match PopulationLedger::open_read_bounded(root, bounds.max_file_bytes) {
         Ok(value) => value,
@@ -581,8 +581,8 @@ fn read_admissions(
 ) -> StageProbe<Vec<AdmissionFact>> {
     let expected = labeled_ids("population", &request.population_ids);
     let primary = AdmissionAuthorityLedger::completion_path(root);
-    if !primary.exists() {
-        return StageProbe::unmeasured(expected, format!("{} is absent", primary.display()));
+    if let Some(probe) = absent_or_uninspectable(&primary, &expected) {
+        return probe;
     }
     let ledger = match AdmissionAuthorityLedger::open_read_bounded(root, bounds.max_file_bytes) {
         Ok(value) => value,
@@ -668,14 +668,11 @@ fn read_execution(
 ) -> StageProbe<Vec<ExecutionFact>> {
     let expected = labeled_ids("population", &request.population_ids);
     let paths = execution_paths(root);
-    if !ExecutionDispositionLedgerV2::completion_path(root).exists() {
-        return StageProbe::unmeasured(
-            expected,
-            format!(
-                "{} is absent",
-                ExecutionDispositionLedgerV2::completion_path(root).display()
-            ),
-        );
+    if let Some(probe) = absent_or_uninspectable(
+        &ExecutionDispositionLedgerV2::completion_path(root),
+        &expected,
+    ) {
+        return probe;
     }
     if let Err(why) = preflight_files(&paths, bounds.max_file_bytes) {
         return StageProbe::refused(expected, why);
@@ -762,8 +759,8 @@ fn read_stored(
 ) -> StageProbe<Vec<StoredFact>> {
     let expected = labeled_ids("population", &request.population_ids);
     let primary = StoredDataCompletenessLedgerV1::path(root);
-    if !primary.exists() {
-        return StageProbe::unmeasured(expected, format!("{} is absent", primary.display()));
+    if let Some(probe) = absent_or_uninspectable(&primary, &expected) {
+        return probe;
     }
     if let Err(why) = preflight_files(std::slice::from_ref(&primary), bounds.max_file_bytes) {
         return StageProbe::refused(expected, why);
@@ -860,8 +857,8 @@ fn read_selections(
 ) -> StageProbe<Vec<SelectionFact>> {
     let expected = labeled_ids("selection", &request.selection_ids);
     let primary = SelectionLedgerV4::path(root);
-    if !primary.exists() {
-        return StageProbe::unmeasured(expected, format!("{} is absent", primary.display()));
+    if let Some(probe) = absent_or_uninspectable(&primary, &expected) {
+        return probe;
     }
     if let Err(why) = preflight_files(std::slice::from_ref(&primary), bounds.max_file_bytes) {
         return StageProbe::refused(expected, why);
@@ -944,8 +941,8 @@ fn read_global_replay(
 ) -> StageProbe<crate::global_replay_v2::PreparedGlobalReplayV2> {
     let expected = vec![labeled_id("completion", request.replay_completion_id)];
     let primary = GlobalReplayLedgerV2::completion_path(root);
-    if !primary.exists() {
-        return StageProbe::unmeasured(expected, format!("{} is absent", primary.display()));
+    if let Some(probe) = absent_or_uninspectable(&primary, &expected) {
+        return probe;
     }
     if let Err(why) = preflight_files(&global_replay_paths(root), bounds.max_file_bytes) {
         return StageProbe::refused(expected, why);
@@ -1483,6 +1480,29 @@ fn sum_or_refuse<T>(
     name: &str,
 ) -> Result<u64, String> {
     sum_u64(facts.iter().map(value), name)
+}
+
+/// `Some` stage answer when `path` is absent (unmeasured) or cannot be
+/// inspected (refused); `None` when it is there to be opened.
+///
+/// `Path::exists` folded every stat error into "absent", so a symlink loop or
+/// an EIO on a primary ledger was reported as an unmeasured stage rather than
+/// refused. audit-20261003 errpaths-2, D-1561.
+fn absent_or_uninspectable<T>(path: &Path, expected: &[String]) -> Option<StageProbe<T>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => None,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Some(StageProbe::unmeasured(
+            expected.to_vec(),
+            format!("{} is absent", path.display()),
+        )),
+        Err(why) => Some(StageProbe::refused(
+            expected.to_vec(),
+            format!(
+                "{} could not be inspected: {why}. It is not treated as absent",
+                path.display()
+            ),
+        )),
+    }
 }
 
 fn labeled_ids<const N: usize>(label: &str, ids: &[[u8; 32]; N]) -> Vec<String> {
@@ -2149,5 +2169,66 @@ mod tests {
         assert!(Step3ReadBoundsV1::new(1, 7, 16, 1).is_err());
         assert!(Step3ReadBoundsV1::new(1, 8, 15, 1).is_err());
         assert!(Step3ReadBoundsV1::new(1, 8, 16, 0).is_err());
+    }
+
+    /// audit-20261003 errpaths-2 (step3 half): a primary ledger path that
+    /// cannot be inspected is refused by name, not reported as an absent,
+    /// unmeasured stage. A self-referencing symlink makes `Path::exists`
+    /// return false for a stat failure that is not an absence.
+    #[cfg(unix)]
+    #[test]
+    fn an_uninspectable_primary_path_is_refused_not_reported_absent() {
+        fn shape<T>(probe: StageProbe<T>) -> (Step3StatusV1, String) {
+            (probe.status, probe.detail)
+        }
+        fn paths(root: &Path) -> [PathBuf; 6] {
+            [
+                PopulationLedger::receipt_v4_path(root),
+                AdmissionAuthorityLedger::completion_path(root),
+                ExecutionDispositionLedgerV2::completion_path(root),
+                StoredDataCompletenessLedgerV1::path(root),
+                SelectionLedgerV4::path(root),
+                GlobalReplayLedgerV2::completion_path(root),
+            ]
+        }
+        fn statuses(root: &Path) -> [(Step3StatusV1, String); 6] {
+            let request = request();
+            [
+                shape(read_populations(root, &request, bounds())),
+                shape(read_admissions(root, &request, bounds())),
+                shape(read_execution(root, &request, bounds())),
+                shape(read_stored(root, &request, bounds())),
+                shape(read_selections(root, &request, bounds())),
+                shape(read_global_replay(root, &request, bounds())),
+            ]
+        }
+        // A symlink loop: `exists()` is false, and the path is not absent.
+        let looped = temp_root("uninspectable-loop");
+        for path in &paths(&looped) {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+            std::os::unix::fs::symlink(path, path).expect("a self-referencing symlink");
+        }
+        for (index, (status, detail)) in statuses(&looped).iter().enumerate() {
+            assert_eq!(*status, Step3StatusV1::Refused, "stage {index}: {detail}");
+            assert!(!detail.contains("is absent"), "stage {index}: {detail}");
+        }
+        let _ = std::fs::remove_dir_all(&looped);
+        // A parent that is a regular file: the stat itself fails (ENOTDIR).
+        let blocked = temp_root("uninspectable-notdir");
+        for path in &paths(&blocked) {
+            let parent = path.parent().expect("parent");
+            std::fs::create_dir_all(parent.parent().expect("grandparent")).expect("grandparent");
+            if !parent.is_file() {
+                std::fs::write(parent, b"not a directory").expect("a file where a directory goes");
+            }
+        }
+        for (index, (status, detail)) in statuses(&blocked).iter().enumerate() {
+            assert_eq!(*status, Step3StatusV1::Refused, "stage {index}: {detail}");
+            assert!(
+                detail.contains("could not be inspected"),
+                "stage {index}: {detail}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&blocked);
     }
 }

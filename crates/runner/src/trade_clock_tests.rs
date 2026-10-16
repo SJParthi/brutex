@@ -161,10 +161,12 @@ fn horizon_lookup_requires_positive_cadence_exact_actual_timestamp_and_present_i
     let bars = [bar(stamp(1, 600)), bar(stamp(1, 601)), bar(stamp(1, 602))];
     let mut facts = SliceFacts {
         exits: Vec::new(),
-        step_micros: MINUTE,
+        cadence: super::Cadence::Fixed(MINUTE),
         accepted: None,
         refused_prefix: Vec::new(),
         broken_prefix: Vec::new(),
+        next_refused: Vec::new(),
+        next_broken: Vec::new(),
         at_timestamp: [(stamp(1, 602), 2)].into_iter().collect(),
     };
     assert_eq!(horizon_bar(&bars, 0, 2, MINUTE, &facts), Some(2));

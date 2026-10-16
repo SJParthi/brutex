@@ -66,10 +66,13 @@
 //!
 //! # It halts. It never defaults
 //!
-//! Invariant P-07. A missing file, an unreadable one, a missing key, a missing
-//! vendor table, an empty segment, a segment holding a path separator, or
-//! anything shaped like a pasted secret is a refusal that names what was wrong
-//! and where. There is no default `org`, no default `env`, no "assume the usual
+//! Invariant P-07. A missing file, an unreadable one, a missing key, an empty
+//! segment, a segment holding a path separator, or anything shaped like a
+//! pasted secret is a refusal at load that names what was wrong and where. A
+//! missing vendor TABLE is not refused at load — a config naming one broker
+//! must still serve that broker — and is refused by name, as
+//! [`ConfigError::MissingVendor`], when [`CredentialConfig::fields`] or
+//! [`CredentialConfig::path_for`] asks for that vendor. There is no default `org`, no default `env`, no "assume the usual
 //! region" and no skip-the-line-we-did-not-understand — `CLAUDE.md` §4 bans a
 //! fallback that hides a failure, and a credential path resolved by guesswork
 //! points a pull at somebody else's account.
@@ -190,7 +193,7 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// arm no test could reach. The assertion below keeps the two honest, and
 /// `pull::unit::the_configuration_file_is_bounded_before_it_is_read` pins the
 /// value itself so the expression cannot drift.
-const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
+pub(crate) const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
 
 const _: () = assert!(MAX_FILE_BYTES == 65_536 && MAX_FILE_BYTES_LEN == 65_536);
 
@@ -436,6 +439,14 @@ pub enum ConfigError {
         /// The number of bytes read before the reader stopped.
         at_least: u64,
     },
+    /// The file opens with a byte-order mark, U+FEFF.
+    ///
+    /// Refused by name. It used to fall through to line 1's parse and come
+    /// back as an unknown key or an unparseable line, which is loud but sends
+    /// the operator looking for a typo they cannot see (CE-77, D-1780). It is
+    /// not stripped: §4 bans a fallback that hides a failure, and an editor
+    /// that writes one is worth knowing about.
+    ByteOrderMark,
     /// A line is longer than [`MAX_LINE_BYTES`].
     LineTooLong {
         /// One-based line number.
@@ -565,6 +576,10 @@ impl fmt::Display for ConfigError {
             Self::LineTooLong { line, len } => {
                 write!(f, "line {line} is {len} bytes, max {MAX_LINE_BYTES}")
             }
+            Self::ByteOrderMark => write!(
+                f,
+                "the file starts with a byte-order mark (U+FEFF); save it as UTF-8 without one"
+            ),
             Self::Unparseable { line } => write!(f, "line {line} is not a line this reader knows"),
             Self::UnknownTable { line } => {
                 write!(f, "line {line} is not a [vendor.<name>] table header")
@@ -748,6 +763,19 @@ impl CredentialConfig {
     /// [`ConfigError::TooLarge`] if it holds more than [`MAX_FILE_BYTES`].
     /// Otherwise whatever [`CredentialConfig::parse`] refuses.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        // EVERY OUTCOME IS NOTED, NOT ONLY THE ONES THAT REACHED `parse`. The
+        // read refusals below used to return through `?` before `note_load`
+        // ran, so the absent file — P-07's headline case — left no line at
+        // all, while `note_load`'s own doc promised the log could tell "the
+        // file is missing" from "the file names no vendor". D-1393.
+        let loaded = Self::read_and_parse(path);
+        note_load(path, &loaded);
+        loaded
+    }
+
+    /// [`CredentialConfig::load`] without the telemetry line, so every early
+    /// return here is still noted by the one caller.
+    fn read_and_parse(path: &Path) -> Result<Self, ConfigError> {
         // THE BOUND IS ON WHAT WAS READ, not on what `stat` claimed is there.
         // See `MAX_FILE_BYTES` and D-0036 for the two ways the old check was
         // not a check at all.
@@ -769,9 +797,7 @@ impl CredentialConfig {
             path: path.to_path_buf(),
             kind: std::io::ErrorKind::InvalidData,
         })?;
-        let parsed = Self::parse(&text);
-        note_load(path, &parsed);
-        parsed
+        Self::parse(&text)
     }
 
     /// Validates configuration text that is already in memory.
@@ -818,6 +844,9 @@ impl CredentialConfig {
         let mut vendors: Vec<VendorPaths> = Vec::with_capacity(Vendor::ALL.len());
         let mut current: Option<Pending> = None;
 
+        if text.starts_with('\u{feff}') {
+            return Err(ConfigError::ByteOrderMark);
+        }
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             if raw.len() > MAX_LINE_BYTES {
@@ -959,16 +988,14 @@ impl CredentialConfig {
     /// that does not exist, and "parameter not found" is a much worse
     /// diagnosis of a typo than "you did not configure that".
     pub fn path_for(&self, vendor: Vendor, field: &str) -> Result<CredentialPath<'_>, ConfigError> {
-        // `and_then` rather than `?` on the vendor lookup, on purpose.
-        // [`CredentialConfig::parse`] refuses a configuration missing any
-        // vendor, so the `None` arm here is unreachable by any input — and a
-        // `?` would put its short-circuit in *this* function, where the
-        // coverage gate would count a branch no test could ever enter and the
-        // whole crate would sit at 99%. Written this way the unreachable arm
-        // lives in `Result::and_then`, which is not this repository's code to
-        // measure. The refusal is still returned, and it is still a refusal
-        // rather than an empty slice: an empty field list would read as "this
-        // vendor needs no credential".
+        // THE `MissingVendor` ARM IS REACHABLE, and is reached by any config
+        // that names fewer vendors than `Vendor::ALL`. This comment used to
+        // say `parse` refuses such a config and so the arm was "unreachable by
+        // any input"; `parse` stopped refusing an absent vendor, and the
+        // refusal moved here and to `fields`, where the absence costs one feed
+        // rather than all of them. `pull::unit` drives it. D-1394. It is still
+        // a refusal rather than an empty slice: an empty field list would read
+        // as "this vendor needs no credential".
         self.vendors
             .iter()
             .find(|v| v.vendor == vendor)
@@ -1003,11 +1030,16 @@ impl CredentialConfig {
 /// "over it" without trusting a second `stat`.
 ///
 /// The two fallible calls are joined with `and_then` and `map` rather than with
-/// `?`, for the reason `CredentialConfig::path_for` gives: their failure arms
-/// then live in `std`, which is not this repository's code to measure, instead
+/// `?`: their failure arms then live in `std`, which is not this repository's code to measure, instead
 /// of being two arms in this function that a test would have to force a
 /// permission error to reach.
-fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+///
+/// **Two callers, one shape.** `crate::ssm::AwsIdentity::from_credentials_file`
+/// reads `~/.aws/credentials` through this too: it sits beside this file on the
+/// same start-up path and was read with an unbounded `read_to_string`, so the
+/// FIFO hang and the device OOM this function removes were still reachable one
+/// file over. P1-19-03, D-2326.
+pub(crate) fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !std::fs::metadata(path)?.is_file() {
         return Ok(None);
     }

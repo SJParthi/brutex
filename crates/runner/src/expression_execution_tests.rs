@@ -4,7 +4,7 @@ use super::*;
 use crate::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
     RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-    printed_ohlcv_cost_model_id_v1,
+    printed_ohlcv_cost_model_id_v2,
 };
 use crate::identity::{Direction, Params};
 use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -35,7 +35,7 @@ fn policy(side: crate::excursion::Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
         32,
         ExitGridSelectorV1::PessimisticTotal,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v2(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,
@@ -122,6 +122,53 @@ fn conjunction_uses_identical_exact_grid_and_every_coordinate_replays() -> Resul
         assert!(admitted > 0);
         assert_eq!(evaluated.grid().cells.len() as u64, resolved.cell_count());
     }
+    Ok(())
+}
+
+/// W3-runner2-0 (D-0741): programs priced and coordinates materialized over
+/// one attestation derive the slice facts only in that attestation.
+#[test]
+fn programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once() -> Result<(), String>
+{
+    let (bars, column) = fixture()?;
+    let key = key()?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let before = crate::trade::slice_facts_derived_on_this_thread();
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let attested_at = crate::trade::slice_facts_derived_on_this_thread();
+    let mut coordinates = 0_u64;
+    for text in ["30 & 44", "30 | 44", "30 & !44"] {
+        let program = expression(text)?;
+        let run = ExpressionExecutionRunV1::new(
+            &run(&key, &bars, &program, Direction::Long),
+            &program,
+            &bars,
+            None,
+        )?;
+        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let validated = resolved.validate_expression_evaluation(&evaluated)?;
+        for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
+            let rows =
+                resolved.materialize_expression_coordinate(&attested, &validated, ordinal)?;
+            assert_eq!(u64::try_from(rows.len()).map_err(display)?, cell.trades);
+            coordinates += 1;
+        }
+    }
+    assert_eq!(coordinates, 30);
+    assert_eq!(
+        crate::trade::slice_facts_derived_on_this_thread() - attested_at,
+        0,
+        "{coordinates} coordinates over three programs must not re-derive the slice facts"
+    );
+    assert_eq!(attested_at - before, 1, "attestation derives once");
     Ok(())
 }
 

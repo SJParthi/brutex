@@ -1,8 +1,10 @@
 // THE ROUNDING DIVERGENCE BETWEEN THE BROWSER AND THE ENGINE.
 //
 // `node --test web/tests/` — the runner is node's own, so this costs no
-// dependency and no toolchain. It drives the same module
-// `routes/db/+page.svelte` imports; nothing here is a copy of the page's
+// dependency and no toolchain. It drives the same module the /db page imports
+// — since WP-00 split `routes/db/+page.svelte`, that is the bar grid
+// (`routes/db/DbBarsGrid.svelte`) and the coverage grid
+// (`routes/db/DbCoverageGrid.svelte`); nothing here is a copy of the page's
 // arithmetic.
 //
 // The first three cases are the engine's own test, transcribed:

@@ -67,10 +67,11 @@ fn pinned() -> Tolerance {
 
 fn evaluator(tolerance: Tolerance, calendar: Calendar) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
-            fib: tolerance,
-            pivot: vocab::tolerance::pinned_pivot().expect("pivot tolerance"),
-        },
+        Widths::new(
+            tolerance,
+            vocab::tolerance::pinned_pivot().expect("pivot tolerance"),
+        )
+        .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         calendar,
@@ -304,18 +305,10 @@ fn zero_range_is_unknown_until_positive_completed_reference_exists() {
 }
 
 #[test]
-fn wrong_tolerance_family_is_unknown_but_zero_width_has_exact_known_answers() {
-    let wrong = vocab::tolerance::pinned_pivot().expect("valid wrong-family width");
-    let mut actual = seeded(wrong, 112_345, 100_000, 105_000);
-    let (truth, known) = fold(&mut actual, &candle(30_005, 0, 105_000, 105_000, 105_000));
-    assert_answers(
-        truth,
-        known,
-        105_000,
-        Some((112_345, 100_000)),
-        Some((112_345, 100_000)),
-        wrong,
-    );
+fn wrong_tolerance_family_is_refused_but_zero_width_has_exact_known_answers() {
+    // A wrong family cannot reach an evaluator at all (D-1553); the degraded
+    // path is proved inside the crate.
+    refused_widths();
 
     let zero = Tolerance::from_milli_on(Base::SessionRange, 0).expect("zero width is valid");
     let seed = seeded(zero, 112_345, 100_000, 105_000);
@@ -444,4 +437,34 @@ fn public_column_retains_known_false_fibonacci_answers_for_negated_search() {
         verified, 74,
         "every admitted bar after the fifth completed session is checked"
     );
+}
+
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
+    }
 }

@@ -30,6 +30,53 @@
 //! records this commit publishes: `store::write::the_committed_length_is_exactly_durable_through`
 //! asserts the file's length against it after every commit of a ladder.
 //!
+//! # Inside a durable batch, the batch is the unit (WP-16, DB-N25, D-3353)
+//!
+//! The table above is the default, and every writer gets it unless it asks
+//! otherwise. A writer that runs inside a [`DurableBatch`] (the GDFL import's
+//! day, `pull::gdfl_import`) gets this instead:
+//!
+//! * the writes are the same writes, in the same order (records, checksums,
+//!   index, header slot), so a process killed at any point leaves every month
+//!   at its last commit or its new one, exactly as above: what a killed
+//!   process wrote is in the kernel, in the order it was written;
+//! * no flush is issued per append, per new name or per sidecar record. With
+//!   [`BatchFlush::OncePerDevice`] every file is opened `O_SYNC`, so each
+//!   write is on the device when it returns, and the batch ends with one
+//!   `F_FULLFSYNC` per device (and one per directory that gained a name);
+//!   with [`BatchFlush::EveryFile`] the batch ends with one `F_FULLFSYNC` of
+//!   every file and directory it wrote;
+//! * so nothing is durable until [`DurableBatch::make_durable`] returns `Ok`,
+//!   and the caller's unit (the import's day) is not closed until then, so a
+//!   unit cut off before it is read again;
+//! * a unit read again finds months an earlier process wrote and never made
+//!   durable. The store answers them `AlreadyPresent` from the kernel's
+//!   cache and writes nothing, so nothing of theirs would be in the new batch:
+//!   the caller names each one with [`DurableBatch::confirm_month`], and the
+//!   batch then flushes every file of that month for itself, and every
+//!   directory down to it, whatever its kind.
+//!
+//! **What a power loss inside an open batch can leave, said rather than
+//! implied away.** Between a batch's first write and its `make_durable` no
+//! barrier orders a month's records before its header slot on the drive, so a
+//! power cut (not a killed process) can leave a month the batch appended to
+//! with its slot on the platter and its records, or its checksums, not. Such
+//! a month is not served: its length, its header and its block checksums
+//! refuse it by name, and it stays refused until it is repaired; the bars it
+//! held before the batch are behind that refusal too. A writer that cannot
+//! accept that asks for no batch and keeps the table above.
+//!
+//! `F_FULLFSYNC` is what [`File::sync_all`] and [`File::sync_data`] issue on
+//! macOS (`std` 1.97.1, `sys/fs/unix.rs:1397` and `:1411`); fcntl(2) says of
+//! it: "As this drains the entire queue of the device and acts as a barrier,
+//! data that had been fsync'd on the same device before is guaranteed to be
+//! persisted when this call returns." `O_SYNC` is the macOS SDK's
+//! `sys/_types/_o_sync.h:29`, "synch I/O file integrity". That an `O_SYNC`
+//! write counts as fsync'd for that guarantee is the POSIX meaning of the
+//! flag (synchronized I/O file integrity completion); it is UNVERIFIED
+//! against a power cut on the operator's drive, and [`BatchFlush::EveryFile`]
+//! is the batch that does not rest on it.
+//!
 //! # No writable mapping, and why the ban is load-bearing here
 //!
 //! `CLAUDE.md` §4 bans a writable memory mapping and this module is where that
@@ -64,12 +111,15 @@
 //! * A network filesystem whose lock is a fiction. `flock` over NFS is
 //!   emulated, and over some mounts it is a no-op that reports success.
 //!   `docs/02-store-format.md` §9 already says to keep the store on local disk.
-//! * A symlink at any path component. [`crate::path::StorePath`] guarantees a
-//!   **lexical** property only, and this module resolves nothing: it opens the
-//!   rendered path with an ordinary `open`, so `bars/groww` linked at
-//!   `bars/dhan` sends one vendor's writes into another's file with the lock
-//!   held on the wrong month. Closing it needs `openat` with `O_NOFOLLOW` per
-//!   component.
+//! * A symlink swapped into a DIRECTORY component between the writer's walk
+//!   and its open. [`crate::path::StorePath`] guarantees a **lexical**
+//!   property only, so `bars/groww` linked at `bars/dhan` would send one
+//!   vendor's writes into another's file. The writer refuses every link it
+//!   finds below the root by `symlink_metadata` before creating anything, and
+//!   opens the month file, its lock and its sidecar with `O_NOFOLLOW`, so a
+//!   leaf link is refused at the open itself (CE-62, D-2686). A directory
+//!   link placed after the walk is still followed: closing that window needs
+//!   `openat` per component, which `std` does not offer without `unsafe`.
 //! * A crash. The lock is released by the kernel when the process dies, which
 //!   is the property a lock *file* created with `O_EXCL` would not have — that
 //!   was the alternative, and it was rejected because a crashed writer would
@@ -140,12 +190,14 @@
 //! passing a block because a mismatch *might* be this case is still refused,
 //! as `CLAUDE.md` §4 requires.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
+use std::mem::Discriminant;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::format::{
     Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
@@ -174,10 +226,12 @@ const MAX_ROW_LEN: usize = {
 
 /// The three widths, pinned so a format change is seen here.
 const _: () = assert!(MAX_ROW_LEN == 80);
+
 use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
-use crate::path::{FileKind, StorePath};
+use crate::path::{FileKind, StorePath, YearMonth};
+use crate::time_index::{Entry, Fault, Geometry, Held, Why, below_threshold};
 
 /// The largest header region the format family can declare, as a length.
 ///
@@ -211,9 +265,102 @@ const _: () = assert!(REGION_LEN_U64 == 32_768);
 /// `u64::MAX` at a one-record block, and `Layout::offset_of` refuses that as
 /// [`FormatError::OffsetOverflow`] long before a read gets here.
 ///
-/// The alternative was an `Option<u64>` behind a lock, which is a lock on the
-/// read path to express a value that already has a spare bit pattern.
+/// It still names "nothing cached" inside [`VerifiedBlock`], which since
+/// D-1433 sits behind a lock for a different reason: the lock guards the
+/// verified BYTES, and a spare bit pattern is still the cheapest way to say
+/// "none of them yet".
 const NO_BLOCK: u64 = u64::MAX;
+
+/// The verified-block buffer's capacity, in bytes — D-1433.
+///
+/// The format's block lengths are 4,088
+/// (bars), 4,080 (overlay) and 4,080 (greeks), and the assertion below walks
+/// every geometry a [`BarFile`] can resolve, so a new row with a wider block
+/// fails to compile here instead of being refused at its first read.
+///
+/// It also sizes the one stack buffer the tail block's records past the commit
+/// are read into (D-0914), so a cold verify allocates nothing on the heap: the
+/// covered range goes into the handle's cached buffer and the past-the-commit
+/// bytes onto the stack. Pinned to the bar geometry's 4,088-byte block (56 ×
+/// 73), the widest the three geometries declare, so `slice_of` refuses a
+/// covered range one byte past it by name.
+const MAX_BLOCK_LEN: usize = 4_088;
+
+/// Pinned to the bar geometry's block, so a format change is seen here.
+const _: () = assert!(MAX_BLOCK_LEN as u64 == crate::format::BLOCK_LEN);
+const _: () = assert!(MAX_BLOCK_LEN == 4_088);
+
+const _: () = {
+    let mut rest = Layout::KNOWN;
+    while let [layout, tail @ ..] = rest {
+        assert!(
+            layout.block_len() <= MAX_BLOCK_LEN as u64,
+            "a block wider than MAX_BLOCK_LEN cannot be verified into the \
+             handle's buffer; widen MAX_BLOCK_LEN in crates/store/src/file.rs"
+        );
+        rest = tail;
+    }
+};
+
+/// The one checksum block this handle verified, and the bytes it verified —
+/// D-1433.
+///
+/// **The bytes, not only the index.** Until D-1433 the handle remembered the
+/// block INDEX and re-read each later record from the disk, so every read after
+/// the first in a block served bytes nobody had checksummed: a record damaged
+/// after its block was verified was served as a plausible wrong price
+/// (ET-bars-candles-store-0). Serving from this buffer means the bytes returned
+/// are the bytes summed, and a warm read costs no syscall at all.
+///
+/// Keyed by `(block, n_valid)` because the tail block's covered range is a
+/// function of the counter (`Layout::covered_byte_range`): bytes verified at
+/// three records do not hold a fourth, and an append must not be answered from
+/// them. [`BarFile::seal_committed`] also clears it, so the two keys agree.
+///
+/// `Debug` is written by hand so a `BarFile` in a panic message or a log
+/// names the block and its extent rather than dumping 4,088 bytes.
+struct VerifiedBlock {
+    /// The block these bytes are, or [`NO_BLOCK`].
+    block: u64,
+    /// The commit counter the covered range was taken against.
+    n_valid: u64,
+    /// The file offset of `bytes[0]`.
+    start: u64,
+    /// How many leading bytes of `bytes` were read and verified.
+    len: usize,
+    /// The verified block, as read in one `pread`.
+    bytes: [u8; MAX_BLOCK_LEN],
+}
+
+impl VerifiedBlock {
+    /// Nothing verified yet.
+    const EMPTY: Self = Self {
+        block: NO_BLOCK,
+        n_valid: 0,
+        start: 0,
+        len: 0,
+        bytes: [0u8; MAX_BLOCK_LEN],
+    };
+
+    /// The verified bytes of the record at file offset `at`, `width` long, or
+    /// `None` when they are not inside what was verified.
+    fn record(&self, at: u64, width: usize) -> Option<&[u8]> {
+        let from = usize::try_from(at.checked_sub(self.start)?).ok()?;
+        let to = from.checked_add(width)?;
+        self.bytes.get(..self.len)?.get(from..to)
+    }
+}
+
+impl fmt::Debug for VerifiedBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedBlock")
+            .field("block", &self.block)
+            .field("n_valid", &self.n_valid)
+            .field("start", &self.start)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Which syscall refused, so an error names the operation and not only the
 /// path.
@@ -326,12 +473,45 @@ pub enum StoreError {
         /// Which operation refused.
         action: Action,
     },
+    /// A FIFO, a device or a socket sits where a read door expected a regular
+    /// file (directly or through a symlink).
+    ///
+    /// The read door opens with `O_NONBLOCK` and checks the handle with
+    /// `fstat`, so a FIFO is refused at once rather than parking the caller in
+    /// `open(2)` until some writer appears. D-1432, AC-whp-cx-0.
+    NotARegularFile {
+        /// The path the store asked for (not a symlink's target).
+        path: PathBuf,
+        /// Which operation refused.
+        action: Action,
+    },
+    /// The writer met a symbolic link at a path component below the store
+    /// root, or at the month file, its lock or its sidecar.
+    ///
+    /// Vendor-prefix isolation is a LEXICAL property of `StorePath`: a link at
+    /// `bars/groww` naming `bars/dhan` sends one vendor's appends into
+    /// another's month with the lock held on the wrong file. The writer
+    /// therefore refuses every link it meets and names the linked component
+    /// (`docs/02-store-format.md` §9). CE-62, D-2686.
+    Symlinked {
+        /// The component that is a link (not the link's target).
+        path: PathBuf,
+    },
     /// The path is not there. `ENOENT`.
     Missing {
         /// The path that does not exist.
         path: PathBuf,
         /// Which operation refused.
         action: Action,
+    },
+    /// A durability barrier on this month already failed in this process.
+    ///
+    /// Linux marks the pages of a failed `fsync` clean, so a second barrier
+    /// would report success without proving anything reached the device. The
+    /// month takes no further append from this process. D-1907.
+    BarrierFailed {
+        /// The month whose barrier failed.
+        path: PathBuf,
     },
     /// The host refused for a reason this module does not classify.
     ///
@@ -418,8 +598,9 @@ pub enum StoreError {
     /// Carries [`FormatError`], which names which disagreement it was:
     /// [`FormatError::CounterExceedsFile`] for a header claiming more records
     /// than the file can hold, [`FormatError::NoValidHeader`] when every slot
-    /// is damaged, [`FormatError::TimestampsOutOfOrder`] for a batch that does
-    /// not follow what is committed, and so on.
+    /// is damaged, [`FormatError::CounterOverflow`] for a batch the counter
+    /// cannot take, and so on. A batch that overlaps the committed range and
+    /// disagrees with it is [`Self::OverlapDisagrees`] (D-1525).
     Format {
         /// The bar file.
         path: PathBuf,
@@ -550,6 +731,201 @@ pub enum StoreError {
         /// Index within the batch.
         at: u64,
     },
+    /// A batch holding a bar stamped outside the IST month its file's path
+    /// names.
+    ///
+    /// The path is `…/<yyyy-mm>.bin` and the file is append-only and strictly
+    /// increasing, so one bar stamped past the month — or an `i64::MAX`
+    /// sentinel — would refuse every later legitimate bar of that month for
+    /// ever, and one stamped before it would sit in the wrong file. The span
+    /// is [`YearMonth::ist_bounds_micros`], the convention
+    /// `pull::ingest::months_in` assigns months by. D-0915.
+    OutsideMonth {
+        /// Index within the batch.
+        at: u64,
+        /// The timestamp as offered.
+        ts_micros: i64,
+        /// The month the file is named for.
+        month: YearMonth,
+    },
+    /// A batch holding a bar stamped off the grid of the timeframe its file's
+    /// path names — 09:15:30 in a one-minute file.
+    ///
+    /// Intraday rungs are anchored at the 09:15 IST open, as `pull::fold`
+    /// builds them; the daily rung admits any whole second, because vendors
+    /// stamp a daily bar at midnight, the open or the close. D-0915.
+    OffGrid {
+        /// Index within the batch.
+        at: u64,
+        /// The timestamp as offered.
+        ts_micros: i64,
+        /// The file's timeframe, from its header.
+        timeframe_secs: u32,
+    },
+    /// The month's `.tix` time index could not be kept in step with an
+    /// append, for the reason given. Refused before the header slot, so the
+    /// bars it would have described are not committed. D-2329.
+    TimeIndex {
+        /// The `.tix` file.
+        path: PathBuf,
+        /// What went wrong, as `crate::time_index::Why` says it.
+        reason: String,
+    },
+    /// The month's `.srt` sort index could not be written by the rebuild
+    /// door, for the reason given. The bar file is untouched. D-3349.
+    SortIndex {
+        /// The `.srt` file.
+        path: PathBuf,
+        /// What went wrong.
+        reason: String,
+    },
+    /// A bar file whose header region is gone while its checksum sidecar
+    /// proves records were committed. audit-20261003 attackdata-1, D-1520.
+    ///
+    /// The writer door repairs an interrupted `initialise` (a region of
+    /// zeros, or a torn genesis slot) because such a file provably held
+    /// nothing. That proof read only the bar file's own bytes. The sidecar is
+    /// written by an append, after the records and before the header slot, so
+    /// a sidecar with entries beside a region with no committed header is a
+    /// month that HELD bars and was truncated or zeroed. Re-initialising it
+    /// would reopen it empty and let the next append start again at index 0,
+    /// and the lost bars would never be named.
+    CommittedRecordsLost {
+        /// The bar file.
+        path: PathBuf,
+        /// The sidecar whose entries prove the commit.
+        sidecar: PathBuf,
+        /// How many bytes of sealed entries it holds.
+        sidecar_len: u64,
+    },
+    /// A batch overlapping what the month holds, whose overlap is not what the
+    /// month holds. audit-20261003 attackdata-7, D-1525.
+    ///
+    /// This was reported as [`FormatError::TimestampsOutOfOrder`], which is
+    /// what `Header::advance` says about any batch that does not follow the
+    /// tail. A batch reaching this refusal is ordered (`survey` proved that),
+    /// so the real fact is one of the three [`Conflict`]s, and an operator told
+    /// "out of order" is sent to look at the wrong thing.
+    OverlapDisagrees {
+        /// The bar file.
+        path: PathBuf,
+        /// Index within the batch of the first record that disagrees.
+        at: u64,
+        /// The offered stamp for [`Conflict::Restated`] and
+        /// [`Conflict::NotHeld`]; the HELD stamp the batch omits for
+        /// [`Conflict::Skipped`].
+        ts_micros: i64,
+        /// Which disagreement.
+        conflict: Conflict,
+    },
+    /// The month's generation pointer cannot say which generation is served.
+    /// D-3350, WP-13c. See [`crate::generation`].
+    Generation {
+        /// The pointer file.
+        path: PathBuf,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// The writer door was asked to open a month served from a repair
+    /// revision. An append to the original would land where no reader looks,
+    /// so it is refused; the month grows only by a further repair. D-3350.
+    Superseded {
+        /// The original month's bar file.
+        path: PathBuf,
+        /// The revision every reader opens instead.
+        ordinal: u32,
+    },
+    /// The month's provenance sidecar was written for ANOTHER month: the files
+    /// were copied or restored under a different vendor, instrument, contract,
+    /// bar length or month. DB-B65, WP-81.
+    ///
+    /// The bar header's own cross-check is the symbol's hash, which the index,
+    /// every option contract of that underlying and both vendors share, so a
+    /// month copied to a sibling strike opened cleanly and was served as the
+    /// other instrument. The `.prv` header binds itself to the whole store
+    /// path ([`crate::provenance::written_for`]), and every bar door asks it.
+    Misfiled {
+        /// The bar file that was asked for.
+        path: PathBuf,
+        /// The sidecar beside it that names another month.
+        sidecar: PathBuf,
+        /// What is not this month's: `vendor`, `timeframe`, `month` or
+        /// `store path`.
+        field: &'static str,
+    },
+}
+
+/// How an offered overlap disagrees with the records a month holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conflict {
+    /// The month holds a record at this stamp and its bytes differ: the vendor
+    /// restated history.
+    Restated,
+    /// The stamp lies inside the held range and the month holds no record at
+    /// it. Append-only history cannot take a record in the middle.
+    NotHeld,
+    /// The batch runs past a held stamp without offering it.
+    Skipped,
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Restated => "restates the record held at",
+            Self::NotHeld => "is inside the held range at a stamp the month never held:",
+            Self::Skipped => "skips the record held at",
+        })
+    }
+}
+
+/// The [`StoreError::NotARegularFile`] sentence.
+fn write_not_regular(f: &mut fmt::Formatter<'_>, path: &Path, action: Action) -> fmt::Result {
+    write!(
+        f,
+        "{} is not a regular file (a FIFO, device or socket), {action} it",
+        path.display()
+    )
+}
+
+/// The [`StoreError::RaggedTail`] sentence.
+fn write_ragged(f: &mut fmt::Formatter<'_>, path: &Path, len: u64, extra: u64) -> fmt::Result {
+    write!(
+        f,
+        "{} is {len} bytes, {extra} past the last whole record",
+        path.display()
+    )
+}
+
+/// The [`StoreError::OverlapDisagrees`] sentence.
+fn write_overlap(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    at: u64,
+    ts_micros: i64,
+    conflict: Conflict,
+) -> fmt::Result {
+    write!(
+        f,
+        "{}: batch record {at} {conflict} {ts_micros}",
+        path.display()
+    )
+}
+
+/// The [`StoreError::CommittedRecordsLost`] sentence.
+fn write_committed_records_lost(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    sidecar: &Path,
+    sidecar_len: u64,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} has no committed header but {} holds {sidecar_len} bytes of sealed \
+         entries: records were committed to this month and are gone, so it is \
+         refused rather than re-initialised empty",
+        path.display(),
+        sidecar.display()
+    )
 }
 
 /// The [`StoreError::ImpossibleCount`] sentence.
@@ -568,6 +944,75 @@ fn write_impossible_count(
          interest {open_interest}. A count is never negative — zero means \
          zero, and the only legal negative is the open-interest null sentinel"
     )
+}
+
+/// The [`StoreError::Io`] sentence. See [`write_not_a_bar_path`]: lifted, word
+/// for word, when D-0915's two refusals pushed that match past the ceiling.
+fn write_io(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    action: Action,
+    kind: ErrorKind,
+    code: Option<i32>,
+) -> fmt::Result {
+    write!(
+        f,
+        "{action} {} failed: {kind:?} (errno {code:?})",
+        path.display()
+    )
+}
+
+/// The [`StoreError::ShortWrite`] sentence. Lifted for [`write_io`]'s reason.
+fn write_short_write(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    offset: u64,
+    asked: usize,
+    wrote: usize,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} stalled at offset {offset} with {asked} bytes still owed after {wrote} accepted",
+        path.display()
+    )
+}
+
+/// The [`StoreError::OutsideMonth`] sentence. See [`write_not_a_bar_path`].
+fn write_outside_month(
+    f: &mut fmt::Formatter<'_>,
+    at: u64,
+    ts_micros: i64,
+    month: YearMonth,
+) -> fmt::Result {
+    write!(
+        f,
+        "batch record {at} is stamped {ts_micros}, outside the IST month {month} \
+         its file is named for"
+    )
+}
+
+/// The [`StoreError::OffGrid`] sentence. See [`write_not_a_bar_path`].
+fn write_off_grid(
+    f: &mut fmt::Formatter<'_>,
+    at: u64,
+    ts_micros: i64,
+    timeframe_secs: u32,
+) -> fmt::Result {
+    write!(
+        f,
+        "batch record {at} is stamped {ts_micros}, off the {timeframe_secs}-second \
+         grid its file is named for"
+    )
+}
+
+/// The [`StoreError::TimeIndex`] sentence. See [`write_not_a_bar_path`].
+fn write_time_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(f, "{}: time index refused: {reason}", path.display())
+}
+
+/// The [`StoreError::SortIndex`] sentence.
+fn write_sort_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(f, "{}: sort index not written: {reason}", path.display())
 }
 
 /// The [`StoreError::NotABarPath`] sentence.
@@ -649,64 +1094,53 @@ fn write_checksums_missing(
     )
 }
 
+fn write_short_read(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    offset: u64,
+    asked: usize,
+    read: usize,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} ended at offset {offset} with {asked} bytes owed after {read}",
+        path.display()
+    )
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
-            Self::Locked { path } => {
-                write!(f, "another writer holds {}", path.display())
-            }
-            Self::DiskFull { path, action } => {
-                write!(f, "disk full {action} {}", path.display())
-            }
-            Self::Denied { path, action } => {
-                write!(f, "permission denied {action} {}", path.display())
-            }
-            Self::ReadOnly { path, action } => {
-                write!(f, "read-only filesystem {action} {}", path.display())
-            }
-            Self::IsADirectory { path, action } => {
-                write!(f, "{} is a directory, {action} it", path.display())
-            }
+            Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::DiskFull { path, action } => write_host(f, "disk full", action, path),
+            Self::Denied { path, action } => write_host(f, "permission denied", action, path),
+            Self::ReadOnly { path, action } => write_host(f, "read-only filesystem", action, path),
+            Self::IsADirectory { path, action } => write_state(f, path, "is a directory", action),
             Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
-            Self::Missing { path, action } => {
-                write!(f, "{} does not exist, {action} it", path.display())
-            }
+            Self::NotARegularFile { path, action } => write_not_regular(f, path, *action),
+            Self::Symlinked { path } => write_symlinked(f, path),
+            Self::Missing { path, action } => write_state(f, path, "does not exist", action),
+            Self::BarrierFailed { path } => write_barrier_failed(f, path),
             Self::Io {
                 path,
                 action,
                 kind,
                 code,
-            } => write!(
-                f,
-                "{action} {} failed: {kind:?} (errno {code:?})",
-                path.display()
-            ),
+            } => write_io(f, path, *action, *kind, *code),
             Self::ShortWrite {
                 path,
                 offset,
                 asked,
                 wrote,
-            } => write!(
-                f,
-                "{} stalled at offset {offset} with {asked} bytes still owed after {wrote} accepted",
-                path.display()
-            ),
+            } => write_short_write(f, path, *offset, *asked, *wrote),
             Self::ShortRead {
                 path,
                 offset,
                 asked,
                 read,
-            } => write!(
-                f,
-                "{} ended at offset {offset} with {asked} bytes owed after {read}",
-                path.display()
-            ),
-            Self::RaggedTail { path, len, extra } => write!(
-                f,
-                "{} is {len} bytes, {extra} past the last whole record",
-                path.display()
-            ),
+            } => write_short_read(f, path, *offset, *asked, *read),
+            Self::RaggedTail { path, len, extra } => write_ragged(f, path, *len, *extra),
             Self::Format { path, source } => write!(f, "{}: {source}", path.display()),
             Self::SymbolMismatch {
                 path,
@@ -741,9 +1175,37 @@ impl fmt::Display for StoreError {
                 volume,
                 open_interest,
             } => write_impossible_count(f, *at, *volume, *open_interest),
-            Self::ImpossibleBar { at } => {
-                write!(f, "batch record {at} has impossible OHLC")
-            }
+            Self::ImpossibleBar { at } => write!(f, "batch record {at} has impossible OHLC"),
+            Self::OutsideMonth {
+                at,
+                ts_micros,
+                month,
+            } => write_outside_month(f, *at, *ts_micros, *month),
+            Self::OffGrid {
+                at,
+                ts_micros,
+                timeframe_secs,
+            } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
+            Self::TimeIndex { path, reason } => write_time_index(f, path, reason),
+            Self::SortIndex { path, reason } => write_sort_index(f, path, reason),
+            Self::CommittedRecordsLost {
+                path,
+                sidecar,
+                sidecar_len,
+            } => write_committed_records_lost(f, path, sidecar, *sidecar_len),
+            Self::OverlapDisagrees {
+                path,
+                at,
+                ts_micros,
+                conflict,
+            } => write_overlap(f, path, *at, *ts_micros, *conflict),
+            Self::Generation { path, reason } => write_generation(f, path, reason),
+            Self::Superseded { path, ordinal } => write_superseded(f, path, *ordinal),
+            Self::Misfiled {
+                path,
+                sidecar,
+                field,
+            } => write_misfiled(f, path, sidecar, field),
         }
     }
 }
@@ -841,9 +1303,10 @@ pub struct BarFile {
     /// The fourth row cannot happen: the flag branch refuses with
     /// [`StoreError::NotABarPath`] when it is handed no path at all.
     crc_path: Option<PathBuf>,
-    /// The last checksum block this handle verified, or [`NO_BLOCK`].
+    /// The last checksum block this handle verified **and its verified bytes**,
+    /// or [`NO_BLOCK`] — see [`VerifiedBlock`].
     ///
-    /// # Why a single block index and not a set of them
+    /// # Why a single block and not a set of them
     ///
     /// Verification has to be **lazy** — `Self::validated`'s own comment is that
     /// checking every block at open would make opening a month O(file), and
@@ -852,13 +1315,25 @@ pub struct BarFile {
     /// checksum 4,088 bytes per 56-byte record: seventy-three times the work,
     /// per bar, for an answer it computed one bar ago.
     ///
-    /// So the answer is remembered, and this is the cheapest thing that can
-    /// remember it. One relaxed load and one comparison, no allocation at open
+    /// So the answer is remembered, and one block is the cheapest thing that
+    /// can remember it: a fixed buffer inside the handle, no allocation at open
     /// and none ever, which is what keeps the O(1) open the constraint asks for.
     /// A `HashSet` of verified blocks would be the general answer and it is not
     /// available here: CI gate 11 rule 3 refuses `HashSet::new()` in shipping
     /// source outright, and rule 7 refuses the `.contains(&…)` that would probe
     /// it — both for the reason this field is sized the way it is.
+    ///
+    /// # Records are served FROM these bytes — D-1433
+    ///
+    /// This field used to remember only the block index, and a later read in
+    /// that block re-read its record from the disk and checked nothing. This
+    /// doc then said a re-verification "reaches the same verdict", and that was
+    /// the hole: no re-verification ever happened, so a record damaged after its
+    /// block was first verified was served as a plausible wrong price
+    /// (ET-bars-candles-store-0). Now the cold read of a block is one `pread`
+    /// of its covered range into this buffer, the check runs over exactly those
+    /// bytes, and every read in the block — the first included — copies its
+    /// record out of them. A warm read costs no syscall.
     ///
     /// # What it therefore does NOT do, said rather than left to be found
     ///
@@ -866,19 +1341,57 @@ pub struct BarFile {
     /// access pattern this store actually has: `cli::stored` walks `0..n_valid`
     /// in order, `api::bars::page` walks a window in order, and the bench reads
     /// one index two thousand times. A pattern that ALTERNATES between two
-    /// blocks re-verifies on each alternation — the bisection in
+    /// blocks re-reads and re-verifies on each alternation — the bisection in
     /// [`first_at_or_after`] is the one that can, at fourteen probes for a
-    /// one-minute month. That is bounded per read and it is a cost, not a
-    /// correctness hole: a re-verification reaches the same verdict.
+    /// one-minute month. That is bounded per read and it is a cost. It is a
+    /// FRESH verdict against the disk as it then stands, not a repeat of the
+    /// old one: a block damaged while the handle was elsewhere is refused on
+    /// return.
+    /// For the TAIL block the cost is not only the CRC: each re-verification
+    /// pays [`Self::past_the_commit`]'s `fstat` and reads again, and for a tail
+    /// an interrupted append sealed past the commit it writes one more
+    /// `store.block` WARN — once per alternation, not once per handle.
+    /// `store::tail_proof` counts those lines; `docs/06-limits.md` (D-0688
+    /// section) states the cost. D-1448.
     ///
-    /// `AtomicU64` rather than a `Cell`, because it is the only shape that keeps
-    /// `BarFile` `Sync` — a reader shared across threads must not become a
-    /// compile error in a caller because a cache moved in here.
+    /// The cache is what a handle verified, not what the disk holds now: a
+    /// warm read serves the bytes that matched the sidecar when they were read,
+    /// even if the disk has since been damaged. That is the stronger of the two
+    /// honest answers — a verified value, never an unverified one.
+    ///
+    /// A [`Mutex`] and not a `Cell`, because it is the only shape that keeps
+    /// `BarFile` `Sync` with a buffer behind it — a reader shared across threads
+    /// must not become a compile error in a caller because a cache moved in
+    /// here. Reads through ONE shared handle therefore serialise on it; two
+    /// handles do not share it. A poisoned lock is recovered rather than
+    /// refused, because the block field is set to [`NO_BLOCK`] before any fill
+    /// and to the block only after its check passed, so a panic mid-fill leaves
+    /// "nothing cached", never "cached but unchecked".
     ///
     /// **UNVERIFIED as a measured bound.** No bench in this workspace
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
-    verified: AtomicU64,
+    verified: Mutex<VerifiedBlock>,
+    /// What the file's PATH says a bar in it may be stamped: inside its IST
+    /// month and on its timeframe's grid. Computed once at open from the path
+    /// month and the header timeframe; [`Self::append`] asks it of every bar.
+    /// D-0915.
+    admission: Admission,
+    /// The month's `.tix` time index, for a BAR file opened through a door
+    /// that knows its path; `None` for an overlay, a greeks file and the
+    /// in-module test harness, whose lookups bisect as they always have.
+    /// D-2329.
+    tix: Option<Tix>,
+    /// The [`DurableBatch`] this writer was opened in, when its thread had
+    /// entered one (WP-16, D-3353): its files are opened `O_SYNC` when the
+    /// batch [`DurableBatch::writes_through`], and every flush it would issue
+    /// is the batch's while the batch is open. `None` for every reader and for
+    /// a writer outside a batch, which flushes for itself.
+    batch: Option<DurableBatch>,
+    /// The month's `.srt` sort index, for a BAR file opened by a door that
+    /// keeps it — the writer's and `Self::sort_index_existing`; `None` for
+    /// every reader, which never writes. D-3349.
+    srt: Option<sort_writer::SortSidecar>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -893,6 +1406,78 @@ pub struct BarFile {
     _lock: Option<Flock<File>>,
 }
 
+/// One month's `.tix` time index, as a handle holds it. D-2329.
+///
+/// `state` is decided ONCE per handle: at open for the writer, which must
+/// keep the index in step with every append, and at the first lookup for a
+/// reader, so a sweep that opens a month and never asks for a timestamp pays
+/// nothing for it. The reader holds the month's shared lock for its whole
+/// life, so the index it decided on cannot change under it.
+#[derive(Debug)]
+struct Tix {
+    /// `<yyyy-mm>.tix` beside the `.bin`, composed by `crate::path`.
+    path: PathBuf,
+    /// The slots this month's path and header imply.
+    geometry: Geometry,
+    /// Ready, or bisecting for a named reason.
+    state: OnceLock<TixState>,
+}
+
+/// Whether a handle's lookups go through its index.
+#[derive(Debug)]
+enum TixState {
+    /// The index is open and describes the committed bars.
+    Ready(File),
+    /// It does not, for this reason, and every lookup bisects (D-1434). The
+    /// reason was written to the log the first time this process entered
+    /// this state for this month and kind of reason (D-3340).
+    Bisecting(Why),
+}
+
+/// How a handle answers [`BarFile::first_at_or_after`]. D-2329.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimeLookup {
+    /// Through the month's `.tix` index: at most one entry read and one bar
+    /// read per lookup, whatever the month holds.
+    Indexed,
+    /// By the D-1434 bisection, for the reason named — which this process has
+    /// also written to the log as a `store.tix` warning, once per file and
+    /// kind of reason (D-3340).
+    Bisection(Why),
+}
+
+/// What [`BarFile::index_existing`] found beside one month, and what it left.
+/// D-3340, WP-15.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reindexed {
+    /// The `.tix` already described the committed bars, and nothing was
+    /// written: a second run over the same months changes no byte.
+    Kept,
+    /// The `.tix` was written from the committed bars, because of the reason
+    /// named — [`Why::Absent`] for a month written before D-2329.
+    Built(Why),
+    /// No index can describe these bars, for the reason named. No `.tix` is
+    /// left claiming them; every lookup bisects and the log says why.
+    Unindexable(Why),
+    /// The month holds fewer than [`crate::time_index::INDEX_MIN_ROWS`] bars
+    /// and has no `.tix`, and the small-month rule gives it none: nothing was
+    /// written, and its lookups bisect in at most ten bar reads, which is not
+    /// a finding (D-4933). The commit that brings it to the threshold writes
+    /// its index whole.
+    BelowThreshold,
+}
+
+/// One month through [`BarFile::index_existing`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMonth {
+    /// The committed bars the month holds, from its header.
+    pub n_valid: u64,
+    /// What the index step found and did.
+    pub outcome: Reindexed,
+}
+
 /// The only geometry a `.ovl` file may have.
 ///
 /// A one-row table rather than a bare `Layout`, so it goes through the same
@@ -902,6 +1487,23 @@ const OVERLAY_TABLE: &[Layout] = &[Layout::OVERLAY];
 
 /// The one geometry a `.grk` file can resolve to.
 const GREEKS_TABLE: &[Layout] = &[Layout::GREEKS];
+
+/// The geometries a `.bin` file may resolve to: the BAR versions only.
+///
+/// This was `Layout::KNOWN`, which also holds the overlay (version 9, 24-byte
+/// records) and the greeks sidecar (version 8, 80-byte records), because
+/// `Header::decode_parts` must be able to decode both. So an overlay or greeks
+/// file copied to a `.bin` name opened through the ordinary bar door and
+/// `read_record` served 56-byte bars read at 24- or 80-byte offsets, low above
+/// high and an open interest equal to a timestamp, every block CRC passing.
+/// `Layout::KNOWN`'s own doc promised "a `.bar` path is offered only the bar
+/// geometries whatever its header claims"; this table is what makes it true.
+/// audit-20261003 hunt-store-1, D-1523.
+// Version 2 stays readable beside version 3, the version written since
+// D-1571: a format version is never mutated in place (§3 rule 8).
+const BAR_TABLE: &[Layout] = &[Layout::V2, Layout::V3];
+
+const _: () = assert!(Layout::V2.record_stride() == crate::format::RECORD_STRIDE);
 
 /// The geometry a file of this kind is BORN at.
 ///
@@ -921,19 +1523,21 @@ const fn geometry_of(kind: FileKind) -> Layout {
 
 /// The versions a file of this kind may resolve against.
 ///
-/// A sidecar gets a one-row table; a bar file gets every bar version this build
-/// can read. See [`geometry_of`] on why the two answers must be derived from
+/// A sidecar gets a one-row table; a bar file gets every BAR version this build
+/// can read, which is [`BAR_TABLE`] and not [`Layout::KNOWN`]. See [`geometry_of`] on why the two answers must be derived from
 /// the same input.
 const fn table_of(kind: FileKind) -> &'static [Layout] {
     match kind {
         FileKind::Overlay => OVERLAY_TABLE,
         FileKind::Greeks => GREEKS_TABLE,
-        _ => Layout::KNOWN,
+        _ => BAR_TABLE,
     }
 }
 
 impl BarFile {
-    /// Opens a month's bar file, creating it and its directory if absent.
+    /// Opens a month's bar file, creating it and its directories below the
+    /// store root if absent. **The store root itself must exist**: a missing
+    /// root is [`StoreError::Missing`] and is never created (D-1522).
     ///
     /// A file that does not exist, and one that exists with zero bytes, are
     /// the same thing to this function: both get a fresh 32768-byte header
@@ -949,7 +1553,11 @@ impl BarFile {
     /// # Errors
     ///
     /// [`StoreError::NotABarPath`] for a path naming a sibling other than the
-    /// records. [`StoreError::Locked`] when another writer holds the month.
+    /// records. [`StoreError::Missing`] or [`StoreError::NotADirectory`] naming
+    /// the store root when it is absent or not a directory (D-1522).
+    /// [`StoreError::CommittedRecordsLost`] for a month with no committed header
+    /// whose sidecar proves records were committed (D-1520).
+    /// [`StoreError::Locked`] when another writer holds the month.
     /// [`StoreError::Denied`], [`StoreError::ReadOnly`],
     /// [`StoreError::IsADirectory`], [`StoreError::NotADirectory`],
     /// [`StoreError::DiskFull`] or [`StoreError::Io`] from the host.
@@ -963,10 +1571,41 @@ impl BarFile {
     /// **Not [`StoreError::RaggedTail`].** Bytes past the committed extent are
     /// an interrupted append, and this door opens the month and logs them
     /// rather than refusing it; see `Self::validated`.
+    ///
+    /// # Inside a [`DurableBatch`]
+    ///
+    /// On a thread that entered an open batch, the writer belongs to it for
+    /// its whole life (WP-16, D-3353): nothing it creates or appends is
+    /// durable until the batch is made durable. The module header says what a
+    /// crash leaves.
     pub fn open_or_create(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
+    ) -> Result<Self, StoreError> {
+        // ONE FLUSH PER DIRECTORY PER OPEN (WP-16, DB-N25). A new month names
+        // three files in its directory -- the bars, the checksum sidecar and
+        // the time index -- and each name was flushed on its own, three
+        // `F_FULLFSYNC`s of one directory on macOS. Every name is still
+        // durable before this returns, so before any commit can need it
+        // (D-0688's reason for the sidecar's): the flushes are only gathered
+        // to the end of the open, and each directory is flushed once. The
+        // name of a directory this open MAKES is not gathered: it is flushed
+        // the moment the directory exists (`create_below`).
+        //
+        // A writer inside a durable batch leaves every flush, its names'
+        // included, to the batch (D-3353).
+        let batch = DurableBatch::current();
+        with_directories_flushed_once(|| Self::open_or_create_once(root, path, symbol_id, batch))
+    }
+
+    /// [`Self::open_or_create`]'s body, its directory flushes gathered by
+    /// [`with_directories_flushed_once`].
+    fn open_or_create_once(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+        batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
         // BARS OR A SIDECAR BESIDE THEM, and nothing else. A `.crc` or a
         // `.lock` opened here would be read as records at whichever geometry
@@ -979,6 +1618,11 @@ impl BarFile {
             .file()
             .checksums()
             .ok_or(StoreError::NotABarPath { found: path.file() })?;
+        // A MONTH SERVED FROM A REPAIR REVISION IS NOT APPENDED TO (D-3350).
+        // Its original is a generation no reader opens; bars appended there
+        // would be stored and never served. Asked before anything is created
+        // or locked: one `open` that is `ENOENT` for a month never repaired.
+        crate::generation::refuse_superseded(root, path)?;
         let timeframe_secs = path.timeframe().secs();
         // THE GEOMETRY THIS FILE IS BORN AT AND RESOLVED AGAINST, decided once
         // from the file kind so creation and reopen cannot disagree.
@@ -991,18 +1635,65 @@ impl BarFile {
         // alternative is a refusal arm no input can produce. Reaching it would
         // create the root and then fail loudly on the open below.
         let dir = bars_path.parent().unwrap_or(root).to_path_buf();
-        fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
+
+        // THE STORE ROOT IS NEVER CREATED HERE. `create_dir_all` made every
+        // missing ancestor, the root included, so a store on an unmounted
+        // volume got a fresh root on the parent filesystem and bars landed
+        // there: append-only history split across two devices, with nothing
+        // said. api's journal fixed this class first (W1-api1-9, D-0954); the
+        // bar writer is now the same. audit-20261003 hunt-store-3, D-1522.
+        let root_meta = fault(fs::metadata(root), root, Action::Open)?;
+        if !root_meta.is_dir() {
+            return Err(StoreError::NotADirectory {
+                path: root.to_path_buf(),
+                action: Action::Open,
+            });
+        }
+
+        // EVERY DIRECTORY THIS OPEN CREATES HAS ITS ENTRY FLUSHED, not only
+        // the leaf. `create_dir_all` can make up to six (vendor .. rung) and
+        // only the month's own directory was synced, so after a crash a month
+        // whose first commit returned `Committed` could lose the directory
+        // that names it. Found before creating, so a directory that already
+        // existed costs nothing; bounded by the path's depth below the root.
+        // audit-20261003 hunt-store-4, D-1522.
+        // NO LINK BELOW THE ROOT IS FOLLOWED (CE-62, D-2686). `create_dir_all`
+        // and an ordinary `open` both resolve links, so a linked directory or
+        // month file sent this month's appends wherever the link pointed.
+        // Every existing component from the root down to the month file is
+        // asked with `symlink_metadata`, which never follows, before anything
+        // is created; the leaves are then opened with `O_NOFOLLOW` as well, so
+        // a link swapped in after this walk still fails at the open.
+        refuse_links_below(root, &bars_path)?;
+        // MADE ONE LEVEL AT A TIME, EACH NAME FLUSHED AT ONCE, so a directory
+        // this open made is named durably whatever refuses the open next: the
+        // next level, the lock, the bar file, the genesis. These flushes are
+        // never gathered to the end of the open ([`create_below`] says why).
+        create_below(root, &dir, batch.as_ref())?;
 
         // The lock is taken before the bar file is opened, let alone measured.
         // Everything below this line assumes exactly one writer. Every `?`
         // below it releases the month through the guard's explicit unlock.
+        refuse_link(&lock_path)?;
         let lock = Flock::try_lock(
-            fault(open_rw(&lock_path), &lock_path, Action::Open)?,
+            writer_open(open_lock_hooked(&lock_path), &lock_path)?,
             lock_path.clone(),
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        // ASKED AGAIN UNDER THE LOCK (D-3350). A promotion holds this month's
+        // lock shared while it writes the pointer
+        // (`crate::generation::promote`), so a writer that passed the first
+        // question before a promotion and took the lock after it is refused
+        // here, before a byte is appended to a generation no reader opens.
+        // The guard's drop unlocks explicitly (`crate::flock`).
+        crate::generation::refuse_superseded(root, path)?;
 
-        let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
+        // Whether the month file was THERE before this open. Only a file that
+        // existed can have been truncated or zeroed; one this open creates was
+        // deleted whole, an explicit act D-1520 does not second-guess.
+        let existed = matches!(fs::symlink_metadata(&bars_path), Ok(meta) if meta.is_file());
+        let through = batch.as_ref().is_some_and(DurableBatch::writes_through);
+        let bars = writer_open(open_rw_through(&bars_path, through), &bars_path)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
 
         // `len == 0` WAS THE REPAIR CONDITION, AND IT DID NOT COVER THE CRASH.
@@ -1036,12 +1727,37 @@ impl BarFile {
         // `len == 0` is subsumed rather than kept beside this — an empty file
         // is the all-zero case with nothing in it, and two conditions that must
         // agree are two conditions that can drift.
+        //
+        // TWO REFINEMENTS, audit-20261003, D-1520 and D-1521.
+        //
+        // "Provably holds no data" read only this file's bytes. The checksum
+        // sidecar is written by an append, after the records and before the
+        // header slot, so a sidecar with entries proves records WERE committed:
+        // a month truncated to nothing, or zeroed back to its region, was
+        // reopened empty and the next append started again at index 0, the
+        // lost bars never named (attackdata-1). It is now refused by name.
+        //
+        // And a torn GENESIS SLOT — the fill landed and part of the 64-byte
+        // slot did — is the same interrupted `initialise`, but it is not all
+        // zeros, so it was refused on every open for ever (hunt-store-2). It is
+        // repaired when every byte past the first slot is zero and the slot
+        // does not decode: a slot that decodes is a commit, not a tear.
         if len <= REGION_LEN_U64 {
             let mut head = vec![0u8; usize::try_from(len).unwrap_or(REGION_LEN)];
             read_fully(&bars, &bars_path, 0, &mut head)?;
-            if head.iter().all(|&byte| byte == 0) {
-                initialise(&bars, &bars_path, symbol_id, timeframe_secs, born)?;
-                fsync_dir(&dir)?;
+            if is_interrupted_genesis(&head) {
+                if existed {
+                    refuse_if_sealed(&bars_path, &path.with_file(checksum_kind).to_path_buf(root))?;
+                }
+                initialise(
+                    &bars,
+                    &bars_path,
+                    symbol_id,
+                    timeframe_secs,
+                    born,
+                    batch.as_ref(),
+                )?;
+                fsync_dir(&dir, batch.as_ref())?;
                 len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
             }
         }
@@ -1061,18 +1777,32 @@ impl BarFile {
         // a fallback that hides a failure — it reads as safe and refuses
         // nothing. The duplicate is gone and the sentence is now true by
         // construction rather than by inspection.
+        //
+        // A MONTH FILED UNDER ANOTHER NAME IS NOT APPENDED TO (DB-B65): the
+        // landing's own record would be refused after its bars were committed.
+        refuse_misfiled(root, path, &bars_path)?;
         Self::validated(
             bars,
             bars_path,
             Some(path.with_file(checksum_kind).to_path_buf(root)),
+            time_index_path(root, path),
             Some(lock),
             len,
             symbol_id,
             timeframe_secs,
+            path.month(),
             // THE SAME ANSWER CREATION USED, from the same function.
             table_of(path.file()),
             Access::Write,
+            batch,
         )
+        .map(|mut file| {
+            // THE SORT INDEX IS THE WRITER'S TO KEEP, after the bars it orders
+            // are committed — at open for rows an earlier writer left
+            // unordered, and after every commit (D-3349).
+            file.attach_sort_index(root, path);
+            file
+        })
     }
 
     /// Open a month that already exists, **without creating anything**.
@@ -1112,8 +1842,54 @@ impl BarFile {
     ///
     /// [`StoreError::NotABarPath`] for a non-bar path, [`StoreError::Missing`]
     /// when the month does not exist, [`StoreError::Locked`] when a writer holds
-    /// it, and whatever `Self::validated` refuses.
+    /// it, [`StoreError::NotARegularFile`] (or [`StoreError::IsADirectory`])
+    /// when the bars, the `.lock` or the `.crc` is not a regular file — refused
+    /// at once, never waited on — and whatever `Self::validated` refuses.
+    ///
+    /// # The generation served (D-3350)
+    ///
+    /// A bar month a versioned repair promoted is opened from its revision,
+    /// under `bar-revisions-v1/<n>/`, and only after its header is checked
+    /// against the pointer record that promoted it
+    /// ([`crate::generation::Pointer::describes`]); a revision that moved is
+    /// [`StoreError::Generation`], never served. Every reader of the store
+    /// comes through this door, so all of them read one generation. A month
+    /// never repaired costs one more `open`, which is `ENOENT`.
     pub fn open_existing(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+    ) -> Result<Self, StoreError> {
+        match crate::generation::served(root, path)? {
+            crate::generation::Served::Original => Self::open_existing_at(root, path, symbol_id),
+            crate::generation::Served::Revision(pointer) => {
+                let served = crate::generation::Served::Revision(pointer).root(root);
+                let file = Self::open_existing_at(&served, path, symbol_id)?;
+                if !pointer.describes(&file.header) {
+                    return Err(StoreError::Generation {
+                        path: crate::generation::pointer_path(root, path),
+                        reason: format!(
+                            "revision {} holds {} record(s) {}..{} at header generation {}, and its promotion recorded {} record(s) {}..{} at {}; it was written outside the repair protocol and is not served",
+                            pointer.revision.ordinal(),
+                            file.header.n_valid,
+                            file.header.first_ts_micros,
+                            file.header.last_ts_micros,
+                            file.header.generation,
+                            pointer.n_valid,
+                            pointer.first_ts_micros,
+                            pointer.last_ts_micros,
+                            pointer.header_generation
+                        ),
+                    });
+                }
+                Ok(file)
+            }
+        }
+    }
+
+    /// [`Self::open_existing`] for the files under `root` exactly, with no
+    /// generation resolved: the original month, or one revision's own files.
+    fn open_existing_at(
         root: &Path,
         path: StorePath<'_>,
         symbol_id: u32,
@@ -1134,36 +1910,167 @@ impl BarFile {
 
         // Read-only and no `create`, so a missing month is `ENOENT` and
         // `classify` turns it into `Missing` naming this exact path.
-        let bars = fault(File::open(&bars_path), &bars_path, Action::Open)?;
+        //
+        // NEVER A BLOCKING OPEN. A FIFO at `<month>.bin` parked this call in
+        // `open(2)` until a writer appeared — a sweep, an HTTP worker or a pull
+        // hung with no refusal and no log line. `open_read` opens nonblocking
+        // and refuses anything `fstat` does not call a regular file. D-1432.
+        let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
 
         // The lock is opened read-only and never created. A bar file with no
         // lock beside it has had no writer since it was made, so there is
         // nothing to wait for and `None` is the honest answer; inventing the
         // file to hold a lock on would be the very write this function exists
         // to avoid.
-        let lock = match File::open(&lock_path) {
+        let lock = match open_read(&lock_path) {
             Ok(handle) => Some(
                 Flock::try_lock_shared(handle, lock_path.clone())
                     .map_err(|refusal| lock_fault(&lock_path, refusal))?,
             ),
-            Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-            Err(why) => return Err(classify(&lock_path, Action::Open, &why)),
+            Err(why) if why.is_absent() => None,
+            Err(why) => return Err(why.refusal(&lock_path)),
         };
 
         let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        // WHICH MONTH THESE FILES WERE WRITTEN FOR, asked before a record is
+        // served (DB-B65): the header's symbol hash cannot tell a contract
+        // from its sibling strike, and the `.prv` header can.
+        refuse_misfiled(root, path, &bars_path)?;
         Self::validated(
             bars,
             bars_path,
             Some(path.with_file(checksum_kind).to_path_buf(root)),
+            time_index_path(root, path),
             lock,
             len,
             symbol_id,
             path.timeframe().secs(),
+            path.month(),
             // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed, and by
             // the same function the creating door uses.
             table_of(path.file()),
             Access::Read,
+            None,
         )
+    }
+
+    /// Builds, or confirms, one month's `.tix` time index through the writer's
+    /// half of opening, and changes nothing else. D-3340, WP-15; DB-064,
+    /// DB-G81.
+    ///
+    /// # Why a door of its own
+    ///
+    /// The writer door already builds the index of a month that lacks one
+    /// (`Self::index_on_open`, D-2329), so [`Self::open_or_create`] would do
+    /// it — and would also create a month that is not there and open its bars
+    /// for writing. A rebuild over named months must do neither:
+    ///
+    /// * a month that is not there is [`StoreError::Missing`], with nothing
+    ///   created — no directory, no bar file, no `.lock`, no `.tix`;
+    /// * the bar file and its checksum sidecar are opened READ-ONLY, so no
+    ///   byte of either can move, whatever the index step does;
+    /// * the `.tix` is the one file written, through the same
+    ///   `Self::index_on_open` an appending writer runs, so the index this
+    ///   builds is the index an append would have kept. Only a month that has
+    ///   no `.lock` at all gains one, exactly as from a writer.
+    ///
+    /// # Exclusive, and refused rather than waited for
+    ///
+    /// The month's lock is taken EXCLUSIVE and non-blocking — the writer's
+    /// own — so a month another process holds, a writer appending or a reader
+    /// mid-request, is [`StoreError::Locked`] and nothing is written to it.
+    /// Rerunning is safe: a month already indexed is [`Reindexed::Kept`] after
+    /// one 64-byte and two 16-byte reads.
+    ///
+    /// # No link below the root
+    ///
+    /// Every component from the root down to the bar file is asked with
+    /// `symlink_metadata` first, as the writer door does (CE-62, D-2686), so
+    /// the `.tix` lands beside the bars it describes and never wherever a
+    /// link points — a test server's shadow root, whose `bars` is a link into
+    /// the real store, is refused as [`StoreError::Symlinked`].
+    ///
+    /// # Cost
+    ///
+    /// To build: every committed record, through the verified read path,
+    /// once per month — O(`n_valid`) — plus one write of the entries. To keep:
+    /// three reads.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::NotABarPath`] for any other file kind;
+    /// [`StoreError::Symlinked`] for a link below the root;
+    /// [`StoreError::Missing`] (or another open refusal) when the month's bar
+    /// file is not a readable regular file; [`StoreError::Locked`] when
+    /// another holder has the month; whatever `Self::validated` refuses about
+    /// the month; whatever writing the `.tix` refuses; and
+    /// [`StoreError::Generation`] when the month's served generation cannot be
+    /// told, or its revision is not the one its promotion recorded (D-3350).
+    pub fn index_existing(
+        root: &Path,
+        path: StorePath<'_>,
+        symbol_id: u32,
+    ) -> Result<IndexedMonth, StoreError> {
+        if path.file() != FileKind::Bars {
+            return Err(StoreError::NotABarPath { found: path.file() });
+        }
+        // THE GENERATION EVERY READER OPENS is the one indexed (D-3350,
+        // WP-13c): a repaired month's `.tix` is its revision's, and rebuilding
+        // the original's would report a month indexed that no reader reads.
+        // The links are still refused from the store root down.
+        let store_root = root;
+        let served = crate::generation::served(store_root, path)?;
+        let served_root = served.root(store_root);
+        let root = served_root.as_path();
+        let bars_path = path.to_path_buf(root);
+        let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
+        refuse_links_below(store_root, &bars_path)?;
+        // READ-ONLY AND NEVER CREATED. `open_read` has no `create`, so a month
+        // that is not there is `ENOENT`, named, before the lock is touched.
+        let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
+        refuse_link(&lock_path)?;
+        let lock = Flock::try_lock(
+            writer_open(open_rw(&lock_path), &lock_path)?,
+            lock_path.clone(),
+        )
+        .map_err(|refusal| lock_fault(&lock_path, refusal))?;
+        // MEASURED UNDER THE LOCK, so no append can move the length between
+        // the measurement and the header it is checked against.
+        let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+        refuse_misfiled(root, path, &bars_path)?;
+        let mut file = Self::validated(
+            bars,
+            bars_path,
+            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            time_index_path(root, path),
+            Some(lock),
+            len,
+            symbol_id,
+            path.timeframe().secs(),
+            path.month(),
+            table_of(path.file()),
+            // The READ door's sidecar handling: the `.crc` opened read-only
+            // and never made. The index step is run below, by hand, so its
+            // outcome can be reported.
+            Access::Read,
+            None,
+        )?;
+        if let crate::generation::Served::Revision(pointer) = served
+            && !pointer.describes(&file.header)
+        {
+            return Err(StoreError::Generation {
+                path: crate::generation::pointer_path(store_root, path),
+                reason: format!(
+                    "revision {} is not the one its promotion recorded; not indexed",
+                    pointer.revision.ordinal()
+                ),
+            });
+        }
+        let outcome = file.index_on_open()?;
+        Ok(IndexedMonth {
+            n_valid: file.header.n_valid,
+            outcome,
+        })
     }
 
     /// Opt-in audited read with nonblocking regular-file opens for all three files.
@@ -1181,6 +2088,9 @@ impl BarFile {
         if path.file() != FileKind::Bars {
             return Err("strict historical checksum audit requires a bar path".to_owned());
         }
+        // THE GENERATION EVERY READER OPENS is the one audited (D-3350).
+        let served = crate::generation::served(root, path).map_err(|why| why.to_string())?;
+        let root = &served.root(root);
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
         let lock = Flock::try_lock_shared(
@@ -1191,19 +2101,32 @@ impl BarFile {
         let bars =
             crate::checksum_audit::open_regular(&bars_path).map_err(|why| why.to_string())?;
         let len = bars.metadata().map_err(|why| why.to_string())?.len();
-        Self::validated(
+        refuse_misfiled(root, path, &bars_path).map_err(|why| why.to_string())?;
+        let file = Self::validated(
             bars,
             bars_path,
             Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            time_index_path(root, path),
             Some(lock),
             len,
             symbol_id,
             path.timeframe().secs(),
+            path.month(),
             table_of(path.file()),
             Access::Audit,
+            None,
         )
-        .map_err(|why| why.to_string())?
-        .audit_checksums(max_bytes)
+        .map_err(|why| why.to_string())?;
+        if let crate::generation::Served::Revision(pointer) = served
+            && !pointer.describes(&file.header)
+        {
+            return Err(format!(
+                "repair revision {} of {} is not the one its promotion recorded; not audited",
+                pointer.revision.ordinal(),
+                file.bars_path.display()
+            ));
+        }
+        file.audit_checksums(max_bytes)
     }
 
     /// The checks both doors perform, once.
@@ -1249,10 +2172,15 @@ impl BarFile {
         // drifts. `None` at the doors that have no `StorePath` to ask -- only
         // the test harness.
         crc_path: Option<PathBuf>,
+        // WHERE THE TIME INDEX WOULD BE, for a bar file and nothing else,
+        // composed by `crate::path` exactly as the sidecar path is. `None`
+        // for an overlay or greeks file and for the in-module harness. D-2329.
+        tix_path: Option<PathBuf>,
         lock: Option<Flock<File>>,
         len: u64,
         symbol_id: u32,
         timeframe_secs: u32,
+        month: YearMonth,
         // WHICH GEOMETRIES THIS FILE MAY BE. Passed rather than looked up,
         // because the answer differs by file KIND: a `.bar` may be any version
         // in `Layout::KNOWN`, and a `.ovl` may only be `Layout::OVERLAY`.
@@ -1264,6 +2192,10 @@ impl BarFile {
         // parameter so that cannot happen by omission.
         table: &[Layout],
         access: Access,
+        // The writer's durable batch, when it was opened inside one (WP-16,
+        // D-3353): the sidecar it opens or makes, and the index it keeps, are
+        // the batch's too. `None` for every other door.
+        batch: Option<DurableBatch>,
     ) -> Result<Self, StoreError> {
         let (header, claimed) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
@@ -1339,16 +2271,13 @@ impl BarFile {
         // three records are just as lost — the length-shaped refusal cannot
         // even state this condition, which is half of why it was the wrong one.
         //
-        // WHAT THIS DOES NOT FIX, stated rather than implied: a truncation that
-        // lands exactly on an older commit's extent. Cut the file to
-        // `offset_of` of the generation the fallback returns and there is
-        // nothing left over to notice — `discarded` is zero and the bytes are
-        // byte-for-byte what a header published before its records became
-        // durable looks like. Those two files are the same file, so no rule
-        // over these bytes can separate them, and the recovery is the half
-        // worth keeping: `store::write::a_header_that_outran_its_file_falls_back_one_generation`
-        // is that file and it still opens. Catching it needs the block
-        // checksums this build does not write, which the module doc names.
+        // A truncation that lands exactly on an older commit's extent leaves
+        // `discarded` at zero, so nothing in THIS arm notices it. The guard
+        // below does: `claimed > header.n_valid` refuses that file as
+        // `CounterExceedsFile`, and
+        // `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+        // asserts it. This paragraph used to say that file "still opens",
+        // through a test renamed when its assertion was inverted. D-0790.
         //
         // The subtraction is written through `capacity_for` and
         // `ragged_tail_bytes` rather than `offset_of`, because those two are
@@ -1407,6 +2336,22 @@ impl BarFile {
                 asked: timeframe_secs,
             });
         }
+        // THE COUNTER AND THE RANGE AGAINST THE MONTH, not only the length
+        // (CE-61, CE-63, D-2685). `Header::validate` bounds `n_valid` by the
+        // bytes the file has, and a sparse file has as many as it claims: a
+        // CRC-valid slot naming 2^34 records opened, and every reader that
+        // sized a vector or a loop from it (`api::bars::window`,
+        // `read_month_bars`, `calendar_of`, the ingest history checks) aborted
+        // or spun. The writer can never commit past the month's grid, so the
+        // writer's own bound is the reader's. A range outside the month is the
+        // same kind of fault, named as a header fault rather than found later
+        // as an overlap that blames an offered batch.
+        if let Err(source) = Admission::new(month, timeframe_secs).admit_header(&header) {
+            return Err(StoreError::Format {
+                path: bars_path,
+                source,
+            });
+        }
         // THE SIDECAR IS OPENED ONLY IF THE HEADER SAYS THERE IS ONE.
         //
         // Asked of the FLAG and never of the filesystem: a `.crc` that exists
@@ -1458,15 +2403,19 @@ impl BarFile {
                     // checksum file. Missing existing evidence is a refusal,
                     // never permission to seal history anew.
                     let fresh = header.n_valid == 0;
-                    let sidecar = fault(
-                        File::options()
-                            .read(true)
-                            .write(true)
-                            .create(fresh)
-                            .truncate(false)
-                            .open(at),
+                    refuse_link(at)?;
+                    let through = batch.as_ref().is_some_and(DurableBatch::writes_through);
+                    let sidecar = writer_open(
+                        no_follow_through(
+                            File::options()
+                                .read(true)
+                                .write(true)
+                                .create(fresh)
+                                .truncate(false),
+                            through,
+                        )
+                        .open(at),
                         at,
-                        Action::Open,
                     )?;
                     // THE SIDECAR'S NAME IS DURABLE BEFORE ANY COMMIT NEEDS IT.
                     //
@@ -1479,14 +2428,14 @@ impl BarFile {
                     // the same flush for its sibling. Only a fresh stream can
                     // have created one, so only a fresh stream pays it. D-0688.
                     if fresh {
-                        fsync_dir(at.parent().unwrap_or(at))?;
+                        fsync_dir(at.parent().unwrap_or(at), batch.as_ref())?;
                     }
                     Some(sidecar)
                 }
                 Access::Read => match open_read(at) {
                     Ok(file) => Some(file),
-                    Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-                    Err(why) => return Err(classify(at, Action::Open, &why)),
+                    Err(why) if why.is_absent() => None,
+                    Err(why) => return Err(why.refusal(at)),
                 },
                 Access::Audit => Some(fault(
                     crate::checksum_audit::open_regular(at),
@@ -1497,7 +2446,12 @@ impl BarFile {
         } else {
             None
         };
-        Ok(Self {
+        let tix = tix_path.map(|path| Tix {
+            path,
+            geometry: Geometry::new(month, timeframe_secs, symbol_id),
+            state: OnceLock::new(),
+        });
+        let mut file = Self {
             bars,
             bars_path,
             layout,
@@ -1511,9 +2465,21 @@ impl BarFile {
             // "this file was sealed", and the read path could no longer tell an
             // unsealed month from a sealed one that lost its `.crc`.
             crc_path: if sealed { crc_path } else { None },
-            verified: AtomicU64::new(NO_BLOCK),
+            verified: Mutex::new(VerifiedBlock::EMPTY),
+            admission: Admission::new(month, timeframe_secs),
+            tix,
+            batch,
+            srt: None,
             _lock: lock,
-        })
+        };
+        // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
+        // decides at its first lookup instead (`Self::tix_state`). D-2329.
+        // What it found is the log's to say (`store.tix`), not the writer's
+        // caller's: an appending writer needs the index kept, not a receipt.
+        if access == Access::Write {
+            let _logged_by_the_step = file.index_on_open()?;
+        }
+        Ok(file)
     }
 
     /// Seals every block an append touched, into the checksum sidecar.
@@ -1542,6 +2508,8 @@ impl BarFile {
     /// by the file. A batch landing wholly inside one block seals one block; the
     /// re-read is that block's covered bytes, which is at most one block. There
     /// is no walk of the file and no read of a block this append did not reach.
+    /// It allocates nothing: every block is re-read into one 4,088-byte stack
+    /// buffer (OD-7, D-2376), where it used to be one heap `Vec` per block.
     ///
     /// # Errors
     ///
@@ -1566,10 +2534,23 @@ impl BarFile {
         // Cleared rather than narrowed to `first..last`, because
         // `BarFile::verified` remembers one block and not a set: there is
         // nothing to intersect with, and "forget it" is the whole operation.
-        // One relaxed store, off the read path entirely — this runs once per
-        // commit, never per record.
-        self.verified.store(NO_BLOCK, Ordering::Relaxed);
+        // One uncontended lock and one store, off the read path entirely — this
+        // runs once per commit, never per record. Since D-1433 the cache is
+        // also keyed by `n_valid`, so a read after the commit misses it either
+        // way; this keeps the two keys saying the same thing.
+        self.verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .block = NO_BLOCK;
 
+        // ONE STACK BUFFER FOR EVERY BLOCK THIS APPEND SEALS (OD-7, D-2376).
+        // This was a zeroed heap vector per block inside the loop: one allocation per
+        // sealed block per append, on the write path. Every geometry's block
+        // fits `MAX_BLOCK_LEN` (the `const` assertion above it), so the covered
+        // range goes into this array through `slice_of`, which refuses a span
+        // past it by name rather than truncating. The bytes read and the CRC
+        // sealed are unchanged; only where they are held moved.
+        let mut room = [0u8; MAX_BLOCK_LEN];
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
             // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
@@ -1588,15 +2569,10 @@ impl BarFile {
                 self.layout.covered_byte_range(block, n_valid),
                 &self.bars_path,
             )?;
-            let span =
-                usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
-                    path: self.bars_path.clone(),
-                    source: FormatError::OffsetOverflow,
-                })?;
-            let mut bytes = vec![0u8; span];
-            read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+            let bytes = slice_of(&mut room, end.saturating_sub(start), block, &self.bars_path)?;
+            read_fully(&self.bars, &self.bars_path, start, bytes)?;
             let sum = refused(
-                crate::block::seal(self.layout, n_valid, block, &bytes),
+                crate::block::seal(self.layout, n_valid, block, bytes),
                 &self.bars_path,
             )?;
             // FOUR BYTES AT `block * 4`. The sidecar is addressed by arithmetic
@@ -1609,7 +2585,8 @@ impl BarFile {
                 &sum.to_le_bytes(),
             )?;
         }
-        fault(crc.sync_all(), &self.bars_path, Action::Sync)
+        let crc_path = self.crc_path.as_deref().unwrap_or(&self.bars_path);
+        barrier_in(self.batch.as_ref(), crc, crc_path, &self.bars_path)
     }
 
     /// Verifies the old tail block's committed prefix against its existing
@@ -1634,13 +2611,29 @@ impl BarFile {
     /// the entry and no interrupted-append extent proves it, or the host's own
     /// refusal from a read.
     fn verify_old_tail_before_reseal(&self, n_valid: u64) -> Result<(), StoreError> {
-        // A file born without the flag is answered by `verify_block_of`
-        // itself (`crc_path` is `None`), so it is not asked twice here.
+        // A file born without the flag has no entry to protect: `crc_path` is
+        // `None` and there is nothing to verify the old tail against.
         if self.layout.block_of(n_valid) >= self.layout.blocks_for(n_valid) {
             return Ok(());
         }
-        self.verified.store(NO_BLOCK, Ordering::Relaxed);
-        self.verify_block_of(n_valid.saturating_sub(1))
+        let Some(sidecar) = self.crc_path.as_deref() else {
+            return Ok(());
+        };
+        let last = n_valid.saturating_sub(1);
+        let (at, end) = refused(self.layout.record_byte_range(last), &self.bars_path)?;
+        let mut image = [0u8; MAX_ROW_LEN];
+        let image = usize::try_from(end.saturating_sub(at))
+            .ok()
+            .and_then(|width| image.get_mut(..width))
+            .ok_or(StoreError::NotCommitted {
+                index: last,
+                n_valid,
+            })?;
+        // FORGET FIRST (D-1433's cache): the bytes below overwrite the buffer,
+        // and a refusal must not leave an older key naming them as verified.
+        let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.block = NO_BLOCK;
+        self.verify_block_of(sidecar, self.layout.block_of(last), at, image, &mut cache)
     }
 
     /// The committed header, as the file's own bytes describe it.
@@ -1706,6 +2699,27 @@ impl BarFile {
         })
     }
 
+    /// The checks every append makes before it reads a bar.
+    fn may_append<R: Row>(&self) -> Result<(), StoreError> {
+        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
+        // 24-byte record into a 56-byte geometry lays every field at the wrong
+        // offset and the CRC would still pass, because the bytes written are
+        // the bytes read back. Refused here, once, before any of them move.
+        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
+            return Err(StoreError::NotABarPath {
+                found: FileKind::Overlay,
+            });
+        }
+        // A MONTH WHOSE BARRIER FAILED TAKES NO FURTHER APPEND IN THIS
+        // PROCESS (D-1907, store1-2). Linux marks the pages of a failed
+        // `fsync` clean, so a second barrier returns success without writing
+        // them: re-issuing the same append would "commit" records that may
+        // never have reached the device, and the duplicate check below would
+        // answer `AlreadyPresent` from the page cache for a header slot whose
+        // barrier failed. Both are refused by name instead.
+        refuse_after_failed_barrier(&self.bars_path)
+    }
+
     /// Appends a batch and publishes it.
     ///
     /// The sequence is `docs/02-store-format.md` §5: the records are written
@@ -1732,24 +2746,17 @@ impl BarFile {
     ///
     /// [`StoreError::EmptyBatch`], [`StoreError::BatchNotOrdered`] or
     /// [`StoreError::ImpossibleBar`] before anything is written.
-    /// [`StoreError::Format`] carrying
-    /// [`FormatError::TimestampsOutOfOrder`] for a batch that overlaps the
-    /// committed range with different bars, or
+    /// [`StoreError::OverlapDisagrees`] for a batch that overlaps the
+    /// committed range with different bars, a stamp the month never held, or a
+    /// gap over a held one (D-1525). [`StoreError::Format`] carrying
     /// [`FormatError::CounterOverflow`] and
     /// [`FormatError::GenerationExhausted`] at the counters' ends. Anything
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
     pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
-        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
-        // 24-byte record into a 56-byte geometry lays every field at the wrong
-        // offset and the CRC would still pass, because the bytes written are
-        // the bytes read back. Refused here, once, before any of them move.
-        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
-            return Err(StoreError::NotABarPath {
-                found: FileKind::Overlay,
-            });
-        }
+        self.may_append::<R>()?;
         let (first_ts, last_ts) = survey(batch)?;
+        self.admission.admit(batch)?;
         let count = len_u64(batch.len());
 
         // `Header::advance` is the single authority on whether a batch follows
@@ -1800,7 +2807,10 @@ impl BarFile {
                 // month refused the whole window as a vendor restating history
                 // — for bars it already held, byte for byte. Only a re-pull
                 // that happened to end at the file's last record could answer.
-                let located = already_stored(batch, first_ts, self.header.n_valid, |index| {
+                // LOCATED BY THE TIME INDEX when the month has one (D-2329):
+                // one entry read instead of the bisection.
+                let at = self.locate::<R>(first_ts)?;
+                let located = already_stored(batch, at, self.header.n_valid, |index| {
                     self.read_row::<R>(index)
                 })?;
                 if let Some(first_index) = located {
@@ -1835,15 +2845,34 @@ impl BarFile {
 
                 // THREE: a genuine conflict. The vendor restated history, or
                 // bars arrived out of order. Refused by name.
-                return Err(StoreError::Format {
+                //
+                // With the REAL diagnosis, which is one of three conflicts
+                // `Conflict` names: this used to hand
+                // back `advance`'s `TimestampsOutOfOrder`, which is true of
+                // every batch that does not follow the tail and sent an
+                // operator to look at ordering. attackdata-7, D-1525.
+                return Err(self.diagnose_overlap(batch).unwrap_or(StoreError::Format {
                     path: self.bars_path.clone(),
                     source,
-                });
+                }));
             }
         };
         let commit = refused(next.commit(), &self.bars_path)?;
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;
+
+        // THE TIME INDEX'S SHARE OF THIS APPEND IS COMPUTED BEFORE ANY BYTE IS
+        // WRITTEN, because it can refuse or retire the index: a bar in the slot
+        // of the bar before it removes the `.tix` (D-2330), and either one
+        // after the records landed would leave an index claiming bars it does
+        // not hold.
+        // In memory, plus one entry read. D-2329.
+        //
+        // A month under the small-month threshold with no index writes it
+        // WHOLE here when this commit reaches the threshold (D-4933); whether
+        // it was is told on this commit's `store.append` line below.
+        let was_below = self.below_threshold_unindexed();
+        let indexed = self.index_batch(batch)?;
 
         // THE OLD TAIL BLOCK IS PROVED BEFORE ANYTHING IS WRITTEN. D-0910.
         //
@@ -1867,7 +2896,12 @@ impl BarFile {
         // below `commit.durable_through` is on stable storage when the second
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier_in(
+            self.batch.as_ref(),
+            &self.bars,
+            &self.bars_path,
+            &self.bars_path,
+        )?;
 
         // THE CHECKSUMS, BETWEEN THE RECORDS AND THE COMMIT. The ORDER is the
         // whole guarantee, and the other order is unsafe:
@@ -1884,12 +2918,33 @@ impl BarFile {
         // header, extended by one step.
         self.seal_committed(first_index, commit.header.n_valid)?;
 
+        // THE TIME INDEX, AFTER THE CHECKSUMS AND BEFORE THE HEADER — step 3b
+        // of `docs/02-store-format.md` §5. Written and synced ahead of the slot
+        // that commits the bars it describes, so a committed bar is never
+        // missing from the index; a crash here leaves entries AHEAD of the
+        // commit, which `time_index::resume` masks off and the next append
+        // overwrites. D-2329.
+        if let Some((bucket, entries)) = &indexed {
+            self.write_entries(*bucket, entries)?;
+        }
+
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier_in(
+            self.batch.as_ref(),
+            &self.bars,
+            &self.bars_path,
+            &self.bars_path,
+        )?;
 
         self.header = commit.header;
+        // THE SORT INDEX, AFTER THE COMMIT AND NEVER BEFORE IT (D-3349): a
+        // run is written only over bars already durable, so no index ever
+        // claims a bar that is not committed. It cannot refuse them either:
+        // a run that would not write is a `store.srt` warning, and readers
+        // read the rows it would have ordered themselves.
+        self.keep_sort_index();
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
         // never before. An event emitted ahead of the commit would claim a
         // durability the file does not have yet, and a crash between the two
@@ -1897,18 +2952,34 @@ impl BarFile {
         // failure than silence, which is what this path had.
         //
         // `Debug`: this is the per-member write path, so a normal run at the
-        // `Info` floor pays one relaxed atomic load and writes nothing.
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::debug("store.append", "committed")
-                .with(
-                    "file",
-                    telemetry::Value::Str(&self.bars_path.display().to_string()),
-                )
-                .with("bars", telemetry::Value::Uint(count))
-                .with("first_index", telemetry::Value::Uint(first_index))
-                .with("n_valid", telemetry::Value::Uint(self.header.n_valid))
-                .with("generation", telemetry::Value::Uint(self.header.generation)),
+        // `Info` floor pays one relaxed atomic load and writes nothing. It is
+        // `emit_if!` and not `emit` because only the macro makes that true:
+        // `emit` is a function, so its arguments, the path's formatted
+        // `to_string()` among them, are built before the level is read.
+        // Through `emit_if!` a filtered event evaluates no field at all.
+        let _dropped_when_filtered = telemetry::emit_if!(
+            telemetry::Level::Debug,
+            "store.append",
+            "committed",
+            "file" => telemetry::Value::Str(&self.bars_path.display().to_string()),
+            "bars" => telemetry::Value::Uint(count),
+            "first_index" => telemetry::Value::Uint(first_index),
+            "n_valid" => telemetry::Value::Uint(self.header.n_valid),
+            "generation" => telemetry::Value::Uint(self.header.generation),
+            "time_index" => telemetry::Value::Str(self.index_note(was_below)),
         );
+        // THE CROSSING IS A STATE CHANGE THE OPERATOR SEES (D-4933): the
+        // commit that brought a small month to the threshold wrote its `.tix`
+        // whole, once in the month's life, and says so at `Info`, where the
+        // per-commit line above is filtered. Written as the commit returns,
+        // after its records, index and header slot are written, and never
+        // before, so a refused commit leaves no line claiming an index. A plain
+        // writer's commit is durable by then; inside a `DurableBatch` it is
+        // durable when the batch's `make_durable` returns, as is every other
+        // line that batch's commits write.
+        if let Some(tix) = self.crossed_threshold(was_below) {
+            note_index_at_threshold(tix, self.header.n_valid);
+        }
         Ok(Appended::Committed {
             first_index,
             n_valid: self.header.n_valid,
@@ -1927,9 +2998,15 @@ impl BarFile {
     ///
     /// **Read that bound precisely.** The *operation* is constant; the read
     /// syscall underneath it is not free and its latency is the device's, not
-    /// this crate's. Nothing here measures the device, and no bench in this
-    /// repository times a syscall — `crates/store/benches/ratio.rs` measures
-    /// the arithmetic and the checksum. The syscall cost is UNVERIFIED.
+    /// this crate's. This method IS timed, and with it its one `pread`:
+    /// C-28 and C-29 time it in `crates/store/benches/ratio.rs` (a sentence
+    /// here said no bench timed a syscall until D-1434 corrected it). What
+    /// they time is a WARM read — one fixed index, so its checksum block is
+    /// cached and its page resident after the first call. The cold block
+    /// verify a random index pays is timed by C-BC-01 (flat in the file) and
+    /// C-BC-02 (its own 10,000-floor budget), D-0914; this sentence called it
+    /// UNVERIFIED until D-1506. A cold DEVICE, the page cache dropped, is
+    /// UNVERIFIED. D-0790.
     ///
     /// # Errors
     ///
@@ -1951,29 +3028,544 @@ impl BarFile {
     /// `n_valid` when every bar is older, which is the correct answer for a
     /// window starting past the end of the month rather than an error.
     ///
-    /// # Why this is public now
+    /// # A constant number of reads, through the time index — D-2329
     ///
-    /// The bisection has existed since the append path needed it, privately.
-    /// `/bars.json` meanwhile read THE WHOLE MONTH and applied the day window
-    /// afterwards — an O(1) audit measured the shape as "reads every bar,
-    /// filters after", so a one-day query against a one-minute month read
-    /// ~8,250 records, one `pread` each, to return ~375.
+    /// When the month's `.tix` index describes its committed bars, the lookup
+    /// costs at most ONE 16-byte entry read and ONE bar read, whatever the
+    /// month holds: the header's first and last stamps answer a timestamp
+    /// outside them with no read at all, and inside them the entry for the
+    /// timestamp's slot gives the row by a popcount (`crate::time_index`). The
+    /// bar read happens only on the daily rung, for a timestamp strictly
+    /// inside a day that holds a bar; an intraday lookup never reads one.
+    /// The read count is asserted at every month size up to the one-second
+    /// ceiling by `store::time_index::every_lookup_reads_at_most_one_entry_and_one_bar`,
+    /// and the answer is checked against the bisection on real files by
+    /// `store::tix::the_index_answers_every_timestamp_exactly_as_the_bisection_does`.
+    /// C-TIX-01 and C-TIX-02 time it. The first lookup through a READ handle
+    /// also opens the index and reads its header and two entries, once.
     ///
-    /// Bars in a file are strictly increasing by timestamp — the writer refuses
-    /// otherwise, which is what the bisection has always rested on — so the
-    /// window start is addressable in `log2(n_valid)` reads rather than found by
-    /// walking. At 8,250 bars that is fourteen.
+    /// # The legacy path, and it is loud
     ///
-    /// **UNVERIFIED as a measured bound.** No bench in this workspace
-    /// times this, so the shape above is read from the source rather
-    /// than measured. `CLAUDE.md` §3 rule 6.
+    /// A month with no usable index — written before D-2329, or by a writer
+    /// that does not maintain one, or one whose index is damaged — is answered
+    /// by the D-1434 bisection: at most `ceil(log2(n_valid + 1))` record reads,
+    /// asserted by
+    /// `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`.
+    /// The process writes one `store.tix` warning naming why — once per month
+    /// and kind of reason, not once per handle (D-3340) — and
+    /// [`Self::time_lookup`] reports which path it takes, on every handle. A
+    /// writer open of such a month builds the index
+    /// (`docs/02-store-format.md` §8.1), and so does [`Self::index_existing`],
+    /// which changes nothing else.
     ///
     /// # Errors
     ///
     /// Anything a record read can fail with. A refusal means the file could not
     /// be addressed, not that the window is empty.
     pub fn first_at_or_after(&self, ts: i64) -> Result<u64, StoreError> {
-        first_at_or_after::<Bar, _>(self.header.n_valid, ts, |index| self.read_record(index))
+        self.locate::<Bar>(ts)
+    }
+
+    /// Which path [`Self::first_at_or_after`] takes on this handle, and why.
+    ///
+    /// Asking decides it, for a read handle that has not looked anything up
+    /// yet — the same once-per-handle decision a lookup makes, warning
+    /// included when the answer is the bisection.
+    #[must_use]
+    pub fn time_lookup(&self) -> TimeLookup {
+        match self.tix_state() {
+            None => TimeLookup::Bisection(Why::NotBars),
+            Some(TixState::Ready(_)) => TimeLookup::Indexed,
+            Some(TixState::Bisecting(why)) => TimeLookup::Bisection(why.clone()),
+        }
+    }
+
+    /// Time to row for any record kind this handle holds: the index when it
+    /// is ready, the D-1434 bisection otherwise. Every locate in this module
+    /// goes through here — the public lookup, `append`'s re-offer check and
+    /// its overlap diagnosis — so none of them can drift onto the slow path
+    /// while another stays on the fast one.
+    fn locate<R: Row>(&self, ts: i64) -> Result<u64, StoreError> {
+        let n_valid = self.header.n_valid;
+        let bisect = || first_at_or_after(n_valid, ts, |index| self.read_row::<R>(index));
+        // An empty month answers 0 by either path and reads nothing; asking
+        // nothing of the index keeps an empty reader silent.
+        if n_valid == 0 {
+            return bisect();
+        }
+        let Some(tix) = self.tix.as_ref() else {
+            return bisect();
+        };
+        let TixState::Ready(index) = self.decided(tix) else {
+            return bisect();
+        };
+        match crate::time_index::locate(
+            &tix.geometry,
+            Held::of(&self.header),
+            ts,
+            |bucket| read_entry(index, &tix.path, bucket),
+            |row| self.read_row::<R>(row).map(|found| found.stamp()),
+        ) {
+            Ok(row) => Ok(row),
+            Err(Fault::Bar(why)) => Err(why),
+            // THE INDEX FAILED THIS ONE LOOKUP — an entry that no longer reads
+            // or no longer checks. The answer still comes back, by the slower
+            // path, and the reason is written down. `CLAUDE.md` §4.
+            Err(Fault::Index(why)) => {
+                note_lookup_bisects(&tix.path, &why);
+                bisect()
+            }
+        }
+    }
+
+    /// This handle's index state, deciding it for a reader on first use.
+    fn tix_state(&self) -> Option<&TixState> {
+        self.tix.as_ref().map(|tix| self.decided(tix))
+    }
+
+    /// `tix.state`, decided once: a writer's was set at open; a reader's is
+    /// decided here, by opening the `.tix` read-only and confirming it.
+    fn decided<'t>(&self, tix: &'t Tix) -> &'t TixState {
+        tix.state.get_or_init(|| {
+            let index = match open_read(&tix.path) {
+                Ok(index) => index,
+                // A SMALL MONTH WITH NO INDEX IS THE RULE, NOT A FAULT
+                // (D-4933): it bisects in at most ten bar reads, and the
+                // warning a missing index earns is not written for it.
+                Err(why) if why.is_absent() && below_threshold(self.header.n_valid) => {
+                    return bisecting(&tix.path, Why::BelowThreshold);
+                }
+                Err(why) if why.is_absent() => return bisecting(&tix.path, Why::Absent),
+                Err(why) => {
+                    return bisecting(&tix.path, Why::Unreadable(why.refusal(&tix.path)));
+                }
+            };
+            match self.confirm_index(&index, tix) {
+                Ok(()) => TixState::Ready(index),
+                Err(why) => bisecting(&tix.path, why),
+            }
+        })
+    }
+
+    /// Whether `index` is this month's index and describes its committed bars:
+    /// the header against the geometry, then `time_index::confirm`. One
+    /// 64-byte read and two 16-byte reads.
+    fn confirm_index(&self, index: &File, tix: &Tix) -> Result<(), Why> {
+        let mut head = [0u8; 64];
+        read_fully(index, &tix.path, 0, &mut head).map_err(|why| match why {
+            StoreError::ShortRead { .. } => Why::Header("it is shorter than its header"),
+            other => Why::Unreadable(other),
+        })?;
+        tix.geometry.check(&head)?;
+        crate::time_index::confirm(&tix.geometry, Held::of(&self.header), |bucket| {
+            read_entry(index, &tix.path, bucket)
+        })
+    }
+
+    /// The writer's half of opening: create the `.tix` if absent, and leave
+    /// this handle with an index that describes the committed bars — or with
+    /// none, said out loud.
+    ///
+    /// An empty month gets a header and no entries. A month with records
+    /// keeps its index when `confirm_index` accepts it, at the cost of three
+    /// reads; otherwise the index is rebuilt from the bars, once, which reads
+    /// every committed record (`Self::rebuild_index`). That is the explicit
+    /// migration path for a month written before D-2329 or by another writer:
+    /// a writer open, through this door — or [`Self::index_existing`], which
+    /// runs this step alone and reports what it did (D-3340).
+    ///
+    /// The answer says what was found and done: [`Reindexed::Kept`] when the
+    /// index already described the bars and nothing was written,
+    /// [`Reindexed::Built`] naming why it had to be written, and
+    /// [`Reindexed::Unindexable`] naming why no index can be kept.
+    fn index_on_open(&mut self) -> Result<Reindexed, StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(Reindexed::Unindexable(Why::NotBars));
+        };
+        let named = fs::symlink_metadata(&tix.path);
+        // THE SMALL-MONTH RULE (D-4933): a month under the threshold with NO
+        // `.tix` is given none — not created, not built, nothing written. Only
+        // a name that is not there at all qualifies: a link, a directory or
+        // anything else at the name goes down the path below, which refuses
+        // it by name, so the rule can never hide what sits there. An index
+        // already beside a small month is kept in step as before.
+        if below_threshold(self.header.n_valid)
+            && matches!(&named, Err(why) if why.kind() == ErrorKind::NotFound)
+        {
+            self.set_tix_state(TixState::Bisecting(Why::BelowThreshold));
+            return Ok(Reindexed::BelowThreshold);
+        }
+        let existed = matches!(named, Ok(meta) if meta.is_file());
+        let batch = self.batch.as_ref();
+        let through = batch.is_some_and(DurableBatch::writes_through);
+        let index = fault(open_rw_through(&tix.path, through), &tix.path, Action::Open)?;
+        if !existed {
+            fsync_dir(tix.path.parent().unwrap_or(&tix.path), batch)?;
+        }
+        // WHY IT MUST BE WRITTEN, NAMED AS WHAT IT IS. An index this open just
+        // made is ABSENT — confirming the empty file it created would call it
+        // "shorter than its header", and the rebuild line would then blame a
+        // damaged index for a month that never had one (D-3340). An empty
+        // month's index is its header and nothing else, so entries past the
+        // header describe bars that never committed.
+        let checked = if !existed {
+            Err(Why::Absent)
+        } else if self.header.n_valid == 0
+            && fault(index.metadata(), &tix.path, Action::Measure)?.len()
+                != crate::time_index::HEADER_LEN
+        {
+            Err(Why::Stale)
+        } else {
+            self.confirm_index(&index, tix)
+        };
+        let (state, outcome) = match checked {
+            Ok(()) => (TixState::Ready(index), Reindexed::Kept),
+            Err(why) if self.header.n_valid == 0 => {
+                write_index(&index, tix, &[], batch)?;
+                (TixState::Ready(index), Reindexed::Built(why))
+            }
+            Err(why) => {
+                let state = self.rebuild_index(index, tix, &why)?;
+                let outcome = match &state {
+                    TixState::Ready(_) => Reindexed::Built(why),
+                    TixState::Bisecting(cannot) => Reindexed::Unindexable(cannot.clone()),
+                };
+                (state, outcome)
+            }
+        };
+        self.set_tix_state(state);
+        Ok(outcome)
+    }
+
+    /// Replaces this handle's index state — the writer's, at open or after a
+    /// rebuild an append needed.
+    fn set_tix_state(&mut self, state: TixState) {
+        if let Some(tix) = self.tix.as_mut() {
+            tix.state = OnceLock::from(state);
+        }
+    }
+
+    /// Rebuilds `index` from every committed bar, because `why`.
+    ///
+    /// O(`n_valid`) record reads, through the verified read path, and paid
+    /// once per month: the writer that rebuilt it keeps it in step from then
+    /// on. Logged as a `store.tix` info line naming the reason.
+    ///
+    /// When the bars cannot be indexed — one shares a slot with the bar before
+    /// it, lies off its rung's grid or outside the month, or does not read —
+    /// no index is left
+    /// claiming them: the `.tix` is removed, the handle bisects, and the
+    /// reason is logged as a warning. The month stays openable and appendable,
+    /// exactly as it was before D-2329.
+    fn rebuild_index(&self, index: File, tix: &Tix, why: &Why) -> Result<TixState, StoreError> {
+        let held = Held::of(&self.header);
+        let stamps =
+            (0..held.n_valid).map(|row| self.read_row::<Bar>(row).map(|bar| bar.ts_micros));
+        let built = crate::time_index::extend(&tix.geometry, 0, Entry::EMPTY, 0, stamps).and_then(
+            |entries| {
+                // THE BARS AND THE HEADER MUST AGREE about which bars are
+                // first and last, or the lookup's two no-read answers would
+                // contradict the entries built here.
+                crate::time_index::confirm(&tix.geometry, held, |bucket| {
+                    usize::try_from(bucket)
+                        .ok()
+                        .and_then(|at| entries.get(at).copied())
+                        .ok_or(Why::Entry { bucket })
+                })
+                .map(|()| entries)
+            },
+        );
+        match built {
+            Ok(entries) => {
+                write_index(&index, tix, &entries, self.batch.as_ref())?;
+                note_index_built(&tix.path, why, held.n_valid, len_u64(entries.len()));
+                Ok(TixState::Ready(index))
+            }
+            Err(cannot) => {
+                drop(index);
+                remove_index(&tix.path, self.batch.as_ref())?;
+                Ok(bisecting(&tix.path, cannot))
+            }
+        }
+    }
+
+    /// The entries this append adds to the index, and the bucket they start
+    /// at — `None` when this handle keeps no index.
+    ///
+    /// One entry read (`time_index::resume`) and one pass over the batch. An
+    /// entry that no longer puts the last committed bar where the header does
+    /// — a torn write from an append that failed on this handle — rebuilds
+    /// the index first, loudly, and is asked again.
+    ///
+    /// A bar in the slot of the bar before it — a second daily bar on one IST
+    /// day, which the daily rung admits (D-0915) — is not refused: the append
+    /// is what it was before D-2329, and this month stops being indexed,
+    /// loudly, before any byte moves (`Self::retire_index`, D-2330).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::OffGrid`] or [`StoreError::OutsideMonth`] for a bar the
+    /// admission already refuses, should one ever reach here; whatever a
+    /// rebuild's write refuses; and whatever removing a retired `.tix`
+    /// refuses.
+    fn index_batch<R: Row>(
+        &mut self,
+        batch: &[R],
+    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+        let held = Held::of(&self.header);
+        let resumed = match self.tix.as_ref() {
+            Some(tix) => match tix.state.get() {
+                Some(TixState::Ready(index)) => {
+                    crate::time_index::resume(&tix.geometry, held, |bucket| {
+                        read_entry(index, &tix.path, bucket)
+                    })
+                }
+                Some(TixState::Bisecting(Why::BelowThreshold))
+                    if !below_threshold(held.n_valid.saturating_add(len_u64(batch.len()))) =>
+                {
+                    return self.index_at_threshold(batch);
+                }
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        let (bucket, start) = match resumed {
+            Ok(found) => found,
+            Err(why) => {
+                self.reindex(&why)?;
+                let Some(tix) = self.tix.as_ref() else {
+                    return Ok(None);
+                };
+                let Some(TixState::Ready(index)) = tix.state.get() else {
+                    return Ok(None);
+                };
+                match crate::time_index::resume(&tix.geometry, held, |bucket| {
+                    read_entry(index, &tix.path, bucket)
+                }) {
+                    Ok(found) => found,
+                    Err(why) => return Err(index_refused(&tix.path, &why)),
+                }
+            }
+        };
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(None);
+        };
+        let stamps = batch.iter().map(|row| Ok(row.stamp()));
+        let extended =
+            crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps);
+        match extended {
+            Ok(entries) => Ok(Some((bucket, entries))),
+            Err(why @ Why::SharedSlot { .. }) => {
+                self.retire_index(why)?;
+                Ok(None)
+            }
+            Err(Why::OffGrid { index, ts_micros }) => Err(StoreError::OffGrid {
+                at: index.saturating_sub(held.n_valid),
+                ts_micros,
+                timeframe_secs: self.header.timeframe_secs,
+            }),
+            Err(Why::Outside { index, ts_micros }) => Err(StoreError::OutsideMonth {
+                at: index.saturating_sub(held.n_valid),
+                ts_micros,
+                month: self.admission.month,
+            }),
+            Err(other) => Err(index_refused(&tix.path, &other)),
+        }
+    }
+
+    /// Whether this handle keeps no index because its month is under the
+    /// small-month threshold (D-4933) — asked by `append` before
+    /// [`Self::index_batch`], so the commit line can say that this commit
+    /// wrote the index whole.
+    fn below_threshold_unindexed(&self) -> bool {
+        matches!(
+            self.tix.as_ref().and_then(|tix| tix.state.get()),
+            Some(TixState::Bisecting(Why::BelowThreshold))
+        )
+    }
+
+    /// The `.tix` this commit wrote whole because it brought a month under
+    /// the small-month threshold to it (D-4933), or `None`: `was_below` is
+    /// [`Self::below_threshold_unindexed`] before the commit, and the index
+    /// is ready after it only when the threshold write succeeded.
+    fn crossed_threshold(&self, was_below: bool) -> Option<&Path> {
+        let tix = self.tix.as_ref()?;
+        (was_below && matches!(tix.state.get(), Some(TixState::Ready(_))))
+            .then_some(tix.path.as_path())
+    }
+
+    /// What a commit left the month's time index as, for its `store.append`
+    /// line: `was_below` is [`Self::below_threshold_unindexed`] before it.
+    /// Static words, so the line costs nothing it did not cost before.
+    fn index_note(&self, was_below: bool) -> &'static str {
+        match self.tix.as_ref().and_then(|tix| tix.state.get()) {
+            None => "none: only bar files carry a time index",
+            Some(TixState::Ready(_)) if was_below => {
+                "written whole: this commit brought the month to the small-month threshold (D-4933)"
+            }
+            Some(TixState::Ready(_)) => "kept in step",
+            Some(TixState::Bisecting(Why::BelowThreshold)) => {
+                "none: the month is under the small-month threshold (D-4933)"
+            }
+            Some(TixState::Bisecting(_)) => {
+                "none: lookups bisect, and a store.tix warning says why"
+            }
+        }
+    }
+
+    /// The commit that brings a small month to
+    /// [`crate::time_index::INDEX_MIN_ROWS`] bars writes its `.tix` WHOLE
+    /// (D-4933): every committed bar and every bar of `batch`, written and
+    /// synced before the records are, so the header slot that commits them
+    /// never names a bar the index lacks.
+    ///
+    /// # Cost
+    ///
+    /// Once per month: the committed bars — fewer than
+    /// [`crate::time_index::INDEX_MIN_ROWS`], so at most 1,023 record reads
+    /// through the verified path — and one pass over the batch, then one
+    /// write of the entries and the header. From the next commit on the month
+    /// is an ordinary indexed one: one entry read per append.
+    ///
+    /// # A crash anywhere in it
+    ///
+    /// The entries are written and synced before the header (`write_index`),
+    /// so an index whose header checks never covers half old, half new
+    /// entries. A crash after the index and before the bars' commit leaves
+    /// entries AHEAD of the commit, exactly the state every append's crash
+    /// leaves, which `time_index::resume` masks off and the next append
+    /// overwrites; a reader confirms the committed bars against it and goes
+    /// through it. A crash before the header leaves a `.tix` whose header does
+    /// not check: a reader bisects and says so, and the next writer open
+    /// rebuilds it.
+    ///
+    /// # When the bars cannot be indexed
+    ///
+    /// A committed bar that would not read, or two bars in one slot, leaves no
+    /// file: the month bisects from now on and the `store.tix` warning names
+    /// why, as a rebuild that met the same bars would (D-2330). A bar of the
+    /// BATCH off its rung's grid or outside the month is refused as
+    /// [`Self::index_batch`] refuses it, before any byte is written.
+    fn index_at_threshold<R: Row>(
+        &mut self,
+        batch: &[R],
+    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+        let held = Held::of(&self.header);
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(None);
+        };
+        let committed =
+            (0..held.n_valid).map(|row| self.read_row::<R>(row).map(|found| found.stamp()));
+        let mut entries =
+            match crate::time_index::extend(&tix.geometry, 0, Entry::EMPTY, 0, committed) {
+                Ok(entries) => entries,
+                Err(cannot) => {
+                    let path = tix.path.clone();
+                    self.set_tix_state(bisecting(&path, cannot));
+                    return Ok(None);
+                }
+            };
+        // `extend` always yields the entry it ended in, so the committed
+        // prefix's last entry is where the batch continues from.
+        let start = entries.pop().unwrap_or(Entry::EMPTY);
+        let bucket = len_u64(entries.len());
+        let stamps = batch.iter().map(|row| Ok(row.stamp()));
+        match crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps) {
+            Ok(tail) => entries.extend(tail),
+            Err(why @ Why::SharedSlot { .. }) => {
+                let path = tix.path.clone();
+                self.set_tix_state(bisecting(&path, why));
+                return Ok(None);
+            }
+            Err(Why::OffGrid { index, ts_micros }) => {
+                return Err(StoreError::OffGrid {
+                    at: index.saturating_sub(held.n_valid),
+                    ts_micros,
+                    timeframe_secs: self.header.timeframe_secs,
+                });
+            }
+            Err(Why::Outside { index, ts_micros }) => {
+                return Err(StoreError::OutsideMonth {
+                    at: index.saturating_sub(held.n_valid),
+                    ts_micros,
+                    month: self.admission.month,
+                });
+            }
+            Err(other) => return Err(index_refused(&tix.path, &other)),
+        }
+        let batched = self.batch.as_ref();
+        let through = batched.is_some_and(DurableBatch::writes_through);
+        // A NEW INODE OR NOTHING: the name was not there when this writer
+        // opened, and `create_new` refuses whatever appeared at it since — a
+        // file, a link, a directory — rather than write through it.
+        let index = fault(
+            open_new_through(&tix.path, through),
+            &tix.path,
+            Action::Open,
+        )?;
+        let written = fsync_dir(tix.path.parent().unwrap_or(&tix.path), batched)
+            .and_then(|()| write_threshold_index(&index, tix, &entries, batched));
+        if let Err(refusal) = written {
+            // THE FILE THIS CALL MADE, AND NOTHING ELSE, is taken back, so the
+            // next commit on this handle begins again from no name at all
+            // rather than meeting its own half-written file at `create_new`.
+            // The refusal returned is the write's, and no bar was written. A
+            // removal that is refused as well leaves a `.tix` whose header or
+            // entries do not check: readers bisect and say so, the next
+            // commit here is refused by name at its create, and the next
+            // writer open rebuilds it.
+            drop(index);
+            let _taken_back = remove_index(&tix.path, batched);
+            return Err(refusal);
+        }
+        self.set_tix_state(TixState::Ready(index));
+        // Written whole above: the append's own entry step has nothing left.
+        Ok(None)
+    }
+
+    /// Stops indexing this month, because `why`: the handle bisects from now
+    /// on, saying so (`store.tix` warning), and the `.tix` is removed and its
+    /// directory synced — all before the append that made it necessary writes
+    /// a byte, so no index is ever left claiming bars it does not describe.
+    /// A later writer open tries the rebuild again, finds the same reason,
+    /// and says so again. D-2330.
+    fn retire_index(&mut self, why: Why) -> Result<(), StoreError> {
+        let Some(path) = self.tix.as_ref().map(|tix| tix.path.clone()) else {
+            return Ok(());
+        };
+        // Dropping the `Ready` state closes the handle before the unlink.
+        self.set_tix_state(bisecting(&path, why));
+        remove_index(&path, self.batch.as_ref())
+    }
+
+    /// Rebuilds a writer's index mid-life, because `why`: reopens the `.tix`
+    /// and goes through `Self::rebuild_index` exactly as an open would.
+    fn reindex(&mut self, why: &Why) -> Result<(), StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(());
+        };
+        let through = self
+            .batch
+            .as_ref()
+            .is_some_and(DurableBatch::writes_through);
+        let index = fault(open_rw_through(&tix.path, through), &tix.path, Action::Open)?;
+        let state = self.rebuild_index(index, tix, why)?;
+        self.set_tix_state(state);
+        Ok(())
+    }
+
+    /// Writes an append's entries at `bucket`, cuts anything an interrupted
+    /// append left past them, and syncs — before the header slot that commits
+    /// the bars they describe.
+    fn write_entries(&self, bucket: u64, entries: &[Entry]) -> Result<(), StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(());
+        };
+        let Some(TixState::Ready(index)) = tix.state.get() else {
+            return Ok(());
+        };
+        put_entries(index, &tix.path, bucket, entries)?;
+        sync_index(index, &tix.path, self.batch.as_ref())
     }
 
     /// One record of whatever kind this file holds.
@@ -2004,17 +3596,19 @@ impl BarFile {
     /// shape and is exactly wrong — it disappears in release, which is where
     /// the store runs.
     ///
-    /// # The record is READ first and the block is verified second
+    /// # A truncated record is still named as the RECORD
     ///
-    /// Both orders refuse the same records — nothing is returned until
-    /// [`Self::verify_block_of`] has passed — so the choice is only about which
-    /// refusal an operator is handed for a file that is BOTH truncated and
-    /// checksummed. Reading first names the record: `ShortRead` at that record's
-    /// own offset, owing that record's own bytes, which is the sentence
-    /// `crates/store/tests/write.rs` asserts and the one that answers "is the
-    /// bar I asked for there". Verifying first would name the block's offset and
-    /// the block's length for every index inside it, so a caller walking a month
-    /// would be told the same thing 73 times about 73 different records.
+    /// Since D-1433 a sealed file reads the whole covered block in one `pread`
+    /// and serves the record out of it, so the record is no longer read on its
+    /// own. Only the refusal for a file that is BOTH truncated and checksummed
+    /// could change with that, and it does not: when the block read comes up
+    /// short, [`Self::verify_block_of`] reads the record by itself — on that
+    /// failure path only — and hands back the record's `ShortRead`, at that
+    /// record's own offset, owing that record's own bytes, which is the
+    /// sentence `crates/store/tests/write.rs` asserts and the one that answers
+    /// "is the bar I asked for there". Naming the block's offset and length for
+    /// every index inside it would tell a caller walking a month the same thing
+    /// 73 times about 73 different records.
     ///
     /// # Errors
     ///
@@ -2036,20 +3630,57 @@ impl BarFile {
             index,
             n_valid: self.header.n_valid,
         })?;
-        read_fully(&self.bars, &self.bars_path, at, image)?;
-        let row = refused(W::read_from(image), &self.bars_path)?;
-        // THE ONE LINE THAT MAKES THE SIDECAR MEAN ANYTHING.
+        // THE ONE BRANCH THAT MAKES THE SIDECAR MEAN ANYTHING.
         //
         // Every read in this crate funnels through here — `read_record`,
         // `first_at_or_after`'s bisection, `already_stored`'s comparison,
         // `suffix_that_follows`' overlap — so this is the single place the check
-        // has to go for none of them to serve an unverified byte.
-        self.verify_block_of(index)?;
-        Ok(row)
+        // has to go for none of them to serve an unverified byte. A sealed file
+        // is served from the verified block's own bytes (D-1433); an unsealed
+        // one has nothing to verify against and reads its record directly.
+        match self.crc_path.as_deref() {
+            Some(sidecar) => self.read_verified(sidecar, index, at, image)?,
+            None => read_fully(&self.bars, &self.bars_path, at, image)?,
+        }
+        refused(W::read_from(image), &self.bars_path)
     }
 
-    /// Verifies the checksum block record `index` lives in, once per run of
-    /// reads inside it.
+    /// Copies record `index`, at file offset `at`, out of its verified block —
+    /// D-1433.
+    ///
+    /// Warm (the handle's cached block is this block at this counter): one
+    /// uncontended lock and one copy of the record's bytes, no syscall. Cold:
+    /// [`Self::verify_block_of`] reads and checks the block into the cache,
+    /// and only then is the record copied out of it. Either way the bytes
+    /// returned are bytes the check ran over.
+    fn read_verified(
+        &self,
+        sidecar: &Path,
+        index: u64,
+        at: u64,
+        image: &mut [u8],
+    ) -> Result<(), StoreError> {
+        let n_valid = self.header.n_valid;
+        let block = self.layout.block_of(index);
+        let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.block != block || cache.n_valid != n_valid {
+            // FORGET FIRST, so a refusal or a panic below leaves nothing cached.
+            cache.block = NO_BLOCK;
+            self.verify_block_of(sidecar, block, at, image, &mut cache)?;
+            cache.block = block;
+            cache.n_valid = n_valid;
+        }
+        let verified = cache
+            .record(at, image.len())
+            .ok_or(StoreError::NotCommitted { index, n_valid })?;
+        image.copy_from_slice(verified);
+        Ok(())
+    }
+
+    /// Reads `block`'s covered range into the handle's cache and verifies it,
+    /// once per run of reads inside it — called by [`Self::read_verified`] on a
+    /// cache miss only. On success the cache's `start` and `len` describe the
+    /// verified bytes; the caller sets its key. D-1433.
     ///
     /// # The defect this closes, measured rather than reasoned about
     ///
@@ -2066,8 +3697,9 @@ impl BarFile {
     ///
     /// # Three states, and only one of them refuses for want of a sidecar
     ///
-    /// * **No flag.** The file was born unsealed, `crc_path` is `None`, and this
-    ///   returns `Ok` without a syscall. `docs/02-store-format.md` §6 provides
+    /// * **No flag.** The file was born unsealed, `crc_path` is `None`, and
+    ///   [`Self::read_row`] never calls this: it reads the record directly,
+    ///   with nothing to verify it against. `docs/02-store-format.md` §6 provides
     ///   for exactly that, and §3 rule 8 says the flag is not added later — a
     ///   sidecar written for it now would cover the tail while claiming the
     ///   file, which converts "unverified" into a false "verified".
@@ -2084,9 +3716,11 @@ impl BarFile {
     ///
     /// # Cost
     ///
-    /// One `pread` of four bytes and one CRC-32C over at most
-    /// [`Layout::block_len`] — 4,088 bytes at the bar geometry — on the FIRST
-    /// touch of a block, and one relaxed load on every touch after it. A forward
+    /// One `pread` of the covered range (at most [`Layout::block_len`], 4,088
+    /// bytes at the bar geometry) into the handle's fixed buffer, one `pread`
+    /// of four sidecar bytes and one CRC-32C over the covered range, on the
+    /// FIRST touch of a block; every touch after it is served from the buffer
+    /// with no syscall and never reaches this function. A forward
     /// walk of a month therefore pays this once per 73 records, never once per
     /// record. It is not free and is not claimed to be: `CLAUDE.md` §3 rule 4
     /// bounds the per-operation cost and this is bounded by the block, which is
@@ -2113,22 +3747,27 @@ impl BarFile {
     /// [`StoreError::ShortRead`] for a sidecar too short to hold this block's
     /// entry, [`StoreError::Format`] if the geometry refuses the block, and
     /// anything the host refuses measuring or reading either file.
-    fn verify_block_of(&self, index: u64) -> Result<(), StoreError> {
-        // ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is `Some`
-        // exactly when `validated` saw `FLAG_CHECKSUMS`, so this is the header's
-        // answer with the sidecar's name already in hand — which the refusal
-        // below needs and `Header::checksums_present()` alone could not give.
-        let Some(at) = self.crc_path.as_ref() else {
-            return Ok(());
-        };
-        let block = self.layout.block_of(index);
-        if self.verified.load(Ordering::Relaxed) == block {
-            return Ok(());
-        }
+    fn verify_block_of(
+        &self,
+        at: &Path,
+        block: u64,
+        record_at: u64,
+        image: &mut [u8],
+        cache: &mut VerifiedBlock,
+    ) -> Result<(), StoreError> {
+        // `at` IS ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is
+        // `Some` exactly when `validated` saw `FLAG_CHECKSUMS`, and
+        // `Self::read_row` calls this only then — so this is the header's answer
+        // with the sidecar's name already in hand, which the refusal below needs
+        // and `Header::checksums_present()` alone could not give.
         let Some(crc) = self.checksums.as_ref() else {
+            // THE RECORD'S OWN SHORT READ STILL COMES FIRST, as it did when the
+            // record was read before anything else. One `pread`, on this
+            // refusal path only.
+            read_fully(&self.bars, &self.bars_path, record_at, image)?;
             return Err(StoreError::ChecksumsMissing {
                 path: self.bars_path.clone(),
-                sidecar: at.clone(),
+                sidecar: at.to_path_buf(),
                 block,
             });
         };
@@ -2142,12 +3781,24 @@ impl BarFile {
             self.layout.covered_byte_range(block, self.header.n_valid),
             &self.bars_path,
         )?;
-        let span = usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
-            path: self.bars_path.clone(),
-            source: FormatError::OffsetOverflow,
-        })?;
-        let mut bytes = vec![0u8; span];
-        read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+        // INTO THE HANDLE'S OWN FIXED BUFFER, which is what the reads after
+        // this one are served from (D-1433). It used to be a fresh heap buffer
+        // per cold block, checked and then thrown away. `MAX_BLOCK_LEN` is
+        // asserted at compile time to hold every geometry a `BarFile` resolves,
+        // so the refusal here is for a covered range no `Layout` can produce.
+        let bytes = usize::try_from(end.saturating_sub(start))
+            .ok()
+            .and_then(|span| cache.bytes.get_mut(..span))
+            .ok_or_else(|| StoreError::Format {
+                path: self.bars_path.clone(),
+                source: FormatError::OffsetOverflow,
+            })?;
+        if let Err(short) = read_fully(&self.bars, &self.bars_path, start, bytes) {
+            // NAME THE RECORD WHEN IT IS THE RECORD THAT IS MISSING — see
+            // `Self::read_row`. Only on this failure path.
+            read_fully(&self.bars, &self.bars_path, record_at, image)?;
+            return Err(short);
+        }
 
         // FOUR BYTES AT `block * 4`, AND THE `.crc` IS THE PATH A FAILURE HERE
         // NAMES. A short sidecar is a short read of the SIDECAR, not of the
@@ -2162,7 +3813,8 @@ impl BarFile {
         // other block and for a healthy file. `block::verify_through` uses them
         // only to PROVE that a mismatching tail entry was sealed over the
         // committed bytes plus some of these — see `Self::past_the_commit`.
-        let past = self.past_the_commit(block, end)?;
+        let mut beyond = [0u8; MAX_BLOCK_LEN];
+        let past = self.past_the_commit(block, end, &mut beyond)?;
 
         // `block::verify_through` AND NOT A COMPARISON WRITTEN HERE. It is the
         // body of `block::verify`, the function `crates/store/tests/fault.rs`
@@ -2171,7 +3823,7 @@ impl BarFile {
         // admitted, visible in `/logs` as well as in the return value. A second
         // comparison in this module would be a second answer to one question.
         let checked =
-            crate::block::verify_through(&self.header, self.layout, block, &bytes, &past, stored);
+            crate::block::verify_through(&self.header, self.layout, block, bytes, past, stored);
         if let Err(FormatError::BlockChecksum { computed, .. }) = checked {
             return Err(StoreError::BlockChecksum {
                 path: self.bars_path.clone(),
@@ -2181,7 +3833,8 @@ impl BarFile {
             });
         }
         refused(checked, &self.bars_path)?;
-        self.verified.store(block, Ordering::Relaxed);
+        cache.start = start;
+        cache.len = bytes.len();
         Ok(())
     }
 
@@ -2207,28 +3860,98 @@ impl BarFile {
     ///
     /// # Errors
     ///
-    /// Anything the host refuses measuring or reading the bar file.
-    fn past_the_commit(&self, block: u64, end: u64) -> Result<Vec<u8>, StoreError> {
+    /// Anything the host refuses measuring or reading the bar file, and
+    /// [`FormatError::BlockLengthMismatch`] for records past the commit that
+    /// would not fit in `room`, which the geometry rules out (see
+    /// [`MAX_BLOCK_LEN`]).
+    ///
+    /// # Into the caller's buffer — D-0914
+    ///
+    /// The records are read into `room`, a stack array the caller owns, and
+    /// the answer borrows from it. Until D-0914 this returned a fresh `Vec`,
+    /// a heap allocation on every cold read of a tail block holding records
+    /// past the commit.
+    fn past_the_commit<'r>(
+        &self,
+        block: u64,
+        end: u64,
+        room: &'r mut [u8; MAX_BLOCK_LEN],
+    ) -> Result<&'r [u8], StoreError> {
         let n_valid = self.header.n_valid;
         if block.saturating_add(1) != self.layout.blocks_for(n_valid) {
-            return Ok(Vec::new());
+            return Ok(&[]);
         }
         let len = fault(self.bars.metadata(), &self.bars_path, Action::Measure)?.len();
         let nominal_end = block
             .saturating_add(1)
             .saturating_mul(self.layout.records_per_block());
         let held = self.layout.capacity_for(len).min(nominal_end);
-        let span = usize::try_from(
-            held.saturating_sub(n_valid)
-                .saturating_mul(self.layout.record_stride()),
-        )
-        .map_err(|_| StoreError::Format {
-            path: self.bars_path.clone(),
-            source: FormatError::OffsetOverflow,
-        })?;
-        let mut past = vec![0u8; span];
-        read_fully(&self.bars, &self.bars_path, end, &mut past)?;
+        let span = held
+            .saturating_sub(n_valid)
+            .saturating_mul(self.layout.record_stride());
+        let past = slice_of(room, span, block, &self.bars_path)?;
+        read_fully(&self.bars, &self.bars_path, end, past)?;
         Ok(past)
+    }
+
+    /// Why an ordered batch overlapping the held range was refused: the first
+    /// offered record that disagrees with what the month holds.
+    ///
+    /// Walks the overlap against the held records from the first held stamp
+    /// at or after the batch's first, one read per overlapping record, so it
+    /// is bounded by the batch and runs only on the refusal path. `None` only
+    /// when the walk finds no disagreement, which the two checks before it
+    /// make unreachable; the caller then keeps `advance`'s own refusal rather
+    /// than inventing one. A read that fails is that failure, named.
+    /// audit-20261003 attackdata-7, D-1525.
+    fn diagnose_overlap<R: Row>(&self, batch: &[R]) -> Option<StoreError> {
+        let n_valid = self.header.n_valid;
+        let held_through = self.header.last_ts_micros;
+        let read = |index| self.read_row::<R>(index);
+        let conflict = |at: usize, ts_micros, conflict| StoreError::OverlapDisagrees {
+            path: self.bars_path.clone(),
+            at: len_u64(at),
+            ts_micros,
+            conflict,
+        };
+        let first = batch.first()?;
+        let mut index = match self.locate::<R>(first.stamp()) {
+            Ok(index) => index,
+            Err(why) => return Some(why),
+        };
+        let mut offered = 0usize;
+        for (at, row) in batch.iter().enumerate() {
+            if row.stamp() > held_through {
+                break;
+            }
+            offered = at.saturating_add(1);
+            if index >= n_valid {
+                return Some(conflict(at, row.stamp(), Conflict::NotHeld));
+            }
+            let stored = match read(index) {
+                Ok(stored) => stored,
+                Err(why) => return Some(why),
+            };
+            if stored.stamp() > row.stamp() {
+                return Some(conflict(at, row.stamp(), Conflict::NotHeld));
+            }
+            if stored.stamp() < row.stamp() {
+                return Some(conflict(at, stored.stamp(), Conflict::Skipped));
+            }
+            if !stored.same_bytes(row) {
+                return Some(conflict(at, row.stamp(), Conflict::Restated));
+            }
+            index = index.saturating_add(1);
+        }
+        // Every overlapping record matched; if held records remain past them
+        // and the batch goes on beyond the held range, it skipped them.
+        if index < n_valid && offered < batch.len() {
+            return Some(match read(index) {
+                Ok(stored) => conflict(offered, stored.stamp(), Conflict::Skipped),
+                Err(why) => why,
+            });
+        }
+        None
     }
 
     /// The part of `batch` that follows what is committed, when the part that
@@ -2289,7 +4012,7 @@ impl BarFile {
         };
         for (offset, bar) in overlap.iter().enumerate() {
             let stored = self.read_row::<R>(start.saturating_add(len_u64(offset)))?;
-            if stored != *bar {
+            if !stored.same_bytes(bar) {
                 return Ok(None);
             }
         }
@@ -2346,6 +4069,141 @@ pub(crate) fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
     Ok((first.stamp(), previous.unwrap_or(first.stamp())))
 }
 
+/// What a file's path admits: a stamp inside its IST month, on its rung's grid.
+///
+/// # The month
+///
+/// [`YearMonth::ist_bounds_micros`], `[from, until)`. Anything outside it —
+/// a neighbouring month, a year-2030 bar, `i64::MIN`, `i64::MAX`, zero — is
+/// [`StoreError::OutsideMonth`]. Before D-0915 such a bar committed, and the
+/// file being append-only and strictly increasing, one bar past the month's
+/// end refused every later real bar of that month (ET-bars-candles-store-2).
+///
+/// # The grid
+///
+/// Intraday rungs are anchored at the 09:15 IST open, exactly as `pull::fold`
+/// cuts them: a stamp is admitted when `(ts + anchor) mod width == 0`, with
+/// `anchor` `pull::fold`'s `OPEN_ANCHOR_MICROS` (IST offset less 555 minutes).
+/// Every intraday width divides 86,400 s, so the one congruence holds on every
+/// day. For 1, 3, 5 and 15 minutes it is the same grid a midnight anchor
+/// gives, which is why vendor-direct bars on those rungs pass unchanged.
+///
+/// The daily rung admits any WHOLE SECOND and nothing finer.
+/// `pull::session::Window::verdict` records that vendors stamp a daily bar
+/// "at midnight, at the open or at the close", and refusing two of the three
+/// here would refuse real data; a fractional second is none of them. That is
+/// a weaker check than the intraday one, and `docs/06-limits.md` says so in
+/// its D-0915 section.
+///
+/// # What it does not check
+///
+/// Session membership. 03:00 IST is inside the month and on the minute grid,
+/// and it is admitted: the venue hours and the holiday calendar live in
+/// `pull`, which this crate may not depend on. `docs/06-limits.md`, D-0915.
+///
+/// # Cost
+///
+/// O(1) per bar — two comparisons and one remainder — so O(batch) per append,
+/// the same order as [`survey`]'s own pass over the batch. The bounds are
+/// computed once per open, not per append. That shape is read from the
+/// source; no bench times it, so the cost is UNVERIFIED as a measurement
+/// (`docs/06-limits.md`, D-0915). What it refuses is pinned by invariant rows
+/// S-30-month, S-30-sentinel and S-30-grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Admission {
+    month: YearMonth,
+    from: i64,
+    until: i64,
+    timeframe_secs: u32,
+    width: i64,
+    anchor: i64,
+}
+
+/// `pull::fold`'s open anchor: the IST offset less the 555 minutes from IST
+/// midnight to 09:15, in microseconds. Negative, and `rem_euclid` floors.
+pub(crate) const OPEN_ANCHOR_MICROS: i64 = (crate::path::IST_OFFSET_SECS
+    - crate::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64 * 60)
+    * 1_000_000;
+
+impl Admission {
+    pub(crate) const fn new(month: YearMonth, timeframe_secs: u32) -> Self {
+        let (from, until) = month.ist_bounds_micros();
+        let (width, anchor) = if timeframe_secs >= 86_400 {
+            (1_000_000, 0)
+        } else {
+            (timeframe_secs as i64 * 1_000_000, OPEN_ANCHOR_MICROS)
+        };
+        Self {
+            month,
+            from,
+            until,
+            timeframe_secs,
+            width,
+            anchor,
+        }
+    }
+
+    /// The most records the month holds on this rung's grid: the month's
+    /// length over the grid width. The writer admits no stamp outside the
+    /// month or off the grid and commits strictly increasing stamps, so no
+    /// committed counter exceeds this. On the daily rung the grid is one
+    /// second (any whole second is admitted), so the bound is the month's
+    /// seconds: loose, and still the writer's own. CE-61, D-2685; proved by
+    /// `store::write::a_header_counting_more_records_than_its_month_holds_is_refused`.
+    pub(crate) const fn slots(&self) -> u64 {
+        // `until > from` for every month and `width >= 1_000_000`, so the
+        // quotient is positive and fits.
+        ((self.until - self.from) / self.width).unsigned_abs()
+    }
+
+    /// The header-level half of [`Self::admit`]: a non-empty header's counter
+    /// within [`Self::slots`] and its range inside the month. Two comparisons
+    /// and one division, once per open. CE-61 and CE-63, D-2685.
+    pub(crate) const fn admit_header(&self, header: &Header) -> Result<(), FormatError> {
+        let slots = self.slots();
+        if header.n_valid > slots {
+            return Err(FormatError::CounterExceedsMonth {
+                n_valid: header.n_valid,
+                slots,
+            });
+        }
+        if header.n_valid > 0
+            && (header.first_ts_micros < self.from || header.last_ts_micros >= self.until)
+        {
+            return Err(FormatError::RangeOutsideMonth {
+                first_ts_micros: header.first_ts_micros,
+                last_ts_micros: header.last_ts_micros,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admit<R: Row>(&self, batch: &[R]) -> Result<(), StoreError> {
+        for (offset, row) in batch.iter().enumerate() {
+            let ts_micros = row.stamp();
+            if ts_micros < self.from || ts_micros >= self.until {
+                return Err(StoreError::OutsideMonth {
+                    at: len_u64(offset),
+                    ts_micros,
+                    month: self.month,
+                });
+            }
+            // Inside the month, so `ts + anchor` is nowhere near either end of
+            // `i64`. A zero width cannot reach here: `validated` refuses a
+            // header whose timeframe disagrees with the path, and every
+            // `Timeframe` is at least one second.
+            if (ts_micros + self.anchor).rem_euclid(self.width) != 0 {
+                return Err(StoreError::OffGrid {
+                    at: len_u64(offset),
+                    ts_micros,
+                    timeframe_secs: self.timeframe_secs,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Where `batch` already sits among `n_valid` committed records, when the file
 /// holds **every** bar of it, byte for byte, in one run.
 ///
@@ -2355,17 +4213,19 @@ pub(crate) fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
 /// caller's problem to refuse or to resume from; answering "already present"
 /// for any of them is the fallback `CLAUDE.md` §4 bans.
 ///
-/// `first_ts` is the batch's first timestamp, which [`survey`] has already
-/// computed and already proven is the smallest. Taking it as an argument
-/// rather than re-reading `batch[0]` is what keeps this function free of an
-/// empty-batch arm that [`survey`] makes unreachable.
+/// `at` is where the batch's first timestamp would sit — the insertion point
+/// `BarFile::locate` found for it, through the month's time index when it has
+/// one and by the bisection otherwise (D-2329). Locating is the caller's so
+/// this function is the comparison and nothing else.
 ///
 /// # Cost, stated exactly
 ///
-/// `O(log n_valid)` reads to locate the run, then one read per offered bar —
-/// so it is bounded by the batch plus a bisection, never by the month. It runs
-/// only when a batch overlaps the committed range, which is the re-pull case;
-/// an ordinary forward append never enters it.
+/// The locate is the caller's: at most one index entry read and one record
+/// read through a ready time index, `O(log n_valid)` reads by the bisection
+/// without one. Then one read per offered bar — so it is bounded by the batch
+/// plus the locate, never by the month. It runs only when a batch overlaps
+/// the committed range, which is the re-pull case; an ordinary forward append
+/// never enters it.
 ///
 /// **This is NOT an O(1) path and does not claim to be.** `CLAUDE.md` §3 rule
 /// 4's constant-cost list is bar lookup, condition lookup, mask evaluation,
@@ -2387,15 +4247,13 @@ pub(crate) fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
 /// the read COUNT rather than assert the cost in a comment.
 fn already_stored<W: Row, F>(
     batch: &[W],
-    first_ts: i64,
+    at: u64,
     n_valid: u64,
     read: F,
 ) -> Result<Option<u64>, StoreError>
 where
     F: Fn(u64) -> Result<W, StoreError>,
 {
-    let at = first_at_or_after(n_valid, first_ts, &read)?;
-
     // THE RUN MUST LIE WHOLLY INSIDE WHAT IS COMMITTED. Without this the
     // comparison below would ask for a record past the counter and get
     // `StoreError::NotCommitted` back — turning a batch that merely EXTENDS
@@ -2412,7 +4270,7 @@ where
     }
 
     for (offset, bar) in batch.iter().enumerate() {
-        if read(at.saturating_add(len_u64(offset)))? != *bar {
+        if !read(at.saturating_add(len_u64(offset)))?.same_bytes(bar) {
             return Ok(None);
         }
     }
@@ -2461,6 +4319,201 @@ where
     Ok(low)
 }
 
+/// Where a month's time index lives: beside a BAR file, and nowhere for any
+/// other record kind. D-2329.
+fn time_index_path(root: &Path, path: StorePath<'_>) -> Option<PathBuf> {
+    (path.file() == FileKind::Bars).then(|| path.with_file(FileKind::TimeIndex).to_path_buf(root))
+}
+
+/// The entry for `bucket`, read and checked. A short read or a failed
+/// checksum is [`Why::Entry`]; any other refusal is carried as
+/// [`Why::Unreadable`].
+fn read_entry(index: &File, path: &Path, bucket: u64) -> Result<Entry, Why> {
+    let mut raw = [0u8; 16];
+    match read_fully(
+        index,
+        path,
+        crate::time_index::entry_offset(bucket),
+        &mut raw,
+    ) {
+        Ok(()) => Entry::decode(&raw, bucket).ok_or(Why::Entry { bucket }),
+        Err(StoreError::ShortRead { .. }) => Err(Why::Entry { bucket }),
+        Err(other) => Err(Why::Unreadable(other)),
+    }
+}
+
+/// Writes a whole index: cut to nothing, the entries, a sync, then the
+/// header and a sync. The header goes LAST so a crash mid-write leaves a file
+/// whose header does not check, which every reader refuses and the next
+/// writer rebuilds — never a valid header over entries half old, half new.
+///
+/// An index of NO entries -- a new or an empty month's -- takes one flush, not
+/// two (WP-16): there is no entry for the header to be ordered after, and a
+/// crash before its one flush leaves a file of the wrong length or with no
+/// header that checks, which the next writer rebuilds and a reader of an
+/// empty month has nothing to look up in.
+fn write_index(
+    index: &File,
+    tix: &Tix,
+    entries: &[Entry],
+    batch: Option<&DurableBatch>,
+) -> Result<(), StoreError> {
+    fault(index.set_len(0), &tix.path, Action::Write)?;
+    put_entries(index, &tix.path, 0, entries)?;
+    if !entries.is_empty() {
+        sync_index(index, &tix.path, batch)?;
+    }
+    write_fully(index, &tix.path, 0, &tix.geometry.encode())?;
+    sync_index(index, &tix.path, batch)
+}
+
+/// Writes `entries` from `bucket` on in one positional write, and sets the
+/// file's length to end exactly after them, so entries an interrupted append
+/// wrote further out are not left lying past the ones that replace them.
+fn put_entries(
+    index: &File,
+    path: &Path,
+    bucket: u64,
+    entries: &[Entry],
+) -> Result<(), StoreError> {
+    let width = usize::try_from(crate::time_index::ENTRY_LEN).unwrap_or(16);
+    let mut image = Vec::with_capacity(entries.len().saturating_mul(width));
+    for (at, entry) in (bucket..).zip(entries) {
+        image.extend_from_slice(&entry.encode(at));
+    }
+    write_fully(index, path, crate::time_index::entry_offset(bucket), &image)?;
+    let end = crate::time_index::entry_offset(bucket.saturating_add(len_u64(entries.len())));
+    fault(index.set_len(end), path, Action::Write)
+}
+
+/// Enters the bisecting state for `why`, saying so. The one place the
+/// `store.tix` warning is decided, so no path can fall back silently — and
+/// no month is named twice for one kind of reason (D-3340).
+fn bisecting(path: &Path, why: Why) -> TixState {
+    note_lookup_bisects(path, &why);
+    TixState::Bisecting(why)
+}
+
+/// Removes a `.tix` that must no longer claim its month, and syncs the
+/// directory so the removal survives a crash. Already gone is done.
+fn remove_index(path: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => fsync_dir(path.parent().unwrap_or(path), batch),
+        Err(gone) if gone.kind() == ErrorKind::NotFound => Ok(()),
+        Err(refusal) => Err(classify(path, Action::Write, &refusal)),
+    }
+}
+
+/// An index failure an append cannot route around, as a refusal.
+fn index_refused(path: &Path, why: &Why) -> StoreError {
+    match why {
+        Why::Unreadable(inner) => inner.clone(),
+        other => StoreError::TimeIndex {
+            path: path.to_path_buf(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// The months, and the kinds of reason, this process has already named in a
+/// `store.tix` bisection warning. D-3340.
+///
+/// # Why there is a memory at all
+///
+/// A read handle decides its index once, and every HTTP request opens its own
+/// handle, so a month with no `.tix` wrote one WARN per request: one per
+/// `/spot.json` chunk of 400 instants, 101 of them in one live 64 MiB log
+/// window, crowding out the evidence the window exists to keep (DB-064,
+/// DB-G81, DB-G88). The first says everything the hundredth does.
+///
+/// # Keyed by the KIND of reason as well as the month
+///
+/// A month whose index goes from absent to stale is a new fact and is named
+/// again; a damaged entry is named once whichever bucket a lookup meets,
+/// because `std::mem::discriminant` does not see the bucket. So a month is
+/// warned about at most once per variant of [`Why`], in this process.
+///
+/// # What it costs
+///
+/// One lock and one hash insert per bisecting DECISION — never on the indexed
+/// path, never per bisection probe — O(1) expected. Held entries are bounded
+/// by the months this process opened times the variants of [`Why`], and a
+/// month that is later indexed simply stops asking.
+///
+/// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+/// "Cost claims of the /db fix round that name no proof").
+static WARNED: OnceLock<Mutex<HashSet<Warned>>> = OnceLock::new();
+
+/// One month named bisecting, and the kind of reason it was named for.
+type Warned = (PathBuf, Discriminant<Why>);
+
+/// Whether this is the first time this process names `path` bisecting for a
+/// reason of `why`'s kind — and, from now on, that it has.
+fn first_warning(path: &Path, why: &Why) -> bool {
+    WARNED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((path.to_path_buf(), std::mem::discriminant(why)))
+}
+
+/// `store.tix`, WARN: this month's time lookups bisect, and why — ONCE per
+/// month and kind of reason in this process ([`WARNED`], D-3340), whether a
+/// handle decided it or a lookup's entry failed after that. Each handle
+/// still answers [`BarFile::time_lookup`] with the reason, every time.
+fn note_lookup_bisects(path: &Path, why: &Why) {
+    // THE SMALL-MONTH RULE IS NOT A FAULT (D-4933): such a month has no index
+    // by design and is named only by `BarFile::time_lookup`.
+    if matches!(why, Why::BelowThreshold) || !first_warning(path, why) {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.tix", "time lookup falls back to bisection")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("reason", telemetry::Value::Str(&why.to_string()))
+            .with(
+                "repeats",
+                telemetry::Value::Str(
+                    "not logged again for this file and kind of reason in this process (D-3340)",
+                ),
+            ),
+    );
+}
+
+/// `store.tix`, INFO: the commit that brought a month to
+/// [`crate::time_index::INDEX_MIN_ROWS`] bars wrote its time index whole
+/// (D-4933). Once in a month file's life — a month never shrinks, and one that
+/// loses its index past the threshold is rebuilt and says so on the line
+/// below — so an import writes at most one such line per month it brings
+/// past the threshold, never one per commit.
+fn note_index_at_threshold(path: &Path, n_valid: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info(
+            "store.tix",
+            "time index written whole at the small-month threshold",
+        )
+        .with("file", telemetry::Value::Str(&path.display().to_string()))
+        .with("n_valid", telemetry::Value::Uint(n_valid))
+        .with(
+            "threshold",
+            telemetry::Value::Uint(crate::time_index::INDEX_MIN_ROWS),
+        )
+        .with("decision", telemetry::Value::Str("D-4933")),
+    );
+}
+
+/// `store.tix`, INFO: a writer rebuilt this month's time index from its bars,
+/// and why it had to.
+fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("store.tix", "time index rebuilt from the bars")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("reason", telemetry::Value::Str(&why.to_string()))
+            .with("n_valid", telemetry::Value::Uint(n_valid))
+            .with("entries", telemetry::Value::Uint(entries)),
+    );
+}
+
 /// Writes a fresh header region: zeros, then the genesis commit.
 ///
 /// The zeros are written rather than left as a hole, so the whole region is
@@ -2477,6 +4530,9 @@ fn initialise(
     // would validate and the CRC would pass because the bytes written are the
     // bytes read.
     layout: Layout,
+    // The writer's durable batch (WP-16, D-3353): the genesis is its flush to
+    // issue while it is open.
+    batch: Option<&DurableBatch>,
 ) -> Result<(), StoreError> {
     // BORN WITH CHECKSUMS, AND ONLY EVER BORN WITH THEM.
     //
@@ -2512,6 +4568,11 @@ fn initialise(
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
     write_fully(dst, path, commit.offset, &commit.bytes)?;
+    if let Some(batch) = batch
+        && batch.defer_file(dst, path)?
+    {
+        return Ok(());
+    }
     fault(dst.sync_all(), path, Action::Sync)
 }
 
@@ -2634,23 +4695,908 @@ fn note_tail_past_the_commit(path: &Path, len: u64, n_valid: u64, discarded: u64
     );
 }
 
+/// Whether a header region of at most [`REGION_LEN`] bytes is what an
+/// interrupted `initialise` leaves: nothing past the first slot, and a first
+/// slot that does not decode. All zeros is the case with nothing in the slot.
+///
+/// `initialise` writes the zero fill and then the genesis slot at offset 0, so
+/// a crash between or inside those writes can leave bytes only in `0..64`. A
+/// slot that DECODES — magic, known version, stride and its own CRC — was
+/// committed, so it is not a tear and this answers `false`. D-1521.
+fn is_interrupted_genesis(head: &[u8]) -> bool {
+    let (slot, rest) = head.split_at(head.len().min(crate::format::SLOT_LEN));
+    rest.iter().all(|&byte| byte == 0) && Header::decode(slot).is_err()
+}
+
+/// Refuses to re-initialise a month whose checksum sidecar holds entries.
+///
+/// The sidecar gains an entry only from an append, so one with any bytes in it
+/// is proof that records were committed to this month. Absent or empty, it
+/// proves nothing was, and the caller may repair. D-1520.
+///
+/// # Errors
+///
+/// [`StoreError::CommittedRecordsLost`] for a sidecar with entries, and the
+/// host's refusal, named, for one that cannot be measured.
+fn refuse_if_sealed(bars_path: &Path, sidecar: &Path) -> Result<(), StoreError> {
+    match fs::metadata(sidecar) {
+        Ok(meta) if meta.len() > 0 => Err(StoreError::CommittedRecordsLost {
+            path: bars_path.to_path_buf(),
+            sidecar: sidecar.to_path_buf(),
+            sidecar_len: meta.len(),
+        }),
+        Ok(_) => Ok(()),
+        Err(why) if why.kind() == ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(classify(sidecar, Action::Measure, &why)),
+    }
+}
+
+/// The directories between `root` (exclusive) and `dir` (inclusive) that do
+/// not exist yet, outermost first.
+///
+/// Asked with `try_exists`, not `exists`: `exists` answers `false` for every
+/// stat error, so a directory that could not be examined would be counted as
+/// one this open created. A directory that cannot be examined (a file where a
+/// directory belongs, a component this process may not search) ends the walk
+/// instead, and is not counted: `create_dir_all` meets the same component next
+/// and refuses it by name, with the `CreateDir` action the operator needs.
+/// Bounded by the path's depth below the root, which a rendered store path
+/// fixes at six. D-1522.
+fn missing_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(here) = cursor.filter(|&here| here != root && here.starts_with(root)) {
+        if !matches!(here.try_exists(), Ok(false)) {
+            break;
+        }
+        missing.push(here.to_path_buf());
+        cursor = here.parent();
+    }
+    missing.reverse();
+    missing
+}
+
+/// Makes every directory between `root` and `dir` that is missing, ONE LEVEL
+/// AT A TIME, the name of each flushed in its parent before the next level is
+/// made and before anything else can refuse the open.
+///
+/// # Why the flush is not gathered, and not left until the levels are all made
+///
+/// A later open finds a directory present and flushes nothing for it, so the
+/// open that made it is the only one that ever names it durably. WP-16 first
+/// gathered these flushes to the end of the open with the month's own, and an
+/// open refused in between (the lock, the bar file, the genesis) dropped them:
+/// the next open committed records under a directory whose name no flush had
+/// reached (the second agent's probe, 11 Oct 2026). Before that the levels
+/// were made by one `create_dir_all` and flushed after it, so a making that
+/// stopped half way (a level the host refused) left the levels above it
+/// unnamed in the same way. Now a level exists only for as long as it takes to
+/// flush its name: whatever refuses the open afterwards, by `Ok` or by `Err`,
+/// every directory it made is already durable (D-1522).
+///
+/// # A flush the host refuses
+///
+/// The level just made holds nothing, so it is taken away again and the open
+/// refused by the flush's own words: the next open finds the level missing,
+/// makes it again and asks the flush again. `remove_dir` takes only an empty
+/// directory, so a level another opener has already put a name in stays, and
+/// is then the one residue named below.
+///
+/// # What this cannot cover (for `docs/06-limits.md`)
+///
+/// A process killed between making a level and flushing its name, and a
+/// refused flush whose level could not be taken away again, leave a directory
+/// no later open flushes. Inside a [`DurableBatch`] every flush here is the
+/// batch's: a batch never made durable leaves its day open, and the next run
+/// confirms every directory of that day's months ([`DurableBatch::
+/// confirm_month`]).
+///
+/// A level another opener made between the walk and the `create_dir` is
+/// flushed here as well: this open saw it missing a moment ago and cannot
+/// know that its maker's flush will succeed. Bounded by the path's depth
+/// below the root, six; a path whose directories exist costs the one
+/// `try_exists` of [`missing_below`] and the one `create_dir_all` it always
+/// did, which also refuses by name a component the walk could not examine.
+fn create_below(root: &Path, dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    for made in &missing_below(root, dir) {
+        match create_dir_hooked(made) {
+            Ok(()) => {}
+            Err(raced) if raced.kind() == ErrorKind::AlreadyExists => {}
+            Err(refusal) => return Err(classify(dir, Action::CreateDir, &refusal)),
+        }
+        if let Err(refusal) = fsync_dir_now(made.parent().unwrap_or(root), batch) {
+            // Nothing is lost if the host refuses this too: the level then
+            // stays, which is the residue the doc comment names.
+            let _unmade = fs::remove_dir(made);
+            return Err(refusal);
+        }
+    }
+    fault(fs::create_dir_all(dir), dir, Action::CreateDir)
+}
+
+/// `create_dir`, through the thread-local test fault injector: the shape of
+/// [`sync_hooked`], and for the same reason.
+fn create_dir_hooked(dir: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::name_fault_fires() {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    fs::create_dir(dir)
+}
+
+/// [`open_rw`] of a month's lock, through the same injector as
+/// [`create_dir_hooked`]: the first thing that can refuse an open after its
+/// directories are made.
+fn open_lock_hooked(path: &Path) -> io::Result<File> {
+    #[cfg(test)]
+    if tests::name_fault_fires() {
+        return Err(io::Error::from(ErrorKind::PermissionDenied));
+    }
+    open_rw(path)
+}
+
+/// One directory flush that is NEVER gathered by an open in progress: now, or
+/// the batch's. For the name of a directory an open just made
+/// ([`create_below`]).
+fn fsync_dir_now(dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
+    flush_directory(dir)
+}
+
 /// Flushes a directory, so a newly created file's **name** is durable.
 ///
 /// Without it the bars can be on stable storage inside a file the directory
 /// does not yet mention after a crash, which is the same as not having them.
-fn fsync_dir(dir: &Path) -> Result<(), StoreError> {
-    let handle = fault(File::open(dir), dir, Action::Open)?;
-    fault(handle.sync_all(), dir, Action::Sync)
+///
+/// Inside [`with_directories_flushed_once`] the flush is gathered instead,
+/// and issued once per directory when that open ends (WP-16): the month's own
+/// directory, for the names of its files. The name of a DIRECTORY an open
+/// made is never asked here ([`fsync_dir_now`]). Inside an open
+/// [`DurableBatch`] the flush is the batch's, issued once when the batch is
+/// made durable.
+fn fsync_dir(dir: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if batch.is_some_and(|batch| batch.defer_directory(dir)) {
+        return Ok(());
+    }
+    let gathered = GATHERED_DIRECTORIES.with(|cell| {
+        let mut gathered = cell.borrow_mut();
+        let Some(dirs) = gathered.as_mut() else {
+            return false;
+        };
+        if !dirs.iter().any(|known| known == dir) {
+            dirs.push(dir.to_path_buf());
+        }
+        true
+    });
+    if gathered {
+        return Ok(());
+    }
+    flush_directory(dir)
 }
 
-/// Opens for reading and writing, creating but never truncating.
+/// One flush of a month's time index, or its deferral to `batch`.
+fn sync_index(index: &File, path: &Path, batch: Option<&DurableBatch>) -> Result<(), StoreError> {
+    if let Some(batch) = batch
+        && batch.defer_file(index, path)?
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    tests::count_index_flush(path);
+    fault(index.sync_all(), path, Action::Sync)
+}
+
+/// An append's durability barrier on `file` (the records, the checksum
+/// sidecar or the header slot of the month at `month`), or its deferral to
+/// `batch` while the batch is open. A failed barrier is remembered for
+/// `month` ([`barrier`]).
+fn barrier_in(
+    batch: Option<&DurableBatch>,
+    file: &File,
+    path: &Path,
+    month: &Path,
+) -> Result<(), StoreError> {
+    if let Some(batch) = batch
+        && batch.defer_file(file, path)?
+    {
+        return Ok(());
+    }
+    barrier(file, month)
+}
+
+// ═══ A batch made durable together (WP-16, DB-N25, D-3353) ═══════════════
+//
+// Measured on the operator's drive (an external WD_BLACK, APFS; a scratch
+// probe of 1,000 months, each one 25,000-byte record write, a 4-byte checksum
+// write, a 16-byte index write and a 64-byte header write; `tgt/p-WP-16/
+// probe2`, never in the repository; 10 Oct 2026, and again on 11 Oct with the
+// machine under load 13, the second figure of each pair):
+//
+// | per month                                     | 1 thread        | 8 threads         | 12 threads        |
+// |-----------------------------------------------|-----------------|-------------------|-------------------|
+// | four `F_FULLFSYNC`s (this module's default)   | 6.05-7.00, 5.52 ms | 1.85-2.54, 1.65 ms | 1.85, 1.44 ms   |
+// | `F_BARRIERFSYNC` for each of the four         | 6.05, 5.75 ms   | 2.12, 3.44 ms     | 1.82 ms           |
+// | `fsync(2)` for each, one `F_FULLFSYNC` at the end | 0.77 ms     | 0.24, 0.36 ms     | 0.19 ms           |
+// | `O_SYNC` writes, one `F_FULLFSYNC` at the end | 0.35, 0.37 ms   | 0.11-0.16, 0.12 ms | 0.12-0.14, 0.11 ms |
+// | plain writes, an `F_FULLFSYNC` of each file at the end | 4.4, 5.7 ms | 1.3, 1.4 ms  | 1.1, 1.25 ms      |
+//
+// `F_BARRIERFSYNC` costs a full flush on this drive, and the drive serves
+// about 850 to 3,400 `F_FULLFSYNC`s a second however many threads ask, so no
+// scheme with a flush per month can make an options day of 5,600 to 6,500
+// months ten times faster. Every crate here forbids `unsafe`, so a plain
+// `fsync(2)` is not reachable either: `std`'s `sync_all` and `sync_data` both
+// issue `F_FULLFSYNC` on macOS.
+
+/// How a [`DurableBatch`] makes what it deferred durable (D-3353).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchFlush {
+    /// Every file a writer opens inside the batch is opened `O_SYNC`, so each
+    /// write is on the device when it returns; the batch ends with one
+    /// `F_FULLFSYNC` per directory that gained a name and one per device.
+    /// The measured choice (WP-16).
+    OncePerDevice,
+    /// Writes are plain; the batch ends with one `F_FULLFSYNC` of every file
+    /// and directory whose flush it deferred. Rests on fcntl(2) alone, and
+    /// costs a flush per file.
+    EveryFile,
+}
+
+/// Writes whose flushes are deferred and then made durable together: the
+/// GDFL import's day (WP-16, DB-N25, D-3353).
+///
+/// A writer on a thread that has [`DurableBatch::enter`]ed a batch, through
+/// [`BarFile::open_or_create`], [`crate::provenance::record`] or anything
+/// else that asks [`DurableBatch::current`], writes what it always writes, in
+/// the order it always writes it, and leaves each flush it would have issued
+/// to the batch. Nothing it wrote is durable until
+/// [`DurableBatch::make_durable`] returns `Ok`; after that call the batch is
+/// sealed, and a writer still holding it flushes for itself again, so no
+/// write can slip past the flush that sealed it. The module header says what
+/// a crash or a power loss leaves.
+///
+/// Clones share one batch, so every worker thread of a day enters the same
+/// one.
+#[derive(Debug, Clone)]
+pub struct DurableBatch(Arc<Batch>);
+
+/// The batch the clones share.
+#[derive(Debug)]
+struct Batch {
+    flush: BatchFlush,
+    deferred: Mutex<Deferred>,
+}
+
+/// What a batch has deferred, under its lock.
+#[derive(Debug, Default)]
+struct Deferred {
+    /// Made durable, or being made so: nothing more is deferred.
+    sealed: bool,
+    /// Every file whose flush was deferred, each once.
+    files: HashSet<PathBuf>,
+    /// Every directory whose flush was deferred, each once.
+    directories: HashSet<PathBuf>,
+    /// One file per device written through the batch
+    /// ([`BatchFlush::OncePerDevice`]).
+    devices: BTreeMap<u64, PathBuf>,
+    /// Every file of a month the caller asked to confirm
+    /// ([`DurableBatch::confirm_month`]), each once: flushed for itself
+    /// whatever the batch's kind, because this batch did not write it.
+    confirmed: HashSet<PathBuf>,
+}
+
+/// What [`DurableBatch::make_durable`] flushed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MadeDurable {
+    /// Files whose flushes the batch held.
+    pub files: usize,
+    /// Directories whose flushes the batch held.
+    pub directories: usize,
+    /// Files of confirmed months ([`DurableBatch::confirm_month`]) that the
+    /// batch flushed for themselves.
+    pub confirmed: usize,
+    /// `F_FULLFSYNC`s issued to make them durable.
+    pub flushes: usize,
+}
+
+thread_local! {
+    /// The batch this thread's writers defer to, if any.
+    static ENTERED: std::cell::RefCell<Option<DurableBatch>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A thread inside a [`DurableBatch`]: dropping it puts back the batch the
+/// thread was in before, if any. Never sent to another thread.
+#[derive(Debug)]
+#[must_use = "the batch is left as soon as this is dropped"]
+pub struct InBatch {
+    before: Option<DurableBatch>,
+    _this_thread: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for InBatch {
+    fn drop(&mut self) {
+        let before = self.before.take();
+        ENTERED.with(|cell| cell.replace(before));
+    }
+}
+
+/// `O_SYNC` on the hosts `crate::open_flags` verified one for.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+const O_SYNC: Option<i32> = Some(crate::open_flags::O_SYNC);
+
+/// No verified `O_SYNC` for any other host: there a
+/// [`BatchFlush::OncePerDevice`] batch defers nothing, and every writer
+/// flushes for itself as it always did.
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+const O_SYNC: Option<i32> = None;
+
+impl DurableBatch {
+    /// A new, open batch.
+    #[must_use]
+    pub fn new(flush: BatchFlush) -> Self {
+        Self(Arc::new(Batch {
+            flush,
+            deferred: Mutex::new(Deferred::default()),
+        }))
+    }
+
+    /// How it flushes.
+    #[must_use]
+    pub fn flush(&self) -> BatchFlush {
+        self.0.flush
+    }
+
+    /// This thread's writers defer to this batch until the answer drops.
+    pub fn enter(&self) -> InBatch {
+        InBatch {
+            before: ENTERED.with(|cell| cell.replace(Some(self.clone()))),
+            _this_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// This thread's writers defer to NO batch until the answer drops, which
+    /// puts back the batch the thread was in, if any.
+    ///
+    /// For a writer whose own flushes are its protocol, reached on a thread
+    /// that may be inside a batch: the versioned month repair
+    /// (`crate::repair::publish`) flushes a revision's bars before it writes
+    /// the receipt that publishes them and before it promotes them, and a
+    /// batch would hold those flushes back past both (WP-16 with WP-12d,
+    /// D-3353 beside D-3350). Suspended, every writer flushes for itself as
+    /// it does outside any batch.
+    pub fn suspend() -> InBatch {
+        InBatch {
+            before: ENTERED.with(|cell| cell.replace(None)),
+            _this_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// The batch this thread has entered, while it is open; `None` outside
+    /// one, or once it is sealed.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        ENTERED
+            .with(|cell| cell.borrow().clone())
+            .filter(|batch| !batch.deferred().sealed)
+    }
+
+    /// The lock, whatever a panicking writer left: every field is written
+    /// whole under it.
+    fn deferred(&self) -> std::sync::MutexGuard<'_, Deferred> {
+        self.0
+            .deferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a writer inside this batch opens its files `O_SYNC`:
+    /// [`BatchFlush::OncePerDevice`] on a host with a verified `O_SYNC`.
+    #[must_use]
+    pub fn writes_through(&self) -> bool {
+        self.0.flush == BatchFlush::OncePerDevice && O_SYNC.is_some()
+    }
+
+    /// Defers the flush of `file`, open at `path` and opened `O_SYNC` when
+    /// [`Self::writes_through`]: `Ok(true)` when the batch holds it,
+    /// `Ok(false)` when the batch is sealed, or cannot hold a flush on this
+    /// host, and the caller must flush now.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal to measure the file's device.
+    pub fn defer_file(&self, file: &File, path: &Path) -> Result<bool, StoreError> {
+        let device = match self.0.flush {
+            BatchFlush::OncePerDevice if O_SYNC.is_none() => return Ok(false),
+            BatchFlush::OncePerDevice => {
+                use std::os::unix::fs::MetadataExt as _;
+                Some(fault(file.metadata(), path, Action::Measure)?.dev())
+            }
+            BatchFlush::EveryFile => None,
+        };
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return Ok(false);
+        }
+        if !deferred.files.contains(path) {
+            deferred.files.insert(path.to_path_buf());
+        }
+        if let Some(device) = device {
+            deferred
+                .devices
+                .entry(device)
+                .or_insert_with(|| path.to_path_buf());
+        }
+        Ok(true)
+    }
+
+    /// Defers the flush of the directory `dir`, which gained or lost a name:
+    /// `true` when the batch holds it, `false` when it is sealed.
+    #[must_use]
+    pub fn defer_directory(&self, dir: &Path) -> bool {
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return false;
+        }
+        if !deferred.directories.contains(dir) {
+            deferred.directories.insert(dir.to_path_buf());
+        }
+        true
+    }
+
+    /// Holds a flush of every file the month at `path` has under `root`, and
+    /// of every directory from the month's own up to `root`: `Ok(true)` when
+    /// the batch holds them, `Ok(false)` when it is sealed and holds nothing.
+    ///
+    /// For a month an EARLIER PROCESS may have written and never made durable
+    /// (a unit cut off before its batch was, D-3353). Read again, such a
+    /// month answers [`Appended::AlreadyPresent`] from the kernel's cache and
+    /// nothing is written, so no writer defers anything of it and the device
+    /// flush of a [`BatchFlush::OncePerDevice`] batch may never be issued at
+    /// all. Each file named here is therefore flushed for itself when the
+    /// batch is made durable, whatever the batch's kind, and so is each
+    /// directory, whose names that process never flushed either.
+    ///
+    /// O(1): one `lstat` per sibling kind ([`FileKind::ALL`], the lock aside,
+    /// which holds no byte) and one set insert per directory level. A sibling
+    /// that is absent, or is not a regular file, is not the month's and is
+    /// passed over: the doors that open it refuse it by name. A month with no
+    /// file at all holds nothing to confirm.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal to measure a sibling, by path.
+    ///
+    /// UNVERIFIED: this cost names no test or bench that proves it (docs/06-limits.md,
+    /// "Cost claims of the /db fix round that name no proof").
+    pub fn confirm_month(&self, root: &Path, path: StorePath<'_>) -> Result<bool, StoreError> {
+        let mut files = Vec::with_capacity(FileKind::ALL.len());
+        for kind in FileKind::ALL {
+            if kind == FileKind::Lock {
+                continue;
+            }
+            let at = path.with_file(kind).to_path_buf(root);
+            match fs::symlink_metadata(&at) {
+                Ok(meta) if meta.is_file() => files.push(at),
+                Ok(_) => {}
+                Err(gone) if gone.kind() == ErrorKind::NotFound => {}
+                Err(refusal) => return Err(classify(&at, Action::Measure, &refusal)),
+            }
+        }
+        let bars = path.to_path_buf(root);
+        let mut deferred = self.deferred();
+        if deferred.sealed {
+            return Ok(false);
+        }
+        // A month the store holds no file of has nothing to confirm, and its
+        // directories may not exist.
+        if files.is_empty() {
+            return Ok(true);
+        }
+        deferred.confirmed.extend(files);
+        let mut next = bars.parent();
+        while let Some(dir) = next {
+            if !dir.starts_with(root) {
+                break;
+            }
+            if !deferred.directories.contains(dir) {
+                deferred.directories.insert(dir.to_path_buf());
+            }
+            next = dir.parent();
+        }
+        Ok(true)
+    }
+
+    /// Seals the batch and makes everything it deferred durable, on up to
+    /// `threads` threads: every directory, one file per device
+    /// ([`BatchFlush::OncePerDevice`]) or every file
+    /// ([`BatchFlush::EveryFile`]), and every file of a confirmed month
+    /// ([`Self::confirm_month`]), each by `F_FULLFSYNC`. A second call has
+    /// nothing left and flushes nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first flush the host refused, by path. Every file of the batch is
+    /// then remembered as a failed barrier ([`StoreError::BarrierFailed`]),
+    /// so no later append in this process can confirm its bytes with a
+    /// second flush.
+    pub fn make_durable(&self, threads: usize) -> Result<MadeDurable, StoreError> {
+        self.make_durable_by(threads, &|file, _| sync_hooked(file))
+    }
+
+    /// [`Self::make_durable`] with each flush issued through `flush`: the
+    /// seam a test fails one at.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::make_durable`].
+    pub fn make_durable_by(
+        &self,
+        threads: usize,
+        flush: &(dyn Fn(&File, &Path) -> io::Result<()> + Sync),
+    ) -> Result<MadeDurable, StoreError> {
+        let (files, directories, devices, mut confirmed) = {
+            let mut deferred = self.deferred();
+            deferred.sealed = true;
+            (
+                std::mem::take(&mut deferred.files),
+                std::mem::take(&mut deferred.directories),
+                std::mem::take(&mut deferred.devices),
+                std::mem::take(&mut deferred.confirmed),
+            )
+        };
+        let mut targets: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
+        match self.0.flush {
+            BatchFlush::OncePerDevice => targets.extend(devices.values().map(PathBuf::as_path)),
+            BatchFlush::EveryFile => {
+                // A file this batch wrote is flushed once, confirmed or not.
+                confirmed.retain(|path| !files.contains(path));
+                targets.extend(files.iter().map(PathBuf::as_path));
+            }
+        }
+        targets.extend(confirmed.iter().map(PathBuf::as_path));
+        let made = MadeDurable {
+            files: files.len(),
+            directories: directories.len(),
+            confirmed: confirmed.len(),
+            flushes: targets.len(),
+        };
+        let refused = flush_all(&targets, threads, flush);
+        if let Some((path, why)) = refused {
+            let mut failed = FAILED_BARRIERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            failed.extend(files);
+            failed.extend(confirmed);
+            return Err(classify(&path, Action::Sync, &why));
+        }
+        Ok(made)
+    }
+}
+
+/// `F_FULLFSYNC`s each of `targets` through `flush` on up to `threads`
+/// threads (at least one); the first refusal, by path. Every target is
+/// asked even after one refuses, so the batch's failure names what it can.
+fn flush_all(
+    targets: &[&Path],
+    threads: usize,
+    flush: &(dyn Fn(&File, &Path) -> io::Result<()> + Sync),
+) -> Option<(PathBuf, io::Error)> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let one = |path: &Path| -> Result<(), (PathBuf, io::Error)> {
+        // A FILE THE BATCH HELD AND THAT IS GONE was removed by its own
+        // writer after its flush was deferred (a time index retired by a
+        // later append, D-2330). Nothing of it is left to flush; what is left
+        // to make durable is its removal, so its directory is flushed in its
+        // place, and the device with it.
+        let (opened, at) = match no_follow(File::options().read(true)).open(path) {
+            Err(gone) if gone.kind() == ErrorKind::NotFound => {
+                let dir = path.parent().unwrap_or(path);
+                (File::open(dir), dir)
+            }
+            opened => (opened, path),
+        };
+        #[cfg(test)]
+        tests::count_batch_flush(at);
+        opened
+            .and_then(|file| flush(&file, at))
+            .map_err(|why| (at.to_path_buf(), why))
+    };
+    let next = AtomicUsize::new(0);
+    let first: Mutex<Option<(usize, PathBuf, io::Error)>> = Mutex::new(None);
+    let work = || {
+        loop {
+            let at = next.fetch_add(1, Ordering::Relaxed);
+            let Some(path) = targets.get(at) else {
+                break;
+            };
+            if let Err((path, why)) = one(path) {
+                let mut first = first.lock().unwrap_or_else(PoisonError::into_inner);
+                if first.as_ref().is_none_or(|(earlier, _, _)| at < *earlier) {
+                    *first = Some((at, path, why));
+                }
+            }
+        }
+    };
+    let wanted = threads.clamp(1, targets.len().max(1));
+    if wanted == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 1..wanted {
+                // A thread the host will not start leaves its share to the
+                // others; this one always works.
+                let _started = std::thread::Builder::new()
+                    .name("store-flush".to_owned())
+                    .spawn_scoped(scope, work);
+            }
+            work();
+        });
+    }
+    first
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(|(_, path, why)| (path, why))
+}
+
+/// One directory flush, now.
+fn flush_directory(dir: &Path) -> Result<(), StoreError> {
+    #[cfg(test)]
+    tests::count_directory_flush(dir);
+    let handle = fault(File::open(dir), dir, Action::Open)?;
+    fault(sync_hooked(&handle), dir, Action::Sync)
+}
+
+thread_local! {
+    /// The directories an open in progress on this thread has asked to flush,
+    /// each once, in the order first asked (WP-16). `None` outside one.
+    static GATHERED_DIRECTORIES: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Puts back what [`GATHERED_DIRECTORIES`] held before an open began, even
+/// when the open unwinds, so no later flush on this thread is gathered by an
+/// open that is over.
+struct Gathering {
+    /// What the thread held before: `None` outside any open.
+    before: Option<Vec<PathBuf>>,
+    /// Whether [`Gathering::finish`] already put it back.
+    finished: bool,
+}
+
+impl Gathering {
+    /// Starts gathering on this thread.
+    fn begin() -> Self {
+        Self {
+            before: GATHERED_DIRECTORIES.with(|cell| cell.replace(Some(Vec::new()))),
+            finished: false,
+        }
+    }
+
+    /// The directories gathered since [`Gathering::begin`], the earlier
+    /// state back.
+    fn finish(mut self) -> Vec<PathBuf> {
+        self.finished = true;
+        let before = self.before.take();
+        GATHERED_DIRECTORIES
+            .with(|cell| cell.replace(before))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Gathering {
+    fn drop(&mut self) {
+        if !self.finished {
+            let before = self.before.take();
+            GATHERED_DIRECTORIES.with(|cell| cell.replace(before));
+        }
+    }
+}
+
+/// Runs `open` with every directory flush it asks for gathered, then flushes
+/// each gathered directory once, in the order first asked, before answering
+/// (WP-16, DB-N25). A name is therefore durable when the open returns, as it
+/// was when each was flushed on its own.
+///
+/// ONLY THE MONTH'S OWN DIRECTORY IS GATHERED: the names of its bar file, its
+/// checksum sidecar and its time index, three flushes of one directory made
+/// one. The name of a directory the open MADE is flushed at once and never
+/// passes through here ([`create_below`]): a later open finds that directory
+/// present and flushes nothing for it, so a flush dropped here would be
+/// dropped for good.
+///
+/// An open that fails flushes nothing it gathered, and for the month's own
+/// directory that loses nothing. No record can have been committed inside an
+/// open (the only commit it makes is an empty month's genesis), so a name
+/// lost to a crash after a refused open is the name of a month that holds
+/// nothing, and every later open of a month that holds nothing asks this
+/// flush again before it answers: it makes the month again (`is_interrupted_
+/// genesis`) or names its checksum sidecar again (`fresh`, D-0688). The
+/// checksum sidecar of a month with records is never created by an open, and
+/// its time index is rebuilt from its records when it is missing.
+fn with_directories_flushed_once<T>(
+    open: impl FnOnce() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
+    let gathering = Gathering::begin();
+    let opened = open();
+    let dirs = gathering.finish();
+    let value = opened?;
+    for dir in &dirs {
+        flush_directory(dir)?;
+    }
+    Ok(value)
+}
+
+/// Opens for reading and writing, creating but never truncating, and never
+/// through a final symlink (CE-62, D-2686).
 fn open_rw(path: &Path) -> io::Result<File> {
-    File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    open_rw_through(path, false)
+}
+
+/// [`open_rw_through`] for a name that must not exist: `O_CREAT | O_EXCL`, so
+/// the kernel opens nothing already there — a file, a second name of one, a
+/// link — and the index of a month that reached the small-month threshold is
+/// always a new inode (D-4933).
+fn open_new_through(path: &Path, through: bool) -> io::Result<File> {
+    no_follow_through(
+        File::options().read(true).write(true).create_new(true),
+        through,
+    )
+    .open(path)
+}
+
+/// [`write_index`] for the index a month is given at the small-month
+/// threshold ([`BarFile::index_at_threshold`], D-4933), through the
+/// thread-local test fault injector: after the new `.tix` is created and its
+/// name flushed, and before a byte of it is written — a full disk, or a host
+/// that refuses the write.
+///
+/// The injector is compiled out of production and ADDS a branch under test
+/// rather than replacing one, so the `write_index` line that ships is the
+/// line every test runs — the shape of [`sync_hooked`].
+fn write_threshold_index(
+    index: &File,
+    tix: &Tix,
+    entries: &[Entry],
+    batch: Option<&DurableBatch>,
+) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if tests::threshold_fault_fires() {
+        return Err(StoreError::DiskFull {
+            path: tix.path.clone(),
+            action: Action::Write,
+        });
+    }
+    write_index(index, tix, entries, batch)
+}
+
+/// [`open_rw`], and `O_SYNC` as well when `through` (a writer inside a
+/// [`DurableBatch`] that [`DurableBatch::writes_through`]).
+fn open_rw_through(path: &Path, through: bool) -> io::Result<File> {
+    no_follow_through(
+        File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+        through,
+    )
+    .open(path)
+}
+
+/// `O_NOFOLLOW` on the hosts `crate::open_flags` has a verified value for.
+/// Elsewhere the options are returned unchanged and [`refuse_link`]'s
+/// `symlink_metadata` check is the only guard, which is weaker by the window
+/// between the check and the open.
+fn no_follow(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
+    no_follow_through(options, false)
+}
+
+/// [`no_follow`], and `O_SYNC` as well when `through`.
+fn no_follow_through(options: &mut fs::OpenOptions, through: bool) -> &mut fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.custom_flags(writer_flags(through));
+    options
+}
+
+/// The custom open flags of a writer: `O_NOFOLLOW` where `crate::open_flags`
+/// verified it, and `O_SYNC` too when `through` and this host has one. The
+/// provenance sidecar's writer opens with the same flags.
+pub(crate) const fn writer_flags(through: bool) -> i32 {
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        if through {
+            crate::open_flags::O_NOFOLLOW_SYNC
+        } else {
+            crate::open_flags::O_NOFOLLOW
+        }
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        match O_SYNC {
+            Some(flag) if through => flag,
+            _ => 0,
+        }
+    }
+}
+
+/// A writer open's failure, named: a final symlink the kernel refused under
+/// `O_NOFOLLOW` (`ELOOP`) is [`StoreError::Symlinked`], everything else is
+/// what [`classify`] says it is.
+fn writer_open(opened: io::Result<File>, path: &Path) -> Result<File, StoreError> {
+    opened.map_err(|why| {
+        #[cfg(any(
+            target_os = "macos",
+            all(
+                any(target_os = "linux", target_os = "android"),
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))]
+        if why.raw_os_error() == Some(crate::open_flags::ELOOP) {
+            return StoreError::Symlinked {
+                path: path.to_path_buf(),
+            };
+        }
+        classify(path, Action::Open, &why)
+    })
+}
+
+/// [`StoreError::Symlinked`] when `path` itself is a link. Asked with
+/// `symlink_metadata`, which never follows; an absent path is not a link.
+fn refuse_link(path: &Path) -> Result<(), StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Symlinked {
+            path: path.to_path_buf(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// [`refuse_link`] for every component of `leaf` below `root`, root-most
+/// first, stopping at the first that does not exist (nothing below it can).
+/// The root itself is the operator's to place and may be a link. Bounded by
+/// the path's depth below the root, which `crate::path` fixes.
+fn refuse_links_below(root: &Path, leaf: &Path) -> Result<(), StoreError> {
+    let Ok(below) = leaf.strip_prefix(root) else {
+        return Ok(());
+    };
+    let mut at = root.to_path_buf();
+    for part in below.components() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(StoreError::Symlinked { path: at });
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// A file, seen as the two positional calls this module makes of it.
@@ -2712,6 +5658,34 @@ fn write_fully<P: Positional>(
         }
     }
     Ok(())
+}
+
+/// The first `len` bytes of a block-sized stack buffer, or a refusal naming
+/// the block when `len` will not fit — D-0914.
+///
+/// The one door both of `verify_block_of`'s reads take into their stack
+/// buffers, so neither can fall back to reading short or to the heap. A
+/// `len` past [`MAX_BLOCK_LEN`] is [`FormatError::BlockLengthMismatch`]
+/// carrying the room there was as `len` and the bytes asked for as `need`.
+/// No geometry a `BarFile` opens produces one; the refusal is what happens if
+/// a future geometry did, instead of a panic or a silent truncation.
+fn slice_of<'b>(
+    buffer: &'b mut [u8; MAX_BLOCK_LEN],
+    len: u64,
+    block: u64,
+    path: &Path,
+) -> Result<&'b mut [u8], StoreError> {
+    usize::try_from(len)
+        .ok()
+        .and_then(|len| buffer.get_mut(..len))
+        .ok_or_else(|| StoreError::Format {
+            path: path.to_path_buf(),
+            source: FormatError::BlockLengthMismatch {
+                block,
+                len: MAX_BLOCK_LEN,
+                need: len,
+            },
+        })
 }
 
 /// Reads every byte, resuming a short read at the offset it stopped at.
@@ -2783,6 +5757,150 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
     }
 }
 
+/// [`StoreError::Generation`]'s sentence.
+fn write_generation(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(
+        f,
+        "{}: the month's generation pointer refused: {reason}",
+        path.display()
+    )
+}
+
+/// [`StoreError::Superseded`]'s sentence.
+fn write_superseded(f: &mut fmt::Formatter<'_>, path: &Path, ordinal: u32) -> fmt::Result {
+    write!(
+        f,
+        "{} is served from repair revision {ordinal} (bar-revisions-v1/{ordinal}); an append to the original would land where no reader looks, so the writer refuses it. Add to this month with a further versioned repair (D-3350)",
+        path.display()
+    )
+}
+
+/// The host's refusal of one action on one path: `<what> <action> <path>`.
+fn write_host(
+    f: &mut fmt::Formatter<'_>,
+    what: &str,
+    action: &dyn fmt::Display,
+    path: &Path,
+) -> fmt::Result {
+    write!(f, "{what} {action} {}", path.display())
+}
+
+/// What a path turned out to be when one action met it:
+/// `<path> <state>, <action> it`.
+fn write_state(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    state: &str,
+    action: &dyn fmt::Display,
+) -> fmt::Result {
+    write!(f, "{} {state}, {action} it", path.display())
+}
+
+/// [`StoreError::Misfiled`]'s sentence.
+fn write_misfiled(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    sidecar: &Path,
+    field: &str,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} is not the month its provenance sidecar {} was written for: its {field} is not this month's. The files were copied or restored under another name; refused rather than served as another instrument (DB-B65)",
+        path.display(),
+        sidecar.display()
+    )
+}
+
+/// Refuses a bar month whose `.prv` names another month, before a byte of its
+/// bars is read (DB-B65, WP-81). `root` is the root the month's files are
+/// under exactly — a repair revision's own, for a revision.
+///
+/// One `open` and one 64-byte read ([`crate::provenance::written_for`]); a
+/// month with no sidecar costs the one `open` that answers `ENOENT` and is
+/// served as before. Overlay and greeks files have no provenance sidecar and
+/// are not asked.
+fn refuse_misfiled(root: &Path, path: StorePath<'_>, bars_path: &Path) -> Result<(), StoreError> {
+    if path.file() != FileKind::Bars {
+        return Ok(());
+    }
+    match crate::provenance::written_for(root, path) {
+        crate::provenance::WrittenFor::Another { sidecar, field } => Err(StoreError::Misfiled {
+            path: bars_path.to_path_buf(),
+            sidecar,
+            field,
+        }),
+        crate::provenance::WrittenFor::ThisMonth | crate::provenance::WrittenFor::Unrecorded => {
+            Ok(())
+        }
+    }
+}
+
+/// [`StoreError::Symlinked`]'s sentence.
+fn write_symlinked(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "{} is a symbolic link, and the bar writer follows none below the store \
+         root: a link there can send one vendor's appends into another's month. \
+         Nothing was opened through it",
+        path.display()
+    )
+}
+
+/// [`StoreError::BarrierFailed`]'s sentence.
+fn write_barrier_failed(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a durability barrier on {} already failed in this process; a second barrier cannot prove its bytes reached the device, so it takes no further append",
+        path.display()
+    )
+}
+
+/// Every month whose durability barrier failed in this process. Process-wide,
+/// because a second handle on the same path shares the same page cache.
+static FAILED_BARRIERS: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// The durability barrier of an append. A failure is remembered for `path`
+/// before it is returned, so no later append confirms it with a second one.
+fn barrier(file: &File, path: &Path) -> Result<(), StoreError> {
+    sync_hooked(file).map_err(|refusal| {
+        FAILED_BARRIERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        classify(path, Action::Sync, &refusal)
+    })
+}
+
+/// `sync_all`, through the thread-local test fault injector.
+///
+/// The injector is compiled out of production and ADDS a branch under test
+/// rather than replacing one, so the `sync_all` line that ships is the line
+/// every test runs. It used to be a `cfg(test)`/`cfg(not(test))` fork whose
+/// production arm no test compiled (P10-07, D-2740); this is the shape of
+/// `cli::fixed_tail::sync_all_hooked` (D-1902).
+fn sync_hooked(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::sync_fault_fires() {
+        return Err(io::Error::other("injected sync fault"));
+    }
+    file.sync_all()
+}
+
+/// Refuses an append to a month whose barrier already failed in this process.
+fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
+    if FAILED_BARRIERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(path)
+    {
+        return Err(StoreError::BarrierFailed {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Lifts an [`io::Result`] into this module's errors.
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
     match result {
@@ -2822,15 +5940,1072 @@ fn len_u64(len: usize) -> u64 {
 mod tests {
     use std::cell::{Cell, RefCell};
 
+    thread_local! {
+        /// Barriers to let pass on this thread before one fails.
+        static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+        /// Every directory flushed on this thread, in order (WP-16).
+        static DIRECTORY_FLUSHES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+        /// Names an open may make on this thread (a directory level, then
+        /// the month's lock) before the host refuses one (WP-16).
+        static NAME_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    thread_local! {
+        /// Whether the next threshold write on this thread is refused
+        /// (D-4933).
+        static THRESHOLD_FAULT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arms the threshold write's fault for the next one on this thread.
+    pub(super) fn arm_threshold_fault() {
+        THRESHOLD_FAULT.with(|armed| armed.set(true));
+    }
+
+    /// Whether the armed threshold fault fires now; it fires once.
+    pub(super) fn threshold_fault_fires() -> bool {
+        THRESHOLD_FAULT.with(|armed| armed.replace(false))
+    }
+
+    /// Whether the armed name fault fires now; it fires once.
+    pub(super) fn name_fault_fires() -> bool {
+        NAME_FAULT.with(|armed| match armed.get() {
+            Some(0) => {
+                armed.set(None);
+                true
+            }
+            Some(left) => {
+                armed.set(Some(left - 1));
+                false
+            }
+            None => false,
+        })
+    }
+
+    /// Counts one directory flush on this thread.
+    pub(super) fn count_directory_flush(dir: &Path) {
+        DIRECTORY_FLUSHES.with(|flushed| flushed.borrow_mut().push(dir.to_path_buf()));
+    }
+
+    thread_local! {
+        /// Time indexes flushed on this thread (WP-16).
+        static INDEX_FLUSHES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts one time-index flush on this thread.
+    pub(super) fn count_index_flush(_path: &Path) {
+        INDEX_FLUSHES.with(|flushed| flushed.set(flushed.get() + 1));
+    }
+
+    /// The time-index flushes on this thread since the last call.
+    fn index_flushes() -> usize {
+        INDEX_FLUSHES.with(|flushed| flushed.replace(0))
+    }
+
+    /// The directories flushed on this thread since the last call.
+    fn directory_flushes() -> Vec<PathBuf> {
+        DIRECTORY_FLUSHES.with(|flushed| std::mem::take(&mut *flushed.borrow_mut()))
+    }
+
+    /// WP-16 (DB-N25): A NEW MONTH FLUSHES EACH DIRECTORY ONCE. Its bars, its
+    /// checksum sidecar and its time index are three names in one directory,
+    /// which used to be three flushes of it; every directory the open created
+    /// still has its entry flushed in its parent, and all of it before the
+    /// open returns. Opening the month again flushes nothing, and an open
+    /// that refuses leaves this thread flushing as before.
+    #[test]
+    fn a_new_month_flushes_each_directory_once() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-dirflush-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let bars = month.to_path_buf(&root);
+        let dir = bars.parent().expect("the month's directory").to_path_buf();
+        let _ = (directory_flushes(), index_flushes());
+        let mut writer =
+            BarFile::open_or_create(&root, month, SYMBOL).expect("a fresh month opens");
+        let flushed = directory_flushes();
+        assert_eq!(
+            index_flushes(),
+            0,
+            "a new month is under the small-month threshold and gets no time index (D-4933)"
+        );
+        assert!(bars.with_extension("crc").exists(), "crc was created");
+        assert!(
+            !bars.with_extension("tix").exists(),
+            "no tix under the threshold"
+        );
+        assert_eq!(
+            flushed.iter().filter(|one| **one == dir).count(),
+            1,
+            "two names, one flush of their directory: {flushed:?}"
+        );
+        let mut distinct = flushed.clone();
+        distinct.dedup();
+        assert_eq!(distinct, flushed, "no directory flushed twice");
+        let mut created = Vec::new();
+        let mut at = dir.as_path();
+        while at != root {
+            created.push(at.parent().expect("below the root").to_path_buf());
+            at = at.parent().expect("below the root");
+        }
+        for parent in &created {
+            assert!(
+                flushed.contains(parent),
+                "{} not flushed: {flushed:?}",
+                parent.display()
+            );
+        }
+        assert_eq!(flushed.len(), created.len() + 1, "{flushed:?}");
+        commits_across_the_threshold(&mut writer, &bars, &dir);
+        drop(writer);
+
+        let again = BarFile::open_or_create(&root, month, SYMBOL).expect("it reopens");
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "nothing new to name"
+        );
+        let refused = BarFile::open_or_create(&root, month, SYMBOL ^ 1);
+        assert!(
+            refused.is_err(),
+            "a second writer, or another symbol, is refused"
+        );
+        drop(again);
+        let _ = directory_flushes();
+        super::fsync_dir(&dir, None).expect("a flush outside any open");
+        assert_eq!(
+            directory_flushes(),
+            vec![dir],
+            "issued at once, never gathered"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// The commits of [`a_new_month_flushes_each_directory_once`] on its new
+    /// month `bars` in `dir`: one under the small-month threshold, which
+    /// flushes no index and names nothing, then the one that reaches 1,024
+    /// bars, which writes the time index whole — its entries, then its
+    /// header, a flush each — and the sort index whole by rename, and names
+    /// both (D-4933, D-3349).
+    fn commits_across_the_threshold(writer: &mut BarFile, bars: &Path, dir: &Path) {
+        let batch: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&batch),
+            Ok(Appended::Committed { .. })
+        ));
+        assert_eq!(
+            index_flushes(),
+            0,
+            "a commit under the threshold flushes no index"
+        );
+        assert!(
+            !bars.with_extension("srt").exists(),
+            "no srt under the threshold"
+        );
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "a commit under the threshold names nothing"
+        );
+        let crossing: Vec<Bar> = (3..1_024).map(bar).collect();
+        assert!(matches!(
+            writer.append(&crossing),
+            Ok(Appended::Committed { n_valid: 1_024, .. })
+        ));
+        assert_eq!(
+            index_flushes(),
+            2,
+            "the threshold's index: entries, then header"
+        );
+        assert!(bars.with_extension("tix").exists(), "tix was created");
+        assert!(bars.with_extension("srt").exists(), "srt was created");
+        assert_eq!(
+            directory_flushes(),
+            vec![dir.to_path_buf(), dir.to_path_buf()],
+            "the threshold names the time index and the sort index: one flush each"
+        );
+    }
+
+    /// A month of its own under a root of its own, nothing below the root
+    /// made yet: the root, the month, the month's directory, and the parent
+    /// each of the six levels is named in, outermost first.
+    fn unmade_month(
+        tag: &str,
+    ) -> (
+        PathBuf,
+        crate::path::StorePath<'static>,
+        PathBuf,
+        Vec<PathBuf>,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("brutex-store-file-{tag}-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        let month = crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "BANKNIFTY",
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let dir = month
+            .to_path_buf(&root)
+            .parent()
+            .expect("the month's directory")
+            .to_path_buf();
+        let mut parents = Vec::new();
+        let mut at = dir.as_path();
+        while at != root {
+            at = at.parent().expect("below the root");
+            parents.push(at.to_path_buf());
+        }
+        parents.reverse();
+        assert_eq!(parents.len(), 6, "six levels below the root: {parents:?}");
+        (root, month, dir, parents)
+    }
+
+    /// WP-16, repair 1 (the second agent's probe, 11 Oct 2026): A REFUSED OPEN
+    /// LEAVES NO DIRECTORY IT MADE UNNAMED. A later open finds a directory
+    /// present and flushes nothing for it, so the open that made it must have
+    /// flushed its name before it answered, `Err` as much as `Ok`. The host
+    /// refuses each name an open of a new month makes in turn: one of the six
+    /// levels (a making that stops half way), then the month's lock (every
+    /// level made, the open refused after them). The refused open has flushed
+    /// the name of every level it made and made none it did not flush; the
+    /// next open makes and names the rest, and only then commits.
+    ///
+    /// Before the repair the flushes were gathered to the end of the open and
+    /// dropped when it was refused: at the lock, six directories existed and
+    /// not one name was flushed, by that open or by any later one.
+    #[test]
+    fn a_refused_open_leaves_no_directory_it_made_unnamed() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for refused_at in 0..=6_usize {
+            let (root, month, dir, parents) = unmade_month(&format!("refused-{refused_at}"));
+            let _ = directory_flushes();
+            NAME_FAULT.with(|armed| armed.set(u32::try_from(refused_at).ok()));
+            let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
+            assert!(
+                NAME_FAULT.with(Cell::get).is_none(),
+                "{refused_at}: the fault never fired"
+            );
+            let action = if refused_at < 6 {
+                Action::CreateDir
+            } else {
+                Action::Open
+            };
+            assert!(
+                matches!(&refused, Err(StoreError::Denied { action: at, .. }) if *at == action),
+                "{refused_at}: {refused:?}"
+            );
+            // What exists is exactly what was named: the levels above the
+            // refusal, each flushed in its parent, in the order made.
+            let made: Vec<&PathBuf> = parents
+                .iter()
+                .skip(1)
+                .chain(std::iter::once(&dir))
+                .filter(|level| level.is_dir())
+                .collect();
+            assert_eq!(made.len(), refused_at, "{refused_at}: {made:?}");
+            assert_eq!(
+                directory_flushes(),
+                parents[..refused_at],
+                "{refused_at}: every level the refused open made is named, and no other"
+            );
+            let mut again = BarFile::open_or_create(&root, month, SYMBOL).expect("opens now");
+            let mut rest = parents[refused_at..].to_vec();
+            rest.push(dir.clone());
+            assert_eq!(
+                directory_flushes(),
+                rest,
+                "{refused_at}: the next open names the levels it makes, then the month's files"
+            );
+            let batch: Vec<Bar> = (0..2).map(bar).collect();
+            assert!(matches!(
+                again.append(&batch),
+                Ok(Appended::Committed { .. })
+            ));
+            drop(again);
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16, repair 1: A DIRECTORY FLUSH THE HOST REFUSES FAILS THE OPEN, BY
+    /// NAME, AND IS ASKED AGAIN BY THE NEXT ONE. The seven flushes of a new
+    /// month's open fail in turn: the name of each of the six levels, then
+    /// the month's own directory (its three files' names, gathered into one
+    /// flush). Nothing is answered as opened. A level whose name could not be
+    /// flushed is taken away again, so the next open makes it again and asks
+    /// that very flush again, before it commits; when the gathered flush is
+    /// the one refused, every level is already named and the next open asks
+    /// only for the month's own directory (an empty month's checksum sidecar
+    /// is named again before its first commit, D-0688).
+    ///
+    /// Before the repair a refused flush left every level in place and the
+    /// next open asked for the month's own directory alone: records were
+    /// committed under directories whose names no flush had reached.
+    #[test]
+    fn a_directory_flush_that_fails_fails_the_open_and_is_asked_again() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for refused_at in 0..=6_usize {
+            let (root, month, dir, parents) = unmade_month(&format!("flush-fault-{refused_at}"));
+            SYNC_FAULT.with(|armed| armed.set(u32::try_from(refused_at).ok()));
+            let refused = BarFile::open_or_create(&root, month, SYMBOL).map(|_| ());
+            assert!(
+                matches!(
+                    refused,
+                    Err(StoreError::Io {
+                        action: Action::Sync,
+                        ..
+                    })
+                ),
+                "{refused_at}: {refused:?}"
+            );
+            assert!(!sync_fault_fires(), "{refused_at}: the fault never fired");
+            let levels: Vec<&PathBuf> = parents
+                .iter()
+                .skip(1)
+                .chain(std::iter::once(&dir))
+                .collect();
+            for (depth, level) in levels.iter().enumerate() {
+                assert_eq!(
+                    level.is_dir(),
+                    depth < refused_at,
+                    "{refused_at}: a level stays only when its name was flushed: {}",
+                    level.display()
+                );
+            }
+            let _ = directory_flushes();
+            let mut again =
+                BarFile::open_or_create(&root, month, SYMBOL).expect("the month opens again");
+            let mut asked_again = parents[refused_at.min(6)..].to_vec();
+            asked_again.push(dir.clone());
+            assert_eq!(
+                directory_flushes(),
+                asked_again,
+                "{refused_at}: the refused flush and every one after it, asked again"
+            );
+            let batch: Vec<Bar> = (0..2).map(bar).collect();
+            assert!(matches!(
+                again.append(&batch),
+                Ok(Appended::Committed { .. })
+            ));
+            drop(again);
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    // ═══ A durable batch (WP-16, DB-N25, D-3353) ═══════════════════════════
+
+    /// Every flush a batch issued, from any thread, in the order issued:
+    /// `flush_all` runs on threads of its own, so a test filters this by its
+    /// own root.
+    static BATCH_FLUSHES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    /// Counts one flush a batch issued.
+    pub(super) fn count_batch_flush(path: &Path) {
+        BATCH_FLUSHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(path.to_path_buf());
+    }
+
+    /// The flushes batches issued under `root` so far.
+    fn batch_flushes_under(root: &Path) -> Vec<PathBuf> {
+        BATCH_FLUSHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect()
+    }
+
+    /// A fresh store root for one batch test.
+    fn batch_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-store-file-batch-{tag}-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
+        root
+    }
+
+    /// A one-second NIFTY month of `symbol` under any root.
+    fn second_month(symbol: &str) -> crate::path::StorePath<'_> {
+        crate::path::StorePath::new(crate::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol,
+            contract: None,
+            timeframe: crate::path::Timeframe::SECOND_1,
+            month: crate::path::YearMonth::new(2024, 6).expect("2024-06"),
+            file: crate::path::FileKind::Bars,
+        })
+        .expect("a legal path")
+    }
+
+    /// Every file under `root`, by its path below it, with its bytes.
+    fn files_under(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a directory of the store") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .expect("below the root")
+                        .to_path_buf();
+                    out.insert(rel, std::fs::read(&path).expect("a file of the store"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Opens NIFTY's month under `root`, appends two batches and drops it,
+    /// on this thread. The second brings the month past the small-month
+    /// threshold (D-4933), so it holds every sidecar a month can.
+    fn two_appends(root: &Path) {
+        let mut writer =
+            BarFile::open_or_create(root, second_month("NIFTY"), SYMBOL).expect("the month opens");
+        let first: Vec<Bar> = (0..3).map(bar).collect();
+        let second: Vec<Bar> = (3..1_100).map(bar).collect();
+        for batch in [&first, &second] {
+            assert!(matches!(
+                writer.append(batch),
+                Ok(Appended::Committed { .. })
+            ));
+        }
+    }
+
+    /// WP-16 (DB-N25, D-3353): INSIDE A BATCH NO APPEND FLUSHES, THE BYTES ARE
+    /// THE BYTES, AND THE BATCH ENDS WITH ONE FLUSH PER DIRECTORY AND ONE PER
+    /// DEVICE. A new month and two appends to it, written inside a
+    /// once-per-device batch, issue no barrier (an armed fault never fires),
+    /// no index flush and no directory flush; every file is byte for byte what
+    /// the same writes outside a batch leave; and making the batch durable
+    /// flushes each directory that gained a name once and the device once.
+    #[test]
+    fn a_batch_defers_every_flush_and_ends_with_one_per_directory_and_device() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let plain = batch_root("plain");
+        two_appends(&plain);
+        let root = batch_root("once");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        assert!(batch.writes_through(), "O_SYNC is verified on this host");
+        let _ = (directory_flushes(), index_flushes());
+        {
+            let _inside = batch.enter();
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            two_appends(&root);
+            assert!(
+                SYNC_FAULT.with(Cell::get) == Some(0),
+                "no barrier was issued inside the batch"
+            );
+            SYNC_FAULT.with(|armed| armed.set(None));
+        }
+        assert_eq!(index_flushes(), 0, "no index flush inside the batch");
+        assert_eq!(
+            directory_flushes(),
+            Vec::<PathBuf>::new(),
+            "no directory flush inside the batch"
+        );
+        assert_eq!(files_under(&root), files_under(&plain), "the same bytes");
+        let made = batch.make_durable(4).expect("the batch is made durable");
+        let month_dir = second_month("NIFTY")
+            .to_path_buf(&root)
+            .parent()
+            .expect("the month's directory")
+            .to_path_buf();
+        // The root and every directory below it down to the month's own
+        // gained a name (the month's own gained four: bars, checksums, time
+        // index, and the sort index its first commit writes, D-3349), and
+        // each is flushed once.
+        let mut gained = vec![root.clone()];
+        let mut at = month_dir.as_path();
+        while at != root {
+            gained.push(at.to_path_buf());
+            at = at.parent().expect("below the root");
+        }
+        gained.sort();
+        assert_eq!(made.directories, gained.len(), "{made:?}");
+        assert_eq!(
+            made.files, 4,
+            "the bars, the checksums, the time index, the sort index: {made:?}"
+        );
+        assert_eq!(made.flushes, made.directories + 1, "one for the device");
+        let flushed = batch_flushes_under(&root);
+        assert_eq!(flushed.len(), made.flushes, "{flushed:?}");
+        let mut directories: Vec<PathBuf> = flushed
+            .iter()
+            .filter(|path| path.is_dir())
+            .cloned()
+            .collect();
+        directories.sort();
+        assert_eq!(directories, gained, "each directory once");
+        let device: Vec<&PathBuf> = flushed.iter().filter(|path| path.is_file()).collect();
+        assert_eq!(device.len(), 1, "one file flushes the device: {flushed:?}");
+        assert_eq!(
+            batch.make_durable(4).expect("a second call"),
+            MadeDurable::default(),
+            "nothing left to flush"
+        );
+        assert_eq!(batch_flushes_under(&root).len(), made.flushes);
+        for dir in [plain, root] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// WP-16 (D-3353): AN EVERY-FILE BATCH WRITES PLAINLY AND ENDS WITH ONE
+    /// FLUSH OF EACH FILE AND EACH DIRECTORY IT WROTE, each once however many
+    /// appends touched it, on as many threads as it is given.
+    #[test]
+    fn an_every_file_batch_flushes_each_file_and_directory_once() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let plain = batch_root("plain-every");
+        two_appends(&plain);
+        let root = batch_root("every");
+        let batch = DurableBatch::new(BatchFlush::EveryFile);
+        assert!(!batch.writes_through(), "plain writes");
+        let _ = (directory_flushes(), index_flushes());
+        {
+            let _inside = batch.enter();
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            two_appends(&root);
+            assert!(SYNC_FAULT.with(Cell::get) == Some(0), "no barrier");
+            SYNC_FAULT.with(|armed| armed.set(None));
+        }
+        assert_eq!((index_flushes(), directory_flushes()), (0, Vec::new()));
+        assert_eq!(files_under(&root), files_under(&plain), "the same bytes");
+        let made = batch.make_durable(3).expect("durable");
+        assert_eq!(made.files, 4, "{made:?}");
+        assert_eq!(made.flushes, made.files + made.directories, "{made:?}");
+        let flushed = batch_flushes_under(&root);
+        let mut files: Vec<String> = flushed
+            .iter()
+            .filter(|path| path.is_file())
+            .filter_map(|path| {
+                path.extension()
+                    .map(|ext| ext.to_string_lossy().into_owned())
+            })
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            ["bin", "crc", "srt", "tix"],
+            "each file once: {flushed:?}"
+        );
+        for dir in [plain, root] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// WP-16 (D-3353): ONCE A BATCH IS MADE DURABLE IT HOLDS NOTHING MORE. A
+    /// writer opened inside it, appending after it was sealed, flushes for
+    /// itself again (its barrier fires), and a new open on a thread still
+    /// inside it belongs to no batch.
+    #[test]
+    fn a_sealed_batch_leaves_each_writer_to_flush_for_itself() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("sealed");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        let _inside = batch.enter();
+        assert!(DurableBatch::current().is_some(), "inside an open batch");
+        let mut writer =
+            BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL).expect("opens");
+        let first: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(matches!(
+            writer.append(&first),
+            Ok(Appended::Committed { .. })
+        ));
+        batch.make_durable(2).expect("durable");
+        assert!(DurableBatch::current().is_none(), "sealed: no batch");
+        let _ = index_flushes();
+        SYNC_FAULT.with(|armed| armed.set(Some(0)));
+        let after: Vec<Bar> = (3..6).map(bar).collect();
+        let refused = writer.append(&after);
+        assert!(
+            matches!(
+                refused,
+                Err(StoreError::Io {
+                    action: Action::Sync,
+                    ..
+                })
+            ),
+            "the writer's own barrier, armed to fail, was issued: {refused:?}"
+        );
+        drop(writer);
+        let _ = directory_flushes();
+        let other = BarFile::open_or_create(&root, second_month("BANKNIFTY"), SYMBOL)
+            .expect("another month opens");
+        assert!(other.batch.is_none(), "a writer of no batch");
+        assert!(
+            !directory_flushes().is_empty(),
+            "its new names were flushed by the open itself"
+        );
+        assert_eq!(
+            index_flushes(),
+            0,
+            "and no index: a new month is under the small-month threshold (D-4933)"
+        );
+        drop(other);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// WP-16 (D-3353): A BATCH THAT CANNOT BE MADE DURABLE NAMES THE PATH AND
+    /// BARS EVERY MONTH IT WROTE, so no later append in this process can
+    /// confirm bytes whose flush failed with a second one (D-1907's rule for
+    /// one barrier, applied to the batch's).
+    #[test]
+    fn a_batch_that_cannot_be_made_durable_bars_every_month_it_wrote() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("refused");
+        let batch = DurableBatch::new(BatchFlush::OncePerDevice);
+        {
+            let _inside = batch.enter();
+            two_appends(&root);
+        }
+        let refused = batch.make_durable_by(2, &|file, path| {
+            if path.is_file() {
+                Err(io::Error::other("injected batch flush fault"))
+            } else {
+                file.sync_all()
+            }
+        });
+        let bars = second_month("NIFTY").to_path_buf(&root);
+        match refused {
+            Err(StoreError::Io {
+                action: Action::Sync,
+                path,
+                ..
+            }) => assert!(path.starts_with(&root), "{}", path.display()),
+            other => panic!("the flush was refused by path: {other:?}"),
+        }
+        let mut reopened =
+            BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL).expect("reopens");
+        assert_eq!(
+            reopened.append(&[bar(200)]),
+            Err(StoreError::BarrierFailed { path: bars }),
+            "the month takes no further append in this process"
+        );
+        drop(reopened);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// WP-16: THE WRITER'S FLAGS ARE THE UNIONS THEY NAME, on this host.
+    #[test]
+    fn the_writer_flags_are_the_unions_they_name() {
+        let sync = super::O_SYNC.expect("a verified O_SYNC on this host");
+        assert_eq!(sync, crate::open_flags::O_SYNC);
+        #[cfg(target_os = "macos")]
+        assert_eq!(sync, 0x80, "sys/fcntl.h");
+        assert_eq!(super::writer_flags(false), crate::open_flags::O_NOFOLLOW);
+        assert_eq!(
+            super::writer_flags(true),
+            crate::open_flags::O_NOFOLLOW | sync
+        );
+        assert_eq!(crate::open_flags::O_NOFOLLOW & sync, 0, "disjoint bits");
+    }
+
+    /// WP-16: A BATCH IS ENTERED BY ONE THREAD AT A TIME, NESTS, AND IS LEFT
+    /// WHEN ITS GUARD DROPS; another thread is in none until it enters.
+    #[test]
+    fn entering_a_batch_is_this_threads_alone_and_nests() {
+        assert!(DurableBatch::current().is_none());
+        let outer = DurableBatch::new(BatchFlush::OncePerDevice);
+        let inner = DurableBatch::new(BatchFlush::EveryFile);
+        let in_outer = outer.enter();
+        let is = |batch: &DurableBatch| {
+            DurableBatch::current().is_some_and(|now| Arc::ptr_eq(&now.0, &batch.0))
+        };
+        assert!(is(&outer));
+        {
+            let _in_inner = inner.enter();
+            assert!(is(&inner));
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| assert!(DurableBatch::current().is_none(), "another thread"))
+                    .join()
+                    .expect("the other thread");
+            });
+        }
+        assert!(is(&outer), "the outer batch is back");
+        drop(in_outer);
+        assert!(DurableBatch::current().is_none());
+        assert_eq!(outer.flush(), BatchFlush::OncePerDevice);
+        assert_eq!(inner.flush(), BatchFlush::EveryFile);
+    }
+
+    /// WP-16 with WP-12d (D-3353 beside D-3350): A WRITER THAT SUSPENDS THE
+    /// BATCH FLUSHES FOR ITSELF, AND THE BATCH HOLDS NOTHING OF IT. Inside an
+    /// entered batch a suspended thread is in no batch: a new month and two
+    /// appends written there issue their own barriers (an armed fault fires)
+    /// and their own directory flushes, the batch is left with nothing to make
+    /// durable, and when the guard drops the thread is back in the batch it
+    /// was in. Without this a versioned repair reached from a day's batch
+    /// published a revision whose bars no flush had covered.
+    #[test]
+    fn a_suspended_batch_defers_nothing_and_comes_back() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let root = batch_root("suspended");
+        let batch = DurableBatch::new(BatchFlush::EveryFile);
+        let _ = (directory_flushes(), index_flushes());
+        let _inside = batch.enter();
+        let is_in = || DurableBatch::current().is_some_and(|now| Arc::ptr_eq(&now.0, &batch.0));
+        assert!(is_in());
+        {
+            let _outside = DurableBatch::suspend();
+            assert!(DurableBatch::current().is_none(), "suspended: no batch");
+            // The first barrier a writer issues for itself is refused: proof
+            // that it issued one. Inside the batch the same fault never fires
+            // (`a_batch_defers_every_flush_and_ends_with_one_per_directory_and_device`).
+            SYNC_FAULT.with(|armed| armed.set(Some(0)));
+            let faulted = batch_root("suspended-fault");
+            let first: Vec<Bar> = (0..3).map(bar).collect();
+            let outcome = BarFile::open_or_create(&faulted, second_month("NIFTY"), SYMBOL)
+                .and_then(|mut writer| writer.append(&first));
+            SYNC_FAULT.with(|armed| armed.set(None));
+            assert!(
+                outcome.is_err(),
+                "a suspended writer issues its own barrier, which the armed fault refuses"
+            );
+            let _ = directory_flushes();
+            two_appends(&root);
+            assert!(
+                !directory_flushes().is_empty(),
+                "a suspended writer flushes the directories it names"
+            );
+        }
+        assert!(is_in(), "the batch is back when the guard drops");
+        assert_eq!(
+            batch.make_durable(2).expect("nothing to refuse"),
+            MadeDurable::default(),
+            "the batch held nothing of the suspended writer"
+        );
+        assert!(batch_flushes_under(&root).is_empty());
+        for dir in [root, batch_root("suspended-fault")] {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The month's own directory and every one above it up to `root`.
+    fn directories_down_to(root: &Path, month: crate::path::StorePath<'_>) -> Vec<PathBuf> {
+        let bars = month.to_path_buf(root);
+        let mut dirs = Vec::new();
+        let mut at = bars.parent().expect("the month's directory");
+        loop {
+            dirs.push(at.to_path_buf());
+            if at == root {
+                break;
+            }
+            at = at.parent().expect("below the root");
+        }
+        dirs.sort();
+        dirs
+    }
+
+    /// WP-16 (D-3353): A MONTH AN EARLIER PROCESS WROTE AND NEVER MADE DURABLE
+    /// IS FLUSHED FOR ITSELF, WHATEVER THE BATCH. Read again it answers
+    /// `AlreadyPresent` and nothing is written, so a once-per-device batch
+    /// would hold no file and issue no flush at all: this failed before
+    /// `confirm_month`, the batch reporting zero flushes for a month whose
+    /// bytes no flush had ever covered. Confirmed, every file the month has
+    /// (bars, checksums, index; no lock) and every directory down to it is
+    /// flushed once.
+    #[test]
+    fn a_confirmed_month_is_flushed_for_itself_whatever_the_batch() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for (tag, kind) in [
+            ("confirm-once", BatchFlush::OncePerDevice),
+            ("confirm-every", BatchFlush::EveryFile),
+        ] {
+            let root = batch_root(tag);
+            // The earlier process: a batch that wrote and was never made
+            // durable (dropped, as a kill drops it).
+            {
+                let cut_off = DurableBatch::new(kind);
+                let _inside = cut_off.enter();
+                two_appends(&root);
+            }
+            let present_again = |batch: &DurableBatch| {
+                let _inside = batch.enter();
+                let mut writer = BarFile::open_or_create(&root, second_month("NIFTY"), SYMBOL)
+                    .expect("the month opens again");
+                let again: Vec<Bar> = (0..3).map(bar).collect();
+                assert!(
+                    matches!(writer.append(&again), Ok(Appended::AlreadyPresent { .. })),
+                    "the month already holds them"
+                );
+            };
+            // THE HOLE: a batch that only found the month present holds
+            // nothing, so it flushes nothing.
+            let unconfirmed = DurableBatch::new(kind);
+            present_again(&unconfirmed);
+            assert_eq!(
+                unconfirmed.make_durable(2).expect("an empty batch"),
+                MadeDurable::default(),
+                "{kind:?}: nothing of a month found present is in a batch"
+            );
+            let batch = DurableBatch::new(kind);
+            present_again(&batch);
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("the month is measured"),
+                "an open batch holds the month"
+            );
+            // A month the store does not hold has nothing to confirm.
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("BANKNIFTY"))
+                    .expect("an absent month")
+            );
+            let before = batch_flushes_under(&root).len();
+            let made = batch.make_durable(3).expect("durable");
+            let dirs = directories_down_to(&root, second_month("NIFTY"));
+            assert_eq!(
+                made.confirmed, 4,
+                "bars, checksums, time index, sort index: {made:?}"
+            );
+            assert_eq!(made.files, 0, "this batch wrote nothing: {made:?}");
+            assert_eq!(made.directories, dirs.len(), "{made:?}");
+            assert_eq!(made.flushes, 4 + dirs.len(), "{made:?}");
+            let flushed: Vec<PathBuf> = batch_flushes_under(&root).split_off(before);
+            let mut files: Vec<String> = flushed
+                .iter()
+                .filter(|path| path.is_file())
+                .filter_map(|path| {
+                    path.extension()
+                        .map(|ext| ext.to_string_lossy().into_owned())
+                })
+                .collect();
+            files.sort();
+            assert_eq!(files, ["bin", "crc", "srt", "tix"], "{kind:?}: {flushed:?}");
+            let mut directories: Vec<PathBuf> = flushed
+                .iter()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .collect();
+            directories.sort();
+            assert_eq!(directories, dirs, "{kind:?}: each directory once");
+            assert!(
+                !batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("a sealed batch"),
+                "a sealed batch holds nothing more"
+            );
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16 (D-3353): A CONFIRMED MONTH THE BATCH ALSO WROTE IS FLUSHED ONCE
+    /// PER FILE by an every-file batch, never twice; a once-per-device batch
+    /// flushes its files for themselves beside the device.
+    #[test]
+    fn a_confirmed_month_the_batch_wrote_is_flushed_once_per_file() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for (tag, kind, device) in [
+            ("confirm-wrote-every", BatchFlush::EveryFile, 0),
+            ("confirm-wrote-once", BatchFlush::OncePerDevice, 1),
+        ] {
+            let root = batch_root(tag);
+            let batch = DurableBatch::new(kind);
+            {
+                let _inside = batch.enter();
+                two_appends(&root);
+            }
+            assert!(
+                batch
+                    .confirm_month(&root, second_month("NIFTY"))
+                    .expect("measured")
+            );
+            let made = batch.make_durable(2).expect("durable");
+            let dirs = directories_down_to(&root, second_month("NIFTY"));
+            assert_eq!(made.files, 4, "{made:?}");
+            assert_eq!(made.directories, dirs.len(), "{made:?}");
+            assert_eq!(made.flushes, 4 + dirs.len() + device, "{kind:?}: {made:?}");
+            let files = batch_flushes_under(&root)
+                .iter()
+                .filter(|path| path.is_file())
+                .count();
+            assert_eq!(files, 4 + device, "{kind:?}");
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// WP-16 (D-3353): A FILE REMOVED AFTER ITS FLUSH WAS DEFERRED DOES NOT
+    /// FAIL THE BATCH. A writer may retire a month's time index after an
+    /// earlier write of it was deferred (D-2330); the file is gone when the
+    /// batch is made durable, and the batch failed on it, by name, before the
+    /// flush fell back to the file's directory, which is what is left to make
+    /// durable.
+    #[test]
+    fn a_file_removed_after_its_flush_was_deferred_is_flushed_through_its_directory() {
+        for (tag, kind) in [
+            ("gone-every", BatchFlush::EveryFile),
+            ("gone-once", BatchFlush::OncePerDevice),
+        ] {
+            let root = batch_root(tag);
+            let gone = root.join("retired.tix");
+            let file = open_rw(&gone).expect("a file under the root");
+            let batch = DurableBatch::new(kind);
+            assert!(batch.defer_file(&file, &gone).expect("held"));
+            drop(file);
+            std::fs::remove_file(&gone).expect("removed by its writer");
+            let made = batch
+                .make_durable(2)
+                .expect("the batch is still made durable");
+            assert_eq!((made.files, made.flushes), (1, 1), "{made:?}");
+            assert_eq!(
+                batch_flushes_under(&root),
+                vec![root.clone()],
+                "{kind:?}: its directory in its place"
+            );
+            let _ignored = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Arms the fault: `skip` hooked syncs pass on this thread, the next one
+    /// fails, once. For a sibling test module that cannot name the cell.
+    pub(super) fn arm_sync_fault(skip: u32) {
+        SYNC_FAULT.with(|armed| armed.set(Some(skip)));
+    }
+
+    /// Whether the armed barrier fault fires now; it fires once.
+    pub(super) fn sync_fault_fires() -> bool {
+        SYNC_FAULT.with(|armed| match armed.get() {
+            Some(0) => {
+                armed.set(None);
+                true
+            }
+            Some(left) => {
+                armed.set(Some(left - 1));
+                false
+            }
+            None => false,
+        })
+    }
+
+    /// store1-2, D-1907: a failed append barrier is never confirmed. The
+    /// same handle, a reopened handle, and the duplicate check all refuse the
+    /// month by name rather than "committing" or answering `AlreadyPresent`
+    /// from a page cache whose barrier failed.
+    #[test]
+    fn a_failed_append_barrier_is_never_confirmed_by_a_later_append() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for skip in [0_u32, 1, 2] {
+            let (path, mut file) = month(&format!("failed-barrier-{skip}"));
+            let batch: Vec<Bar> = (0..3).map(bar).collect();
+            SYNC_FAULT.with(|armed| armed.set(Some(skip)));
+            let refusal = file.append(&batch);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(StoreError::Io {
+                        action: Action::Sync,
+                        ..
+                    })
+                ),
+                "barrier {skip}: {refusal:?}"
+            );
+            assert!(!sync_fault_fires(), "barrier {skip} fired");
+            let barred = Err(StoreError::BarrierFailed { path: path.clone() });
+            assert_eq!(file.append(&batch), barred, "the same handle");
+            drop(file);
+            let mut reopened = reopen(&path).expect("the month reopens");
+            assert_eq!(reopened.append(&batch), barred, "a reopened handle");
+            assert_eq!(reopened.append(&[bar(3)]), barred, "any later append");
+            assert!(
+                barred
+                    .clone()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot prove"),
+                "the refusal says why"
+            );
+            drop(reopened);
+            let _ignored = std::fs::remove_file(&path);
+        }
+    }
+
     use super::{
-        Action, Appended, Bar, BarFile, FormatError, Layout, Positional, StoreError,
-        already_stored, bytes_past_the_counter, classify, first_at_or_after, initialise, len_u64,
-        lock_fault, open_rw, read_fully, write_fully,
+        Action, Appended, Bar, BarFile, BatchFlush, DurableBatch, FormatError, Layout, MadeDurable,
+        NO_BLOCK, Positional, StoreError, already_stored, bytes_past_the_counter, classify,
+        first_at_or_after, initialise, len_u64, lock_fault, open_rw, read_fully, write_fully,
     };
-    use crate::format::OI_NULL;
+    use crate::format::{OI_NULL, RECORDS_PER_BLOCK};
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    /// THE PER-MEMBER `store.append` LINE BUILDS NOTHING WHEN IT IS FILTERED.
+    ///
+    /// Its comment says a run at the `Info` floor "pays one relaxed atomic
+    /// load and writes nothing". Through the function `telemetry::emit` that
+    /// was false: a function's arguments are evaluated first, so every commit
+    /// formatted and allocated the month's path just to throw it away. Only
+    /// `telemetry::emit_if!` gates before evaluating, and
+    /// `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`
+    /// proves the macro's half. This holds the call site to it: the site is the
+    /// macro, the path is formatted inside the macro's arguments only, and no
+    /// production `Debug` event in this file is built eagerly.
+    #[test]
+    fn a_filtered_append_line_formats_no_path() {
+        let source = include_str!("file.rs");
+        let production = source
+            .split_once(concat!("\n#[cfg(test)]\n#[allow(", "\n"))
+            .expect("the test module follows the production code")
+            .0;
+        let (before, after) = production
+            .split_once(concat!("\"store.append", "\",\n"))
+            .expect("the append line names its target");
+        let opener = before
+            .rsplit_once("let _dropped_when_filtered = ")
+            .expect("the append line is bound")
+            .1;
+        assert_eq!(
+            opener.trim(),
+            concat!(
+                "telemetry::emit_if",
+                "!(\n            telemetry::Level::Debug,"
+            )
+            .trim(),
+            "the append line must gate before it builds: {opener}"
+        );
+        let call = after.split_once(");").expect("the call ends").0;
+        assert!(
+            call.contains(concat!("self.bars_path.display", "().to_string()")),
+            "the path is formatted only inside the gated arguments: {call}"
+        );
+        assert_eq!(
+            production.matches(concat!("Event::", "debug(")).count(),
+            0,
+            "no production Debug event in this file is built before its level is read"
+        );
+    }
 
     /// What the fake host should do on the next call.
     #[derive(Debug, Clone, Copy)]
@@ -2884,6 +7059,32 @@ mod tests {
 
     fn path() -> &'static Path {
         Path::new("/tmp/brutex-store-fake.bin")
+    }
+
+    /// `slice_of` hands out exactly the asked-for prefix of the stack buffer
+    /// at every length from nothing to the whole block, and refuses one byte
+    /// more — and `u64::MAX` — by name, naming the block. D-0914.
+    #[test]
+    fn the_block_buffer_serves_up_to_its_length_and_refuses_one_byte_more() {
+        let mut buffer = [0u8; super::MAX_BLOCK_LEN];
+        for len in [0u64, 1, 56, 4_087, 4_088] {
+            let got = super::slice_of(&mut buffer, len, 3, path()).map(|s| len_u64(s.len()));
+            assert_eq!(got, Ok(len), "a prefix of {len} bytes");
+        }
+        for (len, block) in [(4_089u64, 7u64), (u64::MAX, u64::MAX)] {
+            assert_eq!(
+                super::slice_of(&mut buffer, len, block, path()),
+                Err(StoreError::Format {
+                    path: path().to_path_buf(),
+                    source: FormatError::BlockLengthMismatch {
+                        block,
+                        len: 4_088,
+                        need: len,
+                    },
+                }),
+                "{len} bytes do not fit a 4,088-byte block buffer"
+            );
+        }
     }
 
     #[test]
@@ -3141,7 +7342,7 @@ mod tests {
         let path = scratch(tag);
         let _ignored = std::fs::remove_file(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        initialise(&bars, &path, SYMBOL, 60, Layout::CURRENT)
+        initialise(&bars, &path, SYMBOL, 60, Layout::CURRENT, None)
             .expect("a fresh header region is written");
         (path.clone(), reopen(&path).expect("and reads back"))
     }
@@ -3159,11 +7360,14 @@ mod tests {
             // what `crate::path` composes for a real store.
             Some(path.with_extension("crc")),
             None,
+            None,
             len,
             SYMBOL,
             60,
+            crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Write,
+            None,
         )
     }
 
@@ -3182,11 +7386,14 @@ mod tests {
             path.to_path_buf(),
             Some(path.with_extension("crc")),
             None,
+            None,
             len,
             SYMBOL,
             60,
+            crate::path::YearMonth::new(2024, 6).expect("the month T0 is in"),
             Layout::KNOWN,
             super::Access::Read,
+            None,
         )
     }
 
@@ -3373,14 +7580,14 @@ mod tests {
         altered[2].close += 1;
         assert_eq!(
             file.append(&altered),
-            Err(StoreError::Format {
+            Err(StoreError::OverlapDisagrees {
                 path: path.clone(),
-                source: FormatError::TimestampsOutOfOrder {
-                    previous: bar(19).ts_micros,
-                    next: bar(5).ts_micros,
-                },
+                at: 2,
+                ts_micros: bar(7).ts_micros,
+                conflict: super::Conflict::Restated,
             }),
-            "a vendor restating history is refused, not absorbed"
+            "a vendor restating history is refused, not absorbed, and named \
+             as the restatement it is (D-1525)"
         );
 
         // And a batch that starts inside the month and runs past its end is a
@@ -3436,6 +7643,102 @@ mod tests {
         assert_eq!(reads.get(), 0, "an empty month is not probed at all");
     }
 
+    /// `ceil(log2(n + 1))`, the height of a bisection over `n` records: the
+    /// most probes `first_at_or_after` may spend. Written as a bit count so it
+    /// is exact for every `u64`, which `f64::log2` is not.
+    fn bisection_height(n: u64) -> u32 {
+        u64::BITS - n.leading_zeros()
+    }
+
+    /// Probes `first_at_or_after` spends on `n` records for `ts`, the answer,
+    /// and how many cold block verifies a handle with ONE cached block — the
+    /// shape `BarFile::verify_block_of` has — would pay on the way, starting
+    /// from [`NO_BLOCK`]. Records are `stamp == index`, so any `n` up to
+    /// `i64::MAX` is addressable without a table.
+    fn probe(n: u64, ts: i64) -> (u32, u64, u32) {
+        let probes = Cell::new(0u32);
+        let cold = Cell::new(0u32);
+        let cached = Cell::new(NO_BLOCK);
+        let read = |index: u64| -> Result<Bar, StoreError> {
+            assert!(index < n, "probe {index} is past the {n} committed records");
+            probes.set(probes.get() + 1);
+            let block = index / RECORDS_PER_BLOCK;
+            if cached.get() != block {
+                cold.set(cold.get() + 1);
+                cached.set(block);
+            }
+            Ok(Bar {
+                ts_micros: i64::try_from(index).expect("test n stays below i64::MAX"),
+                ..bar(0)
+            })
+        };
+        let at = first_at_or_after(n, ts, read).expect("an in-memory read never refuses");
+        (probes.get(), at, cold.get())
+    }
+
+    #[test]
+    fn first_at_or_after_never_probes_more_than_the_bisection_height() {
+        // W3-store1-0 / D-1434. `docs/06-limits.md` states the lookup as
+        // `ceil(log2(n_valid + 1))` record reads, each possibly paying one
+        // cold block verify; this is that sentence as a number. A scan, a
+        // probe that re-reads `mid`, or a loop that runs one step past an
+        // interval of one each breaks it.
+        //
+        // EXHAUSTIVE for small months: every insertion point, plus the
+        // timestamps before the first and after the last record, across the
+        // block edges at 73 and 146 records.
+        for n in 0u64..=150 {
+            let height = bisection_height(n);
+            let mut worst = 0u32;
+            for ts in -1..=i64::try_from(n).expect("small") + 1 {
+                let (probes, at, cold) = probe(n, ts);
+                let want = u64::try_from(ts.clamp(0, i64::try_from(n).expect("small")))
+                    .expect("clamped non-negative");
+                assert_eq!(at, want, "n={n} ts={ts}: wrong insertion point");
+                assert!(
+                    probes <= height,
+                    "n={n} ts={ts}: {probes} probes against a height of {height}"
+                );
+                assert!(cold <= probes, "n={n} ts={ts}: a verify with no read");
+                worst = worst.max(probes);
+            }
+            // TIGHT, not merely bounded: some timestamp costs the full height,
+            // so the stated bound is the cost and not a loose ceiling over it.
+            assert_eq!(worst, height, "n={n}: the worst case is the height");
+        }
+
+        // THE MONTH CEILING. A one-minute month is at most 31 sessions of 375
+        // bars; `docs/06-limits.md` names fourteen probes for it.
+        let month = 31 * 375;
+        assert_eq!(bisection_height(month), 14);
+        let mut worst_cold = 0u32;
+        for ts in [-1, 0, 1, 72, 73, 74, 5_812, 11_623, 11_624, 11_625, 11_626] {
+            let (probes, at, cold) = probe(month, ts);
+            assert_eq!(at, u64::try_from(ts.clamp(0, 11_625)).expect("clamped"));
+            assert!(
+                probes <= 14,
+                "ts={ts}: {probes} probes at the month ceiling"
+            );
+            worst_cold = worst_cold.max(cold);
+        }
+        assert!(
+            worst_cold <= 14,
+            "at most one cold block verify per probe, not {worst_cold}"
+        );
+
+        // LARGE COUNTERS, where `(low + high) / 2` would overflow and where a
+        // linear walk would never finish. Both ends and the middle.
+        for n in [1u64 << 31, (1u64 << 62) - 1, 1u64 << 62] {
+            let height = bisection_height(n);
+            let last = i64::try_from(n).expect("below i64::MAX");
+            for ts in [i64::MIN, 0, last / 2, last - 1, last, i64::MAX] {
+                let (probes, at, _) = probe(n, ts);
+                assert_eq!(at, u64::try_from(ts.clamp(0, last)).expect("clamped"));
+                assert!(probes <= height, "n={n} ts={ts}: {probes} > {height}");
+            }
+        }
+    }
+
     #[test]
     fn a_read_that_refuses_mid_comparison_comes_back_out_rather_than_answering_no() {
         // "The month does not hold these" and "I could not look" are different
@@ -3454,8 +7757,10 @@ mod tests {
             Ok(held[usize::try_from(index).expect("an index fits a usize")])
         };
 
+        let at = first_at_or_after(4, bar(1).ts_micros, read).expect("an in-memory read");
+        assert_eq!(at, 1, "the bisection probes 2, 1, 0 and never 3");
         assert_eq!(
-            already_stored(&held[1..4], bar(1).ts_micros, 4, read),
+            already_stored(&held[1..4], at, 4, read),
             Err(StoreError::NotCommitted {
                 index: 3,
                 n_valid: 4,
@@ -3604,6 +7909,100 @@ mod tests {
         scrub_month(&path);
     }
 
+    /// **A NEW MONTH IS VERSION 3, AND ITS CHECKSUM FLAG CANNOT BE CLEARED
+    /// (audit-20261003 attackdata-8, D-1571).**
+    ///
+    /// The attack the audit measured: clear `FLAG_CHECKSUMS` in every slot and
+    /// recompute each slot's CRC. At version 2 the month then opened
+    /// unverified with its `.crc` beside it, ignored. A month born now is
+    /// version 3, whose checksums are mandatory, so the same rewrite is refused
+    /// by name while the honest month round-trips verified.
+    #[test]
+    fn a_new_month_is_version_three_and_a_cleared_checksum_flag_is_refused() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("v3flag");
+        assert_eq!(file.header().format_version, 3, "born at version 3");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+        let honest = reopen_readonly(&path).expect("the honest month opens");
+        assert_eq!(honest.header().format_version, 3);
+        assert!(honest.header().checksums_present());
+        for (index, want) in (0u64..).zip(&held) {
+            assert_eq!(honest.read_record(index), Ok(*want), "verified round trip");
+        }
+        drop(honest);
+
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        let mut cleared = 0;
+        for base in [0usize, 16_384] {
+            let slot = &mut bytes[base..base + 64];
+            if &slot[..7] != b"BRUTEXB" {
+                continue;
+            }
+            slot[12..16].copy_from_slice(&0u32.to_le_bytes());
+            let crc = crate::crc::crc32c_split(&slot[..56], &slot[60..64]);
+            slot[56..60].copy_from_slice(&crc.to_le_bytes());
+            cleared += 1;
+        }
+        assert_eq!(cleared, 2, "the premise: both slots hold a commit");
+        std::fs::write(&path, &bytes).expect("the rewrite lands");
+        assert!(sidecar_of(&path).exists(), "the .crc is still there");
+
+        match reopen_readonly(&path) {
+            Err(StoreError::Format {
+                source: FormatError::ChecksumsRequired(3),
+                ..
+            }) => {}
+            other => panic!("a version-3 month without its flag must be refused, got {other:?}"),
+        }
+        scrub_month(&path);
+    }
+
+    /// **A VERSION-2 MONTH STILL READS AND STILL APPENDS AT VERSION 2 (D-1571).**
+    ///
+    /// Minting version 3 must not strand a month written before it, nor
+    /// rewrite one: §3 rule 8. A sealed version-2 month is written by hand,
+    /// appended to through the ordinary door, and read back verified, and its
+    /// header still says 2.
+    #[test]
+    fn a_version_two_month_still_reads_and_appends_at_version_two() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = scratch("v2still");
+        scrub_month(&path);
+        let bars = open_rw(&path).expect("a temp path opens");
+        initialise(&bars, &path, SYMBOL, 60, Layout::V2, None).expect("a version-2 header region");
+        drop(bars);
+
+        let mut file = reopen(&path).expect("a version-2 month opens");
+        assert_eq!(file.header().format_version, 2, "the premise");
+        assert!(file.header().checksums_present());
+        let held: Vec<Bar> = (0..4).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 4,
+            })
+        );
+        drop(file);
+        let reader = reopen_readonly(&path).expect("and reads back");
+        assert_eq!(reader.header().format_version, 2, "never rewritten as 3");
+        for (index, want) in (0u64..).zip(&held) {
+            assert_eq!(reader.read_record(index), Ok(*want));
+        }
+        drop(reader);
+        scrub_month(&path);
+    }
+
     /// A month born without the flag reads, and no sidecar is invented for it.
     ///
     /// `initialise` sets `FLAG_CHECKSUMS` unconditionally, so this month is
@@ -3618,7 +8017,9 @@ mod tests {
         let path = scratch("unsealed");
         scrub_month(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        let genesis = crate::header::Header::genesis_at(Layout::CURRENT, SYMBOL, 60, 0);
+        // VERSION 2: an unflagged month is a version-2 month. Version 3 refuses
+        // to commit a slot without the flag (D-1571).
+        let genesis = crate::header::Header::genesis_at(Layout::V2, SYMBOL, 60, 0);
         let commit = genesis.commit().expect("the genesis header commits");
         let region = vec![0u8; 32_768];
         write_fully(&bars, &path, 0, &region).expect("the header region");
@@ -3694,6 +8095,286 @@ mod tests {
         );
         drop(fresh);
         scrub_month(&path);
+    }
+
+    /// Overwrites `bytes` into the bar file at `offset`, under any open handle.
+    ///
+    /// The damage a disk, a stray writer or a bad copy does after a block was
+    /// verified — the case ET-bars-candles-store-0 found served unchecked.
+    fn damage_bars(path: &Path, offset: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the month is writable");
+        raw.seek(SeekFrom::Start(offset)).expect("the offset seeks");
+        raw.write_all(bytes).expect("the damage lands");
+        raw.sync_all().expect("and is on disk");
+    }
+
+    /// Flips bit 22 of record `index`'s `high`, on disk, and returns the forgery.
+    ///
+    /// `high` is the third `i64` after `ts_micros` and `open`, so it starts 16
+    /// bytes into the record. Bit 22 is clear in every `bar(..)` high (bit 21
+    /// is set), so the flip makes a LARGER high that still clears
+    /// `Bar::ohlc_is_sane` — nothing but the checksum can tell it from a price.
+    fn flip_high(path: &Path, layout: Layout, index: u64) -> Bar {
+        let at = layout.offset_of(index).expect("a record offset") + 16;
+        let mut forged = bar(i64::try_from(index).expect("a small index"));
+        forged.high ^= 1 << 22;
+        damage_bars(path, at, &forged.high.to_le_bytes());
+        assert!(forged.ohlc_is_sane(), "the forgery is a plausible price");
+        forged
+    }
+
+    /// A record corrupted AFTER its block was verified is never served as the
+    /// corrupted value — D-1433, ET-bars-candles-store-0.
+    ///
+    /// Before D-1433 the first read verified block 0 and remembered only its
+    /// INDEX, then every later read in that block re-read the record from disk
+    /// and checked nothing: the bytes served were never the bytes summed. Now
+    /// the verified block's own bytes are what later reads are served from.
+    /// The first, a middle and the last record of a full block are each
+    /// damaged after the first read, and the fresh handle at the end is the
+    /// control proving the damage is real.
+    #[test]
+    fn a_record_damaged_after_its_block_verified_is_served_as_verified_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912afterverify");
+        let held: Vec<Bar> = (0..80).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 80,
+            })
+        );
+        drop(file);
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        let layout = reader.layout;
+        assert_eq!(reader.read_record(1), Ok(bar(1)), "block 0 verifies here");
+
+        for index in [0u64, 36, 72] {
+            let forged = flip_high(&path, layout, index);
+            let served = reader.read_record(index);
+            assert_ne!(
+                served,
+                Ok(forged),
+                "record {index}: the forgery is never served"
+            );
+            assert_eq!(
+                served,
+                Ok(bar(i64::try_from(index).expect("small"))),
+                "record {index} comes from the verified block, not the disk"
+            );
+        }
+        assert_eq!(
+            reader.read_record(72),
+            Ok(bar(72)),
+            "a rerun serves the same"
+        );
+
+        // Block 1 has not been touched by this handle; its damage is seen.
+        let _forged = flip_high(&path, layout, 73);
+        assert!(
+            matches!(
+                reader.read_record(73),
+                Err(StoreError::BlockChecksum { block: 1, .. })
+            ),
+            "a cold block is checked against the disk as it now stands"
+        );
+        // Block 0's verified bytes did not outlive the move: coming back
+        // re-verifies, and block 0 is damaged on disk now.
+        assert!(
+            matches!(
+                reader.read_record(0),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "a block left is re-verified on return"
+        );
+        drop(reader);
+
+        let fresh = reopen_readonly(&path).expect("the month still opens");
+        assert!(
+            matches!(
+                fresh.read_record(5),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "the control: the damage is real, so the reads above were served \
+             from verified bytes and not from a disk that still matched"
+        );
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// Two handles on one month each serve the bytes they verified — D-1433.
+    #[test]
+    fn two_handles_each_serve_the_bytes_they_verified_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912twohandles");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert!(file.append(&held).is_ok());
+        drop(file);
+
+        let one = reopen_readonly(&path).expect("the month opens");
+        let two = reopen_readonly(&path).expect("the month opens twice");
+        assert_eq!(one.read_record(0), Ok(bar(0)));
+        assert_eq!(two.read_record(2), Ok(bar(2)));
+        let forged = flip_high(&path, one.layout, 2);
+        assert_eq!(
+            one.read_record(2),
+            Ok(bar(2)),
+            "handle one, the last record"
+        );
+        assert_eq!(
+            two.read_record(2),
+            Ok(bar(2)),
+            "handle two, the same record"
+        );
+        assert_ne!(one.read_record(2), Ok(forged));
+        drop((one, two));
+        scrub_month(&path);
+    }
+
+    /// The tail block grows on append, and the cache follows the counter —
+    /// D-1433.
+    ///
+    /// A cache of the tail block taken at three records holds no fourth; a
+    /// read of record 3 after an append must neither slice past what was
+    /// verified nor be refused as uncommitted. It is re-verified over the new
+    /// covered range and served, and damage to record 4 after that read is
+    /// still not served.
+    #[test]
+    fn the_tail_block_cache_follows_an_append_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912tailgrows");
+        assert!(file.append(&[bar(0), bar(1), bar(2)]).is_ok());
+        assert_eq!(
+            file.read_record(2),
+            Ok(bar(2)),
+            "the 3-record tail is cached"
+        );
+        assert!(file.append(&[bar(3), bar(4)]).is_ok());
+        assert_eq!(file.read_record(3), Ok(bar(3)), "the grown tail is re-read");
+        assert_eq!(file.read_record(4), Ok(bar(4)), "to its new last record");
+        let forged = flip_high(&path, file.layout, 4);
+        assert_ne!(
+            file.read_record(4),
+            Ok(forged),
+            "and damage after is not served"
+        );
+        assert_eq!(file.read_record(0), Ok(bar(0)));
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// A block that fills to exactly `records_per_block` and then spills into a
+    /// second: the last record of block 0 and the first of block 1 are each
+    /// served from their own verified bytes — D-1433.
+    #[test]
+    fn the_block_edge_is_served_from_each_side_s_own_verified_bytes_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912edge");
+        let per = Layout::V2.records_per_block();
+        let full: Vec<Bar> = (0..i64::try_from(per).expect("73")).map(bar).collect();
+        assert!(file.append(&full).is_ok());
+        // n_valid AT the block boundary: block 0 is whole, block 1 is empty.
+        assert_eq!(file.read_record(per - 1), Ok(bar(72)), "the last record");
+        assert_eq!(
+            file.read_record(per),
+            Err(StoreError::NotCommitted {
+                index: per,
+                n_valid: per,
+            }),
+            "the first index of an empty block is not committed"
+        );
+        assert!(file.append(&[bar(73)]).is_ok());
+        assert_eq!(file.read_record(per), Ok(bar(73)), "block 1, one record");
+        let forged = flip_high(&path, file.layout, per);
+        assert_ne!(file.read_record(per), Ok(forged));
+        assert_eq!(file.read_record(per), Ok(bar(73)));
+        let forged_edge = flip_high(&path, file.layout, per - 1);
+        assert!(
+            matches!(
+                file.read_record(per - 1),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "crossing back over the edge is a cold read of block 0"
+        );
+        assert_ne!(file.read_record(per - 1), Ok(forged_edge));
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// With the sidecar gone, a record that is ALSO truncated away is still
+    /// named as the record — the order the reads had before D-1433 kept them.
+    #[test]
+    fn a_missing_record_is_named_before_a_missing_sidecar_d0912() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("d0912nosidecarshort");
+        assert!(file.append(&[bar(0), bar(1), bar(2)]).is_ok());
+        let layout = file.layout;
+        drop(file);
+        std::fs::remove_file(sidecar_of(&path)).expect("take the sidecar away");
+        let reader = reopen_readonly(&path).expect("the month opens");
+        // Truncated UNDER the open handle: an open would refuse it outright.
+        let cut = layout.offset_of(2).expect("an offset");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("writable")
+            .set_len(cut)
+            .expect("truncated");
+
+        assert_eq!(
+            reader.read_record(2),
+            Err(StoreError::ShortRead {
+                path: path.clone(),
+                offset: cut,
+                asked: crate::format::RECORD_LEN,
+                read: 0,
+            }),
+            "the record that is gone is named first"
+        );
+        assert!(
+            matches!(
+                reader.read_record(1),
+                Err(StoreError::ChecksumsMissing { block: 0, .. })
+            ),
+            "a record that survives is refused for the sidecar"
+        );
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// `VerifiedBlock::record` serves only bytes inside what was verified.
+    #[test]
+    fn a_verified_block_serves_only_inside_its_verified_extent_d0912() {
+        let mut cache = super::VerifiedBlock::EMPTY;
+        assert_eq!(cache.record(0, 1), None, "nothing verified, nothing served");
+        cache.start = 100;
+        cache.len = 8;
+        if let Some(head) = cache.bytes.get_mut(..8) {
+            head.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        }
+        assert_eq!(cache.record(100, 8), Some(&[1, 2, 3, 4, 5, 6, 7, 8][..]));
+        assert_eq!(cache.record(104, 4), Some(&[5, 6, 7, 8][..]), "the last");
+        assert_eq!(cache.record(105, 4), None, "one byte past the extent");
+        assert_eq!(cache.record(99, 1), None, "one byte before it");
+        assert_eq!(cache.record(108, 0), Some(&[][..]), "the empty tail");
+        assert_eq!(cache.record(u64::MAX, 1), None, "the largest offset");
+        assert_eq!(cache.record(100, usize::MAX), None, "an overflowing width");
+        let shown = format!("{cache:?}");
+        assert!(
+            shown.contains("start: 100") && shown.contains("len: 8") && !shown.contains("bytes"),
+            "Debug names the extent and not the buffer: {shown}"
+        );
     }
 
     /// Opening a month reads no sidecar byte, however damaged the sidecar is.
@@ -4100,6 +8781,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("brutex-store-file-flockdup-{}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
         let month = crate::path::StorePath::new(crate::path::PathParts {
             vendor: brutex_core::vendor::Vendor::Groww,
             exchange: "NSE",
@@ -4674,8 +9356,9 @@ mod tests {
             let end = v2.offset_of(n_valid).expect("an offset");
 
             let reader = reopen_readonly(&path).expect("the month opens");
+            let mut room_buffer = [0u8; crate::file::MAX_BLOCK_LEN];
             let past = reader
-                .past_the_commit(tail, end)
+                .past_the_commit(tail, end, &mut room_buffer)
                 .expect("the tail's past reads");
             assert_eq!(
                 len_u64(past.len()),
@@ -4683,14 +9366,14 @@ mod tests {
                 "{tag}: the tail block's room and not the dead batch"
             );
             assert_eq!(
-                past,
+                *past,
                 bytes[offset(n_valid)..offset(n_valid + room)],
                 "{tag}: exactly the records that follow the commit"
             );
             if tail > 0 {
                 assert_eq!(
-                    reader.past_the_commit(tail - 1, end),
-                    Ok(Vec::new()),
+                    reader.past_the_commit(tail - 1, end, &mut [0u8; crate::file::MAX_BLOCK_LEN]),
+                    Ok(&[] as &[u8]),
                     "{tag}: a block that is not the tail has nothing past the commit"
                 );
             }
@@ -4716,9 +9399,10 @@ mod tests {
             assert_eq!(
                 settled.past_the_commit(
                     v2.block_of(last - 1),
-                    v2.offset_of(last).expect("an offset")
+                    v2.offset_of(last).expect("an offset"),
+                    &mut [0u8; crate::file::MAX_BLOCK_LEN],
                 ),
-                Ok(Vec::new()),
+                Ok(&[] as &[u8]),
                 "{tag}: a file that ends at its commit has nothing past it"
             );
             drop(settled);
@@ -5041,8 +9725,98 @@ mod tests {
 /// The counterpart to [`open_rw`], and the reason it exists is that `open_rw`
 /// carries `create(true)`: any door that used it turned a read into a write the
 /// moment its target was absent.
-fn open_read(path: &Path) -> io::Result<File> {
-    fs::OpenOptions::new().read(true).open(path)
+///
+/// # Never a blocking open, never a non-regular file (D-1432, AC-whp-cx-0)
+///
+/// A plain `open(2)` of a FIFO for reading blocks until a writer opens the
+/// other end, so a FIFO (or a symlink to one) at a month's `.bin`, `.lock` or
+/// `.crc` hung every reader with no refusal. This opens with `O_NONBLOCK` —
+/// which makes the FIFO open return at once — and then asks the HANDLE, by
+/// `fstat`, whether it is a regular file. Asking the handle rather than the
+/// name leaves no window for a swap between the check and the open.
+///
+/// Symlinks are still followed (no `O_NOFOLLOW`): a symlink to a regular bar
+/// file was readable before and stays readable; what it reaches is checked.
+/// `O_NONBLOCK` is left set on the returned handle. For a regular file it has
+/// no effect on `pread`, and `flock` is taken with `LOCK_NB` regardless.
+///
+/// The flag values are the ones `crate::checksum_audit::open_regular` already
+/// carries for the same hosts. On any other unix host there is no verified
+/// value, so every read open is refused as unsupported rather than risk a
+/// blocking open, exactly as `open_regular` refuses there.
+fn open_read(path: &Path) -> Result<File, ReadOpen> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    let flags = 0x800; // O_NONBLOCK
+    #[cfg(target_os = "macos")]
+    let flags = 0x4; // O_NONBLOCK
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    let flags = {
+        let _ = path;
+        return Err(ReadOpen::Host(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "store reads require verified macOS or Linux x86_64/aarch64 open flags",
+        )));
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(ReadOpen::Host)?;
+    let held = file.metadata().map_err(ReadOpen::Host)?;
+    if held.is_file() {
+        Ok(file)
+    } else {
+        Err(ReadOpen::NotRegular {
+            directory: held.is_dir(),
+        })
+    }
+}
+
+/// Why [`open_read`] gave no handle.
+#[derive(Debug)]
+enum ReadOpen {
+    /// The host refused the open or the `fstat`.
+    Host(io::Error),
+    /// The handle is not a regular file. A directory keeps its own, more
+    /// specific name ([`StoreError::IsADirectory`]); anything else is
+    /// [`StoreError::NotARegularFile`].
+    NotRegular {
+        /// Whether what was reached is a directory.
+        directory: bool,
+    },
+}
+
+impl ReadOpen {
+    /// Whether the name is simply not there — the one answer a read door may
+    /// turn into `None` for an optional sibling.
+    fn is_absent(&self) -> bool {
+        matches!(self, Self::Host(why) if why.kind() == ErrorKind::NotFound)
+    }
+
+    /// The named refusal for `path`, always [`Action::Open`].
+    fn refusal(&self, path: &Path) -> StoreError {
+        match self {
+            Self::Host(why) => classify(path, Action::Open, why),
+            Self::NotRegular { directory: true } => StoreError::IsADirectory {
+                path: path.to_path_buf(),
+                action: Action::Open,
+            },
+            Self::NotRegular { directory: false } => StoreError::NotARegularFile {
+                path: path.to_path_buf(),
+                action: Action::Open,
+            },
+        }
+    }
 }
 
 /// Whether a door may create what it opens.
@@ -5061,6 +9835,15 @@ enum Access {
     Read,
 }
 
+/// The writer's half of the `.srt` sort index. D-3349.
+#[path = "sort_index_writer.rs"]
+mod sort_writer;
+pub use sort_writer::{Resorted, SortIndexed};
+
 #[cfg(test)]
 #[path = "sidecar_checksum_tests.rs"]
 mod sidecar_checksum_tests;
+
+#[cfg(test)]
+#[path = "small_month_tests.rs"]
+mod small_month_tests;

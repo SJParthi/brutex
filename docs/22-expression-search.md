@@ -14,6 +14,9 @@ the data digest. Neither variant supplies institutional admission policy.
 `BITS` is `all`, or sorted unique live condition IDs separated by commas.
 The two final positive numbers are per-invocation work budgets. They pause the
 same search; they neither restrict expression depth nor certify exhaustion.
+NODES bounds grammar choices, not candidates reached: every rank is tried at
+every position, so nodes per candidate grow with the alphabet and more than
+4,096 nodes can pass between two candidates (D-0752, `docs/06-limits.md`).
 Repeating the command with the same data and policy resumes saved progress.
 
 | Question | Exact answer |
@@ -62,12 +65,15 @@ children are refusals, never zero rows.
 
 ## Shared checkpoint journal
 
-The only namespaces are `and-checkpoint-v1` and `expression-search-v1`, directly
-under the selected store root. Each full run ID has an exclusive `owner.lock`
-and monotonically reserved, 16-digit hexadecimal sequence directories. A new
-reservation is synchronized before its payload is created. The payload is a
-64-byte header (magic `BTXCHK01`, run ID, sequence, length, eight zero bytes),
-caller bytes and a complete 32-byte BLAKE3 seal. All integers are little-endian.
+The AND sweep writes `and-checkpoint-v2` (D-0712; `Journal::open` still admits
+`and-checkpoint-v1`, which no production path writes any more) and the
+expression search writes `expression-search-v1`, each directly under the
+selected store root; `Journal::open` refuses a namespace it does not list.
+Each full run ID has an exclusive `owner.lock` and monotonically reserved,
+16-digit hexadecimal sequence directories. A new reservation is synchronized
+before its payload is created. The payload is a 64-byte header (magic
+`BTXCHK01`, run ID, sequence, length, eight zero bytes), caller bytes and a
+complete 32-byte BLAKE3 seal. All integers are little-endian.
 A separate 32-byte `complete` marker contains that seal.
 
 The writer synchronizes and re-reads the held payload, checking its pathname

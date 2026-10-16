@@ -24,7 +24,7 @@
 //! # What it reads
 //!
 //! The D-0681, D-0682, D-0693 and D-0694 entries of `docs/05-decisions.md`, the whole of
-//! `docs/04-invariants.md` and `docs/06-limits.md`, and the comment lines of
+//! `docs/04-invariants.md`, `docs/06-limits.md` and `docs/07-plan.md`, and the comment lines of
 //! `crates/store/tests/tail_proof.rs`. Each is read as sentences, split after
 //! a full stop that a space follows, with every run of whitespace made one
 //! space and the comment markers `//!`, `///` and `//` dropped, so a phrase a
@@ -126,18 +126,34 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 26] = [
+const NOT_ON_MAIN: [(&str, Off); 37] = [
+    ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
     ("28c362c1", Off::Neither),
     ("da28ae95", Off::Neither),
     ("b1d9ac70", Off::Neither),
+    // The GDFL line's docs/07-plan.md rows (D-0808, round-3 and round-5
+    // repairs): a branch history squashed before it landed; none of the nine
+    // is an ancestor of this branch either.
+    ("266561f2", Off::Neither),
+    ("51518fdc", Off::Neither),
+    ("e8f0d281", Off::Neither),
+    ("1457dd29", Off::Neither),
+    ("76d5c4f8", Off::Neither),
+    ("5a55340c", Off::Neither),
+    ("14133fa3", Off::Neither),
+    ("4f19b981", Off::Neither),
+    ("bfee2e39", Off::Neither),
     ("7f617f01", Off::Squashed),
     ("9fc9233b", Off::Squashed),
     ("f6716814", Off::Squashed),
     ("fd70a1bd", Off::Squashed),
     ("eecca4da", Off::Squashed),
     ("950ead28", Off::Squashed),
+    // GI-21 (D-2822) names the GDFL import's own earlier commit whose
+    // journal form it resumes.
+    ("3cc6b8e0", Off::Squashed),
     ("08a4258", Off::MainsOwnText),
     ("0d4fef13", Off::MainsOwnText),
     ("11feb080", Off::MainsOwnText),
@@ -162,7 +178,15 @@ const MAIN: &str = "refs/remotes/origin/main";
 const ENTRIES: [&str; 4] = ["D-0681", "D-0682", "D-0693", "D-0694"];
 
 /// The documents this file reads whole, from the repository root.
-const WHOLE: [&str; 2] = ["docs/04-invariants.md", "docs/06-limits.md"];
+///
+/// `docs/07-plan.md` joined with P1-18-04 (D-1944): its DONE table named
+/// sixteen commits as each row's proof, and none was an ancestor of `main`.
+/// It was outside this list, so nothing refused them.
+const WHOLE: [&str; 3] = [
+    "docs/04-invariants.md",
+    "docs/06-limits.md",
+    "docs/07-plan.md",
+];
 
 /// The test file whose comment lines this file reads.
 const COMMENTED: &str = "crates/store/tests/tail_proof.rs";

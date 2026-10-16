@@ -309,6 +309,7 @@ pub(super) fn finish(
         committed,
         search,
         execution,
+        execution_replay: std::sync::OnceLock::new(),
     }
     .into())
 }

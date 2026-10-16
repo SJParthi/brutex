@@ -217,6 +217,11 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
         holdings.census.spot,
         holdings.census.with_contract
     );
+    // WHAT THE CATALOG SAW AND OFFERED TO NOBODY, so a stock whose directory
+    // is locked or linked is not read as simply absent from the counts above.
+    // Printed by the catalog's own `unoffered_report`; nothing when there is
+    // none. D-0769.
+    out.push_str(&holdings.census.unoffered_report());
     // EVERY ROW ABOVE IS A STOCK, so the statement every report over a stock
     // carries is carried here too, beside the no-charges discovery policy it
     // qualifies. D-0694.
@@ -226,8 +231,13 @@ fn render(holdings: &Holdings, vendor: Vendor, window: ResearchWindow) -> String
 
 /// CLI boundary for `research-plan VENDOR` with no operator-typed end month.
 pub(crate) fn command(vendor: &str, out: &mut String) -> u8 {
+    // The one argument first, with the usage when it names no feed; what is
+    // refused after that is the work's and exits `FAILED` (P8-03, D-2722).
+    let feed = match crate::parse_vendor(vendor) {
+        Ok(feed) => feed,
+        Err(why) => return crate::refuse(out, &why),
+    };
     let result = (|| {
-        let feed = crate::parse_vendor(vendor)?;
         let window = ResearchWindow::now()?;
         let root = crate::preflight_store_root()?;
         inspect(&root, feed, window)
@@ -237,10 +247,7 @@ pub(crate) fn command(vendor: &str, out: &mut String) -> u8 {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => {
-            let _ = writeln!(out, "refused: {why}");
-            crate::MISUSED
-        }
+        Err(why) => crate::fail(out, &why),
     }
 }
 
@@ -339,6 +346,39 @@ mod tests {
         assert!(text.contains("0/81"));
         assert!(text.contains("NOT A SWEEP OR A COMPLETENESS CERTIFICATE"));
         assert!(text.contains("No stock search was started"));
+    }
+
+    /// **The inventory names what the catalog saw and offered to nobody.**
+    /// D-0769.
+    ///
+    /// A stock whose directory was locked printed `0/81` on every rung, the
+    /// same row as a stock never pulled, and the catalog line counted only
+    /// `seen`, `spot` and `with_contract` (found by a review). A linked stock
+    /// directory, which the catalog does not follow since D-0766, is named
+    /// by a real walk here; an empty store prints no such line.
+    #[test]
+    fn the_inventory_names_the_entries_the_catalog_did_not_offer() {
+        let window = ResearchWindow::at(clock(2026, 9, 5)).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("brutex-research-unoffered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cash = root.join("bars/zerodha/NSE/CASH");
+        std::fs::create_dir_all(cash.join("RELIANCE/1min")).unwrap();
+        std::fs::write(cash.join("RELIANCE/1min/2026-08.bin"), b"").unwrap();
+        std::os::unix::fs::symlink(cash.join("RELIANCE"), cash.join("TCS")).unwrap();
+        let text = inspect(&root, Vendor::Zerodha, window);
+        let _ = std::fs::remove_dir_all(&root);
+        let text = text.unwrap();
+        assert!(
+            text.contains("NOT OFFERED: below bars/ the catalog could not read 0 director(ies) or entr(ies), did not follow 1 symbolic link(s)"),
+            "{text}"
+        );
+        let quiet = render(&Holdings::default(), Vendor::Zerodha, window);
+        assert!(!quiet.contains("NOT OFFERED"), "{quiet}");
+        assert!(
+            quiet.ends_with(&format!("{}\n", runner::audit::CORPORATE_ACTIONS_UNCHECKED)),
+            "{quiet}"
+        );
     }
 
     /// Every row of this inventory is a stock, so it carries the statement

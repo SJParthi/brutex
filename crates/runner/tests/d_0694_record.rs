@@ -82,21 +82,19 @@ fn limits_d_0694() -> String {
 }
 
 /// **AF-16 SCOPES THE STOCK BANNER TO THE STORED REPORTS THAT RANK OR AUDIT,
-/// AND NAMES THE EXPLICIT EXPRESSION REPORT AS ONE THAT OPENS BARE.**
+/// AND SAYS THE EXPLICIT EXPRESSION REPORT CARRIES THE STOCK NOTE (D-1851).**
 ///
 /// `cli expression-stored` loads one instrument-month through `stored::load`,
-/// which admits the F&O shares, and builds its report from
-/// `STORED_PROVENANCE` alone. It ranks nothing, which is the operator's scope
-/// for the note ("every report that ranks or audits a cash equity"), and
-/// D-0694 lists Expression V1 as unchanged. AF-16 said every stored report
-/// over one stock carries the note, and D-0694's item 3 still opens by saying
-/// it of every stored report over one instrument. This checks the row's
-/// scope, that D-0694's correction scopes item 3's opening sentence to the
-/// reports its list names, and that the report AF-16 names as the exception
-/// still opens bare, so the row fails here if that report gains the note or
-/// the row loses its exception.
+/// which admits the F&O shares. It ranks nothing, and D-0694 once left it
+/// opening with the bare `STORED_PROVENANCE`; D-1851 made it open with
+/// `stored_provenance_of`, so a stock's report states gross of every charge
+/// and corporate actions unchecked. This checks the row's scope, that
+/// D-0694's correction scopes item 3's opening sentence to the reports its
+/// list names, and that the row and the source agree the explicit expression
+/// report carries the note, so it fails if the report goes bare again or the
+/// row still names it as the bare exception.
 #[test]
-fn af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_banner() {
+fn af_16_names_the_explicit_expression_report_as_carrying_the_stock_note_since_d_1851() {
     let af_16 = collapse(&row("AF-16"));
     assert!(
         af_16.contains(
@@ -112,10 +110,14 @@ fn af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_ba
     assert!(
         af_16.contains(
             "The explicit expression report, `expression-stored` (Expression V1), ranks \
-             nothing and opens with the bare `STORED_PROVENANCE` banner, over a stock as \
-             over an index."
+             nothing and, since D-1851, opens with `stored_provenance_of`, so over a stock \
+             it carries both statements and over an index it is the bare banner."
         ),
-        "AF-16 must name the explicit expression report as the exception: {af_16}"
+        "AF-16 must say the explicit expression report carries the stock note: {af_16}"
+    );
+    assert!(
+        !af_16.contains("opens with the bare `STORED_PROVENANCE` banner, over a stock"),
+        "AF-16 again names the explicit expression report as opening bare: {af_16}"
     );
     let decision = d_0694();
     assert!(
@@ -144,17 +146,15 @@ fn af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_ba
          which admits a share, so AF-16's exception may be stale"
     );
     assert!(
-        source.contains("let mut report = String::from(crate::STORED_PROVENANCE);"),
-        "the explicit expression report no longer opens with the bare banner, so \
-         AF-16's exception is stale"
+        source.contains("let mut report = crate::stored_provenance_of(self.key);"),
+        "the explicit expression report no longer opens with `stored_provenance_of`, \
+         so a stock's report may have lost D-0694's statements (D-1851)"
     );
-    for note in ["stored_provenance(", "equity_note"] {
-        assert!(
-            !source.contains(note),
-            "the explicit expression report now names {note:?}; AF-16 says it \
-             opens bare and must be corrected with it"
-        );
-    }
+    assert!(
+        !source.contains("String::from(crate::STORED_PROVENANCE)"),
+        "the explicit expression report opens with the bare banner again; D-1851 \
+         gave a stock's report the gross and corporate-action statements"
+    );
 }
 
 /// Every non-test source under `dir` that names `minute_gaps::`, by its path

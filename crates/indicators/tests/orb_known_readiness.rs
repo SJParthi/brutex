@@ -42,10 +42,11 @@ fn sample(day: i64, minute: i64, high: i64, low: i64, close: i64) -> Sample {
 
 fn evaluator(fib: Tolerance) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
+        Widths::new(
             fib,
-            pivot: vocab::tolerance::pinned_pivot().expect("pinned pivot tolerance"),
-        },
+            vocab::tolerance::pinned_pivot().expect("pinned pivot tolerance"),
+        )
+        .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         Calendar::all_regular(),
@@ -229,8 +230,6 @@ fn zero_span_and_tolerance_family_only_withhold_the_near_answers() {
         pinned(),
         Tolerance::from_milli_on(Base::SessionRange, 0).expect("exact equality tolerance"),
         Tolerance::from_milli_on(Base::SessionRange, i64::MAX).expect("large finite tolerance"),
-        vocab::tolerance::pinned_pivot().expect("wrong family"),
-        Tolerance::from_milli(10).expect("baseless tolerance"),
     ] {
         let counts = verify(&samples, tolerance);
         for (offset, [false_count, true_count, unknown_count]) in counts.into_iter().enumerate() {
@@ -240,14 +239,15 @@ fn zero_span_and_tolerance_family_only_withhold_the_near_answers() {
                     "exact comparisons only await window closure"
                 );
                 assert_eq!(false_count + true_count, 3);
-            } else if tolerance.base() == Some(Base::SessionRange) {
+            } else {
+                assert_eq!(tolerance.base(), Some(Base::SessionRange));
                 assert_eq!(unknown_count, 3, "zero span has no near scale");
                 assert_eq!(false_count + true_count, 2);
-            } else {
-                assert_eq!((false_count, true_count, unknown_count), (0, 0, 5));
             }
         }
     }
+    // A wrong or missing family cannot reach an evaluator at all (D-1553).
+    refused_widths();
 }
 
 #[test]
@@ -343,5 +343,35 @@ fn anchored_columns_preserve_known_false_opening_range_answers() {
             let negation = Expression::parse(&format!("!{bit}")).expect("live ORB bit");
             assert_answers(*truth, *known, expected, bit, &negation);
         }
+    }
+}
+
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
     }
 }

@@ -1,4 +1,8 @@
 //! Bounded observation-only views of saved Boolean statistics and admission.
+//! An unpinned first page reuses a held model that is still current
+//! (`detail::must_admit`); every page checks currency once per linked catalog,
+//! several times. `docs/06-limits.md`, D-1444, states both costs, which are
+//! UNVERIFIED as measurements.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_evidence::{
     Admission, Qualification, Statistics, StatisticsRow, StatisticsSource, StatisticsSummary,
@@ -228,13 +232,49 @@ enum Reader {
     Admission(Box<Admission>),
     Qualification(Box<Qualification>),
 }
-struct Cached {
+impl Reader {
+    /// The held model's own currency check, which walks every linked catalog
+    /// it authenticated. D-1444.
+    fn require_current(&self) -> Result<(), String> {
+        match self {
+            Self::Statistics(reader) => reader.require_current(),
+            Self::Admission(reader) => reader.require_current(),
+            Self::Qualification(reader) => reader.require_current(),
+        }
+    }
+}
+/// What a held reader was opened for: root, model, identity and budget. A held
+/// reader answers only the identical key; any one differing field is a cold
+/// admission, never a reuse of another tree's reader.
+#[derive(Debug, PartialEq, Eq)]
+struct Key {
     root: PathBuf,
     model: Model,
     identity: [u8; 32],
     budget: crate::detail::BooleanObservationBudget,
-    reader: Reader,
 }
+impl Key {
+    fn of(root: &Path, asked: &Asked, budget: crate::detail::BooleanObservationBudget) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            model: asked.model,
+            identity: asked.identity,
+            budget,
+        }
+    }
+}
+/// One held reader beside the key it was opened for. Generic so the reuse
+/// decision is testable without opening saved evidence.
+struct Held<R> {
+    key: Key,
+    reader: R,
+}
+/// The held entry when, and only when, it was opened for exactly `key`. Constant in
+/// what is held: three fixed-width fields and the root path's bytes, one compare.
+fn held_for<'a, R>(slot: Option<&'a Held<R>>, key: &Key) -> Option<&'a Held<R>> {
+    slot.filter(|held| held.key == *key)
+}
+type Cached = Held<Reader>;
 fn render(root: &Path, asked: &Asked) -> Result<Value, String> {
     render_with_budget(
         root,
@@ -254,27 +294,18 @@ fn render_with_budget(
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "Boolean evidence cache poisoned")?;
-    if asked.completion.is_none()
-        || !cache.as_ref().is_some_and(|held| {
-            held.root == root
-                && held.identity == asked.identity
-                && held.model == asked.model
-                && held.budget == budget
-        })
-    {
+    let key = Key::of(root, asked, budget);
+    let held = held_for(cache.as_ref(), &key);
+    if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+        held.is_some_and(|held| held.reader.require_current().is_ok())
+    }) {
         *cache = None;
         let reader=match asked.model {
             Model::Statistics=>Statistics::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Statistics),
             Model::Admission=>Admission::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Admission),
             Model::Qualification=>Qualification::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Qualification),
         }.map_err(|why|budget.context(&format!("Boolean {} evidence {} unavailable under configured root {}: {why}. Dashboard BRUTEX_STORE must match command OUTPUT_ROOT; no other folder searched.",asked.model.name(),crate::server::hex32(asked.identity),root.display())))?;
-        *cache = Some(Cached {
-            root: root.to_path_buf(),
-            model: asked.model,
-            identity: asked.identity,
-            budget,
-            reader,
-        });
+        *cache = Some(Cached { key, reader });
     }
     let reader = &cache
         .as_ref()

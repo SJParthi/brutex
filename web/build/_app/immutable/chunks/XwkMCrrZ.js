@@ -1,0 +1,1 @@
+function e(e,t){let n=(t-e)*1e4;if(!Number.isSafeInteger(n))return null;let r=n%e,i=(n-r)/e,a=r>=0?1:-1,o=r>=0?r:-r;return o>=e-o?i+a:i}function t(e){let t=e>0?`+`:e<0?`-`:``,n=Math.abs(e),r=n%100;return`${t}${(n-r)/100}.${String(r).padStart(2,`0`)}%`}var n=e=>e==null?`none`:e>0?`up`:e<0?`down`:`flat`;export{t as n,n as r,e as t};

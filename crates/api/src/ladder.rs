@@ -87,6 +87,17 @@ pub enum Gate {
         missing: usize,
         /// Instrument-months the window asks for in total.
         of: usize,
+        /// WHICH instrument-months, as runs, and why each is still owed.
+        ///
+        /// A count alone said "315 of 14280" and nothing an operator could
+        /// act on: it was read as the months before young series' first bars,
+        /// which this gate has excused since D-0319, while the real 315 were
+        /// holes between held months, months after a series' last bar and one
+        /// series holding nothing. At most [`OWED_NAMED`] runs are kept, in the
+        /// caller's order; `runs` counts all of them. D-3315.
+        owed: Vec<Owed>,
+        /// Every run of owed months, named or not.
+        runs: usize,
     },
     /// A LEG the operator's order puts first is not COMPLETE.
     ///
@@ -114,6 +125,56 @@ pub enum Gate {
         /// Instrument-months the window asks for in total.
         of: usize,
     },
+}
+
+/// How many runs of owed months a [`Gate::RungFirst`] names. The rest are
+/// counted in its `runs`, so the refusal stays a sentence and never a dump.
+pub const OWED_NAMED: usize = 12;
+
+/// Why a month at the rung below is still owed.
+///
+/// There is no "before the first held month": such a month is not owed at all
+/// (D-0319) and never reaches a [`Gate::RungFirst`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwedWhy {
+    /// The series holds no month of the window at the rung below — the pass
+    /// has not run for it, or the vendor served it nothing in the window.
+    NothingHeld,
+    /// After the series' first held month and before its last one.
+    Interior,
+    /// After the series' last held month in the window.
+    AfterLast,
+}
+
+impl OwedWhy {
+    /// The words an operator reads.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NothingHeld => "nothing of the series is held in this window",
+            Self::Interior => "a hole between held months",
+            Self::AfterLast => "after the series' last held month",
+        }
+    }
+}
+
+/// One run of consecutive owed months of one instrument, for one reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owed {
+    /// The instrument.
+    pub symbol: Symbol,
+    /// Its venue.
+    pub exchange: Exchange,
+    /// Its segment.
+    pub segment: Segment,
+    /// The first owed month of the run.
+    pub from: YearMonth,
+    /// The last owed month of the run.
+    pub to: YearMonth,
+    /// Months in the run.
+    pub months: usize,
+    /// Why they are owed.
+    pub why: OwedWhy,
 }
 
 impl Gate {
@@ -536,39 +597,150 @@ where
         //
         // An instrument holding nothing at all keeps every month owed, which is
         // the case where the day pass genuinely has not run.
-        let mut earliest: std::collections::HashMap<(Exchange, Segment, Symbol), YearMonth> =
-            std::collections::HashMap::new();
-        for w in wanted {
-            if held(&key(w.exchange, w.segment, first, w.symbol, w.month)) {
-                earliest
-                    .entry((w.exchange, w.segment, w.symbol))
-                    .and_modify(|at| {
-                        if w.month < *at {
-                            *at = w.month;
-                        }
-                    })
-                    .or_insert(w.month);
-            }
-        }
-        let missing = wanted
-            .iter()
-            .filter(|w| {
-                earliest
-                    .get(&(w.exchange, w.segment, w.symbol))
-                    .is_none_or(|at| w.month >= *at)
-            })
-            .filter(|w| !held(&key(w.exchange, w.segment, first, w.symbol, w.month)))
-            .count();
-        if missing > 0 {
-            return Gate::RungFirst {
-                needs: first,
-                missing,
-                of: wanted.len(),
-            };
+        //
+        // THE REFUSAL NAMES WHAT IS OWED, AND WHY (D-3315). The same pass that
+        // finds the earliest held month finds the latest, so each owed month
+        // is classed as a hole between held months, a month after the last
+        // held one, or a month of a series holding nothing — one more compare
+        // per instrument-month, and still one probe per instrument-month for
+        // each of the two passes. Consecutive owed months of one instrument
+        // and one class fold into one run while the caller's order keeps them
+        // adjacent (`ladder_refusal` emits each instrument's months in
+        // ascending order); an interleaved caller gets more, shorter runs and
+        // the same count.
+        if let Some(refused) = owed_below(&held, first, wanted) {
+            return refused;
         }
     }
 
     Gate::Open
+}
+
+/// The rung check's arithmetic: every owed month at `first`, counted and
+/// folded into named runs, or [`None`] when nothing is owed. Split out of
+/// [`gate`] only for length; the reasoning is the comment at its call site.
+fn owed_below<F>(held: &F, first: Timeframe, wanted: &[Wanted]) -> Option<Gate>
+where
+    F: Fn(&EntryKey) -> bool,
+{
+    let (missing, run_count, owed) = owed_runs(held, first, wanted, OWED_NAMED);
+    (missing > 0).then_some(Gate::RungFirst {
+        needs: first,
+        missing,
+        of: wanted.len(),
+        owed,
+        runs: run_count,
+    })
+}
+
+/// Every run of months `wanted` owes at the rung below `rung`, uncapped, so a
+/// caller can tell WHICH instruments owe and pull the rest (DB-B27).
+///
+/// # Why this exists beside [`gate`]
+///
+/// The gate answers for the whole ask: one instrument with a hole in its
+/// daily months closed the minute pass for every instrument beside it. On the
+/// operator's store two of 208 shares (MAZDOCK, FORCEMOT) had such holes, so
+/// the whole 1min stock leg answered 409 until both were left out by hand.
+/// The rule is per instrument — a minute month needs ITS OWN daily month —
+/// and this is the same arithmetic answered per instrument.
+///
+/// Empty for an ungated feed, a rung with nothing below it, or an ask that
+/// owes nothing.
+///
+/// # Cost
+///
+/// [`owed_runs`]: two probes per instrument-month of the ask, and one `Owed`
+/// per run of owed months. Bounded by the ask, never by the store.
+#[must_use]
+pub fn owing<F>(held: F, feed: Feed, rung: Timeframe, wanted: &[Wanted]) -> Vec<Owed>
+where
+    F: Fn(&EntryKey) -> bool,
+{
+    if !is_gated(feed) {
+        return Vec::new();
+    }
+    let Some(first) = precedes(rung) else {
+        return Vec::new();
+    };
+    owed_runs(&held, first, wanted, usize::MAX).2
+}
+
+/// [`owed_below`]'s arithmetic: the owed instrument-months, the runs they
+/// fold into, and the first `named` of those runs.
+fn owed_runs<F>(
+    held: &F,
+    first: Timeframe,
+    wanted: &[Wanted],
+    named: usize,
+) -> (usize, usize, Vec<Owed>)
+where
+    F: Fn(&EntryKey) -> bool,
+{
+    let mut span: std::collections::HashMap<(Exchange, Segment, Symbol), (YearMonth, YearMonth)> =
+        std::collections::HashMap::new();
+    for w in wanted {
+        if held(&key(w.exchange, w.segment, first, w.symbol, w.month)) {
+            span.entry((w.exchange, w.segment, w.symbol))
+                .and_modify(|(lo, hi)| {
+                    if w.month < *lo {
+                        *lo = w.month;
+                    }
+                    if w.month > *hi {
+                        *hi = w.month;
+                    }
+                })
+                .or_insert((w.month, w.month));
+        }
+    }
+    let mut missing = 0_usize;
+    let mut run_count = 0_usize;
+    let mut owed: Vec<Owed> = Vec::with_capacity(named.min(OWED_NAMED));
+    let mut open: Option<Owed> = None;
+    for w in wanted {
+        let why = match span.get(&(w.exchange, w.segment, w.symbol)) {
+            None => OwedWhy::NothingHeld,
+            Some((lo, _)) if w.month < *lo => continue,
+            Some((_, hi)) if w.month > *hi => OwedWhy::AfterLast,
+            Some(_) => OwedWhy::Interior,
+        };
+        if held(&key(w.exchange, w.segment, first, w.symbol, w.month)) {
+            continue;
+        }
+        missing += 1;
+        if let Some(run) = open.as_mut()
+            && run.symbol == w.symbol
+            && run.exchange == w.exchange
+            && run.segment == w.segment
+            && run.why == why
+            && month_before(w.month) == Some(run.to)
+        {
+            run.to = w.month;
+            run.months += 1;
+            continue;
+        }
+        if let Some(done) = open.take()
+            && owed.len() < named
+        {
+            owed.push(done);
+        }
+        run_count += 1;
+        open = Some(Owed {
+            symbol: w.symbol,
+            exchange: w.exchange,
+            segment: w.segment,
+            from: w.month,
+            to: w.month,
+            months: 1,
+            why,
+        });
+    }
+    if let Some(done) = open
+        && owed.len() < named
+    {
+        owed.push(done);
+    }
+    (missing, run_count, owed)
 }
 
 /// The one instrument-month a probe asks about, at `(segment, rung)`.
@@ -627,8 +799,28 @@ const fn key(
 /// and `Unreadable` has no honest answer here at all — it is refused by the
 /// caller before a probe is ever built. Same shape as
 /// `autopilot::next_window`, for the same reason.
-pub fn probing(census: &Manifest) -> impl Fn(&EntryKey) -> bool + '_ {
-    |k| census.entry(k).is_some()
+pub fn probing<C: HoldsKey + ?Sized>(census: &C) -> impl Fn(&EntryKey) -> bool + '_ {
+    |k| census.holds(k)
+}
+
+/// A census [`probing`] can ask: one manifest, or a vendor's census read
+/// through `crate::census::Manifests`, which since D-3316 may be a migrated
+/// vendor's partitions. One hash probe either way.
+pub trait HoldsKey {
+    /// Whether the census holds `key`.
+    fn holds(&self, key: &EntryKey) -> bool;
+}
+
+impl HoldsKey for Manifest {
+    fn holds(&self, key: &EntryKey) -> bool {
+        self.entry(key).is_some()
+    }
+}
+
+impl HoldsKey for crate::census::Manifests {
+    fn holds(&self, key: &EntryKey) -> bool {
+        self.entry(key).is_some()
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +842,109 @@ mod tests {
 
     fn sym(name: &str) -> Symbol {
         Symbol::new(name).expect("a legal symbol")
+    }
+
+    /// A `RungFirst`'s counts, for the tests that assert only the arithmetic.
+    fn counts(gate: &Gate) -> Option<(Timeframe, usize, usize)> {
+        match gate {
+            Gate::RungFirst {
+                needs, missing, of, ..
+            } => Some((*needs, *missing, *of)),
+            _ => None,
+        }
+    }
+
+    /// **The refusal names every owed run and why, and never a month before
+    /// the first held one.** D-3315, measured on the operator's store on
+    /// 6 Oct 2026: the 315 indices and 29 swept months the minute pass was
+    /// refused for were all holes between held months, months after a
+    /// series' last held month, or one series holding nothing — none was
+    /// before a first bar. The count alone could not say so.
+    #[test]
+    fn the_rung_refusal_names_each_owed_run_and_why() {
+        let at = |m| YearMonth::new(2018, m).expect("a real month");
+        let window: Vec<YearMonth> = (1..=12).map(at).collect();
+        let asked = |names: &[&str]| -> Vec<Wanted> {
+            names
+                .iter()
+                .flat_map(|n| {
+                    window.iter().map(|month| Wanted {
+                        leg: Leg::Spot,
+                        symbol: sym(n),
+                        exchange: Exchange::Nse,
+                        segment: Segment::Index,
+                        month: *month,
+                    })
+                })
+                .collect()
+        };
+        // YOUNG: first bar in March, every month after held — owes nothing.
+        // HOLED: held Jan..=Apr and Jul..=Sep — owes May..=Jun inside, and
+        // Oct..=Dec after its last held month. NONE: holds nothing.
+        let held = |k: &EntryKey| {
+            k.timeframe == Timeframe::DAY_1
+                && match k.symbol.as_str() {
+                    "YOUNG" => k.month >= at(3),
+                    "HOLED" => matches!(k.month.month(), 1..=4 | 7..=9),
+                    _ => false,
+                }
+        };
+        let gated = gate(
+            held,
+            Feed::Zerodha,
+            Timeframe::MINUTE_1,
+            &asked(&["YOUNG", "HOLED", "NONE"]),
+        );
+        let run = |name, from, to, months, why| Owed {
+            symbol: sym(name),
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            from: at(from),
+            to: at(to),
+            months,
+            why,
+        };
+        assert_eq!(
+            gated,
+            Gate::RungFirst {
+                needs: Timeframe::DAY_1,
+                missing: 2 + 3 + 12,
+                of: 36,
+                owed: vec![
+                    run("HOLED", 5, 6, 2, OwedWhy::Interior),
+                    run("HOLED", 10, 12, 3, OwedWhy::AfterLast),
+                    run("NONE", 1, 12, 12, OwedWhy::NothingHeld),
+                ],
+                runs: 3,
+            },
+            "YOUNG's Jan..=Feb are before its first bar and appear nowhere"
+        );
+
+        // THE NAMES ARE BOUNDED, THE COUNTS ARE NOT.
+        let many: Vec<String> = (0..OWED_NAMED + 5).map(|i| format!("N{i}")).collect();
+        let names: Vec<&str> = many.iter().map(String::as_str).collect();
+        let Gate::RungFirst {
+            missing,
+            owed,
+            runs,
+            ..
+        } = gate(
+            |_| false,
+            Feed::Zerodha,
+            Timeframe::MINUTE_1,
+            &asked(&names),
+        )
+        else {
+            panic!("nothing held must refuse");
+        };
+        assert_eq!(missing, (OWED_NAMED + 5) * 12);
+        assert_eq!(runs, OWED_NAMED + 5);
+        assert_eq!(owed.len(), OWED_NAMED);
+        assert_eq!(owed.first().map(|o| o.symbol), Some(sym("N0")));
+        assert_eq!(
+            owed.last().map(|o| (o.symbol, o.months)),
+            Some((sym(&format!("N{}", OWED_NAMED - 1)), 12))
+        );
     }
 
     /// Instruments in the INDEX segment, which is what a spot request names.
@@ -796,12 +1091,13 @@ mod tests {
         // Neither held.
         let none = census_of(&[]);
         assert_eq!(
-            gate(probing(&none), Feed::Groww, Timeframe::MINUTE_1, &two),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 2,
-                of: 2
-            }
+            counts(&gate(
+                probing(&none),
+                Feed::Groww,
+                Timeframe::MINUTE_1,
+                &two
+            )),
+            Some((Timeframe::DAY_1, 2, 2))
         );
 
         // PARTIAL IS STILL CLOSED, and this is the case a boolean would lose.
@@ -810,12 +1106,13 @@ mod tests {
         // been proved.
         let half = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
         assert_eq!(
-            gate(probing(&half), Feed::Groww, Timeframe::MINUTE_1, &two),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 1,
-                of: 2
-            }
+            counts(&gate(
+                probing(&half),
+                Feed::Groww,
+                Timeframe::MINUTE_1,
+                &two
+            )),
+            Some((Timeframe::DAY_1, 1, 2))
         );
 
         // Both held — open.
@@ -865,17 +1162,13 @@ mod tests {
 
         // AND SO THE GATE STAYS SHUT, by absence rather than by inspection.
         assert_eq!(
-            gate(
+            counts(&gate(
                 probing(&census),
                 Feed::Groww,
                 Timeframe::MINUTE_1,
                 &want(&["NIFTY"])
-            ),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 1,
-                of: 1
-            },
+            )),
+            Some((Timeframe::DAY_1, 1, 1)),
             "an Empty run left no entry, so the day pass has not landed"
         );
     }
@@ -920,17 +1213,13 @@ mod tests {
             ("NIFTY", Segment::Index, Timeframe::DAY_1, 10),
         ]);
         assert_eq!(
-            gate(
+            counts(&gate(
                 probing(&spot_only),
                 Feed::Groww,
                 Timeframe::MINUTE_1,
                 &want_in(Segment::Fno, &["NIFTY"])
-            ),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 1,
-                of: 1
-            },
+            )),
+            Some((Timeframe::DAY_1, 1, 1)),
             "spot is satisfied; the derivative's own day pass is not"
         );
     }
@@ -1049,17 +1338,13 @@ mod tests {
         // nothing.
         let as_if_all_index = want_in(Segment::Index, &["NIFTY", "RELIANCE"]);
         assert_eq!(
-            gate(
+            counts(&gate(
                 probing(&both),
                 Feed::Groww,
                 Timeframe::MINUTE_1,
                 &as_if_all_index
-            ),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 1,
-                of: 2
-            },
+            )),
+            Some((Timeframe::DAY_1, 1, 2)),
             "the equity is not in the index directory, and never was"
         );
     }
@@ -1082,12 +1367,13 @@ mod tests {
             month: month(),
         }];
         assert_eq!(
-            gate(probing(&nse), Feed::Groww, Timeframe::MINUTE_1, &elsewhere),
-            Gate::RungFirst {
-                needs: Timeframe::DAY_1,
-                missing: 1,
-                of: 1
-            },
+            counts(&gate(
+                probing(&nse),
+                Feed::Groww,
+                Timeframe::MINUTE_1,
+                &elsewhere
+            )),
+            Some((Timeframe::DAY_1, 1, 1)),
             "the day pass landed on NSE; a BSE month of the same name and \
              segment is a different file and the census does not hold it"
         );

@@ -1,9 +1,21 @@
 # Explicit historical bar revisions — facility V1
 
-This is an additive store-only seam. It does not activate repaired data in
-production. The ordinary `StorePath`, `BarFile::open_existing`, catalog, and
-append path continue to address the original month. No original `.bin`, `.crc`,
-overlay, lock, or directory is changed by this facility. No rename is used.
+This is an additive store-only seam. On its own a published revision is
+inert: the ordinary `StorePath`, catalog and append path address the original
+month. No original `.bin`, `.crc`, overlay, lock, or directory is changed by
+this facility. No rename is used.
+
+**Served once promoted (D-3350, WP-13c).** `crate::generation` is the one
+authority that says which generation of a month every reader opens: a revision
+becomes the served generation when `generation::promote` appends one
+CRC-sealed record to the month's pointer under
+`<root>/bar-generations-v1/…/<yyyy-mm>.gen-v1`. From then on
+`BarFile::open_existing`, `open_existing_audited`, `index_existing` and
+`provenance::read` resolve the revision, and `BarFile::open_or_create` refuses
+the original (`StoreError::Superseded`). `repair::repair_month` is the whole
+repair: the served month plus the offered bars, a held bar never dropped or
+changed, published at the next free ordinal and promoted. See "Production
+promotion" below for how each blocker this document named is met.
 
 ## API and caller contract
 
@@ -63,8 +75,16 @@ Completion bytes:
 | 16 | 64 | Original expected header, encoded with its existing slot CRC |
 | 80 | 64 | Revised committed header, encoded with its existing slot CRC |
 
-Both headers retain their existing format/version and CRC contracts. The new
-file's bar format remains V2; revision ordinal is not a bar format version.
+Each header keeps the format/version and CRC contract of the file it came
+from. The revised file is created through `BarFile::open_or_create`, so it is
+born at `store::layout::Layout::CURRENT` — bar **version 3** since D-1571, with
+mandatory block checksums — whatever the source month's version. A revision of
+a version-2 month therefore embeds a version-2 original header and a version-3
+revised header; the two versions share one bar geometry (56-byte stride,
+73-record blocks, the same slot), so the records are byte-compatible. The
+revision ordinal is not a bar format version. (This said "The new file's bar
+format remains V2", which stopped being true at D-1571;
+tests-docs-security-pass14 P14-05, D-1959.)
 On open the receipt's magic, ordinal, exact length, header CRCs, symbol,
 timeframe, checksum flags, bounds, and agreement with the opened revised
 header are checked. Block CRCs are checked lazily by the existing read path.
@@ -113,7 +133,18 @@ alternate root with the general `BarFile` writer is outside this protocol.
 
 ## Bounds and cost
 
-Source and revised rows are each capped at 100,000. Ordinals are 1..=1,024 per
+Source, offered and revised rows are each capped at `row_ceiling(path)`, the
+most bars the path's month can hold on the path's rung: the month's length
+over the rung's width (D-4875 (1), D-4898, IA-17). That is 2,678,400 for a
+31-day one-second month, 44,640 for its one-minute month and 31 for its daily
+one, and 28 days of the rung for a February. A count past it is refused
+`RowLimit { rows, ceiling }` before a bar is read. `MAX_ROWS`, 2,678,400, is
+the largest value the ceiling takes and is compared against nowhere. The
+ceiling was a flat 100,000, under which no one-second month of a full session
+calendar fits (a GDFL NIFTY one-second month holds about 409,000 bars), so no
+GDFL month could be repaired (DB-N26, WP-12d), and then a flat 2,678,400 on
+every rung. What one repair holds in memory is `docs/06-limits.md` L-IA-26;
+bench C-RP-01 times it at a full month. Ordinals are 1..=1,024 per
 logical month; no free-ordinal search or implicit latest lookup is performed.
 Each publication or completed retry is O(source + revised rows), with a fixed
 number of directory operations and bounded buffers besides caller-owned rows.
@@ -168,7 +199,50 @@ and no transparent promotion. Rejected: replacing the live `.bin` and `.crc`
 with separate renames, changing append to insert/overwrite, and selecting the
 highest discovered ordinal without a committed authority.
 
-## Exact blocker for production promotion
+## Production promotion (D-3350, WP-13c)
+
+The blockers the next section named, and how `crate::generation` meets each:
+
+- **One versioned authority.** The month's pointer file is append-only; its
+  last record that verifies names the revision served, with that revision's
+  committed header (`Pointer::describes`). A reader that resolves the pointer
+  opens one complete revision pair, whose files never change after
+  promotion; a revision whose header no longer matches its record is refused
+  (`StoreError::Generation`), never served. A torn last record is stepped over
+  with a `store.generation` warning; a pointer of which no record verifies is
+  refused, never read as the original.
+- **Writer admission.** `BarFile::open_or_create` asks the pointer before it
+  creates anything and again under the month's exclusive lock, and refuses a
+  superseded month. `generation::promote` holds the original month's lock
+  shared from its source check until its record is written, so a writer
+  holding the month refuses the promotion (`StoreError::Locked`) and a writer
+  arriving afterwards finds the pointer under its own lock. Both locks are
+  non-blocking, so holding two cannot deadlock.
+- **Indexed siblings.** `repair_month` refuses a month with an overlay or
+  greeks sibling (`RepairError::IndexedSibling`): an insertion would shift
+  every row it indexes. The `.tix` is the revision's own, written when it was
+  published and rebuilt in place by `index_existing`.
+- **A caller's own sibling of the month.** `repair_month_with` takes one
+  step, `before_promote`, and calls it with the revision's root after
+  `publish` has returned (`Created` or `Reused`) and before
+  `generation::promote`: the revision is whole and durable and no reader is
+  served from it, so a file the step writes beside the revision's bars is
+  first seen by readers at the promotion, with the bars. `store` names no type
+  of the caller's. A step that refuses stops the repair unpromoted
+  (`RepairError::BeforePromote`, the step's words kept); the revision stays
+  published and unserved, and the same repair offered again reuses it, runs
+  the step again and promotes, so the step must be repeatable. `repair_month`
+  is the same call with no step, byte for byte. D-4875 (5), D-4898; tests
+  `store/tests/month_repair.rs`.
+- **Caches.** A cache keyed by a month's file keys by
+  `generation::served_bars_path`, so a promotion is a new key
+  (`api::bars_series`). The census row is the served month's header, written
+  by the landing that repaired it.
+- **Provenance.** A revision carries no `.prv`: its records would index the
+  original's bars. `/provenance.json` reads the revision's absence as
+  unrecorded, and the repair journal `audit/<feed>.repairs` names the repair.
+
+## Exact blocker for production promotion (superseded by the section above)
 
 Transparent repaired-month selection is not safe as a store-path substitution
 alone. Production integration must provide a single versioned authority that
