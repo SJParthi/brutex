@@ -281,3 +281,221 @@ impl Ledger {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+mod cloud_mutant_tests {
+    //! Mutant kills for the scope ledger (cloud mutation round, 2026-10-16).
+    //! Every member name is invented.
+
+    use super::{Ledger, Record, scopes_path};
+    use crate::gdfl_fixtures::scratch;
+
+    /// The two swept index members, the digest `printf 'NSE-INDEX-BANKNIFTY\n
+    /// NSE-INDEX-NIFTY\n' | sha256sum` begins with.
+    const SWEPT_DIGEST: &str = "0d28ae1eaf0dd31f";
+
+    fn swept() -> Record {
+        Record::of(vec![
+            "NSE-INDEX-NIFTY".to_owned(),
+            "NSE-INDEX-BANKNIFTY".to_owned(),
+            "NSE-INDEX-NIFTY".to_owned(),
+        ])
+    }
+
+    /// The digest is the FIRST 64 bits of the SHA-256 of the sorted,
+    /// deduplicated list, as sixteen hex digits: exactly what a close's
+    /// `scope=` carries. Kills `DIGEST_HEX / 2` read as `% 2` (an empty
+    /// digest) or `* 2` (the whole 64-digit hash).
+    #[test]
+    fn a_digest_is_sixteen_hex_digits_of_the_sorted_list() {
+        let record = swept();
+        assert_eq!(record.digest(), SWEPT_DIGEST);
+        assert_eq!(
+            record.members(),
+            ["NSE-INDEX-BANKNIFTY", "NSE-INDEX-NIFTY"],
+            "sorted and without repeats"
+        );
+        assert_eq!(record.set().len(), 2);
+        assert!(record.set().contains("NSE-INDEX-NIFTY"));
+        // The empty list is a scope too: SHA-256 of nothing.
+        let none = Record::of(Vec::new());
+        assert_eq!(none.digest(), "e3b0c44298fc1c14");
+        assert!(none.members().is_empty() && none.set().is_empty());
+        // A name holding `&` (an `M&M`-shaped member) hashes as its bytes.
+        assert_eq!(
+            Record::of(vec!["B&C".to_owned(), "A".to_owned()]).digest(),
+            "08f0f05e70c80f78"
+        );
+    }
+
+    /// The ledger is `<store>/imports/gdfl.scopes`, beside the journal.
+    #[test]
+    fn the_ledger_lies_beside_the_import_journal() {
+        let root = std::path::Path::new("/store-root");
+        assert_eq!(
+            scopes_path(root),
+            std::path::PathBuf::from("/store-root/imports/gdfl.scopes")
+        );
+    }
+
+    /// A ledger that cannot be READ (a directory at its path) refuses by
+    /// name with the path; only a missing ledger is empty. Kills the
+    /// `NotFound` guard read as `true`.
+    #[test]
+    fn a_ledger_that_cannot_be_read_refuses_and_only_a_missing_one_is_empty() {
+        let root = scratch("cloud-scope-unreadable");
+        let path = scopes_path(&root);
+        let missing = Ledger::load(path.clone()).unwrap();
+        assert_eq!(missing.torn(), 0);
+        assert!(missing.members_of(SWEPT_DIGEST).is_none());
+        std::fs::create_dir_all(&path).unwrap();
+        let refused = Ledger::load(path.clone()).unwrap_err();
+        assert!(refused.contains("gdfl.scopes"), "{refused}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A `scope` line is read only when its count AND its digest are its
+    /// list's: a wrong count with the right digest, the right count with a
+    /// wrong digest, and a count that is not a number each refuse the load.
+    /// Kills `||` read as `&&` and either `!=` read as `==`.
+    #[test]
+    fn a_scope_line_whose_count_or_digest_is_not_its_lists_refuses() {
+        let root = scratch("cloud-scope-count");
+        let path = scopes_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let list = "NSE-INDEX-BANKNIFTY,NSE-INDEX-NIFTY";
+        let good = format!("scope {SWEPT_DIGEST} indices n=2 {list} .\n");
+        std::fs::write(&path, &good).unwrap();
+        let loaded = Ledger::load(path.clone()).unwrap();
+        let held = loaded.members_of(SWEPT_DIGEST).unwrap();
+        assert_eq!(held.len(), 2);
+        assert!(held.contains("NSE-INDEX-BANKNIFTY") && held.contains("NSE-INDEX-NIFTY"));
+        for bad in [
+            format!("scope {SWEPT_DIGEST} indices n=3 {list} ."),
+            format!("scope {SWEPT_DIGEST} indices n=1 {list} ."),
+            format!("scope 0000000000000000 indices n=2 {list} ."),
+            format!("scope {SWEPT_DIGEST} indices n=two {list} ."),
+            format!("scope {SWEPT_DIGEST} indices 2 {list} ."),
+        ] {
+            std::fs::write(&path, format!("{bad}\n")).unwrap();
+            let why = Ledger::load(path.clone()).unwrap_err();
+            assert!(why.contains("not a scope ledger line"), "{bad}: {why}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An `examined` line is read only with numeric `run=` and `opened=` and
+    /// a `scope=`; any other line, or a line of another shape, refuses.
+    #[test]
+    fn an_examined_line_is_read_whole_or_refuses() {
+        let root = scratch("cloud-scope-examined");
+        let path = scopes_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let good = "examined indices 2031-03-03 * scope=abc run=7 opened=2 .\n";
+        std::fs::write(&path, good).unwrap();
+        let loaded = Ledger::load(path.clone()).unwrap();
+        assert_eq!(loaded.examined_under("indices 2031-03-03 *"), Some("abc"));
+        assert_eq!(loaded.examined_under("indices 2031-03-04 *"), None);
+        for bad in [
+            "examined indices 2031-03-03 * scope=abc run=x opened=2 .",
+            "examined indices 2031-03-03 * scope=abc run=7 opened=-1 .",
+            "examined indices 2031-03-03 * abc run=7 opened=2 .",
+            "examined indices 2031-03-03 * scope=abc 7 opened=2 .",
+            "examined indices 2031-03-03 scope=abc run=7 opened=2 .",
+            "something else .",
+        ] {
+            std::fs::write(&path, format!("{bad}\n")).unwrap();
+            assert!(Ledger::load(path.clone()).is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every fragment without the ` .` end is stepped over AND counted, one
+    /// each, wherever it lies; an empty line is not a fragment. Kills the
+    /// count's `+=` read as `-=` or `*=` and the empty-line filter's `!`
+    /// deleted.
+    #[test]
+    fn every_torn_fragment_is_counted_once_and_whole_lines_still_read() {
+        let root = scratch("cloud-scope-torn");
+        let path = scopes_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = format!(
+            "scope {SWEPT_DIGEST} ind\n\nexamined indices 2031-03-03 * scope={SWEPT_DIGEST} run=1 opened=0 .\n\
+             scope {SWEPT_DIGEST} indices n=2 NSE-INDEX-BANKNIFTY,NSE-INDEX-NIFTY .\nexamined ind"
+        );
+        std::fs::write(&path, text).unwrap();
+        let loaded = Ledger::load(path.clone()).unwrap();
+        assert_eq!(loaded.torn(), 2, "two fragments, one empty line");
+        assert!(loaded.members_of(SWEPT_DIGEST).is_some());
+        assert_eq!(
+            loaded.examined_under("indices 2031-03-03 *"),
+            Some(SWEPT_DIGEST)
+        );
+        // Zero-length and one-fragment files.
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(Ledger::load(path.clone()).unwrap().torn(), 0);
+        std::fs::write(&path, b"scope").unwrap();
+        assert_eq!(Ledger::load(path.clone()).unwrap().torn(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `record` writes a digest's list once and holds it at once; `examine`
+    /// writes its line and holds it at once; a reload reads both back, in
+    /// the shape this module writes. Kills `record` and `examine` read as
+    /// `Ok(())`, and `members`/`set` answering anything but the record's.
+    #[test]
+    fn record_and_examine_write_their_lines_once_and_a_reload_reads_them() {
+        let root = scratch("cloud-scope-write");
+        let path = scopes_path(&root);
+        let mut ledger = Ledger::load(path.clone()).unwrap();
+        let record = swept();
+        ledger.record("indices", &record).unwrap();
+        ledger.record("indices", &record).unwrap();
+        assert_eq!(
+            ledger
+                .members_of(SWEPT_DIGEST)
+                .map(|set| set.contains("NSE-INDEX-NIFTY")),
+            Some(true)
+        );
+        ledger
+            .examine("indices 2031-03-03 *", SWEPT_DIGEST, (9, 3))
+            .unwrap();
+        assert_eq!(
+            ledger.examined_under("indices 2031-03-03 *"),
+            Some(SWEPT_DIGEST)
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "scope {SWEPT_DIGEST} indices n=2 NSE-INDEX-BANKNIFTY,NSE-INDEX-NIFTY .\n\
+                 examined indices 2031-03-03 * scope={SWEPT_DIGEST} run=9 opened=3 .\n"
+            ),
+            "one scope line however often it is recorded"
+        );
+        let reread = Ledger::load(path).unwrap();
+        let held = reread.members_of(SWEPT_DIGEST).unwrap();
+        assert_eq!(held.len(), 2);
+        assert_eq!(
+            reread.examined_under("indices 2031-03-03 *"),
+            Some(SWEPT_DIGEST)
+        );
+        assert_eq!(reread.torn(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A ledger that cannot be appended to (its directory is a file) refuses
+    /// `record` and `examine` by name and holds nothing it did not write.
+    #[test]
+    fn a_ledger_that_cannot_be_appended_to_refuses_and_holds_nothing_new() {
+        let root = scratch("cloud-scope-blocked");
+        let mut ledger = Ledger::load(scopes_path(&root)).unwrap();
+        std::fs::write(root.join("imports"), b"not a directory").unwrap();
+        assert!(ledger.record("indices", &swept()).is_err());
+        assert!(ledger.members_of(SWEPT_DIGEST).is_none());
+        assert!(ledger.examine("k", SWEPT_DIGEST, (1, 0)).is_err());
+        assert_eq!(ledger.examined_under("k"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
