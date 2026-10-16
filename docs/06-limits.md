@@ -16933,6 +16933,27 @@ BUILT; what that costs until it is, is the disk item below.
   per file it lands, up to the 1,024 a month allows. On the operator's store
   on 12 Oct 2026 there were 24 revised months, all one-second GDFL months at
   revision 1 (`find bar-revisions-v1 -name '*.bin'`).
+- **L-IA-26, disk, restated 14 Oct 2026 (AF-07): the "24 revised months,
+  all at revision 1" above is stale by two orders of magnitude.** Measured
+  read-only on the operator's store after the 14 Oct imports by the two
+  checks of assurance finding ingest-8 (scripts and outputs in
+  `state/assurance-20261014/scratch/verify-ingest-8/`, outside the
+  repository): `audit/gdfl.repairs` holds 17,007 `repairing` and 17,007
+  `repair` lines (none left open) over **2,843 GDFL months**, up to
+  **generation 21** for one month (NSE-CASH-ACC 2024-05 among them), 791
+  months with 10 or more. `du -sk bar-revisions-v1` is 121,246,976 KiB =
+  **115.63 GiB** in 449,029 files: **GDFL 106.05 GiB**, **Zerodha 9.58 GiB**
+  (47,140 months, all generation 1, reason `refold_derived_rungs`). Of the
+  GDFL bytes **66.22 GiB are superseded generations that no reader serves**
+  and 39.83 GiB are served. The repairs wrote 1,005,847,649 rows to add
+  68,414,450, about 14.7 rows written per row added, of which 937,433,199
+  (about 13.7 per row added) were rows the month already held, copied
+  into the new generation: one day landed early in a month (a special
+  session imported by its own run) turns every later day of that month into
+  a whole-month generation, because a revision is never appended to
+  (`pull::gdfl_import`'s header). The once-per-month gather (D-4899) is
+  still **NOT BUILT**, and nothing prunes a superseded generation (that
+  would be a deletion, and is the operator's).
 - **L-IA-26, the read path is unchanged and O(1).** Opening a month served
   from a revision checks the revision's and the source's header counts
   against the same ceiling: two comparisons, no I/O beyond the open it
@@ -17114,6 +17135,59 @@ BUILT; what that costs until it is, is the disk item below.
 - **A 1day month the vendor answered empty stays owed**, so its instrument
   is withheld from every 1min pull by name until an empty daily answer is
   recorded durably (a decision is needed; DB-B27).
+- **WP-62's choices are recorded as D-4964 (AF-07, 15 Oct 2026); three of
+  them are policy, not measurement, and stay so.** `SETTLE_MARGIN_MINUTES` =
+  5 is UNVERIFIED as a sufficient wait (no charter source says when a
+  vendor's last candle of a session is final), and this machine's clock is
+  compared with no vendor's, so a clock running ahead by more than the
+  margin is not caught. `STORE_REFUSED_BREAKER` = 8 is NOT MEASURED against
+  a contended run (above). The empty-daily-answer question of DB-B27 is
+  still open: D-4964 point 5 records what the code does and names the
+  question; it decides nothing.
+- **The restart scan's 64-run edge has no behavioural test.**
+  `INTERRUPTED_RUNS` = 64 is held to D-4964 by
+  `core/tests/decision_citations.rs`'s figures test, which reads the
+  constant; no test opens a 65th run record before the scan and shows it is
+  the one not reported.
+
+### Decision citations: what the citation test reads, and what it cannot see (AF-07, D-4971)
+
+- **It reads `crates/` only.** `core/tests/decision_citations.rs` walks every
+  `.rs`, `.toml` and `.md` file under `crates/` (768 files when first
+  written, 772 after the merge with `feat/db-fix` of 15 Oct 2026, whose
+  `git ls-files -z crates | xargs -0 du -ck` gives 40,768 KiB) once
+  per run, O(bytes), and the ledger once through
+  `include_str!`. A number cited only in `docs/`, `web/`, `.github/` or a
+  commit message is not checked: `docs/02-store-format.md` and this file
+  cite numbers too.
+- **It checks that a number resolves, not what it means.** A comment citing
+  a number whose entry is about something else passes, as it always did;
+  gate 27b still checks only that a heading number is unique.
+- **A pending note is trusted.** A number named in a "Cited, never written"
+  note passes whatever the note says; the note is reviewed like any entry.
+- **Its heading reading is stricter than gate 27b's, by one boundary.** The
+  test reads an entry heading as gate 27b's pattern plus the citation's
+  trailing boundary, so `### D-00012` or `### D-0001x` heads nothing for it,
+  while gate 27b (`.github/gates_ledger.rs` `heading_number`, "its first
+  four digits only") counts each as D-0001. The ledger holds no such
+  heading (`grep -nE '^#{2,4} +D-[0-9]{4}[A-Za-z0-9_]' docs/05-decisions.md`
+  prints nothing), so both read the same numbers today. Gate 27b ignores
+  code fences; the test skips a fenced heading and closes a fence only on a
+  run of its own character at least as long with nothing after it
+  (CommonMark's rule). The ledger's 200 fence lines are all three backticks,
+  so the two fence rules read it alike. Tightening gate 27b to match is a
+  `.github/` change this package did not make.
+- **Wall time, measured.** The test prints its own elapsed time with
+  `--nocapture` (the ledger read, the walk, every file read and scanned).
+  The test binary run 40 times in a row, 15 Oct 2026, debug test profile
+  (`opt-level = 3`), on this Mac under other agents' builds, the crates
+  on WD_BLACK: n = 40, p50 178.5 ms, p99 = max 1,384.8 ms (the first, cold
+  run; with n under 100 the p99 is the slowest sample), min 141.9 ms. It
+  grows with the bytes under `crates/`, and is a test, on no request path.
+  Re-measured after AF-07's repair (the merged tree, 772 files, 889 numbers
+  cited): the test binary run 40 times in a row with `--exact
+  every_cited_decision_heads_an_entry_or_is_named_pending`, n = 40, min
+  111.2 ms, p50 120.0 ms, p99 = max 239.6 ms (the first, cold run).
 
 ## Operations safety: the scrub ledger and its index, a month with no sidecar, the start's recovery look — D-3381 to D-3384, 12 October 2026
 
