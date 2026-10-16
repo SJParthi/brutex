@@ -5446,4 +5446,50 @@ mod cloud_mutant_tests {
         assert_eq!(source_file("a/b c"), Some("a%2Fb%20c.idx".to_owned()));
         assert_eq!(source_file(""), None);
     }
+
+    /// An index whose cover is behind entries it holds (a crash between an
+    /// entry's sync and the cover's) reads neither a run nor a fault at or
+    /// past the cover (kills the runs guard `ordinal >= covered` turned to
+    /// `false` and the faults filter's `<` turned to `<=`).
+    #[test]
+    fn entries_at_or_past_the_cover_are_not_read() {
+        use std::os::unix::fs::FileExt as _;
+        let root = scratch("past-cover");
+        let journal = Journal::at(&root);
+        for _ in 0..3 {
+            journal.append(&member("a gap")).expect("a member failure");
+        }
+        journal.append(&run_record()).expect("a run record at 3");
+        journal
+            .append(&member("a gap"))
+            .expect("a member failure at 4");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal.path)
+            .expect("open")
+            .write_all_at(&[0xFF; RECORD_LEN], 4 * RECORD_LEN_U64)
+            .expect("record 4 damaged");
+        let dir = journal.index_dir();
+        std::fs::remove_dir_all(&dir).expect("the index goes");
+        let built = journal.build_index().expect("rebuilt over the damage");
+        assert_eq!((built.runs, built.faults, built.covered), (1, 1, 5));
+        let whole = journal.read_index(5).expect("reads");
+        assert_eq!(whole.runs.len(), 1);
+        assert_eq!(whole.fault_ordinals, vec![4]);
+
+        write_cover(&dir, 4).expect("the cover steps back to 4");
+        let at_four = journal.read_index(5).expect("reads");
+        assert_eq!(at_four.covered, 4);
+        assert_eq!(at_four.runs.len(), 1, "the run at 3 is under the cover");
+        assert!(
+            at_four.fault_ordinals.is_empty(),
+            "the fault AT the cover is not read"
+        );
+        assert_eq!(at_four.faults, 0);
+
+        write_cover(&dir, 3).expect("the cover steps back to 3");
+        let at_three = journal.read_index(5).expect("reads");
+        assert!(at_three.runs.is_empty(), "the run AT the cover is not read");
+        assert_eq!(at_three.malformed, 0);
+    }
 }
