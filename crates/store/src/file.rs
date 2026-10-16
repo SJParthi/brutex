@@ -9847,3 +9847,93 @@ mod sidecar_checksum_tests;
 #[cfg(test)]
 #[path = "small_month_tests.rs"]
 mod small_month_tests;
+
+/// Mutation-survivor tests for this module's private items (cloud session
+/// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{Bar, BarFile};
+    use crate::format::OI_NULL;
+    use crate::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+
+    /// A one-second NIFTY month of 2031-02 (GDFL, NSE INDEX).
+    fn month() -> StorePath<'static> {
+        StorePath::new(PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month: YearMonth::new(2031, 2).unwrap(),
+            file: FileKind::Bars,
+        })
+        .unwrap()
+    }
+
+    /// Invented one-second bar `i` of the month, from 09:15 IST on the 1st.
+    fn bar(i: i64) -> Bar {
+        let origin = YearMonth::new(2031, 2).unwrap().ist_bounds_micros().0;
+        Bar {
+            ts_micros: origin + (555 * 60 + i) * 1_000_000,
+            open: 5_550_000 + i,
+            high: 5_550_100 + i,
+            low: 5_549_900 + i,
+            close: 5_550_050 + i,
+            volume: i % 17,
+            open_interest: OI_NULL,
+        }
+    }
+
+    fn bars(from: i64, to: i64) -> Vec<Bar> {
+        (from..to).map(bar).collect()
+    }
+
+    /// **AN OVERLAP THAT AGREES WITH EVERYTHING IT MEETS HAS NO DIAGNOSIS.**
+    ///
+    /// Kills `replace && with ||`, and `replace < with <=` on either side, in
+    /// `BarFile::diagnose_overlap`'s last check. Its contract is `None` when
+    /// the walk finds no disagreement (`append` keeps the header's own
+    /// refusal then), and "skipped" only when held bars remain AND the batch
+    /// goes on past the held range. Against a month of 40 bars: a batch
+    /// wholly inside it that matches (held bars remain, nothing goes on), and
+    /// one matching its last five bars that goes on past them (nothing
+    /// remains, the batch goes on), each have no diagnosis; a batch that
+    /// matches bars 5 to 9 and then jumps past the whole held range is
+    /// "skipped" at bar 10, by the last check.
+    #[test]
+    fn an_overlap_that_agrees_with_everything_it_meets_has_no_diagnosis() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-file-cloud-diagnose-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut writer = BarFile::open_or_create(&root, month(), 11).unwrap();
+        writer.append(&bars(0, 40)).unwrap();
+        assert!(writer.diagnose_overlap(&bars(5, 10)).is_none(), "inside");
+        assert!(
+            writer.diagnose_overlap(&bars(35, 45)).is_none(),
+            "past the end"
+        );
+        let mut skipping = bars(5, 10);
+        skipping.extend(bars(45, 50));
+        let said = writer.diagnose_overlap(&skipping).expect("a diagnosis");
+        assert!(
+            matches!(
+                &said,
+                super::StoreError::OverlapDisagrees { at: 5, conflict: super::Conflict::Skipped, ts_micros, .. }
+                    if *ts_micros == bar(10).ts_micros
+            ),
+            "{said:?}"
+        );
+        drop(writer);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
