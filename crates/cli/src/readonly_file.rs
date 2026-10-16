@@ -321,3 +321,31 @@ mod tests {
         Ok(())
     }
 }
+
+/// THE CLOUD MUTATION PASS (`reports/cloud-mut-cli-20261016.md`): the line of
+/// [`open`] no test reached.
+#[cfg(test)]
+mod cloud_mutant_tests {
+    use super::*;
+
+    /// **THE HOST'S OWN REFUSAL KEEPS ITS KIND.** An absent file is
+    /// `NotFound` through the evidence door, as the callers that report
+    /// absence rather than damage rely on; a refusal the store names itself,
+    /// a directory, is `Other` and says what it found.
+    #[test]
+    fn an_absent_file_stays_not_found_and_a_named_refusal_is_other()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let scratch = crate::search_checkpoint::tests::Scratch::new()?;
+        let absent = open(&scratch.0.join("absent"))
+            .err()
+            .ok_or("an absent file opened")?;
+        assert_eq!(absent.kind(), std::io::ErrorKind::NotFound, "{absent}");
+        let directory = open(&scratch.0).err().ok_or("a directory opened")?;
+        assert_eq!(directory.kind(), std::io::ErrorKind::Other, "{directory}");
+        assert!(
+            directory.to_string().contains("not a regular file"),
+            "{directory}"
+        );
+        Ok(())
+    }
+}

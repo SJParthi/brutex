@@ -735,3 +735,405 @@ pub(crate) fn command(arguments: &[&str], out: &mut String) -> u8 {
 #[cfg(test)]
 #[path = "srt_builder_tests.rs"]
 mod tests;
+
+/// THE CLOUD MUTATION PASS (`reports/cloud-mut-cli-20261016.md`): each test
+/// pins the behaviour a mutant of this file broke while every other test
+/// stayed green, or runs a line no test reached. Invented stores only.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use store::format::{Bar, OI_NULL};
+
+    use super::*;
+
+    /// A store root that removes itself.
+    struct Root(PathBuf);
+
+    impl Root {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "brutex-cli-srt-cloud-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn run(&self, arguments: &[&str]) -> (u8, String) {
+            let mut out = String::new();
+            let root = self.0.clone();
+            let code = command_with(arguments, &move || Ok(root.clone()), &mut out);
+            (code, out)
+        }
+
+        /// The store path of one month of `contract`, or of the spot series.
+        fn path(contract: Option<&str>, month: YearMonth, file: FileKind) -> StorePath<'static> {
+            StorePath::new(PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: if contract.is_some() { "FNO" } else { "INDEX" },
+                symbol: "NIFTY",
+                contract: contract.and_then(Contract::parse),
+                timeframe: Timeframe::SECOND_1,
+                month,
+                file,
+            })
+            .unwrap()
+        }
+
+        fn file(&self, contract: Option<&str>, month: YearMonth, file: FileKind) -> PathBuf {
+            Self::path(contract, month, file).to_path_buf(&self.0)
+        }
+
+        /// One month of `count` invented bars under `symbol`'s header id, in
+        /// `appends` appends (each past the first adds a run), its `.srt`
+        /// taken away when `bare`.
+        fn month(
+            &self,
+            contract: Option<&str>,
+            month: YearMonth,
+            (count, appends, bare): (i64, usize, bool),
+            symbol: &str,
+        ) {
+            let symbol_id =
+                u32::try_from(brutex_core::universe::fnv1a(symbol) & u64::from(u32::MAX)).unwrap();
+            let mut writer = BarFile::open_or_create(
+                &self.0,
+                Self::path(contract, month, FileKind::Bars),
+                symbol_id,
+            )
+            .unwrap();
+            let open = month.ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+            let rows: Vec<Bar> = (0..count)
+                .map(|k| Bar {
+                    ts_micros: open + k * 1_000_000,
+                    open: 3_210_000 + k % 17,
+                    high: 3_210_050 + k % 17,
+                    low: 3_209_950 + k % 17,
+                    close: 3_210_010 + (k * 7) % 13,
+                    volume: k % 5,
+                    open_interest: if contract.is_some() { 77 } else { OI_NULL },
+                })
+                .collect();
+            if !rows.is_empty() {
+                let cut = if appends == 1 { rows.len() } else { 1_024 };
+                let (first, rest) = rows.split_at(cut);
+                writer.append(first).unwrap();
+                if appends > 1 {
+                    for chunk in rest.chunks(rest.len().div_ceil(appends - 1)) {
+                        writer.append(chunk).unwrap();
+                    }
+                }
+            }
+            drop(writer);
+            let srt = self.file(contract, month, FileKind::SortIndex);
+            if bare && srt.exists() {
+                fs::remove_file(srt).unwrap();
+            }
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ym(year: u16, month: u8) -> YearMonth {
+        YearMonth::new(year, month).unwrap()
+    }
+
+    const SPOT: [&str; 3] = ["gdfl", "NSE/INDEX/NIFTY", "1s"];
+
+    fn span<'a>(from: &'a str, to: &'a str, dry: bool) -> Vec<&'a str> {
+        let mut words = SPOT.to_vec();
+        words.extend([from, to]);
+        if dry {
+            words.push("--dry-run");
+        }
+        words
+    }
+
+    /// The dispatched verb refuses a misuse with its usage, before the store
+    /// root is asked for.
+    #[test]
+    fn the_dispatched_verb_refuses_a_misuse_with_its_usage() {
+        let mut out = String::new();
+        assert_eq!(command(&["gdfl"], &mut out), MISUSED);
+        assert!(out.starts_with("refused: ") && out.contains(USAGE), "{out}");
+    }
+
+    /// A store root that cannot be proven fails the run, and a name the
+    /// store cannot hold is a misuse refused before the store is asked.
+    #[test]
+    fn an_unproven_root_fails_and_an_unstorable_name_is_a_misuse() {
+        let asked = std::cell::Cell::new(0_u32);
+        let store = || {
+            asked.set(asked.get() + 1);
+            Err("no root".to_owned())
+        };
+        let mut out = String::new();
+        let code = command_with(&span("2032-01", "2032-01", false), &store, &mut out);
+        assert_eq!(code, FAILED);
+        assert_eq!(
+            out,
+            "SRT BUILD REFUSED: no root. Nothing was read or written.\n"
+        );
+        let mut out = String::new();
+        let code = command_with(
+            &["gdfl", "NSE/INDEX/NI FTY", "1s", "2032-01", "2032-01"],
+            &store,
+            &mut out,
+        );
+        assert_eq!(code, MISUSED, "{out}");
+        assert_eq!(asked.get(), 1, "a misuse never asks for the store root");
+        assert!(
+            out.contains("is not a store path") && out.contains(USAGE),
+            "{out}"
+        );
+    }
+
+    /// A `*` over a symbol the store has never listed is refused by name.
+    #[test]
+    fn a_star_over_a_symbol_with_no_directory_is_refused() {
+        let root = Root::new();
+        let (code, out) = root.run(&["gdfl", "NSE/FNO/NIFTY/*", "1s", "2032-01", "2032-01"]);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.starts_with("SRT BUILD REFUSED: cannot list ")
+                && out.contains("Nothing was written."),
+            "{out}"
+        );
+    }
+
+    /// **WHAT A `*` LEFT ALONE IS SAID WHEN EITHER COUNT IS NOT ZERO, AND
+    /// ONLY THEN.** A link alone is named; a run that left nothing alone
+    /// prints no `NOT WALKED` line.
+    #[test]
+    fn not_walked_is_said_for_a_link_alone_and_never_for_nothing() {
+        let root = Root::new();
+        let (ce, pe) = ("2032-02-26-1000000-CE", "2032-02-26-1000000-PE");
+        root.month(Some(ce), ym(2032, 2), (1_200, 1, true), "NIFTY");
+        let (code, out) = root.run(&[
+            "gdfl",
+            "NSE/FNO/NIFTY/*",
+            "1s",
+            "2032-02",
+            "2032-02",
+            "--dry-run",
+        ]);
+        assert_eq!(code, OK, "{out}");
+        assert!(!out.contains("NOT WALKED"), "nothing was left alone: {out}");
+        let symbol = root.0.join("bars/gdfl/NSE/FNO/NIFTY");
+        std::os::unix::fs::symlink(symbol.join(ce), symbol.join(pe)).unwrap();
+        let (code, out) = root.run(&[
+            "gdfl",
+            "NSE/FNO/NIFTY/*",
+            "1s",
+            "2032-02",
+            "2032-02",
+            "--dry-run",
+        ]);
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains(
+                "  NOT WALKED: 1 symbolic link(s) — never followed, nothing is built through a \
+                 link — and 0 other entr(ies) that are not contract directories\n"
+            ),
+            "{out}"
+        );
+        // And a spot run lists nothing, so it leaves nothing alone.
+        root.month(None, ym(2032, 2), (1_200, 1, false), "NIFTY");
+        let (code, out) = root.run(&span("2032-02", "2032-02", true));
+        assert_eq!(code, OK, "{out}");
+        assert!(!out.contains("NOT WALKED"), "{out}");
+    }
+
+    /// **A DRY RUN CALLS A MONTH OF SEVERAL RUNS `would build`, NAMING THE
+    /// RUNS**, never `indexed`: one run over every row is the only indexed
+    /// shape.
+    #[test]
+    fn a_dry_run_names_a_month_of_several_runs_as_one_to_build() {
+        let root = Root::new();
+        root.month(None, ym(2032, 3), (1_200, 3, false), "NIFTY");
+        let (code, out) = root.run(&span("2032-03", "2032-03", true));
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains(
+                "  2032-03  would build        1200 bars  3 runs ordering rows 0..1200 of 1200\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// An empty month — a file that commits no rows — is `empty`, dry or
+    /// not, writes nothing and is clean.
+    #[test]
+    fn an_empty_month_is_empty_dry_or_not() {
+        let root = Root::new();
+        root.month(None, ym(2032, 4), (0, 1, true), "NIFTY");
+        for dry in [true, false] {
+            let (code, out) = root.run(&span("2032-04", "2032-04", dry));
+            assert_eq!(code, OK, "{out}");
+            assert!(
+                out.contains("  2032-04  empty         no committed bar to order\n"),
+                "{out}"
+            );
+        }
+        assert!(!root.file(None, ym(2032, 4), FileKind::SortIndex).exists());
+    }
+
+    /// **A MONTH NO RUN CAN ORDER IS `UNSORTABLE`.** The writer refuses a
+    /// stamp off its rung's grid, so the bar here is moved half a second the
+    /// way an append that bypassed the writer would leave it: row 500's stamp
+    /// in place, and its block's `.crc` entry resealed over the new bytes
+    /// (`docs/02-store-format.md`: 56-byte records from byte 32,768, 73 to a
+    /// block, the entry for block `b` the CRC-32C of its committed bytes at
+    /// `4 * b`). No sort-index entry can name half a second, so nothing is
+    /// written and the run fails; the dry run says it would build.
+    #[test]
+    fn a_month_no_run_can_order_is_unsortable_and_fails_the_run() {
+        let root = Root::new();
+        let month = ym(2032, 5);
+        root.month(None, month, (1_200, 1, true), "NIFTY");
+        let (stride, per_block) = (
+            usize::try_from(store::format::RECORD_STRIDE).unwrap(),
+            usize::try_from(store::format::RECORDS_PER_BLOCK).unwrap(),
+        );
+        let start = usize::try_from(store::format::HEADER_LEN).unwrap();
+        let bin = root.file(None, month, FileKind::Bars);
+        let mut raw = fs::read(&bin).unwrap();
+        let at = start + 500 * stride;
+        let stamp = i64::from_le_bytes(raw[at..at + 8].try_into().unwrap());
+        raw[at..at + 8].copy_from_slice(&(stamp + 500_000).to_le_bytes());
+        fs::write(&bin, &raw).unwrap();
+        let block = 500 / per_block;
+        let from = start + block * per_block * stride;
+        let seal = store::crc::crc32c(&raw[from..from + per_block * stride]);
+        let crc = root.file(None, month, FileKind::Checksums);
+        let mut entries = fs::read(&crc).unwrap();
+        entries[4 * block..4 * block + 4].copy_from_slice(&seal.to_le_bytes());
+        fs::write(&crc, &entries).unwrap();
+        let (code, out) = root.run(&span("2032-05", "2032-05", true));
+        assert_eq!(code, OK, "{out}");
+        assert!(
+            out.contains("  2032-05  would build        1200 bars  "),
+            "{out}"
+        );
+        let (code, out) = root.run(&span("2032-05", "2032-05", false));
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains("  2032-05  UNSORTABLE         1200 bars  nothing written; a sort reads these rows: "),
+            "{out}"
+        );
+        assert!(out.contains("unsortable 1, "), "{out}");
+        assert!(!root.file(None, month, FileKind::SortIndex).exists());
+    }
+
+    /// A month filed under another symbol's header id is refused by the
+    /// store, dry or not, and nothing is written to it.
+    #[test]
+    fn a_month_under_another_symbols_id_is_refused_dry_or_not() {
+        let root = Root::new();
+        root.month(None, ym(2032, 6), (1_200, 1, true), "BANKNIFTY");
+        for dry in [true, false] {
+            let (code, out) = root.run(&span("2032-06", "2032-06", dry));
+            assert_eq!(code, FAILED, "{out}");
+            assert!(out.contains("  2032-06  REFUSED       "), "{out}");
+            assert!(out.contains("refused 1"), "{out}");
+        }
+        assert!(!root.file(None, ym(2032, 6), FileKind::SortIndex).exists());
+    }
+
+    /// The receipt lines no store state in a test reaches, word for word.
+    #[test]
+    fn the_receipt_line_for_a_month_a_reader_does_not_find_indexed() {
+        let mut out = String::new();
+        render_line(
+            &mut out,
+            "2032-07",
+            &Line::NotIndexed {
+                n_valid: 1_200,
+                reader: "2 runs ordering rows 0..1200 of 1200".to_owned(),
+            },
+        );
+        assert_eq!(
+            out,
+            "  2032-07  NOT INDEXED        1200 bars  the step finished and a reader finds 2 runs \
+             ordering rows 0..1200 of 1200\n"
+        );
+        let mut out = String::new();
+        assert_eq!(
+            summed(
+                &mut out,
+                &[
+                    Line::Built {
+                        n_valid: 1,
+                        because: String::new()
+                    },
+                    Line::NotIndexed {
+                        n_valid: 1,
+                        reader: String::new()
+                    }
+                ],
+                false
+            ),
+            FAILED
+        );
+        assert!(out.starts_with("Built 1, kept 0, empty 0, small 0, unsortable 0, not indexed 1, not held 0, refused 0: NOT every"), "{out}");
+    }
+
+    /// **A `*` WALKS EXACTLY `MAX_CONTRACTS` CONTRACT DIRECTORIES AND REFUSES
+    /// ONE MORE**, before a month is opened. At the bound every contract is
+    /// walked (none holds the month, so the run says so and fails); one past
+    /// it the listing is refused by name. Empty directories with short
+    /// names, so the bound costs directory entries and nothing else.
+    #[test]
+    fn a_star_walks_exactly_the_contract_bound_and_refuses_one_more() {
+        let root = Root::new();
+        let symbol = root.0.join("bars/gdfl/NSE/FNO/NIFTY");
+        fs::create_dir_all(&symbol).unwrap();
+        for k in 0..MAX_CONTRACTS {
+            fs::create_dir(symbol.join(format!("C{k:06}"))).unwrap();
+        }
+        let star = [
+            "gdfl",
+            "NSE/FNO/NIFTY/*",
+            "1s",
+            "2032-01",
+            "2032-01",
+            "--dry-run",
+        ];
+        let (code, out) = root.run(&star);
+        assert_eq!(code, FAILED, "{out}");
+        assert!(
+            out.contains(&format!("{MAX_CONTRACTS} series × 1 month(s)"))
+                && out.contains(&format!(
+                    "NO MONTH HELD: none of the {MAX_CONTRACTS} contract(s) holds a month"
+                )),
+            "{out}"
+        );
+        fs::create_dir(symbol.join(format!("C{MAX_CONTRACTS:06}"))).unwrap();
+        let (code, out) = root.run(&star);
+        assert_eq!(code, FAILED, "{out}");
+        assert_eq!(
+            out,
+            format!(
+                "SRT BUILD REFUSED: {} holds more than {MAX_CONTRACTS} contract directories; \
+                 name fewer. Nothing was written.\n",
+                symbol.display()
+            )
+        );
+    }
+}
