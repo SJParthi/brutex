@@ -104,6 +104,20 @@ passed, these 10 failed, full `--lib` run in a copy).
 | `ladder.rs` | 112 |
 | **total** | **2,145** |
 
-## Results
+## Results (partial: five of eight files finished)
 
-Not yet measured.
+`missed` before is under the stage-1 filter. `after` is the same filter plus
+`tests/cloud_mutants_bars.rs`, re-run on every stage-1 survivor. `stage 2`
+is the whole `--lib` suite, existing tests only, on the survivors.
+
+| File | total | caught | missed before | stage 2 kills | missed after | timeout | unviable |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `spot.rs` | 123 | 105 | 5 | 0 of 1 run | **1** | 0 | 13 |
+| `ladder.rs` | 112 | 76 | 12 | 6 | **4** (equivalent) | 0 | 24 |
+| `gaps_route.rs` | 179 | 125 | 15 | 0 | **0** | 1 | 38 |
+| `render.rs` | 222 | 189 | 31 | not run | **1** (equivalent) | 0 | 2 |
+| `bars_change.rs` | 146 | 125 | 12 | not run | **4** (equivalent) | 1 | 8 |
+
+The rest of this report (survivors and the tests that killed them, the
+equivalent mutants with reasons, coverage and gates) is written when the
+remaining three files finish.
