@@ -1396,6 +1396,85 @@ mod cm_extremes {
         ));
         std::fs::remove_dir_all(masters).unwrap();
     }
+
+    /// A receipted master for `d` naming RELIANCE eligible for the closing
+    /// auction, installed under a fresh scratch root.
+    fn eligible_masters(tag: &str, d: pull::session::Day) -> std::path::PathBuf {
+        let masters = scratch(tag);
+        let at = brutex_core::universe::FNO_INDEX
+            .position("RELIANCE")
+            .unwrap();
+        let isin = brutex_core::universe::FNO_UNDERLYINGS_ISIN[at];
+        let csv = format!(
+            "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n2885,RELIANCE,EQ,{isin},1\n"
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(csv.as_bytes()).unwrap();
+        pull::cash_session_cache::install(&masters, d, &gz.finish().unwrap()).unwrap();
+        masters
+    }
+
+    /// A traded row in the auction band with only ONE side of the book at
+    /// zero is an ordinary row: the auction's print is a row whose bid and
+    /// ask are both zero. Only the zero-book trade at 15:28:07 is diverted.
+    #[test]
+    fn a_one_sided_book_in_the_auction_band_is_a_row_not_a_print() {
+        let d = day(2026, 8, 4);
+        let date = "04/08/2026";
+        let stem = "RELIANCE.NSE";
+        let rows = [
+            row(stem, date, "15:00:00", "1400.00", "1399.95", "1400.05", 9),
+            row(stem, date, "15:20:00", "1400.20", "0", "1400.25", 5),
+            row(stem, date, "15:22:00", "1400.30", "1400.25", "0", 5),
+            row(stem, date, "15:28:07", "1401.50", "0", "0", 400),
+        ];
+        let text = format!("{HEADER_OPEN_INTEREST}\r\n{}\r\n", rows.join("\r\n"));
+        let masters = eligible_masters("CmOneSided", d);
+        let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
+        let scope = Arc::new(CmScope::swept().with_masters(masters.clone()));
+        let archive = stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]).with_scope(scope);
+        let file = read_day(&archive, &key, d).unwrap().unwrap().file;
+        assert_eq!(
+            file.rows.iter().map(|r| r.sod).collect::<Vec<_>>(),
+            [54_000, 55_200, 55_320]
+        );
+        assert_eq!(
+            file.auction.iter().map(|p| p.sod).collect::<Vec<_>>(),
+            [55_687]
+        );
+        std::fs::remove_dir_all(masters).unwrap();
+    }
+
+    /// The refused-row bound is more than one row in a thousand: 65 refused
+    /// rows (above the floor of 64) among exactly 65,000 read keep the file,
+    /// and the same 65 among 64,999 refuse it by name. Invented rows.
+    #[test]
+    fn exactly_one_refused_row_in_a_thousand_keeps_the_file() {
+        let d = day(2024, 4, 2);
+        let date = "02/04/2024";
+        let stem = "RELIANCE.NSE";
+        let key = InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap();
+        let read = |rows: usize| {
+            let good = row(stem, date, "10:00:00", "1400.00", "1399.95", "1400.05", 1);
+            let bad = row(stem, date, "10:00:00", "1400.00", "Bid", "1400.05", 1);
+            let mut text = format!("{HEADER_OPEN_INTEREST}\r\n");
+            for at in 0..rows {
+                text.push_str(if at < 65 { &bad } else { &good });
+                text.push_str("\r\n");
+            }
+            let archive = stocks_day(d, &[("RELIANCE.NSE.csv", text.as_bytes())]);
+            read_day(&archive, &key, d).map(|day| day.unwrap().file)
+        };
+        let kept = read(65_000).unwrap();
+        assert_eq!((kept.refused.total(), kept.rows.len()), (65, 64_935));
+        assert_eq!(
+            read(64_999).err(),
+            Some(CmRefusal::TooManyBadRows {
+                refused: 65,
+                rows: 64_999
+            })
+        );
+    }
 }
 
 /// A directory where a day file belongs is unavailable as a directory (the
