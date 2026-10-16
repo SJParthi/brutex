@@ -126,7 +126,7 @@ impl Off {
 }
 
 /// Every commit the texts cite that `main` does not hold, and why.
-const NOT_ON_MAIN: [(&str, Off); 37] = [
+const NOT_ON_MAIN: [(&str, Off); 38] = [
     ("6a58d7c", Off::Neither),
     ("79b9a1d5", Off::Neither),
     ("224b6760", Off::Neither),
@@ -154,6 +154,9 @@ const NOT_ON_MAIN: [(&str, Off); 37] = [
     // GI-21 (D-2822) names the GDFL import's own earlier commit whose
     // journal form it resumes.
     ("3cc6b8e0", Off::Squashed),
+    // AF-03's and AF-04's limits (D-4963, D-4962) measured their "before"
+    // builds at `feat/db-fix`'s own commit, which `main`'s squash merge drops.
+    ("521066e6", Off::Squashed),
     ("08a4258", Off::MainsOwnText),
     ("0d4fef13", Off::MainsOwnText),
     ("11feb080", Off::MainsOwnText),
