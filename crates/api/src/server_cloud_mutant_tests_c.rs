@@ -2685,3 +2685,104 @@ fn a_recovery_is_refused_on_the_mapping_a_run_would_be_refused_on() {
         "{why}"
     );
 }
+
+/// A Dhan source whose every feed URL is `vendor`'s loopback base.
+fn loopback_source(vendor: &FakeVendor) -> (pull::http::HttpSource, pull::vendor::HttpSpec) {
+    let spec = pull::vendor::HttpSpec {
+        base_url: vendor.base,
+        ..dhan_spec()
+    };
+    let source =
+        pull::http::HttpSource::new(spec, pull::http::Credential::token("cloudc".to_owned()))
+            .expect("a client");
+    (source, spec)
+}
+
+/// THE FIRST CHUNK IS NOT CHARGED HERE: its permit was taken before the
+/// credential was read, so `fetch_chunks` asks for chunk one without touching
+/// the budget, and a budget that cannot be read does not stop it (kills `>`
+/// turned to `>=` at `nth > 0`). The answered chunk is logged as chunk 1 of 1
+/// (kills `+` turned to `*` in the trace event's `chunk`).
+#[tokio::test]
+async fn the_first_chunk_is_asked_without_a_second_charge_and_logged_as_chunk_one() {
+    let vendor = FakeVendor::answering(|_, _| (200, dhan_bar(AUG_03))).await;
+    let (source, spec) = loopback_source(&vendor);
+    let fx = Fixture::new("first-chunk-free");
+    let site = fx.refused();
+    std::thread::scope(|scope| {
+        let poisoner = scope.spawn(|| {
+            let _budgets = site.budgets.lock().expect("not yet poisoned");
+            panic!("poison the budget lock before the first chunk");
+        });
+        assert!(poisoner.join().is_err());
+    });
+    assert!(
+        site.budgets.lock().is_err(),
+        "the premise: no budget can be read"
+    );
+    let from = crate::emitted::mark();
+    let got = fetch_chunks(
+        &spot(DHAN_DAY),
+        &site,
+        &source,
+        "990001",
+        pull::vendor::Listing::Index,
+        &spec,
+    )
+    .await
+    .expect("chunk one is asked whatever the budget says");
+    assert_eq!(got.bodies.len(), 1);
+    assert_eq!(got.bodies[0].1.rows.len(), 1);
+    assert_eq!(vendor.seen().len(), 1);
+    let answered: Vec<telemetry::Record> = crate::emitted::landed(from, "pull.chunk", "answered")
+        .into_iter()
+        .filter(|record| crate::emitted::says(record, "instrument_id", "990001"))
+        .collect();
+    assert_eq!(answered.len(), 1, "{answered:?}");
+    assert!(
+        crate::emitted::counts(&answered[0], "chunk", 1),
+        "{answered:?}"
+    );
+    assert!(
+        crate::emitted::counts(&answered[0], "of", 1),
+        "{answered:?}"
+    );
+    assert!(
+        crate::emitted::counts(&answered[0], "rows", 1),
+        "{answered:?}"
+    );
+}
+
+/// A WINDOW THE VENDOR REFUSES IS LOGGED AS CHUNK 1 OF 1, unwrapped, with the
+/// vendor's own words (kills `+` turned to `*` in the refusal event's
+/// `chunk`).
+#[tokio::test]
+async fn a_refused_window_is_logged_by_its_chunk_counted_from_one() {
+    let vendor = FakeVendor::answering(|_, _| (400, "{\"reason\":\"no\"}".to_owned())).await;
+    let (source, spec) = loopback_source(&vendor);
+    let fx = Fixture::new("refused-chunk-one");
+    let site = fx.refused();
+    let from = crate::emitted::mark();
+    let refused = fetch_chunks(
+        &spot(DHAN_DAY),
+        &site,
+        &source,
+        "990002",
+        pull::vendor::Listing::Index,
+        &spec,
+    )
+    .await;
+    assert!(refused.is_err(), "nothing landed before the refusal");
+    let logged: Vec<telemetry::Record> =
+        crate::emitted::landed(from, "pull.http", "vendor refused a window")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "instrument_id", "990002"))
+            .collect();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(crate::emitted::counts(&logged[0], "chunk", 1), "{logged:?}");
+    assert!(crate::emitted::counts(&logged[0], "of", 1), "{logged:?}");
+    assert!(
+        crate::emitted::says(&logged[0], "vendor_said", "400"),
+        "{logged:?}"
+    );
+}
