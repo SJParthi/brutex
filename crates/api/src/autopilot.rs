@@ -780,7 +780,23 @@ fn probe_io(root: &std::path::Path, path: &std::path::Path) -> std::io::Result<(
             ),
         ));
     }
-    let mut file = std::fs::File::create(path)?;
+    // NEVER WRITE THROUGH WHAT SITS AT THE PROBE NAME. `File::create` follows
+    // a symlink and truncates its target, so a link planted (or left) at the
+    // probe name pointed this write at any file it named — a store file
+    // among them — and `remove_file` then removed only the link. The name is
+    // the probe's own: whatever is there is removed (a link, never its
+    // target), and the file is made with `create_new`, which refuses a link
+    // rather than following one — the repair `server::store_fault` made for
+    // its probe (cloud-attack-law-20261016).
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+        Err(why) => return Err(why),
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
     file.write_all(b"brutex write probe\n")?;
     // THE BYTES HAVE TO REACH THE DEVICE. A write that only reached the page
     // cache answers "the disk is fine" on a disk that is full, which is the one
@@ -7266,6 +7282,36 @@ mod tests {
         // the file name carries the vendor precisely so two feeds probing in one
         // pass cannot remove each other's file and read that as a failure.
         store_writable(&occupied, "dhan").expect("a different vendor, a different path");
+    }
+
+    /// **THE WRITE PROBE NEVER WRITES THROUGH A LINK AT ITS NAME**
+    /// (cloud-attack-law-20261016, lens 4). It opened the name with
+    /// `File::create`, which follows a symlink and truncates its target: a
+    /// file the link named — a store file among them — was overwritten with
+    /// the probe line and only the link was removed afterwards.
+    #[test]
+    fn the_write_probe_never_writes_through_a_link_at_its_name() {
+        let root = crate::scratch::path("autopilot-probe-link");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a store root");
+        let outside = crate::scratch::path("autopilot-probe-link-victim");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("a directory outside the root");
+        let victim = outside.join("2025-05.bin");
+        std::fs::write(&victim, b"keep").expect("a file the link names");
+        let probe = root.join(format!("{STORE_PROBE_PREFIX}groww"));
+        std::os::unix::fs::symlink(&victim, &probe).expect("a link at the probe name");
+
+        store_writable(&root, "groww").expect("the root takes a write");
+        assert_eq!(
+            std::fs::read(&victim).expect("the victim is still there"),
+            b"keep",
+            "the probe wrote through the link"
+        );
+        assert!(
+            std::fs::symlink_metadata(&probe).is_err(),
+            "nothing is left at the probe name"
+        );
     }
 
     /// **A store-halted feed probes its own disk inside a real round, and a

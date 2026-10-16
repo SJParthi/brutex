@@ -2507,7 +2507,10 @@ pub(crate) struct Indexed {
     /// lies (DB-B34: a run record damaged before the index was built is
     /// filed here and not under `runs`).
     pub(crate) fault_ordinals: Vec<u64>,
-    /// Index entries that would not decode, skipped.
+    /// Index entries that would not decode — in `runs` or in `faults` — each
+    /// one a run or a fault the index can no longer show. A reader that finds
+    /// any walks the journal instead and says why (`pullrun::older_runs`,
+    /// `audit_json::attribution`).
     pub(crate) malformed: u64,
 }
 
@@ -2860,11 +2863,18 @@ impl Journal {
         out.runs.sort_by_key(|run| run.0);
         out.runs.dedup_by_key(|run| run.0);
         let faults = read_or_empty(&dir.join("faults"))?;
-        let mut fault_ordinals: Vec<u64> = faults
-            .chunks_exact(ORDINAL_ENTRY)
-            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_FAULT))
-            .filter(|ordinal| *ordinal < covered)
-            .collect();
+        // A FAULT ENTRY THAT WILL NOT READ IS COUNTED, NEVER DROPPED: it was a
+        // `filter_map`, so a damaged `faults` file under-reported the very
+        // records that would not decode — corruption hidden by corruption
+        // (CLAUDE.md section 4; cloud-attack-law-20261016).
+        let mut fault_ordinals: Vec<u64> = Vec::new();
+        for chunk in faults.chunks_exact(ORDINAL_ENTRY) {
+            match read_ordinal_entry(chunk, MARK_FAULT) {
+                Some(ordinal) if ordinal < covered => fault_ordinals.push(ordinal),
+                Some(_) => {}
+                None => out.malformed = out.malformed.saturating_add(1),
+            }
+        }
         fault_ordinals.sort_unstable();
         fault_ordinals.dedup();
         out.faults = as_u64(fault_ordinals.len());
@@ -2878,17 +2888,30 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// The file is there and cannot be read.
+    /// The file is there and cannot be read, or one of its entries is not a
+    /// refusal entry (a mark or checksum that does not match): a refusal the
+    /// index lost is named, never answered as a shorter history. It was a
+    /// `filter_map` that dropped the entry (cloud-attack-law-20261016).
     pub(crate) fn refusal_ordinals(&self, source: &str, covered: u64) -> Result<Vec<u64>, String> {
         let Some(name) = source_file(source) else {
             return Ok(Vec::new());
         };
-        let bytes = read_or_empty(&self.index_dir().join("refusals").join(name))?;
-        let mut out: Vec<u64> = bytes
-            .chunks_exact(ORDINAL_ENTRY)
-            .filter_map(|chunk| read_ordinal_entry(chunk, MARK_REFUSAL))
-            .filter(|ordinal| *ordinal < covered)
-            .collect();
+        let path = self.index_dir().join("refusals").join(name);
+        let bytes = read_or_empty(&path)?;
+        let mut out: Vec<u64> = Vec::new();
+        for (entry, chunk) in bytes.chunks_exact(ORDINAL_ENTRY).enumerate() {
+            match read_ordinal_entry(chunk, MARK_REFUSAL) {
+                Some(ordinal) if ordinal < covered => out.push(ordinal),
+                Some(_) => {}
+                None => {
+                    return Err(format!(
+                        "{}: entry {entry} is not a refusal entry (its mark or checksum does \
+                         not match), so no refusal is read from this index",
+                        path.display()
+                    ));
+                }
+            }
+        }
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -4942,6 +4965,54 @@ mod tests {
         let caught = journal.build_index().unwrap();
         assert_eq!((caught.records, caught.faults), (1, 1));
         assert_eq!(journal.read_index(3).unwrap().faults, 1);
+    }
+
+    /// **A DAMAGED FAULT OR REFUSAL ENTRY IS COUNTED OR REFUSED, NEVER
+    /// DROPPED** (cloud-attack-law-20261016, lens 2). Both were a
+    /// `filter_map`: a flipped `faults` entry made `faults` read 0 over a
+    /// journal holding a record that will not decode, and a flipped refusal
+    /// entry answered a member's refusal history one record short.
+    #[test]
+    fn a_damaged_fault_or_refusal_entry_is_counted_or_refused_not_dropped() {
+        let root = scratch("audit-index-damaged-entries");
+        let journal = Journal::at(&root);
+        journal.append(&zerodha_run(1_000)).unwrap();
+        journal
+            .append(&member("ZZOIL", "refused: fixture"))
+            .unwrap();
+        let mut broken = member("ZZOIL", "refused: broken").image();
+        broken[60] ^= 0xff;
+        let mut bytes = std::fs::read(&journal.path).unwrap();
+        bytes.extend_from_slice(&broken);
+        std::fs::write(&journal.path, &bytes).unwrap();
+        journal.build_index().unwrap();
+        let whole = journal.read_index(3).unwrap();
+        assert_eq!((whole.faults, whole.malformed), (1, 0));
+        assert_eq!(journal.refusal_ordinals("ZZOIL", 3).unwrap(), vec![1]);
+
+        let faults = journal.index_dir().join("faults");
+        let mut image = std::fs::read(&faults).unwrap();
+        assert_eq!(image.len(), ORDINAL_ENTRY, "one fault, one entry");
+        image[0] ^= 0xff;
+        std::fs::write(&faults, &image).unwrap();
+        let damaged = journal.read_index(3).unwrap();
+        assert_eq!(
+            (damaged.faults, damaged.malformed),
+            (0, 1),
+            "the lost fault entry is counted, so a reader walks instead"
+        );
+
+        let refusals = journal
+            .index_dir()
+            .join("refusals")
+            .join(source_file("ZZOIL").unwrap());
+        let mut image = std::fs::read(&refusals).unwrap();
+        assert_eq!(image.len(), ORDINAL_ENTRY, "one refusal, one entry");
+        image[3] ^= 0xff;
+        std::fs::write(&refusals, &image).unwrap();
+        let refused = journal.refusal_ordinals("ZZOIL", 3).unwrap_err();
+        assert!(refused.contains("is not a refusal entry"), "{refused}");
+        assert!(refused.contains("ZZOIL.idx"), "{refused}");
     }
 
     /// **AN INDEX ENTRY IS ITS OWN, BY MARK AND CHECKSUM**: a run entry and an

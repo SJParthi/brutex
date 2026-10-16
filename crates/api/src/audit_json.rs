@@ -711,6 +711,19 @@ fn attribution(journal: &audit::Journal, total: u64) -> Result<Attribution, Stri
     let mut work = match cached {
         Some(work) => work,
         None => match journal.read_index(total) {
+            // AN INDEX THAT LOST AN ENTRY IS NOT READ AS A WHOLE ONE: a `runs`
+            // entry that will not decode is a run this page would attribute to
+            // the run before it, so the journal is walked and the page says why
+            // — as `pullrun::older_runs` already refuses it. It was read as a
+            // whole index and the count went nowhere (cloud-attack-law-20261016).
+            Ok(indexed) if indexed.malformed > 0 => Attribution {
+                identity,
+                walk_why: Some(format!(
+                    "{} of the index's entries cannot be read, so a run may be missing from it",
+                    indexed.malformed
+                )),
+                ..Attribution::default()
+            },
             Ok(indexed) => Attribution {
                 scanned: indexed.covered,
                 identity,
@@ -1822,6 +1835,53 @@ mod tests {
         let grown = attribution(&journal, journal.look().records()).expect("attributed");
         assert_eq!(grown.scanned, total + 1);
         assert_eq!(grown.held(Vendor::Groww, total + 1), (4, 2));
+    }
+
+    /// **AN INDEX THAT LOST A RUN ENTRY IS WALKED, AND THE PAGE SAYS WHY**
+    /// (cloud-attack-law-20261016, lens 2). A `runs` entry that will not decode
+    /// was counted into `malformed` and read nowhere here, so its run's
+    /// records were attributed to the run before it: the Groww run below
+    /// vanished into Zerodha's. `pullrun::older_runs` already refused such an
+    /// index; this page now walks the journal and attributes as the walk does.
+    #[test]
+    fn an_index_that_lost_a_run_entry_is_walked_and_says_why() {
+        let whole_site = site("index-lost-run-whole");
+        let whole_journal = whole_site.journal();
+        pulled(&whole_journal, "https://api.kite.trade/a", 2);
+        pulled(&whole_journal, "https://api.groww.in/b", 1);
+        let total = whole_journal.look().records();
+        let whole = attribution(&whole_journal, total).expect("attributed");
+
+        let held_site = site("index-lost-run");
+        let journal = held_site.journal();
+        pulled(&journal, "https://api.kite.trade/a", 2);
+        pulled(&journal, "https://api.groww.in/b", 1);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        assert_eq!(bytes.len(), 64, "two run records, two entries");
+        bytes[32 + 3] ^= 0xff;
+        std::fs::write(&runs, &bytes).expect("the second entry is damaged");
+        let walked = attribution(&journal, total).expect("attributed");
+        assert_eq!(
+            walked.index_covered, None,
+            "an index that lost an entry is walked"
+        );
+        assert!(
+            walked
+                .walk_why
+                .as_deref()
+                .is_some_and(|why| why.contains("1 of the index's entries cannot be read")),
+            "{:?}",
+            walked.walk_why
+        );
+        assert_eq!(
+            walked.runs, whole.runs,
+            "the walk finds the run the index lost"
+        );
+        assert_eq!(
+            walked.held(Vendor::Groww, total),
+            whole.held(Vendor::Groww, total)
+        );
     }
 
     /// **THE RUNS COME FROM THE JOURNAL'S INDEX, NOT A WALK** (WP-33c,

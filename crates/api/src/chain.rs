@@ -193,7 +193,14 @@ fn expiry_param(word: &str) -> Option<Expiry> {
     else {
         return None;
     };
-    if (y.len(), m.len(), d.len()) != (4, 2, 2) {
+    // DIGITS, NOT LENGTHS: `str::parse` takes a leading `+`, so `2019-+3-28`
+    // passed the width check and read as 2019-03-28 — the flaw D-0905 closed
+    // in `ingest::parse_day` (cloud-attack-law-20261016).
+    if (y.len(), m.len(), d.len()) != (4, 2, 2)
+        || ![y, m, d]
+            .iter()
+            .all(|part| part.bytes().all(|b| b.is_ascii_digit()))
+    {
         return None;
     }
     Expiry::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?).ok()

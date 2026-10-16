@@ -2138,3 +2138,100 @@ fn the_event_and_stopped_records_parse_and_label_no_bar() {
     let torn = format!("{text}event NSE-FNO-NIFTY ex=2020-06-16 kind=relisted\n");
     assert_eq!(bars::test_access::lineage_ledger_counts(&torn), (0, 1));
 }
+
+/// The window reads its months through the ONE strict parser
+/// (cloud-attack-law-20261016, lens 8). `server::month_param` says every
+/// route now uses `bars::month_of_text`, but `/bars/window.json` split on
+/// `-` and handed each half to `str::parse`, so a leading `+` or a missing
+/// or extra zero answered another spelling of the month under 200.
+#[test]
+fn the_window_refuses_a_month_not_spelled_yyyy_mm() {
+    let base = "feed=zerodha&timeframe=1min&sort=ts";
+    assert!(WindowAsk::parse(&format!("{base}&from=2025-01&to=2025-02")).is_ok());
+    for (field, spelling, decoded) in [
+        ("from", "2025-1", "2025-1"),
+        ("from", "2025-001", "2025-001"),
+        ("from", "02025-01", "02025-01"),
+        ("from", "%2B2025-01", "+2025-01"),
+        ("from", "2025-%2B1", "2025-+1"),
+        ("to", "2025-2", "2025-2"),
+        ("to", "2025-%2B2", "2025-+2"),
+    ] {
+        let (from, to) = if field == "from" {
+            (spelling, "2025-02")
+        } else {
+            ("2025-01", spelling)
+        };
+        let why = WindowAsk::parse(&format!("{base}&from={from}&to={to}"))
+            .err()
+            .unwrap_or_else(|| panic!("{spelling} must be refused, not read as a month"));
+        assert!(
+            why.contains(&format!("{decoded:?} is not a YYYY-MM month for {field:?}")),
+            "{spelling}: {why}"
+        );
+    }
+}
+
+/// `/bars.json` on a month a WRITER HOLDS, and on a month TRUNCATED to its
+/// header, names the fault and never answers it as a list of bars
+/// (cloud-attack-law-20261016, lens 8). The window route's corrupt-month
+/// answer was pinned; the single-month route's was not, and a regression to
+/// `200 []` would read as "this month holds nothing".
+#[tokio::test]
+async fn the_month_route_names_a_held_or_truncated_month_and_never_answers_it_empty() {
+    let fixture = Fixture::new("month-held-or-cut");
+    let may = fixture.paths[0].clone();
+    let address = StorePath::new(PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(2025, 5).expect("month"),
+        file: FileKind::Bars,
+    })
+    .expect("path");
+    let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
+    let symbol = u32::from_le_bytes(hash[..4].try_into().expect("low32"));
+
+    let (status, whole) = fixture.get_month("").await;
+    assert_eq!(status, StatusCode::OK, "{whole}");
+    assert_eq!(whole.as_array().map(Vec::len), Some(2), "{whole}");
+    {
+        let _writer =
+            store::file::BarFile::open_or_create(&fixture.root, address, symbol).expect("writer");
+        let (status, held) = fixture.get_month("").await;
+        assert_ne!(status, StatusCode::OK, "{held}");
+        assert!(
+            held.as_array().is_none(),
+            "a held month is not bars: {held}"
+        );
+        let why = held["error"].as_str().expect("the refusal is named");
+        assert!(why.contains("holds"), "{held}");
+    }
+    let original = fs::read(&may).expect("May");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&may)
+        .expect("open")
+        .set_len(store::format::HEADER_LEN)
+        .expect("cut to the header");
+    let (status, cut) = fixture.get_month("").await;
+    fs::write(&may, &original).expect("restore");
+    assert_ne!(status, StatusCode::OK, "{cut}");
+    assert!(
+        cut.as_array().is_none(),
+        "a truncated month is not bars: {cut}"
+    );
+    assert!(
+        cut["error"]
+            .as_str()
+            .expect("the refusal is named")
+            .contains("claims more records than the file holds"),
+        "{cut}"
+    );
+    let (status, again) = fixture.get_month("").await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again.as_array().map(Vec::len), Some(2), "{again}");
+}

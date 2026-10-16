@@ -506,13 +506,14 @@ fn held_months(dir: &Path) -> Result<Arc<[YearMonth]>, String> {
     Ok(held)
 }
 
-/// `YYYY-MM` as a month, or `None`.
+/// `YYYY-MM` as a month, or `None`: the one strict parser.
+///
+/// This checked the halves' LENGTHS and handed them to `str::parse`, which
+/// takes a leading `+`, so a directory entry `2024-+3.bin` was listed as a
+/// held March (cloud-attack-law-20261016). `crate::bars::month_of_text`
+/// already refused that spelling for every route.
 fn month_of_text(text: &str) -> Option<YearMonth> {
-    let (year, month) = text.split_once('-')?;
-    if year.len() != 4 || month.len() != 2 {
-        return None;
-    }
-    YearMonth::new(year.parse().ok()?, month.parse().ok()?).ok()
+    crate::bars::month_of_text(text)
 }
 
 /// The month after `month`.
