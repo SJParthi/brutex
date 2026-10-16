@@ -33,11 +33,13 @@ cannot be O(1) bounded by a named cap or refused, and named in
   `store` and `pull` rows were run twice, under `cargo bench --profile dev`
   (opt-level 3, no LTO) and then under the real bench profile
   (`[profile.bench]`: fat LTO, `codegen-units = 1`), and both are quoted,
-  marked *dev* and *bench*. The `api` rows are dev-profile (see §4 for the
-  bench-profile attempt). The first bench-profile build was killed by the
-  kernel (SIGKILL, out of memory) while linking `cli` beside a concurrent test
-  build; alone, it completed. The ratios are the shape the gate asserts; the
-  absolute numbers are this host's, not the operator's M4 Pro.
+  marked *dev* and *bench*. The `api` rows are dev-profile only: the `api`
+  bench links `cli`, and compiling `cli` under the bench profile
+  (`-C opt-level=3 -C linker-plugin-lto -C codegen-units=1 -C debuginfo=2`)
+  was killed by the kernel (signal 9, out of memory) twice on this 15 GB host,
+  once beside a test build and once with nothing else running. The ratios are
+  the shape the gate asserts; the absolute numbers are this host's, not the
+  operator's M4 Pro.
 * **Grammar of the table.** *What grows*: E = census entries (all vendors),
   E_v = one vendor's, U = merged universe keys (about 2,780), M = months in a
   request's range, n = bars, R = run records of the pull journal, H = saved
@@ -291,7 +293,8 @@ shared 4-core VM. Not re-run here.
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` | **clean, exit 0** (after two lint fixes in the new bench rows, b46cf95, and one in `gdfl_nfo.rs`, 217381e) |
 | tests | `cargo test -p api -p pull -p store --locked --no-fail-fast` | 4,245 passed, 15 failed, 32 ignored — all 15 environmental or base-snapshot, below |
 | benches | `cargo bench -p {api,store,pull} --profile dev --locked --bench ratio` | store, pull: **all ratios within the ceiling**; api: one BREACH in the existing C-15 row above (run 2), none in run 1; every new asserted row ok |
-| bench profile | `cargo bench -p api --locked --no-run` | **not completed**: SIGKILL (out of memory) linking `cli` under fat LTO beside a concurrent test build |
+| bench profile | `cargo bench -p store --locked --bench ratio`; `cargo bench -p pull --locked --bench ratio` | **both: all ratios within the ceiling, exit 0** (the gate-8 command CI runs, per crate) |
+| bench profile | `cargo bench -p api --locked --bench ratio` | **not run: the build was killed** (signal 9, out of memory) compiling `cli` under the bench profile, twice — once beside a test build, once alone — on this 15 GB host. The `api` figures above are dev-profile only |
 
 **Full run, `cargo test -p api -p pull -p store --locked --no-fail-fast`: 4,245 passed, 15 failed, 32 ignored (61 test binaries and doc-test sets), exit 101.** Every one of the 15 is in a file this branch does not edit, and each is accounted for:
 
