@@ -1069,6 +1069,42 @@ mod cm_scope_and_auction {
         assert_eq!(scope.stem_for(&future, day(2031, 3, 3)), None);
     }
 
+    /// A stored share whose symbol is exactly the symbol capacity long (24
+    /// bytes) is filed like any other: it has its slot past the swept ones,
+    /// its day file is filed under its own key, and it is its own member.
+    /// Invented symbol.
+    #[test]
+    fn a_stored_share_of_the_full_symbol_width_is_filed() {
+        let name = "ZZABCDEFGHIJKLMNOPQRSTUV";
+        assert_eq!(name.len(), brutex_core::symbol::SYMBOL_CAPACITY);
+        let scope = CmScope::stored([name]).unwrap();
+        let slot = scope.shares().iter().position(|s| &**s == name);
+        assert!(slot.is_some());
+        let stem = format!("{name}.NSE");
+        assert_eq!(scope.extra_slot(CmKind::Stocks, &stem), slot);
+        assert_eq!(
+            scope.filing(CmKind::Stocks, &stem, day(2024, 4, 2)),
+            Ok(Some(InstrumentKey::cash(Exchange::Nse, name).unwrap()))
+        );
+        assert_eq!(
+            scope.member_of(CmKind::Stocks, &stem),
+            Some(format!("NSE-CASH-{name}"))
+        );
+    }
+
+    /// A swept index's stem is its own member under either scope, named by
+    /// its store key: NIFTY's day file is `NSE-INDEX-NIFTY`.
+    #[test]
+    fn a_swept_index_is_its_own_member_under_either_scope() {
+        let stored = CmScope::stored(std::iter::empty::<&str>()).unwrap();
+        for scope in [CmScope::swept(), stored] {
+            assert_eq!(
+                scope.member_of(CmKind::Indices, "NIFTY 50.NSE_IDX"),
+                Some("NSE-INDEX-NIFTY".to_owned())
+            );
+        }
+    }
+
     /// Each row fault's log word.
     #[test]
     fn every_row_fault_has_its_word() {
