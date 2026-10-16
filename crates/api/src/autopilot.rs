@@ -7940,7 +7940,7 @@ mod cloud_mutant_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .due_unix;
-        assert!(due >= before + 1 && due <= before + 3, "{due} vs {before}");
+        assert!(due > before && due <= before + 3, "{due} vs {before}");
     }
 
     /// A store-halted feed whose next probe is not due says how many were

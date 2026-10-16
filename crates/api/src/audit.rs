@@ -5216,6 +5216,7 @@ mod cloud_mutant_tests {
     /// record itself; one whose record will not decode is malformed.
     #[test]
     fn a_run_entry_of_another_rule_reads_its_vendor_from_the_record() {
+        use std::os::unix::fs::FileExt as _;
         let root = scratch("runs-rule");
         let journal = Journal::at(&root);
         journal.append(&run_record()).expect("lands");
@@ -5239,7 +5240,6 @@ mod cloud_mutant_tests {
             assert_eq!(index.malformed, 0);
         }
         // The record itself damaged: nothing to read the vendor from.
-        use std::os::unix::fs::FileExt as _;
         std::fs::OpenOptions::new()
             .write(true)
             .open(&journal.path)

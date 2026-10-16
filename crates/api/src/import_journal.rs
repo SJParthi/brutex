@@ -1060,12 +1060,13 @@ mod cloud_mutant_tests {
     /// on both caps).
     #[test]
     fn faults_past_the_cap_are_counted_and_only_the_first_32_named() {
+        use std::fmt::Write as _;
         let mut text = String::new();
         for n in 0..40 {
-            text.push_str(&format!("done ind{n} (torn)\n"));
+            let _infallible = writeln!(text, "done ind{n} (torn)");
         }
         for n in 0..40 {
-            text.push_str(&format!("nonsense {n}\n"));
+            let _infallible = writeln!(text, "nonsense {n}");
         }
         let root = journal("cloud-fault-cap", &text);
         let parsed = snapshot(&root).expect("reads").parsed;
