@@ -2143,6 +2143,44 @@ mod bars_series_rs {
         }
     }
 
+    /// **AN INSTANT PAST THE CALENDAR'S LAST YEAR IS AFTER EVERY ROW, AND ONE
+    /// BEFORE THE EPOCH IS BEFORE EVERY ROW.** `at=` takes any whole number of
+    /// unix seconds, so 10000-01-01 reaches the window; the calendar names no
+    /// day past 9999. Ascending, every row is before it (index 2 of 2) and
+    /// descending none is after it (index 0); a microsecond before the epoch
+    /// is the mirror. Before the fix the far instant ranked as BEFORE every
+    /// row — `bucket_of` answered `-1`, "before the first month", for any day
+    /// it could not name — so ascending said 0 and descending 2, and the page
+    /// served for `at=` was the wrong end of the window. Kills `bucket_of`'s
+    /// `delete -`, which made that same `-1` a `1`.
+    #[test]
+    fn bars_series_an_instant_past_the_calendar_is_after_every_row() {
+        let scratch = Scratch::new("series-at-far");
+        for m in [4, 5] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[(open_of(m, 2), 10)],
+            );
+        }
+        let year_10000 = 253_402_300_800_i64 * 1_000_000;
+        for (at, desc, want) in [
+            (year_10000, false, 2),
+            (year_10000, true, 0),
+            (-1, false, 0),
+            (-1, true, 2),
+        ] {
+            let mut asked = query(month(4), month(5));
+            asked.at = Some(at);
+            asked.desc = desc;
+            let got = window(scratch.root(), &asked).expect("answers");
+            assert_eq!(got.at_index, Some(want), "at {at} desc {desc}");
+        }
+    }
+
     /// **`at` NAMES THE GLOBAL INDEX OF AN INSTANT INSIDE A MONTH'S RECORDS,
     /// OF ONE IN A LATER MONTH WITH NOTHING STORED, AND OF ONE PAST THE
     /// RANGE.** Runs `rank`'s locate inside a run, its empty-bucket answer and

@@ -925,14 +925,18 @@ impl SeriesPlan {
     fn bucket_of(&self, ts: i64) -> i64 {
         match self.buckets {
             Buckets::Months { first, .. } => {
-                let day = day_of(ts);
-                u32::try_from(day)
-                    .ok()
-                    .and_then(|day| pull::session::Day::from_days(day).ok())
-                    .map_or(-1, |day| {
-                        (i64::from(day.year()) * 12 + i64::from(day.month()))
-                            - (i64::from(first.year()) * 12 + i64::from(first.month()))
-                    })
+                // A DAY BEFORE THE EPOCH IS BEFORE EVERY MONTH, AND A DAY PAST
+                // THE CALENDAR'S LAST YEAR IS AFTER EVERY MONTH. `at=` takes
+                // any whole unix second and the calendar names no day past
+                // 9999: both used to answer `-1`, so an instant in the year
+                // 10000 ranked BEFORE every row.
+                let Ok(day) = u32::try_from(day_of(ts)) else {
+                    return -1;
+                };
+                pull::session::Day::from_days(day).map_or(i64::MAX, |day| {
+                    (i64::from(day.year()) * 12 + i64::from(day.month()))
+                        - (i64::from(first.year()) * 12 + i64::from(first.month()))
+                })
             }
             Buckets::Days { first, .. } => day_of(ts) - first,
         }
