@@ -1329,3 +1329,64 @@ fn the_store_refusal_sentences_name_the_file_and_the_reason() {
         assert_eq!(conflict.to_string(), text);
     }
 }
+
+/// **A BATCH THAT RESTATES THE START OF THE HELD RANGE, SKIPS THE REST AND
+/// RUNS PAST IT IS REFUSED AT THE FIRST HELD BAR IT SKIPPED.**
+///
+/// Covers `BarFile::diagnose_overlap`'s walk past the held range: the
+/// overlap's first two bars match what the month holds, the batch then
+/// jumps beyond the last held bar, and the refusal names the third held bar
+/// as skipped, at the batch position where it should have been. Nothing is
+/// written.
+#[test]
+fn a_batch_that_skips_held_bars_and_runs_past_them_is_refused_where_it_skipped() {
+    use store::file::{BarFile, Conflict, StoreError};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("overlap-skipped");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 10)).unwrap();
+    let batch = [second_bar(0, 0), second_bar(1, 0), second_bar(20, 0)];
+    match writer.append(&batch) {
+        Err(StoreError::OverlapDisagrees {
+            at,
+            ts_micros,
+            conflict,
+            ..
+        }) => {
+            assert_eq!(
+                (at, ts_micros, conflict),
+                (2, second_bar(2, 0).ts_micros, Conflict::Skipped)
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(writer.header().n_valid, 10, "nothing written");
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A DURABLE BATCH HOLDS EACH DIRECTORY ONCE, AND A SEALED ONE HOLDS
+/// NOTHING MORE.**
+///
+/// Covers `DurableBatch::defer_directory`: a directory deferred twice is one
+/// flush when the batch is made durable, and after that the batch is sealed,
+/// so a later name's flush is the writer's own (`false`) rather than one a
+/// finished batch would never issue.
+#[test]
+fn a_durable_batch_holds_a_directory_once_and_a_sealed_one_nothing() {
+    use store::file::{BatchFlush, DurableBatch};
+    let dir = scratch("batch-directory");
+    let file_path = dir.join("held.bin");
+    fs::write(&file_path, b"synthetic").unwrap();
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.defer_directory(&dir));
+    assert!(batch.defer_directory(&dir), "the same directory again");
+    let made = batch.make_durable(1).unwrap();
+    assert_eq!((made.directories, made.files), (1, 0));
+    assert!(!batch.defer_directory(&dir), "sealed");
+    let file = fs::File::open(&file_path).unwrap();
+    assert!(!batch.defer_file(&file, &file_path).unwrap(), "sealed");
+    let _ignored = fs::remove_dir_all(&dir);
+}
