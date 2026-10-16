@@ -27,7 +27,7 @@
 //! No benchmarking framework, for the reason `crates/costs/benches/ratio.rs`
 //! gives: it would be a dependency.
 
-#![allow(clippy::inconsistent_digit_grouping, clippy::too_many_lines)]
+#![allow(clippy::inconsistent_digit_grouping)]
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -126,59 +126,86 @@ fn order(side: OrderSide, quantity: i64, price: i64) -> Option<Order> {
     }
 }
 
-fn main() {
-    println!("CHG-1 charge stack — {SAMPLES} samples of {BATCH} calls each, per call:");
-    let Ok(day) = TradeDay::new(2026, 10, 15) else {
-        println!("  BENCH SETUP FAILED: the trade day");
-        std::process::exit(1);
-    };
-    let intraday = TradeKind::Equity(Product::Intraday);
-    let Ok(card) = RateCard::resolve(intraday, Exchange::Nse, day, RateSelector::default()) else {
-        println!("  BENCH SETUP FAILED: the rate card");
-        std::process::exit(1);
-    };
-    let (Some(small_buy), Some(small_sell), Some(huge_buy), Some(huge_sell)) = (
-        order(OrderSide::Buy, 1, 1_00),
-        order(OrderSide::Sell, 1, 1_01),
-        order(OrderSide::Buy, 10_000_000, 100_000_00),
-        order(OrderSide::Sell, 10_000_000, 100_100_00),
-    ) else {
-        std::process::exit(1);
-    };
+/// Everything the measurements share, built once.
+struct Fixture {
+    day: TradeDay,
+    fresh: ClientSecurityDay,
+    crowded: ClientSecurityDay,
+    small_buy: Order,
+    small_sell: Order,
+    huge_buy: Order,
+    huge_sell: Order,
+}
 
-    // Per executed order: one `add` on a day that already holds orders.
+const INTRADAY: TradeKind = TradeKind::Equity(Product::Intraday);
+
+/// The fixture, or a loud failure: the bench refuses to measure something it
+/// could not set up, rather than measuring something else.
+fn fixture() -> Option<Fixture> {
+    let day = TradeDay::new(2026, 10, 15).ok()?;
+    let card = RateCard::resolve(INTRADAY, Exchange::Nse, day, RateSelector::default()).ok()?;
+    let small_buy = order(OrderSide::Buy, 1, 1_00)?;
+    let small_sell = order(OrderSide::Sell, 1, 1_01)?;
     let fresh = ClientSecurityDay::with_card(card);
-    let add_small = spread(|| {
-        let mut d = black_box(fresh);
-        d.add(black_box(small_buy))
-    });
-    let add_huge = spread(|| {
-        let mut d = black_box(fresh);
-        d.add(black_box(huge_buy))
-    });
     let mut crowded = fresh;
     for _ in 0..1_000_000 {
-        if crowded.add(small_buy).and(crowded.add(small_sell)).is_err() {
-            println!("  BENCH SETUP FAILED: a million orders");
-            std::process::exit(1);
-        }
+        crowded.add(small_buy).ok()?;
+        crowded.add(small_sell).ok()?;
     }
-    let add_crowded = spread(|| {
-        let mut d = black_box(crowded);
-        d.add(black_box(small_buy))
-    });
-    report("per order: add, one share at ₹1", add_small);
-    report("per order: add, a crore of shares at ₹1,00,000", add_huge);
-    report(
-        "per order: add, to a day already holding 2,000,000",
-        add_crowded,
-    );
+    Some(Fixture {
+        day,
+        fresh,
+        crowded,
+        small_buy,
+        small_sell,
+        huge_buy: order(OrderSide::Buy, 10_000_000, 100_000_00)?,
+        huge_sell: order(OrderSide::Sell, 10_000_000, 100_100_00)?,
+    })
+}
 
-    // Per client-security-day: open (resolve the card), two orders, settle.
-    let whole_day = |buy: Order, sell: Order| {
-        move || {
+/// C-CHG-01 — one executed order costs the same whatever its size.
+fn an_orders_cost_does_not_track_its_size(f: &Fixture) -> bool {
+    let add = |order: Order| {
+        let fresh = f.fresh;
+        spread(move || {
+            let mut d = black_box(fresh);
+            d.add(black_box(order))
+        })
+    };
+    let small = add(f.small_buy);
+    let huge = add(f.huge_buy);
+    report("per order: add, one share at ₹1", small);
+    report("per order: add, a crore of shares at ₹1,00,000", huge);
+    ratio("C-CHG-01 add: a crore of shares vs one share", small, huge)
+}
+
+/// C-CHG-02 — the 2,000,001st order costs what the first did.
+fn an_orders_cost_does_not_track_the_orders_before_it(f: &Fixture) -> bool {
+    let (fresh, crowded, buy) = (f.fresh, f.crowded, f.small_buy);
+    let first = spread(move || {
+        let mut d = black_box(fresh);
+        d.add(black_box(buy))
+    });
+    let later = spread(move || {
+        let mut d = black_box(crowded);
+        d.add(black_box(buy))
+    });
+    report("per order: add, to a day already holding 2,000,000", later);
+    ratio(
+        "C-CHG-02 add: the 2,000,001st order vs the first",
+        first,
+        later,
+    )
+}
+
+/// C-CHG-03 — a whole client-security-day (open, two orders, settle) costs
+/// the same whatever its size.
+fn a_days_cost_does_not_track_its_size(f: &Fixture) -> bool {
+    let day = f.day;
+    let whole_day = move |buy: Order, sell: Order| {
+        spread(move || {
             let mut d = ClientSecurityDay::open(
-                black_box(intraday),
+                black_box(INTRADAY),
                 black_box(Exchange::Nse),
                 black_box(day),
                 RateSelector::default(),
@@ -186,35 +213,66 @@ fn main() {
             d.add(buy)?;
             d.add(sell)?;
             d.settle()
-        }
+        })
     };
-    let day_small = spread(whole_day(small_buy, small_sell));
-    let day_huge = spread(whole_day(huge_buy, huge_sell));
+    let small = whole_day(f.small_buy, f.small_sell);
+    let huge = whole_day(f.huge_buy, f.huge_sell);
     report(
         "per client-security-day: open + 2 orders + settle, small",
-        day_small,
+        small,
     );
     report(
         "per client-security-day: open + 2 orders + settle, huge",
-        day_huge,
+        huge,
     );
+    ratio("C-CHG-03 day: huge vs small", small, huge)
+}
 
-    // Settlement alone, of one round trip and of two million orders.
-    let mut one_trip = fresh;
+/// C-CHG-04 — settling a day of two million orders costs what settling two
+/// does: the day keeps totals and never walks its orders.
+fn settling_does_not_track_how_many_orders_the_day_holds(f: &Fixture) -> bool {
+    let mut one_trip = f.fresh;
     if one_trip
-        .add(small_buy)
-        .and(one_trip.add(small_sell))
+        .add(f.small_buy)
+        .and(one_trip.add(f.small_sell))
         .is_err()
     {
-        std::process::exit(1);
+        println!("  BENCH SETUP FAILED: one round trip");
+        return false;
     }
-    let settle_one = spread(|| black_box(one_trip).settle());
-    let settle_crowded = spread(|| black_box(crowded).settle());
-    report("settle: a day of 2 orders", settle_one);
-    report("settle: a day of 2,000,000 orders", settle_crowded);
+    let crowded = f.crowded;
+    let two = spread(move || black_box(one_trip).settle());
+    let many = spread(move || black_box(crowded).settle());
+    report("settle: a day of 2 orders", two);
+    report("settle: a day of 2,000,000 orders", many);
+    ratio("C-CHG-04 settle: 2,000,000 orders vs 2", two, many)
+}
 
-    // The dated selector: the regime walks on top of the same stack.
-    let dated_option_day = spread(|| {
+/// C-CHG-05 — a calculator quote costs the same whatever its size.
+fn a_calculator_quote_does_not_track_its_size() -> bool {
+    let quoted = |quantity: i64, buy: i64, sell: i64| {
+        spread(move || {
+            quote(
+                black_box(INTRADAY),
+                Exchange::Nse,
+                black_box(quantity),
+                Some(Paisa::from_raw(buy)),
+                Some(Paisa::from_raw(sell)),
+            )
+        })
+    };
+    let small = quoted(1, 1_00, 1_01);
+    let huge = quoted(10_000_000, 100_000_00, 100_100_00);
+    report("Dhan calculator quote, small", small);
+    report("Dhan calculator quote, huge", huge);
+    ratio("C-CHG-05 Dhan quote: huge vs small", small, huge)
+}
+
+/// Reported, not gated: opening a day under the dated selector, which adds
+/// the regime's compile-time-bounded walks to the card.
+fn the_dated_selector_cost(f: &Fixture) {
+    let day = f.day;
+    let dated = spread(move || {
         ClientSecurityDay::open(
             TradeKind::Options,
             Exchange::Nse,
@@ -222,52 +280,22 @@ fn main() {
             RateSelector::Dated,
         )
     });
-    report(
-        "open a dated options day (regime lookups)",
-        dated_option_day,
-    );
+    report("open a dated options day (regime lookups)", dated);
+}
 
-    // The calculator replica, per quote.
-    let dhan_small = spread(|| {
-        quote(
-            black_box(intraday),
-            Exchange::Nse,
-            black_box(1),
-            Some(Paisa::from_raw(1_00)),
-            Some(Paisa::from_raw(1_01)),
-        )
-    });
-    let dhan_huge = spread(|| {
-        quote(
-            black_box(intraday),
-            Exchange::Nse,
-            black_box(10_000_000),
-            Some(Paisa::from_raw(100_000_00)),
-            Some(Paisa::from_raw(100_100_00)),
-        )
-    });
-    report("Dhan calculator quote, small", dhan_small);
-    report("Dhan calculator quote, huge", dhan_huge);
-
-    println!("ratios of medians, ceiling 3.000x:");
+fn main() {
+    println!("CHG-1 charge stack — {SAMPLES} samples of {BATCH} calls each, per call:");
+    let Some(f) = fixture() else {
+        println!("  BENCH SETUP FAILED: the fixture");
+        std::process::exit(1);
+    };
     let mut ok = true;
-    ok &= ratio(
-        "C-CHG-01 add: a crore of shares vs one share",
-        add_small,
-        add_huge,
-    );
-    ok &= ratio(
-        "C-CHG-02 add: the 2,000,001st order vs the first",
-        add_small,
-        add_crowded,
-    );
-    ok &= ratio("C-CHG-03 day: huge vs small", day_small, day_huge);
-    ok &= ratio(
-        "C-CHG-04 settle: 2,000,000 orders vs 2",
-        settle_one,
-        settle_crowded,
-    );
-    ok &= ratio("C-CHG-05 Dhan quote: huge vs small", dhan_small, dhan_huge);
+    ok &= an_orders_cost_does_not_track_its_size(&f);
+    ok &= an_orders_cost_does_not_track_the_orders_before_it(&f);
+    ok &= a_days_cost_does_not_track_its_size(&f);
+    ok &= settling_does_not_track_how_many_orders_the_day_holds(&f);
+    ok &= a_calculator_quote_does_not_track_its_size();
+    the_dated_selector_cost(&f);
     if !ok {
         println!("CHG-1 STACK BENCH FAILED: a ratio breached its ceiling");
         std::process::exit(1);
