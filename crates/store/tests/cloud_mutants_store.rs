@@ -3176,3 +3176,21 @@ fn a_batch_asked_for_two_threads_flushes_on_two_at_once() {
     assert!(made.flushes >= 2, "{made:?}");
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **A GENERATION POINTER'S REFUSAL SAYS WHICH POINTER AND WHY.**
+///
+/// Kills `replace write_generation -> fmt::Result with Ok(Default::default())`,
+/// which would print nothing for a refused generation pointer.
+#[test]
+fn a_generation_pointer_refusal_says_which_pointer_and_why() {
+    use store::file::StoreError;
+    let refusal = StoreError::Generation {
+        path: PathBuf::from("/nonexistent/cloud/2031-02.gen"),
+        reason: "it names a revision that is not there".to_owned(),
+    };
+    assert_eq!(
+        refusal.to_string(),
+        "/nonexistent/cloud/2031-02.gen: the month's generation pointer refused: it names a \
+         revision that is not there"
+    );
+}
