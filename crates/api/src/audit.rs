@@ -5389,4 +5389,22 @@ mod cloud_mutant_tests {
             "the one record that was there was filed"
         );
     }
+
+    /// A run opened behind earlier records names its own opening record's
+    /// ordinal, and its last record moves with each failure it appends
+    /// (kills `Thread::first -> 0`).
+    #[test]
+    fn a_threads_first_record_is_its_own_opening_records_ordinal() {
+        let root = scratch("thread-first");
+        let journal = Journal::at(&root);
+        journal.append(&run_record()).expect("an earlier record");
+        journal.append(&run_record()).expect("another");
+        let head = Record::opened(Scope::Spot, at(200), "kite", window(), 1, 7);
+        let mut thread = journal.open_run(&head).expect("opened");
+        assert_eq!((thread.first(), thread.last()), (2, 2));
+        journal
+            .append_failure(&mut thread, &member("a gap"), "a gap")
+            .expect("a failure lands");
+        assert_eq!((thread.first(), thread.last()), (2, 3));
+    }
 }
