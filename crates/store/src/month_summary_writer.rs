@@ -18,7 +18,8 @@
 //! same file, fewer rows, its last row the stamp it names) is EXTENDED: the
 //! rows committed since are read back and folded in, `O(batch)`. Anything else
 //! — no summary, a torn or foreign one, a repaired month, a month whose seconds
-//! the density rule now wants — is built WHOLE from every committed row, once.
+//! the density rule now wants — is built WHOLE from every committed row, and
+//! the `store.sum` log names that write and why (a month's first included).
 //! Either way the new bytes are written to `<yyyy-mm>.new.sum` (a new inode,
 //! [`crate::staging`]) and renamed over `<yyyy-mm>.sum`, so a reader never
 //! sees a file change under it.
@@ -123,13 +124,12 @@ impl BarFile {
                 .map_err(|why| why.to_string())
                 .and_then(|summary| write_summary(sidecar, &summary))
                 .map(|()| {
-                    // SILENT FOR A MONTH THAT HAD NONE: the writer's ordinary
-                    // upkeep, as a first `.srt` is. A summary replaced for any
-                    // other reason (torn, foreign, rewritten) is a state
-                    // change the log names.
-                    if !because.starts_with(Refused::Absent.reason()) {
-                        note_summary_built(&sidecar.path, &because, self.header.n_valid);
-                    }
+                    // EVERY WHOLE WRITE IS NAMED, a month's first one
+                    // included (rule 3: every state change is logged). One
+                    // line a month when it first reaches the threshold, as
+                    // gate 17's one event per instrument-month allows; the
+                    // per-commit extension below stays silent upkeep.
+                    note_summary_built(&sidecar.path, &because, self.header.n_valid);
                 }),
         });
         if let Err(why) = kept {
@@ -184,8 +184,15 @@ impl BarFile {
         }
         summary.bind(&self.header);
         if summary.wants_seconds() {
-            // DENSE NOW, AND ITS SECONDS WERE NOT KEPT: once, whole.
+            // DENSE NOW, AND ITS SECONDS WERE NOT KEPT: the month is read
+            // whole, O(n_valid), and the log says so. This runs on EVERY
+            // commit that takes the month back over the half line, so a
+            // month whose density moves back and forth across it pays it on
+            // each such commit (the bound in `crate::month_summary`).
             summary = self.whole_summary().map_err(|why| why.to_string())?;
+            write_summary(sidecar, &summary)?;
+            note_summary_built(&sidecar.path, DENSE_AGAIN, self.header.n_valid);
+            return Ok(());
         }
         write_summary(sidecar, &summary)
     }
@@ -307,7 +314,12 @@ fn note_summary_lags(path: &Path, why: &str, n_valid: u64) {
     );
 }
 
-/// `store.sum`, INFO: the rebuild door wrote a month's summary whole, and why.
+/// Why a month that was sparse was read whole at this commit.
+const DENSE_AGAIN: &str = "dense_again: the month holds at least half the seconds it spans \
+     again and its seconds were not kept, so it was read whole to keep them (D-4980)";
+
+/// `store.sum`, INFO: a month's summary was written whole (its first, one
+/// replaced, one rebuilt by the door, or a month dense again), and why.
 fn note_summary_built(path: &Path, why: &str, n_valid: u64) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("store.sum", "month summary written whole")

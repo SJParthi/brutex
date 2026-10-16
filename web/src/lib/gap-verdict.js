@@ -7,8 +7,9 @@
  *   lost_minutes: number,
  *   unmeasured_minutes: number,
  *   truncated: boolean,
- *   unreadable_records: number,
+ *   unreadable_records: number | null,
  *   invalid_timestamps?: number,
+ *   summary?: string,
  *   absent_file: string | null,
  *   evidence_error?: string | null
  * }} MonthEvidence
@@ -35,7 +36,13 @@ export function monthVerdict(month) {
   if (
     month.absent_file !== null ||
     month.truncated !== false ||
-    month.unreadable_records !== 0 ||
+    // NULL ONLY WHERE NOTHING WAS READ (R3-06): a month answered off its kept
+    // summary read no record, so the server sends `null` rather than a `0` it
+    // never counted. Anywhere else a null is a missing field, not a zero.
+    !(
+      month.unreadable_records === 0 ||
+      (month.unreadable_records === null && month.summary === 'kept')
+    ) ||
     (month.invalid_timestamps !== undefined && month.invalid_timestamps !== 0) ||
     month.unmeasured_minutes !== 0 ||
     month.lost_minutes !== 0 ||
@@ -146,7 +153,12 @@ export function readFrom(month) {
   const records = typeof month.bar_records_read === 'number' ? month.bar_records_read : null;
   switch (month.summary) {
     case 'kept':
-      return { kind: 'kept', word: 'summary', why: 'read off the month summary; no bar record read' };
+      return {
+        kind: 'kept',
+        word: 'summary',
+        why:
+          'read off the month summary; no bar record read, so a record damaged after the summary was written is not checked here'
+      };
     case 'built':
       return {
         kind: 'built',

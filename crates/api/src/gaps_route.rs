@@ -1165,8 +1165,13 @@ struct AuditedMonth {
     absent_file: Option<String>,
     /// Missing/corrupt dated session evidence is not a missing bar file.
     evidence_error: Option<String>,
-    /// Records `bars::page` could not read.
-    unreadable: usize,
+    /// Records `bars::page` could not read, or `None` when no record was
+    /// read because the month's kept summary answered: rendered `null`,
+    /// NOT `0`. A kept summary was built from a full read of the committed
+    /// records when it was written, but damage to a record after that is not
+    /// seen without reading the bars, and a `0` would claim a check this
+    /// answer never made (R3-06 repair).
+    unreadable: Option<usize>,
     /// Whether `MAX_GAPS` stopped this month's walk.
     truncated: bool,
     /// The runs, already rendered.
@@ -1194,7 +1199,8 @@ impl AuditedMonth {
             self.absent,
             self.unmeasured,
             self.truncated,
-            self.unreadable,
+            self.unreadable
+                .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.invalid_timestamps,
             self.absent_file
                 .as_ref()
@@ -1311,7 +1317,7 @@ fn audit_one(
         unmeasured: 0,
         absent_file,
         evidence_error: None,
-        unreadable: 0,
+        unreadable: Some(0),
         truncated: false,
         runs: String::new(),
         seconds: String::new(),
@@ -1480,7 +1486,9 @@ fn audit_one(
         evidence_error: None,
         // RECORDS, NOT SENTENCES: `page` coalesces a run of refusals into
         // one sentence (DB-B75) and counts every record.
-        unreadable: usize::try_from(input.unreadable).unwrap_or(usize::MAX),
+        unreadable: input
+            .unreadable
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
         truncated: ledger.truncated,
         runs,
         seconds: members,
@@ -1519,8 +1527,8 @@ struct MonthInput {
     fallback: Option<String>,
     /// Bar records read to answer: zero when the summary was kept.
     records_read: u64,
-    /// Records `bars::page` could not read.
-    unreadable: u64,
+    /// Records `bars::page` could not read; `None` when no record was read.
+    unreadable: Option<u64>,
     absent_file: Option<String>,
     /// The fold's refusal of a one-second month's rows, in its own words.
     fold_error: Option<String>,
@@ -1549,7 +1557,7 @@ fn month_input(
                 source: SummarySource::AbsentFile,
                 fallback: None,
                 records_read: 0,
-                unreadable: 0,
+                unreadable: Some(0),
                 absent_file: Some(why),
                 fold_error: None,
             };
@@ -1583,7 +1591,8 @@ fn month_input(
                 source: SummarySource::Kept,
                 fallback: None,
                 records_read: 0,
-                unreadable: 0,
+                // NOT READ, so not counted: see `AuditedMonth::unreadable`.
+                unreadable: None,
                 absent_file: None,
                 fold_error: None,
             };
@@ -1614,7 +1623,7 @@ fn month_input(
         records_read: u64::try_from(rows.len())
             .unwrap_or(u64::MAX)
             .saturating_add(faults.records()),
-        unreadable: faults.records(),
+        unreadable: Some(faults.records()),
         absent_file: None,
         fold_error,
     }
@@ -3162,6 +3171,17 @@ mod tests {
         if let Some(months) = body["month"].as_array_mut() {
             for month in months {
                 if let Some(object) = month.as_object_mut() {
+                    // HOW, NOT WHAT: a kept month read no record and counts
+                    // none (`null`); a built one counts what it read. Each is
+                    // checked against its source, then set aside.
+                    let unread = object.remove("unreadable_records");
+                    let kept =
+                        object.get("summary").and_then(serde_json::Value::as_str) == Some("kept");
+                    assert_eq!(
+                        unread.as_ref().is_some_and(serde_json::Value::is_null),
+                        kept,
+                        "unreadable_records is null exactly when the summary was kept: {unread:?}"
+                    );
                     object.remove("summary");
                     object.remove("summary_fallback");
                     object.remove("bar_records_read");
@@ -3177,8 +3197,8 @@ mod tests {
     /// and says zero. And the proof that does not trust that count: every
     /// record in the middle of both months is then overwritten with garbage
     /// in place (the test's own store), and the answer does not move by one
-    /// byte and names no unreadable record -- a reader that read a bar would
-    /// have read garbage. Only when the summary itself is spoiled are the
+    /// byte and still counts no record it did not read (`null`) -- a reader
+    /// that read a bar would have read garbage. Only when the summary itself is spoiled are the
     /// bars read, named as the fallback, and the garbage shows.
     #[tokio::test]
     #[expect(
@@ -3249,7 +3269,12 @@ mod tests {
             assert!(kept["month"][0]["summary_fallback"].is_null(), "{query}");
             assert_eq!(kept["summaries"]["kept"], 1, "{query}");
             assert_eq!(kept["summaries"]["bar_records_read"], 0, "{query}");
-            assert_eq!(kept["month"][0]["unreadable_records"], 0, "{query}");
+            // NOT READ, SO NOT CLAIMED: a kept answer read no record and
+            // says so with `null`, never a `0` it did not count.
+            assert!(
+                kept["month"][0]["unreadable_records"].is_null(),
+                "{query}: {kept}"
+            );
             assert!(kept["lost_minutes"].as_u64().is_some(), "{query}: {kept}");
 
             // GARBAGE IN EVERY MIDDLE RECORD: the answer cannot move.

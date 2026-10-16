@@ -51,8 +51,21 @@
 //! of a sealed bar's three bytes). The rule is judged at every write: a month
 //! an append takes under half drops its seconds at that write, and a month
 //! whose seconds were dropped or never kept is rebuilt whole the first time an
-//! append makes it dense again, so the whole build runs once per crossing of
-//! the half line, never once per commit. Only the index audit needs seconds
+//! append makes it dense again.
+//!
+//! **The bound, stated honestly (R3-06 repair).** The whole build runs once
+//! per UPWARD crossing of the half line, and it costs `O(n_valid)`: every
+//! committed row is read again. A month whose density moves back and forth
+//! across the line pays that on every commit that takes it back over, which
+//! in the worst case is every second commit, so the writer's step is
+//! `O(batch)` per commit except on those commits, where it is `O(n_valid)`
+//! (at most 2,678,400 rows, a one-second month of 31 whole days). It is not
+//! amortised away. Hysteresis (keeping seconds down to a quarter once kept)
+//! would make it so, and was refused: the bytes would then depend on how the
+//! commits were batched rather than on the bars, and a sealed month's `.sbar`
+//! carries these bytes as a pure function of its inputs (D-4965). Each such
+//! rebuild is a `store.sum` INFO line, `dense_again`, so how often it happens
+//! is read off the log, not assumed. Only the index audit needs seconds
 //! (a trade-driven series owes no count, D-3336 §2), and an index publishes
 //! every second, so its months are dense; a month whose seconds are not kept
 //! is NAMED by the reader that needed them, which then reads the bars.
@@ -550,7 +563,7 @@ impl MonthSummary {
     }
 
     /// A finer-than-minute month that is dense now but whose seconds were not
-    /// kept: its writer rebuilds it whole, once (the module header).
+    /// kept: its writer rebuilds it whole at that commit (the module header).
     #[must_use]
     pub fn wants_seconds(&self) -> bool {
         !self.seconds

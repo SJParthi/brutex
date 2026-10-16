@@ -85,7 +85,7 @@
    *   lost_minutes: number,
    *   absent_minutes: number,
    *   truncated: boolean,
-   *   unreadable_records: number,
+   *   unreadable_records: number | null,
    *   invalid_timestamps?: number,
    *   absent_file: string | null,
    *   evidence_error?: string | null,

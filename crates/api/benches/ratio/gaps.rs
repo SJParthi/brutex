@@ -10,7 +10,7 @@
 //! |---|---|
 //! | one one-second index month of 1,024, 10,240 and 102,400 bars (`MONTH_SIZES`), its summary kept | p99 at 10x and 100x within [`RATIO_CEILING_PERMILLE`] of 1x, and the answer says `kept` and zero bar records read |
 //! | the same months with the summary spoiled, so the bars are read | printed, unasserted: it is the slow path a `built` answer names, and it grows with the bars by design |
-//! | 24 and 240 one-minute months, each with its summary kept | p99 at 240 within [`SPAN_CEILING_PERMILLE`] (ten times) of 24: linear in the months asked, never in their bars |
+//! | 240 one-minute months 2006-01..2025-12 with their summaries kept, asked whole and as the ten 24-month tiles that cover them, each round asking the whole once and every tile once (`SPAN_ROUNDS` rounds, order alternating) | the whole's p99 within [`SPAN_CEILING_PERMILLE`] (one and a half times) of the p99 of each round's ten tile times summed: linear in the months asked, never in their bars, comparing the same months over the same exposure to load (`spans_are_bounded`) |
 //! | a 375-bar commit onto a 1x, 10x and 100x month, and the summary step's own work on the same months | printed both, unasserted: the step's work is a read, a fold of the batch and a write of a few kilobytes |
 //!
 //! R3-06 owns this file. Each fixture root is a new directory of this run's
@@ -26,8 +26,12 @@ use super::{MONTH_SIZES, RATIO_CEILING_PERMILLE, month_file, ratio, refuse};
 /// Requests per timed row.
 const REQUESTS: usize = 200;
 
-/// A span of ten times the months may cost at most ten times as much.
-const SPAN_CEILING_PERMILLE: u128 = 10_000;
+/// The whole span may cost at most one and a half times its ten tiles asked
+/// one by one in the same round. Linear in the months, it costs no more than
+/// they do (one fixed cost against ten); a term in the months squared makes
+/// it up to ten times more. The half is headroom for one answer touching ten
+/// times the memory, and for two p99s that are each an order statistic.
+const SPAN_CEILING_PERMILLE: u128 = 1_500;
 
 /// Commits per timed commit row.
 const COMMITS: usize = 100;
@@ -42,8 +46,27 @@ fn percentiles(samples: &mut [u128]) -> (u128, u128, u128) {
     (at(50), at(99), samples.last().copied().unwrap_or(0))
 }
 
-/// Times `n` sequential `/gaps.json?{query}` answers over `site`; refuses
-/// the row when an answer is not a 200 that contains `must`.
+/// Times one `/gaps.json?{query}` answer over `site`, in nanoseconds;
+/// refuses the row when the answer is not a 200 that contains `must`.
+fn once(
+    runtime: &tokio::runtime::Runtime,
+    site: &api::server::Loaded,
+    query: &str,
+    must: &str,
+) -> u128 {
+    let start = Instant::now();
+    let (code, body) = runtime.block_on(gaps_answer(std::sync::Arc::clone(site), query));
+    let took = start.elapsed().as_nanos();
+    if code != 200 || !body.contains(must) {
+        refuse(&format!(
+            "/gaps.json?{query} answered {code} without {must}: {}",
+            body.get(..400).unwrap_or(&body)
+        ));
+    }
+    took
+}
+
+/// Times `n` sequential `/gaps.json?{query}` answers over `site` ([`once`]).
 fn timed(
     runtime: &tokio::runtime::Runtime,
     site: &api::server::Loaded,
@@ -51,18 +74,7 @@ fn timed(
     must: &str,
     n: usize,
 ) -> (u128, u128, u128) {
-    let mut samples = Vec::with_capacity(n);
-    for _ in 0..n {
-        let start = Instant::now();
-        let (code, body) = runtime.block_on(gaps_answer(std::sync::Arc::clone(site), query));
-        samples.push(start.elapsed().as_nanos());
-        if code != 200 || !body.contains(must) {
-            refuse(&format!(
-                "/gaps.json?{query} answered {code} without {must}: {}",
-                body.get(..400).unwrap_or(&body)
-            ));
-        }
-    }
+    let mut samples: Vec<u128> = (0..n).map(|_| once(runtime, site, query, must)).collect();
     percentiles(&mut samples)
 }
 
@@ -217,32 +229,127 @@ fn minute_months(months: u16) -> std::path::PathBuf {
     root
 }
 
-/// 24 and 240 minute months: the span is linear in its months.
+/// Months the span row asks whole, from 2006-01.
+const SPAN_MONTHS: u16 = 240;
+
+/// Months in each of the tiles that cover the span, asked one by one.
+const TILE_MONTHS: u16 = 24;
+
+/// Rounds of the span row: each asks the whole once and every tile once.
+///
+/// Three times [`REQUESTS`] because the gate compares two p99s and each is
+/// an order statistic: at 200 samples it is the second-largest, and in one
+/// quiet run the ten tiles, which cost the same, printed p99s from 10.3 to
+/// 17.2 ms. At 600 it is the sixth-largest of each.
+const SPAN_ROUNDS: usize = 600;
+
+/// The 240-month span against the ten 24-month tiles it is made of, LIKE
+/// WITH LIKE in the months AND in the time each sample is exposed to load
+/// (R3-06 repair 1, D-4980).
+///
+/// **The first row compared different kinds of month.** It timed
+/// 2006-01..2007-12 against 2006-01..2025-12 and held the second to ten
+/// times the first. The calendar of record (D-3336) vouches for days from
+/// `pull::calendar::SOURCED_FIRST_DAY` (2018-01-01): every one of the 24
+/// base months was unmeasured days, which the audit counts and passes over,
+/// and 96 of the 240 were measured days, which it classifies minute by
+/// minute. The tiles printed below are that difference, measured. A ceiling of
+/// ten on ten times the months left no margin for it: the row breached at
+/// 11.1x and 17.6x on one build and passed at 0.9x under load.
+///
+/// **The second compared different exposures.** It asked the same months
+/// whole and as ten tiles, but held the whole's p99 to the SUM of the ten
+/// tiles' own p99s. A tile answer lasts a tenth as long, so a stall of the
+/// machine lands in a tenth as many of them and their p99s stay quiet while
+/// the whole's does not: under load 68-120 the whole's p99 was 1.50x the
+/// summed tile p99s with the medians at 0.99x, a breach made of load.
+///
+/// Now each round asks the whole once and the ten tiles once, in an order
+/// that alternates round by round, and the round's TILE SAMPLE is the sum of
+/// its ten answers' times: one sample of the same months and about the same
+/// wall time as the whole's, so a stall is as likely to land in either. The
+/// gate holds the whole's p99 to [`SPAN_CEILING_PERMILLE`] of the p99 of
+/// those per-round sums. A route linear in its months answers the whole for
+/// no more than its parts (one fixed cost against ten); one with a term in
+/// the months squared answers it for up to ten times more, so the ceiling
+/// still catches what the first row was for, whatever kind each month is.
 fn spans_are_bounded(runtime: &tokio::runtime::Runtime) -> bool {
-    let mut p99 = Vec::new();
-    for (months, to) in [(24_u16, "2007-12"), (240, "2025-12")] {
-        let root = minute_months(months);
-        let site = site_over(&root);
-        let query = format!(
-            "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2006-01&to={to}"
-        );
-        let must = format!(r#""summaries":{{"kept":{months},"built":0,"bar_records_read":0}}"#);
-        let figures = timed(runtime, &site, &query, &must, REQUESTS);
-        print_row(
-            &format!("gaps 1min span of {months} months, kept"),
-            REQUESTS,
-            figures,
-        );
-        p99.push(figures.1);
-        let _ignored = std::fs::remove_dir_all(root);
-    }
-    let (Some(&base), Some(&big)) = (p99.first(), p99.get(1)) else {
-        refuse("two spans measured");
+    let root = minute_months(SPAN_MONTHS);
+    let site = site_over(&root);
+    let named = |index: u16| format!("{:04}-{:02}", 2006 + index / 12, index % 12 + 1);
+    let ask = |from: u16, months: u16| {
+        (
+            named(from),
+            format!(
+                "feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month={}&to={}",
+                named(from),
+                named(from + months - 1)
+            ),
+            format!(r#""summaries":{{"kept":{months},"built":0,"bar_records_read":0}}"#),
+        )
     };
+    let whole = ask(0, SPAN_MONTHS);
+    let tiles: Vec<_> = (0..SPAN_MONTHS / TILE_MONTHS)
+        .map(|tile| ask(tile * TILE_MONTHS, TILE_MONTHS))
+        .collect();
+    let mut whole_ns = Vec::with_capacity(SPAN_ROUNDS);
+    let mut summed_ns = Vec::with_capacity(SPAN_ROUNDS);
+    let mut tile_ns = vec![Vec::with_capacity(SPAN_ROUNDS); tiles.len()];
+    for round in 0..SPAN_ROUNDS {
+        let mut ask_tiles = || {
+            let mut summed = 0_u128;
+            for ((_, query, must), samples) in tiles.iter().zip(&mut tile_ns) {
+                let took = once(runtime, &site, query, must);
+                samples.push(took);
+                summed = summed.saturating_add(took);
+            }
+            summed
+        };
+        // ALTERNATED, so neither side always runs on the other's warm cache.
+        if round % 2 == 0 {
+            whole_ns.push(once(runtime, &site, &whole.1, &whole.2));
+            summed_ns.push(ask_tiles());
+        } else {
+            summed_ns.push(ask_tiles());
+            whole_ns.push(once(runtime, &site, &whole.1, &whole.2));
+        }
+    }
+    let _ignored = std::fs::remove_dir_all(root);
+    for ((from, _, _), samples) in tiles.iter().zip(&mut tile_ns) {
+        print_row(
+            &format!("gaps 1min {TILE_MONTHS} months from {from}, kept"),
+            SPAN_ROUNDS,
+            percentiles(samples),
+        );
+    }
+    let summed = percentiles(&mut summed_ns);
+    print_row(
+        &format!("the {} tiles summed in each round", tiles.len()),
+        SPAN_ROUNDS,
+        summed,
+    );
+    let figures = percentiles(&mut whole_ns);
+    print_row(
+        &format!("gaps 1min span of {SPAN_MONTHS} months, kept"),
+        SPAN_ROUNDS,
+        figures,
+    );
+    // THE MEDIANS TOO, printed and not asserted: the p99 ratio is the gate,
+    // and the p50 one says how close to "the sum of its parts" the whole is.
+    if let Some(permille) = figures.0.saturating_mul(1_000).checked_div(summed.0) {
+        println!(
+            "  {:<46} ratio {}.{:03}x  (printed, unasserted)",
+            format!("gaps p50 span {SPAN_MONTHS} vs its tiles summed"),
+            permille / 1_000,
+            permille % 1_000
+        );
+    }
+    // NANOSECONDS INTO THE PICOSECONDS `ratio` PRINTS: the first row handed
+    // it nanoseconds, so its line read 1,000 times too small.
     ratio(
-        "gaps p99 span 24->240 months",
-        base,
-        big,
+        &format!("gaps p99 span {SPAN_MONTHS} vs its tiles summed"),
+        summed.1.saturating_mul(1_000),
+        figures.1.saturating_mul(1_000),
         SPAN_CEILING_PERMILLE,
     )
 }

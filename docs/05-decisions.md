@@ -69583,9 +69583,19 @@ the numbers to D-4975 are in use or taken in open worktrees on 16 October
    that part at two bits a held second. It is judged at every write: a month
    an append takes under half drops its seconds then, and a month whose
    seconds were dropped or never kept is written whole the first time an
-   append makes it dense again, once per crossing, never once per commit. Only the spot-index one-second audit needs seconds; a
-   reader that needs seconds a summary does not keep reads the bars and says
-   so.
+   append makes it dense again. **That rebuild is `O(n_valid)` and runs on
+   every commit that takes the month back over the half line**, so a month
+   whose density moves back and forth across it pays it as often as every
+   second commit: the step is `O(batch)` per commit except on those commits.
+   (This item first said "once per crossing, never once per commit"; the
+   second half was wrong, and the R3-06 repair corrects it here before the
+   entry lands.) Hysteresis would amortise it and was refused, because the
+   kept bytes would then depend on how commits were batched rather than on the
+   bars, and a sealed month carries them as a pure function of its inputs
+   (D-4965). Each such rebuild is a `store.sum` INFO line, reason
+   `dense_again`, so its frequency is read off the log. Only the spot-index
+   one-second audit needs seconds; a reader that needs seconds a summary does
+   not keep reads the bars and says so.
 5. **The writer's step never refuses a commit.** After the sort index's step,
    on every writer open and commit: extend a summary of the generation before
    by the rows committed since (`O(batch)`), else build it whole; write to
@@ -69595,13 +69605,21 @@ the numbers to D-4975 are in use or taken in open worktrees on 16 October
    magic, CRC, geometry and the header; and for the same reason
    `DurableBatch::confirm_month` passes the `.sum` over as it passes the lock,
    so a confirmed month costs no flush for it (MS-09).
+   **Every whole write is logged**: a month's first `.sum` (reason
+   `absent`, once a month when it reaches 1,024 bars), one replaced (`torn`,
+   `stale`, ...), one the door rebuilt and a month dense again are each one
+   `store.sum` INFO line, "month summary written whole", naming the file, the
+   reason and `n_valid`; the per-commit extension is silent upkeep (MS-12).
 6. **Readers name every fall-back.** `read_beside` refuses by name (`absent`,
    `below_threshold`, `unreadable`, `torn`, `magic`, `checksum`, `version`,
    `shape`, `not_this_month`, `stale`). `/gaps.json` states per month
    `summary` (`kept`, `built`, `absent_file`), `summary_fallback` (the
    refusal, or why a kept summary was not enough: input the fold may refuse,
    seconds not kept) and `bar_records_read`, and per answer
-   `summaries: {kept, built, bar_records_read}`. The summary is opened as
+   `summaries: {kept, built, bar_records_read}`. A kept month reads no record, so it
+   states `unreadable_records: null`, never a `0` it did not count: damage to
+   a record after its summary was written is seen only by a read of the bars
+   (MS-13). The summary is opened as
    every sidecar is (`O_NOFOLLOW | O_NONBLOCK`, regular files only): a link
    at its name is never followed, a FIFO never makes a request wait, and the
    writer refuses such a name before it stages a file

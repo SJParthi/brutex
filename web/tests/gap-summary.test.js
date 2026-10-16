@@ -44,3 +44,8 @@ test('the /gaps page shows how each month and the answer were read', () => {
   assert.match(page, /<th>Read from<\/th>/);
   assert.match(page, /b\.summaries/, 'the census names months read off a summary');
 });
+
+test('a kept summary says a record damaged after it was written is not checked', () => {
+  const read = readFrom({ summary: 'kept', summary_fallback: null, bar_records_read: 0 });
+  assert.match(read.why, /not checked here/);
+});

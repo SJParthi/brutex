@@ -17802,8 +17802,32 @@ The rest of the 60-client requests were the pool's named 429. Cold (the first
 request after a server start, page cache not dropped): 60.0 ms and 67.6 ms
 kept against 718.5 ms and 326.2 ms read from the bars. Gate 8
 (`crates/api/benches/ratio/gaps.rs`, n=200): a kept one-second month of 1,024,
-10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x); a
-24- and a 240-month span p99 11.6 and 46.8 ms (4.04x, ceiling 10x).
+10,240 and 102,400 bars p99 10.7, 5.7 and 10.7 ms (ratios 0.53x and 0.99x).
+
+**The span row compares like with like (R3-06 repair).** It first held a
+2006-01..2007-12 span to a tenth of 2006-01..2025-12, and those are different
+months: the calendar of record vouches for days from 2018-01-01, so all 24
+base months were unmeasured days and 96 of the 240 measured ones, which cost
+more to audit. It breached at 11.1x and 17.6x and passed at 0.9x and 5.1x,
+by load. It now asks the 240 months whole and as the ten 24-month tiles that
+cover them, one of each per round, and holds the whole's p99 to 1.5x the
+tiles' p99s summed. Measured 16 October 2026 (release bench build of
+`fix/db-R3-06`, n=200 a row, load average 25 to 44 on 14 cores): tiles from
+2006 to 2016 p50 4.20 to 4.34 ms and from 2018 to 2024 p50 5.51 to 5.72 ms
+(the era difference, measured), p99 10.3 to 17.2 ms; the ten summed p50
+48.25 ms, p99 138.57 ms; the whole p50 45.97 ms, p99 93.39 ms, max 209.50 ms:
+p99 0.673x (ceiling 1.5x), p50 0.953x. The same comparison over the real
+months on a clone (Zerodha NIFTY 1 min, 2006-10..2026-09, 105 held, `.sum`
+built by `cli msum-build`; curl `time_total`, n=100 rounds, load average
+about 190): whole p50 29.33 ms, p99 101.34 ms; tiles summed p50 36.13 ms,
+p99 148.90 ms; 0.81x and 0.68x. A tile of months with no file answers in
+about 1 ms, one of 24 held months in about 6.8 ms.
+Re-measured on that clone after the repair (n=200, one client, load average
+about 220): Zerodha NIFTY 1 min 2024-10..2026-09 kept p50 4.8 ms, p99 7.5 ms,
+max 10.8 ms; 2006-10..2026-09 p50 20.4 ms, p99 26.0 ms, max 57.5 ms; GDFL
+NIFTY 1 s 2018-09..2019-08 p50 37.8 ms, p99 40.9 ms, max 44.4 ms. Every kept
+month answered `unreadable_records: null`; a 1 s month with no `.sum`
+(2019-09) read 392,147 records and answered `0`.
 
 **Not measured**: `/gaps.json` with an import writing the months it reads (no
 import may run against a shadow whose bars are the real store's); the
@@ -17814,6 +17838,20 @@ measurement); whether the writer's `.sum` step costs less than its `.srt` step
 100x month measured p50 124 to 135 ms, p99 221 to 257 ms with all its steps,
 and the `.sum` step's own work p50 32 to 37 ms, p99 68 to 95 ms, n=100 each, at
 load average above 40).
+
+**The writer's step is not O(1) on every commit (R3-06 repair).** It is
+`O(batch)` when it extends the kept summary, and `O(n_valid)` -- every
+committed row read again, at most 2,678,400 for a one-second month of 31 whole
+days -- on a month's first summary, on a summary refused as torn, foreign or
+rewritten, and on EVERY commit that takes a one-second month back over the
+half line of the density rule (D-4980 item 4). A month whose density moves
+back and forth across that line can pay it on every second commit; it is not
+amortised, and hysteresis that would amortise it was refused because the bytes
+would then depend on how the commits were batched. Each such write is a
+`store.sum` INFO line ("month summary written whole", reason `absent`,
+`dense_again`, ...), so how often it happens is read off the log rather than
+assumed. The rebuild's cost is the rebuild door's: `cli msum-build` wrote 12
+NIFTY 1 s months (5,167,003 bars) in 0.56 s, about 47 ms a month.
 
 **A cost the summary does not remove, owned elsewhere.** A cash stock's minute
 month on or after 2026-08-03 builds its dated cash-session schedule from the
