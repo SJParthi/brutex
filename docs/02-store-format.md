@@ -161,9 +161,23 @@ pulled before an action and one pulled after it may sit here on different
 bases with nothing to tell them apart. numeric-pass16 p16num-2, D-1969.
 
 **`i64::MIN` is the open-interest null sentinel.** Zero means zero. Spot
-indices carry no open interest and store the sentinel; conflating that with a
-genuine zero would make a derivative series and an index series indistinguish-
-able on a field that matters.
+indices and shares carry no open interest; conflating a null with a genuine
+zero would make a derivative series and an index series indistinguishable on a
+field that matters.
+
+**What the store actually holds for them is two things, by landing date.** Rows
+landed since D-3322 (the Kite decode's `withhold`, `crates/pull/src/fetch.rs`,
+pinned by `an_index_or_a_share_is_filed_with_the_null_and_a_contract_keeps_its_interest`)
+store the sentinel, as GDFL's always did. Rows the Zerodha landing filed before
+it store **0**: measured on the operator's store, every NIFTY `1min` bar
+(796,027) and `1day` bar (2,911) holds 0, and the derived rungs folded from
+them inherit it (DB-A08, DB-A14). Those months are not rewritten in place
+(§3 rule 8 of `CLAUDE.md`); a re-landing is a new generation. So a stored 0 on
+an `INDEX` or `CASH` series is NOT a measured zero, and every read says so:
+`/bars.json` and `/bars/window.json` serve `"oi": null` with
+`"oichg_why": "not_a_derivative"` for those segments whatever is stored
+(D-3322 item 2). This sentence used to say spot indices store the sentinel,
+which no Zerodha month landed before D-3322 does (R3-18).
 
 **A record has no structure that a lost write violates.** An all-zero record is
 a legal flat bar whose open interest is a real zero. Nothing about the record
@@ -4114,4 +4128,115 @@ trailing bytes included, is made before the caller's buffer grows: a refused
 frame reserves nothing, and an accepted one reserves its head's rows once
 (FM-284). Invariants SC1-01 to
 SC1-09 in `docs/04-invariants.md`; limits L-SC-1, L-SC-12 and L-SC-15 in
+`docs/06-limits.md`.
+
+## §40 — The tick store's day file, `BRTXTS01` version 1 (D-2801, D-4967)
+
+The GDFL tick store holds one day file (`.bts`) for each vendor day zip: every
+entry of the zip, losslessly, in the zip's central-directory order, with the
+entry's raw name bytes (Windows `\` separators kept), its uncompressed size,
+CRC-32 and DOS date and time. Read by `pull::gdfl_tickstore` (and through it
+`gdfl_cm` and `gdfl_nfo`); written by `pull::tickstore_write` and, for the
+files already on disk, by the separate tool that first defined the format
+(its specification, `tickstore-data/FORMAT.md`, lives outside this
+repository; this section is the repository's copy of what a reader and a
+writer must agree on). Version 1 is frozen: a change mints a new magic
+(`BRTXTS02`) and a version 1 file is never rewritten. All integers are
+little-endian. "zstd" is one standard zstd frame: any valid frame decodes,
+so files from different encoders are equally version 1 (the tool wrote C
+zstd level 9; `pull::tickstore_write` writes `ruzstd` `Fastest`), and a
+day's identity is its decoded entries, never its file bytes (FM-249).
+
+**Where a day file lives**, under the tick store's root, from the zip's own
+canonical name:
+
+| Tree | Day zip | Day file |
+|---|---|---|
+| Options | `GFDLNFO_TICK_<DDMMYYYY>.zip` | `options/<YYYY>/<MON_YYYY>/GFDLNFO_TICK_<DDMMYYYY>.bts` |
+| Stocks | `GFDLCM_STOCK_TICK_<DDMMYYYY>.zip` | `cm/STOCKS/<YYYY>/<MON_YYYY>/GFDLCM_STOCK_TICK_<DDMMYYYY>.bts` |
+| Indices | `GFDLCM_INDICES_TICK_<DDMMYYYY>.zip` | `cm/INDICES/<YYYY>/<MON_YYYY>/GFDLCM_INDICES_TICK_<DDMMYYYY>.bts` |
+
+A missing day file means the day is not held. A `<day>.bts.tmp*` beside it
+is an unfinished write: readers ignore it, `pull::tickstore_write` refuses
+the day by name while one is there (`stale_temp`) and never removes it.
+
+**Layout.**
+
+```
+offset 0            magic "BRTXTS01" (8 bytes)
+offset 8            block 0 | block 1 | ... (concatenated, no padding)
+index_off           the index, one zstd frame
+file length - 40    the footer (40 bytes)
+```
+
+| Footer offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | `index_off` u64 |
+| 8 | 8 | `index_len` u64, the compressed frame's length |
+| 16 | 8 | `index_raw_len` u64 |
+| 24 | 4 | `index_crc` u32, CRC-32 (IEEE, zlib's polynomial) of the decompressed index |
+| 28 | 4 | `n` u32, the entry count |
+| 32 | 8 | magic `"BRTXTSE1"` |
+
+A file is valid only when `index_off + index_len + 40` is its length, the
+index decompresses to `index_raw_len` bytes with CRC `index_crc`, and every
+block lies inside `[8, index_off)`. The writer also holds every block after
+the one before it and not overlapping it (`block_overlap`, FM-248).
+
+**The index** is `n` entries, no padding, each:
+
+| Size | Field |
+|---:|---|
+| 2 | `name_len` u16 |
+| `name_len` | the raw zip entry name |
+| 1 | `kind`: 0 a directory entry (no block, length 0), 1 a columnar CSV, 2 raw |
+| 8 | `off` u64, the block's absolute offset |
+| 8 | `len` u64, the block's length |
+| 8 | `size` u64, the file's length (the zip's uncompressed size) |
+| 4 | `crc` u32, the file's CRC-32 (the zip's) |
+| 8 | `rows` u64, data rows after the header line (0 for kind 2) |
+| 4 | `dos_time` u32: the zip's DOS date in the high 16 bits, its DOS time in the low 16 |
+
+Names are unique (a writer refuses a zip with a duplicate); a lookup hashes
+the index by name once and is O(1) a probe.
+
+**Blocks.** The first byte is the kind.
+
+- Kind 2 (raw): `0x02`, then one zstd frame of the file's bytes. Any file
+  that is not a perfectly regular CSV: mixed line endings, ragged rows, a
+  stray `\r`, an empty file.
+- Kind 1 (columnar): `0x01`; `crlf` u8 (1 when lines end `\r\n`, 0 for
+  `\n`); `trailing` u8 (1 when the file ends with a terminator);
+  `header_len` u32 and the header line without its terminator; `ncols` u32
+  (the header's commas plus one); `rows` u64; then `ncols` columns, each
+  `tag` u8 (0 text, 1 numeric), `payload_len` u64 (decompressed),
+  `text_len` u64 (the column text's length), `zlen` u64 and a zstd frame of
+  `zlen` bytes holding the payload.
+
+A column's text is that column's field of every data row joined with `\n`, no
+trailing `\n`; a field never holds `,`, `\r` or `\n` (such a file is kind 2).
+Tag 0's payload is the text. Tag 1's payload is `shape[rows]`, `delta` u8,
+`w` u8 and `w` byte planes of `rows` bytes: value `x_i = Σ plane_k[i] << 8k`,
+zigzag `z_i = (x_i >> 1) ^ -(x_i & 1)`, and `v_i = v_{i-1} + z_i` (wrapping,
+`v_{-1} = 0`) when `delta` is 1, else `v_i = z_i`. A field renders from
+`(shape_i, v_i)`: shape bit 5 is a time, `HH:MM:SS` with `HH = v / 3600`,
+`MM = v / 60 % 60`, `SS = v % 60`, two digits each; otherwise an optional `-`
+(bit 4), then `|v|` in decimal, zero-padded to at least `d + 1` digits where
+`d = shape & 0x0F`, with a `.` inserted `d` digits from the right when
+`d > 0`. A column is numeric only if every field re-renders byte for byte.
+
+**Rebuild**: the header, then for each row the terminator and the row's
+fields joined by `,`, then a final terminator when `trailing`. With no rows
+every column text is empty. The result's length must be `size` and its CRC-32
+`crc`, or the reader refuses the file.
+
+**How a day is written** (`pull::tickstore_write`, D-4967): every member is
+held to its zip CRC before anything is written; the file is written as
+`<day>.bts.tmp.<run-id>` in the day's own folder through
+`store::staging::create`, fsynced, read back entry by entry through
+`gdfl_tickstore` and compared byte for byte with the zip, then renamed to
+`<day>.bts` and the folder fsynced. A held day is verified and never
+rewritten. Every outcome is one line of the root's append-only
+`tickstore-write.log` naming the writer, the commit and the run. Invariants
+TSW-01 to TSW-17 in `docs/04-invariants.md`; limits L-TSW-1 to L-TSW-9 in
 `docs/06-limits.md`.

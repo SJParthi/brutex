@@ -19,11 +19,14 @@
 //! sessions the calendar of record owes, how many hold a bar, and each that
 //! does not, with what fills it: `front` and `interior` only a versioned repair
 //! (the append-only store refuses a session before a month's last held bar for
-//! ever), `tail` and `absent` an ordinary pull. Then the `POST /pull/repair`
+//! ever), `tail` and `absent` an ordinary pull; at the minute rung, each
+//! session holding a bar but fewer of its owed minutes than the calendar owes,
+//! classed the same way (R3-18). Then the `POST /pull/repair`
 //! body that fills each month a repair must — one whole month per request, so
 //! the offered bars include held ones to witness the price basis. `ALL` does
 //! the same for every Zerodha series of the segment, one line each: the count
-//! of missing sessions per instrument WP-13c was asked to measure.
+//! of missing sessions per instrument WP-13c was asked to measure, and the
+//! short sessions and their missing minutes (R3-18, CMP-19).
 //!
 //! **With `--from-store ROOT --reason TEXT` it repairs**, from the bars another
 //! store holds for the same feed and series — a scratch store a fresh pull
@@ -285,6 +288,7 @@ fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
         for (day, why) in &month.missing {
             let _ = writeln!(out, "      {day}  {:<12}  {}", why.code(), filled_by(*why));
         }
+        short_lines(out, month);
         for day in &month.unattested {
             let _ = writeln!(
                 out,
@@ -344,6 +348,23 @@ fn plan_one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
     }
 }
 
+/// A SESSION HOLDING A BAR IS NOT THEREFORE WHOLE (R3-18, CMP-19): each of
+/// `month`'s sessions short of its owed minutes, one line with what fills it.
+fn short_lines(out: &mut String, month: &repair_plan::Month) {
+    for short in &month.short {
+        let _ = writeln!(
+            out,
+            "      {}  {:<12}  short: {} of {} owed minutes held, {} missing; {}",
+            short.day,
+            short.fill.code(),
+            short.held,
+            short.owed,
+            short.missing(),
+            filled_by(short.fill)
+        );
+    }
+}
+
 /// What can fill a missing session, in the terminal's words.
 const fn filled_by(why: Missing) -> &'static str {
     match why {
@@ -365,6 +386,10 @@ struct Counts {
     tail: u64,
     absent: u64,
     before_first: u64,
+    /// Sessions holding a bar but short of their owed minutes (R3-18).
+    short: u64,
+    /// Their missing minutes.
+    short_minutes: u64,
 }
 
 impl Counts {
@@ -376,18 +401,22 @@ impl Counts {
         self.tail += other.tail;
         self.absent += other.absent;
         self.before_first += other.before_first;
+        self.short += other.short;
+        self.short_minutes += other.short_minutes;
     }
 
     fn line(&self, name: &str, tail: &str) -> String {
         format!(
-            "  {name:<20}  {:>8}  {:>6}  {:>5}  {:>8}  {:>4}  {:>6}  {:>12}  {tail}",
+            "  {name:<20}  {:>8}  {:>6}  {:>5}  {:>8}  {:>4}  {:>6}  {:>12}  {:>5}  {:>9}  {tail}",
             self.sessions,
             self.held,
             self.front,
             self.interior,
             self.tail,
             self.absent,
-            self.before_first
+            self.before_first,
+            self.short,
+            self.short_minutes
         )
     }
 }
@@ -414,6 +443,12 @@ fn counts(months: &[repair_plan::Month]) -> Counts {
                 Missing::BeforeFirst => row.before_first += 1,
             }
         }
+        row.short += u64::try_from(month.short.len()).unwrap_or(u64::MAX);
+        row.short_minutes += month
+            .short
+            .iter()
+            .map(|short| u64::from(short.missing()))
+            .sum::<u64>();
     }
     row
 }
@@ -456,7 +491,7 @@ fn plan_all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
     );
     let _ = writeln!(
         out,
-        "  instrument            sessions    held  front  interior  tail  absent  before_first  repair-months"
+        "  instrument            sessions    held  front  interior  tail  absent  before_first  short  short-min  repair-months"
     );
     let mut total = Counts::default();
     let mut any = false;
