@@ -135,12 +135,37 @@
 //! | [`scope`] | which segments bear the charge stack at all |
 //! | [`trip`] | the round trip, itemised, and the total |
 
+//!
+//! # Package CHG-1: the contract-note charge stack
+//!
+//! Four modules price what the round trip above does not: equity cash in
+//! three products, futures, and options under the contract-note method, plus
+//! the broker's own fees — one executed order and one client-security-day at
+//! a time, every money value in paisa `i64`, every rate an exact integer
+//! [`exact::Ratio`]. The default mode is **precise** ([`stack`]); a replica of
+//! Dhan's public calculator ([`dhan_calc`]) exists **for comparison only**,
+//! and every one of its outputs says so. Rates are chosen by an explicit
+//! [`schedule::RateSelector`]: today's rates on every date (the default,
+//! labelled on every output) or the dated regime above, unchanged.
+//! D-5110 to D-5119.
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`exact`] | the exact rate, half-up rounding, and the rupee renderer |
+//! | [`charge_error`] | every refusal the charge stack can return |
+//! | [`schedule`] | the trade kinds, today's rates with their sources, the selector |
+//! | [`stack`] | the precise stack: one order, one client-security-day |
+//! | [`dhan_calc`] | Dhan's calculator, line by line, labelled an estimate |
+
 #![forbid(unsafe_code)]
 
 mod dated;
 
+pub mod charge_error;
 pub mod day;
+pub mod dhan_calc;
 pub mod error;
+pub mod exact;
 pub mod expiry;
 pub mod fill;
 pub mod lot;
@@ -148,7 +173,9 @@ pub mod money;
 pub mod moneyness;
 pub mod rate;
 pub mod regime;
+pub mod schedule;
 pub mod scope;
+pub mod stack;
 pub mod strike;
 pub mod trip;
 pub mod venue;
