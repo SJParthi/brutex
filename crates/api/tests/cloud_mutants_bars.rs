@@ -2034,16 +2034,19 @@ mod bars_series_rs {
 
     /// **WITHOUT THE LOOKBACK, A ROW INSIDE ITS RUN STILL MEASURES AGAINST
     /// THE KEPT ROW BEFORE IT, AND EACH MONTH'S FIRST ROW AFTER AN UNKEPT ONE
-    /// IS FIRST IN ITS WINDOW.** Five months, each with a kept 09:20 and an
+    /// IS FIRST IN ITS WINDOW.** Six months, each with a kept 09:20 and an
     /// unkept 09:30: a page from offset 1 with no bound measures its first
     /// row against the row before it in the file, and under 09:20–09:21 every
     /// month after the first is found among the request's months by the slot
     /// bisection, from either half. Runs `previous_is_kept`'s inside-the-run
-    /// answer and `slot_of`'s right-half step, which no test reached.
+    /// answer and `slot_of`'s right-half step, which no test reached. Six
+    /// slots make June's search for May narrow to the first three and then
+    /// step right from the second: `slot_of`'s `mid + 1` → `mid - 1` never
+    /// leaves that range, and the request never ends.
     #[test]
     fn bars_series_without_the_lookback_kept_rows_still_measure() {
         let scratch = Scratch::new("series-no-lookback");
-        for m in 3..=7 {
+        for m in 3..=8 {
             write_month(
                 scratch.root(),
                 SEGMENT,
@@ -2056,7 +2059,7 @@ mod bars_series_rs {
                 ],
             );
         }
-        let mut asked = query(month(3), month(7));
+        let mut asked = query(month(3), month(8));
         asked.lookback = false;
         asked.offset = Some(1);
         asked.limit = 1;
@@ -2084,8 +2087,40 @@ mod bars_series_rs {
                 (500, "first_bar_in_window"),
                 (600, "first_bar_in_window"),
                 (700, "first_bar_in_window"),
+                (800, "first_bar_in_window"),
             ]
         );
+    }
+
+    /// **A MONTH'S COVERED DAYS ARE THE DAYS THAT HOLD A RECORD.** May holds
+    /// records on the 2nd and the 6th only: the three days between are in its
+    /// span and hold none, so `coverage=1` counts two days, not five. Kills
+    /// `days_covered`'s `to > from` → `>=`, which counted every day of the
+    /// span.
+    #[test]
+    fn bars_series_a_month_covers_only_the_days_that_hold_a_record() {
+        let scratch = Scratch::new("series-days-covered");
+        write_month(
+            scratch.root(),
+            SEGMENT,
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            month(5),
+            &[
+                (open_of(5, 2), 10),
+                (open_of(5, 2) + 60, 11),
+                (open_of(5, 6), 12),
+            ],
+        );
+        let mut asked = query(month(5), month(5));
+        asked.coverage = true;
+        let got = window(scratch.root(), &asked).expect("answers");
+        let covered: Vec<(u64, u32)> = got
+            .coverage
+            .iter()
+            .map(|one| (one.rows, one.days_covered))
+            .collect();
+        assert_eq!(covered, vec![(3, 2)]);
     }
 
     /// **A MONTH WHOSE FILE WILL NOT STAT, AND ONE WHOSE GENERATION POINTER

@@ -2906,9 +2906,10 @@ mod cloud_mutant_tests {
     /// not; January's index fails its checksum when the page reads it, so
     /// the page is asked again with January read. The answer counts
     /// February's 360 unread rows once — the attempt that failed does not
-    /// add its own count. Kills `SeriesPlan::clear_unread` → `()` (in
-    /// `bars_series.rs`), which carried the failed attempt's count into the
-    /// answer.
+    /// add its own count. (It was written against `SeriesPlan::clear_unread`
+    /// → `()` and does NOT kill it: the failed attempt had already drained
+    /// its count with `take_unread` before its index failed, so there is
+    /// nothing left to clear. The report lists that mutant as equivalent.)
     #[test]
     fn a_page_asked_again_counts_its_unread_rows_once() {
         let root = scratch("retry-unread");
@@ -3050,6 +3051,66 @@ mod cloud_mutant_tests {
                 let _ = std::fs::remove_dir_all(&root);
             },
         );
+    }
+
+    /// **A PAGE INSIDE AN INDEX RUN OF SEVERAL BLOCKS IS THE BRUTE FORCE.**
+    /// Every other fixture's runs fit one fence block (`FENCE` entries), so
+    /// the fence table alone answers each bound exactly. One run of 1,000
+    /// rows is four blocks: the value bisection's lower and upper counts from
+    /// the fences differ, and the exact count is read only between them.
+    /// Pages at the start, inside and at the end, in both directions, are
+    /// the brute force. Kills `Arrays::more_than`'s `ub += b` → `*=`, which
+    /// collapsed the upper count and answered "not more" too early.
+    #[test]
+    fn a_page_inside_a_run_of_several_blocks_is_the_brute_force() {
+        let root = scratch("multi-block");
+        let rows: Vec<Bar> = (0..1_000).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let symbol_id = super::symbol_id("NIFTY");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(1),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        store::file::BarFile::open_or_create(&root, path, symbol_id)
+            .expect("a generated bar file")
+            .append(&rows)
+            .expect("generated records");
+        crate::scratch::plant_pre_rule_sort_index(
+            &path.to_path_buf(&root),
+            &Shape::of(month(1), 60, symbol_id),
+            &rows,
+            1_000,
+        );
+        for desc in [false, true] {
+            let key = |close: i64| if desc { -close } else { close };
+            let mut want: Vec<(i64, i64)> = rows
+                .iter()
+                .map(|bar| (key(bar.close), bar.ts_micros))
+                .collect();
+            want.sort_unstable();
+            for offset in [0, 300, 517, 963] {
+                let mut asked = query(index(), month(1), month(1), SortKey::Close);
+                asked.desc = desc;
+                asked.offset = Some(offset);
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<(i64, i64)> = got
+                    .bars
+                    .iter()
+                    .map(|row| (key(row.bar.close), row.bar.ts_micros))
+                    .collect();
+                let page: Vec<(i64, i64)> = want.iter().skip(offset).take(37).copied().collect();
+                assert_eq!(served, page, "desc {desc} offset {offset}");
+                let report = got.sort_index.expect("a value sort says what it used");
+                assert_eq!((report.indexed_runs, report.scanned_rows), (1, 0));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A NULL PAGE THAT STARTS ON THE LATER SERIES' ROW OF AN INSTANT
