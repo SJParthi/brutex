@@ -3605,9 +3605,11 @@ mod cloud_mutant_tests {
     /// audit that did not happen. Every slot of the pool is held; then a
     /// request that names no exchange or segment must read the census to
     /// find them, and a request that names both must audit its span, and
-    /// each is refused. Runs `gaps_json`'s two admission refusals, which no
-    /// test reached. The pool is process-wide, so the test runs itself in a
-    /// child process where nothing else needs it.
+    /// each is refused. So is a peer vote led while the pool is full: its
+    /// build is finished with the refusal. Runs `gaps_json`'s two admission
+    /// refusals and `lead_vote`'s, which no test reached. The pool is
+    /// process-wide, so the test runs itself in a child process where
+    /// nothing else needs it.
     #[test]
     fn a_full_calendar_pool_refuses_the_census_and_the_audit() {
         if std::env::var_os(FULL_POOL_CHILD).is_none() {
@@ -3664,6 +3666,14 @@ mod cloud_mutant_tests {
                 assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{query}: {body}");
                 assert!(body.contains("calendar derivation not admitted"), "{query}: {body}");
             }
+            // A PEER VOTE LED NOW is refused where its reading is spawned, and
+            // the build is finished with that refusal, never left unanswered.
+            let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+            let Err((status, _, body)) = voted(&site, &asked).await else {
+                panic!("a vote whose reading was not admitted answered");
+            };
+            assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert!(body.contains("calendar derivation not admitted"), "{body}");
             gate.wait();
             for holder in holders {
                 holder.await.expect("a holder").expect("admitted");

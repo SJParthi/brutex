@@ -1469,6 +1469,44 @@ mod bars_rs {
         assert_eq!((got.total, got.scan_rows), (4, 4));
     }
 
+    /// **A TIME-OF-DAY ORDER WITH A MONTH THAT WILL NOT READ SERVES NO
+    /// EXTREMES, AND SAYS WHY.** April and May, counted while free; then May
+    /// is held by another writer. The scan reads April's two rows and cannot
+    /// read May's, and April's extremes are not the window's: none is
+    /// served, the rows that would not read are counted in the reason, and
+    /// April's rows are still the page. Runs `window_cancellable`'s
+    /// withheld-extremes arm for a scan, which no test reached.
+    #[test]
+    fn bars_a_time_of_day_order_with_an_unread_month_withholds_the_extremes() {
+        let scratch = Scratch::new("bars-tod-unread");
+        for m in [4, 5] {
+            write_month(
+                scratch.root(),
+                "INDEX",
+                "NIFTY",
+                Timeframe::MINUTE_1,
+                month(m),
+                &minutes(m, 2, 2, 100),
+            );
+        }
+        let mut asked = query(vec![index("NIFTY")], month(4), month(5));
+        asked.sort = SortKey::TimeOfDay;
+        asked.want_extremes = true;
+        let free = read(scratch.root(), &asked);
+        assert_eq!((free.total, free.extremes.is_some()), (4, true));
+        let _held = hold(scratch.root(), "NIFTY", 5);
+        let got = read(scratch.root(), &asked);
+        assert_eq!(got.extremes, None);
+        assert_eq!(
+            got.extremes_why.as_deref(),
+            Some(
+                "months_unread: 2 kept rows of this window would not read, so its extremes are \
+                 not known and none is served"
+            )
+        );
+        assert_eq!(got.bars.len(), 2, "April's rows are still the page");
+    }
+
     /// **WITHOUT THE LOOKBACK, A MONTH'S FIRST ROW AFTER AN UNKEPT ROW OF A
     /// MONTH IN THE REQUEST IS FIRST IN ITS WINDOW**, not a month left unread:
     /// May is read, its last row is outside 09:20–09:21, so June's first row

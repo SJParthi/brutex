@@ -3762,4 +3762,31 @@ mod cloud_mutant_tests {
         assert!(ask(depth + 1).is_ok(), "held whole, any depth is served");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A REFUSAL OVER READ ROWS A REBUILD WOULD INDEX NAMES THE COMMAND.**
+    /// As above, but February's `.srt` is a directory: a reason a rebuild
+    /// mends, unlike the small-month rule. A page one past the depth is
+    /// refused, and the refusal ends with the command that indexes February.
+    /// Runs the refusal's command suffix, which no test reached.
+    #[test]
+    fn a_refusal_over_buildable_read_rows_names_the_command() {
+        let root = scratch("refusal-command");
+        let jan: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &jan, &jan);
+        let feb: Vec<Bar> = (0..360).map(|i| bar(month(2), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(2), &feb, &feb);
+        std::fs::remove_file(&srt).expect("the planted index");
+        std::fs::create_dir(&srt).expect("a directory at the index's name");
+        let mut asked = query(index(), month(1), month(2), SortKey::Close);
+        asked.offset = Some(super::MAX_SORT_DEPTH - 36);
+        super::READ_HELD.with(|bound| bound.set(100));
+        let why = window(&root, &asked).expect_err("one past the depth is refused");
+        super::READ_HELD.with(|bound| bound.set(super::MAX_READ_HELD));
+        assert!(why.starts_with("sort_too_deep: 360 kept rows"), "{why}");
+        assert!(
+            why.contains("; index them with: cli srt-build ") && why.ends_with("2031-02 2031-02"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
