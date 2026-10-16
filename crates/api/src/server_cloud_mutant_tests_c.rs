@@ -2507,3 +2507,43 @@ fn a_member_handed_no_rows_did_not_land_nothing() {
     };
     assert!(landed_nothing(&fed));
 }
+
+/// THE RUN'S CLOSING LINE IS `Info` ONLY WHEN THE BOOKS BALANCE AND NO MEMBER
+/// FAILED: a balanced run with a failure, and an unbalanced run with none, are
+/// both `Warn` (kills `&&` turned to `||` in `note_run_finished`). Each run
+/// carries an `expected` figure no other test uses, so its line is found among
+/// the parallel suite's.
+#[test]
+fn the_run_finished_line_is_info_only_when_balanced_and_nothing_failed() {
+    let failure = pull::ingest::Failure {
+        instrument: "NIFTY".to_owned(),
+        why: "the vendor answered nothing".to_owned(),
+        month: None,
+        day: None,
+    };
+    for (expected, balanced, failed, level, message) in [
+        (9_190_311, true, false, telemetry::Level::Info, "finished"),
+        (9_190_312, true, true, telemetry::Level::Warn, "finished"),
+        (
+            9_190_313,
+            false,
+            false,
+            telemetry::Level::Warn,
+            "finished — BOOKS DO NOT BALANCE",
+        ),
+    ] {
+        let mut out = BrokerRun::unreachable_broker();
+        out.attempted = expected;
+        if failed {
+            out.total.failures.push(failure.clone());
+        }
+        let from = crate::emitted::mark();
+        note_run_finished(&out, balanced, None);
+        let mine: Vec<telemetry::Record> = crate::emitted::landed(from, "pull.run", message)
+            .into_iter()
+            .filter(|record| crate::emitted::counts(record, "expected", expected as u64))
+            .collect();
+        assert_eq!(mine.len(), 1, "{expected}: {mine:?}");
+        assert_eq!(mine[0].level, level, "{expected}: {mine:?}");
+    }
+}
