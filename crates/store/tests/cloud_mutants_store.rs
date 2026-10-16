@@ -1178,3 +1178,154 @@ fn a_verdict_reader_refuses_a_damaged_index_or_image_by_name() {
     );
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **A TIME INDEX DAMAGED UNDER A LIVE WRITER IS REBUILT BEFORE THE NEXT
+/// COMMIT, AND THE COMMIT LANDS.**
+///
+/// Covers the writer's mid-life reindex (`BarFile::index_batch` meeting an
+/// entry that fails its checksum, then `reindex`): the `.tix` entries around
+/// the month's last committed bar are damaged on disk while the writer holds
+/// the month, the next append rebuilds the index from the bars and commits,
+/// and the index afterwards describes the bars exactly.
+#[test]
+fn a_time_index_damaged_under_a_live_writer_is_rebuilt_before_the_next_commit() {
+    use store::file::{Appended, BarFile, Reindexed};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("tix-damaged-live");
+    let bars = second_month(FileKind::Bars);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    // The entries of buckets 515 to the last: every bucket the month's bars
+    // touch (09:15 IST is slot 33,300, bucket 520; the last bar's is 537).
+    let mut bytes = fs::read(&tix).unwrap();
+    let from = usize::try_from(store::time_index::HEADER_LEN).unwrap() + 515 * 16;
+    for byte in &mut bytes[from..] {
+        *byte ^= 0x5A;
+    }
+    fs::write(&tix, &bytes).unwrap();
+    assert!(matches!(
+        writer.append(&second_bars(1_100, 1_150)),
+        Ok(Appended::Committed { .. })
+    ));
+    drop(writer);
+    let indexed = BarFile::index_existing(&root, bars, SYMBOL).unwrap();
+    assert_eq!(indexed.n_valid, 1_150);
+    assert_eq!(
+        indexed.outcome,
+        Reindexed::Kept,
+        "the rebuilt index describes the bars"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A SMALL MONTH WHOSE COMMITTED BAR WILL NOT READ CROSSES THE THRESHOLD
+/// UNINDEXED, AND THE COMMIT LANDS.**
+///
+/// Covers `BarFile::index_at_threshold` when the committed bars cannot be
+/// indexed: a block of committed bars is damaged on disk, the commit that
+/// brings the month to 1,024 bars commits its own bars, and no `.tix` is
+/// written that would claim bars nothing read.
+#[test]
+fn a_small_month_whose_committed_bar_will_not_read_crosses_unindexed() {
+    use store::file::{Appended, BarFile};
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("tix-threshold-unreadable");
+    let bars = second_month(FileKind::Bars);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_000)).unwrap();
+    assert!(!tix.exists(), "a small month has no .tix");
+    // One byte of the first committed bar (the header is 32 KiB), in a block
+    // the commit's own tail check never reads.
+    let bar_path = bars.to_path_buf(&root);
+    let mut bytes = fs::read(&bar_path).unwrap();
+    let header = 32_768;
+    bytes[header + 3] ^= 0xFF;
+    fs::write(&bar_path, &bytes).unwrap();
+    assert!(matches!(
+        writer.append(&second_bars(1_000, 1_030)),
+        Ok(Appended::Committed { .. })
+    ));
+    assert!(!tix.exists(), "no index claims bars that did not read");
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A NAME THAT APPEARS AT THE TIME INDEX BEFORE THE CROSSING COMMIT REFUSES
+/// THAT COMMIT, AND NO BAR IS WRITTEN.**
+///
+/// Covers the create of `BarFile::index_at_threshold`: the `.tix` is born
+/// with `create_new`, so a file put at its name after the writer opened is
+/// never written through; the commit that would have crossed is refused and
+/// the month still holds what it held.
+#[test]
+fn a_name_at_the_time_index_before_the_crossing_commit_refuses_it() {
+    use store::file::BarFile;
+    use store::path::FileKind;
+    const SYMBOL: u32 = 11;
+    let root = scratch("tix-threshold-taken");
+    let bars = second_month(FileKind::Bars);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_000)).unwrap();
+    fs::write(&tix, b"put here by something else").unwrap();
+    let refused = writer.append(&second_bars(1_000, 1_030));
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(writer.header().n_valid, 1_000, "no bar written");
+    assert_eq!(
+        fs::read(&tix).unwrap(),
+        b"put here by something else",
+        "never written through"
+    );
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **THE STORE'S REFUSAL SENTENCES NAME THE FILE AND THE REASON.**
+///
+/// Covers the text of `StoreError::TimeIndex`, `StoreError::SortIndex` and
+/// `StoreError::Generation`, and of every `Conflict` an overlap can name.
+#[test]
+fn the_store_refusal_sentences_name_the_file_and_the_reason() {
+    use store::file::{Conflict, StoreError};
+    let path = PathBuf::from("/nonexistent/cloud/2031-02.tix");
+    assert_eq!(
+        StoreError::TimeIndex {
+            path: path.clone(),
+            reason: "a reason".to_owned()
+        }
+        .to_string(),
+        "/nonexistent/cloud/2031-02.tix: time index refused: a reason"
+    );
+    assert_eq!(
+        StoreError::SortIndex {
+            path: path.clone(),
+            reason: "a reason".to_owned()
+        }
+        .to_string(),
+        "/nonexistent/cloud/2031-02.tix: sort index not written: a reason"
+    );
+    let generation = StoreError::Generation {
+        path,
+        reason: "revision 1 is not the one its promotion recorded; not sorted".to_owned(),
+    }
+    .to_string();
+    assert!(
+        generation.contains("/nonexistent/cloud/2031-02.tix")
+            && generation.contains("revision 1 is not the one its promotion recorded"),
+        "{generation}"
+    );
+    for (conflict, text) in [
+        (Conflict::Restated, "restates the record held at"),
+        (
+            Conflict::NotHeld,
+            "is inside the held range at a stamp the month never held:",
+        ),
+        (Conflict::Skipped, "skips the record held at"),
+    ] {
+        assert_eq!(conflict.to_string(), text);
+    }
+}
