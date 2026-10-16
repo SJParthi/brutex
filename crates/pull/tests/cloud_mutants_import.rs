@@ -520,3 +520,81 @@ fn tickstore_a_socket_at_a_day_name_is_refused_by_name() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ═══ request minutes: the ledger names the run the sink holds ══════════════
+
+/// A gap line names the run the installed sink holds, the key `/logs?run=`
+/// groups a pull's events by, so the ledger and the log name one run.
+/// Kills `run_ordinal` answering 0.
+#[test]
+fn request_minutes_a_gap_line_names_the_sinks_run() {
+    let (_, sink) = sink();
+    sink.set_run(4_242);
+    let d = day(2025, 7, 1);
+    let open = i64::from(d.days_from_epoch()) * 86_400 - 19_800 + 555 * 60;
+    let rows = (1..375)
+        .map(|minute| pull::fetch::RawRow {
+            timestamp: open + minute * 60,
+            open: 2_550_000,
+            high: 2_550_040,
+            low: 2_549_960,
+            close: 2_550_010,
+            volume: 400,
+            open_interest: None,
+        })
+        .collect();
+    let request = pull::fetch::BarRequest {
+        instrument_id: String::new(),
+        listing: pull::vendor::Listing::Index,
+        window: pull::session::Window::new(d, d).unwrap(),
+        granularity: pull::vendor::Granularity::Minute1,
+    };
+    let plan = pull::ingest::Plan {
+        calendar: pull::calendar::Runtime::default(),
+        cash_schedule: None,
+        columns: pull::csv::Columns::TrueDataIndex,
+        request: &request,
+        encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
+        scale: pull::vendor::PriceScale::Paisa,
+        vendor: brutex_core::vendor::Vendor::TrueData,
+        exchange: "NSE",
+        segment: "INDEX",
+        contract: None,
+    };
+    let store = scratch("GapRun");
+    let done = pull::ingest::from_window(
+        &pull::fetch::RawWindow { rows },
+        "NIFTY",
+        "Test",
+        &store,
+        plan,
+    );
+    assert!(
+        done.failures.iter().any(|f| f
+            .why
+            .starts_with("request minute coverage gap on 2025-07-01")),
+        "{:?}",
+        done.failures
+    );
+    let ledger = std::fs::read_to_string(store.join("audit").join("truedata.gaps")).unwrap();
+    let gap = ledger
+        .lines()
+        .find(|line| line.starts_with("gap "))
+        .unwrap();
+    assert!(
+        gap.starts_with("gap NSE-INDEX-NIFTY 2025-07-01 v=1 rung=1min owed=375 held=374 missing=1")
+            && gap.ends_with("why=vendor_empty run=4242"),
+        "{ledger}"
+    );
+    // And each derived rung's line, written by the same run.
+    let derived: Vec<&str> = ledger
+        .lines()
+        .filter(|line| line.starts_with("derive "))
+        .collect();
+    assert_eq!(derived.len(), 7, "{ledger}");
+    assert!(
+        derived.iter().all(|line| line.ends_with(" run=4242")),
+        "{ledger}"
+    );
+    std::fs::remove_dir_all(store).unwrap();
+}

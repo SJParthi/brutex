@@ -1877,4 +1877,38 @@ mod cloud_mutant_tests {
             (Why::Unverified, "dated cash eligibility")
         );
     }
+
+    /// A derive ledger that writes is no failure and holds the lines; one
+    /// that cannot be written is a named failure filed under its month.
+    /// Kills `record_derived` read as `None`.
+    #[test]
+    fn record_derived_names_an_unwritten_ledger_under_its_month() {
+        let month = store::path::YearMonth::new(2031, 3).unwrap();
+        let lines = vec![
+            "derive NSE-INDEX-NIFTY 5min 2031-03 v=1 days=1 buckets=75 withheld=0 partial=0 run=0"
+                .to_owned(),
+        ];
+        let root = crate::gdfl_fixtures::scratch("CloudDerived");
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        assert_eq!(record_derived(&root, vendor, "NIFTY", month, &lines), None);
+        assert_eq!(
+            std::fs::read_to_string(root.join("audit").join("zerodha.gaps")).unwrap(),
+            format!("{}\n", lines[0])
+        );
+        std::fs::remove_dir_all(root.join("audit")).unwrap();
+        std::fs::write(root.join("audit"), b"not a directory").unwrap();
+        let failure = record_derived(&root, vendor, "NIFTY", month, &lines).unwrap();
+        assert_eq!(
+            (failure.instrument.as_str(), failure.month, failure.day),
+            ("NIFTY", Some(month), None)
+        );
+        assert!(
+            failure.why.starts_with(&format!(
+                "{month}: the derive ledger was not written (1 line(s)):"
+            )),
+            "{}",
+            failure.why
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
