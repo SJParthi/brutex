@@ -1083,3 +1083,21 @@ mod cm_extremes {
         std::fs::remove_dir_all(masters).unwrap();
     }
 }
+
+/// A directory where a day file belongs is unavailable as a directory (the
+/// host's own refusal), not a malformed file and not an absent day.
+#[test]
+fn tickstore_a_directory_at_a_day_name_is_unavailable_as_a_directory() {
+    use pull::gdfl_cm::{CmKind, CmRefusal, CmSource as _};
+    let root = scratch("TickDirectory");
+    let store = pull::gdfl_tickstore::TickStore::new(&root);
+    let d = day(2024, 4, 2);
+    std::fs::create_dir_all(store.day_path(CmKind::Indices, d)).unwrap();
+    assert_eq!(
+        store.day(CmKind::Indices, d).err(),
+        Some(CmRefusal::TickStoreUnavailable {
+            kind: std::io::ErrorKind::IsADirectory
+        })
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
