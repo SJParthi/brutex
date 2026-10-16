@@ -753,6 +753,34 @@ mod fold_paths {
         assert_eq!((out.len(), out.capacity()), (2, 2));
     }
 
+    /// A day with no minute at all in the middle of a month is neither
+    /// invented nor named by the fold: it judges the buckets it was handed,
+    /// and the request audit owns the missing day. The days either side fold
+    /// whole, for an index and a share alike.
+    #[test]
+    fn a_missing_day_in_the_middle_is_neither_folded_nor_named() {
+        let mut bars = at(day(2025, 7, 1), 555..930);
+        bars.extend(at(day(2025, 7, 3), 555..930));
+        for venue in [Venue::NseIndex, Venue::NseCash] {
+            let folded = derived(&bars, 300, venue);
+            assert!(
+                folded.diagnostics.is_empty(),
+                "{venue:?}: {:?}",
+                folded.diagnostics
+            );
+            assert_eq!(
+                folded.tally,
+                Tally {
+                    days: 2,
+                    buckets: 150,
+                    withheld: 0,
+                    partial: 0
+                },
+                "{venue:?}"
+            );
+        }
+    }
+
     /// A one-second bar is stamped at its second's start, never at its first
     /// traded row's sub-second stamp, and a quote-only row (no trade) still
     /// gives its second the open interest it carried.

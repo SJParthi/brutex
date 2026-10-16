@@ -1673,6 +1673,47 @@ mod cloud_mutant_tests {
         );
     }
 
+    /// A day with no candle at all in the middle of a window is that day's
+    /// own gap, every one of its 375 minutes, said as the vendor's empty
+    /// answer in one finding and one day line; the whole days either side
+    /// owe nothing and fabricate nothing.
+    #[test]
+    fn a_missing_day_in_the_middle_of_a_window_is_its_own_whole_gap() {
+        let (d1, d2, d3) = (
+            Day::new(2022, 10, 10).unwrap(),
+            Day::new(2022, 10, 11).unwrap(),
+            Day::new(2022, 10, 12).unwrap(),
+        );
+        let mut rows = whole_session(d1);
+        rows.extend(whole_session(d3));
+        let audit = within(move || {
+            let request = request_on(d1, d3);
+            audit_refused(
+                &rows,
+                plan_at(&request, "NSE", "INDEX"),
+                Venue::NseIndex,
+                &Refusals::default(),
+            )
+        });
+        let [finding] = audit.findings.as_slice() else {
+            panic!("{:?}", audit.findings);
+        };
+        assert_eq!(
+            (finding.why, finding.day, finding.minutes),
+            (Why::VendorEmpty, Some(d2), 375)
+        );
+        assert_eq!(
+            finding.text,
+            "request minute coverage gap on 2022-10-11: 09:15–15:30 IST (end exclusive), 375 missing scheduled minutes; no bars fabricated"
+        );
+        let lines: Vec<(Day, Why, u32, u32)> = audit
+            .days
+            .iter()
+            .map(|line| (line.day, line.why, line.held, line.missing))
+            .collect();
+        assert_eq!(lines, [(d2, Why::VendorEmpty, 0, 375)]);
+    }
+
     fn at_minute(day: Day, minute: i64) -> i64 {
         i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + minute * 60
     }
