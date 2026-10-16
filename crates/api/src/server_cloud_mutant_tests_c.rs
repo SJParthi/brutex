@@ -2483,3 +2483,27 @@ fn a_run_the_pull_order_refused_carries_the_standing_class_fact() {
         assert_eq!(order_class_fact(code), None, "{code}");
     }
 }
+
+/// A member handed NO rows landed nothing to ask the store about, whatever it
+/// failed with: the probe is for a member the vendor fed and the store did
+/// not take (kills `rows_read > 0` turned to `>=`).
+#[test]
+fn a_member_handed_no_rows_did_not_land_nothing() {
+    let failed = pull::ingest::Ingested {
+        rows_read: 0,
+        bars_committed: 0,
+        failures: vec![pull::ingest::Failure {
+            instrument: "NIFTY".to_owned(),
+            why: "the vendor answered nothing".to_owned(),
+            month: None,
+            day: None,
+        }],
+        ..pull::ingest::Ingested::default()
+    };
+    assert!(!landed_nothing(&failed));
+    let fed = pull::ingest::Ingested {
+        rows_read: 1,
+        ..failed
+    };
+    assert!(landed_nothing(&fed));
+}
