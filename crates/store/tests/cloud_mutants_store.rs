@@ -2585,3 +2585,54 @@ fn a_sealed_months_audit_walks_every_block_once_and_ends() {
         .expect("every audit ended");
     assert_eq!(counted, [0, 6_000, 70_000]);
 }
+
+/// **A TIME INDEX DAMAGED UNDER A LIVE WRITER, OVER BARS THAT NO LONGER INDEX,
+/// IS REMOVED, AND THE COMMIT STILL LANDS UNINDEXED.**
+///
+/// Covers `BarFile::index_batch` after a mid-life rebuild that cannot build:
+/// the `.tix` entries the month's bars touch are damaged, and one committed
+/// bar's stamp (row 500) is moved off the one-second grid on disk, so the
+/// rebuild the next append triggers refuses the bars, removes the `.tix` and
+/// leaves the month bisecting. The append commits all its bars anyway, and
+/// the writer says why it now bisects.
+#[test]
+fn a_damaged_index_over_bars_that_no_longer_index_is_removed_and_the_commit_lands() {
+    use store::file::{Appended, BarFile, StoreError, TimeLookup};
+    use store::path::FileKind;
+    use store::time_index::Why;
+    const SYMBOL: u32 = 11;
+    let root = scratch("tix-damaged-unindexable");
+    let bars = second_month(FileKind::Bars);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let mut writer = BarFile::open_or_create(&root, bars, SYMBOL).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    let mut bytes = fs::read(&tix).unwrap();
+    let from = usize::try_from(store::time_index::HEADER_LEN).unwrap() + 515 * 16;
+    for byte in &mut bytes[from..] {
+        *byte ^= 0x5A;
+    }
+    fs::write(&tix, &bytes).unwrap();
+    let bar_path = bars.to_path_buf(&root);
+    let mut bytes = fs::read(&bar_path).unwrap();
+    bytes[32_768 + 56 * 500 + 3] ^= 0xFF;
+    fs::write(&bar_path, &bytes).unwrap();
+    let appended = writer.append(&second_bars(1_100, 1_150)).unwrap();
+    assert!(
+        matches!(appended, Appended::Committed { .. }),
+        "{appended:?}"
+    );
+    assert!(!tix.exists(), "no index claims bars that do not index");
+    // The rebuild reads every committed bar, and row 500 is in block 6 of
+    // 73 records, whose checksum no longer holds.
+    let decided = writer.time_lookup();
+    assert!(
+        matches!(
+            &decided,
+            TimeLookup::Bisection(Why::Unreadable(StoreError::BlockChecksum { path, block: 6, .. }))
+                if *path == bar_path
+        ),
+        "{decided:?}"
+    );
+    drop(writer);
+    let _ignored = fs::remove_dir_all(&root);
+}
