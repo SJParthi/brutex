@@ -69291,6 +69291,252 @@ measured at 9.3 to 18.0 µs (design §1, quiet) against 0.9 to 2.3 ms here
 Applying codec 1 to tick files: it is a bar codec of seven `i64` columns; a
 GDFL tick file is text whose exact bytes the tick store must give back.
 
+### D-4972 — `/bars.json` answers a window past the month's last bar from one record, the last; only a tail that is not the header's last bar keeps the full read (narrows D-1446, W1-api5-8) — 2026-10-16
+
+**Context** (AF-05, assurance finding p99-8, confirmed by two skeptics on 14
+October 2026). When `from=` lay after a month's last stored bar, the time
+lookup returned `n_valid`. `month_answer` treated that landing as "the lookup
+could not help" and read the whole month to answer `[]`. D-1446 kept that
+read on purpose. A header can name records whose bytes are zeros from a newly
+allocated extent, and an all-zero bar stamps 0, below every real `from`. So the
+lookup lands past the end for a window INSIDE the data too. The D-1446 bullet
+said "a cheaper test that tells the two apart needs a monotonicity proof the
+record cannot give". The cost was never measured. On gdfl NIFTY 1s 2026-07
+(517,373 bars) the answer `[]` took p50 35-44 ms past the end, against about
+1 ms before the first bar: the same empty answer, about 36 times dearer. The
+shipped pages never ask it (`/db` does not call `/bars.json`, and `/markets`
+sends no day window), so only a direct caller reaches it.
+
+**Decision.**
+
+1. ONE RECORD DECIDES. When the lookup for `from` lands at or past `n_valid`,
+   `bars_route::past_the_last_bar` reads the last record once. When that record
+   is the header's last bar (stamp non-zero and equal to `last_ts_micros`) and
+   is older than `from`, the answer is 200 `[]`, and no other record is read.
+2. WHY ONE RECORD IS ENOUGH. Every batch the writer commits begins after the
+   header's `last_ts_micros`: `store::header::Header::advance` refuses anything
+   else (`TimestampsOutOfOrder`). So when the last record equals the header's
+   last stamp, no record in the file holds a later stamp, and zero-filled
+   records stamp 0. That is the monotonicity proof D-1446 said was missing. It
+   is the writer's, not the record's.
+3. ONLY A TAIL THAT IS NOT THE HEADER'S LAST BAR KEEPS THE FULL READ, and
+   D-1446 is narrowed to exactly that case. The tail can be zero-filled (stamp
+   0), stamped differently from the header, or refused by its checksum. Each
+   one keeps the read D-1446 kept, because that read answers such a file
+   correctly and names its faults (206). The cost there stays O(n_valid)
+   reads, and `docs/06-limits.md` W1-api5-8 says so. A file cut short of its
+   header's count never gets this far: the store refuses it at the open
+   (`n_valid claims more records than the file holds`), and the route answers
+   400 with that sentence, before any record is read.
+4. MEASURED, not claimed: `docs/06-limits.md` W1-api5-8 gives p50, p99 and max
+   before and after, n = 200, on a shadow of the operator's store.
+
+**Rejected.** Answering `[]` from the header's `last_ts_micros` alone, with no
+read. It is correct for every well-formed file. But it would also answer a
+zero-filled tail without ever looking at it, and the finding's own correction
+asked that only a zero-filled tail keep the full read. Reading one record
+costs one `pread`, and it keeps damage visible.
+
+**Proof.** `api::server::bars_route::tests::a_window_past_the_last_bar_reads_one_record`,
+`a_zero_filled_tail_still_takes_the_full_read`,
+`a_window_before_the_first_bar_stays_one_bisection`, and
+`api::server::cost_limits_tests::w1_api5_8_a_window_past_the_last_bar_reads_one_record`.
+`docs/04-invariants.md` AF5-01 to AF5-03.
+
+### D-4973 — `/bars.json` refuses `limit`, `page` and `offset` by name; `/bars/window.json` takes one spelling of a month — 2026-10-16
+
+**Context** (AF-05, assurance findings p99-9 = RT-DB-11 and app-7, each
+confirmed by two skeptics on 14 October 2026). `/bars.json` has a day window
+(`from=`, `to=`) and no pager. It accepted `limit=` and `page=` and ignored
+them: `limit=2` answered 200 with the whole month, 71,397,475 bytes on gdfl
+NIFTY 1s 2026-07. A pager would have read that as its two rows, which is the
+hidden fallback `CLAUDE.md` §4 bans. The route's doc said "a month is at most
+375 × ~22 bars and is sent whole". That is a one-minute month; a one-second
+month is about 63 times larger. Separately, `/bars/window.json` parsed `from`
+and `to` by splitting on `-` and handing each half to `str::parse`, which
+accepts leading zeros and a `+`. So `2024-3`, `2024-003`, `2024-0003`,
+`02024-03` and the `%2B` forms all named March 2024. AF-04 (D-4962) made
+every other route take one spelling, and this was the last route that still
+accepted the others.
+
+**Decision.**
+
+1. `/bars.json` refuses a query that names `limit`, `page` or `offset`, with a
+   value, with an empty value or bare, with 400: `/bars.json takes no limit or
+   page; page with /bars/window.json or narrow with from and to ("limit" was
+   sent)`. It checks this before anything else, so the refusal does not
+   depend on the rest of the query. The route does not honour them, because
+   paging a month is `/bars/window.json`'s job, and that route already pages
+   any range and caps the page at `MAX_WINDOW_LIMIT`. A key that only begins
+   with one of the three names (`limited=`) is not one of them.
+2. The route's doc states the measured sizes: 517,373 bars and 71,397,475
+   bytes for the whole month, and 3,105,001 bytes for one day of it. It also
+   states the two bounds, the day window and the paged route. The blocking
+   pool comment that said "35 MB" says the same.
+3. `WindowAsk::parse` reads `from` and `to` through `bars::month_of_text`,
+   the one strict parser D-4962 made. Exactly four ASCII year digits, `-`,
+   then two ASCII month digits; anything else is refused by field.
+4. A row cap on `/bars.json` is not part of this decision, and it is not in
+   the code this decision lands on. R3-08 (RA-060) adds one
+   (`MAX_MONTH_ANSWER_ROWS` = 60,000, refused as `too_many_rows` in
+   `month_answer`) on its own branch, unmerged on 16 October 2026. A trial
+   merge of `fix/db-R3-08` 6e51b1a1 onto this change (`git merge-tree`) is
+   clean, and the past-the-end answer of D-4972 is decided before that cap,
+   so the two compose. Until it merges, a request with no day window gets
+   the whole month, and the route doc says so.
+
+**Proof.** `api::server::bars_route::tests::bars_json_refuses_limit_and_page_by_name`,
+`window_json_refuses_a_month_not_spelled_yyyy_mm`. `docs/04-invariants.md`
+AF5-04 and AF5-05.
+
+### D-4978 — A `/backtest/run.json` poll reads the CLI log only when the log changed, and the `/backtest` status poll backs off, pauses while the tab is hidden and stops out loud (AF-06, p99-7) — 2026-10-15
+
+The 14 Oct 2026 attack run confirmed p99-7 twice: the three status GETs the
+console polls cost hundreds of milliseconds at p99, and each one writes an
+invocation-journal file to the store (D-1445). Both skeptics corrected the
+cause. On `/live.json` and `/backtest.json` the handler is sub-millisecond
+and the cost is the journal's begin and terminal syncs. Only
+`/backtest/run.json` has real handler cost: the CLI-log walk, capped at
+`logs::SCAN_BYTES` (4 MiB, D-0954), redone on every poll. The `/backtest`
+page polled it every 2 s for as long as the tab stayed open, hidden or not,
+and for ever while the answer was `unknown`. Measured on this package's own
+shadows (15 Oct 2026, release builds, n = 200 sequential GETs), the
+`/backtest/run.json` handler had p50 16.51 ms, p99 34.51 ms and max
+45.25 ms before AF-06. With the walk remembered it had p50 0.26 ms, p99
+5.73 ms and max 8.80 ms. One open headless `/backtest` tab added 354
+journal files in 720 s before, which is 1,770 an hour. Over the same 720 s
+it added 12 after AF-06, and its poll stopped at 302 s. The tables are in
+`docs/06-limits.md` under D-1445.
+
+1. **The CLI log's evidence is remembered under the stamp of every file the
+   walk could read.** The stamp is the device, inode, length, modification
+   time and change time (seconds and nanoseconds) of each path
+   `telemetry::paths_newest_first(dir, DEFAULT_KEEP_FILES)` names; "absent"
+   is a value. That is eight `stat`s, the walk's own list of files, so the
+   stamp and the walk cannot disagree about what the log is.
+   `api::sweeprun::CliLogMemory` keeps one entry, keyed on the directory and
+   the stamp. A poll whose stamp matches reads no byte of the log. A grown,
+   rolled, truncated or replaced log, including one replaced by a file of the
+   same length, is walked again under the same `SCAN_BYTES` cap, so a miss
+   costs what every poll cost before.
+2. **The evidence is remembered; the judgement is not.** `observe_elsewhere`
+   is split into `read_evidence` (everything read off disk) and `judge`
+   (evidence at `now`). A quiet sweep goes from `running` to stale `unknown`
+   at `STALE_AFTER_MILLIS` without any byte of the log changing, so each poll
+   judges the remembered evidence at its own time. Caching the response body
+   was rejected for that reason.
+3. **Kept only when the log held still for the whole walk.** The stamp is
+   taken before and after the walk, and the walk is remembered only when the
+   two are equal. A walk the log changed under answers that poll alone
+   (`walk-not-kept`). A file that cannot be `stat`ed for any reason other
+   than being absent is never remembered, so every poll of it walks again and
+   reports the walk's own error.
+4. **A monotonic bound re-walks an unchanged log every five minutes**
+   (`REWALK_AFTER`). The one change the stamp can miss is a same-length
+   rewrite in place that lands on the same modification and change time to
+   the nanosecond. That means one tick of a coarse filesystem clock, and the
+   append-only, roll-by-rename CLI log never does it. The bound caps how long
+   such a miss could be served at 5 minutes, and costs at most 12 walks an
+   hour per process. It runs on `Instant`, so a wall clock stepping backwards
+   neither expires nor extends it.
+5. **Every answer says where its evidence came from.**
+   `/backtest/run.json` gains a `cli_log` member: `schema_version` 1,
+   `answered_from` (`memory`, `walk`, `walk-not-kept` or `not-configured`),
+   `bytes_read` for this poll, `walked_at_unix_millis`, the process's `walks`
+   and `answered_from_memory` counts, `rewalk_after_millis` and a `why`
+   sentence. One `curl` shows whether a poll read the log.
+6. **Launch admission still walks afresh.** `claim_execution`, the POST that
+   takes the execution lease, calls `observe_elsewhere` directly. An
+   admission decision is never answered from memory. Launches are rare, and a
+   stale memory there could admit a run.
+7. **The page's poll lives in `web/src/lib/status-poll.js`.** It wraps the
+   page's existing single-flight `createPageRequests` owner and changes only
+   when a re-poll fires:
+   - While a sweep is in flight (`running`, `in_flight` not false) the next
+     check is always 2 s away. Its rung progress, its best rows so far and
+     its finish are read on the poll's tick, and a browser sweep's status
+     body (`Progress::to_json`) is the same on every read until the run ends.
+     The first version of this package backed off there too, which made the
+     live view and the finish of a sweep the operator had just launched up
+     to 60 s old; its second check failed it for that, and this rule is the
+     repair. The cost is bounded by the run: a browser sweep ends with its
+     task, and a CLI sweep silent for `STALE_AFTER_MILLIS` (15 min) is
+     answered `unknown`. Rejected: putting the live feed's newest event
+     into the answer key, which still backs off through a long quiet rung
+     and so still shows a finished sweep as running for up to 60 s.
+     Only the poll that reads the run (`pollSweep`, the page's
+     `followsRun`) keeps that pace. The lease re-check
+     (`refreshCurrentAdmission`) reads `/backtest/run.json` for the lease
+     alone and leaves the page's `sweep` as it was, so a `running` it last
+     saw before a child observer took over is not evidence of a run in
+     flight, and that re-check backs off as before.
+   - The next check is 2 s after any change of answer.
+   - While a settled, idle or `unknown` answer is unchanged the wait doubles,
+     up to a 60 s ceiling. The page's "has not changed" note follows the
+     poll's own `backedOff`, never the phase.
+   - `unknown` counts as one answer whatever its reason text says, and the
+     server's `age_millis` (now minus the event, so it grows on every read)
+     is not a change.
+   - A hidden tab sends nothing: a timer that fires while the tab is hidden
+     parks its check, and showing the tab runs that check at once.
+   - After 10 `unknown` answers in a row, about five minutes when they are
+     unchanged, the poll stops. Every `unknown` answer counts, including one
+     whose lease availability differs from the last: that is a change, so
+     the wait returns to 2 s, but a lease that flips on every read would
+     otherwise keep an unknown poll at 2 s for ever (a follow-up of the same
+     check). A known answer in between starts the count again. The page shows the server's reason with a Refresh control.
+     It never stops silently, and showing the tab never restarts a stopped
+     poll; only Refresh does.
+   - `cancel()` starts a new chapter. The page calls it before a launch and
+     when a child observer takes over.
+
+   It governs `pollSweep` and `refreshCurrentAdmission`, the two self-repeating
+   `/backtest/run.json` reads. Rejected: a `setInterval` on visibility alone
+   (it still polls an unchanged `unknown` for ever), and a server push (a
+   second transport for one fact, and the journal would still record every
+   read).
+8. **Concurrent misses make one walk.** A poll that misses the memory takes
+   a walk gate, then looks at the memory again under a fresh stamp before it
+   walks, so polls that missed together are answered by the first one's walk.
+   A poll that hits memory never takes the gate, and the `kept` lock is still
+   never held across a walk. A missing poll waits for at most the walks
+   queued ahead of it, each capped at `SCAN_BYTES`. Rejected: handing a
+   waiter the result of a walk that was not kept (the log changed under it),
+   which would answer a request with evidence older than its arrival.
+9. **Not in this package: the journal itself.** Taking the three polled
+   read-only GETs out of the per-request invocation journal (D-1445) needs
+   `operation_audit.rs`'s `AUDITED` array, which R3-05 is editing, and
+   R3-14's per-route minute line. Owner R3-14. It is named NOT DONE in
+   `docs/06-limits.md` beside D-1445. This package reduces the journal's
+   growth only by asking less often.
+10. **Not in this package: a server-side record of the page's stop.** The
+   stop, its reason and the Refresh control are shown on the page and the
+   poll's state is on its root element (`data-status-poll`), but nothing on
+   the server records that a tab stopped asking: a stop is the absence of a
+   request, and the api has no route that takes a page's own events. R3-14's
+   per-route minute line would show it as that route's count falling to
+   zero. Owner R3-14; named NOT DONE in `docs/06-limits.md` beside D-0954.
+
+Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_without_a_read`,
+`a_grown_log_is_walked_again`, `a_rotated_log_is_walked_again`,
+`a_log_replaced_by_one_of_the_same_length_is_walked_again`,
+`a_log_rewritten_in_place_at_the_same_length_is_walked_again_even_with_its_old_mtime`,
+`a_truncated_log_is_walked_again`,
+`a_zero_byte_log_and_a_missing_directory_are_remembered_until_they_change`,
+`a_log_that_cannot_be_described_is_never_remembered`,
+`a_log_that_changes_during_the_walk_answers_that_poll_and_is_not_remembered`,
+`the_monotonic_bound_rewalks_and_a_wall_clock_step_back_changes_nothing`,
+`one_memory_follows_the_directory_it_was_asked_about`,
+`concurrent_polls_of_an_unchanged_log_agree`,
+`concurrent_polls_after_a_change_make_one_walk`,
+`the_route_body_says_where_its_cli_evidence_came_from`) and
+`web/tests/status-poll.test.js` (`backs_off_while_unchanged`,
+`returns_to_two_seconds_on_change`, `pauses_while_hidden`,
+`stops_after_n_unknown_and_says_why`, `keeps_two_seconds_while_a_sweep_is_in_flight`,
+`an_unknown_answer_whose_lease_alternates_still_stops`, the extremes test and
+the page-source test). The measurements are in `docs/06-limits.md` under
+D-1445, D-0954 and D-2327.
+
 ### D-4975 — The head deadline runs only while no request is in flight: it restarts when a response is complete, not at its first written byte, and a response whose writes stop making progress is cut after the same timeout and logged as cut (amends D-1200 by addition) — 2026-10-15
 
 **Implemented by** AH-02 (`api::server`: `HeadDeadline`, `HeadState`,
