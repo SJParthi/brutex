@@ -12555,7 +12555,8 @@ fn price_group(
             out.refused = out.refused.saturating_add(1);
             note_price_refusal(
                 &mut out,
-                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
+                "the vendor sent no underlying level beside this bar, so there \
+                 is nothing to price it against",
             );
             continue;
         };
@@ -35182,3 +35183,8 @@ mod http_admission_tests;
 #[cfg(test)]
 #[path = "hand_stop_tests.rs"]
 mod hand_stop_tests;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_b.rs"]
+mod cloud_mutant_tests_b;
