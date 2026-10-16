@@ -4854,4 +4854,80 @@ mod cloud_mutant_tests {
             .collect();
         assert_eq!(per, [1, 1]);
     }
+
+    /// **A KEY IS FOUND ONLY BY ITS HASH AND ITS TEXT TOGETHER.**
+    ///
+    /// Kills `replace && with || in Reader::lookup`: a record whose hash is the
+    /// asked key's but whose text is another's (a 64-bit hash collision, made
+    /// here by building the record's key by hand) must not answer for it; nor
+    /// may the record's text asked under another hash with the same tag and
+    /// home slot (bit 20 changed). The record answers for its own key alone.
+    #[test]
+    fn a_key_is_found_only_by_its_hash_and_its_text_together() {
+        use super::{Found, NoRecord, Reader, key_hash};
+        let root = std::env::temp_dir().join(format!(
+            "brutex-verdict-cloud-collision-{}",
+            std::process::id()
+        ));
+        let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let series = Series {
+            root: &root,
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            timeframe: Timeframe::SECOND_1,
+        };
+        let day = Day::new(2031, 3, 4).unwrap();
+        let collided = Key {
+            text: "ZZB".to_owned(),
+            hash: key_hash(b"ZZA"),
+            whole: None,
+        };
+        let generation = Generation {
+            day,
+            run: 1,
+            written_at: 1_900_000_000,
+            verifier: 1,
+            mode: Mode::Cold,
+            rule_set: 0,
+            origin: [7; 16],
+            day_block: DayBlock::of(Code::Match),
+            day_details: Vec::new(),
+            entries: vec![Entry {
+                key: collided.clone(),
+                facts: Facts::of(Code::Match),
+                details: Vec::new(),
+            }],
+            carry: Carry::WholeDay,
+        };
+        commit(&series, &generation).unwrap();
+        let found = |key: &Key| {
+            Reader::new()
+                .lookup(&series, day, key)
+                .unwrap()
+                .answer
+                .expect("the day is committed")
+                .found
+        };
+        assert!(
+            matches!(found(&collided), Found::Record { ordinal: 0, .. }),
+            "its own key"
+        );
+        for other in [
+            Key::instrument("ZZA").unwrap(),
+            Key {
+                text: "ZZB".to_owned(),
+                hash: key_hash(b"ZZA") ^ (1 << 20),
+                whole: None,
+            },
+        ] {
+            assert_eq!(
+                found(&other),
+                Found::NoRecord(NoRecord::NotInDay),
+                "{other:?}"
+            );
+        }
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
 }

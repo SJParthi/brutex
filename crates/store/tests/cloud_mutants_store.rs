@@ -1595,3 +1595,348 @@ fn two_year_index_slots_at_one_commit_are_read_from_slot_zero() {
     assert_eq!((tied.slot, tied.commit), (0, committed.commit));
     let _ignored = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_store_root_that_cannot_be_listed_refuses_the_first_commit_of_a_series() {
+    support::where_permission_binds(
+        "a_store_root_that_cannot_be_listed_refuses_the_first_commit_of_a_series",
+        a_store_root_that_cannot_be_listed_refuses_the_first_commit_of_a_series_body,
+    );
+}
+
+/// **THE FIRST COMMIT OF A SERIES MAKES EVERY DIRECTORY IT MADE DURABLE, UP
+/// TO AND INCLUDING THE STORE ROOT, OR IS REFUSED BEFORE ANYTHING IS
+/// PUBLISHED.**
+///
+/// Kills `replace sync_dir -> Result<(), VerdictError> with Ok(())` and
+/// `replace == with != in make_dirs`: the first answers every directory sync
+/// "done" without one, and the second stops after the year directory's own
+/// parent, so the entries the commit made in `verify/` and in the root are
+/// never made durable. The root here may be written and searched but not
+/// read (mode 0300), so its sync cannot open it: the commit is refused
+/// `io` naming the root, with no lock, index or image made. Run where the
+/// mode bits bind (D-0995).
+fn a_store_root_that_cannot_be_listed_refuses_the_first_commit_of_a_series_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use store::verdict::{Code, VerdictError, commit};
+    let dir = scratch("verdict-root-unlisted");
+    let root = dir.join("store");
+    fs::create_dir(&root).unwrap();
+    let series = verdict_series(&root);
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
+    let answer = commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    );
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    let refusal = answer.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            VerdictError::Io { path, action: "sync directory", source }
+                if path == &root && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "{refusal:?}"
+    );
+    assert!(
+        series.dir().join("2031").is_dir(),
+        "the year directory made"
+    );
+    assert!(!series.lock_path(2031).exists(), "no lock");
+    assert!(!series.year_index(2031).exists(), "no index");
+    let _ignored = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_year_directory_that_cannot_be_listed_is_refused_never_absent() {
+    support::where_permission_binds(
+        "a_year_directory_that_cannot_be_listed_is_refused_never_absent",
+        a_year_directory_that_cannot_be_listed_is_refused_never_absent_body,
+    );
+}
+
+/// **A YEAR WITH NO INDEX WHOSE DIRECTORY CANNOT BE LISTED IS THE HOST'S
+/// REFUSAL, NEVER "NO GENERATION".**
+///
+/// Kills `replace match guard why.kind() == ErrorKind::NotFound with true` in
+/// `lost_index`: every failure to list the year directory would be taken for
+/// "no directory", so a reader would answer a year whose images it cannot see
+/// as a year never written, the silent absence the lost-index rule exists to
+/// refuse. Run where the mode bits bind (D-0995).
+fn a_year_directory_that_cannot_be_listed_is_refused_never_absent_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use store::verdict::{Reader, VerdictError};
+    let root = scratch("verdict-year-unlisted");
+    let series = verdict_series(&root);
+    let year = series.dir().join("2031");
+    fs::create_dir_all(&year).unwrap();
+    fs::set_permissions(&year, fs::Permissions::from_mode(0o300)).unwrap();
+    let answer = Reader::new().year(&series, 2031);
+    fs::set_permissions(&year, fs::Permissions::from_mode(0o755)).unwrap();
+    let refusal = answer.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            VerdictError::Io { path, action: "list", source }
+                if path == &year && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "{refusal:?}"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unreadable_index_or_image_is_refused_never_absent() {
+    support::where_permission_binds(
+        "an_unreadable_index_or_image_is_refused_never_absent",
+        an_unreadable_index_or_image_is_refused_never_absent_body,
+    );
+}
+
+/// **AN INDEX OR AN IMAGE THAT IS THERE BUT CANNOT BE OPENED IS THE HOST'S
+/// REFUSAL, TO THE WRITER AND TO THE READER: NEVER "ABSENT".**
+///
+/// Kills three guards that take any `io` refusal for `ENOENT`:
+/// `commit_within`'s open of the year index (the writer would call a present
+/// index lost, `index_missing`), `Reader::handle` (the reader would say
+/// `index_missing` or `image_missing` of files that are there), and `plan`'s
+/// read of the image a carrying generation copies from (`image_missing`).
+/// Each file is made unreadable in turn (mode 000) and the refusal must be
+/// `io` naming it, with the host's `PermissionDenied`. Run where the mode
+/// bits bind (D-0995).
+fn an_unreadable_index_or_image_is_refused_never_absent_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use store::verdict::{Carry, Code, Key, Reader, VerdictError, commit};
+    let denied = |answer: VerdictError, at: &std::path::Path| {
+        assert!(
+            matches!(
+                &answer,
+                VerdictError::Io { path, source, .. }
+                    if path == at && source.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            "{answer:?}"
+        );
+    };
+    let root = scratch("verdict-unreadable");
+    let series = verdict_series(&root);
+    let committed = commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    )
+    .unwrap();
+    let key = Key::instrument("ZZA").unwrap();
+    let mut carrying = verdict_generation(&[("ZZB", Code::Match, Vec::new())]);
+    carrying.run = 2;
+    carrying.carry = Carry::Others;
+
+    let index = series.year_index(2031);
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o000)).unwrap();
+    let written = commit(&series, &carrying);
+    let read = Reader::new().lookup(&series, verdict_day(), &key);
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
+    denied(written.unwrap_err(), &index);
+    denied(read.unwrap_err(), &index);
+
+    let image = committed.path;
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o000)).unwrap();
+    let written = commit(&series, &carrying);
+    let read = Reader::new().lookup(&series, verdict_day(), &key);
+    fs::set_permissions(&image, fs::Permissions::from_mode(0o644)).unwrap();
+    denied(written.unwrap_err(), &image);
+    denied(read.unwrap_err(), &image);
+
+    // Readable again, the same carrying commit lands over generation 1.
+    let landed = commit(&series, &carrying).unwrap();
+    assert_eq!((landed.previous, landed.carried), (1, 1));
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A YEAR DIRECTORY WITH NO INDEX AND NO IMAGE COSTS ITS ONE LOOK.**
+///
+/// Kills `replace += with *= in lost_index`: the `opendir` that tells a year
+/// never written from a lost index is counted as an open, as the function's
+/// cost line says, so a lookup of a year whose directory exists empty costs
+/// exactly one open and no read; with no directory at all, nothing.
+#[test]
+fn a_year_directory_with_no_index_and_no_image_costs_one_open() {
+    use store::verdict::{Cost, Key, Reader};
+    let root = scratch("verdict-empty-year");
+    let series = verdict_series(&root);
+    let key = Key::instrument("ZZA").unwrap();
+    let never = Reader::new().lookup(&series, verdict_day(), &key).unwrap();
+    assert_eq!((never.cost, never.answer), (Cost::default(), None));
+    fs::create_dir_all(series.dir().join("2031")).unwrap();
+    let empty = Reader::new().lookup(&series, verdict_day(), &key).unwrap();
+    assert_eq!(
+        (empty.cost, empty.answer),
+        (Cost { opens: 1, reads: 0 }, None)
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A COMMIT LOCK HELD FOR THE WHOLE WAIT IS REFUSED `lock_stalled` WHEN
+/// THE WAIT ENDS, AFTER ONE TRY PER STEP, AND NOTHING IS PUBLISHED.**
+///
+/// Kills `replace match guard step < steps with true` and `replace += with
+/// *=` in `lock_within` (caught before only by a timeout: both wait for
+/// ever). The lock is held by this test through its own handle on the lock
+/// file; the commit runs on a worker with a deadline, and must answer within
+/// it, having tried the lock once and once more per `LOCK_STEP` of its 50 ms.
+#[test]
+fn a_held_commit_lock_is_refused_when_the_wait_ends() {
+    use std::time::Duration;
+    use store::verdict::{Code, LOCK_STEP, VerdictError, commit, commit_within};
+    let root = scratch("verdict-lock-held");
+    let series = verdict_series(&root);
+    fs::create_dir_all(series.dir()).unwrap();
+    let lock_path = series.lock_path(2031);
+    let holder = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock().unwrap();
+    let wait = Duration::from_millis(50);
+    let (send, answer) = std::sync::mpsc::channel();
+    let worker_root = root.clone();
+    std::thread::spawn(move || {
+        let series = verdict_series(&worker_root);
+        let generation = verdict_generation(&[("ZZA", Code::Match, Vec::new())]);
+        let _receiver_gone = send.send(commit_within(&series, &generation, wait).map(|_| ()));
+    });
+    let refusal = answer
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the commit answered")
+        .unwrap_err();
+    let steps = u32::try_from(wait.as_millis() / LOCK_STEP.as_millis()).unwrap();
+    assert!(
+        matches!(
+            &refusal,
+            VerdictError::LockStalled { path, waited_ms: 50, tries }
+                if path == &lock_path && *tries == steps + 1
+        ),
+        "{refusal:?}"
+    );
+    assert!(!series.year_index(2031).exists(), "no index");
+    holder.unlock().unwrap();
+    commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    )
+    .unwrap();
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A PAGE NAMES A DAMAGED RECORD BY ITS OWN ORDINAL.**
+///
+/// Kills `replace + with *` in `Reader::page`'s ordinal of each record read:
+/// the refusal must name the record that failed its CRC, not the page's
+/// first. Two records of one code; the one at ordinal 1 has a byte of its key
+/// changed on disk; a page of both, and a page starting at it, each name
+/// record 1.
+#[test]
+fn a_page_names_a_damaged_record_by_its_own_ordinal() {
+    use store::verdict::{Code, Found, Key, Reader, VerdictError, commit};
+    let root = scratch("verdict-page-ordinal");
+    let series = verdict_series(&root);
+    let committed = commit(
+        &series,
+        &verdict_generation(&[
+            ("ZZA", Code::Match, Vec::new()),
+            ("ZZB", Code::Match, Vec::new()),
+        ]),
+    )
+    .unwrap();
+    let second = ["ZZA", "ZZB"]
+        .into_iter()
+        .find(|name| {
+            let lookup = Reader::new()
+                .lookup(&series, verdict_day(), &Key::instrument(name).unwrap())
+                .unwrap();
+            matches!(
+                lookup.answer.map(|answer| answer.found),
+                Some(Found::Record { ordinal: 1, .. })
+            )
+        })
+        .expect("one key is record 1");
+    let mut field = second.as_bytes().to_vec();
+    field.resize(store::verdict::KEY_LEN, 0);
+    let mut bytes = fs::read(&committed.path).unwrap();
+    let at = bytes
+        .windows(field.len())
+        .position(|w| w == field.as_slice())
+        .expect("record 1's key field");
+    bytes[at + 2] ^= 0x01;
+    fs::write(&committed.path, &bytes).unwrap();
+    for (start, len) in [(0, 2), (1, 1)] {
+        let refusal = Reader::new()
+            .page(&series, verdict_day(), Code::Match, start, len)
+            .unwrap_err();
+        assert!(
+            matches!(refusal, VerdictError::RecordCorrupt { ordinal: 1, .. }),
+            "page ({start}, {len}): {refusal:?}"
+        );
+    }
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A RECORD'S DETAILS ARE READ ENTRY BY ENTRY FROM ITS OWN OFFSET.**
+///
+/// Kills `replace += with *= in Reader::details` (caught before only by a
+/// timeout, as a walk from offset 0 never moves): from a record whose entries
+/// follow another record's, the walk must step one entry at a time, so both
+/// of its entries come back in order. Only that record is asked for, so this
+/// test cannot hang under the mutant: its walk jumps past the section.
+#[test]
+fn a_records_details_after_another_records_are_read_entry_by_entry() {
+    use store::verdict::{Code, Detail, Found, Key, Reader, commit};
+    let detail = |kind: u16, payload: &[u8]| Detail {
+        kind,
+        payload: payload.to_vec(),
+    };
+    let own = |name: &str| {
+        let low = name.to_ascii_lowercase();
+        vec![detail(2, name.as_bytes()), detail(3, low.as_bytes())]
+    };
+    let root = scratch("verdict-details-walk");
+    let series = verdict_series(&root);
+    let committed = commit(
+        &series,
+        &verdict_generation(&[
+            ("ZZA", Code::ValueMismatch, own("ZZA")),
+            ("ZZB", Code::ValueMismatch, own("ZZB")),
+        ]),
+    )
+    .unwrap();
+    let mut walked = 0;
+    for name in ["ZZA", "ZZB"] {
+        let lookup = Reader::new()
+            .lookup(&series, verdict_day(), &Key::instrument(name).unwrap())
+            .unwrap();
+        let Some(Found::Record { ordinal, record }) = lookup.answer.map(|answer| answer.found)
+        else {
+            panic!("{name} is in the day");
+        };
+        assert!(record.detail_at > 0, "{name} owns details");
+        if record.detail_at == 1 {
+            continue;
+        }
+        walked += 1;
+        assert_eq!(
+            Reader::new()
+                .details(
+                    &series,
+                    verdict_day(),
+                    committed.generation,
+                    Some((ordinal, &record))
+                )
+                .unwrap(),
+            own(name),
+            "{name}"
+        );
+    }
+    assert_eq!(walked, 1, "exactly one record's entries follow another's");
+    let _ignored = fs::remove_dir_all(&root);
+}
