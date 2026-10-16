@@ -60,7 +60,7 @@ changed.
 | store `time_index.rs` | 135 | 127 | 0 | 2 | 6 | 0 |
 | store `sort_index_writer.rs` | 74 | 58 | 6 | 0 | 10 | 2 (equivalent in practice) |
 | store `path.rs` | 130 | 118 | 1 | 0 | 11 | 0 |
-| store `verdict.rs` | 840 | 714 | 59 | 5 | 62 | pending |
+| store `verdict.rs` | 840 | 714 | 59 | 5 | 62 | 13 (equivalent) |
 | store `sealed.rs` | 638 | pending | | | | |
 | store `file.rs` | 407 | pending | | | | |
 | store `emits.rs`, `lib.rs` | 0 | no mutable code | | | | |
@@ -70,6 +70,15 @@ After the new tests, `--iterate` re-tested its 47 missed or timed-out mutants:
 37 caught, 1 missed (the equivalent below), 9 still timeouts. The 9 time out
 because the pre-existing tests hang on them; re-run with only the new tests,
 all 9 are **caught** (fail fast).
+
+`verdict.rs`'s three pass-1 shards were merged and their 64 missed or
+timed-out mutants re-tested on this branch against the new tests (the
+module's existing unit tests and the other modules' skipped): 47 caught, 14
+missed, 3 timeouts. Of the 14, 13 are the equivalents below; the 14th,
+`2533:28`, was killed by a test committed after that run began. The three
+timeouts (`931:17`, `2619:12`, `4153:16`) hang a test that does not target
+them. Re-run against only their own deadline tests (`--timeout 60`, since a
+deadline is 20 s), all four are **caught**.
 
 ## Equivalent mutants (so far)
 
@@ -100,6 +109,7 @@ all 9 are **caught** (fail fast).
 |---|---|---|
 | `store::staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported` | `assert_ne!(ino)` after unlink + create: ext4 reuses the freed inode number (fails 40/40 alone). Passes on tmpfs and APFS. A test defect, not a code defect. | left unchanged; the new race test proves the same branch without inode numbers |
 | `store tests/cited_commits.rs every_commit_the_store_records_cite_is_on_main_or_says_why_not` | the cloud base is a one-commit snapshot, so the commits the docs cite are not ancestors | environment only |
+| GitHub CI on this branch's PR: `Gate W — the browser tree`, step W1 "web/build matches web/src" | the base snapshot's committed `web/build` is not what its own `web/src` builds (18 files differ); this branch changes nothing under `web/`. Gate W fails first and the run cancels the Rust gates, so CI never ran them on this branch: they were run locally (Gates, below). | not this branch's; needs a `web/build` rebuild on the base |
 | four `telemetry::sink::tests` chmod tests | fail as root (mode bits do not bind); pass with `CAP_DAC_OVERRIDE` dropped. They do not use `where_permission_binds` (D-0995) as the store's do. | environment only |
 
 ## Coverage
