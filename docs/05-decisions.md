@@ -69159,3 +69159,51 @@ checks three of them.
 
 **Rejected.** *Excluding test files from the gate.* The gate reads test code on
 purpose: a fixture is where a real segment would be pasted first.
+
+### D-5254 — Sixteen invariant rows citing tests that were deleted or renamed are restated to what the code and its tests show today — 2026-10-16
+
+**Status: locked.** Part of the operator's "unblock CI here" (16 October 2026).
+
+**What was red.** Gate 10 (every invariant names a test that exists) refused
+`feat/db-fix` at `4756cce0` on its own: fifteen references named functions
+that no longer exist, and ZMC-01 cited a path-qualified test that had been
+renamed. Each was traced to the commit that removed or renamed it:
+`bd6b6f5a` (WP-30, D-3327 items 1 and 4: one census cache cell per vendor;
+`/instruments.json` built from the facet index), `bfccbd24` (WP-35, D-3336
+item 3: the calendar is the exchange record, built once per feed generation),
+`50c2437e` (WP-13b, D-3319, D-3321, D-3341: every Muhurat has a recorded
+window, special sessions fold inside their windows, request-minute gaps are
+one event per month and reason), `de98c55a` (D-3342, `BAR_DEFINITION` 3),
+`efc353ed` (WP-12d: an older day is back-filled as a new generation),
+`704072ad` (D-3317 item 7: a census refusal stops the run) and `3a208d57`
+(D-3331 item 1: an expiry on a closed day settles on the previous session).
+None of those changes restated the rows that pinned the old behaviour.
+
+**Decision.** Each row keeps its id and is restated to the behaviour the code
+has now, citing the test that proves it — never only renamed, because twelve
+of the sixteen described behaviour their own decisions changed on purpose, and
+a row pointed at a test proving the opposite of its sentence would be green and
+false. Each restated row says "restated by D-5254" and names the decision that
+changed the behaviour: SS-06, MR-34, AF-23, AF-28j, PIF-02, APIC-05,
+C4-CLI-03-03, AFA-13, ZR-04, ZX-20, AFG-71, GI-01, GI-07, GI-10, ZMC-01.
+
+**Claims withdrawn, not proven, said plainly.** Five rows asserted something
+the deleted tests checked and no test checks now, and the restated rows say so
+instead of keeping the claim: SS-06's manifest-read COUNT for
+`/instruments.json` (only the source's shape and body equality are proven);
+MR-34's empty-store answer; APIC-05's answer for a census-only symbol asked by
+name (read from the code: 503 `bars: "unopened"`, untested); ZR-04's BSE
+listing of a shared symbol (the fixture files every census under NSE); and
+PIF-02's end-to-end withholding of an unsized day, which has no subject now
+that every calendar day has a recorded window. Each is a test someone can
+write; none is written here.
+
+**Left stale, recorded rather than guessed at.** `docs/06-limits.md`'s D-0686
+and D-0695 sections still describe the shared census cache's costs ("Each such
+request reads every vendor's manifest"), which D-3327 item 1 changed; and
+`docs/11-findings.md` (append-only) still cites the old AFA-13 and AFG-71
+names. Correcting the limits text needs its own measurement; neither is read
+by a gate.
+
+**Rejected.** *Gate 10's allowlist.* It exempts a row from the check, which
+would leave sixteen false or unproven rows looking proven.
