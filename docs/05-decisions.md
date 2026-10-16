@@ -68965,3 +68965,100 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-5260 — `rustls` 0.23.46 and `ruzstd` 0.9.1 for five RustSec advisories; both manifests that name `ruzstd` require 0.9.1 — 2026-10-16
+
+**Context.** `cargo deny check` (cargo-deny 0.20.2) failed its advisories
+check on `cloud/base-20261016` (`c9e3472`, a snapshot of `feat/db-fix` at
+`4756cce0`); bans, licenses and sources passed. Reproduced on that tree on 16
+October 2026, the same five advisories and no others:
+
+- `rustls` 0.23.45: RUSTSEC-2026-0346 (`Debug` impls expose TLS secrets),
+  RUSTSEC-2026-0347 (buffered data sent to the outer server after an ECH
+  rejection), RUSTSEC-2026-0348 (Brotli certificate decompression can allocate
+  up to 1 GiB before authentication), RUSTSEC-2026-0349 (an unauthenticated
+  ServerHello can downgrade later connections to classical key exchange).
+  Patched in 0.23.46. Reached through `reqwest` 0.12.28 (`hyper-rustls`,
+  `tokio-rustls`) and `rustls-graviola` 0.4.0, both `pull`'s.
+- `ruzstd` 0.8.2: RUSTSEC-2026-0344, a decompression bomb. A Compressed
+  block's regenerated size was never held to `Block_Maximum_Size` (RFC 8878
+  §3.1.1.2.4: the smaller of the window and 128 KiB), so one block under 128 KB
+  could make gigabytes in one step. Patched in 0.9.1. `lake` decodes Parquet
+  page bodies with it (D-0056) and `pull` the GDFL tick store's frames (D-2801).
+
+**Decision.**
+
+1. **`rustls` 0.23.45 → 0.23.46**, by `cargo update -p rustls --precise
+   0.23.46`. It replaces the 0.23.45 D-0612 locked. No manifest names
+   `rustls`, so no requirement changes; `Cargo.lock` moves its version and
+   checksum and nothing else, its `dependencies` list included.
+2. **`ruzstd` 0.8.2 → 0.9.1, replacing the 0.8 D-0056 and D-2801 chose.** The
+   requirement moves from `"0.8"` to `"0.9.1"` in `[workspace.dependencies]`,
+   which `pull` inherits, and in `crates/lake/Cargo.toml`, which names its
+   own; `default-features = false` and the features `std` and `hash` are
+   unchanged. `"0.9.1"` and not `"0.9"`, because 0.9.0 is inside the advisory
+   too and the requirement itself should refuse a lock that resolves to it.
+   `Cargo.lock` moves its version and checksum; its one dependency,
+   `twox-hash` 2.1.2, is unchanged. Still pure Rust: 0.9.1 sets `build =
+   false` and ships no `.c`, `.h`, `.S` or `.asm`, the reason D-2801 chose it.
+3. **No call site changes.** `lake::page::LakePageReader::decode` and
+   `pull::gdfl_tickstore::unzstd` use `decoding::StreamingDecoder::new` and
+   `std::io::Read`; the tests also use `encoding::compress_to_vec` at
+   `CompressionLevel::Fastest`. All of these have the same signatures in
+   0.9.1. Neither call site's own bound changes: each still reads one byte
+   past the size it was promised and refuses any other length.
+4. **No advisory is ignored**, and `deny.toml` is unchanged.
+
+**What 0.9.1 now refuses that 0.8.2 decoded.** Two cases. Both are refusals
+by name through refusals that already existed, and neither is a fallback:
+
+- **A Compressed block past `Block_Maximum_Size`** fails the read: in `lake`
+  as `zstd decode refused: …`, and in `pull` as `TickStoreMalformed` naming
+  `FRAME`. On 0.8.2, such a block decoded, and was accepted whenever the size
+  the header or index entry promised matched what it made. RFC 8878
+  §3.1.1.2.4 does not allow such a block, so a conforming encoder never writes
+  one.
+- **A frame declaring a window past 128 MiB** (`ruzstd`'s
+  `DEFAULT_MAX_WINDOW_SIZE`, 134,217,728 bytes) fails at the frame header,
+  before any block is read: in `lake` as `zstd frame refused: …`, and in
+  `pull` as `FRAME`. 0.8.2 accepted any window up to the format's maximum.
+  Neither call site raises the limit, although 0.9.1 offers
+  `StreamingDecoder::new_with_max_window_size`, because raising it reopens
+  the allocation the limit bounds. A `lake` page is already capped at 64 MiB
+  (`MAX_PAGE_BYTES`). **UNVERIFIED for the GDFL tick store:** the store's
+  writer is outside this repository, the charter does not record its zstd
+  parameters, and its files are not reachable from the session that made this
+  change. A single-segment frame declares its content size as its window, so
+  a raw block over 128 MiB written that way would now be refused by name.
+  Raising the limit for that source would be a new decision, not a silent
+  fallback.
+
+**Evidence** (measured 16 October 2026):
+
+- `cargo deny check` 0.20.2 before: `advisories FAILED, bans ok, licenses ok,
+  sources ok`, with exactly the five IDs above. After: `advisories ok, bans
+  ok, licenses ok, sources ok`. The two `duplicate` warnings, `getrandom` and
+  `syn`, belong to the base and are unchanged.
+- Four hand-built frames, decoded by both versions out of tree:
+
+  | Frame | 0.8.2 | 0.9.1 |
+  |---|---|---|
+  | One Compressed block making 131,074 bytes | decodes | refused, `TooManyBytesGenerated { max: 131072, decoded: 131074 }` |
+  | The same block making exactly 131,072 | decodes | decodes |
+  | One Raw byte under a 256 MiB window | decodes | refused at init, `Requested: 268435456, Max: 134217728` |
+  | The same under a 128 MiB window | decodes | decodes |
+
+  The four ZSTD-01 and ZSTD-02 tests drive these frames through both call
+  sites. They pass on 0.9.1. With the base's lock (0.8.2), the two refusal
+  tests in each crate fail.
+- The registry scan `the_dependency_set_has_not_moved_without_review` asks
+  for, recorded beside its new pin `0xFFDD_76EA_1ADA_B2F7`: the package count
+  is still 192, and neither new version ships non-Rust source. `rustls`
+  0.23.46's `build.rs` is byte-identical to 0.23.45's.
+- Every existing test in `lake` and in `pull`'s GDFL readers passes
+  unchanged on 0.9.1, including the fixtures `ruzstd`'s encoder writes, so
+  the decoders give the same bytes. The `#[ignore]`d tests over the
+  operator's real lake were not run: the lake is not on this machine.
+
+**Proven by** ZSTD-01 and ZSTD-02 (`docs/04-invariants.md`), and by the
+fingerprint pin in `crates/vocab/tests/workspace_is_rust.rs`.

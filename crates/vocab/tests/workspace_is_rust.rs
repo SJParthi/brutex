@@ -588,8 +588,18 @@ fn the_dependency_set_has_not_moved_without_review() {
     // PACKAGE (D-2801): `pull` names `ruzstd` 0.8.2 to read the GDFL tick store.
     // The package was already in the lock under `lake` with the same features,
     // the count is unchanged, and it is pure Rust with no `build.rs` (D-0056).
+    // 0x8ACF_7E51_E4A6_F150 -> 0xFFDD_76EA_1ADA_B2F7 IS TWO VERSION BUMPS, NO NEW
+    // PACKAGE AND NO NEW ARROW (D-5260): `rustls` 0.23.45 -> 0.23.46 and `ruzstd`
+    // 0.8.2 -> 0.9.1, for RUSTSEC-2026-0346 to -0349 and RUSTSEC-2026-0344. The
+    // count is still 192 and both `dependencies` lists are unchanged. The scan,
+    // over the registry sources of both new versions: no .c/.cc/.cpp/.h/.S/.asm/
+    // .js in either. `ruzstd` 0.9.1 sets `build = false`; its only non-Rust files
+    // are four `.zst` test fixtures it does not compile. `rustls` 0.23.46 keeps
+    // the `build.rs` 0.23.45 had, byte-identical: a `rustversion` cfg emitter for
+    // the `read_buf` feature, which this tree does not enable, with no `Command`,
+    // `process::`, `spawn` or `.output()`. `DECLARED` is unchanged.
     assert_eq!(
-        h, 0x8ACF_7E51_E4A6_F150,
+        h, 0xFFDD_76EA_1ADA_B2F7,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

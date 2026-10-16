@@ -1019,6 +1019,112 @@ mod tests {
         }
     }
 
+    /// A frame whose one Compressed block regenerates `ml` bytes from a
+    /// single sequence, after a one-byte Raw block that gives it a history.
+    ///
+    /// 28 B5 2F FD  magic
+    /// 00           frame header: no single segment, no content size
+    /// 50           window descriptor: 2^(10 + 10) = 1 MiB
+    /// 08 00 00     block header: Raw, size 1  (0 | 0<<1 | 1<<3)
+    /// 41           `A`
+    /// 4D 00 00     block header: last block, Compressed, size 9  (1 | 2<<1 | 9<<3)
+    /// 00           literals: Raw, none
+    /// 01           one sequence
+    /// 54           literal-length, offset and match-length codes all RLE
+    /// 00 02 34     the codes: literal length 0, offset 2, match length 52
+    /// lo hi 04     the bitstream: 16 match-length bits `ml - 65,539`, two zero
+    ///              offset bits (offset 1, the `A`), and the end marker
+    ///
+    /// So the block repeats the `A` `ml` times, and the frame is `ml + 1`
+    /// bytes of `A`. RFC 8878 §3.1.1.2.4 caps a block's regenerated size at
+    /// `Block_Maximum_Size`, the smaller of the window and 128 KiB.
+    fn one_sequence_frame(ml: u32) -> Vec<u8> {
+        let [lo, hi, ..] = (ml - 65_539).to_le_bytes();
+        let mut frame = vec![
+            0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x50, 0x08, 0x00, 0x00, b'A', 0x4D, 0x00, 0x00, 0x00,
+            0x01, 0x54, 0x00, 0x02, 0x34,
+        ];
+        frame.extend([lo, hi, 0x04]);
+        frame
+    }
+
+    /// **A COMPRESSED BLOCK THAT REGENERATES PAST 128 KiB IS REFUSED, EVEN
+    /// WHEN THE HEADER PROMISES EXACTLY WHAT THE FRAME DECODES TO.**
+    ///
+    /// RUSTSEC-2026-0344 (D-5260): `ruzstd` before 0.9.1 never held a
+    /// Compressed block to `Block_Maximum_Size`, so one block of a few bytes
+    /// could regenerate gigabytes in a single step. That happens before the
+    /// one-byte-past cap in [`LakePageReader::decode`] can stop anything,
+    /// because the decoder makes the whole block before the read takes any of
+    /// it. The frame below needs 22 bytes to make 131,074, two past the
+    /// maximum; nothing larger is needed to tell the versions apart, and a
+    /// larger one would have to allocate to prove it.
+    ///
+    /// The header promises 131,075, every byte the frame holds, so the length
+    /// check below agrees with it and only the decoder can refuse: on
+    /// `ruzstd` 0.8.2 this page DECODES. The premise is the same frame at
+    /// exactly 131,072, which must still decode, so the refusal is the bound
+    /// and not "those bytes are not a frame".
+    #[test]
+    fn a_compressed_block_past_the_block_maximum_is_refused_by_the_decoder() {
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+
+        let at_limit = r
+            .decode(&one_sequence_frame(131_072), 131_073)
+            .expect("a block of exactly 128 KiB is legal and decodes");
+        assert_eq!(at_limit.len(), 131_073, "the premise: the A and its block");
+        assert!(at_limit.iter().all(|b| *b == b'A'));
+
+        let refused = r
+            .decode(&one_sequence_frame(131_074), 131_075)
+            .expect_err("a block two bytes past 128 KiB must be refused");
+        let text = refused.to_string();
+        assert!(
+            text.contains("zstd decode refused"),
+            "the decoder refuses, not the length check, which this header \
+             satisfies; got: {text}"
+        );
+    }
+
+    /// **A FRAME DECLARING A WINDOW PAST 128 MiB IS REFUSED BEFORE ANY BLOCK
+    /// IS READ.**
+    ///
+    /// `ruzstd` 0.9 refuses such a frame by default (D-5260); on 0.8.2 the
+    /// same frame decodes. A page is already capped at [`MAX_PAGE_BYTES`],
+    /// half that window, so only a writer that asked for a wider window than
+    /// its page needs meets this refusal. It is new, so it is named here:
+    /// `zstd frame refused`, at the frame header, before anything is
+    /// allocated for the window. The premise is the same one-byte frame at
+    /// exactly 128 MiB, which still decodes.
+    #[test]
+    fn a_zstd_frame_declaring_a_window_past_128_mib_is_refused() {
+        // 28 B5 2F FD  magic
+        // 00           frame header: no single segment, no content size
+        // 88 / 90      window descriptor: 2^(10 + 17) = 128 MiB / 2^(10 + 18)
+        // 09 00 00     block header: last block, Raw, size 1  (1 | 1<<3)
+        // 41           `A`
+        let window = |descriptor: u8| {
+            [
+                0x28, 0xB5, 0x2F, 0xFD, 0x00, descriptor, 0x09, 0x00, 0x00, b'A',
+            ]
+        };
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+
+        let edge = r
+            .decode(&window(0x88), 1)
+            .expect("a 128 MiB window is accepted");
+        assert_eq!(&edge[..], b"A", "the premise: the frame is sound");
+
+        let refused = r
+            .decode(&window(0x90), 1)
+            .expect_err("a 256 MiB window must be refused");
+        let text = refused.to_string();
+        assert!(
+            text.contains("zstd frame refused"),
+            "refused at the frame header, before any block; got: {text}"
+        );
+    }
+
     #[test]
     fn codec_renders_its_name() {
         assert_eq!(Codec::Uncompressed.to_string(), "UNCOMPRESSED");
