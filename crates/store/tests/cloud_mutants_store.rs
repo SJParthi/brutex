@@ -3073,3 +3073,106 @@ fn a_confirmed_month_is_its_regular_files_and_an_unmeasurable_one_is_refused() {
     let _ignored = fs::remove_dir_all(&root);
     let _ignored = fs::remove_dir_all(&other);
 }
+
+/// **A BATCH'S FLUSH REPORTS THE EARLIEST TARGET THAT FAILED, AND A HELD FILE
+/// THAT TURNED INTO A LINK IS A FAILURE, NOT A FILE GONE.**
+///
+/// Kills `replace < with ==` and `replace < with >` in `flush_all`'s choice
+/// of the refusal it reports, and `replace match guard gone.kind() ==
+/// ErrorKind::NotFound with true` in its open of each target.
+///
+/// A batch's targets are its directories first, then the files it holds. On
+/// two threads, the month's own directory refuses its flush 300 ms late and
+/// the month's checksum file at once: the checksum's refusal is met first,
+/// and the directory's, earlier in the batch, is the one reported. Then a
+/// held file replaced by a symbolic link after the month was confirmed is
+/// refused at its open (`O_NOFOLLOW`): only a file that is GONE has its
+/// directory flushed in its place.
+#[test]
+fn a_batch_flush_reports_its_earliest_failure_and_a_linked_file_is_one() {
+    use store::file::{BarFile, BatchFlush, DurableBatch, StoreError};
+    use store::path::FileKind;
+    let root = scratch("flush-earliest");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let month_dir = bars.to_path_buf(&root).parent().unwrap().to_path_buf();
+    let checksums = second_month(FileKind::Checksums).to_path_buf(&root);
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.confirm_month(&root, bars).unwrap());
+    let slow = month_dir.clone();
+    let fast = checksums.clone();
+    let flush = move |_: &fs::File, at: &std::path::Path| {
+        if at == slow {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            return Err(std::io::Error::other("the directory's flush, refused late"));
+        }
+        if at == fast {
+            return Err(std::io::Error::other(
+                "the checksum's flush, refused at once",
+            ));
+        }
+        Ok(())
+    };
+    let refusal = batch.make_durable_by(2, &flush).unwrap_err();
+    assert!(
+        matches!(&refusal, StoreError::Io { path, .. } if *path == month_dir),
+        "{refusal:?}"
+    );
+
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.confirm_month(&root, bars).unwrap());
+    let kept = month_dir.join("kept.crc");
+    fs::rename(&checksums, &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, &checksums).unwrap();
+    let refusal = batch.make_durable(1).unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .contains(&checksums.display().to_string()),
+        "{refusal}"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A BATCH ASKED FOR TWO THREADS FLUSHES ON TWO AT ONCE.**
+///
+/// Kills `replace == with !=` in `flush_all`'s choice of threads, which
+/// would flush a two-thread batch on one, in turn. The month's directory and
+/// its checksum file each arrive in their flush and wait (up to 5 s, holding
+/// nothing) for the other: both arrive only if the two flushes are in flight
+/// together, and one alone is refused.
+#[test]
+fn a_batch_asked_for_two_threads_flushes_on_two_at_once() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use store::file::{BarFile, BatchFlush, DurableBatch};
+    use store::path::FileKind;
+    let root = scratch("flush-two-at-once");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let month_dir = bars.to_path_buf(&root).parent().unwrap().to_path_buf();
+    let checksums = second_month(FileKind::Checksums).to_path_buf(&root);
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.confirm_month(&root, bars).unwrap());
+    let flush = move |_: &fs::File, at: &std::path::Path| {
+        if at == month_dir || at == checksums {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let since = std::time::Instant::now();
+            while arrived.load(Ordering::SeqCst) < 2 {
+                if since.elapsed() > std::time::Duration::from_secs(5) {
+                    return Err(std::io::Error::other("flushed alone"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    };
+    let made = batch.make_durable_by(2, &flush).unwrap();
+    assert!(made.flushes >= 2, "{made:?}");
+    let _ignored = fs::remove_dir_all(&root);
+}
