@@ -2962,3 +2962,58 @@ fn a_torn_month_whose_sidecar_cannot_be_measured_is_refused() {
     assert_eq!(fs::read(&bar_path).unwrap(), [0u8; 100], "left as it was");
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// **TWO WRITERS MAKING ONE NEW DIRECTORY CHAIN AT ONCE BOTH OPEN.**
+///
+/// Kills `replace match guard raced.kind() == ErrorKind::AlreadyExists with
+/// false` in `create_below`: a level another opener made between this one's
+/// walk and its `create_dir` is that opener's, not a refusal. Two writers of
+/// two months that share every directory open at the same moment in a fresh
+/// root, 200 times; every open must succeed and both months must be there.
+/// Which writer makes which level is the host's race, so the test makes the
+/// race often rather than once.
+#[test]
+fn two_writers_making_one_new_directory_chain_at_once_both_open() {
+    use std::sync::{Arc, Barrier};
+    use store::file::BarFile;
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    let month_path = |month: u8| {
+        StorePath::new(PathParts {
+            vendor: brutex_core::vendor::Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::SECOND_1,
+            month: YearMonth::new(2031, month).unwrap(),
+            file: FileKind::Bars,
+        })
+        .unwrap()
+    };
+    for round in 0..200 {
+        let root = scratch("dir-race");
+        let start = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = [2u8, 3]
+            .into_iter()
+            .map(|month| {
+                let root = root.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    BarFile::open_or_create(&root, month_path(month), 11).map(|_| ())
+                })
+            })
+            .collect();
+        for worker in workers {
+            let opened = worker.join().unwrap();
+            assert!(opened.is_ok(), "round {round}: {opened:?}");
+        }
+        for month in [2, 3] {
+            assert!(
+                month_path(month).to_path_buf(&root).exists(),
+                "round {round}"
+            );
+        }
+        let _ignored = fs::remove_dir_all(&root);
+    }
+}
