@@ -1373,3 +1373,40 @@ fn tickstore_a_directory_at_a_day_name_is_unavailable_as_a_directory() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ═══ gdfl_nfo: the day zip's size ═════════════════════════════════════════
+
+/// An options day's listing states the size of the day zip it was read
+/// from only when its source read one: none for a fresh listing (the tick
+/// store's, which holds no zip), and exactly the bytes it was given
+/// otherwise.
+#[test]
+fn nfo_a_listing_states_its_day_zips_size_only_when_given_one() {
+    let fresh: pull::gdfl_nfo::NfoDay<u64> = pull::gdfl_nfo::NfoDay::new(day(2024, 4, 2), 0);
+    assert_eq!(fresh.member_bytes(), None);
+    assert_eq!(
+        fresh.with_member_bytes(7_340_033).member_bytes(),
+        Some(7_340_033)
+    );
+}
+
+/// Before the day-form switch an index weekly's dated reading must expire
+/// in the three-month cycle, counted in calendar months across a year end:
+/// a dated expiry three months on is read dated, and one fifteen months on
+/// (December of the next year, an earlier calendar month than the trade's)
+/// is no dated reading, so the name reads monthly. Invented strikes.
+#[test]
+fn nfo_a_pre_switch_index_weekly_is_dated_only_inside_the_three_month_cycle() {
+    use pull::gdfl_nfo::{TickerForm, decode_ticker};
+    let on = day(2018, 9, 10);
+    let near = decode_ticker("BANKNIFTY13DEC1826000CE", on).unwrap();
+    assert_eq!(
+        (near.form, near.contract.as_str()),
+        (TickerForm::Day, "2018-12-13-2600000-CE")
+    );
+    let far = decode_ticker("BANKNIFTY18DEC19500CE", on).unwrap();
+    assert_eq!(
+        (far.form, far.contract.as_str()),
+        (TickerForm::Monthly, "2018-12-27-1950000-CE")
+    );
+}
