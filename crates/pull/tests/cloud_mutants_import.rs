@@ -1160,6 +1160,48 @@ mod cm_scope_and_auction {
         std::fs::remove_dir_all(later).unwrap();
     }
 
+    /// A stocks day before 2026-08-03 asks no closing-auction eligibility,
+    /// even of a scope that names no masters: the rule did not exist yet, so
+    /// no share is unknown for want of a master.
+    #[test]
+    fn a_stocks_day_before_the_auction_change_asks_no_eligibility() {
+        let listing = DayListing::<()>::new(CmKind::Stocks, day(2026, 7, 31));
+        assert_eq!(
+            listing.auction_for(&InstrumentKey::cash(Exchange::Nse, "RELIANCE").unwrap()),
+            Auction::NotAsked
+        );
+    }
+
+    /// An F&O underlying that is an index has an empty ISIN in the F&O list,
+    /// so a stocks day's auction rule for it is unknown for want of an ISIN:
+    /// the master is never asked with an empty one.
+    #[test]
+    fn an_index_underlying_has_no_isin_to_ask_the_master_with() {
+        assert_eq!(isin("FINNIFTY"), "");
+        let root = scratch("CmMasterIndex");
+        let d = day(2026, 8, 4);
+        master(&root, d);
+        let scope = Arc::new(CmScope::swept().with_masters(root.clone()));
+        let listing = DayListing::<()>::scoped(CmKind::Stocks, d, scope);
+        assert!(matches!(
+            listing.auction_for(&InstrumentKey::cash(Exchange::Nse, "FINNIFTY").unwrap()),
+            Auction::Unknown(why) if why.contains("core::universe records no ISIN")
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A day listing states its day zip's size only when its source read
+    /// one: none for a fresh listing, exactly the bytes given otherwise.
+    #[test]
+    fn a_day_listing_states_its_zips_size_only_when_given_one() {
+        let fresh = DayListing::<()>::new(CmKind::Indices, day(2024, 4, 2));
+        assert_eq!(fresh.member_bytes(), None);
+        assert_eq!(
+            fresh.with_member_bytes(524_289).member_bytes(),
+            Some(524_289)
+        );
+    }
+
     /// A source that does not say which scope it lists under lists under
     /// the swept surface: the trait's default.
     #[test]

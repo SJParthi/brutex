@@ -5485,4 +5485,16 @@ mod cloud_mutant_tests {
             );
         }
     }
+
+    /// A share member is filed in its share's months: the member's name less
+    /// the instrument id's prefix and less a trade-for-trade series, and a
+    /// name without the prefix is read as the symbol. Invented symbols.
+    #[test]
+    fn a_share_member_is_filed_under_its_own_share() {
+        use super::member_share;
+        assert_eq!(member_share("NSE-CASH-ZZSHARE"), "ZZSHARE");
+        assert_eq!(member_share("NSE-CASH-ZZSHARE.BE"), "ZZSHARE");
+        assert_eq!(member_share("ZZSHARE.BZ"), "ZZSHARE");
+        assert_eq!(member_share("NSE-CASH-ZZ.SHARE"), "ZZ.SHARE");
+    }
 }
