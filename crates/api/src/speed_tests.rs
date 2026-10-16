@@ -327,22 +327,100 @@ fn the_route_answers_the_report_and_filters_by_route() {
     let speed = Speed::new(0, 8);
     speed.record("/bars.json", Kind::Route, 10, Outcome::Answered, 0);
     speed.record("/spot.json", Kind::Route, 20, Outcome::Answered, 0);
-    let all: serde_json::Value =
-        serde_json::from_str(&crate::speed_route::answer(&speed, "", 5).unwrap()).unwrap();
+    let json = |query: &str| {
+        let (status, body) = crate::speed_route::answer(&speed, query, 5);
+        (
+            status,
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        )
+    };
+    let (status, all) = json("");
+    assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(all["rows"].as_array().unwrap().len(), 2);
     assert_eq!(all["resolution"], RESOLUTION);
     assert_eq!(all["now_ms"], 5);
-    let one: serde_json::Value =
-        serde_json::from_str(&crate::speed_route::answer(&speed, "route=%2Fspot.json", 5).unwrap())
-            .unwrap();
+    let (status, one) = json("route=%2Fspot.json");
+    assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(one["rows"].as_array().unwrap().len(), 1);
     assert_eq!(one["rows"][0]["route"], "/spot.json");
     assert_eq!(one["rows"][0]["since_start"]["max_micros"], 20);
     assert_eq!(one["rows"][0]["kind"], "route");
-    let none: serde_json::Value =
-        serde_json::from_str(&crate::speed_route::answer(&speed, "route=%2Fnever", 5).unwrap())
-            .unwrap();
-    assert_eq!(none["rows"].as_array().unwrap().len(), 0);
+}
+
+/// **A NAME WITH NO ROW IS A 404 THAT SAYS SO** (R3-14 repair 4). It was a
+/// `200` with an empty row list, which reads exactly like a route asked and
+/// measured as nothing. The body names the row asked for, the three ways a
+/// name has no row, the over-cap count, and every name the table keeps.
+#[test]
+fn a_route_with_no_row_is_refused_by_name_with_the_rows_kept() {
+    let speed = Speed::new(0, 8);
+    speed.record("/bars.json", Kind::Route, 10, Outcome::Answered, 0);
+    speed.record(
+        "stage:zerodha landing",
+        Kind::Stage,
+        30,
+        Outcome::Answered,
+        0,
+    );
+    for (query, asked) in [
+        ("route=%2Fnever", "/never"),
+        ("route=%2Fbars.json%20", "/bars.json "),
+        ("route=bars.json", "bars.json"),
+        ("route=%2FBARS.JSON", "/BARS.JSON"),
+        ("route=stage%3Azerodha", "stage:zerodha"),
+    ] {
+        let (status, body) = crate::speed_route::answer(&speed, query, 5);
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{query}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"], format!("no speed row is named '{asked}'"));
+        let why = json["why"].as_str().unwrap();
+        for part in ["has not been since started_ms", OVER_CAP, "is not a route"] {
+            assert!(why.contains(part), "{query}: the why names {part}: {why}");
+        }
+        assert_eq!(json["over_cap"], 0);
+        assert_eq!(json["started_ms"], 0);
+        assert_eq!(json["now_ms"], 5);
+        assert_eq!(
+            json["rows_kept"],
+            serde_json::json!(["/bars.json", "stage:zerodha landing"]),
+            "{query}"
+        );
+        assert!(json.get("rows").is_none(), "no empty report rides along");
+    }
+    let (status, body) = crate::speed_route::answer(&speed, "route=stage%3Azerodha%20landing", 5);
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let (status, _) = crate::speed_route::answer(&speed, "route=", 5);
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "an empty route= is no filter"
+    );
+}
+
+/// A FULL TABLE: a name past the cap has no row of its own, and the 404 says
+/// how many requests were counted under the cap row, so the caller learns
+/// that the name may be among them.
+#[test]
+fn a_route_past_the_cap_is_refused_with_the_over_cap_count() {
+    let speed = Speed::new(0, 1);
+    speed.record("/bars.json", Kind::Route, 10, Outcome::Answered, 0);
+    speed.record("/spot.json", Kind::Route, 10, Outcome::Answered, 0);
+    speed.record("/spot.json", Kind::Route, 10, Outcome::Answered, 0);
+    let (status, body) = crate::speed_route::answer(&speed, "route=%2Fspot.json", 5);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let over = json["over_cap"].as_u64().unwrap();
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        over, 2,
+        "both /spot.json requests were counted over the cap: {body}"
+    );
+    assert!(
+        json["why"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("({over} requests there)")),
+        "{body}"
+    );
 }
 
 /// **EVERY ROUTE IS TIMED THROUGH THE SERVER'S OWN LAYERS**, under its
@@ -404,12 +482,21 @@ async fn a_served_request_is_counted_under_its_matched_path() {
         n > before,
         "the first request was counted under /speed.json, query or not: {body}"
     );
+    let unknown = get("/speed.json?route=%2Fno-such-route-anywhere")
+        .await
+        .unwrap();
+    assert!(
+        unknown.starts_with("HTTP/1.1 404 ")
+            && unknown.contains("no speed row is named '/no-such-route-anywhere'"),
+        "a name with no row is a 404 that says so, through the served router: {unknown}"
+    );
     let _front = get("/no-such-page-at-all").await.unwrap();
     let page = get("/page-report").await.unwrap();
     assert!(
         page.starts_with("HTTP/1.1 405 "),
         "the report route is registered, POST only: {page}"
     );
+    page_report_through_the_served_router(addr).await;
     let rows = global().report(now_ms()).rows;
     assert!(
         rows.iter().any(|r| r.route == FRONT_END),
@@ -421,6 +508,59 @@ async fn a_served_request_is_counted_under_its_matched_path() {
     );
     let _gone = stop.send(());
     served.await.unwrap().unwrap();
+}
+
+/// `POST /page-report` THROUGH THE SERVED ROUTER at `addr` (R3-14 repair 4:
+/// it had a handler test only). A same-origin report reaches the handler,
+/// which names the bad field; a report past 1 KiB is the handler's own JSON
+/// `413`; a cross-site report is the write gate's `403`, before the handler.
+/// Each body is refused before the ration is spent, so this cannot starve
+/// `a_page_report_is_rationed_and_audited` of its window, and none depends on
+/// whether a sink is installed.
+async fn page_report_through_the_served_router(addr: std::net::SocketAddr) {
+    let post = |sec_fetch: &'static str, body: String| {
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read as _, Write as _};
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            write!(
+                s,
+                "POST /page-report HTTP/1.1\r\nHost: {addr}\r\nOrigin: http://{addr}\r\n\
+                 Sec-Fetch-Site: {sec_fetch}\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).unwrap();
+            buf
+        })
+    };
+    let empty_what = post("same-origin", "page=%2Fdb&what=".to_owned())
+        .await
+        .unwrap();
+    assert!(
+        empty_what.starts_with("HTTP/1.1 400 ")
+            && empty_what.contains("\"written\":false")
+            && empty_what.contains("what="),
+        "a same-origin report reaches the handler, which names the bad field: {empty_what}"
+    );
+    let long = format!(
+        "page=%2Fdb&what={}",
+        "x".repeat(crate::page_report_route::MAX_REPORT_BYTES)
+    );
+    let too_long = post("same-origin", long).await.unwrap();
+    assert!(
+        too_long.starts_with("HTTP/1.1 413 ") && too_long.contains("\"written\":false"),
+        "a report past 1 KiB is the handler's own JSON 413: {too_long}"
+    );
+    let cross = post("cross-site", "page=%2Fdb&what=boom".to_owned())
+        .await
+        .unwrap();
+    assert!(
+        cross.starts_with("HTTP/1.1 403 ") && !cross.contains("\"written\""),
+        "a cross-site report is refused before the handler: {cross}"
+    );
 }
 
 /// **A WINDOW'S MAX IS NEVER BELOW ITS SLOWEST REQUEST** (R3-14). A request
@@ -539,24 +679,37 @@ async fn a_sigterm_stops_the_server_gracefully_and_the_open_minute_is_written() 
 
     // AND STOP_ASKED RACES THE REAL SIGNALS through it.
     let speed = include_str!("speed.rs");
+    // BOTH ARE REGISTERED BY THE CALL, before the future it returns (R3-14
+    // repair 4): registered inside `async`, a TERM before the first poll
+    // ended the process with no line.
     let body = speed
-        .split_once(concat!("\npub async fn stop_", "asked("))
+        .split_once(concat!("\npub fn stop_", "asked("))
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map_or("", |(body, _)| body);
-    let registered = body.find(concat!("SignalKind::", "terminate()"));
-    let raced = body.find(concat!("first_", "stop(tokio::signal::ctrl_c()"));
+    let interrupt = body.find(concat!("signal(SignalKind::", "interrupt())"));
+    let registered = body.find(concat!("signal(SignalKind::", "terminate())"));
+    let deferred = body.find(concat!("async ", "move {"));
+    let raced = body.find(concat!("first_", "stop(ctrl_c,"));
     assert!(
-        matches!((registered, raced), (Some(t), Some(r)) if t < r),
-        "stop_asked registers SIGTERM and races it against Ctrl-C: {body}"
+        matches!(
+            (interrupt, registered, deferred, raced),
+            (Some(i), Some(t), Some(d), Some(r)) if i < d && t < d && d < r
+        ),
+        "stop_asked registers SIGINT and SIGTERM before its future, and races them: {body}"
     );
 
-    // AND THE PATH IS WIRED: the binary passes this future, and the server
-    // writes the open minute after its graceful stop. The needles are split
-    // so this file cannot match them.
+    // AND THE PATH IS WIRED: the binary makes the call before its runtime
+    // runs anything and passes the future, and the server writes the open
+    // minute after its graceful stop. The needles are split so this file
+    // cannot match them.
     let main = include_str!("main.rs");
+    let asked = main.find(concat!("api::speed::", "stop_asked()"));
+    let entered = main.find(concat!("runtime.", "enter()"));
+    let blocked = main.find(concat!("runtime.", "block_on("));
     assert!(
-        main.contains(concat!("Box::pin(api::speed::", "stop_asked())")),
-        "the binary stops on SIGTERM too"
+        matches!((entered, asked, blocked), (Some(e), Some(a), Some(b)) if e < a && a < b)
+            && main.contains(concat!("Box::pin(", "stop)")),
+        "the binary registers its stop inside the runtime before it serves, and stops on SIGTERM too"
     );
     // AND ENDS THROUGH `end_served`, which counts what the drain cut and
     // only then frees the store and the port (R3-14 repair 1).
@@ -911,5 +1064,58 @@ fn the_whole_stop_ends_inside_what_a_redeploy_waits_for() {
         crate::server::ConnectionLimits::SERVED.drain_grace + crate::server::SHUTDOWN_GRACE,
         STOP_BOUND,
         "the served process's drain plus its runtime's end is the bound the stop line says"
+    );
+}
+
+/// **THE STOP'S SIGNALS ARE REGISTERED BY THE CALL, NOT BY THE FIRST POLL**
+/// (R3-14 repair 4). `stop_asked` was an `async fn`, so nothing was
+/// registered until the serve first polled it, after the load and the bind:
+/// a `SIGTERM` in the 1-2.5 s before ended the process with no line.
+///
+/// Called with no runtime, the eager form panics in tokio's registration
+/// (`signal` needs a runtime's driver); the old form only built a future and
+/// returned, so this half fails on it. Inside a runtime the call registers and
+/// its future stays pending until a signal comes. That half runs in a child
+/// of this test binary, because a registration changes the process's
+/// `SIGINT` and `SIGTERM` for life and this binary's own must stay default.
+///
+/// No signal is sent: a test may not start `kill` (gate 0, D-1603) and this
+/// crate forbids the unsafe call that raises one. That a signal landing
+/// between the call and the first poll is kept is tokio's `watch` receiver,
+/// made at registration; the OS half is shown on a shadow server stopped by
+/// `kill -TERM` at once after its start (R3-14 repair 4's report).
+#[test]
+fn stop_asked_registers_its_signals_when_called_not_when_polled() {
+    const CHILD: &str = "BRUTEX_STOP_REGISTERED_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let stop = {
+            let _inside = runtime.enter();
+            stop_asked()
+        };
+        let waited = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(50), stop).await
+        });
+        assert!(waited.is_err(), "no signal came, so no stop: {waited:?}");
+        println!("STOP REGISTERED: pending with no signal");
+        return;
+    }
+    let outside = std::panic::catch_unwind(|| {
+        let _never_polled = stop_asked();
+    });
+    assert!(
+        outside.is_err(),
+        "with no runtime the call itself reaches tokio's registration and panics"
+    );
+    let out = crate::isolated::rerun(
+        "speed::tests::stop_asked_registers_its_signals_when_called_not_when_polled",
+        &[(CHILD, std::ffi::OsStr::new("1"))],
+    );
+    assert!(
+        out.contains("STOP REGISTERED: pending with no signal"),
+        "{out}"
     );
 }

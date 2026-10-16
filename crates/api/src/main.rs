@@ -47,6 +47,14 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(api::server::FAILED);
         }
     };
+    // CTRL-C AND SIGTERM ARE REGISTERED FIRST (R3-14 repair 4), inside the
+    // runtime and before the masters and the store load. Registered at the
+    // serve's first poll, a TERM in the 1-2.5 s before it ended the process
+    // with no line at all; one now is kept and answered by a graceful stop.
+    let stop = {
+        let _inside = runtime.enter();
+        api::speed::stop_asked()
+    };
     // A BUILD NOBODY CAN NAME SERVES NO WRITE (DB-B71): armed here, by the
     // binary, before a router exists. See `api::server::arm_unstamped_gate`.
     let _refusal = api::server::arm_unstamped_gate();
@@ -58,9 +66,7 @@ fn main() -> std::process::ExitCode {
         match text_args(raw) {
             // CTRL-C OR SIGTERM (R3-14): a `kill -TERM` stops gracefully too,
             // so the speed table's open minute is written (`api::speed`).
-            Ok(args) => {
-                api::server::run_held(&args, Box::pin(api::speed::stop_asked()), &mut held).await
-            }
+            Ok(args) => api::server::run_held(&args, Box::pin(stop), &mut held).await,
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED

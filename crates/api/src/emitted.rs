@@ -1987,7 +1987,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exit's uncounted-requests line, read back by
     // `server::stop_tests::a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free`
     // and `speed::tests::a_request_still_open_at_exit_is_named_not_dropped`.
-    const REACHED_IN_SPEED_TESTS: usize = 5;
+    // 5 -> 6 at R3-14 repair 4: `api.main blocking work outlived the shutdown
+    // wait`, read back by `server::stop_tests::
+    // blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end`.
+    const REACHED_IN_SPEED_TESTS: usize = 6;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -2060,9 +2063,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 83 -> 85 at R3-14 repair 1: `api.serve stop started` and `api.speed
     // requests still open at exit were not counted`, both named in
     // `REACHED_IN_SPEED_TESTS`.
+    //
+    // 85 -> 86 at R3-14 repair 4: `api.main blocking work outlived the
+    // shutdown wait`, named in `REACHED_IN_SPEED_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 85,
+        lib_sites, 86,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

@@ -846,26 +846,64 @@ pub fn flush_at_exit() -> usize {
 /// `SIGTERM` the OS will not let this process catch is said in the log, and
 /// Ctrl-C still stops it gracefully.
 ///
+/// # Registered by the call, not by the first poll (R3-14 repair 4)
+///
+/// This was an `async fn`, so neither signal was registered until the serve
+/// first polled its shutdown: after the masters and the store had loaded and
+/// the port was bound, 1 to 2.5 s after the start on the operator's machine.
+/// A `SIGTERM` in that window met the default disposition and ended the
+/// process with no log line and no exit line. Both signals are now registered
+/// by the call itself, before the future is returned; the binary makes the
+/// call inside its runtime before anything else. A signal that lands before
+/// the first poll is kept by tokio's driver and answered on that poll, so a
+/// TERM during the load ends in the same graceful stop as one after it, every
+/// line said. Proved by the call's registration, not by a signal (a test may
+/// not start `kill`, gate 0, D-1603):
+/// `speed::tests::stop_asked_registers_its_signals_when_called_not_when_polled`.
+///
+/// What is left is the process's own start up to the runtime's build: no
+/// signal can be registered before a runtime's driver exists without a raw
+/// handler, which this crate does not take. That window is not measured.
+///
+/// The "cannot be caught" line is said when the future is first polled, not
+/// at the call: the call comes before `telemetry::install`, where the line
+/// would be dropped unseen.
+///
 /// # Errors
 ///
-/// Ctrl-C's own registration error, as [`tokio::signal::ctrl_c`] gives it.
-pub async fn stop_asked() -> std::io::Result<()> {
-    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-        Ok(mut term) => {
-            first_stop(tokio::signal::ctrl_c(), async move {
-                // A stream that ended delivers no more signals: not a stop.
-                if term.recv().await.is_none() {
-                    std::future::pending::<()>().await;
-                }
-            })
-            .await
-        }
-        Err(why) => {
-            let _said = telemetry::emit(
-                &telemetry::Event::error("api.speed", "SIGTERM cannot be caught")
-                    .with("why", telemetry::Value::Str(&why.to_string())),
-            );
-            tokio::signal::ctrl_c().await
+/// Ctrl-C's own registration error, as `tokio::signal::unix::signal` gives
+/// it for `SIGINT` (what [`tokio::signal::ctrl_c`] registers on unix).
+///
+/// # Panics
+///
+/// Outside a tokio runtime's context, as `tokio::signal::unix::signal` does.
+pub fn stop_asked() -> impl std::future::Future<Output = std::io::Result<()>> + Send + 'static {
+    use tokio::signal::unix::{SignalKind, signal};
+    let interrupt = signal(SignalKind::interrupt());
+    let terminate = signal(SignalKind::terminate());
+    async move {
+        // Ctrl-C as `tokio::signal::ctrl_c` reads it on unix, registered above.
+        let ctrl_c = async move {
+            let _received = interrupt?.recv().await;
+            Ok::<(), std::io::Error>(())
+        };
+        match terminate {
+            Ok(mut term) => {
+                first_stop(ctrl_c, async move {
+                    // A stream that ended delivers no more signals: not a stop.
+                    if term.recv().await.is_none() {
+                        std::future::pending::<()>().await;
+                    }
+                })
+                .await
+            }
+            Err(why) => {
+                let _said = telemetry::emit(
+                    &telemetry::Event::error("api.speed", "SIGTERM cannot be caught")
+                        .with("why", telemetry::Value::Str(&why.to_string())),
+                );
+                ctrl_c.await
+            }
         }
     }
 }

@@ -350,3 +350,98 @@ async fn whenever_the_port_is_free_the_store_and_the_log_are_free() {
     log.close().expect("closed by hand");
     assert!(log_is_free(&root), "a closed log frees its lock");
 }
+
+/// **BLOCKING WORK THAT OUTLIVES THE WAIT KEEPS THE STORE AND THE PORT UNTIL
+/// THE PROCESS ENDS** (R3-14 repair 4).
+///
+/// Tokio's `shutdown_timeout` detaches a blocking thread still running at its
+/// deadline, and it runs on until the process ends: measured 0.15 to 0.5 s
+/// after the release on a shadow with a scrub in flight. The release freed
+/// the store and the port into that gap. Fails before the repair: the store
+/// and the port were both free the moment the end returned, with the work
+/// still running. Now the log is closed, the store and the port are kept for
+/// the process's end to free, and the keep is said at `Error`.
+#[test]
+fn blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end() {
+    let _shared = crate::emitted::sink();
+    let mark = crate::emitted::mark();
+    let root = crate::scratch::path("stop-outlived");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let (held, addr) = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("its address");
+        let lock = take_serve_lock(&root, addr).expect("a free store");
+        let (_listener, port) = keep_port(listener).expect("the port kept");
+        let held = Held {
+            log: Some(store_log(&root)),
+            lock: Some(lock),
+            port: Some(port),
+        };
+        (held, addr)
+    });
+    let (started, has_started) = std::sync::mpsc::channel::<()>();
+    let (finish, until_finished) = std::sync::mpsc::channel::<()>();
+    let _work = runtime.spawn_blocking(move || {
+        let _sent = started.send(());
+        // Runs until this test lets it go, long past the wait.
+        let _released = until_finished.recv();
+    });
+    has_started.recv().expect("the blocking work started");
+    let grace = std::time::Duration::from_millis(100);
+    let began = std::time::Instant::now();
+    let mut said_last = false;
+    let _abandoned = ended_then_released(runtime, grace, held, || said_last = true);
+    assert!(began.elapsed() >= grace, "the end waited out its grace");
+    assert!(said_last, "the exit line was said");
+    assert!(
+        !store_is_free(&root),
+        "the store stays held while this process's blocking work still runs"
+    );
+    assert!(!port_is_free(addr), "and so does the port");
+    assert!(
+        log_is_free(&root),
+        "the log is closed, as every end closes it"
+    );
+    let said = crate::emitted::landed(mark, "api.main", "blocking work outlived the shutdown wait");
+    assert!(
+        said.iter().any(|record| field_of(record, "grace_ms") == 100
+            && field_of(record, "engine_abandoned") == 0),
+        "the keep is said, with the wait it outlived: {said:?}"
+    );
+    drop(finish);
+}
+
+/// A CLEAN END IS NOT OUTLIVED, AND ONE THAT TOOK ALL ITS TIME IS: the
+/// measure [`end_served`] decides the release by (R3-14 repair 4). Zero time
+/// left counts as outlived, because an end with no time to wait cannot know.
+#[test]
+fn an_end_that_takes_all_its_time_is_outlived_and_a_quick_one_is_not() {
+    let ms = std::time::Duration::from_millis;
+    assert!(!took_all_of(ms(5_000), || {}), "a quick end");
+    assert!(
+        took_all_of(ms(30), || std::thread::sleep(ms(40))),
+        "an end that ran past its time"
+    );
+    assert!(took_all_of(ms(0), || {}), "no time left");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let ended = wait_then_end_counting(runtime, ms(2_000), || 0);
+    assert_eq!(
+        ended,
+        Ended {
+            engine: 0,
+            outlived: false
+        },
+        "a runtime with nothing running ends inside its wait and is released"
+    );
+}

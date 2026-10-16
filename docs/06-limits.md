@@ -15152,6 +15152,20 @@ bounds are all nonzero.
   line, so a free port means a free store and a free log. A redeploy tool
   that waits less than the bound for the port is not covered; waiting for
   the old process's pid to end is the form that needs no number.
+  **Blocking work still running when `SHUTDOWN_GRACE` runs out (R3-14
+  repair 4)** is detached by tokio and runs on until the process ends, so
+  that end closes the log as usual but leaves the serve lock and the port
+  for the process's own end to free: said as `api.main blocking work
+  outlived the shutdown wait`. Measured on a shadow with a `/verify.json`
+  scrub in flight, n = 3, polled every ~20 ms: pid gone at +6.17 to +6.22 s
+  after the `TERM`, the port refusing connections at +6.20 to +6.24 s, never
+  before the pid. Before this, the port was free 0.15 to 0.5 s before the
+  pid ended. Whether a blocking thread outlived the wait is read from how
+  long `Runtime::shutdown_timeout` took (it returns early only when every
+  thread has ended); tokio's own busy-thread count needs `tokio_unstable`.
+  The stop's signals are registered when the runtime is built, before the
+  masters and the store load; a `TERM` before that (the process's first
+  instants, unmeasured) still ends it with no line.
 - **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
   queue to another thread for the length of each landing, so the HTTP surface
   keeps answering; the landing itself is as costly as before (D-1446).

@@ -17571,6 +17571,24 @@ impl Held {
         self.release_in_order();
     }
 
+    /// Closes the log and keeps the store and the port until the process
+    /// ends, for a process whose blocking work outlived the runtime's wait
+    /// (R3-14 repair 4, see [`end_served`]).
+    ///
+    /// The serve lock's descriptor and the kept socket are left open, never
+    /// closed by this process: its end stops every thread before it closes a
+    /// descriptor, so no instant exists in which the port is free and a thread
+    /// of this process still runs. The log is closed as [`Held::release`]
+    /// closes it, so its last line is synced; a later line is dropped and
+    /// counted.
+    pub fn keep_to_exit(mut self) {
+        if let Some(log) = self.log.take() {
+            let _closed = log.close();
+        }
+        std::mem::forget(self.lock.take());
+        std::mem::forget(self.port.take());
+    }
+
     /// The store, then the port.
     fn release_in_order(&mut self) {
         drop(self.lock.take());
@@ -17607,21 +17625,31 @@ fn keep_port(
 ///
 /// The exit line is said HERE, before the release, because after it the log
 /// may already be the successor's: a line written later would be dropped.
+///
+/// # Work that outlived the wait keeps the store and the port (R3-14 repair 4)
+///
+/// When the runtime's blocking threads did not all end inside the wait
+/// ([`Ended::outlived`]), tokio detaches them and they run on until the
+/// process ends: 0.15 to 0.5 s after the release on the operator's machine,
+/// with a scrub in flight. Releasing the store and the port in that gap let a
+/// successor start, and write, beside work the old process was still doing.
+/// So that end closes the log, as every end does, and leaves the store and
+/// the port to the process's own end ([`Held::keep_to_exit`]), which stops
+/// every thread before it closes a descriptor; it is said at `Error` first.
 pub fn end_served(
     runtime: tokio::runtime::Runtime,
     grace: std::time::Duration,
     held: Held,
     last_word: impl FnOnce(),
 ) -> usize {
-    let abandoned = end_runtime(runtime, grace);
-    let _lines = crate::speed::flush_at_exit();
-    last_word();
-    held.release();
-    abandoned
+    cli::cancel::request();
+    released_after(wait_then_end_said(runtime, grace), held, last_word)
 }
 
 /// [`end_served`] without asking engine work to stop, for the reason
-/// [`wait_then_end`] exists.
+/// [`wait_then_end`] exists, and without waiting for it: in a test process
+/// every engine task running is another test's, and counting one would end
+/// this runtime as outlived for work it never had.
 #[cfg(test)]
 pub(crate) fn ended_then_released(
     runtime: tokio::runtime::Runtime,
@@ -17629,11 +17657,24 @@ pub(crate) fn ended_then_released(
     held: Held,
     last_word: impl FnOnce(),
 ) -> usize {
-    let abandoned = wait_then_end(runtime, grace);
+    released_after(
+        wait_then_end_counting(runtime, grace, || 0),
+        held,
+        last_word,
+    )
+}
+
+/// What follows a runtime's end, in order: the speed table's last counts,
+/// the exit line, then the release, or the keep when work outlived the wait.
+fn released_after(ended: Ended, held: Held, last_word: impl FnOnce()) -> usize {
     let _lines = crate::speed::flush_at_exit();
     last_word();
-    held.release();
-    abandoned
+    if ended.outlived {
+        held.keep_to_exit();
+    } else {
+        held.release();
+    }
+    ended.engine
 }
 
 /// R3-14: a stop with a request still open keeps the port until the store is
@@ -18901,11 +18942,58 @@ pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration)
 /// Separate so a unit test can prove the bound without setting the
 /// process-wide stop, which would cancel the other tests' engine work.
 pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
+    wait_then_end_said(runtime, grace).engine
+}
+
+/// How a runtime ended (R3-14 repair 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ended {
+    /// Engine tasks still running when the wait ran out.
+    pub(crate) engine: usize,
+    /// Whether ending the blocking pool took all the wait that was left, so
+    /// a blocking thread may still be running, detached, with this process.
+    pub(crate) outlived: bool,
+}
+
+/// Whether `end`, given `left` to finish, took all of it.
+///
+/// `Runtime::shutdown_timeout` returns as soon as every thread of the
+/// blocking pool has ended, and only at its deadline when one has not; it
+/// does not say which. Its own deadline is set inside the call, after
+/// `started`, so a wait that ran out always measures at least `left`. A pool
+/// that ended just at the deadline counts as outlived: the cost of that is a
+/// store and a port freed by the process's end instead of before it.
+/// Tokio's own count of busy blocking threads is behind `tokio_unstable`
+/// (`RuntimeMetrics::num_idle_blocking_threads`), which this workspace does
+/// not build with.
+fn took_all_of(left: std::time::Duration, end: impl FnOnce()) -> bool {
+    let started = std::time::Instant::now();
+    end();
+    started.elapsed() >= left
+}
+
+/// [`wait_then_end`], and whether blocking work outlived the wait: that is
+/// said on stderr and in the log at `Error` before it returns.
+pub(crate) fn wait_then_end_said(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+) -> Ended {
+    wait_then_end_counting(runtime, grace, crate::sweeprun::engine_tasks_running)
+}
+
+/// [`wait_then_end_said`], with the count of running engine tasks given:
+/// the process's own in a served process, none in a test, where every engine
+/// task running is another test's.
+pub(crate) fn wait_then_end_counting(
+    runtime: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+    running: impl Fn() -> usize,
+) -> Ended {
     let deadline = std::time::Instant::now() + grace;
-    while crate::sweeprun::engine_tasks_running() > 0 && std::time::Instant::now() < deadline {
+    while running() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let abandoned = crate::sweeprun::engine_tasks_running();
+    let abandoned = running();
     if abandoned > 0 {
         warn_line!(
             "STOPPING WITH {abandoned} ENGINE TASK(S) STILL RUNNING: the shutdown wait of \
@@ -18925,8 +19013,36 @@ pub(crate) fn wait_then_end(runtime: tokio::runtime::Runtime, grace: std::time::
             ),
         );
     }
-    runtime.shutdown_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
-    abandoned
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let outlived = took_all_of(left, || runtime.shutdown_timeout(left));
+    if outlived {
+        warn_line!(
+            "STOPPING WITH BLOCKING WORK STILL RUNNING: the runtime's threads did not all end \
+             inside the shutdown wait of {grace:?}, so they run on until this process ends. \
+             The store's serve lock and the port are kept until then and freed by the \
+             process's end, never before; the log closes now."
+        );
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Error,
+                "api.main",
+                "blocking work outlived the shutdown wait",
+            )
+            .with("engine_abandoned", telemetry::Value::Uint(abandoned as u64))
+            .with(
+                "grace_ms",
+                telemetry::Value::Uint(u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)),
+            )
+            .with(
+                "left_ms",
+                telemetry::Value::Uint(u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
+            ),
+        );
+    }
+    Ended {
+        engine: abandoned,
+        outlived,
+    }
 }
 
 /// Prints the report for `dir` and returns the exit code it earned.
