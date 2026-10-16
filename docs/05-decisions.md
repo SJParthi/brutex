@@ -68812,7 +68812,8 @@ path that answered the underlying.
 
 **Implemented by** AG-02 (assurance findings rekey-3, rekey-5, rekey-2 and
 stocks-7, 14 October 2026): `pull::gdfl_rekey::{plan, against_ledger,
-held_months, copied_into, Plan::{recorded_moves, recorded_retired, pending},
+held_months, copied_months, census_step, Plan::{recorded_moves, recorded_retired, pending, census},
+CensusStep, Group::check,
 Withdrawn::{parse, counts_for, line_of, superseded_records, retired_records,
 admits}, apply}`, `cli::gdfl_rekey::{render_survey, render_plan}`,
 `cli::operation_audit::{RunClaim, claim_invocation_run}`. **Number** the
@@ -68845,22 +68846,25 @@ run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
    `Plan::recorded_retired`: out of `moves`, `retired` and `changes()`, and
    `apply` does not redo them. The receipt prints `N moved and M retired
    already recorded`, lists each as `(recorded in the ledger)`, and prints
-   `PENDING: P` (moves + retirements + unresolved), the one number a gate
-   reads; the ledger totals follow `--underlying`. This replaces WP-12c's
+   `PENDING: P` (moves + retirements + unresolved + the census step), the one
+   number a gate reads; the ledger totals follow `--underlying`. This replaces WP-12c's
    pinned re-plan. **The restated acceptance** for R4-21, ING-10 and
    DATA-REKEY-APPLY: a second `--plan` reads `PENDING: 0`, and a second
    `--apply` writes 0 month files, appends 0 ledger lines and installs no
-   epoch. A run cut short is finished by the next: after its lines it is
-   recorded and the next apply installs only the epoch; before them the
-   target holds the copy, the plan reads the move pending (not a second
-   name: same bar count every day, same last stamp each month) and the apply
-   finds those months exactly held.
+   epoch. A run cut short is finished by the next: after its lines every key
+   is recorded and the CENSUS STEP is pending (`census: N withdrawn key(s)
+   still listed`, in `PENDING`), and the next apply installs only the epoch;
+   before them the target holds the copy, the plan reads the move pending
+   (not a second name: the same bar count on every day of a month and apply's
+   own `target_state` finding that month `Already`, bar for bar) and the
+   apply finds those months exactly held.
 2. **One target per key.** `Withdrawn::parse`, the one public reader of the
    two record kinds, refuses a second `superseded` line of one
    `(underlying, old)` whose `by=` differs, and a key superseded and retired
-   in either order, each naming both line numbers; the same line again (or a
-   second line to the same target) reads as the first; a second `retired`
-   line keeps the first. A last line with no newline is torn, never a record:
+   in either order, each naming both line numbers; the same record again
+   reads once at its first line; a second `superseded` line to the same
+   target with other counts or digest, and a second `retired` line of one key
+   with another account, are refused naming both lines (repair r1e). A last line with no newline is torn, never a record:
    the next append marks it `(torn)` and writes its own line whole, so it can
    never vanish after having been counted. The writer refuses first: the plan
    names as unresolved, with the ledger line, a verdict that would re-target a
@@ -68869,12 +68873,16 @@ run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
    target the ledger withdraws is unresolved; and `apply` refuses, before it
    writes a byte, a plan whose lines the parser would refuse
    (`Withdrawn::admits`).
-3. **A move into a held month is known before the apply.** The plan reads the
-   target's month headers the survey already read (no second read): a target
-   month with a bar at or after the first moved one is `target month held:
-   ... needs the repair-door publish (R4-21 item 1)`, and moves into one month
-   whose spans interleave are unresolved; a group is refused whole, as the
-   apply refuses it. The publish itself is R4-21 item 1's.
+3. **A move into a held month is known before the apply.** The month headers
+   the survey read decide every month the target does not hold at or after
+   the moved bars (the apply appends there without reading). A group with a
+   month the target does hold is decided by `Group::check`, the very read and
+   `target_state` the apply runs before its first write: if it refuses, the
+   moves are `target month held: ... needs the repair-door publish (R4-21
+   item 1) (apply's own check: ...)`; if every such month is `Already` (an
+   apply cut short), the move stands and the next apply finishes it. Moves
+   into one month whose spans interleave are unresolved; a group is refused
+   whole, as the apply refuses it. The publish itself is R4-21 item 1's.
 4. **A cli invocation's run.** `cli::operation_audit::RunClaim` holds an
    attempt id as the sink's run for its life: `claim_run` takes only a free
    key, the guard releases only what it took, zero and no sink claim nothing
@@ -68882,13 +68890,42 @@ run, and no cli path claims it, so 34,014 `gdfl.repairs`, 47,140
    runs one command, the `cli` binary: the API process runs work beside other
    runs, which is why `Attempt::enter` does not claim.
 
+**Repair r1e (16 October 2026; a second agent's check of the first build).**
+Two blocking defects, both reproduced before this repair. (a) The census
+step was not in the plan: an apply stopped after its ledger lines and before
+the epoch (killed, or refused by a census lock another ingest holds at step
+4, which a retirements-only apply reaches without step 2) left every key
+recorded, and the next `--plan` read `PENDING: 0` and "would change nothing"
+while the next `--apply` installed an epoch. Now `Plan::census` is a
+`CensusStep` (`Clear`, `Listed(keys)`, `Unreadable(why)`, `NotRead`), read
+by the plan from the census's current FNO epoch with `Withdrawn::holds`, the
+predicate the apply's withdrawal uses; a listed key counts one in `PENDING`
+and in `changes()`, an unread or unreadable census counts one and fails the
+plan's exit; an empty ledger reads nothing (no census can list what it does
+not withdraw). The check covers the whole ledger even under `--underlying`,
+because the apply withdraws the whole ledger's keys. (b) `copied_into` read
+only headers and day counts, so a target holding other bars under the same
+counts and stamps was taken for an apply cut short: `named_twice` and
+`held_months` skipped it, the plan read one move and no unresolved, and the
+apply refused the move. Now a copy is decided month by month: equal counts on
+every day of the month AND apply's `target_state` finding it `Already`; only
+those months' days are exempt from the second-name check, and a held month
+is decided by `Group::check`. A move killed between its two months (June
+written, July not) now plans as the move the apply finishes, where the first
+build named it a second name. Also taken: the ledger's two-account repeats
+(above, item 2).
+
 **Rejected.** Rewriting the acceptance to a second `--apply` receipt: the
 plan is the gate the one-click ingest reads, and asking "is it done?" must
 not need a write-capable run. Re-verifying each recorded move bar for bar on
 every plan: O(bars) a run for keys whose digest the ledger holds; a pending
-move is still verified exactly by `target_state`. A stat or header read of
-each target month inside the plan: the survey has read every month header
-already, so the plan stays pure. Last-wins for a re-targeted key: one
+move is still verified exactly by `target_state`. Reading the bars of every
+move into an existing target in the plan: O(bars moved) for the common case
+the headers decide exactly (a month the target does not hold at or after the
+moved bars is appended to without a read, by the apply as by the plan).
+Keeping the plan pure and leaving the census step to the apply's receipt:
+`PENDING` must answer "is it done?" without a write-capable run, and the
+census epoch is read without the lock, as every census reader reads it. Last-wins for a re-targeted key: one
 contract becomes three series and nothing refuses. Claiming the run inside
 `Attempt::enter`: the API's browser tasks enter attempts beside its own pull
 runs, and a claim there would stamp a pull's events with a sweep's id.
@@ -68913,13 +68950,21 @@ the_plan_never_retargets_a_superseded_key,
 the_plan_never_retires_a_superseded_key,
 apply_never_writes_a_line_its_parser_refuses,
 a_move_into_a_held_month_is_unresolved_in_the_plan,
+a_held_month_is_decided_by_applys_own_check,
+an_apply_killed_between_two_months_plans_as_the_move_it_finishes,
+a_target_with_the_same_counts_and_other_bars_is_unresolved_not_a_refused_move,
+a_retirements_only_apply_stopped_at_the_census_lock_leaves_step_4_pending,
+a_census_not_read_or_unreadable_is_pending_never_done,
+one_move_or_retirement_recorded_twice_with_another_account_is_refused,
 moves_whose_spans_interleave_in_one_target_month_are_unresolved,
 a_rekey_cut_short_is_reported_truly_and_finished_by_the_next_apply,
 a_ledger_reads_empty_torn_garbage_and_long_exactly,
 every_underlying_reads_done_after_its_apply,
 applying_publishes_new_files_keeps_the_old_and_withdraws_them_from_the_census}`,
 `cli::gdfl_rekey::tests::{the_plan_receipt_prints_recorded_apart_from_pending,
-applying_moves_and_retires_and_a_second_apply_writes_nothing}`,
+applying_moves_and_retires_and_a_second_apply_writes_nothing,
+the_plan_receipt_names_a_census_step_left_pending,
+a_census_that_will_not_read_is_named_and_fails_the_plan}`,
 `cli::operation_audit::run_tests::{a_cli_written_repair_line_carries_the_invocations_run,
 a_process_with_no_attempt_writes_run_0,
 two_invocations_in_one_process_each_name_their_own_run,

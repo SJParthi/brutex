@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 
 use brutex_core::symbol::Symbol;
 use pull::gdfl_lineage::option_key;
-use pull::gdfl_rekey::{self, Applied, Plan, Survey, Withdrawn};
+use pull::gdfl_rekey::{self, Applied, CensusStep, Plan, Survey, Withdrawn};
 
 use crate::{FAILED, MISUSED, OK};
 
@@ -190,17 +190,23 @@ fn render_plan(out: &mut String, plan: &Plan) {
         plan.recorded_moves.len(),
         plan.recorded_retired.len()
     );
+    // FM-273'S STEP 4 (AG-02 repair r1e): whether the census still lists a
+    // key the ledger withdraws. A run stopped after its ledger lines leaves
+    // every key recorded and this step pending, and the receipt says so.
+    let _ = writeln!(out, "  {}", plan.census.describe());
     // THE ONE NUMBER A GATE READS (AG-02, finding rekey-3): what is still to
     // do or to answer. Recorded moves and retirements are done and are not
     // in it, so a store whose re-key has run reads `pending 0` however long
-    // its old files are kept.
+    // its old files are kept; the census step is in it until the epoch that
+    // leaves out every withdrawn key is installed.
     let _ = writeln!(
         out,
-        "  PENDING: {} ({} to move, {} to retire, {} unresolved)",
+        "  PENDING: {} ({} to move, {} to retire, {} unresolved, {} census)",
         plan.pending(),
         plan.moves.len(),
         plan.retired.len(),
-        plan.unresolved.len()
+        plan.unresolved.len(),
+        plan.census.pending()
     );
     for one in plan.moves.iter().take(SHOWN) {
         let _ = writeln!(
@@ -236,12 +242,24 @@ fn render_plan(out: &mut String, plan: &Plan) {
             option_key(record.underlying, record.key)
         );
     }
-    let shown = plan.moves.len().min(SHOWN)
+    let listed: &[String] = match &plan.census {
+        CensusStep::Listed(keys) => keys,
+        _ => &[],
+    };
+    for key in listed.iter().take(SHOWN) {
+        let _ = writeln!(
+            out,
+            "    census  {key} (withdrawn by the ledger, still listed)"
+        );
+    }
+    let shown = listed.len().min(SHOWN)
+        + plan.moves.len().min(SHOWN)
         + plan.retired.len().min(SHOWN)
         + plan.unresolved.len().min(SHOWN)
         + plan.recorded_moves.len().min(SHOWN)
         + plan.recorded_retired.len().min(SHOWN);
-    let all = plan.moves.len()
+    let all = listed.len()
+        + plan.moves.len()
         + plan.retired.len()
         + plan.unresolved.len()
         + plan.recorded_moves.len()
@@ -330,7 +348,11 @@ pub(crate) fn command_with(
     render_survey(out, &root, &found, &ledger, asked.only.as_ref());
     let plan = gdfl_rekey::plan(&found, &ledger);
     render_plan(out, &plan);
-    let clean = found.unreadable == 0 && plan.unresolved.is_empty();
+    // A census that was not read or would not read leaves step 4 unknown: that
+    // is a failure to answer, not pending work (AG-02 repair r1e).
+    let clean = found.unreadable == 0
+        && plan.unresolved.is_empty()
+        && !matches!(plan.census, CensusStep::NotRead | CensusStep::Unreadable(_));
     if !asked.apply {
         let _ = writeln!(
             out,

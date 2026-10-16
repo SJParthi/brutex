@@ -237,7 +237,7 @@ fn applying_moves_and_retires_and_a_second_apply_writes_nothing() {
         "{again}"
     );
     assert!(
-        again.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved)"),
+        again.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved, 0 census)"),
         "{again}"
     );
     assert!(again.contains("0 ledger line(s) appended"), "{again}");
@@ -287,7 +287,7 @@ fn the_plan_receipt_prints_recorded_apart_from_pending() {
         "{before}"
     );
     assert!(
-        before.contains("PENDING: 2 (1 to move, 1 to retire, 0 unresolved)"),
+        before.contains("PENDING: 2 (1 to move, 1 to retire, 0 unresolved, 0 census)"),
         "{before}"
     );
     let mut out = String::new();
@@ -314,7 +314,7 @@ fn the_plan_receipt_prints_recorded_apart_from_pending() {
         "{after}"
     );
     assert!(
-        after.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved)"),
+        after.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved, 0 census)"),
         "{after}"
     );
     assert!(
@@ -343,6 +343,120 @@ fn the_plan_receipt_prints_recorded_apart_from_pending() {
         whole.contains("1 superseded and 1 retired key(s) already recorded (the whole ledger)"),
         "{whole}"
     );
+}
+
+/// AG-02 repair r1e, blocking item 1: AN APPLY STOPPED AFTER ITS LEDGER
+/// LINES AND BEFORE THE CENSUS EPOCH (killed, or refused by a census lock
+/// another ingest holds) leaves the retirement recorded and the census still
+/// listing it. The receipt names that step, counts it in `PENDING`, and does
+/// not say "would change nothing"; the next `--apply` installs the epoch;
+/// after it `PENDING: 0` means what the acceptance says: a second `--apply`
+/// writes no month, appends no line and installs no epoch. The base receipt
+/// read `PENDING: 0` and "would change nothing" in the retirements-only
+/// shape of this state.
+#[test]
+fn the_plan_receipt_names_a_census_step_left_pending() {
+    let scratch = store("census-step");
+    let root = scratch.0.clone();
+    let found = pull::gdfl_rekey::survey(&root, None).unwrap();
+    let decided = pull::gdfl_rekey::plan(&found, &pull::gdfl_rekey::Withdrawn::default());
+    let ledger = pull::gdfl_lineage::lineage_path(&root);
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    std::fs::write(&ledger, format!("{}\n", decided.retired[0].line())).unwrap();
+
+    let mut stopped = String::new();
+    assert_eq!(
+        command_with(&["--plan"], &|| Ok(root.clone()), &mut stopped),
+        OK,
+        "{stopped}"
+    );
+    assert!(
+        stopped.contains("census: 1 withdrawn key(s) still listed"),
+        "{stopped}"
+    );
+    assert!(
+        stopped.contains("PENDING: 2 (1 to move, 0 to retire, 0 unresolved, 1 census)"),
+        "{stopped}"
+    );
+    assert!(
+        stopped.contains(&format!(
+            "    census  NSE-FNO-NIFTY-{IMPOSSIBLE} (withdrawn by the ledger, still listed)"
+        )),
+        "{stopped}"
+    );
+    assert!(!stopped.contains("would change nothing"), "{stopped}");
+
+    let mut finish = String::new();
+    assert_eq!(
+        command_with(&["--apply"], &|| Ok(root.clone()), &mut finish),
+        OK,
+        "{finish}"
+    );
+    assert!(
+        finish.contains("census epoch 000001 -> 000002 (rekey)"),
+        "{finish}"
+    );
+
+    let mut done = String::new();
+    assert_eq!(
+        command_with(&["--plan"], &|| Ok(root.clone()), &mut done),
+        OK,
+        "{done}"
+    );
+    assert!(
+        done.contains("census: lists no key the ledger withdraws (step 4 done)"),
+        "{done}"
+    );
+    assert!(
+        done.contains("PENDING: 0 (0 to move, 0 to retire, 0 unresolved, 0 census)"),
+        "{done}"
+    );
+    assert!(done.contains("(and would change nothing)"), "{done}");
+    let bytes = std::fs::read(&ledger).unwrap();
+    let mut again = String::new();
+    assert_eq!(
+        command_with(&["--apply"], &|| Ok(root.clone()), &mut again),
+        OK,
+        "{again}"
+    );
+    assert!(
+        again.contains("APPLIED: 0 key(s) moved (0 month file(s) written, 0 already held exactly)"),
+        "{again}"
+    );
+    assert!(again.contains("0 ledger line(s) appended"), "{again}");
+    assert!(
+        again.contains("census lists no withdrawn key; no epoch was installed"),
+        "{again}"
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), bytes);
+}
+
+/// A census that will not read leaves step 4 unknown: the receipt says why,
+/// counts it in `PENDING`, and the plan exits failed rather than clean.
+#[test]
+fn a_census_that_will_not_read_is_named_and_fails_the_plan() {
+    let scratch = store("census-garbage");
+    let root = scratch.0.clone();
+    let found = pull::gdfl_rekey::survey(&root, None).unwrap();
+    let decided = pull::gdfl_rekey::plan(&found, &pull::gdfl_rekey::Withdrawn::default());
+    let ledger = pull::gdfl_lineage::lineage_path(&root);
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    std::fs::write(&ledger, format!("{}\n", decided.retired[0].line())).unwrap();
+    std::fs::write(
+        epoch_path(&root, Vendor::Gdfl, Segment::Fno, 2),
+        b"not a census",
+    )
+    .unwrap();
+    let mut out = String::new();
+    assert_eq!(
+        command_with(&["--plan"], &|| Ok(root.clone()), &mut out),
+        FAILED,
+        "{out}"
+    );
+    assert!(out.contains("census: could not be read ("), "{out}");
+    assert!(out.contains("step 4 is not known done"), "{out}");
+    assert!(out.contains("unresolved, 1 census)"), "{out}");
+    assert!(!out.contains("would change nothing"), "{out}");
 }
 
 /// A store root that cannot be had refuses, and nothing is written.

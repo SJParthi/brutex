@@ -136,6 +136,17 @@ fn symbol_id(symbol: Symbol) -> u32 {
     brutex_core::universe::fnv1a(symbol.as_str()) as u32
 }
 
+/// The first eight bytes of a digest in hex: enough to tell two accounts of
+/// one move apart in a refusal, which names both lines for the whole value.
+fn short_digest(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// The IST day an instant falls on.
 fn ist_day(ts_micros: i64) -> Option<Day> {
     IstMoment::from_epoch_secs(ts_micros.div_euclid(MICROS))
@@ -206,7 +217,9 @@ impl Withdrawn {
     /// # Errors
     ///
     /// A `superseded` or `retired` line that does not parse; a key superseded
-    /// by two different keys; a key both superseded and retired. Each names
+    /// by two different keys; a key both superseded and retired; one move or
+    /// one retirement recorded twice with different counts or digest (an
+    /// identical repeat reads once). Each names
     /// its line(s): a ledger the re-key cannot read whole is refused, never
     /// read as the part that parsed.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -265,6 +278,25 @@ impl Withdrawn {
                     option_key(record.underlying, record.new)
                 ));
             }
+            // ONE TARGET, TWO ACCOUNTS OF IT (AG-02 repair r1e, follow-up):
+            // the same move with other counts or another digest is not the
+            // same fact twice, and keeping the first would serve counts the
+            // ledger itself contradicts.
+            if *held != record {
+                return Err(format!(
+                    "line {first} supersedes {} by {} with {} month(s), {} bar(s) and digest \
+                     {}, and line {at} with {} month(s), {} bar(s) and digest {}; one move \
+                     has one account",
+                    option_key(record.underlying, record.old),
+                    option_key(record.underlying, record.new),
+                    held.months,
+                    held.bars,
+                    short_digest(&held.digest),
+                    record.months,
+                    record.bars,
+                    short_digest(&record.digest)
+                ));
+            }
             return Ok(());
         }
         let _ = self.line_of.insert(key, at);
@@ -272,8 +304,9 @@ impl Withdrawn {
         Ok(())
     }
 
-    /// One `retired` line on line `at`, refused if the key is superseded. A
-    /// second `retired` line of one key keeps the first. O(1).
+    /// One `retired` line on line `at`, refused if the key is superseded or
+    /// already retired with another account. An identical second `retired`
+    /// line of one key is the same fact twice and reads once. O(1).
     fn admit_retired(&mut self, record: RetiredRecord, at: usize) -> Result<(), String> {
         let key = (record.underlying, record.key);
         let first = self.line_of.get(&key).copied().unwrap_or(at);
@@ -285,7 +318,16 @@ impl Withdrawn {
                 option_key(record.underlying, held.new)
             ));
         }
-        if self.retired.contains_key(&key) {
+        if let Some(held) = self.retired.get(&key) {
+            if *held != record {
+                return Err(format!(
+                    "line {first} retires {} as {:?} and line {at} as {:?}; one retirement \
+                     has one account",
+                    option_key(record.underlying, record.key),
+                    held.line(),
+                    record.line()
+                ));
+            }
             return Ok(());
         }
         let _ = self.line_of.insert(key, at);
@@ -368,9 +410,9 @@ impl Withdrawn {
     }
 
     /// The lines [`apply`] would append for `plan`, checked against this
-    /// ledger by [`Self::parse`]'s own two rules, and against each other:
-    /// `Err` names the first key one of them would re-target, or both
-    /// supersede and retire. O(moves + retirements): one or two probes each.
+    /// ledger by [`Self::parse`]'s own rules, and against each other: `Err`
+    /// names the first key one of them would re-target, both supersede and
+    /// retire, move again once recorded, or retire with another account. O(moves + retirements): one or two probes each.
     fn admits(&self, plan: &Plan) -> Result<(), String> {
         let mut planned: HashMap<(Symbol, Contract), Contract> =
             HashMap::with_capacity(plan.moves.len());
@@ -382,14 +424,22 @@ impl Withdrawn {
                     "the plan moves {name}, which ledger line {line} retires"
                 ));
             }
-            if let Some(held) = self.superseded.get(&key)
-                && held.new != one.to
-            {
+            if let Some(held) = self.superseded.get(&key) {
+                let line = self.line_of.get(&key).copied().unwrap_or(0);
+                if held.new != one.to {
+                    return Err(format!(
+                        "the plan moves {name} to {}, and ledger line {line} supersedes it by {}",
+                        option_key(one.underlying, one.to),
+                        option_key(one.underlying, held.new)
+                    ));
+                }
+                // A RECORDED MOVE IS DONE (repair r1e): its second account,
+                // with whatever counts this run would write, is a line the
+                // parser refuses.
                 return Err(format!(
-                    "the plan moves {name} to {}, and ledger line {} supersedes it by {}",
-                    option_key(one.underlying, one.to),
-                    self.line_of.get(&key).copied().unwrap_or(0),
-                    option_key(one.underlying, held.new)
+                    "the plan moves {name} to {}, which ledger line {line} already records: a \
+                     recorded move is done, and a second account of it is refused",
+                    option_key(one.underlying, one.to)
                 ));
             }
             if planned.insert(key, one.to).is_some_and(|to| to != one.to) {
@@ -406,6 +456,17 @@ impl Withdrawn {
             }
             if planned.contains_key(&key) {
                 return Err(format!("the plan both moves and retires {name}"));
+            }
+            if let Some(held) = self.retired.get(&key)
+                && held != record
+            {
+                return Err(format!(
+                    "the plan retires {name} as {:?}, and ledger line {} retires it as {:?}: one \
+                     retirement has one account",
+                    record.line(),
+                    self.line_of.get(&key).copied().unwrap_or(0),
+                    held.line()
+                ));
             }
         }
         Ok(())
@@ -497,6 +558,13 @@ pub struct Survey {
     /// Keys holding a rung other than [`RUNG`], which the re-key does not
     /// move; each is also [`Unresolved`] in the plan.
     pub other_rungs: Vec<String>,
+    /// The store root the survey read. [`plan`] reads two things more
+    /// there, read-only and bounded (AG-02 repair r1e): the census's current
+    /// FNO epoch, to tell FM-273's step 4 done from pending, and the bars of
+    /// a move whose target month already holds bars, to predict exactly what
+    /// [`apply`]'s `target_state` will do with it. Empty for a survey built
+    /// by hand, whose plan then says it read no census.
+    pub root: PathBuf,
 }
 
 impl Survey {
@@ -597,7 +665,10 @@ pub fn day_counts(file: &BarFile) -> Result<Vec<(Day, u64)>, StoreError> {
 /// A directory that exists and cannot be listed. A month file that will not
 /// open is counted in [`Survey::unreadable`], not returned.
 pub fn survey(root: &Path, only: Option<&BTreeSet<Symbol>>) -> Result<Survey, String> {
-    let mut found = Survey::default();
+    let mut found = Survey {
+        root: root.to_path_buf(),
+        ..Survey::default()
+    };
     let base = root
         .join(store::path::STORE_ROOT)
         .join(Vendor::Gdfl.as_str())
@@ -748,27 +819,92 @@ pub struct Plan {
     /// Retirements the ledger already records: DONE, not pending, kept as
     /// the ledger's own record.
     pub recorded_retired: Vec<RetiredRecord>,
+    /// FM-273's step 4 as the census now stands: whether its current FNO
+    /// epoch still lists a key the ledger withdraws (AG-02 repair r1e).
+    pub census: CensusStep,
+}
+
+/// FM-273's fourth step — the census's next FNO epoch, installed without
+/// every key the ledger withdraws — as [`plan`] finds it.
+///
+/// A run stopped after its ledger lines and before this step (killed, or
+/// refused by a census lock another ingest holds) leaves every moved and
+/// retired key RECORDED, and the census still listing them. Without this the
+/// next plan read `PENDING: 0` and "would change nothing" while the next
+/// `--apply` installed an epoch (AG-02 repair r1e, blocking item 1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CensusStep {
+    /// No census was read: a plan of a survey built by hand. Not known
+    /// done, so it is pending.
+    #[default]
+    NotRead,
+    /// The current epoch lists no key the ledger withdraws: done.
+    Clear,
+    /// The current epoch still lists these ledger-withdrawn keys, in key
+    /// order: pending, and the next `--apply` installs the epoch without
+    /// them.
+    Listed(Vec<String>),
+    /// The census could not be read, with why: not known done, so pending.
+    Unreadable(String),
+}
+
+impl CensusStep {
+    /// What this step adds to [`Plan::pending`]: one per listed key, one
+    /// for a census not read or unreadable, none when it is clear.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        match self {
+            Self::Clear => 0,
+            Self::Listed(keys) => keys.len(),
+            Self::NotRead | Self::Unreadable(_) => 1,
+        }
+    }
+
+    /// The step in the receipt's words, one line.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Clear => "census: lists no key the ledger withdraws (step 4 done)".to_owned(),
+            Self::Listed(keys) => format!(
+                "census: {} withdrawn key(s) still listed; --apply installs the FNO epoch \
+                 without them (FM-273 step 4)",
+                keys.len()
+            ),
+            Self::NotRead => {
+                "census: not read (a plan of a survey with no store root); step 4 is not \
+                 known done"
+                    .to_owned()
+            }
+            Self::Unreadable(why) => {
+                format!("census: could not be read ({why}); step 4 is not known done")
+            }
+        }
+    }
 }
 
 impl Plan {
-    /// Whether the plan would change anything. Recorded moves and
-    /// retirements are done, so they do not count.
+    /// Whether an `--apply` of this plan could change anything: a move or a
+    /// retirement not yet recorded, or a census step not known done.
+    /// Recorded moves and retirements are done, so they do not count.
     #[must_use]
     pub fn changes(&self) -> bool {
-        !self.moves.is_empty() || !self.retired.is_empty()
+        !self.moves.is_empty() || !self.retired.is_empty() || self.census.pending() > 0
     }
 
     /// What is still to do or to answer: moves and retirements not yet
-    /// recorded, and keys left unresolved. Zero is the one reading that says
-    /// a second `--apply` writes nothing and nothing is waiting on a
-    /// decision (AG-02: the acceptance R4-21, ING-10 and DATA-REKEY-APPLY
-    /// read).
+    /// recorded, keys left unresolved, and the census step (one per
+    /// ledger-withdrawn key the census still lists, or one when it is not
+    /// known). Zero is the one reading that says a second `--apply` writes
+    /// no month, appends no line and installs no epoch, and nothing is
+    /// waiting on a decision (AG-02: the acceptance R4-21, ING-10 and
+    /// DATA-REKEY-APPLY read).
     #[must_use]
     pub fn pending(&self) -> usize {
         self.moves
             .len()
             .saturating_add(self.retired.len())
             .saturating_add(self.unresolved.len())
+            .saturating_add(self.census.pending())
     }
 }
 
@@ -900,8 +1036,12 @@ fn settled_contract(expiry: Day, strike: i64, side: OptionSide) -> Option<Contra
     })
 }
 
-/// Decides what to do with every surveyed key (module doc). Pure: reads
-/// nothing and writes nothing.
+/// Decides what to do with every surveyed key (module doc). Writes nothing.
+/// It reads, read-only, only what the survey's headers cannot answer: the
+/// census's current FNO epoch (once, for the census step), and the bars of
+/// a move whose target month already holds bars at or after the moved ones
+/// (bounded by those moves), through the very `target_state` [`apply`]
+/// calls, so its verdict on them is apply's (AG-02 repair r1e).
 ///
 /// A key the ledger already names superseded is left out of the day's
 /// ladders, because the key it continues as is in them with the same strike
@@ -922,12 +1062,21 @@ fn settled_contract(expiry: Day, strike: i64, side: OptionSide) -> Option<Contra
 /// * a move whose target month already holds bars the moved ones would
 ///   precede, and moves into one target month whose spans interleave, are
 ///   [`Unresolved`]: [`apply`]'s own check would refuse them, so the plan
-///   says so first, from the month headers the survey already read (finding
-///   rekey-2).
+///   says so first (finding rekey-2). The month headers decide a month the
+///   target does not hold at or after the moved bars (apply appends there);
+///   a month it does hold is decided by apply's own `target_state` over the
+///   bars, so a cut-short copy (the same bars) still plans as a move and a
+///   target holding other bars with the same counts is unresolved;
+/// * the census step: [`CensusStep`], pending while the current FNO epoch
+///   lists a key the ledger withdraws.
 ///
 /// Cost: O(key-days) for the verdicts as before, plus O(1) per key for the
 /// ledger (one or two hash probes) and per moved month for the target probe
-/// (one hash probe and one search of the target's sorted month list).
+/// (one hash probe and one search of the target's sorted month list); plus
+/// one load of the census epoch per plan (O(entries), skipped when the
+/// ledger withdraws nothing) and the bars of the moves into a held target
+/// month (O(those bars); none on a store whose re-key has not been cut
+/// short and whose targets are free).
 #[must_use]
 pub fn plan(survey: &Survey, ledger: &Withdrawn) -> Plan {
     let mut ladders: HashMap<(Symbol, Day), Vec<i64>> =
@@ -971,9 +1120,103 @@ pub fn plan(survey: &Survey, ledger: &Withdrawn) -> Plan {
         let verdict = judge(key, &medians);
         against_ledger(&mut out, key, verdict, ledger);
     }
-    named_twice(&mut out, &held, ledger);
-    held_months(&mut out, &held);
+    let copied = copied_months(&survey.root, &out, &held);
+    named_twice(&mut out, &held, ledger, &copied);
+    held_months(&mut out, &held, &survey.root);
+    out.census = census_step(&survey.root, ledger);
     out
+}
+
+/// FM-273's step 4 as the census at `root` stands for `ledger`: the keys
+/// the ledger withdraws that the census's current FNO epoch still lists —
+/// the very file and the very predicate ([`Withdrawn::holds`]) the apply's
+/// withdrawal reads, so `Clear` here is `None` there. Read-only and without
+/// the census lock, as every census reader reads (`census_store::read_vendor`).
+///
+/// Cost: one load of the epoch (O(entries)) and one walk of its keys with
+/// one or two hash probes each, once per plan; nothing at all when the
+/// ledger withdraws no key, because then no census can list one.
+fn census_step(root: &Path, ledger: &Withdrawn) -> CensusStep {
+    if root.as_os_str().is_empty() {
+        return CensusStep::NotRead;
+    }
+    if ledger.superseded.is_empty() && ledger.retired.is_empty() {
+        return CensusStep::Clear;
+    }
+    let loaded = match census_store::target_for(root, Vendor::Gdfl, Segment::Fno)
+        .and_then(|target| target.load())
+    {
+        Ok(loaded) => loaded,
+        Err(why) => return CensusStep::Unreadable(why),
+    };
+    let listed: BTreeSet<String> = loaded
+        .census
+        .held_keys()
+        .filter(|key| ledger.holds(key))
+        .filter_map(|key| {
+            key.contract
+                .map(|contract| option_key(key.symbol, contract))
+        })
+        .collect();
+    if listed.is_empty() {
+        CensusStep::Clear
+    } else {
+        CensusStep::Listed(listed.into_iter().collect())
+    }
+}
+
+/// The source months whose bars the target already holds exactly, as an
+/// apply cut short after (some of) its writes left them, as
+/// `(underlying, source, month)`: every day the source holds in that month
+/// has the same bar count in the target (so the target holds no other bar on
+/// those days), and then apply's own `target_state` finds the month
+/// `Already` there, bar for bar. Only these months' days are exempt from
+/// [`named_twice`]'s second-name check; a target agreeing on every count
+/// and stamp with other bars is not a copy (AG-02 repair r1e, blocking item
+/// 2), and a month copied before a kill between two months is one, so the
+/// next apply's finishing it is planned (FM-273 step 1 cut short).
+///
+/// Cost: one pass over each moved key's days, and the bars of a month only
+/// when its counts already agree, which on a store whose re-key was never
+/// cut short is no month at all. A month that will not read is not a copy,
+/// so its days are checked as a second name and named there.
+fn copied_months(
+    root: &Path,
+    out: &Plan,
+    held: &HashMap<(Symbol, Contract), &Stored>,
+) -> HashSet<(Symbol, Contract, YearMonth)> {
+    let mut copied: HashSet<(Symbol, Contract, YearMonth)> = HashSet::new();
+    for one in &out.moves {
+        let (Some(source), Some(target)) = (
+            held.get(&(one.underlying, one.from)),
+            held.get(&(one.underlying, one.to)),
+        ) else {
+            continue;
+        };
+        let mut agree: BTreeMap<YearMonth, bool> = BTreeMap::new();
+        for (day, bars) in &source.days {
+            let Ok(month) = day.year_month() else {
+                continue;
+            };
+            let same = target.days.get(day) == Some(bars);
+            let _ = agree
+                .entry(month)
+                .and_modify(|all| *all &= same)
+                .or_insert(same);
+        }
+        for (month, all) in agree {
+            if !all || month_of(target, month).is_none() {
+                continue;
+            }
+            let exact = read_month(root, one.underlying, one.from, month)
+                .and_then(|bars| target_state(root, one.underlying, one.to, month, &bars))
+                .is_ok_and(|write| matches!(write, Write::Already));
+            if exact {
+                let _ = copied.insert((one.underlying, one.from, month));
+            }
+        }
+    }
+    copied
 }
 
 /// One key's verdict, read against what the ledger already records of it
@@ -1060,27 +1303,6 @@ fn against_ledger(out: &mut Plan, key: &Stored, verdict: Verdict, ledger: &Withd
     }
 }
 
-/// Whether `source`'s every month and day is already in `target` exactly
-/// as an [`apply`] cut short after its writes would have left it: the same
-/// bar count on every day the source holds, and each month's last stamp
-/// the source's. The plan reads no bar, so this is the header-level
-/// necessary condition; [`apply`]'s `target_state` then compares the bars
-/// themselves and refuses a month that differs by name.
-fn copied_into(source: &Stored, target: &Stored) -> bool {
-    !source.days.is_empty()
-        && source
-            .days
-            .iter()
-            .all(|(day, bars)| target.days.get(day) == Some(bars))
-        && source.months.iter().all(|month| {
-            month_of(target, month.month).is_some_and(|held| {
-                held.last_ts_micros == month.last_ts_micros
-                    && held.first_ts_micros <= month.first_ts_micros
-                    && held.rows >= month.rows
-            })
-        })
-}
-
 /// `key`'s header of `month`, if it holds a bar there. The months are
 /// oldest first, so a binary search: O(log months), at most a few dozen.
 fn month_of(key: &Stored, month: YearMonth) -> Option<&Month> {
@@ -1094,10 +1316,17 @@ fn month_of(key: &Stored, month: YearMonth) -> Option<&Month> {
 /// the plan first (finding rekey-2): a target month that already holds a bar
 /// at or after the first moved one ("target month held"), and two sources
 /// whose spans in one target month interleave. A whole group is refused
-/// because apply refuses a group whole. Sources [`copied_into`] their
-/// target are an apply cut short, which apply finishes, and are not checked
-/// against the copy they wrote.
-fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>) {
+/// because apply refuses a group whole.
+///
+/// The headers decide every month the target does not hold at or after the
+/// moved bars: apply appends there without reading the target's bars. A
+/// group with a month the target does hold is then decided by
+/// [`Group::check`] — the read and the `target_state` [`apply`] runs before
+/// it writes — so an apply cut short (the same bars, `Already`) still plans
+/// as a move it finishes, and a target holding other bars under the same
+/// counts and stamps is unresolved, never a move the apply refuses (AG-02
+/// repair r1e, blocking item 2). Cost: the bars of those groups only.
+fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>, root: &Path) {
     let mut groups: BTreeMap<(Symbol, Contract), Vec<usize>> = BTreeMap::new();
     for (at, one) in out.moves.iter().enumerate() {
         groups.entry((one.underlying, one.to)).or_default().push(at);
@@ -1105,7 +1334,7 @@ fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>) {
     let mut refused: BTreeMap<usize, String> = BTreeMap::new();
     for ((underlying, to), sources) in &groups {
         let target = held.get(&(*underlying, *to)).copied();
-        let mut spans: BTreeMap<YearMonth, Vec<(i64, i64, bool)>> = BTreeMap::new();
+        let mut spans: BTreeMap<YearMonth, Vec<(i64, i64)>> = BTreeMap::new();
         for &at in sources {
             let Some(stored) = out
                 .moves
@@ -1114,17 +1343,16 @@ fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>) {
             else {
                 continue;
             };
-            let copied = target.is_some_and(|target| copied_into(stored, target));
             for month in &stored.months {
-                spans.entry(month.month).or_default().push((
-                    month.first_ts_micros,
-                    month.last_ts_micros,
-                    copied,
-                ));
+                spans
+                    .entry(month.month)
+                    .or_default()
+                    .push((month.first_ts_micros, month.last_ts_micros));
             }
         }
         let name = option_key(*underlying, *to);
         let mut why: Option<String> = None;
+        let mut contested: Option<String> = None;
         for (month, mut runs) in spans {
             runs.sort_unstable();
             if runs
@@ -1137,20 +1365,34 @@ fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>) {
                 ));
                 break;
             }
-            let all_copied = runs.iter().all(|run| run.2);
             let first = runs.first().map_or(i64::MAX, |run| run.0);
-            if let Some(there) = target.and_then(|target| month_of(target, month))
-                && !all_copied
+            if contested.is_none()
+                && let Some(there) = target.and_then(|target| month_of(target, month))
                 && there.rows > 0
                 && first <= there.last_ts_micros
             {
-                why = Some(format!(
+                contested = Some(format!(
                     "target month held: {name} {month} already holds {} bar(s) from {} to {}, \
                      which bars from {first} would precede or contradict; a month is never \
                      rewritten in place, so this needs the repair-door publish (R4-21 item 1)",
                     there.rows, there.first_ts_micros, there.last_ts_micros
                 ));
-                break;
+            }
+        }
+        if why.is_none()
+            && let Some(held_why) = contested
+        {
+            let group = Group {
+                underlying: *underlying,
+                to: *to,
+                sources: sources
+                    .iter()
+                    .filter_map(|&at| out.moves.get(at))
+                    .map(|one| (one.from, one))
+                    .collect(),
+            };
+            if let Err(apply_why) = group.check(root) {
+                why = Some(format!("{held_why} (apply's own check: {apply_why})"));
             }
         }
         if let Some(why) = why {
@@ -1176,13 +1418,20 @@ fn held_months(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>) {
 /// named.
 ///
 /// A move the ledger already records is not here at all ([`plan`]: it is
-/// done). A source whose days the target already holds exactly as an apply
-/// cut short after its writes left them ([`copied_into`]) is that apply's
-/// copy, not a second name, so it is not checked against them; apply then
-/// compares the bars and finishes it or refuses it by name. A target the
-/// ledger itself withdraws (superseded or retired) takes no move: its bars
-/// would land where no reader looks.
-fn named_twice(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>, ledger: &Withdrawn) {
+/// done). A source whose bars the target already holds exactly, as an apply
+/// cut short after its writes left them (`copied`: [`copied_months`], month
+/// by month and bar for bar through apply's `target_state`, never the
+/// headers alone), is that apply's copy, not a second name, so those
+/// months' days are not checked against it; apply finishes it. A target holding the same days and counts with other
+/// bars is a second name and is named here. A target the ledger itself
+/// withdraws (superseded or retired) takes no move: its bars would land
+/// where no reader looks.
+fn named_twice(
+    out: &mut Plan,
+    held: &HashMap<(Symbol, Contract), &Stored>,
+    ledger: &Withdrawn,
+    copied: &HashSet<(Symbol, Contract, YearMonth)>,
+) {
     let blocked: HashSet<String> = out
         .retired
         .iter()
@@ -1232,14 +1481,14 @@ fn named_twice(out: &mut Plan, held: &HashMap<(Symbol, Contract), &Stored>, ledg
             let Some(stored) = held.get(&(one.underlying, one.from)) else {
                 continue;
             };
-            if held
-                .get(&(one.underlying, one.to))
-                .is_some_and(|target| copied_into(stored, target))
-            {
-                continue;
-            }
             let name = option_key(one.underlying, one.from);
             for &day in stored.days.keys() {
+                if day
+                    .year_month()
+                    .is_ok_and(|month| copied.contains(&(one.underlying, one.from, month)))
+                {
+                    continue;
+                }
                 if let Some(other) = seen.insert(day, name.clone()) {
                     let why = format!(
                         "it and {other} both hold {day} and the decoder files both under \
@@ -1424,6 +1673,9 @@ fn census_row(
 /// One target key's bars by month, merged, and each source's digest.
 type Merged = (BTreeMap<YearMonth, Vec<Bar>>, Vec<[u8; 32]>);
 
+/// Every month of a group as it is to be written, and each source's digest.
+type Checked = (Vec<(YearMonth, Vec<Bar>, Write)>, Vec<[u8; 32]>);
+
 /// One target key's moves: every source month read, merged by month in time
 /// order, checked against what the target holds, then written.
 struct Group<'a> {
@@ -1489,15 +1741,24 @@ impl Group<'_> {
         Ok((by_month, digests))
     }
 
-    /// Reads, checks and writes the group; nothing is written unless every
-    /// month checked.
-    fn run(&self, root: &Path) -> Result<Done, String> {
+    /// Reads the group and checks every month against what the target holds,
+    /// writing nothing: the half of [`Self::run`] before its first write,
+    /// and the very check [`plan`]'s `held_months` asks of a group whose
+    /// target month is held, so the plan's verdict on it is the apply's.
+    fn check(&self, root: &Path) -> Result<Checked, String> {
         let (by_month, digests) = self.read(root)?;
         let mut checked: Vec<(YearMonth, Vec<Bar>, Write)> = Vec::with_capacity(by_month.len());
         for (month, bars) in by_month {
             let write = target_state(root, self.underlying, self.to, month, &bars)?;
             checked.push((month, bars, write));
         }
+        Ok((checked, digests))
+    }
+
+    /// Reads, checks and writes the group; nothing is written unless every
+    /// month checked.
+    fn run(&self, root: &Path) -> Result<Done, String> {
+        let (checked, digests) = self.check(root)?;
         // THEN WRITTEN, month by month, through the store's own writer.
         let mut done = Done {
             records: Vec::with_capacity(self.sources.len()),
