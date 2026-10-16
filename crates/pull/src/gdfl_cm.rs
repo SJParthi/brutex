@@ -5497,4 +5497,34 @@ mod cloud_mutant_tests {
         assert_eq!(member_share("ZZSHARE.BZ"), "ZZSHARE");
         assert_eq!(member_share("NSE-CASH-ZZ.SHARE"), "ZZ.SHARE");
     }
+
+    /// A same-second spread of exactly the threshold counts, one a paisa
+    /// short does not, and of two seconds equally wide the first is named
+    /// the widest. Invented values.
+    #[test]
+    fn a_spread_at_the_threshold_counts_and_the_first_widest_second_is_named() {
+        use super::{DUAL_SPREAD_BPS, DualSpread, SpreadRun};
+        assert_eq!(DUAL_SPREAD_BPS, 10, "the premise: ten basis points");
+        let mut run = SpreadRun::default();
+        let mut out = DualSpread::default();
+        for (sod, ltp) in [
+            (33_300, 100_000),
+            (33_300, 100_100),
+            (33_301, 200_000),
+            (33_301, 200_200),
+            (33_302, 100_000),
+            (33_302, 100_099),
+        ] {
+            run.observe(sod, ltp, &mut out);
+        }
+        run.finish(&mut out);
+        assert_eq!(
+            out,
+            DualSpread {
+                seconds: 2,
+                max_bps: 10,
+                max_at: Some(33_300)
+            }
+        );
+    }
 }
