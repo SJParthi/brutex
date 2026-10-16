@@ -230,6 +230,9 @@ pub mod series_identity;
 pub mod session;
 pub mod ssm;
 pub mod tenor;
+/// The tick-store writer in pure Rust: one GDFL day zip to one verified
+/// `BRTXTS01` day file, never overwriting, never removing (E2E-02, R4-08).
+pub mod tickstore_write;
 pub mod totp;
 /// Joining the exchange's published constituents against a vendor's master.
 ///
