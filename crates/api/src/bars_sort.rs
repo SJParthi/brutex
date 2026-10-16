@@ -2864,4 +2864,40 @@ mod cloud_mutant_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **THE WEIGHED MEMO HOLDS WHAT FITS ITS BUDGET, EMPTIES WHOLE WHEN A
+    /// VALUE WOULD PASS IT, AND NEVER HOLDS ONE HEAVIER THAN THE BUDGET.**
+    /// A value weighing exactly the budget is held; the next, which would
+    /// pass it, empties the memo first; one heavier than the budget is not
+    /// held and empties nothing. Kills `Weighed::get` → `None`,
+    /// `Weighed::put` → `()`, and every mutant of `weight > budget`.
+    #[test]
+    fn the_weighed_memo_holds_within_its_budget() {
+        let memo: super::Weighed<u32, &str> = super::Weighed::new(100);
+        assert_eq!(memo.get(&1), None);
+        memo.put(1, "whole budget", 100);
+        assert_eq!(
+            memo.get(&1),
+            Some("whole budget"),
+            "exactly the budget is held"
+        );
+        memo.put(2, "small", 10);
+        assert_eq!(
+            (memo.get(&1), memo.get(&2)),
+            (None, Some("small")),
+            "a value that would pass the budget empties the memo first"
+        );
+        memo.put(3, "too heavy", 101);
+        assert_eq!(
+            (memo.get(&2), memo.get(&3)),
+            (Some("small"), None),
+            "a value heavier than the budget is not held and empties nothing"
+        );
+        memo.put(4, "fits", 90);
+        assert_eq!(
+            (memo.get(&2), memo.get(&4)),
+            (Some("small"), Some("fits")),
+            "10 + 90 is the budget, held together"
+        );
+    }
 }
