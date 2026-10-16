@@ -970,6 +970,14 @@ impl Results {
                 ));
             }
             write_fresh_header(&mut file, &path)?;
+            // THE NAME IS MADE DURABLE, NOT ONLY THE BYTES (D-1903's rule).
+            // `write_fresh_header` syncs the file; a crash before its directory
+            // entry reached the disk lost `runs.bin` itself, and the next open
+            // read the absence as "No run has been recorded" — an empty ledger
+            // presented as the truth. `results/` itself may be new, so the root
+            // is synced too (cloud-attack-law-20261016, lens 4).
+            sync_directory(&dir)?;
+            sync_directory(root)?;
             VERSION
         } else {
             let mut header = [0_u8; HEADER_BYTES];
@@ -1626,6 +1634,14 @@ fn unsealed(index: u64) -> Refusal {
          pattern here parses into a legal record and would render as a \
          run that never happened."
     )
+}
+
+/// Syncs a directory, so an entry made in it survives a crash: the one
+/// barrier a file's own `sync_all` cannot give (D-1903).
+fn sync_directory(dir: &Path) -> Result<(), Refusal> {
+    File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .map_err(|why| format!("{} could not be synced: {why}", dir.display()))
 }
 
 #[cfg(test)]
@@ -2800,10 +2816,12 @@ mod tests {
 
         let syncs = code.iter().filter(|l| l.contains(".sync_all()")).count();
         assert_eq!(
-            syncs, 2,
-            "exactly two direct durability barriers are expected: one after the \
-             fresh header is read back, and one in `confirm_durable`. The record \
-             append's barrier is `fixed_tail::sync_or_roll_back` (D-1900)."
+            syncs, 3,
+            "exactly three direct durability barriers are expected: one after the \
+             fresh header is read back, one in `confirm_durable`, and the directory \
+             barrier in `sync_directory` that makes a new ledger's NAME durable \
+             (cloud-attack-law-20261016). The record append's barrier is \
+             `fixed_tail::sync_or_roll_back` (D-1900)."
         );
 
         // THE APPEND'S BARRIER ROLLS BACK ON FAILURE NOW (D-1900, resources-1),
@@ -2951,6 +2969,32 @@ mod tests {
             assert!(why.contains(&"05".repeat(32)), "{why}");
         }
         let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// Creating the run ledger syncs its directory and the root, not only the
+    /// file (cloud-attack-law-20261016, lens 4; D-1903's rule). A lost
+    /// directory entry read back as "No run has been recorded". Measured on the
+    /// source because a directory entry's durability cannot be observed without
+    /// a power cut — the pattern `creating_the_data_file_syncs_its_directory`
+    /// set.
+    #[test]
+    fn creating_the_run_ledger_syncs_its_directory_and_the_root() {
+        let src = include_str!("results.rs");
+        let shipping = src.split("\nmod tests {").next().unwrap_or(src);
+        let (_, body) = shipping
+            .split_once("fn open_with(")
+            .expect("open_with exists");
+        let (_, fresh) = body
+            .split_once("write_fresh_header(&mut file, &path)?;")
+            .expect("a fresh ledger gets its header in open_with");
+        let fresh = fresh.split_once("VERSION").map_or(fresh, |(head, _)| head);
+        assert!(fresh.contains("sync_directory(&dir)?;"), "{fresh}");
+        assert!(fresh.contains("sync_directory(root)?;"), "{fresh}");
+        let (_, helper) = shipping
+            .split_once("fn sync_directory(")
+            .expect("the helper exists");
+        let helper = helper.split_once("\n}").map_or(helper, |(head, _)| head);
+        assert!(helper.contains("sync_all()"), "{helper}");
     }
 }
 

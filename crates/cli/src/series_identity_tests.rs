@@ -374,3 +374,44 @@ fn every_series_is_one_line_and_a_day_rung_with_no_minutes_is_named() {
         "{out}"
     );
 }
+
+/// A listing entry that could not be read refuses the every-series table
+/// rather than shortening it (cloud-attack-law-20261016, lens 2). `all` and
+/// `zerodha_repair::plan_all` read `entries.filter_map(Result::ok)`, so an
+/// unreadable entry left its series out of a table that could still exit
+/// `OK` — and the quarantine works from that table. A real directory listing
+/// cannot be made to fail one entry on demand, so the listing is driven
+/// through the helper both verbs now share.
+#[test]
+fn an_unreadable_listing_entry_refuses_rather_than_shortening_the_table() {
+    let dir = Path::new("bars/zerodha/NSE/INDEX");
+    let refused = super::series_names(
+        dir,
+        vec![
+            Ok("NIFTY".into()),
+            Err(std::io::Error::other("injected EIO")),
+            Ok("BANKNIFTY".into()),
+        ],
+    )
+    .expect_err("an unreadable entry is a refusal, not a shorter table");
+    assert!(refused.contains("injected EIO"), "{refused}");
+    assert!(refused.contains("no partial table"), "{refused}");
+    assert!(refused.contains("bars/zerodha/NSE/INDEX"), "{refused}");
+
+    // A clean listing still names every series, in name order, and still
+    // leaves out what is not a symbol.
+    let names = super::series_names(
+        dir,
+        vec![
+            Ok("NIFTY".into()),
+            Ok("BANKNIFTY".into()),
+            Ok("notes.txt".into()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        names.into_iter().collect::<Vec<_>>(),
+        vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()]
+    );
+    assert!(super::series_names(dir, Vec::new()).unwrap().is_empty());
+}
