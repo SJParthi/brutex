@@ -4792,4 +4792,66 @@ mod cloud_mutant_tests {
         assert_eq!(days_from_civil(-1, 12, 31), -719_529);
         assert_eq!(days_from_civil(-400, 3, 1), -719_468 - 146_097);
     }
+
+    /// **A DETAIL SECTION OF EXACTLY `DETAIL_CAP` BYTES IS IN PLACE.**
+    ///
+    /// Kills `replace > with >=` in `geometry`'s cap test, which refuses a
+    /// section `section` itself fills to the cap exactly.
+    #[test]
+    fn a_detail_section_of_exactly_the_cap_is_in_place() {
+        let path = Path::new(PATH);
+        let records_end = TABLE_OFFSET + SLOT_LEN * (16 + OVERFLOW_SLOTS) + RECORD_STRIDE * 2;
+        let mut h = header();
+        h.detail_bytes = u32::try_from(DETAIL_CAP).unwrap();
+        h.detail_offset = u32::try_from(records_end).unwrap();
+        h.detail_entries = 64;
+        let shape = geometry(&h, path).unwrap();
+        assert_eq!(shape.len, records_end + DETAIL_CAP + TRAILER_LEN);
+    }
+
+    /// **AN IMAGE OF EXACTLY A HEADER, A DAY BLOCK AND A TRAILER IS READ AS
+    /// ONE, AND REFUSED FOR WHAT IT LACKS.**
+    ///
+    /// Kills `replace < with <=` in `parse`'s length floor: such an image is
+    /// long enough to be read, sealed, and refused by its geometry (its
+    /// header implies a table), never as "shorter than a header and a day
+    /// block".
+    #[test]
+    fn an_image_of_exactly_the_floor_is_read_and_refused_by_its_geometry() {
+        let good = committed_image();
+        let mut floor = good[..TABLE_OFFSET + TRAILER_LEN].to_vec();
+        reseal(&mut floor);
+        let implied = good.len();
+        assert_eq!(
+            corrupt_why(parsed(&floor)),
+            format!("{} bytes where the header implies {implied}", floor.len())
+        );
+    }
+
+    /// **A DETAIL SECTION IS WALKED ENTRY BY ENTRY TO ITS END, IN BOUNDED
+    /// TIME.**
+    ///
+    /// Kills `replace += with *=` in `parse_details`' step to the next entry
+    /// (from 0 it never moves; caught before only by a timeout): a whole
+    /// image with details is parsed on a worker with a deadline, and every
+    /// detail is read back in place.
+    #[test]
+    fn a_detail_section_is_walked_to_its_end_in_bounded_time() {
+        let good = committed_image();
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _receiver_gone = send.send(parse(&good, Path::new(PATH)));
+        });
+        let image = answer
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("parse returned")
+            .unwrap();
+        assert_eq!(image.day_details.len(), 1);
+        let per: Vec<usize> = image
+            .records
+            .iter()
+            .map(|(_, details)| details.len())
+            .collect();
+        assert_eq!(per, [1, 1]);
+    }
 }

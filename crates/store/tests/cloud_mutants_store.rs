@@ -1469,3 +1469,99 @@ fn a_commit_is_named_near_the_ceiling_at_half_the_measured_placement() {
     assert_eq!(store::verdict::RECORDS_PLACED, 137_900);
     assert_eq!(store::verdict::RECORDS_WATCH, 68_950);
 }
+
+/// **A STEM CUT INSIDE A CHARACTER STEPS BACK TO ITS START, IN BOUNDED
+/// TIME.**
+///
+/// Kills `replace -= with /=` in `Key::stem`'s step back to a character
+/// boundary (the cut never moves, so the step never ends; caught before only
+/// by a timeout): the stem is made on a worker with a deadline, and the cut
+/// lands before the three-byte character the field's last byte falls in.
+#[test]
+fn a_stem_cut_inside_a_character_steps_back_in_bounded_time() {
+    use store::verdict::{KEY_LEN, Key};
+    // 62 ASCII bytes, then "€" (3 bytes) across the 64-byte field's end.
+    let whole = format!("{}€TAIL", "Z".repeat(KEY_LEN - 2));
+    let (send, answer) = std::sync::mpsc::channel();
+    let text = whole.clone();
+    std::thread::spawn(move || {
+        let _receiver_gone = send.send(Key::stem(&text).map(|key| key.text().to_owned()));
+    });
+    let kept = answer
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the stem returned")
+        .unwrap();
+    assert_eq!(kept, "Z".repeat(KEY_LEN - 2));
+}
+
+/// **A DAY ALREADY FLAGGED `DETAILS_CAPPED` WHOSE DETAILS ARE CAPPED AGAIN
+/// KEEPS THE FLAG.**
+///
+/// Kills `replace | with ^` in the day flags of a capped build: a toggle
+/// would clear a fact the caller had already stated. The day's details are
+/// one byte past `DETAIL_CAP`, so none are kept, and the committed day block
+/// says so either way.
+#[test]
+fn a_capped_day_keeps_its_capped_flag() {
+    use store::verdict::{Code, Detail, Reader, commit, flags};
+    let root = scratch("verdict-capped-day");
+    let series = verdict_series(&root);
+    let mut generation = verdict_generation(&[("ZZA", Code::Match, Vec::new())]);
+    generation.day_block.flags = flags::DETAILS_CAPPED;
+    // 64 entries of 65,528 bytes fill the cap; one byte more is past it.
+    generation.day_details = vec![
+        Detail {
+            kind: 3,
+            payload: vec![0x5A; 65_528],
+        };
+        64
+    ];
+    generation.day_details[0].payload.push(0);
+    let committed = commit(&series, &generation).unwrap();
+    assert!(committed.details_capped);
+    let lookup = Reader::new()
+        .lookup(
+            &series,
+            verdict_day(),
+            &store::verdict::Key::instrument("ZZA").unwrap(),
+        )
+        .unwrap();
+    let day = lookup.answer.expect("committed").day;
+    assert_ne!(day.flags & flags::DETAILS_CAPPED, 0, "still flagged");
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A FILE OF EXACTLY THE LONGEST DAY IMAGE IS READ; ONE BYTE MORE IS
+/// REFUSED UNREAD.**
+///
+/// Kills `replace > with >=` in `read_image`'s size gate. The extreme case
+/// a file at the maximum size: a sparse file of `MAX_IMAGE_LEN` bytes (about
+/// 180 MB, no block of it written) is read whole and refused by its BLAKE3
+/// trailer, as any image whose bytes changed is; one byte longer is refused
+/// as too long before a byte is read or allocated for.
+#[test]
+fn a_file_of_exactly_the_longest_day_image_is_read_and_one_byte_more_is_not() {
+    use store::verdict::{MAX_IMAGE_LEN, VerdictError, read_image};
+    let dir = scratch("verdict-max-image");
+    let path = dir.join("2031-03-04.g0000000001.vdt");
+    let file = fs::File::create(&path).unwrap();
+    let max = u64::try_from(MAX_IMAGE_LEN).unwrap();
+    file.set_len(max).unwrap();
+    assert!(
+        matches!(read_image(&path), Err(VerdictError::TrailerMismatch { .. })),
+        "read whole and refused by its trailer"
+    );
+    file.set_len(max + 1).unwrap();
+    match read_image(&path) {
+        Err(VerdictError::ImageCorrupt { why, .. }) => assert_eq!(
+            why,
+            format!(
+                "the file is {} bytes, longer than any day image can be ({MAX_IMAGE_LEN}); not read",
+                max + 1
+            )
+        ),
+        other => panic!("{other:?}"),
+    }
+    drop(file);
+    let _ignored = fs::remove_dir_all(&dir);
+}
