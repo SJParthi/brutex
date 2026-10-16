@@ -1328,6 +1328,73 @@ mod bars_rs {
         );
     }
 
+    /// Holds `symbol`'s INDEX month `m` exclusive, as an import writer holds
+    /// it, without writing a byte.
+    fn hold(root: &std::path::Path, symbol: &str, m: u8) -> store::flock::Flock<std::fs::File> {
+        let lock = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(m),
+            file: FileKind::Lock,
+        })
+        .expect("a generated path")
+        .to_path_buf(root);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock file");
+        store::flock::Flock::try_lock(file, lock).expect("the month's lock is free")
+    }
+
+    /// **A MERGED PAGE WHOSE BISECTION MEETS A MONTH THAT WILL NOT OPEN IS
+    /// REFUSED, IN TIME ORDER AND IN THE OPEN-INTEREST ORDER THAT IS TIME
+    /// ORDER.** Two index series over April to June, counted once while
+    /// free; then NIFTY's May is held by another writer. A page in the middle
+    /// of the merge must rank inside May to find its first row, and May will
+    /// not open: the request is refused, never answered from the months that
+    /// did. Runs the refusal out of `merged` on both of the window's seek
+    /// paths, which no test reached.
+    #[test]
+    fn bars_a_merged_page_that_must_rank_a_held_month_is_refused() {
+        let scratch = Scratch::new("bars-merge-held");
+        for symbol in ["NIFTY", "BANKNIFTY"] {
+            for m in 4..=6 {
+                write_month(
+                    scratch.root(),
+                    "INDEX",
+                    symbol,
+                    Timeframe::MINUTE_1,
+                    month(m),
+                    &minutes(m, 2, 30, 100),
+                );
+            }
+        }
+        let mut asked = query(vec![index("NIFTY"), index("BANKNIFTY")], month(4), month(6));
+        asked.offset = Some(90);
+        asked.limit = 10;
+        let free = read(scratch.root(), &asked);
+        assert_eq!(
+            (free.total, free.bars.len()),
+            (180, 10),
+            "{:?}",
+            free.faults
+        );
+        let _held = hold(scratch.root(), "NIFTY", 5);
+        for sort in [SortKey::Ts, SortKey::OpenInterest] {
+            asked.sort = sort;
+            let refused = window(scratch.root(), &asked)
+                .expect_err("a merge that cannot rank its page is refused");
+            assert!(refused.contains("2025-05"), "{sort:?}: {refused}");
+        }
+    }
+
     /// **A TIME-OF-DAY ORDER COUNTS THE ROWS IT READ, NOT THEIR PLACES.**
     /// Under a 09:20–09:21 bound the scan reads two day windows of one
     /// month, the second starting at row 4: `scan_rows` is the four kept
