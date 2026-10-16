@@ -3194,3 +3194,68 @@ fn a_generation_pointer_refusal_says_which_pointer_and_why() {
          revision that is not there"
     );
 }
+
+/// **EACH COMMIT'S `store.append` LINE SAYS WHAT IT LEFT THE MONTH'S TIME
+/// INDEX AS: WRITTEN WHOLE AT THE THRESHOLD, AND GONE WHEN THE BARS NO LONGER
+/// INDEX.**
+///
+/// Covers `BarFile::index_note`, which only the `Debug` line evaluates
+/// (`emit_if!` builds no field of a filtered event). This test installs the
+/// one process sink of this test binary at `Trace`; nothing else here
+/// installs one, and every other test only emits into it. A month of 1,100
+/// one-second bars is committed at once (it crosses the small-month threshold,
+/// so its `.tix` is written whole), then its index entries and one committed
+/// bar are damaged and 50 bars more commit unindexed: the two lines for this
+/// month carry the two notes.
+#[test]
+fn each_commits_line_says_what_it_left_the_time_index_as() {
+    use store::file::BarFile;
+    use store::path::FileKind;
+    let log = scratch("append-log");
+    let sink =
+        telemetry::install(&telemetry::Config::new(&log).with_min_level(telemetry::Level::Trace))
+            .expect("nothing else in this test binary installs a sink");
+    let root = scratch("append-notes");
+    let bars = second_month(FileKind::Bars);
+    let tix = second_month(FileKind::TimeIndex).to_path_buf(&root);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 1_100)).unwrap();
+    let mut bytes = fs::read(&tix).unwrap();
+    let from = usize::try_from(store::time_index::HEADER_LEN).unwrap() + 515 * 16;
+    for byte in &mut bytes[from..] {
+        *byte ^= 0x5A;
+    }
+    fs::write(&tix, &bytes).unwrap();
+    let bar_path = bars.to_path_buf(&root);
+    let mut bytes = fs::read(&bar_path).unwrap();
+    bytes[32_768 + 56 * 500 + 3] ^= 0xFF;
+    fs::write(&bar_path, &bytes).unwrap();
+    writer.append(&second_bars(1_100, 1_150)).unwrap();
+    drop(writer);
+    sink.sync().unwrap();
+    let found = telemetry::tail(
+        &log,
+        sink.keep_files(),
+        &telemetry::Query::last(telemetry::MAX_LIMIT),
+    );
+    let file = bar_path.display().to_string();
+    let notes: Vec<String> = found
+        .records
+        .iter()
+        .filter(|line| line.target == "store.append" && line.message == "committed")
+        .filter(|line| line.field("file") == Some(&telemetry::OwnedValue::Str(file.clone())))
+        .filter_map(|line| match line.field("time_index") {
+            Some(telemetry::OwnedValue::Str(note)) => Some(note.clone()),
+            _ => None,
+        })
+        .collect();
+    // `tail` answers newest first.
+    assert_eq!(
+        notes,
+        [
+            "none: lookups bisect, and a store.tix warning says why",
+            "written whole: this commit brought the month to the small-month threshold (D-4933)",
+        ]
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
