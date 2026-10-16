@@ -3119,6 +3119,56 @@ mod cloud_mutant_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A PAGE SERVED FROM CUT RUNS ALONE IS THE BRUTE FORCE.** A day bound
+    /// keeps the 3rd alone, which cuts the month's first two index runs and
+    /// leaves the third out, so every kept row is ordered from cut runs'
+    /// entries and the value domain the page bisects comes from their lowest
+    /// and highest values. Pages at the start, the middle and the end are
+    /// the brute force, and the report names its column. Kills `page_once`'s
+    /// `delete field max` on a cut run's `ColumnInfo` (it made `0` the top of
+    /// the domain, which leaves out every value above the lowest) and
+    /// `delete field column` on the report.
+    #[test]
+    fn a_page_from_cut_runs_alone_is_the_brute_force() {
+        let root = scratch("cut-runs-alone");
+        {
+            let m = 1;
+            let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+            write(&root, &index(), month(m), &rows, &rows);
+            let (lo, _) = month(m).ist_bounds_micros();
+            let (from, to) = (lo + 2 * 86_400 * MICROS, lo + 3 * 86_400 * MICROS);
+            let mut want: Vec<(i64, i64)> = rows
+                .iter()
+                .filter(|bar| bar.ts_micros >= from && bar.ts_micros < to)
+                .map(|bar| (bar.close, bar.ts_micros))
+                .collect();
+            want.sort_unstable();
+            assert_eq!(want.len(), 120, "the 3rd holds one session");
+            for offset in [0, 41, 83] {
+                let mut asked = query(index(), month(m), month(m), SortKey::Close);
+                asked.filter.from = Some(from);
+                asked.filter.to = Some(to);
+                asked.offset = Some(offset);
+                let got = window(&root, &asked).expect("answers");
+                let served: Vec<(i64, i64)> = got
+                    .bars
+                    .iter()
+                    .map(|row| (row.bar.close, row.bar.ts_micros))
+                    .collect();
+                let page: Vec<(i64, i64)> = want.iter().skip(offset).take(37).copied().collect();
+                assert_eq!(served, page, "month {m} offset {offset}");
+                let report = got.sort_index.expect("a value sort says what it used");
+                assert_eq!(report.column, Column::Close.as_str());
+                assert_eq!(
+                    (report.cut_runs, report.indexed_rows, report.scanned_rows),
+                    (2, 120, 0),
+                    "every kept row is ordered from the two cut runs"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A PAGE PAST EVERY ROW THAT COULD BE READ IS EMPTY, NOT AN ERROR.**
     /// February has no index and another writer holds it, so its 360 rows
     /// are counted in the total and read by no one. A page at offset 1,000
