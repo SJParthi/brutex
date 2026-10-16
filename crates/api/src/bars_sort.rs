@@ -3051,4 +3051,118 @@ mod cloud_mutant_tests {
             },
         );
     }
+
+    /// **A NULL PAGE THAT STARTS ON THE LATER SERIES' ROW OF AN INSTANT
+    /// SKIPS THE EARLIER SERIES' ROW OF THAT INSTANT.** Open interest over
+    /// the index (asked first, every row null) and a contract (null on every
+    /// sixth bar): past the valued rows the order is null rows by instant,
+    /// then series. A page that starts on the contract's null row of an
+    /// instant must not serve the index's row of the same instant, which
+    /// sorts before it. Every such page is the brute force. Runs
+    /// `cursors_at`'s probe one microsecond past the start for a time-ordered
+    /// series asked before the start's, which no test reached.
+    #[test]
+    fn a_null_page_on_the_later_series_skips_the_earlier_ones_row() {
+        let root = scratch("null-start-series");
+        let oi = |i: i64| {
+            if i % 6 == 0 {
+                OI_NULL
+            } else {
+                40_000 + (i * 17) % 50
+            }
+        };
+        let mut rows: Vec<(bool, i64, i64, usize)> = Vec::new();
+        for m in 1..=2 {
+            let index_rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+            let option_rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, oi(i))).collect();
+            write(&root, &index(), month(m), &index_rows, &index_rows);
+            write(&root, &option(), month(m), &option_rows, &option_rows);
+            rows.extend(index_rows.iter().map(|bar| (true, 0, bar.ts_micros, 0)));
+            rows.extend(option_rows.iter().map(|bar| {
+                let null = bar.open_interest == OI_NULL;
+                (
+                    null,
+                    if null { 0 } else { bar.open_interest },
+                    bar.ts_micros,
+                    1,
+                )
+            }));
+        }
+        rows.sort_unstable();
+        let starts: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.0 && row.3 == 1)
+            .map(|(at, _)| at)
+            .take(3)
+            .collect();
+        assert_eq!(starts.len(), 3, "the fixture holds null contract rows");
+        for start in starts {
+            let mut asked = query(index(), month(1), month(2), SortKey::OpenInterest);
+            asked.series.push(option());
+            asked.offset = Some(start);
+            asked.limit = 5;
+            let got = window(&root, &asked).expect("answers");
+            let served: Vec<(i64, usize)> = got
+                .bars
+                .iter()
+                .map(|row| (row.bar.ts_micros, row.series))
+                .collect();
+            let want: Vec<(i64, usize)> = rows
+                .iter()
+                .skip(start)
+                .take(5)
+                .map(|row| (row.2, row.3))
+                .collect();
+            assert_eq!(served, want, "offset {start}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A PAGE PAST EVERY ROW THAT COULD BE READ IS EMPTY, NOT AN ERROR.**
+    /// February has no index and another writer holds it, so its 360 rows
+    /// are counted in the total and read by no one. A page at offset 1,000
+    /// of 1,080 lies past the 720 rows January's and March's indexes order:
+    /// it is empty, and the unread rows are said. Runs `start_key`'s and
+    /// `select`'s past-every-row answers, which no test reached.
+    #[test]
+    fn a_page_past_every_readable_row_is_empty() {
+        let root = scratch("past-readable");
+        let srts: Vec<PathBuf> = (1..=3)
+            .map(|m| {
+                let rows: Vec<Bar> = (0..360).map(|i| bar(month(m), i, OI_NULL)).collect();
+                write(&root, &index(), month(m), &rows, &rows)
+            })
+            .collect();
+        std::fs::remove_file(&srts[1]).expect("February is left with no index");
+        let mut ask = query(index(), month(1), month(3), SortKey::Close);
+        let free = window(&root, &ask).expect("answers");
+        assert_eq!(free.total, 1_080);
+        let lock = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(2),
+            file: FileKind::Lock,
+        })
+        .expect("a generated path")
+        .to_path_buf(&root);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock)
+            .expect("the lock file");
+        let _held = store::flock::Flock::try_lock(held, lock).expect("February's lock is free");
+        ask.offset = Some(1_000);
+        let got = window(&root, &ask).expect("a page past the readable rows answers");
+        assert!(got.bars.is_empty(), "{:?}", got.bars.len());
+        let report = got.sort_index.expect("a value sort says what it used");
+        assert_eq!((report.unread_rows, report.unread_months), (360, 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
