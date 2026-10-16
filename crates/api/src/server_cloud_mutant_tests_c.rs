@@ -2663,3 +2663,25 @@ async fn a_body_whose_cash_schedule_is_refused_is_still_a_member() {
         assert_eq!((failure.month, failure.day), (Some(august), None));
     }
 }
+
+/// A RECOVERY IS REFUSED ON THE MAPPING A RUN WOULD BE REFUSED ON, before any
+/// audit or wire request: a member no feed id names is refused in the run's
+/// own words, and a fully mapped target is not (kills `recovery_mapping ->
+/// Ok(())`).
+#[test]
+fn a_recovery_is_refused_on_the_mapping_a_run_would_be_refused_on() {
+    let fx = Fixture::new("recovery-mapping");
+    let site = fx.refused();
+    assert_eq!(recovery_mapping(&site, &spot(DHAN_DAY)), Ok(()));
+    let asked = spot(&format!("{DHAN_DAY}&member=NOSUCH"));
+    let why = recovery_mapping(&site, &asked).expect_err("an unmapped member is refused");
+    assert_eq!(
+        Some(why.as_str()),
+        spot_mapping_refusal(&asked, &site.universe().read, &spot_targets(&asked, &site))
+            .as_deref()
+    );
+    assert!(
+        why.starts_with("Instrument mapping is not ready for Dhan: NOSUCH: "),
+        "{why}"
+    );
+}
