@@ -1992,3 +1992,54 @@ fn an_image_whose_temporary_cannot_be_created_is_refused_and_nothing_moves_body(
     );
     let _ignored = fs::remove_dir_all(&root);
 }
+
+/// A sealed one-second NIFTY month of June 2024 (GDFL, NSE INDEX), symbol 4242.
+fn sealed_path() -> store::path::StorePath<'static> {
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
+    StorePath::new(PathParts {
+        vendor: brutex_core::vendor::Vendor::Gdfl,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::SECOND_1,
+        month: YearMonth::new(2024, 6).unwrap(),
+        file: FileKind::Bars,
+    })
+    .unwrap()
+}
+
+/// The committed header of a month of no bar, as a sealed head copies it.
+fn empty_month_header() -> store::header::Header {
+    store::header::Header {
+        format_version: 3,
+        record_stride: 56,
+        flags: store::format::FLAG_CHECKSUMS,
+        generation: 7,
+        n_valid: 0,
+        first_ts_micros: 5,
+        last_ts_micros: 9,
+        symbol_id: 4_242,
+        timeframe_secs: 1,
+    }
+}
+
+/// **A PROVENANCE IMAGE THAT PACKS TO MORE THAN ITS LENGTH AND TWO, AND AT
+/// MOST TWICE ITS LENGTH, IS SEALED AND READ BACK.**
+///
+/// Kills `replace * with +` in `Head::check_geometry`'s bound on the packed
+/// provenance (`packed <= 2 * raw`, the most `pack_provenance` can write):
+/// `raw + 2` would refuse a valid head. Every isolated zero byte packs to two
+/// bytes, so eight bytes alternating one and zero pack to twelve: more than
+/// ten, less than sixteen. An image shorter than a provenance header is
+/// stored as given (only a whole header is checked for its owner).
+#[test]
+fn a_provenance_image_that_packs_past_its_length_is_sealed_and_read() {
+    use store::sealed::{SealedMonth, build, pack_provenance};
+    let path = sealed_path();
+    let image = [1u8, 0, 1, 0, 1, 0, 1, 0];
+    assert_eq!(pack_provenance(&image).len(), 12);
+    let built = build(path, &empty_month_header(), &[], Some(&image), None).unwrap();
+    let month = SealedMonth::open(built.to_bytes(), path, 4_242).unwrap();
+    assert_eq!(month.provenance().unwrap(), Some(image.to_vec()));
+}
