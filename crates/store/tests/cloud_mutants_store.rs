@@ -949,3 +949,232 @@ fn a_long_stem_is_cut_at_a_character_and_hashed_whole() {
     );
     assert_eq!(short.hash(), key_hash(b"ZZCLOUD"));
 }
+
+/// A verdict series of this test's own root: GDFL, NSE, F&O, one-second.
+fn verdict_series(root: &std::path::Path) -> store::verdict::Series<'_> {
+    store::verdict::Series {
+        root,
+        feed: brutex_core::vendor::Vendor::Gdfl,
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Fno,
+        timeframe: store::path::Timeframe::SECOND_1,
+    }
+}
+
+fn verdict_day() -> store::provenance::Day {
+    store::provenance::Day::new(2031, 3, 4).unwrap()
+}
+
+/// One invented generation of `entries`, each `(key, code, details)`.
+fn verdict_generation(
+    entries: &[(&str, store::verdict::Code, Vec<store::verdict::Detail>)],
+) -> store::verdict::Generation {
+    use store::verdict::{Carry, Code, DayBlock, Entry, Facts, Generation, Key, Mode};
+    Generation {
+        day: verdict_day(),
+        run: 1,
+        written_at: 1_900_000_000,
+        verifier: 1,
+        mode: Mode::Cold,
+        rule_set: 0,
+        origin: [7; 16],
+        day_block: DayBlock::of(Code::Match),
+        day_details: Vec::new(),
+        entries: entries
+            .iter()
+            .map(|(name, code, details)| Entry {
+                key: Key::instrument(name).unwrap(),
+                facts: Facts::of(*code),
+                details: details.clone(),
+            })
+            .collect(),
+        carry: Carry::WholeDay,
+    }
+}
+
+/// **A READER ANSWERS WHAT IS NOT THERE AS ABSENT, AND SAYS WHY A DAY HOLDS
+/// NO RECORD.**
+///
+/// Covers the reader's empty answers: a page of a day never committed is
+/// `None`, a generation with no detail section has no details, a key the day
+/// does not hold is answered by the day's `NoRecord` and its code, and a new
+/// reader holds no handle. The staleness words are pinned beside them.
+#[test]
+fn a_verdict_reader_answers_what_is_not_there_as_absent() {
+    use store::verdict::{Code, Found, Key, NoRecord, Reader, Stale, Unknown, commit};
+    let root = scratch("verdict-absent");
+    let series = verdict_series(&root);
+    let mut reader = Reader::default();
+    assert_eq!(reader.cached(), 0);
+    assert_eq!(
+        reader
+            .page(&series, verdict_day(), Code::Match, 0, 10)
+            .unwrap(),
+        None,
+        "a day never committed"
+    );
+    let committed = commit(
+        &series,
+        &verdict_generation(&[("ZZA", Code::Match, Vec::new())]),
+    )
+    .unwrap();
+    assert_eq!(
+        reader
+            .details(&series, verdict_day(), committed.generation, None)
+            .unwrap(),
+        Vec::new(),
+        "no detail section"
+    );
+    let lookup = reader
+        .lookup(
+            &series,
+            verdict_day(),
+            &Key::instrument("ZZNOTHERE").unwrap(),
+        )
+        .unwrap();
+    let answer = lookup.answer.expect("the day is committed");
+    assert_eq!(answer.found, Found::NoRecord(NoRecord::NotInDay));
+    assert_eq!(answer.code(), None);
+    assert!(reader.cached() > 0, "the image's handle is held");
+    for (stale, word) in [
+        (
+            Stale::Verifier {
+                image: 1,
+                running: 2,
+            },
+            "verifier",
+        ),
+        (Stale::CrossKindPending, "cross_kind_pending"),
+        (
+            Stale::StoreChanged {
+                verified: (1, 0, 9),
+                now: (2, 0, 9),
+            },
+            "store_changed",
+        ),
+        (Stale::StoreUnknown(Unknown::NoTix), "unknown"),
+    ] {
+        assert_eq!(stale.word(), word);
+    }
+    let _ignored = fs::remove_dir_all(&root);
+}
+
+/// **A READER REFUSES A DAMAGED YEAR INDEX OR DAY IMAGE BY NAME.**
+///
+/// Covers the reader's own checks, which run without the BLAKE3 trailer a
+/// lookup never reads: a year index cut short, a slot naming a record past
+/// the records, an image longer than its header implies, and a detail entry
+/// that runs past its section.
+#[test]
+fn a_verdict_reader_refuses_a_damaged_index_or_image_by_name() {
+    use store::verdict::{
+        Code, Detail, Found, Key, Reader, SLOT_LEN, TABLE_OFFSET, VerdictError, commit,
+    };
+    let corrupt_why = |answer: Result<(), VerdictError>| match answer {
+        Err(VerdictError::ImageCorrupt { why, .. }) => why,
+        other => panic!("not image_corrupt: {other:?}"),
+    };
+    let root = scratch("verdict-damaged");
+    let series = verdict_series(&root);
+    let detail = Detail {
+        kind: 2,
+        payload: b"cloud".to_vec(),
+    };
+    let committed = commit(
+        &series,
+        &verdict_generation(&[
+            ("ZZA", Code::Match, Vec::new()),
+            ("ZZB", Code::ValueMismatch, vec![detail.clone()]),
+        ]),
+    )
+    .unwrap();
+    let image = committed.path.clone();
+    let good = fs::read(&image).unwrap();
+    let zzb = Key::instrument("ZZB").unwrap();
+    let lookup = |reader: &mut Reader| {
+        reader
+            .lookup(&series, verdict_day(), &zzb)
+            .map(|found| found.answer.map(|answer| answer.found))
+    };
+    let Some(Found::Record { ordinal, record }) = lookup(&mut Reader::new()).unwrap() else {
+        panic!("ZZB is in the day");
+    };
+    assert_eq!(
+        Reader::new()
+            .details(
+                &series,
+                verdict_day(),
+                committed.generation,
+                Some((ordinal, &record))
+            )
+            .unwrap(),
+        vec![detail]
+    );
+
+    // A detail entry whose size runs past the section.
+    let mut bytes = good.clone();
+    let size_at = bytes
+        .windows(5)
+        .position(|w| w == b"cloud")
+        .expect("the payload")
+        - 2;
+    bytes[size_at..size_at + 2].copy_from_slice(&900u16.to_le_bytes());
+    fs::write(&image, &bytes).unwrap();
+    assert_eq!(
+        corrupt_why(
+            Reader::new()
+                .details(
+                    &series,
+                    verdict_day(),
+                    committed.generation,
+                    Some((ordinal, &record))
+                )
+                .map(|_| ())
+        ),
+        "a detail entry runs past the section"
+    );
+
+    // A slot naming a record past the records: ZZB's own slot, its mark
+    // raised.
+    let mut bytes = good.clone();
+    let tag = u32::try_from(zzb.hash() >> 32).unwrap();
+    let slot = (TABLE_OFFSET..)
+        .step_by(SLOT_LEN)
+        .take(64)
+        .find(|&at| bytes[at + 4..at + 8] == tag.to_le_bytes())
+        .expect("ZZB's slot");
+    bytes[slot..slot + 4].copy_from_slice(&99u32.to_le_bytes());
+    fs::write(&image, &bytes).unwrap();
+    assert_eq!(
+        corrupt_why(lookup(&mut Reader::new()).map(|_| ())),
+        "a slot names record 98, past the records"
+    );
+
+    // An image longer than its header implies.
+    let mut bytes = good.clone();
+    bytes.extend_from_slice(&[0; 8]);
+    fs::write(&image, &bytes).unwrap();
+    assert_eq!(
+        corrupt_why(lookup(&mut Reader::new()).map(|_| ())),
+        format!(
+            "{} bytes where the header implies {}",
+            good.len() + 8,
+            good.len()
+        )
+    );
+    fs::write(&image, &good).unwrap();
+
+    // A year index cut short.
+    let index = series.year_index(2031);
+    let file = fs::OpenOptions::new().write(true).open(&index).unwrap();
+    file.set_len(9).unwrap();
+    drop(file);
+    assert!(
+        matches!(
+            Reader::new().year(&series, 2031),
+            Err(VerdictError::IndexShort { len: 9, .. })
+        ),
+        "a year index of 9 bytes"
+    );
+    let _ignored = fs::remove_dir_all(&root);
+}
