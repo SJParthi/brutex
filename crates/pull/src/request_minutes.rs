@@ -1779,6 +1779,47 @@ mod cloud_mutant_tests {
             assert_eq!((finding.why, finding.day), (why, Some(day)), "{day}");
             assert!(audit.days.is_empty(), "{day}");
         }
+        // The past-record sentence leads with the words a run folds these
+        // findings by, names the record's last day and the day, and says the
+        // vendor's bars are kept as landed.
+        let request = request_on(after, after);
+        let audit = audit_venue(&[], plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        let text = &audit.findings[0].text;
+        let reason = Runtime::default().unverified_reason(i64::from(after.days_from_epoch()));
+        assert_eq!(
+            text,
+            &format!(
+                "{} (it ends on 2026-12-31): 2027-01-04: {reason}; bars the vendor sent for it are kept as landed, and no completeness is claimed until the record is extended",
+                crate::calendar::PAST_RECORD_FINDING
+            )
+        );
+    }
+
+    /// Of two missing runs of equal length the FIRST is the day's longest:
+    /// a later run must be strictly longer to take its place. Kills the
+    /// longest-run test's `>` read as `>=`.
+    #[test]
+    fn of_two_equal_runs_the_first_is_the_longest() {
+        let day = Day::new(2022, 10, 3).unwrap();
+        let request = request_on(day, day);
+        let rows: Vec<RawRow> = (555..930)
+            .filter(|minute| ![600, 601, 700, 701].contains(minute))
+            .map(|minute| row(at_minute(day, minute)))
+            .collect();
+        let audit = audit_venue(&rows, plan_at(&request, "NSE", "INDEX"), Venue::NseIndex);
+        let [line] = audit.days.as_slice() else {
+            panic!("{:?}", audit.days);
+        };
+        assert_eq!(
+            (
+                line.missing,
+                line.runs,
+                line.longest,
+                line.longest_at,
+                line.first_missing
+            ),
+            (4, 2, 2, Some(600), Some(600))
+        );
     }
 
     /// From 2026-08-03 an index still owes 09:15 to 15:30 and needs no cash
