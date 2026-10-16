@@ -69135,3 +69135,33 @@ it settles, so a refusal can never stand in for it.
 CHG-1's rows in `docs/04-invariants.md` take a prefix no row uses, rather than
 `K-54` onward, because about twenty packages are adding rows in parallel and
 gates 10b and 27 refuse a reused id at merge.
+
+### D-5120 — The cost-row reconciliation reads every bench binary, not only `ratio.rs` — 2026-10-16
+
+`core::cost_invariants` read the printed ids only from each crate's
+`benches/ratio.rs`, so C-CHG-01..05 (D-5118), which
+`crates/costs/benches/stack.rs` prints, failed
+`every_declared_cost_invariant_reaches_a_bench` as unbenched. Yet gate 8's
+`cargo bench --workspace --locked` runs that bench in the same step as every
+`ratio.rs`.
+
+**Chosen:** the two reconciliation tests read every top-level
+`crates/<name>/benches/*.rs`, the root file of each bench binary.
+`every_crate_carries_a_ratio_bench` still walks `ratio.rs` alone, because one
+per crate is gate 8's premise. The wider walk asserts that it read every
+`ratio.rs` the narrower one did, so it cannot quietly read less.
+
+**Rejected:**
+- Citing a C-K id in each C-CHG row. That would pass the test, but the C-K
+  benches measure the options trip, not this stack, so the citation would be
+  false.
+- Moving the stack bench into `benches/ratio/` as a module. The test does not
+  read modules, so the five rows would still fail.
+- Merging it into `costs/benches/ratio.rs`. That would rewrite gate 8's
+  harness, which gate 14 counts point by point, for no gain.
+
+**Seen and not changed:** files under `benches/ratio/` are modules, and this
+walk still does not read them. `store/benches/ratio/safe_files.rs` prints
+C-SF-01..04, and no row in `docs/04-invariants.md` declares any of the four.
+RC-01's direction would refuse them if it could see them. That is a separate
+change to another crate's ledger; it is not widened into package CHG-1.
