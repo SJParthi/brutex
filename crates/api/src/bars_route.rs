@@ -79,19 +79,24 @@ pub(super) fn bars_array_of(
         // `lightweight-charts` takes UTC seconds. The store holds micros.
         let _ = write!(
             out,
-            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}{tail}}}"#,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":"#,
             bar.ts_micros / 1_000_000,
             bar.open,
             bar.high,
             bar.low,
             bar.close,
             bar.volume,
-            if !oi_applies || bar.open_interest == store::format::OI_NULL {
-                "null".to_owned()
-            } else {
-                bar.open_interest.to_string()
-            }
         );
+        // WRITTEN IN PLACE, NOT THROUGH A `String` PER BAR: a one-second
+        // month is about 2.7 million rows, and the open interest was one heap
+        // allocation each (`cloud/attack-o1-20261016`).
+        if !oi_applies || bar.open_interest == store::format::OI_NULL {
+            out.push_str("null");
+        } else {
+            let _ = write!(out, "{}", bar.open_interest);
+        }
+        out.push_str(tail);
+        out.push('}');
     }
     out.push(']');
     (out, withheld)
@@ -1228,6 +1233,61 @@ mod tests {
         let field = faults_json(&[long.as_str(); 200]);
         assert!(field.len() < bound, "{} bytes", field.len());
         assert!(field.contains("[cut: 999490 more bytes]"), "a cut is named");
+    }
+
+    /// **A `/bars.json` ROW ALLOCATES NOTHING OF ITS OWN**
+    /// (`cloud/attack-o1-20261016`).
+    ///
+    /// The open interest went through `"null".to_owned()` or
+    /// `open_interest.to_string()` once per bar, about 2.7 million heap
+    /// allocations for a one-second month. The bytes are pinned for all three
+    /// segment shapes, and the allocation's absence is asserted on the source
+    /// of `bars_array_of`, whose needles are assembled at run time so this
+    /// test cannot match itself.
+    #[test]
+    fn a_bars_row_is_written_in_place_with_the_same_bytes() {
+        use brutex_core::instrument::Segment;
+        let bar = |open_interest: i64| store::format::Bar {
+            ts_micros: 1_704_079_800_000_000,
+            open: 2_150_000,
+            high: 2_151_000,
+            low: 2_149_000,
+            close: 2_150_500,
+            volume: 75,
+            open_interest,
+        };
+        let rows = [bar(1_234), bar(store::format::OI_NULL)];
+        let head =
+            r#"{"t":1704079800,"o":2150000,"h":2151000,"l":2149000,"c":2150500,"v":75,"oi":"#;
+        assert_eq!(
+            bars_array_of(&rows, None, None, Some(Segment::Fno)).0,
+            format!("[{head}1234}},{head}null}}]")
+        );
+        let index = r#","oichg_why":"not_a_derivative","v_why":"index_no_volume"}"#;
+        assert_eq!(
+            bars_array_of(&rows, None, None, Some(Segment::Index)).0,
+            format!("[{head}null{index},{head}null{index}]")
+        );
+        let cash = r#","oichg_why":"not_a_derivative"}"#;
+        assert_eq!(
+            bars_array_of(&rows, None, None, Some(Segment::Cash)).0,
+            format!("[{head}null{cash},{head}null{cash}]")
+        );
+        let source = include_str!("bars_route.rs");
+        let start = source
+            .find(&format!("{}{}", "fn bars_array", "_of("))
+            .expect("bars_array_of exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("bars_array_of ends")];
+        for needle in [
+            format!("{}{}", ".to_", "owned()"),
+            format!("{}{}", ".to_", "string()"),
+        ] {
+            assert!(
+                !body.contains(&needle),
+                "bars_array_of holds {needle:?}: a per-bar allocation is back"
+            );
+        }
     }
     use crate::server::Site;
     use crate::server::tests::{masters, store_root};

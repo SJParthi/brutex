@@ -1094,6 +1094,65 @@ fn alert_window_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
     a && b
 }
 
+// ══ The fold, per bar (cloud/attack-o1-20261016): C-FD-01 ══════════════════
+
+/// Snapshot counts folded: 1x / 10x / 100x.
+const FOLD_SIZES: [u32; 3] = [1_000, 10_000, 100_000];
+
+/// `n` one-second snapshots of one IST day from 2026-09-07 09:15, every
+/// tenth second skipped so a bucket is folded from a ragged run of rows.
+fn snapshots(n: u32) -> Vec<store::format::Bar> {
+    // 2026-09-07 09:15:00 IST in UTC microseconds.
+    const OPEN: i64 = 1_788_752_700_000_000;
+    (0..n)
+        .map(|i| {
+            let raw = i64::from(i);
+            store::format::Bar {
+                ts_micros: OPEN + (raw + raw / 9) * 1_000_000,
+                open: 2_000_000 + raw % 97,
+                high: 2_000_100 + raw % 97,
+                low: 1_999_900 + raw % 97,
+                close: 2_000_050 + raw % 89,
+                volume: 75,
+                open_interest: store::format::OI_NULL,
+            }
+        })
+        .collect()
+}
+
+/// C-FD-01 — `pull::fold::fold_from_snapshots` into minutes costs the same
+/// PER BAR at 1,000, 10,000 and 100,000 snapshots, and its p50/p99/max per
+/// whole fold are printed. `docs/06-limits.md` (D-1201) said "no bench times
+/// the fold"; this is the row.
+fn fold_is_flat_per_bar() -> bool {
+    let mut per_bar = Vec::with_capacity(FOLD_SIZES.len());
+    for n in FOLD_SIZES {
+        let bars = snapshots(n);
+        let folded = pull::fold::fold_from_snapshots(&bars, pull::fold::Bucket::MINUTE)
+            .unwrap_or_else(|_| refuse("the fold refused its fixture"));
+        if folded.is_empty() {
+            refuse("the fold produced no minute");
+        }
+        spread(&format!("C-FD-01 fold to 1min, {n} snapshots"), 200, || {
+            black_box(
+                pull::fold::fold_from_snapshots(black_box(&bars), pull::fold::Bucket::MINUTE)
+                    .map_or(0, |out| out.len()),
+            );
+        });
+        let whole = cost_ps(3, || {
+            pull::fold::fold_from_snapshots(black_box(&bars), pull::fold::Bucket::MINUTE)
+                .map_or(0, |out| out.len())
+        });
+        per_bar.push(whole / u128::from(n));
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (per_bar.first(), per_bar.get(1), per_bar.get(2))
+    else {
+        refuse("three sizes measured");
+    };
+    ratio("C-FD-01 fold per bar, 1k -> 10k", base, mid)
+        & ratio("C-FD-01 fold per bar, 1k -> 100k", base, big)
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -1110,6 +1169,7 @@ fn main() {
     ok &= alert_put_is_flat(&alert_stores);
     ok &= alert_window_is_flat(&alert_stores);
     let _cleanup = std::fs::remove_dir_all(&alert_root);
+    ok &= fold_is_flat_per_bar();
     if ok {
         println!("all ratios within the ceiling");
     } else {

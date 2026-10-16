@@ -799,6 +799,55 @@ fn every_row_fault_is_refused_by_name_at_its_line() {
     );
 }
 
+/// **NO OPTIONS ROW ALLOCATES A FIELD LIST** (`cloud/attack-o1-20261016`).
+///
+/// The capital-market reader's `parse_row` splits into a fixed `[&str; 10]`
+/// and `csv::decode_rows` was made to (D-1203); this reader still collected a
+/// `Vec<&str>` per row, on a tree of 27.6 million rows a day. The allocation
+/// has no observable output, so its absence is asserted on the source of
+/// `decode_capped`, as `csv::the_decode_loop_collects_no_field_vector` does.
+/// The needles are assembled at run time so this test cannot match itself.
+#[test]
+fn the_options_row_loop_collects_no_field_vector() {
+    let source = include_str!("gdfl_nfo.rs");
+    let start = source
+        .find(&format!("{}{}", "fn decode_", "capped("))
+        .expect("decode_capped exists");
+    let body = &source[start..];
+    let body = &body[..body.find("\n}\n").expect("decode_capped ends")];
+    for needle in [
+        format!("{}{}", "Vec<&", "str>"),
+        format!("{}{}", ".coll", "ect()"),
+        format!("{}{}", "Vec::", "new()"),
+    ] {
+        assert!(
+            !body.contains(&needle),
+            "decode_capped holds {needle:?}: a per-row allocation or an unreserved \
+             row vector is back"
+        );
+    }
+    assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
+}
+
+/// An eleventh field is refused at the line it is on, however many follow:
+/// a row of a thousand commas is the same `MalformedRow` as one of eleven
+/// fields, and the rows before it still decode in a file that has none.
+#[test]
+fn a_row_of_many_fields_is_malformed_at_its_line() {
+    let good = rows(&[(33_300, "10", 1, 5)])[0].clone();
+    let wide = format!("{good}{}", ",0".repeat(1_000));
+    let bytes = csv(&[rows(&[(33_299, "10", 1, 5)])[0].clone(), wide]);
+    assert_eq!(
+        decode(&bytes, STEM, trade()),
+        Err(NfoRefusal::MalformedRow { line: 3 })
+    );
+    let bytes = csv(&rows(&[(33_299, "10", 1, 5), (33_300, "10", 1, 5)]));
+    assert_eq!(
+        decode(&bytes, STEM, trade()).map(|file| file.rows.len()),
+        Ok(2)
+    );
+}
+
 #[test]
 fn a_zero_price_is_admitted_only_on_a_row_with_no_trade() {
     let bytes = csv(&rows(&[(33_300, "0", 0, 9)]));
