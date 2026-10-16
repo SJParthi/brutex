@@ -439,7 +439,7 @@ none is committed.
 | runner | `cargo test -p runner --locked --no-fail-fast` | **green**: exit 0. lib 740 passed; 12 integration binaries 46 passed; doc-tests 6 passed |
 | store | `cargo test -p store --locked --no-fail-fast` | **exit 101, one failure, environmental**: lib 229 passed; 33 integration binaries, 412 passed, 1 failed, 4 ignored (32 green); doc-tests 11 passed. The one failure is `cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not` (`crates/store/tests/cited_commits.rs:637`), explained under lens 3: the snapshot base is one commit, so commits the docs cite are not ancestors of `HEAD`. This branch edits neither cited document |
 | pull | `cargo test -p pull --locked --no-fail-fast` | **green**: exit 0. lib 1221 passed, 17 ignored (each `#[ignore]` carries its reason); 20 integration binaries, 375 passed, 0 failed, 6 ignored (`census` 21 passed, `census_v4` 9 passed and 1 ignored, `store_evidence` 5 ignored); doc-tests 38 passed |
-| api | `cargo test -p api --locked --no-fail-fast` | running when this was committed; the next commit records it |
+| api | `cargo test -p api --locked --no-fail-fast` | **green as root**: exit 0. lib 1976 passed, 0 failed, 5 ignored (before this branch: 1966 passed, 10 failed as root, the ten permission tests lens 3 names); `main.rs` 3 passed; `tests/binary.rs` 4 passed; doc-tests 1 passed |
 | cli | `cargo test -p cli --locked --no-fail-fast` | queued when this was committed; the next commit records it |
 | engine | `cargo test -p engine --locked --no-fail-fast` | queued when this was committed; the next commit records it |
 | core | `cargo test -p core --locked --no-fail-fast` | queued when this was committed; the next commit records it |
