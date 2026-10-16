@@ -5542,3 +5542,179 @@ pub fn json_string(value: &str) -> String {
     out.push('"');
     out
 }
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+mod cloud_mutant_tests {
+    use super::*;
+    use crate::audit::Drops;
+
+    /// **EACH REASON TAKES ITS OWN SHARE, AT ITS OWN OFFSET, AND ONLY THE LAST
+    /// TAKES THE REMAINDER; A REASON WITH NO DROP DRAWS NO SEGMENT.** Three
+    /// equal reasons are 33 each and the closed-day segment takes the 1 the
+    /// division left. The existing test summed the widths to 100, which a bar
+    /// whose FIRST segment took the whole width also does: `== with !=` on
+    /// `last` in `share_bar`. And it never asked for the absence of a
+    /// zero-width segment: `> with >=` drew one for `after_close`.
+    #[test]
+    fn each_drop_reason_takes_its_own_share_and_only_the_last_the_remainder() {
+        let svg = share_bar(Drops {
+            before_window: 1,
+            after_window: 1,
+            before_open: 1,
+            after_close: 0,
+            ..Drops::default()
+        });
+        for (class, x, width) in [("r0", 0, 33), ("r1", 33, 33), ("r2", 66, 33), ("r4", 99, 1)] {
+            let rect = format!("<rect class=\"{class}\" x=\"{x}\" y=\"0\" width=\"{width}\"");
+            assert!(svg.contains(&rect), "{rect} in {svg}");
+        }
+        assert!(
+            !svg.contains("class=\"r3\""),
+            "a reason that dropped nothing draws nothing: {svg}"
+        );
+        assert_eq!(svg.matches("<rect").count(), 4, "{svg}");
+    }
+
+    /// **A DATE PICKER'S CAPTION IS A `<div>`, NOT A `<label>`**, around the
+    /// control it was given. Kills both constant answers of `field_unlabelled`.
+    #[test]
+    fn an_unlabelled_field_wraps_its_control_in_a_div_with_its_caption() {
+        assert_eq!(
+            field_unlabelled("From & to", "<i>control</i>"),
+            "<div class=\"field\"><span>From &amp; to</span><i>control</i></div>"
+        );
+    }
+
+    /// A scratch tree nobody else in this process shares, emptied first.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("brutex-cloud-render-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch tree");
+        root
+    }
+
+    fn file(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("its directory");
+        std::fs::write(path, "a\n").expect("a generated file");
+    }
+
+    /// **THE WALK OFFERS A FOLDER ONLY FOR A REAL `.csv`, NEVER A HIDDEN OR
+    /// SHADOW FOLDER, AND NEVER PAST ITS DEPTH.** Kills `|| with &&` on the
+    /// hidden-name test (a `.hidden` or `__MACOSX` folder walked), `&& with ||`
+    /// on the `.csv` test (a folder of `.txt` offered), and both mutants of
+    /// `depth - 1` (a folder below the bound offered).
+    #[test]
+    fn the_folder_walk_offers_only_visible_csv_folders_within_its_depth() {
+        let root = scratch("walk");
+        file(&root.join("a").join("x.csv"));
+        file(&root.join("notes").join("readme.txt"));
+        file(&root.join(".hidden").join("y.csv"));
+        file(&root.join("__MACOSX").join("z.csv"));
+        file(&root.join("b").join("c").join("deep.csv"));
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 2, &mut found);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            found,
+            vec![root.join("a").to_string_lossy().into_owned()],
+            "depth 2 reaches `a`, not `b/c`; no hidden, shadow or text-only folder"
+        );
+    }
+
+    /// Set by [`folder_suggestions_follow_their_switch_and_walk_home`] in the
+    /// child it runs: the child prints what the walk found and stops.
+    const SUGGESTIONS_CHILD: &str = "BRUTEX_CLOUD_MUTANT_SUGGESTIONS_CHILD";
+
+    /// What `folder_suggestions` answers in a child of this test binary whose
+    /// environment is `home` and `switch`: the process environment is read
+    /// in the child, so this process's is never changed.
+    fn suggestions_in_child(home: &std::path::Path, switch: Option<&str>) -> String {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("this binary"));
+        child
+            .args([
+                "--exact",
+                "render::cloud_mutant_tests::folder_suggestions_follow_their_switch_and_walk_home",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SUGGESTIONS_CHILD, "1")
+            .env("HOME", home);
+        match switch {
+            Some(word) => child.env("BRUTEX_ARCHIVE_SUGGESTIONS", word),
+            None => child.env_remove("BRUTEX_ARCHIVE_SUGGESTIONS"),
+        };
+        let output = child.output().expect("the child test process starts");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child failed or ran no test:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+            .lines()
+            .find_map(|line| line.split_once("SUGGESTED=").map(|(_, found)| found))
+            .expect("the child says what it found")
+            .to_owned()
+    }
+
+    /// **FOLDER SUGGESTIONS ARE ON UNLESS TURNED OFF, A WORD THE SWITCH DOES
+    /// NOT TAKE TURNS THEM OFF, AND ON THEY ARE THE CSV FOLDERS UNDER `HOME`'s
+    /// `Downloads` AND `.brutex/vendor-data`, SORTED** (CE-38, CE-39, D-1769).
+    /// Kills the three constant answers and `== with !=` of
+    /// `folder_suggestions`, both constant answers of `archive_suggestions`
+    /// and the three of `discover_folders`: no test ran any of them.
+    #[test]
+    fn folder_suggestions_follow_their_switch_and_walk_home() {
+        if std::env::var_os(SUGGESTIONS_CHILD).is_some() {
+            println!("SUGGESTED={:?}", folder_suggestions());
+            return;
+        }
+        let home = scratch("home");
+        file(&home.join("Downloads").join("nse").join("a.csv"));
+        file(
+            &home
+                .join(".brutex")
+                .join("vendor-data")
+                .join("gdfl")
+                .join("b.csv"),
+        );
+        file(&home.join("elsewhere").join("c.csv"));
+        let walked = format!(
+            "{:?}",
+            vec![
+                home.join(".brutex")
+                    .join("vendor-data")
+                    .join("gdfl")
+                    .to_string_lossy()
+                    .into_owned(),
+                home.join("Downloads")
+                    .join("nse")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        );
+        let on = suggestions_in_child(&home, None);
+        let said_on = suggestions_in_child(&home, Some("on"));
+        let off = suggestions_in_child(&home, Some("off"));
+        let refused = suggestions_in_child(&home, Some("maybe"));
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(on, walked, "unset is on");
+        assert_eq!(said_on, walked);
+        assert_eq!(off, "[]");
+        assert_eq!(refused, "[]", "a word the switch refuses walks nothing");
+    }
+
+    /// **A DATE INPUT IS THE MONTH-GRID PICKER, ITS IDS SCOPED BY THE FORM AND
+    /// ITS NAME NOT.** Kills both constant answers of `date_input`.
+    #[test]
+    fn a_date_input_is_the_picker_scoped_to_its_form() {
+        let max = Day::new(2026, 8, 7).expect("a day");
+        let html = date_input("spot-", "from", max);
+        assert_eq!(html, calendar::picker("from", "spot-from", "spot-", max));
+        assert!(html.contains("id=\"o-spot-from\""), "{html}");
+        assert!(html.contains("name=\"from_y\""), "{html}");
+    }
+}

@@ -2927,3 +2927,238 @@ mod tests {
         );
     }
 }
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use brutex_core::vendor::Vendor;
+    use store::path::YearMonth;
+
+    fn month(year: u16, month: u8) -> YearMonth {
+        YearMonth::new(year, month).expect("a real month")
+    }
+
+    fn epoch_day(year: u16, month: u8, day: u8) -> i64 {
+        i64::from(
+            Day::new(year, month, day)
+                .expect("a real day")
+                .days_from_epoch(),
+        )
+    }
+
+    /// The `calendar` member of one `/gaps.json` body over `span`, audited
+    /// against a denominator from `source` vouching for `bounds`.
+    fn calendar_of(
+        source: &'static str,
+        bounds: (i64, i64),
+        span: &[YearMonth],
+    ) -> serde_json::Value {
+        let denominator = Denominator {
+            calendar: None,
+            source,
+            bounds,
+            from: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        let identity = Identity {
+            json: r#""identity":{}"#.to_owned(),
+            one_second: false,
+        };
+        let body = gaps_body(&[], span, &denominator, false, &identity);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+        parsed["calendar"].clone()
+    }
+
+    /// **A PEER VOTE NOBODY CAST STILL NAMES WHO VOTED AND WHO COULD NOT BE
+    /// READ.** With no calendar agreed the denominator is the typed table, and
+    /// the readings and the unreadable peers ride on it to the answer. Kills
+    /// `delete field from` and `delete field unreadable` in
+    /// `Denominator::peers`: either would answer `voted_by: []` or
+    /// `unreadable: []`, the same answer as a store with no peers.
+    #[test]
+    fn a_vote_with_no_calendar_keeps_its_readings_and_its_unreadable_peers() {
+        let denominator = Denominator::peers(PeerCalendar {
+            calendar: None,
+            from: vec!["dhan:NIFTY".to_owned()],
+            unreadable: vec!["groww".to_owned()],
+        });
+        assert_eq!(denominator.source, "table");
+        assert!(denominator.calendar.is_none());
+        assert_eq!(denominator.from, vec!["dhan:NIFTY".to_owned()]);
+        assert_eq!(denominator.unreadable, vec!["groww".to_owned()]);
+    }
+
+    /// **A HALT THAT RUNS TO THE CLOSE LEAVES ONE WINDOW, AND ONE WINDOW IS A
+    /// SESSION.** 2021-02-24's outage halts minutes 700..=944, past the 15:29
+    /// close, so carving it out of a regular session leaves 09:15..=11:39 —
+    /// one run. `> with <` in `carved` refused every carving with fewer runs
+    /// than a session can hold, so that day's owed minutes read unmeasured.
+    #[test]
+    fn a_halt_that_runs_to_the_close_carves_a_one_window_session() {
+        let day = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let carved = carved(day, pull::calendar::Session::full()).expect("one window is a session");
+        assert_eq!(carved.count, 1);
+        assert!(carved.expects(555), "09:15 is owed");
+        assert!(carved.expects(699), "11:39 is owed");
+        assert!(!carved.expects(700), "the halt is carved out");
+        // A day with no recorded halt is handed back untouched.
+        let plain = epoch_day(2025, 5, 2);
+        assert_eq!(carved_or_none(plain), Some(pull::calendar::Session::full()));
+    }
+
+    fn carved_or_none(day: i64) -> Option<pull::calendar::Session> {
+        carved(day, pull::calendar::Session::full())
+    }
+
+    /// **`stale` IS TODAY PAST THE SOURCE'S LAST DAY, AND NEVER FOR A PEER
+    /// VOTE.** A record whose last day is yesterday is stale; one ending today
+    /// or later is not; a peer vote is never stale, whatever its bounds. Kills
+    /// `!= with ==` and `&& with ||` at 670-671 and the three mutants of the
+    /// `>` that compares today with the last day.
+    #[test]
+    fn stale_is_today_past_the_last_day_and_never_a_peer_vote() {
+        let today = i64::from(crate::ingest::today_ist().expect("today").days_from_epoch());
+        let span = [month(2025, 5)];
+        let first = epoch_day(2025, 5, 1);
+        for (source, last, stale) in [
+            ("record", today - 1, true),
+            ("record", today, false),
+            ("record", today + 1, false),
+            ("table", today - 1, true),
+            ("peers", today - 1, false),
+            ("peers", today + 1, false),
+        ] {
+            let calendar = calendar_of(source, (first, last), &span);
+            assert_eq!(
+                calendar["stale"], stale,
+                "{source} ending {last} (today {today})"
+            );
+        }
+    }
+
+    /// **`covers_span` IS THE WHOLE SPAN INSIDE WHAT THE SOURCE VOUCHES FOR**:
+    /// its first month's first day on or after the source's first day, AND its
+    /// last month's last day on or before the source's last. Kills `>= with <`
+    /// at 679 and `&& with ||` at 680.
+    #[test]
+    fn a_span_is_covered_only_when_both_its_ends_are_inside_the_source() {
+        let (may_first, may_last) = (epoch_day(2025, 5, 1), epoch_day(2025, 5, 31));
+        let span = [month(2025, 5)];
+        for (bounds, covered) in [
+            ((may_first, may_last), true),
+            ((may_first - 10, may_last + 10), true),
+            ((may_first + 1, may_last), false),
+            ((may_first, may_last - 1), false),
+            ((may_first + 1, may_last - 1), false),
+        ] {
+            assert_eq!(
+                calendar_of("record", bounds, &span)["covers_span"],
+                covered,
+                "{bounds:?}"
+            );
+        }
+    }
+
+    /// **A VOTE THAT WAITS ON THE START-UP CENSUS SAYS SO**, not that it is
+    /// walking the census. Kills `delete match arm "census"` in
+    /// `vote_building`: the answer then fell through to the "walking every
+    /// feed's census" sentence of a build with nothing owed yet.
+    #[test]
+    fn a_vote_held_by_the_start_up_census_names_that_wait() {
+        let asked = Addressed {
+            vendor: Vendor::Dhan,
+            month: month(2025, 5),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            contract: None,
+            exchange: "NSE".to_owned(),
+            segment: "INDEX".to_owned(),
+            symbol: "NIFTY".to_owned(),
+        };
+        let (status, _, body) = vote_building(
+            &asked,
+            "census",
+            "start-up",
+            std::time::Duration::from_millis(5),
+            None,
+            0,
+            0,
+        );
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let reason = body["reason"].as_str().expect("a reason");
+        assert!(reason.contains("reading its census at start"), "{reason}");
+        assert!(!reason.contains("walking"), "{reason}");
+    }
+
+    /// **2021-02-24 OWES NO SECOND** (D-0420): the index's publication window
+    /// that day is unproved, so a one-second audit counts its rows as outside
+    /// and audits no second of it. Kills the match guard
+    /// `day != SYSTEMS_OUTAGE_DAY -> true` in `second_audit`, which audited
+    /// the day against its carved session.
+    #[test]
+    fn the_outage_day_owes_no_second() {
+        let day = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let at = |second: i64| store::format::Bar {
+            ts_micros: (day * 86_400 - 19_800 + second) * 1_000_000,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: store::format::OI_NULL,
+        };
+        // 09:15:00 and 09:15:01 IST, against the calendar of record, which
+        // opens the day with its halt carved out (one window, 09:15..=11:39).
+        let rows = [at(33_300), at(33_301)];
+        let record = record_calendar(day, day);
+        assert!(
+            matches!(
+                record.kind_of(day),
+                pull::calendar::DayKind::Open(session) if session.expects(555)
+            ),
+            "the record opens the day, so only the outage rule can owe it nothing"
+        );
+        let audit = second_audit(&rows, day, day, Some(&record), 1);
+        assert_eq!(audit.expected, 0, "no second of the day is owed");
+        assert_eq!(audit.held, 0);
+        assert_eq!(
+            audit.outside, 2,
+            "both rows are held outside any owed second"
+        );
+        assert!(audit.days.is_empty(), "the day is not audited at all");
+    }
+
+    /// **A DAY'S LONGEST RUN IS THE FIRST OF EQUAL LENGTH.** Two missing runs
+    /// of three seconds each: the day names the earlier. Kills `> with >=` in
+    /// `close_run`, which let the later of two equal runs replace it.
+    #[test]
+    fn of_two_equally_long_runs_the_earlier_is_the_longest() {
+        let mut audit = SecondAudit::default();
+        let mut day = SecondDay {
+            day: 1,
+            expected: 0,
+            held: 0,
+            missing: 0,
+            longest: None,
+        };
+        for run in [(100, 102), (200, 202)] {
+            let mut open = Some(run);
+            close_run(&mut audit, &mut day, &mut open, 1);
+            assert_eq!(open, None, "a closed run is taken");
+        }
+        assert_eq!(day.longest, Some((100, 3)));
+        assert_eq!(audit.run_count, 2);
+        // A strictly longer run still replaces it.
+        let mut open = Some((300, 310));
+        close_run(&mut audit, &mut day, &mut open, 1);
+        assert_eq!(day.longest, Some((300, 11)));
+    }
+}

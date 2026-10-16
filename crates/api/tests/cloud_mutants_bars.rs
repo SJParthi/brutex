@@ -409,3 +409,245 @@ mod ladder_rs {
         assert!(!held(&key(2)));
     }
 }
+
+/// `render.rs`: the two public pages whose branches a mutant could flip
+/// without any test noticing.
+mod render_rs {
+    use api::census::{Census, Coverage, Series, StoreFilter, VendorCensus};
+    use api::render::{BarsView, Notes, StoreView, bars_page, store_page};
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::symbol::Symbol;
+    use brutex_core::vendor::Vendor;
+    use pull::session::Day;
+    use store::format::{Bar, OI_NULL};
+    use store::path::{Timeframe, YearMonth};
+
+    fn nifty() -> Series {
+        Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").expect("a legal symbol"),
+            timeframe: Timeframe::MINUTE_1,
+        }
+    }
+
+    fn held_row(groww: Option<u64>) -> Coverage {
+        Coverage {
+            series: nifty(),
+            month: YearMonth::new(2026, 7).expect("a month"),
+            rows: vec![(Vendor::Groww, groww), (Vendor::Dhan, None)],
+        }
+    }
+
+    fn absent(vendor: Vendor) -> VendorCensus {
+        VendorCensus {
+            vendor,
+            path: std::path::PathBuf::from("/nowhere"),
+            state: Census::Absent,
+        }
+    }
+
+    /// The `/store` page over `rows`, for Groww.
+    fn store(
+        rows: &[Coverage],
+        censuses: &[VendorCensus],
+        filter: Option<&StoreFilter>,
+        (total, held, held_only): (usize, usize, bool),
+    ) -> String {
+        store_page(&StoreView {
+            feed: Vendor::Groww,
+            today: Day::new(2026, 8, 7).expect("a day"),
+            censuses,
+            rows,
+            page: 0,
+            last_page: 0,
+            total,
+            notes: &Notes::build(&[]),
+            filter,
+            held,
+            held_only,
+        })
+    }
+
+    /// **THE PAGE'S CARDS AND ITS PICKER NAME THE FEED IT SHOWS, AND ONLY
+    /// THAT ONE IS MARKED.** Groww's page draws Groww's census card and not
+    /// Dhan's, and its feed picker marks Groww `is-on` and Dhan not. Kills
+    /// `== with !=` in `store_page`'s census filter (the cards of every OTHER
+    /// feed) and in `coverage_table`'s picker (every other feed marked on).
+    #[test]
+    fn render_the_store_page_marks_only_the_feed_it_shows() {
+        let rows = [held_row(Some(8_250))];
+        let html = store(
+            &rows,
+            &[absent(Vendor::Groww), absent(Vendor::Dhan)],
+            None,
+            (1, 1, false),
+        );
+        assert!(html.contains("groww · months held"), "{html}");
+        assert!(!html.contains("dhan · months held"), "{html}");
+        assert!(
+            html.contains(
+                r#"<a class="feedpick-one is-on" href="/store?feed=groww" aria-current="true">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a class="feedpick-one" href="/store?feed=dhan">"#),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches(r#"class="feedpick-one is-on""#).count(),
+            1,
+            "{html}"
+        );
+    }
+
+    /// **A COUNT OF ZERO IS NOT A LINK.** A cell links to the bars it counts
+    /// only when there are some; a zero would open a page that can only say
+    /// the month holds nothing. Kills `> with >=` in `coverage_table`.
+    #[test]
+    fn render_a_cell_counting_no_rows_is_not_a_link_to_them() {
+        let linked = store(&[held_row(Some(7))], &[], None, (1, 1, false));
+        assert!(linked.contains("href=\"/bars?"), "{linked}");
+        let zero = store(&[held_row(Some(0))], &[], None, (1, 1, false));
+        assert!(!zero.contains("href=\"/bars?"), "{zero}");
+    }
+
+    /// **THE KIND PILL A FILTER NAMES IS THE ONE CHECKED.** A filter on
+    /// indices checks `Indices` and not `All`. Kills `== with !=` in
+    /// `store_filter_bar` (every pill but the named one checked); no test drew
+    /// the bar with a segment set, so the line never ran.
+    #[test]
+    fn render_the_filter_bar_checks_the_kind_the_filter_names() {
+        let filter = StoreFilter {
+            segment: Some(Segment::Index),
+            ..StoreFilter::default()
+        };
+        let html = store(&[], &[], Some(&filter), (0, 0, true));
+        assert!(
+            html.contains(r#"id="k-INDEX" value="INDEX" checked>"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"id="k-" value="" checked>"#), "{html}");
+        assert!(
+            !html.contains(r#"id="k-CASH" value="CASH" checked>"#),
+            "{html}"
+        );
+    }
+
+    /// **A NARROWED HELD LIST SAYS WHAT IT NARROWED FROM, AND AN EMPTY RESULT
+    /// OVER A FULL STORE SAYS THE STORE IS NOT EMPTY.** A filter that names
+    /// something adds " of N in the store"; one that names nothing does not.
+    /// Kills `delete !` in `store_page`'s `narrowed`, and runs the two
+    /// sentences no test reached.
+    #[test]
+    fn render_a_narrowed_held_list_names_the_store_it_narrowed() {
+        let narrowed = StoreFilter {
+            symbol: Some("BANK".to_owned()),
+            ..StoreFilter::default()
+        };
+        let html = store(&[], &[], Some(&narrowed), (0, 5, true));
+        assert!(
+            html.contains("<b>0</b> instrument-month(s) held of 5 in the store"),
+            "{html}"
+        );
+        assert!(
+            html.contains("nothing matches this filter; the store is not empty"),
+            "{html}"
+        );
+        let plain = store(&[], &[], Some(&StoreFilter::default()), (5, 5, true));
+        assert!(
+            plain.contains("<b>5</b> instrument-month(s) held · showing"),
+            "{plain}"
+        );
+        assert!(!plain.contains("in the store"), "{plain}");
+    }
+
+    fn bars(rows: &[Bar], trouble: Option<&str>) -> String {
+        bars_page(&BarsView {
+            symbol: "NIFTY",
+            contract: None,
+            segment: "INDEX",
+            vendor: "dhan",
+            month: "2025-05",
+            rows,
+            total: rows.len(),
+            page: 0,
+            last_page: 0,
+            timeframe: "1min",
+            trouble,
+            store_root: "/store",
+        })
+    }
+
+    fn one_bar() -> Bar {
+        Bar {
+            ts_micros: 1_746_157_500_000_000,
+            open: 2_400_000,
+            high: 2_400_500,
+            low: 2_399_500,
+            close: 2_400_100,
+            volume: 0,
+            open_interest: OI_NULL,
+        }
+    }
+
+    /// **THE PRICES PAGE SAYS "held" ONLY WITH ROWS AND NO TROUBLE, AND "empty
+    /// month" ONLY FOR A FILE THAT OPENED AND HOLDS NOTHING.** Kills both
+    /// mutants of `ok` (`&& with ||`, `delete !`) and `&& with ||` on the empty
+    /// month block, and runs that block, which no test drew.
+    #[test]
+    fn render_the_prices_page_tells_held_empty_and_refused_apart() {
+        let held = bars(&[one_bar()], None);
+        assert!(held.contains(">held<"), "{held}");
+        assert!(!held.contains("nothing to show"), "{held}");
+        assert!(!held.contains("empty month"), "{held}");
+
+        let empty = bars(&[], None);
+        assert!(empty.contains("nothing to show"), "{empty}");
+        assert!(empty.contains("empty month"), "{empty}");
+        assert!(
+            empty.contains("holds no committed record"),
+            "the empty month says why: {empty}"
+        );
+
+        let refused = bars(&[], Some("the month is not held"));
+        assert!(refused.contains("nothing to show"), "{refused}");
+        assert!(refused.contains("the month is not held"), "{refused}");
+        assert!(!refused.contains("empty month"), "{refused}");
+
+        // Rows beside a trouble are not "held" either.
+        let troubled = bars(&[one_bar()], Some("1 record would not read"));
+        assert!(troubled.contains("nothing to show"), "{troubled}");
+        assert!(!troubled.contains("empty month"), "{troubled}");
+    }
+}
+
+/// `render.rs`: `json_string`, the one JSON string writer every route uses.
+mod render_json_rs {
+    use api::render::json_string;
+
+    /// **EVERY CONTROL CHARACTER BELOW 0x20 IS A `\uXXXX` ESCAPE, AND A
+    /// SPACE IS A SPACE**; `\r` and `\t` have their own short escapes. Kills
+    /// the match guard `(c as u32) < 0x20 -> false` (a raw control character,
+    /// which is invalid JSON), `< with ==` and `< with <=` (a space escaped),
+    /// and runs the `\r` and `\t` arms no test reached.
+    #[test]
+    fn render_json_string_escapes_every_control_character_and_no_space() {
+        assert_eq!(json_string("a\u{1}b"), "\"a\\u0001b\"");
+        assert_eq!(json_string("\u{1f}"), "\"\\u001f\"");
+        assert_eq!(json_string("a b"), "\"a b\"");
+        assert_eq!(json_string("\r\t"), "\"\\r\\t\"");
+        for byte in 0_u8..0x20 {
+            let text = char::from(byte).to_string();
+            let escaped = json_string(&text);
+            let parsed: String = serde_json::from_str(&escaped).expect("valid JSON");
+            assert_eq!(parsed, text, "{escaped}");
+            assert!(
+                !escaped.contains(char::from(byte)),
+                "no raw control character: {escaped:?}"
+            );
+        }
+    }
+}
