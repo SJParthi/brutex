@@ -1747,6 +1747,57 @@ mod bars_series_rs {
         );
     }
 
+    /// **A MONTH WHOSE FILE WILL NOT STAT, AND ONE WHOSE GENERATION POINTER
+    /// IS NOT A FILE, ARE EACH ONE FAULT BY NAME**, and the months that read
+    /// are still answered. May's name is a link to itself (the kernel's
+    /// "too many levels of symbolic links", which is not an absence); June's
+    /// pointer name is a directory, so which generation of June is served
+    /// cannot be told — and serving the original anyway would be the hidden
+    /// fallback `CLAUDE.md` §4 bans. Runs `header_of`'s stat refusal and
+    /// `admit`'s served-path refusal, which no test reached.
+    #[test]
+    fn bars_series_a_month_that_will_not_stat_or_be_resolved_is_one_fault() {
+        let scratch = Scratch::new("series-stat-pointer");
+        for m in [4, 6] {
+            write_month(
+                scratch.root(),
+                SEGMENT,
+                SYMBOL,
+                Timeframe::MINUTE_1,
+                month(m),
+                &[(open_of(m, 2), 10)],
+            );
+        }
+        let may = month_path(scratch.root(), 5);
+        std::os::unix::fs::symlink(&may, &may).expect("a link to itself");
+        let june = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: SEGMENT,
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(6),
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        std::fs::create_dir_all(store::generation::pointer_path(scratch.root(), june))
+            .expect("a directory at June's pointer name");
+        let got = window(scratch.root(), &query(month(4), month(6))).expect("answers");
+        assert_eq!((got.total, got.months_read), (1, 1), "April alone reads");
+        assert_eq!(got.faults.len(), 2, "{:?}", got.faults);
+        assert!(
+            got.faults[0].starts_with(&format!("2025-05: cannot read {}: ", may.display())),
+            "{:?}",
+            got.faults
+        );
+        assert!(
+            got.faults[1].starts_with("2025-06: ") && got.faults[1].contains("not a regular file"),
+            "{:?}",
+            got.faults
+        );
+    }
+
     /// **WITH THE LOOKBACK OFF, A MONTH'S FIRST ROW IS MEASURED AGAINST THE
     /// MONTH BEFORE WHEN THAT MONTH IS KEPT WHOLE, AND A DAY'S FIRST ROW
     /// UNDER A TIME-OF-DAY BOUND IS NOT.** Runs `previous_is_kept` across a
