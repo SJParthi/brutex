@@ -2847,3 +2847,11 @@ async fn the_first_attempt_is_not_charged_here_and_a_retry_is() {
     );
     assert_eq!(busy.seen().len(), 1, "the retry was never sent");
 }
+
+/// One whole second is said in seconds, and the microsecond under it in
+/// milliseconds (kills `<` turned to `<=` in `render_elapsed`).
+#[test]
+fn one_second_is_said_in_seconds() {
+    assert_eq!(render_elapsed(1_000_000), "1.000 s");
+    assert_eq!(render_elapsed(999_999), "999.999 ms");
+}
