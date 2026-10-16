@@ -1318,12 +1318,7 @@ fn decode_capped(bytes: &[u8], stem: &str, day: Day, cap: usize) -> Result<NfoFi
     // RESERVED ONCE, FROM THE BODY, as `csv::decode_rows` is (D-1203): every
     // row is one line after the header, so the body's newlines bound the
     // rows, and `cap` bounds the reservation as it bounds the rows kept.
-    let bound = body
-        .iter()
-        .filter(|&&byte| byte == b'\n')
-        .count()
-        .saturating_add(1)
-        .min(cap);
+    let bound = body.split(|&byte| byte == b'\n').count().min(cap);
     let mut rows = Vec::with_capacity(bound);
     let mut quoted_rows = 0_u32;
     for (index, raw) in lines.enumerate() {
