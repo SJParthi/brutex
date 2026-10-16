@@ -44,6 +44,13 @@
 //! temporary file no reader opens; one killed after it leaves a complete
 //! generation. No file is ever torn at its final name.
 //!
+//! THE LINK IS THE COMMIT. Once it succeeds the save has landed and is
+//! answered [`Saved`], never refused: another writer that read the new
+//! generation may land the next one before this save reads back, and that is
+//! said as [`Saved::superseded_by`], not as a failure.
+//!
+//! The format is `docs/02-store-format.md` §41; its choices are D-4969.
+//!
 //! The generations themselves are the audit: each records when, by whom,
 //! why and which keys changed, and every earlier generation is still on
 //! disk to compare against.
@@ -245,8 +252,10 @@ pub struct Fault {
     pub why: String,
 }
 
-/// Why a change was not saved. Nothing was written in any case but `Io`
-/// after the link, which [`save`] never returns.
+/// Why a change was not saved. Every refusal is decided BEFORE the hard link
+/// that publishes a generation, so nothing is at a generation's name when
+/// one is returned: once the link succeeds, [`save`] answers [`Saved`] and
+/// says what its read-back found beside it (R3-05 repair 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// A value, or the change as a whole, failed its check. `key` is the
@@ -1005,6 +1014,15 @@ pub fn history(root: &Path, from: u64, limit: usize) -> Vec<Result<Generation, F
 
 // -- saving ------------------------------------------------------------------
 
+#[cfg(test)]
+thread_local! {
+    /// A test's step between a save's hard link and its read-back, run once
+    /// and only on the thread that set it: the window in which another
+    /// writer can land the next generation, made deterministic.
+    pub(crate) static AFTER_LINK: std::cell::RefCell<Option<Box<dyn FnOnce(&Path, u64)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// A counter of this process's saves, in every temporary name. Two threads of
 /// one process that read the clock in the same nanosecond still differ by it
 /// — the race test found exactly that collision, and a writer that then
@@ -1088,6 +1106,29 @@ fn write_temp(dir: &Path, number: u64, bytes: &[u8]) -> Result<(PathBuf, Option<
     Ok((temp, staged.cleared))
 }
 
+/// A save that LANDED: its hard link succeeded, so generation
+/// `generation.number` is on disk and nothing about it is a refusal.
+///
+/// What the read-back after the link found is said beside the success,
+/// never instead of it (R3-05 repair 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    /// The generation this save wrote, built from the bytes it wrote.
+    pub generation: Arc<Generation>,
+    /// The generation in force after the read-back: this one, a later one
+    /// another writer landed, or (when this one did not read back) an older
+    /// one; `None` when none reads.
+    pub in_force: Option<u64>,
+    /// A later generation another writer landed after this save's link and
+    /// before its read-back, now in force; `None` when this save is in force
+    /// or did not read back.
+    pub superseded_by: Option<u64>,
+    /// Why the read-back after the link could not confirm this generation:
+    /// the directory could not be looked in, or the file did not read.
+    /// `None` when it read back.
+    pub read_back: Option<String>,
+}
+
 /// Check `change` against the generation in force, then save it as the next
 /// generation — or refuse with nothing written.
 ///
@@ -1095,18 +1136,25 @@ fn write_temp(dir: &Path, number: u64, bytes: &[u8]) -> Result<(PathBuf, Option<
 /// does not offer, say); it runs after every value's own check and before
 /// any byte is written.
 ///
+/// ONCE THE HARD LINK SUCCEEDS THE ANSWER IS [`Saved`], whatever the
+/// read-back finds: a successor generation another writer landed in the
+/// meantime is [`Saved::superseded_by`], and a read-back that faults or
+/// cannot look is [`Saved::read_back`]. No refusal is ever returned for a
+/// generation that is on disk.
+///
 /// # Errors
 ///
-/// [`Refusal::Stale`] when a generation newer than `change.expected` is on
-/// disk (including one written by a racing save); [`Refusal::Invalid`] for a
-/// value, the window, the author or reason, or `extra`;
-/// [`Refusal::Unchanged`] for a change that changes nothing;
-/// [`Refusal::Io`] when the disk refuses — nothing is then visible.
+/// Every refusal is returned BEFORE the link, with nothing at a generation's
+/// name: [`Refusal::Stale`] when a generation newer than `change.expected` is
+/// on disk (including one written by a racing save that saw the same
+/// generation); [`Refusal::Invalid`] for a value, the window, the author or
+/// reason, or `extra`; [`Refusal::Unchanged`] for a change that changes
+/// nothing; [`Refusal::Io`] when the disk refuses — nothing is then visible.
 pub fn save(
     reader: &mut Reader,
     change: &Change,
     extra: impl Fn(&Settings) -> Result<(), Refusal>,
-) -> Result<Arc<Generation>, Refusal> {
+) -> Result<Saved, Refusal> {
     reader.last_cleared = None;
     // THE STORE'S FAULT, NOT THE CALLER'S: a settings directory that cannot
     // be listed (a FILE at its name, a permission) is `Io`, which the route
@@ -1211,28 +1259,57 @@ pub fn save(
             let _ = handle.sync_all();
         }
     }
-    reader.refresh().map_err(|fault| Refusal::Invalid {
-        key: None,
-        why: format!(
-            "saved as {}, and it did not read back: {}",
-            target.display(),
-            fault.why
-        ),
-    })?;
-    match reader.newest() {
-        Some(newest) if newest.number == number => Ok(Arc::clone(newest)),
-        _ => Err(Refusal::Invalid {
-            key: None,
-            why: format!(
-                "saved as {}, and the reader did not take it: {}",
-                target.display(),
-                reader
-                    .faults()
-                    .first()
-                    .map_or("no fault recorded", |fault| fault.why.as_str())
-            ),
-        }),
+    #[cfg(test)]
+    if let Some(step) = AFTER_LINK.with(|slot| slot.borrow_mut().take()) {
+        step(reader.root(), number);
     }
+    // THE LINK LANDED THE SAVE. From here nothing is a refusal: generation
+    // `number` is on disk under this writer's name, and an answer of
+    // "refused" would tell the operator, and `/audit`, that a change in force
+    // was never made (R3-05 repair 5, the second agent's blocking 1). Before,
+    // the answer was taken from the read-back alone: a successor writer that
+    // read `number` and landed `number + 1` between this link and the refresh
+    // below made the reader step past this save, and the save was answered
+    // `Invalid` "the reader did not take it" — 100 of 100 trials on the
+    // operator's volume. The generation answered is built from the bytes this
+    // save wrote, never from what a later read happens to find.
+    let generation = Arc::new(Generation {
+        number,
+        settings: after,
+        changed_at_micros: change.at_micros,
+        changed_by: change.changed_by.clone(),
+        reason: change.reason.clone(),
+        changed,
+        path: target.clone(),
+    });
+    let mut read_back = reader.refresh().err().map(|fault| {
+        format!(
+            "saved as {}; the reader could not look for it afterwards ({}): {}",
+            target.display(),
+            fault.path.display(),
+            fault.why
+        )
+    });
+    let in_force = reader.newest().map(|newest| newest.number);
+    let superseded_by = in_force.filter(|&newest| newest > number);
+    if read_back.is_none() && in_force.is_none_or(|newest| newest < number) {
+        read_back = Some(format!(
+            "saved as {}, and it did not read back, so the generation in force is {}: {}",
+            target.display(),
+            in_force.map_or_else(|| "none".to_owned(), |newest| newest.to_string()),
+            reader
+                .faults()
+                .iter()
+                .find(|fault| fault.generation == number)
+                .map_or("no fault was recorded for it", |fault| fault.why.as_str())
+        ));
+    }
+    Ok(Saved {
+        generation,
+        in_force,
+        superseded_by,
+        read_back,
+    })
 }
 
 #[cfg(test)]

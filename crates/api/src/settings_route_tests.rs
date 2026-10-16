@@ -720,3 +720,132 @@ fn a_hole_in_the_generation_numbers_is_served_and_degrades_the_answer() {
     };
     assert_eq!(super::degraded(&clean), None);
 }
+
+/// **A LANDED SAVE IS ANSWERED 200 `saved: true`, WITH WHAT ITS READ-BACK
+/// FOUND BESIDE IT** (R3-05 repair 5, the second agent's blocking 1): a
+/// successor generation in force is `superseded_by`, a read-back that faulted
+/// is `read_back`, and `warning` says each in words. Before, both were a
+/// `400 invalid saved:false`, and the request audit wrote `Refused` for a
+/// change that is on disk.
+#[test]
+fn a_landed_save_superseded_or_unread_is_answered_saved_never_refused() {
+    let generation = Arc::new(Generation {
+        number: 2,
+        settings: settings::Settings::default(),
+        changed_at_micros: 1_700_000_000_000_000,
+        changed_by: "A".to_owned(),
+        reason: "a test change".to_owned(),
+        changed: vec![Key::WindowTo],
+        path: PathBuf::from("/nowhere/settings/v1/00000000000000000002.settings"),
+    });
+    let superseded = saved_answer(
+        &settings::Saved {
+            generation: Arc::clone(&generation),
+            in_force: Some(3),
+            superseded_by: Some(3),
+            read_back: None,
+        },
+        1,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(superseded["saved"], true, "{superseded}");
+    assert_eq!(superseded["generation"]["generation"], 2, "{superseded}");
+    assert_eq!(superseded["superseded_by"], 3, "{superseded}");
+    assert_eq!(superseded["in_force"], 3, "{superseded}");
+    assert!(superseded["read_back"].is_null(), "{superseded}");
+    let warning = superseded["warning"].as_str().expect("a warning");
+    assert!(
+        warning.contains("generation 2 was saved") && warning.contains("generation 3"),
+        "{warning}"
+    );
+
+    let unread = saved_answer(
+        &settings::Saved {
+            generation,
+            in_force: Some(1),
+            superseded_by: None,
+            read_back: Some("saved as X, and it did not read back".to_owned()),
+        },
+        1,
+        vec![serde_json::json!({"generation": 9, "path": "p", "why": "w"})],
+        None,
+    );
+    assert_eq!(unread["saved"], true, "{unread}");
+    assert_eq!(unread["in_force"], 1, "{unread}");
+    assert!(unread["superseded_by"].is_null(), "{unread}");
+    let warning = unread["warning"].as_str().expect("a warning");
+    assert!(
+        warning.contains("did not read back") && warning.contains("built on generation 1"),
+        "{warning}"
+    );
+
+    // A CLEAN SAVE CARRIES NO WARNING.
+    let clean = saved_answer(
+        &settings::Saved {
+            generation: Arc::new(Generation {
+                number: 1,
+                settings: settings::Settings::default(),
+                changed_at_micros: 1,
+                changed_by: "A".to_owned(),
+                reason: "r".to_owned(),
+                changed: Vec::new(),
+                path: PathBuf::from("/nowhere"),
+            }),
+            in_force: Some(1),
+            superseded_by: None,
+            read_back: None,
+        },
+        0,
+        Vec::new(),
+        None,
+    );
+    assert!(clean["warning"].is_null(), "{clean}");
+    assert!(clean["superseded_by"].is_null(), "{clean}");
+}
+
+/// **THROUGH `POST /settings`'S OWN FUNCTION, UNDER A REAL SUCCESSOR RACE,
+/// A WRITER WHOSE GENERATION IS ON DISK IS ANSWERED 200 `saved: true`** —
+/// the second agent's route probe as a test (2 of 20 trials answered 400
+/// before). B saves on A's generation the moment its name appears.
+#[test]
+fn under_a_successor_race_a_landed_post_is_answered_saved() {
+    for trial in 0..20 {
+        let root = root("route-successor");
+        let (seeded, body) = change(
+            &root,
+            r#"{"expected":0,"changed_by":"seed","reason":"race","set":{"window.to":"2026-09-30"}}"#,
+        );
+        assert_eq!(seeded, StatusCode::OK, "{body}");
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let (racer, racer_gate) = (root.clone(), Arc::clone(&gate));
+        let b = std::thread::spawn(move || {
+            racer_gate.wait();
+            let next = settings::path_of(&racer, 2);
+            let started = std::time::Instant::now();
+            while std::fs::symlink_metadata(&next).is_err() {
+                if started.elapsed() > std::time::Duration::from_secs(10) {
+                    return None;
+                }
+                std::hint::spin_loop();
+            }
+            Some(change(
+                &racer,
+                r#"{"expected":2,"changed_by":"B","reason":"race","set":{"window.to":"2026-11-30"}}"#,
+            ))
+        });
+        gate.wait();
+        let (status, answer) = change(
+            &root,
+            r#"{"expected":1,"changed_by":"A","reason":"race","set":{"window.to":"2026-10-31"}}"#,
+        );
+        let (b_status, b_answer) = b.join().unwrap().expect("generation 2 appeared");
+        let second = std::fs::read_to_string(settings::path_of(&root, 2)).unwrap();
+        assert!(second.contains("changed_by A\n"), "trial {trial}: {second}");
+        assert_eq!(status, StatusCode::OK, "trial {trial}: {answer}");
+        assert_eq!(answer["saved"], true, "trial {trial}: {answer}");
+        assert_eq!(answer["generation"]["generation"], 2, "trial {trial}: {answer}");
+        assert_eq!(b_status, StatusCode::OK, "trial {trial}: {b_answer}");
+        assert_eq!(b_answer["generation"]["generation"], 3, "trial {trial}");
+    }
+}

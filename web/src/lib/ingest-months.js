@@ -190,8 +190,9 @@ export function archiveLane(span, from, to) {
   const opens = Date.parse(from);
   const closes = Date.parse(to);
   const first = Date.parse(span.from);
-  // AN OPEN LAST DAY (`to_binds: false`) cuts nothing after it: the vendor
-  // delivers daily, so the lane stays live to the window's end.
+  // AN OPEN LAST DAY (`to_binds: false`) cuts nothing after it: a later day
+  // may be delivered and waiting (the vendor's delivery cadence is
+  // UNVERIFIED), so the lane stays live to the window's end.
   const openEnd = span.bindsTo === false;
   const last = openEnd ? Math.max(Date.parse(span.to), closes) : Date.parse(span.to);
   if (![opens, closes, first, last].every(Number.isFinite) || !(closes > opens) || last < first) return null;
@@ -535,8 +536,9 @@ const isoDay = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? 
  * THE SPAN A FEED'S DESCRIPTOR STATES, read off `/feeds.json` and nothing
  * else: an archive vendor's measured span (`archive`: its first day binds,
  * no file exists before it; its last day binds only when the server says
- * `to_binds` — a dated measurement of a vendor that delivers daily is a
- * lower bound, so a later day may be delivered and waiting, R3-05 repair 2),
+ * `to_binds` — a dated measurement is a lower bound, so a later day may be
+ * delivered and waiting; the vendor's delivery cadence is UNVERIFIED, R3-05
+ * repairs 2 and 5),
  * or the operator's window for a pulled feed (`window`, which sets where the
  * form OPENS and binds nothing — the vendor answers outside it and a month
  * there is real).

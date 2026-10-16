@@ -784,6 +784,72 @@ fn parse_change(body: &str) -> Result<Change, String> {
     })
 }
 
+/// The `200` answer to a save that LANDED (`store::settings::Saved`).
+///
+/// A LANDED SAVE IS ANSWERED SAVED, ALWAYS (R3-05 repair 5, the second
+/// agent's blocking 1). Before, a successor writer that landed the next
+/// generation between this save's link and its read-back, or a read-back
+/// that faulted, was answered `400 invalid saved:false`, and the request
+/// audit recorded a change that is on disk as `Refused`. Now what the
+/// read-back found is said beside the success: `superseded_by` names the
+/// later generation in force, `read_back` why this one could not be
+/// confirmed, `in_force` the generation in force either way, and `warning`
+/// carries every one of them in words.
+fn saved_answer(
+    saved: &settings::Saved,
+    built_on: u64,
+    over_faults: Vec<serde_json::Value>,
+    cleared: Option<(&Path, u64)>,
+) -> serde_json::Value {
+    let generation = &saved.generation;
+    // SAVED IS NOT APPLIED: every key this change moved that nothing reads
+    // yet is named with its reason.
+    let not_applied: Vec<serde_json::Value> = generation
+        .changed
+        .iter()
+        .filter_map(|key| {
+            reader_of(*key)
+                .err()
+                .map(|why| serde_json::json!({"key": key.name(), "why": why}))
+        })
+        .collect();
+    let mut warnings: Vec<String> = Vec::with_capacity(3);
+    if !over_faults.is_empty() {
+        warnings.push(format!(
+            "built on generation {built_on}, the newest that reads: {} newer generation(s) \
+             did not read and are left as they are",
+            over_faults.len()
+        ));
+    }
+    if let Some(later) = saved.superseded_by {
+        warnings.push(format!(
+            "generation {} was saved and is on disk; generation {later}, saved by another \
+             writer after it, is now in force",
+            generation.number
+        ));
+    }
+    if let Some(why) = &saved.read_back {
+        warnings.push(why.clone());
+    }
+    serde_json::json!({
+        "saved": true,
+        "generation": generation_json(generation),
+        "in_force": saved.in_force,
+        "superseded_by": saved.superseded_by,
+        "read_back": saved.read_back,
+        "not_applied": not_applied,
+        "built_on": built_on,
+        "over_faults": over_faults,
+        "warning": (!warnings.is_empty()).then(|| warnings.join("; ")),
+        "cleared_leftover": cleared.map(|(path, bytes)| {
+            serde_json::json!({
+                "path": path.display().to_string(),
+                "bytes": bytes,
+            })
+        }),
+    })
+}
+
 /// Save a change for the store at `root`: the status and the JSON answer.
 #[must_use]
 pub fn change(root: &Path, body: &str) -> (StatusCode, serde_json::Value) {
@@ -814,40 +880,10 @@ pub fn change(root: &Path, body: &str) -> (StatusCode, serde_json::Value) {
             })
             .collect();
         match settings::save(reader, &parsed, |result| server_check(result, &parsed)) {
-            Ok(saved) => {
-                // SAVED IS NOT APPLIED: every key this change moved that
-                // nothing reads yet is named with its reason.
-                let not_applied: Vec<serde_json::Value> = saved
-                    .changed
-                    .iter()
-                    .filter_map(|key| {
-                        reader_of(*key)
-                            .err()
-                            .map(|why| serde_json::json!({"key": key.name(), "why": why}))
-                    })
-                    .collect();
-                (
-                    StatusCode::OK,
-                    serde_json::json!({
-                        "saved": true,
-                        "generation": generation_json(&saved),
-                        "not_applied": not_applied,
-                        "built_on": built_on,
-                        "over_faults": over_faults,
-                        "warning": (!over_faults.is_empty()).then(|| format!(
-                            "built on generation {built_on}, the newest that reads: {} newer \
-                             generation(s) did not read and are left as they are",
-                            over_faults.len()
-                        )),
-                        "cleared_leftover": reader.last_cleared().map(|(path, bytes)| {
-                            serde_json::json!({
-                                "path": path.display().to_string(),
-                                "bytes": bytes,
-                            })
-                        }),
-                    }),
-                )
-            }
+            Ok(saved) => (
+                StatusCode::OK,
+                saved_answer(&saved, built_on, over_faults, reader.last_cleared()),
+            ),
             Err(refusal) => {
                 let (status, code, key) = match &refusal {
                     Refusal::Invalid { key, .. } => {

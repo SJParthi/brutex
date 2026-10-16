@@ -83,7 +83,7 @@ fn a_setting_round_trips_and_every_generation_is_kept() {
         ),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(first.number, 1);
     assert_eq!(first.changed, vec![Key::WindowFrom, Key::WindowTo]);
     let first_bytes = std::fs::read(path_of(&root, 1)).unwrap();
@@ -93,7 +93,7 @@ fn a_setting_round_trips_and_every_generation_is_kept() {
         &change(1, &[(Key::WindowTo, "2026-10-31")]),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(second.number, 2);
     assert_eq!(second.changed, vec![Key::WindowTo]);
     assert_eq!(second.settings.get(Key::WindowFrom), Some("2018-01-01"));
@@ -116,7 +116,7 @@ fn a_setting_round_trips_and_every_generation_is_kept() {
     // UNSET RESTORES THE FALLBACK, and is itself a recorded change.
     let mut unset = change(2, &[]);
     unset.unset = vec![Key::WindowTo];
-    let third = save(&mut reader, &unset, no_extra).unwrap();
+    let third = save(&mut reader, &unset, no_extra).unwrap().generation;
     assert_eq!(third.settings.get(Key::WindowTo), None);
     assert_eq!(third.changed, vec![Key::WindowTo]);
 }
@@ -161,7 +161,7 @@ fn a_bad_path_is_refused_before_it_is_saved() {
         &change(0, &[(Key::SourceGdfl, &good)]),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(saved.settings.get(Key::SourceGdfl), Some(good.as_str()));
 }
 
@@ -391,7 +391,7 @@ fn a_damaged_generation_is_a_named_fault_and_never_read_as_settings() {
             &change(2, &[(Key::OpenOrder, "oldest")]),
             no_extra,
         )
-        .unwrap();
+        .unwrap().generation;
         assert_eq!(saved.number, 3, "{what}");
     }
 
@@ -431,7 +431,7 @@ fn a_writer_killed_mid_write_leaves_nothing_a_reader_opens() {
         &change(0, &[(Key::OpenOrder, "newest")]),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(saved.number, 1);
 }
 
@@ -763,7 +763,7 @@ fn a_generation_name_that_is_not_a_regular_file_is_a_named_fault_never_a_wait() 
             assert!(listed[1].is_ok(), "{label}: {listed:?}");
             // A SAVE STEPS PAST THE ODD NAME, never stuck as stale at it,
             // and leaves it as it is.
-            let saved = save(reader, &change(2, &[(Key::OpenFeed, "gdfl")]), no_extra).unwrap();
+            let saved = save(reader, &change(2, &[(Key::OpenFeed, "gdfl")]), no_extra).unwrap().generation;
             assert_eq!(saved.number, 3, "{label}");
             assert!(reader.last_cleared().is_none(), "{label}");
             assert!(
@@ -797,7 +797,7 @@ fn a_fault_is_reread_and_a_live_reader_agrees_with_a_fresh_one() {
         &change(2, &[(Key::OpenOrder, "oldest")]),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(saved.number, 3);
     let mut fresh = Reader::new(&below);
     fresh.refresh().unwrap();
@@ -987,6 +987,153 @@ fn a_hole_in_the_generation_numbers_is_named_and_a_save_never_lands_in_it() {
         &change(5, &[(Key::OpenOrder, "oldest")]),
         no_extra,
     )
-    .unwrap();
+    .unwrap().generation;
     assert_eq!(saved.number, 6);
+}
+
+/// A change by `by` setting `window.to` to `to` against `expected`.
+fn change_by(expected: u64, by: &str, to: &str) -> Change {
+    Change {
+        changed_by: by.to_owned(),
+        ..change(expected, &[(Key::WindowTo, to)])
+    }
+}
+
+/// Run `step` once, on this thread only, between the next save's hard link
+/// and its read-back.
+fn after_link(step: impl FnOnce(&Path, u64) + 'static) {
+    super::AFTER_LINK.with(|slot| *slot.borrow_mut() = Some(Box::new(step)));
+}
+
+/// **A SAVE THAT LANDED IS ANSWERED SAVED, EVEN WHEN A SUCCESSOR WRITER
+/// LANDED THE NEXT GENERATION BEFORE ITS READ-BACK** (R3-05 repair 5, the
+/// second agent's blocking 1).
+///
+/// Before: A linked generation 2; B read generation 2 and landed 3 in the
+/// window before A's refresh; A's refresh stepped to 3 and A was answered
+/// `Invalid` "the reader did not take it" — a change on disk, in force for a
+/// moment and carrying A's own reason, reported as refused. The race the
+/// same-`expected` test runs cannot reach this: there the loser never links.
+#[test]
+fn a_landed_save_is_saved_even_when_a_successor_landed_before_its_read_back() {
+    let root = root("successor");
+    let mut reader = Reader::new(&root);
+    save(&mut reader, &change_by(0, "seed", "2026-09-30"), no_extra).unwrap();
+    let racer = root.clone();
+    after_link(move |_, landed| {
+        assert_eq!(landed, 2);
+        // B READS GENERATION 2, A'S, AND LANDS 3 ON IT.
+        let mut other = Reader::new(&racer);
+        let by_b = save(&mut other, &change_by(2, "B", "2026-11-30"), no_extra).unwrap();
+        assert_eq!(by_b.generation.number, 3);
+        assert_eq!(by_b.superseded_by, None);
+    });
+    let saved = save(&mut reader, &change_by(1, "A", "2026-10-31"), no_extra)
+        .expect("generation 2 is on disk under A's name: the save landed");
+    assert_eq!(saved.generation.number, 2);
+    assert_eq!(saved.generation.changed_by, "A");
+    assert_eq!(saved.generation.changed, vec![Key::WindowTo]);
+    assert_eq!(saved.in_force, Some(3));
+    assert_eq!(saved.superseded_by, Some(3));
+    assert_eq!(saved.read_back, None);
+    // WHAT WAS ANSWERED IS WHAT IS ON DISK, byte for byte as a reader reads
+    // it, and the reader follows the successor.
+    let on_disk = history(&root, 3, 3);
+    assert_eq!(on_disk[1].as_ref().unwrap(), saved.generation.as_ref());
+    assert_eq!(on_disk[0].as_ref().unwrap().changed_by, "B");
+    assert_eq!(reader.newest().unwrap().number, 3);
+    assert_eq!(reader.highest(), 3);
+    assert_eq!(files(&root).len(), 3, "{:?}", files(&root));
+}
+
+/// **A LANDED SAVE WHOSE READ-BACK FAULTS IS SAVED, AND THE FAULT IS SAID
+/// BESIDE IT**, never answered as a refusal of a change that is on disk.
+#[test]
+fn a_landed_save_whose_read_back_faults_is_saved_with_the_fault_said() {
+    let root = root("readback-fault");
+    let mut reader = Reader::new(&root);
+    save(&mut reader, &change_by(0, "seed", "2026-09-30"), no_extra).unwrap();
+    after_link(|root, landed| {
+        // THE DISK DAMAGES THE NEW FILE before it is read back.
+        std::fs::write(path_of(root, landed), "brutex-settings 1\ngarbage\n").unwrap();
+    });
+    let saved = save(&mut reader, &change_by(1, "A", "2026-10-31"), no_extra)
+        .expect("the link succeeded: the save landed");
+    assert_eq!(saved.generation.number, 2);
+    assert_eq!(saved.in_force, Some(1));
+    assert_eq!(saved.superseded_by, None);
+    let read_back = saved.read_back.expect("the read-back fault is said");
+    assert!(
+        read_back.contains("did not read back") && read_back.contains("generation in force is 1"),
+        "{read_back}"
+    );
+    assert_eq!(reader.faults()[0].generation, 2, "{:?}", reader.faults());
+}
+
+/// **A LANDED SAVE WHOSE READ-BACK CANNOT LOOK IS SAVED, AND WHY IS SAID.**
+#[cfg(unix)]
+#[test]
+fn a_landed_save_whose_read_back_cannot_look_is_saved_with_the_reason() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = root("readback-blind");
+    let mut reader = Reader::new(&root);
+    save(&mut reader, &change_by(0, "seed", "2026-09-30"), no_extra).unwrap();
+    after_link(|root, _| {
+        std::fs::set_permissions(dir(root), std::fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    let saved = save(&mut reader, &change_by(1, "A", "2026-10-31"), no_extra);
+    std::fs::set_permissions(dir(&root), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let saved = saved.expect("the link succeeded: the save landed");
+    assert_eq!(saved.generation.number, 2);
+    assert_eq!(saved.in_force, Some(1));
+    let read_back = saved.read_back.expect("the blind read-back is said");
+    assert!(read_back.contains("could not look"), "{read_back}");
+    // THE NEXT REFRESH FINDS IT: it was on disk all along.
+    reader.refresh().unwrap();
+    assert_eq!(reader.newest().unwrap().as_ref(), saved.generation.as_ref());
+}
+
+/// **NO SAVE THAT LANDED IS EVER ANSWERED REFUSED, UNDER A REAL RACE** —
+/// the verifier's probe, as a test: B saves on A's generation the moment its
+/// name appears. Whatever the interleaving, a generation on disk under a
+/// writer's name was answered saved to that writer.
+#[test]
+fn under_a_real_successor_race_no_landed_save_is_answered_refused() {
+    for trial in 0..12 {
+        let root = root("successor-race");
+        let mut seed = Reader::new(&root);
+        save(&mut seed, &change_by(0, "seed", "2026-09-30"), no_extra).unwrap();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (racer, racer_gate) = (root.clone(), std::sync::Arc::clone(&gate));
+        let b = std::thread::spawn(move || {
+            racer_gate.wait();
+            let next = path_of(&racer, 2);
+            let started = std::time::Instant::now();
+            while std::fs::symlink_metadata(&next).is_err() {
+                if started.elapsed() > std::time::Duration::from_secs(10) {
+                    return None;
+                }
+                std::hint::spin_loop();
+            }
+            let mut reader = Reader::new(&racer);
+            Some(save(&mut reader, &change_by(2, "B", "2026-11-30"), no_extra))
+        });
+        let mut reader = Reader::new(&root);
+        reader.refresh().unwrap();
+        gate.wait();
+        let a = save(&mut reader, &change_by(1, "A", "2026-10-31"), no_extra);
+        let b = b.join().unwrap().expect("generation 2 appeared");
+        let on_disk = history(&root, 3, 3);
+        assert_eq!(on_disk[1].as_ref().unwrap().changed_by, "A", "trial {trial}");
+        let a = a.unwrap_or_else(|why| panic!("trial {trial}: A landed and was refused: {why}"));
+        assert_eq!(a.generation.number, 2, "trial {trial}");
+        let b = b.unwrap_or_else(|why| panic!("trial {trial}: B landed and was refused: {why}"));
+        assert_eq!(b.generation.number, 3, "trial {trial}");
+        assert_eq!(on_disk[0].as_ref().unwrap().changed_by, "B", "trial {trial}");
+        // A's answer is in force or superseded by B's, never neither.
+        assert!(
+            a.superseded_by == Some(3) || a.in_force == Some(2),
+            "trial {trial}: {a:?}"
+        );
+    }
 }

@@ -1195,6 +1195,50 @@ fn not_after_today(evidence: Evidence, today: Option<i64>) -> Evidence {
     }
 }
 
+/// The import journal's written span (`JournalReach::written`) bounded at
+/// `today` (IST epoch days): the first written day and the FURTHEST WRITTEN
+/// DAY AT OR BEFORE TODAY, with the passed-over last day when it was after
+/// today; `Err` when every written day is after today; `None` when nothing
+/// was written.
+///
+/// THE SAME END `/gaps.json` NAMES (R3-05 repair 5, the second agent's
+/// follow-up 1). Before, one line for a day after today made the whole
+/// journal evidence a `why`, so `/feeds.json`'s archive dropped every day the
+/// journal really shows while `/gaps.json`'s `imported_to` passed over the
+/// same line and kept the furthest day at or before today, and `/db`'s day
+/// flags and `/gaps.json` named two ends for one journal.
+///
+/// Cost: none while the last written day is not after today; otherwise one
+/// newest-first walk over the rows after today until a written row at or
+/// before today, O(rows after that day), as `imported_to` (L-R305-3).
+fn written_at_or_before(
+    parsed: &crate::server::import_journal::Parsed,
+    written: Option<(pull::session::Day, pull::session::Day)>,
+    today: Option<i64>,
+) -> Option<Result<(pull::session::Day, pull::session::Day, Option<pull::session::Day>), String>> {
+    let (first, last) = written?;
+    let epoch = |day: pull::session::Day| i64::from(day.days_from_epoch());
+    let Some(now) = today.filter(|&now| epoch(last) > now) else {
+        return Some(Ok((first, last, None)));
+    };
+    if epoch(first) > now {
+        return Some(Err(format!(
+            "names no day at or before today {} (IST) that an import wrote bars on: its \
+             written days run {first} to {last}, and a day that has not happened shows no \
+             delivery, so this evidence sets neither end of the archive",
+            day_text(now)
+        )));
+    }
+    // `first` IS WRITTEN AND NOT AFTER TODAY, so the walk always finds a
+    // day; it never passes below `first`.
+    let bounded = parsed
+        .range(first, last)
+        .rev()
+        .find(|row| wrote(row.outcome) && epoch(row.day) <= now)
+        .map_or(first, |row| row.day);
+    Some(Ok((first, bounded, Some(last))))
+}
+
 /// `archive` on `/feeds.json` for a feed bought as an archive: how far the
 /// VENDOR'S delivered archive reaches, as far as this server can show it
 /// without walking a folder — never what the store has imported (that is
@@ -1211,8 +1255,9 @@ fn not_after_today(evidence: Evidence, today: Option<i64>) -> Evidence {
 ///
 /// `from_binds: true`: the measured first day is where the vendor's archive
 /// begins, and no file before it exists. `to_binds: false`: a measurement is
-/// dated, and the vendor delivers daily, so a later day may already be
-/// delivered and waiting — past `to` a day is `not imported`, never
+/// dated, and a later day may already be delivered and waiting (how often
+/// the vendor delivers is UNVERIFIED: no line of `docs/00-charter.md` gives
+/// GDFL a delivery cadence, so none is claimed) — past `to` a day is `not imported`, never
 /// "outside the archive", and no form may cap there (FM-083, SC-CLOSE-2).
 /// No delivered-folder inventory is read on this path (`inventory` says
 /// so): `/folder.json` walks a folder on demand.
@@ -1268,23 +1313,42 @@ fn archive_json(
     let journal_source = "the GDFL import journal: the first and last day an import wrote bars \
                           on, from that day's delivered files";
     let journal = match crate::server::import_journal::snapshot(root) {
-        Ok(snapshot) => Evidence {
-            by: "journal",
-            span: journal_reach(root, &snapshot)
-                .written
-                .map(|(first, last)| DaySpan {
-                    first: i64::from(first.days_from_epoch()),
-                    last: i64::from(last.days_from_epoch()),
-                })
-                .ok_or_else(|| {
-                    if snapshot.present {
+        Ok(snapshot) => {
+            let written = journal_reach(root, &snapshot).written;
+            match written_at_or_before(&snapshot.parsed, written, today) {
+                Some(Ok((first, last, passed_over))) => Evidence {
+                    by: "journal",
+                    span: Ok(DaySpan {
+                        first: i64::from(first.days_from_epoch()),
+                        last: i64::from(last.days_from_epoch()),
+                    }),
+                    source: passed_over.map_or_else(
+                        || journal_source.to_owned(),
+                        |future| {
+                            format!(
+                                "{journal_source}, at or before today; a line that wrote bars \
+                                 on {future}, after today, is not evidence of a delivery and \
+                                 was passed over"
+                            )
+                        },
+                    ),
+                },
+                Some(Err(why)) => Evidence {
+                    by: "journal",
+                    span: Err(why),
+                    source: journal_source.to_owned(),
+                },
+                None => Evidence {
+                    by: "journal",
+                    span: Err(if snapshot.present {
                         "the journal names no day an import wrote bars on".to_owned()
                     } else {
                         "no import has run against this store: the journal is absent".to_owned()
-                    }
-                }),
-            source: journal_source.to_owned(),
-        },
+                    }),
+                    source: journal_source.to_owned(),
+                },
+            }
+        }
         Err(why) => Evidence {
             by: "journal",
             span: Err(format!("the GDFL import journal cannot be read: {why}")),
@@ -1318,8 +1382,8 @@ fn archive_json(
         render::json_string(&day_text(to.0)),
         render::json_string(&format!(
             "the widest of the descriptor's dated measurement, the import journal and the \
-             store's census; the last day is set by the {} and is a lower bound: the vendor \
-             delivers daily, so a later day may be delivered and not imported",
+             store's census; the last day is set by the {} and is a lower bound: a later day \
+             may be delivered and not imported (the vendor's delivery cadence is UNVERIFIED)",
             to.1.by
         )),
         render::json_string(&from.1.source),
@@ -2642,6 +2706,78 @@ mod tests {
             serde_json::from_str(&archive_json(pull::vendor::Feed::Gdfl, None, &root, None))
                 .expect("archive JSON");
         assert_eq!(unbounded["to"], "2099-01-01", "{unbounded}");
+    }
+
+    /// **A JOURNAL LINE AFTER TODAY IS PASSED OVER, AND THE FURTHEST WRITTEN
+    /// DAY AT OR BEFORE TODAY STILL COUNTS** — the end `/gaps.json`'s
+    /// `imported_to` names (R3-05 repair 5, the second agent's follow-up 1).
+    /// Before: one `done` line for 2099-01-01 made the whole journal row a
+    /// `why`, and the 2026-09-24 the journal really shows was dropped.
+    #[test]
+    fn a_journal_line_after_today_is_passed_over_and_the_day_before_it_counts() {
+        let root = store_root("feeds-archive-passed-over");
+        let journal = pull::gdfl_import::journal_path(&root);
+        std::fs::create_dir_all(journal.parent().expect("imports/")).expect("mkdir");
+        std::fs::write(
+            &journal,
+            "begin indices 2026-09-23 *\n\
+             done indices 2026-09-23 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+             begin indices 2026-09-24 *\n\
+             done indices 2026-09-24 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n\
+             begin indices 2099-01-01 *\n\
+             done indices 2099-01-01 * files=2 seconds=20 failures=0 late=0 late_unresolved=0 max_back_s=0\n",
+        )
+        .expect("the journal");
+        let today = i64::from(
+            Day::new(2026, 10, 15)
+                .expect("a real date")
+                .days_from_epoch(),
+        );
+        let answer: serde_json::Value = serde_json::from_str(&archive_json(
+            pull::vendor::Feed::Gdfl,
+            None,
+            &root,
+            Some(today),
+        ))
+        .expect("archive JSON");
+        assert_ne!(answer["to"], "2099-01-01", "{answer}");
+        let journal_row = answer["evidence"]
+            .as_array()
+            .expect("evidence")
+            .iter()
+            .find(|row| row["by"] == "journal")
+            .cloned()
+            .expect("the journal's row");
+        assert_eq!(journal_row["from"], "2026-09-23", "{answer}");
+        assert_eq!(journal_row["to"], "2026-09-24", "{answer}");
+        let source = journal_row["source"].as_str().expect("a source");
+        assert!(
+            source.contains("2099-01-01") && source.contains("passed over"),
+            "{source}"
+        );
+        // ON OR BEFORE TODAY NOTHING IS PASSED OVER: the plain source.
+        let on_the_day = i64::from(Day::new(2099, 1, 1).expect("a day").days_from_epoch());
+        let whole: serde_json::Value = serde_json::from_str(&archive_json(
+            pull::vendor::Feed::Gdfl,
+            None,
+            &root,
+            Some(on_the_day),
+        ))
+        .expect("archive JSON");
+        let row = whole["evidence"]
+            .as_array()
+            .expect("evidence")
+            .iter()
+            .find(|row| row["by"] == "journal")
+            .cloned()
+            .expect("the journal's row");
+        assert_eq!(row["to"], "2099-01-01", "{whole}");
+        assert!(
+            !row["source"]
+                .as_str()
+                .is_some_and(|s| s.contains("passed over")),
+            "{whole}"
+        );
     }
 
     /// **THE WINDOW IS REFUSED LOUDLY WHEN THE SETTINGS CANNOT BE READ, AND

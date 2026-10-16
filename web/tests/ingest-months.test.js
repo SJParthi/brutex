@@ -397,8 +397,8 @@ test('an archive’s measured span is its reach on the strip, never "reach not s
 
 test('R3-05 repair 2: an archive whose last day is a dated lower bound caps nothing after it', () => {
   // `/feeds.json` serves GDFL's archive as the vendor's archive AS MEASURED:
-  // its first day binds, its last day (`to_binds: false`) does not — the
-  // vendor delivers daily, so a later day may be delivered and waiting.
+  // its first day binds, its last day (`to_binds: false`) does not — a later
+  // day may be delivered and waiting (the delivery cadence is UNVERIFIED).
   const open = feedSpan({ archive: { from: '2018-09-03', to: '2026-09-30', to_binds: false, source: 'measured' } });
   assert.deepEqual([open.kind, open.binds, open.bindsTo], ['archive', true, false]);
   // An older server's archive, with no `to_binds`, still binds both ends.
