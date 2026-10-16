@@ -31,7 +31,7 @@ core costs engine indicators pull runner store telemetry vocab <-- cli
 | `vocab` | the condition bit table, `ConditionMask`, `Tolerance` | **nothing** | ✓ |
 | `greeks` | Black-Scholes-Merton, integer-safe: five greeks, implied volatility, the strike ladder | **nothing** | ✓ |
 | `telemetry` | the event sink, the encoder, the tail reader | **nothing** | ✓ |
-| `costs` | Indian F&O transaction costs: dated statutory regimes, option arithmetic, the round-trip charge stack | `core` | ✓ |
+| `costs` | Indian F&O transaction costs: dated statutory regimes, option arithmetic, the round-trip charge stack; and (CHG-1, D-5110) the contract-note charge stack for equity, futures and options, precise by default, with a Dhan calculator replica for comparison | `core` | ✓ |
 | `indicators` | candles in, condition bits out | **`vocab`** | ✓ |
 | `engine` | the Apriori ladder: generation, subset-prune, support, extinction | **`vocab`** | ✓ |
 | `store` | the fixed-stride bar file: open, read, append, verify; `flock`, the advisory-lock guard every lock with an early return or an owner goes through (D-0693) | `core`, `telemetry` | ✓ |

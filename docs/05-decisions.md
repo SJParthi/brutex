@@ -69121,7 +69121,14 @@ samples per measurement, each a batch of 16 calls timed by one pair of
 five ratios of medians under the shared 3.0× ceiling (C-CHG-01..05): a crore of
 shares against one, the 2,000,001st order against the first, a huge day against
 a small one, settling two million orders against two, a huge calculator quote
-against a small one. Absolute figures are printed and not gated.
+against a small one. Absolute figures are printed and not gated. A sixth
+measurement, a day at the widest `i64` allows, is printed beside C-CHG-03 and
+not gated: its rate products pass 2^64, where `i128` division takes the
+compiler's software routine, measured at about 1.26× a normal day. That is a
+second constant, bounded by the 128-bit width, not a cost that grows; gating it
+at 3.0× would hold, but a ratio between two different constants is not the
+claim the gate exists to check. The bench refuses to time the widest day unless
+it settles, so a refusal can never stand in for it.
 
 ### D-5119 — Invariant ids `CHG-nn` and bench ids `C-CHG-nn` — 2026-10-16
 

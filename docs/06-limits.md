@@ -17487,11 +17487,19 @@ time are UNVERIFIED (the brief names the 15:10 equity ceiling).
 
 ### Measured cost, and what the figures are not
 
-`crates/costs/benches/stack.rs`, two runs on the 4-core cloud container of 16
-Oct 2026, 20,000 batches of 16 calls each: one executed order p50 25.0–25.1 ns,
-p99 28.7–41.8 ns; one client-security-day (open, two orders, settle) p50
-202.1–203.8 ns, p99 308.3–424.5 ns; one calculator quote p50 66.2–66.3 ns.
-The **max** column (up to 72 µs for a batch) is the container's scheduler, not
-the stack: the code holds no loop over orders, no allocation and no lock. The
-absolute figures belong to that machine; only the ratios (C-CHG-01..05, all
-within 1.04×) are gated.
+`crates/costs/benches/stack.rs`, two final runs on the 4-core cloud container of
+16 Oct 2026, 20,000 batches of 16 calls each: one executed order p50 26.8–27.3
+ns, p99 28.5–40.7 ns; one client-security-day (open, two orders, settle) p50
+201.9–202.6 ns, p99 337.8–415.6 ns; one calculator quote p50 47.8–48.3 ns. The
+**max** column (up to half a millisecond for a batch) is the container's
+scheduler, not the stack: the code holds no loop over orders, no allocation and
+no lock. The absolute figures belong to that machine; only the ratios
+(C-CHG-01..05) are gated, and one run of seven before the final two put
+C-CHG-03 at 1.651× without reproducing.
+
+**The widest day is a different constant.** A day at the widest `i64` allows
+(10^9 units at ₹4 crore a side) costs p50 254–255 ns, 1.26× a normal day, in
+both final runs: its rate products pass 2^64, where `i128` division leaves the
+64-bit fast path for the compiler's software routine. That routine is bounded
+by the 128-bit width, not by the magnitude, so the cost is still constant — a
+second constant, printed and not gated (D-5118).

@@ -225,7 +225,40 @@ fn a_days_cost_does_not_track_its_size(f: &Fixture) -> bool {
         "per client-security-day: open + 2 orders + settle, huge",
         huge,
     );
-    ratio("C-CHG-03 day: huge vs small", small, huge)
+    let gated = ratio("C-CHG-03 day: huge vs small", small, huge);
+    // The widest day i64 allows: ₹4 crore a unit, a hundred crore units a
+    // side, a turnover of 8 x 10^18 paisa. Its rate products pass 2^64, where
+    // i128 division leaves the hardware's 64-bit fast path for the
+    // software routine. That routine's cost is bounded by the 128-bit width,
+    // not by the magnitude, so the cost is still constant; it is a
+    // different constant, so it is printed and NOT gated (D-5118).
+    let (Some(wide_buy), Some(wide_sell)) = (
+        order(OrderSide::Buy, 1_000_000_000, 40_000_000_00),
+        order(OrderSide::Sell, 1_000_000_000, 40_000_000_00),
+    ) else {
+        return false;
+    };
+    // It must SETTLE: timing a refusal would time the wrong thing.
+    let settled = ClientSecurityDay::open(INTRADAY, Exchange::Nse, f.day, RateSelector::default())
+        .and_then(|mut d| {
+            d.add(wide_buy)?;
+            d.add(wide_sell)?;
+            d.settle()
+        });
+    if let Err(reason) = settled {
+        println!("  BENCH SETUP FAILED: the widest day refused: {reason}");
+        return false;
+    }
+    {
+        let widest = whole_day(wide_buy, wide_sell);
+        report("per client-security-day: the widest i64 allows", widest);
+        let _ = ratio(
+            "  (reported, not gated) day: widest vs small",
+            small,
+            widest,
+        );
+    }
+    gated
 }
 
 /// C-CHG-04 — settling a day of two million orders costs what settling two

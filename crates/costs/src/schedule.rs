@@ -384,11 +384,10 @@ pub fn dhan_brokerage(kind: TradeKind, order_value: Paisa) -> Result<Paisa, Char
                 DHAN_EQUITY_BROKERAGE_RATE
                     .rate()
                     .apply(order_value, 1, Quantum::Paisa)?;
-            Ok(if percent.raw() < DHAN_EQUITY_BROKERAGE_CAP.raw() {
-                percent
-            } else {
-                DHAN_EQUITY_BROKERAGE_CAP
-            })
+            // The lower of the two. `min` rather than a comparison: at equality
+            // both arms are ₹20, so a `<` and a `<=` are the same function and
+            // no test could tell them apart (cargo-mutants found it).
+            Ok(percent.min(DHAN_EQUITY_BROKERAGE_CAP))
         }
         TradeKind::Futures | TradeKind::Options => Ok(DHAN_FNO_BROKERAGE),
     }
