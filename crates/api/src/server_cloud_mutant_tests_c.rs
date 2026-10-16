@@ -2547,3 +2547,27 @@ fn the_run_finished_line_is_info_only_when_balanced_and_nothing_failed() {
         assert_eq!(mine[0].level, level, "{expected}: {mine:?}");
     }
 }
+
+/// A RUN'S TARGETS ARE TRACKED **AND** NAMED BY THE TARGET ASKED FOR. Four
+/// tracked indices are in the masters; the swept target names two, and only
+/// those two are run, while the index target names all four (kills `&&`
+/// turned to `||` in `spot_targets`, which would run every tracked name
+/// whatever the target).
+#[test]
+fn a_runs_targets_are_tracked_and_named_by_the_target_asked_for() {
+    let fx = Fixture::four_indices("targets-named");
+    let site = fx.refused();
+    let names = |body: &str| {
+        let mut named: Vec<String> = spot_targets(&spot(body), &site)
+            .iter()
+            .map(|key| key.underlying.as_str().to_owned())
+            .collect();
+        named.sort_unstable();
+        named
+    };
+    assert_eq!(names(DHAN_DAY), ["BANKNIFTY", "NIFTY"]);
+    assert_eq!(
+        names("target=indices&vendor=dhan&granularity=1day&from=2026-08-03&to=2026-08-05"),
+        ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"]
+    );
+}
