@@ -35213,3 +35213,8 @@ mod cloud_mutant_tests_b;
 #[cfg(test)]
 #[path = "server_cloud_mutant_tests_c.rs"]
 mod cloud_mutant_tests_c;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_a.rs"]
+mod cloud_mutant_tests_a;
