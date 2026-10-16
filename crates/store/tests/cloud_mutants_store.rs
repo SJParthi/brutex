@@ -2121,3 +2121,87 @@ fn a_staging_refusal_of_what_is_there_says_it_was_left_alone() {
          is and nothing was written through it"
     );
 }
+
+/// `n` invented one-second bars of June 2024 from 09:15 IST, a seeded walk.
+fn sealed_bars(n: i64) -> Vec<store::format::Bar> {
+    let open = store::path::YearMonth::new(2024, 6)
+        .unwrap()
+        .ist_bounds_micros()
+        .0
+        + 555 * 60_000_000;
+    let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut close = 2_250_000_i64;
+    (0..n)
+        .map(|i| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let step = i64::try_from(seed >> 58).unwrap() - 32;
+            let o = close;
+            close += step;
+            store::format::Bar {
+                ts_micros: open + i * 1_000_000,
+                open: o,
+                high: o.max(close) + 5,
+                low: o.min(close) - 5,
+                close,
+                volume: i64::try_from(seed >> 52).unwrap(),
+                open_interest: store::format::OI_NULL,
+            }
+        })
+        .collect()
+}
+
+/// **A FRAME'S ENTRY IS REFUSED FOR ITS ORDER ONLY WHEN IT RUNS BACKWARDS OR
+/// PAST THE LONGEST FRAME, NOT AT EITHER BOUND.**
+///
+/// Kills `replace < with <=` twice in `SealedMonth::span`: an entry ending
+/// where it starts (an empty frame) and one exactly `max_frame_len` long are
+/// both in order, so the read goes on to the frame and the frame's checksum
+/// refuses it (`frame`), where the mutants refuse the entry (`entry_order`).
+/// Each forged entry carries its own recomputed entry checksum, so only the
+/// span check and the frame check see it.
+#[test]
+fn a_frame_entry_at_either_bound_of_its_span_is_read_and_checked_as_a_frame() {
+    use store::sealed::{SealedMonth, build};
+    const ENTRIES: usize = 512;
+    const ENTRY: usize = 24;
+    let path = sealed_path();
+    let bars = sealed_bars(6_000);
+    let mut header = empty_month_header();
+    header.n_valid = 6_000;
+    header.first_ts_micros = bars[0].ts_micros;
+    header.last_ts_micros = bars[5_999].ts_micros;
+    let built = build(path, &header, &bars, None, None).unwrap();
+    let head = *built.head();
+    let longest = u32::try_from(store::sealed_codec::max_frame_len(head.block_rows)).unwrap();
+    assert!(head.n_blocks > 2);
+    assert!(
+        u64::from(longest) < head.blocks_len,
+        "a frame that long fits"
+    );
+    let good = built.to_bytes();
+    let end_of = |bytes: &[u8], k: usize| {
+        let at = ENTRIES + ENTRY * k;
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    };
+    let with_end = |k: usize, end: u32| {
+        let mut bytes = good.clone();
+        let at = ENTRIES + ENTRY * k;
+        bytes[at..at + 4].copy_from_slice(&end.to_le_bytes());
+        let crc = store::crc::crc32c_split(&bytes[at..at + 20], &(k as u64).to_le_bytes());
+        bytes[at + 20..at + 24].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    };
+    for (block, end) in [(1, end_of(&good, 0)), (0, longest)] {
+        let month = SealedMonth::open(with_end(block, end), path, 4_242).unwrap();
+        let mut out = Vec::new();
+        let refusal = month.read_block(block as u64, &mut out).unwrap_err();
+        assert_eq!(
+            refusal.reason(),
+            "frame",
+            "block {block}, end {end}: {refusal}"
+        );
+        assert!(out.is_empty());
+    }
+}
