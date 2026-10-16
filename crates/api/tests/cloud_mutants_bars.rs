@@ -786,7 +786,9 @@ mod bars_rs {
         window,
     };
     use brutex_core::vendor::Vendor;
-    use store::path::{Timeframe, YearMonth};
+    use store::file::BarFile;
+    use store::format::Bar;
+    use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
     fn month(m: u8) -> YearMonth {
         YearMonth::new(2025, m).expect("a month")
@@ -919,7 +921,79 @@ mod bars_rs {
         let extremes = got.extremes.expect("folded");
         assert_eq!(extremes.close_max.map(|e| e.v), Some(302));
         assert_eq!(extremes.close_min.map(|e| e.v), Some(200));
+        assert_eq!(extremes.volume_max, None, "an index trades no volume");
         assert_eq!(got.scan_rows, 6);
+    }
+
+    /// **A TIME-OF-DAY ORDER HAS NO NULL ROW, AND ITS VOLUME EXTREME IS THE
+    /// TRADED SERIES'.** Over an index and a series whose rows carry open
+    /// interest and volume, the scan orders by the second of the day alone
+    /// — open interest is not this order's column, so no row sorts last as
+    /// a null — and folds volume only where it trades. Kills `scan`'s
+    /// `delete !` on the volume flag and its `&&` → `||` on the null rule.
+    #[test]
+    fn bars_a_time_of_day_order_over_an_index_and_a_traded_series() {
+        let scratch = Scratch::new("bars-tod-mixed");
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &minutes(5, 2, 2, 200),
+        );
+        let traded = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "TESTSEG",
+            symbol: "OITEST",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(5),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        let rows: Vec<Bar> = minutes(5, 5, 2, 300)
+            .into_iter()
+            .map(|(secs, close)| Bar {
+                ts_micros: secs * 1_000_000,
+                open: close,
+                high: close + 5,
+                low: close - 5,
+                close,
+                volume: 7,
+                open_interest: 40_000,
+            })
+            .collect();
+        BarFile::open_or_create(scratch.root(), traded, super::symbol_id("OITEST"))
+            .expect("a generated bar file")
+            .append(&rows)
+            .expect("generated records");
+        let mut asked = query(
+            vec![index("NIFTY"), SeriesKey::new("NSE", "TESTSEG", "OITEST", None)],
+            month(5),
+            month(5),
+        );
+        asked.sort = SortKey::TimeOfDay;
+        asked.want_extremes = true;
+        let got = read(scratch.root(), &asked);
+        let closes: Vec<(i64, usize)> = got
+            .bars
+            .iter()
+            .map(|row| (row.bar.close, row.series))
+            .collect();
+        assert_eq!(
+            closes,
+            vec![(200, 0), (300, 1), (201, 0), (301, 1)],
+            "by the second of the day, ties in time order, neither series last"
+        );
+        let extremes = got.extremes.expect("folded");
+        assert_eq!(extremes.volume, 7);
+        assert_eq!(
+            extremes.volume_max.map(|e| (e.v, e.series)),
+            Some((7, 1)),
+            "the traded series' volume, never the index's none"
+        );
     }
 
     /// **NO MORE THAN `MAX_NAMED_MISSING` HOLES ARE NAMED, AND THE COUNT IS
