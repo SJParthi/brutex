@@ -1353,6 +1353,46 @@ mod bars_rs {
         store::flock::Flock::try_lock(file, lock).expect("the month's lock is free")
     }
 
+    /// **A MONTH WHOSE DAYS CANNOT BE COUNTED IS A FAULT, NOT A ZERO.** With
+    /// `coverage=1`, April's days are counted and May — held by another
+    /// writer, its header counted while it was free — will not open to be
+    /// counted: it is left out of the coverage and its refusal is said.
+    /// Runs `coverage_of`'s refusal arm, which no test reached.
+    #[test]
+    fn bars_a_month_whose_days_cannot_be_counted_is_a_fault() {
+        let scratch = Scratch::new("bars-coverage-held");
+        for m in [4, 5] {
+            write_month(
+                scratch.root(),
+                "INDEX",
+                "NIFTY",
+                Timeframe::MINUTE_1,
+                month(m),
+                &minutes(m, 2, 2, 100),
+            );
+        }
+        let mut asked = query(vec![index("NIFTY")], month(4), month(5));
+        let free = read(scratch.root(), &asked);
+        assert_eq!(free.total, 4);
+        let _held = hold(scratch.root(), "NIFTY", 5);
+        asked.coverage = true;
+        asked.limit = 1;
+        let got = read(scratch.root(), &asked);
+        let counted: Vec<(u8, u32)> = got
+            .coverage
+            .iter()
+            .map(|one| (one.month.month(), one.days_covered))
+            .collect();
+        assert_eq!(counted, vec![(4, 1)], "May is not counted as a zero");
+        assert!(
+            got.faults
+                .iter()
+                .any(|fault| fault.contains("2025-05") && fault.contains("another writer holds")),
+            "{:?}",
+            got.faults
+        );
+    }
+
     /// **A MERGED PAGE WHOSE BISECTION MEETS A MONTH THAT WILL NOT OPEN IS
     /// REFUSED, IN TIME ORDER AND IN THE OPEN-INTEREST ORDER THAT IS TIME
     /// ORDER.** Two index series over April to June, counted once while
