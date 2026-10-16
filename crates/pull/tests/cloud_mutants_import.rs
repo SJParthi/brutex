@@ -1105,6 +1105,74 @@ mod cm_scope_and_auction {
         }
     }
 
+    /// A share's trade-for-trade series file is a member only of a scope
+    /// that files series, and only for a share the scope files: the stored
+    /// scope names `RELIANCE.BE` its own member, the swept scope names none,
+    /// and a share neither scope files is no member of either.
+    #[test]
+    fn a_series_member_needs_a_scope_that_files_series_and_its_share() {
+        let stored = CmScope::stored(std::iter::empty::<&str>()).unwrap();
+        let swept = CmScope::swept();
+        assert_eq!(
+            stored.member_of(CmKind::Stocks, "RELIANCE.BE.NSE"),
+            Some("NSE-CASH-RELIANCE.BE".to_owned())
+        );
+        assert_eq!(swept.member_of(CmKind::Stocks, "RELIANCE.BE.NSE"), None);
+        assert_eq!(
+            swept.member_of(CmKind::Stocks, "RELIANCE.NSE"),
+            Some("NSE-CASH-RELIANCE".to_owned())
+        );
+        for scope in [&stored, &swept] {
+            assert_eq!(scope.member_of(CmKind::Stocks, "ZZUNFILED.NSE"), None);
+        }
+    }
+
+    /// Every member a scope files, sorted: the swept scope's index members
+    /// are exactly its two swept indices; its share members are the F&O
+    /// shares alone, and the stored scope adds each stored share with both
+    /// of its trade-for-trade series.
+    #[test]
+    fn a_scope_lists_every_member_it_files_and_no_other() {
+        let swept = CmScope::swept();
+        assert_eq!(
+            swept.members(CmKind::Indices),
+            ["NSE-INDEX-BANKNIFTY", "NSE-INDEX-NIFTY"]
+        );
+        let shares = swept.members(CmKind::Stocks);
+        assert!(shares.iter().any(|m| m == "NSE-CASH-RELIANCE"));
+        assert!(
+            !shares
+                .iter()
+                .any(|m| m.contains(".BE") || m.contains("ZZSHARE"))
+        );
+        let stored = CmScope::stored(["ZZSHARE"])
+            .unwrap()
+            .members(CmKind::Stocks);
+        for member in [
+            "NSE-CASH-ZZSHARE",
+            "NSE-CASH-ZZSHARE.BE",
+            "NSE-CASH-ZZSHARE.BZ",
+            "NSE-CASH-RELIANCE.BE",
+        ] {
+            assert!(stored.iter().any(|m| m == member), "{member}");
+        }
+        assert!(
+            stored.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted, no repeats"
+        );
+    }
+
+    /// A day file names its trade-for-trade series, and a share's own file
+    /// and an index file name none.
+    #[test]
+    fn a_series_day_file_names_its_series() {
+        use pull::gdfl_cm::series_file;
+        assert_eq!(series_file("ADANIPOWER.BE.NSE.csv"), Some("BE"));
+        assert_eq!(series_file("ZZSHARE.BZ.NSE.csv"), Some("BZ"));
+        assert_eq!(series_file("RELIANCE.NSE.csv"), None);
+        assert_eq!(series_file("NIFTY 50.NSE_IDX.csv"), None);
+    }
+
     /// Each row fault's log word.
     #[test]
     fn every_row_fault_has_its_word() {
