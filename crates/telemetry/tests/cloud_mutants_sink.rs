@@ -122,15 +122,38 @@ fn a_posting_name_at_the_ceiling_is_named_and_one_past_it_is_not() {
 fn every_audit_failure_alone_makes_the_stream_loud() {
     let quiet = telemetry::AuditHealth::default();
     assert!(!quiet.is_loud(), "nothing failed");
-    let alone: [(&str, fn(&mut telemetry::AuditHealth)); 4] = [
-        ("dropped", |h| h.dropped = 1),
-        ("rotation_failures", |h| h.rotation_failures = 1),
-        ("index_failures", |h| h.index_failures = 1),
-        ("reap_failures", |h| h.reap_failures = 1),
+    let one = || telemetry::AuditHealth::default();
+    let alone = [
+        (
+            "dropped",
+            telemetry::AuditHealth {
+                dropped: 1,
+                ..one()
+            },
+        ),
+        (
+            "rotation_failures",
+            telemetry::AuditHealth {
+                rotation_failures: 1,
+                ..one()
+            },
+        ),
+        (
+            "index_failures",
+            telemetry::AuditHealth {
+                index_failures: 1,
+                ..one()
+            },
+        ),
+        (
+            "reap_failures",
+            telemetry::AuditHealth {
+                reap_failures: 1,
+                ..one()
+            },
+        ),
     ];
-    for (signal, set) in alone {
-        let mut health = telemetry::AuditHealth::default();
-        set(&mut health);
+    for (signal, health) in alone {
         assert!(health.is_loud(), "{signal} alone is loud: {health:?}");
     }
     let keep = u64::from(telemetry::AUDIT_KEEP_FILES);

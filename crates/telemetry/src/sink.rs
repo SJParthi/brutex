@@ -7867,8 +7867,10 @@ mod tests {
 )]
 mod cloud_mutant_tests {
     use super::{
-        AUDIT_HANDLES, Audit, EventKeys, FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Held, Pair, Rationed,
-        Reap, Retired, audit_gone_is_ours, is_day_text, postings_of, reaper,
+        AUDIT_HANDLES, AUDIT_KEEP_FILES, Audit, Config, Emitted, EventKeys, FLOOD_PAIRS,
+        FLOOD_WINDOW_MS, Flood, Held, Pair, Rationed, Reap, Retired, Sink, Target,
+        audit_current_path, audit_generation_path, audit_gone_is_ours, audit_rolled_path,
+        audit_serial_path, is_day_text, postings_of, reaper, rotated_path,
     };
     use crate::event::Event;
     use crate::level::Level;
@@ -8249,6 +8251,246 @@ mod cloud_mutant_tests {
         assert_eq!(health.reap_error.as_deref(), Some("the reaper's words"));
         assert_eq!(health.last_error.as_deref(), Some("the reaper's words"));
         drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FULL TABLE OF PAIRS STILL OWED A COUNT WRITES A NEW PAIR
+    /// UNFOLLOWED.**
+    ///
+    /// Covers the arm of `Flood::admit` where the eviction frees nothing: no
+    /// pair may be dropped while its held count is unsaid, so the new pair is
+    /// written and not followed (it loses nothing), and the table is left as
+    /// it was.
+    #[test]
+    fn a_full_table_of_owed_pairs_writes_a_new_pair_unfollowed() {
+        let mut flood = Flood::default();
+        for key in 1..=u64::try_from(FLOOD_PAIRS).unwrap() {
+            flood.pairs.insert(
+                key,
+                Pair {
+                    start: 0,
+                    written: 9,
+                    held: 2,
+                },
+            );
+        }
+        let answer = flood.admit(1, "cloud.flood", "unfollowed", 1_000_000);
+        assert_eq!(answer, Rationed::Write { held_before: 0 });
+        assert_eq!(flood.pairs.len(), FLOOD_PAIRS, "nothing evicted");
+        assert!(
+            !flood
+                .pairs
+                .contains_key(&key_of("cloud.flood", "unfollowed"))
+        );
+        assert!(
+            flood.pairs.values().all(|pair| pair.held == 2),
+            "counts kept"
+        );
+    }
+
+    /// **AN AUDIT STREAM THAT CANNOT OPEN SAYS WHY, AND COUNTS EVERY LINE IT
+    /// THEN CANNOT KEEP.**
+    ///
+    /// Covers `Audit::open`'s two refusals (a serial that cannot be read, a
+    /// current file that cannot be opened), `Audit::failed`, and `append`'s
+    /// arm for a stream with no file.
+    #[test]
+    fn an_audit_stream_that_cannot_open_says_why_and_drops_by_count() {
+        let event = Event::error("cloud.audit", "kept nowhere");
+        let unreadable_serial = scratch("audit-open-serial");
+        std::fs::create_dir_all(audit_serial_path(&unreadable_serial)).expect("a directory");
+        let (mut audit, said) = Audit::open(&unreadable_serial, 8);
+        let said = said.expect("a refusal");
+        assert!(said.starts_with("the audit stream's serial: "), "{said}");
+        assert!(audit.file.is_none());
+        assert_eq!(audit.health().last_error.as_deref(), Some(said.as_str()));
+        let again = audit.append(b"{}\n", 1, Level::Error, &EventKeys(&event, 0));
+        assert_eq!(again.as_deref(), Some(said.as_str()));
+        assert_eq!(audit.health().dropped, 1);
+        drop(audit);
+
+        let unopenable = scratch("audit-open-current");
+        std::fs::create_dir_all(audit_current_path(&unopenable)).expect("a directory");
+        let (audit, said) = Audit::open(&unopenable, 8);
+        let said = said.expect("a refusal");
+        assert!(said.contains("cannot open the audit stream"), "{said}");
+        assert!(audit.file.is_none());
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&unreadable_serial);
+        let _ignored = std::fs::remove_dir_all(&unopenable);
+    }
+
+    /// **A NEW STREAM SEEDS ONLY THE RING'S AUDITED LINES IT CAN READ.**
+    ///
+    /// Covers `Audit::seed`'s two refusals: a line that does not decode is
+    /// passed over, and a ring file that cannot be read (a directory in its
+    /// place) ends that file's walk. The one decodable audited line is
+    /// seeded.
+    #[test]
+    fn seeding_passes_over_what_it_cannot_decode_or_read() {
+        use std::io::Write as _;
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("audit-seed");
+        let ring = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
+        assert_eq!(
+            ring.emit(&Event::error("cloud.seed", "a refusal")),
+            Emitted::Written
+        );
+        drop(ring);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(super::current_path(&dir))
+            .expect("the ring")
+            .write_all(b"not a record\n")
+            .expect("a foreign line");
+        std::fs::create_dir_all(rotated_path(&dir, 1)).expect("a directory where events.1 is");
+        let (audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        let health = audit.health();
+        assert_eq!((health.seeded, health.written), (1, 1), "{health:?}");
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN AUDITED LINE THE FILE WILL NOT TAKE IS DROPPED, COUNTED AND
+    /// NAMED.**
+    ///
+    /// Covers `Audit::append`'s failed write. A handle opened for reading
+    /// stands in for a full disk: the write is refused by the host, which is
+    /// the arm a real `ENOSPC` takes.
+    #[test]
+    fn an_audited_line_the_file_refuses_is_dropped_and_named() {
+        let dir = scratch("audit-append-refused");
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        audit.file = Some(std::fs::File::open(audit_current_path(&dir)).expect("read-only"));
+        let event = Event::error("cloud.audit", "refused");
+        let why = audit
+            .append(b"0123456789\n", 1, Level::Error, &EventKeys(&event, 0))
+            .expect("refused");
+        assert!(why.contains("cannot append an audited line"), "{why}");
+        let health = audit.health();
+        assert_eq!((health.dropped, health.written), (1, 0));
+        assert_eq!(health.last_error.as_deref(), Some(why.as_str()));
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A POSTING THAT CANNOT BE MADE IS AN INDEX FAILURE, AND THE LINE
+    /// STILL LANDS.**
+    ///
+    /// Covers `Audit::post`'s refused `create_dir_all` and `append`'s count
+    /// of it: a regular file stands where the `target` dimension's directory
+    /// belongs.
+    #[test]
+    fn a_posting_that_cannot_be_made_is_an_index_failure() {
+        let dir = scratch("audit-post-refused");
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        std::fs::write(audit_generation_path(&dir, 0).join("target"), b"x").expect("a file");
+        let event = Event::error("cloud.audit", "posted nowhere");
+        let why = audit
+            .append(b"0123456789\n", 1, Level::Error, &EventKeys(&event, 0))
+            .expect("an index failure");
+        assert!(why.contains("cannot create"), "{why}");
+        let health = audit.health();
+        assert_eq!(health.written, 1, "the line landed");
+        assert_eq!(health.index_failures, 1, "{health:?}");
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A ROLL THAT CANNOT DELETE THE OLDEST FILE STOPS ROLLING, SAYS SO,
+    /// AND THE LINE STILL LANDS.**
+    ///
+    /// Covers `Audit::roll`'s named failure and `append`'s latch: a directory
+    /// with a file in it stands at the oldest kept name, so the roll's first
+    /// step is refused.
+    #[test]
+    fn a_roll_that_cannot_delete_the_oldest_file_stops_rolling() {
+        let dir = scratch("audit-roll-refused");
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        let oldest = audit_rolled_path(&dir, AUDIT_KEEP_FILES - 1);
+        std::fs::create_dir_all(&oldest).expect("a directory");
+        std::fs::write(oldest.join("kept"), b"x").expect("a file in it");
+        audit.max_file_bytes = 20;
+        let event = Event::error("cloud.audit", "rolled");
+        assert_eq!(
+            audit.append(b"0123456789\n", 1, Level::Error, &EventKeys(&event, 0)),
+            None
+        );
+        let why = audit
+            .append(b"0123456789\n", 2, Level::Error, &EventKeys(&event, 0))
+            .expect("the roll's failure");
+        assert!(why.contains("cannot delete the oldest audit file"), "{why}");
+        let health = audit.health();
+        assert_eq!(
+            (health.rotation_failures, health.rotations, health.written),
+            (1, 0, 2),
+            "{health:?}"
+        );
+        assert!(audit.rotation_broken);
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A destination that refuses every call.
+    #[derive(Debug)]
+    struct Refusing;
+
+    impl Target for Refusing {
+        fn append(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        }
+        fn sync(&self) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        }
+        fn reopen(&mut self, _path: &std::path::Path) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        }
+    }
+
+    /// **AN AUDITED EVENT NEITHER FILE TAKES IS DROPPED FROM BOTH, EACH
+    /// COUNTED IN ITS OWN HEALTH.**
+    ///
+    /// Covers `Sink::emit`'s report of an audit failure on the path where the
+    /// ring's append failed too: the ring counts the event dropped and names
+    /// its own failure, and the audit stream counts and names its own.
+    #[test]
+    fn an_audited_event_neither_file_takes_is_dropped_from_both() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("sink-both-refuse");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        {
+            let mut inner = sink.inner.lock().expect("unpoisoned");
+            inner.target = Box::new(Refusing);
+            let audit = inner.audit.as_mut().expect("a stream");
+            audit.file = Some(std::fs::File::open(audit_current_path(&dir)).expect("read-only"));
+        }
+        assert_eq!(
+            sink.emit(&Event::error("cloud.sink", "nowhere")),
+            Emitted::Dropped
+        );
+        let health = sink.health();
+        assert_eq!(health.dropped, 1);
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot append the event")),
+            "{health:?}"
+        );
+        let audit = sink.audit_health().expect("a stream");
+        assert_eq!(audit.dropped, 1);
+        assert!(
+            audit
+                .last_error
+                .as_deref()
+                .is_some_and(|why| why.contains("cannot append an audited line")),
+            "{audit:?}"
+        );
+        drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }

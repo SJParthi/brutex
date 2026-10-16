@@ -134,7 +134,7 @@ fn a_leftover_that_vanishes_before_the_look_leaves_the_create_free() {
             }
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let (mut vanished, mut contended) = (0u32, 0u32);
     while (vanished < 20 || contended < 20) && Instant::now() < deadline {
         match store::staging::create(&path) {
