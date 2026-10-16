@@ -1297,3 +1297,29 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 #[cfg(test)]
 #[path = "sealed_codec_tests.rs"]
 mod sealed_codec_tests;
+
+/// Mutation-survivor tests for this module's private items (cloud session
+/// 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+#[cfg(test)]
+mod cloud_mutant_tests {
+    use super::pack;
+
+    /// **VALUES ARE PACKED LEAST SIGNIFICANT BIT FIRST, WHOLE BYTES OUT AS
+    /// SOON AS THEY ARE WHOLE, THE LAST BYTE PADDED WITH ZEROS.**
+    ///
+    /// Kills `replace / with *` in `pack`'s count of whole bytes (caught
+    /// before only by the exhaustive codec tests timing out): it pushes eight
+    /// times too many bytes per value, which this fails on at once.
+    #[test]
+    fn values_pack_least_significant_bit_first_into_whole_bytes() {
+        let mut out = Vec::new();
+        pack([1u64, 2, 3].into_iter(), 4, &mut out);
+        assert_eq!(out, [0x21, 0x03]);
+        out.clear();
+        pack([0x1FFu64, 0].into_iter(), 9, &mut out);
+        assert_eq!(out, [0xFF, 0x01, 0x00]);
+        out.clear();
+        pack([7u64; 5].into_iter(), 0, &mut out);
+        assert!(out.is_empty(), "nothing at width 0");
+    }
+}
