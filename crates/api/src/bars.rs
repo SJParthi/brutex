@@ -3985,3 +3985,74 @@ mod window_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// Tests written to kill mutants a cloud mutation pass left alive in this
+/// file (`reports/cloud-mut-api-a-20261016.md`). Each names the mutant.
+#[cfg(test)]
+mod cloud_mutant_tests {
+    use super::*;
+
+    fn bar(ts_micros: i64, low: i64, high: i64, close: i64, volume: i64) -> Bar {
+        Bar {
+            ts_micros,
+            open: close,
+            high,
+            low,
+            close,
+            volume,
+            open_interest: OI_NULL,
+        }
+    }
+
+    /// **A FOLD MERGED UNDER A SERIES IS RENAMED TO THAT SERIES**: a month's
+    /// memoised extremes are folded once and merged into every request that
+    /// reads the month, each under its own place in the request. Kills
+    /// `delete field series` in `Extremes::merge`, which kept the memo's own
+    /// series index in every extreme.
+    #[test]
+    fn a_merged_fold_names_the_series_it_was_merged_under() {
+        let mut month = Extremes::default();
+        month.fold(&bar(1_000, 90, 110, 100, 7), 0, true);
+        let mut answer = Extremes::default();
+        answer.merge(&month, Some(3));
+        for extreme in [
+            answer.close_max,
+            answer.close_min,
+            answer.high_max,
+            answer.low_min,
+            answer.range_max,
+            answer.volume_max,
+        ] {
+            assert_eq!(extreme.map(|e| (e.series, e.t)), Some((3, 1_000)));
+        }
+        // Merged with no name, the fold keeps its own.
+        let mut kept = Extremes::default();
+        kept.merge(&month, None);
+        assert_eq!(kept.close_max.map(|e| e.series), Some(0));
+    }
+
+    /// **EVERY ORDER READS ITS OWN FIELD OF A BAR**, and the time of day is
+    /// the IST second. `SortKey::of` is read only by the time-of-day scan, so
+    /// no test asked the other arms.
+    #[test]
+    fn every_order_reads_its_own_field() {
+        let one = Bar {
+            ts_micros: 1_746_157_500_000_000,
+            open: 1,
+            high: 2,
+            low: 3,
+            close: 4,
+            volume: 5,
+            open_interest: 6,
+        };
+        assert_eq!(SortKey::Ts.of(&one), one.ts_micros);
+        assert_eq!(SortKey::Open.of(&one), 1);
+        assert_eq!(SortKey::High.of(&one), 2);
+        assert_eq!(SortKey::Low.of(&one), 3);
+        assert_eq!(SortKey::Close.of(&one), 4);
+        assert_eq!(SortKey::Volume.of(&one), 5);
+        assert_eq!(SortKey::OpenInterest.of(&one), 6);
+        // 2025-05-02 03:45 UTC is 09:15 IST, second 33,300 of the IST day.
+        assert_eq!(SortKey::TimeOfDay.of(&one), 33_300);
+    }
+}

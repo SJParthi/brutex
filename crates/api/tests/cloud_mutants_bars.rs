@@ -1053,4 +1053,91 @@ mod bars_rs {
         assert_eq!(rows.first().map(|bar| bar.close), Some(104));
         assert!(faults.is_empty());
     }
+
+    /// **THE SECOND OF THE DAY IS THE IST ONE**: 09:15 IST sorts before 12:00
+    /// IST whatever day either is on. A second of the day taken against the
+    /// wrong side of UTC (`+ with -` in `SortKey::of`) put every bar after
+    /// 11:00 IST ahead of the morning, because the shift wraps past midnight
+    /// there; the other time-of-day test's bars were all before 11:00.
+    #[test]
+    fn bars_the_second_of_the_day_is_the_ist_one() {
+        let scratch = Scratch::new("bars-tod-ist");
+        let noon = open_of(5, 2) + 2 * 3_600 + 45 * 60;
+        let rows = vec![(noon, 1_200), (open_of(5, 5), 915)];
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::MINUTE_1,
+            month(5),
+            &rows,
+        );
+        let mut asked = query(vec![index("NIFTY")], month(5), month(5));
+        asked.sort = SortKey::TimeOfDay;
+        let got = read(scratch.root(), &asked);
+        let closes: Vec<i64> = got.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(closes, vec![915, 1_200]);
+    }
+
+    /// **A CANCELLABLE PAGE RETURNS EXACTLY THE ROWS IT WAS ASKED FOR, ACROSS
+    /// CHUNKS, AND AN ASK PAST THE MONTH STOPS AT ITS END.** 70,000 one-second
+    /// rows are more than one 65,536-row chunk. Kills `- with +` in the chunk
+    /// size (rows past the ask returned), `< with ==` and `< with <=` on the
+    /// short-chunk stop (a read stopped after its first full chunk), and
+    /// asks for `usize::MAX` rows, which only that stop ends.
+    #[test]
+    fn bars_a_cancellable_page_reads_exactly_its_ask_across_chunks() {
+        let scratch = Scratch::new("bars-page-chunks");
+        let start = open_of(5, 2) - 33_300;
+        let rows: Vec<(i64, i64)> = (0..70_000).map(|i| (start + i, 100 + i)).collect();
+        write_month(
+            scratch.root(),
+            "INDEX",
+            "NIFTY",
+            Timeframe::SECOND_1,
+            month(5),
+            &rows,
+        );
+        let file = api::bars::open(
+            scratch.root(),
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            Timeframe::SECOND_1,
+            month(5),
+            None,
+        )
+        .expect("the month opens");
+        let never = Cancel::never();
+        let (three, _) = page_cancellable(&file, 4, 3, &never).expect("read");
+        assert_eq!(
+            three.iter().map(|bar| bar.close).collect::<Vec<_>>(),
+            vec![104, 105, 106]
+        );
+        let (all, faults) = page_cancellable(&file, 0, 70_000, &never).expect("read");
+        assert_eq!(all.len(), 70_000);
+        assert_eq!(all.last().map(|bar| bar.close), Some(100 + 69_999));
+        assert!(faults.is_empty());
+        let (rest, _) = page_cancellable(&file, 69_990, usize::MAX, &never).expect("read");
+        assert_eq!(rest.len(), 10);
+    }
+
+    /// **A BAR THAT DID NOT MOVE IS UNSIGNED**: its change is `0.00`, never
+    /// `+0.00`. Kills `> with >=` on `table`'s sign.
+    #[test]
+    fn bars_a_flat_bar_is_unsigned() {
+        let flat = store::format::Bar {
+            ts_micros: open_of(5, 2) * 1_000_000,
+            open: 2_450_000,
+            high: 2_450_000,
+            low: 2_450_000,
+            close: 2_450_000,
+            volume: 1,
+            open_interest: store::format::OI_NULL,
+        };
+        let html = api::bars::table(&[flat]);
+        assert!(html.contains("<td class=\"num delta\">0.00</td>"), "{html}");
+        assert!(!html.contains("+0.00"), "{html}");
+    }
 }
