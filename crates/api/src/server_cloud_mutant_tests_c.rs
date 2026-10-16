@@ -2571,3 +2571,35 @@ fn a_runs_targets_are_tracked_and_named_by_the_target_asked_for() {
         ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"]
     );
 }
+
+/// THE EPOCH'S FIRST DAY IS A DAY LIKE ANY OTHER. A window opening on
+/// 1970-01-01 (day 0) is read like every other window: its in-session minute is
+/// observed and its pre-open minute is not (kills `-` turned to `/` in the
+/// window's day count, which divides by that zero).
+#[test]
+fn a_window_opening_on_the_epochs_first_day_is_read_like_any_other() {
+    let row = |timestamp: i64| pull::fetch::RawRow {
+        timestamp,
+        open: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        volume: 1,
+        open_interest: None,
+    };
+    let first = Day::from_days(0).expect("1970-01-01");
+    let second = Day::from_days(1).expect("1970-01-02");
+    let window = pull::session::Window::new(first, second).expect("a window");
+    // 10:00 IST on each day (04:30 UTC), and 08:00 IST on the first, before
+    // the open.
+    let body = pull::fetch::RawWindow {
+        rows: vec![row(16_200), row(9_000), row(86_400 + 16_200)],
+    };
+    assert_eq!(
+        observed_cash_source_days(
+            &[(window, body)],
+            pull::vendor::TimestampEncoding::EpochSecondsUtc
+        ),
+        Ok(vec![first, second])
+    );
+}
