@@ -68965,3 +68965,100 @@ to the repair door (SC-4); the sort index version 2 (SC-5); sealing a month by
 rename, its journal and its failpoints (SC-6); when a month is closed and the
 sweep (SC-7); retiring the raw files (SC-9, the operator's decision). Until
 SC-3 and SC-6 land, nothing writes or opens a `.sbar`.
+
+### D-5250 — The Py-language is used nowhere in this repository and its name appears in no tracked file; one line of D-0207 is the only recorded exception, and a `cargo test` gate refuses everything else — 2026-10-16
+
+**Status: locked.** The operator's rule, given on 16 October 2026 at 08:35 IST.
+Throughout this entry the language is called "the Py-language": the language
+whose source files end in `.py`. Its name is not written here, because this
+entry is a tracked file and the rule it records applies to it.
+
+**Decision.**
+
+1. **The rule.** The Py-language is never used anywhere in this repository —
+   not as a dependency, a tool, a build step, a script, a notebook or a file —
+   and its name appears in no tracked file, in any case, `web/` included. This
+   is stricter than `CLAUDE.md` §2 twice over: §2 refuses the language by
+   extension only outside `web/` (D-0053 made `web/` unrestricted), and §2 says
+   nothing about the name.
+2. **Five lines named it on `feat/db-fix` at `4756cce0`, in four files.** Four
+   are rewritten so the meaning stays and the name goes. Each now says "the
+   vendor's own SDK", which is the charter's own wording: `docs/00-charter.md`,
+   the `PermissionException` row, *"Live in the vendor's own SDK"*, which
+   already cites the SDK's repository and file. Nothing the sentences claimed
+   about the vendor changed; only the language's name went.
+
+   | File | Line | Was | Now |
+   |---|---|---|---|
+   | `crates/pull/src/kite.rs` | 25 | `vendor's own` + the name + ` SDK.` | `vendor's own SDK.` |
+   | `crates/pull/src/kite.rs` | 102 | the name + ` SDK. An entitlement failure, not a session failure.` | `SDK. An entitlement failure, not a session failure.` |
+   | `crates/pull/src/refusal.rs` | 29 | `in its own` + the name + ` SDK rather than on the` | `in its own SDK rather than on the` |
+   | `crates/pull/src/vendor.rs` | 6227 | `in the vendor's own` + the name + ` SDK -- so on the status axis they are one` | `in the vendor's own SDK -- so on the status axis they are one` |
+
+3. **The fifth is inside D-0207, and it stays.** This ledger's header says
+   *"Append only. Entries are never edited"*, and no decision allows an
+   editorial redaction of an old entry. Two entries bent the rule, each for one
+   named defect and neither as a general licence: D-0212 left a false claim
+   standing with *"an additive bracket, because this file is append-only and a
+   bracket is not a rewrite"*, and D-0215 repointed two citations in place
+   *"because leaving them would be worse than the append-only rule they
+   bend"*. Neither covers removing a word. So the line stays exactly as
+   written: `docs/05-decisions.md` line 16338, D-0207's paragraph headed **The
+   pair that forced it.**, the words "the vendor's own" + the name + " SDK".
+   **This entry supersedes that wording**: read D-0207's sentence as *"the
+   second in the vendor's own SDK"*. It is the only occurrence of the name in
+   the tree, and the only exception the gate below admits. Whether to redact it
+   in place is the operator's decision; doing so means removing the exception
+   from the gate and from `NOPY-04` in the same change.
+4. **The gate.** `crates/vocab/tests/no_py_language.rs`, beside
+   `workspace_is_rust.rs`, the other workspace-wide Rust-only scan that runs
+   under `cargo test`. It reads every file `git ls-files` lists, from the
+   working tree, every byte of each, and fails on: the name in any case, in a
+   file's bytes or in its path; a file whose extension is `py`, `pyi`, `pyc`,
+   `pyo`, `pyw`, `pyd`, `pyz` or `ipynb`; and a shebang line, on any line, that
+   runs the interpreter by its name or as `py`, `pypy`, `jython` or `graalpy`
+   (a `#![` Rust inner attribute is not a shebang). The needle is
+   `concat!("py", "thon")`-style halves with a length tripwire, so the test file
+   never holds the word. The exception is matched by EXACT PATH AND EXACT LINE
+   CONTENT and must match exactly once: a copied line fails, and so does the
+   line's disappearance. A tree with no `.git` (a `cargo-mutants` copy) or a
+   host where `git` cannot run is walked as a directory instead, skipping
+   `.git`, the root `target` and every `node_modules`, and the run says so; a
+   `.git` that `git` cannot list is a failure. Invariants `NOPY-01` to
+   `NOPY-06` in `docs/04-invariants.md`.
+
+**What this does not change.**
+
+* **CI gate 15 and its allowlist in `.github/workflows/ci.yml` are untouched**:
+  this change edits no workflow. Its allowlist still names all four files; after
+  this change three of them hold no occurrence, which gate 15 reports as a loose
+  entry and does not fail on (*"THE COUNTS ARE CEILINGS, NOT EXACT"*). Pruning
+  it to `docs/05-decisions.md 1` is a workflow edit left to whoever may make one.
+* **`CLAUDE.md` §2 is not edited here.** It still says that under `web/` the
+  front end may use *"Any language"*. This entry narrows that for one language,
+  which is a scope change under §3 rule 2, and §2's sentence should say so; that
+  edit is the operator's. Until it lands, this entry and the gate are the
+  record, and `CLAUDE.md` §10's precedence rule reads the two as a
+  contradiction for `web/` alone.
+
+**Rejected.**
+
+* *Deleting the four sentences.* Gate 15's own comment refuses that trade: it
+  would delete true provenance about the vendor (§3 rule 1). The rewrite keeps
+  the provenance — the SDK is still the vendor's own, and the charter row still
+  names its repository — and drops only the name, which the provenance never
+  needed.
+* *Editing D-0207 in place.* See item 3: nothing allows it, and doing it
+  anyway is the move the ledger's header forbids.
+* *A per-file or pattern exception.* Gate 15's escape hatch is a count per
+  file, so any line of an allowed file may carry the name up to its ceiling.
+  This gate's is one path and one exact line, matched exactly once.
+* *Folding the extension and shebang checks into gate 15.* It lives in a
+  workflow, which this change does not edit, and it does not run under
+  `cargo test`, which §9 makes the definition of done.
+
+**Why.** A rule that lives in a document is negotiated in every pull request; a
+rule that fails the build is not (D-0001). Gate 15's own comment lists what it
+cannot see — the interpreter's binary name and a shebang line — and a `.py`
+under `web/` passes gate 1, because `web/` is exempt from the extension
+allowlist. This gate closes all three under `cargo test`.
