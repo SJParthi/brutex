@@ -35188,3 +35188,8 @@ mod hand_stop_tests;
 #[cfg(test)]
 #[path = "server_cloud_mutant_tests_b.rs"]
 mod cloud_mutant_tests_b;
+
+// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016).
+#[cfg(test)]
+#[path = "server_cloud_mutant_tests_c.rs"]
+mod cloud_mutant_tests_c;
