@@ -7867,10 +7867,11 @@ mod tests {
 )]
 mod cloud_mutant_tests {
     use super::{
-        Audit, EventKeys, FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Held, Pair, Rationed, Reap, Retired,
-        audit_gone_is_ours, is_day_text, postings_of, reaper,
+        AUDIT_HANDLES, Audit, EventKeys, FLOOD_PAIRS, FLOOD_WINDOW_MS, Flood, Held, Pair, Rationed,
+        Reap, Retired, audit_gone_is_ours, is_day_text, postings_of, reaper,
     };
     use crate::event::Event;
+    use crate::level::Level;
     use std::sync::atomic::Ordering;
 
     /// The key `Flood::admit` files a pair under, computed the same way.
@@ -8141,6 +8142,113 @@ mod cloud_mutant_tests {
         assert_eq!(answer, Ok(()));
         assert!(spawned, "the start is asked for");
         assert!(audit.reaper.is_some());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE AUDIT FILE ROLLS ONLY WHEN A LINE WOULD PASS ITS BOUND; A LINE
+    /// THAT FILLS IT EXACTLY STAYS.**
+    ///
+    /// Kills `replace > with >=` in `Audit::append`'s roll test: it rolls a
+    /// file that the next line fills to exactly `max_file_bytes`, so every
+    /// file ends one line short of its bound and the stream rolls (and
+    /// retires an index generation) one line early.
+    #[test]
+    fn an_audit_line_that_fills_the_file_exactly_does_not_roll_it() {
+        let dir = scratch("audit-roll-edge");
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        let event = Event::error("cloud.audit", "x");
+        let line = b"0123456789";
+        assert_eq!(
+            audit.append(line, 1, Level::Error, &EventKeys(&event, 0)),
+            None
+        );
+        audit.max_file_bytes = 20;
+        assert_eq!(
+            audit.append(line, 2, Level::Error, &EventKeys(&event, 0)),
+            None
+        );
+        let health = audit.health();
+        assert_eq!(
+            (health.rotations, health.serial, health.current_bytes),
+            (0, 0, 20),
+            "exactly full, not rolled: {health:?}"
+        );
+        assert_eq!(
+            audit.append(line, 3, Level::Error, &EventKeys(&event, 0)),
+            None
+        );
+        let health = audit.health();
+        assert_eq!(
+            (health.rotations, health.serial, health.current_bytes),
+            (1, 1, 10),
+            "one byte past: rolled: {health:?}"
+        );
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE POSTING-HANDLE CACHE HOLDS UP TO `AUDIT_HANDLES` FILES AND IS
+    /// EMPTIED ONLY FOR A NEW ONE PAST THEM.**
+    ///
+    /// Kills the three mutants of `self.handles.len() >= AUDIT_HANDLES &&
+    /// !self.handles.contains_key(&path)` in `Audit::post`: `&&` to `||` and
+    /// `>=` to `<` empty the cache at every new posting (an open per pointer
+    /// on the emit path); deleting `!` never bounds it (a handle per posting
+    /// ever written, up to the process's file limit) and empties it for a
+    /// posting it already holds.
+    #[test]
+    fn the_posting_handle_cache_is_bounded_and_kept_until_it_must_be_emptied() {
+        let dir = scratch("audit-handles");
+        let (mut audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        let image = [0u8; super::AUDIT_POINTER_BYTES];
+        let posting = |n: usize| dir.join("postings").join(format!("{n}.idx"));
+        for n in 0..3 {
+            audit.post(posting(n), &image).expect("posted");
+        }
+        assert_eq!(audit.handles.len(), 3, "kept between postings");
+        for n in 3..AUDIT_HANDLES {
+            audit.post(posting(n), &image).expect("posted");
+        }
+        assert_eq!(audit.handles.len(), AUDIT_HANDLES, "full");
+        audit.post(posting(0), &image).expect("posted again");
+        assert_eq!(audit.handles.len(), AUDIT_HANDLES, "one it holds: kept");
+        audit.post(posting(AUDIT_HANDLES), &image).expect("posted");
+        assert_eq!(audit.handles.len(), 1, "a new one past the bound: emptied");
+        assert_eq!(
+            std::fs::metadata(posting(0)).expect("the posting").len(),
+            2 * u64::try_from(image.len()).expect("small"),
+            "every pointer landed"
+        );
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE STREAM'S HEALTH CARRIES THE REAPER'S COUNTS AND WORDS.**
+    ///
+    /// Kills `delete field reap_failures from struct AuditHealth expression
+    /// in Audit::health` (caught before only by a test that timed out
+    /// waiting): the page would read zero failed deletes while the reaper
+    /// counted them. The other copied counts, and the reaper's words standing
+    /// in for a writer with none of its own, are pinned beside it.
+    #[test]
+    fn the_audit_health_carries_the_reapers_counts_and_words() {
+        let dir = scratch("audit-health-reap");
+        let (audit, said) = Audit::open(&dir, 8);
+        assert_eq!(said, None);
+        audit.reap.waiting.store(5, Ordering::Relaxed);
+        audit.reap.reaped.store(7, Ordering::Relaxed);
+        audit.reap.failures.store(3, Ordering::Relaxed);
+        audit.reap.fail("the reaper's words".to_owned());
+        let health = audit.health();
+        assert_eq!(
+            (health.gone_waiting, health.reaped, health.reap_failures),
+            (5, 7, 4)
+        );
+        assert_eq!(health.reap_error.as_deref(), Some("the reaper's words"));
+        assert_eq!(health.last_error.as_deref(), Some("the reaper's words"));
+        drop(audit);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
