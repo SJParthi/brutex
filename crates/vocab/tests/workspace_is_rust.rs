@@ -563,9 +563,27 @@ fn the_dependency_set_has_not_moved_without_review() {
     // The cookie feature that would have arrived alongside it was NOT taken --
     // `cargo deny` refused the `time 0.3.45` it dragged in -- so `cookie`,
     // `cookie_store` and `time` are absent from this count. D-0311.
+    //
+    // 192 -> 194 BY `rustix`, AND THE SCAN WAS RUN BEFORE THIS NUMBER MOVED.
+    //
+    // `api` names `rustix` 1.1.4 (`std`, `fs`, no defaults) so `/disk.json`
+    // measures its filesystem with one `statvfs(2)` instead of starting
+    // `/bin/df` (D-5240). Two packages arrived and no others: `rustix` and
+    // `linux-raw-sys` 0.12.1; the four others `rustix` names (`bitflags`,
+    // `errno`, `libc`, `windows-sys` 0.61.2) were already locked at the version
+    // it takes. Measured over the registry sources of both:
+    //   * **zero** files matching .c .cc .cpp .h .S .s .asm .js -- `rustix`
+    //     ships 318 `.rs` files and `linux-raw-sys` 462, the rest licences,
+    //     manifests and Markdown -- so neither is added to DECLARED. On Linux
+    //     `rustix` makes its system calls through `core::arch::asm!`, ordinary
+    //     stable Rust, as `graviola` does;
+    //   * `linux-raw-sys` has no `build.rs`. `rustix`'s runs `$RUSTC` (or a
+    //     `RUSTC_WRAPPER`) on feature probes and prints `cfg`s, the probe
+    //     `docs/06-limits.md` §96 records for thirteen packages already; §96
+    //     now lists fourteen. It is not a new exception and not treated as one.
     assert_eq!(
         names.len(),
-        192,
+        194,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
@@ -588,8 +606,12 @@ fn the_dependency_set_has_not_moved_without_review() {
     // PACKAGE (D-2801): `pull` names `ruzstd` 0.8.2 to read the GDFL tick store.
     // The package was already in the lock under `lake` with the same features,
     // the count is unchanged, and it is pure Rust with no `build.rs` (D-0056).
+    // 0x8ACF_7E51_E4A6_F150 -> 0x0D06_2B04_5053_8A00 IS `rustix` 1.1.4 AND
+    // `linux-raw-sys` 0.12.1 ARRIVING WITH THE ONE NEW ARROW `api -> rustix`
+    // (D-5240); the scan is recorded beside the count above, and no other
+    // package's `dependencies` list moved.
     assert_eq!(
-        h, 0x8ACF_7E51_E4A6_F150,
+        h, 0x0D06_2B04_5053_8A00,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

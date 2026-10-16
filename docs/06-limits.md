@@ -6296,8 +6296,13 @@ the packages `cargo tree -e normal,build -i` finds in the native host graph:
 | `crc32fast` `getrandom` `zerocopy` | `Command::new` |
 | `ahash` `generic-array` | `version_check` (which runs `rustc`) |
 | `num-traits` | `autocfg` (`emit_expression_cfg` compiles probes with `rustc`) |
+| `rustix` | `std::process::Command::new` on `$RUSTC` or `RUSTC_WRAPPER` (feature probes; D-5240) |
 
-Thirteen packages. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
+Fourteen packages: the thirteen D-2328 measured, and `rustix` 1.1.4, which
+`api` took on 2026-10-16 so `/disk.json` calls `statvfs(2)` instead of starting
+`/bin/df` (D-5240) — a run-time child process traded for a build-time `rustc`
+probe of the kind already listed, its registry source read before the lock
+moved. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
 in `Cargo.lock` but not in the native graph, and missed `num-traits`. `ring`,
 `rustversion` and `wasm-bindgen-shared` also spawn, and are in `Cargo.lock` for
 other targets only; `cargo tree -i` on the host finds none of them.
@@ -6308,8 +6313,8 @@ from this workspace, so **the ban as written cannot be held at the dependency
 level**, and the sentence in §2 is stronger than the tree.
 
 **Why this is recorded rather than fixed.** A gate banning dependency build
-scripts would fail on `serde`. A gate with an allowlist of the thirteen would
-pass everything on the list forever and say nothing about the fourteenth. Neither
+scripts would fail on `serde`. A gate with an allowlist of the fourteen would
+pass everything on the list forever and say nothing about the fifteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
@@ -6327,7 +6332,7 @@ named binding libraries.
 
 **What is not held**: the literal sentence, against dependencies. A reader
 finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
-something true and something this workspace already contains thirteen of. See
+something true and something this workspace already contains fourteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
 
@@ -16817,11 +16822,19 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   1,055 of 80,000 with waits of up to 869 ms. A request that finds the
   ledger longer reads and indexes the bytes appended since the last request
   under the vendor's lock: O(appended), at most 16 MiB.
-- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One `df -Pk`,
-  a stat of each census file, each feed's scrub state. Its uncached
-  measurement at 385,440 standing findings: 3.1–4.5 ms (it was 84–92 ms: a
-  walk and a sort of every finding for 16 names); cached, n=200, 0.06 / 0.17
-  / 1.79 ms.
+- **L-WP81-4. `/disk.json` is measured at most once in 30 s.** One
+  `statvfs(2)` and a `stat` per directory from the store root up to its mount
+  point (a `/bin/df -Pk` child process until D-5240), a stat of each census
+  file, each feed's scrub state. Its uncached measurement at 385,440 standing
+  findings: 3.1–4.5 ms (it was 84–92 ms: a walk and a sort of every finding
+  for 16 names); cached, n=200, 0.06 / 0.17 / 1.79 ms. That figure included
+  the `df` child, which was not timed apart on the operator's machine and the
+  figure was not re-taken there after D-5240. On the 4-core cloud container on
+  16 Oct 2026 (n=1,000 after 50 warm-up calls, three runs, a temporary
+  directory, nearest rank): the filesystem step alone was p50 1.56–1.74 ms,
+  p99 2.91–3.70 ms, max 4.69–5.93 ms with the child and is p50 3.1–5.2 µs,
+  p99 7.2–11.2 µs, max 64–69 µs with `statvfs(2)`; the whole uncached answer
+  over an empty store was p50 1.57–1.71 ms and is p50 17.7–17.8 µs.
 - **L-WP81-5. `/bars.json` of a whole month whose `.crc` sidecar is lost is
   O(blocks of that month) in TIME; its answer is constant-size.** Every block
   is asked for and refused. GDFL NIFTY 1s 2020-07, 517,292 records, sidecar
@@ -16878,8 +16891,10 @@ only, on a machine also running other builds. Latencies are p50 / p99 / max.
   census file: O(epochs), a handful today). It grows by one census epoch per
   compaction — about the size of the live census each time. NOT DONE: a
   bound, an alarm at a threshold, or an archive step that moves older epochs
-  off the store's drive; `/disk.json` also runs one `df -Pk` with no timeout
-  of its own (L-WP81-4), cached for 30 s in the operations pool.
+  off the store's drive; `/disk.json`'s one `statvfs(2)` has no timeout of
+  its own either: a filesystem that hangs the call hangs the measurement, as
+  it hung the `df -Pk` child the call replaced (L-WP81-4, D-5240), cached for
+  30 s in the operations pool.
 
 ## GDFL capital-market scope: what a widened scope costs and what it does not reach — D-4878, 12 October 2026
 

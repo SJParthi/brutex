@@ -93,6 +93,10 @@ vocab = { path = "../vocab", version = "0.1.0" }
 
 axum   = { workspace = true }
 http-body = { workspace = true }
+# `/disk.json`'s free space and mount point from one `statvfs(2)` (and, on
+# macOS, one `statfs(2)`) through a safe wrapper, instead of a `/bin/df` child
+# process. The workspace table says why this crate and not `libc`. D-5240.
+rustix = { workspace = true }
 tokio  = { workspace = true }
 serde  = { workspace = true }
 serde_json = { workspace = true }
