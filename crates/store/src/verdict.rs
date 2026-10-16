@@ -4168,3 +4168,292 @@ impl Reader {
 #[cfg(test)]
 #[path = "verdict_tests.rs"]
 mod tests;
+
+/// Mutation-survivor and coverage tests for this module's private decoders
+/// (cloud session 2026-10-16, report `reports/cloud-mut-store-20261016.md`).
+/// Each refusal is driven by ONE changed field, its CRC recomputed where the
+/// check runs after the CRC, so the refusal under test is the one that fires.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod cloud_mutant_tests {
+    use super::{
+        CODE_SLOTS, Code, DETAIL_CAP, DayBlock, Exchange, Facts, ImageHeader, Key, MAX_CAPACITY,
+        Mode, OVERFLOW_SLOTS, RECORD_STRIDE, SLOT_LEN, Segment, TABLE_OFFSET, TRAILER_LEN,
+        Timeframe, Unit, Vendor, VerdictError, crc_to, decode_day, decode_header, decode_record,
+        encode_day, encode_header, encode_record, geometry, put, unit_of,
+    };
+    use std::path::Path;
+
+    const PATH: &str = "/nonexistent/cloud/2031-03-04.g0000000001.vdt";
+
+    /// The CRC over `bytes[..at]` written at `at`, as every encoder does.
+    fn fix(bytes: &mut [u8], at: usize) {
+        let crc = crc_to(bytes, at);
+        put(bytes, at, &crc.to_le_bytes());
+    }
+
+    /// The `why` of an `image_corrupt`, or a panic naming what came instead.
+    fn corrupt_why(answer: Result<impl std::fmt::Debug, VerdictError>) -> String {
+        match answer {
+            Err(VerdictError::ImageCorrupt { why, .. }) => why,
+            other => panic!("not image_corrupt: {other:?}"),
+        }
+    }
+
+    /// The `(what, value)` of a `written_by_newer_build`.
+    fn unknown(answer: Result<impl std::fmt::Debug, VerdictError>) -> (&'static str, u64) {
+        match answer {
+            Err(VerdictError::Unknown { what, value, .. }) => (what, value),
+            other => panic!("not written_by_newer_build: {other:?}"),
+        }
+    }
+
+    fn header() -> ImageHeader {
+        let mut counts = [0; CODE_SLOTS];
+        counts[1] = 2;
+        ImageHeader {
+            feed: Vendor::Gdfl,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            timeframe: Timeframe::SECOND_1,
+            unit: unit_of(Timeframe::SECOND_1),
+            epoch_day: 22_342,
+            generation: 1,
+            records: 2,
+            capacity: 16,
+            counts,
+            run: 7,
+            written_at: 9,
+            verifier: 1,
+            mode: Mode::Inline,
+            rule_set: 0,
+            previous: 0,
+            carried: 0,
+            origin: [0; 16],
+            detail_offset: 0,
+            detail_bytes: 0,
+            detail_entries: 0,
+        }
+    }
+
+    /// **EVERY CHECK OF AN IMAGE HEADER REFUSES BY NAME.**
+    ///
+    /// The magic, the version, the stride, the CRC (and a header cut short),
+    /// the reserved bytes, a timeframe no rung has, a unit this build does not
+    /// know or that is not the timeframe's, and a feed, exchange, segment or
+    /// mode byte no table holds. A whole header decodes as itself.
+    #[test]
+    fn every_check_of_an_image_header_refuses_by_name() {
+        let path = Path::new(PATH);
+        let good = encode_header(&header());
+        assert_eq!(decode_header(&good, path).unwrap(), header());
+        let with = |at: usize, value: &[u8], crc: bool| {
+            let mut bytes = good;
+            put(&mut bytes, at, value);
+            if crc {
+                fix(&mut bytes, 252);
+            }
+            decode_header(&bytes, path)
+        };
+        assert_eq!(
+            corrupt_why(with(0, b"X", false)),
+            "the magic is not BRUTEXVD"
+        );
+        assert_eq!(
+            unknown(with(8, &2u16.to_le_bytes(), false)),
+            ("image version", 2)
+        );
+        assert_eq!(
+            corrupt_why(with(10, &161u16.to_le_bytes(), false)),
+            "the record stride is not 160"
+        );
+        assert_eq!(
+            corrupt_why(with(30, &[0xFF], false)),
+            "the header fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(decode_header(&good[..200], path)),
+            "the header fails its CRC-32C",
+            "a header cut short"
+        );
+        assert_eq!(
+            corrupt_why(with(200, &[1], true)),
+            "the header's reserved bytes are not zero"
+        );
+        assert_eq!(
+            unknown(with(184, &7u32.to_le_bytes(), true)),
+            ("timeframe seconds", 7)
+        );
+        assert_eq!(unknown(with(15, &[9], true)), ("unit", 9));
+        assert_eq!(
+            corrupt_why(with(15, &[Unit::Day.code()], true)),
+            "the unit is not the timeframe's"
+        );
+        assert_eq!(unknown(with(12, &[0], true)), ("feed", 0));
+        assert_eq!(unknown(with(14, &[9], true)), ("exchange", 9));
+        assert_eq!(unknown(with(13, &[9], true)), ("segment", 9));
+        assert_eq!(unknown(with(146, &[0], true)), ("mode", 0));
+    }
+
+    /// **A HEADER WHOSE GEOMETRY CANNOT HOLD ITS RECORDS IS REFUSED, AND ONE
+    /// THAT CAN IS MEASURED EXACTLY.**
+    ///
+    /// The table's capacity (not a power of two, below the floor, above the
+    /// ceiling), records that overfill it, per-code counts that do not sum to
+    /// the records or count code 0, and a detail section out of its place or
+    /// past its cap.
+    #[test]
+    fn a_header_whose_geometry_cannot_hold_its_records_is_refused() {
+        let path = Path::new(PATH);
+        let refused = |change: &dyn Fn(&mut ImageHeader)| {
+            let mut h = header();
+            change(&mut h);
+            corrupt_why(geometry(&h, path).map(|shape| shape.len))
+        };
+        for capacity in [24, 8, u32::try_from(MAX_CAPACITY).unwrap() * 2] {
+            assert_eq!(
+                refused(&|h| h.capacity = capacity),
+                format!("table capacity {capacity} is not a power of two in range")
+            );
+        }
+        assert_eq!(
+            refused(&|h| {
+                h.records = 9;
+                h.counts[1] = 9;
+            }),
+            "9 records overfill a table of 16"
+        );
+        assert_eq!(
+            refused(&|h| h.counts[1] = 1),
+            "the per-code counts do not sum to the records"
+        );
+        assert_eq!(
+            refused(&|h| {
+                h.counts[0] = 1;
+                h.counts[1] = 1;
+            }),
+            "the per-code counts do not sum to the records",
+            "code 0 is unset and counts nothing"
+        );
+        let records_end = TABLE_OFFSET + SLOT_LEN * (16 + OVERFLOW_SLOTS) + RECORD_STRIDE * 2;
+        let end = u32::try_from(records_end).unwrap();
+        let place = "the detail section's place does not follow the records";
+        for (bytes, offset, entries) in [
+            (u32::try_from(DETAIL_CAP).unwrap() + 1, end, 1),
+            (10, 0, 1),
+            (10, end, 0),
+            (10, end + 8, 1),
+            (0, end, 0),
+        ] {
+            assert_eq!(
+                refused(&|h| {
+                    h.detail_bytes = bytes;
+                    h.detail_offset = offset;
+                    h.detail_entries = entries;
+                }),
+                place,
+                "{bytes} bytes at {offset}, {entries} entries"
+            );
+        }
+        let mut h = header();
+        h.detail_bytes = 10;
+        h.detail_offset = end;
+        h.detail_entries = 1;
+        let shape = geometry(&h, path).unwrap();
+        assert_eq!(shape.len, records_end + 10 + TRAILER_LEN);
+        assert_eq!(shape.records_at, records_end - RECORD_STRIDE * 2);
+        assert_eq!(shape.capacity, 16);
+    }
+
+    /// **EVERY CHECK OF A DAY BLOCK REFUSES BY NAME.**
+    ///
+    /// Its CRC (and a block cut short), its reserved bytes, and each of its
+    /// five enumerations at a byte this build does not know. A whole block
+    /// decodes as itself.
+    #[test]
+    fn every_check_of_a_day_block_refuses_by_name() {
+        let path = Path::new(PATH);
+        let day = DayBlock::of(Code::Match);
+        let good = encode_day(&day);
+        assert_eq!(decode_day(&good, path).unwrap(), day);
+        let with = |at: usize, value: u8, crc: bool| {
+            let mut bytes = good;
+            bytes[at] = value;
+            if crc {
+                fix(&mut bytes, 252);
+            }
+            decode_day(&bytes, path)
+        };
+        assert_eq!(
+            corrupt_why(with(40, 1, false)),
+            "the day block fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(decode_day(&good[..255], path)),
+            "the day block fails its CRC-32C"
+        );
+        assert_eq!(
+            corrupt_why(with(100, 1, true)),
+            "the day block's reserved bytes are not zero"
+        );
+        assert_eq!(unknown(with(1, 9, true)), ("source held", 9));
+        assert_eq!(unknown(with(2, 9, true)), ("v3 manifest", 9));
+        assert_eq!(unknown(with(3, 9, true)), ("journal outcome", 9));
+        assert_eq!(unknown(with(4, 9, true)), ("day state", 9));
+        assert_eq!(unknown(with(5, 0, true)), ("worst code", 0));
+    }
+
+    /// **EVERY CHECK OF A RECORD REFUSES BY NAME, NAMING THE RECORD.**
+    ///
+    /// Its CRC (and a record cut short) as `record_corrupt` with its ordinal;
+    /// a key field that is empty, not UTF-8, or not zero after its key; a code
+    /// this build does not know; and reserved bytes that are not zero. A whole
+    /// record decodes as itself.
+    #[test]
+    fn every_check_of_a_record_refuses_by_name() {
+        let path = Path::new(PATH);
+        let key = Key::instrument("ZZCLOUD").unwrap();
+        let facts = Facts::of(Code::ValueMismatch);
+        let good = encode_record(&key, 7, &facts, 3);
+        let record = decode_record(&good, path, 3).unwrap();
+        assert_eq!(
+            (record.key, record.run, record.facts, record.detail_at),
+            (key, 7, facts, 3)
+        );
+        let with = |at: usize, value: u8, crc: bool| {
+            let mut bytes = good;
+            bytes[at] = value;
+            if crc {
+                fix(&mut bytes, 156);
+            }
+            decode_record(&bytes, path, 3)
+        };
+        for answer in [with(90, 1, false), decode_record(&good[..159], path, 3)] {
+            assert!(
+                matches!(answer, Err(VerdictError::RecordCorrupt { ordinal: 3, .. })),
+                "{answer:?}"
+            );
+        }
+        let not_a_key = "record 3's key field is not a key";
+        assert_eq!(corrupt_why(with(8, 0, true)), not_a_key, "empty");
+        assert_eq!(corrupt_why(with(8, 0xFF, true)), not_a_key, "not UTF-8");
+        assert_eq!(
+            corrupt_why(with(8 + 7 + 1, b'X', true)),
+            not_a_key,
+            "not zero after the key"
+        );
+        assert_eq!(unknown(with(72, 0, true)), ("verdict code", 0));
+        assert_eq!(unknown(with(72, 99, true)), ("verdict code", 99));
+        assert_eq!(
+            corrupt_why(with(150, 1, true)),
+            "record 3's reserved bytes are not zero"
+        );
+    }
+}
