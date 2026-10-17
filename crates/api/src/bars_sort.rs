@@ -4495,4 +4495,64 @@ mod cloud_mutant_tests {
         assert!(got.bars.is_empty(), "no row is served from a guess");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A DAY-CUT FOLD THAT MEETS A RECORD THAT WILL NOT READ WITHHOLDS THE
+    /// EXTREMES BY NAME AND HOLDS NOTHING**: the 3rd keeps rows `[120, 240)`,
+    /// cut from two index runs; the month has a time index, so the bound is
+    /// located without reading a bar; and row 200 is damaged, which fails
+    /// its whole block (rows 192–255, no index run begins or ends there).
+    /// The page is served from the index, its extremes are withheld
+    /// (`months_unread`). A second request finds the clean stretch
+    /// `[120, 130)` held and folds the damaged one again, because a fold that
+    /// missed a row is never held. Takes the false branch of `missed == 0` in `cut_extremes`.
+    #[test]
+    fn a_day_cut_fold_that_meets_an_unreadable_record_holds_nothing() {
+        let root = scratch("cut-fold-damaged");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let bars = srt.with_extension("bin");
+        let mut bytes = std::fs::read(&bars).expect("the month");
+        let address = StorePath::new(PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: month(1),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        crate::scratch::plant_pre_rule_time_index(&root, address, super::symbol_id("NIFTY"));
+        let stamp = rows[200].ts_micros.to_le_bytes();
+        let at = bytes
+            .windows(8)
+            .rposition(|window| window == stamp)
+            .expect("the record's stamp is in the file");
+        bytes[at] ^= 0x01;
+        std::fs::write(&bars, &bytes).expect("damage one generated record");
+        let (lo, _) = month(1).ist_bounds_micros();
+        let mut asked = query(index(), month(1), month(1), SortKey::Close);
+        asked.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        asked.filter.to = Some(lo + 3 * 86_400 * MICROS);
+        asked.want_extremes = true;
+        let mut read = Vec::new();
+        for request in 0..2 {
+            let got = window(&root, &asked).expect("answers");
+            assert_eq!(got.extremes, None, "request {request}");
+            assert!(
+                got.extremes_why
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("months_unread")),
+                "request {request}: {:?}",
+                got.extremes_why
+            );
+            read.push(got.scan_rows);
+        }
+        // THE CLEAN STRETCH `[120, 130)` IS HELD after the first request;
+        // the damaged stretch is folded again, reading as many rows.
+        assert_eq!(read[0] - read[1], 10, "{read:?}");
+        assert!(read[1] > 0 && read[1] < 110, "{read:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
