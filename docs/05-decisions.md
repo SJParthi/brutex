@@ -70728,3 +70728,63 @@ being written, and which never completes, is closed silently at the deadline
 rather than answered `408` (the wrapper did not see those bytes; it used to,
 when the head clock wrongly ran during the body). Both are written down in
 `docs/06-limits.md` under D-4975.
+
+### D-4996 — The app runs under two launchd agents that `cli launch-agent` prints at install time and no file in the tree holds; the watchdog is one `cli watchdog` probe a minute whose notice is a page handed to `open` — 2026-10-14
+
+R3-32. Until now the app on :8080 ran only when a session started it, so a
+reboot, a crash or a drive that mounted after login left it down with nothing
+to say so.
+
+**What is decided.** (1) Two agents, `in.brutex.app` and `in.brutex.watchdog`,
+are rendered by `cli launch-agent app|watchdog` from the operator's own
+arguments and written by his shell into `~/Library/LaunchAgents/`; no `.plist`
+is tracked (`CLAUDE.md` §2, gate 1; round-3 amendment A5), so the verb, its
+tests and `docs/36-ops-runbook.md` §9 are the agents' source. The verb writes
+and installs nothing. (2) The app agent is kept alive by a `PathState` on the
+store root, so launchd waits for the drive rather than the api polling for it,
+and `ThrottleInterval` (10 s by default) bounds a start-time refusal to one a
+throttle interval (FM-196). It also sets `ProcessType Interactive` (unset,
+launchd throttles a job's CPU and I/O) and a soft `NumberOfFiles` of 65,536
+(launchd's own was measured at 256; FM-088). (3) The watchdog is one probe
+per run of `GET /health` within 5 s; an outage is two unanswered probes in a
+row, its one notice goes out at the second (at most 120 s after the last
+answer), and the first answer after it sends one "back" notice; a single miss
+is a `blip` with no notice. Any HTTP status line is an answer (`/health`
+answers 503 when the data is not clean). Its state lives off the store drive
+(refused by DEVICE: the store root's `st_dev` against the directory's nearest
+existing ancestor, so a sibling, a `..` or a link into the drive is refused
+like a path under the root; an agent rendered with the drive away carries a
+`NOT CHECKED` comment) and two misses are "in a row" only within two
+intervals (`--interval-seconds`, passed by the agent), so a miss at shutdown
+and one at the next login are no outage. `main` skips the store
+preflight for these two verbs, because an unmounted drive is one of the
+outages to report. (4) The notice is an HTML page under the state directory
+handed to `open`, not a Notification Center banner: a banner needs `osascript`
+(an interpreter, gate 0) or an Objective-C binding, both forbidden by §2. A
+page `open` could not deliver is retried at the next probe and is never
+counted as delivered. (5) A notice is SAVED BEFORE IT IS SENT (`pending=` in
+the v2 state line; v1 still reads): a state that cannot be saved withholds
+the notice with a `notice-withheld` line, and a run killed inside `open` is
+named `notify-unknown` by the next and counted as sent, so a notice goes out
+at most once per outage; the price is a silent watchdog when its own
+directory cannot be written (`docs/06-limits.md` L-WD-6). A lock held by
+another is waited for up to 1 s before the run is refused, because any spawn
+duplicates the lock's descriptor until its `exec` (verify-R3-32-r1).
+
+**Not decided here.** A distinct exit code per start refusal and a graceful
+stop on SIGTERM are the api's; the kill drill's seconds are the operator's to
+record in `docs/36` §9.4.
+
+**Proved by** `cli::watchdog_command::tests::the_watchdog_notifies_once_when_health_does_not_answer`,
+`cli::watchdog_command::tests::the_watchdog_says_when_the_app_is_back`,
+`cli::watchdog_command::tests::a_single_missed_probe_is_a_blip_and_sends_no_notice`,
+`cli::watchdog_command::tests::a_notice_that_could_not_be_delivered_is_tried_again_and_never_doubled`,
+`cli::watchdog_command::tests::the_launch_agent_waits_for_the_store_drive`,
+`cli::watchdog_command::tests::startup_waits_for_a_missing_root_with_backoff`,
+`cli::watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`,
+`watchdog_binary::the_watchdog_runs_with_the_store_drive_away`,
+`cli::watchdog_command::tests::a_state_that_cannot_be_saved_withholds_the_notice_and_never_repeats_it`,
+`cli::watchdog_command::tests::a_run_killed_while_open_runs_sends_no_second_notice`,
+`cli::watchdog_command::tests::a_lock_held_for_a_moment_is_waited_for_not_refused`,
+`cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
+`cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.

@@ -18531,3 +18531,22 @@ under `BANKNIFTY,NIFTY` before that run started), and 2020-09-16's
 `incomplete` close counts 94 refusals in its own window, equal to its
 `failures=94`, where it counted 151 (57 move to `later_count`); neither
 sentence changes (bodies `state/fix/af02-r3/bodies/real-*.json`).
+
+## The app under launchd and its watchdog — D-4996, 14 October 2026
+
+`cli watchdog` and `cli launch-agent` (R3-32; `docs/36-ops-runbook.md` §9).
+Measured on 14 October 2026 against a release build serving a private shadow
+of the store on 127.0.0.1:8501 (`state/fix/serve.sh`), n = 200 sequential
+runs each, on the shared machine with other builds running.
+
+| Id | Limit | Why | Bound, measured | Owner |
+|---|---|---|---|---|
+| L-WD-1 | One probe waits at most its limit | a stopped or hung app must not hold the probe past the next one | connect, request and status line inside `--timeout-ms` (5,000 by default); no name is resolved, so no resolver can stretch it. The probe itself: p50 0 ms, p99 6 ms, max 7 ms; `GET /health` by `curl`: p50 0.76 ms, p99 5.08 ms, max 6.53 ms; one whole `cli watchdog` process (start, probe, state, exit): p50 11.1 ms, p99 19.1 ms, max 22.3 ms | R3-32 |
+| L-WD-2 | A run's cost does not grow with its history | the log is appended to and never read, a notice page is created by name and the folder never listed (`a_run_never_lists_the_notices_or_reads_the_log`) | one state read of under 200 bytes, one read of at most 42 bytes at the start of `watchdog.lock` (and, only when the state cannot be saved, one 41-byte write there), at most four appended lines, at most one new page, one rename | R3-32 |
+| L-WD-3 | The notice is at most two probes late | an outage is two unanswered probes in a row, so a restart inside one interval is a `blip` | at most 2 × `StartInterval` (120 s at 60 s) after the last answer, tested with a fake clock; a probe missed while the Mac sleeps is not run (`man launchd.plist`, `StartInterval`) | R3-32 |
+| L-WD-4 | The watchdog's files grow | every change is kept; nothing is deleted | `watchdog.log`: one line of about 200 bytes per change; `launchd.log`: the report line of each run, about 60 bytes, so about 86 KB a day (computed from the measured line, not from a day's run); one page per notice | R3-32 |
+| L-WD-5 | A refusal at start is retried by launchd, not by the api | the api has no wait mode (FM-196) | at most one start a `ThrottleInterval` (10 s by default) while the store root exists; none while it is absent (`PathState`); UNVERIFIED on this Mac until the operator loads the agent | R3-32 |
+| L-WD-6 | The watchdog goes SILENT when its own directory cannot be written | a notice is saved before it is sent (at most once per outage, R332-12), so a state that cannot be saved — a full Mac disk, a read-only or damaged state directory, a non-file at `watchdog.state.tmp` — withholds every notice rather than repeating it | one `notice-withheld` line a minute in `watchdog.log` when the log can still be appended to, the run's refusal in `launchd.log` (the same directory) and exit 1 in `launchctl print`; no page and no `open`. Nothing outside the directory says so: the health page's last-restart tile (R3-33) is the second witness | R3-32, R3-33 |
+| L-WD-7 | A run killed inside `open` may have shown nothing | the notice is counted as sent once its run saved `pending` (R332-12), so a run killed before `open` showed the page leaves the operator unwarned for that outage | the next run's `notify-unknown` line names it with the minute it was sent; the page is in `notices/` under that minute's name | R3-32 |
+| L-WD-8 | Waiting for the lock | a spawn duplicates the lock's descriptor until its `exec` | at most `LOCK_WAIT` (1 s) of 5, 10, 20, 40, 80 then 100 ms pauses, then refused by name (R332-11) | R3-32 |
+| L-WD-9 | The drive check needs the drive | the store root's device can be read only while it is mounted | rendered with the drive away, an agent carries a `NOT CHECKED` comment and only the by-name check was made; the verb at run time refuses the same drive whenever the root can be looked at (R332-16). One `stat` per missing path component | R3-32 |
