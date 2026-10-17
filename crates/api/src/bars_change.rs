@@ -1140,4 +1140,50 @@ mod cloud_mutant_tests {
             "a poisoned ledger records nothing"
         );
     }
+
+    /// **THE LINEAGE LEDGER IS READ ONCE PER STAMP**: a request finds the
+    /// ledger it parsed while its length and modified time stay, and parses
+    /// it again once either moves. The ledger is rewritten in place to a text
+    /// of the same length with its modified time put back; the parse held
+    /// (two unparsable lines) still answers. Moved on, the new text (one
+    /// unparsable line) is read. Kills the memo guard `(len, secs, nanos) ==
+    /// stamp -> false` in `Lineage::read`, which the 16 Oct pass called
+    /// cost-only: what it changes is whether a ledger is read again, and
+    /// that is what this asks.
+    #[test]
+    fn the_lineage_ledger_is_read_once_per_stamp() {
+        let root = crate::scratch::path("cloud-change-lineage-memo");
+        let _ = std::fs::remove_dir_all(&root);
+        let path = pull::gdfl_lineage::lineage_path(&root);
+        std::fs::create_dir_all(path.parent().expect("a ledger directory"))
+            .expect("the ledger directory");
+        std::fs::write(&path, "bad1\nbad2\n").expect("two unparsable lines");
+        let said = |lineage: &Lineage| lineage.fault.clone().unwrap_or_default();
+        assert!(said(&Lineage::read(&root, Vendor::Gdfl)).starts_with("2 line(s)"));
+
+        let modified = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .expect("the ledger's modified time");
+        std::fs::write(&path, "bad1_bad2\n").expect("the same length, one line");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(modified))
+            .expect("the modified time put back");
+        assert!(
+            said(&Lineage::read(&root, Vendor::Gdfl)).starts_with("2 line(s)"),
+            "the parse held under an unmoved stamp answers"
+        );
+
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(modified + std::time::Duration::from_secs(1)))
+            .expect("the modified time moved on");
+        assert!(
+            said(&Lineage::read(&root, Vendor::Gdfl)).starts_with("1 line(s)"),
+            "a moved stamp is read again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -4337,4 +4337,74 @@ mod cloud_mutant_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Marks the child process of `the_index_memos_hold_exactly_their_budgets`.
+    const MEMO_CHILD: &str = "BRUTEX_CLOUD_SORT_MEMO_CHILD";
+
+    /// **THE FENCE MEMO HOLDS TABLES UP TO ITS WHOLE 64 MiB BUDGET, AND THE
+    /// CUT MEMO ENTRIES UP TO ITS 48 MiB ONE; A BYTE MORE IS NOT HELD AND
+    /// EMPTIES NOTHING.** What a process keeps between requests is these
+    /// budgets: a smaller one re-reads tables a request would have found held.
+    /// Run in a child process, because the memos are the process's and
+    /// filling one would empty it under every other test. Kills the eight
+    /// mutants of the two budget constants, which the 16 Oct pass called
+    /// cost-only: the cost they change is what a memo holds, and that is
+    /// asked here.
+    #[test]
+    fn the_index_memos_hold_exactly_their_budgets() {
+        const MIB: usize = 1024 * 1024;
+        if std::env::var_os(MEMO_CHILD).is_none() {
+            let out = crate::isolated::rerun(
+                "bars::sort::cloud_mutant_tests::the_index_memos_hold_exactly_their_budgets",
+                &[(MEMO_CHILD, std::ffi::OsStr::new("1"))],
+            );
+            assert!(out.contains("both memos held their budgets"), "{out}");
+            return;
+        }
+        let root = scratch("memo-budgets");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let shape = Shape::of(month(1), 60, super::symbol_id("NIFTY"));
+        let fences = std::sync::Arc::new(
+            SortIndex::open(&srt, &shape)
+                .expect("the index")
+                .fences(0, Column::Close)
+                .expect("a fence table"),
+        );
+        let stamp = super::Stamp::of(&std::fs::metadata(&srt).expect("the index's stamp"));
+        let fence_key = |run: usize| (srt.clone(), stamp, run, Column::Close);
+        super::FENCE_TABLES.put(fence_key(0), std::sync::Arc::clone(&fences), 64 * MIB);
+        assert!(
+            super::FENCE_TABLES.get(&fence_key(0)).is_some(),
+            "64 MiB is held"
+        );
+        super::FENCE_TABLES.put(fence_key(1), fences, 64 * MIB + 1);
+        assert!(
+            super::FENCE_TABLES.get(&fence_key(1)).is_none(),
+            "a byte more is not"
+        );
+        assert!(
+            super::FENCE_TABLES.get(&fence_key(0)).is_some(),
+            "and empties nothing"
+        );
+
+        let entries: super::CutEntries = std::sync::Arc::new((std::sync::Arc::from(Vec::new()), 0));
+        let cut_key = |run: usize| (srt.clone(), stamp, run, Column::Close, 0_i64, 1_i64);
+        super::CUT_ENTRIES.put(cut_key(0), std::sync::Arc::clone(&entries), 48 * MIB);
+        assert!(
+            super::CUT_ENTRIES.get(&cut_key(0)).is_some(),
+            "48 MiB is held"
+        );
+        super::CUT_ENTRIES.put(cut_key(1), entries, 48 * MIB + 1);
+        assert!(
+            super::CUT_ENTRIES.get(&cut_key(1)).is_none(),
+            "a byte more is not"
+        );
+        assert!(
+            super::CUT_ENTRIES.get(&cut_key(0)).is_some(),
+            "and empties nothing"
+        );
+        println!("both memos held their budgets");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
