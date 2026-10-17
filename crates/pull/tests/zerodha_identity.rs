@@ -786,6 +786,9 @@ fn a_zero_price_day_bar_is_refused_by_name_at_landing() {
         );
         let named = whys(&done, "non_positive_price");
         assert_eq!(named.len(), 2, "{symbol}: {:?}", done.failures);
+        // Each refusal names its own row of the answer.
+        assert!(named[0].starts_with("row 1:"), "{}", named[0]);
+        assert!(named[1].starts_with("row 3:"), "{}", named[1]);
         assert!(
             named[0].contains("open 0, high 0, low 0, close 0"),
             "{}",
@@ -1357,4 +1360,117 @@ fn an_index_is_never_judged_by_the_jump_rule() {
         month_bars(&scratch.0, symbol, Timeframe::MINUTE_1, (2024, 1)).len(),
         sent
     );
+}
+
+/// Every `pull.identity` line the sink holds for `instrument`.
+fn identity_lines(sink: &telemetry::Sink, instrument: &str) -> Vec<String> {
+    let needle = format!("\"instrument\":\"{instrument}\"");
+    sink.paths()
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|line| line.contains("\"target\":\"pull.identity\"") && line.contains(&needle))
+        .collect()
+}
+
+/// `/logs` says what the screen did (one `warn` per refused cause and day, an
+/// `info` line for minutes left unjudged) and says nothing about an answer
+/// that was wholly held. Each symbol here is used by no other test in this
+/// binary, so the global sink's lines can be told apart.
+#[test]
+fn the_screen_names_each_refused_cause_and_day_on_the_log() {
+    let dir = std::env::temp_dir().join(format!("brutex-identity-log-{}", std::process::id()));
+    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    let sink = match telemetry::install(&config) {
+        Ok(installed) => installed,
+        Err(_already) => telemetry::global().expect("install named the sink that exists"),
+    };
+    let scratch = Scratch::new("identity-log");
+    let (from, to, days) = week();
+
+    // KFINTECH: a zero day bar (day arm), then a zero minute (minute arm).
+    let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    day_rows[1] = RawRow {
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        ..day_rows[1]
+    };
+    let done = land_cash(
+        &scratch.0,
+        "KFINTECH",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        day_rows,
+    );
+    assert_eq!(whys(&done, "non_positive_price").len(), 1);
+    let lines = identity_lines(sink, "KFINTECH");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"level\":\"warn\""), "{}", lines[0]);
+    assert!(
+        lines[0].contains("\"cause\":\"non_positive_price\""),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("\"listing\":\"inferred_from_vendor_span\""),
+        "{}",
+        lines[0]
+    );
+    let mut rows = answer(days[2], days[2]);
+    rows[7].close = 0;
+    rows[7].low = 0;
+    let done = land_cash(
+        &scratch.0,
+        "KFINTECH",
+        (days[2], days[2]),
+        pull::vendor::Granularity::Minute1,
+        rows,
+    );
+    assert_eq!(whys(&done, "non_positive_price").len(), 1);
+    assert!(
+        whys(&done, "non_positive_price")[0].contains("row 7:"),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(identity_lines(sink, "KFINTECH").len(), 2);
+
+    // PATANJALI: a clean day rung and clean minutes. Nothing to say.
+    let rows = days.iter().copied().map(day_candle).collect();
+    let done = land_cash(
+        &scratch.0,
+        "PATANJALI",
+        (from, to),
+        pull::vendor::Granularity::Day1,
+        rows,
+    );
+    assert!(done.failures.is_empty());
+    let done = land_cash(
+        &scratch.0,
+        "PATANJALI",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert!(
+        identity_lines(sink, "PATANJALI").is_empty(),
+        "{:?}",
+        identity_lines(sink, "PATANJALI")
+    );
+
+    // UNITDSPR: minutes and no day rung. They land, unjudged, and it is said.
+    let done = land_cash(
+        &scratch.0,
+        "UNITDSPR",
+        (from, to),
+        pull::vendor::Granularity::Minute1,
+        answer(from, to),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let lines = identity_lines(sink, "UNITDSPR");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("\"level\":\"info\""), "{}", lines[0]);
+    assert!(lines[0].contains("\"no_day_rung\":1875"), "{}", lines[0]);
 }
