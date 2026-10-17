@@ -8788,7 +8788,24 @@ fn vendor_down_sentence(streak: u32, done: usize, total: usize) -> String {
     )
 }
 
-/// two parameters are fetched against the same signing instant.
+/// Reads one feed's credential from Parameter Store (`CLAUDE.md` §8).
+///
+/// The `access-token` is always read. A feed whose auth row names a key field
+/// reads that parameter too: Zerodha's row names `api-key`
+/// (`pull::vendor::AuthScheme::PrefixedPair`), so a Zerodha credential is two
+/// reads and every other feed in this build is one. One signing stamp is taken
+/// first and shared, so when there are two parameters they are fetched against
+/// the same signing instant.
+///
+/// This is the first read only. A vendor that rejects the value is answered by
+/// `crate::credential_law::Watch::reread` — one more read, compared with the
+/// rejected one by fingerprint (D-0948) — not by calling this again in a loop.
+///
+/// # Errors
+///
+/// [`crate::credential_law::Unreadable`], classed: a clock that cannot sign or
+/// a path that cannot be built is configuration, and Parameter Store's own
+/// answer keeps the kind it was refused with.
 async fn read_credential(
     identity: &pull::ssm::AwsIdentity,
     config: &pull::config::CredentialConfig,
@@ -8822,7 +8839,9 @@ async fn read_credential(
 
     let token = read("access-token").await?;
     match auth.key_field {
-        // One secret. Every feed in this build until a two-secret vendor lands.
+        // One secret: a feed whose auth row names no key field sends the
+        // access-token alone. Zerodha is the two-secret vendor and takes the arm
+        // below (`api-key`, `PrefixedPair`).
         None => Ok(pull::http::Credential::token(token)),
         // Two. `Credential::pair` takes the key FIRST because that is the order
         // it goes on the wire, so a transposition is visible at the call site
@@ -16957,10 +16976,17 @@ fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str)
 /// connections took the process to its 20,000-descriptor limit while a real
 /// `GET /vocab.json` got 0 bytes in 10.2 s.
 ///
-/// The clock starts at accept, and again after every response written on a
-/// kept-alive connection, and stops when the head's blank line arrives. It is
-/// a deadline for the WHOLE head, not an idle timer: a client dripping one byte
-/// every second is cut at the same moment as one that sent nothing.
+/// The clock starts at accept, and again when each response on a kept-alive
+/// connection is COMPLETE — its body let go by the service and every byte of
+/// it handed to the socket — and stops when the head's blank line arrives. It
+/// is a deadline for the WHOLE head, not an idle timer: a client dripping one
+/// byte every second is cut at the same moment as one that sent nothing.
+///
+/// It never runs while a response is being written. It used to restart at a
+/// response's FIRST written byte, which cut every body still streaming this
+/// long after it began (g-ui-dom-vs-json-1); a response whose writes stop
+/// making progress is bounded by the same duration as a write stall instead
+/// (D-4975, `HeadDeadline`).
 ///
 /// Ten seconds is a choice, not a vendor fact: this listener is loopback-only
 /// and its clients are the operator's own browser, which sends a head in one
@@ -17194,29 +17220,211 @@ impl axum::serve::Listener for LimitedListener {
     }
 }
 
-/// Where one connection is in its current request head.
+/// Where one connection is in its current exchange.
 #[derive(Debug, Clone, Copy)]
 enum HeadState {
-    /// Waiting for a head to finish by `deadline`. `progress` is how much of
-    /// the blank line that ends a head has been seen (`\n`, then optionally
-    /// `\r`); `partial` is whether any byte of this head's request line has
-    /// arrived — the CR/LF a client may send before it does not count.
+    /// No request is in flight: waiting for a head to finish by `deadline`.
+    /// `progress` is how much of the blank line that ends a head has been seen
+    /// (`\n`, then optionally `\r`); `partial` is whether any byte of this
+    /// head's request line has arrived — the CR/LF a client may send before it
+    /// does not count.
     Awaiting {
         deadline: tokio::time::Instant,
         progress: u8,
         partial: bool,
     },
-    /// The head is complete; the request belongs to the handler, and no
-    /// deadline runs until the response is written.
+    /// A request is in flight: its head was delivered and its response is not
+    /// yet wholly handed to the socket. No head deadline runs here, however
+    /// long the handler takes or the body takes to drain (AH-02, D-4975); a
+    /// response whose writes stop making progress is bounded by the
+    /// write-stall deadline instead ([`HeadDeadline::stall`]).
     Delivered,
 }
 
-/// A connection whose request head must arrive by a deadline.
+/// What the request side of one connection tells its socket side (AH-02,
+/// g-ui-dom-vs-json-1, D-4975).
 ///
-/// Every operation is O(1) apart from the scan for the end of the head, which
-/// is O(1) per byte read: one match on a two-state progress counter.
-/// UNVERIFIED by any bench: structural, and stated as such in
-/// `docs/06-limits.md` under D-1200.
+/// # Why the socket cannot know on its own
+///
+/// The socket sees bytes, and the end of a response is not visible in them:
+/// hyper reads the socket while a body is still streaming (to notice a client
+/// that left), and the FIRST written byte is where a response starts, not
+/// where it ends. Until D-4975 that first byte re-armed the head deadline, so
+/// every response was cut an absolute [`HEAD_READ_TIMEOUT`] after its first
+/// byte while its body was still being written: the 183,715,726-byte GDFL
+/// census reached a reader slower than about 18 MB/s cut short, with a `200`
+/// and a `Content-Length` that promised the rest.
+///
+/// The service can tell. [`exchange_watch`] counts every request it takes
+/// (`entered`) and every response body hyper lets go of (`finished`), written
+/// whole or abandoned, and a request is in flight while `entered > finished`.
+/// The socket reads the two counters; hyper then says the rest itself, by
+/// asking the socket to flush only once its own write buffer is empty.
+#[derive(Debug, Default)]
+struct Exchange {
+    entered: std::sync::atomic::AtomicU64,
+    finished: std::sync::atomic::AtomicU64,
+    /// The newest response's request and status, read only to name a cut or
+    /// a client's close in the log.
+    newest: std::sync::Mutex<Option<ExchangeNote>>,
+}
+
+/// One response, as the log names it.
+#[derive(Debug, Clone)]
+struct ExchangeNote {
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    /// The status the handler answered with; `None` while it is running.
+    status: Option<u16>,
+    /// The body's length when the response declared one.
+    length: Option<u64>,
+    /// The `/db` access count this response is in, when it is in one: a cut
+    /// takes it back out of `served` (`crate::logs::note_cut`).
+    counted: Option<crate::logs::CountedServed>,
+}
+
+/// The [`Exchange`] of the connection a request arrived on, handed to the
+/// service through axum's connect-info extension.
+#[derive(Debug, Clone)]
+struct ExchangeOf(std::sync::Arc<Exchange>);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, LimitedListener>>
+    for ExchangeOf
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, LimitedListener>) -> Self {
+        Self(std::sync::Arc::clone(&stream.io().exchange))
+    }
+}
+
+/// One request the service has taken. Built when the request enters
+/// [`exchange_watch`]; dropped with its response body, which is the
+/// response's end.
+#[derive(Debug)]
+struct InFlight(std::sync::Arc<Exchange>);
+
+impl InFlight {
+    fn enter(exchange: std::sync::Arc<Exchange>) -> Self {
+        exchange
+            .entered
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(exchange)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0
+            .finished
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// A response body that tells its connection when hyper lets go of it.
+/// Every other answer is the inner body's own.
+struct WatchedBody {
+    inner: axum::body::Body,
+    _in_flight: InFlight,
+}
+
+impl http_body::Body for WatchedBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Counts a request in and its response out for the connection it arrived
+/// on (AH-02, D-4975). O(1) a request: one atomic add each way, two
+/// uncontended locks (the request line, then its status), one boxed body.
+///
+/// The extension is missing only for a router served without
+/// [`serve_limited`], which has no [`HeadDeadline`] to tell; such a request
+/// passes through untouched. `serve_limited` is the only place this layer is
+/// added, and it always serves with the extension.
+async fn exchange_watch(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use http_body::Body as _;
+    let Some(axum::extract::ConnectInfo(ExchangeOf(exchange))) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<ExchangeOf>>()
+        .cloned()
+    else {
+        return next.run(request).await;
+    };
+    let mut newest = ExchangeNote {
+        method: request.method().clone(),
+        uri: request.uri().clone(),
+        status: None,
+        length: None,
+        counted: None,
+    };
+    *exchange
+        .newest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(newest.clone());
+    let in_flight = InFlight::enter(std::sync::Arc::clone(&exchange));
+    let response = next.run(request).await;
+    newest.status = Some(response.status().as_u16());
+    newest.length = response.body().size_hint().exact();
+    newest.counted = response
+        .extensions()
+        .get::<crate::logs::CountedServed>()
+        .copied();
+    *exchange
+        .newest
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(newest);
+    response.map(|inner| {
+        axum::body::Body::new(WatchedBody {
+            inner,
+            _in_flight: in_flight,
+        })
+    })
+}
+
+/// A connection whose request head must arrive by a deadline, and whose
+/// response must keep making write progress.
+///
+/// # The two clocks (D-1200, amended by D-4975)
+///
+/// * The HEAD clock runs only while no request is in flight
+///   ([`HeadState::Awaiting`]): from accept, and again from the moment the
+///   previous response is complete — the service has let go of its body and
+///   hyper has handed every byte of it to the socket. A head that is not
+///   complete by then is answered `408` (if any of it came) and closed; an
+///   idle kept-alive connection is closed silently.
+/// * The WRITE-STALL clock runs only while a response is in flight and a
+///   write makes no progress: it starts at the first write that returns
+///   `Pending`, is cleared by any write that moves a byte, and closes the
+///   connection when a write has made no progress for the same timeout. A
+///   slow reader is never cut while it keeps taking bytes; a reader that
+///   stops is cut and logged as cut (`api.serve` "response cut").
+///
+/// # Cost
+///
+/// O(1) per operation. A write that moves bytes is one compare of the state,
+/// one add and one store: no clock read and no timer touched. A write that
+/// returns `Pending` reads the clock and resets the timer once per stall, and
+/// polls it once. A read or a flush loads two counters. The head scan is O(1)
+/// per byte read, one match on a two-state counter.
+/// `head_deadline_body_tests::a_progressing_write_touches_no_timer_and_a_stall_resets_it_once`
+/// counts it over 400 writes; the numbers are in `docs/06-limits.md` under
+/// D-4975.
 #[derive(Debug)]
 struct HeadDeadline {
     io: tokio::net::TcpStream,
@@ -17224,14 +17432,15 @@ struct HeadDeadline {
     timeout: std::time::Duration,
     state: HeadState,
     alarm: std::pin::Pin<Box<tokio::time::Sleep>>,
-    /// The waker of the last read that returned `Pending`.
-    ///
-    /// A read hyper left pending while the head was [`HeadState::Delivered`]
-    /// registered no alarm, and hyper does not poll again until something
-    /// wakes it. Without this, a response written on a kept-alive connection
-    /// re-armed a deadline nobody would ever look at: the idle socket was held
-    /// for as long as the client liked, which the keep-alive test caught.
-    parked_read: Option<std::task::Waker>,
+    /// Requests taken and responses finished, as the service counts them.
+    exchange: std::sync::Arc<Exchange>,
+    /// Bytes written since the request in flight was delivered.
+    written: u64,
+    /// When the write that is still making no progress first returned
+    /// `Pending`; `None` while writes progress.
+    stalled_since: Option<tokio::time::Instant>,
+    /// Whether this connection's cut or its client's close was logged.
+    reported: bool,
 }
 
 /// What a client that sent part of a head is told before its socket closes.
@@ -17255,7 +17464,10 @@ impl HeadDeadline {
                 partial: false,
             },
             alarm: Box::pin(tokio::time::sleep_until(deadline)),
-            parked_read: None,
+            exchange: std::sync::Arc::new(Exchange::default()),
+            written: 0,
+            stalled_since: None,
+            reported: false,
         }
     }
 
@@ -17289,7 +17501,7 @@ impl HeadDeadline {
             // its handler.
             progress = match (progress, byte) {
                 (1 | 2, b'\n') => {
-                    self.state = HeadState::Delivered;
+                    self.deliver();
                     return;
                 }
                 (_, b'\n') => 1,
@@ -17304,46 +17516,50 @@ impl HeadDeadline {
         };
     }
 
-    /// A written response starts the next head's clock.
-    fn rearm(&mut self) {
+    /// A request is in flight: no head clock until its response is complete.
+    fn deliver(&mut self) {
+        self.state = HeadState::Delivered;
+        self.written = 0;
+        self.stalled_since = None;
+    }
+
+    /// Lines the head clock up with what the service says (D-4975).
+    ///
+    /// `drained` is true only from `poll_flush`, which hyper calls on the
+    /// socket once its own write buffer is empty. With every request the
+    /// service took finished and at least one byte written since the head was
+    /// delivered, the response is complete, and only then does the next
+    /// head's clock start. The other way round, a request the service took
+    /// while the clock ran — a pipelined head hyper parsed from its own
+    /// buffer, which this wrapper never saw — stops the clock.
+    fn settle(&mut self, drained: bool, cx: &std::task::Context<'_>) {
+        use std::sync::atomic::Ordering::Acquire;
+        let entered = self.exchange.entered.load(Acquire);
+        let finished = self.exchange.finished.load(Acquire);
         match self.state {
-            HeadState::Delivered => {
+            HeadState::Awaiting { .. } if entered > finished => self.deliver(),
+            HeadState::Delivered if drained && entered == finished && self.written > 0 => {
                 let deadline = tokio::time::Instant::now() + self.timeout;
                 self.state = HeadState::Awaiting {
                     deadline,
                     progress: 0,
                     partial: false,
                 };
+                self.stalled_since = None;
                 self.alarm.as_mut().reset(deadline);
-                // Make the parked read look again, so it polls the alarm.
-                if let Some(waker) = self.parked_read.take() {
-                    waker.wake();
-                }
+                // hyper may not read again until something wakes it, and a
+                // clock nobody polls holds an idle socket for ever: the
+                // keep-alive test caught exactly that (D-1200).
+                cx.waker().wake_by_ref();
             }
-            // A RESPONSE STILL BEING WRITTEN, with no byte of a next head yet,
-            // moves the next head's clock to after THIS write, so it starts
-            // when the response ends, as the deadline's own doc says. It was
-            // armed by the response's FIRST write and never moved, so a body
-            // that took longer than the deadline to write was cut mid-body:
-            // `/store.json?feed=gdfl&encoding=census-tuples-v1`, 183,715,726
-            // bytes, ended at 138 to 178 MB at 10.2 to 10.4 s with curl exit
-            // 18 on the shadow of the real store (R3-09, 17 Oct 2026). One
-            // timer reset per write.
-            HeadState::Awaiting {
-                progress,
-                partial: false,
-                ..
-            } => {
-                let deadline = tokio::time::Instant::now() + self.timeout;
-                self.state = HeadState::Awaiting {
-                    deadline,
-                    progress,
-                    partial: false,
-                };
-                self.alarm.as_mut().reset(deadline);
-            }
-            // A pipelined head already under way keeps its own clock.
-            HeadState::Awaiting { partial: true, .. } => {}
+            // A RESPONSE STILL BEING WRITTEN never runs the head clock (R3-09's
+            // cut 184 MB census body, AH-02, D-4975): while the service holds a
+            // request the state is `Delivered` and the clock starts only when
+            // the response is complete, so an `Awaiting` here is a connection
+            // with nothing in flight and keeps its own clock.
+            // `head_deadline_tests::a_response_longer_than_the_deadline_to_write_is_delivered_whole`
+            // holds the case R3-09 fixed by a per-write reset.
+            HeadState::Awaiting { .. } | HeadState::Delivered => {}
         }
     }
 
@@ -17362,6 +17578,120 @@ impl HeadDeadline {
             "the request head did not arrive before the head-read deadline",
         )
     }
+
+    /// A write returned `Pending`: start the stall clock if it is not running,
+    /// and cut the response when it has run out.
+    fn stall(&mut self, cx: &mut std::task::Context<'_>) -> Option<std::io::Error> {
+        if self.stalled_since.is_none() {
+            let now = tokio::time::Instant::now();
+            self.stalled_since = Some(now);
+            self.alarm.as_mut().reset(now + self.timeout);
+        }
+        if self.alarm.as_mut().poll(cx).is_pending() {
+            return None;
+        }
+        let stalled_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
+        let said = self.report(
+            telemetry::Level::Warn,
+            "response cut",
+            &format!("no write progress for {stalled_ms} ms; the connection is closed"),
+        );
+        // A cut `/db` read is not a served one: its access count is taken
+        // back (D-4975).
+        if let Some(counted) = said {
+            crate::logs::note_cut(counted);
+        }
+        Some(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "response cut: no write progress for {stalled_ms} ms after {} bytes",
+                self.written
+            ),
+        ))
+    }
+
+    /// Fold one write's outcome into the stall clock.
+    fn wrote(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        written: std::task::Poll<std::io::Result<usize>>,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        use std::task::Poll;
+        match written {
+            Poll::Ready(Ok(n)) => {
+                if n > 0 {
+                    self.written = self
+                        .written
+                        .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                    self.stalled_since = None;
+                }
+                Poll::Ready(Ok(n))
+            }
+            Poll::Pending => match self.stall(cx) {
+                Some(cut) => Poll::Ready(Err(cut)),
+                None => Poll::Pending,
+            },
+            Poll::Ready(Err(why)) => {
+                let _left = self.report(
+                    telemetry::Level::Info,
+                    "response closed by the client",
+                    &format!("a write failed: {}", why.kind()),
+                );
+                Poll::Ready(Err(why))
+            }
+        }
+    }
+
+    /// Writes the one line this connection's cut or client close earns: what
+    /// was being answered, how much of it went, and why it stopped. Once per
+    /// connection, whichever comes first; the connection closes after it.
+    ///
+    /// Hands back the `/db` access count the response was in, when this call
+    /// wrote the line and the response was in one, so a cut can take it back.
+    fn report(
+        &mut self,
+        level: telemetry::Level,
+        message: &str,
+        why: &str,
+    ) -> Option<crate::logs::CountedServed> {
+        if self.reported {
+            return None;
+        }
+        self.reported = true;
+        let note = self
+            .exchange
+            .newest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let target = note
+            .as_ref()
+            .map(|note| {
+                note_alphabet(
+                    note.uri
+                        .path_and_query()
+                        .map_or(note.uri.path(), axum::http::uri::PathAndQuery::as_str),
+                )
+            })
+            .unwrap_or_default();
+        let method = note.as_ref().map_or("", |note| note.method.as_str());
+        let mut event = telemetry::Event::new(level, "api.serve", message)
+            .with("method", telemetry::Value::Str(method))
+            .with("path", telemetry::Value::Str(&target))
+            .with("bytes_written", telemetry::Value::Uint(self.written))
+            .with("delivered", telemetry::Value::Bool(false))
+            .with("why", telemetry::Value::Str(why));
+        if let Some(status) = note.as_ref().and_then(|note| note.status) {
+            event = event.with("status", telemetry::Value::Uint(u64::from(status)));
+        }
+        if let Some(length) = note.as_ref().and_then(|note| note.length) {
+            event = event.with("declared_length", telemetry::Value::Uint(length));
+        }
+        let counted = note.as_ref().and_then(|note| note.counted);
+        event = event.with("access_counted", telemetry::Value::Bool(counted.is_some()));
+        let _dropped_when_filtered = telemetry::emit(&event);
+        counted
+    }
 }
 
 impl tokio::io::AsyncRead for HeadDeadline {
@@ -17372,6 +17702,7 @@ impl tokio::io::AsyncRead for HeadDeadline {
     ) -> std::task::Poll<std::io::Result<()>> {
         use std::task::Poll;
         let this = &mut *self;
+        this.settle(false, cx);
         if let HeadState::Awaiting {
             deadline, partial, ..
         } = this.state
@@ -17379,20 +17710,36 @@ impl tokio::io::AsyncRead for HeadDeadline {
         {
             return Poll::Ready(Err(this.expire(partial)));
         }
+        let room = buf.remaining() > 0;
         let before = buf.filled().len();
         match std::pin::Pin::new(&mut this.io).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
-                if let Some(fresh) = buf.filled().get(before..) {
-                    this.observe(fresh);
+                match buf.filled().get(before..) {
+                    Some(fresh) if !fresh.is_empty() => this.observe(fresh),
+                    // The end of the stream with a request in flight: the
+                    // client left before its response was whole.
+                    _ if room && matches!(this.state, HeadState::Delivered) => {
+                        let _left = this.report(
+                            telemetry::Level::Info,
+                            "response closed by the client",
+                            "the client closed its side before the response was whole",
+                        );
+                    }
+                    _ => {}
                 }
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(why)) => Poll::Ready(Err(why)),
-            Poll::Pending => {
-                match &mut this.parked_read {
-                    Some(parked) => parked.clone_from(cx.waker()),
-                    None => this.parked_read = Some(cx.waker().clone()),
+            Poll::Ready(Err(why)) => {
+                if matches!(this.state, HeadState::Delivered) {
+                    let _left = this.report(
+                        telemetry::Level::Info,
+                        "response closed by the client",
+                        &format!("a read failed: {}", why.kind()),
+                    );
                 }
+                Poll::Ready(Err(why))
+            }
+            Poll::Pending => {
                 if let HeadState::Awaiting { partial, .. } = this.state
                     && this.alarm.as_mut().poll(cx).is_ready()
                 {
@@ -17405,17 +17752,21 @@ impl tokio::io::AsyncRead for HeadDeadline {
 }
 
 impl tokio::io::AsyncWrite for HeadDeadline {
+    /// hyper writes nothing but responses here (the `408` goes out by
+    /// `try_write`), so a write while the head clock runs is a response
+    /// starting — one for a head hyper parsed from its own buffer — and
+    /// stops that clock.
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
-        let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
-            this.rearm();
+        if let HeadState::Awaiting { .. } = this.state {
+            this.deliver();
         }
-        written
+        let written = std::pin::Pin::new(&mut this.io).poll_write(cx, buf);
+        this.wrote(cx, written)
     }
 
     fn poll_write_vectored(
@@ -17424,11 +17775,11 @@ impl tokio::io::AsyncWrite for HeadDeadline {
         bufs: &[std::io::IoSlice<'_>],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = &mut *self;
-        let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
-        if matches!(written, std::task::Poll::Ready(Ok(n)) if n > 0) {
-            this.rearm();
+        if let HeadState::Awaiting { .. } = this.state {
+            this.deliver();
         }
-        written
+        let written = std::pin::Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
+        this.wrote(cx, written)
     }
 
     /// `true`, because `poll_write_vectored` above forwards to a tokio
@@ -17442,11 +17793,18 @@ impl tokio::io::AsyncWrite for HeadDeadline {
         true
     }
 
+    /// hyper flushes the socket only once its own write buffer is empty, so a
+    /// flush is where a finished response becomes complete ([`Self::settle`]).
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.io).poll_flush(cx)
+        let this = &mut *self;
+        let flushed = std::pin::Pin::new(&mut this.io).poll_flush(cx);
+        if matches!(flushed, std::task::Poll::Ready(Ok(()))) {
+            this.settle(true, cx);
+        }
+        flushed
     }
 
     fn poll_shutdown(
@@ -17456,6 +17814,12 @@ impl tokio::io::AsyncWrite for HeadDeadline {
         std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
     }
 }
+
+/// AH-02, D-4975: bodies longer than the head deadline, slow and stopped
+/// readers, pipelining mid-body, and the empty-bodied answers.
+#[cfg(test)]
+#[path = "head_deadline_body_tests.rs"]
+mod head_deadline_body_tests;
 
 /// Serves on an already-bound listener until `shutdown` resolves.
 ///
@@ -17505,6 +17869,13 @@ pub async fn serve_limited(
         limits.body_read_timeout,
         body_deadline,
     ));
+    // The watch is the OUTER layer, so a request is counted in before any
+    // other middleware runs and out only when hyper lets its body go, and the
+    // connect-info service hands each request its connection's `Exchange`
+    // (AH-02, D-4975).
+    let app = app
+        .layer(axum::middleware::from_fn(exchange_watch))
+        .into_make_service_with_connect_info::<ExchangeOf>();
     // THE GRACEFUL STOP IS BOUNDED (R3-14): `crate::speed::drain_bound`
     // waits for requests still open at most `DRAIN_GRACE` past the signal,
     // then says so, and the stop returns: a slow read cannot hold a
