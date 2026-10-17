@@ -183,7 +183,7 @@ caller. Four classes. Line numbers are this branch's.
 | `bars.rs` | 659 (658) | `u64::try_from(usize)` on a 64-bit target. |
 | `bars.rs` | 2292 (2290) | `u32::try_from` of a series index (at most `MAX_SERIES`, 1,024) and of a plan's run count (one a month or one a day of at most 120 months). |
 | `bars_sort.rs` | 2102 (2101), 2172 (2171) | `u32::try_from` of a series index, as above. |
-| `gaps_route.rs` | 1335–1351, 1354–1357 (1353) | `audit_one`'s answer for a month whose first day the calendar cannot name, and the `empty` closure only it calls. `YearMonth` and `pull::session::Day` share the range 1970..=9999, so every month has a first day. |
+| `gaps_route.rs` | 1335, 1342–1344, 1346–1349, 1351, 1354–1357 (1353) | `audit_one`'s answer for a month whose first day the calendar cannot name, and the `empty` closure only it calls. `YearMonth` and `pull::session::Day` share the range 1970..=9999, so every month has a first day. |
 | `ladder.rs` | (455) | `Day::year_month` fails only outside `YearMonth`'s range, which is `Day`'s. |
 
 **A2. A lookup by an index the same function took from the list it now
