@@ -220,13 +220,44 @@
        a series' first month is measured from its first bar, and the months
        between its two ends it does not hold are drawn absent.
        ====================================================================== */
-    /* ON EITHER TAB (R3-04): the Coverage tab's count is read on the Bars
-       tab too, and it counts the absent months this index finds. One pass
-       per census read, as before; no request. */
-    const seriesIndex = $derived.by(() => {
+    const seriesIndex = $derived(db.view === 'census' ? indexSeries(db.deco, null, null) : new Map());
+
+    /**
+     * THE SAME INDEX FOR THE MATCHED SERIES ONLY (R3-04): what the Coverage
+     * tab's count reads, on either tab. Each entry is the one `seriesIndex`
+     * holds for that series — and a derived rung's 1min source is kept too —
+     * but a census row of any other instrument or rung costs two Set probes,
+     * not a Map entry and a Set of months. Measured on 243,810 synthetic
+     * rows: indexing the whole census cost p50 130 ms on the Bars tab; see
+     * the report for this path's figures.
+     */
+    const matchedSeries = $derived.by(() => {
+      const names = new Set();
+      const rungs = new Set();
+      for (const r of db.matched) {
+        names.add(r.instrument);
+        rungs.add(r.timeframe);
+        if (derivedRungs.has(r.timeframe)) rungs.add('1min');
+      }
+      return indexSeries(db.deco, names, rungs);
+    });
+
+    /**
+     * First and last month and day of each (instrument, rung) in `rows`, and
+     * the months it holds; only instruments in `names` and rungs in `rungs`
+     * when they are given.
+     *
+     * @param {any[]} rows
+     * @param {Set<string> | null} names
+     * @param {Set<string> | null} rungs
+     */
+    function indexSeries(rows, names, rungs) {
       /** @type {Map<string, { first: string, last: string, firstDay: number | null, lastDay: number | null, months: Set<string>, like: any }>} */
       const by = new Map();
-      for (const r of db.deco) {
+      if (names !== null && names.size === 0) return by;
+      for (const r of rows) {
+        if (names !== null && !names.has(r.instrument)) continue;
+        if (rungs !== null && !rungs.has(r.timeframe)) continue;
         const key = `${r.instrument}\u0000${r.timeframe}`;
         let s = by.get(key);
         if (!s) {
@@ -246,7 +277,7 @@
         }
       }
       return by;
-    });
+    }
 
     /**
      * HOW FAR THE STORE REACHES AT EACH RUNG: the last day any series holds
@@ -350,23 +381,25 @@
      */
     function absentOf(instrument, timeframe) {
       const s = seriesIndex.get(`${instrument}\u0000${timeframe}`);
-      return s ? absentMonthsOf(instrument, timeframe).map((m) => absentRow(s.like, m)) : [];
+      return s ? absentMonthsOf(seriesIndex, instrument, timeframe).map((m) => absentRow(s.like, m)) : [];
     }
 
     /**
      * The absent months of one series as `YYYY-MM`, before any row is built:
-     * what `absentOf` draws and what the Coverage tab's count counts.
+     * what `absentOf` draws and what the Coverage tab's count counts, each
+     * from an index holding every rung of the instrument.
      *
+     * @param {Map<string, any>} index `seriesIndex` or `matchedSeries`
      * @param {string} instrument
      * @param {string} timeframe
      */
-    function absentMonthsOf(instrument, timeframe) {
-      const s = seriesIndex.get(`${instrument}\u0000${timeframe}`);
+    function absentMonthsOf(index, instrument, timeframe) {
+      const s = index.get(`${instrument}\u0000${timeframe}`);
       if (!s) return [];
       let first = s.first;
       let last = s.last;
       if (derivedRungs.has(timeframe)) {
-        const one = seriesIndex.get(`${instrument}\u00001min`);
+        const one = index.get(`${instrument}\u00001min`);
         if (one) {
           if (one.first < first) first = one.first;
           if (one.last > last) last = one.last;
@@ -402,9 +435,9 @@
         const key = `${r.instrument}\u0000${r.timeframe}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const s = seriesIndex.get(key);
+        const s = matchedSeries.get(key);
         if (!s) continue;
-        for (const m of absentMonthsOf(r.instrument, r.timeframe)) {
+        for (const m of absentMonthsOf(matchedSeries, r.instrument, r.timeframe)) {
           if (monthInWindow(m, covWindow)) out.push({ like: s.like, month: m });
         }
       }

@@ -156,8 +156,11 @@ test('coverage_follows_the_day_window_or_says_it_does_not (DB-046, R3-04)', () =
   assert.match(declaration(COVERAGE, 'listedAbsent'), /if \(monthInWindow\(m, covWindow\)\) out\.push/);
   assert.match(COVERAGE, /const covCount = \$derived\(listedStored\.length \+ listedAbsent\.length\)/);
   assert.match(declaration(COVERAGE, 'judged'), /for \(const r of listedStored\)[\s\S]*for \(const a of listedAbsent\)/);
-  // The series index is no longer census-only: the count reads it on Bars too.
-  assert.doesNotMatch(declaration(COVERAGE, 'seriesIndex'), /db\.view !== 'census'/);
+  // The count reads an index of the matched instruments only, on either tab;
+  // the whole-census index stays the Coverage view's, so Bars pays a Set probe a row.
+  assert.match(declaration(COVERAGE, 'matchedSeries'), /names\.add\(r\.instrument\);\s*rungs\.add\(r\.timeframe\);\s*if \(derivedRungs\.has\(r\.timeframe\)\) rungs\.add\('1min'\);[\s\S]*return indexSeries\(db\.deco, names, rungs\);/);
+  assert.match(COVERAGE, /const seriesIndex = \$derived\(db\.view === 'census' \? indexSeries\(db\.deco, null, null\) : new Map\(\)\);/);
+  assert.match(declaration(COVERAGE, 'listedAbsent'), /absentMonthsOf\(matchedSeries, r\.instrument, r\.timeframe\)/);
   assert.doesNotMatch(declaration(COVERAGE, 'listedAbsent'), REQUEST);
   // It says plainly that dates narrow Coverage, and why the grid is empty.
   assert.match(COVERAGE, /\{#if db\.covWindow\}[\s\S]*months touching <b>\{windowText\(db\.covWindow\)\}<\/b>/);
