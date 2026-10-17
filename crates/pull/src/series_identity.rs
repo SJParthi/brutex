@@ -1098,6 +1098,17 @@ mod tests {
             judge.judge(second(2, 5), day(2), ohlc(10_100)),
             (Verdict::Held, Some(0))
         );
+        // A jump of exactly JUMP_BPS lands: only one beyond it is refused.
+        assert_eq!(
+            judge
+                .judge(second(2, 6), day(2), [10_000, 10_000, 10_000, 10_000])
+                .0,
+            Verdict::Held
+        );
+        assert_eq!(
+            judge.judge(second(2, 7), day(2), [13_000, 13_000, 10_500, 10_500]),
+            (Verdict::Held, Some(JUMP_BPS))
+        );
         // Without the jump rule nothing is measured, and without a listing the
         // first-day-bar rule refuses.
         let mut plain = MinuteJudge::new(&book, Rules::default(), 60);

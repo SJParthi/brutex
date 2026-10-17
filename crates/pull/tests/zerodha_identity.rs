@@ -1319,3 +1319,42 @@ fn a_price_the_landing_cannot_hold_is_left_to_the_landing() {
         assert!(whys(&done, "non_positive_price").is_empty());
     }
 }
+
+/// The jump rule is a CASH rule (D-4993 item 4): the same interleave under an
+/// index key and a day bar that spans both levels is not judged by it. An
+/// index is judged by its day rung alone (`foreign_level`).
+#[test]
+fn an_index_is_never_judged_by_the_jump_rule() {
+    let scratch = Scratch::new("index-no-jump");
+    let symbol = "NIFTY";
+    let (from, to, days) = week();
+    let mut day_rows: Vec<RawRow> = days.iter().copied().map(day_candle).collect();
+    day_rows[2].low = LEVEL * 8_990 / 82_165 - 1_000;
+    let req = request(from, to, pull::vendor::Granularity::Day1);
+    let done = pull::ingest::from_window(
+        &RawWindow { rows: day_rows },
+        symbol,
+        "IDENTITY TEST",
+        &scratch.0,
+        plan(&req),
+    );
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    let mut rows = answer(from, to);
+    let sent = rows.len();
+    for row in &mut rows {
+        let (on, minute) = local_minute(row);
+        if on == days[2] && (600..=609).contains(&minute) {
+            *row = impostor(on, minute, 8_990, 82_165);
+        }
+    }
+    let done = land(&scratch.0, symbol, from, to, rows);
+    assert!(
+        whys(&done, "in_session_jump").is_empty(),
+        "{:?}",
+        done.failures
+    );
+    assert_eq!(
+        month_bars(&scratch.0, symbol, Timeframe::MINUTE_1, (2024, 1)).len(),
+        sent
+    );
+}

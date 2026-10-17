@@ -309,6 +309,10 @@ fn a_master_name_is_read_exactly() {
         "NSE_CM_security_04092026.csv.gz.receipt",
         "NSE_CM_security_0409202.csv.gz",
         "NSE_CM_security_0409202x.csv.gz",
+        // Nine digits whose first eight read as a day, and a sign the integer
+        // parse would take: neither is a master's name.
+        "NSE_CM_security_040920261.csv.gz",
+        "NSE_CM_security_+1012026.csv.gz",
         "NSE_CM_security_31022026.csv.gz",
         "NSE_FO_security_04092026.csv.gz",
         "NSE_CM_security_04092026.csv",
