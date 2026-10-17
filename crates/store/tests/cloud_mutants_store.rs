@@ -3314,3 +3314,42 @@ fn the_head_extremes_are_the_sort_runs() {
         );
     }
 }
+
+/// **ON ONE THREAD, A LATER FAILURE NEVER REPLACES THE EARLIEST.**
+///
+/// Covers `flush_all`'s keeping of the refusal it already holds when a
+/// later target fails after it (`at < earlier` false). On one thread the
+/// targets are flushed in order, so the month's directory (earlier) is
+/// refused first and the checksum sidecar (later) second, and the refusal
+/// reported is the directory's, with both refused.
+#[test]
+fn on_one_thread_a_later_failure_never_replaces_the_earliest() {
+    use std::sync::{Arc, Mutex};
+    use store::file::{BarFile, BatchFlush, DurableBatch, StoreError};
+    use store::path::FileKind;
+    let root = scratch("flush-in-order");
+    let bars = second_month(FileKind::Bars);
+    let mut writer = BarFile::open_or_create(&root, bars, 11).unwrap();
+    writer.append(&second_bars(0, 40)).unwrap();
+    drop(writer);
+    let month_dir = bars.to_path_buf(&root).parent().unwrap().to_path_buf();
+    let checksums = second_month(FileKind::Checksums).to_path_buf(&root);
+    let batch = DurableBatch::new(BatchFlush::EveryFile);
+    assert!(batch.confirm_month(&root, bars).unwrap());
+    let refused = Arc::new(Mutex::new(Vec::new()));
+    let (dir, crc, seen) = (month_dir.clone(), checksums.clone(), Arc::clone(&refused));
+    let flush = move |_: &fs::File, at: &std::path::Path| {
+        if at == dir || at == crc {
+            seen.lock().unwrap().push(at.to_path_buf());
+            return Err(std::io::Error::other("refused"));
+        }
+        Ok(())
+    };
+    let refusal = batch.make_durable_by(1, &flush).unwrap_err();
+    assert!(
+        matches!(&refusal, StoreError::Io { path, .. } if *path == month_dir),
+        "{refusal:?}"
+    );
+    assert_eq!(*refused.lock().unwrap(), vec![month_dir, checksums]);
+    let _ignored = fs::remove_dir_all(&root);
+}
