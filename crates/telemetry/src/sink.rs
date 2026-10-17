@@ -997,6 +997,11 @@ impl Sink {
         }
         // A FLOOR AHEAD OF THE CLOCK IS NAMED, not carried silently.
         let now = now_millis();
+        // Under `cfg(test)` the clock this check reads can be pinned, once, on
+        // this thread: a stamp EQUAL to the clock is not ahead of it, and only
+        // a pinned clock can be equal on request.
+        #[cfg(test)]
+        let now = tests::open_clock().unwrap_or(now);
         if resumed.last_at > now {
             sink.report(&format!(
                 "{}: the last line on disk is stamped {} ms, ahead of the clock's {now} ms; \
@@ -3531,6 +3536,20 @@ mod tests {
         /// `Audit::retire`'s making of it and its look, once, on this thread.
         static BETWEEN: std::cell::Cell<Option<fn(&Path)>> =
             const { std::cell::Cell::new(None) };
+        /// The clock the next `Sink::open` on this thread reads for its
+        /// ahead-of-the-clock check, once.
+        static OPEN_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Pins the clock the next `Sink::open` on this thread checks its
+    /// resumed floor against.
+    pub(super) fn pin_open_clock(at_unix_millis: i64) {
+        OPEN_CLOCK.with(|pinned| pinned.set(Some(at_unix_millis)));
+    }
+
+    /// The pinned clock, taken: it answers once.
+    pub(super) fn open_clock() -> Option<i64> {
+        OPEN_CLOCK.with(std::cell::Cell::take)
     }
 
     /// Arms [`between_making_and_asking`] for the next retire on this
@@ -8927,6 +8946,50 @@ mod cloud_mutant_tests {
             "{health:?}"
         );
         drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A RESUMED FLOOR EQUAL TO THE CLOCK IS NOT AHEAD OF IT; ONE
+    /// MILLISECOND PAST IT IS.**
+    ///
+    /// Kills `replace > with >= in Sink::open`'s ahead-of-the-clock check,
+    /// which would name a line stamped at this very millisecond as ahead of
+    /// the clock and set every new event to wait for nothing. The last line
+    /// is re-stamped at a fixed instant, and the open's clock is pinned
+    /// (once, on this thread) to that instant and then to one millisecond
+    /// before it.
+    #[test]
+    fn a_resumed_floor_equal_to_the_clock_is_not_ahead_of_it() {
+        let _gate = crate::tests::no_fork_in_flight();
+        let dir = scratch("floor-equal");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            assert!(sink.emit(&Event::info("t", "before")).is_written());
+        }
+        let path = super::current_path(&dir);
+        let text = std::fs::read_to_string(&path).expect("the log");
+        let stamp = crate::record::Record::decode(text.trim_end().as_bytes())
+            .expect("a record")
+            .at_unix_millis;
+        let at = 4_102_444_800_000_i64;
+        let patched = text.replacen(&format!("\"ms\":{stamp}"), &format!("\"ms\":{at}"), 1);
+        assert_ne!(patched, text, "the premise: the stamp was rewritten");
+        std::fs::write(&path, patched).expect("rewrite");
+        for (clock, ahead) in [(at, false), (at - 1, true)] {
+            crate::sink::tests::pin_open_clock(clock);
+            let reopened = Sink::open(&Config::new(&dir)).expect("reopens");
+            assert!(
+                crate::sink::tests::open_clock().is_none(),
+                "the pin was read"
+            );
+            let named = reopened.health().last_error.unwrap_or_default();
+            assert_eq!(
+                named.contains("ahead of the clock"),
+                ahead,
+                "clock {clock}, stamp {at}: {named}"
+            );
+            drop(reopened);
+        }
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
