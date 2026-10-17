@@ -212,12 +212,7 @@ the old pass already used. No vendor byte is committed.
 | `a_zero_book_print_before_the_match_band_never_prices_the_band` | `tests/cloud_mutants_import.rs` | An eligible share's zero-book print at 15:20 is diverted as a print but never decides the band's price, so the booked 15:30 row at the band's one price is taken as the auction's and nothing is left unattributed. |
 | `a_stored_share_of_the_full_symbol_width_is_filed` (extended) | `tests/cloud_mutants_import.rs` | One byte past the symbol capacity is no slot and no member. |
 | `the_monthly_walk_back_over_a_holiday_answers_within_a_bound` | `gdfl_nfo.rs` | The monthly expiry over Thu 29 Mar 2018 (a holiday) answers 28 Mar inside a ten-second watchdog; a walk that stops stepping fails here instead of hanging the run. |
-
-## Done
-
-- Re-applied the 2026-10-16 tests onto the newest `feat/db-fix`.
-
-## Left
+| `a_stored_day_holding_every_owed_minute_has_no_line` | `request_minutes.rs` | `stored_line`: a whole stored day has no `gap` line; a day one minute short has the line, field by field, with `fill=` and `source=store`, and a count of 1. |
 
 ## Gates
 
