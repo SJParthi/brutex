@@ -413,7 +413,7 @@ export function dayFieldWhy(o) {
   const held = dayBoundWhy(iso, { lo: o.min, hi: o.max, reason: o.reason });
   if (held) return `${label} ${dayText(iso)}: ${held}`;
   /* `windowWhy` answers only a backwards pair, so it is asked both ways. */
-  const order = windowWhy(o.after ?? '', iso) ?? windowWhy(iso, o.before ?? '');
+  const order = windowWhy(o.after ?? '', iso) ?? windowWhy(iso, /** @type {string} */ (o.before));
   if (order) return `${order}.`;
   return null;
 }
@@ -476,8 +476,7 @@ export function calendarNote(o) {
 const clockOf = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 /** @param {unknown} t `HH:MM` @returns {number | null} */
 const minuteOf = (t) => {
-  if (typeof t !== 'string') return null;
-  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(t);
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(t));
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 };
 
@@ -677,8 +676,7 @@ export function specialsIn(specials, lo, hi) {
  * @param {string} ym
  */
 export function monthDays(ym) {
-  if (typeof ym !== 'string') return null;
-  const m = /^(\d{4})-(\d{2})$/.exec(ym);
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym));
   if (!m) return null;
   const y = Number(m[1]);
   const mo = Number(m[2]);

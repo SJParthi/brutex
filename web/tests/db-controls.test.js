@@ -476,7 +476,8 @@ test('the edges of the special list, the day count and the month span', () => {
   assert.equal(prefixOf(cal), prefixOf(cal), 'built once per calendar and kept');
   assert.deepEqual([...prefixOf(cal).regular], [0, 1, 2, 2, 3, 4, 4, 4, 5]);
   assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-01'), 1, 'one day');
-  assert.equal(regularDaysIn(cal, '1970-01-05', '1970-01-04'), 0, 'backwards over a regular day');
+  assert.equal(regularDaysIn(cal, '1970-01-05', '1970-01-04'), 0, 'backwards by one day');
+  assert.equal(regularDaysIn(cal, '1970-01-06', '1970-01-03'), 0, 'backwards over regular days');
   assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-06'), 4);
   assert.equal(regularDaysIn(cal, '1970-01-08', '1970-01-08'), 1, "after a '-' day, from the day after it");
   assert.equal(regularDaysIn(cal, '1970-01-07', '1970-01-08'), null, "a '-' day at the span's start");
@@ -545,5 +546,7 @@ test('the edges of the shortfall fold and the hidden clause', () => {
   assert.deepEqual(by.get('D')?.get('1min'), { months: 1, short: 0, trade: false, seg: 'CASH' }, 'the CASH contract is not the fullest share');
   assert.deepEqual(by.get('S')?.get('1s'), { months: 1, short: 0, trade: true, seg: 'CASH' });
   assert.equal(by.has('C'), false);
+  // A row with no segment field is folded under an empty segment, said as nothing.
+  assert.equal(spotShortfalls([], [{ underlying: 'X', month: '2020-01', timeframe: '1min', rows: 1, expiry: null }]).get('X')?.get('1min')?.seg, '');
   assert.equal(hiddenText(3, { from: '2018-01-01' }, fmt), ' 3 more month(s) are held outside your window and hidden — "Show them, labelled" under the dates brings them in.');
 });
