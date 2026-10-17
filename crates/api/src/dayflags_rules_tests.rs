@@ -1366,14 +1366,10 @@ fn a_zero_volume_peer_is_found_under_the_shares_other_name() {
 #[test]
 fn a_shares_day_names_the_markets_sampling_and_its_first_second() {
     let root = root_of("r3-13-cmp06");
-    let index: Vec<store::format::Bar> = (0..375)
-        .map(|m| {
-            bar(
-                "2019-05-30",
-                9 * 3_600 + 15 * 60 + m * 60 + 59,
-                [1_000_000; 4],
-                0,
-            )
+    let index: Vec<store::format::Bar> = ["2019-05-30", "2019-05-31"]
+        .iter()
+        .flat_map(|on| {
+            (0..375).map(move |m| bar(on, 9 * 3_600 + 15 * 60 + m * 60 + 59, [1_000_000; 4], 0))
         })
         .collect();
     file_bars(
@@ -1407,6 +1403,21 @@ fn a_shares_day_names_the_markets_sampling_and_its_first_second() {
          mostly missing (suspected), 375 of 22500 session second(s) held (1.7%), at most 2 a \
          minute; no day-ledger line measures its rows yet; this share's first held second is \
          11:57:47",
+    );
+    // A day the market is sampled and the share holds no second says so.
+    let got = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2019-05-31&to=2019-05-31"),
+    );
+    let rec = record(&got, "2019-05-31");
+    assert_eq!(rec["sampled"]["first_held"], Value::Null, "{rec:#}");
+    assert!(
+        says(rec)
+            .iter()
+            .any(|say| say.starts_with("degraded vendor day -- market-wide")
+                && say.ends_with("; this share holds no second that day")),
+        "{:#?}",
+        says(rec)
     );
 }
 
