@@ -8757,4 +8757,44 @@ mod cloud_mutant_tests {
         drop(audit);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
+
+    /// **STRAY FILES IN `audit.idx.gone/` ARE COUNTED AND NAMED IN THE
+    /// PLURAL, AND NEVER OVER THE WRITER'S OWN ERROR.**
+    ///
+    /// Covers the plural arms of `hand_over_what_waits`' sentence (one stray
+    /// is `a_stray_file_in_the_graveyard_is_named_and_never_a_failed_delete`'s)
+    /// and its guard that the writer's own error is kept: two files where
+    /// only retired generations belong are both counted, the first by name,
+    /// and the sentence says "entries are", "they are" and "them"; asked
+    /// again while the stream already holds an error of its own, it leaves
+    /// that error as it was. Neither file is touched.
+    #[test]
+    fn stray_files_are_counted_in_the_plural_and_never_over_the_writers_error() {
+        let dir = scratch("audit-strays");
+        let gone = dir.join(super::AUDIT_GONE_DIR);
+        std::fs::create_dir_all(&gone).expect("the folder");
+        std::fs::write(gone.join("a.stray"), b"one").expect("a stray");
+        std::fs::write(gone.join("b.stray"), b"two").expect("a stray");
+        let (mut audit, _said) = Audit::open(&dir, 8);
+        let said = audit
+            .health
+            .last_error
+            .clone()
+            .expect("the strays are named");
+        assert!(
+            said.contains("is not a retired index generation (it is not a directory), and 2 such entries are in audit.idx.gone/ left where they are: nothing here made them, so nothing here deletes them"),
+            "{said}"
+        );
+        assert!(
+            said.contains(".stray: is not"),
+            "the first stray by name: {said}"
+        );
+        audit.health.last_error = Some("the writer's own".to_owned());
+        audit.hand_over_what_waits().expect("listed");
+        assert_eq!(audit.health.last_error.as_deref(), Some("the writer's own"));
+        assert_eq!(std::fs::read(gone.join("a.stray")).expect("kept"), b"one");
+        assert_eq!(std::fs::read(gone.join("b.stray")).expect("kept"), b"two");
+        drop(audit);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 }
