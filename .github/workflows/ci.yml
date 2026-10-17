@@ -1740,9 +1740,13 @@ jobs:
           # did not pass by testing nothing. Each sits inside
           # `#[cfg(test)] mod tests`, so no production path reaches it, and it
           # is not a diagnostic: nothing is wrong when it prints.
+          # `STOP REGISTERED` (R3-14 repair 4, `api/src/speed_tests.rs`) is the
+          # same kind: the child that registers the stop's SIGINT and SIGTERM
+          # in its own process, so the test binary's own stay default.
           declared="$declared api/src/booleanlaunch_tests.rs:println!:2
           api/src/frontierjson.rs:println!:1
           api/src/sweeprun.rs:println!:1
+          api/src/speed_tests.rs:println!:1
           api/src/trades.rs:println!:2
           api/src/recovery.rs:println!:1
           cli/src/boolean_candidate_tests.rs:eprintln!:2
@@ -1809,6 +1813,14 @@ jobs:
           #     apart, whose ratio the test bounds.
           declared="$declared pull/src/gdfl_cm_admission_tests.rs:println!:1
           pull/src/gdfl_scope_tests.rs:println!:3"
+          # ONE MORE, a test's skip notice, declared by R3-35 (17 Oct 2026),
+          # which ran this gate: `pull/src/gdfl_import_split_tests.rs`
+          # println! 1 says the importer split's line count was not taken,
+          # and why, when the tree holds neither the split's own bytes nor
+          # their blobs (a `cargo-mutants` copy has no `.git`), as
+          # `store/tests/cited_commits.rs` says its own. Inside a
+          # `#[cfg(test)]`-mounted module; no production path reaches it.
+          declared="$declared pull/src/gdfl_import_split_tests.rs:println!:1"
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
@@ -2187,6 +2199,17 @@ jobs:
           #   fs::write        x1  the staged audit serial
           #   File::open       x1  the ring's own files, read once to seed a new
           #                        audit stream
+          #   File::unlock     x1  releases the sink's own `<dir>/events.lock`
+          #                        in `Sink::close`, so a stopping server frees
+          #                        its log before its store lock and its port
+          #                        (R3-14 repair 3). It opens nothing: it acts
+          #                        on the handle `hold_directory` opened (one
+          #                        of the OpenOptions::new sites above) and
+          #                        locked with the method call `try_lock`,
+          #                        which as a method is not a path and so not
+          #                        a site. It is counted because it is named
+          #                        as a path, `File::unlock`, and a release
+          #                        is a change of what the logger holds
           #
           # NOT COUNTED, AND SAID SO: this list is of `std::fs::` paths. A
           # question asked through `Path` (`exists`, and since IA-11r's repair
@@ -2195,6 +2218,7 @@ jobs:
           # name built from the sink's own directory: it opens, reads and
           # writes nothing, and it is not a site here.
           declared='sink.rs:std::fs::File::open:1
+          sink.rs:std::fs::File::unlock:1
           sink.rs:std::fs::OpenOptions::new:6
           sink.rs:std::fs::create_dir_all:5
           sink.rs:std::fs::metadata:2
@@ -3811,6 +3835,39 @@ jobs:
           st_k=0; xargs -0 -r "$scan" bench-keys < "$work/bench-manifests.z" > "$work/bench-keys" || st_k=$?
           [ -s "$work/bench-manifests.z" ] || st_k=1
           "${RUNNER_TEMP:-/tmp}/gates-bounds" gate14 "$cover" "$work" "$st_p" "$st_k"
+
+      - name: Gate 29 — every served route has a limits row and a growth bench
+        run: |
+          set -euo pipefail
+          # R3-14 (NEW-02, RA-031, RA-064): `.github/gates_routes.rs`, std
+          # only, proved by its own tests first. It reads the server's route
+          # table, `docs/06-limits.md`'s `## Every route:` section and every
+          # `ROUTES` list of `crates/api/benches/ratio`. RED is a served route
+          # with no limits row or no 1x/10x/100x bench that the tool does not
+          # name as owed with its owner and why, a `/db` read without its
+          # bench, or an owed line gone stale, so the owed lists only shrink.
+          work=$(mktemp -d)
+          rustc --edition=2024 --test -D warnings .github/gates_routes.rs -o "$work/gates-routes-tests"
+          "$work/gates-routes-tests"
+          rustc --edition=2024 -D warnings .github/gates_routes.rs -o "$work/gates-routes"
+          "$work/gates-routes" .
+
+      - name: Gate 29b — the checks list and the owners check prove themselves
+        run: |
+          set -euo pipefail
+          # R3-14 (NEW-02, NEW-37, RA-184, RA-325). `.github/checks_all.rs`
+          # is the list of every check and the verdict over a run of them,
+          # and `checks_all script` prints the loop that runs them locally.
+          # `.github/findings_owner.rs` holds every confirmed finding and
+          # audit row to an owner; the board it reads lives outside the
+          # repository, so CI runs its tests (a synthetic board) and the
+          # local run reads the real one. Both are std only, built by rustc,
+          # and start no program.
+          work=$(mktemp -d)
+          rustc --edition=2024 --test -D warnings .github/checks_all.rs -o "$work/checks-all-tests"
+          "$work/checks-all-tests"
+          rustc --edition=2024 --test -D warnings .github/findings_owner.rs -o "$work/findings-owner-tests"
+          "$work/findings-owner-tests"
 
   build:
     name: Gates 3-6 — fmt, clippy, deny, test

@@ -70636,6 +70636,357 @@ Proof: `api::sweeprun::status_cache_tests` (`an_unchanged_cli_log_is_answered_wi
 the page-source test). The measurements are in `docs/06-limits.md` under
 D-1445, D-0954 and D-2327.
 
+### D-4979 — R3-35: the importer's file is split by its seams into six files, by a move that changes no line — 2026-10-17
+
+The audit's IA-00 (RA-142, NEW-20). `crates/pull/src/gdfl_import.rs` was
+7,613 lines at `d7eb0ecf` (6,046 when the plan was written), and the build
+order of `state/design/ingest-automation.md` §16.2 has eleven packages edit
+it in strict order: WP-16, WP-11c, WP-12d, WP-12f, then IA-1, IA-2, IA-3,
+IA-16, IA-4, IA-7 and IA-17. The first four have merged. The file is split
+before IA-1, so that each later package edits the file that holds its seam.
+
+1. **Six files, by seam.** The five new modules are private, mounted by
+   `#[path]` from `gdfl_import.rs`, and every item a caller outside the module
+   reaches keeps its path through a `pub use`
+   (`pull::gdfl_import::{Cause, ImportRefusal, Outcome, Stage, cm_cause,
+   nfo_cause, CensusRoom, drive, drive_from, BAR_DEFINITION,
+   definition_is_current, journal_path}`, and `append_lines` for the crate),
+   so no caller in `pull`, `cli` or `api` changed.
+   - `gdfl_import.rs` (3,160 lines): the run's types and entry points
+     (`ImportKind`, `SourceKind`, `Origin` and its measurement, `RunOptions`,
+     `Durability`, `Workers`, `convert`, `TickFile`, `DayRead`, `Refused`,
+     `Report`, `Run`), the CM and options readers (`run_cm`, `cm_jobs`,
+     `cm_day_with`, `run_nfo`, `option_handed`, `warm_up`, `nfo_jobs`,
+     `nfo_day_with`), `Rescan`, and the module lines.
+   - `gdfl_import_day.rs` (1,663): the day loop (`Ctx`, `admit` and the
+     done-day skip, `decisive`, `close_of`, `close_day`, `drive`,
+     `drive_from`, `drive_core`, the reach-back, `widen`, `probe`, `day_pass`,
+     `record_close`).
+   - `gdfl_import_journal.rs` (992): `journal_path`, `BAR_DEFINITION`,
+     `definition_is_current`, the journal's parse, `Journal`, `append_lines`,
+     `closing_line`, `run_line`.
+   - `gdfl_import_filing.rs` (1,093): the provenance record, `BeginGate`,
+     `on_workers`, `Filing`, `DayFiler`, `make_durable`,
+     `stop_at_durability`.
+   - `gdfl_import_census.rs` (265): `CensusRoom`, the `Census` trait,
+     `StoreCensus`, `census_room`, `census_code`, `census_refusal`,
+     `stop_at_census`.
+   - `gdfl_import_causes.rs` (567): `ImportRefusal`, `Stage`, `Cause`,
+     `cm_cause`, `nfo_cause`, `Outcome`.
+2. **Move-only.** No line was added but module lines (the five `mod`
+   declarations with their `#[path]`, and a `//!` header for each new file),
+   use lines, and visibility (`pub(super)` where the file beside needs an
+   item). `the_split_moves_lines_and_changes_none` counts the six files'
+   non-blank lines as a multiset against the unsplit file's (blob
+   `1c349b13`), less those three kinds, and finds 0 others; it pins what it
+   set aside: 54 module, 97 use and 311 visibility lines, against the unsplit
+   file's 24, 23 and 154. `the_line_counter_sets_aside_only_module_use_and_visibility`
+   proves the counter cannot pass a changed line.
+   `the_split_importer_writes_the_same_bytes` was committed first, on the
+   unsplit importer, and is unchanged since: six imports of invented NIFTY,
+   BANKNIFTY, share and option days (a special session, a weekend, a holiday,
+   a refused file, an illiquid strike and a re-run among them) leave the same
+   files with the same bytes. The pull crate's test names are the same
+   before and after, plus the two line tests.
+3. **Where a later package edits: the file that holds its seam, and a new
+   seam beside the nearest one.** The map of §16.2's rows onto these files
+   (derived from the design's text, not measured) is
+   `docs/06-limits.md` L-R335-01, with the longest chain that is left.
+4. **Rejected.** `pub mod` for the new modules: it would add public paths no
+   caller asked for, and the re-exports keep every old one. A seventh file
+   for the CM and options readers: not in this package's seams; IA-1's run
+   seams and IA-4's `option_handed` counts share `gdfl_import.rs` with them.
+   Splitting `gdfl_import_tests.rs` (5,786 lines): not this package's file,
+   and each later package puts new tests in its own test file.
+
+Limits: `docs/06-limits.md` L-R335-01 (the chain left) and L-R335-02 (where
+the line proof cannot run). Invariants: `docs/04-invariants.md` R335-01 and
+R335-02.
+
+### D-4980 — The month summary: one section, version 1, carried by a sealed month's `.sbar` and kept in a `<yyyy-mm>.sum` sibling while a month is written; the gap audit reads it and no bar, and names the fall-back when it cannot — 2026-10-16
+
+**Implemented by** R3-06 (`store::month_summary`: `MonthSummary`, `Counts`,
+`Extremes`, `Refused`, `read_beside`, `path_beside`; the writer's step and the
+rebuild door `BarFile::month_summary_existing` in
+`crates/store/src/month_summary_writer.rs`; `FileKind::MonthSummary`; the gap
+audit in `crates/api/src/gaps_route.rs`; the halt rule in
+`crates/pull/src/gaps.rs`; gate 8's rows in `crates/api/benches/ratio/gaps.rs`;
+the store step `cli msum-build` in `crates/cli/src/msum_builder.rs`, which
+walks the rebuild door over named months with `cli srt-build`'s own argument
+parser; the `Read from` column and census cell on `/gaps`).
+**Closes** DB-A30 (the gap audit read every record of every month asked) and
+the `/gaps.json` half of DB-G47 (a recorded halt owed on some doors). **Number**:
+the numbers to D-4975 are in use or taken in open worktrees on 16 October
+2026; this takes D-4980 and the merge renumbers it if another lands first
+(amendment A6). **Bytes**: `docs/02-store-format.md` §8.6.
+
+**Decision.**
+
+1. **A summary of facts, not a stored gap result.** A gap result depends on
+   the request (the calendar asked, `min_run`, the contract's expiry); one
+   stored result would answer one request and silently mis-answer the rest.
+   The summary keeps the calendar-free facts every result is computed from:
+   the committed header it describes, the minutes held per day (a bitmap from
+   the first held minute to the last), the seconds held per day when the
+   month is dense enough (below), bars and first/last second per day, the
+   input counts the audit refuses on (off-grid or not strictly increasing,
+   decreasing, negative volume, outside the month, distinct seconds and
+   minutes held), and the extremes with the stamp of the earliest bar holding
+   each. The kept and the built answer are one computation.
+2. **One section, two homes (amendment A4).** The section is the summary
+   version (`u16`), two zero bytes, the payload and a CRC-32C. A sealed month
+   carries it in its `.sbar` summary section (head flag bit 2, `sum_off`,
+   `sum_len`, D-4965) and has no sidecar. A month still being written keeps
+   the same section behind the magic `BRUTEXU1` in `<yyyy-mm>.sum`, so the
+   sealer copies the bytes after the magic unchanged
+   (`a_sealed_month_carries_the_summary_section_byte_for_byte`).
+3. **No `.sum` under 1,024 bars** (D-4933's threshold): such a month's summary
+   is built from its at most 1,023 bars when asked. 552,686 of 852,757 months
+   are under it (D-4933), so at most 300,071 months pay a `.sum` and an inode
+   until they are sealed, and none after.
+4. **The density rule for seconds.** Seconds are kept when the distinct
+   seconds held are at least half of the seconds the days span, which bounds
+   that part at two bits a held second. It is judged at every write: a month
+   an append takes under half drops its seconds then, and a month whose
+   seconds were dropped or never kept is written whole the first time an
+   append makes it dense again. **That rebuild is `O(n_valid)` and runs on
+   every commit that takes the month back over the half line**, so a month
+   whose density moves back and forth across it pays it as often as every
+   second commit: the step is `O(batch)` per commit except on those commits.
+   (This item first said "once per crossing, never once per commit"; the
+   second half was wrong, and the R3-06 repair corrects it here before the
+   entry lands.) Hysteresis would amortise it and was refused, because the
+   kept bytes would then depend on how commits were batched rather than on the
+   bars, and a sealed month carries them as a pure function of its inputs
+   (D-4965). Each such rebuild is a `store.sum` INFO line, reason
+   `dense_again`, so its frequency is read off the log. Only the spot-index
+   one-second audit needs seconds; a reader that needs seconds a summary does
+   not keep reads the bars and says so.
+5. **The writer's step never refuses a commit.** After the sort index's step,
+   on every writer open and commit: extend a summary of the generation before
+   by the rows committed since (`O(batch)`), else build it whole; write to
+   `<yyyy-mm>.new.sum` (a new inode) and rename. A failure is a `store.sum`
+   warning; the summary left describes an older generation and every reader
+   refuses it as `stale` by a header comparison. Not flushed: every read checks
+   magic, CRC, geometry and the header; and for the same reason
+   `DurableBatch::confirm_month` passes the `.sum` over as it passes the lock,
+   so a confirmed month costs no flush for it (MS-09).
+   **Every whole write is logged**: a month's first `.sum` (reason
+   `absent`, once a month when it reaches 1,024 bars), one replaced (`torn`,
+   `stale`, ...), one the door rebuilt and a month dense again are each one
+   `store.sum` INFO line, "month summary written whole", naming the file, the
+   reason and `n_valid`; the per-commit extension is silent upkeep (MS-12).
+6. **Readers name every fall-back.** `read_beside` refuses by name (`absent`,
+   `below_threshold`, `unreadable`, `torn`, `magic`, `checksum`, `version`,
+   `shape`, `not_this_month`, `stale`). `/gaps.json` states per month
+   `summary` (`kept`, `built`, `absent_file`), `summary_fallback` (the
+   refusal, or why a kept summary was not enough: input the fold may refuse,
+   seconds not kept) and `bar_records_read`, and per answer
+   `summaries: {kept, built, bar_records_read}`. A kept month reads no record, so it
+   states `unreadable_records: null`, never a `0` it did not count: damage to
+   a record after its summary was written is seen only by a read of the bars
+   (MS-13). The summary is opened as
+   every sidecar is (`O_NOFOLLOW | O_NONBLOCK`, regular files only): a link
+   at its name is never followed, a FIFO never makes a request wait, and the
+   writer refuses such a name before it stages a file
+   (`a_linked_or_special_summary_is_refused_and_never_followed`).
+7. **A recorded halt is not owed by any classifier door.** `pull::gaps`
+   takes a recorded halt's minutes (`calendar::halt_on`, sourced or suspected,
+   D-3320) out of what a day owes whatever calendar sized the day -- the
+   table, the derivatives venue's hours, a cash schedule, a peer vote -- so
+   `/gaps.json` owes a halt day what `/calendar.json` and `/dayflags.json` owe
+   (`a_recorded_halt_is_not_owed_on_every_route`). A minute lost outside the
+   halt is still lost.
+
+**Limits** (for `docs/06-limits.md`): `/gaps.json` is O(months asked) per
+request, each month O(1) in its bars when its summary is kept (one read of the
+section, one pass over its minutes, and for a spot index at one second over
+each day's owed seconds); a month with no usable summary reads its bars whole,
+named. Caps unchanged: 12 one-second months, 240 minute months.
+
+**Gate 8 compares like with like, in the months and in the exposure to load**
+(R3-06 repair 1). Both of its asserted rows hold one p99 to another, and a
+p99 at a few hundred samples is decided by a handful of machine stalls; a row
+whose two sides were timed at different moments, or over different kinds of
+month, breached by load and passed by load. So the 240-month span is asked
+whole and as its ten 24-month tiles in the same round, the tiles' times summed
+into one sample (`spans_are_bounded`: the median at 1.5x, the sharp edge, and the p99 at 2x, stated headroom for the tail, because a p99 over 600 rounds is the sixth-largest sample and which side a stall lands in at that rank is chance; like with like it read 0.98x to 1.28x while the medians held at 0.94x to 1.00x), and the one-second kept
+months of 1,024, 10,240 and 102,400 bars are asked once each in every round
+with the first size rotating (`months_are_flat`, ceiling unchanged at 3x),
+600 rounds each. A kept answer that read its bars, or a span with a term in
+the months squared, still breaches: the answer's own words (`kept`, zero bar
+records read) are asserted on every sample.
+
+**Measured before choosing the home** (16 October 2026, a private APFS clone
+of real months, `cli msum-build`): a dense one-second month's `.sum` is 52 to
+66 KB (60 KiB on disk), a minute or option month's 771 to 1,629 bytes (one
+4 KiB block), one inode each; at most 300,071 such months, about 2.7 GiB,
+until sealed. The kept and the bar-read answer were byte-identical on 10 real
+selections (NIFTY, BANKNIFTY and RELIANCE at 1 s and 1 min, the 2020-03 halt
+month, two NIFTY 2019-06 strikes), and the kept NIFTY 1 s year read no bar
+where the real store read 5,167,003. Timings: `docs/06-limits.md`, "`/gaps.json`
+and the month summary".
+
+### D-4996 — The app runs under two launchd agents that `cli launch-agent` prints at install time and no file in the tree holds; the watchdog is one `cli watchdog` probe a minute whose notice is a page handed to `open` — 2026-10-14
+
+R3-32. Until now the app on :8080 ran only when a session started it, so a
+reboot, a crash or a drive that mounted after login left it down with nothing
+to say so.
+
+**What is decided.** (1) Two agents, `in.brutex.app` and `in.brutex.watchdog`,
+are rendered by `cli launch-agent app|watchdog` from the operator's own
+arguments and written by his shell into `~/Library/LaunchAgents/`; no `.plist`
+is tracked (`CLAUDE.md` §2, gate 1; round-3 amendment A5), so the verb, its
+tests and `docs/36-ops-runbook.md` §9 are the agents' source. The verb writes
+and installs nothing. (2) The app agent is kept alive by a `PathState` on the
+store root, so launchd waits for the drive rather than the api polling for it,
+and `ThrottleInterval` (10 s by default) bounds a start-time refusal to one a
+throttle interval (FM-196). It also sets `ProcessType Interactive` (unset,
+launchd throttles a job's CPU and I/O) and a soft `NumberOfFiles` of 65,536
+(launchd's own was measured at 256; FM-088). (3) The watchdog is one probe
+per run of `GET /health` within 5 s; an outage is two unanswered probes in a
+row, its one notice goes out at the second (at most 120 s after the last
+answer), and the first answer after it sends one "back" notice; a single miss
+is a `blip` with no notice. Any HTTP status line is an answer (`/health`
+answers 503 when the data is not clean). Its state lives off the store drive
+(refused by DEVICE: the store root's `st_dev` against the directory's nearest
+existing ancestor, so a sibling, a `..` or a link into the drive is refused
+like a path under the root; an agent rendered with the drive away carries a
+`NOT CHECKED` comment) and two misses are "in a row" only within two
+intervals (`--interval-seconds`, passed by the agent), so a miss at shutdown
+and one at the next login are no outage. `main` skips the store
+preflight for these two verbs, because an unmounted drive is one of the
+outages to report. (4) The notice is an HTML page under the state directory
+handed to `open`, not a Notification Center banner: a banner needs `osascript`
+(an interpreter, gate 0) or an Objective-C binding, both forbidden by §2. A
+page `open` could not deliver is retried at the next probe and is never
+counted as delivered. (5) A notice is SAVED BEFORE IT IS SENT (`pending=` in
+the v2 state line; v1 still reads): a state that cannot be saved withholds
+the notice with a `notice-withheld` line, and a run killed inside `open` is
+named `notify-unknown` by the next and counted as sent, so a notice goes out
+at most once per outage; the price is a silent watchdog when its own
+directory cannot be written (`docs/06-limits.md` L-WD-6). A lock held by
+another is waited for up to 1 s before the run is refused, because any spawn
+duplicates the lock's descriptor until its `exec` (verify-R3-32-r1).
+
+**Not decided here.** A distinct exit code per start refusal and a graceful
+stop on SIGTERM are the api's; the kill drill's seconds are the operator's to
+record in `docs/36` §9.4.
+
+**Proved by** `cli::watchdog_command::tests::the_watchdog_notifies_once_when_health_does_not_answer`,
+`cli::watchdog_command::tests::the_watchdog_says_when_the_app_is_back`,
+`cli::watchdog_command::tests::a_single_missed_probe_is_a_blip_and_sends_no_notice`,
+`cli::watchdog_command::tests::a_notice_that_could_not_be_delivered_is_tried_again_and_never_doubled`,
+`cli::watchdog_command::tests::the_launch_agent_waits_for_the_store_drive`,
+`cli::watchdog_command::tests::startup_waits_for_a_missing_root_with_backoff`,
+`cli::watchdog_command::tests::a_run_never_lists_the_notices_or_reads_the_log`,
+`watchdog_binary::the_watchdog_runs_with_the_store_drive_away`,
+`cli::watchdog_command::tests::a_state_that_cannot_be_saved_withholds_the_notice_and_never_repeats_it`,
+`cli::watchdog_command::tests::a_run_killed_while_open_runs_sends_no_second_notice`,
+`cli::watchdog_command::tests::a_lock_held_for_a_moment_is_waited_for_not_refused`,
+`cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
+`cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
+
+### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
+
+**Number** taken from above every ledger head on the local branches on
+16 Oct (the highest was D-5240; D-5251 and D-5260 are named for branches not
+yet merged). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R3-01. **Findings** DB-077, DB-G98, DB-051, SC-CLOSE-18,
+and the second agent's re-check of 16 Oct (`verify-R3-01-r1.json`).
+
+**What was observed.** D-3337 item 4 says `k` is "a strike in paisa,
+repeatable" and names seventeen keys. The page has written strikes as ONE
+field since R3-01's first commit, because the server answered the repeated
+form 400 on reload and on every shared link, and it writes four keys item 4
+never named. The code and the append-only ledger said opposite things, and
+the bounds and the history rule the page follows were recorded nowhere.
+
+**Decision.** Item 4 of D-3337 is replaced by the following. Items 1–3, 5
+and 6 stand.
+
+1. **The keys, in the order the page writes them** (`DB_KEYS`,
+   `web/src/lib/urlstate.js`): `feed`, `universe`, `seg`, `sym`, `key`, `tf`,
+   `exp`, `k`, `mny`, `side`, `spot`, `from`, `to`, `tfrom`, `tto`, `sort`,
+   `dir`, `rows`, `page`, `view`, `oow`. Four are new: `universe` (a
+   membership universe key; Everything is `''` and is not written), `mny`
+   (moneyness rungs `ATM`, `ITM`, `OTM`, `ITM-n`, `OTM+n`), `spot` (`exact`, or
+   `prev` = the last spot at or before t, D-3328) and `rows` (a whole number of
+   rows per page, or `fit`).
+2. **A default is not written** (`DB_DEFAULTS`): `sort=ts`, `dir=desc` (the
+   Bars view; Coverage opens by instrument ascending), `page=1`, `view=bars`,
+   `oow` off, `spot=exact` (D-2807) and `rows=fit`. A bookmark names exactly
+   the choices that differ from opening the page.
+3. **`k` is ONE comma-joined field of strikes in whole paisa**, sorted
+   numerically and deduplicated: `k=1160000,1200000`. `mny` is one
+   comma-joined field too, sorted. The comma is written as itself; `%2C`
+   reads the same. **No field is written twice**: one selection is one
+   address, byte for byte, and `encodeDb(decodeDb(q).sel) === q`.
+4. **A repeated `k` (a link written before R3-01) is still read** by the
+   page's reader, `decodeDb`. **The server refuses it first**:
+   `crates/api/src/server.rs` `request_bounds_refusal` answers 400 to any
+   query that names a field twice, except the two list fields in
+   `MULTI_VALUED_QUERY_FIELDS` (`/bars/window.json`'s `key` and
+   `/scrub.json`'s `key`). So such a bookmark opens on the server's refusal
+   page and not on /db. This entry changes no server code. Letting /db's `k`
+   repeat, or redirecting to the comma form, is a follow-up for the `api`
+   owner. Until that lands, a pre-R3-01 two-strike link does not open.
+5. **Bounds**, each a bound and not a vendor fact: a text field (`sym`,
+   `key`, …) is read for at most `MAX_TEXT` = 128 characters
+   (`web/src/lib/db/input-check.js`). A list field (`k`, `mny`) is read for
+   at most `MAX_LIST_FIELD` = 1,024 characters (64 values of 16), and a
+   longer one is refused by its length before it is split. `page` and `rows`
+   are whole numbers from 1 to `MAX_PAGE` = 999,999,999. One address names
+   at most `MAX_REFUSED` = 12 refusals one by one and counts the rest in one
+   closing entry. A value refused twice is named once. One sentence quotes
+   at most 8 unknown field names.
+6. **Honoured or refused in words, never dropped.** A page past the end of
+   the answer is named, and the last page is shown. That costs one extra
+   `/bars/window.json` read, at most one (docs/06-limits.md). An unknown
+   sort, direction, side, view, universe or rows value is named. So is an
+   unknown field. A feed the operator excluded (`dhan`, `groww`, `truedata`,
+   D-3338) is refused by name and nothing is probed.
+7. **A key against the fields beside it** (`linkedContract`,
+   `web/src/lib/db/selection-model.js`): a key whose underlying differs
+   from `sym` is not read, and the page says so. Inside one underlying, a
+   field beside the key is read in place of the key's. A contract's segment
+   is filed by today's calendar. A contract field on a segment without that
+   rung is named and not applied. A key with any small letter is refused by
+   name and never re-cased (a stored key is upper case: `Symbol::new`
+   upper-cases a name and `Contract::parse` takes only A–Z, 0–9 and `-`).
+8. **Back and Forward** (`dbHistory`). The address is written with
+   SvelteKit's `pushState` or `replaceState` once the selection settles, and
+   only when it differs. The first write after the page opens is a
+   `replace`. So is a write after Back or Forward restored an entry, and a
+   write with no choice gesture since the last write (a seed, a clamp).
+   Anything else is a `push`. One press is one entry: the first write spends
+   it. **A choice gesture is a primary-button `pointerdown`, or a `keydown`
+   other than a modifier, Tab, Escape or a function key, on or inside a
+   control** (`CHOICE_TARGET`: a form control, a link, a label, a menu or
+   grid item, anything with `tabindex`; `isChoiceGesture`). A press on
+   blank space arms nothing. **`GESTURE_MS` = 30 s**: a press made longer
+   ago than that does not cause the next write, which is written as a
+   `replace`. The address is still exact; only that step loses its own Back
+   entry. Every pick on /db sets a field `encodeDb` writes inside the
+   press's own task, so the bound is not reached in normal use. The reader
+   reads the browser's `location.search` (`addressNow`), never the URL the
+   page was entered with.
+
+**Proof.** `web/tests/db-address.test.js`:
+`every_db_choice_round_trips_through_the_address`,
+`an_address_with_two_strikes_reloads`,
+`a_linked_page_number_is_honoured_or_refused`,
+`an_excluded_feed_in_a_link_is_refused_by_name`,
+`an_absurd_address_names_each_problem_once_and_a_bounded_few`,
+`a_lower_case_key_is_named_and_not_read`,
+`a_key_that_disagrees_with_the_fields_beside_it_is_named_and_not_read`, and
+the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
+`web/tests/db-history.test.js`: `back_and_forward_restore_each_selection`,
+`a seed, a clamp and a restore correct the current entry and never add one`,
+`a press off a control, or a key that chooses nothing, arms no Back entry`.
+Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
 ### D-4990 — A CASH bar dated before its exact symbol+ISIN's listing day is not that security's bar, and a listing day the master does not state refuses nothing (R4-17; Z5, ING-01 d) — 2026-10-17
 
 **Decision.** `pull::listing` reads the listing day of a CASH security from the

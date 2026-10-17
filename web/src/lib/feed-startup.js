@@ -67,6 +67,22 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
       .map((feed) => feed.wire)
       .join(', ') || 'none';
     const shown = state.active === null ? 'No feed is selected' : `Showing ${state.active} instead`;
+    /* A FEED THE OPERATOR EXCLUDED IS LISTED AND REFUSED BY NAME (R3-01,
+       DB-051): `/db?feed=dhan` opened Dhan and read its census, although the
+       operator removed Dhan, Groww and TrueData from every picker on 6 Oct.
+       The server's own words for the exclusion are quoted. */
+    const excluded = state.all.find((feed) => feed.wire === unlisted && /** @type {any} */ (feed).offered === false);
+    if (excluded) {
+      const f = /** @type {any} */ (excluded);
+      const by = [f.excluded_by ? `by ${String(f.excluded_by).slice(0, 64)}` : '', f.excluded_on ? `on ${String(f.excluded_on).slice(0, 32)}` : '']
+        .filter(Boolean)
+        .join(' ');
+      const because = f.excluded_because ? `: ${String(f.excluded_because).slice(0, 200)}` : '';
+      state.notice =
+        `The address names feed ${JSON.stringify(unlisted.slice(0, 64))}, which was excluded${by ? ` ${by}` : ''}${because}. ` +
+        `It is not offered, so nothing was read from it. ${shown}; the address was not followed and nothing was saved.`;
+      return;
+    }
     state.notice =
       `The address names feed ${JSON.stringify(unlisted.slice(0, 64))}, which /feeds.json does not list ` +
       `(the feeds offered are: ${listed}). ${shown}; the address was not followed and nothing was saved.`;
@@ -106,13 +122,18 @@ export function createFeedStartup(state, request, storage, urlFeed = () => null)
     } catch {
       addressed = null;
     }
-    if (addressed !== null && list.some((feed) => feed.wire === addressed)) return addressed;
+    /* LISTED IS NOT ENOUGH: an excluded feed (`offered: false`) named by the
+       address is refused by name in `sayUnlisted` and never chosen, so no
+       census, header or bar of it is asked for. */
+    if (addressed !== null && list.some((feed) => feed.wire === addressed && /** @type {any} */ (feed).offered !== false)) return addressed;
     unlisted = addressed;
     try {
       const saved = storage().getItem(FEED_PREFERENCE_KEY);
       if (saved !== null) {
         const wire = JSON.parse(saved);
-        if (wire === null || (typeof wire === 'string' && list.some((f) => f.wire === wire))) {
+        /* A saved feed the operator has since excluded is not chosen either:
+           it would be probed on every first paint. */
+        if (wire === null || (typeof wire === 'string' && list.some((f) => f.wire === wire && /** @type {any} */ (f).offered !== false))) {
           return wire;
         }
       }

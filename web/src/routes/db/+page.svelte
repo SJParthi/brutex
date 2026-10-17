@@ -74,6 +74,7 @@
      fills them, and are mounted where that owner will need them.
      ====================================================================== */
   import './db.css';
+  import { onDestroy } from 'svelte';
   import { store, refreshStore } from '$lib/store.svelte.js';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import DbCensusBanner, { censusState, censusLoading } from './DbCensusBanner.svelte';
@@ -117,6 +118,28 @@
   // THE DAY BAND (WP-54): read by the band, the bar grid's empty state and
   // the day fields, so it lives here rather than in any one of them.
   dayFlagsState(db);
+
+  /* THE NEXT PAGE GETS ITS OWN TAB TITLE (R3-01). A page without a
+     `<svelte:head><title>` of its own (/terminal) kept this one, so after the
+     Terminal link — and after Back to /terminal — the tab still read
+     "Database". Leaving, a title still ours is replaced by the destination's
+     name, read off the top bar's own link to it (never a list kept here); a
+     destination that sets its own title overwrites this, whichever runs
+     first. */
+  const OWN_TITLE = 'Database · brutex';
+  onDestroy(() => {
+    if (typeof document === 'undefined' || document.title !== OWN_TITLE) return;
+    const path = location.pathname;
+    if (path === '/db') return;
+    let name = '';
+    try {
+      name = document.querySelector(`a[href="${CSS.escape(path)}"]`)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    } catch {
+      name = '';
+    }
+    if (!name) name = (path.split('/').filter(Boolean)[0] ?? 'home').replace(/^./, (c) => c.toUpperCase());
+    document.title = `${name.slice(0, 40)} · brutex`;
+  });
 </script>
 
 <svelte:head><title>Database · brutex</title></svelte:head>

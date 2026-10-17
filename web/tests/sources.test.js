@@ -62,7 +62,7 @@ import {
 // row is filed under: a link from /sources is proved against these, not
 // against a string.
 import { decodeDb } from '../src/lib/urlstate.js';
-import { SEGMENT_KEYS, linkOfKey, segmentOf } from '../src/lib/db/selection-model.js';
+import { SEGMENT_KEYS, linkOfKey, segmentOf, linkedContract } from '../src/lib/db/selection-model.js';
 
 const read = (/** @type {string} */ path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const PAGE = read('../src/routes/sources/+page.svelte');
@@ -902,26 +902,21 @@ test('a day a source does not hold names the reason: closed, after the archive, 
 });
 
 /**
- * WHAT /db DOES WITH A LINK, by its own code: `decodeDb` reads the address,
- * `seg` (when the address carries one) is taken AS GIVEN for the segment,
- * else the segment is derived from `key` by `linkOfKey` and `segmentOf`; then
+ * WHAT /db DOES WITH A LINK, by its own code: `decodeDb` reads the address
+ * and `linkedContract` resolves it — the very function /db's link reader
+ * applies (R3-01): `seg` is checked by `linkedSegment` (a segment /db does
+ * not have is named and read as none; a contract's is the one its expiry is
+ * filed under today), else the segment is derived from `key`; then
  * a census row is shown exactly when `segmentOf(row) === segment` and its
- * underlying is the link's. The three source lines this mirrors are asserted
- * to still be in /db's store, so a change there fails here.
+ * underlying is the link's. The source lines that apply it are asserted to
+ * still be in /db's store, so a change there fails here.
  *
  * @param {string} href @param {{today: string, archiveTo: string|null}} clock
  */
 function dbReads(href, clock) {
   const { sel, refused } = decodeDb(href.slice(href.indexOf('?') + 1));
-  const link = sel.key ? linkOfKey(sel.key) : null;
-  const segment = sel.seg
-    ? sel.seg
-    : link
-      ? link.contract === 'spot'
-        ? 'spot'
-        : segmentOf({ expiry: link.expiry, instrument: String(sel.key) }, clock.today, clock.archiveTo)
-      : '';
-  return { sel, refused, sym: sel.sym ?? link?.sym ?? '', segment };
+  const c = linkedContract(sel, clock.today, clock.archiveTo);
+  return { sel, refused, sym: c.sym ?? '', segment: c.seg ?? '', segWhy: c.notes.find((n) => n.startsWith('seg ') || n.startsWith('seg=')) ?? null, notes: c.notes };
 }
 
 /** The census rows /db would show for a link: one feed's rows of one underlying, filed under the link's segment. */
@@ -932,8 +927,8 @@ function dbShows(/** @type {string} */ href, /** @type {any[]} */ census, /** @t
 
 test('every link from /sources into /db lands on rows: the segment is one /db itself files the row under', () => {
   // the three lines of /db's link reader and row match that `dbReads` and `dbShows` mirror
-  assert.match(DB_STORE, /if \(sel\.seg\) db\.kind = sel\.seg;/);
-  assert.match(DB_STORE, /link\.contract === 'spot'\s*\? 'spot'\s*: segmentOf\(/);
+  assert.match(DB_STORE, /const c = linkedContract\(sel, db\.today, .*\);\n\s+notes\.push\(\.\.\.c\.notes\);/);
+  assert.match(DB_STORE, /if \(c\.seg\) db\.kind = c\.seg;/);
   assert.match(DB_STORE, /instrumentMatched\.filter\(\(\/\*\* @type \{any\} \*\/ r\) => segOf\(r\) === kind\)/);
   // and the server still writes the STORE's segment name into its link: the reason this page must not pass it on
   assert.match(SERVER, /"\/db\?feed=\{\}&seg=\{\}&sym=\{\}&key=\{\}&tf=\{\}"/);
@@ -967,16 +962,21 @@ test('every link from /sources into /db lands on rows: the segment is one /db it
     { link: server('gdfl', 'FNO', 'TESTIDX', 'NSE-FNO-TESTIDX-2026-10-29-1000000-CE', '1s'), segment: 'options-live', shows: 'NSE-FNO-TESTIDX-2026-10-29-1000000-CE' }
   ];
   for (const c of cases) {
-    // THE DEFECT, pinned: the server's link as sent names a segment /db has no rows under, so /db shows nothing
+    // THE DEFECT, pinned: the server's link as sent names a segment /db does not have. Until R3-01 /db took
+    // it as given and matched no row; now /db NAMES it and reads the segment off the key, so it lands on rows
+    // too, but with a notice the operator did not need: this page still drops the store's name.
     const raw = dbReads(c.link, clock);
-    assert.equal(SEGMENT_KEYS.includes(raw.segment), false, `${c.link}: the store's segment name is not one of /db's`);
-    assert.deepEqual(dbShows(c.link, census, clock), [], `${c.link}: passed on unchanged, /db matches no row`);
+    assert.equal(SEGMENT_KEYS.includes(String(raw.sel.seg)), false, `${c.link}: the store's segment name is not one of /db's`);
+    assert.match(String(raw.segWhy), /is not one this page knows/, `${c.link}: /db names it`);
+    assert.equal(raw.segment, c.segment, `${c.link}: and reads the key's segment`);
 
     // THE FIX: each of the three shapes this page draws (the rung's rows, one day of them, outside the window)
     for (const change of [{}, { day: '2020-03-19' }, { day: '2017-06-01', oow: true }, { oow: true }]) {
       const href = String(dbLinkOf(c.link, change));
       const read = dbReads(href, clock);
       assert.deepEqual(read.refused, [], href);
+      assert.equal(read.segWhy, null, `${href}: the page's own link needs no notice`);
+      assert.deepEqual(read.notes, [], `${href}: nothing of it is set aside`);
       assert.equal(read.segment, c.segment, href);
       assert.ok(SEGMENT_KEYS.includes(read.segment), href);
       const shown = dbShows(href, census, clock).map((r) => r.instrument);

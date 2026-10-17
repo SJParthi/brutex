@@ -161,7 +161,7 @@ test('/db reads bars through one window request a page and never the whole-month
   assert.match(script, /readWindowPage\(windowQuery\(feed, p, \{ \.\.\.b, sort: wire, desc, offset, limit: size \}\), size, signal\)/);
   // NOTHING IS READ BEFORE THE FIT SETTLES (DB-N02), AND PAGING DOES NOT
   // RE-MEASURE IT (DB-N11).
-  assert.match(script, /const ready = db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\);/);
+  assert.match(script, /const ready = !db\.linkDaysPending && \(db\.sizeMode !== 'fit' \|\| \(db\.fitLatched && db\.pageSize === db\.rowsThatFit\)\);/);
   assert.doesNotMatch(script, /void db\.barPlanKeys/);
   // A PAGE-SIZE CHANGE KEEPS THE READER'S ROW ON SCREEN (DB-N06, DB-N12).
   assert.match(script, /anchorRow = anchor && pageTotal > 0 \? firstRow : -1;/);

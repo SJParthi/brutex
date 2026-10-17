@@ -156,6 +156,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "gdfl-dayflags"
                 | "gdfl-import"
                 | "gdfl-rekey"
+                | "msum-build"
                 | "srt-build"
                 | "tix-rebuild"
                 | "research-plan"
@@ -171,6 +172,10 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
                 | "zerodha-gaps"
                 // The stored-series identity scan (WP-13d): a store verb.
                 | "series-identity"
+                // The app's watchdog and its launchd agents (R3-32, D-4996):
+                // operations verbs that read no bar.
+                | "launch-agent"
+                | "watchdog"
                 // The tick-store writer (R4-08, D-4967): a store verb.
                 | "tickstore-write"
         );

@@ -7,8 +7,9 @@
  *   lost_minutes: number,
  *   unmeasured_minutes: number,
  *   truncated: boolean,
- *   unreadable_records: number,
+ *   unreadable_records: number | null,
  *   invalid_timestamps?: number,
+ *   summary?: string,
  *   absent_file: string | null,
  *   evidence_error?: string | null
  * }} MonthEvidence
@@ -35,7 +36,13 @@ export function monthVerdict(month) {
   if (
     month.absent_file !== null ||
     month.truncated !== false ||
-    month.unreadable_records !== 0 ||
+    // NULL ONLY WHERE NOTHING WAS READ (R3-06): a month answered off its kept
+    // summary read no record, so the server sends `null` rather than a `0` it
+    // never counted. Anywhere else a null is a missing field, not a zero.
+    !(
+      month.unreadable_records === 0 ||
+      (month.unreadable_records === null && month.summary === 'kept')
+    ) ||
     (month.invalid_timestamps !== undefined && month.invalid_timestamps !== 0) ||
     month.unmeasured_minutes !== 0 ||
     month.lost_minutes !== 0 ||
@@ -130,4 +137,37 @@ export function auditRung(rows, instrument) {
     if (row.timeframe === '1s') second = true;
   }
   return second ? '1s' : null;
+}
+
+/**
+ * How a month's gap answer was read (R3-06, D-4980): off the month's kept
+ * summary, with no bar record read, or from its bars because no summary was
+ * usable — and then why, and how many records it cost. A slow answer is
+ * named, never silent; a server that does not say is "not stated", never
+ * read as either.
+ *
+ * @param {{ summary?: string, summary_fallback?: string | null, bar_records_read?: number }} month
+ * @returns {{ kind: 'kept' | 'built' | 'none' | 'unknown', word: string, why: string }}
+ */
+export function readFrom(month) {
+  const records = typeof month.bar_records_read === 'number' ? month.bar_records_read : null;
+  switch (month.summary) {
+    case 'kept':
+      return {
+        kind: 'kept',
+        word: 'summary',
+        why:
+          'read off the month summary; no bar record read, so a record damaged after the summary was written is not checked here'
+      };
+    case 'built':
+      return {
+        kind: 'built',
+        word: records == null ? 'bars' : `bars · ${records.toLocaleString('en-IN')} records`,
+        why: month.summary_fallback || 'no usable month summary; the server gave no reason'
+      };
+    case 'absent_file':
+      return { kind: 'none', word: '—', why: 'the month file is absent; nothing was read' };
+    default:
+      return { kind: 'unknown', word: 'not stated', why: 'this server does not say how the month was read' };
+  }
 }
