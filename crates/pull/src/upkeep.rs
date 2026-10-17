@@ -34,8 +34,8 @@
 //! # One run at a time per vendor and kind
 //!
 //! The run holds an exclusive `flock` on its journal for its whole life. A
-//! second run of the same vendor and kind is refused by name at once; a run
-//! of another kind, or of another vendor, goes on beside it. While a run
+//! second run of the same vendor and kind is refused by name at once; the
+//! caller's own locks can serialise more (`cli upkeep`'s). While a run
 //! holds the lock, [`status`] says it is running; a journal whose last line
 //! is not an `end` and whose lock is free belongs to a run that DIED.
 //!
