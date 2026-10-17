@@ -932,12 +932,12 @@ fn every_verdict_filing_byte_round_trips_and_an_unknown_one_names_nothing() {
 fn a_long_stem_is_cut_at_a_character_and_hashed_whole() {
     use store::verdict::{KEY_LEN, Key, key_hash};
     let whole = format!("{}é-TAIL", "Z".repeat(KEY_LEN - 1));
-    let key = Key::stem(&whole).unwrap();
+    let key = stem_within(&whole).unwrap();
     assert_eq!(key.text(), "Z".repeat(KEY_LEN - 1), "é is not split");
     assert_eq!(key.whole(), Some(whole.as_str()));
     assert_eq!(key.to_string(), whole);
     assert_eq!(key.hash(), key_hash(whole.as_bytes()));
-    let other = Key::stem(&format!("{}é-OTHER", "Z".repeat(KEY_LEN - 1))).unwrap();
+    let other = stem_within(&format!("{}é-OTHER", "Z".repeat(KEY_LEN - 1))).unwrap();
     assert_eq!(other.text(), key.text());
     assert_ne!(other.hash(), key.hash());
     let short = Key::instrument("ZZCLOUD").unwrap();
@@ -1477,19 +1477,26 @@ fn a_commit_is_named_near_the_ceiling_at_half_the_measured_placement() {
 /// lands before the three-byte character the field's last byte falls in.
 #[test]
 fn a_stem_cut_inside_a_character_steps_back_in_bounded_time() {
-    use store::verdict::{KEY_LEN, Key};
+    use store::verdict::KEY_LEN;
     // 62 ASCII bytes, then "€" (3 bytes) across the 64-byte field's end.
     let whole = format!("{}€TAIL", "Z".repeat(KEY_LEN - 2));
+    let kept = stem_within(&whole).unwrap();
+    assert_eq!(kept.text(), "Z".repeat(KEY_LEN - 2));
+}
+
+/// `Key::stem(text)` made on a worker and given 20 seconds, so a cut that
+/// never steps back to a character fails the test instead of hanging the
+/// binary: every stem in this file whose field ends inside a character is
+/// made through here.
+fn stem_within(text: &str) -> Result<store::verdict::Key, store::verdict::VerdictError> {
     let (send, answer) = std::sync::mpsc::channel();
-    let text = whole.clone();
+    let text = text.to_owned();
     std::thread::spawn(move || {
-        let _receiver_gone = send.send(Key::stem(&text).map(|key| key.text().to_owned()));
+        let _receiver_gone = send.send(store::verdict::Key::stem(&text));
     });
-    let kept = answer
+    answer
         .recv_timeout(std::time::Duration::from_secs(20))
         .expect("the stem returned")
-        .unwrap();
-    assert_eq!(kept, "Z".repeat(KEY_LEN - 2));
 }
 
 /// **A DAY ALREADY FLAGGED `DETAILS_CAPPED` WHOSE DETAILS ARE CAPPED AGAIN
