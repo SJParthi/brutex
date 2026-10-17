@@ -153,6 +153,18 @@ both sides' intent:
   (four concurrent `api` builds); its mutant (`audit.rs:529:14`) was logged
   unviable and is re-run by name. Dev builds now wait for a window with at
   most one mutation build running.
+- **The disk filled once, during coverage run 3** (about 19:01–19:04),
+  because one profraw per test process came to about 6.5 GB. That run
+  failed and is discarded: one test refused with `DiskFull`, and no report
+  was written. One mutant build failed for lack of space
+  (`autopilot.rs:4114:33`, recorded unviable) and `w1`'s prebuild after
+  the merge failed. Every mutant whose result was written from 18:55 to
+  19:10 (26 of them) goes back into phase 2, whatever its result. Space
+  was recovered by deleting only stale build caches in this pass's own
+  scratch copies (`api` incremental directories no build had touched
+  since the merge); nothing of the repository's was deleted. Coverage now
+  merges profiles online into a pool of eight (`LLVM_PROFILE_FILE_NAME`
+  with `%8m`), and a watchdog reports free space below 4 GB.
 - Coverage: `cargo llvm-cov nextest -p api --lib --branch` with
   `RUSTC_BOOTSTRAP=1` on the pinned toolchain (branch coverage is a nightly
   flag; this is measurement only, nothing is committed that needs it).
@@ -202,12 +214,127 @@ lines / lines with an unhit branch side:
 | `pullrun.rs` | 34 / 32 | 4 / 8 |
 | `server.rs` | 232 / 49 | 205 / 27 |
 
-What remains in run 2 is listed with its reason below once the final run
-on the final source has fixed the line numbers. Since run 2, tests have
-covered `server.rs`'s right-hand ISIN disqualifier in
-`spot_vendor_identity_for` and both `let` guards on `with_retry`'s
-named-throttle decrease. The three assertion arms of defect 4 are gone
-with the assertions.
+Run 4 (merged tree, `2b119504`, 2,501 of 2,501 tests passed): `audit` 1 / 0,
+`import_journal` 1 / 1, `autopilot` 29 / 8, `pullrun` 3 / 6, `server` 206 / 22,
+`emitted` and `scratch` 0 / 0. Since run 2, tests cover `server.rs`'s
+right-hand ISIN disqualifier in `spot_vendor_identity_for` and both `let`
+guards on `with_retry`'s named-throttle decrease. The three assertion arms
+of defect 4 went with the assertions. Every line and branch side still
+unexecuted is listed under **Lines not covered, and why**.
+
+## Lines not covered, and why
+
+Coverage run 4, merged tree at `2b119504`; line numbers are that commit's.
+"L" is a line never executed; "B" is a line with a branch side never
+taken. Nothing below is left unexplained. Each item is either
+**unreachable** in this build, with the reason, or **not driven**, with
+the rule or the missing seam that stops a test.
+
+**`audit.rs`**
+- L 634, `_ => 0`: the wildcard arm over a foreign `#[non_exhaustive]`
+  `DropReason`. Every variant this build knows has its own arm.
+  Unreachable.
+
+**`import_journal.rs`**
+- L 361: a run index past `u32::MAX` lines needs a journal of more than
+  4·10⁹ lines in memory. Unreachable in a test.
+- B 467, the `None` side of `self.last.get_mut(slot)`: `slot` comes from
+  `ImportKindOrder::of` of a known kind, and the table is sized to
+  `ImportKind::ALL`. Unreachable.
+
+**`autopilot.rs`**
+- L 319, B 2814 / L 2815: `Day` and `YearMonth` both span 1970..=9999, so
+  `year_month()` of a `Day` never fails. Unreachable.
+- B 928 / L 929–930: `day < to <= 9999-12-31`, so `day` has a successor.
+  Unreachable.
+- B 2907, L 2909, B/L 2910–2932, B 3553 / L 3554: `yesterday_ist(now)` is
+  `None` only for a host clock outside 1970..=9999. There is no clock seam.
+  Not driven.
+- B 2963 / L 2964–2968, B 3018 / L 3019: `store_timeframe()` is `None` for
+  a rung with no store directory. Every rung the autopilot drives has one
+  in this build; the arm is a backstop for a rung added without one.
+  Unreachable.
+- B 3639 / L 3640: `slot` comes from a survey over the same `feeds`.
+  Unreachable.
+
+**`pullrun.rs`**
+- B 863 / L 864: `unjournalled_feeds()` is never empty. The vendor table
+  ships two archive-folder feeds. Unreachable.
+- B 1713 / L 1714: `at` is a position the walk recorded while walking the
+  same `read`. Unreachable.
+- B 2080 / L 2081: the scan runs only while `skip < min(SCAN, records)`,
+  so each page asks for at least one record and gets it or an error.
+  Unreachable.
+- B 3814, 3854, 3859: `nth` enumerates the groups the run's `feeds` and
+  `outcomes` were built from. Unreachable.
+
+**`server.rs`, unreachable in this build**
+- L 1903–1908: `VendorCensusNow::census()` is always `Some` (D-3327).
+- B 1971 / L 1972: `report_from` always ends its text with a newline.
+- B 2739: `slot` enumerates `SpotTarget::ALL`, and the array is that long.
+- B 4462: a one-day `Window` of a valid `Day` always builds.
+- L 5756–5757: `verdict()` reads `kind_of`, and every `LENGTH_UNMEASURED`
+  day has a `SPECIAL_SESSIONS` window, so `SessionLengthUnmeasured` never
+  reaches `observed_cash_source_days`. The `NseCash` anchor row is
+  verified from `EPOCH_DAY`, so `hours_on` never refuses.
+- B 6001: the `vendor != Vendor::Zerodha` side. The function's first guard
+  already returned for every other vendor under a non-ISIN policy.
+- L 6477: `ledger.source()` is `None` only for a run that never opened,
+  and every unblocked `BrokerRun` was opened by `RunLedger::open`, which
+  always sets it.
+- B 9260 / L 9261–9266, L 9674–9680: `Feed::store_vendor()` is `None` for
+  no feed: TrueData and GDFL have store prefixes too.
+- B 9750 / L 9751–9757: both archive feeds declare an FNO layout.
+- B 11194 / L 11195–11196, B 11662 / L 11663, L 12542: a `Day` and a
+  `YearMonth` span 1970..=9999, and a window has at least one day.
+- B 12612 / L 12613–12618: `window.verdict` converts the same stamp first
+  and skips the row on its error, so the second conversion cannot fail.
+- L 15280: `contract_param` re-reads a query `locate_series` already
+  accepted with the same parser.
+- B 17409: `poll_read` only grows `filled`.
+- B 35685 / L 35686, B 35692 / L 35693: the vocabulary table is dense and
+  far below `u16::MAX`, so `definition()` always answers.
+
+**`server.rs`, not driven, by rule**
+- L 8811–8950 (B 8885): `read_credential` and `credentialed_source` read
+  AWS Parameter Store. No test reads a credential or reaches AWS
+  (`CLAUDE.md` §8, and this pass's network rule).
+- B 34885 / L 34902–34988: the `/universe` crawl fetches NSE's index pages
+  from `INDEX_HOST`, and no test may reach a non-loopback host. Driving it
+  needs a crawl-source seam.
+- B 11586 (`fno_report` after a chain discovery): `pull::chain::month`
+  builds discovery URLs from the shipped descriptor, not from the wire's
+  base URL, so a loopback credential does not redirect it (the 16 Oct
+  pass's incident). Driving it needs a discovery-URL seam.
+- B 19492 / L 19494–19513, L 20035: `open_in_browser` past its
+  suppression. Every test runs with `BRUTEX_NO_OPEN`.
+- L 17711–17719 (`end_served`), L 19228–19230 (`run_held`): the binary's
+  entry points. `end_served` calls `cli::cancel::request()`, a
+  process-wide cancel that would stop every other test in the binary.
+- B 19965 / L 19966–19969: the autopilot's start banner needs a writable
+  serve with `BRUTEX_AUTOPILOT=run`, a live autopilot over the real
+  credential source.
+
+**`server.rs`, not driven: host resources, the wall clock, a race**
+- L 19794–19798 (`local_addr()` failing after a bind), L 19839–19844
+  (`keep_port`, no descriptor left to duplicate): driving either means
+  exhausting descriptors, which would starve every other test.
+- L 19918 (`Loading::Failed`): the start-up load's thread panicked, and
+  `Site::serving` has no panic a fixture can trigger.
+- B 20049 / L 20050 (`warm_at_start`), B 20055 / L 20056
+  (`census_cache::start`, arrived with the merge): only a thread that
+  cannot be spawned.
+- B 6713 / L 6722–6723 (`finished_day_only`: today, with its session not
+  yet settled), L 10320–10323 and L 14253–14256 (`ist_day(now)` failing):
+  they read the wall clock, so which side runs depends on the hour the
+  suite runs. There is no clock seam.
+- B 6495 / L 6496 (`recovery_spot` refused after its run closed): a
+  member-failure append refused while the closing append right after it
+  lands. A notes file that cannot be written does not refuse an append
+  (`with_whole_note` keeps the record and logs). Only a busy journal lock
+  refuses one append and not the next, a race inside one call that no
+  fixture can time from outside. A test built on a blocked notes path was
+  tried and the failure was filed anyway, so the arm is not driven.
 
 ## Done
 
