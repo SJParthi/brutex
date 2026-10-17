@@ -169,6 +169,27 @@ so every survivor below is re-tested on the final tree.
     behind it, and the binary passed cargo-mutants' four-minute limit. The
     helper now gives up after 30 s by the clock. Measured under the mutant:
     4 tests fail and the suite ends in 60 s. Clean, it passes in 0.16 s.
+  - **Run D, final** (resumed, on `402b9349`'s tree): 354 tested in 58 min,
+    315 caught, 33 unviable, 1 missed, 5 timeouts. The other 83 of the 437
+    were caught earlier under the same name.
+    - The 1 missed is `mark_coverage` `>` → `>=`, confirmed equivalent:
+      `older` differs only when `self.bytes == 0`, and then both arms give
+      0.
+    - The 5 timeouts are the `reaped()` wait again: `Reap::fail` → `()`,
+      `reaper` → `()`, `start_reaper` and `start_reaper_with` → `Ok(())`,
+      and `reap_failures` deleted from `AuditHealth`. The helper fix landed
+      after run D took its tree.
+    - **Re-tested on `af6423fe` with the full suite: 12 mutants matched,
+      12 caught.** Under `reaper` → `()` the suite now fails in 120 s, 9
+      tests red.
+- **`Key::stem` `-=` → `/=`** (run B, timeout): the 16 Oct pass bounded one
+  test, but two more stemmed a name whose field ends inside a character
+  with no deadline. One is this branch's re-applied
+  `a_long_stem_is_cut_at_a_character_and_hashed_whole`; the other is
+  `tests/verdict.rs`' `a_long_key_is_refused_and_a_long_stem_is_kept_whole`.
+  Both now stem through a `stem_within` helper (a worker given 20 s).
+  Measured under the mutant: every store test binary ends, and those two
+  fail in 21 s (`11d407e7`).
 
 ### Coverage (run r3, on `402b9349`)
 
