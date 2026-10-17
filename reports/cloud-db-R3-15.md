@@ -1,9 +1,34 @@
-STATUS: IN PROGRESS
+STATUS: DONE
+
+Every gate R3-15 can move is green on the branch. Three are red here exactly as on the base and
+are not this part's, said plainly: `cargo deny` (the base's five advisories, DENY-1's);
+`cargo test --workspace` (the same 27 failures on base and branch, all of this container's: 25
+pass once root's permission override is dropped, the other 2 are an inode-reuse and a
+commits-on-main check); `svelte-check` (the base's 7 errors, all in other parts' files). The web
+suite is fully green under Node 24, the version CI uses. The page targets are NOT all met: see
+"Met and not met" below; the measured figures are written down either way. `web/build` is not
+committed here (NEEDS THE MAC 1).
 
 # R3-15 (cloud): Speed page, a browser harness for every page, a speed run at every deploy, page budgets
 
 Branch `cloud/db-R3-15-20261017`, from `origin/feat/db-fix` at `f9cdb584` (Merge R3-14). No Rust
 file is touched; every change is under `web/` plus this report.
+
+## Met and not met (the work package's measured target)
+
+| Target | Result (this container, empty store, n = 200 cold and warm) |
+|---|---|
+| Speed page from `/speed.json` with the build stamp | MET (drawn from the real server; see Measured) |
+| Speed run of every route after each deploy, the page's own requests, stamped, failing on an ignored field | MET as code and tests; run here against the real binary with 20 real restarts; `warm+writer` and the real-data run are NEEDS THE MAC 4 (no import or pull can run here) |
+| Browser harness, four targets, n = 200 cold and warm, p50/p99/max written | MET as a tool; figures below |
+| First content p99 < 300 ms | HOLDS on all seven pages, cold and warm (worst `/markets` cold 228 ms) |
+| Heap < 100 MB | HOLDS on all seven pages (worst 56 MB) |
+| < 400 KB on the wire | NOT MET cold on `/db` (815 KB), `/markets` (577 KB), `/ingest` (560 KB); holds on the other four and on every warm load. Needs compression in `crates/api/src/assets.rs` (not an R3-15 file) or splitting those pages |
+| No pause > 50 ms | NOT MET on any cold load (57–235 ms max: the shared shell's script evaluated in one task); holds on every warm load but one 51 ms pause on `/db`. The Speed page: cold p99 62 ms, max 66 ms; warm 0 |
+| Interactions timed (picker, feed switch, option-cell page turn, 20,000-row sort) | NOT MEASURED here: on an empty store `/db` draws none of the four controls; each row names its selector; NEEDS THE MAC 3 |
+| Size budget per page that fails the build | MET (`vite.config.js`; every page inside its budget; three pages over the 400 KB target and said so) |
+| Idle tab asks only the header-only up check, 1/10/20 tabs for an hour | The header's own probe: MET (`HEAD /inspection.json`, no body). The rule over whole pages: NOT MET — `/db`, `/ingest` and `/audit` keep their own polls on an idle tab (named below; not R3-15 files). Measured 60 s here; the hour is NEEDS THE MAC 3 |
+| One shared reporter (failed request, uncaught error, fallback) | MET, proved end to end against the real server |
 
 ## Prerequisites
 
@@ -69,6 +94,15 @@ after R3-15, so they rebase on this.
 4. The reporter check looked only at finished requests, so the real server's keepalive report
    would have read "sent no report".
 5. The uninstall put back a bound copy of `fetch`, not the page's own function.
+6. Idle tabs opened in one window were background tabs, so hidden, so silent: "10 idle tabs, 7
+   requests a minute" measured one tab. Each idle tab now has a browser context (a window) of its
+   own, and the table says how many were visible.
+7. The sheet's "first after restart" rows printed "0 answered" for twenty answers (their classes
+   were not counted).
+8. A capture the sheet could not read threw out of the run unnamed; it is now a failed run that
+   says so, and nothing is timed from it.
+9. Empty option values (`--pages ''`, `--idle-tabs ''`, `--clients ''`) are refused, never quietly
+   replaced by the defaults (found by the mutation pass).
 
 ## Measured
 
@@ -193,9 +227,12 @@ Run in this cloud container (4 cores, runs as root, node 22.22.0, rustc 1.97.1).
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | EXIT 0 | EXIT 0 |
 | `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store` (the known slow cli test skipped, per CONTEXT) | 9,066 passed, 27 failed | 9,066 passed, the **same** 27 failed |
 | `cargo deny check` | EXIT 1: RUSTSEC-2026-0344, 0346, 0347, 0348, 0349 | EXIT 1: exactly the same five (no `Cargo.toml`, `Cargo.lock` or crate file changed) |
-| `node --test web/tests/*.test.js` | 1,400 pass, 0 fail, 5 cancelled | see below |
+| `node --test web/tests/*.test.js` under **Node 24.22.0** (gate W2's version; from the repo root, as CI runs it) | 1,405 pass, 0 fail, 0 cancelled | **1,445 pass, 0 fail, 0 cancelled** (the 40 new included) |
+| `npm --prefix web test` under Node 22.22.0 (this container's) | 1,400 pass, 0 fail, 5 cancelled (`ask.test.js` ×3, `census-worker.test.js` ×2) | run while load was ≈ 7: 1,435 pass, 1 fail, 9 cancelled — the base's 5, plus `db-search.test.js:505` (a 16 ms p99 test read 22 ms) and `store-watch.test.js` ×4; both files pass alone (33/33), and all of it passes under Node 24 above |
 | `svelte-check` (gate W3, ceiling 0) | 7 errors | the same 7 errors, none in an R3-15 file |
-| `vite build` (gates W1, W4) | builds | builds, every page inside its budget, no unused CSS selector; `web/build` NOT committed here (NEEDS THE MAC 1) |
+| `vite build` (gates W1, W4) | builds | builds, every page inside its budget, 0 unused CSS selectors (`gates_jobs w4`: ceiling 0 held); `web/build` NOT committed here (NEEDS THE MAC 1) |
+| gate W5 (`web/ci/css-comments.mjs` on the new page and the layout), W6 | pass | pass |
+| gate 1 and 1b (`.github/source_scan.rs`, `.github/gates_tree.rs`), `.github/gates_routes.rs` | pass | pass |
 
 The 27 Rust failures are the same on base and branch, in crates R3-15 does not touch, and they
 are this container's, not the code's. **Proved, not inferred:** the same test binaries run with
@@ -258,7 +295,21 @@ tests left out, for time). First pass, before the tests it led to:
 
 The browser-driving functions of the harness (`launch`, `openTab`, `loadOnce`, the report check,
 `runHarness`) are covered 100% by the real-browser tests but were not mutated (each run needs
-Chromium, about 40 s). Second pass after the added tests: below.
+Chromium, about 40 s).
+
+Second pass, on the code as committed (tests in-process, `--experimental-test-isolation=none`,
+so a mutant that loops forever is killed by the timeout with its whole run), plus the six lines
+re-run after the last tests:
+
+| Module | Mutants | Killed | Survived, every one equivalent |
+|---|---:|---:|---|
+| `src/lib/speed.js` | 120 | 109 | 11: six inside JSDoc type casts (comments); five `??`→`||` where the left side is never a falsy value that is not null (an object, a function, a budget, a script's text) |
+| `src/lib/page-report.js` | 106 | 97 | 9: `<= 0x20` (a space becomes a space); seven `??`→`||` on functions and strings never empty; the prune `>=`→`>` at exactly one minute (pruning then only frees memory: the next check allows the entry either way) |
+| `src/lib/api-status.js` | 14 | 10 | 4: `??`→`||` on two clocks, a null header and a route never empty |
+| `ci/speed-sheet.mjs` | 186 | 157 | 29: 28 `??`→`||` where the left side is a function, an object, a count, a non-empty string or `undefined`; one wall-clock deadline `>`→`>=` |
+| `ci/browser-harness.mjs` (its rules) | 79 | 76 | 3: `--base ''` (refused either way); `fcp.n >= 0` (an empty window's p99 is 0, never ≥ 300); `??`→`||` on a count |
+
+No mutant that changes behaviour survives.
 
 ## NEEDS THE MAC
 
@@ -331,6 +382,24 @@ Mac's state directory. Nothing below writes the real store.
 6. **Docs** (not R3-15 files; text proposed below): `docs/04-invariants.md`,
    `docs/05-decisions.md` (number from the ledger head at landing), `docs/06-limits.md`.
 
+7. **Findings for other owners** (measured here; none is an R3-15 file, so nothing was changed):
+   - Idle-tab polls that the harness fails on, by page: `/db` `HEAD /store.json?feed=<wire>`
+     (the census generation watch, `$lib/store.svelte.js` / `store-watch`); `/ingest`
+     `GET /ingest/status.json` and `GET /pull/run.json`; `/audit` `GET /audit.json?feed=<wire>`.
+     Goal 4's idle rule holds for the whole app only when each moves to the header-only check or
+     the operator allows it by name.
+   - Compression: the server sends the bundle raw. gzip-6 would take `/db`'s first-load code from
+     731,132 B to 238,652 B, `/ingest`'s from 486,772 B to 166,862 B, `/backtest`'s from
+     1,096,161 B to 309,389 B — inside 400 KB. `crates/api/src/assets.rs`.
+   - `/markets` reads about 250 KB of data on a cold load over an EMPTY store (577 KB on the wire
+     against 325 KB of code).
+   - `/db` on an empty store reports `GET /instruments.json?feed=zerodha answered HTTP 503` on
+     every load (the new reporter put it in the log unprompted).
+
+8. **Ordering**: R3-31 and R3-33 depend on R3-15 and add their own `+layout.svelte` lines; R3-33
+   draws `speedTile()` from `$lib/speed.js` as the health page's "speed" tile; R4-04's hover
+   coverage plugs into the harness with `--hook web/ci/hover-coverage.mjs`.
+
 ### Proposed `docs/04-invariants.md` section
 
 ```
@@ -379,3 +448,15 @@ Mac's state directory. Nothing below writes the real store.
 | R3-15 harness bytes | A worker's own script and a keepalive report finish outside the page's session: their bytes count only as far as the page session sees them (`dataReceived`); the census worker script is 5,098 B. |
 | R3-15 harness pauses | Chrome reports a long task only past 50 ms, so "no pause over 50 ms" is exact and a shorter pause reads 0. |
 ```
+
+## Left on this machine (nothing of it is tracked)
+
+Everything below is in this session's scratchpad, `/tmp/claude-0/-home-user-brutex/f7d1ed70-61fe-5585-8a99-7d847d66b4f9/scratchpad/`:
+the base worktree `base-wt` (registered with `git worktree list`, detached at `f9cdb584`), the
+web copies `webcopy1`–`webcopy3` and `mut1`–`mut3`, the three empty synthetic stores and their
+logs under `live`, `live2`, `live3` (the harness sheets, the speed sheet and the capture are in
+`live3`), the mutation runner `mutate.mjs` and its results `mut-*.json`, `mut2-*.json`, and a
+Node 24.22.0 binary under `node24`. The scratch `api` servers and every browser this part started
+are stopped. Nothing was deleted except one marker file of this session's own mutation runner in
+the scratchpad. No real store, no `:8080` and no credential was touched; no file holds a
+credential, a token, a parameter path or a link.
