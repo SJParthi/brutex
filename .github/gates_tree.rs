@@ -2504,9 +2504,17 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
      wp12f-owed-cost wp12f-reach wp12f-restated-auction wp12f-restated-member \
      wp12f-restated-names wp12f-restated-open wp12f-retry wp12f-series wp12f-sparse \
      wp12f-told wp12f-torn wp12f-widen";
+// R3-35 (D-4979): the importer split's two proofs in
+// `pull/src/gdfl_import_split_tests.rs`. `r3-35-bytes` is the byte test's
+// scratch-directory tag; `git`, `cat-file` and `blob` are the words of the
+// `git cat-file blob <id>` the line test reads the split's and the unsplit
+// file's blobs with, as `store/tests/cited_commits.rs` runs `git`. None names
+// an account, an environment, a vendor credential or a field of a parameter
+// path.
+const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 61] = [
+const DECLARED: [&str; 62] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2568,6 +2576,7 @@ const DECLARED: [&str; 61] = [
     CENSUS_V4_LITERAL,
     DB_FIX_ROUND_LITERAL,
     WP12F_LITERAL,
+    R3_35_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

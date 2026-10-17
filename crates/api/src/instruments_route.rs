@@ -65,8 +65,18 @@ use std::fmt::Write as _;
 ///   parse): an unchanged census answers the kept body. It walked every
 ///   census entry on every request, and on a miss rebuilt the census inline
 ///   on a Tokio worker for 360 to 400 ms.
+///
+/// # Revalidated, not resent (R3-14 repair 1)
+///
+/// The body is the whole list, so its cost grows with the census: gate 8
+/// measured 81 to 103 ms at p50 for 100,000 series. Like `/store.json`, the
+/// answer now carries an `ETag` (the BLAKE3 of the kept body, computed once
+/// per kept body), and a reader that sends it back in `If-None-Match` gets
+/// `304` and no body: a probe of the kept answer, whatever the census's size.
+/// Only a `200` is ever answered `304`; a failure keeps its status.
 pub(super) async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
+    asked_with: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     // REFUSED BY NAME, NEVER SUBSTITUTED. `ingest::parse_vendor` answers the
@@ -81,7 +91,20 @@ pub(super) async fn instruments_json(
         );
     };
     match crate::detail::run_store_read(move || instruments_answer(&site, feed)).await {
-        Ok(answer) => answer,
+        Ok((code, headers, body)) => {
+            // DECIDED BEFORE THE BODY IS COPIED: a `304` touches the kept
+            // body's tag and nothing else.
+            let unchanged = code == axum::http::StatusCode::OK
+                && headers
+                    .get(axum::http::header::ETAG)
+                    .and_then(|tag| tag.to_str().ok())
+                    .is_some_and(|tag| super::store_route::none_match_hit(&asked_with, tag));
+            if unchanged {
+                (axum::http::StatusCode::NOT_MODIFIED, headers, String::new())
+            } else {
+                (code, headers, body.to_string())
+            }
+        }
         Err(why) => {
             let saturated = matches!(why, crate::detail::RunError::Saturated);
             let mut headers = json_headers();
@@ -117,10 +140,17 @@ fn json_headers() -> axum::http::HeaderMap {
 }
 
 /// The whole `/instruments.json` answer for one feed, off the async workers.
+///
+/// The body is the kept one, shared (`Arc<str>`): answering costs no copy of
+/// it, so a revalidation that ends in `304` never pays for the list.
 pub(super) fn instruments_answer(
     site: &Site,
     feed: Vendor,
-) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+) -> (
+    axum::http::StatusCode,
+    axum::http::HeaderMap,
+    std::sync::Arc<str>,
+) {
     let (_stamps, now) = vendor_census(site, feed);
     let census = now.census();
     // THE GUARD TAKEN ONCE, AND HELD ACROSS THE BUILD. The rows borrow from
@@ -132,7 +162,14 @@ pub(super) fn instruments_answer(
         feed,
         "instruments.json",
         universe.generation,
-        || Ok(instruments_body(site, feed, now.slot(), &universe.read)),
+        || {
+            Ok(Tagged::of(instruments_body(
+                site,
+                feed,
+                now.slot(),
+                &universe.read,
+            )))
+        },
     );
     let (master, master_note) = universe.read.master(feed);
     let behind = super::store_route::behind(site, feed);
@@ -161,12 +198,36 @@ pub(super) fn instruments_answer(
         axum::http::StatusCode::OK
     };
     match body {
-        Ok(body) => (code, headers, body.as_ref().clone()),
+        Ok(tagged) => {
+            // A tag that would not be a header value is not sent, and then
+            // no reader is ever answered `304`: the whole body, as before.
+            if let Ok(value) = axum::http::HeaderValue::from_str(&tagged.etag) {
+                headers.insert(axum::http::header::ETAG, value);
+            }
+            (code, headers, std::sync::Arc::clone(&tagged.body))
+        }
         Err(why) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             headers,
-            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)).into(),
         ),
+    }
+}
+
+/// One kept `/instruments.json` body and its validator, made together once
+/// per kept body.
+#[derive(Debug)]
+struct Tagged {
+    body: std::sync::Arc<str>,
+    etag: String,
+}
+
+impl Tagged {
+    fn of(body: String) -> Self {
+        Self {
+            etag: super::store_route::census_etag(&body),
+            body: body.into(),
+        }
     }
 }
 
@@ -702,6 +763,7 @@ mod tests {
 
         let (status, _headers, body) = instruments_json(
             axum::extract::State(std::sync::Arc::clone(&loaded)),
+            axum::http::HeaderMap::new(),
             "/instruments.json?feed=notafeed".parse().expect("a uri"),
         )
         .await;
@@ -722,6 +784,7 @@ mod tests {
         // unknown" would have broken all of them.
         let (status, _headers, body) = instruments_json(
             axum::extract::State(loaded),
+            axum::http::HeaderMap::new(),
             "/instruments.json".parse().expect("a uri"),
         )
         .await;
@@ -850,6 +913,7 @@ mod tests {
 
         let (_code, _headers, json) = instruments_json(
             axum::extract::State(std::sync::Arc::clone(&loaded)),
+            axum::http::HeaderMap::new(),
             // The feed is part of the question now: the two brokers do not
             // list the same instruments, so the index is per feed.
             "/instruments.json?feed=groww".parse().expect("a legal uri"),
@@ -952,6 +1016,7 @@ mod tests {
         let loaded: Loaded = std::sync::Arc::new(site);
         let (_code, _headers, json) = instruments_json(
             axum::extract::State(loaded),
+            axum::http::HeaderMap::new(),
             "/instruments.json?feed=groww".parse().expect("a legal uri"),
         )
         .await;
@@ -1091,5 +1156,59 @@ mod tests {
                 && refused.contains("dhan"),
             "the refusal names what was asked and what is known: {refused}"
         );
+    }
+
+    /// **`/instruments.json` IS REVALIDATED, NOT RESENT** (R3-14 repair 1).
+    /// Gate 8 timed the whole list per row and its 1x-to-100x ratio straddled
+    /// the ceiling (0.474x, then 3.002x BREACH) because the route sent no
+    /// `ETag` and every page load paid the whole body. A `200` now carries
+    /// the kept body's tag, the same tag on an unchanged census, and a reader
+    /// that sends it back gets `304` with no body; any other tag is the whole
+    /// answer.
+    #[tokio::test]
+    async fn the_instrument_list_is_revalidated_not_resent() {
+        let dir = agreeing("etagjson");
+        let site = site("etagjson", &dir);
+        let loaded: Loaded = std::sync::Arc::new(site);
+        let ask = |headers: axum::http::HeaderMap| {
+            instruments_json(
+                axum::extract::State(std::sync::Arc::clone(&loaded)),
+                headers,
+                "/instruments.json?feed=groww".parse().expect("a legal uri"),
+            )
+        };
+        let (code, headers, body) = ask(axum::http::HeaderMap::new()).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        let tag = headers
+            .get(axum::http::header::ETAG)
+            .expect("a 200 carries its tag")
+            .clone();
+        assert!(
+            tag.to_str()
+                .is_ok_and(|t| t.starts_with('"') && t.ends_with('"')),
+            "an ETag is a quoted string: {tag:?}"
+        );
+        let (_, again, _) = ask(axum::http::HeaderMap::new()).await;
+        assert_eq!(
+            again.get(axum::http::header::ETAG),
+            Some(&tag),
+            "unchanged census, same tag"
+        );
+
+        let mut held = axum::http::HeaderMap::new();
+        held.insert(axum::http::header::IF_NONE_MATCH, tag.clone());
+        let (code, headers, empty) = ask(held).await;
+        assert_eq!(code, axum::http::StatusCode::NOT_MODIFIED);
+        assert!(empty.is_empty(), "a 304 sends no body: {empty}");
+        assert_eq!(headers.get(axum::http::header::ETAG), Some(&tag));
+
+        let mut other = axum::http::HeaderMap::new();
+        other.insert(
+            axum::http::header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_static("\"deadbeef\""),
+        );
+        let (code, _, whole) = ask(other).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(whole, body, "another tag is answered with the whole list");
     }
 }
