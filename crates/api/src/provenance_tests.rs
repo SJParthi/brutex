@@ -1308,7 +1308,12 @@ fn a_month_being_written_is_the_being_written_503_naming_the_writer() {
     let mut writer = BarFile::open_or_create(&root, path, symbol_id("NIFTY")).unwrap();
     let _landed = writer.append(&seconds("2019-03-01", 2)).unwrap();
     let held = get(&root, GDFL_NIFTY);
-    assert_eq!(held.status, StatusCode::SERVICE_UNAVAILABLE, "{}", held.body);
+    assert_eq!(
+        held.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        held.body
+    );
     assert_eq!(held.body["being_written"], true, "{}", held.body);
     assert!(
         held.body["error"]
@@ -1320,7 +1325,11 @@ fn a_month_being_written_is_the_being_written_503_naming_the_writer() {
     );
     let wire = held.body.to_string();
     assert!(wire.contains(crate::detail::BEING_WRITTEN_FIELD), "{wire}");
-    assert!(wire.len() <= crate::detail::BEING_WRITTEN_BODY_MAX, "{}", wire.len());
+    assert!(
+        wire.len() <= crate::detail::BEING_WRITTEN_BODY_MAX,
+        "{}",
+        wire.len()
+    );
     assert!(
         held.body["error"]
             .as_str()

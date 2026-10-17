@@ -858,11 +858,18 @@ fn a_chain_beside_a_writer_says_being_written_never_spot_unreadable() {
         )
     };
     let (status, body) = patient(&format!("{BASE}&expiry=2019-03-28&at={}", t1()));
-    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "{body}"
+    );
     assert_eq!(body["being_written"], true, "{body}");
     let error = body["error"].as_str().expect("the sentence");
     assert!(error.contains(store::flock::BEING_WRITTEN), "{body}");
-    assert!(error.contains("r3-08-chain-writer"), "names the holder: {body}");
+    assert!(
+        error.contains("r3-08-chain-writer"),
+        "names the holder: {body}"
+    );
     assert!(body.get("chains").is_none(), "no rung is sent: {body}");
     assert!(!body.to_string().contains("unreadable"), "{body}");
 
@@ -871,12 +878,12 @@ fn a_chain_beside_a_writer_says_being_written_never_spot_unreadable() {
     std::fs::create_dir_all(damaged.parent().expect("a parent")).expect("a directory");
     std::fs::write(&damaged, b"not a bar file, invented for this test").expect("damage");
     let november = ist(2018, 11, 1, 10, 0, 0);
-    let (status, body) = patient(&format!(
-        "{BASE}&expiry=2019-03-28&at={},{november}",
-        t1()
-    ));
+    let (status, body) = patient(&format!("{BASE}&expiry=2019-03-28&at={},{november}", t1()));
     assert_eq!(status, axum::http::StatusCode::PARTIAL_CONTENT, "{body}");
-    assert_eq!(body["chains"][0]["spot_why"], "spot_being_written", "{body}");
+    assert_eq!(
+        body["chains"][0]["spot_why"], "spot_being_written",
+        "{body}"
+    );
     assert_eq!(body["chains"][1]["spot_why"], "spot_unreadable", "{body}");
     let faults = body["faults"].as_str().expect("the faults");
     assert!(faults.contains(store::flock::BEING_WRITTEN), "{faults}");

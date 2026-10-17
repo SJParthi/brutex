@@ -172,6 +172,22 @@ const ROUTES: &[(&str, Runs)] = &[
         "/census/facets.json",
         pool(Named::StoreRead, "facets.rs", "facets_json", STORE_READ),
     ),
+    // THE TWO CENSUS ROUTES R3-09 ADDED, named on the merge of feat/db-fix
+    // (this test refused both until they were): the warm table is memory, the
+    // roll-up reads the census in the store-read pool.
+    (
+        "/census/warm.json",
+        Runs::Memory("the census warm rows kept in memory (R3-09): one lock, no file"),
+    ),
+    (
+        "/census/rollup.json",
+        pool(
+            Named::StoreRead,
+            "census_rollup.rs",
+            "rollup_json",
+            STORE_READ,
+        ),
+    ),
     (
         "/chain.json",
         pool(Named::StoreRead, "chain.rs", "chain_json", STORE_READ),
@@ -1260,6 +1276,58 @@ async fn the_fold_day_flags_and_day_table_beside_a_writer_say_being_written() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// **REAL DAMAGE BESIDE A WRITER-HELD MONTH IS ANSWERED, NEVER HELD BACK**
+/// (R3-08 repair 2, verify-R3-08-r2 follow-up on RA-117). The day flags'
+/// being-written 503 looked at `month_faults` only, so a page whose gaps
+/// ledger would not read, beside a month a writer held, answered the 503 and
+/// hid the ledger's failure until the writer let go. The invented store here
+/// holds Zerodha NIFTY 1min 2024-01 under a writer and an `audit/zerodha.gaps`
+/// that is a directory (a read of it fails `EISDIR`): the answer lists the
+/// ledger in `source_faults`, the held month's cells still say
+/// `being_written`, and the route answers it rather than the 503.
+#[test]
+fn day_flags_beside_a_writer_still_answer_a_source_that_would_not_read() {
+    let (root, path, symbol_id) = one_month("flags-source-fault-beside-writer");
+    let ledger = root.join("audit").join("zerodha.gaps");
+    std::fs::create_dir_all(&ledger).expect("a ledger path that is a directory");
+    let (writer, release) = hold(&root, path, symbol_id, "r3-08-hold-source-fault");
+    let asked = crate::server::dayflags::asked(
+        "feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-01-01&to=2024-01-31&order=asc",
+    )
+    .expect("a legal ask");
+    let body = crate::server::dayflags::answer(&root, &asked);
+    release.send(()).expect("the writer lets go");
+    writer.join().expect("the writer thread");
+    assert!(
+        crate::server::dayflags::being_written(&body).is_none(),
+        "a source that would not read is answered beside the writer, not held back: {body}"
+    );
+    let sources = body["source_faults"].as_array().expect("source_faults");
+    assert_eq!(sources.len(), 1, "{}", body["source_faults"]);
+    assert!(
+        sources[0]
+            .as_str()
+            .is_some_and(|said| said.contains("zerodha.gaps")),
+        "{}",
+        body["source_faults"]
+    );
+    let days = body["days"].as_array().expect("days");
+    assert!(
+        days.iter().all(|day| day["held"]["why"] == "being_written"),
+        "{}",
+        body["days"]
+    );
+    // THE SAME BODY WITH NO SOURCE FAULT IS STILL THE 503: the gate is the
+    // source fault, not a weakened rule.
+    let mut quiet = body.clone();
+    quiet["source_faults"] = serde_json::json!([]);
+    let (status, said) =
+        crate::server::dayflags::being_written(&quiet).expect("a writer-only page is the 503");
+    assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(said.contains(crate::detail::BEING_WRITTEN_FIELD), "{said}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// **A GAPS AUDIT BESIDE A WRITER NEVER COUNTS THE HELD MONTH ABSENT OR ITS
 /// MINUTES LOST** (R3-08 repair 2, verify-R3-08-r2 blocking 2; NEW-21). The
 /// audit folded the open's refusal into `absent_file`, and the calendar then
@@ -1309,7 +1377,9 @@ async fn a_gaps_audit_beside_a_writer_never_counts_the_held_month_absent() {
         let january = &audit["month"][2];
         assert_eq!(january["month"], "2024-01", "{january}");
         assert!(january["absent_file"].is_null(), "{january}");
-        let why = january["being_written"].as_str().expect("the holder's sentence");
+        let why = january["being_written"]
+            .as_str()
+            .expect("the holder's sentence");
         assert!(why.contains(store::flock::BEING_WRITTEN), "{january}");
         assert!(why.contains("r3-08-gaps-writer"), "{january}");
         assert_eq!(january["summary"], "being_written", "{january}");
@@ -1326,8 +1396,16 @@ async fn a_gaps_audit_beside_a_writer_never_counts_the_held_month_absent() {
         writer.join().expect("the writer thread");
         let (answer, _) = get(addr, held_only).await;
         assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
-        assert!(answer.contains(r#""months_being_written":0"#), "{}", head_text(&answer));
-        assert!(!answer.contains("being written, ask again"), "{}", head_text(&answer));
+        assert!(
+            answer.contains(r#""months_being_written":0"#),
+            "{}",
+            head_text(&answer)
+        );
+        assert!(
+            !answer.contains("being written, ask again"),
+            "{}",
+            head_text(&answer)
+        );
     })
     .await;
     let _ = std::fs::remove_dir_all(&root);
@@ -1612,6 +1690,16 @@ async fn the_pools_answer_names_the_front_end_row_it_counts() {
             .unwrap_or("");
         let parsed: serde_json::Value = serde_json::from_str(json).expect("pools JSON");
         assert_eq!(parsed["front_end"], crate::detail::FRONT_END, "{json}");
+        // A POOL'S `answered` IS WORK RUN, NOT WHAT THE ROUTE SAID: a
+        // being-written 503 is answered in the pool and being_written in its
+        // route's row, and the answer says so rather than leaving two
+        // `answered` columns to disagree silently (verifier follow-up).
+        let say = parsed["say"].as_str().unwrap_or("");
+        assert!(
+            say.contains("A pool's answered is work it ran to its end")
+                && say.contains("the two answered columns count different things"),
+            "{json}"
+        );
         let routes = parsed["routes"].as_array().expect("routes");
         assert!(
             routes

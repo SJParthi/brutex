@@ -107,3 +107,17 @@ test('the panel reads /pools.json through the poller and shows both tables', () 
   assert.match(src, /aria-label="Routes"/);
   for (const head of ['Busy', 'Being written', 'Cancelled']) assert.match(src, new RegExp(`>${head}</th>`));
 });
+
+test('a pool counts work it ran, never the routes’ answered: the two columns are named apart', () => {
+  // R3-08 repair 2 (verifier follow-up): a being-written 503 is work the
+  // store_read pool ran to its end, and the route row counts it
+  // being_written. Both columns were headed "Answered", so the same request
+  // read as answered in one table and being written in the other.
+  const src = readFileSync(new URL('../src/routes/ingest/panels/ReadPools.svelte', import.meta.url), 'utf8');
+  const [poolTable, routeTable] = src.split('aria-label="Routes"');
+  assert.match(poolTable, />Ran<\/th>/);
+  assert.doesNotMatch(poolTable, />Answered<\/th>/);
+  assert.match(routeTable, />Answered<\/th>/);
+  const server = readFileSync(new URL('../../crates/api/src/detail.rs', import.meta.url), 'utf8');
+  assert.match(server, /A pool's answered is work it ran to its end/);
+});

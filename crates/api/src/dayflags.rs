@@ -464,6 +464,15 @@ pub(super) async fn dayflags_json(
 /// damage beside a busy month is answered as damage, its writer-held cells
 /// saying `being_written`.
 pub(crate) fn being_written(body: &Value) -> Option<(axum::http::StatusCode, String)> {
+    // REAL DAMAGE BESIDE A BUSY MONTH IS ANSWERED AS DAMAGE: a source that
+    // would not read is never held back behind the writer (R3-08 repair 2).
+    if body
+        .get("source_faults")
+        .and_then(Value::as_array)
+        .is_some_and(|faults| !faults.is_empty())
+    {
+        return None;
+    }
     let faults: Vec<String> = body
         .get("month_faults")?
         .as_array()?
@@ -616,10 +625,12 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         "lineage": lineage_json(root, asked.feed, inst),
         "rules": rules_json(),
         "notes": notes,
-        // EVERY MONTH THAT WOULD NOT OPEN, whatever the cause (R3-08, RA-117):
+        // EVERY MONTH THAT WOULD NOT OPEN, AND EVERY LOOKUP OR COUNT IN ONE THAT
+        // WOULD NOT READ, whatever the cause (R3-08, RA-117):
         // when a writer is the only cause the route answers "being written,
         // ask again" from these, and a reader of the body sees them here.
         "month_faults": month_faults,
+        "source_faults": source_faults(journal.as_ref(), quality.as_ref(), &gaps, pull.as_ref()),
     })
 }
 
@@ -3298,27 +3309,24 @@ fn counts(
                         Ok((lo, hi)) => {
                             let held = hi.saturating_sub(lo);
                             per_day.push(Held::Bars(held));
-                            halted.push(halted_of(&file, (feed, inst, rung), *day, &mut notes));
+                            halted.push(halted_of(
+                                &file,
+                                (feed, inst, rung),
+                                *day,
+                                (&mut notes, &mut faults),
+                            ));
+                            let scan = fills && held <= MAX_FILL_SCAN;
                             zero.push(
-                                (fills && held <= MAX_FILL_SCAN)
-                                    .then(|| {
-                                        (lo..hi).try_fold(0_u64, |n, at| {
-                                            file.read_record(at)
-                                                .map(|bar| n + u64::from(bar.volume == 0))
-                                        })
-                                    })
-                                    .and_then(|counted| match counted {
-                                        Ok(n) => Some(n),
-                                        Err(why) => {
-                                            notes.push(format!(
-                                                "{} {} {} {day}: zero-volume bars could not be counted: {why}",
-                                                feed.as_str(),
-                                                inst.key(),
-                                                rung.as_str()
-                                            ));
-                                            None
-                                        }
-                                    }),
+                                scan.then(|| {
+                                    zero_volume_of(
+                                        &file,
+                                        (lo, hi),
+                                        (feed, inst, rung),
+                                        *day,
+                                        (&mut notes, &mut faults),
+                                    )
+                                })
+                                .flatten(),
                             );
                             lower = Some(hi);
                         }
@@ -3356,25 +3364,73 @@ fn counts(
 }
 
 /// [`bars_in_halt`] for one day of `inst`, a failed lookup named in `notes`
-/// and answered `None`: never a count the store did not give.
+/// and in `faults` ([`count_failed`]) and answered `None`: never a count the
+/// store did not give.
 fn halted_of(
     file: &BarFile,
     (feed, inst, rung): (Vendor, &Instrument, Timeframe),
     day: Day,
-    notes: &mut Vec<String>,
+    said: (&mut Vec<String>, &mut Vec<String>),
 ) -> Option<u64> {
     match bars_in_halt(file, inst.venue(), day)? {
         Ok(inside) => Some(inside),
         Err(why) => {
-            notes.push(format!(
-                "{} {} {} {day}: the bars inside the halt could not be counted: {why}",
-                feed.as_str(),
-                inst.key(),
-                rung.as_str()
-            ));
+            count_failed(
+                format!(
+                    "{} {} {} {day}: the bars inside the halt could not be counted: {why}",
+                    feed.as_str(),
+                    inst.key(),
+                    rung.as_str()
+                ),
+                said,
+            );
             None
         }
     }
+}
+
+/// How many of `file`'s records `lo..hi` (one day's) carry zero volume
+/// (DB-B16), a record that would not read named in `notes` and in `faults`
+/// ([`count_failed`]) and answered `None`: never a count the store did not
+/// give.
+fn zero_volume_of(
+    file: &BarFile,
+    (lo, hi): (u64, u64),
+    (feed, inst, rung): (Vendor, &Instrument, Timeframe),
+    day: Day,
+    said: (&mut Vec<String>, &mut Vec<String>),
+) -> Option<u64> {
+    let counted = (lo..hi).try_fold(0_u64, |n, at| {
+        file.read_record(at)
+            .map(|bar| n + u64::from(bar.volume == 0))
+    });
+    match counted {
+        Ok(n) => Some(n),
+        Err(why) => {
+            count_failed(
+                format!(
+                    "{} {} {} {day}: zero-volume bars could not be counted: {why}",
+                    feed.as_str(),
+                    inst.key(),
+                    rung.as_str()
+                ),
+                said,
+            );
+            None
+        }
+    }
+}
+
+/// A count over a month that OPENED and then would not read (its zero-volume
+/// bars, its bars inside a halt), said once in `notes` and once in `faults`.
+/// It is damage, so a page beside a writer-held month that also holds this is
+/// answered 200 naming both, never held back as one "being written, ask
+/// again" 503 that hides it until the writer lets go (R3-08 repair 2, verifier
+/// follow-up on RA-117). It was a note only, which [`being_written`] cannot
+/// see.
+fn count_failed(said: String, (notes, faults): (&mut Vec<String>, &mut Vec<String>)) {
+    notes.push(said.clone());
+    faults.push(said);
 }
 
 /// The bars of `file` that open inside the halt the calendar of record holds
@@ -5056,6 +5112,33 @@ fn sources_json(
 }
 
 /// The sentences an answer owes its reader about what it could not read.
+/// THE PAGE'S OWN SOURCES THAT WOULD NOT READ (R3-08 repair 2): the import
+/// journal, the quality and gaps ledgers and the pull journal. Each is already
+/// a note ([`source_notes`], [`pull_notes`]); listed again as `source_faults`
+/// because it is damage, not a writer, so [`being_written`] answers a page
+/// that holds one beside a writer-held month as the 200 naming both, never as
+/// a 503 hiding it until the writer lets go. A pull journal still warming is
+/// not damage and is not listed.
+fn source_faults(
+    journal: Option<&Result<JournalRows, String>>,
+    quality: Option<&Result<LedgerRead<QualityLedger>, String>>,
+    gaps: &Result<LedgerRead<GapLedger>, String>,
+    pull: Option<&Result<PullRead, PullUnread>>,
+) -> Vec<String> {
+    [
+        journal.and_then(|read| read.as_ref().err().cloned()),
+        quality.and_then(|read| read.as_ref().err().cloned()),
+        gaps.as_ref().err().cloned(),
+        match pull {
+            Some(Err(unread @ PullUnread::Failed(_))) => Some(unread.note()),
+            _ => None,
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 fn source_notes(
     asked: &Asked,
     journal: Option<&Result<JournalRows, String>>,

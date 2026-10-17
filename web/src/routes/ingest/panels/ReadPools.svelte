@@ -84,7 +84,7 @@
             <th scope="col" title="Slots on this machine">Slots</th>
             <th scope="col" title="Running now">Running</th>
             <th scope="col" title="Waiting for a slot now">Waiting</th>
-            <th scope="col">Answered</th>
+            <th scope="col" title="Work run to its end for a reader still there, whatever the route then said: a page, a refusal or being written. The routes below split it by what was said.">Ran</th>
             <th scope="col" title="Refused 429 after the wait, with Retry-After">Busy</th>
             <th scope="col" title="The reader left before its answer">Cancelled</th>
           </tr>

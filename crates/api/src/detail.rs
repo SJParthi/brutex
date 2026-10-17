@@ -997,7 +997,10 @@ pub(crate) async fn pools_json() -> (
         "say": "since this process started; busy is a 429 (every slot of the pool stayed taken \
                 for the wait) and being_written a 503 (a writer held the month past the read's \
                 patience), each with Retry-After; cancelled is a reader that left before its \
-                answer; failed is every other 5xx",
+                answer; failed is every other 5xx. A pool's answered is work it ran to its end for a \
+                reader still there, WHATEVER the route then said: a page, a refusal or being \
+                written. The route rows split that one count by what was said, so the two \
+                answered columns count different things",
     });
     (
         axum::http::StatusCode::OK,

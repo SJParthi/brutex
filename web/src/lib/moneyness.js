@@ -220,9 +220,7 @@ const int = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
  * @param {{instrument: string, tf: string, ts: number, side: string|null, month?: string}[]} rows
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
- * @param {'exact'|'prev'} [asof]
- * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking again
- * @returns {Promise<{rungs: Map|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
+ * @param {'exact'|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
  * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking a month being written again (R3-08)
  * @returns {Promise<Map<string, SpotAnswer>>}
  */
