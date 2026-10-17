@@ -951,7 +951,7 @@ export function selectionState(db) {
         master: r?.master ?? null
       });
     }
-    /** @param {string} k @param {{months:number,bars:number,short:number,spotMonths:number,contractMonths:number,rows?:any[]}=} h */
+    /** @param {string} k @param {{months:number,bars:number,short:number,spotMonths:number,contractMonths:number}=} h */
     const decorate = (k, h) => ({
       key: k,
       sym: meta.get(k)?.sym ?? k,
@@ -963,9 +963,8 @@ export function selectionState(db) {
       short: h?.short ?? 0,
       spotMonths: h?.spotMonths ?? 0,
       contractMonths: h?.contractMonths ?? 0,
-      /* PER RUNG, AGAINST ITS OWN SEGMENT (DB-G63); `seg` names that segment. */
-      shortBy: shortfalls.get(k),
-      seg: (h?.rows ?? []).find((/** @type {any} */ r) => r.expiry === null || r.expiry === undefined)?.kind ?? ''
+      /* PER RUNG, AGAINST ITS OWN SEGMENT (DB-G63). */
+      shortBy: shortfalls.get(k)
     });
     if (universeNames === null) return instrumentRows.map((r) => decorate(r.key, r));
     /* ALREADY UNDERLYINGS AND ALREADY UNIQUE -- `universeNames` is a Set of

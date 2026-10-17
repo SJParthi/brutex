@@ -290,18 +290,18 @@ test('the shortfall is per rung, against the same segment, and never said of a t
     row('NSE-FNO-BIGIDX', '2019-06', '1s', 11, '2023-12-28')
   ];
   const by = spotShortfalls(census, census);
-  assert.deepEqual(by.get('SMALLIDX')?.get('1s'), { months: 1, short: 47, trade: false }, 'short of the fullest INDEX, not of every series');
-  assert.deepEqual(by.get('SMALLIDX')?.get('1min'), { months: 1, short: 0, trade: false }, "a share's pre-open minute does not make an index short");
-  assert.deepEqual(by.get('OTHER')?.get('1min'), { months: 1, short: 30, trade: false }, 'a share is short of the fullest share');
-  assert.deepEqual(by.get('SHARE')?.get('1s'), { months: 1, short: 0, trade: true }, 'a share at 1s is trade-driven');
+  assert.deepEqual(by.get('SMALLIDX')?.get('1s'), { months: 1, short: 47, trade: false, seg: 'INDEX' }, 'short of the fullest INDEX, not of every series');
+  assert.deepEqual(by.get('SMALLIDX')?.get('1min'), { months: 1, short: 0, trade: false, seg: 'INDEX' }, "a share's pre-open minute does not make an index short");
+  assert.deepEqual(by.get('OTHER')?.get('1min'), { months: 1, short: 30, trade: false, seg: 'CASH' }, 'a share is short of the fullest share');
+  assert.deepEqual(by.get('SHARE')?.get('1s'), { months: 1, short: 0, trade: true, seg: 'CASH' }, 'a share at 1s is trade-driven');
   assert.equal(by.get('BIGIDX')?.size, 2, 'the contract month is not folded into its underlying');
-  assert.equal(shortfallText(by.get('SMALLIDX'), 'INDEX', tfCmp, fmt), ' (1s: 47 bar(s) short of the fullest INDEX series of each month)');
-  assert.equal(shortfallText(by.get('SHARE'), 'CASH', tfCmp, fmt), ' (1s: trade-driven, a bar only where a trade printed, so no fixed bar count)');
-  assert.equal(shortfallText(by.get('BIGIDX'), 'INDEX', tfCmp, fmt), '');
-  assert.equal(shortfallText(undefined, 'INDEX', tfCmp, fmt), '');
+  assert.equal(shortfallText(by.get('SMALLIDX'), tfCmp, fmt), ' (1s: 47 bar(s) short of the fullest INDEX series of each month)');
+  assert.equal(shortfallText(by.get('SHARE'), tfCmp, fmt), ' (1s: trade-driven, a bar only where a trade printed, so no fixed bar count)');
+  assert.equal(shortfallText(by.get('BIGIDX'), tfCmp, fmt), '');
+  assert.equal(shortfallText(undefined, tfCmp, fmt), '');
   // Several rungs short: listed in ladder order, never summed into one figure.
   const two = spotShortfalls(census, [row('NSE-INDEX-SMALLIDX', '2019-06', '1min', 7_000), row('NSE-INDEX-SMALLIDX', '2019-06', '1s', 400_000)]);
-  assert.equal(shortfallText(two.get('SMALLIDX'), 'INDEX', tfCmp, fmt), ' (1s: 5,647 bar(s) short of the fullest INDEX series of each month; 1min: 875 bar(s) short of the fullest INDEX series of each month)');
+  assert.equal(shortfallText(two.get('SMALLIDX'), tfCmp, fmt), ' (1s: 5,647 bar(s) short of the fullest INDEX series of each month; 1min: 875 bar(s) short of the fullest INDEX series of each month)');
   // A month no other series shares measures against itself.
   assert.equal(spotShortfalls([], [row('NSE-INDEX-LONE', '2020-01', '1min', 10)]).get('LONE')?.get('1min')?.short, 0);
   assert.equal(tradeDriven({ segment: 'CASH', timeframe: '1s' }), true);
@@ -311,7 +311,7 @@ test('the shortfall is per rung, against the same segment, and never said of a t
 
   // WIRED: the Instrument row's title says the per-rung, per-segment figure — not the census's pooled `short`.
   const controls = dbSource('../src/routes/db/DbControls.svelte');
-  assert.match(controls, /spot month\(s\)\$\{shortfallText\(r\.shortBy, r\.seg, tfCmp, fmt\)\}/);
+  assert.match(controls, /spot month\(s\)\$\{shortfallText\(r\.shortBy, tfCmp, fmt\)\}/);
   assert.doesNotMatch(controls, /bar\(s\) short of the fullest series\)/);
   assert.match(dbSource('../src/lib/db/selection.svelte.js'), /const shortfalls = \$derived\(spotShortfalls\(db\.deco, universed\)\);/);
 });

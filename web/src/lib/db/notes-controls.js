@@ -785,7 +785,7 @@ export function tradeDriven(r) {
  *
  * @param {Iterable<any>} all every census row (the fullest is the store's)
  * @param {Iterable<any>} rows the rows to fold (the universe's)
- * @returns {Map<string, Map<string, {months: number, short: number, trade: boolean}>>}
+ * @returns {Map<string, Map<string, {months: number, short: number, trade: boolean, seg: string}>>}
  */
 export function spotShortfalls(all, rows) {
   /** @type {Map<string, number>} */
@@ -796,14 +796,14 @@ export function spotShortfalls(all, rows) {
     const seen = fullest.get(k);
     if (seen === undefined || r.rows > seen) fullest.set(k, r.rows);
   }
-  /** @type {Map<string, Map<string, {months: number, short: number, trade: boolean}>>} */
+  /** @type {Map<string, Map<string, {months: number, short: number, trade: boolean, seg: string}>>} */
   const out = new Map();
   for (const r of rows) {
     if (r.expiry !== null && r.expiry !== undefined) continue;
     let by = out.get(r.underlying);
     if (!by) out.set(r.underlying, (by = new Map()));
     let a = by.get(r.timeframe);
-    if (!a) by.set(r.timeframe, (a = { months: 0, short: 0, trade: tradeDriven(r) }));
+    if (!a) by.set(r.timeframe, (a = { months: 0, short: 0, trade: tradeDriven(r), seg: String(r.kind ?? '') }));
     a.months += 1;
     if (!a.trade) a.short += Math.max(0, (fullest.get(`${r.month}|${r.timeframe}|${r.kind}`) ?? r.rows) - r.rows);
   }
@@ -812,22 +812,21 @@ export function spotShortfalls(all, rows) {
 
 /**
  * The shortfall clause of one instrument's title: per rung, in ladder order,
- * "1min 1,234 bar(s) short of the fullest INDEX series of each month", a
- * trade-driven rung said as that. `''` when nothing is short and nothing is
- * trade-driven.
+ * "1min 1,234 bar(s) short of the fullest INDEX series of each month" — the
+ * segment the rung's rows carry — a trade-driven rung said as that. `''`
+ * when nothing is short and nothing is trade-driven.
  *
- * @param {Map<string, {months: number, short: number, trade: boolean}> | undefined} by
- * @param {string} segment the instrument's segment word (INDEX, CASH)
+ * @param {Map<string, {months: number, short: number, trade: boolean, seg: string}> | undefined} by
  * @param {(a: string, b: string) => number} order the rung ladder's comparator
  * @param {(n: number) => string} fmt
  */
-export function shortfallText(by, segment, order, fmt) {
+export function shortfallText(by, order, fmt) {
   if (!by) return '';
   const parts = [];
   for (const tf of [...by.keys()].sort(order)) {
-    const a = /** @type {{months: number, short: number, trade: boolean}} */ (by.get(tf));
+    const a = /** @type {{months: number, short: number, trade: boolean, seg: string}} */ (by.get(tf));
     if (a.trade) parts.push(`${tf}: trade-driven, a bar only where a trade printed, so no fixed bar count`);
-    else if (a.short > 0) parts.push(`${tf}: ${fmt(a.short)} bar(s) short of the fullest ${segment} series of each month`);
+    else if (a.short > 0) parts.push(`${tf}: ${fmt(a.short)} bar(s) short of the fullest ${a.seg} series of each month`);
   }
   return parts.length ? ` (${parts.join('; ')})` : '';
 }

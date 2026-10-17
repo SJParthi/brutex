@@ -259,7 +259,7 @@
             title:
               r.months === 0
                 ? `${r.sym} — ${r.key}. Nothing stored for it at this selection.`
-                : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot month(s)${shortfallText(r.shortBy, r.seg, tfCmp, fmt)} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
+                : `${r.sym} — ${r.key}. ${fmt(r.spotMonths)} spot month(s)${shortfallText(r.shortBy, tfCmp, fmt)} and ${fmt(r.contractMonths)} contract-month(s) held.${r.master === null && db.noMaster ? ` ${db.feedName} has no instrument master; this row is its census.` : ''}`
           }))
         ]}
         selected={new Set([db.filter])}
