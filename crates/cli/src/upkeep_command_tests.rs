@@ -1460,3 +1460,85 @@ fn every_rekey_outcome_is_an_item() {
     assert_eq!(code, FAILED, "{out}");
     assert!(out.contains("STOPPED 1"), "{out}");
 }
+
+/// A re-key that finds its ledger lines written and its months held but the
+/// retired keys listed again (a later write put them back in the census)
+/// writes no line and no month, installs the next epoch again, and says
+/// `applied`.
+#[test]
+fn a_rekey_that_only_withdraws_again_says_applied() {
+    let root = Root::new();
+    let day = Day::new(2019, 5, 30).unwrap();
+    let mut rows = Vec::new();
+    for (at, contract) in [
+        "2019-05-30-1150000-CE",
+        "2019-05-30-1170000-PE",
+        "2019-05-30-1180000-CE",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        rows.push(option(
+            &root.0,
+            contract,
+            day,
+            37_845 + u32::try_from(at).unwrap(),
+        ));
+    }
+    let impossible = option(&root.0, IMPOSSIBLE[0], day, 37_900);
+    rows.push(impossible);
+    census_of(&root.0, rows);
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    pull::ingest::census_store::record(&root.0, Vendor::Gdfl, &[impossible]).unwrap();
+    let (code, out) = plain(&root.0, &["run", "rekey", "gdfl"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("outcomes            applied 1"), "{out}");
+    assert!(
+        root.journal(Kind::Rekey).contains(
+            "0 moved (0 month file(s) written, 0 already held exactly), 0 ledger line(s) appended"
+        ),
+        "{}",
+        root.journal(Kind::Rekey)
+    );
+}
+
+/// A Zerodha plan names no re-key: the re-key is GDFL's alone.
+#[test]
+fn a_zerodha_plan_names_no_rekey() {
+    let root = Root::new();
+    let at = StorePath::new(PathParts {
+        vendor: Vendor::Zerodha,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: ym(2024, 1),
+        file: FileKind::Bars,
+    })
+    .unwrap();
+    let open = ym(2024, 1).ist_bounds_micros().0 + (86_400 + 555 * 60) * 1_000_000;
+    let mut writer =
+        BarFile::open_or_create(&root.0, at, crate::srt_builder::symbol_id("NIFTY")).unwrap();
+    writer
+        .append(&[Bar {
+            ts_micros: open,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 1,
+            open_interest: OI_NULL,
+        }])
+        .unwrap();
+    drop(writer);
+    let (code, out) = plain(&root.0, &["plan", "zerodha"]);
+    assert_eq!(code, OK, "{out}");
+    assert!(out.contains("NSE/INDEX/NIFTY 1min"), "{out}");
+    assert!(!out.contains("rekey:"), "{out}");
+    assert!(
+        out.contains("cli upkeep run recount zerodha --from DAY --to DAY"),
+        "{out}"
+    );
+}
