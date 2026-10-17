@@ -2454,3 +2454,137 @@ fn a_days_bar_phrases_are_said_only_where_they_apply() {
     assert_eq!(far["calendar"]["code"], "-", "{far:#}");
     says_has(far, "GDFL holds 1 bar(s)");
 }
+
+/// **THE SCAN'S EDGES ARE WHERE THEY ARE NAMED** (DB-B20): a day's extreme is
+/// its FIRST minute at that value; a minute at the day bar's own high or low
+/// is inside the day's range; a day of exactly 1,440 minutes is scanned and a
+/// span of one more is not; points read zero unsigned.
+#[test]
+fn the_scans_edges_are_where_they_are_named() {
+    let on = "2022-03-07";
+    let at = |minute: i64| 9 * 3_600 + 15 * 60 + minute * 60;
+    let ts = |minute: i64| bar(on, at(minute), [1; 4], 0).ts_micros;
+    // Highs 10, 12, 12 and lows 9, 7, 7: each extreme is its first minute.
+    let scan = fold_minutes(
+        [
+            bar(on, at(0), [10, 10, 9, 9], 0),
+            bar(on, at(1), [12, 12, 7, 7], 0),
+            bar(on, at(2), [12, 12, 7, 7], 0),
+        ]
+        .into_iter(),
+        |_| false,
+    );
+    assert_eq!(scan.high, Some((12, ts(1))));
+    assert_eq!(scan.low, Some((7, ts(1))));
+    // A lower low after a higher one replaces it; an equal one does not.
+    let falling = fold_minutes(
+        [
+            bar(on, at(0), [10, 10, 10, 10], 0),
+            bar(on, at(1), [5, 5, 5, 5], 0),
+        ]
+        .into_iter(),
+        |_| false,
+    );
+    assert_eq!(falling.low, Some((5, ts(1))));
+    // At the day bar's own high and low: inside the range, nothing flagged.
+    let edge = IndexDay {
+        feed: Vendor::Zerodha,
+        midnight: 0,
+        scan: Some(scan),
+        day_bar: Some((12, 7)),
+        ledger: None,
+        halt: None,
+    };
+    let (json, says) = edge.json();
+    assert_eq!(json["outside_day_range"]["flagged"], false, "{json:#}");
+    assert!(says.is_empty(), "{says:?}");
+    // Points: zero has no sign.
+    assert_eq!(points(0), "0.00");
+    assert_eq!(points(-5), "-0.05");
+    assert_eq!(points(22_985), "229.85");
+
+    // A day of exactly MAX_SCAN_BARS minutes is scanned; a longer span is not read.
+    let root = root_of("r3-13-scan-bound");
+    let full: Vec<store::format::Bar> = (0..i64::try_from(MAX_SCAN_BARS).expect("a count"))
+        .map(|minute| bar(on, minute * 60, [1_600_000; 4], 0))
+        .collect();
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-INDEX-NIFTY",
+        Timeframe::MINUTE_1,
+        full,
+    );
+    let inst = super::super::instrument_of("NSE-INDEX-NIFTY", "").expect("a key");
+    let month = YearMonth::new(2022, 3).expect("a month");
+    let super::super::Opened::File(file) =
+        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
+    else {
+        panic!("the month opens");
+    };
+    let whole = scan_day(&file, None, (0, MAX_SCAN_BARS), |_| false).expect("the day reads");
+    assert_eq!(whole.map(|scan| scan.bars), Some(MAX_SCAN_BARS));
+    assert_eq!(
+        scan_day(&file, None, (0, MAX_SCAN_BARS + 1), |_| false),
+        Ok(None)
+    );
+}
+
+/// **A MONTH FILE'S IDENTITY IS ITS OWN DEVICE AND INODE**: two months are two
+/// keys, so one month's kept scan is never another's.
+#[test]
+fn a_month_files_identity_is_its_own_device_and_inode() {
+    use std::os::unix::fs::MetadataExt as _;
+    let root = root_of("r3-13-identity");
+    let on = "2022-03-07";
+    let open = 9 * 3_600 + 15 * 60;
+    let month = YearMonth::new(2022, 3).expect("a month");
+    // NIFTY frozen for three minutes, BANKNIFTY moving: the same rows [0, 3).
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-INDEX-NIFTY",
+        Timeframe::MINUTE_1,
+        (0..3)
+            .map(|m| bar(on, open + m * 60, [1_600_000; 4], 0))
+            .collect(),
+    );
+    file_bars(
+        &root,
+        Vendor::Zerodha,
+        "NSE-INDEX-BANKNIFTY",
+        Timeframe::MINUTE_1,
+        (0..3)
+            .map(|m| bar(on, open + m * 60, [3_400_000 + m; 4], 0))
+            .collect(),
+    );
+    let opened = |key: &str| {
+        let inst = super::super::instrument_of(key, "").expect("a key");
+        let super::super::Opened::File(file) =
+            super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
+        else {
+            panic!("the month opens");
+        };
+        file
+    };
+    let (nifty, bank) = (opened("NSE-INDEX-NIFTY"), opened("NSE-INDEX-BANKNIFTY"));
+    for (file, key) in [(&nifty, "NSE-INDEX-NIFTY"), (&bank, "NSE-INDEX-BANKNIFTY")] {
+        let meta = std::fs::metadata(month_path(
+            &root,
+            Vendor::Zerodha,
+            key,
+            Timeframe::MINUTE_1,
+            month,
+        ))
+        .expect("the month file");
+        assert_eq!(file_identity(file), Some((meta.dev(), meta.ino())), "{key}");
+    }
+    let frozen = scan_day(&nifty, file_identity(&nifty), (0, 3), |_| false).expect("reads");
+    let moving = scan_day(&bank, file_identity(&bank), (0, 3), |_| false).expect("reads");
+    assert_eq!(frozen.map(|scan| scan.frozen_runs), Some(1));
+    assert_eq!(
+        moving.map(|scan| scan.frozen_runs),
+        Some(0),
+        "never the other month's scan"
+    );
+}
