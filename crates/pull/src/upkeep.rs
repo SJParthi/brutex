@@ -523,10 +523,7 @@ pub fn parse(line: &str) -> Option<Entry> {
 pub fn one_line(text: &str) -> String {
     let mut line = text.replace(['\n', '\r'], " ");
     if line.len() > WHY_CAP {
-        let mut cut = WHY_CAP;
-        while !line.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let cut = line.floor_char_boundary(WHY_CAP);
         let rest = line.len() - cut;
         line.truncate(cut);
         let _ = write!(line, "...(+{rest} bytes)");
@@ -1190,8 +1187,9 @@ fn drive<T: Sync>(
         }
     });
     let shared = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
-    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let seconds = millis / 1_000;
+    let elapsed = started.elapsed();
+    let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let seconds = elapsed.as_secs();
     let (how, why) = ending(
         shared.fault.as_deref(),
         of.saturating_sub(shared.n),

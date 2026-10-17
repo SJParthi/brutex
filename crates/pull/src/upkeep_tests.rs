@@ -659,6 +659,25 @@ fn a_stopped_run_resumes_along_its_chain() {
         (nothing.skipped, nothing.built(), nothing.how),
         (10, 0, How::Done)
     );
+    // A fresh run is a chain of its own: its resume skips only what IT
+    // closed, never the items the unrelated chain above closed clean.
+    built.store(2, Ordering::Relaxed);
+    let fresh = run(
+        &root.0,
+        &ask(Kind::SortIndex, 1, &stop, &now),
+        &plan,
+        &stopping,
+    )
+    .unwrap();
+    assert_eq!((fresh.id, fresh.built(), fresh.how), (104, 1, How::Stopped));
+    stop.store(false, Ordering::Release);
+    resume.resume = Some(104);
+    let own = run(&root.0, &resume, &plan, &clean).unwrap();
+    assert_eq!(
+        (own.skipped, own.built(), own.how),
+        (1, 9, How::Done),
+        "only run 104's one clean item is skipped"
+    );
 }
 
 /// A resume of a run the journal does not hold is refused, builds nothing,
