@@ -326,6 +326,9 @@ pub struct Ran {
     /// Milliseconds the items took, wall clock: the run's own measurement of
     /// its rate (items per second), on the host and the load it ran under.
     pub millis: u64,
+    /// Times the journal was flushed to the disk: after the `run` line, every
+    /// [`SYNC_EVERY`] items and after the `end` line.
+    pub flushes: u64,
 }
 
 impl Ran {
@@ -571,6 +574,8 @@ pub fn plan_digest<'a>(keys: impl IntoIterator<Item = &'a str>) -> u64 {
 struct Journal {
     flock: Flock<File>,
     path: PathBuf,
+    /// Times its lines were flushed to the disk since it was opened.
+    flushes: u64,
 }
 
 impl Journal {
@@ -594,7 +599,11 @@ impl Journal {
         plain(&file, &path)?;
         let flock = Flock::try_lock(file, path.clone())
             .map_err(|why| not_locked(&path, vendor, kind, why))?;
-        Ok(Self { flock, path })
+        Ok(Self {
+            flock,
+            path,
+            flushes: 0,
+        })
     }
 
     /// Ends a tail no newline ends, as a void line, and returns the bytes of
@@ -653,8 +662,10 @@ impl Journal {
         io(&self.path, self.flock.write_all(&bytes))
     }
 
-    fn sync(&self) -> Result<(), String> {
-        io(&self.path, self.flock.sync_data())
+    fn sync(&mut self) -> Result<(), String> {
+        io(&self.path, self.flock.sync_data())?;
+        self.flushes += 1;
+        Ok(())
     }
 }
 
@@ -1099,7 +1110,8 @@ pub fn run<T: Sync>(
         done,
         torn,
     };
-    let ran = drive(&mut journal, root, ask, begun, build)?;
+    let mut ran = drive(&mut journal, root, ask, begun, build)?;
+    ran.flushes = journal.flushes;
     Ok(released(ran, journal.flock.release()))
 }
 
@@ -1210,6 +1222,7 @@ fn drive<T: Sync>(
         why,
         torn,
         millis,
+        flushes: 0,
     })
 }
 

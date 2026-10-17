@@ -746,7 +746,10 @@ fn a_stop_request_names_its_run_and_a_stale_one_stops_nothing() {
     // A request whose directory cannot be made is refused by name.
     let gone = root.0.join("no-such-store");
     let why = request_stop(&gone, Vendor::Gdfl, Kind::DayIndex, 1).unwrap_err();
-    assert!(why.contains("no-such-store"), "{why}");
+    assert!(
+        why.starts_with(&format!("{}: ", gone.join("audit").display())),
+        "the audit directory itself is named: {why}"
+    );
     // A staging name that is a directory is refused, and the request with it.
     let staging = root
         .0
@@ -976,7 +979,8 @@ fn a_journal_that_is_not_a_plain_file_is_refused() {
     )
     .unwrap_err();
     assert!(
-        why.contains("not-a-store") && why.contains("nothing was written"),
+        why.starts_with(&format!("{}: ", gone.join("audit").display()))
+            && why.ends_with("; nothing was written"),
         "{why}"
     );
     assert!(!gone.exists(), "the root is never made");
@@ -1684,6 +1688,7 @@ fn the_hosts_own_refusals_are_said_by_name() {
         why: "every item of the run was built".to_owned(),
         torn: 0,
         millis: 0,
+        flushes: 0,
     };
     assert_eq!(super::released(ran(How::Done), Ok(())), ran(How::Done));
     let left = super::released(
@@ -1718,4 +1723,32 @@ fn the_hosts_own_refusals_are_said_by_name() {
         why.starts_with("bars/gdfl//INDEX/NIFTY/1s/2020-01.bin is not a store path: "),
         "{why}"
     );
+}
+
+/// **A RUN FLUSHES ITS JOURNAL** after its `run` line, after every
+/// [`SYNC_EVERY`]-th item and after its `end` line, and no more often: what a
+/// kill can lose is at most the lines since the last flush (L-R317-06).
+#[test]
+fn a_run_flushes_its_journal_at_the_run_line_every_64_items_and_the_end() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 99;
+    let every = usize::try_from(SYNC_EVERY).unwrap();
+    for (items, flushes) in [
+        (0, 2),
+        (1, 2),
+        (every - 1, 2),
+        (every, 3),
+        (2 * every + 2, 4),
+    ] {
+        let ran = run(
+            &root.0,
+            &ask(Kind::SortIndex, 1, &stop, &now),
+            &keys(items),
+            &clean,
+        )
+        .unwrap();
+        assert_eq!(ran.flushes, flushes, "{items} item(s)");
+        assert_eq!(ran.built(), items);
+    }
 }
