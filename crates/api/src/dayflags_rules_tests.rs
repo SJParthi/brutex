@@ -13,7 +13,9 @@
               keep panics out of the crate rather than out of its tests"
 )]
 
-use super::super::tests::{ask, bar, day, file_bars, record, root_of, says, says_has, write};
+use super::super::tests::{
+    append, ask, bar, day, file_bars, record, root_of, says, says_has, write,
+};
 use super::super::{Value, answer, answer_at};
 use super::*;
 use std::fmt::Write as _;
@@ -711,6 +713,39 @@ fn a_filtered_runs_late_rows_are_over_the_files_it_read() {
             .all(|say| !say.contains("all of the day's indices files")),
         "{:#?}",
         says(rec)
+    );
+}
+
+/// **THE LATE LEDGER IS KEPT FOR THE PROCESS AND READ BY ITS TAIL** (L-R3-13
+/// (d)): the whole journal once, then a read with nothing appended reads
+/// nothing, and an append reads only its bytes.
+#[test]
+fn the_late_ledger_is_read_by_its_tail() {
+    use super::super::{late_tails, read_ledger};
+    let root = root_of("r3-13-late-tail");
+    let path = pull::gdfl_import::journal_path(&root);
+    let first = "done options 2019-11-14 * late=5 max_back_s=2\n";
+    write(&path, first);
+    let read = read_ledger(late_tails(), &path).expect("the journal reads");
+    assert_eq!(read.read_now, read.bytes);
+    let again = read_ledger(late_tails(), &path).expect("the journal reads");
+    assert_eq!(again.read_now, 0, "nothing new, nothing read");
+    let more = "done options 2019-11-15 * late=1 max_back_s=1\n";
+    append(&path, more);
+    let tail = read_ledger(late_tails(), &path).expect("the journal reads");
+    assert_eq!(tail.read_now, u64::try_from(more.len()).expect("a length"));
+    let kind = pull::gdfl_import::ImportKind::Options;
+    assert_eq!(
+        tail.parsed
+            .get(day("2019-11-14"), kind, "*")
+            .map(|close| close.late),
+        Some(5)
+    );
+    assert_eq!(
+        tail.parsed
+            .get(day("2019-11-15"), kind, "*")
+            .map(|close| close.late),
+        Some(1)
     );
 }
 
