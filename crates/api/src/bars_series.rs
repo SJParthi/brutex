@@ -1482,3 +1482,273 @@ mod generation_tests {
         assert_eq!(life_of(&index, Vendor::Zerodha, &[]), None);
     }
 }
+
+/// Tests written for lines and branches a cloud mutation and coverage pass
+/// found unrun in this file (`reports/cloud-mut-api-a-20261017.md`). Every bar
+/// is generated, in a scratch store the test removes.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "a fixture that cannot be planted is a test that cannot run, and \
+              must fail loudly"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use store::format::OI_NULL;
+
+    const SYMBOL: &str = "CLOUDSERIES";
+
+    fn key() -> SeriesKey {
+        SeriesKey::new("NSE", "INDEX", SYMBOL, None)
+    }
+
+    fn month(m: u8) -> YearMonth {
+        YearMonth::new(2025, m).expect("a month")
+    }
+
+    /// A scratch store root, emptied first.
+    fn scratch(tag: &str) -> PathBuf {
+        let root = crate::scratch::path(&format!("cloud-series-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        root
+    }
+
+    /// `minutes` (IST minutes of the day) on IST day `day` of `month`, as one
+    /// minute bars of the fixture series. Appends; returns the file's path.
+    fn plant(root: &Path, month: YearMonth, day: u8, minutes: &[i64]) -> PathBuf {
+        let series = key();
+        let address = StorePath::new(series.parts(Vendor::Dhan, Timeframe::MINUTE_1, month))
+            .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a(SYMBOL) & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let mut file = BarFile::open_or_create(root, address, id).expect("a bar file");
+        let midnight = month.ist_bounds_micros().0 + i64::from(day - 1) * DAY_SECS * MICROS;
+        let rows: Vec<Bar> = minutes
+            .iter()
+            .map(|&minute| Bar {
+                ts_micros: midnight + minute * 60 * MICROS,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 1,
+                open_interest: OI_NULL,
+            })
+            .collect();
+        file.append(&rows).expect("generated records");
+        address.to_path_buf(root)
+    }
+
+    fn plan(root: &Path, months: &[YearMonth], filter: Filter) -> SeriesPlan {
+        SeriesPlan::build(
+            root,
+            Vendor::Dhan,
+            Timeframe::MINUTE_1,
+            key(),
+            months,
+            filter,
+            &super::super::Cancel::never(),
+        )
+        .expect("a plan")
+    }
+
+    /// **ONLY A WHOLE DATE AND A STRIKE, OR A WHOLE DATE AND `FUT`, IS A
+    /// CONTRACT'S TAIL.** Three fields are neither, and an empty year is no
+    /// date. Runs `contract_shaped`'s `_` arm and the false branch of its
+    /// `!text.is_empty()`.
+    #[test]
+    fn only_five_or_four_whole_fields_are_a_contract() {
+        assert!(contract_shaped(&["2026", "08", "27", "2500000", "CE"]));
+        assert!(contract_shaped(&["2026", "08", "27", "FUT"]));
+        assert!(!contract_shaped(&["2026", "08", "27"]));
+        assert!(!contract_shaped(&["", "08", "27", "2500000", "CE"]));
+        assert!(!contract_shaped(&["2026", "08", "27", "", "CE"]));
+    }
+
+    /// **A WINDOW OF NO MONTHS IS REFUSED BY NAME**, not planned as empty.
+    #[test]
+    fn a_window_of_no_months_is_refused_by_name() {
+        let got = SeriesPlan::build(
+            Path::new("/nonexistent-cloud-series-root"),
+            Vendor::Dhan,
+            Timeframe::MINUTE_1,
+            key(),
+            &[],
+            Filter::default(),
+            &super::super::Cancel::never(),
+        );
+        assert_eq!(
+            got.err(),
+            Some("a window names at least one month".to_owned())
+        );
+    }
+
+    /// **A HEADER MEMOISED UNDER AN OLDER STAMP IS READ AGAIN**: a month that
+    /// grew after a request read it is planned at its new length. Takes the
+    /// false branch of `at == stamp` in `header_of`.
+    #[test]
+    fn a_month_that_grew_is_planned_at_its_new_length() {
+        let root = scratch("grew");
+        plant(&root, month(5), 2, &[555, 556]);
+        assert_eq!(plan(&root, &[month(5)], Filter::default()).total(), 2);
+        plant(&root, month(5), 2, &[557]);
+        assert_eq!(plan(&root, &[month(5)], Filter::default()).total(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A MONTH THAT IS GONE WHEN IT IS OPENED IS NO SLOT, NOT A FAULT.**
+    /// `header_of` stats the file, then opens it; another process may remove
+    /// it between the two. The race is stood in for by a stat that finds a
+    /// file and an open of an address that holds none. Runs `header_of`'s
+    /// `Absent` arm.
+    #[test]
+    fn a_month_gone_at_its_open_is_absent() {
+        let root = scratch("gone-at-open");
+        let present = plant(&root, month(5), 2, &[555]);
+        let series = key();
+        let missing = series.parts(Vendor::Dhan, Timeframe::MINUTE_1, month(6));
+        assert!(matches!(header_of(&root, missing, &present), Ok(None)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAY BOUND THAT LEAVES A HELD MONTH OUT CUTS NO RUN OF IT**: from
+    /// 10 February, January keeps nothing and February keeps its rows. Takes
+    /// the true branch of `lo >= hi` in `cut_months`.
+    #[test]
+    fn a_day_bound_past_a_month_cuts_no_run_of_it() {
+        let root = scratch("bound-past");
+        plant(&root, month(1), 2, &[555, 556]);
+        plant(&root, month(2), 11, &[555, 556, 557]);
+        let from = month(2).ist_bounds_micros().0 + 9 * DAY_SECS * MICROS;
+        let cut = plan(
+            &root,
+            &[month(1), month(2)],
+            Filter {
+                from: Some(from),
+                ..Filter::default()
+            },
+        );
+        assert_eq!(cut.total(), 3);
+        assert!(cut.runs.iter().all(|run| run.slot == 1), "February alone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A CUT UNDER THE OTHER BUCKET KIND IS NO CUT**: `cut_months` on a
+    /// plan bucketed by day, and `cut_days` on one bucketed by month, add no
+    /// run and refuse nothing.
+    #[test]
+    fn a_cut_under_the_other_bucket_kind_adds_no_run() {
+        let root = scratch("other-kind");
+        plant(&root, month(5), 2, &[600, 601]);
+        let tod = Filter {
+            tod: Some((36_000, 36_119)),
+            ..Filter::default()
+        };
+        let mut by_day = plan(&root, &[month(5)], tod);
+        let runs = by_day.runs.len();
+        by_day.cut_months(&root, Filter::default()).expect("no cut");
+        assert_eq!(by_day.runs.len(), runs);
+        let mut by_month = plan(&root, &[month(5)], Filter::default());
+        let runs = by_month.runs.len();
+        by_month
+            .cut_days(&root, tod, (36_000, 36_119), &super::super::Cancel::never())
+            .expect("no cut");
+        assert_eq!(by_month.runs.len(), runs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **PAST THE LAST KEPT ROW THERE IS NO ROW, NO PREDECESSOR AND NO
+    /// STRETCH TO READ, AND A SLOT THE PLAN DOES NOT HOLD COVERS NO DAY.**
+    /// The edges of `nth`, `previous_is_kept`, `read_stretch` and
+    /// `days_covered`, which their callers never ask.
+    #[test]
+    fn the_edges_past_a_plan_answer_nothing() {
+        let root = scratch("edges");
+        plant(&root, month(5), 2, &[555, 556]);
+        let mut held = plan(&root, &[month(5)], Filter::default());
+        assert_eq!(held.total(), 2);
+        assert!(held.nth(1).is_some());
+        assert!(held.nth(2).is_none(), "the third of two rows");
+        let past = Position {
+            count: 2,
+            run: held.runs.len(),
+            row: 0,
+        };
+        assert!(!held.previous_is_kept(past));
+        let mut since = 0;
+        assert_eq!(
+            held.read_stretch(
+                &root,
+                0,
+                (1, 1),
+                &super::super::Cancel::never(),
+                &mut since,
+                |_, _| { unreachable!("an empty stretch reads no row") }
+            ),
+            Ok(0)
+        );
+        assert_eq!(since, 0, "and counts none toward the stride");
+        assert_eq!(held.days_covered(&root, held.slots.len()), Ok(0));
+        assert_eq!(held.days_covered(&root, 0), Ok(1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **UNDER A TIME-OF-DAY BOUND, A MONTH'S FIRST KEPT ROW MEASURES
+    /// AGAINST THE MONTH BEFORE ONLY WHEN IT OPENS ITS FILE, THE MONTH BEFORE
+    /// CLOSED ON A KEPT ROW, AND NO HELD MONTH LIES BETWEEN.** The window is
+    /// 10:00–10:59. January keeps its every row; February holds only a 09:15
+    /// row, so it keeps none; March opens on a kept row; April opens on a
+    /// 09:15 row it does not keep. March's first kept row does not measure
+    /// against January (February is held between), and April's does not
+    /// measure against March (the row before it in its file is not kept).
+    /// Takes the false branches of `at.row == 0` and of
+    /// `before.slot + 1 == run.slot` in `previous_is_kept`.
+    #[test]
+    fn a_first_kept_row_measures_back_only_across_adjacent_whole_files() {
+        let root = scratch("lookback-tod");
+        plant(&root, month(1), 2, &[600, 601]);
+        plant(&root, month(2), 3, &[555]);
+        plant(&root, month(3), 3, &[600, 601]);
+        plant(&root, month(4), 1, &[555, 600]);
+        let held = plan(
+            &root,
+            &[month(1), month(2), month(3), month(4)],
+            Filter {
+                tod: Some((36_000, 39_599)),
+                ..Filter::default()
+            },
+        );
+        let first_of = |slot: usize| {
+            let run = held
+                .runs
+                .iter()
+                .position(|run| run.slot == slot)
+                .expect("a kept run");
+            Position {
+                count: 0,
+                run,
+                row: held.runs[run].start,
+            }
+        };
+        assert!(
+            held.runs.iter().all(|run| run.slot != 1),
+            "February keeps nothing"
+        );
+        let march = first_of(2);
+        assert_eq!(march.row, 0, "March opens on a kept row");
+        assert!(!held.previous_is_kept(march), "February is held between");
+        let april = first_of(3);
+        assert_eq!(april.row, 1, "April's 09:15 row is not kept");
+        assert!(!held.previous_is_kept(april));
+        // THE SAME RULE, MET: January's second kept row follows its first.
+        let january = first_of(0);
+        assert!(held.previous_is_kept(Position {
+            count: 1,
+            run: january.run,
+            row: 1
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

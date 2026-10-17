@@ -71071,3 +71071,33 @@ the production signature for a test. Leaving the eighteen as NOT DONE:
 `bars::sort::cloud_mutant_tests::a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget`,
 `bars::sort::cloud_mutant_tests::a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget`.
 Invariants MUT-A-02 to MUT-A-05.
+
+### D-5423 — The bars scan orders a null open interest by time alone, never by the number a vendor stamped — 2026-10-17
+
+**Number** as D-5420.
+
+**What was observed.** A branch-coverage run of `crates/api/src/bars.rs`
+found the open-interest operand of the scan's candidate never read: the
+router sends a time-of-day order to `scan` and open interest elsewhere (the
+sort indexes for a derivative, a seek for an index or a share). Asked
+directly, `scan` broke `SortKey`'s contract. An index's or a share's open
+interest is not applicable (D-3322) and every one of its rows is a null, but
+the candidate still carried the number the vendor stamped, and the
+comparator ordered nulls by it before time: `[30, null, 10, null, 20]` came
+back `30, 20, 10, null, null` descending, a null ordered as a real number.
+
+**Decision.** A null candidate's value is `OI_NULL`, so nulls compare equal
+and fall to time, then series, in both directions, as `SortKey::of` and
+`window_cancellable` state.
+
+**Rejected.** Leaving it because no route reaches it: the scan is the
+documented brute force a future route may use, and a latent wrong order is
+the silent wrong answer `CLAUDE.md` §4 bans. Ordering in the comparator
+instead (ignore `value` when both are null): the same answer, read on every
+comparison instead of set once a row.
+
+**Limit.** Unreachable from any route today; no served page changes.
+
+**Proof.** `bars::cloud_mutant_tests::the_scan_orders_open_interest_with_its_nulls_last`
+failed before the fix (`desc false`: the five nulls in stamped-value order)
+and passes after it. Invariant MUT-A-06.

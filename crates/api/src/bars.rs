@@ -2312,14 +2312,18 @@ fn scan(
                     if query.want_extremes {
                         extremes.fold(bar, series, volume);
                     }
+                    let null = matches!(query.sort, SortKey::OpenInterest)
+                        && (oi_absent || bar.open_interest == OI_NULL);
                     let candidate = Candidate {
-                        value: query.sort.of(bar),
+                        // A NULL IS NEVER ORDERED AS A REAL NUMBER (`SortKey::of`):
+                        // an index's or a share's open interest is null whatever
+                        // the vendor stamped, and nulls go by time, then series.
+                        value: if null { OI_NULL } else { query.sort.of(bar) },
                         ts: bar.ts_micros,
                         series: series_at,
                         run: run_at,
                         row,
-                        null: matches!(query.sort, SortKey::OpenInterest)
-                            && (oi_absent || bar.open_interest == OI_NULL),
+                        null,
                     };
                     if bar_to_beat.is_some_and(|worst| order(&candidate, &worst).is_ge()) {
                         return;
@@ -4476,6 +4480,334 @@ mod cloud_mutant_tests {
         plan.read_stretch(&root, 0, (0, 3), &Cancel::never(), &mut since, |_, _| {})
             .expect("a client that stayed is answered");
         assert_eq!(since, 2, "the look at row 0, then rows 1 and 2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A CLIENT GONE AT ANY LOOK OF A TIME-OF-DAY SCAN ENDS THE REQUEST AS
+    /// CANCELLED** (DB-N15). Over one month of 5,000 rows with no time-of-day
+    /// bound the request looks four times: once per asked key, once between
+    /// the plan and the read, once before the month's run, and once at row
+    /// 4,096 of the stride. A flag that turns at any of them ends the request
+    /// by name. Runs the scan's own cancellation exits and
+    /// `window_cancellable`'s `?` on the scan, which no test reached.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_client_gone_at_any_look_of_a_scan_ends_the_request() {
+        let (root, query) = index_month("scan-cancel", 5_000);
+        let query = WindowQuery {
+            sort: SortKey::TimeOfDay,
+            want_extremes: false,
+            ..query
+        };
+        assert_eq!(looks_of(&root, &query), 4);
+        let whole = window(&root, &query).expect("an answered window");
+        assert_eq!(whole.scan_rows, 5_000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One month of 2025-05 of an NSE option on Dhan, one minute a bar from
+    /// the month's first instant: each bar's open interest given, `None` a
+    /// null. Returns the scratch root and the plan and rules a window builds.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    fn option_month(
+        tag: &str,
+        segment: &str,
+        open_interest: &[Option<i64>],
+    ) -> (
+        std::path::PathBuf,
+        WindowQuery,
+        Vec<SeriesPlan>,
+        Vec<change::Rules>,
+    ) {
+        let root = crate::scratch::path(&format!("cloud-bars-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let contract = (segment == "FNO")
+            .then(|| brutex_core::instrument::Contract::parse("2025-05-29-2500000-CE"))
+            .flatten();
+        let key = SeriesKey::new("NSE", segment, "NIFTY", contract);
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment,
+            symbol: "NIFTY",
+            contract,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let bars: Vec<Bar> = (0_i64..)
+            .zip(open_interest)
+            .map(|(i, oi)| Bar {
+                open_interest: oi.unwrap_or(OI_NULL),
+                ..bar(start + i * 60_000_000, 90, 110, 100, 1)
+            })
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&bars).expect("generated records");
+        drop(file);
+        let query = WindowQuery::single(
+            Vendor::Dhan,
+            key.clone(),
+            Timeframe::MINUTE_1,
+            month,
+            month,
+            SortKey::OpenInterest,
+            false,
+            0,
+            10,
+            false,
+        );
+        let lineage = change::Lineage::read(&root, Vendor::Dhan);
+        let rules = vec![change::Rules::of(
+            &root,
+            Timeframe::MINUTE_1,
+            &key,
+            &lineage,
+        )];
+        let plans = vec![
+            series::SeriesPlan::build(
+                &root,
+                Vendor::Dhan,
+                Timeframe::MINUTE_1,
+                key,
+                &[month],
+                Filter::default(),
+                &Cancel::never(),
+            )
+            .expect("a plan"),
+        ];
+        (root, query, plans, rules)
+    }
+
+    /// **THE SCAN ORDERS OPEN INTEREST WITH ITS NULLS LAST, AND AN INDEX'S
+    /// OPEN INTEREST IS NULL EVERY ROW**, as `SortKey` documents. The router
+    /// sends open interest to the sort indexes or a seek, never to the scan,
+    /// so the scan's null rule is asked here directly: an option's nulls
+    /// follow its values in both directions, and an index's rows, all null,
+    /// stay in time order. Takes both branches of `oi_absent ||
+    /// open_interest == OI_NULL` in `scan`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn the_scan_orders_open_interest_with_its_nulls_last() {
+        let ois = [Some(30), None, Some(10), None, Some(20)];
+        let oi_of = |page: &[WindowBar]| -> Vec<i64> {
+            page.iter().map(|row| row.bar.open_interest).collect()
+        };
+        for desc in [false, true] {
+            let (root, query, mut plans, rules) = option_month("scan-oi", "FNO", &ois);
+            let query = WindowQuery { desc, ..query };
+            let mut faults = FaultLog::default();
+            let scanned = scan(
+                &root,
+                &mut plans,
+                &rules,
+                &query,
+                (0, 10),
+                &mut faults,
+                &Cancel::never(),
+            )
+            .expect("a scan");
+            let valued = if desc { [30, 20, 10] } else { [10, 20, 30] };
+            assert_eq!(
+                oi_of(&scanned.page),
+                [&valued[..], &[OI_NULL, OI_NULL]].concat(),
+                "desc {desc}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        // AN INDEX WHOSE ROWS CARRY STAMPED NUMBERS: its open interest does
+        // not apply, so every row is a null and none is ordered by the number
+        // the vendor stamped. Before the fix the nulls were ordered by it
+        // (30, 20, 10 descending), a null ordered as a real number.
+        for desc in [false, true] {
+            let (root, query, mut plans, rules) = option_month("scan-oi-index", "INDEX", &ois);
+            let mut faults = FaultLog::default();
+            let scanned = scan(
+                &root,
+                &mut plans,
+                &rules,
+                &WindowQuery { desc, ..query },
+                (0, 10),
+                &mut faults,
+                &Cancel::never(),
+            )
+            .expect("a scan");
+            let stamps: Vec<i64> = scanned.page.iter().map(|row| row.bar.ts_micros).collect();
+            let mut ascending = stamps.clone();
+            ascending.sort_unstable();
+            assert_eq!(stamps, ascending, "every row null: time order, desc {desc}");
+            assert_eq!(stamps.len(), ois.len());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// **A POSITION PAST THE PLAN'S RUNS HAS NOTHING BEHIND IT.** The edge of
+    /// `behind_of` no caller asks: every page position comes from a run.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_position_past_the_runs_has_nothing_behind_it() {
+        let (root, _, mut plans, _) = option_month("behind-past", "FNO", &[Some(1), Some(2)]);
+        let plan = plans.first_mut().expect("one plan");
+        let past = series::Position {
+            count: 2,
+            run: plan.runs.len(),
+            row: 0,
+        };
+        assert!(matches!(
+            behind_of(&root, plan, past, None, true),
+            Behind::Nothing
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A GDFL F&O KEY WITH NO CONTRACT IS OPENED AS ASKED**: only an option
+    /// or a future WITH a contract is held against the re-key ledger (D-3331),
+    /// so an F&O key with none is simply absent where no month is held.
+    /// Takes the false branch of `let Some(contract) = contract` in
+    /// `open_classified`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_gdfl_fno_key_with_no_contract_is_opened_as_asked() {
+        let root = crate::scratch::path("cloud-bars-fno-no-contract");
+        let _ = std::fs::remove_dir_all(&root);
+        let refused = open_classified(
+            &root,
+            PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: "FNO",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: Timeframe::MINUTE_1,
+                month: YearMonth::new(2025, 5).expect("a month"),
+                file: FileKind::Bars,
+            },
+        )
+        .map(|_| ())
+        .expect_err("no month is held");
+        assert!(
+            matches!(refused.kind, OpenRefusalKind::Absent),
+            "{}",
+            refused.message
+        );
+    }
+
+    /// **A REPAIRED MONTH WHOSE SERVED REVISION IS GONE IS UNREADABLE, NEVER
+    /// ABSENT** (D-3350). The month is repaired and its revision promoted;
+    /// then the revision's bar file goes. The store names the revision's path
+    /// as missing, which is not the asked month's path, so the month is a
+    /// file the store cannot read — not "no month here", which a gap audit
+    /// would count as a backfill never made. Takes the false branch of the
+    /// missing-path comparison in `open_classified`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_repaired_month_whose_revision_is_gone_is_unreadable() {
+        let root = crate::scratch::path("cloud-bars-revision-gone");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let parts = PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        };
+        let path = StorePath::new(parts).expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let first = bar(start, 90, 110, 100, 1);
+        let later = bar(start + 60_000_000, 90, 110, 101, 1);
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&[first]).expect("one record");
+        let header = file.header();
+        drop(file);
+        let revision = store::repair::Revision::new(1).expect("revision 1");
+        store::repair::publish(&root, path, id, revision, header, &[first, later])
+            .expect("a revision");
+        store::generation::promote(&root, path, id, revision).expect("promoted");
+        assert!(
+            open_classified(&root, parts).is_ok(),
+            "the revision is served"
+        );
+
+        std::fs::remove_file(path.to_path_buf(&store::repair::revision_root(&root, revision)))
+            .expect("the revision's bars go");
+        let refused = open_classified(&root, parts)
+            .map(|_| ())
+            .expect_err("the served file is gone");
+        assert!(
+            matches!(refused.kind, OpenRefusalKind::Unreadable),
+            "{}",
+            refused.message
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A KEY THAT IS ITS OWN FILING NAMES NO SUCCESSOR.** `NSE-INDEX-NIFTY`
+    /// on a keyed feed is the key the alias table files NIFTY under; asked
+    /// where nothing is held, its refusal names it alone, with no "now" or
+    /// "filed as". Takes the true branch of `filed == key.text()` in
+    /// `successor_of`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_key_that_is_its_own_filing_names_no_successor() {
+        let root = crate::scratch::path("cloud-bars-own-filing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let refused = window(
+            &root,
+            &WindowQuery::single(
+                Vendor::Gdfl,
+                SeriesKey::new("NSE", "INDEX", "NIFTY", None),
+                Timeframe::MINUTE_1,
+                month,
+                month,
+                SortKey::Ts,
+                false,
+                0,
+                10,
+                false,
+            ),
+        )
+        .map(|_| ())
+        .expect_err("nothing is held");
+        assert_eq!(
+            refused,
+            "unknown_series: NSE-INDEX-NIFTY names no series gdfl holds at 1min"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
