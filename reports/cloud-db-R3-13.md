@@ -11,17 +11,27 @@ Both merged into `origin/feat/db-fix`:
 - `Merge WP-11c: import data-quality labels: minute-sampled days and halts` (c4f6e522)
 - `Merge WP-62: pull runtime: calendar horizon, idle stop, per-instrument gates, stop/restart/storage safety` (72c91a46)
 
-## Done (turn 1)
+## Done
 
-- Read `CLAUDE.md`, the cloud README, `CONTEXT.md` and `R3-13.md`.
-- Mapped every finding to the code that owns it (below). No source edited yet.
-- Started a cold build of `api`'s tests (4 cores; still compiling at the end of the turn).
+- Turn 1: read `CLAUDE.md`, the cloud README, `CONTEXT.md` and `R3-13.md`; mapped every
+  finding to the code that owns it (below). A cold build of `api`'s tests finished, exit 0.
+- Turn 2: merged the newer `origin/feat/db-fix` (62396df0) into the branch, because AF-02 and
+  AF-07 changed `dayflags.rs` (+395/-40). **SC-CLOSE-11 is already fixed on the base by AF-02**
+  ("multi-name filters read right on /dayflags.json": `Names` in `journal_rows`, tests in
+  `crates/api/src/imports_filter_tests.rs`); R3-13 adds nothing for it.
+- Turn 2: wrote `crates/api/src/dayflags_rules.rs` (not yet declared or wired, so the build
+  is unchanged): `feed_rungs` (goal 5b, the one function for peers and finest rungs),
+  `asked_rung` (goal 1's `timeframe=`), `CasFlags` (SC-CLOSE-8: the share's dated master flag,
+  read as `bars_change.rs` reads it, failed loads never kept), `expiry_of` (SC-CLOSE-12) and
+  `held_month_before` (goal 2a: 144 `stat`s back, one open).
+- Constraint found: `crates/api/src/sources.rs` (not owned) builds `dayflags::Asked` by struct
+  literal, so the grid's timeframe is passed beside `Asked`, never as a new field of it.
 
 ## Finding → code map (the plan)
 
 | Finding / goal | Where | Fix |
 |---|---|---|
-| SC-CLOSE-11 | `crates/api/src/dayflags.rs` `journal_rows` (`filter == inst.symbol`) | a comma list naming the symbol matches |
+| SC-CLOSE-11 | `dayflags.rs` `journal_rows` | DONE ON THE BASE by AF-02 (`Names`); nothing added here |
 | SC-CLOSE-8 | `dayflags.rs` `calendar_json` (`CasEligibility::Unknown`) | the share's dated master flag, read as `bars_change.rs` reads it, in the new `dayflags_rules.rs` |
 | SC-CLOSE-9 | `web/src/lib/db/dayflags.js` `kindsOf`; `DbDayFlags.svelte` auction line | `cas` only where the served flag is 1; no "kept apart" claim while no auction sidecar is served |
 | SC-CLOSE-10 | `web/src/lib/db/notes-labels.js` auction-print label | no ordinary trade labelled the auction; no zero-book claim where the print has a book |
@@ -46,7 +56,7 @@ limits row, and every gate.
 
 ## Gate results
 
-Not run yet (no source change).
+Not run yet: the new module is not compiled until it is wired (turn 3).
 
 ## NEEDS THE MAC
 
