@@ -12218,7 +12218,8 @@ the source.
   The measurements below were taken on 16 October 2026:
   - **Store:** a shadow of the operator's store, with its bars linked
     read-only.
-  - **Build:** the release `api` of feat/db-fix 4756cce0.
+  - **Build:** the release `api` of feat/db-fix 4756cce0, which `main`'s
+    squash merge does not keep.
   - **Request:** `/bars/window.json?feed=gdfl&timeframe=1s&key=NSE-INDEX-NIFTY&limit=200`.
   - **Method:** n = 200 sequential GETs per row, on a host shared with other
     agents' builds.
@@ -12269,7 +12270,8 @@ the source.
   keys, once per whole census read.
 
   Measured warm on 16 October 2026: a shadow of the operator's store, the
-  release `api` of 4756cce0, n = 200 sequential GETs per feed.
+  release `api` of 4756cce0, which `main`'s squash merge does not keep,
+  n = 200 sequential GETs per feed.
 
   | Feed | Census entries (E) | Body | p50 | p99 | max |
   |---|---|---|---|---|---|
@@ -12309,7 +12311,8 @@ the source.
 
   Measured on 16 October 2026 on two shadows of the operator's store, each
   with its bars linked read-only: before is the release `api` of feat/db-fix
-  4756cce0, after is this change. Method: n = 200 rounds of one GET to each
+  4756cce0, which `main`'s squash merge does not keep, after is this change.
+  Method: n = 200 rounds of one GET to each
   build in turn (n = 20 for `limit=2`, whose before answer is 71 MB), on a
   host shared with other agents' builds. Every month is `/bars.json` with the
   named `from=` and `to=`; the answers are byte for byte the same on both
@@ -12474,7 +12477,8 @@ the source.
   the same machine, and AF-06 does not touch the journal. On these three
   routes the journal is now nearly the whole cost of a poll. The AF-06 r1
   rows were taken later the same day (load average 50) on a fresh shadow
-  over feat/db-fix 023d6ab8 with the r1 build (single-flight walk gate in
+  over feat/db-fix 023d6ab8, which `main`'s squash merge does not keep,
+  with the r1 build (single-flight walk gate in
   place): the memory path stays under a millisecond at p99, and the journal
   part was about 8 ms at p50 in that window. The journal's own time moves
   with the machine's load and the journal's code, which AF-06 does not
@@ -17317,7 +17321,8 @@ BUILT; what that costs until it is, is the disk item below.
   medians move by a fifth). Built per GET of
   `/pull/run.json`, so a page read costs at most this with 64 runs open,
   whatever the journal's length. Before-numbers: a scratch tree of
-  feat/db-fix 079ad4af with the same journal shapes
+  feat/db-fix 079ad4af, which `main`'s squash merge does not keep, with the
+  same journal shapes
   (`state/fix/logs-AG-01/before-tests2.log`, `cost-rerun.log`).
 - **`/pull/run.json` grows with the runs left open, bounded at 64.** The
   run read last keeps its keys; `alsoOpen` names at most 63 more
@@ -18099,7 +18104,8 @@ this file); this package added one journal probe to it.
 
 Measured 15 October 2026 on a release build over a shadow of the real store
 (`state/fix/shadow.sh AF-04`, port 8703; the "before" build is feat/db-fix at
-521066e6 on port 8704), 200 sequential GETs per row after one warm-up, curl
+521066e6, which `main`'s squash merge does not keep, on port 8704), 200
+sequential GETs per row after one warm-up, curl
 `time_total`, loaded shared machine, while another `cargo` build ran.
 Script and raw times: `tgt/p-AF-04/measure/timeit.sh`, `urls.txt`,
 `before.txt`, `after.txt`.
@@ -18207,7 +18213,8 @@ alone only to re-check and publish. The figures below were taken on 14 October
 2026 on a private shadow of the real store (`state/fix/shadow.sh AF-03`, bars
 linked read-only under the kernel lock, session masters cloned) served by two
 release builds on 127.0.0.1:8702: BEFORE is this branch with the two files as
-`feat/db-fix` holds them at 521066e6 (so its code is that head's), AFTER is
+`feat/db-fix` holds them at 521066e6, which `main`'s squash merge does not
+keep (so its code is that head's), AFTER is
 `fix/db-AF-03`. GET requests only, timed client-side
 around each whole response (`state/fix/round2/af03-evidence/measure.py`,
 results `before.jsonl` and `after.jsonl` beside it), on a machine shared with
@@ -18302,7 +18309,8 @@ restate when its page is re-measured.
 
 **Measured 16 October 2026** on release builds over two fresh shadows of the
 real store (`state/fix/shadow.sh AH-02` on port 8904 serving this change's
-build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, whose
+build, `AH-02-before` on port 8905 serving feat/db-fix at `023d6ab8`, which
+`main`'s squash merge does not keep, whose
 `HeadDeadline` is the one this change replaces), load average 22-51 from other
 agents' builds, `curl` with `--noproxy`, GET only. The full-speed rows
 alternate one before and one after request, so both builds saw the same load.
@@ -18331,7 +18339,8 @@ construction (the body over the rate), which is why n is 20 and not 200:
 **Re-measured on the merged build**, 16 October 2026 from 22:17 IST: this
 change merged onto feat/db-fix at `bf84e1f3` (`AH-02` on 8904, telemetry
 beneath the shadow) against feat/db-fix at `bf84e1f3` itself (`AH-02-before`
-on 8905), two fresh shadows, load average 31-87, the same method. The slow
+on 8905), a commit `main`'s squash merge does not keep, two fresh shadows,
+load average 31-87, the same method. The slow
 reads ran five at a time, four rounds, so the `/bars.json` admission cap
 refused none of them; ten at a time it answered some `429` (105 bytes,
 `Retry-After: 1`) on both builds, which is that cap and not this change:
@@ -18368,7 +18377,8 @@ RELIANCE cash 1 s 2026-09 and the Zerodha census were all cut (exit 18 at
 they fit in the kernel's buffers. After: all eight arrived whole (exit 0,
 size = `Content-Length`). The run on the pre-merge build at 17:23 gave the
 same split. After this run the branch was merged once more onto feat/db-fix at
-`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll); neither touches
+`94320a4e` (AF-05's `/bars.json` bounds, AF-06's status poll), which `main`'s
+squash merge does not keep; neither touches
 `HeadDeadline`, `exchange_watch` or `logs`, so these rows were not re-taken
 on that merge, and the `/bars.json` rows are AF-05's to re-measure.
 
@@ -18376,7 +18386,8 @@ on that merge, and the `/bars.json` rows are AF-05's to re-measure.
 this change merged onto feat/db-fix at `62396df0` (branch head `1ff03397`,
 `AH-02` on 8901) against the release build of feat/db-fix at `bf84e1f3`
 (`AH-02-before` on 8902; its `HeadDeadline`, `serve_limited` and `logs` are the
-same as `62396df0`'s), two fresh shadows, load average 23-41, the same method
+same as `62396df0`'s), three commits `main`'s squash merge does not keep, two
+fresh shadows, load average 23-41, the same method
 and scripts (`tgt/ah02-final-logs/`). The branch's later merge of R3-32 touches
 only `cli`'s watchdog verbs and the ledgers.
 
@@ -18441,8 +18452,9 @@ waiting write resets it once, and 200 more waiting polls move neither.
 
 ## Window keys that name no series (AG-03, D-4966)
 
-Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af (before)
-and `fix/db-AG-03` (after), each serving its own fresh shadow of the real
+Measured 15 October 2026: release builds of `feat/db-fix` 079ad4af, which
+`main`'s squash merge does not keep (before), and `fix/db-AG-03` (after),
+each serving its own fresh shadow of the real
 store (bars linked read-only, `state/fix/shadow.sh`, `serve.sh`), GET only,
 n = 300 sequential requests per case on one keep-alive connection
 (`curl -K`, `%{time_total}`), two rounds in opposite order on the loaded
@@ -18664,8 +18676,9 @@ range)), and `/dayflags.json` reads one page of `PAGE_DAYS` days through it.
 | L-AF2-6 | `dayflags::import_json` (repair round 2): a close's window | `journal_rows` keeps each day's closing run ids (one `contains` over the day's handful per row with `run=`); a day's `next_s` is one `start_of` per closer, each a find over the answer's first page of runs (`RUNS_PAGE`, 20), then `refusals_of` places each `logged` line with one `placed` call, the same one comparison per line the first form made against the run start alone | the repair-2 table below |
 
 **Measured, 14 October 2026.** Each route asked 200 times of a release build
-of the code before this change (feat/db-fix 72c91a46 with the tests' module
-hooks only) and 200 times of this change, INTERLEAVED (each iteration asks
+of the code before this change (feat/db-fix 72c91a46, which `main`'s squash
+merge does not keep, with the tests' module hooks only) and 200 times of this
+change, INTERLEAVED (each iteration asks
 both, alternating which goes first) so the shared machine's load falls on
 both alike; each server reads its own fresh shadow of the operator's store
 (bars through the link, GET only); `curl`'s `time_total`; load average 46 to
@@ -18702,12 +18715,19 @@ and every unread log directory is counted). Two interleaved runs (each iteration
 servers, alternating which goes first), n = 200 per route per build, each
 server over its own fresh shadow of the operator's store (bars through the
 link, GET only); `curl`'s `time_total`. Run 1: the build before AF-02
-(feat/db-fix 72c91a46 with the tests' module hooks only, `tgt/p-AF-02-before`)
-against the repair's release build (`cde73992`). Run 2: the first form's
-release build (`ff636f58`) against the same repair build. Load average 16 to
+(feat/db-fix 72c91a46, which `main`'s squash merge does not keep, with the
+tests' module hooks only, `tgt/p-AF-02-before`) against the repair's release
+build (`cde73992`, a work-in-progress commit of the AF-02 branch that is in
+neither `main`'s history nor this branch; its `imports.rs`, `dayflags.rs`,
+`imports_filter_tests.rs` and `dayflags_filter_tests.rs` under
+`crates/api/src` are byte for byte those of `9cb9de51`, which `main`'s squash
+merge does not keep). Run 2: the first form's release build (`ff636f58`,
+which `main`'s squash merge does not keep) against the same repair build.
+Load average 16 to
 19 (logs `state/fix/af02/r1/ab-orig/timings.txt` and
 `state/fix/af02/r1/ab-r1/timings.txt` in the work tree; the script is
-`state/fix/af02/r1/ab.sh`). p50 / p99 / max, ms:
+`state/fix/af02/r1/ab.sh`). p50 / p99 / max, ms (`main`'s squash merge does
+not keep `ff636f58`):
 
 | Route | Before AF-02 | Repair (run 1) | First form `ff636f58` | Repair (run 2) |
 |---|---|---|---|---|
@@ -18740,8 +18760,13 @@ refusals of its own run's window, and an unowned refusal keeps its log-only
 row; L-AF2-5, L-AF2-6). Interleaved (each iteration asks both servers,
 alternating which goes first), n = 200 per route per build, `curl`'s
 `time_total`, GET only. Before: repair round 1's release build (`9cb9de51`,
-the second agent's copy `tgt/v-AF-02-r2b`); after: this round's (`91ef0094`,
-frozen at `tgt/af02-r3-after`). The real-store pair reads two fresh shadows
+which `main`'s squash merge does not keep; the second agent's copy
+`tgt/v-AF-02-r2b`); after: this round's (`91ef0094`, frozen at
+`tgt/af02-r3-after`, a work-in-progress commit of the AF-02 branch that is in
+neither `main`'s history nor this branch; its `imports.rs`, `dayflags.rs`,
+`imports_filter_tests.rs` and `dayflags_filter_tests.rs` under
+`crates/api/src` are byte for byte those of `867771784f`, which `main`'s
+squash merge does not keep). The real-store pair reads two fresh shadows
 of the operator's store (`AF-02-b3` on :8706, `AF-02` on :8701); the attack
 pair reads two fresh shadows with the second agent's invented lines appended
 (`state/fix/af02-r3/attack.sh`, its `af02-v4` script with only the shadow
@@ -18750,7 +18775,7 @@ filter naming NIFTY on every weekday of 2026 Q1; `AF-02-b3x` on :8708,
 `AF-02-a3x` on :8707). Load average 13 to 37 at the start (logs
 `state/fix/af02-r3/ab-real/timings.txt` and `ab-attack/timings.txt` in the
 work tree; the scripts are `state/fix/af02-r3/ab.sh` and `ab-attack.sh`).
-p50 / p99 / max, ms:
+p50 / p99 / max, ms (`main`'s squash merge does not keep `9cb9de51`):
 
 | Route | Repair 1 `9cb9de51` | Repair 2 |
 |---|---|---|
@@ -18994,12 +19019,16 @@ here unless a table above says so, and each is UNVERIFIED as a latency.
 
 Measured 17 October 2026 in two rounds, each with release builds of
 `feat/db-fix` (before) and `fix/db-AG-04` (after). Round 1 (the figures in
-the rows below): before `feat/db-fix` 94320a4e, after the change at 54f547be;
+the rows below): before `feat/db-fix` 94320a4e, which `main`'s squash merge
+does not keep, after the change at 54f547be, which is in neither `main`'s
+history nor this row's branch, because AG-04 was squashed before it merged;
 `sources.rs`, `gdfl_cm_auction.rs`, `calendar.rs` and `cash_session_cache.rs`
 of that before build are those this change starts from. Round 2, after the
 branch took `feat/db-fix` 62396df0 (AF-02's `dayflags.rs`, which this route
-calls, among it): before 62396df0, after the branch at fef92d53 (the change
-merged with 62396df0); its figures are the last sentence of L-AG04-01 and
+calls, among it): before 62396df0, which `main`'s squash merge does not keep,
+after the branch at fef92d53 (the change merged with 62396df0), which is in
+neither `main`'s history nor this row's branch, because AG-04 was squashed
+before it merged; its figures are the last sentence of L-AG04-01 and
 L-AG04-02. The branch's later merge of R3-32 changed only `cli`'s watchdog
 verbs, none of which this route reaches, and was not timed again. Each build served its own
 fresh shadow of the real store (bars linked read-only through
