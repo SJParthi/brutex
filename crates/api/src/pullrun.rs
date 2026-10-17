@@ -10192,3 +10192,200 @@ mod cloud_render_tests {
         assert_eq!(doc["unnamed"], 2);
     }
 }
+
+/// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
+/// for the restart walk's own predicates and words, driven by value.
+#[cfg(test)]
+mod cloud_walk_tests {
+    use super::*;
+    use crate::audit::{Outcome, Record, Scope};
+
+    fn at(secs: u64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + core::time::Duration::from_secs(secs)
+    }
+
+    fn window(from: u32, to: u32) -> pull::session::Window {
+        let day = |n| pull::session::Day::from_days(n).expect("a day");
+        pull::session::Window::new(day(from), day(to)).expect("a window")
+    }
+
+    /// A closing record of `scope` for `source` over `from..to`.
+    fn close_of(scope: Scope, source: &str, from: u32, to: u32) -> Record {
+        Record::refused(scope, Outcome::Failed, at(50), source, "closed")
+            .with_window(window(from, to))
+    }
+
+    /// **Two records are of one key only when scope, window and source all
+    /// agree**; each one alone tells them apart. Covers every side of
+    /// `same_key`'s `&&` (pullrun.rs:1527), of which the walk's own
+    /// fixtures only ever differed in the source.
+    #[test]
+    fn a_key_is_scope_window_and_source_together() {
+        let base = close_of(Scope::Spot, "kite", 20_000, 20_010);
+        assert!(same_key(
+            &base,
+            &close_of(Scope::Spot, "kite", 20_000, 20_010)
+        ));
+        assert!(!same_key(
+            &base,
+            &close_of(Scope::Fno, "kite", 20_000, 20_010)
+        ));
+        assert!(!same_key(
+            &base,
+            &close_of(Scope::Spot, "kite", 20_000, 20_011)
+        ));
+        assert!(!same_key(
+            &base,
+            &close_of(Scope::Spot, "dhan", 20_000, 20_010)
+        ));
+    }
+
+    fn pairing(close: u64) -> Guess {
+        Guess::Pairing {
+            close,
+            runs: vec![close - 2, close - 4],
+            at: 0,
+        }
+    }
+
+    /// **A NOT KNOWN answer names at most three guesses and counts the rest;
+    /// it says what the reading found, or that it found no run open; and it
+    /// says when the run records before the scan could not be read.** Covers
+    /// `guessed_words`' count of unnamed guesses, its no-reading sentence and
+    /// its unread-index sentence (pullrun.rs:2232-2233, 2245-2246, 2249-2254).
+    #[test]
+    fn a_not_known_answer_bounds_its_guesses_and_says_each_half() {
+        let guesses: Vec<Guess> = [10, 20, 30, 40, 50].into_iter().map(pairing).collect();
+        let words = guessed_words(&guesses, None, Some("the index would not open"));
+        assert_eq!(
+            words.matches("the closing record at record").count(),
+            DAMAGED_NAMED,
+            "{words}"
+        );
+        assert!(
+            words.contains(&format!(
+                "; and {} more such guess(es)",
+                guesses.len() - DAMAGED_NAMED
+            )),
+            "{words}"
+        );
+        assert!(
+            words.contains(
+                ". Read one way, the records leave no run open; read the other way, a run is open"
+            ),
+            "{words}"
+        );
+        assert!(
+            words.ends_with(
+                ". The run records before the scan could not be read through the journal's \
+                 index (the index would not open) either"
+            ),
+            "{words}"
+        );
+        // EXACTLY THE CAP NAMES ALL OF THEM AND COUNTS NONE.
+        let capped = guessed_words(&guesses[..DAMAGED_NAMED], None, None);
+        assert!(!capped.contains("more such guess(es)"), "{capped}");
+        assert!(!capped.contains("could not be read"), "{capped}");
+    }
+
+    /// An opening record of `source` over `from..to`, naming `ask`.
+    fn open_of(source: &str, from: u32, to: u32, ask: u64) -> Record {
+        Record::opened(Scope::Spot, at(10), source, window(from, to), 2, ask)
+    }
+
+    /// `record` with `note` in place of its own.
+    fn noted(mut record: Record, note: &str) -> Record {
+        record.note = note.to_owned();
+        record.note_bytes = u16::try_from(note.len()).expect("a short note");
+        record
+    }
+
+    /// **A close that names its run's ask ends that run, among several of
+    /// its key, and nothing is guessed.** Two spot runs of one key are open
+    /// with different asks; a close that does not directly follow either
+    /// names the first's ask, so it ends the first and the second is the
+    /// run left open. Covers `Walker::by_candidates`' ask-named pairing
+    /// (pullrun.rs:1952-1956).
+    #[test]
+    fn a_close_naming_its_ask_ends_that_run_among_several() {
+        let first = open_of("kite", 20_000, 20_010, 0xA);
+        let second = open_of("kite", 20_000, 20_010, 0xB);
+        let close = noted(
+            close_of(Scope::Spot, "kite", 20_000, 20_010),
+            &crate::audit::ask_note("closed", 0xA),
+        );
+        let found = walk(&[(0, first), (1, second), (3, close)]);
+        assert!(
+            found.guessed.is_empty(),
+            "the ask settles it: {:?}",
+            found.guessed
+        );
+        let open = found.open.expect("the second run is open");
+        assert_eq!((open.ordinal, open.ask), (1, Some(0xB)));
+        assert_eq!(open.open_count, 1, "only the second");
+    }
+
+    /// **Two runs of one key, the first written before runs named their ask,
+    /// and a close naming none, leave the pairing a guess.** No ask is shared
+    /// when the first names none. Covers `Walker::by_candidates`' `first_ask.is_some()`
+    /// false side (pullrun.rs:1959).
+    #[test]
+    fn a_close_among_runs_one_of_which_names_no_ask_is_a_guess() {
+        let older = noted(
+            open_of("kite", 20_000, 20_010, 0xA),
+            "opened for 2 instruments",
+        );
+        assert_eq!(crate::audit::ask_of(&older.note), None, "the premise");
+        let newer = open_of("kite", 20_000, 20_010, 0xB);
+        let close = close_of(Scope::Spot, "kite", 20_000, 20_010);
+        let found = walk(&[(0, older), (1, newer), (3, close)]);
+        assert!(
+            matches!(found.guessed.as_slice(), [Guess::Pairing { close: 3, .. }]),
+            "{:?}",
+            found.guessed
+        );
+    }
+
+    /// **A head restated behind a close of ANOTHER key is no guess about
+    /// that close.** A close that ended no run read is a candidate only for a
+    /// restated head of its own scope, window and source: one of another
+    /// window, or another scope, is simply its own open run. Covers the false
+    /// sides of the unseen-close match (pullrun.rs:1789).
+    #[test]
+    fn a_head_restated_behind_a_close_of_another_key_is_no_guess() {
+        for close in [
+            close_of(Scope::Spot, "kite", 20_000, 20_011),
+            close_of(Scope::Fno, "kite", 20_000, 20_010),
+        ] {
+            let head = noted(
+                open_of("kite", 20_000, 20_010, 0xC),
+                "continues the run opened at record 100",
+            );
+            let found = walk(&[(200, close), (201, head)]);
+            assert!(found.guessed.is_empty(), "{:?}", found.guessed);
+            let open = found.open.expect("the restated run is open");
+            assert_eq!(open.ordinal, 100);
+        }
+        // THE PREMISE: behind a close of its OWN key the same head is a guess.
+        let head = noted(
+            open_of("kite", 20_000, 20_010, 0xC),
+            "continues the run opened at record 100",
+        );
+        let found = walk(&[
+            (200, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+            (201, head),
+        ]);
+        assert!(
+            matches!(
+                found.guessed.as_slice(),
+                [Guess::Unseen {
+                    close: 200,
+                    run: 100,
+                    ..
+                }]
+            ),
+            "{:?}",
+            found.guessed
+        );
+    }
+}
