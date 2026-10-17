@@ -91,8 +91,8 @@ builder is NOT MEASURED (it needs timing inside the store's doors, not R3-17's f
 
 ## Left
 
-- Mutation testing of the changed lines (running), then this report's final gate lines and a last
-  workspace test run.
+- Mutation testing of the changed lines on the final code (running), then this report's final gate
+  lines and a last workspace test run.
 
 ### Coverage: 100% of the changed lines and branches
 
@@ -123,11 +123,30 @@ No line is declared unreachable: every host refusal goes through one path a test
 constructed refusal. The whole-module figure of the existing builder modules is not claimed: only
 their changed lines are measured.
 
+### Mutation testing (running)
+
+`cargo-mutants` 27.1.0 over the lines this branch changes (`--in-diff` against `origin/feat/db-fix`),
+opt-level 0 by environment (the workspace's `profile.dev` is untouched), the same test filters as
+coverage. No mutant is excluded and a timeout is not counted as caught.
+
+A first pass on `57c6ff9b` was cut short by a full disk on this host after 173 of `pull`'s 237
+mutants and 12 of `cli`'s 179; what it found, and the fix for each:
+
+| Mutant (`crates/pull/src/upkeep.rs`) | Why it lived | Fixed in |
+|---|---|---|
+| `Journal::sync` → `Ok(())`, twice (the method and the `Lines` impl) | no test counted the flushes | `96e93e53`: `Ran::flushes`, `a_run_flushes_its_journal_at_the_run_line_every_64_items_and_the_end` |
+| `audit_dir`'s `AlreadyExists` guard → `false` | the refusal's text was not pinned | `96e93e53`: the refusal must start with the audit directory's path |
+| `done_by_chain`'s `chain.contains(id)` guard → `true` | every test journal held one chain | `4ccd8ee7`: a fresh run's resume skips only its own chain's one item |
+| `one_line`'s `cut -= 1` → `/= 1` (a TIMEOUT: an endless loop) | the loop itself | `4ccd8ee7`: `floor_char_boundary`, no loop |
+| `drive`'s `millis / 1_000` → `%`, `*` | the end line's seconds come from the wall clock | `4ccd8ee7`: `Duration::as_secs`, no division |
+
+A fresh pass on the final code is running for both crates.
+
 ## Gate results (so far)
 
 - `cargo fmt --all --check`: clean.
-- `cargo clippy -p cli -p pull --all-targets --locked -- -D warnings`: clean (workspace run pending).
-- `cargo test -p pull --lib upkeep`: 27 passed. `cargo test -p cli --lib upkeep_command`: 21 passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean, on `20653571`.
+- `cargo test -p pull --lib upkeep`: 28 passed. `cargo test -p cli --lib upkeep_command`: 21 passed.
 - `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
   (the one test CONTEXT.md says to skip; it reads nothing R3-17 touches), on `3704e6bd`'s
   predecessor `fb05b8b9`: every failure but one is the base's or root-only, and the one was R3-17's and
