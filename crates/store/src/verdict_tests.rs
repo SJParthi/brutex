@@ -837,14 +837,14 @@ fn an_image_naming_another_series_day_or_generation_is_refused() {
     later.day = other_day;
     commit(&series, &later).unwrap();
     commit(&series, &generation(93, named(Code::ValueMismatch))).unwrap();
-    const SAID: &str = "the header names another series, day or generation";
+    let said = "the header names another series, day or generation";
 
     let g2 = series.image_path(day(), 2);
     let kept = fs::read(&g2).unwrap();
     fs::copy(series.image_path(day(), 1), &g2).unwrap();
     assert_eq!(
         corrupt_why(Reader::new().lookup(&series, day(), &key)),
-        SAID
+        said
     );
     fs::write(&g2, &kept).unwrap();
 
@@ -853,7 +853,7 @@ fn an_image_naming_another_series_day_or_generation_is_refused() {
     fs::copy(series.image_path(day(), 1), &elsewhere).unwrap();
     assert_eq!(
         corrupt_why(Reader::new().lookup(&series, other_day, &key)),
-        SAID
+        said
     );
     fs::write(&elsewhere, &kept_elsewhere).unwrap();
 
@@ -874,7 +874,7 @@ fn an_image_naming_another_series_day_or_generation_is_refused() {
         fs::copy(&g2, other.image_path(day(), 2)).unwrap();
         assert_eq!(
             corrupt_why(Reader::new().lookup(other, day(), &key)),
-            SAID,
+            said,
             "{}",
             other.dir().display()
         );
