@@ -78,13 +78,19 @@ export const CHROME_PATHS = Object.freeze([
  * The timed interactions. Each step is `{click}`, `{type: [selector, text]}`
  * or `{waitFor}`; the time is from the LAST step's click to settled.
  * `open` is the address the page is opened at first.
+ *
+ * @typedef {{click: string} | {type: [string, string]} | {waitFor: string}} Step
+ * @type {{name: string, open: string, steps: Step[]}[]}
  */
-export const INTERACTIONS = Object.freeze([
-  Object.freeze({ name: 'picker click', open: '/db', steps: [{ type: ['[aria-controls="db-search-list"]', 'NIFTY'] }, { waitFor: '#db-search-list [role="option"]' }, { click: '#db-search-list [role="option"]' }] }),
-  Object.freeze({ name: 'feed switch', open: '/db', steps: [{ click: '[aria-controls="feed-listbox"]' }, { waitFor: '#feed-listbox [role="option"][aria-selected="false"]:not([aria-disabled="true"])' }, { click: '#feed-listbox [role="option"][aria-selected="false"]:not([aria-disabled="true"])' }] }),
-  Object.freeze({ name: 'page turn of option cells', open: '/db?seg=options', steps: [{ waitFor: 'button[aria-label="Next page"]:not([disabled])' }, { click: 'button[aria-label="Next page"]:not([disabled])' }] }),
-  Object.freeze({ name: `sort at the ${LOCAL_SORT_BUDGET.toLocaleString('en-IN')}-row browser sort edge`, open: '/db', steps: [{ waitFor: 'th[aria-sort] button:not([disabled])' }, { click: 'th[aria-sort] button:not([disabled])' }] })
-]);
+const TIMED = [
+  { name: 'picker click', open: '/db', steps: [{ type: ['[aria-controls="db-search-list"]', 'NIFTY'] }, { waitFor: '#db-search-list [role="option"]' }, { click: '#db-search-list [role="option"]' }] },
+  { name: 'feed switch', open: '/db', steps: [{ click: '[aria-controls="feed-listbox"]' }, { waitFor: '#feed-listbox [role="option"][aria-selected="false"]:not([aria-disabled="true"])' }, { click: '#feed-listbox [role="option"][aria-selected="false"]:not([aria-disabled="true"])' }] },
+  { name: 'page turn of option cells', open: '/db?seg=options', steps: [{ waitFor: 'button[aria-label="Next page"]:not([disabled])' }, { click: 'button[aria-label="Next page"]:not([disabled])' }] },
+  { name: `sort at the ${LOCAL_SORT_BUDGET.toLocaleString('en-IN')}-row browser sort edge`, open: '/db', steps: [{ waitFor: 'th[aria-sort] button:not([disabled])' }, { click: 'th[aria-sort] button:not([disabled])' }] }
+];
+
+/** {@link TIMED}, frozen. */
+export const INTERACTIONS = Object.freeze(TIMED.map((t) => Object.freeze(t)));
 
 /** The observer every page gets before its own scripts run. */
 const OBSERVER = `(() => {

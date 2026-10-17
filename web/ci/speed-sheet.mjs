@@ -91,9 +91,9 @@ const plan = (c) => ({ keys: [c.instrument], timeframe: c.timeframe, from: c.mon
  * builder, the file it comes from and the page file that calls it. A route
  * with no query (`/feeds.json`) has no builder and is named bare.
  *
- * @type {readonly CatalogueEntry[]}
+ * @type {CatalogueEntry[]}
  */
-export const CATALOGUE = Object.freeze([
+const ENTRIES = [
   { page: '(every page)', route: UP_ROUTE, label: 'header-only up check', method: UP_METHOD, builder: null, from: null, usedBy: 'src/lib/api-status.js', make: () => UP_ROUTE },
   { page: '(every page)', route: '/feeds.json', builder: null, from: null, usedBy: 'src/lib/feed-startup.js', make: () => '/feeds.json' },
   { page: '/db', route: '/census/facets.json', builder: facetsUrl, from: 'src/lib/store-census.js', usedBy: 'src/lib/store-census.js', make: (c) => facetsUrl({ feed: c.feed }) },
@@ -108,7 +108,10 @@ export const CATALOGUE = Object.freeze([
   { page: '/sources', route: '/sources/day.json', builder: dayUrl, from: 'src/lib/sources.js', usedBy: 'src/routes/sources/+page.svelte', make: (c) => dayUrl(c.instrument, c.month) },
   { page: '/sources', route: '/sources/bars.json', builder: barsUrl, from: 'src/lib/sources.js', usedBy: 'src/routes/sources/+page.svelte', make: (c) => barsUrl({ key: c.instrument, rung: c.timeframe, day: c.day }) },
   { page: '/speed', route: SPEED_ROUTE, builder: null, from: null, usedBy: 'src/routes/speed/+page.svelte', make: () => SPEED_ROUTE }
-].map((e) => Object.freeze(e)));
+];
+
+/** {@link ENTRIES}, frozen: the catalogue the run and the test read. */
+export const CATALOGUE = Object.freeze(ENTRIES.map((e) => Object.freeze(e)));
 
 /**
  * @typedef {{page: string, route: string, label: string, method: string, url: string,
@@ -410,10 +413,15 @@ function run(command) {
  * every failure. `send` is the network, injected so a test drives the run
  * against a stand-in server.
  *
+ * @typedef {{ok: boolean, rows: SheetRow[], ignored: {request: SheetRequest, field: string, how: string, said: string}[],
+ *   failures: string[], notMeasured: string[], skipped: string[], ctx: SheetContext | null,
+ *   commit: string | null}} SheetResult
+ *
  * @param {ReturnType<typeof parseArgs>} args
  * @param {{send?: typeof timed, log?: (line: string) => void, capture?: string | null,
  *   restart?: (command: string) => Promise<unknown>}} [deps] `restart` runs one restart and
  *   resolves with its exit code (the shell command, by default)
+ * @returns {Promise<SheetResult>}
  */
 export async function runSheet(args, deps = {}) {
   const sendTo = deps.send ?? timed;
@@ -516,7 +524,7 @@ const msText = (ms) => (ms < 10 ? ms.toFixed(2) : ms.toFixed(1));
  * The sheet as Markdown: every row stamped with its commit, then every
  * section not measured and every failure.
  *
- * @param {Awaited<ReturnType<typeof runSheet>>} result
+ * @param {SheetResult} result
  * @param {{n: number, clients: number[]}} args
  */
 export function renderSheet(result, args) {

@@ -66,7 +66,8 @@ const CTX = { feed: 'zerodha', instrument: 'NSE-INDEX-NIFTY', timeframe: '1min',
 
 test('the_speed_sheet_uses_the_pages_own_requests', async () => {
   const sheetSource = source('ci/speed-sheet.mjs');
-  const catalogue = sheetSource.slice(sheetSource.indexOf('export const CATALOGUE'), sheetSource.indexOf('].map((e) => Object.freeze(e)))'));
+  const catalogue = sheetSource.slice(sheetSource.indexOf('const ENTRIES = ['), sheetSource.indexOf('export const CATALOGUE'));
+  assert.ok(catalogue.length > 1_000, 'the catalogue was found');
   // NO URL IS TYPED BY HAND: no query string is spelled in the catalogue.
   assert.doesNotMatch(catalogue, /\.json\?[a-z_]+=/, 'the catalogue spells a query instead of calling a builder');
   for (const e of sheet.CATALOGUE) {
@@ -174,7 +175,7 @@ test('the_bundle_is_inside_its_budget', async () => {
   // A page that grows past its budget fails the BUILD, through the plugin
   // vite.config.js runs over the client output.
   const config = (await import('../vite.config.js')).default;
-  const plugin = config.plugins.find((/** @type {any} */ p) => p?.name === 'brutex-page-budget');
+  const plugin = /** @type {any} */ (config.plugins.find((/** @type {any} */ p) => p?.name === 'brutex-page-budget'));
   assert.ok(plugin, 'vite.config.js runs the page budget');
   const big = synthBuild({ pageBytes: BUNDLE_BUDGETS.default + 1 });
   const ctx = { error: (/** @type {string} */ m) => { throw new Error(m); }, warn: () => {} };
@@ -1067,7 +1068,8 @@ async function browserStandIn(o) {
   return { server, log, base: `http://127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}` };
 }
 
-/** @param {number} status @param {string} [body] @param {Record<string, string>} [headers] */
+/** A `Response` as far as the code under test reads one.
+ * @param {number} status @param {string} [body] @param {Record<string, string>} [headers] @returns {any} */
 function response(status, body = '', headers = {}) {
   const h = new Headers(headers);
   return { status, ok: status >= 200 && status < 300, headers: h, json: async () => JSON.parse(body), text: async () => body };
