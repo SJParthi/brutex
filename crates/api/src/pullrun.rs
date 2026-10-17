@@ -10415,6 +10415,38 @@ mod cloud_walk_tests {
         );
     }
 
+    /// **A refusal of the same key after a pairing's close is no close of
+    /// theirs, so the count of runs it left open still stands.** Two runs of
+    /// one key are open with different asks and one close ends one of them,
+    /// which is not known: one of the two surely has no closing record. A
+    /// refusal of that scope, window and source follows. A refusal closes
+    /// no run, so it cannot be the other run's close, and the count is a
+    /// fact. Kills `is_close -> true` (pullrun.rs:1521), under which any
+    /// later record of the key, the refusal included, was taken for a close
+    /// and the count was dropped.
+    #[test]
+    fn a_refusal_after_a_pairing_is_no_close_of_its_runs() {
+        let refusal = Record::refused(Scope::Spot, Outcome::Refused, at(60), "kite", "refused")
+            .with_window(window(20_000, 20_010));
+        assert!(!is_close(&refusal), "the premise: a refusal closes nothing");
+        let found = walk(&[
+            (0, open_of("kite", 20_000, 20_010, 0xA)),
+            (1, open_of("kite", 20_000, 20_010, 0xB)),
+            (3, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+            (4, refusal),
+        ]);
+        assert!(
+            matches!(found.guessed.as_slice(), [Guess::Pairing { close: 3, .. }]),
+            "{:?}",
+            found.guessed
+        );
+        let [counted] = found.left_open.as_slice() else {
+            panic!("one counted pairing: {:?}", found.left_open);
+        };
+        assert_eq!(counted.close, 3);
+        assert_eq!(counted.left_open, 1, "{counted:?}");
+    }
+
     /// **A head restated behind a close of ANOTHER key is no guess about
     /// that close.** A close that ended no run read is a candidate only for a
     /// restated head of its own scope, window and source: one of another
