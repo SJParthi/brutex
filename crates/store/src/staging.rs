@@ -24,7 +24,7 @@
 //! | nothing | the new file |
 //! | a regular file with exactly one name | a dead writer's leftover: the NAME is removed (`unlink`, which changes no byte) and the create is tried once more; [`Staged::cleared`] says how many bytes it held |
 //! | a regular file with more than one name | refused `staging_linked`; nothing is removed, truncated or written |
-//! | nothing by the look, or a file with no name left (the look caught its last name going) | the name is free: the create is tried once more and nothing is cleared |
+//! | nothing by the look, or a file with no name left (the look caught its last name going) | the name is free: the create is tried once more and nothing is cleared (D-6017) |
 //! | anything else (a symbolic link, a directory, a pipe, a socket, a device) | refused `staging_not_regular`, naming what it found ([`crate::safe_open::Found`]); left as it is |
 //! | a file again after the one removal | refused `staging_contended`: another writer is using this name |
 //!

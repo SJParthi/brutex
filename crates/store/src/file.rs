@@ -5933,7 +5933,7 @@ fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
 /// [`sync_hooked`], for the host calls whose refusal no test can stage on a
 /// file this process has just opened, measured or written (a flush, an
 /// `fstat`, a read of a file the writer holds). The injector adds a branch
-/// under test, so the lift that ships is the lift every test runs.
+/// under test, so the lift that ships is the lift every test runs (D-6017).
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
     #[cfg(test)]
     let result = tests::host_fault(action, path).map_or(result, Err);

@@ -70986,3 +70986,76 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-6017 — The store's host refusals a disk cannot stage are driven by `#[cfg(test)]` seams; a look that catches a staging file mid-unlink is a free name; a refused checksum write names the sidecar — 2026-10-17
+
+**Implemented by** the store mutation and coverage pass of 17 October 2026
+(`reports/cloud-mut-store-20261017.md`, branch `cloud/mut-store-20261017`),
+which continues the 16 October pass. **Number** chosen above every number in
+use or reserved on any branch on 17 October 2026 (D-5619 the highest, on
+`cloud/fib1-20261016`), so no package landing beside this one meets it.
+
+**What was observed.** `CLAUDE.md` §9 asks for 100% line and branch
+coverage and no surviving mutant on every touched module. The 16 October
+pass left 34 mutants and about 110 production lines in `crates/store` and
+`crates/telemetry/src/sink.rs` it argued no test could reach. Fifteen of
+the mutants, and most of the lines, sit on arms that only a host refusal
+reaches, on a file the same function has just opened, measured or written,
+or only a race between two calls of one function. No test can stage those
+on a real disk. Two of the arms answered wrongly when they were driven:
+
+1. `store::staging::create` refused a file whose last name went between
+   the host's lookup of the name and its read of the file's status as
+   `staging_linked`, "one of 0 names of a file". A file with no name has none
+   to protect. The 16 October pass observed this under a real race.
+2. `BarFile::seal_committed` named the BAR file when the host refused the
+   write of the checksum sidecar. The bar file had not been refused.
+
+**Decided.**
+
+1. **Seams, `#[cfg(test)]` only, in the codebase's existing shape.** Each
+   seam adds a branch under test, so the call that ships is the call every
+   test runs (`file::sync_hooked`, D-2740; `flock::unlock`'s refusal; the
+   verdict crash seam, D-4865). There are seven:
+   - `file::fault` and `impl Positional for File`: one per-thread host
+     refusal, armed for one `Action` on one file. The file is matched by
+     path, or by device and inode for an open handle. `fault` replaces the
+     answer after the call; a read or write is refused before it, so a
+     refused write writes nothing.
+   - `staging`: a stand-in for the look, and an open refusal, so the Nth
+     open can be refused.
+   - `sort_index_writer`: the index's looks and positional reads go through
+     the file seam (`look`, `read_index_at`).
+   - `verdict`: an interference seam, which runs another actor's step before
+     a host call. It sits before the removal of a refused temporary,
+     `remove_tmp`, the year index's link, the image's link, and a reader's
+     second look for a year index.
+   - `flock::Flock::try_lock`: a one-shot refusal, in the shape of its
+     unlock seam.
+   - `safe_open::name_the_refusal`: a per-thread look counter, so the cost
+     its doc states (no look on any other path) is measured.
+   - `telemetry::sink::Audit::retire`: an actor between making the
+     roll-aside folder and looking at it.
+2. **A staging look that sees 0 links is a free name.** The create is tried
+   once more and nothing is cleared, exactly as for a name gone by the look
+   (`staging.rs`'s table gains the row).
+3. **A refused sidecar write names the sidecar**, which is the path the
+   host refused.
+4. **`sort_index_writer::write_whole` loses its `n_valid == 0` guard.** Its
+   only route (`keep_sort_index`) returns first for an empty month, so no
+   input reached the guard. It now returns `()`.
+
+**Rejected.**
+- *Restructuring production paths so a test could reach these arms from
+  data.* That changes production control flow to serve a test (D-0696
+  item 6 rejected the same for `cli`'s two seams).
+- *Declaring every such arm unreachable.* The two defects above were on
+  such arms.
+
+**What is still not reached**, each with its reason, is listed in the
+report's "Coverage" and "Equivalent mutants" sections. Two kinds remain.
+Defensive re-borrows (`let Some(tix) = self.tix.as_ref() else`) after a
+caller has checked the same value. And `cfg` arms for targets that are not
+built here (`safe_open`'s and `file`'s unverified-flag arms).
+
+Invariants: `docs/04-invariants.md` CMS-01 to CMS-07.
