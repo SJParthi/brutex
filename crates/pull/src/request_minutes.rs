@@ -2182,6 +2182,42 @@ mod cloud_mutant_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A stored day holding every minute it owes has no `gap` line; one
+    /// minute short, it has the line naming that minute, the store as the
+    /// source and the fill word it was given, and the count of the missing.
+    /// Kills the line test's `>` read as `>=`, which wrote a `missing=0` line
+    /// for every whole day. Invented stamps.
+    #[test]
+    fn a_stored_day_holding_every_owed_minute_has_no_line() {
+        let day = Day::new(2019, 9, 23).unwrap();
+        let windows = [(555_u32, 930_u32)];
+        let midnight = (i64::from(day.days_from_epoch()) * 86_400 - 19_800) * 1_000_000;
+        let minute = |m: i64| midnight + m * 60_000_000;
+        let whole: Vec<i64> = (555..930).map(minute).collect();
+        assert_eq!(
+            stored_line(
+                "NSE-INDEX-NIFTY",
+                day,
+                &windows,
+                whole.iter().copied(),
+                "interior"
+            ),
+            None
+        );
+        let short = whole.iter().copied().filter(|&stamp| stamp != minute(600));
+        let (line, missing) =
+            stored_line("NSE-INDEX-NIFTY", day, &windows, short, "interior").unwrap();
+        assert_eq!(missing, 1);
+        assert!(
+            line.starts_with(
+                "gap NSE-INDEX-NIFTY 2019-09-23 v=1 rung=1min owed=375 held=374 missing=1 \
+                 first_missing=10:00 runs=1 longest=1 longest_at=10:00 why=stored_short run="
+            ),
+            "{line}"
+        );
+        assert!(line.ends_with(" fill=interior source=store"), "{line}");
+    }
+
     /// A pipe at the ledger's name opens at once (`O_NONBLOCK`) and is
     /// refused by the handle's own status, by name: nothing is appended
     /// and the append never waits for a reader. `mkfifo` is the external
