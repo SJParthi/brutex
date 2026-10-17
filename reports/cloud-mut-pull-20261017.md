@@ -39,11 +39,14 @@ and this report.
 
 On the branch head, under Gate 18's own flags and as an unprivileged user,
 **every mutant that can be killed in the ten files is killed**, and **no
-mutant times out**. What survives is 19 mutants proved equivalent (the old
-18, re-confirmed, and one on a line `feat/db-fix` added). **No real bug was
-found**; one missing test was (`stored_line`'s whole-day answer), and is
-written. Lines and branches: five files at 100% of both; every line and
-branch left in the other five is listed with why no test can reach it.
+mutant times out**. What survives is 20 mutants proved equivalent (the old
+18, re-confirmed, and two on lines `feat/db-fix` added: `gdfl_archive.rs:280:58`
+and `gdfl_cm_auction.rs:535:73`). **No real bug was found**; five missing
+tests were (a mutant of new `feat/db-fix` code that survived because nothing
+pinned that behaviour: `stored_line`'s whole-day answer, and four of the v2
+auction sidecar's), and each is written and its mutant now caught. Lines
+and branches: five files at 100% of both; every line and branch left in the
+other five is listed with why no test can reach it.
 
 | Run (Gate 18 flags, user `mut`) | Mutants | Caught | Missed | Timeout | Unviable |
 |---|---:|---:|---:|---:|---:|
@@ -52,6 +55,9 @@ branch left in the other five is listed with why no test can reach it.
 | `newcode` — every mutant on a line `feat/db-fix` changed since `c9e3472` | 58 | 53 | 2 | 0 | 3 |
 | `rmrest` — the rest of `request_minutes.rs` | 115 | 104 | 2 | 0 | 9 |
 | `fixed544` — `stored_line`'s mutant after its new test | 1 | **1** | 0 | 0 | 0 |
+| `moved` — every mutant on a line the mid-pass merge changed in `gdfl_cm_auction.rs`, `gdfl_tickstore.rs`, `gdfl_nfo.rs` (5 outcomes voided by a full disk, 1 never run) | 92 | 70 | 4 | 1 | 12 |
+| `movedafter` — `moved`'s 5 survivors after this pass's tests, and the 1 never run | 6 | **5** | 1 | **0** | 0 |
+| `moveddisk` — the 4 the full disk voided | 4 | **4** | 0 | 0 | 0 |
 
 The eight files whose production code is unchanged since `c9e3472` were not
 re-mutated whole: the old pass killed every killable mutant in them against
@@ -181,7 +187,29 @@ error. Build outputs this session made were removed to free space (the
 first coverage build, the workspace-test target, test scratch directories);
 nothing tracked.
 
-MOVED_RESULT
+Of the 92, `moved` settled 87: **70 caught, 12 unviable** (each asks
+`Default`, or a constructor, of a type that has none: `Record`, `Refused`,
+`Appended`, `NfoFile`, `Sidecar`, `Flock`), **4 missed and 1 timeout**.
+The other five — the four voided and the one never run (`242:5`
+`record_crc` → 1) — and the five survivors went to the runs below, after
+this pass's tests for the survivors, each under Gate 18's flags with one
+test thread:
+
+| Mutant | Run | Outcome |
+|---|---|---|
+| `gdfl_cm_auction.rs:446:45` `==` → `!=` in `parse` (the header refusal's words by version) | `movedafter` | **caught** by `a_bad_header_is_refused_in_its_own_versions_words` (new) |
+| `gdfl_cm_auction.rs:497:21` guard `NotFound` → `true` in `read` | `movedafter` | **caught** by `only_a_missing_sidecar_reads_as_none` (new) |
+| `gdfl_cm_auction.rs:612:75` `&&` → `\|\|` in `append`'s directory walk | `movedafter` | **caught** by `a_fresh_sidecar_syncs_no_directory_above_the_one_it_was_made_in` (new) |
+| `gdfl_cm_auction.rs:535:55` guard `started.elapsed() < bound` → `true` in `hold` (was a **timeout**: waits forever on a held lock) | `movedafter` | **caught** at test 1 of 1,804, 10.0 s, by `a_sidecar_lock_held_past_the_bound_is_refused_in_time` (new, run first by the nextest override) |
+| `gdfl_cm_auction.rs:242:5` `record_crc` → 1 (never run) | `movedafter` | caught by `the_auction_sidecar_is_append_only_and_idempotent` |
+| `gdfl_cm_auction.rs:535:73` `<` → `<=` in `hold` | `movedafter` | **missed: equivalent.** `started.elapsed()` and `bound` are `Duration`s; `<` and `<=` differ only when the elapsed time equals the bound to the nanosecond, which no test can arrange (and the arm after either is the same refusal one poll later). |
+| `gdfl_cm_auction.rs:233:5` `take` → `[1; N]`, `234:21` `+` → `-` and `*`, `242:5` `record_crc` → 0 (voided by the disk) | `moveddisk` | **all four caught**, by `an_eligible_shares_print_is_filed_in_the_sidecar_never_as_a_bar` and `a_flipped_bit_in_price_quantity_or_time_is_refused_by_name` |
+
+**So the 92 end as 79 caught, 12 unviable, 1 equivalent, 0 timeouts.** No
+catch rests on a timing test, and no log of `movedafter` or `moveddisk`
+holds a disk error. The `gdfl_nfo` and `gdfl_tickstore` changes' seven
+mutants were all caught or unviable in `moved` (the nfo row reservation's
+`==` → `!=` by `allocation`'s `a_row_of_half_a_million_fields_is_refused_without_holding_them`).
 
 ### Equivalent mutants (18, missed by construction)
 
@@ -344,12 +372,13 @@ on):
 
 ## NEEDS THE MAC
 
-1. **Gate 18 will be red on 16 equivalent mutants when `feat/db-fix` is
+1. **Gate 18 will be red on 17 equivalent mutants when `feat/db-fix` is
    planned against `main`, whatever the tests.** Gate 18 plans every line of
-   the PR's diff (`main...feat/db-fix` holds 6,241 `pull` mutants) and "never
-   excludes a mutation or credits a timeout". 16 of this report's 19
-   equivalents are on lines of that diff (all but `fold.rs:272:38`,
-   `272:44` and `1527:9`). No test can kill them; only a production
+   the PR's diff (`main...feat/db-fix` held 6,241 `pull` mutants at
+   `f9cdb584`) and "never excludes a mutation or credits a timeout". 17 of
+   this report's 20 equivalents are on lines of that diff (all but
+   `fold.rs:272:38`, `272:44` and `1527:9`; measured for 16 at `f9cdb584`,
+   and `gdfl_cm_auction.rs:535:73` is new `feat/db-fix` code). No test can kill them; only a production
    rewrite that removes the mutation site, or a gate policy, can. Each
    rewrite below keeps behaviour by the same argument that makes the mutant
    equivalent; none was made here (production code of other parts, and a
@@ -368,6 +397,7 @@ on):
    | `request_minutes.rs:333:35` | ask the calendar whether `at` is past the record (one function), instead of comparing with `SOURCED_LAST_DAY` at a boundary the arm never reaches. |
    | `request_minutes.rs:347:22` | none without a venue-table seam a test can fill; the guard is data-equivalent (every shipped row continuous). A gate policy is the only other way. |
    | `cash_session_cache.rs:508:5` | open the lock with `O_NOFOLLOW` and judge the open handle's own `fstat` (as `request_minutes::append_named_picking` now does) instead of re-reading the path: the race the re-check guards no longer exists, and a pipe or device at the name becomes a testable refusal. |
+   | `gdfl_cm_auction.rs:535:73` | `if started.elapsed() < bound` → `if bound.checked_sub(started.elapsed()).is_some()` (waits while time is left): no comparison operator, so no `<`/`<=` pair; the two differ only at an elapsed time equal to the bound to the nanosecond, as the mutant does. |
 
 2. **`cli` `generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`
    fails as an ordinary user here and passes as root** (Gates). Not this
