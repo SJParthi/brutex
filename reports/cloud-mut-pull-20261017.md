@@ -62,6 +62,17 @@ so the run hung. Two changes, no existing test edited:
   own pattern for running a fast regression first (D-0693, D-0694). Order
   only; gate 1's nextest scan allows exactly the keys used.
 
+Run `timeouts2`, the same flags on the branch with both changes (baseline
+60 s build, 414 s test): **5 mutants, 5 caught, 0 timeouts.**
+
+| Mutant | Caught by | At |
+|---|---|---|
+| `fold.rs:1083:42` `*` → `/` in `fold_month` | `cloud_mutants_import fold_paths::an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not` (watchdog) | test 3 of 1,750, 10.0 s |
+| `fold.rs:1191:20` `+=` → `*=` in `fold_month` | the same | test 3, 10.0 s |
+| `fold.rs:1245:42` `*` → `/` in `flush_tail` | the same | test 3, 10.0 s |
+| `gdfl_nfo.rs:569:22` `-=` → `/=` in `monthly_expiry` | `gdfl_nfo::cloud_mutant_tests::the_monthly_walk_back_over_a_holiday_answers_within_a_bound` | test 1, 10.0 s |
+| `cash_session_cache.rs:546:19` `>=` → `<` in `hold` | `cash_session_cache::cloud_mutant_tests::an_installer_waits_for_readers_who_let_go_inside_the_bound` | test 129, 0.03 s |
+
 ### Equivalent mutants (18, missed by construction)
 
 Re-confirmed missed under Gate 18's flags (run `survivors1`). Line numbers
