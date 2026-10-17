@@ -313,6 +313,20 @@ Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
       year and the year within its month. The re-test with the full suite
       is what counts.
     - `Fold::push` `<` → `<=`, an argued equivalent.
+  - **The disk allowance filled at about 22:11.** Tests that fail under a
+    mutant leave their scratch directories behind: 11 GB of them in run
+    B's TMPDIR and 4.8 GB in run C's. Run C stopped on its own log write.
+    - Freed by removing scratch left for over 15 minutes, never a
+      cargo-mutants copy. A sweeper now does this every 5 minutes while a
+      run lasts.
+    - Every outcome recorded in that window was checked. Only the logs
+      that show the host's `os error 28` are suspect: 6 of run B's
+      (`verdict.rs` 3081:5, 3084:21 ×2, 3084:32, 3108:21 ×2: 3 caught, 3
+      unviable) and 1 of run C's (`sealed.rs` 2156:9 caught).
+    - These 7 are re-tested with the full suite. No other log of the
+      window holds the error, so the others failed for reasons of their
+      own. The two unviables of 22:12 (`verdict.rs` 3094:5) are a real
+      compile error: `File: Default`.
 - **Coverage**: a final run on the final tree.
 - **Equivalent mutants** still argued, each to be confirmed by the runs:
   - `verdict` `Code::worse` `<` → `<=`.
