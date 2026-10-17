@@ -3211,6 +3211,10 @@ impl Audit {
             .map_err(|why| format!("{}: cannot create — {why}", aside.display()))?;
         std::fs::create_dir_all(&aside)
             .map_err(|e| format!("{}: cannot create — {e}", aside.display()))?;
+        // Under `cfg(test)`, another actor's step here, as only a race with
+        // one stages it: the folder gone between its making and the look.
+        #[cfg(test)]
+        tests::between_making_and_asking(&aside);
         // WHICH FOLDER the generation is renamed into, asked again now that
         // it is there: the reaper deletes only inside this one (RA-294).
         let held = audit_gone_is_ours(&aside)
@@ -3521,6 +3525,32 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    thread_local! {
+        /// What another actor does to the roll-aside folder between
+        /// `Audit::retire`'s making of it and its look, once, on this thread.
+        static BETWEEN: std::cell::Cell<Option<fn(&Path)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Arms [`between_making_and_asking`] for the next retire on this
+    /// thread.
+    pub(super) fn arm_between_making_and_asking(actor: fn(&Path)) {
+        BETWEEN.with(|armed| armed.set(Some(actor)));
+    }
+
+    /// Whether the armed actor is still waiting.
+    pub(super) fn between_armed() -> bool {
+        BETWEEN.with(std::cell::Cell::get).is_some()
+    }
+
+    /// The seam `Audit::retire` calls between making the roll-aside folder
+    /// and asking which folder it is: the armed actor, taken and run.
+    pub(super) fn between_making_and_asking(aside: &Path) {
+        if let Some(actor) = BETWEEN.with(std::cell::Cell::take) {
+            actor(aside);
+        }
+    }
 
     /// A directory no other live process will name, emptied first.
     ///
@@ -8684,6 +8714,47 @@ mod cloud_mutant_tests {
         );
         std::fs::remove_dir(&folder).expect("removed again");
         assert_eq!(changed_under(&job), Some(said("nothing has its name now")));
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A ROLL-ASIDE FOLDER GONE BETWEEN ITS MAKING AND ITS LOOK IS SAID BY
+    /// NAME, AND THE GENERATION STAYS WHERE IT WAS.**
+    ///
+    /// Covers `Audit::retire`'s refusal when nothing has the folder's name
+    /// after `create_dir_all` made it, which only another actor's removal
+    /// between the two calls stages: the seam is that actor. The open of a
+    /// stream whose serial is three past the kept files retires the
+    /// generation an earlier process stranded, and the refusal it returns
+    /// says the folder and why; the stranded generation is not renamed into
+    /// a folder that is not there.
+    #[test]
+    fn a_roll_aside_folder_gone_before_its_look_is_said_by_name() {
+        let dir = scratch("audit-aside-gone");
+        let serial = audit_serial_path(&dir);
+        std::fs::create_dir_all(serial.parent().expect("a parent")).expect("the index");
+        let past = u64::from(AUDIT_KEEP_FILES) + 3;
+        std::fs::write(&serial, past.to_le_bytes()).expect("the serial");
+        let stranded = audit_generation_path(&dir, 3);
+        std::fs::create_dir_all(&stranded).expect("a stranded generation");
+        crate::sink::tests::arm_between_making_and_asking(|aside| {
+            std::fs::remove_dir(aside).expect("the folder goes");
+        });
+        let (audit, said) = Audit::open(&dir, 8);
+        assert!(!crate::sink::tests::between_armed(), "the seam ran");
+        let aside = dir.join(super::AUDIT_GONE_DIR);
+        assert_eq!(
+            said.as_deref(),
+            Some(
+                format!(
+                    "{}: cannot create — nothing has the name after it was made",
+                    aside.display()
+                )
+                .as_str()
+            )
+        );
+        assert!(stranded.is_dir(), "the generation stays in audit.idx/");
+        assert!(!aside.exists());
+        drop(audit);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
