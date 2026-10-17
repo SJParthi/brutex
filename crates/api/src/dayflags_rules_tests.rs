@@ -2039,6 +2039,27 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
     else {
         panic!("the month opens");
     };
+    // Whole, and with no memo key, the day is read and scanned in place.
+    let reads = super::super::Reads {
+        fills: true,
+        scan: true,
+        first: true,
+    };
+    let mut whole = Vec::new();
+    let (fills, scan, first) = super::super::day_reads(
+        (&file, None),
+        (Vendor::Zerodha, &inst, Timeframe::MINUTE_1),
+        (day("2022-03-07"), 0, 2),
+        reads,
+        &mut whole,
+    );
+    assert_eq!(fills, Some(2), "two minutes with no volume");
+    assert_eq!(scan.map(|scan| scan.bars), Some(2));
+    assert_eq!(
+        first,
+        Some(super::super::ist_midnight_micros(day("2022-03-07")) + i64::from(open) * 1_000_000)
+    );
+    assert!(whole.is_empty(), "{whole:#?}");
     let path = month_path(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, month);
     std::fs::OpenOptions::new()
         .write(true)
@@ -2047,11 +2068,6 @@ fn a_day_whose_bars_will_not_read_is_named_and_not_counted() {
         .set_len(0)
         .expect("cut short");
     let mut notes = Vec::new();
-    let reads = super::super::Reads {
-        fills: true,
-        scan: true,
-        first: true,
-    };
     let got = super::super::day_reads(
         (&file, None),
         (Vendor::Zerodha, &inst, Timeframe::MINUTE_1),

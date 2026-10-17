@@ -524,6 +524,11 @@ pub(super) struct DayScan {
 /// often a month being written grows.
 static SCANS: OnceLock<Mutex<ScanMemo>> = OnceLock::new();
 
+/// The process's kept scans.
+fn scans() -> &'static Mutex<ScanMemo> {
+    SCANS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Scans by the month file's device and inode and the day's first row:
 /// `(end row, scan)`. No path is hashed or allocated per day.
 type ScanMemo = HashMap<(u64, u64, u64), (u64, DayScan)>;
@@ -608,7 +613,7 @@ pub(super) fn scan_day(
         return Ok(None);
     }
     let key = identity.map(|(dev, ino)| (dev, ino, lo));
-    let memo = SCANS.get_or_init(|| Mutex::new(HashMap::new()));
+    let memo = scans();
     if let Some(key) = &key
         && let Some((end, kept)) = memo
             .lock()
@@ -650,10 +655,7 @@ pub(super) fn scan_month(
     in_halt: impl Fn(Day, i64) -> bool + Sync,
 ) -> usize {
     let cold: Vec<(Day, u64, u64)> = {
-        let memo = SCANS
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let memo = scans().lock().unwrap_or_else(PoisonError::into_inner);
         spans
             .iter()
             .filter(|(_, lo, hi)| {
