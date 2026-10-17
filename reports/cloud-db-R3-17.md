@@ -7,6 +7,16 @@ rules ("If one is missing, say so in your report and stop: never build on top of
 part") nothing has been built. No source file, test, doc, `Cargo.toml` or `Cargo.lock` was
 edited; this report is the only file on the branch that differs from the base.**
 
+**Operator's decision (17 Oct 2026, asked in this session): wait for R3-06.** Not "build
+now with the month summary held back", and not "build all of it". On the next CONTINUE the
+session re-fetches, re-runs the prerequisite check and, once it prints three lines, merges
+the newest `feat/db-fix` into this branch and builds the whole part. Re-checked once more
+after the first report: `feat/db-fix` was still at `50093fa3` with no R3-06 merge.
+
+Defaults for the relaunch, unless the Mac says otherwise: R3-17 takes the existing
+`srt_builder*.rs` and `tix_rebuilder*.rs` as the spec's `srt_build*` / `tix_rebuild*` files,
+and DB-027's decode-time refusal stays with the owner of `gdfl_nfo.rs` (item 3 below).
+
 Branch `cloud/db-R3-17-20261017`, cut from `origin/feat/db-fix` at
 `50093fa3314164d2fb9fc4931da4689eaba1e2e5` (`Merge R3-35: Importer file split …`), fetched
 17 Oct 2026.
