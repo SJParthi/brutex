@@ -5271,16 +5271,17 @@ fn behind_words_with(behind: u64, failed: Option<&str>) -> String {
 /// error dropped.
 fn refusals_in(dir: &std::path::Path, slice: u64) -> (std::sync::Arc<DirRefusals>, u64) {
     let paths = telemetry::paths_newest_first(dir, telemetry::DEFAULT_KEEP_FILES);
-    let Some((current, rolled_paths)) = paths.split_first() else {
-        return (std::sync::Arc::default(), 0);
-    };
-    // OLDEST FIRST, as the ring was written.
-    let rolled: Vec<(&std::path::PathBuf, Seen)> = rolled_paths
+    // THE CURRENT FILE IS ALWAYS NAMED FIRST, whatever the keep; the rolled
+    // ones follow it, OLDEST FIRST here, as the ring was written.
+    let current = telemetry::current_path(dir);
+    let rolled: Vec<(&std::path::PathBuf, Seen)> = paths
+        .get(1..)
+        .unwrap_or_default()
         .iter()
         .rev()
         .map(|path| (path, Seen::of(path)))
         .collect();
-    let now = Seen::of(current);
+    let now = Seen::of(&current);
     let len = now.len();
     let mut held = refusal_tails()
         .lock()
@@ -5292,11 +5293,11 @@ fn refusals_in(dir: &std::path::Path, slice: u64) -> (std::sync::Arc<DirRefusals
         || !tail.current.same_file(&now)
         || len < tail.parsed;
     if fresh {
-        *tail = RefusalTail::queue_ring(&rolled, current, now);
+        *tail = RefusalTail::queue_ring(&rolled, &current, now);
     }
     let left = tail.read_queued(slice);
     if len > tail.parsed && left > 0 && len != tail.fragment_end {
-        tail.read_appended(current, len, left);
+        tail.read_appended(&current, len, left);
     }
     let behind = tail.behind(len);
     (std::sync::Arc::clone(&tail.built), behind)
@@ -9517,14 +9518,14 @@ mod r3_24_edge_tests {
     fn line(seq: u64, ms: i64) -> String {
         format!(
             "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"error\",\
-             \"target\":\"span.test\",\"msg\":\"at {ms}\",\"fields\":{{}}}}\n"
+             \"target\":\"span.test\",\"msg\":\"at {ms}\",\"fields\":{{\"day\":\"2020-01-02\"}}}}\n"
         )
     }
 
     /// An audit stream written by hand into `dir`: one generation per entry
     /// of `gens`, oldest first, the last the file being appended to; each line
     /// stamped with its time; each generation with its span file (the current
-    /// one open-ended) and its `target` posting. `seq` runs from 1.
+    /// one open-ended) and its `day` posting (2020-01-02). `seq` runs from 1.
     fn hand_stream(dir: &std::path::Path, gens: &[&[i64]]) {
         let current = u64::try_from(gens.len() - 1).unwrap();
         std::fs::create_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
@@ -9562,7 +9563,7 @@ mod r3_24_edge_tests {
             )
             .expect("a span file");
             let posting_path =
-                telemetry::audit_posting_path(dir, serial, "target", "span.test").expect("a name");
+                telemetry::audit_posting_path(dir, serial, "day", "2020-01-02").expect("a name");
             std::fs::create_dir_all(posting_path.parent().unwrap()).expect("a dimension");
             std::fs::write(posting_path, posting).expect("a posting");
         }
@@ -9636,6 +9637,14 @@ mod r3_24_edge_tests {
         let mut out = telemetry::PostingsPage::default();
         let spent = span_backwards(&path, 0, (len, 0), 100, &mut 0, &mut out);
         assert!(matches!(spent, Ok(Walked::Stopped)));
+        // A SLICE SHORTER THAN THE FILE starts mid-line: the piece before its
+        // first newline is left for a later slice, never read as a line.
+        let mut half = len / 2;
+        let mut part = telemetry::PostingsPage::default();
+        let walked = span_backwards(&path, 0, (len, 0), 100, &mut half, &mut part);
+        assert!(matches!(walked, Ok(Walked::Stopped)));
+        assert_eq!(seqs(&part), [(0, 3)]);
+        assert_eq!(part.malformed, 0);
         // A TORN END: the slice holds part of one line and no newline.
         let mut budget = 10;
         let torn = span_backwards(&path, 0, (len - 1, 0), 100, &mut budget, &mut out);
@@ -9653,7 +9662,7 @@ mod r3_24_edge_tests {
     fn a_key_beside_a_span_passes_a_generation_unread() {
         let dir = scratch("prune");
         hand_stream(&dir, &GENS);
-        let asked = super::asked("target=span.test&from=1500&to=2500&limit=50");
+        let asked = super::asked("day=2020-01-02&from=1500&to=2500&limit=50");
         let got: serde_json::Value =
             serde_json::from_str(&super::keyed_json(&dir, None, &asked, None)).expect("JSON");
         let found: Vec<i64> = got["records"]
@@ -9663,6 +9672,16 @@ mod r3_24_edge_tests {
             .map(|record| record["ts"].as_i64().unwrap())
             .collect();
         assert_eq!(found, [2002, 2001, 2000], "{:#}", got["keyed"]);
+        let probed: Vec<&str> = got["keyed"]["index"]["postings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|posting| posting["dimension"].as_str().unwrap())
+            .collect();
+        assert!(
+            probed.contains(&"day") && !probed.contains(&"span"),
+            "premise: a key's posting, not a span alone: {probed:?}"
+        );
         // THE PASSED-OVER FILES COULD NOT HAVE BEEN READ: gone, every line
         // of them would have been an error or a roll-off.
         for serial in [0, 2] {
