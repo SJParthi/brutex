@@ -622,6 +622,8 @@ test('the reader names a calendar still building or withheld without a reason, r
   const building = await readLedger('/calendar.json', async () => answer(200, { status: 'building' }), signal);
   assert.equal(building.ledger, null);
   assert.match(building.why, /still building this calendar: no reason given/);
+  // An answer with no body is a calendar with no day string, said as such — never a TypeError.
+  assert.equal((await readLedger('/calendar.json', async () => answer(200, null), signal)).why, 'the calendar could not be read (/calendar.json carried no day string)');
   const withheld = await readLedger('/calendar.json', async () => answer(200, { status: 'withheld' }), signal);
   assert.match(withheld.why, /withheld: no reason given/);
   const thrown = await readLedger('/calendar.json', async () => { throw 'a string, not an Error'; }, signal);
