@@ -4,23 +4,29 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic
+    clippy::panic,
+    clippy::too_many_lines
 )]
 
 use super::*;
 
+/// The operator's recorded yes for the fixture step's one operator item.
+const YES: &str = "operator_yes = [\"a yes | operator, 17 Oct 10:30 IST: 'yes, run it'\"]";
+
 /// A list with one package and one kind step, `fields` spliced into the step.
 fn list(merged: bool, fields: &str) -> String {
     format!(
-        "format = 1\nleftovers = [\n  \"XX-01\", # a comment\n]\n\n[[package]]\nname = \"R9-01\"\nmerged = {merged}\ntitle = \"a = b # not a comment\"\n\n[[step]]\nid = \"S-90\"\nkind = \"tick-day-import\"\nprerequisites = [\"R9-01\", \"operator: a yes\"]\n{fields}\n\n[[step]]\nid = \"S-91\"\ntitle = \"a hand step, no kind\"\n"
+        "format = 1\nleftovers = [\n  \"XX-01\", # a comment\n]\n\n[[package]]\nname = \"R9-01\"\nmerged = {merged}\ntitle = \"a = b # not a comment\"\n\n[[step]]\nid = \"S-90\"\nkind = \"tick-day-import\"\nprerequisites = [\"R9-01\", \"operator: a yes\"]\n{YES}\n{fields}\n\n[[step]]\nid = \"S-91\"\ntitle = \"a hand step, no kind\"\n"
     )
 }
 
 /// Every part of a rehearsal, present and current.
-const WHOLE: &str = "check = [\n  \"GET /imports.json: done (0 today)\",\n]\nrehearsed_ms = 1200\nrehearsed_bytes = 4096\nrehearsed_commit = \"abc1234 200\"\nwriter_changed = \"def5678 150\"\nsnapshot = \"brutex-before-ticks 300\"";
+const WHOLE: &str = "state = \"pending\"\ncheck = [\n  \"GET /imports.json: done (0 today)\",\n]\nrehearsed_ms = 1200\nrehearsed_bytes = 4096\nrehearsed_commit = \"abc1234 200\"\nwriter_changed = \"def5678 150\"\nsnapshot = \"brutex-before-ticks 300\"";
 
 const QUIET: Facts = Facts {
     last_bulk_write: LastBulkWrite::At(250),
+    now: 1_000,
+    attested: Vec::new(),
 };
 
 fn gate(merged: bool, fields: &str) -> Gate {
@@ -130,9 +136,12 @@ fn an_unmerged_prerequisite_is_not_ready() {
             waits_for: vec!["R9-01".to_owned()],
         }
     );
-    // An undeclared package is unmerged too; an operator item is the
-    // person's and does not hold an automatic start.
-    let undeclared = list(true, WHOLE).replace("[\"R9-01\", \"operator: a yes\"]", "[\"R9-77\"]");
+    // An undeclared package is unmerged too. (An operator item is judged
+    // after the packages: see an_operator_prerequisite_is_never_met_silently.)
+    let undeclared = list(true, WHOLE).replace(
+        "[\"R9-01\", \"operator: a yes\"]",
+        "[\"R9-77\", \"operator: a yes\"]",
+    );
     let refused = Gate::from_list(&undeclared)
         .unwrap()
         .admit("tick-day-import", &QUIET)
@@ -176,6 +185,7 @@ fn a_snapshot_must_be_newer_than_the_last_bulk_write() {
             "tick-day-import",
             &Facts {
                 last_bulk_write: facts.clone(),
+                ..QUIET
             },
         );
         assert_eq!(answer.is_ok(), admitted, "{facts:?}: {answer:?}");
@@ -185,6 +195,7 @@ fn a_snapshot_must_be_newer_than_the_last_bulk_write() {
             "tick-day-import",
             &Facts {
                 last_bulk_write: LastBulkWrite::Unknown("torn".to_owned()),
+                ..QUIET
             },
         )
         .unwrap_err();
@@ -195,6 +206,7 @@ fn a_snapshot_must_be_newer_than_the_last_bulk_write() {
             "tick-day-import",
             &Facts {
                 last_bulk_write: LastBulkWrite::At(300),
+                ..QUIET
             },
         )
         .unwrap_err();
@@ -318,6 +330,7 @@ fn the_tracked_list_reads_and_names_no_kind_yet() {
         "tick-day-import",
         &Facts {
             last_bulk_write: LastBulkWrite::NoneRecorded,
+            ..QUIET
         },
     )
     .unwrap_err();
@@ -363,4 +376,301 @@ fn the_gate_is_one_lookup_per_start() {
         l50 < s50.max(1) * 20,
         "p50 {l50}ns at 10,001 kinds against {s50}ns at 1"
     );
+}
+
+/// `list(true, WHOLE)` with the step's prerequisites and yes replaced.
+fn with_operator(prerequisites: &str, yes: &str) -> Gate {
+    Gate::from_list(
+        &list(true, WHOLE)
+            .replace("[\"R9-01\", \"operator: a yes\"]", prerequisites)
+            .replace(YES, yes),
+    )
+    .unwrap()
+}
+
+/// **AN OPERATOR PREREQUISITE IS NEVER MET SILENTLY** (the second agent's
+/// blocking 1, `verify-R4-06-r1.json`). Before this change every
+/// `operator: <what>` item was skipped, so each case below that is refused
+/// was admitted.
+#[test]
+fn an_operator_prerequisite_is_never_met_silently() {
+    // THE SECOND AGENT'S OWN CASE: an approval the list does not record.
+    let window = "approval, and a docs/05-decisions.md entry moving the window";
+    let g = with_operator(&format!("[\"R9-01\", \"operator: {window}\"]"), "");
+    let refused = g.admit("tick-day-import", &QUIET).unwrap_err();
+    assert_eq!(
+        refused,
+        Refusal::OperatorPending {
+            kind: "tick-day-import".to_owned(),
+            step: "S-90".to_owned(),
+            items: vec![window.to_owned()],
+        }
+    );
+    assert_eq!(
+        (refused.code(), refused.part()),
+        ("operator_pending", "operator")
+    );
+    assert!(refused.to_string().contains(window), "{refused}");
+    // An operator item alone, with every package merged, is still refused.
+    let drill = with_operator("[\"operator: the restore drill (no agent runs it)\"]", "");
+    assert_eq!(
+        drill.admit("tick-day-import", &QUIET).unwrap_err().code(),
+        "operator_pending"
+    );
+    // A RECORDED YES meets its item, and is handed back to the starter.
+    let admitted = gate(true, WHOLE).admit("tick-day-import", &QUIET).unwrap();
+    assert_eq!(
+        admitted.operator,
+        [OperatorMet {
+            item: "a yes".to_owned(),
+            by: MetBy::Recorded("operator, 17 Oct 10:30 IST: 'yes, run it'".to_owned()),
+        }]
+    );
+    // AN ATTESTED CONDITION meets its item, by its exact words only.
+    let token = "a Kite access token valid on the day";
+    let g = with_operator(&format!("[\"R9-01\", \"operator: {token}\"]"), "");
+    let attest = |words: &str| Facts {
+        attested: vec![words.to_owned()],
+        ..QUIET
+    };
+    let admitted = g.admit("tick-day-import", &attest(token)).unwrap();
+    assert_eq!(
+        admitted.operator,
+        [OperatorMet {
+            item: token.to_owned(),
+            by: MetBy::Attested,
+        }]
+    );
+    for near in [
+        format!("operator: {token}"),
+        token.to_uppercase(),
+        format!("{token} "),
+        String::new(),
+    ] {
+        assert_eq!(
+            g.admit("tick-day-import", &attest(&near))
+                .unwrap_err()
+                .code(),
+            "operator_pending",
+            "{near:?}"
+        );
+    }
+    // TWO ITEMS: each must be met; the refusal names only the unmet one, and
+    // an admission hands both back in list order.
+    let two = with_operator(
+        &format!("[\"R9-01\", \"operator: a yes\", \"operator: {token}\"]"),
+        YES,
+    );
+    let refused = two.admit("tick-day-import", &QUIET).unwrap_err();
+    assert_eq!(
+        refused,
+        Refusal::OperatorPending {
+            kind: "tick-day-import".to_owned(),
+            step: "S-90".to_owned(),
+            items: vec![token.to_owned()],
+        }
+    );
+    let both = two.admit("tick-day-import", &attest(token)).unwrap();
+    assert_eq!(
+        both.operator
+            .iter()
+            .map(|m| m.item.as_str())
+            .collect::<Vec<_>>(),
+        ["a yes", token]
+    );
+    assert_eq!(both.operator[1].by, MetBy::Attested);
+    // A YES THAT NAMES NO ITEM, or says no one's yes, does not read: the
+    // whole list is refused (every kind list_unreadable), never half-read.
+    for (yes, says) in [
+        (
+            "operator_yes = [\"a no | operator, 17 Oct\"]",
+            "\"a no | operator, 17 Oct\"",
+        ),
+        ("operator_yes = [\"a yes | \"]", "\"a yes | \""),
+        ("operator_yes = [\"a yes\"]", "\"a yes\""),
+        (
+            "operator_yes = [\"a yesterday | operator\"]",
+            "\"a yesterday | operator\"",
+        ),
+    ] {
+        let why = Gate::from_list(&list(true, WHOLE).replace(YES, yes)).unwrap_err();
+        assert!(
+            why.contains("S-90: operator_yes") && why.contains(says),
+            "{yes}: {why}"
+        );
+    }
+}
+
+#[test]
+fn a_done_or_withdrawn_step_never_starts_by_itself() {
+    for (state, says) in [
+        ("state = \"done\"", "is \"done\""),
+        ("state = \"withdrawn\"", "is \"withdrawn\""),
+        ("state = \"Pending\"", "is \"Pending\""),
+        ("", "is (no state)"),
+    ] {
+        let fields = WHOLE.replace("state = \"pending\"", state);
+        let refused = gate(true, &fields)
+            .admit("tick-day-import", &QUIET)
+            .unwrap_err();
+        assert_eq!(
+            (refused.code(), refused.part()),
+            ("step_closed", "state"),
+            "{state}"
+        );
+        assert!(refused.to_string().contains(says), "{state}: {refused}");
+    }
+}
+
+/// The second agent's garbage figures and stamps, each admitted before.
+#[test]
+fn garbage_figures_and_impossible_stamps_are_refused() {
+    for (from, to, part, says) in [
+        (
+            "rehearsed_ms = 1200",
+            "rehearsed_ms = -5",
+            "dry_run",
+            "above 0",
+        ),
+        (
+            "rehearsed_ms = 1200",
+            "rehearsed_ms = 0",
+            "dry_run",
+            "above 0",
+        ),
+        (
+            "rehearsed_bytes = 4096",
+            "rehearsed_bytes = 0",
+            "dry_run",
+            "above 0",
+        ),
+        (
+            "abc1234 200",
+            "abc1234 -9223372036854775808",
+            "rehearsed_commit",
+            "between 1970 and now",
+        ),
+        (
+            "def5678 150",
+            "def5678 0",
+            "writer_changed",
+            "between 1970 and now",
+        ),
+        (
+            "brutex-before-ticks 300",
+            "brutex-before-ticks 99999999999",
+            "snapshot",
+            "between 1970 and now (1000)",
+        ),
+        (
+            "abc1234 200",
+            "not-a-commit 200",
+            "rehearsed_commit",
+            "not a commit hash",
+        ),
+        (
+            "def5678 150",
+            "DEF5678 150",
+            "writer_changed",
+            "not a commit hash",
+        ),
+        (
+            "abc1234 200",
+            "abc12 200",
+            "rehearsed_commit",
+            "not a commit hash",
+        ),
+    ] {
+        let fields = WHOLE.replace(from, to);
+        let refused = gate(true, &fields)
+            .admit("tick-day-import", &QUIET)
+            .unwrap_err();
+        assert_eq!(
+            (refused.code(), refused.part()),
+            ("not_rehearsed", part),
+            "{to}"
+        );
+        assert!(refused.to_string().contains(says), "{to}: {refused}");
+    }
+    // A stamp AT the caller's clock is not after it; one past it is.
+    let at_now = WHOLE.replace("brutex-before-ticks 300", "brutex-before-ticks 1000");
+    assert!(gate(true, &at_now).admit("tick-day-import", &QUIET).is_ok());
+    let a_40_hex = WHOLE.replace("abc1234", &"a".repeat(40));
+    assert!(
+        gate(true, &a_40_hex)
+            .admit("tick-day-import", &QUIET)
+            .is_ok()
+    );
+    let a_41_hex = WHOLE.replace("abc1234", &"a".repeat(41));
+    assert!(
+        gate(true, &a_41_hex)
+            .admit("tick-day-import", &QUIET)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_key_twice_or_a_package_twice_does_not_read() {
+    let twice = list(true, WHOLE).replace(
+        "rehearsed_ms = 1200",
+        "rehearsed_ms = 1200\nrehearsed_ms = 7",
+    );
+    let why = Gate::from_list(&twice).unwrap_err();
+    assert!(
+        why.contains("key \"rehearsed_ms\" is written twice"),
+        "{why}"
+    );
+    let package = list(true, WHOLE).replace(
+        "[[step]]\nid = \"S-90\"",
+        "[[package]]\nname = \"R9-01\"\nmerged = false\n\n[[step]]\nid = \"S-90\"",
+    );
+    let why = Gate::from_list(&package).unwrap_err();
+    assert!(why.contains("package \"R9-01\" is declared twice"), "{why}");
+    // The same key in two tables is two keys.
+    assert!(Gate::from_list(&list(true, WHOLE)).is_ok());
+}
+
+#[test]
+fn a_kind_longer_than_the_bound_is_refused_unread() {
+    let long = "k".repeat(1 << 20);
+    let g = gate(true, WHOLE);
+    let started = std::time::Instant::now();
+    let refused = g.admit(&long, &QUIET).unwrap_err();
+    let took = started.elapsed();
+    assert_eq!((refused.code(), refused.part()), ("not_rehearsed", "entry"));
+    assert_eq!(refused.kind().len(), MAX_KIND_BYTES);
+    assert!(refused.to_string().contains("1048576 bytes"), "{refused}");
+    println!("rehearsal admit, a 1 MiB kind: refused in {took:?}");
+    // At the bound it is read (and is no kind of this list).
+    let at = "k".repeat(MAX_KIND_BYTES);
+    let refused = gate(true, WHOLE).admit(&at, &QUIET).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("no step of config/store-steps.toml"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_check_line_field_cannot_forge_another() {
+    let forged = check_line(&CheckRecord {
+        run: "r1 kind=forged step=S-00 outcome=passed",
+        at: 7,
+        kind: "k%",
+        step: "S-90\tx",
+        outcome: &CheckOutcome::Failed("held 3 = 4? no".to_owned()),
+    });
+    assert_eq!(
+        forged,
+        "v=1 at=7 run=r1%20kind%3Dforged%20step%3DS-00%20outcome%3Dpassed kind=k%25 step=S-90%09x outcome=failed why=held 3 = 4? no\n"
+    );
+    // Every field but the last is one space-free word: a first-match reader
+    // reads the true outcome.
+    let words: Vec<&str> = forged.split(' ').collect();
+    assert_eq!(
+        words.iter().filter(|w| w.starts_with("outcome=")).count(),
+        1
+    );
+    assert_eq!(words[5], "outcome=failed");
 }

@@ -70862,3 +70862,158 @@ the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
 `a seed, a clamp and a restore correct the current entry and never add one`,
 `a press off a control, or a key that chooses nothing, arms no Back entry`.
 Invariants R301-01 to R301-05 in docs/04-invariants.md.
+
+### D-5320 — R4-06: an automatic kind starts only from a pending step whose every operator item is met by a recorded yes or the starter's attestation; figures are positive, stamps lie in 1970..now and commit stamps name a commit; the steps list is compiled in — 2026-10-17
+
+**Number** taken above every ledger head on the local branches on 17 Oct
+(feat/db-fix's highest is D-5301; D-5800..D-5804 are named by an unmerged
+branch). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R4-06 (repair 1). **Findings** AUT-05, and the second
+agent's re-check of 16 Oct (`verify-R4-06-r1.json`, blocking 1 and the
+follow-ups on `rehearsal.rs`).
+
+**What was observed.** `pull::rehearsal::Gate::admit` filtered every
+`operator: <what>` prerequisite out before judging readiness, so a kind
+whose step waits for the operator's approval (S-33's window past
+2026-09-30, S-35, S-48) or for "every writer stopped" (S-01) was admitted
+to start by itself, and the starter was never told those items existed.
+The same gate admitted `rehearsed_ms = -5`, `rehearsed_bytes = 0`, a stamp
+at `i64::MIN`, a snapshot at unix 99999999999 (always newer than any bulk
+write) and `rehearsed_commit = "not-a-commit 200"`, read a key written twice
+or a package declared twice as last-wins, admitted a kind on a `done` or
+`withdrawn` step, and wrote check lines whose run id could forge fields.
+
+**Decision.**
+
+1. **An operator item is never met silently.** Each `operator: <what>`
+   prerequisite of a kind's step is met only by (a) the step's own
+   `operator_yes` entry `"<the item's words, exactly> | <who, when, and the
+   words of the yes>"`, or (b) the starter attesting the item's exact words
+   in `Facts::attested` at the moment of the start — for a condition it can
+   read for itself (a Kite token read from Parameter Store and found valid;
+   every writer stopped). A person's approval is always (a). Anything else
+   is `operator_pending`, naming each unmet item; an admitted kind returns
+   every item with how it was met (`Admitted::operator`) so the run records
+   it. A yes that names no operator item of its step word for word, or says
+   no one's yes, makes the whole list unreadable (every kind refused
+   `list_unreadable`), and gate 30 refuses it in CI. This supersedes the
+   builder's first choice ("an operator item is the person's and does not
+   hold an automatic start"), which was the defect.
+2. **Only a `pending` step's kind starts by itself** (`step_closed`
+   otherwise): a `done` step's run is not done twice and a `withdrawn` one
+   never runs. A recurring kind stays `pending`.
+3. **Figures above 0; stamps in 1970..now; commit stamps name a commit.**
+   `rehearsed_ms` and `rehearsed_bytes` must both be above 0 (a dry run that
+   took no time or wrote nothing rehearsed no write); every stamp's unix
+   seconds must be above 0 and not after `Facts::now`, the caller's clock;
+   `rehearsed_commit` and `writer_changed` must name 7 to 40 lower-case hex
+   digits. Gate 30 holds the same in CI.
+4. **Commits are compared by time, not ancestry.** The running app has no
+   repository to ask, and asking `git` would put a process launch on every
+   start. So a rehearsal on a commit later in time that does not contain the
+   writer's change reads as current; the commit stamps are written at
+   landing, from the branch that lands. `docs/06-limits.md` L-R406-03.
+5. **The list is compiled in** (`include_str!` of `config/store-steps.toml`):
+   the build that starts a kind is the build whose list it obeys, read once
+   per process. The price is that every edit of the list rebuilds `pull`
+   and every crate above it (`api`, `cli`), and a recorded rehearsal reaches
+   a running starter only through a new build. Reading the file once per
+   file stamp instead would let an edit under a running app change what it
+   starts, which is the edit this gate exists to stop. L-R406-02.
+6. **The list reader refuses a key written twice in one table and a package
+   declared twice**, as gate 30 already did; a kind longer than 64 bytes is
+   refused before it is read, so the never-automatic scan is bounded.
+7. **A check line escapes `%`, space, `=`, tab and line breaks** in `run`,
+   `kind` and `step` (`%25 %20 %3D %09 %0A %0D`); `why` comes last and keeps
+   spaces. The ledger's folder is fsynced when an append creates the file.
+   No caller writes this ledger yet (R3-23 owns the runs ledger), so the v=1
+. **Every built `POST /pull/spot` and `POST /pull/fno` line of the list is a
+   body the route's own parser accepts** (`api/tests/store_step_forms.rs`).
+   Reading them found S-48's line refused three ways: no `underlying=` (the
+   route takes one a request), `series=futures` (the slug is `fut`), and, with
+   an underlying named, `ExpiredSeriesIsOneMinuteOnly`: the operator's rule
+   of 2026-08-19 in `parse_fno` stores an expired contract at 1min or not at
+   all, and S-48 asks for 1day. S-48 is therefore `planned:` and names the
+   conflict; R4-28 (its prerequisite) reconciles the step with the rule or
+   brings the operator's answer. The four `/pull/spot` lines (S-33, S-34)
+   parse.
+
+**Proof.** `pull::rehearsal::tests::an_operator_prerequisite_is_never_met_silently`
+(the second agent's own case among them), `a_done_or_withdrawn_step_never_starts_by_itself`,
+`garbage_figures_and_impossible_stamps_are_refused`,
+`a_key_twice_or_a_package_twice_does_not_read`,
+`a_kind_longer_than_the_bound_is_refused_unread`,
+`a_check_line_field_cannot_forge_another`; gate 30
+`a_kind_is_named_once_never_a_deletion_and_its_stamps_read`. Invariants
+R406-02, R406-03, R406-06 to R406-08 in docs/04-invariants.md.
+
+### D-5321 — R4-06: the secret-shape detector reads a path's later words, full-width and zero-width characters and loosely written parameter paths; `-` and `_` still break a token run; a refusal says a value's length, never the value — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+SEC-07, and the second agent's attacks of 16 Oct (`verify-R4-06-r1.json`).
+
+**What was observed.** `brutex_core::secret_shape` let through `/x
+<token>` (a value opening with `/` skipped the token test whole), a token
+split by U+200B or typed in full width, and a parameter path with a
+trailing `/`, a doubled `/`, a `./` segment or an upper-case field. And
+`GET /settings.json?open.order=<token>` answered `bad_parameter` quoting the
+pair back.
+
+**Decision.**
+
+1. **In a value that opens with a separator, every word is still read**;
+   a word without a separator is a token when its run of twenty or more
+   letters and digits mixes letters and digits. A long all-letter folder
+   word stays a folder word (a false refusal there would block a real
+   archive path); a pasted token almost always mixes the two.
+2. **A full-width ASCII form reads as its ASCII character, and a zero-width
+   or soft-hyphen character as nothing**, in both shapes.
+3. **A parameter path is read from a word's first `/`**: empty and `.`
+   segments are no segments, the field matches in any letter case, and a
+   quote or stop after it is not part of it.
+4. **`-` and `_` break a token run although they are base64url's**: the
+   store symbols the operator types are upper-case words joined by `-`
+   (`NSE-INDEX-NIFTYNXT50`), and counting the `-` would refuse them. A
+   base64url token whose every run is broken that way is missed, and so is
+   a token pasted as a path segment; both are pinned by a test and stated
+   in the module docs (`CLAUDE.md` §3 rule 6).
+5. **A query refusal names a parameter by `said` and its value by length
+   only.** `store::settings`'s own `Invalid` refusals (R3-05's file) still
+   quote a value that evades the detector; that is R3-05's to change and is
+   listed as NOT DONE in R4-06's report.
+
+**Proof.** `brutex_core::secret_shape::tests::every_evasion_the_second_agent_tried_is_refused`,
+`a_full_width_or_zero_width_character_reads_as_the_shape_tests_say`, and the
+four earlier tests unchanged; `api::settings_route::tests::garbage_is_refused_by_name`
+(the token-in-query cases). Invariant R406-01; limit L-R406-01.
+
+### D-5322 — R4-06: a listed scheduler module may not delete, cut, rename, empty or spawn, except at a named, counted site — 2026-10-17
+
+**Number** as D-5320. **Implemented by** R4-06 (repair 1). **Findings**
+AUT-05 item 2, and the second agent's mutations of `autopilot.rs` (16 Oct).
+
+**What was observed.** `pull/tests/no_scheduler_delete.rs` caught
+`remove_file`, `remove_dir`, `remove_dir_all` and a same-line `rename(`, and
+missed `Command::new("rm")`, `libc::unlink`, a turbofish
+`rename::<_, _>(..)`, a `rename` whose `(` is on the next line and
+`OpenOptions::truncate(true)`.
+
+**Decision.** The scan reads the whole stripped text (comments, literals
+and top-level `#[cfg(test)]` items blanked) and refuses: `remove_file`,
+`remove_dir`, `remove_dir_all`, `unlink`, `unlinkat`, `rmdir`, `set_len`,
+`ftruncate` anywhere; `rename` called (the `(` on any later line),
+turbofished, reached as `fs::rename` or imported; `truncate(true)` and
+`libc::truncate`; `File::create` (it empties an existing file);
+`libc::remove`; and `Command`, because a spawned process can delete anything
+and its program name is a string the scan blanks. A scheduler module that
+must spawn (a chain that runs a `cli` verb) adds a named, counted `ALLOWED`
+row with its reason in the change that needs it. `autopilot.rs` holds two:
+the store-writable probe's `File::create` and its `remove_file` of the
+dot-file it created (R4-12 owns making the probe overwrite instead).
+
+**Proof.** `every_evasion_the_second_agent_tried_is_refused`,
+`no_scheduler_path_deletes_a_file`,
+`a_fixture_deletion_is_refused_and_a_comment_or_string_is_not`,
+`every_declared_module_that_exists_is_listed`. Invariant R406-04; limit
+L-R406-04.

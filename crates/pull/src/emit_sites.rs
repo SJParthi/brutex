@@ -1267,6 +1267,8 @@ fn drive_rehearsal(_scratch: &Scratch) {
         "emit-site-fixture-kind",
         &crate::rehearsal::Facts {
             last_bulk_write: crate::rehearsal::LastBulkWrite::NoneRecorded,
+            now: 1_800_000_000,
+            attested: Vec::new(),
         },
     )
     .expect_err("no step names this kind");

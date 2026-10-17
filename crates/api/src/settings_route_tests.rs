@@ -226,6 +226,39 @@ async fn garbage_is_refused_by_name() {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
     }
+    // A TOKEN IN THE QUERY IS NEVER QUOTED BACK (SEC-07, the second agent's
+    // `GET /settings.json?open.order=<token>`, whose refusal used to repeat
+    // the pair): the value by its length only, and a token-shaped NAME not at
+    // all.
+    let token = "q7Zt0invented0token0value0x9K2mW";
+    for (query, says) in [
+        (
+            format!("open.order={token}"),
+            "parameter \"open.order\" with a value of 32 bytes (not repeated)".to_owned(),
+        ),
+        (
+            format!("history={token}"),
+            "parameter \"history\" with a value of 32 bytes".to_owned(),
+        ),
+        (
+            format!("{token}=1"),
+            "parameter of 32 bytes, shaped like a token and not repeated".to_owned(),
+        ),
+    ] {
+        let (status, _, body) = settings_json(
+            axum::extract::State(site.clone()),
+            axum::extract::RawQuery(Some(query.clone())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert!(!body.contains(token), "{query}: {body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            answer["refusal"].as_str().unwrap().contains(&says),
+            "{query}: {body}"
+        );
+        assert_eq!(answer["code"], "bad_parameter", "{body}");
+    }
     let (status, _, body) = settings_json(
         axum::extract::State(site),
         axum::extract::RawQuery(Some("history=50".to_owned())),

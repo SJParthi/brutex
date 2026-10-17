@@ -436,7 +436,7 @@ env = ["BRUTEX_STORE"]
 prerequisites = ["WP-39"]
 check = ["the same two commands again: every line 'kept', exit 0; a whole-history sort on /db reads sort_index.scanned_rows 0"]
 closes = ["RA-002"]
-ran = "2026-10-11 19:35:06 to 19:35:29 UTC (01:05 IST 12 Oct), build app13, after WP-39's rehearsal on a private copy: dry runs 30 ms and 24 ms, builds 11,497 ms and 11,184 ms; 97 months each, 0 refused, 194 index files (4.25 GB). Live whole-history sorts p50 3.3 ms, p99 19.4 ms (main session's board). Its record is in the store's logs/cli/events.ndjson (cli.lifecycle), where every cli run logs (R-01); the run ids were not copied here (not read by R4-06)."
+ran = "2026-10-11 19:35:06 to 19:35:29 UTC (01:05 IST 12 Oct), build app13, after WP-39's rehearsal on a private copy: dry runs 30 ms and 24 ms, builds 11,497 ms and 11,184 ms; 97 months each, 0 refused, 194 index files (4.25 GB). Live whole-history sorts p50 3.3 ms, p99 19.4 ms (main session's board). Its record is the store's logs/cli/audit.ndjson, cli.lifecycle (read by R4-06 on 17 Oct): runs 5202 and 5303 (the dry runs, 19:35:06.542 to .572 and 19:35:18.112 to .136) and runs 5204 and 5305 (the builds, 19:35:06.582 to 19:35:18.079 and 19:35:18.141 to 19:35:29.325), seq 5202 to 5403, each 'command finished' exit_code 0."
 ran_ms = 22681
 approval = "operator, 10 Oct and 11 Oct (as S-02)"
 
@@ -1330,7 +1330,7 @@ id = "S-48"
 title = "Zerodha futures 1day for the F&O underlyings inside the window"
 state = "pending"
 writes = "New Zerodha futures 1day series for the F&O underlyings, census, journal; stored, never swept (CLAUDE.md section 1)."
-command = ["POST /pull/fno series=futures&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30"]
+command = ["planned: POST /pull/fno series=fut&vendor=zerodha&granularity=1day&from=2018-01-01&to=2026-09-30 (R4-28 builds the form for all F&O underlyings at once: the route refuses this body today, as it takes one underlying= a request, and it stores an expired contract at 1min only, by the operator rule of 2026-08-19 that R4-28 must reconcile with this 1day step; the slug is fut, not futures; crates/api/tests/store_step_forms.rs pins the refusals)"]
 dry_run = ["planned: the same request for one underlying with BRUTEX_STORE on a private copy (R4-28's rehearsal)"]
 env = ["BRUTEX_STORE"]
 prerequisites = ["R4-28", "operator: approval of the futures pull", "operator: a Kite access token valid on the day (read from Parameter Store; this repository never mints one)"]

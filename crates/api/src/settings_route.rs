@@ -651,9 +651,14 @@ pub(super) async fn settings_json(
             return (
                 StatusCode::BAD_REQUEST,
                 json_headers(),
+                // THE VALUE IS NEVER QUOTED BACK, only its length: a token
+                // pasted into the query must not come back in the answer
+                // (SEC-07, R4-06 repair 1). The name is said as `said` says.
                 serde_json::json!({
                     "refusal": format!(
-                        "{pair:?}: /settings.json takes only history=0..={MAX_HISTORY}"
+                        "parameter {} with a value of {} bytes (not repeated): /settings.json takes only history=0..={MAX_HISTORY}",
+                        said(name),
+                        value.len()
                     ),
                     "code": "bad_parameter",
                 })

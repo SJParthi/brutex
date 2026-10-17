@@ -451,6 +451,7 @@ fn keys(kind: &str) -> &'static [(&'static str, Shape, bool)] {
             ("rehearsed_commit", Text, false),
             ("writer_changed", Text, false),
             ("snapshot", Text, false),
+            ("operator_yes", List, false),
         ],
         "owed" => &[
             ("id", Text, true),
@@ -979,18 +980,27 @@ fn outside_quotes(line: &str) -> String {
     out
 }
 
-/// Whether `text` names a run id: `run <digits>`, `runs <digits>` or
-/// `run=<id>`.
+/// Units that, after `runs <digits>`, make the digits a measure and not a
+/// run id (`dry runs 30 ms` names no run).
+const UNITS: [&str; 10] = [
+    "ms", "s", "sec", "secs", "second", "seconds", "min", "mins", "minutes", "times",
+];
+
+/// Whether `text` names a run id: `run <digits>` or `runs <digits>`, the
+/// digits whole (only `,;:.)` may follow them) and not followed by a unit
+/// ([`UNITS`]).
 fn names_a_run(text: &str) -> bool {
     let words: Vec<&str> = text.split_whitespace().collect();
-    words.windows(2).any(|pair| {
-        let head = pair[0].trim_start_matches('(');
+    (0..words.len().saturating_sub(1)).any(|at| {
+        let head = words[at].trim_start_matches('(');
+        let id = words[at + 1].trim_end_matches(|c: char| ",;:.)".contains(c));
+        let next = words
+            .get(at + 2)
+            .map(|w| w.trim_end_matches(|c: char| ",;:.)".contains(c)));
         (head == "run" || head == "runs")
-            && pair[1]
-                .trim_end_matches(|c: char| !c.is_ascii_digit())
-                .chars()
-                .all(|c| c.is_ascii_digit())
-            && pair[1].starts_with(|c: char| c.is_ascii_digit())
+            && !id.is_empty()
+            && id.chars().all(|c| c.is_ascii_digit())
+            && !next.is_some_and(|w| UNITS.contains(&w))
     })
 }
 
@@ -1015,24 +1025,42 @@ fn forms(step: &Entry, out: &mut Vec<Problem>) {
                 format!("{label}: command {line:?} says {word:?}: a loop is one line per day or a range verb, never prose"),
             ));
         }
-        if let Some(mark) = NOT_THE_CLI.iter().find(|m| lower.contains(*m)) {
+        // A PATH IS A PATH INSIDE QUOTES AND PLACEHOLDERS TOO: the shell
+        // hands a quoted '/Volumes/...' to the cli as itself, and an operator
+        // fills a <runtime/store/x> with the real store's path. So the script,
+        // build-path and path checks read the line with its quotes and angle
+        // brackets opened (their words kept), not blanked.
+        let opened = body.replace(['\'', '<', '>'], " ");
+        let opened_lower = opened.to_ascii_lowercase();
+        if let Some(mark) = NOT_THE_CLI.iter().find(|m| opened_lower.contains(*m)) {
             out.push(problem(
                 "forms",
                 format!("{label}: command {line:?} holds {mark:?}: the cli is the deployed release binary run as `cli`, never a script or a build path"),
             ));
         }
+        if opened_lower.contains("runtime/store") {
+            out.push(problem(
+                "forms",
+                format!("{label}: command {line:?} names the store's own folder: name a root by its [[env]] variable"),
+            ));
+        }
+        // A word is a path when it opens with `/` or `~`, or when what follows
+        // its `=` does (`--root=/x`, `root=~/x`).
+        let is_path = |w: &&str| {
+            let value = w.rsplit_once('=').map_or(*w, |(_, v)| v);
+            value.starts_with('/')
+                || value.starts_with('~')
+                || w.starts_with('/')
+                || w.starts_with('~')
+        };
         let paths: Vec<&str> = if body.starts_with("cli ") {
-            bare.split_whitespace()
-                .filter(|w| w.starts_with('/'))
-                .collect()
+            opened.split_whitespace().filter(is_path).collect()
         } else if body.starts_with("POST ") {
-            bare.split_whitespace()
-                .skip(2)
-                .filter(|w| w.starts_with('/'))
-                .collect()
+            opened.split_whitespace().skip(2).filter(is_path).collect()
         } else {
-            bare.split_whitespace()
-                .filter(|w| w.contains("/brutex") || w.contains("/work-"))
+            opened
+                .split_whitespace()
+                .filter(|w| w.contains("/brutex") || w.contains("/work-") || w.starts_with('~'))
                 .collect()
         };
         if let Some(path) = paths.first() {
@@ -1074,7 +1102,12 @@ fn kinds(steps: &[&Entry], out: &mut Vec<Problem>) {
     for step in steps {
         let label = step.label();
         let Some(kind) = step.text("kind") else {
-            for key in ["rehearsed_commit", "writer_changed", "snapshot"] {
+            for key in [
+                "rehearsed_commit",
+                "writer_changed",
+                "snapshot",
+                "operator_yes",
+            ] {
                 if step.has(key) {
                     out.push(problem(
                         "kinds",
@@ -1113,17 +1146,58 @@ fn kinds(steps: &[&Entry], out: &mut Vec<Problem>) {
         for key in ["rehearsed_commit", "writer_changed", "snapshot"] {
             if let Some(text) = step.text(key) {
                 let words: Vec<&str> = text.split_whitespace().collect();
-                let reads = words.len() == 2 && words[1].parse::<i64>().is_ok();
-                if !reads {
+                let reads = words.len() == 2 && words[1].parse::<i64>().is_ok_and(|unix| unix > 0);
+                let commit = key == "snapshot"
+                    || words.first().is_some_and(|name| {
+                        (7..=40).contains(&name.len())
+                            && name
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    });
+                if !reads || !commit {
                     out.push(problem(
                         "kinds",
-                        format!("{label}: {key} {text:?} is not \"<name> <unix seconds>\""),
+                        format!(
+                            "{label}: {key} {text:?} is not \"<{}> <unix seconds after 1970>\"",
+                            if key == "snapshot" {
+                                "name"
+                            } else {
+                                "commit hash, 7 to 40 lower-case hex digits"
+                            }
+                        ),
                     ));
                 }
             }
         }
+        // AN OPERATOR ITEM IS MET BY A YES THAT NAMES IT WORD FOR WORD, or by
+        // the starter attesting it at the start; the pull reader refuses the
+        // whole list over a yes that names no item (`pull::rehearsal`).
+        let items: Vec<&str> = step
+            .list("prerequisites")
+            .iter()
+            .filter_map(|p| p.strip_prefix(OPERATOR))
+            .collect();
+        for yes in step.list("operator_yes") {
+            let names_one = items.iter().any(|words| {
+                yes.strip_prefix(words)
+                    .and_then(|rest| rest.strip_prefix(YES_SEPARATOR))
+                    .is_some_and(|who| !who.trim().is_empty())
+            });
+            if !names_one {
+                out.push(problem(
+                    "kinds",
+                    format!(
+                        "{label}: operator_yes {yes:?} is not \"<an operator item's words, exactly>{YES_SEPARATOR}<who, when, the words of the yes>\" for an `operator: ` prerequisite of the step"
+                    ),
+                ));
+            }
+        }
     }
 }
+
+/// What separates an `operator_yes` entry's item words from who said yes
+/// (`pull::rehearsal::YES_SEPARATOR`, the same three bytes).
+const YES_SEPARATOR: &str = " | ";
 
 /// The owed runs of `config/owed-runs.toml`, by id, or why not: format 1,
 /// one or more [[owed]] tables, each id `OWED-<two or more digits>` once.
@@ -6105,7 +6179,7 @@ owed runs: not given; NOT CHECKED
         let kinded = with(
             GOOD,
             "disk = \"4 KiB\"",
-            "disk = \"4 KiB\"\nkind = \"gdfl-options-day\"\nrehearsed_commit = \"abc 10\"\nwriter_changed = \"def 9\"\nsnapshot = \"s 11\"",
+            "disk = \"4 KiB\"\nkind = \"gdfl-options-day\"\nrehearsed_commit = \"abc1234 10\"\nwriter_changed = \"def5678 9\"\nsnapshot = \"s 11\"",
         );
         assert!(by_rule(&problems_of(&kinded, &writers()), "kinds").is_empty());
         for (from, to, says) in [
@@ -6125,9 +6199,24 @@ owed runs: not given; NOT CHECKED
                 "is not lower-case words",
             ),
             (
-                "writer_changed = \"def 9\"",
-                "writer_changed = \"def\"",
-                "is not \"<name> <unix seconds>\"",
+                "writer_changed = \"def5678 9\"",
+                "writer_changed = \"def5678\"",
+                "<unix seconds after 1970>\"",
+            ),
+            (
+                "rehearsed_commit = \"abc1234 10\"",
+                "rehearsed_commit = \"not-a-commit 10\"",
+                "is not \"<commit hash, 7 to 40 lower-case hex digits> <unix seconds after 1970>\"",
+            ),
+            (
+                "snapshot = \"s 11\"",
+                "snapshot = \"s 0\"",
+                "is not \"<name> <unix seconds after 1970>\"",
+            ),
+            (
+                "snapshot = \"s 11\"",
+                "snapshot = \"s 11\"\noperator_yes = [\"a yes | operator, 17 Oct\"]",
+                "operator_yes \"a yes | operator, 17 Oct\" is not",
             ),
         ] {
             let p = problems_of(&with(&kinded, from, to), &writers());
@@ -6154,5 +6243,115 @@ owed runs: not given; NOT CHECKED
             "snapshot without a kind"
         ));
         assert_eq!(NEVER_AUTOMATIC.len(), 8);
+        // A YES THAT NAMES ITS ITEM WORD FOR WORD reads; one that names the
+        // item loosely, says no one's yes, or sits on a kindless step does not.
+        let asked = with(
+            &kinded,
+            "prerequisites = [\"WP-01\"]\ncheck = [\"GET /bars/window.json",
+            "prerequisites = [\"WP-01\", \"operator: a Kite token valid on the day\"]\ncheck = [\"GET /bars/window.json",
+        );
+        let yes = |entry: &str| {
+            with(
+                &asked,
+                "snapshot = \"s 11\"",
+                &format!("snapshot = \"s 11\"\noperator_yes = [{entry:?}]"),
+            )
+        };
+        assert!(
+            by_rule(
+                &problems_of(
+                    &yes("a Kite token valid on the day | operator, 17 Oct: 'yes'"),
+                    &writers()
+                ),
+                "kinds"
+            )
+            .is_empty()
+        );
+        for entry in [
+            "a Kite token | operator, 17 Oct",
+            "a Kite token valid on the day | ",
+            "a Kite token valid on the day",
+            "operator: a Kite token valid on the day | operator",
+        ] {
+            let p = problems_of(&yes(entry), &writers());
+            assert!(refused(&p, "kinds", "operator_yes"), "{entry}: {p:?}");
+        }
+        let kindless = with(
+            GOOD,
+            "disk = \"4 KiB\"",
+            "disk = \"4 KiB\"\noperator_yes = [\"x | y\"]",
+        );
+        assert!(refused(
+            &problems_of(&kindless, &writers()),
+            "kinds",
+            "operator_yes without a kind"
+        ));
+    }
+
+    /// The second agent's evasions of the forms rule (`verify-R4-06-r1.json`
+    /// attacks): a path inside single quotes, a script inside quotes, a
+    /// `~/` root, a `<runtime/store/x>` placeholder and a `--root=/x` value,
+    /// each passed before this change; and `dry runs 30 ms` named a run.
+    #[test]
+    fn a_path_in_quotes_or_a_placeholder_and_a_measure_for_a_run_are_refused() {
+        let at =
+            "command = [\"cli gdfl-import options zip 2018-11-07 2018-11-07 NIFTY BANKNIFTY\"]";
+        let one = |line: &str| {
+            problems_of(
+                &with(GOOD, at, &format!("command = [{line:?}]")),
+                &writers(),
+            )
+        };
+        for (line, says) in [
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --root '/Volumes/WD_BLACK/brutex/fresh-20260919/runtime/store'",
+                "names the store's own folder",
+            ),
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --root '/Volumes/X/other'",
+                "names the path \"/Volumes/X/other\"",
+            ),
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --from 'state/data-census-20261013/cli.sh'",
+                "holds \".sh\"",
+            ),
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --root ~/brutex/store",
+                "names the path \"~/brutex/store\"",
+            ),
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --root <runtime/store/x>",
+                "names the store's own folder",
+            ),
+            (
+                "cli gdfl-import stocks zip 2018-11-07 2018-11-07 --root=/Volumes/X/y",
+                "names the path \"--root=/Volumes/X/y\"",
+            ),
+            (
+                "POST /pull/repair target=indices root=~/x",
+                "names the path \"root=~/x\"",
+            ),
+        ] {
+            let p = one(line);
+            assert!(refused(&p, "forms", says), "{line}: {p:?}");
+        }
+        // A quoted reason and a placeholder that name no path still pass.
+        for line in [
+            "cli zerodha-repair NIFTY 2021-02-24 2021-02-24 --from-store $BRUTEX_STORE --reason 'refold the 1min rung'",
+            "cli gdfl-import options zip <DAY> <DAY> NIFTY",
+            "cli srt-build gdfl 'NSE/FNO/NIFTY/*' 1s 2018-09 2026-09",
+        ] {
+            assert!(by_rule(&one(line), "forms").is_empty(), "{line}");
+        }
+        for (text, names) in [
+            ("dry runs 30 ms and 24 ms", false),
+            ("dry runs 30ms", false),
+            ("runs 5202 and 5303 (the dry runs)", true),
+            ("run 1791736194, build eaf41cdf", true),
+            ("runs 3 times", false),
+            ("run 12.", true),
+        ] {
+            assert_eq!(names_a_run(text), names, "{text}");
+        }
     }
 }

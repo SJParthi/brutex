@@ -15,9 +15,12 @@
 //! # What is refused
 //!
 //! In production code — comments, string and character literals, and every
-//! top-level `#[cfg(test)]` item stripped — the identifiers `remove_file`,
-//! `remove_dir` and `remove_dir_all`, and any call of `rename`, unless the
-//! site is one of [`ALLOWED`], each a named, counted exception with its
+//! top-level `#[cfg(test)]` item stripped — every site [`is_site`] names:
+//! the identifiers of [`DELETES`] (std's and tokio's removes, the C
+//! library's `unlink`, `unlinkat` and `rmdir`, `set_len`, `ftruncate`), any
+//! call, turbofish, path or import of `rename` (its `(` may be on a later
+//! line), `truncate(true)`, `File::create`, `libc::remove`, and `Command`,
+//! unless the site is one of [`ALLOWED`], each a named, counted exception with its
 //! reason. A rename that publishes a verified temporary under its sibling
 //! final name is the one rename an append-only writer needs; the scan cannot
 //! prove sibling-ness from text, so each such site is enumerated, and an
@@ -66,7 +69,15 @@ const LISTED: [(&str, &str); 2] = [
 
 /// The named exceptions: (module, the site's code line trimmed, how many
 /// times it may appear, why).
-const ALLOWED: [(&str, &str, usize, &str); 2] = [
+const ALLOWED: [(&str, &str, usize, &str); 3] = [
+    (
+        "crates/api/src/autopilot.rs",
+        "let mut file = std::fs::File::create(path)?;",
+        1,
+        "store_writable's probe creates its own dot-file (STORE_PROBE_PREFIX + \
+         vendor) to learn whether the disk takes a write; File::create would \
+         empty a file of that name, and no store file carries it",
+    ),
     (
         "crates/api/src/autopilot.rs",
         "std::fs::remove_file(path)",
@@ -84,8 +95,51 @@ const ALLOWED: [(&str, &str, usize, &str); 2] = [
     ),
 ];
 
-/// The identifiers that delete.
-const DELETES: [&str; 3] = ["remove_file", "remove_dir", "remove_dir_all"];
+/// The identifiers that delete or cut a file wherever they appear: std's,
+/// tokio's and the C library's (`libc::unlink`, `unlinkat`, `rmdir`), and
+/// the two that cut a file to a length (`set_len`, `ftruncate`).
+const DELETES: [&str; 8] = [
+    "remove_file",
+    "remove_dir",
+    "remove_dir_all",
+    "unlink",
+    "unlinkat",
+    "rmdir",
+    "set_len",
+    "ftruncate",
+];
+
+/// Whether the identifier `word` at byte `at` of `code` is a site: one of
+/// [`DELETES`]; a `rename` that is called (its `(` on this line or a later
+/// one), turbofished, reached as a path segment (`fs::rename`) or imported;
+/// a `truncate(true)` (an open that empties the file) or `libc::truncate`;
+/// `File::create` (which empties an existing file); the C library's
+/// `remove`; or `Command`, since a spawned process can delete anything (`rm`,
+/// `unlink`, a shell) and its program name is a string this scan blanks.
+fn is_site(code: &str, at: usize, word: &str) -> bool {
+    let after = code[at + word.len()..].trim_start();
+    let before = &code[..at];
+    let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+    match word {
+        w if DELETES.contains(&w) => true,
+        "rename" => {
+            after.starts_with('(')
+                || after.starts_with("::")
+                || before.ends_with("::")
+                || code[line_start..].trim_start().starts_with("use ")
+        }
+        "truncate" => {
+            before.ends_with("libc::")
+                || after
+                    .strip_prefix('(')
+                    .is_some_and(|args| args.trim_start().starts_with("true"))
+        }
+        "create" => before.ends_with("File::"),
+        "remove" => before.ends_with("libc::"),
+        "Command" => true,
+        _ => false,
+    }
+}
 
 /// `source` with comments, string and character literals blanked (newlines
 /// kept, so line numbers hold).
@@ -243,21 +297,23 @@ fn identifiers(line: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// Every deleting or renaming site of `module`'s production code that no
-/// [`ALLOWED`] row covers, as `module:line: code`.
+/// Every deleting, renaming, truncating or spawning site ([`is_site`]) of
+/// `module`'s production code that no [`ALLOWED`] row covers, as
+/// `module:line: code`. The whole text is read at once, so a call whose `(`
+/// is on the next line is still a call; a line with two sites is one site.
 fn refused_sites(module: &str, source: &str, allowed: &[(&str, &str, usize, &str)]) -> Vec<String> {
     let code = without_tests(&code_only(source));
+    let lines: Vec<&str> = code.lines().collect();
+    let mut hit_lines: Vec<usize> = identifiers(&code)
+        .into_iter()
+        .filter(|(at, word)| is_site(&code, *at, word))
+        .map(|(at, _)| code[..at].matches('\n').count())
+        .collect();
+    hit_lines.dedup();
     let mut used = vec![0_usize; allowed.len()];
     let mut out = Vec::new();
-    for (number, line) in code.lines().enumerate() {
-        let hit = identifiers(line).into_iter().any(|(at, word)| {
-            DELETES.contains(&word)
-                || (word == "rename" && line[at + word.len()..].trim_start().starts_with('('))
-        });
-        if !hit {
-            continue;
-        }
-        let trimmed = line.trim();
+    for number in hit_lines {
+        let trimmed = lines.get(number).map_or("", |line| line.trim());
         match allowed
             .iter()
             .position(|(m, site, _, _)| *m == module && *site == trimmed)
@@ -373,6 +429,48 @@ fn after_tests() { std::fs::remove_file("late").ok(); }
     // word, are not sites.
     let names = "fn f() { let renamed = 1; let rename_count = 2; let x = s.rename_all; }\n";
     assert!(refused_sites("fixture.rs", names, &[]).is_empty());
+}
+
+/// Each evasion the second agent tried on a copy of `autopilot.rs` (16 Oct,
+/// `verify-R4-06-r1.json` attacks) is a site, by line; the near misses that
+/// cut nothing are not.
+#[test]
+fn every_evasion_the_second_agent_tried_is_refused() {
+    let fixture = "fn a(p: &Path) {
+    let _ = std::process::Command::new(\"rm\").arg(\"-rf\").arg(p).status();
+    unsafe { libc::unlink(c.as_ptr()) };
+    unsafe { libc::rmdir(c.as_ptr()) };
+    unsafe { libc::remove(c.as_ptr()) };
+    std::fs::rename::<&str, &str>(\"a\", \"b\").ok();
+    std::fs::rename
+        (p, \"b\").ok();
+    let f = std::fs::OpenOptions::new().write(true).truncate(true).open(p);
+    let g = std::fs::OpenOptions::new().write(true).truncate(
+        true,
+    ).open(p);
+    file.set_len(0).ok();
+    let h = std::fs::File::create(p);
+    use std::fs::rename as mv;
+    let _ = nix::unistd::unlink(p);
+}
+fn fine(p: &Path) {
+    failures.truncate(MAX_FAILURES);
+    let t = std::fs::File::create_new(p);
+    map.remove(&key);
+    let renamed = rename_count;
+}
+";
+    let refused = refused_sites("fixture.rs", fixture, &[]);
+    let lines: Vec<usize> = refused
+        .iter()
+        .map(|site| site.split(':').nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [2, 3, 4, 5, 6, 7, 9, 10, 13, 14, 15, 16],
+        "{refused:#?}"
+    );
+    assert!(refused[5].contains("std::fs::rename"), "{}", refused[5]);
 }
 
 #[test]
