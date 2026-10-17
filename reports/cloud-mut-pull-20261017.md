@@ -199,4 +199,30 @@ the old pass already used. No vendor byte is committed.
 
 ## Gates
 
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | **pass** |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **pass** (exit 0) |
+| `cargo test --workspace --locked --no-fail-fast`, as the unprivileged user | **exit 101: 159 test runs (unit, integration and doc) ok, 2 tests fail, both outside this branch's diff** (below); 38 min with two build jobs |
+| `cargo test -p pull --locked`, as the unprivileged user (inside the coverage run) | **pass**: every `pull` test, lib and integration |
+| `cargo test -p pull --locked`, as root | the two `gdfl_import` permission tests still fail as root, as on the base (`a_day_ledger_that_will_not_take_a_line_leaves_the_day_open`, `a_journal_that_cannot_be_written_fails_the_day_by_name`); both pass as uid 65534. `gdfl_tickstore`'s third one passes as root now (repaired here). |
+| `cargo deny check` (0.19.0) | **red, identical to the base**: advisories RUSTSEC-2026-0344 (ruzstd) and RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls); bans, licenses and sources ok. Same five errors and two duplicate warnings on `origin/feat/db-fix`. `Cargo.toml`/`Cargo.lock` untouched (part DENY-1). |
+| Gate 1d (`gates_tree gate-1d`, built from the tree) | **red on the base** (141 undeclared words in `crates/pull` on `f9cdb584`); **this branch adds none**. The re-applied tests brought three (`store-root`, `proc`, `self`): the first is gone from the test, the other two are declared in `CLOUD_MUT_PULL_LITERAL` with their reason (`/proc/self/status`, the procfs file `read_limited`'s test needs). `gates_tree`'s own 48 tests pass. |
+
+The two workspace failures, both identical on `feat/db-fix` (this branch
+changes no file of `cli` or `store`, and no non-test line any crate depends
+on):
+
+- `cli` `boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`:
+  fails as the unprivileged user (`published` 0, expected 1: "only a durably
+  readable reservation publishes an identity",
+  `crates/cli/src/boolean_search_integration_tests.rs:397`), deterministically
+  and alone, with `TMPDIR` either `/tmp` or the user's own; the same binary
+  passes as root.
+- `store` `tests/cited_commits.rs::every_commit_the_store_records_cite_is_on_main_or_says_why_not`:
+  `docs/06-limits.md` on `feat/db-fix` cites nine commits (`023d6ab8`,
+  `079ad4af`, `4756cce0`, `521066e6`, `72c91a46`, `91ef0094`, `9cb9de51`,
+  `cde73992`, `ff636f58`) that are not ancestors of `origin/main`
+  (`4bbd37df`). Fails the same in the real checkout.
+
 ## NEEDS THE MAC
