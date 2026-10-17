@@ -937,6 +937,37 @@ fn the_status_of_a_long_run_comes_from_its_last_line() {
     assert_eq!(second.skipped, plan.len());
 }
 
+/// The first piece of a tail that cut the journal may be the end of a
+/// longer line, and is never read as a line of its own: here the cut falls
+/// exactly where a reason's text spells a line of run 999, and the next run
+/// id still follows the journal's real newest, 5.
+#[test]
+fn a_line_the_tail_cuts_is_never_read_as_one() {
+    let root = Root::new();
+    let stop = AtomicBool::new(false);
+    let now = || 1;
+    let path = root.0.join(journal_name(Vendor::Gdfl, Kind::SortIndex));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let spelled = "item 999 n=1 ok=1 of=1 t=0 clean=1 word=built key=k why=w\n";
+    assert!(
+        parse(spelled.trim_end()).is_some(),
+        "it reads as a line alone"
+    );
+    let head = format!("end 5 how=done n=0 ok=0 of=0 t=0 why=a reason that reads {spelled}");
+    // The last line is sized so the tail starts where the spelled line does.
+    let start = "end 5 how=done n=0 ok=0 of=0 t=0 why=";
+    let pad = usize::try_from(TAIL_BYTES).unwrap() - spelled.len() - start.len() - 1;
+    fs::write(&path, format!("{head}{start}{}\n", "w".repeat(pad))).unwrap();
+    let ran = run(
+        &root.0,
+        &ask(Kind::SortIndex, 1, &stop, &now),
+        &keys(1),
+        &clean,
+    )
+    .unwrap();
+    assert_eq!(ran.id, 6);
+}
+
 /// The journal's name must be a regular file of one name: a directory, a
 /// link and a second name of another file are each refused by name, nothing
 /// written; a store root that is not there is refused, never made.

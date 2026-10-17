@@ -71087,7 +71087,7 @@ over one counter, as `gdfl_import_filing::on_workers` does). Inferring that a
 present sidecar is current from its name alone in the run (`--all` re-checks
 it, and the plan says it reads names, not bodies).
 
-**Proof.** `crates/pull/src/upkeep_tests.rs` (28 tests) and
+**Proof.** `crates/pull/src/upkeep_tests.rs` (29 tests) and
 `crates/cli/src/upkeep_command_tests.rs`: `an_upkeep_run_stops_and_resumes_where_it_stopped`,
 `upkeep_and_an_import_exclude_each_other_on_a_month`,
 `the_sort_index_is_the_same_bytes_at_1_and_8_workers`,

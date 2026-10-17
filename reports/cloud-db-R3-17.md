@@ -140,13 +140,19 @@ mutants and 12 of `cli`'s 179; what it found, and the fix for each:
 | `one_line`'s `cut -= 1` → `/= 1` (a TIMEOUT: an endless loop) | the loop itself | `4ccd8ee7`: `floor_char_boundary`, no loop |
 | `drive`'s `millis / 1_000` → `%`, `*` | the end line's seconds come from the wall clock | `4ccd8ee7`: `Duration::as_secs`, no division |
 
-A fresh pass on the final code is running for both crates.
+The fresh pass on `20653571` found one more, and it is fixed:
+
+| Mutant (`crates/pull/src/upkeep.rs`) | Why it lived | Fixed in |
+|---|---|---|
+| `tail_of`'s `from > 0` → `from < 0` (a cut tail read as uncut) | a cut-off first piece never parsed as a line in any test | `a_line_the_tail_cuts_is_never_read_as_one`: the cut lands on a reason that spells `item 999 …`; the next run id must be 6, not 1000 (checked by hand: 1000 under the mutant) |
+
+The pass on the final code is still running for both crates.
 
 ## Gate results (so far)
 
 - `cargo fmt --all --check`: clean.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean, on `20653571`.
-- `cargo test -p pull --lib upkeep`: 28 passed. `cargo test -p cli --lib upkeep_command`: 21 passed.
+- `cargo test -p pull --lib upkeep`: 29 passed. `cargo test -p cli --lib upkeep_command`: 21 passed.
 - `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
   (the one test CONTEXT.md says to skip; it reads nothing R3-17 touches), on `3704e6bd`'s
   predecessor `fb05b8b9`: every failure but one is the base's or root-only, and the one was R3-17's and
