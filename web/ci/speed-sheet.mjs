@@ -483,6 +483,8 @@ export async function runSheet(args, deps = {}) {
   else {
     /** @type {Map<string, number[]>} */
     const firsts = new Map();
+    /** @type {Map<string, Record<string, number>>} each request's answers after the restarts, by class */
+    const firstClasses = new Map();
     for (let i = 0; i < args.restarts; i += 1) {
       const code = await restartOnce(args.restart);
       if (code !== 0) {
@@ -501,17 +503,25 @@ export async function runSheet(args, deps = {}) {
         const a = await send(r.url, { method: r.method });
         const key = `${r.method} ${r.url}`;
         firsts.set(key, [...(firsts.get(key) ?? []), a.ms]);
+        const counted = firstClasses.get(key) ?? {};
+        counted[classOf(a)] = (counted[classOf(a)] ?? 0) + 1;
+        firstClasses.set(key, counted);
         if (classOf(a) !== 'answered') failures.push(`restart ${i + 1}: the first ${r.url} answered ${'error' in a ? a.error : `HTTP ${a.status}`}`);
       }
     }
     for (const r of requests) {
-      const s = summary(firsts.get(`${r.method} ${r.url}`) ?? []);
-      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: {}, builds: commit ? [commit] : [], bytes: 0, said: null });
+      const key = `${r.method} ${r.url}`;
+      const s = summary(firsts.get(key) ?? []);
+      // The classes are counted here as in every other row, so a restart row
+      // never prints "0 answered" for twenty answers.
+      rows.push({ page: r.page, route: r.route, label: r.label, url: r.url, builder: r.builder, phase: 'first after restart', clients: 1, n: s.n, p50: s.p50, p99: s.p99, max: s.max, classes: firstClasses.get(key) ?? {}, builds: commit ? [commit] : [], bytes: 0, said: null });
     }
   }
   for (const row of rows) {
     if (row.builds.length > 1) failures.push(`${row.url} (${row.phase}, ${row.clients} clients) was answered by ${row.builds.length} builds: ${row.builds.join(', ')}`);
     else if (row.phase !== 'first after restart' && commit !== null && row.builds[0] !== commit) failures.push(`${row.url} (${row.phase}) was answered by ${row.builds[0] ?? 'no named build'}, not ${commit}`);
+    // A restart row's answers were each failed by name, restart by restart, above.
+    if (row.phase === 'first after restart') continue;
     for (const k of ['failed', 'no answer', 'refused']) {
       if ((row.classes[k] ?? 0) > 0) failures.push(`${row.page} ${row.url} (${row.phase}, ${row.clients} clients): ${row.classes[k]} ${k} — ${row.said}`);
     }

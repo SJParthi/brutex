@@ -725,6 +725,7 @@ test('every phase of the sheet is run or said NOT MEASURED, and every row is sta
   assert.ok(done.failures.some((f) => f.includes('the --writer command ended before the warm+writer pass did')), done.failures.join('\n'));
   assert.ok(done.rows.some((r) => r.phase === 'warm+writer'));
   assert.equal(done.rows.filter((r) => r.phase === 'first after restart')[0].n, 2);
+  assert.deepEqual(done.rows.filter((r) => r.phase === 'first after restart')[0].classes, { answered: 2 }, 'a restart row counts its answers like every other row');
   const text = sheet.renderSheet(done, argsFor());
   assert.match(text, /^# Speed sheet — FAIL/);
   assert.match(text, /\| cccccccccccc \| \/db \| `\/bars\/window\.json` \| the grid, newest first \| cold \| 1 \| 3 \|/);
