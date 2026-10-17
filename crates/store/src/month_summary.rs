@@ -92,6 +92,12 @@
 //! minute month, about 55 KB for a one-second index month, at most
 //! [`MAX_PAYLOAD_LEN`]), one CRC and a decode linear in those bytes; no bar
 //! is read. Building: one pass over the bars folded, each O(1).
+//!
+//! Proof of the read: gate 8's `/gaps.json` rows (MS-10), one-second months
+//! of 1,024, 10,240 and 102,400 bars answered off their kept summaries, run
+//! by `crates/api/benches/ratio.rs`. The build's per-bar fold is UNVERIFIED:
+//! no test times it at two month sizes (GF-1, gate 12; `docs/06-limits.md`
+//! L-GF1-33).
 
 use std::fmt;
 use std::io::{ErrorKind, Read as _};
@@ -461,7 +467,9 @@ impl MonthSummary {
         self.n_valid = header.n_valid;
     }
 
-    /// Folds the next row, in the month's order. O(1).
+    /// Folds the next row, in the month's order. O(1). UNVERIFIED: no test
+    /// times the fold at two month sizes (GF-1, gate 12; `docs/06-limits.md`
+    /// L-GF1-33).
     pub fn fold(&mut self, bar: &Bar) {
         let ts = bar.ts_micros;
         let previous = (self.counts.folded > 0).then_some(self.last_ts_micros);
