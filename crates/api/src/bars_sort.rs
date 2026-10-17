@@ -127,6 +127,41 @@ fn read_held() -> u64 {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`MAX_SCAN_BARS`], lowered by a test on its own thread so the refusal
+    /// past it is driven without writing 24 million bars.
+    pub(super) static SCAN_BUDGET: std::cell::Cell<u64> = const { std::cell::Cell::new(MAX_SCAN_BARS) };
+    /// [`super::MAX_EXTREMES_SCAN_BARS`], lowered the same way, so the
+    /// extremes withheld past it are driven without writing 64 million.
+    pub(super) static EXTREMES_BUDGET: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(super::MAX_EXTREMES_SCAN_BARS) };
+}
+
+/// [`MAX_SCAN_BARS`], or a test's own bound.
+fn scan_budget() -> u64 {
+    #[cfg(test)]
+    {
+        SCAN_BUDGET.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        MAX_SCAN_BARS
+    }
+}
+
+/// [`super::MAX_EXTREMES_SCAN_BARS`], or a test's own bound.
+fn extremes_budget() -> u64 {
+    #[cfg(test)]
+    {
+        EXTREMES_BUDGET.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        super::MAX_EXTREMES_SCAN_BARS
+    }
+}
+
 /// Bytes of fence tables the process keeps between requests. Emptied whole
 /// when full, as every memo here is: a forgotten table costs one read.
 const FENCE_BUDGET: usize = 64 * 1024 * 1024;
@@ -1993,10 +2028,11 @@ fn page_once(
             format!("; index them with: {}", report.build.join(" ; "))
         }
     };
-    if read_rows > MAX_SCAN_BARS {
+    let budget = scan_budget();
+    if read_rows > budget {
         return Err(Attempt::Refused(format!(
             "scan_budget_exceeded: ordering by {} serves {} kept rows from sort indexes and \
-             would read the other {read_rows}, past the {MAX_SCAN_BARS} one request may read \
+             would read the other {read_rows}, past the {budget} one request may read \
              ({}){}",
             column.as_str(),
             report.indexed_rows,
@@ -2262,13 +2298,13 @@ fn page_once(
                 }
             }
         }
-        if owed > super::MAX_EXTREMES_SCAN_BARS {
+        let budget = extremes_budget();
+        if owed > budget {
             extremes = None;
             extremes_why = Some(format!(
                 "scan_budget_exceeded: the extremes need {owed} records read that no sort index \
-                 summarises and no earlier request folded, past the {} one request may fold; the \
-                 page is served without them",
-                super::MAX_EXTREMES_SCAN_BARS
+                 summarises and no earlier request folded, past the {budget} one request may \
+                 fold; the page is served without them"
             ));
         } else {
             let mut since = 0_u64;
@@ -2528,12 +2564,12 @@ pub(super) fn extremes_of(
             }
         }
     }
-    if owed > super::MAX_EXTREMES_SCAN_BARS {
+    let budget = extremes_budget();
+    if owed > budget {
         return Err(format!(
             "scan_budget_exceeded: the extremes need {owed} records read that no sort index \
-             summarises and no earlier request folded, past the {} one request may fold; the \
-             page is served without them",
-            super::MAX_EXTREMES_SCAN_BARS
+             summarises and no earlier request folded, past the {budget} one request may fold; \
+             the page is served without them"
         ));
     }
     let mut since = 0_u64;
@@ -3787,6 +3823,123 @@ mod cloud_mutant_tests {
             why.contains("; index them with: cli srt-build ") && why.ends_with("2031-02 2031-02"),
             "{why}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A VALUE PAGE THAT WOULD READ MORE ROWS THAN THE SCAN BUDGET IS
+    /// REFUSED BY NAME; ONE THAT READS EXACTLY THE BUDGET IS SERVED.** The
+    /// month holds 360 rows and no index, so a close-ordered page reads all
+    /// 360. The budget is lowered on this thread from `MAX_SCAN_BARS`, as
+    /// `READ_HELD` is from `MAX_READ_HELD`: a budget of 360 serves the page,
+    /// and 359 refuses it `scan_budget_exceeded`, naming both numbers and
+    /// the month read. Kills `> with >=` (refused at exactly the budget) and
+    /// `> with ==` (served past it) in `page_once`.
+    #[test]
+    fn a_value_page_is_served_to_the_scan_budget_and_refused_past_it() {
+        let root = scratch("scan-budget");
+        let rows = unindexed(&root, &index(), month(1));
+        let asked = query(index(), month(1), month(1), SortKey::Close);
+        let ask = |budget: u64| {
+            super::SCAN_BUDGET.with(|held| held.set(budget));
+            let got = window(&root, &asked);
+            super::SCAN_BUDGET.with(|held| held.set(super::MAX_SCAN_BARS));
+            got
+        };
+        let served = ask(360).expect("exactly the budget is served");
+        let mut closes: Vec<i64> = rows.iter().map(|bar| bar.close).collect();
+        closes.sort_unstable();
+        let page: Vec<i64> = served.bars.iter().map(|row| row.bar.close).collect();
+        assert_eq!(page, closes[..37], "the 37 smallest closes");
+        assert_eq!(served.scan_rows, 360);
+        let refused = ask(359).expect_err("one row past the budget is refused");
+        assert!(refused.starts_with("scan_budget_exceeded"), "{refused}");
+        assert!(
+            refused.contains("the other 360, past the 359 one request may read"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("NSE-INDEX-NIFTY 2031-01: 360 rows read"),
+            "the month read is named: {refused}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAY-CUT VALUE PAGE OWES ITS CUT RUNS' KEPT ROWS TO THE EXTREMES
+    /// BUDGET, AND ONLY THE ONES NO EARLIER REQUEST FOLDED.** Runs of 130
+    /// over 360 rows; the 3rd keeps rows `[120, 240)`, so two cut runs owe
+    /// 10 and 110 rows: 120. Under an extremes budget of 119 the page is
+    /// served without them, named; at 120 they are folded, and held. Held,
+    /// they owe nothing: under a budget of 0 they are served from the memo.
+    /// Kills, in `page_once`'s owed sum, `delete !` on the held test, `- with
+    /// +` and `- with /` in `end - start`, `> with >=` and `> with ==` on the
+    /// budget, and `cut_extremes_held -> true` and `-> false`.
+    #[test]
+    fn a_day_cut_value_page_owes_only_unfolded_cut_rows_to_the_extremes_budget() {
+        let root = scratch("cut-extremes-budget");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let (lo, _) = month(1).ist_bounds_micros();
+        let mut asked = query(index(), month(1), month(1), SortKey::Close);
+        asked.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        asked.filter.to = Some(lo + 3 * 86_400 * MICROS);
+        asked.want_extremes = true;
+        let ask = |budget: u64| {
+            super::EXTREMES_BUDGET.with(|held| held.set(budget));
+            let got = window(&root, &asked).expect("the page is served either way");
+            super::EXTREMES_BUDGET.with(|held| held.set(super::super::MAX_EXTREMES_SCAN_BARS));
+            (got.extremes, got.extremes_why, got.scan_rows)
+        };
+        // NOTHING FOLDED YET: 120 rows are owed, one past a budget of 119.
+        let (extremes, why, read) = ask(119);
+        assert_eq!(extremes, None);
+        let why = why.expect("withheld by name");
+        assert!(
+            why.starts_with("scan_budget_exceeded: the extremes need 120 records read")
+                && why.contains("past the 119 one request may fold"),
+            "{why}"
+        );
+        assert_eq!(read, 0, "no row is read for extremes that are withheld");
+        // EXACTLY THE BUDGET: folded from the kept rows, and held.
+        assert_eq!(ask(120), (Some(index_extremes(&rows[120..240])), None, 120));
+        // HELD: nothing is owed, so no budget withholds them.
+        assert_eq!(ask(0), (Some(index_extremes(&rows[120..240])), None, 0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A TIME-ORDERED PAGE'S EXTREMES OWE ITS CUT RUNS' KEPT ROWS TO THE
+    /// EXTREMES BUDGET, AND ONLY THE ONES NO EARLIER REQUEST FOLDED.** The
+    /// same month and day as the value page above, ordered by time: the two
+    /// cut runs owe 120 rows. At 119 the extremes are withheld by name, at
+    /// 120 they are folded and held, and held they are served under a budget
+    /// of 0. Kills, in `extremes_of`, `&& with ||` on the held test, `- with
+    /// +` in the owed sum, `> with >=` and `> with ==` on the budget, and
+    /// `cut_extremes_held -> true` and `-> false` there.
+    #[test]
+    fn a_time_ordered_pages_cut_runs_owe_only_unfolded_rows_to_the_extremes_budget() {
+        let root = scratch("ts-extremes-budget");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        write(&root, &index(), month(1), &rows, &rows);
+        let (lo, _) = month(1).ist_bounds_micros();
+        let mut asked = query(index(), month(1), month(1), SortKey::Ts);
+        asked.filter.from = Some(lo + 2 * 86_400 * MICROS);
+        asked.filter.to = Some(lo + 3 * 86_400 * MICROS);
+        asked.want_extremes = true;
+        let ask = |budget: u64| {
+            super::EXTREMES_BUDGET.with(|held| held.set(budget));
+            let got = window(&root, &asked).expect("the page is served either way");
+            super::EXTREMES_BUDGET.with(|held| held.set(super::super::MAX_EXTREMES_SCAN_BARS));
+            (got.extremes, got.extremes_why, got.scan_rows)
+        };
+        let (extremes, why, _) = ask(119);
+        assert_eq!(extremes, None);
+        let why = why.expect("withheld by name");
+        assert!(
+            why.starts_with("scan_budget_exceeded: the extremes need 120 records read")
+                && why.contains("past the 119 one request may fold"),
+            "{why}"
+        );
+        assert_eq!(ask(120), (Some(index_extremes(&rows[120..240])), None, 120));
+        assert_eq!(ask(0), (Some(index_extremes(&rows[120..240])), None, 0));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -85,9 +85,15 @@ impl Cancel {
     /// Whether the client went away.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        self.0.as_ref().is_some_and(|flag| {
+            // A CANCELLATION THAT LANDS MID-LOOP, made deterministic: a test
+            // trips the flag at a look it chose, on its own thread.
+            #[cfg(test)]
+            if cancel_trip::tripped() {
+                return true;
+            }
+            flag.load(std::sync::atomic::Ordering::Acquire)
+        })
     }
 
     /// `Err("cancelled: …")` once the client went away.
@@ -4293,5 +4299,223 @@ mod cloud_mutant_tests {
             "faults",
             got.faulted_records
         ));
+    }
+
+    /// One-minute bars of the 2025-05 NIFTY index on Dhan, in a scratch store
+    /// of this test's own: `rows` of them, a minute apart from the month's
+    /// first IST instant, every close its own number.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    fn index_month(tag: &str, rows: i64) -> (std::path::PathBuf, WindowQuery) {
+        let root = crate::scratch::path(&format!("cloud-bars-{tag}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2025, 5).expect("a month");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let start = month.ist_bounds_micros().0;
+        let bars: Vec<Bar> = (0..rows)
+            .map(|i| bar(start + i * 60_000_000, 90 + i, 110 + i, 100 + i, 0))
+            .collect();
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a bar file");
+        file.append(&bars).expect("generated records");
+        drop(file);
+        // NO SORT INDEX: the writer indexes a month of 1,024 bars or more,
+        // and an index run's summary answers the extremes with no row read.
+        let srt = path.to_path_buf(&root).with_extension("srt");
+        let _ = std::fs::remove_file(&srt);
+        assert!(!srt.exists(), "the month is left with no index");
+        let query = WindowQuery::single(
+            Vendor::Dhan,
+            SeriesKey::new("NSE", "INDEX", "NIFTY", None),
+            Timeframe::MINUTE_1,
+            month,
+            month,
+            SortKey::Ts,
+            false,
+            0,
+            10,
+            true,
+        );
+        (root, query)
+    }
+
+    /// Asks `query` again and again with a flag that reads "cancelled" from
+    /// one look later each time, until a request is answered. Every request
+    /// cut short must be the cancellation by name, and the first one answered
+    /// must be a page whose extremes were not cut short. Returns the looks
+    /// one whole request takes: the first count the flag outlasted.
+    #[allow(clippy::panic, reason = "a request that never ends must fail the test")]
+    fn looks_of(root: &std::path::Path, query: &WindowQuery) -> u64 {
+        let (cancel, guard) = Cancel::pair();
+        for looks in 0..256_u64 {
+            cancel_trip::arm(looks);
+            let got = window_cancellable(root, query, &cancel);
+            let left = cancel_trip::disarm();
+            match got {
+                Err(why) => assert!(why.starts_with("cancelled"), "look {looks}: {why}"),
+                Ok(window) => {
+                    assert!(
+                        window
+                            .extremes_why
+                            .as_deref()
+                            .is_none_or(|why| !why.contains("cancelled")),
+                        "look {looks}: a request whose client went away was answered as a \
+                         page with its extremes withheld: {:?}",
+                        window.extremes_why
+                    );
+                    assert_eq!(left, Some(0), "look {looks}: answered with looks to spare");
+                    guard.disarm();
+                    return looks;
+                }
+            }
+        }
+        panic!("one request took more than 256 looks at its flag");
+    }
+
+    /// **A CLIENT THAT GOES AWAY WHILE THE EXTREMES ARE FOLDED ENDS THE
+    /// REQUEST AS CANCELLED, NEVER AS A PAGE WITH ITS EXTREMES WITHHELD**
+    /// (DB-N15). The fold over 5,000 kept rows looks at the flag at row 4,096,
+    /// so a request that asks for extremes takes one look more than the same
+    /// request without them; a flag that turns at that look must end the
+    /// request, by name, on both paths that fold (a time-ordered page, and an
+    /// open-interest page over an index, which is time-ordered too). Kills
+    /// the guard `why.starts_with("cancelled") -> false` at both folds in
+    /// `window_cancellable`, which served the page with
+    /// `extremes_why = "cancelled: …"` as if a month had been damaged.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_client_gone_while_the_extremes_fold_ends_the_request_as_cancelled() {
+        for (tag, sort) in [("fold-ts", SortKey::Ts), ("fold-oi", SortKey::OpenInterest)] {
+            let (root, query) = index_month(tag, 5_000);
+            let query = WindowQuery { sort, ..query };
+            // WITHOUT EXTREMES FIRST: a whole request memoises the month's
+            // extremes, and a held fold reads no row and takes no look.
+            let bare = looks_of(
+                &root,
+                &WindowQuery {
+                    want_extremes: false,
+                    ..query.clone()
+                },
+            );
+            let folded = looks_of(&root, &query);
+            assert_eq!(
+                folded,
+                bare + 1,
+                "{tag}: the fold over 5,000 rows looks at the flag once"
+            );
+            let whole = window(&root, &query).expect("an answered window");
+            assert!(whole.extremes.is_some(), "{tag}: {:?}", whole.extremes_why);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// **A STRETCH READ LOOKS AT ITS CLIENT EVERY `CANCEL_STRIDE` ROWS,
+    /// COUNTED ACROSS THE STRETCHES OF ONE REQUEST** (DB-N15). The count is
+    /// the caller's, so a stretch that begins one row short of the stride
+    /// looks at its first row, and one that begins at zero does not look
+    /// before the stride's end. The flag here was set before the read. Kills
+    /// `+= with *=` (the count never moves, so no look is ever taken) and
+    /// `>= with <` (a look at every row before the stride) in
+    /// `SeriesPlan::read_stretch`.
+    #[allow(
+        clippy::expect_used,
+        reason = "a fixture that cannot be planted must fail"
+    )]
+    #[test]
+    fn a_stretch_read_looks_at_its_client_once_a_stride() {
+        let (root, query) = index_month("stride", 3);
+        let mut plan = series::SeriesPlan::build(
+            &root,
+            query.vendor,
+            query.timeframe,
+            query.series.first().cloned().expect("one series"),
+            &[query.from],
+            Filter::default(),
+            &Cancel::never(),
+        )
+        .expect("a plan of one held month");
+        let (gone, guard) = Cancel::pair();
+        drop(guard);
+
+        // FROM ZERO: three rows are read, and no look is taken.
+        let mut since = 0;
+        let mut read = Vec::new();
+        let missed = plan
+            .read_stretch(&root, 0, (0, 3), &gone, &mut since, |row, _| read.push(row))
+            .expect("no look before the stride ends");
+        assert_eq!((missed, read, since), (0, vec![0, 1, 2], 3));
+
+        // ONE ROW SHORT OF THE STRIDE: the first row's look sees the flag.
+        let mut since = series::CANCEL_STRIDE - 1;
+        let refused = plan
+            .read_stretch(&root, 0, (0, 3), &gone, &mut since, |_, _| {})
+            .expect_err("the look at the stride sees the client gone");
+        assert!(refused.starts_with("cancelled"), "{refused}");
+        assert_eq!(since, 0, "a look starts the count again");
+
+        // AND WITH THE CLIENT STILL THERE, the count starts again at the
+        // look and goes on.
+        let mut since = series::CANCEL_STRIDE - 1;
+        plan.read_stretch(&root, 0, (0, 3), &Cancel::never(), &mut since, |_, _| {})
+            .expect("a client that stayed is answered");
+        assert_eq!(since, 2, "the look at row 0, then rows 1 and 2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A cancellation that lands in the middle of a loop, made deterministic. A
+/// client goes away whenever it likes, so the looks a loop takes at its flag
+/// between rows are tested by a flag that answers "not cancelled" for a
+/// number of looks a test chose and "cancelled" from then on, on the test's
+/// own thread. Only a flag from [`Cancel::pair`] reads it: [`Cancel::never`]
+/// is a flag nothing ever sets, and stays one.
+#[cfg(test)]
+pub(crate) mod cancel_trip {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Looks left before the flag reads as set; `None` when unarmed.
+        static LEFT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// The flag reads as set from the look after the next `looks`.
+    pub(crate) fn arm(looks: u64) {
+        LEFT.with(|left| left.set(Some(looks)));
+    }
+
+    /// Unarms the flag, and answers the looks it had left: `Some(0)` once
+    /// it tripped (or was about to), more when the work took fewer looks
+    /// than it was armed for.
+    pub(crate) fn disarm() -> Option<u64> {
+        LEFT.with(|left| left.replace(None))
+    }
+
+    /// One look at an armed flag: whether it has run out.
+    pub(super) fn tripped() -> bool {
+        LEFT.with(|left| match left.get() {
+            Some(0) => true,
+            Some(more) => {
+                left.set(Some(more.saturating_sub(1)));
+                false
+            }
+            None => false,
+        })
     }
 }

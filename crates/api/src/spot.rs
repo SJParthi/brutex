@@ -694,3 +694,103 @@ pub async fn spot_json(
         Err(why) => not_admitted("a spot read", &why),
     }
 }
+
+/// Tests written for mutants a cloud mutation pass left alive in this file
+/// (`reports/cloud-mut-api-a-20261017.md`). Every bar is generated, in a
+/// scratch store the test removes.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "a fixture that cannot be planted is a test that cannot run, and \
+              must fail loudly"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use crate::bars::{Cancel, cancel_trip};
+    use brutex_core::vendor::Vendor;
+    use store::format::{Bar, OI_NULL};
+    use store::path::{FileKind, StorePath};
+
+    /// 2025-05-02 09:15 IST, in UTC seconds.
+    fn open_second() -> i64 {
+        i64::from(
+            pull::session::Day::new(2025, 5, 2)
+                .expect("a generated day")
+                .days_from_epoch(),
+        ) * 86_400
+            + 13_500
+    }
+
+    /// The ask for `count` instants a minute apart from the open.
+    fn ask(count: usize) -> SpotAsk {
+        let times: Vec<String> = (0..count)
+            .map(|n| (open_second() + i64::try_from(n).expect("a short ask") * 60).to_string())
+            .collect();
+        SpotAsk::parse(&format!(
+            "feed=dhan&exchange=NSE&symbol=NIFTY&timeframe=1min&month=2025-05&t={}",
+            times.join(",")
+        ))
+        .expect("a well-formed ask")
+    }
+
+    /// **A CLIENT THAT GOES AWAY IN THE MIDDLE OF A SPOT READ IS SEEN AT THE
+    /// NEXT LOOK OF THE STRIDE: NOT AT EVERY INSTANT, AND NOT NEVER.** The
+    /// read looks at its flag on instants `0, CANCEL_EVERY, 2·CANCEL_EVERY …`
+    /// (DB-N15). The flag here answers "not cancelled" at its first look and
+    /// "cancelled" at every look after it — a client that left while instant
+    /// 0 was answered. An ask of `CANCEL_EVERY` instants takes one look and is
+    /// answered whole; one more instant takes a second look, on instant
+    /// `CANCEL_EVERY`, and is refused by name. Kills `% with /` in
+    /// `answer_with`, which looked at every instant of the first stride (and
+    /// refused the two-instant ask) and never after it (and answered the long
+    /// one).
+    #[test]
+    fn a_client_gone_mid_read_is_seen_at_the_next_look_of_the_stride() {
+        let root = crate::scratch::path("cloud-spot-stride");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let path = StorePath::new(PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2025, 5).expect("a month"),
+            file: FileKind::Bars,
+        })
+        .expect("a generated path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("the low 32 bits");
+        let mut file = BarFile::open_or_create(&root, path, id).expect("a generated month");
+        file.append(&[Bar {
+            ts_micros: open_second() * 1_000_000,
+            open: 2_400_000,
+            high: 2_400_005,
+            low: 2_399_995,
+            close: 2_400_000,
+            volume: 0,
+            open_interest: OI_NULL,
+        }])
+        .expect("a generated record");
+        drop(file);
+
+        let (cancel, guard) = Cancel::pair();
+        for (count, answered) in [(2, true), (CANCEL_EVERY, true), (CANCEL_EVERY + 1, false)] {
+            cancel_trip::arm(1);
+            let got = ask(count).answer_with(&root, &cancel);
+            let left = cancel_trip::disarm();
+            if answered {
+                let (spots, faults) = got.expect("one look, before the client left");
+                assert_eq!(spots.len(), count, "every instant is answered");
+                assert!(faults.is_empty(), "{faults:?}");
+                assert_eq!(left, Some(0), "exactly one look for {count} instants");
+            } else {
+                let refused = got.expect_err("the second look sees the client gone");
+                assert!(refused.starts_with("cancelled"), "{refused}");
+            }
+        }
+        guard.disarm();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

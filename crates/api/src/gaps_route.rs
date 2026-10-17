@@ -3994,6 +3994,32 @@ mod cloud_mutant_tests {
         )
     }
 
+    /// The one-second month summary of `rows`, all inside the month of the
+    /// IST epoch day `day`: what the audit reads in place of the bars since
+    /// R3-06, folded exactly as the writer folds them.
+    fn summary_of(day: i64, rows: &[store::format::Bar]) -> store::month_summary::MonthSummary {
+        let civil = Day::from_days(u32::try_from(day).expect("a day after the epoch"))
+            .expect("a day the calendar names");
+        let mut summary =
+            store::month_summary::MonthSummary::new(0, 1, month(civil.year(), civil.month()));
+        for bar in rows {
+            summary.fold(bar);
+        }
+        summary
+    }
+
+    /// An import reach that says nothing: no journal, no clock, so no minute
+    /// is `not-imported` or `not-yet`, as for a pulled feed read with no
+    /// clock.
+    fn silent_reach() -> super::super::feeds_route::ImportReach {
+        super::super::feeds_route::ImportReach {
+            to: None,
+            from: "test".to_owned(),
+            open: Vec::new(),
+            today: None,
+        }
+    }
+
     /// The `calendar` member of one `/gaps.json` body over `span`, audited
     /// against a denominator from `source` vouching for `bounds`.
     fn calendar_of(
@@ -4166,7 +4192,7 @@ mod cloud_mutant_tests {
             ),
             "the record opens the day, so only the outage rule can owe it nothing"
         );
-        let audit = second_audit(&rows, day, day, Some(&record), 1);
+        let audit = second_audit(&summary_of(day, &rows), day, day, Some(&record), 1);
         assert_eq!(audit.expected, 0, "no second of the day is owed");
         assert_eq!(audit.held, 0);
         assert_eq!(
@@ -4382,18 +4408,29 @@ mod cloud_mutant_tests {
         };
         let outage = pull::calendar::SYSTEMS_OUTAGE_DAY;
         assert_eq!(
-            run_word(&gap(outage, 700, 710, Reason::OutsideWindow), false, None),
+            run_word(
+                &gap(outage, 700, 710, Reason::OutsideWindow),
+                false,
+                None,
+                &silent_reach()
+            ),
             "halted"
         );
         assert_eq!(
-            run_word(&gap(18_334, 570, 580, Reason::OutsideWindow), false, None),
+            run_word(
+                &gap(18_334, 570, 580, Reason::OutsideWindow),
+                false,
+                None,
+                &silent_reach()
+            ),
             "halt-suspected"
         );
         assert_eq!(
             run_word(
                 &gap(outage, 700, 710, Reason::OutsideWindow),
                 false,
-                Some(outage - 1)
+                Some(outage - 1),
+                &silent_reach()
             ),
             "expired"
         );
@@ -4457,7 +4494,8 @@ mod cloud_mutant_tests {
             .map(|second| second_bar(day, second))
             .collect();
         rows.insert(0, second_bar(day, 30_000));
-        let audit = second_audit(&rows, day, day, None, 1);
+        let held = summary_of(day, &rows);
+        let audit = second_audit(&held, day, day, None, 1);
         assert_eq!(
             (audit.expected, audit.held, audit.missing),
             (22_500, 22_500, 0)
@@ -4465,10 +4503,21 @@ mod cloud_mutant_tests {
         assert_eq!(audit.outside, 1, "08:20:00 is held and owed by no session");
         assert_eq!(audit.days.len(), 1);
         assert_eq!(audit.days[0].longest, None);
-        let members = one_second_members(&rows, day, day, None, false, None, 1, None, (0, 0));
+        let members = one_second_members(
+            &held,
+            day,
+            day,
+            None,
+            false,
+            None,
+            1,
+            None,
+            (0, 0),
+            &silent_reach(),
+        );
         assert!(members.contains(r#""longest_run":null"#), "{members}");
 
-        let days = trade_days(&rows, day, day, None, None);
+        let days = trade_days(&held, day, day, None, None);
         assert_eq!((days.sessions, days.held), (1, 1));
         assert!(days.without.is_empty());
     }
