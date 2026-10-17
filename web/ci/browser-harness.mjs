@@ -101,6 +101,29 @@ const OBSERVER = `(() => {
   } catch {}
 })();`;
 
+/**
+ * An uncaught exception as the page's console would name it: the thrown
+ * error's description (`Error: boom` and its stack), else the protocol's
+ * text (`Uncaught` for a thrown string).
+ *
+ * @param {{exception?: {description?: string}, text?: string}} d `Runtime.exceptionThrown`'s details
+ */
+export function exceptionText(d) {
+  return String(d.exception?.description ?? d.text ?? 'an exception the browser did not describe');
+}
+
+/**
+ * The browser to drive: `--chrome`, else `BRUTEX_CHROME`, else the first of
+ * {@link CHROME_PATHS} that exists, else empty (and `launch` refuses it by name).
+ *
+ * @param {string | undefined} given
+ * @param {string | undefined} env
+ * @param {(path: string) => boolean} exists
+ */
+export function chromeOf(given, env, exists) {
+  return given ?? env ?? CHROME_PATHS.find((p) => exists(p)) ?? '';
+}
+
 /** @param {string[]} argv */
 export function parseArgs(argv) {
   /** @type {Record<string, string | boolean | string[]>} */
@@ -131,7 +154,7 @@ export function parseArgs(argv) {
   if (pages.some((p) => !p.startsWith('/'))) throw new Error('--pages is a comma list of paths, each starting /');
   const idleTabs = String(o['idle-tabs'] ?? '1,10,20').split(',').map(Number);
   if (idleTabs.some((t) => !Number.isSafeInteger(t) || t < 1 || t > 64)) throw new Error('--idle-tabs is a comma list of whole numbers from 1 to 64');
-  const chrome = String(o.chrome ?? process.env.BRUTEX_CHROME ?? CHROME_PATHS.find((p) => existsSync(p)) ?? '');
+  const chrome = chromeOf(o.chrome === undefined ? undefined : String(o.chrome), process.env.BRUTEX_CHROME, existsSync);
   return {
     base,
     chrome,
@@ -251,7 +274,7 @@ export async function openTab(cdp, context) {
   let lastActivity = Date.now();
   const off = cdp.on((m) => {
     if (m.sessionId !== sessionId) return;
-    const p = m.params ?? {};
+    const p = m.params;
     if (m.method === 'Network.requestWillBeSent') {
       inflight.set(p.requestId, { method: p.request.method, url: p.request.url, status: 0 });
       lastActivity = Date.now();
@@ -264,7 +287,7 @@ export async function openTab(cdp, context) {
       lastActivity = Date.now();
       if (r) done.push({ method: r.method, url: r.url, bytes: Number(p.encodedDataLength ?? 0), status: r.status, failed: m.method === 'Network.loadingFailed' ? String(p.errorText) : null });
     } else if (m.method === 'Runtime.exceptionThrown') {
-      errors.push(String(p.exceptionDetails?.exception?.description ?? p.exceptionDetails?.text ?? 'an exception'));
+      errors.push(exceptionText(p.exceptionDetails));
     }
   });
   for (const domain of ['Page', 'Network', 'Runtime']) await cdp.send(`${domain}.enable`, {}, sessionId);
@@ -546,6 +569,16 @@ export async function runHarness(args) {
   return { ok: failures.length === 0, lines, failures, notes };
 }
 
+/**
+ * The harness's sheet as Markdown: its tables, then every note and every failure.
+ *
+ * @param {{ok: boolean, lines: string[], notes: string[], failures: string[]}} result
+ * @param {{n: number, base: string}} args
+ */
+export function renderHarness(result, args) {
+  return [`# Browser harness — ${result.ok ? 'PASS' : 'FAIL'}`, '', `n = ${args.n} cold and ${args.n} warm loads a page against ${args.base}.`, '', ...result.lines, '', ...result.notes.map((n) => `- ${n}`), ...result.failures.map((f) => `- FAILED: ${f}`), ''].join('\n');
+}
+
 async function main() {
   let args;
   try {
@@ -561,10 +594,10 @@ async function main() {
     console.error(`browser-harness: ${/** @type {Error} */ (why).message}`);
     process.exit(2);
   }
-  const text = [`# Browser harness — ${result.ok ? 'PASS' : 'FAIL'}`, '', `n = ${args.n} cold and ${args.n} warm loads a page against ${args.base}.`, '', ...result.lines, '', ...result.notes.map((n) => `- ${n}`), ...result.failures.map((f) => `- FAILED: ${f}`), ''].join('\n');
+  const text = renderHarness(result, args);
   process.stdout.write(text);
   if (args.out) writeFileSync(args.out, text);
   process.exit(result.ok ? 0 : 1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) await main();
+if (import.meta.url === pathToFileURL(String(process.argv[1])).href) await main();

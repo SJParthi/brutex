@@ -436,7 +436,13 @@ export async function runSheet(args, deps = {}) {
     if (args.allowUnstamped) log(`WARNING: ${why} — allowed by --allow-unstamped`);
     else failures.push(why);
   }
-  const ctx = await discover((p) => send(p), args);
+  /** @type {SheetContext} */
+  let ctx;
+  try {
+    ctx = await discover((p) => send(p), args);
+  } catch (why) {
+    return { ok: false, rows: [], ignored: [], failures: [/** @type {Error} */ (why).message], notMeasured, skipped: [], ctx: null, commit };
+  }
   const captureText = deps.capture ?? (args.fromPages ? readFileSync(args.fromPages, 'utf8') : null);
   const { requests, skipped } = requestsFor(ctx, captureText === null ? [] : readCapture(captureText));
   if (captureText === null) notMeasured.push('the requests /gaps, /audit, /markets and the other pages build inline: no --from-pages capture was given');
@@ -549,4 +555,4 @@ async function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) await main();
+if (import.meta.url === pathToFileURL(String(process.argv[1])).href) await main();

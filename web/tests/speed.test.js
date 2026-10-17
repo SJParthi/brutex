@@ -949,6 +949,70 @@ test('the harness as a command writes its sheet and exits by its verdict', { tim
   }
 });
 
+test('the last edges: which browser, how an exception is named, odd captures, odd fetch arguments, the window\'s own reporter', async () => {
+  assert.equal(harness.chromeOf('/given', '/env', () => true), '/given');
+  assert.equal(harness.chromeOf(undefined, '/env', () => true), '/env');
+  assert.equal(harness.chromeOf(undefined, undefined, (p) => p === harness.CHROME_PATHS[2]), harness.CHROME_PATHS[2]);
+  assert.equal(harness.chromeOf(undefined, undefined, () => false), '', 'no browser anywhere is empty, and launch refuses it by name');
+  assert.equal(harness.exceptionText({ exception: { description: 'Error: boom' }, text: 'Uncaught' }), 'Error: boom');
+  assert.equal(harness.exceptionText({ exception: {}, text: 'Uncaught' }), 'Uncaught');
+  assert.equal(harness.exceptionText({}), 'an exception the browser did not describe');
+  assert.throws(() => sheet.readCapture(JSON.stringify({ requests: [null] })), /capture request 0 is a method-less/);
+  const url = String(rungsUrl('NSE-INDEX-NIFTY'));
+  const ctx = await sheet.discover(async (p) => (p === url ? answer(200, JSON.stringify({ rungs: [null, { feed: 'zerodha', rung: '1min', stored: true, last_month: '2026-09', last_day: '2026-09-30' }] })) : answer(404)), { ...sheet.parseArgs(['--base', 'http://h:1']), feed: 'zerodha' });
+  assert.equal(ctx.month, '2026-09', 'a null row in the rung table is passed over');
+  const { spawnSync } = await import('node:child_process');
+  const down = spawnSync(process.execPath, [new URL('ci/speed-sheet.mjs', web).pathname, '--base', 'http://127.0.0.1:1', '--timeout-ms', '500'], { encoding: 'utf8' });
+  assert.equal(down.status, 1, 'a server that is not up fails the run');
+  assert.match(down.stdout, /- FAILED: the server at http:\/\/127\.0\.0\.1:1 is not up/);
+  // fetch's other argument shapes, a URL that cannot be read, a thrown value that is not an Error.
+  /** @type {string[]} */
+  const said = [];
+  const win = fakeWindow(async (input, init) => {
+    if (String(input) === REPORT_ROUTE) {
+      said.push(String(new URLSearchParams(init.body).get('what')));
+      return response(202);
+    }
+    if (String(input).includes('offline')) throw 'offline';
+    return response(500);
+  });
+  installPageReport(win);
+  await win.fetch(/** @type {any} */ ({ toString: () => '/thing.json' }));
+  await win.fetch('http://[not a url');
+  await assert.rejects(win.fetch('/offline.json'));
+  await flush();
+  assert.deepEqual(said, ['request: GET /thing.json answered HTTP 500', 'request: GET http://[not a url answered HTTP 500', 'request: GET /offline.json got no answer: offline']);
+  // In a browser the module installs itself on `window`, and reportFallback
+  // finds it there: a fresh process with a `window`, importing the module.
+  const inBrowser = [
+    "const seen = new Map(); const posted = [];",
+    "globalThis.window = { fetch: async (u, o) => { posted.push(String(o?.body ?? u)); return { status: 202, headers: new Headers() }; }, location: { pathname: '/speed', origin: 'http://localhost' },",
+    "  addEventListener: (t, f) => seen.set(t, f), removeEventListener: () => {}, dispatchEvent: (e) => { seen.get(e.type)?.(e); return true; } };",
+    `const m = await import(${JSON.stringify(new URL('src/lib/page-report.js', web).href)});`,
+    "const said = m.reportFallback('the grid fell back');",
+    "await new Promise((r) => setTimeout(r, 10));",
+    "console.log(JSON.stringify({ installed: seen.has(m.FALLBACK_EVENT), said, posted }));"
+  ].join('\n');
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', inBrowser], { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  const seen = JSON.parse(child.stdout);
+  assert.equal(seen.installed, true, 'imported in a browser, the reporter is installed on window');
+  assert.equal(seen.said, true, 'reportFallback finds window on its own');
+  assert.match(decodeURIComponent(seen.posted[0]), /page=\/speed&what=fallback: the grid fell back/);
+  const given = await sheet.discover(async (p) => (p === url ? answer(200, JSON.stringify({ rungs: [{ feed: 'zerodha', rung: '1min', stored: true, last_month: '2026-09' }, { feed: 'zerodha', rung: '1day', stored: true, last_month: '2026-08', last_day: '2026-08-31' }] })) : answer(404)), { ...sheet.parseArgs(['--base', 'http://h:1']), feed: 'zerodha', timeframe: '1day' });
+  assert.deepEqual([given.timeframe, given.month], ['1day', '2026-08'], 'a timeframe given picks its own rung, not the finest');
+  // The run discovers its selection from the server, and a selection it cannot discover is a failed run, said.
+  const base = sheet.parseArgs(['--base', 'http://stand.in', '--n', '1', '--clients', '1']);
+  const found = await sheet.runSheet({ ...base, feed: 'zerodha' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.deepEqual([found.ctx?.timeframe, found.ctx?.month, found.ctx?.day], ['1min', '2026-09', '2026-09-30']);
+  const lost = await sheet.runSheet(base, { send: standIn({ ignore: new Set() }).send, log: () => {} });
+  assert.deepEqual(lost.failures, ['discovering the selection: /feeds.json named no feed; pass --feed']);
+  assert.equal(lost.ok, false);
+  assert.equal(harness.renderHarness({ ok: false, lines: ['| t |'], notes: ['n1'], failures: ['f1'] }, { n: 2, base: 'http://h:1' }), '# Browser harness — FAIL\n\nn = 2 cold and 2 warm loads a page against http://h:1.\n\n| t |\n\n- n1\n- FAILED: f1\n');
+  // A build whose app entry carries no text is refused like one with no preload list.
+  assert.throws(() => builtPages(new Map([['_app/immutable/entry/app.A.js', { size: 9 }]])), /no __vite__mapDeps/);
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1075,7 +1139,9 @@ function standIn(o) {
       const status = o.status?.[u.pathname] ?? 200;
       const read = [...u.searchParams].filter(([k]) => !o.ignore.has(k));
       if (read.some(([, v]) => v === GARBLED)) return { status: 400, headers: {}, body: '{"error":"a value this route cannot read"}', ms: 1, bytes: 40, build };
-      const body = u.pathname === '/sources.json' ? JSON.stringify({ rungs: [] }) : JSON.stringify({ route: u.pathname, read });
+      const body = u.pathname === '/sources.json'
+        ? JSON.stringify({ rungs: [{ feed: 'zerodha', rung: '1min', stored: true, last_month: '2026-09', last_day: '2026-09-30', read }] })
+        : JSON.stringify({ route: u.pathname, read });
       return { status, headers: {}, body, ms: 1 + (served % 7), bytes: body.length, build };
     }
   };
@@ -1111,5 +1177,7 @@ function synthBuild(o) {
   writeFileSync(join(dir, '_app/immutable/nodes/0.A.js'), 'x');
   writeFileSync(join(dir, '_app/immutable/nodes/7.A.js'), 'x'.repeat(Math.max(0, o.pageBytes - app.length - 1)));
   writeFileSync(join(dir, '_app/immutable/nodes/7.A.js.map'), 'x'.repeat(o.pageBytes));
+  mkdirSync(join(dir, '_app/immutable/assets'), { recursive: true });
+  writeFileSync(join(dir, '_app/immutable/assets/unused.css'), 'a{}');
   return dir;
 }
