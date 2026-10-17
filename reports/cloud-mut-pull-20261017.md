@@ -34,6 +34,61 @@ and this report.
 | User | every mutation, coverage and workspace-test run is as an **unprivileged user** (`mut`, uid 30033) in a mirror of the tree, so permission-bit tests run their own path as on CI and the operator's machine; the container itself runs as root |
 | Coverage | `cargo +nightly llvm-cov -p pull --branch`, production lines and branches only (each file cut at its first `#[cfg(test)]` module) |
 
+## Mutants
+
+### The old pass's 23 survivors, re-tested under Gate 18's exact flags
+
+Run `survivors1`, on the re-applied tree before this pass's new tests: the
+whole `pull` suite (1,739 tests, lib and every integration binary),
+sequential, stopping at the first failure. Baseline: 65 s build, 500 s test.
+
+| Outcome | Count | Mutants |
+|---|---:|---|
+| Caught | 1 | `cash_session_cache.rs:546:19` (`>=` → `<` in `hold`): filed a timeout by the old `cargo test` run, caught here by `an_installer_waits_for_readers_who_let_go_inside_the_bound`, which runs before the test that hangs |
+| Missed | 18 | exactly the 18 the old report proved equivalent (table below) |
+| Timeout | 4 | `fold.rs:1083:42`, `fold.rs:1191:20`, `fold.rs:1245:42`, `gdfl_nfo.rs:569:22`, each at 1,002 s |
+
+### Timeouts made catches
+
+Gate 18 never credits a timeout. Under its sequential order an unguarded
+test that loops forever on the mutant ran before any test with a watchdog,
+so the run hung. Two changes, no existing test edited:
+
+- `gdfl_nfo::cloud_mutant_tests::the_monthly_walk_back_over_a_holiday_answers_within_a_bound`
+  (new): the holiday walk-back under a ten-second watchdog. The fold's three
+  already had one: `an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not`
+  (old pass) runs the fold on its own thread and fails after ten seconds.
+- `.config/nextest.toml`: those two tests at `priority = 100`, the repo's
+  own pattern for running a fast regression first (D-0693, D-0694). Order
+  only; gate 1's nextest scan allows exactly the keys used.
+
+### Equivalent mutants (18, missed by construction)
+
+Re-confirmed missed under Gate 18's flags (run `survivors1`). Line numbers
+are the current file's; `request_minutes.rs` moved by 8 lines since the old
+report (`325` → `333`, `339` → `347`).
+
+| File:line:col | Mutant | Why it is equivalent |
+|---|---|---|
+| `fold.rs:272:38` | guard `width > 0` → `true` in `fold` | `width = secs × 10⁶` and `Bucket::of_secs` refuses 0, so `width ≥ 10⁶`. |
+| `fold.rs:272:44` | `>` → `>=` in `fold` | Same: `width` is never 0. |
+| `fold.rs:1126:32` | `>` → `>=` in `fold_month` | `day_note_at` is read only for a withheld day, and every withheld day either had `day_session` push its note (both forms set the same index) or has `day_note` push one, which overwrites it right after. |
+| `fold.rs:1149:68` | `<` → `<=` in `fold_month` | At `missing == start`, `scheduled_minutes(.., missing, start)` is 0, so nothing is pushed either way. |
+| `fold.rs:1206:42` | `>` → `>=` (complete's `expected > 0`) | Every candidate bucket holds a bar, so `count ≥ 1`; `count == expected` cannot hold at 0. |
+| `fold.rs:1209:22` | `>` → `>=` (partial's `count > 0`) | `count ≥ 1` always. |
+| `fold.rs:1210:25` | `>` → `>=` (partial's `expected > 0`) | `count < expected` cannot hold at `expected == 0` with `count ≥ 1`. |
+| `fold.rs:1527:9` | `\|\|` → `&&` in `minute_session` | Every shipped venue row is continuous and opens at 09:15: both operands are false on every reachable input. |
+| `request_minutes.rs:333:35` | `>` → `>=` in `day_plan` | The arm is reached only with `Unmeasured`; `sourced_kind_of` never answers that inside `SOURCED_FIRST_DAY..=SOURCED_LAST_DAY`, so at `SOURCED_LAST_DAY` both forms take the same arm. |
+| `request_minutes.rs:347:22` | guard `hours.kind() == Continuous` → `true` in `regular_plan` | Every venue row is `Continuous` and verified. |
+| `cash_session_cache.rs:508:5` | `still_regular` → `Ok(())` | Only a swap of the lock path between two system calls (a race) reaches the refusal. |
+| `gdfl_cm.rs:854:13` | delete field `indices` in `CmScope::stored` | `..Self::swept()` supplies the same empty `Vec`. |
+| `gdfl_cm.rs:965:31` | guard `name.len() > SYMBOL_CAPACITY` → `false` | `share_at` holds only legal symbols of at most 24 bytes; a longer name misses the probe either way. |
+| `gdfl_cm.rs:1010:41` | guard `self.series` → `true` in `CmScope::filing` | Reached only when `stored`, and every constructor sets `stored` and `series` together. |
+| `gdfl_cm.rs:1097:22` | guard `self.stored` → `true` in `CmScope::member_of` | An unstored scope is `swept`, whose `indices` is empty: `index_row` is `None`, the arm's own answer. |
+| `gdfl_cm.rs:2306:70` | `>` → `>=` in `settle_auction` | An unknown-eligibility zero-book candidate refuses the file at its row, so a one-price band always has `booked ≥ 1` here. |
+| `gdfl_cm.rs:2313:34` | guard `self.booked > 0` → `true` | Differs only for a one-price band of zero-book prints alone: no row is in the band, `retain` takes nothing, the recomputed maximum equals the running one. |
+| `gdfl_cm.rs:2313:46` | `>` → `>=` | Same as `2313:34`. |
+
 ## Coverage — lines AND branches, production only
 
 The old pass could not measure branches (the pinned 1.97.1 has no
@@ -100,6 +155,30 @@ another check already decided.
 | `request_minutes.rs:425` (branch), `426–433` | the "invalid day" finding | The loop walks day numbers between two valid `Day`s. |
 | `request_minutes.rs:1039` | the ledger append's host-error closure | Used only by `fstat`, `flock`, `pread`, `write` or `sync` failing on an open regular file. |
 | `scrub.rs:220–223` | an entry naming no legal store path | Every segment comes from a type that already enforces the store's rules, so `StorePath::new` cannot refuse a manifest entry. |
+
+## Tests added or repaired this pass
+
+All synthetic: invented shares (`ZZAUCTION`, a 25-byte `ZZ…W`), invented
+prices and stamps; `RELIANCE` and `HINDALCO` appear only as the name shapes
+the old pass already used. No vendor byte is committed.
+
+| Test | File | What it pins |
+|---|---|---|
+| `a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses` (repaired) | `gdfl_tickstore.rs` | Now runs where permission bits bind (D-0995's `where_permission_binds`): it failed as root on its own premise, a mode-0 day file opening. Body unchanged. |
+| `tickstore_a_socket_at_a_day_name_is_refused_by_name` (repaired) | `tests/cloud_mutants_import.rs` | The old test bound its socket at the deep day path, which overflows `sun_path` (108 bytes Linux, 104 macOS) under any longer temporary directory: it failed as an ordinary user and would on a Mac. Bound at a short name and renamed to the day path; it now first asserts the inode is a socket. |
+| `the_ledger_lies_beside_the_import_journal` (literal changed) | `gdfl_import_scope.rs` | Root now a temporary directory, not the undeclared gate-1d word `store-root`. |
+| `a_cache_root_that_cannot_be_a_directory_refuses_by_name` | `cash_session_cache.rs` | A file at the cache root: the lock refuses by the root's name, the file untouched. |
+| `a_lock_that_cannot_be_reopened_for_writing_refuses_by_name` | `cash_session_cache.rs` | A read-only lock file refuses the lock by its own name (where permission binds). |
+| `a_cache_directory_that_cannot_be_synced_names_the_unsynced_publication` | `cash_session_cache.rs` | A writable, unreadable cache directory (0o300): payload and receipt are published and kept, then the missing directory sync is named, durability UNVERIFIED (where permission binds). |
+| `a_hang_up_before_the_head_or_inside_the_body_is_refused_by_name` | `cash_session_cache.rs` | A server that closes before its head is refused naming the URL; one that closes inside its declared body is refused naming the body. |
+| `a_pipe_at_the_ledger_name_is_refused_and_never_waited_on` | `request_minutes.rs` | A FIFO at `audit/<vendor>.gaps` opens at once (`O_NONBLOCK`) and is refused by its own `fstat`, by name, within a one-minute watchdog; `mkfifo` run from the test as `tickstore_write_tests` already does. |
+| `a_buckets_ist_day_is_checked_at_both_ends_of_the_line` | `fold.rs` | `ist_day_of`: day 0 and day 1 exact, and `AnchorOverflow` at `i64::MAX` and `i64::MIN`, never a wrapped day. |
+| `a_regular_session_on_a_day_no_day_can_name_is_refused` | `fold.rs` | `minute_session` asked for a regular session on day −1 or 3,000,000 refuses for the day, not the hours. |
+| `a_header_longer_than_the_size_refuses_before_any_column_is_read` | `gdfl_tickstore.rs` | The size test's second half: a header past the stated size refuses though the rows fit; exactly at it, the columns are read. |
+| `a_directory_at_the_sidecar_name_is_refused_by_name` | `gdfl_cm_auction.rs` | A directory where the month's auction sidecar belongs: refused by the sidecar's name, nothing written inside. |
+| `a_zero_book_print_before_the_match_band_never_prices_the_band` | `tests/cloud_mutants_import.rs` | An eligible share's zero-book print at 15:20 is diverted as a print but never decides the band's price, so the booked 15:30 row at the band's one price is taken as the auction's and nothing is left unattributed. |
+| `a_stored_share_of_the_full_symbol_width_is_filed` (extended) | `tests/cloud_mutants_import.rs` | One byte past the symbol capacity is no slot and no member. |
+| `the_monthly_walk_back_over_a_holiday_answers_within_a_bound` | `gdfl_nfo.rs` | The monthly expiry over Thu 29 Mar 2018 (a holiday) answers 28 Mar inside a ten-second watchdog; a walk that stops stepping fails here instead of hanging the run. |
 
 ## Done
 
