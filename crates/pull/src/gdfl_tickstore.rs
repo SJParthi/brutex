@@ -1370,9 +1370,17 @@ mod tests {
     /// Only the exact `.bts` name is opened: a day with only a `*.bts.tmp`
     /// left by an ingest, or with nothing, was not ingested and is `None`; a
     /// day file that cannot be read refuses `TickStoreUnavailable`; a rebuilt
-    /// file that is not its stated size refuses before it decodes.
+    /// file that is not its stated size refuses before it decodes. Run where
+    /// permission bits bind (D-0995): as root the mode-0 day file opens.
     #[test]
     fn a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses() {
+        crate::support::where_permission_binds(
+            "gdfl_tickstore::tests::a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses",
+            a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses_body,
+        );
+    }
+
+    fn a_temporary_or_absent_day_is_none_and_an_unreadable_one_refuses_body() {
         let csv = n50_csv(true, false);
         let block = columnar_block(true, false, HEADER_OPEN_INTEREST, 3, &n50_columns());
         let mut wrong = put(

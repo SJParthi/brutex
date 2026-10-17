@@ -2512,9 +2512,16 @@ const WP12F_LITERAL: &str = "auction_band_unattributed bar-revisions booked_rows
 // an account, an environment, a vendor credential or a field of a parameter
 // path.
 const R3_35_LITERAL: &str = "r3-35-bytes git cat-file blob";
+// The cloud mutation pass over `crates/pull` (reports/cloud-mut-pull-20261017.md):
+// `proc` and `self` are the two directories of the Linux path
+// `/proc/self/status`, which `cash_session_cache`'s `read_limited` test reads
+// because procfs states a length of 0 for a file that yields more, the one
+// regular file that reaches the read's own length recheck. None names an
+// account, an environment, a vendor credential or a field of a parameter path.
+const CLOUD_MUT_PULL_LITERAL: &str = "proc self";
 
 /// Every declared group, in the order the step joined them.
-const DECLARED: [&str; 62] = [
+const DECLARED: [&str; 63] = [
     SEG_SHAPE,
     VENDOR_WIRE,
     CLAIM_STANDING,
@@ -2577,6 +2584,7 @@ const DECLARED: [&str; 62] = [
     DB_FIX_ROUND_LITERAL,
     WP12F_LITERAL,
     R3_35_LITERAL,
+    CLOUD_MUT_PULL_LITERAL,
 ];
 
 fn declared() -> BTreeSet<&'static str> {

@@ -335,11 +335,8 @@ mod cloud_mutant_tests {
     /// The ledger is `<store>/imports/gdfl.scopes`, beside the journal.
     #[test]
     fn the_ledger_lies_beside_the_import_journal() {
-        let root = std::path::Path::new("/store-root");
-        assert_eq!(
-            scopes_path(root),
-            std::path::PathBuf::from("/store-root/imports/gdfl.scopes")
-        );
+        let root = std::env::temp_dir().join("Store");
+        assert_eq!(scopes_path(&root), root.join("imports/gdfl.scopes"));
     }
 
     /// A ledger that cannot be READ (a directory at its path) refuses by
