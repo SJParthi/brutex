@@ -909,6 +909,33 @@ mod cloud_mutant_tests {
         assert!(std::fs::read_dir(&sidecar).unwrap().next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// A header that is not its version's own is refused in that version's
+    /// words: a version-1 header with a reserved byte set is named against
+    /// version 1's shape, a version-2 header with its checksum broken against
+    /// version 2's. Kills the message choice's `==` read as `!=`, which
+    /// swapped the two.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn a_bad_header_is_refused_in_its_own_versions_words() {
+        let mut first = super::header_of(super::VERSION_1);
+        first[12] = 1;
+        assert_eq!(
+            super::parse(&first).unwrap_err().why,
+            "the version-1 header is not BRTXAUC1 with 32-byte records and a zero reserved field"
+        );
+        let mut second = super::header_of(super::VERSION);
+        second[12] ^= 0xFF;
+        assert_eq!(
+            super::parse(&second).unwrap_err().why,
+            "the version-2 header's checksum does not match, or its record length is not 32"
+        );
+        // The premise: each header unbroken is read, with no record.
+        for version in [super::VERSION_1, super::VERSION] {
+            let read = super::parse(&super::header_of(version)).unwrap();
+            assert_eq!((read.version, read.records.len()), (version, 0));
+        }
+    }
 }
 
 #[cfg(test)]
