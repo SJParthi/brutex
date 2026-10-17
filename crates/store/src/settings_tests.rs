@@ -1177,7 +1177,9 @@ fn a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named() {
     );
     assert_eq!(
         disk_floor("4096"),
-        Err("\"4096\" is 4096 bytes, below the smallest floor of 1000000000 bytes (1GB)".to_owned())
+        Err(
+            "\"4096\" is 4096 bytes, below the smallest floor of 1000000000 bytes (1GB)".to_owned()
+        )
     );
     for small in ["1", "95", "96", "999999999"] {
         assert!(disk_floor(small).is_err(), "{small:?} must be refused");
