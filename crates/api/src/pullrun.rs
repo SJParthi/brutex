@@ -10466,6 +10466,49 @@ mod cloud_walk_tests {
         assert_eq!(counted.left_open, 1, "{counted:?}");
     }
 
+    /// **An earlier guess about ANOTHER key takes nothing from a pairing's
+    /// count.** Two kite runs open, then two dhan runs; a dhan close pairs
+    /// the dhan runs by a guess, and a later kite close pairs the kite runs.
+    /// Each pairing is the first guess about its own key and no close of
+    /// that key follows it, so both counts are facts: one run of each key
+    /// surely has no closing record. Kills `Guess::at -> 0` and `-> 1`
+    /// (pullrun.rs:1581), under which the dhan guess was read from the kite
+    /// records walked first, and the `!` deleted in `first_of_key`'s
+    /// `!same_key` (pullrun.rs:1719), under which a guess of another key
+    /// counted as one of the same.
+    #[test]
+    fn an_earlier_guess_of_another_key_takes_nothing_from_a_count() {
+        let found = walk(&[
+            (0, open_of("kite", 20_000, 20_010, 0xA)),
+            (1, open_of("kite", 20_000, 20_010, 0xB)),
+            (2, open_of("dhan", 20_000, 20_010, 0xC)),
+            (3, open_of("dhan", 20_000, 20_010, 0xD)),
+            (5, close_of(Scope::Spot, "dhan", 20_000, 20_010)),
+            (8, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+        ]);
+        assert!(
+            matches!(
+                found.guessed.as_slice(),
+                [
+                    Guess::Pairing { close: 5, .. },
+                    Guess::Pairing { close: 8, .. }
+                ]
+            ),
+            "{:?}",
+            found.guessed
+        );
+        assert_eq!(
+            found
+                .left_open
+                .iter()
+                .map(|counted| (counted.close, counted.source.as_str(), counted.left_open))
+                .collect::<Vec<_>>(),
+            [(5, "dhan", 1), (8, "kite", 1)],
+            "{:?}",
+            found.left_open
+        );
+    }
+
     /// **A refusal of the same key after a pairing's close is no close of
     /// theirs, so the count of runs it left open still stands.** Two runs of
     /// one key are open with different asks and one close ends one of them,
