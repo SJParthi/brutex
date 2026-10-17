@@ -50,12 +50,13 @@ priority = 100
 
 # The cloud mutation pass over crates/pull (reports/cloud-mut-pull-20261017.md).
 # Each of these fails inside ten seconds through its own watchdog where a
-# mutant stops a loop stepping: a zeroed bucket width or a cursor that never
-# advances in the completeness fold, and a holiday walk-back in the options
-# expiry rule that never steps. Run in their default places, an unguarded test
-# earlier in the order hangs on the same mutant until the mutation timeout, and
-# Gate 18 never credits a timeout as a catch. This changes order only: nothing
-# is filtered, skipped, retried or ignored.
+# mutant stops a loop ending: a zeroed bucket width or a cursor that never
+# advances in the completeness fold, a holiday walk-back in the options expiry
+# rule that never steps, and an auction-sidecar lock wait that never gives up.
+# Run in their default places, an unguarded test earlier in the order hangs on
+# the same mutant until the mutation timeout, and Gate 18 never credits a
+# timeout as a catch. This changes order only: nothing is filtered, skipped,
+# retried or ignored.
 [[profile.default.overrides]]
-filter = 'test(an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not) | test(the_monthly_walk_back_over_a_holiday_answers_within_a_bound)'
+filter = 'test(an_index_days_absent_head_and_tail_are_named_and_a_shares_are_not) | test(the_monthly_walk_back_over_a_holiday_answers_within_a_bound) | test(a_sidecar_lock_held_past_the_bound_is_refused_in_time)'
 priority = 100

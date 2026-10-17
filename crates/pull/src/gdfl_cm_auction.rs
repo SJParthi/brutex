@@ -958,6 +958,71 @@ mod cloud_mutant_tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// A fresh sidecar's new directories are synced in their parents up to
+    /// the directory that already existed, and no higher: the store root is
+    /// synced (it holds the first directory the append made) and nothing
+    /// above it is. Kills the walk's `&&` read as `||`, which took every
+    /// existing ancestor up to `/` for a directory the append made.
+    #[test]
+    #[allow(clippy::unwrap_used, reason = "a test that cannot panic cannot fail")]
+    fn a_fresh_sidecar_syncs_no_directory_above_the_one_it_was_made_in() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarSync");
+        let key = super::InstrumentKey::cash(brutex_core::instrument::Exchange::Nse, "ZZAUCTION")
+            .unwrap();
+        let day = super::Day::new(2026, 8, 4).unwrap();
+        let print = Print {
+            sod: 55_687,
+            price: 140_150,
+            quantity: 400,
+            rows: 1,
+            line: 3,
+        };
+        super::seam::SYNCED.with(|synced| synced.borrow_mut().clear());
+        super::append(&root, &key, day, &[print]).unwrap();
+        let synced = super::seam::SYNCED.with(|synced| synced.borrow().clone());
+        assert!(synced.contains(&root), "{synced:?}");
+        assert!(
+            synced.iter().all(|dir| dir.starts_with(&root)),
+            "{synced:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A sidecar lock another handle holds past the bound is refused once
+    /// the bound passes, naming it. Run on its own thread under a ten-second
+    /// watchdog, so a wait that never ends fails here instead of hanging the
+    /// run (the wait guard read as `true`).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "a test that cannot panic cannot fail"
+    )]
+    fn a_sidecar_lock_held_past_the_bound_is_refused_in_time() {
+        let root = crate::gdfl_fixtures::scratch("CloudSidecarHeld");
+        let path = root.join("Held.auc");
+        std::fs::write(&path, b"").unwrap();
+        let holder = std::fs::File::open(&path).unwrap();
+        holder.lock().unwrap();
+        let (send, answer) = std::sync::mpsc::channel();
+        let at = path.clone();
+        std::thread::spawn(move || {
+            let file = std::fs::File::open(&at).unwrap();
+            let bound = std::time::Duration::from_millis(50);
+            let got = super::hold(&file, &at, super::Hold::Shared, bound).map(drop);
+            let _gone_when_the_test_ended = send.send(got);
+        });
+        let got = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("refused within ten seconds");
+        assert_eq!(
+            got,
+            Err("the lock is held by another reader or writer past 50 ms".to_owned())
+        );
+        holder.unlock().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
