@@ -1480,4 +1480,18 @@ mod cloud_mutant_tests {
         let got = decode(body.as_bytes(), stem, Day::new(2024, 4, 2).unwrap()).unwrap();
         assert_eq!((got.rows.len(), got.quoted_rows), (6, 4));
     }
+
+    /// The monthly expiry walks back over a holiday (Thu 29 Mar 2018) to
+    /// the trading day before it, and answers inside ten seconds: a walk
+    /// that stops stepping back fails here instead of hanging the run.
+    #[test]
+    #[allow(clippy::expect_used, reason = "a test that cannot panic cannot fail")]
+    fn the_monthly_walk_back_over_a_holiday_answers_within_a_bound() {
+        let (send, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(super::monthly_expiry(2018, 3)));
+        let got = answer
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("answered within ten seconds");
+        assert_eq!(got, Some(Day::new(2018, 3, 28).unwrap()));
+    }
 }
