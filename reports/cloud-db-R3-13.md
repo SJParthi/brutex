@@ -82,7 +82,11 @@ too. The record, the day's events and the answer's envelope are now built by mov
 92-day pages of NIFTY on both feeds, RELIANCE on both, one NIFTY contract; 375 bars a session at
 each finest rung; n = 200 a page. Run on the base (the same harness pasted into a worktree of
 `origin/feat/db-fix` 62396df0) and on the branch, back to back, 4 cores, idle. **Not a gate: one
-machine, one run each; the real store's figure is NEEDS THE MAC below.**
+machine, one run each; the real store's figure is NEEDS THE MAC below.** The branch figures are
+of commit 5af9ea1e's code, before the second review's fixes and the R3-06/R3-14 merge; those add
+no read to a page (a calendar lookup a day for the closing-auction flag, which `record_of`
+answers from a table) and were not re-timed here, because the machine was not idle again while
+the mutant run held it. RETIME_NOTE
 
 | measure (p50 / p99 / max) | base | branch |
 |---|---|---|
@@ -104,21 +108,53 @@ NOT MEASURED.
 
 ## Gate results (this cloud machine)
 
-- `cargo fmt --all --check`: clean.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean.
-- `cargo test --workspace --locked`: RUNNING (skipping only
-  `the_pool_verb_prints_its_whole_page_on_a_generated_store`, the known slow one `CONTEXT.md`
-  names). `api`'s day-flag tests: 70 passed, 3 ignored (the real-store test, the timing, the
-  profiler target).
-- `cargo deny check`: **advisories FAILED, bans ok, licenses ok, sources ok** — RUSTSEC-2026-0344,
+On the final tree: this branch with `origin/feat/db-fix` f9cdb584 (R3-06, R3-14) merged in. The
+cloud session runs as root, which matters for one gate below.
+
+- `cargo fmt --all --check`: **clean.**
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: **clean.**
+- `cargo test --workspace --locked`: RESULT_TEST
+- `cargo deny check`: **advisories FAILED; bans, licenses and sources ok.** RUSTSEC-2026-0344,
   -0346, -0347, -0348 and -0349 (`ruzstd` 0.8.2 under `lake` and `pull`; `rustls`). The same five
-  fail on the base `origin/feat/db-fix`; `Cargo.lock` is not an R3-13 file and is unchanged here.
-- Web: `node --test "web/tests/*.test.js"` 1,407 tests, 0 failed; 5 timer tests in
-  `ask.test.js` and `census-worker.test.js` are cancelled ("Promise resolution is still pending")
-  exactly as on the base, and `store-watch.test.js`'s 4 are cancelled in some full runs and pass
-  alone on both trees. `npm run check` (svelte-check): 6 errors, the same 6 as on the base, none
-  in an R3-13 file (`ingest-months.js`, `ingest/+page.svelte`, `settings-ceilings.test.js`).
-- Coverage and mutants: NOT RUN YET.
+  fail on `origin/feat/db-fix`; `Cargo.lock` is not an R3-13 file, and this branch leaves it
+  unchanged.
+- **Coverage, Rust: 100% of the changed lines and branches.** Of the production lines this branch
+  adds or changes in `dayflags.rs` and `dayflags_rules.rs` (the diff against `origin/feat/db-fix`),
+  1,097 of 1,097 run, and 170 of 170 branches on them are taken; the 27 changed lines of
+  `dayflags.rs`'s own test module run too. Measured with `cargo-llvm-cov` 0.9.1 `--branch` on a
+  nightly toolchain (rustc 1.101.0-nightly 2026-10-16; branch coverage needs nightly, and the
+  repository's pinned 1.97.1 is untouched), opt-level 0, over the `server::dayflags` tests only,
+  so a line counts only if a day-flag test runs it. Reaching 100% took eight tests (a month
+  before the page that will not open, near and 22 months back; a page in 1970-01; a month cut
+  short under an open handle; a late ledger that will not read; a day bar session with no
+  minutes; a peer across three months under two names; the sidecar's one-stat-a-month memo),
+  and the removal of every line that existed only for an impossible case: the answer's
+  envelope and each count are built by `object`, with no `as_object_mut` fallback; the month
+  step is one `month_before` (`Day::year_month` documents its refusal unreachable); a frozen
+  minute is `high == low`, since the store refuses any bar whose open or close lies outside its
+  range (`store::file` `survey`). The whole `api` crate is not at 100% on the base either (CI's
+  floor is 90% lines, 89% regions over the workspace), and its figure was not taken.
+- **Coverage, front end: 100% of the changed lines and branches.** Of the lines this branch adds
+  or changes in `web/src/lib/db/dayflags.js` and `notes-labels.js`, 381 of 381 run, and 268 of
+  268 branches are taken (`node --test --experimental-test-coverage`, Node 22, the whole web
+  suite). Whole files: `dayflags.js` 100% lines; `notes-labels.js`'s uncovered lines are all the
+  base's. The `.svelte` components have no coverage tool here; their logic was moved into the
+  two modules where it can be measured (`casCounts`, `bandInstrument`, `bandExpiry`).
+- `cargo mutants`: RESULT_MUTANTS
+- Web tests, `node --test "web/tests/*.test.js"`: 1,417 tests, 1,407 passed, **1 failed, 9
+  cancelled, none in an R3-13 file.** The failure is `db-search.test.js`'s "p99 … inside one
+  frame (16 ms)", a timing test, run while two mutant builds and the workspace build held all
+  four cores: it fails the same way on a copy of `origin/feat/db-fix` under the same load, and
+  passed alone on this branch when the machine was quieter. The 9 cancelled are timer tests in
+  `ask.test.js`, `census-worker.test.js` and `store-watch.test.js` ("Promise resolution is still
+  pending"), cancelled on the base too.
+- `npm run check` (svelte-check): **7 errors, the same 7 as on `origin/feat/db-fix`**, none in an
+  R3-13 file (`gap-verdict.js`, which arrived with R3-06; `ingest-months.js` and its test;
+  `ingest/+page.svelte`; `settings-ceilings.test.js`). CI's W3 ceiling is 0, so W3 fails on the
+  base as well.
+- Gate W1 (`web/build` matches `web/src`): **fails on this branch until the Mac rebuilds the
+  bundle.** `web/build` is not an R3-13 file. The front end builds from this tree (`npm run build`
+  on a copy, exit 0); the rebuild is in NEEDS THE MAC section 1.
 
 ## NEEDS THE MAC
 
