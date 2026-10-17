@@ -73,10 +73,18 @@ fn journal(dir: &Path, lines: u32) -> PathBuf {
         refuse("the journal folder could not be made");
     }
     let mut text = String::with_capacity(usize::try_from(lines).unwrap_or(0) * 96);
+    // Every third line keeps a non-ASCII name as the journal does (an en
+    // dash and accents, two and three bytes a character), so the 64 KiB
+    // window starts inside a character at some sizes (repair round 1, C4).
     for n in 0..lines {
+        let extra = if n % 3 == 0 {
+            " \u{2013} kopie \u{e9}t\u{e9}"
+        } else {
+            ""
+        };
         let _ = writeln!(
             text,
-            "v=1 listed run=r at_ms={n} name=\"GFDLNFO_TICK_{:08}.zip\" bytes={n}",
+            "v=1 listed run=r at_ms={n} name=\"GFDLNFO_TICK_{:08}{extra}.zip\" bytes={n}",
             n % 100_000_000
         );
     }

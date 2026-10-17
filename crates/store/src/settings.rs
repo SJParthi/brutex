@@ -623,13 +623,23 @@ impl fmt::Display for Floor {
     }
 }
 
+/// The smallest byte floor [`disk_floor`] accepts: 1 GB (10^9 bytes). A
+/// floor below it protects nothing (a single GDFL options day zip is about
+/// 290 MB, docs/06 L-R407-9), and a bare small number is most often a
+/// percent with its `%` left off, so it is refused by name, never taken as
+/// a few bytes. This repository's own choice, not a vendor's (D-4987,
+/// repair round 1).
+pub const MIN_FLOOR_BYTES: u64 = 1_000_000_000;
+
 /// The one reader of a `disk.floor` value: `<n>%` (1 to 95), a byte count,
-/// or a whole number of `GiB`, `TiB`, `GB` or `TB`. O(length).
+/// or a whole number of `GiB`, `TiB`, `GB` or `TB`, of at least
+/// [`MIN_FLOOR_BYTES`]. O(length).
 ///
 /// # Errors
 ///
 /// The sentence naming why `text` is not a floor: a percent outside 1 to
-/// 95, zero bytes, an unknown unit, or an amount that overflows 64 bits.
+/// 95, fewer bytes than [`MIN_FLOOR_BYTES`], an unknown unit, or an amount
+/// that overflows 64 bits.
 pub fn disk_floor(text: &str) -> Result<Floor, String> {
     let text = text.trim();
     if let Some(number) = text.strip_suffix('%') {
@@ -669,6 +679,17 @@ pub fn disk_floor(text: &str) -> Result<Floor, String> {
     if bytes == 0 {
         return Err(format!(
             "{text:?} is no floor at all; a floor of nothing would let a step fill the disk"
+        ));
+    }
+    if bytes < MIN_FLOOR_BYTES {
+        let percent_too = if unit.is_empty() && (1..=95).contains(&amount) {
+            format!("; for {amount} percent write {amount}%")
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "{text:?} is {bytes} bytes, below the smallest floor of {MIN_FLOOR_BYTES} bytes \
+             (1GB){percent_too}"
         ));
     }
     Ok(Floor::Bytes(bytes))

@@ -303,8 +303,13 @@ fn the_floor_has_one_grammar_and_rounds_a_percent_up() {
     assert_eq!(disk_floor("2GiB"), Ok(Floor::Bytes(2 << 30)));
     assert_eq!(disk_floor("1TiB"), Ok(Floor::Bytes(1 << 40)));
     assert_eq!(disk_floor("3GB"), Ok(Floor::Bytes(3_000_000_000)));
-    assert_eq!(disk_floor("4096"), Ok(Floor::Bytes(4_096)));
+    assert_eq!(
+        disk_floor("1000000000"),
+        Ok(Floor::Bytes(store::settings::MIN_FLOOR_BYTES))
+    );
     for bad in [
+        "4096",
+        "15",
         "0%",
         "96%",
         "100%",

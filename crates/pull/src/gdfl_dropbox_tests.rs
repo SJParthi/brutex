@@ -541,6 +541,7 @@ fn config() -> Config {
 fn fast() -> Backoff {
     Backoff {
         max_attempts: 4,
+        max_total: Duration::from_mins(1),
         base: Duration::from_millis(1),
         cap: Duration::from_millis(20),
         second: Duration::from_millis(1),
@@ -2208,4 +2209,839 @@ fn a_config_folder_others_can_write_is_a_named_wait() {
     )
     .unwrap();
     assert_eq!(Config::load(&path).unwrap(), config());
+}
+
+// -- repair round 1: the second agent's six blocking defects -------------------
+
+mod repair_r1 {
+    use super::*;
+    use std::time::Instant;
+
+    /// A held tick-store day file for `name`, as the writer would leave it.
+    fn hold(roots: &Roots, name: &str) {
+        let path = DayIdentity::of_zip_name(name)
+            .unwrap()
+            .path_under(&roots.tick);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"held by the test, invented").unwrap();
+    }
+
+    fn go(server: &Server, roots: &Roots, handoff: &mut dyn Handoff) -> Report {
+        press(
+            server,
+            roots,
+            &Tokens::new(&["tok-one"]),
+            &Meter::roomy(),
+            Ok(config()),
+            handoff,
+        )
+    }
+
+    /// A press on its own thread with `backoff` and `stop` against
+    /// `endpoints`; its outcome and how long it took, or `None` after
+    /// `secs`.
+    fn threaded(
+        endpoints: Endpoints,
+        roots: &Roots,
+        backoff: Backoff,
+        stop: Arc<AtomicBool>,
+        secs: u64,
+    ) -> Option<(Outcome, Duration)> {
+        let (store, tick) = (roots.store.clone(), roots.tick.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let token = Tokens::new(&["tok-one"]);
+            let meter = Meter::roomy();
+            let fetch = Fetch {
+                store_root: &store,
+                tick_root: &tick,
+                endpoints: &endpoints,
+                token: &token,
+                meter: &meter,
+                floor: Floor::Percent(15),
+                backoff,
+                stop: Some(&stop),
+            };
+            let start = Instant::now();
+            let report = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run(&fetch, Ok(config()), &mut Recorder::default()));
+            let _ = tx.send((report.outcome, start.elapsed()));
+        });
+        rx.recv_timeout(Duration::from_secs(secs)).ok()
+    }
+
+    fn refused_code(outcome: &Outcome) -> &'static str {
+        match outcome {
+            Outcome::Refused(refusal) => refusal.code,
+            _ => "not_refused",
+        }
+    }
+
+    /// R407-01 (C1): a content duplicate with NO listed content hash is
+    /// refused by its SHA-256 on press one, and stays refused on presses two
+    /// and three after the original is held: never handed, never fetched
+    /// again, and its refusal journalled once. Failed before the repair:
+    /// press two handed `GFDLNFO_TICK_04072019.zip`.
+    #[test]
+    fn a_duplicate_refused_by_its_sha256_stays_refused_on_every_later_press() {
+        let same = day_zip(31, 2, 3_000);
+        let mut fake = fake_with(&[
+            ("/GFDLNFO_TICK_03072019.zip", same.clone()),
+            ("/GFDLNFO_TICK_04072019.zip", same),
+        ]);
+        for file in &mut fake.files {
+            file.hash = String::new();
+        }
+        let server = Server::start(fake);
+        let roots = roots("r1-dup");
+        let mut first = Recorder::default();
+        let one = go(&server, &roots, &mut first);
+        assert_eq!(first.got, vec!["GFDLNFO_TICK_03072019.zip".to_owned()]);
+        assert_eq!(
+            codes(&one),
+            vec![("GFDLNFO_TICK_04072019.zip".to_owned(), "content_duplicate")]
+        );
+        hold(&roots, "GFDLNFO_TICK_03072019.zip");
+        let downloads = server.downloads().len();
+        for press_no in 2..=3 {
+            let mut again = Recorder::default();
+            let report = go(&server, &roots, &mut again);
+            assert!(
+                again.got.is_empty(),
+                "press {press_no} handed {:?}",
+                again.got
+            );
+            assert_eq!(
+                codes(&report),
+                vec![("GFDLNFO_TICK_04072019.zip".to_owned(), "content_duplicate")],
+                "press {press_no}"
+            );
+            assert!(
+                report.refused[0]
+                    .detail
+                    .contains("GFDLNFO_TICK_03072019.zip"),
+                "{:?}",
+                report.refused[0]
+            );
+            assert_eq!(report.held, 1);
+            assert_eq!(report.outcome, Outcome::Incomplete);
+        }
+        assert_eq!(server.downloads().len(), downloads, "nothing fetched again");
+        let text = journal_text(&roots);
+        let refusals = text
+            .lines()
+            .filter(|l| {
+                l.starts_with("v=1 refused ")
+                    && l.contains("GFDLNFO_TICK_04072019.zip")
+                    && l.contains("reason=content_duplicate")
+            })
+            .count();
+        assert_eq!(refusals, 1, "journalled once:\n{text}");
+        let verified = text
+            .lines()
+            .filter(|l| l.starts_with("v=1 verified ") && l.contains("GFDLNFO_TICK_04072019.zip"))
+            .count();
+        assert_eq!(verified, 1, "verified once, never read again:\n{text}");
+    }
+
+    /// The memory keeps the FIRST name a hash was verified under.
+    #[test]
+    fn the_memory_keeps_the_first_name_of_a_hash() {
+        let mut memory = Memory::default();
+        for name in ["A.zip", "B.zip"] {
+            memory.read(
+                &parse_line(&format!(
+                    "v=1 verified run=r at_ms=1 name=\"{name}\" rev=\"1\" hash=\"\" \
+                     path=\"/p/{name}\" bytes=1 entries=1 sha256=abc how=downloaded"
+                ))
+                .unwrap(),
+            );
+        }
+        assert_eq!(memory.hashes.get("abc").map(String::as_str), Some("A.zip"));
+        memory.read(
+            &parse_line(
+                "v=1 refused run=r at_ms=1 name=\"B.zip\" rev=\"1\" \
+                 reason=content_duplicate of=\"A.zip\" detail=\"x\"",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            memory
+                .duplicates
+                .get(&("B.zip".to_owned(), "1".to_owned()))
+                .map(String::as_str),
+            Some("A.zip")
+        );
+    }
+
+    /// R407-05 (C2): a listing that says `has_more` forever with no entry
+    /// is refused `listing_incomplete` after `MAX_STALLED_PAGES` pages. Failed
+    /// before the repair: tens of thousands of requests and no end.
+    #[test]
+    fn an_endless_empty_listing_is_refused_after_a_bounded_number_of_pages() {
+        let mut fake = fake_with(&[]);
+        fake.list_override = Some(json_reply(
+            200,
+            &serde_json::json!({"entries": [], "cursor": "c", "has_more": true}),
+        ));
+        let server = Server::start(fake);
+        let roots = roots("r1-endless");
+        let got = threaded(
+            server.endpoints(),
+            &roots,
+            fast(),
+            Arc::new(AtomicBool::new(false)),
+            20,
+        );
+        let requests = server.log.lock().unwrap().len();
+        let (outcome, _) = got.expect("the press ended");
+        assert_eq!(refused_code(&outcome), "listing_incomplete", "{outcome:?}");
+        assert!(
+            requests <= MAX_STALLED_PAGES + 1,
+            "{requests} listing requests"
+        );
+        let text = journal_text(&roots);
+        assert!(
+            text.lines().any(|l| l.starts_with("v=1 listing ")
+                && l.contains("complete=false")
+                && l.contains("reason=listing_incomplete")),
+            "{text}"
+        );
+    }
+
+    /// R407-05 (C2, C8): a page served again and again (the same entries,
+    /// the same cursor) is one listing of each file, its repeats counted,
+    /// and a stall refused by name; never a file listed twice.
+    #[test]
+    fn a_page_served_again_is_a_repeat_and_a_stall_never_a_second_file() {
+        let mut fake = fake_with(&[]);
+        fake.list_override = Some(json_reply(
+            200,
+            &serde_json::json!({
+                "entries": [{
+                    ".tag": "file",
+                    "name": "GFDLNFO_TICK_01072019.zip",
+                    "path_display": "/GFDLNFO_TICK_01072019.zip",
+                    "size": 100,
+                    "rev": "0123456789a",
+                }],
+                "cursor": "same",
+                "has_more": true,
+            }),
+        ));
+        let server = Server::start(fake);
+        let roots = roots("r1-repeat");
+        let report = go(&server, &roots, &mut Recorder::default());
+        let Outcome::Refused(refusal) = &report.outcome else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(refusal.code, "listing_incomplete", "{refusal:?}");
+        assert!(refusal.detail.contains("kept the cursor"), "{refusal:?}");
+        assert!(server.log.lock().unwrap().len() <= MAX_STALLED_PAGES + 1);
+    }
+
+    /// R407-11 (C2): Stop pressed before the press, over an endless
+    /// listing, ends it `stopped` at once. Failed before the repair: the
+    /// press never returned.
+    #[test]
+    fn stop_ends_a_press_during_its_listing() {
+        let mut fake = fake_with(&[]);
+        fake.list_override = Some(json_reply(
+            200,
+            &serde_json::json!({"entries": [], "cursor": "c", "has_more": true}),
+        ));
+        let server = Server::start(fake);
+        let roots = roots("r1-stop-listing");
+        let got = threaded(
+            server.endpoints(),
+            &roots,
+            fast(),
+            Arc::new(AtomicBool::new(true)),
+            20,
+        );
+        let (outcome, took) = got.expect("the press ended");
+        assert_eq!(refused_code(&outcome), "stopped", "{outcome:?}");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        assert!(server.log.lock().unwrap().len() <= 1);
+    }
+
+    /// R407-11: Stop pressed during a long back-off sleep ends the press
+    /// within a poll, not after the sleep.
+    #[test]
+    fn stop_ends_a_press_during_a_back_off_sleep() {
+        let mut fake = fake_with(&[("/GFDLNFO_TICK_01072019.zip", day_zip(1, 1, 50))]);
+        fake.throttle = usize::MAX;
+        let server = Server::start(fake);
+        let roots = roots("r1-stop-sleep");
+        let stop = Arc::new(AtomicBool::new(false));
+        let slow = Backoff {
+            max_attempts: 50,
+            max_total: Duration::from_hours(1),
+            base: Duration::from_mins(1),
+            cap: Duration::from_mins(10),
+            second: Duration::from_secs(1),
+        };
+        let flag = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Release);
+        });
+        let got = threaded(server.endpoints(), &roots, slow, stop, 30);
+        let (outcome, took) = got.expect("the press ended");
+        assert_eq!(refused_code(&outcome), "stopped", "{outcome:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    /// R407-11: Stop pressed while a request waits on a server that never
+    /// answers ends the press within a poll, not after the read timeout.
+    #[test]
+    fn stop_ends_a_press_whose_request_is_never_answered() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let roots = roots("r1-stop-silent");
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            flag.store(true, Ordering::Release);
+        });
+        let got = threaded(Endpoints::loopback(&base), &roots, fast(), stop, 30);
+        let (outcome, took) = got.expect("the press ended");
+        assert_eq!(refused_code(&outcome), "stopped", "{outcome:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    /// A press waits on `429` no longer than its total: a storm under a
+    /// small `max_total` is `throttled`, naming the total.
+    #[test]
+    fn the_total_wait_of_a_press_is_capped() {
+        let mut fake = fake_with(&[("/GFDLNFO_TICK_01072019.zip", day_zip(1, 1, 50))]);
+        fake.throttle = usize::MAX;
+        let server = Server::start(fake);
+        let roots = roots("r1-total");
+        let capped = Backoff {
+            max_attempts: 1_000,
+            max_total: Duration::from_millis(40),
+            base: Duration::from_millis(5),
+            cap: Duration::from_millis(10),
+            second: Duration::from_millis(1),
+        };
+        let got = threaded(
+            server.endpoints(),
+            &roots,
+            capped,
+            Arc::new(AtomicBool::new(false)),
+            30,
+        );
+        let (outcome, _) = got.expect("the press ended");
+        let Outcome::Refused(refusal) = &outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(refusal.code, "throttled", "{refusal:?}");
+        assert!(refusal.detail.contains("total wait"), "{refusal:?}");
+    }
+
+    /// One complete press, then `fragment` appended raw to the journal as a
+    /// crash would leave it; presses two to four are never
+    /// `journal_unreadable`, and each later press counts the torn line.
+    fn torn_tail_never_blocks(tag: &str, fragment: &[u8]) {
+        let server = Server::start(fake_with(&[(
+            "/GFDLNFO_TICK_05082019.zip",
+            day_zip(5, 1, 100),
+        )]));
+        let roots = roots(tag);
+        let one = go(&server, &roots, &mut Recorder::default());
+        assert_eq!(one.outcome, Outcome::Complete, "{one:#?}");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal_path(&roots.store))
+            .unwrap();
+        file.write_all(fragment).unwrap();
+        drop(file);
+        for press_no in 2..=4 {
+            let report = go(&server, &roots, &mut Recorder::default());
+            assert_eq!(
+                report.outcome,
+                Outcome::Complete,
+                "{tag} press {press_no}: {report:#?}"
+            );
+            assert_eq!(report.journal_torn, 1, "{tag} press {press_no}");
+        }
+        let text = String::from_utf8_lossy(&std::fs::read(journal_path(&roots.store)).unwrap())
+            .into_owned();
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with("v=1 begin ") && l.contains("torn=1")),
+            "{tag}: the torn line is journalled"
+        );
+        assert_eq!(status(&roots.store).unwrap().unwrap().verb, "end");
+    }
+
+    /// R407-02 (C3): a line torn after two bytes. Failed before the repair:
+    /// press three and every later press refused `journal_unreadable`.
+    #[test]
+    fn a_line_torn_inside_its_first_bytes_costs_one_line() {
+        torn_tail_never_blocks("r1-torn-short", b"v=");
+        torn_tail_never_blocks("r1-torn-v", b"v");
+    }
+
+    /// R407-02 (C3b): a NUL tail a lost block left, alone or after a line's
+    /// start. Failed before the repair, as above.
+    #[test]
+    fn a_nul_tail_costs_one_line() {
+        torn_tail_never_blocks("r1-torn-nul", &[0_u8; 37]);
+        torn_tail_never_blocks("r1-torn-v-nul", b"v=1 listed run=x name=\"A\0\0\0\0");
+    }
+
+    /// R407-02: a line cut inside a two-byte character (the journal keeps
+    /// names as they are) is torn, not an unreadable journal.
+    #[test]
+    fn a_line_cut_inside_a_character_costs_one_line() {
+        torn_tail_never_blocks("r1-torn-utf8", b"v=1 refused run=x name=\"kopie \xc3");
+    }
+
+    /// A line this journal never writes, in the middle, is still refused by
+    /// its number: the tolerance is for torn writes only.
+    #[test]
+    fn a_foreign_line_is_still_refused_by_its_number() {
+        let roots = roots("r1-foreign");
+        let path = journal_path(&roots.store);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            b"v=1 begin run=a at_ms=1 link=x\nhello, not a journal\nv=1 end run=a at_ms=2 verdict=complete\n",
+        )
+        .unwrap();
+        let why = Memory::load(&path).unwrap_err();
+        assert!(why.contains("line 2: not a journal line"), "{why}");
+        assert_eq!(status(&roots.store).unwrap().unwrap().verb, "end");
+    }
+
+    /// The torn-shape rule on its own.
+    #[test]
+    fn the_torn_shapes_are_prefixes_of_this_journals_lines_or_nul() {
+        for torn in [
+            &b"v"[..],
+            b"v=",
+            b"v=1",
+            b"v=1 ",
+            b"v=1 begin run=",
+            b"\0\0\0",
+            b"\0 rev=\"3\"",
+            b"v=\0\0",
+            b"v=1 x \xc3",
+        ] {
+            assert!(torn_shape(torn), "{torn:?}");
+        }
+        for foreign in [&b""[..], b"hello", b"v=2 begin", b"x=1 ", b" v=1 begin"] {
+            assert!(!torn_shape(foreign), "{foreign:?}");
+        }
+    }
+
+    /// The O(1) status read (C4): non-ASCII journal lines, the 64 KiB
+    /// window starting on a UTF-8 continuation byte. Failed before the
+    /// repair: `stream did not contain valid UTF-8`.
+    #[test]
+    fn status_reads_the_last_line_whatever_byte_its_window_starts_on() {
+        let roots = roots("r1-status-utf8");
+        let path = journal_path(&roots.store);
+        let mut journal = Journal {
+            path: path.clone(),
+            run: "r".into(),
+            lines: 0,
+            error: None,
+        };
+        let mut hit = false;
+        for i in 0..4_000 {
+            journal.line(
+                "refused",
+                &[
+                    (
+                        "name",
+                        quoted(&format!(
+                            "GFDLNFO_TICK_01072019 \u{2013} kopie {i} \u{e9}t\u{e9}.zip"
+                        )),
+                    ),
+                    ("reason", "not_a_day_zip".to_owned()),
+                ],
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            if bytes.len() > 65_536 && (bytes[bytes.len() - 65_536] & 0xC0) == 0x80 {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the window never started inside a character");
+        let last = status(&roots.store).unwrap().unwrap();
+        assert_eq!(last.verb, "refused");
+        assert!(last.get("name").unwrap().contains('\u{e9}'));
+        assert!(journal.error.is_none());
+    }
+
+    /// The status read passes a torn last line over, reads a last line
+    /// longer than 64 KiB by widening its window, and names a tail with no
+    /// whole line in `MAX_STATUS_WINDOW` bytes rather than answer `None`.
+    #[test]
+    fn status_passes_a_torn_line_widens_for_a_long_line_and_names_a_lineless_tail() {
+        let roots = roots("r1-status-wide");
+        let path = journal_path(&roots.store);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let long = "a".repeat(200 * 1_024);
+        let mut text =
+            format!("v=1 begin run=r at_ms=1 link=x\nv=1 ignored run=r at_ms=2 count={long}\n");
+        std::fs::write(&path, &text).unwrap();
+        let last = status(&roots.store).unwrap().unwrap();
+        assert_eq!(last.verb, "ignored");
+        assert_eq!(last.get("count").map(str::len), Some(long.len()));
+        text.push_str("v=1 end run=r at_\n");
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(status(&roots.store).unwrap().unwrap().verb, "ignored");
+        let huge = "b".repeat(usize::try_from(MAX_STATUS_WINDOW).unwrap() + 10);
+        std::fs::write(
+            &path,
+            format!("v=1 begin run=r at_ms=1 link=x\nv=1 ignored run=r count={huge}\n"),
+        )
+        .unwrap();
+        let why = status(&roots.store).unwrap_err();
+        assert!(why.contains("no whole journal line"), "{why}");
+        std::fs::write(&path, b"v=").unwrap();
+        assert_eq!(status(&roots.store).unwrap(), None);
+    }
+
+    /// R407-02 (C5): a journal that cannot be written stops the press before
+    /// any byte is fetched: `journal_unwritable`, nothing handed, nothing
+    /// downloaded, on every press. Failed before the repair: Complete, the
+    /// file handed, and downloaded again by press two.
+    #[test]
+    fn a_journal_that_cannot_be_written_stops_the_press_before_any_byte() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let server = Server::start(fake_with(&[(
+            "/GFDLNFO_TICK_08082019.zip",
+            day_zip(8, 1, 100),
+        )]));
+        let roots = roots("r1-unwritable");
+        let dir = journal_path(&roots.store).parent().unwrap().to_owned();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut reports = Vec::new();
+        let mut handed = Vec::new();
+        for _ in 0..2 {
+            let mut recorder = Recorder::default();
+            reports.push(go(&server, &roots, &mut recorder));
+            handed.extend(recorder.got);
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for report in &reports {
+            assert_eq!(
+                refused_code(&report.outcome),
+                "journal_unwritable",
+                "{report:#?}"
+            );
+            assert!(report.journal_error.is_some());
+            assert_eq!(report.listed, 0, "nothing listed: {report:#?}");
+        }
+        assert!(handed.is_empty(), "{handed:?}");
+        assert!(server.log.lock().unwrap().is_empty(), "no request at all");
+    }
+
+    /// L-R407-3 (C6): a press over N held days adds a constant number of
+    /// journal lines once each held day has its line. Failed before the
+    /// repair: every press added N + 4 lines, one sync each.
+    #[test]
+    fn held_days_are_journalled_once_not_once_a_press() {
+        let names: Vec<String> = (1..=40)
+            .map(|i| {
+                let (day, month) = (1 + (i - 1) % 28, 1 + (i - 1) / 28);
+                format!("GFDLNFO_TICK_{day:02}{month:02}2019.zip")
+            })
+            .collect();
+        let files: Vec<(String, Vec<u8>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                (
+                    format!("/{name}"),
+                    day_zip(u32::try_from(i).unwrap() + 1, 1, 30),
+                )
+            })
+            .chain(std::iter::once((
+                "/not a day zip.zip".to_owned(),
+                day_zip(99, 1, 30),
+            )))
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+        let server = Server::start(fake_with(&refs));
+        let roots = roots("r1-held");
+        for name in &names {
+            hold(&roots, name);
+        }
+        let mut added = Vec::new();
+        let mut before = 0;
+        for _ in 0..3 {
+            let report = go(&server, &roots, &mut Recorder::default());
+            assert_eq!(report.held, names.len());
+            assert_eq!(codes(&report).len(), 1, "{report:#?}");
+            assert!(report.staging.is_none(), "nothing wanted, no run folder");
+            let lines = journal_text(&roots).lines().count();
+            added.push(lines - before);
+            before = lines;
+        }
+        assert!(added[0] > names.len(), "{added:?}");
+        assert_eq!(added[1], added[2], "{added:?}");
+        assert!(added[1] <= 6, "a later press adds a constant: {added:?}");
+        let text = journal_text(&roots);
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("v=1 held ") && l.contains(&names[0]))
+                .count(),
+            1,
+            "{text}"
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("v=1 picks ") && l.contains("held=40"))
+                .count(),
+            3
+        );
+        assert!(server.downloads().is_empty());
+    }
+
+    /// C12: a store root that is there but may not be written is
+    /// `store_not_writable`, never `store_lost`.
+    #[test]
+    fn a_read_only_store_root_is_not_writable_not_lost() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let server = Server::start(fake_with(&[(
+            "/GFDLNFO_TICK_08082019.zip",
+            day_zip(8, 1, 100),
+        )]));
+        let roots = roots("r1-readonly");
+        std::fs::set_permissions(&roots.store, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let report = go(&server, &roots, &mut Recorder::default());
+        std::fs::set_permissions(&roots.store, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            refused_code(&report.outcome),
+            "store_not_writable",
+            "{report:#?}"
+        );
+    }
+
+    /// R407-18 with presses at once: the journal's folder made by two first
+    /// writers at the same moment is one folder, never a lost line. Failed
+    /// before the repair: the writer that lost the race to `create_dir` got
+    /// `File exists`, and since a lost line now stops the press, a press
+    /// beside another on a fresh store ended `journal_unwritable` (the
+    /// second agent's C7: 1 of 20).
+    #[test]
+    fn first_writers_at_once_share_the_journal_folder_and_lose_no_line() {
+        const WRITERS: usize = 16;
+        for round in 0..40 {
+            let roots = roots(&format!("r1-race-{round}"));
+            let path = journal_path(&roots.store);
+            assert!(!path.parent().unwrap().exists());
+            let gate = std::sync::Barrier::new(WRITERS);
+            let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..WRITERS)
+                    .map(|writer| {
+                        let (gate, path) = (&gate, &path);
+                        scope.spawn(move || {
+                            gate.wait();
+                            append_line(
+                                path,
+                                &format!("v=1 end run=w{writer} at_ms={round} verdict=run_busy"),
+                            )
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert!(
+                results.iter().all(Result::is_ok),
+                "round {round}: {results:?}"
+            );
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(text.lines().count(), WRITERS, "{text}");
+            assert!(text.lines().all(|l| parse_line(l).is_some()), "{text}");
+        }
+    }
+
+    /// Presses at once on a fresh store: one holds the staging lock, the
+    /// others are `run_busy` or run after it; none is `journal_unwritable`
+    /// and every journal line is whole.
+    #[test]
+    fn presses_at_once_on_a_fresh_store_never_lose_a_journal_line() {
+        let server = Server::start(fake_with(&[
+            ("/GFDLNFO_TICK_09082019.zip", day_zip(9, 2, 2_000)),
+            ("/GFDLNFO_TICK_12082019.zip", day_zip(12, 2, 2_000)),
+        ]));
+        let world = roots("r1-presses-at-once");
+        let endpoints = server.endpoints();
+        let gate = std::sync::Barrier::new(12);
+        let words: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..12)
+                .map(|_| {
+                    let (world, endpoints, gate) = (&world, &endpoints, &gate);
+                    scope.spawn(move || {
+                        let token = Tokens::new(&["tok-one"]);
+                        let meter = Meter::roomy();
+                        let fetch = Fetch {
+                            store_root: &world.store,
+                            tick_root: &world.tick,
+                            endpoints,
+                            token: &token,
+                            meter: &meter,
+                            floor: Floor::Percent(15),
+                            backoff: fast(),
+                            stop: None,
+                        };
+                        gate.wait();
+                        let report = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap()
+                            .block_on(run(&fetch, Ok(config()), &mut Recorder::default()));
+                        match &report.outcome {
+                            Outcome::Refused(why) => why.code.to_owned(),
+                            other => other.word().to_owned(),
+                        }
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(
+            words.iter().all(|w| w == "complete" || w == "run_busy"),
+            "{words:?}"
+        );
+        assert!(words.iter().any(|w| w == "complete"), "{words:?}");
+        let text = journal_text(&world);
+        assert!(text.lines().all(|l| parse_line(l).is_some()), "{text}");
+    }
+
+    /// The measurement behind docs/06 L-R407-3 (run with `--ignored
+    /// --nocapture`): three presses over 1,000 held days, the lines and the
+    /// time each adds, and `Memory::load` and `status` p50, p99 and max over
+    /// 31 reads of journals of 1,000, 10,000 and 100,000 lines, some of them
+    /// non-ASCII. Asserts the constant per-press growth it reports.
+    #[test]
+    #[ignore = "a measurement: run by name with --ignored --nocapture"]
+    fn measure_the_journal_costs_of_a_press() {
+        let mut names = Vec::new();
+        'outer: for year in 2019..2027 {
+            for month in 1..=12 {
+                for day in 1..=28 {
+                    names.push(format!("GFDLNFO_TICK_{day:02}{month:02}{year}.zip"));
+                    if names.len() == 1_000 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let files: Vec<(String, Vec<u8>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                (
+                    format!("/{name}"),
+                    day_zip(u32::try_from(i).unwrap() + 1, 1, 30),
+                )
+            })
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> =
+            files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+        let server = Server::start(fake_with(&refs));
+        let world = roots("r1-measure");
+        for name in &names {
+            hold(&world, name);
+        }
+        let mut before = 0;
+        let mut added = Vec::new();
+        for press_no in 1..=3 {
+            let start = Instant::now();
+            let report = go(&server, &world, &mut Recorder::default());
+            let took = start.elapsed();
+            let lines = journal_text(&world).lines().count();
+            println!(
+                "MEASURE press {press_no}: n=1000 held={} outcome={} took_ms={} lines_added={}",
+                report.held,
+                report.outcome.word(),
+                took.as_millis(),
+                lines - before
+            );
+            added.push(lines - before);
+            before = lines;
+        }
+        assert_eq!(added[1], added[2]);
+        assert!(added[1] <= 6, "{added:?}");
+        for count in [1_000_usize, 10_000, 100_000] {
+            let roots = roots(&format!("r1-measure-{count}"));
+            let path = journal_path(&roots.store);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut text = String::new();
+            for i in 0..count {
+                let _ = writeln!(
+                    text,
+                    "v=1 verified run=r at_ms={i} name=\"GFDLNFO_TICK_{:02}072019 \u{e9}t\u{e9} {i}.zip\" \
+                     rev=\"{i:011}\" hash=\"\" path=\"/s/{i}\" bytes=100 entries=1 sha256={i:064x} how=downloaded",
+                    1 + i % 28
+                );
+            }
+            std::fs::write(&path, &text).unwrap();
+            let mut load = Vec::new();
+            let mut tail = Vec::new();
+            for _ in 0..31 {
+                let start = Instant::now();
+                let memory = Memory::load(&path).unwrap();
+                load.push(start.elapsed());
+                assert_eq!(memory.verified.len(), count);
+                let start = Instant::now();
+                assert!(status(&roots.store).unwrap().is_some());
+                tail.push(start.elapsed());
+            }
+            load.sort();
+            tail.sort();
+            println!(
+                "MEASURE lines={count} bytes={} Memory::load p50={:?} p99={:?} max={:?} | status p50={:?} p99={:?} max={:?} (n=31 each, wall clock, debug build)",
+                text.len(),
+                load[15],
+                load[30],
+                load[30],
+                tail[15],
+                tail[30],
+                tail[30]
+            );
+        }
+    }
+
+    /// A redirect to an allowlisted host under another scheme (here `https`
+    /// where the routes are `http`; in the app, `http` where they are
+    /// `https`: a downgrade) is `redirect_refused`, never followed.
+    #[test]
+    fn a_redirect_that_changes_the_scheme_is_refused() {
+        let mut fake = fake_with(&[("/GFDLNFO_TICK_01082019.zip", day_zip(1, 1, 500))]);
+        fake.redirect_to = Some("https://127.0.0.1:9/redirected".into());
+        let server = Server::start(fake);
+        let roots = roots("r1-scheme");
+        let report = go(&server, &roots, &mut Recorder::default());
+        assert_eq!(
+            codes(&report),
+            [("GFDLNFO_TICK_01082019.zip".to_owned(), "redirect_refused")],
+            "{report:#?}"
+        );
+        assert!(
+            report.refused[0].detail.contains("scheme=https"),
+            "{:?}",
+            report.refused[0]
+        );
+    }
 }

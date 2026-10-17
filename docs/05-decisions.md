@@ -71055,6 +71055,48 @@ Rejected: listing the folder by scraping the shared page's HTML (a page shape
 nobody documents), and a total request timeout (a day zip is hundreds of
 megabytes). Tests: `crates/pull/src/gdfl_dropbox_tests.rs`.
 
+Repair round 1 (2026-10-17, after the second agent's check
+`round2/verify-R4-07-r1.json`), each locked here:
+
+1. **The first name of a hash is the original.** The journal's memory keeps
+   the first name a content hash or SHA-256 was verified under, and a file
+   refused `content_duplicate` by its SHA-256 is journalled with `of=<name>`;
+   while its listed revision is unchanged a later press refuses it at the
+   pick and never fetches, reads or hands it again (R407-14).
+2. **Every listing ends.** A page that lists nothing new or keeps its cursor
+   is a stall, and 8 in a row (`MAX_STALLED_PAGES`) are
+   `listing_incomplete`; an entry listed again at the same path and revision
+   is one file and a counted repeat; Stop is read before every page, while a
+   request waits and during a back-off sleep (polled every 50 ms); and one
+   press waits on `429` and `5xx` at most `Backoff::max_total`, 30 minutes,
+   in all (R407-15). Eight and thirty are this repository's own choices,
+   not Dropbox's: no vendor source states how many empty pages a listing
+   may return.
+3. **One torn write costs one line.** A whole line with a torn write's shape
+   (a prefix of this journal's own lines, at any byte, or a NUL tail) is
+   counted on `begin` as `torn=` and skipped; any other line is still
+   refused by its number (R407-16). The journal is read as bytes, so a cut
+   inside a character is a torn line, not an unreadable journal.
+4. **`status` reads bytes** and decodes whole lines, widening its window to
+   at most 4 MiB for a longer line and naming a tail with none (R407-17).
+5. **A journal that cannot be written stops the press** `journal_unwritable`
+   before the next byte, file or hand-off, and a press that lost a line is
+   never `complete` (R407-18).
+6. **Held and refused files are journalled once**, and a `picks` line counts
+   them on every press, in one write made durable once (R407-19). The
+   journal still grows by a constant a press and is read whole once a press
+   (L-R407-3); a checkpoint sidecar that would make that read O(state) is
+   not built.
+7. A permission refusal of the store root is `store_not_writable`, and a
+   redirect keeps the routes' scheme (R407-20).
+8. **Two first writers share the journal's folder.** Once a lost line
+   stops the press (item 5), the loser of a `create_dir` race on a fresh
+   store would end `journal_unwritable`; `File exists` with the folder
+   there is not a failure, and a lost line found with the store root gone
+   is named `store_lost` (R407-21).
+9. **A byte floor is at least 1 GB** (`store::settings::MIN_FLOOR_BYTES`),
+   recorded under D-4987 below (R407-22).
+
 ### D-4987 — One disk projection and one free-space floor for every disk-writing step; the floor refuses before any byte (R4-07, PERF-13) — 2026-10-16
 
 `pull::disk_projection` is the shared answer to "how many bytes will this plan
@@ -71096,3 +71138,16 @@ a from-scratch fetch of 2,000 options days and 3,995 market files projects
 708.5 GB and is refused `disk_floor`, 137.6 GB short. The median rule
 over-projects a small index on real data (L-R407-7: 4.9x for FINNIFTY), which
 the floor can afford and the label says.
+
+Repair round 1 (2026-10-17): **a byte floor is at least 1 GB**
+(`store::settings::MIN_FLOOR_BYTES`, 10^9 bytes). The second agent found
+`disk.floor = 15` read as fifteen bytes: a floor that protects nothing, and
+most likely a percent with its `%` left off. A smaller byte floor is refused by
+name, and a bare `1` to `95` is told to write `<n>%`. One gigabyte is this
+repository's own choice, not a vendor's: it is more than three times the
+largest file a press downloads, one GDFL options day zip (about 290 MB,
+L-R407-9). Rejected: accepting any non-zero
+byte count (the defect) and guessing that a bare small number means percent
+(a fallback that would hide which reading was taken). Test:
+`crates/store/src/settings_tests.rs::a_byte_floor_below_one_gigabyte_is_refused_and_a_bare_percent_named`
+(R407-22).

@@ -137,6 +137,21 @@ pub const MAX_PAGE_BYTES: usize = 32 << 20;
 /// How many cut downloads of one file a run resumes before it moves on.
 pub const MAX_RESUMES: u32 = 4;
 
+/// The most listing pages in a row that make no progress (no entry the
+/// listing did not already hold, or a cursor that did not move) before the
+/// listing is `listing_incomplete`. With [`MAX_LISTED`] and [`MAX_FOLDERS`]
+/// it bounds every listing: a page that makes progress adds at least one
+/// entry, and both entry counts are capped.
+pub const MAX_STALLED_PAGES: usize = 8;
+
+/// The widest tail [`status`] reads when the last whole line does not fit
+/// its first 64 KiB window; past it the read is refused by name.
+pub const MAX_STATUS_WINDOW: u64 = 4 << 20;
+
+/// How often a wait (a request in flight, a back-off sleep) reads the
+/// operator's Stop.
+const STOP_POLL: Duration = Duration::from_millis(50);
+
 /// The config file's path under `home`.
 #[must_use]
 pub fn config_path(home: &Path) -> PathBuf {
@@ -548,15 +563,20 @@ pub struct Backoff {
     pub cap: Duration,
     /// What one `Retry-After` second is (one second, except in a test).
     pub second: Duration,
+    /// The most one press waits on `429` and `5xx` in all, over every
+    /// request: a wait that would pass it refuses the run by name.
+    pub max_total: Duration,
 }
 
 impl Backoff {
-    /// Five attempts, 2 s doubling, at most 5 minutes a wait.
+    /// Five attempts, 2 s doubling, at most 5 minutes a wait and 30 minutes
+    /// a press.
     pub const DEFAULT: Self = Self {
         max_attempts: 5,
         base: Duration::from_secs(2),
         cap: Duration::from_mins(5),
         second: Duration::from_secs(1),
+        max_total: Duration::from_mins(30),
     };
 
     fn wait(&self, attempt: u32, retry_after: Option<u64>) -> Duration {
@@ -574,9 +594,17 @@ impl Backoff {
 fn client(endpoints: &Endpoints) -> Result<reqwest::Client, String> {
     crate::ensure_tls_provider();
     let allowed = endpoints.clone();
+    // A redirect keeps the routes' own scheme: an allowlisted host over
+    // plain `http` is a downgrade, refused like a foreign host.
+    let scheme = endpoints
+        .api
+        .split_once("://")
+        .map_or("https", |(scheme, _)| scheme)
+        .to_owned();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
         let host = attempt.url().host_str().unwrap_or_default().to_owned();
-        if attempt.previous().len() < 3 && allowed.allows(&host) {
+        if attempt.previous().len() < 3 && attempt.url().scheme() == scheme && allowed.allows(&host)
+        {
             attempt.follow()
         } else {
             attempt.stop()
@@ -657,6 +685,30 @@ struct Wire<'a> {
     waited: Duration,
     /// The proxy every request goes through, by host only, or `None`.
     via: Option<String>,
+    /// The operator's Stop, read while a request is in flight and while a
+    /// back-off sleeps.
+    stop: Option<&'a AtomicBool>,
+}
+
+/// Resolves once the operator's Stop is set; never without one.
+async fn stop_pressed(stop: Option<&AtomicBool>) {
+    match stop {
+        Some(flag) => {
+            while !flag.load(Ordering::Acquire) {
+                tokio::time::sleep(STOP_POLL).await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The run refusal of a Stop read during `what`.
+fn stopped_during(what: &str) -> Stop {
+    RunRefusal::new(
+        "stopped",
+        format!("the operator pressed Stop during the {what}"),
+    )
+    .into()
 }
 
 /// A response with its status and the headers the fetch reads.
@@ -676,8 +728,17 @@ impl Wire<'_> {
         let mut attempt = 0_u32;
         let mut reread = false;
         loop {
+            if self.stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(stopped_during(what));
+            }
             let request = build(&self.client, self.token.expose());
-            let response = request.send().await.map_err(|why| {
+            // A request in flight is raced against the Stop: an answer that
+            // never comes holds the press no longer than one poll.
+            let sent = tokio::select! {
+                sent = request.send() => sent,
+                () = stop_pressed(self.stop) => return Err(stopped_during(what)),
+            };
+            let response = sent.map_err(|why| {
                 RunRefusal::new(
                     "transport",
                     format!("{what}: {}", transport_words(&why, self.via.as_deref())),
@@ -715,8 +776,29 @@ impl Wire<'_> {
                     .into());
                 }
                 let pause = self.backoff.wait(attempt, retry_after);
+                if self.waited.saturating_add(pause) > self.backoff.max_total {
+                    let code = if status == 429 {
+                        "throttled"
+                    } else {
+                        "server_error"
+                    };
+                    return Err(RunRefusal::new(
+                        code,
+                        format!(
+                            "{what}: answered {status}; waiting {} ms more would pass the \
+                             press's total wait of {} ms (waited {} ms)",
+                            pause.as_millis(),
+                            self.backoff.max_total.as_millis(),
+                            self.waited.as_millis()
+                        ),
+                    )
+                    .into());
+                }
                 self.waited = self.waited.saturating_add(pause);
-                tokio::time::sleep(pause).await;
+                tokio::select! {
+                    () = tokio::time::sleep(pause) => {}
+                    () = stop_pressed(self.stop) => return Err(stopped_during(what)),
+                }
                 continue;
             }
             return Ok(Answer { response, status });
@@ -887,17 +969,77 @@ async fn refused_listing(answer: Answer) -> RunRefusal {
     )
 }
 
-/// Every file the shared folder lists, every page of every folder.
+/// What a listing has gathered so far.
+#[derive(Default)]
+struct Walk {
+    files: Vec<Listed>,
+    /// `(path, rev)` of every file listed.
+    seen: std::collections::HashSet<(String, String)>,
+    /// Every folder listed.
+    seen_folders: std::collections::HashSet<String>,
+    /// Folders still to list, with their depth.
+    queue: Vec<(String, usize)>,
+    /// Entries a page listed again.
+    repeats: usize,
+}
+
+impl Walk {
+    /// Takes one page: a file or folder not listed before is kept, one
+    /// listed before is a repeat. How many entries were new, or the cap a
+    /// page passed.
+    fn take(&mut self, page: Page, depth: usize) -> Result<usize, Stop> {
+        let mut added = 0_usize;
+        for file in page.files {
+            if self.seen.insert((file.path.clone(), file.rev.clone())) {
+                self.files.push(file);
+                added += 1;
+            } else {
+                self.repeats += 1;
+            }
+        }
+        for sub in page.folders {
+            if self.seen_folders.insert(sub.clone()) {
+                self.queue.push((sub, depth + 1));
+                added += 1;
+            } else {
+                self.repeats += 1;
+            }
+        }
+        if self.files.len() > MAX_LISTED {
+            return Err(RunRefusal::new(
+                "listing_incomplete",
+                format!("more than {MAX_LISTED} files"),
+            )
+            .into());
+        }
+        if self.seen_folders.len() > MAX_FOLDERS {
+            return Err(RunRefusal::new(
+                "listing_incomplete",
+                format!("more than {MAX_FOLDERS} folders"),
+            )
+            .into());
+        }
+        Ok(added)
+    }
+}
+
+/// Every file the shared folder lists, every page of every folder, and how
+/// many entries a page repeated. An entry listed again with the same path
+/// and revision is one file, counted as a repeat; a page that adds no entry
+/// or keeps its cursor is a stall, and [`MAX_STALLED_PAGES`] of them in a
+/// row is `listing_incomplete`. Stop is read before every page.
 async fn list(
     wire: &mut Wire<'_>,
     endpoints: &Endpoints,
     link: &str,
-) -> Result<(Vec<Listed>, usize), Stop> {
-    let mut files = Vec::new();
-    let mut queue = vec![(String::new(), 0_usize)];
+) -> Result<(Vec<Listed>, usize, usize), Stop> {
+    let mut walk = Walk {
+        queue: vec![(String::new(), 0_usize)],
+        ..Walk::default()
+    };
     let mut folders = 0_usize;
     let mut pages = 0_usize;
-    while let Some((folder, depth)) = queue.pop() {
+    while let Some((folder, depth)) = walk.queue.pop() {
         folders += 1;
         if folders > MAX_FOLDERS || depth > MAX_DEPTH {
             return Err(RunRefusal::new(
@@ -907,62 +1049,94 @@ async fn list(
             .into());
         }
         let mut cursor: Option<String> = None;
+        let mut stalled = 0_usize;
         loop {
+            if wire.stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                return Err(RunRefusal::new(
+                    "stopped",
+                    format!("the operator pressed Stop during the listing, after {pages} pages"),
+                )
+                .into());
+            }
             let first = cursor.is_none();
-            let (url, body) = match &cursor {
-                None => (
-                    format!("{}/2/files/list_folder", endpoints.api),
-                    serde_json::json!({"path": folder, "shared_link": {"url": link}, "recursive": false}),
-                ),
-                Some(c) => (
-                    format!("{}/2/files/list_folder/continue", endpoints.api),
-                    serde_json::json!({"cursor": c}),
-                ),
-            };
-            let text = body.to_string();
-            let answer = wire
-                .send("listing", &|client, token| {
-                    client
-                        .post(&url)
-                        .bearer_auth(token)
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .body(text.clone())
-                })
-                .await
-                .map_err(|stop| incomplete_unless_first(stop, first && folder.is_empty(), pages))?;
-            if !(200..300).contains(&answer.status) {
-                if first && folder.is_empty() {
-                    return Err(refused_listing(answer).await.into());
-                }
-                return Err(RunRefusal::new(
-                    "listing_incomplete",
-                    format!("pages={pages} a later page answered {}", answer.status),
-                )
-                .into());
-            }
-            let bytes = body_capped(answer.response, MAX_PAGE_BYTES, wire.via.as_deref())
-                .await
-                .map_err(|why| {
-                    RunRefusal::new("listing_incomplete", format!("pages={pages} {why}"))
-                })?;
-            let page = parse_page(&bytes, &folder)?;
+            let page = list_page(wire, endpoints, link, &folder, cursor.as_deref(), pages).await?;
             pages += 1;
-            files.extend(page.files);
-            queue.extend(page.folders.into_iter().map(|f| (f, depth + 1)));
-            if files.len() > MAX_LISTED {
-                return Err(RunRefusal::new(
-                    "listing_incomplete",
-                    format!("more than {MAX_LISTED} files"),
-                )
-                .into());
-            }
-            if !page.has_more {
+            let has_more = page.has_more;
+            let next = page.cursor.clone();
+            let added = walk.take(page, depth)?;
+            if !has_more {
                 break;
             }
-            cursor = Some(page.cursor);
+            let kept_cursor = !first && cursor.as_deref() == Some(next.as_str());
+            stalled = if added == 0 || kept_cursor {
+                stalled + 1
+            } else {
+                0
+            };
+            if stalled >= MAX_STALLED_PAGES {
+                return Err(RunRefusal::new(
+                    "listing_incomplete",
+                    format!(
+                        "pages={pages} {stalled} pages in a row said has_more and listed \
+                         nothing new or kept the cursor (folder {})",
+                        if folder.is_empty() { "/" } else { &folder }
+                    ),
+                )
+                .into());
+            }
+            cursor = Some(next);
         }
     }
-    Ok((files, pages))
+    Ok((walk.files, pages, walk.repeats))
+}
+
+/// One page of `folder`: the first by `list_folder`, a later one by its
+/// cursor. A refusal on the link's first page names the link; on any later
+/// page it is `listing_incomplete`.
+async fn list_page(
+    wire: &mut Wire<'_>,
+    endpoints: &Endpoints,
+    link: &str,
+    folder: &str,
+    cursor: Option<&str>,
+    pages: usize,
+) -> Result<Page, Stop> {
+    let first = cursor.is_none();
+    let (url, body) = match cursor {
+        None => (
+            format!("{}/2/files/list_folder", endpoints.api),
+            serde_json::json!({"path": folder, "shared_link": {"url": link}, "recursive": false}),
+        ),
+        Some(c) => (
+            format!("{}/2/files/list_folder/continue", endpoints.api),
+            serde_json::json!({"cursor": c}),
+        ),
+    };
+    let text = body.to_string();
+    let answer = wire
+        .send("listing", &|client, token| {
+            client
+                .post(&url)
+                .bearer_auth(token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(text.clone())
+        })
+        .await
+        .map_err(|stop| incomplete_unless_first(stop, first && folder.is_empty(), pages))?;
+    if !(200..300).contains(&answer.status) {
+        if first && folder.is_empty() {
+            return Err(refused_listing(answer).await.into());
+        }
+        return Err(RunRefusal::new(
+            "listing_incomplete",
+            format!("pages={pages} a later page answered {}", answer.status),
+        )
+        .into());
+    }
+    let bytes = body_capped(answer.response, MAX_PAGE_BYTES, wire.via.as_deref())
+        .await
+        .map_err(|why| RunRefusal::new("listing_incomplete", format!("pages={pages} {why}")))?;
+    Ok(parse_page(&bytes, folder)?)
 }
 
 /// A transport failure after the first page is `listing_incomplete`.
@@ -1106,8 +1280,55 @@ struct Journal {
 
 impl Journal {
     /// Appends `verb` with `pairs` as one line, made durable; a failure is
-    /// kept and named in the run's report, never dropped.
+    /// kept and named in the run's report, never dropped, and the press
+    /// stops at its next [`Journal::ok`].
     fn line(&mut self, verb: &str, pairs: &[(&str, String)]) {
+        let text = self.text(verb, pairs);
+        self.batch(&[text]);
+    }
+
+    /// Appends `lines` (each from [`Journal::text`]) in one write made
+    /// durable once: one sync for a listing's every pick, not one a file.
+    fn batch(&mut self, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        if let Err(why) = append_line(&self.path, &lines.join("\n")) {
+            self.error.get_or_insert(why);
+        } else {
+            self.lines += u64::try_from(lines.len()).unwrap_or(u64::MAX);
+        }
+    }
+
+    /// `Err(journal_unwritable)` once any line could not be written: no
+    /// byte is fetched and nothing is handed on that the journal cannot
+    /// record (R407-02).
+    fn ok(&self) -> Result<(), Stop> {
+        let Some(why) = &self.error else {
+            return Ok(());
+        };
+        // A store root that is gone (the drive unplugged) is what failed,
+        // and is named so; the lost line is its consequence.
+        if let Some(root) = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .filter(|root| !root.is_dir())
+        {
+            return Err(RunRefusal::new(
+                "store_lost",
+                format!(
+                    "{} is gone; the journal could not be written: {why}",
+                    root.display()
+                ),
+            )
+            .into());
+        }
+        Err(RunRefusal::new("journal_unwritable", why.clone()).into())
+    }
+
+    /// One journal line's text: `v=1 <verb> run=.. at_ms=..` and `pairs`.
+    fn text(&self, verb: &str, pairs: &[(&str, String)]) -> String {
         let mut text = format!(
             "v=1 {verb} run={} at_ms={}",
             self.run,
@@ -1121,23 +1342,41 @@ impl Journal {
             text.push('=');
             text.push_str(value);
         }
-        if let Err(why) = append_line(&self.path, &text) {
-            self.error.get_or_insert(why);
-        } else {
-            self.lines += 1;
-        }
+        text
     }
 }
 
-/// Appends one whole line to `path`, closing a torn last line first.
+/// Whether a whole journal line that does not parse is the shape a torn
+/// write leaves, which the next append closed: a prefix of one of this
+/// module's own lines (it begins `v=1 `, or is a non-empty prefix of
+/// `v=1 `), possibly ending in NUL bytes, or a line a lost block left
+/// beginning with NUL. Anything else is not this journal's and is refused.
+fn torn_shape(line: &[u8]) -> bool {
+    if line.first() == Some(&0) {
+        return true;
+    }
+    let end = line.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let kept = line.get(..end).unwrap_or(line);
+    kept.starts_with(b"v=1 ") || (!kept.is_empty() && b"v=1 ".starts_with(kept))
+}
+
+/// Appends `line` (one or more whole lines, `\n` between them) to `path`,
+/// closing a torn last line first.
 fn append_line(path: &Path, line: &str) -> Result<(), String> {
     let refused = |why: std::io::Error| format!("{}: {why}", path.display());
     // ONE folder, never a chain: a store root that is gone (the drive was
-    // unplugged) is refused, never made again somewhere else.
+    // unplugged) is refused, never made again somewhere else. Two first
+    // writers at once (presses side by side on a fresh store) make it once:
+    // the loser's `File exists` with the folder there is no failure
+    // (R407-21).
     if let Some(dir) = path.parent()
         && !dir.is_dir()
     {
-        std::fs::create_dir(dir).map_err(refused)?;
+        match std::fs::create_dir(dir) {
+            Ok(()) => {}
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(why) => return Err(refused(why)),
+        }
     }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1169,33 +1408,59 @@ struct Memory {
     complete: HashMap<String, u64>,
     /// `(name, rev)` to the verified file's path.
     verified: HashMap<(String, String), PathBuf>,
-    /// Listed or computed content hashes of verified files, to their name.
+    /// Listed or computed content hashes of verified files, to the FIRST
+    /// name verified with them: a later name with the same bytes is the
+    /// duplicate on every press, never the original (R407-01).
     hashes: HashMap<String, String>,
+    /// `(name, rev)` of a file refused `content_duplicate` by its SHA-256,
+    /// to the name it duplicates: refused again at the pick, never fetched
+    /// or verified again while its revision is unchanged.
+    duplicates: HashMap<(String, String), String>,
+    /// Names already journalled `held`: a held file is journalled once,
+    /// not once a press (the press's `picks` line counts every one).
+    held: std::collections::HashSet<String>,
+    /// `(name, rev, reason)` of refusals already journalled: a listing's
+    /// refusal is journalled once, and counted by every press's `picks`.
+    refused: std::collections::HashSet<(String, String, String)>,
     /// `(name, rev)` to the newest part's path, not yet promoted or refused.
     parts: HashMap<(String, String), PathBuf>,
     /// A name to the `(rev, listed content hash)` it was last verified with:
     /// what a re-delivery of a held day is told apart by (FM-007).
     delivered: HashMap<String, (String, String)>,
-    /// Lines of this journal's own shape that do not parse: a torn line a
-    /// crash left, closed by the next append. Counted, never read.
+    /// Lines a torn write left ([`torn_shape`]), closed by the next append,
+    /// and an unterminated last line: counted, journalled on `begin` and
+    /// reported, never read.
     torn: usize,
 }
 
 impl Memory {
-    /// Reads every whole line of the journal: O(lines), once per press. A
-    /// torn last line is ignored.
+    /// Reads every whole line of the journal as bytes: O(lines), once per
+    /// press. A torn line (one a crash or a full disk cut, at any byte,
+    /// even inside a character, or a NUL tail a lost block left) is counted
+    /// and skipped, so one torn write costs one line and never blocks a
+    /// later press; a line of any other shape is refused by its number.
     fn load(path: &Path) -> Result<Self, String> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => String::new(),
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(why) => return Err(format!("{}: {why}", path.display())),
         };
         let mut memory = Self::default();
-        let whole = text.rsplit_once('\n').map_or("", |(whole, _)| whole);
-        for (number, line) in whole.lines().enumerate() {
-            match parse_line(line) {
+        let (whole, tail) = match bytes.iter().rposition(|&b| b == b'\n') {
+            Some(at) => (
+                bytes.get(..at).unwrap_or_default(),
+                bytes.get(at + 1..).unwrap_or_default(),
+            ),
+            None => (&[][..], &bytes[..]),
+        };
+        memory.torn += usize::from(!tail.is_empty());
+        if whole.is_empty() && bytes.first() != Some(&b'\n') {
+            return Ok(memory);
+        }
+        for (number, line) in whole.split(|&b| b == b'\n').enumerate() {
+            match std::str::from_utf8(line).ok().and_then(parse_line) {
                 Some(fields) => memory.read(&fields),
-                None if line.starts_with("v=1 ") => memory.torn += 1,
+                None if torn_shape(line) => memory.torn += 1,
                 None => {
                     return Err(format!(
                         "{} line {}: not a journal line",
@@ -1238,7 +1503,9 @@ impl Memory {
                     .flatten()
                 {
                     if !hash.is_empty() {
-                        self.hashes.insert(hash.to_owned(), key.0.clone());
+                        self.hashes
+                            .entry(hash.to_owned())
+                            .or_insert_with(|| key.0.clone());
                     }
                 }
                 if let Some(hash) = fields.get("hash").filter(|hash| !hash.is_empty()) {
@@ -1252,17 +1519,36 @@ impl Memory {
             "refused" if fields.get("part").is_some() => {
                 self.parts.remove(&key());
             }
+            "refused" if fields.get("name").is_some() => {
+                let (name, rev) = key();
+                let reason = fields.get("reason").unwrap_or_default();
+                if let Some(of) = fields.get("of").filter(|_| reason == "content_duplicate") {
+                    self.duplicates
+                        .insert((name.clone(), rev.clone()), of.to_owned());
+                }
+                self.refused.insert((name, rev, reason.to_owned()));
+            }
+            "held" => {
+                if let Some(name) = fields.get("name") {
+                    self.held.insert(name.to_owned());
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// The journal's last whole line, read from at most its last 64 KiB: O(1)
-/// in the journal's length. `None` for a missing or empty journal.
+/// The journal's last whole line that parses, read as bytes from its last
+/// 64 KiB: O(1) in the journal's length. The window's first, cut line is
+/// skipped and every line is decoded whole, so a window that starts inside
+/// a character reads the same; a torn line is passed over. When no whole
+/// line fits the window it is doubled, up to [`MAX_STATUS_WINDOW`]. `None`
+/// for a missing journal, an empty one, or one with no whole line yet.
 ///
 /// # Errors
 ///
-/// The path and why it could not be read.
+/// The path and why it could not be read, or that no whole line ends in
+/// its last [`MAX_STATUS_WINDOW`] bytes.
 pub fn status(store_root: &Path) -> Result<Option<Fields>, String> {
     let path = journal_path(store_root);
     let refused = |why: std::io::Error| format!("{}: {why}", path.display());
@@ -1272,14 +1558,42 @@ pub fn status(store_root: &Path) -> Result<Option<Fields>, String> {
         Err(why) => return Err(refused(why)),
     };
     let len = file.metadata().map_err(refused)?.len();
-    let from = len.saturating_sub(64 * 1_024);
-    file.seek(std::io::SeekFrom::Start(from)).map_err(refused)?;
-    let mut tail = String::new();
-    file.take(64 * 1_024)
-        .read_to_string(&mut tail)
-        .map_err(refused)?;
-    let whole = tail.rsplit_once('\n').map_or("", |(whole, _)| whole);
-    Ok(whole.lines().next_back().and_then(parse_line))
+    let mut window = 64 * 1_024_u64;
+    loop {
+        let from = len.saturating_sub(window);
+        file.seek(std::io::SeekFrom::Start(from)).map_err(refused)?;
+        let mut tail = Vec::new();
+        (&mut file)
+            .take(window)
+            .read_to_end(&mut tail)
+            .map_err(refused)?;
+        let whole = match tail.iter().rposition(|&b| b == b'\n') {
+            Some(at) => tail.get(..at).unwrap_or_default(),
+            None => &[][..],
+        };
+        let mut lines: Vec<&[u8]> = whole.split(|&b| b == b'\n').collect();
+        if from > 0 && !lines.is_empty() {
+            // The window's first line may begin before it: never read.
+            lines.remove(0);
+        }
+        if let Some(fields) = lines
+            .iter()
+            .rev()
+            .find_map(|line| std::str::from_utf8(line).ok().and_then(parse_line))
+        {
+            return Ok(Some(fields));
+        }
+        if from == 0 {
+            return Ok(None);
+        }
+        if window >= MAX_STATUS_WINDOW {
+            return Err(format!(
+                "{}: no whole journal line ends in its last {MAX_STATUS_WINDOW} bytes",
+                path.display()
+            ));
+        }
+        window = window.saturating_mul(2).min(MAX_STATUS_WINDOW);
+    }
 }
 
 // -- the hand-off -------------------------------------------------------------
@@ -1442,6 +1756,9 @@ pub struct Report {
     pub waited: Duration,
     /// Why a journal line could not be written, if one could not.
     pub journal_error: Option<String>,
+    /// Torn journal lines this press found and skipped (a crash or a full
+    /// disk cut them), journalled on its `begin` line.
+    pub journal_torn: usize,
     /// How it ended.
     pub outcome: Outcome,
 }
@@ -1486,9 +1803,17 @@ pub async fn run(
         resumed: 0,
         waited: Duration::ZERO,
         journal_error: None,
+        journal_torn: 0,
         outcome: Outcome::Complete,
     };
-    let outcome = match press(fetch, config, handoff, &mut journal, &mut report).await {
+    let pressed = press(fetch, config, handoff, &mut journal, &mut report).await;
+    // A press whose journal lost a line is never complete, whatever it did:
+    // the next press could not know it (R407-02).
+    let pressed = match (pressed, journal.ok()) {
+        (Ok(()), Err(lost)) => Err(lost),
+        (pressed, _) => pressed,
+    };
+    let outcome = match pressed {
         Ok(()) if report.refused.is_empty() && report.not_handed.is_empty() => Outcome::Complete,
         Ok(()) => Outcome::Incomplete,
         Err(Stop::Wait(wait)) => {
@@ -1534,6 +1859,10 @@ pub async fn run(
             .with(
                 "refused",
                 telemetry::Value::Uint(u64::try_from(report.refused.len()).unwrap_or(u64::MAX)),
+            )
+            .with(
+                "journal_error",
+                telemetry::Value::Str(journal.error.as_deref().unwrap_or("none")),
             ),
     );
     report.journal_error = journal.error.take();
@@ -1568,7 +1897,13 @@ async fn press(
         }
         .into());
     }
-    journal.line("begin", &[("link", print.clone())]);
+    report.journal_torn = memory.torn;
+    journal.line(
+        "begin",
+        &[("link", print.clone()), ("torn", memory.torn.to_string())],
+    );
+    // A journal that cannot be written stops the press before any byte.
+    journal.ok()?;
     let token = fetch.token.read()?;
     let mut wire = Wire {
         client: client(fetch.endpoints).map_err(|why| RunRefusal::new("transport", why))?,
@@ -1577,9 +1912,17 @@ async fn press(
         backoff: fetch.backoff,
         waited: Duration::ZERO,
         via: fetch.endpoints.proxy_in_use(),
+        stop: fetch.stop,
     };
     let picked = listing(fetch, &mut wire, &config.link, &memory, journal, report).await?;
+    journal.ok()?;
     plan_floor(fetch, &staging, &picked, &memory, journal)?;
+    journal.ok()?;
+    if picked.wanted.is_empty() {
+        // Nothing to fetch: no run folder, so a daily press over a held
+        // store leaves no empty folder behind.
+        return Ok(());
+    }
     let run_dir = staging.join(&journal.run);
     std::fs::create_dir(&run_dir)
         .map_err(|why| RunRefusal::new("store_lost", format!("{}: {why}", run_dir.display())))?;
@@ -1598,8 +1941,15 @@ async fn press(
 /// never made again under `/Volumes`), and its lock taken: `run_busy` names
 /// the holder.
 fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<std::fs::File, Stop> {
+    // A store root that is there but may not be written is its own code:
+    // the drive is not lost, its permissions refuse the press.
     let lost = |path: &Path, why: std::io::Error| {
-        RunRefusal::new("store_lost", format!("{}: {why}", path.display()))
+        let code = if why.kind() == std::io::ErrorKind::PermissionDenied {
+            "store_not_writable"
+        } else {
+            "store_lost"
+        };
+        RunRefusal::new(code, format!("{}: {why}", path.display()))
     };
     let rest = staging.strip_prefix(store_root).unwrap_or(staging);
     let mut at = store_root.to_path_buf();
@@ -1619,8 +1969,13 @@ fn lock_staging(store_root: &Path, staging: &Path, run: &str) -> Result<std::fs:
         .open(&path)
         .map_err(|why| lost(&path, why))?;
     if lock.try_lock().is_err() {
-        let mut holder = String::new();
-        let _ = (&lock).read_to_string(&mut holder);
+        // The lock gains a line a press: only its last 4 KiB are read.
+        let mut tail = Vec::new();
+        let len = lock.metadata().map_or(0, |m| m.len());
+        let _ = (&lock)
+            .seek(std::io::SeekFrom::Start(len.saturating_sub(4_096)))
+            .and_then(|_| (&lock).take(4_096).read_to_end(&mut tail));
+        let holder = String::from_utf8_lossy(&tail);
         return Err(RunRefusal::new(
             "run_busy",
             format!(
@@ -1647,7 +2002,7 @@ async fn listing(
     let print = print_of(link);
     let listed = list(wire, fetch.endpoints, link).await;
     report.waited = wire.waited;
-    let (files, pages) = match listed {
+    let (files, pages, repeats) = match listed {
         Ok(found) => found,
         Err(stop) => {
             if let Stop::Refused(refusal) = &stop {
@@ -1679,10 +2034,11 @@ async fn listing(
             ("complete", "true".to_owned()),
             ("count", count.to_string()),
             ("pages", pages.to_string()),
+            ("repeats", repeats.to_string()),
             ("wanted", picked.wanted.len().to_string()),
         ],
     );
-    record_picks(&picked, journal, report);
+    record_picks(&picked, memory, journal, report);
     Ok(picked)
 }
 
@@ -1736,6 +2092,7 @@ async fn fetch_all(
 ) -> Result<(), Stop> {
     let mut seen_sha: HashMap<String, String> = ctx.memory.hashes.clone();
     for file in wanted {
+        journal.ok()?;
         if ctx.fetch.stopped() {
             journal.line(
                 "stopped",
@@ -1757,16 +2114,30 @@ async fn fetch_all(
                 .get(&verified.sha256)
                 .filter(|of| **of != verified.name)
             {
-                refuse_file(
-                    journal,
-                    report,
-                    file,
-                    "content_duplicate",
-                    format!("the same bytes as {of}"),
+                let detail = format!("the same bytes as {of}");
+                journal.line(
+                    "refused",
+                    &[
+                        ("name", quoted(&file.name)),
+                        ("rev", quoted(&file.rev)),
+                        ("reason", "content_duplicate".to_owned()),
+                        ("of", quoted(of)),
+                        ("detail", quoted(&detail)),
+                    ],
                 );
+                emit_file(&journal.run, file, "content_duplicate");
+                report.refused.push(FileRefusal {
+                    path: file.path.clone(),
+                    code: "content_duplicate",
+                    detail,
+                });
                 continue;
             }
-            seen_sha.insert(verified.sha256.clone(), verified.name.clone());
+            seen_sha
+                .entry(verified.sha256.clone())
+                .or_insert_with(|| verified.name.clone());
+            // The `verified` line is durable before anything is handed on.
+            journal.ok()?;
             hand(handoff, &verified, journal, report);
             report.verified.push(verified);
         }
@@ -1878,6 +2249,23 @@ fn pick(files: &[Listed], fetch: &Fetch<'_>, memory: &Memory) -> Result<Picked, 
             } else {
                 picked.held.push((file.clone(), why));
             }
+            continue;
+        }
+        // A file an earlier press refused by its SHA-256, at the same
+        // listed revision, is the same bytes: refused again here, by name,
+        // and neither fetched nor read again.
+        if let Some(of) = memory
+            .duplicates
+            .get(&(file.name.clone(), file.rev.clone()))
+            .filter(|_| !file.rev.is_empty())
+        {
+            let detail = format!(
+                "the same bytes as {of}, found by an earlier press's SHA-256; rev {} is unchanged",
+                file.rev
+            );
+            picked
+                .refused
+                .push((file.clone(), "content_duplicate", detail));
             continue;
         }
         if !file.hash.is_empty() {
@@ -2028,21 +2416,49 @@ fn unsafe_name(name: &str) -> Option<&'static str> {
     None
 }
 
-/// Journals every held, refused and wanted file of the listing.
-fn record_picks(picked: &Picked, journal: &mut Journal, report: &mut Report) {
+/// Journals the listing's picks in ONE durable write: a held file and a
+/// refusal the journal does not already hold get their own line (once,
+/// not once a press), every wanted file its `listed` line, and one `picks`
+/// line counts them all, so a press over N held days adds a constant
+/// number of lines and one sync, never N (L-R407-3).
+fn record_picks(picked: &Picked, memory: &Memory, journal: &mut Journal, report: &mut Report) {
     report.held = picked.held.len();
     report.wanted = picked.wanted.len();
+    let mut lines = Vec::new();
+    let mut held_new = 0_usize;
     for (file, why) in &picked.held {
-        journal.line(
-            "held",
-            &[("name", quoted(&file.name)), ("reason", (*why).to_owned())],
-        );
+        if !memory.held.contains(&file.name) {
+            held_new += 1;
+            lines.push(journal.text(
+                "held",
+                &[("name", quoted(&file.name)), ("reason", (*why).to_owned())],
+            ));
+        }
     }
+    let mut refused_new = 0_usize;
     for (file, code, detail) in &picked.refused {
-        refuse_file(journal, report, file, code, detail.clone());
+        let key = (file.name.clone(), file.rev.clone(), (*code).to_owned());
+        if !memory.refused.contains(&key) {
+            refused_new += 1;
+            lines.push(journal.text(
+                "refused",
+                &[
+                    ("name", quoted(&file.name)),
+                    ("rev", quoted(&file.rev)),
+                    ("reason", (*code).to_owned()),
+                    ("detail", quoted(detail)),
+                ],
+            ));
+        }
+        emit_file(&journal.run, file, code);
+        report.refused.push(FileRefusal {
+            path: file.path.clone(),
+            code,
+            detail: detail.clone(),
+        });
     }
     for file in &picked.wanted {
-        journal.line(
+        lines.push(journal.text(
             "listed",
             &[
                 ("name", quoted(&file.name)),
@@ -2051,11 +2467,20 @@ fn record_picks(picked: &Picked, journal: &mut Journal, report: &mut Report) {
                 ("rev", quoted(&file.rev)),
                 ("hash", quoted(&file.hash)),
             ],
-        );
+        ));
     }
-    if picked.ignored > 0 {
-        journal.line("ignored", &[("count", picked.ignored.to_string())]);
-    }
+    lines.push(journal.text(
+        "picks",
+        &[
+            ("held", picked.held.len().to_string()),
+            ("held_new", held_new.to_string()),
+            ("refused", picked.refused.len().to_string()),
+            ("refused_new", refused_new.to_string()),
+            ("wanted", picked.wanted.len().to_string()),
+            ("ignored", picked.ignored.to_string()),
+        ],
+    ));
+    journal.batch(&lines);
 }
 
 /// Journals, emits and reports one refused file.
@@ -2463,6 +2888,8 @@ async fn download(
     let answer = match answer {
         Ok(answer) => answer,
         Err(Stop::Refused(refusal)) if refusal.code == "transport" => return Ok(Got::Cut(from)),
+        // Stop read while the request waited: the part keeps what it holds.
+        Err(Stop::Refused(refusal)) if refusal.code == "stopped" => return Ok(Got::Stopped(from)),
         Err(stop) => return Err(stop),
     };
     if let Some(got) = judge(&answer, file, from) {
@@ -2480,13 +2907,20 @@ async fn download(
 fn judge(answer: &Answer, file: &Listed, from: u64) -> Option<Got> {
     let headers = answer.response.headers();
     if (300..400).contains(&answer.status) {
-        let host = headers
+        let location = headers
             .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.to_str().ok());
+        let host = location
             .and_then(|v| v.split("//").nth(1))
             .and_then(|v| v.split('/').next())
             .unwrap_or("none");
-        return Some(Got::Refused("redirect_refused", format!("location={host}")));
+        let scheme = location
+            .and_then(|v| v.split_once("://"))
+            .map_or("none", |(scheme, _)| scheme);
+        return Some(Got::Refused(
+            "redirect_refused",
+            format!("location={host} scheme={scheme}"),
+        ));
     }
     if answer.status == 416 {
         return Some(Got::Restart("remote_changed"));
