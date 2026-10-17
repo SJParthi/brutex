@@ -17,13 +17,17 @@
 //!
 //! **Every input is invented.** Runs of one byte, counter text, xorshift noise
 //! and a numeric byte-plane payload shaped like the tick store's columnar one
-//! (`/Volumes/WD_BLACK/brutex/tickstore-data/FORMAT.md` §4). No vendor row, no
-//! price, nothing that could be mistaken for market data.
+//! (the separate tool's `tickstore-data/FORMAT.md` §4, which is not in this
+//! repository). No vendor row, no price, nothing that could be mistaken for
+//! market data.
 //!
 //! **One file, two readers.** `lake`'s page path and `pull`'s tick-store
 //! `unzstd` are the workspace's only two decode call sites, and each must be
 //! held to the same frames; `pull`'s test module includes this file by
 //! `#[path]` rather than keeping a second copy that could drift from this one.
+//! That include is a TEST-ONLY file edge from `pull` into `lake`'s source
+//! tree, not a Cargo dependency: `cargo metadata` shows no `pull -> lake`
+//! arrow and none is meant. `docs/01-architecture.md` names it.
 //!
 //! The crafted frames at the end are not round trips. Each pins one decision a
 //! call site makes about a frame the encoder would never write: a block wider

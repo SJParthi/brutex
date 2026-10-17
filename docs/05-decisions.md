@@ -70696,7 +70696,7 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
 
-### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling — 2026-10-16
+### D-5090 — `ruzstd` 0.8.2 → 0.9.1 and `rustls` 0.23.45 → 0.23.46 to clear five RustSec advisories; both zstd decode call sites name the 128 MiB window ceiling, and the tick-store writer names the encoder it links — 2026-10-16, extended 2026-10-17
 
 **Context** (DENY-1, attack run wf_56ba1121-825 issue H1). The full gate on
 `feat/db-fix` stopped at `STEP deny rc=1` (gate 72c91a46, 14 Oct):
@@ -70757,17 +70757,74 @@ connections to classical key exchange).
    decoded byte for byte through both call sites; every truncation is refused,
    a stated length one byte long or short is refused, and the two crafted
    frames of point 4 are refused (both crafted tests fail under 0.8.2).
-6. **No timing changed**, so `docs/06-limits.md` gains no row. Same harness,
+6. **No decode timing changed.** Same harness,
    same frames, the two versions interleaved per iteration: real tick-store
    frames p50 301 µs vs 0.8.2's 308 µs, p99 2.56 ms vs 2.52 ms (n = 1,592,231);
    synthetic frames n = 2,000 each, 0.9.1 equal or faster at p50 and p99 on all
    six. Decoding stays O(frame) as before; nothing moved onto a per-request path.
+   The encoder's sizes and timing are point 8's; the memory one decode may
+   still hold inside the ceiling is point 9's, and both are in
+   `docs/06-limits.md` (L-TSW-4, L-ZST-1, L-ZST-2).
 7. **The dependency fingerprint is re-pinned** in
    `crates/vocab/tests/workspace_is_rust.rs` after the scan it demands:
    `ruzstd` 0.9.1 ships no `build.rs` and no C/assembly; `rustls` 0.23.46's
    non-Rust file set equals 0.23.45's and its `build.rs` is byte-identical.
    Package count unchanged at 195.
+8. **The third call site is the tick-store writer's ENCODER, and its output
+   bytes change; decoded-entry identity does not** (added 2026-10-17, DENY-1
+   repair round 1, after R4-08's writer reached `feat/db-fix`).
+   `pull::tickstore_write` (D-4967) writes every tick-store frame with
+   `compress_to_vec` at `Fastest`. Under 0.9.1 that encoder writes a block
+   Raw when compressing it would not make it smaller
+   (`encoding/levels/fastest.rs`: `compressed_size >= block_size`), where 0.8.2
+   kept the larger Compressed block. Measured with both versions linked side by
+   side on invented inputs: 512 noise bytes were a 529-byte frame (one
+   Compressed block of 516) and are now 525 (one Raw block of 512); a
+   132,024-byte input's short second block went from Compressed 956 to Raw 952;
+   ten other inputs (repeats, sparse zeros, text) came out byte-identical. 0.9.1
+   also corrects the extra bits of match-length code 52 (65,539..=131,074),
+   which 0.8.2's `encoding/blocks/compressed.rs` took over 32,771; `Fastest`
+   never writes a match that long (read from the source: its matcher's window
+   is one 128 KiB slice, evicted before the next block is matched, and a match
+   is no longer than its offset, so a match is at most 65,536 bytes), and no
+   input of 65,538 to 131,000 bytes changed. So a day this writer writes now is
+   at most the size 0.8.2 wrote, block by block. What does not change is
+   identity: FM-249 defines it on decoded entries (name, size, CRC-32, DOS
+   time, rebuilt bytes), never on `.bts` bytes, and point 5 shows every frame
+   of the old encoder decoding to the same bytes under 0.9.1, so a day held
+   under 0.8.2 still verifies and is never rewritten. **The label moves with
+   the encoder**: `WRITER` is `pull::tickstore_write/1 ruzstd-0.9.1 Fastest`.
+   After the merge it still said `ruzstd-0.8.2`, so every log line and event
+   would have named an encoder the build no longer links (the second agent's
+   blocking finding, `state/fix/round2/verify-DENY-1-r1.json`).
+   `the_writer_names_the_ruzstd_cargo_lock_links` now holds the label and the
+   module doc to the one `ruzstd` in `Cargo.lock`, and
+   `no_block_is_stored_larger_than_the_bytes_it_holds` holds the Raw fallback
+   (it fails under 0.8.2: run through both versions linked side by side, three
+   of its ten inputs store more than they hold under 0.8.2 — 516 bytes for
+   512, 4,100 for 4,096, 300,004 for 300,000 — and none under 0.9.1; log
+   `state/fix/deny-1-logs/no-block-larger-0.8.2-vs-0.9.1-20261017.log`).
+   D-4967's sizes were measured on 0.8.2's encoder and were taken again on
+   17 October on the same three day zips: 16,385,730, 59,143,634 and
+   253,387,791 B against 0.8.2's 16,400,878, 60,066,755 and 255,904,074 B,
+   1.0% fewer over the three days, every file verified against its zip; so
+   D-4967's "about 332 MB a trading day" is about 329 MB now and its "1.60 to
+   2.04 times" is 1.57 to 2.04 (`docs/06-limits.md` L-TSW-4, L-TSW-7).
+9. **What the ceiling does not bound, stated** (`docs/06-limits.md` L-ZST-1).
+   0.9.1's decoder keeps a frame's whole declared window before it hands a
+   byte out, so the `take(want + 1)` at both call sites bounds what is
+   RETURNED, not what is decoded: a 4,105-byte crafted frame of 1,024 RLE
+   blocks declaring a 128 MiB window, asked for 16 bytes, is refused after
+   peak RSS of 273,203,200 to 273,334,272 bytes (n = 3, `/usr/bin/time -l`,
+   17 Oct 2026, the second agent's harness; it measured 271 MB under 0.8.2).
+   Bounded where 0.8.2 was not, about twice the ceiling. A per-call ceiling
+   taken from the promised length (refusing a frame whose stated content size
+   is not the promise before decoding it) would close most of it and is NOT
+   built here: it changes what both call sites accept, and only the frames'
+   own measured windows (largest 4 MiB, point 5) say it would refuse nothing
+   real.
 
 **Supersedes** the version lines of D-2801 point 5 and of the `lake` entry
-that first named `ruzstd` 0.8; the reasons those gave (pure Rust, no
-`build.rs`, no C) still hold for 0.9.1.
+that first named `ruzstd` 0.8, and D-4967's encoder version (its point naming
+"`ruzstd` 0.8.2 encoder" and its `WRITER` text `ruzstd-0.8.2`); the reasons
+those gave (pure Rust, no `build.rs`, no C) still hold for 0.9.1.

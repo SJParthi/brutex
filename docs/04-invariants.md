@@ -7324,6 +7324,8 @@ unless named otherwise; every zip is built in code from invented files.
 | TSW-15 | **The writer never makes a root**, and a zip of only its day folder is not a day (`root_missing`, `no_file_in_day`) | `a_missing_root_is_refused_and_never_made`, `a_zip_of_only_its_day_folder_is_refused` | ✓ |
 | TSW-16 | **Every folder made for a day has its parent fsynced**, outermost first, and the log line is fsynced | `every_new_folder_has_its_parent_fsynced` | ✓ |
 | TSW-17 | **No folder below the tick store's root is written through a link** (`linked_folder`; the root itself may be one), so a shadow whose `cm` or month folder links elsewhere makes nothing there | `a_tick_store_folder_that_is_a_link_is_never_written_through`; `cli::store_write::tests::every_writing_verb_refuses_a_store_whose_bars_folder_is_a_link` lists the verb | ✓ |
+| TSW-18 | **The writer's label names the encoder it links** (D-5090 point 8): `WRITER` ends ` ruzstd-<v> Fastest` for the one `ruzstd` `Cargo.lock` locks, and the module doc names the same version, so a dependency bump cannot leave every log line and event naming an encoder the build no longer runs | `the_writer_names_the_ruzstd_cargo_lock_links` | ✓ |
+| TSW-19 | **No block is stored larger than the bytes it holds**: the blocks of every frame the writer's encoder writes store at most its input (an incompressible block is written Raw; RLE counts one byte), walked by RFC 8878's headers — empty, one byte, either side of 128 KiB, several blocks, text beside noise; each is rebuilt through the reader (fails under `ruzstd` 0.8.2) | `no_block_is_stored_larger_than_the_bytes_it_holds` | ✓ |
 
 ### `/bars.json` bounds and the window's month spelling (AF-05; D-4972, D-4973)
 
@@ -7377,3 +7379,19 @@ notifier a counter, every app a listener the test opened.
 | R332-17 | **A port is digits only, with no sign and no leading zero** (`+80`, `0080` refused) | `a_port_with_a_sign_or_a_leading_zero_is_refused` | ✓ |
 | R332-18 | **Every number flag is digits only, with no sign and no leading zero** (`--timeout-ms`, `--interval-seconds`, `--throttle-seconds`, `--max-files`: `+60`, `060`, ` 500`, `6e1` and an empty value refused by name, as the port is) | `a_number_flag_with_a_sign_or_a_leading_zero_is_refused` | ✓ |
 | R332-19 | **A probe that ran but could not save its state is not a skipped probe**: it stamps `watchdog.lock` (one fixed 41-byte line), so ten minutes of an unwritable state directory are ten `notice-withheld` lines, never a `suspect-expired`, and the DOWN goes out at the first probe that can be saved, dated from the first miss; a stamp older than the saved probe, in the future, or not a stamp at all keeps nothing (the last named once and rewritten), and a stamp that cannot be written is named in the refusal | `probes_that_could_not_save_are_not_a_sleep_and_the_withheld_notice_stays_due`, `the_lock_stamp_never_keeps_a_miss_across_a_real_sleep`, `a_state_that_cannot_be_saved_withholds_the_notice_and_never_repeats_it`, `a_read_only_state_directory_sends_no_notice_at_all_rather_than_many` | ✓ |
+
+## zstd frames after the `ruzstd` 0.8.2 → 0.9.1 bump (DENY-1; D-5090)
+
+The two decode call sites are `lake::page::LakePageReader::decode` and
+`pull::gdfl_tickstore::unzstd`; each row is proved at both, by tests of the
+same name in `crates/lake/src/page.rs` and `crates/pull/src/gdfl_tickstore.rs`
+(the frames are one file, `crates/lake/src/zstd_v082_frames.rs`, which `pull`'s
+test module includes by `#[path]`). The writer's encoder is TSW-18 and TSW-19.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| ZST-01 | **Every frame `ruzstd` 0.8.2's own encoder wrote decodes to the same bytes under 0.9.1**: six frames frozen as hex (Raw with and without content, RLE across block boundaries, Compressed text, noise and columnar planes), each decoded byte for byte through both call sites | `frames_ruzstd_0_8_2_wrote_decode_to_their_input_through_the_page_path` (lake), `frames_ruzstd_0_8_2_wrote_decode_to_their_input_through_unzstd` (pull) | ✓ |
+| ZST-02 | **The frozen frames cover every block type**, and each fixture's stated level matches its blocks | `the_fixtures_cover_every_block_type` (lake), `the_old_frames_cover_every_block_type` (pull) | ✓ |
+| ZST-03 | **Every truncation of an old frame is refused, and so is a stated length one byte long or short** | `every_truncation_of_an_old_frame_is_refused` (both) | ✓ |
+| ZST-04 | **The declared window ceiling is 128 MiB exactly, named at both call sites**: a window of 134,217,728 bytes is accepted and one of 134,217,729 refused (0.8.2 checked none on a fresh decoder) | `the_declared_window_ceiling_is_128_mib_exactly` (both) | ✓ |
+| ZST-05 | **A block that decodes wider than its window is refused** — RUSTSEC-2026-0344's class: a ten-byte frame 0.8.2 expanded to 4,096 bytes past a 1 KiB window | `a_block_wider_than_its_window_is_refused` (both) | ✓ |
