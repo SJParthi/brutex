@@ -108,6 +108,7 @@ test('go_to_a_minute_lands_on_its_first_bar_in_both_directions', () => {
   assert.deepEqual(landing({ total: 0, bars: [] }, { ...late, desc: true, size: 8, when }), { why: 'No bar is kept by this query, so there is nothing to land on.' });
   assert.match(/** @type {any} */ (landing({ total: 5, at_index: null, bars: [] }, { ...late, desc: true, size: 8, when })).why, /did not say where/);
   assert.match(/** @type {any} */ (landing(null, { ...late, desc: true, size: 8, when })).why, /No bar is kept/);
+  assert.match(/** @type {any} */ (landing({ total: 5, at_index: 2, bars: 'x' }, { ...late, desc: true, size: 8, when })).why, /did not say where/);
   // The query the grid sends: ascending, the instant, no offset.
   const plan = seriesPlan([{ instrument: 'NSE-FNO-NIFTY-2019-03-28-1160000-CE', month: '2019-03', timeframe: '1s', rows: 30 }]);
   const q = new URLSearchParams(windowQuery('gdfl', plan, gotoAsk(asked.at)));

@@ -169,3 +169,47 @@ test('/db reads bars through one window request a page and never the whole-month
   assert.match(script, /anchorRow = anchor && pageTotal > 0 \? firstRow : -1;/);
   assert.match(script, /box\.scrollTop = Math\.max\(0, tr\.offsetTop/);
 });
+
+test('the plan, the wire and the row helpers answer every edge in words or a sentinel, never a throw (R3-03)', async () => {
+  const { paisaText, daysBetween } = await import('../src/lib/db/bars-plan.js');
+  const { barWhyText, BAR_WHY } = await import('../src/lib/db/notes-bars.js');
+  // A month that is not a month spans nothing; a series with no count holds 0.
+  assert.equal(monthSpan('2019-xx', '2019-03'), 0);
+  assert.equal(monthSpan('2019-04', '2019-03'), 0);
+  const uncounted = seriesPlan([{ instrument: CE, month: '2019-03', timeframe: '1s' }, { instrument: CE, month: '2019-04', timeframe: '1s' }]);
+  assert.equal(uncounted.series.get(CE)?.rows, 0);
+  // Absent inputs are no bound, no instant and no lag.
+  assert.equal(todWire(/** @type {any} */ (undefined), 'from'), '');
+  assert.equal(istInstant(/** @type {any} */ (undefined), '10:00'), null);
+  assert.equal(istInstant('2019-03-20', /** @type {any} */ (null)), null);
+  assert.deepEqual(censusBehind(/** @type {any} */ (null), new Map()), []);
+  // The local comparator: unknowns last both ways, text by text, ties by time then key.
+  const asc = localComparator('side', false);
+  const desc = localComparator('side', true);
+  assert.equal(asc({ side: null, ts: 1, rk: 'a' }, { side: 'CE', ts: 1, rk: 'b' }), 1);
+  assert.equal(desc({ side: 'PE', ts: 1, rk: 'a' }, { side: undefined, ts: 1, rk: 'b' }), -1);
+  assert.equal(asc({ side: 'CE', ts: 1, rk: 'a' }, { side: 'PE', ts: 1, rk: 'b' }), -1);
+  assert.equal(asc({ side: 'PE', ts: 1, rk: 'a' }, { side: 'CE', ts: 1, rk: 'b' }), 1);
+  assert.equal(desc({ side: 'CE', ts: 1, rk: 'a' }, { side: 'PE', ts: 1, rk: 'b' }), 1);
+  assert.equal(asc({ side: 'CE', ts: 2, rk: 'a' }, { side: 'CE', ts: 1, rk: 'b' }), 1, 'a tie falls to time');
+  assert.equal(desc({ side: 'CE', ts: 1, rk: 'a' }, { side: 'CE', ts: 2, rk: 'b' }), -1, 'and does not invert');
+  assert.equal(asc({ side: 'CE', ts: 1, rk: 'b' }, { side: 'CE', ts: 1, rk: 'a' }), 1, 'then to the key');
+  assert.equal(asc({ side: 'CE', ts: 1, rk: 'a' }, { side: 'CE', ts: 1, rk: 'b' }), -1);
+  assert.equal(asc({ side: 'CE', ts: 1, rk: 'a' }, { side: 'CE', ts: 1, rk: 'a' }), 0);
+  assert.equal(asc({ side: null, ts: 1, rk: 'a' }, { side: null, ts: 1, rk: 'a' }), 0);
+  assert.equal(localComparator('chg', false)({ chg: 5, ts: 1, rk: 'a' }, { chg: 5, ts: 1, rk: 'a' }), 0);
+  // Paisa: the null is a dash, the minus a real minus, the two decimals always.
+  assert.equal(paisaText(null), '-');
+  assert.equal(paisaText(undefined), '-');
+  assert.equal(paisaText(-1_234_505), '−12,345.05');
+  assert.equal(paisaText(100), '1.00');
+  // Whole days between two ISO days; a day that will not parse is null.
+  assert.equal(daysBetween('2019-03-20', '2019-03-28'), 8);
+  assert.equal(daysBetween('2019-03-28', '2019-03-20'), -8);
+  assert.equal(daysBetween('nope', '2019-03-20'), null);
+  assert.equal(daysBetween('2019-03-20', 'nope'), null);
+  // Every code has its sentence; no code is null; an unknown code is a defect said.
+  assert.equal(barWhyText('oi_null'), BAR_WHY.oi_null);
+  assert.equal(barWhyText(null), 'unknown, and this page did not record why - which is a defect here, not a fact about the store.');
+  assert.equal(barWhyText('no_such_code'), barWhyText(null));
+});

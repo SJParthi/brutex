@@ -286,17 +286,8 @@ export const BAR_UNGROUPED = BAR_COLS.filter((c) => !GROUPED_KEYS.has(c.key)).ma
 export const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
 export const BAR_UNSOURCED = BAR_COLS.length - BAR_SOURCED;
 
-/* ---------------------------------------------------------------------
-   THE READ BUDGET - a CHOICE, not a count the page took for the reader.
-
-   `/bars.json` is one month per request and about 81 bytes per bar on the
-   wire, so "read everything that matched" is a request storm on a 206-row
-   census. The budget is a control with its cost on its face; `0` means
-   every matched instrument-month and the option says so.
-   --------------------------------------------------------------------- */
-export const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
-/** @param {number} n */
-export const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
+/* THE READ BUDGET (`READ_BUDGETS`, `budgetLabel`) WENT IN R3-03: the control
+   left with the per-month reads (D-3326) and nothing read either name since. */
 
 /**
  * Why one bar's percentage is not a number. One code, one sentence — EVERY

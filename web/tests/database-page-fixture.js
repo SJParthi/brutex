@@ -29,6 +29,7 @@ export const DB_PAGE_FILES = [
   '../src/routes/db/DbProvenance.svelte',
   '../src/routes/db/DbScrubNote.svelte',
   '../src/routes/db/DbChart.svelte',
+  '../src/routes/db/DbPager.svelte',
   '../src/routes/db/db.css',
   '../src/lib/db/selection.svelte.js',
   '../src/lib/db/selection-model.js',
@@ -46,7 +47,9 @@ export const DB_PAGE_FILES = [
   '../src/lib/db/dayflags.js',
   '../src/lib/db/chart.js',
   '../src/lib/db/scrub.js',
-  '../src/lib/db/notes-labels.js'
+  '../src/lib/db/notes-labels.js',
+  '../src/lib/db/pager.js',
+  '../src/lib/db/goto.js'
 ];
 
 /** @param {string} path relative to this file */

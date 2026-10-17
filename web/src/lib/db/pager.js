@@ -73,9 +73,9 @@ export function servedPages({ total, size, wire, report }) {
   if (front >= count) return every;
   const fromEnd =
     wire !== 'tod' && wire !== 'oi' && report && Number(report.indexed_rows) === 0;
-  let tail = fromEnd ? Math.ceil((n - MAX_SORT_DEPTH) / rows) + 1 : null;
+  /* Never past `count`: the tail starts within MAX_SORT_DEPTH of the end. */
+  const tail = fromEnd ? Math.ceil((n - MAX_SORT_DEPTH) / rows) + 1 : null;
   if (tail !== null && tail <= front + 1) return every;
-  if (tail !== null && tail > count) tail = null;
   const what = wire === 'tod' ? 'a time-of-day order' : 'this value order';
   const ends = tail === null
     ? `from the front only: rows 1 to ${fmt(front * rows)}`

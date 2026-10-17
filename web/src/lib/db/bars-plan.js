@@ -19,7 +19,6 @@
  * functions only, so `node --test` can import it with no compiler. Imports
  * are relative for the same reason — `$lib` is a Vite alias node cannot see.
  */
-import { pooled as readPool } from '../pooled.js';
 import { fmt } from './notes-labels.js';
 
 /* ---------------------------------------------------------------------
@@ -410,64 +409,9 @@ export function acrossDay(rows, o) {
   return out;
 }
 
-/* ---------------------------------------------------------------------
-   HOW MANY OF THOSE REQUESTS ARE IN FLIGHT AT ONCE - and it is a constant,
-   which is the whole point.
-
-   `Promise.all(want.map(read))` starts EVERY request in the same tick. The
-   budget above deliberately reads every matched instrument-month, so `want`
-   is as long as the query is wide, and the number of open sockets was
-   therefore a function of how much history the store holds.
-
-   MEASURED on this build, 2026-08-22, a store holding 2019-12..2026-08 for
-   NIFTY, BANKNIFTY and INDIAVIX at nine rungs - 81 months x 9 x 3 = 2,187
-   matched instrument-months:
-
-     requests fired                     498+ (the capture cut off)
-     succeeded                          0
-     every one of them                  net::ERR_INSUFFICIENT_RESOURCES
-
-   Chrome refuses to open more sockets long before 2,187 and fails the
-   REQUEST rather than queueing it, so the grid rendered nothing at all. Not
-   slow - empty, with a console full of failures and no sentence on the page
-   saying why. That is the shape `CLAUDE.md` §4 bans: a failure wearing an
-   empty table's clothes.
-
-   A POOL, NOT A SMALLER BUDGET. Capping `readBudget` would answer a narrower
-   question than the operator asked, which the block above rejects in the
-   operator's own words - "a page that answers a narrower question than the
-   one it was asked is worse than a slow one". Every matched month is still
-   read. What is bounded is how many are in flight, so the cost per reader is
-   constant no matter how wide the query gets, and a store ten years deep
-   costs the same sockets as one month does.
-
-   SIX because that is what a browser gives a single origin over HTTP/1.1;
-   asking for more does not make more, it makes a queue this code cannot see
-   and cannot report on.
-   --------------------------------------------------------------------- */
-export const IN_FLIGHT = 6;
-
-/**
- * Runs `job` over `items` with at most `limit` outstanding at any moment.
- *
- * Results come back in the ORDER OF `items`, not the order they finished,
- * because the caller indexes them against its own plan and a pool that
- * reordered would silently shuffle the grid.
- *
- * A job that throws lands as a rejection in its own slot rather than taking
- * the pool down - `readBarFile` already returns failures as values, so this
- * is the belt to that braces.
- *
- * @template T, R
- * @param {T[]} items
- * @param {number} limit
- * @param {(item: T) => Promise<R>} job
- * @param {AbortSignal} [signal]
- * @returns {Promise<R[]>}
- */
-export async function pooled(items, limit, job, signal) {
-  return readPool(items, limit, job, signal);
-}
+/* `pooled` AND `IN_FLIGHT` STOOD HERE AND WENT IN R3-03: nothing imported
+   them from this file any more. The one pool and its six-socket ceiling are
+   `$lib/pooled.js`, which every reader that fans out already uses. */
 /** Files whose bar count disagrees with the census row that named them. */
 /* `barDisagree` HAS MOVED, to sit below `windowSaid` — it now has to ask
    whether the rows came from the window endpoint, and `windowSaid` is

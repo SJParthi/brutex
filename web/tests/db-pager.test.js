@@ -285,6 +285,7 @@ test('the_store_growing_between_two_pages_repeats_no_row', () => {
 test('no_sort_is_offered_on_a_column_without_values', () => {
   assert.equal(segmentOfKey(SPOT), 'INDEX');
   assert.equal(segmentOfKey(''), '');
+  assert.equal(segmentOfKey(/** @type {any} */ (null)), '');
   assert.equal(sortRefusal('vol', [SPOT]), NO_VOLUME_SORT, 'an index has no traded volume');
   assert.equal(sortRefusal('vol', [SPOT, CE]), null, 'a selection with a derivative keeps it');
   assert.equal(sortRefusal('vol', [SHARE]), null, 'a share trades');
@@ -321,6 +322,7 @@ test('a sort the page cannot do keeps the sort that was on, with advice that wor
   const minute = localSortAdvice({ label: 'Change %', total: 30_000, budget: 20_000, tfSecs: 60, series: 1, stored: ['Date'] });
   assert.match(minute, /narrow to one day \(a day holds at most 1,440 bar\(s\) of this series at this rung\)/);
   assert.doesNotMatch(minute, /one strike or one side/);
+  assert.match(localSortAdvice({ label: 'Strike', total: 30_000, budget: 20_000, tfSecs: 60, series: 2, stored: ['Date'] }), /narrow to one day \(a day holds at most 2,880 bar\(s\) of these 2 series at this rung\)/);
   // Many series: the series count is named, and the day bound counts them all.
   const chain = localSortAdvice({ label: 'Strike', total: 900_000, budget: 20_000, tfSecs: 60, series: 40, stored: ['Date'] });
   assert.match(chain, /a whole day of these 40 series can hold 57,600 bar\(s\)/);
