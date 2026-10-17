@@ -184,9 +184,14 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
             "`census::MAX_MANIFEST_BYTES`",
         ],
     );
-    let miss = item(CENSUS_CACHE, "pub(super) fn census_now_stamping(");
+    // R3-09 MOVED the all-vendor read into `census_now_kept`, which both the
+    // production path and the test seam `census_now_stamping` call; the read
+    // there hands back which rows were served from a kept read.
+    let miss = item(CENSUS_CACHE, "fn census_now_kept(");
     assert!(
-        miss.contains("let mut censuses = read(&site.store_root);"),
+        miss.contains("let (mut censuses, kept_under) = read(&site.store_root);")
+            && item(CENSUS_CACHE, "pub(super) fn census_now_stamping(")
+                .contains("census_now_kept(site, stamp,"),
         "{miss}"
     );
     assert!(
@@ -196,12 +201,17 @@ fn w1_api5_2_a_census_miss_reads_every_manifest_and_a_pull_makes_every_request_m
     );
     assert!(
         item(CENSUS_CACHE, "pub(crate) fn census_now_stamped(")
-            .contains("vendor_slot(site, vendor, vendor_stamp(root, vendor), true)"),
+            .contains("vendor_slot_fresh(site, vendor, vendor_stamp(root, vendor), true)"),
         "each vendor is read through its own cell"
     );
+    // R3-09: the miss is rebuilt by `rebuild` (a cold vendor's first reader,
+    // or the background re-read), through `fresh_read`, which extends the
+    // vendor's previous read.
     assert!(
-        item(CENSUS_CACHE, "fn vendor_slot(")
-            .contains("census::read_vendor_after(root, vendor, previous)"),
+        item(CENSUS_CACHE, "fn vendor_slot_fresh(").contains("rebuild(&site.store_root, cell,")
+            && item(CENSUS_CACHE, "fn rebuild(").contains("let census = fresh_read(")
+            && item(CENSUS_CACHE, "fn fresh_read(")
+                .contains("census::read_vendor_after(root, vendor, previous)"),
         "and a miss extends the vendor's previous read"
     );
     assert!(

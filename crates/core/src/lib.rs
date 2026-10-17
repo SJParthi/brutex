@@ -19,6 +19,7 @@
 //! | [`isin`] | the cross-check that is deliberately not part of identity |
 //! | [`knob`] | how an environment value naming a folder or a switch is read |
 //! | [`price`] | paisa integers and the one float boundary |
+//! | [`secret_shape`] | whether a typed value has the shape of a pasted credential |
 //! | [`symbol`] | fixed-width symbols, one identity for every vendor |
 //! | [`universe`] | which lists a symbol belongs to |
 //! | [`vendor`] | one vendor master row in, one canonical key out |
@@ -32,6 +33,7 @@ pub mod instrument;
 pub mod isin;
 pub mod knob;
 pub mod price;
+pub mod secret_shape;
 pub mod symbol;
 pub mod universe;
 pub mod vendor;
