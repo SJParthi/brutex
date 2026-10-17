@@ -110,8 +110,10 @@ export const WHY = {
  * @param {string | null} code
  */
 export const whyText = (code) =>
-  (code === null ? null : /** @type {Record<string, string | undefined>} */ (WHY)[code]) ??
-  `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
+  // AN OWN KEY ONLY: `WHY.constructor` is Object's, never a reason (R3-04).
+  Object.hasOwn(WHY, String(code))
+    ? /** @type {Record<string, string>} */ (WHY)[String(code)]
+    : `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
 
 /* ======================================================================
    THE COVERAGE VERDICT'S WORDS (D-3336, WP-54)
@@ -169,8 +171,9 @@ export const NOTE_TEXT = {
  * @param {string} code
  */
 export const noteText = (code) =>
-  /** @type {Record<string, string | undefined>} */ (NOTE_TEXT)[code] ??
-  `A coverage note this page has no sentence for: ${code}.`;
+  Object.hasOwn(NOTE_TEXT, code)
+    ? /** @type {Record<string, string>} */ (NOTE_TEXT)[code]
+    : `A coverage note this page has no sentence for: ${code}.`;
 
 /** The state words, as the grid prints them. */
 export const STATE_WORD = {
@@ -210,7 +213,7 @@ export function coverWindow(fromDay, toDay, narrowing) {
   let from = fromDay || '';
   let to = toDay || '';
   if (from === '' && to === '') return null;
-  if (from !== '' && to !== '' && to < from) [from, to] = [to, from];
+  if (from !== '' && to !== '') [from, to] = [from, to].sort();
   return { from, to };
 }
 
@@ -224,9 +227,9 @@ export function coverWindow(fromDay, toDay, narrowing) {
  */
 export function monthInWindow(month, window) {
   if (window === null) return true;
-  if (window.from !== '' && month < window.from.slice(0, 7)) return false;
-  if (window.to !== '' && month > window.to.slice(0, 7)) return false;
-  return true;
+  // Its first day is not after To, and its last is not before From: `-31`
+  // bounds every day of a month as text, and an empty From bounds nothing.
+  return (window.to === '' || `${month}-01` <= window.to) && `${month}-31` >= window.from;
 }
 
 /**
@@ -249,9 +252,8 @@ export function windowText(window) {
  */
 export function windowEmptyWhy(o) {
   if (o.window === null || o.matched === 0 || o.listed > 0) return '';
-  const held = o.held && o.held.lo && o.held.hi
-    ? `; this selection holds ${dayLabel(o.held.lo <= o.held.hi ? o.held.lo : o.held.hi)} → ${dayLabel(o.held.lo <= o.held.hi ? o.held.hi : o.held.lo)}`
-    : '';
+  const [lo, hi] = o.held ? [o.held.lo, o.held.hi].sort() : ['', ''];
+  const held = lo && hi ? `; this selection holds ${dayLabel(lo)} → ${dayLabel(hi)}` : '';
   return `The From and To window, ${windowText(o.window)}, holds no month of the ${fmt(o.matched)} instrument-month(s) this selection matches${held}. Coverage follows the window, as the Bars grid does: widen the dates to see them.`;
 }
 
@@ -387,18 +389,11 @@ export function barsBadge(o) {
  * @returns {{ from: string, to: string, word: string } | null}
  */
 export function headerRange(months, window) {
-  if (window !== null) {
-    const lo = months.length ? months.reduce((a, b) => (b < a ? b : a)) : '';
-    const hi = months.length ? months.reduce((a, b) => (b > a ? b : a)) : '';
-    return {
-      from: window.from ? dayLabel(window.from) : lo ? month(lo) : '—',
-      to: window.to ? dayLabel(window.to) : hi ? month(hi) : '—',
-      word: 'in view'
-    };
-  }
-  if (months.length === 0) return null;
   const sorted = [...months].sort();
-  return { from: month(sorted[0]), to: month(sorted[sorted.length - 1]), word: 'on disk' };
+  const first = sorted.length > 0 ? month(sorted[0]) : '—';
+  const last = sorted.length > 0 ? month(sorted[sorted.length - 1]) : '—';
+  if (window === null) return sorted.length > 0 ? { from: first, to: last, word: 'on disk' } : null;
+  return { from: window.from ? dayLabel(window.from) : first, to: window.to ? dayLabel(window.to) : last, word: 'in view' };
 }
 
 /**
@@ -425,8 +420,8 @@ export function closeInWindow(ms, window, isoDay) {
   if (window === null) return 'in';
   const day = isoDay(ms);
   if (window.to !== '' && day > window.to) return 'after';
-  if (window.from !== '' && day < window.from) return 'before';
-  return 'in';
+  // An empty From is before every day.
+  return day < window.from ? 'before' : 'in';
 }
 
 /**

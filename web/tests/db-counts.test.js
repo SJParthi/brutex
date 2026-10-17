@@ -29,7 +29,12 @@ import {
   refusedFrontOf,
   whyText,
   noteText,
-  bytesText
+  bytesText,
+  WHY,
+  NOTE_TEXT,
+  SOLE_WHY,
+  STATE_WORD,
+  COLS
 } from '../src/lib/db/notes-coverage.js';
 import { judgeRow } from '../src/lib/completeness.js';
 import { owedLedger, epochDayOfIso } from '../src/lib/calendar-owed.js';
@@ -298,4 +303,84 @@ test('the coverage words at their edges: an unknown code is named as one, bytes 
   assert.equal(t.derivedLagging, 2);
   assert.equal(t.missing, 4);
   assert.equal(t.heldExact, true);
+});
+
+test('the coverage words are pinned: every sentence present, every column and state word as the grid prints it', () => {
+  for (const table of [WHY, NOTE_TEXT]) {
+    for (const [code, sentence] of Object.entries(table)) {
+      assert.ok(sentence.length > 40 && /[.)]$/.test(sentence), `${code} carries a whole sentence`);
+    }
+  }
+  assert.match(SOLE_WHY, /^This is the only instrument-month stored at this rung[\s\S]*a tautology, not a measurement[\s\S]*Pull a second instrument/);
+  assert.deepEqual(STATE_WORD, { full: 'full', near: 'near', gap: 'short', absent: 'absent', trade: 'trade-driven', unmeasured: 'unmeasured', over: 'over' });
+  assert.deepEqual(COLS.map((c) => [c.key, c.label, c.num]), [
+    ['instrument', 'Instrument', false],
+    ['month', 'Month', false],
+    ['timeframe', 'TF', false],
+    ['rows', 'Bars', true],
+    ['days', 'Sessions', true],
+    ['short', 'Missing', true],
+    ['pct', 'Coverage', true],
+    ['chg', '% in month', true],
+    ['prevChg', 'Prev month %', true]
+  ]);
+  for (const c of COLS.slice(4)) assert.ok(typeof c.why === 'string' && c.why.length > 40, `${c.key} says what it is`);
+  // An inherited name is no reason and no note.
+  assert.match(whyText('constructor'), /does not have a sentence for: constructor/);
+  assert.match(noteText('toString'), /no sentence for: toString/);
+  // Bytes at each boundary.
+  assert.deepEqual([1e9, 1e6, 1e3, 999].map(bytesText), ['1.0 GB', '1.0 MB', '1.0 kB', '999 B']);
+});
+
+test('the window and the header at their boundaries', () => {
+  assert.deepEqual(coverWindow('', '2024-10-31', true), { from: '', to: '2024-10-31' });
+  // A To on the 1st holds its month; a From on the 31st holds its month.
+  assert.equal(monthInWindow('2024-10', { from: '', to: '2024-10-01' }), true);
+  assert.equal(monthInWindow('2024-11', { from: '', to: '2024-10-01' }), false);
+  assert.equal(monthInWindow('2024-10', { from: '2024-10-31', to: '' }), true);
+  assert.equal(monthInWindow('2024-09', { from: '2024-10-31', to: '' }), false);
+  assert.equal(monthInWindow('2030-01', { from: '2024-10-31', to: '' }), true, 'an open To holds every later month');
+  assert.equal(monthInWindow('2019-03', { from: '', to: '' }), true);
+  // A held span with an end missing names no span.
+  assert.doesNotMatch(windowEmptyWhy({ matched: 1, listed: 0, window: { from: '2024-10-01', to: '' }, held: { lo: '', hi: '2019-01-01' } }), /this selection holds/);
+  // The close on the window's first day is in it; an open To has nothing after it.
+  const at = Date.parse('2019-03-28T09:59:59Z');
+  assert.equal(closeInWindow(at, { from: '2019-03-28', to: '' }, istDay), 'in');
+  assert.equal(closeInWindow(at, { from: '2019-03-29', to: '' }, istDay), 'before');
+  assert.equal(closeInWindow(at, { from: '', to: '' }, istDay), 'in');
+  assert.deepEqual(headerRange(['2019-02', '2019-03', '2019-01'], null), { from: 'Jan 2019', to: 'Mar 2019', word: 'on disk' });
+  assert.deepEqual(headerRange(['2019-02'], { from: '', to: '' }), { from: 'Feb 2019', to: 'Feb 2019', word: 'in view' });
+  // The key tells two series lists apart, not merely their letters.
+  assert.notEqual(barsQueryKey('gdfl', { keys: ['NSE-A', 'NSE-B'] }, null, 0), barsQueryKey('gdfl', { keys: ['NSE-ANSE-B'] }, null, 0));
+});
+
+test('the counted line counts each kind once and the right way round', () => {
+  const cover = (/** @type {Partial<import('../src/lib/completeness.js').Cover>} */ c) =>
+    /** @type {import('../src/lib/completeness.js').Cover} */ ({ basis: 'calendar', state: 'near', owed: 10, missing: 1, sessions: 2, heldSessions: 1.5, heldExact: false, notes: [], extra: 0, ...c });
+  const t = coverTotals([
+    { rows: 0, absent: true, cover: cover({ state: 'absent', missing: 10, sessions: 3, heldSessions: 0 }) },
+    { rows: 0, absent: true, cover: cover({ state: 'absent', missing: 10, sessions: 3, heldSessions: 0 }) },
+    { rows: 0, absent: true, cover: cover({ basis: 'trade', state: 'absent', owed: null, missing: null, sessions: 4, heldSessions: null }) },
+    { rows: 7, cover: cover({ state: 'unmeasured', missing: null, notes: ['cas_unresolved'] }) },
+    { rows: 7, cover: cover({ state: 'unmeasured', missing: null, notes: ['cas_unresolved'] }) },
+    { rows: 9, cover: cover({ notes: ['cas_unresolved'] }) },
+    // Covers no judgeRow writes, to prove each condition of the sums on its own.
+    { rows: 9, cover: cover({ basis: 'trade', owed: 5, missing: 1 }) },
+    { rows: 9, cover: cover({ owed: null, missing: 1 }) }
+  ]);
+  assert.equal(t.n, 8);
+  assert.equal(t.absent, 2);
+  assert.equal(t.noTrade, 1);
+  assert.equal(t.stored, 5);
+  assert.equal(t.trade, 2);
+  assert.equal(t.unresolved, 2);
+  assert.equal(t.sessions, 3 + 3 + 4 + 2 * 5);
+  assert.equal(t.heldSessions, 1.5 * 5);
+  assert.equal(t.missing, 10 + 10 + 1, 'only calendar rows with a count owed and a count missing');
+  assert.equal(t.owed, 30);
+  assert.equal(t.held, 9);
+  // A row no calendar measured prints a dash, whatever it carries.
+  assert.equal(missingText({ cover: cover({ basis: 'none', missing: 3 }) }), '—');
+  assert.equal(missingText({ cover: cover({ state: 'unmeasured', missing: null }) }), '—');
+  assert.equal(missingText({ cover: cover({ state: 'over', missing: null, extra: 4 }) }), '+4');
 });
