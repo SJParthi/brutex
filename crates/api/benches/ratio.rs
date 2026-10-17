@@ -81,6 +81,8 @@ mod gaps;
 mod greeks;
 #[path = "ratio/logs_dirs.rs"]
 mod logs_dirs;
+#[path = "ratio/months.rs"]
+mod months;
 #[path = "ratio/options.rs"]
 mod options;
 #[path = "ratio/provenance.rs"]
@@ -781,6 +783,7 @@ fn main() {
     ]
     .concat();
     println!("  routes timed by modules: {}", by_modules.join(" "));
+    ok &= months::rows_are_measured();
     if ok {
         println!("all ratios within the ceiling");
     } else {

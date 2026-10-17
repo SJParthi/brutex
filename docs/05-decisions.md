@@ -71149,3 +71149,269 @@ dot-file it created (R4-12 owns making the probe overwrite instead).
 `a_fixture_deletion_is_refused_and_a_comment_or_string_is_not`,
 `every_declared_module_that_exists_is_listed`. Invariant R406-04; limit
 L-R406-04.
+
+### D-5800 — The GDFL options reader splits a row into a fixed ten-field array, refuses the eleventh field where it is seen, and reserves its rows once from the body (CLOUD-ATTACKO1, F1) — 2026-10-17
+
+`pull::gdfl_nfo::decode_capped` collected a `Vec<&str>` of every comma-split
+field for every row of every options file. On 2026-08-03 the options tree is
+27.6 M rows over 11,524 files (`docs/06-limits.md`, the import-of-one-day row
+of the C-GI table). Counted on `feat/db-fix` at 62396df08 by
+`crates/pull/tests/allocation.rs`, 4,096 more rows made 12,289 more allocating
+calls: three per row, the collect and two growths to hold ten fields. A row of
+500,010 fields allocated 17,779,147 bytes for a 1,000,205-byte file. The row
+vector itself started from `Vec::new()`.
+
+1. **Ten fields, a fixed `[&str; 10]`.** The ten are the header the reader
+   already admits (`HEADER_OPEN_INTEREST` or its spaced form;
+   `docs/00-charter.md`, "GDFL NSE options tick files", D-2806). It is the
+   capital-market reader's `gdfl_cm::parse_row` shape. `csv::decode_rows`
+   was given the same shape by D-0721.
+2. **The eleventh field is `MalformedRow` at its line, the moment it is
+   seen.** A line of a million commas costs eleven steps, not a
+   million-slot vector. A line with fewer than ten fields is the same
+   refusal it always was. Rejected: counting every field to report the true
+   width, as `csv::decode` does. `NfoRefusal::MalformedRow` carries only the
+   line, and widening the wire is not this package's change.
+3. **Rows reserved once, from the body's newline count, capped at the row
+   bound** (`fetch::MAX_ROWS`, 1,000,000). That is D-1203's rule for
+   `csv::decode_rows`. The newline count is one extra pass over bytes the
+   CRC check has already read (O(bytes) per file, O(1) per row). The
+   reservation is at most `MAX_ROWS` × 32 B = 32 MB, the size of the rows
+   such a file would keep; a body of blank lines can ask that much for rows
+   it never fills, and that bound is named in `docs/06-limits.md` under this
+   number.
+
+Proof: `pull::gdfl_nfo::tests::the_options_row_loop_collects_no_field_vector`
+(source shape; fails on 62396df08) and
+`a_row_of_many_fields_is_malformed_at_its_line` (the refusal, unchanged).
+`crates/pull/tests/allocation.rs`
+`gdfl_nfo::twice_the_options_rows_cost_no_allocation_per_row` (at most 4 more
+calls for 4,096 more rows; 12,289 on 62396df08) and
+`gdfl_nfo::a_row_of_half_a_million_fields_is_refused_without_holding_them`
+(under twice the file's bytes; 17,779,147 on 62396df08). These reuse that
+file's one global allocator (D-0724). No new unsafe root is added. Bench row
+C-NFO-01 (`crates/pull/benches/ratio.rs`): `read_file` per row at 1k, 10k and
+100k rows, asserted flat, with p50/p99/max per file. The numbers are in
+`docs/06-limits.md` under D-5804.
+
+On real days, read-only: `pull::gdfl_nfo::tests::the_fixed_array_decodes_real_days_as_the_field_vector_did`
+(ignored; `BRUTEX_GDFL_TICKSTORE` is the tick store root). It decodes every
+NIFTY, BANKNIFTY and RELIANCE option file of three days with both readers:
+the fixed array, and the field-vector loop kept in the test as an oracle
+(`decode_by_field_vector`, checked against the fixed array on invented
+files by `the_field_vector_oracle_agrees_with_the_fixed_array_on_invented_files`).
+The three days are 2018-09-03, the tick store's first options day and the
+early day form (469 files, 3,751,736 rows); 2023-11-12, the Muhurat special
+session (1,163 files, 1,281,196 rows); and 2026-08-03 (1,374 files,
+8,867,328 rows). Every file gave the same rows or the same refusal under
+both readers, and no file was refused. Run on 17 Oct 2026; no vendor row
+reaches the repository.
+
+### D-5801 — `/live.json` holds the hard response ceiling every other JSON route holds, stops encoding at it, and refuses the census whole, by name (CLOUD-ATTACKO1, F2) — 2026-10-17
+
+`api::livejson::respond` encoded whatever the live census held and answered
+200. The census admits `cli::live::LIVE_RUN_LIMIT` (128) runs of
+`LIVE_ROW_LIMIT` (256) rows. A killed run leaves its file, so a store can
+reach that maximum without one run in flight. The test fixture (128 runs of
+256 rows, each field at its widest) was served whole on 62396df08 at
+12,960,281 bytes with 200, by a route the page polls every 2 s.
+
+1. **The ceiling is `detail::MAX_RESPONSE_BYTES`, 8,388,608 bytes.** Why
+   that size: it is the one every other JSON route here already holds, so
+   the console has one ceiling to know, not two. At about 395 encoded bytes
+   per row at their widest, it holds about 21,000 rows, some 82 full runs.
+   That is far more than any in-flight count the store has shown. A census
+   past it is stale files, not a live answer. Rejected: a larger ceiling for
+   this route, which would send a body the size of a month of bars every
+   2 s; paging, which is a wire change the page is not built for; and
+   serving the first runs that fit, because a cut list reads as every run in
+   flight.
+2. **Encoding stops at the first run that carries the body past the
+   ceiling.** A refused census costs the ceiling plus one run's rows (at
+   most 256 rows, about 100 KB), not the whole admitted census. The one
+   check after the trailer refuses it, and also a body that the trailer
+   alone carries over.
+3. **The refusal is 503 with `"runs":[]`.** It names the run count, the
+   ceiling, the byte count at which encoding stopped, and how many runs were
+   encoded. The status is the one this route already gives a census it
+   cannot read whole.
+
+Proof: `api::livejson::tests::a_full_live_census_is_refused_past_the_response_ceiling`
+(on 62396df08: 200 with 12,960,281 bytes; here: 503, a small body, an empty
+list, and fewer runs encoded than the census holds).
+`a_run_in_flight_carries_its_bar_and_is_not_given_a_verdict` still answers
+200. Not changed here, and named in `docs/06-limits.md` under this number:
+the census `refresh` walks the live directory per poll (O(live files),
+bounded by `LIVE_ENTRY_LIMIT` 4,096), and it clones each run twice.
+
+### D-5802 — A `/bars.json` row writes its open interest into the body in place, never through a `String` per bar (CLOUD-ATTACKO1, F3) — 2026-10-17
+
+`api::server::bars_route::bars_array_of` formatted every row with an open
+interest built as `"null".to_owned()` or `open_interest.to_string()`. That is
+one heap allocation per bar, about 2.7 M for a one-second month. The row is
+now written straight into the reserved body. The bytes are unchanged for FNO
+(a number or `null`), INDEX and CASH (always `null`, with their `oichg_why`
+and `v_why` tails). Rejected: a per-row scratch buffer, which is the same
+copy with one more step.
+
+Proof: `api::server::bars_route::tests::a_bars_row_is_written_in_place_with_the_same_bytes`.
+It pins the bytes for all three segment shapes, and the absence of
+`.to_owned()` and `.to_string()` in `bars_array_of`'s source. On 62396df08
+the bytes match and the source check fails. `api` has no counting allocator:
+Gate 5 admits three unsafe test roots, none in `api`. So the allocation is
+pinned on the source, which is weaker than a count and is said here. Shadow
+timings are in `docs/06-limits.md` under D-5804. The whole-month `/bars.json`
+ask (no `from`/`to`) still reads and encodes the whole month, which is
+O(bars of the month). It is named there, not fixed here.
+
+### D-5803 — `/census/facets.json` reads an underlying's contract count and an expiry's strike count from counters `Index::apply` keeps (CLOUD-ATTACKO1, F4) — 2026-10-17
+
+With no underlying asked, `render_answer` summed every expiry's contracts of
+every underlying. With no expiry asked, it collected every contract of every
+expiry into a `BTreeSet` of strikes. Both are O(contracts of the segment) per
+request, growing with every stored month. `Underlying::contracts` and
+`Expiry::strikes` are now counted in `Index::apply` as a contract is first
+seen:
+
+1. **A contract is new when its `ContractId` is not yet in its expiry's
+   map.** A strike is new when neither its call nor its put was held there
+   before. A future is a contract and no strike.
+2. **Exact without a decrement.** `apply` never removes a key from any map
+   in this index (a census key's rows only grow, the rule `denoms` already
+   relies on), so a counter never has to come down. A rebuilt index and a
+   moved one agree.
+
+Proof: `api::server::facets::tests::the_contract_and_strike_counts_are_counters_kept_by_apply`.
+The counters equal the old walk on a fresh build, after a move that adds a PE
+at a CE's strike, after a move that grows a key, and on a rebuild; the
+answer sites hold no walk (source needles). On 62396df08 it does not compile:
+the counters do not exist. On the shadow, the NIFTY underlyings answer's
+`contracts` equals the sum of its expiries answer's `contracts`. The URLs and
+values are in `docs/06-limits.md` under D-5804.
+
+### D-5804 — The month-axis benches: the bars per month are held fixed and the months grow, rows printed where the cost is O(months) by design and asserted where it is not (CLOUD-ATTACKO1) — 2026-10-17
+
+Every earlier store-backed bench row grew ONE month (1,024, 10,240 and
+102,400 bars), which cannot see a cost paid once per month of a range.
+`cloud/attack-o1-20261016` added rows that hold 1,024 bars a month fixed (the
+smallest indexed month, D-4933) and grow the series to 1, 10 and 100 months.
+They are merged here unchanged:
+
+1. **`crates/api/benches/ratio/months.rs`.** `/bars/window.json` (first
+   page, last page, `sort=c`, `at=`), the `/verify.json` scrub, `/spot.json`
+   at the last month (asserted flat), the `/store` page over the months, and
+   the warm `/store` page over censuses of 1k, 10k and 100k entries
+   (asserted flat).
+2. **`crates/store/benches/ratio/months.rs`.** C-MO-01 (open, read and
+   `.tix` lookup beside 1, 10 and 100 months, asserted flat), C-MO-02
+   (`read_record` and the `.tix` lookup, reader handle), and C-MO-03 (96
+   one-bar commits per month size, the three slowest named by position).
+3. **`crates/pull/benches/ratio.rs`.** C-FD-01 (`fold_from_snapshots`, per
+   bar, asserted flat) and, from this package, C-NFO-01 (D-5800).
+4. **Printed, never asserted, where the route's own doc states O(months) or
+   O(entries).** The window seek is one pointer open and one `stat` per held
+   month; the scrub opens every held entry. The figure is the finding, and
+   it is named in `docs/06-limits.md` under this number with the Mac's
+   numbers.
+
+The cloud container could not build the `api` bench under the real bench
+profile (out of memory, twice). Every number in `docs/06-limits.md` under
+this number was taken on the operator's Mac under `[profile.bench]` (fat LTO,
+one codegen unit), by `cargo bench -p <crate> --locked --bench ratio`, the
+gate-8 command.
+
+### D-5830 — Gate 10 resolves a bare proof name against the front-end tests the runner runs, and the two rows pointing at nothing point at real tests (BASE-GATE10) — 2026-10-17
+
+**Number** the first of the block D-5830..D-5849 assigned to BASE-GATE10;
+unused when this entry was written (`grep -n 'D-58[34][0-9]'` over `docs/`
+found none on feat/db-fix at f9cdb5840).
+
+**Finding** BASE-RED-GATE10, from the CLOUD-RUST1 merge-back of 17 Oct: gate 10
+was red on feat/db-fix itself, which blocks "all gates green". On the head
+this package started from (f9cdb5840) the gate's two steps refused fourteen
+names. The other rows the merge-back listed (MR-34, AF-23, GI-07, ...) had been
+repaired by merges in between and resolve today.
+
+**What was observed.**
+
+1. **GI-08 named a test that a later package renamed.** AF-01 (D-4977) turned
+   `an_empty_source_reports_every_day_it_does_not_hold`, which pinned an OK
+   exit for a run that read no file, into
+   `cli::gdfl_import_command::tests::a_run_that_read_no_file_never_exits_ok`,
+   which pins FAILED. Its own doc comment records the rename. The row was not
+   moved with it, so `gates_ledger invariant-tests` reported it missing.
+2. **Thirteen front-end test names were refused although every one of them
+   exists.** AF06-05 and AF06-07 (D-4978) cite `web/tests/status-poll.test.js`
+   tests by their snake-case names, and R301-01 to R301-04 (D-5301) cite
+   `web/tests/db-address.test.js` and `web/tests/db-history.test.js` tests the
+   same way. D-1606 resolves a backticked bare name with three or more
+   underscores in a status row against RUST declarations only, so each was
+   refused as "declared in no tracked source file". The names did not move: the
+   gate could not see the files that declare them.
+3. **R301-05 named no proof the `✓` check accepts.** Its two tests are named by
+   their sentence names, with no file. Point 2's refusal hid it, because the
+   `✓` check runs only after the name check passes.
+
+**Decision.**
+
+1. GI-08's proof cell names `a_run_that_read_no_file_never_exits_ok`, and says
+   in prose (not in a code span, which the gate would read as a phantom) which
+   name it replaced and why. R301-05's proof cell names its file,
+   `web/tests/db-address.test.js`. No row is deleted or weakened, and no
+   allowlist entry is added.
+2. **`.github/invariant_paths.rs --web-tests FILE...`** lists `FILE<TAB>name`
+   for every test a front-end test file declares: the literal first argument
+   of each `test(` call made in CODE. The source is read by a lexer, not a
+   line pattern (D-1114's reason, for the browser's files): a `test('a_b_c_d'`
+   inside a `//` or `/* */` comment, a string, a template or a regular
+   expression lists nothing, and so do `x.test(` (a method), `test.skip(`,
+   `test.only(` (a skipped test proves nothing) and a name built at run time.
+   Only `web/tests/<name>.test.js` is read, the runner's own glob
+   (`node --test "tests/*.test.js"`); a deeper file declares no test that
+   runs. A source the lexer cannot delimit (an unterminated comment, string,
+   template or regular expression, or a `}` that closes nothing) is a refusal
+   naming the file and line, and so is a name holding a tab or line break.
+3. **Gate 10 passes that listing to the check as a fourth argument.** A bare
+   proof name resolves when a tracked Rust source declares it OR a runner-run
+   front-end file declares a test of exactly that name, and a `✓` row whose
+   proof names such a test is accepted. An undeclared name is refused by the
+   same message as before. The step refuses an empty listing
+   (`GATE 10 READ NO FRONT-END TEST.`) and the tool refuses a listing file that
+   names no test, so a glob that stops matching is red rather than a smaller
+   table. The two- and three-argument forms are unchanged, and without a
+   listing a web name is still refused, so a caller cannot lose the check by
+   omitting it.
+
+**What this does not do.** It does not resolve sentence-named web tests
+(`'a seed, a clamp and a restore ...'`) or a snake-case name under D-1606's
+three-underscore threshold (`pauses_while_hidden`): of the 1,403 names the
+tree declares, 26 have the bare-name shape and 1,377 do not,
+and a backticked phrase in a proof cell is not
+distinguishable from prose by shape. A row that cites them is accepted on its
+`.test.js` mention, as before. A web name resolves anywhere among the runner's
+files, not in the file the row names, the rule bare Rust names already follow.
+Both are in docs/06-limits.md (L-G10W-1, L-G10W-2).
+
+**Proof.** Before, on f9cdb5840: `invariant-paths` refused thirteen names
+(lines 7365, 7366, 7405 to 7408) and `invariant-tests` reported
+`1 missing` (GI-08). After, on this branch: `1920 path-qualified test
+references checked`, `0 missing`, both steps exit 0; the web listing reads
+1,403 names from 145 files, which matches the 1,393 `test('` and 10 `test("`
+declarations at line start (the one template-named test is built at run time).
+A copy of the document with one AF06-05 and one R301-04 name misspelled is
+refused by both names. Tests in `.github/invariant_paths.rs`:
+`web_test_names_are_read_from_code_and_never_from_prose`,
+`a_web_source_the_lexer_cannot_delimit_is_refused_by_its_line`,
+`only_a_file_the_runner_runs_declares_a_web_test`,
+`a_bare_proof_name_resolves_against_a_declared_front_end_test`. Fourteen hand
+mutants of the new lines (the method-call rule, the keyword rule, the comment,
+class, interpolation and template rules, the path rule both ways, the listing's
+line-break check, the stray `}`, the unclosed interpolation, the resolution
+and the `✓` union) were each killed by those tests. Invariants G10W-01 to
+G10W-04.
+
+**Cost.** Not a hot path: a CI step, linear in the bytes of the tracked web
+test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
+builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
+p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
+the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
