@@ -10415,6 +10415,57 @@ mod cloud_walk_tests {
         );
     }
 
+    /// **A close with exactly one open run of its key ends that run, proven,
+    /// even when the run names no ask, and leaves no guess behind to hide a
+    /// later count.** The first close does not directly follow its run's
+    /// record, because another key's run opened in between, so it is matched
+    /// among candidates. There is one candidate, and one is nothing to guess
+    /// between: the run is closed and no guess is kept. Later, two runs of
+    /// the same key open with different asks and a close pairs them by a
+    /// guess. Of those two, one surely has no closing record, and that count
+    /// is a fact because no earlier guess was about their key. Kills `>`
+    /// turned to `>=` at `candidates.len() > 1` in `Walker::by_candidates`
+    /// (pullrun.rs:1948). Under it the lone askless run fell through to a
+    /// one-run pairing guess, dead and so never served, which then took
+    /// "first of its key" from the later pairing and dropped the count.
+    #[test]
+    fn a_close_with_one_open_run_of_its_key_ends_it_with_no_guess() {
+        let askless = noted(
+            open_of("kite", 20_000, 20_010, 0xA),
+            "opened for 2 instruments",
+        );
+        assert_eq!(crate::audit::ask_of(&askless.note), None, "the premise");
+        let lone = walk(&[
+            (0, askless.clone()),
+            (1, open_of("dhan", 20_000, 20_010, 0xB)),
+            (2, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+        ]);
+        assert!(lone.guessed.is_empty(), "{:?}", lone.guessed);
+        let open = lone.open.as_ref().expect("the dhan run is open");
+        assert_eq!(open.ordinal, 1, "{open:?}");
+        assert_eq!(open.open_count, 1, "the kite run is closed: {open:?}");
+        assert!(open.also_open.is_empty(), "{:?}", open.also_open);
+
+        let found = walk(&[
+            (0, askless),
+            (1, open_of("dhan", 20_000, 20_010, 0xB)),
+            (2, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+            (3, open_of("kite", 20_000, 20_010, 0xC)),
+            (4, open_of("kite", 20_000, 20_010, 0xD)),
+            (6, close_of(Scope::Spot, "kite", 20_000, 20_010)),
+        ]);
+        assert!(
+            matches!(found.guessed.as_slice(), [Guess::Pairing { close: 6, .. }]),
+            "{:?}",
+            found.guessed
+        );
+        let [counted] = found.left_open.as_slice() else {
+            panic!("one counted pairing: {:?}", found.left_open);
+        };
+        assert_eq!(counted.close, 6);
+        assert_eq!(counted.left_open, 1, "{counted:?}");
+    }
+
     /// **A refusal of the same key after a pairing's close is no close of
     /// theirs, so the count of runs it left open still stands.** Two runs of
     /// one key are open with different asks and one close ends one of them,
