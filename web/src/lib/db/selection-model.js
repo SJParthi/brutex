@@ -18,6 +18,8 @@
  */
 import { istDay } from '../dates.js';
 import { parseKey } from '../instrument.js';
+import { dayText, quote } from './input-check.js';
+import { SEG_VIEW } from './notes-controls.js';
 
 /** The operator's opening instrument (D-3337 item 2, operator answer 11). */
 export const DEFAULT_INSTRUMENT = 'NIFTY';
@@ -294,39 +296,93 @@ export function dayCode(cal, iso) {
 export const SESSION_OPEN_MINUTE = 9 * 60 + 15;
 export const SESSION_CLOSE_MINUTE = 15 * 60 + 30;
 
+/**
+ * THE DATED CLOSE OF 03 AUG 2026 (SC-CLOSE-18; R3-01). `docs/00-charter.md`
+ * §7 (NSE's closing-auction session rules, and Zerodha's dated notice):
+ * derivatives trade continuously to 15:40 from 2026-08-03, so a contract's
+ * one-minute bars open up to 15:39; a CAS-eligible share's continuous trading
+ * ends 15:15 and 15:15–15:29 is its closing auction; an index and a share that
+ * is not eligible keep 15:30. The same dated table is `pull::vendor`'s
+ * derivatives schedule and `pull::calendar`'s cash rows (D-2831, D-3320).
+ * The grid listed 09:15–15:29 for every instrument on every day, and called
+ * an option's 15:30–15:39 minutes "such as a closing-auction print".
+ */
+export const CLOSE_CHANGE_DAY = '2026-08-03';
+export const DERIVATIVES_CLOSE_MINUTE = 15 * 60 + 40;
+export const CAS_AUCTION_MINUTE = 15 * 60 + 15;
+
 /** @param {number} m minutes since IST midnight */
 export const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+/**
+ * @typedef {object} SessionContext
+ * @property {'index' | 'cash' | 'derivative'} [venue] what the series is:
+ *   an index level, a share's cash series, or a futures/options contract
+ * @property {string} [lo] first ISO day of the selection's span
+ * @property {string} [hi] last ISO day of the selection's span
+ */
 
 /**
  * The minutes a bar of this rung can open on, regular session first, plus any
  * held minute outside it.
  *
+ * With a `venue` and a span, the dated close above is applied: a contract
+ * span reaching 2026-08-03 lists 15:30–15:39 as regular minutes (said to be
+ * so only from that day when the span starts earlier), and a share's
+ * 15:15–15:29 are marked as the closing auction for an eligible share. Without
+ * them the grid is the charter's 09:15 to 15:30, as before.
+ *
  * @param {number | undefined} rungSecs the rung's length (`TF_SECS`)
  * @param {Iterable<string>} [held] `HH:MM` minutes the loaded rows hold
+ * @param {SessionContext} [ctx]
  * @returns {Array<{key: string, name: string, detail: string, why?: string}>}
  */
-export function sessionGrid(rungSecs, held = []) {
+export function sessionGrid(rungSecs, held = [], ctx = {}) {
   if (!Number.isFinite(rungSecs) || /** @type {number} */ (rungSecs) <= 0 || /** @type {number} */ (rungSecs) >= 86_400) return [];
   const step = Math.max(1, Math.round(Math.max(/** @type {number} */ (rungSecs), 60) / 60));
+  const reaches = Boolean(ctx.hi) && /** @type {string} */ (ctx.hi) >= CLOSE_CHANGE_DAY;
+  const wholly = Boolean(ctx.lo) && /** @type {string} */ (ctx.lo) >= CLOSE_CHANGE_DAY;
+  const derivative = ctx.venue === 'derivative' && reaches;
+  const close = derivative ? DERIVATIVES_CLOSE_MINUTE : SESSION_CLOSE_MINUTE;
+  const closeText = hhmm(close);
   /** @type {Map<string, {key: string, name: string, detail: string, why?: string}>} */
   const out = new Map();
-  for (let m = SESSION_OPEN_MINUTE; m < SESSION_CLOSE_MINUTE; m += step) {
+  for (let m = SESSION_OPEN_MINUTE; m < close; m += step) {
     const t = hhmm(m);
-    out.set(t, { key: t, name: t, detail: 'regular session' });
+    if (m >= SESSION_CLOSE_MINUTE) {
+      out.set(t, {
+        key: t,
+        name: t,
+        detail: wholly ? 'regular session' : 'regular from 03 Aug 2026',
+        why: wholly
+          ? 'Derivatives trade continuously to 15:40 from 03 Aug 2026 (charter §7).'
+          : 'Derivatives trade continuously to 15:40 from 03 Aug 2026 (charter §7); a day before that ends at 15:29, so this minute holds bars only from 03 Aug 2026.'
+      });
+    } else if (ctx.venue === 'cash' && reaches && m >= CAS_AUCTION_MINUTE) {
+      out.set(t, {
+        key: t,
+        name: t,
+        detail: wholly ? 'closing auction (CAS share)' : 'auction from 03 Aug 2026 (CAS share)',
+        why: 'From 03 Aug 2026 a CAS-eligible share trades continuously to 15:15 and 15:15–15:29 is its closing auction; a share that is not eligible trades to 15:30 (charter §7, §9). Whether this share is eligible is not stated on this page.'
+      });
+    } else out.set(t, { key: t, name: t, detail: 'regular session' });
   }
   for (const t of held) {
     if (!/^\d{2}:\d{2}$/.test(t) || out.has(t)) continue;
     const m = Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
     const before = m < SESSION_OPEN_MINUTE;
-    const after = m >= SESSION_CLOSE_MINUTE;
+    const after = m >= close;
+    const rule = derivative
+      ? 'charter §7: 09:15 to 15:40 for derivatives from 03 Aug 2026'
+      : 'charter §3: 09:15 to 15:30';
     out.set(t, {
       key: t,
       name: t,
-      detail: before ? 'before 09:15' : after ? 'after 15:30' : 'held',
+      detail: before ? 'before 09:15' : after ? `after ${closeText}` : 'held',
       why: before
-        ? 'Outside the regular session (charter §3: 09:15 to 15:30); listed because a loaded bar opens here, such as a pre-open print.'
+        ? `Outside the regular session (${rule}); listed because a loaded bar opens here, such as a pre-open print.`
         : after
-          ? 'Outside the regular session (charter §3: 09:15 to 15:30); listed because a loaded bar opens here, such as a closing-auction print.'
+          ? `Outside the regular session (${rule}); listed because a loaded bar opens here${derivative ? '' : ', such as a closing-auction print'}.`
           : 'Off this rung’s grid; listed because a loaded bar opens here.'
     });
   }
@@ -490,6 +546,14 @@ export function keepOffered(picks, offer) {
  *   expiry: string, strike: string, side: string}}
  */
 export function linkOfKey(key) {
+  /* A KEY IN SMALL LETTERS IS NOT A KEY (R3-01 repair 1). A store key is
+     written in capitals — `Symbol::new` upper-cases a name and
+     `Contract::parse` (crates/core/src/instrument.rs) refuses any byte but
+     A–Z, 0–9 and `-` — so `nse-fno-nifty-2019-03-28-1150000-ce` names nothing
+     stored. Read as written it became a spot underlying
+     `nifty-2019-03-28-1150000-ce` with no word said, and the address written
+     from it was not the one opened. It is refused, never re-cased. */
+  if (typeof key === 'string' && /[a-z]/.test(key)) return null;
   const p = parseKey(key);
   if (!p.underlying || p.why) return null;
   return {
@@ -498,5 +562,211 @@ export function linkOfKey(key) {
     expiry: p.expiry ?? '',
     strike: p.strike === null ? '' : String(p.strike),
     side: p.side ?? ''
+  };
+}
+
+/* ======================================================================
+   A LINK AGAINST WHAT IT CAN NAME TODAY (R3-01; DB-077)
+   ----------------------------------------------------------------------
+   An address is read long after it was written. Several of its fields can say
+   something the page cannot honour as written, and each is NAMED and
+   resolved one way, never kept silently:
+
+   - a contract's SEGMENT is a function of its expiry, today and the
+     archive's end (`segmentOf`), so a link written while a contract was
+     unexpired (`seg=options-live&exp=2026-09-29`) names a segment the
+     contract has LEFT by the time the link is opened, and opened there it
+     reads an empty grid over a store that holds the contract. The link's
+     family (options or futures) is kept; the filing is today's.
+   - an instrument KEY beside fields that name a different instrument
+     (`key=NSE-FNO-NIFTY-…&sym=BANKNIFTY`) is two selections in one link.
+     The fields are what the page writes, so they are read and the key is
+     not, and the page says so. Inside one underlying (`…CE&side=PE`) each
+     field beside the key is read in place of the key's (`keyOverride`).
+   - a contract field on a segment without that rung (`seg=spot&side=PE`)
+     is named and not applied (`offSegment`).
+   ====================================================================== */
+
+/**
+ * A linked `seg` against the segments this page has and against the filing
+ * of the contract the link names.
+ *
+ * @param {string | undefined} seg the address's `seg`
+ * @param {string | undefined} exp the contract's expiry, `YYYY-MM-DD`, from `exp` or the key
+ * @param {string} today today's IST day
+ * @param {string | null | undefined} archiveTo the feed's archive end
+ * @returns {{seg: string | undefined, why: string | null}} the segment to open
+ *   on (`undefined` keeps the page's own choice) and the sentence, if any
+ */
+export function linkedSegment(seg, exp, today, archiveTo) {
+  if (!seg) return { seg: undefined, why: null };
+  if (!SEGMENT_KEYS.includes(seg)) {
+    const shown = seg.length > 40 ? `${JSON.stringify(seg.slice(0, 24))}… (${seg.length} characters)` : JSON.stringify(seg);
+    return {
+      seg: undefined,
+      why: `seg ${shown} is not one this page knows (it reads ${SEGMENT_KEYS.join(', ')}); the segment is chosen as if the link named none`
+    };
+  }
+  if (!contractRungsOf(seg).expiry || !exp) return { seg, why: null };
+  const family = seg.replace(/-(cut|live)$/, '');
+  const now = segmentOf({ expiry: exp, instrument: family === 'options' ? 'x-CE' : 'x-FUT' }, today, archiveTo);
+  if (now === seg) return { seg, why: null };
+  /** @param {string} k */
+  const name = (k) => SEG_VIEW.find((s) => s.key === k)?.name ?? k;
+  return {
+    seg: now,
+    why: `seg=${seg} (${name(seg)}) no longer holds a contract expiring ${dayText(exp)}: today it is filed under ${name(now)} (seg=${now}), so the page opens there`
+  };
+}
+
+/** A value as a link note shows it: whole when short, else cut and counted. */
+const shortText = (/** @type {unknown} */ raw) => {
+  const s = String(raw ?? '');
+  return s.length > 40 ? `${s.slice(0, 24)}… (${s.length.toLocaleString('en-IN')} characters)` : s;
+};
+
+/** A strike list as a link note shows it: the first four, the rest counted. */
+const strikeList = (/** @type {string[]} */ k) =>
+  k.length > 4 ? `${k.slice(0, 4).join(',')},… (${k.length.toLocaleString('en-IN')} strikes)` : k.join(',');
+
+/**
+ * A linked instrument key against the UNDERLYING named beside it, or `null`
+ * when they agree (or there is no key, or no `sym`). A key and a `sym` that
+ * name two underlyings are two selections in one link, and the key's
+ * expiry, strike and side mean nothing for the other underlying, so the key
+ * is not read at all. A disagreement inside one underlying is `keyOverride`'s.
+ *
+ * @param {{key?: string, sym?: string}} sel
+ * @param {ReturnType<typeof linkOfKey>} link `linkOfKey(sel.key)`
+ * @returns {string | null}
+ */
+export function keyConflict(sel, link) {
+  if (!link || !sel.sym || sel.sym === link.sym) return null;
+  return `key=${shortText(sel.key)} and sym=${shortText(sel.sym)} (the key's is ${link.sym}) name different instruments, so the key was not read; the page opens on the fields beside it`;
+}
+
+/**
+ * A linked instrument key against the CONTRACT fields beside it, inside one
+ * underlying: `key=…11,600 CE&side=PE` (13 and 16 Oct, shadow). Dropping the
+ * whole key left `side=PE` alone on the opening segment, Spot, which has no
+ * side, and the grid stranded empty over a store that holds the contract.
+ * The fields are what the page writes, so each one beside the key is read
+ * in place of the key's; the key fills only what the fields leave out. Said
+ * in one sentence, `null` when nothing disagrees. A field the key does not
+ * name (a spot key and an `exp`) is no disagreement here: `offSegment` says
+ * whether its segment has that rung. A strike list that holds the key's
+ * strike is no disagreement either.
+ *
+ * @param {{key?: string, exp?: string, k?: string[], side?: string}} sel
+ * @param {ReturnType<typeof linkOfKey>} link `linkOfKey(sel.key)`
+ * @returns {string | null}
+ */
+export function keyOverride(sel, link) {
+  if (!link) return null;
+  /** @type {string[]} */
+  const clash = [];
+  if (sel.exp && link.expiry && sel.exp !== link.expiry) clash.push(`exp=${sel.exp} (the key's is ${link.expiry})`);
+  if (sel.k?.length && link.strike && !sel.k.includes(link.strike)) clash.push(`k=${strikeList(sel.k)} (the key's is ${link.strike})`);
+  if (sel.side && link.side && sel.side !== link.side) clash.push(`side=${sel.side} (the key's is ${link.side})`);
+  if (clash.length === 0) return null;
+  const one = clash.length === 1;
+  return `key=${shortText(sel.key)} and ${clash.join(', ')} disagree: the field${one ? '' : 's'} beside the key ${one ? 'is' : 'are'} read in place of the key's, and the key gives only what the fields leave out`;
+}
+
+/**
+ * The contract fields a link names against the rungs of the segment it
+ * opens on (`contractRungsOf`). Spot has no expiry, strike, moneyness or
+ * side; a future has an expiry and none of the others. A field the segment
+ * does not have is NAMED and not applied: applied, it stranded the grid
+ * empty (`seg=spot&side=PE`, shadow 16 Oct) with no word about the link.
+ * `seg` empty means the link names no segment, no expiry and no key, so the
+ * page opens on its own segment (Spot when the instrument holds it): a
+ * strike, moneyness or side alone names no contract to file there.
+ *
+ * @param {string | undefined} seg the segment the link opens on, if it names one
+ * @param {{exp?: string, strikes: string[], mny: string[], side?: string}} f
+ * @returns {{exp: boolean, strikes: boolean, mny: boolean, side: boolean, why: string | null}}
+ *   which fields are dropped, and the sentence
+ */
+export function offSegment(seg, f) {
+  const rungs = contractRungsOf(seg ?? '');
+  const drop = {
+    exp: Boolean(f.exp) && !rungs.expiry,
+    strikes: f.strikes.length > 0 && !rungs.strike,
+    mny: f.mny.length > 0 && !rungs.money,
+    side: Boolean(f.side) && !rungs.side
+  };
+  /** @type {string[]} */
+  const said = [];
+  if (drop.exp) said.push(`exp=${f.exp}`);
+  if (drop.strikes) said.push(`k=${strikeList(f.strikes)}`);
+  if (drop.mny) said.push(`mny=${f.mny.length > 4 ? `${f.mny.slice(0, 4).join(',')},…` : f.mny.join(',')}`);
+  if (drop.side) said.push(`side=${f.side}`);
+  if (said.length === 0) return { ...drop, why: null };
+  const one = said.length === 1;
+  const where = seg
+    ? `${SEG_VIEW.find((s) => s.key === seg)?.name ?? seg} (seg=${seg}) has no such rung`
+    : 'the link names no segment, expiry or key to file a contract under';
+  return { ...drop, why: `${said.join(', ')} ${one ? 'is' : 'are'} not applied: ${where}` };
+}
+
+/**
+ * THE CONTRACT A LINK NAMES (R3-01; DB-077) — the key, the fields beside it
+ * and the segment, resolved into one selection and the sentences that say
+ * what was not taken as written. Pure, so every combination is tested on
+ * behaviour; the link reader (`applyAddress`) only applies the answer.
+ *
+ * @param {{key?: string, sym?: string, seg?: string, exp?: string, k?: string[], side?: string, mny?: string[]}} sel
+ *   a `decodeDb` selection
+ * @param {string} today today's IST day
+ * @param {string | null | undefined} archiveTo the feed's archive end
+ * @returns {{sym?: string, seg?: string, exp?: string, strikes: string[], side?: string, mny: string[], notes: string[]}}
+ *   an absent field is one the link leaves to the page
+ */
+export function linkedContract(sel, today, archiveTo) {
+  /** @type {string[]} */
+  const notes = [];
+  let link = sel.key ? linkOfKey(sel.key) : null;
+  if (sel.key && link === null)
+    notes.push(
+      /[a-z]/.test(sel.key)
+        ? `key=${quote(sel.key)} is not an instrument key: a stored key is written in capitals (NSE-FNO-NIFTY-2019-03-28-1150000-CE), and a key is never re-cased to make it one`
+        : `key=${quote(sel.key)} is not an instrument key (EXCHANGE-SEGMENT-UNDERLYING[-contract])`
+    );
+  const clash = keyConflict(sel, link);
+  if (clash) {
+    notes.push(clash);
+    link = null;
+  }
+  const over = keyOverride(sel, link);
+  if (over) notes.push(over);
+  const sym = sel.sym ?? link?.sym;
+  const exp = sel.exp ?? (link?.expiry || undefined);
+  const strikes = sel.k ?? (link?.strike ? [link.strike] : []);
+  const side = sel.side ?? (link?.side || undefined);
+  const mny = sel.mny ?? [];
+  /* THE SEGMENT: the link's own `seg`, filed by today's calendar; else the
+     key's family; else a contract named by its expiry alone — an option when
+     a strike, moneyness or side is named, else a future. */
+  const named = linkedSegment(sel.seg, exp, today, archiveTo);
+  if (named.why) notes.push(named.why);
+  let seg = named.seg;
+  if (!seg && link)
+    seg =
+      link.contract === 'spot'
+        ? 'spot'
+        : segmentOf({ expiry: exp ?? link.expiry, instrument: link.contract === 'options' ? 'x-CE' : 'x-FUT' }, today, archiveTo);
+  else if (!seg && exp)
+    seg = segmentOf({ expiry: exp, instrument: strikes.length || side || mny.length ? 'x-CE' : 'x-FUT' }, today, archiveTo);
+  const off = offSegment(seg, { exp, strikes, mny, side });
+  if (off.why) notes.push(off.why);
+  return {
+    sym,
+    seg,
+    exp: off.exp ? undefined : exp,
+    strikes: off.strikes ? [] : strikes,
+    side: off.side ? undefined : side,
+    mny: off.mny ? [] : mny,
+    notes
   };
 }

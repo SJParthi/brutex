@@ -18422,3 +18422,11 @@ runs each, on the shared machine with other builds running.
 | L-WD-7 | A run killed inside `open` may have shown nothing | the notice is counted as sent once its run saved `pending` (R332-12), so a run killed before `open` showed the page leaves the operator unwarned for that outage | the next run's `notify-unknown` line names it with the minute it was sent; the page is in `notices/` under that minute's name | R3-32 |
 | L-WD-8 | Waiting for the lock | a spawn duplicates the lock's descriptor until its `exec` | at most `LOCK_WAIT` (1 s) of 5, 10, 20, 40, 80 then 100 ms pauses, then refused by name (R332-11) | R3-32 |
 | L-WD-9 | The drive check needs the drive | the store root's device can be read only while it is mounted | rendered with the drive away, an agent carries a `NOT CHECKED` comment and only the by-name check was made; the verb at run time refuses the same drive whenever the root can be looked at (R332-16). One `stat` per missing path component | R3-32 |
+
+## The /db address (R3-01, D-5301)
+
+| ID | Limit | Why it is not O(1) | Bound | Package |
+|---|---|---|---|---|
+| L-R301-1 | A linked page past the end of the answer costs a second `/bars/window.json` read | the first read is the only way to learn the total, and the last page is read once it is known | at most one extra read per opened address (the second agent counted it on `page=999999999` on 16 Oct, `verify-R3-01-r1.json`); a page that exists costs one read | R3-01 |
+| L-R301-2 | Whether a typed name is held is answered from a set folded once per census load | the set is built from the census rows as they arrive | O(census rows) once per census load, already the cost of reading the census; each question after that is one `Set` probe (it was a `db.deco.some` scan per change until R3-01 repair 1) | R3-01 |
+| L-R301-3 | A press older than `GESTURE_MS` (30 s) is not the cause of the next address write | a write with no recent choice must be told apart from a seed or a clamp, and nothing else on the page says which caused it | such a write is a `replace`: the address stays exact and only that step's own Back entry is lost. Every pick on /db moves the selection in the press's own task, so this is a bound, not a measured case | R3-01 |

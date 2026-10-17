@@ -70695,3 +70695,103 @@ record in `docs/36` §9.4.
 `cli::watchdog_command::tests::a_lock_held_for_a_moment_is_waited_for_not_refused`,
 `cli::watchdog_command::tests::a_state_dir_on_the_store_drive_is_refused_however_it_is_spelt`,
 `cli::watchdog_command::tests::a_suspect_from_long_ago_is_not_half_an_outage`.
+
+### D-5301 — /db's address contract, as written since R3-01: strikes in one comma field, every choice a key with its default, bounded refusals, and one Back entry per choice made on a control; supersedes D-3337 item 4 — 2026-10-16
+
+**Number** taken from above every ledger head on the local branches on
+16 Oct (the highest was D-5240; D-5251 and D-5260 are named for branches not
+yet merged). Amendment A6: the landing renumbers it from the head it lands on.
+
+**Implemented by** R3-01. **Findings** DB-077, DB-G98, DB-051, SC-CLOSE-18,
+and the second agent's re-check of 16 Oct (`verify-R3-01-r1.json`).
+
+**What was observed.** D-3337 item 4 says `k` is "a strike in paisa,
+repeatable" and names seventeen keys. The page has written strikes as ONE
+field since R3-01's first commit, because the server answered the repeated
+form 400 on reload and on every shared link, and it writes four keys item 4
+never named. The code and the append-only ledger said opposite things, and
+the bounds and the history rule the page follows were recorded nowhere.
+
+**Decision.** Item 4 of D-3337 is replaced by the following. Items 1–3, 5
+and 6 stand.
+
+1. **The keys, in the order the page writes them** (`DB_KEYS`,
+   `web/src/lib/urlstate.js`): `feed`, `universe`, `seg`, `sym`, `key`, `tf`,
+   `exp`, `k`, `mny`, `side`, `spot`, `from`, `to`, `tfrom`, `tto`, `sort`,
+   `dir`, `rows`, `page`, `view`, `oow`. Four are new: `universe` (a
+   membership universe key; Everything is `''` and is not written), `mny`
+   (moneyness rungs `ATM`, `ITM`, `OTM`, `ITM-n`, `OTM+n`), `spot` (`exact`, or
+   `prev` = the last spot at or before t, D-3328) and `rows` (a whole number of
+   rows per page, or `fit`).
+2. **A default is not written** (`DB_DEFAULTS`): `sort=ts`, `dir=desc` (the
+   Bars view; Coverage opens by instrument ascending), `page=1`, `view=bars`,
+   `oow` off, `spot=exact` (D-2807) and `rows=fit`. A bookmark names exactly
+   the choices that differ from opening the page.
+3. **`k` is ONE comma-joined field of strikes in whole paisa**, sorted
+   numerically and deduplicated: `k=1160000,1200000`. `mny` is one
+   comma-joined field too, sorted. The comma is written as itself; `%2C`
+   reads the same. **No field is written twice**: one selection is one
+   address, byte for byte, and `encodeDb(decodeDb(q).sel) === q`.
+4. **A repeated `k` (a link written before R3-01) is still read** by the
+   page's reader, `decodeDb`. **The server refuses it first**:
+   `crates/api/src/server.rs` `request_bounds_refusal` answers 400 to any
+   query that names a field twice, except the two list fields in
+   `MULTI_VALUED_QUERY_FIELDS` (`/bars/window.json`'s `key` and
+   `/scrub.json`'s `key`). So such a bookmark opens on the server's refusal
+   page and not on /db. This entry changes no server code. Letting /db's `k`
+   repeat, or redirecting to the comma form, is a follow-up for the `api`
+   owner. Until that lands, a pre-R3-01 two-strike link does not open.
+5. **Bounds**, each a bound and not a vendor fact: a text field (`sym`,
+   `key`, …) is read for at most `MAX_TEXT` = 128 characters
+   (`web/src/lib/db/input-check.js`). A list field (`k`, `mny`) is read for
+   at most `MAX_LIST_FIELD` = 1,024 characters (64 values of 16), and a
+   longer one is refused by its length before it is split. `page` and `rows`
+   are whole numbers from 1 to `MAX_PAGE` = 999,999,999. One address names
+   at most `MAX_REFUSED` = 12 refusals one by one and counts the rest in one
+   closing entry. A value refused twice is named once. One sentence quotes
+   at most 8 unknown field names.
+6. **Honoured or refused in words, never dropped.** A page past the end of
+   the answer is named, and the last page is shown. That costs one extra
+   `/bars/window.json` read, at most one (docs/06-limits.md). An unknown
+   sort, direction, side, view, universe or rows value is named. So is an
+   unknown field. A feed the operator excluded (`dhan`, `groww`, `truedata`,
+   D-3338) is refused by name and nothing is probed.
+7. **A key against the fields beside it** (`linkedContract`,
+   `web/src/lib/db/selection-model.js`): a key whose underlying differs
+   from `sym` is not read, and the page says so. Inside one underlying, a
+   field beside the key is read in place of the key's. A contract's segment
+   is filed by today's calendar. A contract field on a segment without that
+   rung is named and not applied. A key with any small letter is refused by
+   name and never re-cased (a stored key is upper case: `Symbol::new`
+   upper-cases a name and `Contract::parse` takes only A–Z, 0–9 and `-`).
+8. **Back and Forward** (`dbHistory`). The address is written with
+   SvelteKit's `pushState` or `replaceState` once the selection settles, and
+   only when it differs. The first write after the page opens is a
+   `replace`. So is a write after Back or Forward restored an entry, and a
+   write with no choice gesture since the last write (a seed, a clamp).
+   Anything else is a `push`. One press is one entry: the first write spends
+   it. **A choice gesture is a primary-button `pointerdown`, or a `keydown`
+   other than a modifier, Tab, Escape or a function key, on or inside a
+   control** (`CHOICE_TARGET`: a form control, a link, a label, a menu or
+   grid item, anything with `tabindex`; `isChoiceGesture`). A press on
+   blank space arms nothing. **`GESTURE_MS` = 30 s**: a press made longer
+   ago than that does not cause the next write, which is written as a
+   `replace`. The address is still exact; only that step loses its own Back
+   entry. Every pick on /db sets a field `encodeDb` writes inside the
+   press's own task, so the bound is not reached in normal use. The reader
+   reads the browser's `location.search` (`addressNow`), never the URL the
+   page was entered with.
+
+**Proof.** `web/tests/db-address.test.js`:
+`every_db_choice_round_trips_through_the_address`,
+`an_address_with_two_strikes_reloads`,
+`a_linked_page_number_is_honoured_or_refused`,
+`an_excluded_feed_in_a_link_is_refused_by_name`,
+`an_absurd_address_names_each_problem_once_and_a_bounded_few`,
+`a_lower_case_key_is_named_and_not_read`,
+`a_key_that_disagrees_with_the_fields_beside_it_is_named_and_not_read`, and
+the p99 test (encode, decode and `linkedContract` under 1 ms, n = 1,000).
+`web/tests/db-history.test.js`: `back_and_forward_restore_each_selection`,
+`a seed, a clamp and a restore correct the current entry and never add one`,
+`a press off a control, or a key that chooses nothing, arms no Back entry`.
+Invariants R301-01 to R301-05 in docs/04-invariants.md.
