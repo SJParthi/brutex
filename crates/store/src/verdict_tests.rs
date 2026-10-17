@@ -805,3 +805,116 @@ fn a_year_index_born_between_a_readers_two_looks_is_read() {
         "index_missing"
     );
 }
+
+/// The `why` of a reader's `image_corrupt`, or a panic naming what came.
+fn corrupt_why(answer: Result<super::Lookup, VerdictError>) -> String {
+    match answer {
+        Err(VerdictError::ImageCorrupt { why, .. }) => why,
+        other => panic!("not image_corrupt: {other:?}"),
+    }
+}
+
+/// **A DAY IMAGE WHOSE HEADER NAMES ANOTHER SERIES, DAY OR GENERATION IS
+/// REFUSED BY THE READER, NEVER ANSWERED FROM.**
+///
+/// Covers each condition of the reader's `same` check one at a time: an
+/// image's bytes are whole and its own checks pass, but the name it was
+/// found under is not the one its header was written for. A generation's
+/// image copied over the next generation's name; one day's image put under
+/// another day's name; and the series' index and image copied under a
+/// series that differs in its feed, its exchange, its segment or its
+/// timeframe alone. Each is `image_corrupt`, saying so, and the image under
+/// its own name still answers.
+#[test]
+fn an_image_naming_another_series_day_or_generation_is_refused() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    let other_day = Day::new(2031, 3, 5).unwrap();
+    let named = |code| vec![entry("NSE-FNO-ZZTEST-A", code)];
+    commit(&series, &generation(91, named(Code::Match))).unwrap();
+    let mut later = generation(92, named(Code::Match));
+    later.day = other_day;
+    commit(&series, &later).unwrap();
+    commit(&series, &generation(93, named(Code::ValueMismatch))).unwrap();
+    const SAID: &str = "the header names another series, day or generation";
+
+    let g2 = series.image_path(day(), 2);
+    let kept = fs::read(&g2).unwrap();
+    fs::copy(series.image_path(day(), 1), &g2).unwrap();
+    assert_eq!(
+        corrupt_why(Reader::new().lookup(&series, day(), &key)),
+        SAID
+    );
+    fs::write(&g2, &kept).unwrap();
+
+    let elsewhere = series.image_path(other_day, 1);
+    let kept_elsewhere = fs::read(&elsewhere).unwrap();
+    fs::copy(series.image_path(day(), 1), &elsewhere).unwrap();
+    assert_eq!(
+        corrupt_why(Reader::new().lookup(&series, other_day, &key)),
+        SAID
+    );
+    fs::write(&elsewhere, &kept_elsewhere).unwrap();
+
+    let alike = |change: fn(&mut Series<'_>)| {
+        let mut other = root.series();
+        change(&mut other);
+        other
+    };
+    let others = [
+        alike(|s| s.feed = Feed::Dhan),
+        alike(|s| s.exchange = Exchange::Bse),
+        alike(|s| s.segment = Segment::Index),
+        alike(|s| s.timeframe = crate::path::Timeframe::MINUTE_1),
+    ];
+    for other in &others {
+        fs::create_dir_all(other.dir().join("2031")).unwrap();
+        fs::copy(series.year_index(2031), other.year_index(2031)).unwrap();
+        fs::copy(&g2, other.image_path(day(), 2)).unwrap();
+        assert_eq!(
+            corrupt_why(Reader::new().lookup(other, day(), &key)),
+            SAID,
+            "{}",
+            other.dir().display()
+        );
+    }
+    let answer = Reader::new().lookup(&series, day(), &key).unwrap();
+    assert_eq!(answer.answer.unwrap().code(), Some(Code::ValueMismatch));
+}
+
+/// **A YEAR-INDEX SLOT IS READ ONLY WHEN IT IS WHOLE, THIS STORE'S, OF
+/// THIS VERSION AND OF THIS YEAR.**
+///
+/// Covers each condition of `decode_slot`'s check one at a time: a slot cut
+/// one byte short, one whose magic, version or checksum is changed (the
+/// checksum sealed again over the change for the first two), and a whole
+/// slot asked for another year are each `None`, never a slot read wrongly;
+/// the slot as written decodes to its commit and its days.
+#[test]
+fn a_year_index_slot_is_read_only_when_whole_and_its_own() {
+    use super::{DayEntry, crc_to, decode_slot, encode_slot};
+    let mut days = vec![DayEntry::default(); super::YEAR_DAYS];
+    days[62].generation = 3;
+    let slot = encode_slot(2031, 7, &days);
+    let decoded = decode_slot(&slot, 2031).unwrap();
+    assert_eq!(decoded.0, 7);
+    assert_eq!(decoded.1[62].generation, 3);
+    let len = slot.len();
+    let sealed = |mut bytes: Vec<u8>| {
+        let crc = crc_to(&bytes, len - 4);
+        bytes[len - 4..].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    };
+    assert!(decode_slot(&slot[..len - 1], 2031).is_none(), "short");
+    let mut magic = slot.clone();
+    magic[0] ^= 0x01;
+    assert!(decode_slot(&sealed(magic), 2031).is_none(), "magic");
+    let mut version = slot.clone();
+    version[8] ^= 0x01;
+    assert!(decode_slot(&sealed(version), 2031).is_none(), "version");
+    assert!(decode_slot(&slot, 2030).is_none(), "another year");
+    let mut crc = slot.clone();
+    crc[len - 1] ^= 0x01;
+    assert!(decode_slot(&crc, 2031).is_none(), "checksum");
+}
