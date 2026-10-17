@@ -3012,6 +3012,8 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<bool, VerdictError> {
         Ok(()) => Ok(staged.cleared.is_some()),
         Err((action, action_left, why)) => {
             drop(staged.file);
+            #[cfg(test)]
+            tests::interfere("refused tmp removed", path, path);
             let action = match fs::remove_file(path) {
                 Err(left) if left.kind() != ErrorKind::NotFound => action_left,
                 _ => action,
@@ -3076,6 +3078,8 @@ fn tmp_of(path: &Path, run: u64) -> PathBuf {
 
 /// Removes a temporary this writer made; one already gone is fine.
 fn remove_tmp(path: &Path) -> Result<(), VerdictError> {
+    #[cfg(test)]
+    tests::interfere("tmp removed", path, path);
     match fs::remove_file(path) {
         Err(why) if why.kind() != ErrorKind::NotFound => Err(io_error(path, "remove", why)),
         _ => Ok(()),
@@ -3097,6 +3101,8 @@ fn genesis(series: &Series<'_>, year: u16, run: u64) -> Result<(File, bool), Ver
     let cleared = write_durable(&tmp, &bytes)?;
     #[cfg(test)]
     tests::crash("index tmp written")?;
+    #[cfg(test)]
+    tests::interfere("index linked", &tmp, &path);
     match fs::hard_link(&tmp, &path) {
         Ok(()) => {}
         Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
@@ -3263,6 +3269,8 @@ fn publish(
         cleared += u32::from(write_durable(&tmp, &built.bytes)?);
         #[cfg(test)]
         tests::crash("image tmp written")?;
+        #[cfg(test)]
+        tests::interfere("image linked", &tmp, &path);
         match fs::hard_link(&tmp, &path) {
             Ok(()) => {
                 remove_tmp(&tmp)?;

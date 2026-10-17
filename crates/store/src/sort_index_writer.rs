@@ -173,7 +173,7 @@ impl BarFile {
                 // SILENT ON SUCCESS: a month that predates D-3349, or one past
                 // `COMPACT_AT` runs, is the writer's ordinary upkeep, and an
                 // import writes no line for it. A failure is the warning below.
-                Plan::Whole => self.write_whole(sidecar).map(|_| ()),
+                Plan::Whole => self.write_whole(sidecar),
             })
         });
         if let Err(why) = kept {
@@ -290,7 +290,7 @@ impl BarFile {
                 links,
                 "the index is written whole as a new file",
             );
-            return self.write_whole(sidecar).map(|_| ());
+            return self.write_whole(sidecar);
         }
         let bars = self.committed_rows(from, self.header.n_valid)?;
         let run =
@@ -322,20 +322,22 @@ impl BarFile {
     }
 
     /// Writes every committed row as ONE run into a new file, then renames it
-    /// over the month's index. Returns the runs written: one, or none for a
-    /// month that commits no rows.
+    /// over the month's index.
+    ///
+    /// Only for a month that commits rows: it is reached only through
+    /// [`Self::keep_sort_index`], which returns first for one that commits
+    /// none. A guard here that
+    /// answered "no run" for an empty month was reached by no input (cloud
+    /// pass 2026-10-17); an empty month now reaches the build, which refuses
+    /// it as [`Why::Empty`].
     ///
     /// # Errors
     ///
     /// The run could not be built (named by [`Why`]), or the host refused a
     /// write, a sync or the rename.
-    fn write_whole(&self, sidecar: &SortSidecar) -> Result<usize, String> {
-        if self.header.n_valid == 0 {
-            return Ok(0);
-        }
+    fn write_whole(&self, sidecar: &SortSidecar) -> Result<(), String> {
         let run = self.whole_image(sidecar)?.map_err(|why| why.to_string())?;
-        write_image(sidecar, &run, self.batch.as_ref())?;
-        Ok(1)
+        write_image(sidecar, &run, self.batch.as_ref())
     }
 
     /// The month [`Self::sort_index_existing`] sorts, opened read-only under
@@ -601,16 +603,44 @@ fn open_new(path: &Path, through: bool) -> io::Result<File> {
     no_follow_through(File::options().write(true).create_new(true), through).open(path)
 }
 
+/// One positional read of the month's index, every byte or the host's
+/// refusal.
+///
+/// Under `cfg(test)` it goes through the file test seam
+/// (`file::tests::arm_host_fault`), because no test can make the host refuse
+/// a read of an index this door has just opened.
+fn read_index_at(file: &File, buf: &mut [u8], at: u64) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(refusal) = super::tests::host_fault_on(Action::Read, file) {
+        return Err(refusal);
+    }
+    file.read_exact_at(buf, at)
+}
+
 /// Why the walked index's bodies are not whole, or `None` when every run's
 /// body matches the checksum its header holds
 /// ([`sort_index::verify_bodies`]).
 fn damaged(sidecar: &SortSidecar, walked: &Walked) -> Result<Option<Why>, String> {
     let file = open_read(&sidecar.path).map_err(|why| why.refusal(&sidecar.path).to_string())?;
-    match sort_index::verify_bodies(|at, buf| file.read_exact_at(buf, at), &walked.runs) {
+    match sort_index::verify_bodies(|at, buf| read_index_at(&file, buf, at), &walked.runs) {
         Ok(()) => Ok(None),
         Err(Why::Unreadable(why)) => Err(format!("{}: {why}", sidecar.path.display())),
         Err(why) => Ok(Some(why)),
     }
+}
+
+/// One `lstat` of `path`, never following a final link.
+///
+/// Under `cfg(test)` it goes through the file test seam
+/// (`file::tests::arm_host_fault`, as `measuring`), because the month's own
+/// directory refuses a look only if it changes between two calls of one
+/// function, which no test can stage.
+fn look(path: &Path) -> io::Result<fs::Metadata> {
+    #[cfg(test)]
+    if let Some(refusal) = super::tests::host_fault(Action::Measure, path) {
+        return Err(refusal);
+    }
+    fs::symlink_metadata(path)
 }
 
 /// Removes the NAME `<yyyy-mm>.new.srt` when something left one: a build
@@ -623,7 +653,7 @@ fn damaged(sidecar: &SortSidecar, walked: &Walked) -> Result<Option<Why>, String
 /// that is not a regular file: it is refused by name.
 fn clear_staging(sidecar: &SortSidecar) -> Result<(), String> {
     let staging = sidecar.staging();
-    match fs::symlink_metadata(&staging) {
+    match look(&staging) {
         Ok(meta) if meta.is_file() => {
             fs::remove_file(&staging).map_err(|why| format!("{}: {why}", staging.display()))?;
             if meta.nlink() == 1 {
@@ -656,7 +686,7 @@ fn clear_staging(sidecar: &SortSidecar) -> Result<(), String> {
 /// The month's index, walked: `None` when there is none, the refusal
 /// when it would not walk.
 fn walk_sidecar(sidecar: &SortSidecar) -> Result<Option<Result<Walked, Why>>, String> {
-    let meta = match fs::symlink_metadata(&sidecar.path) {
+    let meta = match look(&sidecar.path) {
         Ok(meta) => meta,
         Err(why) if why.kind() == ErrorKind::NotFound => return Ok(None),
         Err(why) => return Err(format!("{}: {why}", sidecar.path.display())),
@@ -669,7 +699,7 @@ fn walk_sidecar(sidecar: &SortSidecar) -> Result<Option<Result<Walked, Why>>, St
     }
     let file = open_read(&sidecar.path).map_err(|why| why.refusal(&sidecar.path).to_string())?;
     Ok(Some(sort_index::walk(
-        |at, buf| file.read_exact_at(buf, at),
+        |at, buf| read_index_at(&file, buf, at),
         meta.len(),
         &sidecar.shape,
     )))

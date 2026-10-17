@@ -541,3 +541,178 @@ fn a_gathering_dropped_unfinished_restores_the_state_before_it() {
         "nothing gathers after an unfinished one with none before it"
     );
 }
+
+/// A month of 1,100 one-second bars whose writer made its `.srt` and
+/// `.tix`, closed.
+fn sorted_month(tag: &str) -> Root {
+    let root = Root::new(tag);
+    let mut writer = BarFile::open_or_create(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    writer.append(&bars(0, 1_100)).unwrap();
+    drop(writer);
+    assert!(root.at(FileKind::SortIndex).exists(), "the premise");
+    root
+}
+
+fn sort(root: &Root) -> Result<super::SortIndexed, StoreError> {
+    BarFile::sort_index_existing(&root.0, month(FileKind::Bars), SYMBOL)
+}
+
+/// **EVERY READ OF A WHOLE SORT INDEX THE DOOR MAKES, REFUSED, IS EITHER A
+/// WALK THAT FAILED (THE INDEX IS WRITTEN WHOLE AGAIN) OR A BODY THAT COULD
+/// NOT BE CHECKED (THE DOOR IS REFUSED BY THE INDEX'S NAME, AND NOTHING IS
+/// WRITTEN).**
+///
+/// Covers `damaged`'s refusal of a body read the host refused
+/// (`verify_bodies`' `Why::Unreadable`), and the walk's own refused read:
+/// the door over a month whose `.srt` is one whole run reads the run's
+/// headers, then its body once. Each of those reads is refused in turn. A
+/// refused walk cannot say what the index holds, so the door writes the
+/// month whole (`Built`) and the index it leaves is kept by the next run; a
+/// refused body read is never taken for a whole body (the door would answer
+/// `Kept` over bytes nobody read) nor for a damaged one (it would rewrite an
+/// index it could not judge): it refuses, naming the index, and the index
+/// is byte for byte what it was.
+#[test]
+fn every_refused_read_of_a_whole_sort_index_rebuilds_or_refuses_by_name() {
+    let root = sorted_month("srt-reads");
+    let srt = root.at(FileKind::SortIndex);
+    let (mut built, mut refused) = (0u32, 0u32);
+    for skip in 0.. {
+        let before = fs::read(&srt).unwrap();
+        arm_host_fault(Action::Read, &srt, skip, ErrorKind::PermissionDenied);
+        let answer = sort(&root);
+        let fired = !host_fault_armed();
+        super::tests::disarm_host_fault();
+        match answer {
+            Ok(sorted) if !fired => {
+                assert_eq!(sorted.outcome, super::Resorted::Kept, "past every read");
+                break;
+            }
+            Ok(sorted) => {
+                assert!(
+                    matches!(&sorted.outcome, super::Resorted::Built(_)),
+                    "read {skip}: {sorted:?}"
+                );
+                assert_eq!((sorted.n_valid, sorted.runs), (1_100, 1), "read {skip}");
+                assert_eq!(
+                    sort(&root).unwrap().outcome,
+                    super::Resorted::Kept,
+                    "read {skip}: what it wrote is whole"
+                );
+                built += 1;
+            }
+            Err(StoreError::SortIndex { path, reason }) => {
+                assert_eq!(path, srt, "read {skip}");
+                assert!(
+                    reason.starts_with(&format!("{}: ", srt.display()))
+                        && reason.contains("refused by the file test seam"),
+                    "read {skip}: {reason}"
+                );
+                assert_eq!(fs::read(&srt).unwrap(), before, "read {skip}: untouched");
+                refused += 1;
+            }
+            Err(other) => panic!("read {skip}: {other:?}"),
+        }
+    }
+    assert!(
+        built >= 1 && refused >= 1,
+        "{built} built, {refused} refused"
+    );
+}
+
+/// **A LOOK AT THE SORT INDEX OR AT ITS STAGING NAME THE HOST REFUSES
+/// REFUSES THE DOOR BY THAT NAME, AND NOTHING IS REMOVED OR WRITTEN.**
+///
+/// Kills `replace match guard why.kind() == ErrorKind::NotFound with true`
+/// in `walk_sidecar` and in `clear_staging`, and covers both refusals: any
+/// refusal of the `lstat` would be taken for "nothing there", so the door
+/// would rebuild an index it could not see, or call a staging name it could
+/// not see cleared. The month's own directory refuses a look only when it
+/// changes between two calls of one function, so the file test seam
+/// refuses it (`EACCES`).
+#[test]
+fn a_refused_look_at_the_sort_index_or_its_staging_name_refuses_the_door() {
+    let root = sorted_month("srt-looks");
+    let srt = root.at(FileKind::SortIndex);
+    let staging = srt.with_extension("new.srt");
+    fs::write(&staging, b"a dead build's").unwrap();
+    let before = fs::read(&srt).unwrap();
+    for looked in [&srt, &staging] {
+        arm_host_fault(Action::Measure, looked, 0, ErrorKind::PermissionDenied);
+        let answer = sort(&root);
+        assert!(!host_fault_armed(), "{}", looked.display());
+        match answer {
+            Err(StoreError::SortIndex { path, reason }) => {
+                assert_eq!(path, srt);
+                assert!(
+                    reason.starts_with(&format!("{}: ", looked.display())),
+                    "{reason}"
+                );
+            }
+            other => panic!("{}: {other:?}", looked.display()),
+        }
+        assert_eq!(fs::read(&srt).unwrap(), before, "the index is untouched");
+        assert_eq!(
+            fs::read(&staging).unwrap(),
+            b"a dead build's",
+            "not removed"
+        );
+    }
+    let kept = sort(&root).unwrap();
+    assert_eq!(kept.outcome, super::Resorted::Kept);
+    assert!(!staging.exists(), "the next door clears the staging name");
+}
+
+/// **A MONTH WHOSE BAR IS OFF ITS RUNG'S GRID IS UNSORTABLE, SAID, AND NO
+/// INDEX IS WRITTEN FOR IT.**
+///
+/// Covers the door's `Unsortable` answer, which only a bar file written
+/// outside this crate's writer reaches: the writer refuses an off-grid bar
+/// at append. Bar 500's stamp is moved one microsecond on disk and its
+/// block's checksum sealed again over the moved bytes, so the month reads
+/// clean and every bar verifies; the index is removed, so the door must
+/// build one, and the build refuses the bar (a one-second rung's stamps are
+/// whole seconds). Nothing is written in its place.
+#[test]
+fn a_month_with_a_bar_off_its_grid_is_unsortable_and_nothing_is_written() {
+    let root = sorted_month("srt-off-grid");
+    let bars_path = root.at(FileKind::Bars);
+    let crc_path = root.at(FileKind::Checksums);
+    let layout = crate::layout::Layout::CURRENT;
+    let mut image = fs::read(&bars_path).unwrap();
+    let at = 32_768 + 56 * 500;
+    let moved = i64::from_le_bytes(image[at..at + 8].try_into().unwrap()) + 1;
+    image[at..at + 8].copy_from_slice(&moved.to_le_bytes());
+    let block = 500 / 73;
+    let (start, end) = layout.covered_byte_range(block, 1_100).unwrap();
+    let (start, end) = (
+        usize::try_from(start).unwrap(),
+        usize::try_from(end).unwrap(),
+    );
+    let sum = crate::block::seal(layout, 1_100, block, &image[start..end]).unwrap();
+    let mut sums = fs::read(&crc_path).unwrap();
+    let entry = usize::try_from(block * 4).unwrap();
+    sums[entry..entry + 4].copy_from_slice(&sum.to_le_bytes());
+    fs::write(&bars_path, &image).unwrap();
+    fs::write(&crc_path, &sums).unwrap();
+    let srt = root.at(FileKind::SortIndex);
+    fs::remove_file(&srt).unwrap();
+    let reader = BarFile::open_existing(&root.0, month(FileKind::Bars), SYMBOL).unwrap();
+    assert_eq!(
+        reader.read_record(500).unwrap().ts_micros,
+        moved,
+        "it reads clean"
+    );
+    drop(reader);
+    let answer = sort(&root).unwrap();
+    assert_eq!((answer.n_valid, answer.runs), (1_100, 0));
+    assert!(
+        matches!(&answer.outcome, super::Resorted::Unsortable(why) if !why.is_empty()),
+        "{answer:?}"
+    );
+    assert!(!srt.exists(), "no index written");
+    assert!(
+        !srt.with_extension("new.srt").exists(),
+        "nor its staging name"
+    );
+}

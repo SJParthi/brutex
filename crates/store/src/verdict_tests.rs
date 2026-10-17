@@ -57,6 +57,38 @@ pub(super) fn refused_write() -> io::Result<()> {
     Ok(())
 }
 
+/// What another actor does to a writer's files at a named point: given the
+/// temporary and the final name.
+type Actor = fn(&Path, &Path);
+
+thread_local! {
+    /// The interference armed for this thread, if any: its point and actor.
+    static INTERFERE: Cell<Option<(&'static str, Actor)>> = const { Cell::new(None) };
+}
+
+/// The seam `write_durable`, `remove_tmp`, `genesis` and `publish` call
+/// before a host call under `cfg(test)`: when `at` is armed on this
+/// thread, it disarms it and runs the actor, as another process would act
+/// between two of the writer's calls, then the writer goes on.
+pub(super) fn interfere(at: &'static str, tmp: &Path, path: &Path) {
+    if let Some((armed, actor)) = INTERFERE.with(Cell::get)
+        && armed == at
+    {
+        INTERFERE.with(|armed| armed.set(None));
+        actor(tmp, path);
+    }
+}
+
+/// Arms one interference for the next commit on this thread.
+fn arm_interference(at: &'static str, actor: Actor) {
+    INTERFERE.with(|armed| armed.set(Some((at, actor))));
+}
+
+/// Whether the armed interference is still waiting.
+fn interference_armed() -> bool {
+    INTERFERE.with(Cell::get).is_some()
+}
+
 /// Arms one crash point for the next commit on this thread.
 fn arm(at: &'static str) {
     ARMED.with(|armed| armed.set(Some(at)));
@@ -523,4 +555,185 @@ fn a_pipe_device_or_link_at_a_verdict_name_is_refused_and_nothing_waits() {
     )
     .unwrap();
     assert_eq!((next.generation, next.previous), (2, 1));
+}
+
+/// The refusal's action, the host's kind and the path it names.
+fn io_refusal(refused: &VerdictError) -> (&'static str, ErrorKind, PathBuf) {
+    match refused {
+        VerdictError::Io {
+            action,
+            source,
+            path,
+        } => (*action, source.kind(), path.clone()),
+        other => panic!("expected the host's refusal, got {other}"),
+    }
+}
+
+/// The year's first temporary of the year index, as a writer of `run`
+/// names it.
+fn index_tmp(series: &Series<'_>, run: u64) -> PathBuf {
+    let path = series.year_index(2031);
+    let mut name = path.file_name().unwrap().to_os_string();
+    name.push(format!(".{}-{run}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// **A REFUSED WRITE WHOSE TEMPORARY ANOTHER ACTOR TOOK SAYS ONLY THAT THE
+/// WRITE WAS REFUSED; ONE WHOSE NAME IT CANNOT REMOVE SAYS THAT TOO.**
+///
+/// Kills the three mutants of `write_durable`'s guard
+/// `left.kind() != ErrorKind::NotFound` (to `true`, to `false`, and `!=` to
+/// `==`): a full disk refuses the year index's temporary, and before the
+/// writer removes it another actor has either removed it already (gone: the
+/// refusal is the write's alone) or put a directory at its name (held: the
+/// refusal also says the temporary could not be removed). Both arms are
+/// reached only through a second actor between two calls, so the seam is
+/// that actor.
+#[test]
+fn a_refused_writes_temporary_gone_or_held_is_said_as_it_is() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm(DISK_FULL);
+    arm_interference("refused tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(31)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("write", ErrorKind::StorageFull, index_tmp(&series, 31))
+    );
+
+    arm(DISK_FULL);
+    arm_interference("refused tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(32)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        (
+            "write (its temporary could not be removed)",
+            ErrorKind::StorageFull,
+            index_tmp(&series, 32)
+        )
+    );
+    assert!(
+        index_tmp(&series, 32).is_dir(),
+        "what held the name is left"
+    );
+    fs::remove_dir(index_tmp(&series, 32)).unwrap();
+    assert_eq!(commit(&series, &one(33)).unwrap().generation, 1);
+}
+
+/// **A TEMPORARY ALREADY GONE AFTER ITS LINK IS REMOVED; ONE WHOSE NAME
+/// CANNOT BE REMOVED REFUSES THE COMMIT AS A REMOVE.**
+///
+/// Kills `remove_tmp`'s guard `why.kind() != ErrorKind::NotFound` to
+/// `true`, to `false`, and `!=` to `==`: after the year index is linked
+/// another actor removes its temporary (the commit goes on: nothing is left
+/// to remove), or puts a directory at its name (the commit is refused as
+/// the `remove` of that name, naming it). The index is linked either way,
+/// so the next commit finds it and lands.
+#[test]
+fn a_linked_temporary_gone_is_done_and_one_held_refuses_as_a_remove() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm_interference("tmp removed", |tmp, _| fs::remove_file(tmp).unwrap());
+    assert_eq!(commit(&series, &one(41)).unwrap().generation, 1);
+    assert!(!interference_armed());
+
+    let other = Root::new();
+    let series = other.series();
+    arm_interference("tmp removed", |tmp, _| {
+        fs::remove_file(tmp).unwrap();
+        fs::create_dir(tmp).unwrap();
+    });
+    let refused = commit(&series, &one(42)).unwrap_err();
+    assert!(!interference_armed());
+    let (action, _, path) = io_refusal(&refused);
+    assert_eq!((action, path), ("remove", index_tmp(&series, 42)));
+    assert!(series.year_index(2031).exists(), "the index was linked");
+    fs::remove_dir(index_tmp(&series, 42)).unwrap();
+    assert_eq!(commit(&series, &one(43)).unwrap().generation, 1);
+}
+
+/// **A YEAR INDEX ANOTHER WRITER LINKED FIRST IS READ; A LINK THE HOST
+/// REFUSES OTHERWISE IS THE LINK'S REFUSAL, AND NOTHING IS LEFT.**
+///
+/// Kills `genesis`' guard `why.kind() == ErrorKind::AlreadyExists` to
+/// `true` and to `false`, and `==` to `!=`. Between the writer's temporary
+/// and its link, another actor either links an identical index at the name
+/// first (the creation race's loser reads the winner's, and the commit
+/// lands at generation 1), or takes the temporary away (`ENOENT` at the
+/// link: refused as the `link` of the year index, and neither the index nor
+/// a temporary is left).
+#[test]
+fn a_year_index_linked_first_is_read_and_any_other_refused_link_is_said() {
+    let root = Root::new();
+    let series = root.series();
+    let one = |run: u64| generation(run, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]);
+
+    arm_interference("index linked", |tmp, path| {
+        fs::hard_link(tmp, path).unwrap();
+    });
+    assert_eq!(commit(&series, &one(51)).unwrap().generation, 1);
+    assert!(!interference_armed());
+    assert!(!index_tmp(&series, 51).exists());
+
+    let other = Root::new();
+    let series = other.series();
+    arm_interference("index linked", |tmp, _| fs::remove_file(tmp).unwrap());
+    let refused = commit(&series, &one(52)).unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("link", ErrorKind::NotFound, series.year_index(2031))
+    );
+    assert_eq!(names(&series.dir()), ["2031", "2031.vdi.lock"]);
+}
+
+/// **AN IMAGE LINK THE HOST REFUSES OTHER THAN "EXISTS" IS THE LINK'S
+/// REFUSAL, NEVER A GENERATION TO STEP PAST.**
+///
+/// Kills `publish`'s guard `why.kind() == ErrorKind::AlreadyExists` to
+/// `true`: every link refusal would be taken for a generation a crashed
+/// writer left, and the writer would step on to the next one and publish
+/// there. Between the image's temporary and its link another actor takes
+/// the temporary away: the commit is refused as the `link` of generation
+/// 2's image, the committed generation 1 still answers, and no image of
+/// generation 2 or 3 exists.
+#[test]
+fn an_image_link_refused_otherwise_than_exists_is_never_stepped_past() {
+    let root = Root::new();
+    let series = root.series();
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    commit(
+        &series,
+        &generation(61, vec![entry("NSE-FNO-ZZTEST-A", Code::Match)]),
+    )
+    .unwrap();
+    arm_interference("image linked", |tmp, _| fs::remove_file(tmp).unwrap());
+    let refused = commit(
+        &series,
+        &generation(62, vec![entry("NSE-FNO-ZZTEST-A", Code::ValueMismatch)]),
+    )
+    .unwrap_err();
+    assert!(!interference_armed());
+    assert_eq!(
+        io_refusal(&refused),
+        ("link", ErrorKind::NotFound, series.image_path(day(), 2))
+    );
+    assert_eq!(
+        names(&series.dir().join("2031")),
+        ["2031-03-04.g0000000001.vdt"]
+    );
+    let mut reader = Reader::new();
+    let held = reader.lookup(&series, day(), &key).unwrap();
+    assert_eq!(held.answer.unwrap().code(), Some(Code::Match));
 }
