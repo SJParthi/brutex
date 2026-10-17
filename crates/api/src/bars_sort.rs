@@ -4455,4 +4455,44 @@ mod cloud_mutant_tests {
         assert_eq!(super::run_of_slot(plan, 7), None);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A ROW AN INDEX NAMES, WHOSE INSTANT CANNOT BE LOCATED IN THE BARS,
+    /// IS NAMED AND NEVER GUESSED.** A month of 360 rows has its index and no
+    /// time index, so an instant is located by bisecting the records; the
+    /// record the bisection asks first (row 180) is damaged. Each of the 37
+    /// rows the index puts on the page is named as a lookup that failed (the
+    /// instant is in each line, so the lines are not one), and none is served
+    /// from a position the bars did not confirm. Runs `page_once`'s locate
+    /// refusal for an index-named row.
+    #[test]
+    fn a_row_whose_instant_cannot_be_located_is_named_and_not_served() {
+        let root = scratch("locate-refused");
+        let rows: Vec<Bar> = (0..360).map(|i| bar(month(1), i, OI_NULL)).collect();
+        let srt = write(&root, &index(), month(1), &rows, &rows);
+        let bars = srt.with_extension("bin");
+        let mut bytes = std::fs::read(&bars).expect("the month");
+        let stamp = rows[180].ts_micros.to_le_bytes();
+        let at = bytes
+            .windows(8)
+            .rposition(|window| window == stamp)
+            .expect("the record's stamp is in the file");
+        bytes[at] ^= 0x01;
+        std::fs::write(&bars, &bytes).expect("damage one generated record");
+        let got =
+            window(&root, &query(index(), month(1), month(1), SortKey::Close)).expect("answers");
+        let located: Vec<&String> = got
+            .faults
+            .iter()
+            .filter(|fault| fault.contains("cannot locate"))
+            .collect();
+        assert_eq!(located.len(), 37, "one line a page row: {:?}", got.faults);
+        assert!(
+            located
+                .iter()
+                .all(|fault| fault.contains("block 2 was sealed")),
+            "each names the damaged block: {located:?}"
+        );
+        assert!(got.bars.is_empty(), "no row is served from a guess");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
