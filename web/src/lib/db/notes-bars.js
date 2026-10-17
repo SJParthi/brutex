@@ -278,8 +278,15 @@ export const BAR_GROUPS = [
    `data-ungrouped` — the same debug-attribute convention `data-boxh` and
    `data-fit` already earned on this grid — so the answer is one inspection
    away instead of a puzzle. `CLAUDE.md` §4: degrade loudly, name the reason. */
-export const GROUPED_KEYS = new Set(BAR_GROUPS.flatMap((g) => g.keys));
-export const BAR_UNGROUPED = BAR_COLS.filter((c) => !GROUPED_KEYS.has(c.key)).map((c) => c.key);
+/**
+ * The keys of `cols` no group in `groups` names, in column order.
+ * @param {{key: string}[]} cols @param {{keys: string[]}[]} groups
+ */
+export function ungrouped(cols, groups) {
+  const named = new Set(groups.flatMap((g) => g.keys));
+  return cols.filter((c) => !named.has(c.key)).map((c) => c.key);
+}
+export const BAR_UNGROUPED = ungrouped(BAR_COLS, BAR_GROUPS);
 
 
 /** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
@@ -336,7 +343,7 @@ export const BAR_WHY = {
 };
 /** @param {string | null} code */
 export const barWhyText = (code) =>
-  (code === null ? null : /** @type {any} */ (BAR_WHY)[code]) ??
+  /** @type {any} */ (BAR_WHY)[code ?? ''] ??
   'unknown, and this page did not record why - which is a defect here, not a fact about the store.';
 
 /* ---------------------------------------------------------------------
@@ -445,7 +452,7 @@ export function readFailure({ made, status }) {
   return {
     kind: 'failed',
     title: 'This page of bars could not be read',
-    says: status >= 400
+    says: status !== 0 && status !== 200
       ? `The server answered HTTP ${status} and no page. Nothing is drawn rather than a plausible blank; asking again may answer.`
       : 'No answer arrived, or the answer did not check. Nothing is drawn rather than a plausible blank; asking again may answer.',
     retry: true

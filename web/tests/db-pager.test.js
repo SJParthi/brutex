@@ -524,3 +524,35 @@ test('the pager arithmetic at every boundary, and every sentence it says, exactl
       '1 row(s) already shown on the page before are dropped here rather than shown twice. Read again for pages counted against the store as it is now.'
   });
 });
+
+test('the sort offer, the advice and the failure words at every boundary, said whole', () => {
+  assert.equal(sortRefusal('oi', [SPOT, CE]), null, 'open interest with a derivative in the selection');
+  assert.equal(localSortAdvice({ label: 'Change %', total: 30_000, budget: 20_000, tfSecs: 60, series: 1, stored: ['Date', 'Close'] }),
+    'Change % cannot be ordered here: this query keeps 30,000 bar(s), and the browser orders at most 20,000 of a column the server cannot sort. ' +
+    'The grid keeps the order it had. To order by Change %: narrow to one day (a day holds at most 1,440 bar(s) of this series at this rung); ' +
+    'or sort by a stored column (Date, Close), which the server orders over any number.');
+  // A day that holds exactly the budget is a day that fits.
+  assert.match(localSortAdvice({ label: 'x', total: 9e9, budget: 1440, tfSecs: 60, series: 1, stored: [] }), /narrow to one day \(a day holds at most 1,440/);
+  // One minute that fits exactly is still a minute.
+  assert.match(localSortAdvice({ label: 'x', total: 9e9, budget: 60, tfSecs: 1, series: 1, stored: [] }), /a time of day of at most 1 minute\(s\)/);
+  assert.deepEqual(readFailure({ made: 'read', status: 0 }), {
+    kind: 'failed',
+    title: 'This page of bars could not be read',
+    says: 'No answer arrived, or the answer did not check. Nothing is drawn rather than a plausible blank; asking again may answer.',
+    retry: true
+  });
+  assert.equal(readFailure({ made: 'read', status: 200 }).says, readFailure({ made: 'read', status: 0 }).says);
+  assert.equal(readFailure({ made: 'read', status: 503 }).says, 'The server answered HTTP 503 and no page. Nothing is drawn rather than a plausible blank; asking again may answer.');
+  assert.deepEqual(readFailure({ made: 'read', status: 404 }), {
+    kind: 'server',
+    title: 'The server refused this page',
+    says: "The sentence above is the server's own (HTTP 404). Asking again asks the same question, so it is not offered: change what it names.",
+    retry: false
+  });
+  assert.deepEqual(readFailure({ made: 'page', status: 0 }), {
+    kind: 'page',
+    title: 'This selection is not read as one page',
+    says: 'This page refused it before asking the server, so nothing was read and no store was consulted. Change the selection as the sentence above says.',
+    retry: false
+  });
+});

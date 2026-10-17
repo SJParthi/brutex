@@ -179,7 +179,7 @@ export function monthSpan(a, b) {
   const yb = Number(b.slice(0, 4));
   const mb = Number(b.slice(5, 7));
   const n = (yb - ya) * 12 + (mb - ma) + 1;
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
 }
 
 /**
@@ -202,26 +202,29 @@ export function seriesPlan(rows, fromDay = '', toDay = '') {
   /** @type {Map<string, {rows: number, census: any}>} */
   const series = new Map();
   const rungs = new Set();
-  let lo = '';
-  let hi = '';
+  const months = new Set();
   for (const r of rows) {
     rungs.add(r.timeframe);
+    months.add(r.month);
     const held = series.get(r.instrument);
     if (held) held.rows += Number(r.rows) || 0;
     else series.set(r.instrument, { rows: Number(r.rows) || 0, census: r });
-    if (lo === '' || r.month < lo) lo = r.month;
-    if (hi === '' || r.month > hi) hi = r.month;
   }
+  /* The first and last month held, by sorting rather than by comparing, so
+     a tie is not a second way to write the same answer (R3-03). */
+  const held = [...months].sort();
+  const lo = held[0] ?? '';
+  const hi = held.at(-1) ?? '';
   const keys = [...series.keys()].sort();
   const timeframe = rungs.size === 1 ? String([...rungs][0]) : '';
-  let from = lo;
-  let to = hi;
-  if (fromDay && fromDay.slice(0, 7) > from) from = fromDay.slice(0, 7);
-  if (toDay && toDay.slice(0, 7) < to) to = toDay.slice(0, 7);
+  /* A day window narrows the months asked for, never widens them. An empty
+     From sorts before every month, so it leaves the first held one. */
+  const from = [lo, String(fromDay).slice(0, 7)].sort()[1];
+  const to = toDay ? [hi, toDay.slice(0, 7)].sort()[0] : hi;
   /** @type {string | null} */
   let why = null;
-  if (keys.length === 0) why = null;
-  else if (rungs.size > 1) {
+  if (keys.length === 0) return { keys, series, timeframe, from, to, why };
+  if (rungs.size > 1) {
     why = `this selection reaches ${fmt(rungs.size)} rungs (${[...rungs].join(', ')}); a page is read at one rung, so choose one`;
   } else if (keys.length > MAX_SERIES) {
     why = `too_many_series: this selection reaches ${fmt(keys.length)} series and one window request reads at most ${fmt(MAX_SERIES)} — choose an expiry, a strike or a side`;
@@ -310,7 +313,9 @@ export function istInstant(day, time) {
   const [h, m, s] = [Number(t[1]), Number(t[2]), Number(t[3] ?? 0)];
   if (h > 23 || m > 59 || s > 59) return null;
   const midnight = Date.UTC(Number(d[1]), Number(d[2]) - 1, Number(d[3]));
-  if (!Number.isFinite(midnight) || istDayKey(midnight - IST_OFFSET_MS) !== `${d[1]}-${d[2]}-${d[3]}`) return null;
+  /* A day that does not exist rolls over (30 Feb is 2 Mar), so the day read
+     back must be the day typed. */
+  if (new Date(midnight).toISOString().slice(0, 10) !== `${d[1]}-${d[2]}-${d[3]}`) return null;
   return (midnight - IST_OFFSET_MS) / 1000 + h * 3600 + m * 60 + s;
 }
 
@@ -333,7 +338,8 @@ export const pageOfIndex = (index, size) => Math.floor(Math.max(0, index) / Math
 export function censusBehind(totals, census) {
   /** @type {{key: string, file: number, census: number}[]} */
   const out = [];
-  for (const t of totals ?? []) {
+  if (!Array.isArray(totals)) return out;
+  for (const t of totals) {
     const c = census.get(t.key);
     if (c && Number.isSafeInteger(t.total) && c.rows !== t.total) out.push({ key: t.key, file: t.total, census: c.rows });
   }
@@ -347,16 +353,16 @@ export function censusBehind(totals, census) {
  * @param {string} k @param {boolean} desc
  */
 export function localComparator(k, desc) {
-  const dir = desc ? -1 : 1;
   return (/** @type {any} */ a, /** @type {any} */ b) => {
     const A = a[k];
     const B = b[k];
     const na = A === null || A === undefined;
     const nb = B === null || B === undefined;
     if (na !== nb) return na ? 1 : -1;
-    let d = 0;
-    if (!na) d = typeof A === 'string' || typeof B === 'string' ? (String(A) < String(B) ? -1 : String(A) > String(B) ? 1 : 0) : A < B ? -1 : A > B ? 1 : 0;
-    if (d !== 0) return dir * d;
+    /* Text and numbers both order by `<`: an expiry, a side and a strike are
+       each one type down a column; two unknowns are neither. */
+    const d = A < B ? -1 : A > B ? 1 : 0;
+    if (d !== 0) return desc ? -d : d;
     return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.rk < b.rk ? -1 : a.rk > b.rk ? 1 : 0;
   };
 }
@@ -401,8 +407,8 @@ export function acrossDay(rows, o) {
   for (const list of bySeries.values()) {
     list.sort((a, b) => a.ts - b.ts);
     list.forEach((r, i) => {
-      if (r.chg === null || r.chg === undefined) return;
-      const prev = i > 0 ? list[i - 1] : null;
+      if (typeof r.chg !== 'number') return;
+      const prev = list[i - 1];
       if (prev ? prev.day < r.day : o.edgeEarlier) out.set(r.rk, prev ? prev.ts : null);
     });
   }
