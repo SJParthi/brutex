@@ -56,10 +56,14 @@ const DECLARED: [&str; 12] = [
 ];
 
 /// The declared members that exist at this head, read at compile time.
-const LISTED: [(&str, &str); 2] = [
+const LISTED: [(&str, &str); 3] = [
     (
         "crates/api/src/autopilot.rs",
         include_str!("../../api/src/autopilot.rs"),
+    ),
+    (
+        "crates/pull/src/upkeep.rs",
+        include_str!("../src/upkeep.rs"),
     ),
     (
         "crates/pull/src/tickstore_write.rs",
@@ -69,7 +73,7 @@ const LISTED: [(&str, &str); 2] = [
 
 /// The named exceptions: (module, the site's code line trimmed, how many
 /// times it may appear, why).
-const ALLOWED: [(&str, &str, usize, &str); 3] = [
+const ALLOWED: [(&str, &str, usize, &str); 4] = [
     (
         "crates/api/src/autopilot.rs",
         "let mut file = std::fs::File::create(path)?;",
@@ -92,6 +96,14 @@ const ALLOWED: [(&str, &str, usize, &str); 3] = [
         1,
         "publish renames the verified temporary to the day's final name in the \
          same folder, then fsyncs that folder",
+    ),
+    (
+        "crates/pull/src/upkeep.rs",
+        "io(&path, fs::rename(&staging, &path))?;",
+        1,
+        "request_stop renames its synced request (`<name>.stop.new`) to its sibling \
+         final name in the same audit folder; a request it replaces names an earlier \
+         run and stops nothing (R3-17, D-5831)",
     ),
 ];
 

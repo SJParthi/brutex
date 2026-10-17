@@ -42,6 +42,12 @@ Owned files, as the tree spells them (the spec's names drifted; the operator's d
   (`run` and `resume` write), the doc sentence, and the row in the test table of every writer.
 - `crates/cli/src/gdfl_import_command.rs`: one re-export line, `pub(crate) use guard::{Holder, RunLock, escape};`,
   so the upkeep takes the import's own run lock (no other change to the import).
+- `crates/pull/tests/no_scheduler_delete.rs` (R4-06's, arrived with `f8c22b1b`): `pull::upkeep` is a
+  module its plan declares scheduler-reachable, and the test asks the change that creates it to add
+  it to `LISTED` (a shared line); with it, its one rename (the stop request published from
+  `.stop.new` under its sibling name) is a named, counted `ALLOWED` exception. Its scan finds no
+  other site in `upkeep.rs`.
+- `crates/cli/src/sweep_wiring_tests.rs`: `upkeep` added to the store verbs of its list.
 - `docs/05-decisions.md` (D-5831, appended), `docs/04-invariants.md` (UK-01 to UK-14, appended),
   `docs/06-limits.md` (L-R317-01 to -09, appended), `docs/02-store-format.md` (§43, appended).
 
