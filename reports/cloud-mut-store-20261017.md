@@ -157,6 +157,18 @@ so every survivor below is re-tested on the final tree.
     `a_posting_is_paged_from_a_place_without_a_line_twice_or_skipped`, whose
     page loop had no bound. The loop now refuses a fifth page, so all four
     fail in 0.15 s, with the repeated pointers in the message.
+  - Run D reached 371 of 437 (329 caught, 36 unviable), then lost its
+    scratch tree when run B's restart cleared the shared scratch directory.
+    It was resumed in a directory of its own.
+  - Its fifth timeout, `Reap::fail` → `()`, is caught by three tests. Two
+    more (`a_failed_delete_is_counted_named_and_left_for_the_next_start`
+    and `a_link_at_the_logs_gone_folder_is_refused_and_nothing_under_it_is_touched`)
+    waited in the `reaped()` helper. It counted 120,000 one-millisecond
+    sleeps, which runs well past two minutes on a loaded machine. While it
+    waited, one of them held the fork gate, so every permission test queued
+    behind it, and the binary passed cargo-mutants' four-minute limit. The
+    helper now gives up after 30 s by the clock. Measured under the mutant:
+    4 tests fail and the suite ends in 60 s. Clean, it passes in 0.16 s.
 
 ## Left
 

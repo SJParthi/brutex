@@ -6920,9 +6920,18 @@ mod tests {
     }
 
     /// Waits until the reaper has nothing left that it can delete: nothing
-    /// waiting beyond the deletes that failed. Panics after two minutes.
+    /// waiting beyond the deletes that failed. Panics after 30 seconds by the
+    /// clock, where a test's tree takes milliseconds.
+    ///
+    /// The bound used to be 120,000 sleeps of a millisecond, "two minutes".
+    /// On a loaded machine a millisecond's sleep lasts longer, so a reaper
+    /// that never counted a failure (`replace Reap::fail with ()`) kept a
+    /// test that holds the fork gate waiting past cargo-mutants' four-minute
+    /// timeout. That test failed nothing, and every permission test queued
+    /// behind the gate.
     fn reaped(sink: &Sink) -> super::AuditHealth {
-        for _ in 0..120_000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             let health = sink.audit_health().expect("a stream");
             if health.gone_waiting <= health.reap_failures {
                 return health;
