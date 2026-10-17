@@ -703,6 +703,8 @@
     const reads = askOnce();
     /** The request in flight. Not torn down by a re-run that asks nothing new. */
     let inFlight = /** @type {AbortController | null} */ (null);
+    /** The row set the request in flight reads. */
+    let inFlightSet = '';
     /** The order the last read was asked in, so a change of order reads page one at once. */
     let lastOrder = '';
     /** The next read keeps `db.page` whatever the order did: a Go to chose both. */
@@ -825,6 +827,9 @@
         barState = { loading: false, error: p.why, answer: null, rows: [], local: false, page: 1, set, made: 'page', status: 0, moved: null };
         return;
       }
+      /* A READ FOR ANOTHER ROW SET IS STOPPED AT ONCE, settled or not: its
+         rows must not land under a selection that has moved on. */
+      if (inFlight && inFlightSet !== set) stopRead();
       /* AND NOTHING WHILE THE SELECTION IS STILL SETTLING (R3-03). A change
          of Side or Segment moves several rungs one after another, and each
          intermediate selection was a request — for a contract or a month the
@@ -847,6 +852,7 @@
       inFlight?.abort();
       const controller = new AbortController();
       inFlight = controller;
+      inFlightSet = set;
       const mine = ++barToken;
       const before = turned ? pageBefore : null;
       const shown = untrack(() => barState);

@@ -21,8 +21,12 @@
   /** @type {{ db: any }} */
   let { db } = $props();
 
-  /** What the page box refused, said under it until the next try. */
+  /** What the page box refused, said under it until the next try or the next page. */
   let boxWhy = $state('');
+  $effect(() => {
+    void db.pageNow;
+    boxWhy = '';
+  });
 
   /** The page box's text, read when the reader commits it. @param {HTMLInputElement} el */
   function commitBox(el) {

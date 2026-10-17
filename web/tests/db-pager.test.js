@@ -104,6 +104,7 @@ test('a_sort_change_at_a_deep_page_sends_one_request', () => {
   assert.match(script, /if \(!ready \|\| !db\.settled \|\| jumping\) return;/);
   assert.match(script, /const held = Boolean\(db\.linkPending\?\.page\) \|\| pinned;/);
   assert.match(script, /\$effect\(\(\) => \(\) => inFlight\?\.abort\(\)\);/);
+  assert.match(script, /if \(inFlight && inFlightSet !== set\) stopRead\(\);\s*if \(!ready/, 'a read for another row set never lands under the next');
   const read = script.slice(script.indexOf('const ready = !db.linkDaysPending'), script.indexOf('$effect(() => () => inFlight?.abort());'));
   assert.doesNotMatch(read, /return \(\) => controller\.abort\(\);/, 'a re-run must not cancel the question in flight');
 });
