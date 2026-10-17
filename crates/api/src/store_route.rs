@@ -819,6 +819,10 @@ pub(super) fn store_response(
     };
     let behind = behind(site, feed);
     let mut headers = census_headers_with(census, Some(&behind));
+    // HOW CURRENT (R3-09): built from the previous read while a background
+    // re-read runs, the answer says so and how old it is, on the delta, the
+    // whole body and a 304 alike.
+    super::census_cache::freshness_headers(&mut headers, now.freshness());
 
     // HEAD is a header read, not a full census encoding whose body Axum drops.
     // Representation headers that require generating a body are omitted.
@@ -911,8 +915,12 @@ and the reader loads the census whole.
 WHAT IS REFUSED, AND NEVER GUESSED: a `since` this census's shape does
 not take (409 `since_shape`), an epoch that moved (409 `epoch_changed`),
 a generation past a part's newest (409 `since_in_future`), and one the
-census no longer holds the appends after (410 `since_too_old`: it was
-read whole since). A reader that is refused reads the census whole.
+census file cannot answer the appends after (410 `since_too_old`:
+another file stands at the path, or more than
+`census::SINCE_READ_BACK_MOST` entries were appended since). A generation
+older than the census's last WHOLE read -- a restart, a tail read whole
+again past its floor -- is answered from the file, read back by position
+(R3-09, RA-008). A reader that is refused reads the census whole.
 
 WHICH ROWS. Every key appended after the generation, and for each the
 same series' NEXT month when held: a row carries its previous month's
@@ -1077,8 +1085,9 @@ fn delta_entries(
                 axum::http::StatusCode::GONE,
                 delta_refusal(
                     "since_too_old",
-                    "the census no longer holds the appends after that generation (it was \
-                     read whole since); read the census whole",
+                    "the census file cannot answer the appends after that generation \
+                     (another file stands at its path, or more entries were appended since \
+                     than a refresh reads back); read the census whole",
                     &extra(Some(part.since_floor())),
                 ),
             ));
@@ -2184,7 +2193,19 @@ mod tests {
         let after = disk.read(Some(&before));
         let compact = store_wire::Format::Compact;
 
-        // BEFORE THE LAST WHOLE READ: the appends after it are not held.
+        // BEFORE THE LAST WHOLE READ: read back from the file by position
+        // (R3-09, RA-008), the base's own entry and the appended one.
+        let (code, body) = refused(Some(&after), compact, &(generation - 1).to_string(), "");
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["rows"].as_array().map(Vec::len), Some(2), "{body}");
+        // AND REFUSED BY NAME ONCE ANOTHER FILE STANDS AT THE PATH: the same
+        // bytes installed by rename are another inode, and the floor says the
+        // base is the oldest generation answered.
+        let (path, _) = disk.files.first().expect("the file");
+        let bytes = std::fs::read(path).expect("read");
+        let tmp = path.with_extension("man.writing");
+        std::fs::write(&tmp, &bytes).expect("written");
+        std::fs::rename(&tmp, path).expect("renamed");
         let (code, body) = refused(Some(&after), compact, &(generation - 1).to_string(), "");
         assert_eq!(code, axum::http::StatusCode::GONE, "{body}");
         assert_eq!(body["error"], "since_too_old");

@@ -453,13 +453,35 @@ fn a_delta_answers_only_what_changed_and_an_old_generation_is_refused() {
         "with its current totals"
     );
 
-    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS NOT HELD.
+    // A GENERATION BEFORE THE CENSUS WAS LAST READ WHOLE IS READ BACK FROM
+    // THE FILE (R3-09, RA-008): the future the base's last entry named, and
+    // the weekly appended after it.
+    let older = generation.checked_sub(1).expect("a generation");
+    let read_back = json(
+        &render_answer(
+            &index,
+            &asked_for(&format!(
+                "feed=gdfl&segment=FNO&underlying=NIFTY&since={older}"
+            )),
+            "held",
+            None,
+        )
+        .expect("read back"),
+    );
+    let expiries = read_back["expiries"].as_array().expect("a list");
+    assert_eq!(expiries.len(), 2, "{read_back}");
+    assert_eq!(read_back["since"], older);
+
+    // AND REFUSED, NEVER GUESSED, ONCE THE FILE IS NOT THE ONE THE BASE WAS
+    // READ FROM: the same bytes installed by rename are another inode.
+    let path = manifest_path(&disk.root, Vendor::Gdfl);
+    let bytes = std::fs::read(&path).expect("read");
+    let tmp = path.with_extension("man.writing");
+    std::fs::write(&tmp, &bytes).expect("written");
+    std::fs::rename(&tmp, &path).expect("renamed");
     let (code, body) = render_answer(
         &index,
-        &asked_for(&format!(
-            "feed=gdfl&segment=FNO&since={}",
-            generation.checked_sub(1).expect("a generation")
-        )),
+        &asked_for(&format!("feed=gdfl&segment=FNO&since={older}")),
         "held",
         None,
     )
