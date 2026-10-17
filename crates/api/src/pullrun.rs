@@ -9838,4 +9838,357 @@ mod cloud_mutant_tests {
         );
         assert!(why.contains("record 1 ("), "{why}");
     }
+
+    /// One leg of `route` on `dir` for `vendor`.
+    fn leg_of(route: Route, vendor: &str, dir: &str) -> Leg {
+        Leg {
+            route,
+            vendor: vendor.to_owned(),
+            dir: dir.to_owned(),
+            label: format!("{vendor} · {dir}"),
+            body: String::new(),
+        }
+    }
+
+    /// `legs` through `run_chain` on feed slot `nth`, each answered by
+    /// `answer` in turn; answers how many legs were attempted, and the
+    /// chain's verdict.
+    async fn chain_over(
+        site: &Loaded,
+        run: u64,
+        nth: usize,
+        legs: Vec<Leg>,
+        answers: Vec<(axum::http::StatusCode, String)>,
+    ) -> (usize, PassOutcome) {
+        let replies = std::sync::Arc::new(std::sync::Mutex::new(answers.into_iter()));
+        let attempted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let checkpoints = legs
+            .iter()
+            .map(|_| std::sync::atomic::AtomicU8::new(OWED))
+            .collect();
+        let outcome = run_chain(
+            Loaded::clone(site),
+            run,
+            nth,
+            legs,
+            checkpoints,
+            std::sync::Arc::clone(&attempted),
+            move |_site: Loaded, _leg: Leg| {
+                let next = replies
+                    .lock()
+                    .expect("the replies")
+                    .next()
+                    .expect("one answer per attempted leg");
+                async move { next }
+            },
+        )
+        .await;
+        (attempted.load(std::sync::atomic::Ordering::SeqCst), outcome)
+    }
+
+    /// **A failed derivative leg holds back no later leg.** Only a failed
+    /// SPOT rung holds back what is behind it (DB-B26): a failed F&O leg
+    /// leaves the next F&O leg of the chain owed and asked. Covers the false
+    /// side of `run_chain`'s `leg.route == Route::Spot` (pullrun.rs:3733);
+    /// kills it turned to `!=`, under which the failed futures leg would
+    /// hold the options leg back.
+    #[tokio::test]
+    async fn a_failed_derivative_leg_holds_back_no_later_leg() {
+        let site = site("fno-fail-holds-nothing");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                legs: 2,
+                ..FeedReport::default()
+            }];
+        });
+        let (attempted, outcome) = chain_over(
+            &site,
+            run,
+            0,
+            vec![
+                leg_of(Route::Fno, "dhan", "futures"),
+                leg_of(Route::Fno, "dhan", "options"),
+            ],
+            vec![
+                receipt_wrote(502, "FAILED", 0),
+                receipt_wrote(200, "STORED", 3),
+            ],
+        )
+        .await;
+        assert_eq!(attempted, 2, "the options leg was still asked");
+        assert_eq!(outcome, PassOutcome::Retry, "the failed leg is retried");
+        assert_eq!(observed(&site).feeds[0].legs_done, 2);
+    }
+
+    /// **A chain whose feed the document does not hold still runs, and
+    /// writes nothing into another feed's row.** The slot is past the
+    /// document's feeds, so every per-feed edit (the doing label, the legs
+    /// done, the standing count and the end-of-chain skip) finds no row; the
+    /// run-wide figures still move. Covers the `None` sides of
+    /// `progress.feeds.get_mut(nth)` in `run_chain` (pullrun.rs:3699, 3708,
+    /// 3727, 3746).
+    #[tokio::test]
+    async fn a_chain_whose_feed_the_document_does_not_hold_still_runs() {
+        let site = site("chain-past-feeds");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| progress.bars_written = Some(0));
+        let standing = {
+            let facts = vec![(RETRY_CLASS_FACT, RetryClass::Standing.word().to_owned())];
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                crate::render::receipt_page(&crate::render::Receipt {
+                    scope: "Spot pull",
+                    verdict: "FAILED",
+                    reason: "synthetic standing receipt",
+                    good: false,
+                    facts: &facts,
+                    footnote: "No vendor was contacted.",
+                }),
+            )
+        };
+        assert_eq!(
+            leg_outcome(standing.0, &standing.1),
+            LegOutcome::Standing,
+            "the premise"
+        );
+        let (attempted, outcome) = chain_over(
+            &site,
+            run,
+            4,
+            vec![spot_leg("dhan"), leg_of(Route::Spot, "dhan", "1min")],
+            vec![standing, receipt_wrote(200, "STORED", 7)],
+        )
+        .await;
+        assert_eq!((attempted, outcome), (2, PassOutcome::Clean));
+        let progress = observed(&site);
+        assert!(progress.feeds.is_empty(), "no row was made for slot 4");
+        assert_eq!(progress.bars_written, Some(7), "the run-wide count moved");
+    }
+
+    /// **A non-success page that names a dead credential halts the feed,
+    /// whatever its status.** A 502 receipt carrying the vendor's own 401
+    /// sentence is a credential fault; the same sentence on a 200 is read
+    /// by the receipt's badge first. Covers the right side of
+    /// `leg_outcome`'s first `||` (pullrun.rs:3442).
+    #[test]
+    fn a_failed_page_naming_a_dead_credential_halts_whatever_its_status() {
+        let page = "<p>the vendor refused with status 401</p>";
+        assert_eq!(
+            leg_outcome(axum::http::StatusCode::BAD_GATEWAY, page),
+            LegOutcome::Credential
+        );
+        let (status, stored) = receipt_wrote(200, "STORED", 1);
+        assert_eq!(leg_outcome(status, &stored), LegOutcome::Stored);
+        let (_, failed) = receipt_wrote(502, "FAILED", 0);
+        assert_eq!(
+            leg_outcome(axum::http::StatusCode::BAD_GATEWAY, &failed),
+            LegOutcome::Retry,
+            "a failed page naming no credential is not one"
+        );
+    }
+
+    /// **Each store vendor is named once, and a wire no feed carries names
+    /// none.** Covers both `None`/duplicate sides of `own_vendors`
+    /// (pullrun.rs:3251, 3252).
+    #[test]
+    fn own_vendors_names_each_store_vendor_once_and_no_unknown_wire() {
+        let groww = pull::vendor::Feed::Groww.wire().to_owned();
+        let dhan = pull::vendor::Feed::Dhan.wire().to_owned();
+        let groups = vec![
+            ("no-such-wire".to_owned(), Vec::new()),
+            (groww.clone(), Vec::new()),
+            (dhan, Vec::new()),
+            (groww, Vec::new()),
+        ];
+        assert_eq!(
+            own_vendors(&groups),
+            [
+                brutex_core::vendor::Vendor::Groww,
+                brutex_core::vendor::Vendor::Dhan
+            ]
+        );
+        assert!(own_vendors(&[]).is_empty());
+    }
+
+    /// **An edit with no run in the slot changes nothing and is not made.**
+    /// Covers the `None` side of `with_progress`'s `held.as_mut()`
+    /// (pullrun.rs:3287).
+    #[test]
+    fn an_edit_with_no_run_in_the_slot_is_not_made() {
+        let site = site("edit-no-run");
+        let made = std::cell::Cell::new(false);
+        with_progress(&site, 1, |_progress| made.set(true));
+        assert!(!made.get(), "nothing holds the slot, so nothing is edited");
+        assert!(
+            site.run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+    }
+
+    /// **A calendar of record that has ended says so on the run's
+    /// document.** Seen from a day past its last sourced day, the horizon
+    /// has no day left and `ended` is true. Covers `status_json`'s
+    /// `ended` true arm (pullrun.rs:2880).
+    #[test]
+    fn a_calendar_of_record_that_has_ended_says_so() {
+        let past = pull::calendar::record_horizon(0).last_day + 10;
+        let doc: serde_json::Value =
+            serde_json::from_str(&status_json(&Progress::default(), Some(past), None))
+                .expect("valid JSON");
+        assert_eq!(doc["calendar"]["ended"], true, "{doc}");
+        assert_eq!(doc["calendar"]["endsSoon"], true, "{doc}");
+        assert_eq!(doc["calendar"]["daysLeft"], -10, "{doc}");
+    }
+}
+
+/// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
+/// for the restart answer's renderers: every arm of `AlsoOpen` and
+/// `Guessed` in words and on the document, driven by value, since a journal
+/// that reaches each arm through the walk is not needed to prove what each
+/// arm writes.
+#[cfg(test)]
+mod cloud_render_tests {
+    use super::*;
+    use crate::audit::Scope;
+
+    fn other(ordinal: u64, scope: Scope, doubt: Option<&'static str>) -> AlsoOpen {
+        AlsoOpen {
+            ordinal,
+            opened_at_secs: 10,
+            last_at_secs: 30,
+            source: "dhan".to_owned(),
+            scope,
+            ask: None,
+            window: None,
+            failures: 3,
+            failures_whole: false,
+            doubt,
+        }
+    }
+
+    /// **Another run left open with no window and no ask is said so, and
+    /// written with nulls.** An expired-F&O walk, a count that is a floor and
+    /// a doubt, each in its own words. Covers `AlsoOpen::clause`'s F&O scope
+    /// and no-window arms and `AlsoOpen::json`'s F&O scope, null ask and
+    /// null window arms (pullrun.rs:761, 764, 797, 802, 811).
+    #[test]
+    fn another_open_walk_with_no_window_or_ask_is_said_and_written_with_nulls() {
+        let walk = other(4, Scope::Fno, Some("a record after it would not decode"));
+        assert_eq!(
+            walk.clause(),
+            "record 4 (an expired-F&O walk, no window, source \"dhan\", no ask, opened at 10 s \
+             and last read at 30 s since the epoch, at least 3 member failure(s); it may have \
+             been closed: a record after it would not decode)"
+        );
+        let mut out = String::new();
+        walk.json(&mut out);
+        let doc: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(doc["scope"], "fno");
+        assert_eq!(doc["ask"], serde_json::Value::Null);
+        assert_eq!(doc["from"], serde_json::Value::Null);
+        assert_eq!(doc["to"], serde_json::Value::Null);
+        assert_eq!(doc["failures"], 3);
+        assert_eq!(doc["failuresWhole"], false);
+        assert_eq!(doc["mayBeClosed"], "a record after it would not decode");
+    }
+
+    /// **A guessed answer with no reading says every half it holds, and
+    /// writes every list whole.** Two guessed runs, two sure, two doubted,
+    /// two counted pairings (one spot, one F&O) and two runs counted and not
+    /// named: the words name each, the document carries each list in order
+    /// with its separators, and `reading` is null. Covers `Guessed::words`'
+    /// guessed-runs and unnamed sentences and `Guessed::json`'s null reading,
+    /// list separators and spot scope (pullrun.rs:1220, 1232-1238, 1265,
+    /// 1278-1293, 1310).
+    #[test]
+    fn a_guessed_answer_with_no_reading_says_and_writes_every_list() {
+        let guessed = Guessed {
+            why: "a guess decides it".to_owned(),
+            reading: None,
+            guessed_runs: vec![3, 5],
+            sure: vec![other(7, Scope::Spot, None), other(9, Scope::Fno, None)],
+            doubted: vec![
+                other(11, Scope::Spot, Some("one")),
+                other(13, Scope::Spot, Some("two")),
+            ],
+            unnamed: 2,
+            left_open: vec![
+                LeftOpen {
+                    close: 20,
+                    runs: vec![17, 15],
+                    left_open: 1,
+                    scope: Scope::Spot,
+                    source: "kite".to_owned(),
+                },
+                LeftOpen {
+                    close: 22,
+                    runs: vec![19, 18, 16],
+                    left_open: 2,
+                    scope: Scope::Fno,
+                    source: "dhan".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(guessed.at_least_open(), 5, "two sure and three counted");
+        let words = guessed.words();
+        assert!(
+            words.starts_with(
+                "NOT KNOWN which pull runs were left open, though at least 5 run(s) were: \
+                 a guess decides it."
+            ),
+            "{words}"
+        );
+        assert!(
+            words.contains(
+                " A guess names the run(s) opened at records 3, 5: each is open or closed \
+                 whichever way its guess went."
+            ),
+            "{words}"
+        );
+        assert!(
+            words.contains(&format!(
+                " 2 more run(s) of the walk's reading have no closing record and are counted, \
+                 not named (a document names {OPEN_NAMED}); `/audit` lists them."
+            )),
+            "{words}"
+        );
+        assert!(
+            !words.contains("older run record(s)"),
+            "no reading, so no run record is said to be unread: {words}"
+        );
+        assert!(
+            words.ends_with(" Nothing else is claimed; `/audit` lists the journal's runs."),
+            "{words}"
+        );
+
+        let mut keys = String::from("{\"first\":0");
+        guessed.json(&mut keys);
+        keys.push('}');
+        let doc: serde_json::Value = serde_json::from_str(&keys).expect("valid JSON");
+        assert_eq!(doc["reading"], serde_json::Value::Null);
+        assert_eq!(doc["guessedRuns"], serde_json::json!([3, 5]));
+        let ordinals = |key: &str| -> Vec<u64> {
+            doc[key]
+                .as_array()
+                .expect("a list")
+                .iter()
+                .map(|run| run["ordinal"].as_u64().expect("an ordinal"))
+                .collect()
+        };
+        assert_eq!(ordinals("sureOpen"), [7, 9]);
+        assert_eq!(ordinals("doubtedOpen"), [11, 13]);
+        let left = doc["leftOpen"].as_array().expect("a list");
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0]["scope"], "spot");
+        assert_eq!(left[0]["runs"], serde_json::json!([17, 15]));
+        assert_eq!(left[1]["scope"], "fno");
+        assert_eq!(left[1]["leftOpen"], 2);
+        assert_eq!(left[1]["source"], "dhan");
+        assert_eq!(doc["atLeastOpen"], 5);
+        assert_eq!(doc["unnamed"], 2);
+    }
 }
