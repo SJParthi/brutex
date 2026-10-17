@@ -241,3 +241,18 @@ test('a series is audited at its own minutes, else at its seconds, never coarser
   assert.equal(auditRung(rows, 'NSE-CASH-RELIANCE'), null, 'a daily rung proves no minute');
   assert.equal(auditRung([], 'NSE-INDEX-NIFTY'), null);
 });
+
+// R3-06 repair: a month answered off its kept summary read no record, so the
+// server sends `unreadable_records: null` rather than a `0` it never counted.
+test('a kept month that read no record is whole, and a null anywhere else is not a zero', () => {
+  const kept = { ...clean, unreadable_records: null, summary: 'kept' };
+  assert.deepEqual(monthVerdict(kept), { word: 'whole', kind: 'ok' });
+  assert.equal(isWholeAudit(answer([kept])), true);
+  for (const summary of ['built', 'absent_file', undefined]) {
+    const month = { ...clean, unreadable_records: null, summary };
+    assert.equal(monthVerdict(month).word, 'unverified', `summary ${summary}`);
+    assert.equal(isWholeAudit(answer([month])), false, `summary ${summary}`);
+  }
+  // A COUNT IS STILL A COUNT: a kept month never hides one the server sent.
+  assert.equal(monthVerdict({ ...kept, unreadable_records: 2 }).word, 'unreadable');
+});

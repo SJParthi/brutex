@@ -94,7 +94,7 @@ const MAX_CONTRACTS: usize = 100_000;
 
 /// Which contracts the arguments name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Which {
+pub(crate) enum Which {
     /// The spot series.
     Spot,
     /// One contract.
@@ -105,20 +105,24 @@ enum Which {
 
 /// What the arguments name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Ask {
-    vendor: Vendor,
-    exchange: String,
-    segment: String,
-    symbol: String,
-    which: Which,
-    rung: Timeframe,
-    months: Vec<YearMonth>,
-    dry_run: bool,
+pub(crate) struct Ask {
+    pub(crate) vendor: Vendor,
+    pub(crate) exchange: String,
+    pub(crate) segment: String,
+    pub(crate) symbol: String,
+    pub(crate) which: Which,
+    pub(crate) rung: Timeframe,
+    pub(crate) months: Vec<YearMonth>,
+    pub(crate) dry_run: bool,
 }
 
 impl Ask {
     /// The store path of one month of one series.
-    fn path(&self, contract: Option<Contract>, month: YearMonth) -> Result<StorePath<'_>, String> {
+    pub(crate) fn path(
+        &self,
+        contract: Option<Contract>,
+        month: YearMonth,
+    ) -> Result<StorePath<'_>, String> {
         StorePath::new(PathParts {
             vendor: self.vendor,
             exchange: &self.exchange,
@@ -141,7 +145,7 @@ impl Ask {
     }
 
     /// The header's symbol id, as every writer folds it.
-    fn symbol_id(&self) -> u32 {
+    pub(crate) fn symbol_id(&self) -> u32 {
         let [a, b, c, d, ..] = brutex_core::universe::fnv1a(&self.symbol).to_le_bytes();
         u32::from_le_bytes([a, b, c, d])
     }
@@ -154,7 +158,7 @@ impl Ask {
     /// could be built through it) and a name that is not a contract
     /// directory is not a series; both are counted for the receipt. A walk
     /// that finds no contract directory is refused, never an empty success.
-    fn series(&self, root: &Path) -> Result<Walk, String> {
+    pub(crate) fn series(&self, root: &Path) -> Result<Walk, String> {
         match &self.which {
             Which::Spot => Ok(Walk::of(vec![None])),
             Which::One(contract) => Ok(Walk::of(vec![Some(*contract)])),
@@ -218,13 +222,13 @@ impl Ask {
 
 /// The series a run walks, and what a `*` found beside them and left alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Walk {
+pub(crate) struct Walk {
     /// The series, in name order.
-    series: Vec<Option<Contract>>,
+    pub(crate) series: Vec<Option<Contract>>,
     /// Symbolic links under the symbol: never followed, never built through.
-    links: usize,
+    pub(crate) links: usize,
     /// Entries that are not a contract directory by name or by kind.
-    others: usize,
+    pub(crate) others: usize,
 }
 
 impl Walk {
@@ -277,13 +281,19 @@ fn month(label: &str, word: &str) -> Result<(u16, u8), String> {
 
 /// The arguments, refused by name before anything is opened.
 fn ask(arguments: &[&str]) -> Result<Ask, String> {
+    ask_for("srt-build", arguments)
+}
+
+/// [`ask`] for `verb`, a store verb of the same shape (`msum-build`, R3-06):
+/// one parser, so the two verbs name a series and a span the same way.
+pub(crate) fn ask_for(verb: &str, arguments: &[&str]) -> Result<Ask, String> {
     let (positional, dry_run) = match arguments {
         [head @ .., "--dry-run"] => (head, true),
         all => (all, false),
     };
     let [feed, instrument, rung, from, to] = positional else {
         return Err(format!(
-            "srt-build takes five arguments and an optional --dry-run; it was given {}",
+            "{verb} takes five arguments and an optional --dry-run; it was given {}",
             arguments.len()
         ));
     };

@@ -184,6 +184,7 @@ const _: () = {
         provenance,
         sort_index,
         sealed_bars,
+        month_summary,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -196,6 +197,7 @@ const _: () = {
     assert!(provenance.extension().len() <= MAX_EXTENSION_LEN);
     assert!(sort_index.extension().len() <= MAX_EXTENSION_LEN);
     assert!(sealed_bars.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(month_summary.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -725,11 +727,17 @@ pub enum FileKind {
     /// doors refuse it as `NotABarPath` until the read door (SC-3) opens it.
     /// See [`crate::sealed`]. D-4965.
     SealedBars,
+    /// The month's summary while it is still being written (`.sum` version
+    /// 1): its minute and second index, extremes, bars per day and the input
+    /// faults a gap audit refuses on, behind a magic, in exactly the section
+    /// a sealed month carries. Derived from the bars, never a record stream.
+    /// See [`crate::month_summary`]. R3-06, D-4980.
+    MonthSummary,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -741,6 +749,7 @@ impl FileKind {
         Self::Provenance,
         Self::SortIndex,
         Self::SealedBars,
+        Self::MonthSummary,
     ];
 
     /// The file extension, dot included.
@@ -758,6 +767,7 @@ impl FileKind {
             Self::Provenance => ".prv",
             Self::SortIndex => ".srt",
             Self::SealedBars => ".sbar",
+            Self::MonthSummary => ".sum",
         }
     }
 
@@ -776,7 +786,8 @@ impl FileKind {
             | Self::TimeIndex
             | Self::Provenance
             | Self::SortIndex
-            | Self::SealedBars => None,
+            | Self::SealedBars
+            | Self::MonthSummary => None,
         }
     }
 }

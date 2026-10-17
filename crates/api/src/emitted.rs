@@ -1975,7 +1975,28 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// previous window`, which needs more than fifty cross-site failures and
     /// then a minute's wait — the ration it reports is proven by
     /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
-    const UNREACHABLE: usize = 10;
+    ///
+    /// AND TWO MORE AT R3-14, each firing only when the OS refuses this
+    /// process something no test can make it refuse: `api.speed the minute
+    /// thread did not start` (a thread) and `api.speed SIGTERM cannot be
+    /// caught` (a signal handler).
+    const UNREACHABLE: usize = 12;
+    // R3-14: the speed minute line, the page report and the bounded drain's
+    // cut, each read back off this sink by its own module's test; and, at
+    // R3-14 repair 1, the stop's start line (`api.serve stop started`) and the
+    // exit's uncounted-requests line, read back by
+    // `server::stop_tests::a_stop_with_an_open_request_keeps_the_port_until_the_store_is_free`
+    // and `speed::tests::a_request_still_open_at_exit_is_named_not_dropped`.
+    // 5 -> 6 at R3-14 repair 4: `api.main blocking work outlived the shutdown
+    // wait`, read back by `server::stop_tests::
+    // blocking_work_past_the_wait_keeps_the_store_and_the_port_to_the_process_end`.
+    // 6 -> 9 at R3-14 repair 5: `api.serve stop asked during the start-up
+    // load`, read back by `server::stop_tests::
+    // a_stop_during_a_slow_load_ends_within_the_stop_bound`; `api.serve the
+    // stop signal could not be waited for` and `api.serve the start-up load
+    // did not finish`, read back by
+    // `server::stop_tests::every_end_of_the_load_race_is_named`.
+    const REACHED_IN_SPEED_TESTS: usize = 9;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -2029,16 +2050,46 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 77 -> 78 at WP-81 repair 2 (DB-B79, DB-B71): the grounded start's
     // `api.recovery recovery not resumed`, reached in recovery tests. (That
     // branch counted 73 -> 74; the two packages' sites are added here.)
+    //
+    // 78 -> 81 at R3-14: `api.speed minute ended` and `api.page.access page
+    // reported a failure`, both read back off this sink by their own modules'
+    // tests (`speed::tests::the_last_minute_of_counts_survives_a_shutdown`,
+    // `page_report_route::tests::a_page_report_is_rationed_and_audited`), and
+    // `api.speed the minute thread did not start`, named unreachable: it fires
+    // only when the OS refuses a thread, which no test can arrange.
+    //
+    // 81 -> 82 at R3-14: `api.speed SIGTERM cannot be caught`, named
+    // unreachable for the same reason: it fires only when the OS refuses this
+    // process a `SIGTERM` handler.
+    //
+    // 82 -> 83 at R3-14: `api.serve requests still open at the stop were cut
+    // short`, read back off this sink by
+    // `speed::tests::a_stop_waits_for_open_requests_no_longer_than_its_grace`.
+    //
+    // 83 -> 85 at R3-14 repair 1: `api.serve stop started` and `api.speed
+    // requests still open at exit were not counted`, both named in
+    // `REACHED_IN_SPEED_TESTS`.
+    //
+    // 85 -> 86 at R3-14 repair 4: `api.main blocking work outlived the
+    // shutdown wait`, named in `REACHED_IN_SPEED_TESTS`.
+    //
+    // 86 -> 89 at R3-14 repair 5: the start-up load race's three lines (a
+    // stop during the load, a stop future that failed, a load that
+    // panicked), named in `REACHED_IN_SPEED_TESTS`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 78,
+        lib_sites, 89,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
     );
 
     assert_eq!(
-        SITES_HERE + REACHED_IN_SERVER_TESTS + REACHED_IN_RECOVERY_TESTS + UNREACHABLE,
+        SITES_HERE
+            + REACHED_IN_SERVER_TESTS
+            + REACHED_IN_RECOVERY_TESTS
+            + REACHED_IN_SPEED_TESTS
+            + UNREACHABLE,
         lib_sites,
         "every emit site is proven here, in server::tests or recovery::tests, or named above"
     );
