@@ -305,6 +305,7 @@ test('a garbled field is the field only, every occurrence, and the same bytes al
   assert.deepEqual(ignoredFields({ ...base, status: 404, garbled: { b: { status: 200, body: '{"rows":[]}' } } }), [], 'nor does a refused original beside an answered probe');
   assert.deepEqual(ignoredFields({ ...base, status: 300, garbled: { b: { status: 300, body: '{"rows":[]}' } } }), [], 'a 300 is not an answer');
   assert.deepEqual(ignoredFields({ ...base, garbled: { b: { status: 300, body: '{"rows":[]}' } } }), [], 'nor is a probe answered 300');
+  assert.deepEqual(ignoredFields({ ...base, status: 300, garbled: { b: { status: 200, body: '{"rows":[]}' } } }), [], 'an original answered 300 says nothing about a field, whatever the probe got');
   assert.deepEqual(ignoredFields({ ...base, status: 299, garbled: { b: { status: 299, body: '{"rows":[]}' } } }).map((i) => i.how), ['garbled'], '299 is 2xx');
   assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 400, body: '{"error":7,"why":"a is not a parameter"}' }).map((i) => i.how), ['refused'], 'an error that is not a sentence leaves the body to read');
   assert.deepEqual(ignoredFields({ url: '/x.json?a=1', status: 200, body: 'not json' }), []);
