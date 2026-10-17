@@ -24,7 +24,8 @@ export function foldMinuteOwed(from, to, exchangeOwed, indexOwed, addDay) {
   const index = new Map();
   /** @type {Set<string>} */
   const indexUnknown = new Set();
-  if (!from || !to || from > to) return { exchange, index, indexUnknown };
+  // A span that runs backwards walks no day below.
+  if (!from || !to) return { exchange, index, indexUnknown };
   let day = from;
   while (day <= to) {
     const owed = exchangeOwed.get(day);
@@ -151,10 +152,11 @@ export function denseOwed(body) {
   const days = typeof body?.days === 'string' ? body.days : '';
   const from = body?.from;
   if (!days || !Number.isSafeInteger(from)) return { owed, indexOwed };
-  const regular = Number.isSafeInteger(body?.minuteOwed?.regular) ? body.minuteOwed.regular : null;
+  // A BODY IS IN HAND HERE: the guard above read its day string.
+  const regular = Number.isSafeInteger(body.minuteOwed?.regular) ? body.minuteOwed.regular : null;
   /** @type {Map<number, any>} */
   const special = new Map();
-  for (const entry of Array.isArray(body?.special) ? body.special : []) special.set(entry?.day, entry);
+  for (const entry of Array.isArray(body.special) ? body.special : []) special.set(entry?.day, entry);
   for (let at = 0; at < days.length; at += 1) {
     const code = days[at];
     if (code === '.' || code === '-') continue;
@@ -369,7 +371,7 @@ export async function readCalendar(feed, request, signal, wait = pause, span = '
  *   span?: 'held' | 'record'
  * }} options `span: 'record'` reads the calendar of record's whole span (DB-B42).
  */
-export function createCalendarLoader({ request, apply, requests, span = 'held' }) {
+export function createCalendarLoader({ request, apply, requests, span }) {
   return {
     /** @param {string | null | undefined} feed */
     load(feed) {
@@ -517,19 +519,23 @@ export function owedLedger(body) {
     throw new Error(`/calendar.json held string is ${heldText.length} days against ${n} day codes`);
   }
   const int = (/** @type {unknown} */ v) => (Number.isSafeInteger(v) ? /** @type {number} */ (v) : null);
-  const regular = int(body?.owed?.regular);
-  const casEligible = int(body?.owed?.casEligible);
-  /** @type {Map<number, any>} */
-  const special = new Map();
-  for (const entry of Array.isArray(body.special) ? body.special : []) {
-    if (Number.isSafeInteger(entry?.day)) special.set(entry.day, entry);
-  }
-  /** @type {Map<number, any>} */
-  const halts = new Map();
-  for (const halt of Array.isArray(body.halts) ? body.halts : []) {
-    if (Number.isSafeInteger(halt?.day)) halts.set(halt.day, halt);
-  }
-  const derivatives = derivativeEras(body?.owed?.derivatives);
+  const regular = int(body.owed?.regular);
+  const casEligible = int(body.owed?.casEligible);
+  // A SPECIAL OR HALT ENTRY WITH NO DAY IS REFUSED, never skipped, as a
+  // withheld run is: dropped, its day would read as a day nobody sized.
+  /** @param {unknown} list @param {string} name */
+  const byDay = (list, name) => {
+    /** @type {Map<number, any>} */
+    const by = new Map();
+    for (const entry of Array.isArray(list) ? list : []) {
+      if (!Number.isSafeInteger(entry?.day)) throw new Error(`/calendar.json \`${name}\` carries an entry with no day: ${JSON.stringify(entry)}`);
+      by.set(entry.day, entry);
+    }
+    return by;
+  };
+  const special = byDay(body.special, 'special');
+  const halts = byDay(body.halts, 'halts');
+  const derivatives = derivativeEras(body.owed?.derivatives);
   const prefix = () => new Float64Array(n + 1);
   const sessions = prefix();
   const index = prefix();
@@ -558,43 +564,25 @@ export function owedLedger(body) {
   // THE ERA A DAY FALLS IN, by a cursor that only moves forward: the days
   // ascend and the eras are disjoint and sorted, so the walk stays one pass.
   let era = 0;
-  for (let at = 0; at < n; at += 1) {
-    const code = codes[at];
+  [...codes].forEach((code, at) => {
     const day = from + at;
     const session = SESSION_CODES.has(code);
-    /** @type {number | null} */
-    let i = 0;
-    /** @type {number | null} */
-    let s = 0;
-    /** @type {number | null} */
-    let c = 0;
-    /** @type {number | null} */
-    let d = 0;
     while (derivatives !== null && era < derivatives.length && derivatives[era].to < day) era += 1;
     const derivDay =
       derivatives !== null && era < derivatives.length && derivatives[era].from <= day ? derivatives[era].regular : null;
-    if (code === 'R') {
-      i = regular;
-      s = regular;
-      c = regular;
-      d = derivDay;
-    } else if (code === 'X') {
-      i = regular;
-      s = regular;
-      c = casEligible;
-      d = derivDay;
-    } else if (code === 'P' || code === 'H') {
-      const sized = special.get(day);
-      i = int(sized?.indexOwed);
-      s = int(sized?.owed);
-      c = s;
-      d = null;
-    } else if (code === 'U') {
-      i = null;
-      s = null;
-      c = null;
-      d = null;
-    }
+    // THREE KINDS OF DAY: a regular one, an auction one, and every other —
+    // a special or halt day by its record, and a closed, unsized or outside
+    // day by its having none (owed nothing, and unknown only if a session).
+    const sized = special.get(day);
+    const regularDay = code === 'R' || code === 'X';
+    /** @type {number | null} */
+    const i = regularDay ? regular : int(sized?.indexOwed);
+    /** @type {number | null} */
+    const s = regularDay ? regular : int(sized?.owed);
+    /** @type {number | null} */
+    const c = code === 'X' ? casEligible : s;
+    /** @type {number | null} */
+    const d = regularDay ? derivDay : null;
     const held = heldText === null ? 0 : heldText[at] !== '-' && heldText[at] !== '0' ? 1 : 0;
     // A SESSION READ AND NOT HELD: its digit is `0`. Never `-`, which is a
     // day nobody read, and never a closed day, which owes nothing.
@@ -621,9 +609,9 @@ export function owedLedger(body) {
     heldDays[at + 1] = heldDays[at] + held;
     heldSessions[at + 1] = heldSessions[at] + (session ? held : 0);
     closedHeld[at + 1] = closedHeld[at] + (code === '.' ? held : 0);
-  }
+  });
   const heldBy = Array.isArray(body.heldBy) ? body.heldBy.map(String) : [];
-  const target = body?.target ?? null;
+  const target = body.target ?? null;
   return {
     feed: typeof body.feed === 'string' ? body.feed : '',
     rung: typeof body.rung === 'string' ? body.rung : '',
@@ -671,7 +659,7 @@ export function derivativeEras(rows) {
   if (!Array.isArray(rows)) throw new Error('/calendar.json `owed.derivatives` is not a list');
   const eras = rows.map((row) => {
     const iso = /^\d{4}-\d{2}-\d{2}$/;
-    if (typeof row?.from !== 'string' || typeof row?.to !== 'string' || !iso.test(row.from) || !iso.test(row.to) || row.to < row.from) {
+    if (!iso.test(String(row?.from)) || !iso.test(String(row?.to)) || row.to < row.from) {
       throw new Error(`/calendar.json \`owed.derivatives\` carries a malformed era: ${JSON.stringify(row)}`);
     }
     return {

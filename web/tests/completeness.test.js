@@ -35,7 +35,7 @@ import {
   coverPct,
   owedKind
 } from '../src/lib/completeness.js';
-import { owedLedger, epochDayOfIso, ledgerSpan, derivativeEras, foldMinuteOwed, denseOwed, ledgerDay, readLedger, askCalendar, readCalendar } from '../src/lib/calendar-owed.js';
+import { owedLedger, epochDayOfIso, ledgerSpan, derivativeEras, foldMinuteOwed, denseOwed, ledgerDay, readLedger, askCalendar, readCalendar, emptyCalendar, withheldDays, isoOfEpochDay, monthsBetween, createCalendarLoader } from '../src/lib/calendar-owed.js';
 
 /**
  * A synthetic `/calendar.json` body over `from` with the given day codes.
@@ -590,7 +590,7 @@ test("the store's reach bounds the month; a series that stops short of it owes t
 /** A response as `fetch` hands it back, for the reader's own loop. */
 const answer = (/** @type {number} */ status, /** @type {any} */ json) => /** @type {any} */ ({ ok: status >= 200 && status < 300, status, json: async () => json });
 
-test('the ledger reads absent and malformed fields as absent, and a halt with no day is left out', () => {
+test('the ledger reads absent fields as absent, and refuses a special or halt entry with no day', () => {
   const from = epochDayOfIso('2024-01-01');
   const add = (/** @type {string} */ iso, /** @type {number} */ n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
   for (const [a, b] of [['', '2024-01-02'], ['2024-01-01', ''], ['2024-01-03', '2024-01-02']]) {
@@ -598,8 +598,10 @@ test('the ledger reads absent and malformed fields as absent, and a halt with no
   }
   const dense = denseOwed({ days: 'R', from, minuteOwed: { regular: '375' }, special: 'not a list' });
   assert.equal(dense.owed.get('2024-01-01'), null, 'a regular count that is not a whole number is unknown, never 375');
-  const L = owedLedger({ days: 'RH', from, owed: { regular: 375 }, special: 'x', halts: [{ day: from + 1 }, { day: 'x' }], heldBy: 'x', target: null, feed: 7, rung: null });
+  const L = owedLedger({ days: 'RH', from, owed: { regular: 375 }, special: 'x', halts: [{ day: from + 1 }], heldBy: 'x', target: null, feed: 7, rung: null });
   assert.equal(L.halts.size, 1);
+  assert.throws(() => owedLedger({ days: 'RH', from, halts: [{ day: from + 1 }, { day: 'x' }] }), /`halts` carries an entry with no day: \{"day":"x"\}/);
+  assert.throws(() => owedLedger({ days: 'RH', from, special: [null] }), /`special` carries an entry with no day: null/);
   assert.deepEqual(L.heldBy, []);
   assert.equal(L.series, null);
   assert.equal(L.feed, '');
@@ -912,4 +914,140 @@ test('the month roll-up names its rung, counts full and store-wide rows, and kee
   assert.deepEqual(monthVerdict({ n: 1, owed: 100, bars: 100, missing: 0, trade: 0, unmeasured: 0, absent: 0, over: 1 }), { pct: null, state: 'over' });
   assert.deepEqual(monthVerdict({ n: 1, owed: 0, bars: 0, missing: 0, trade: 0, unmeasured: 0, absent: 0 }), { pct: null, state: 'full' });
   assert.deepEqual(monthVerdict({ n: 1, owed: 100, bars: 99, missing: 1, trade: 0, unmeasured: 0, absent: 0 }), { pct: 0.99, state: 'near' });
+});
+
+/* ======================================================================
+   THE LEDGER PINNED (R3-04): every prefix sum of one mixed calendar, and
+   each edge of the reader a surviving mutant found.
+   ====================================================================== */
+
+test('every prefix sum of a mixed calendar, day by day', () => {
+  // 2026-07-29 (Wed) .. 2026-08-07 (Fri): R R R . . X H U P X, with held digits.
+  const from = epochDayOfIso('2026-07-29');
+  const days = 'RRR..XHUPX';
+  const held = '10-1110100';
+  const L = owedLedger({
+    status: 'ok',
+    feed: 'zerodha',
+    rung: '1min',
+    from,
+    days,
+    held,
+    heldBy: ['ZZS'],
+    target: { kind: 'series', symbol: 'ZZS', segment: 'CASH' },
+    owed: {
+      regular: 375,
+      casEligible: 360,
+      derivatives: [
+        { from: '2018-01-01', to: '2026-07-30', regular: 375 },
+        { from: '2026-08-03', to: '2026-10-04', regular: 385, tradeDriven: true }
+      ]
+    },
+    special: [
+      { day: from + 6, code: 'H', owed: 316, indexOwed: 300 },
+      { day: from + 8, code: 'P', owed: 60, indexOwed: 60 }
+    ],
+    halts: []
+  });
+  const span = ledgerSpan(L, L.from, L.to);
+  assert.deepEqual(
+    { ...span },
+    {
+      asked: 10, inside: 10, outside: 0,
+      sessions: 8,
+      index: 375 * 3 + 375 + 300 + 60 + 375,
+      share: 375 * 3 + 375 + 316 + 60 + 375,
+      cas: 375 * 3 + 360 + 316 + 60 + 360,
+      // 07-31 is a session after the first era ends (07-30) and before the second: unknown to a future.
+      deriv: 375 * 2 + 385 * 2,
+      unknownIndex: 1, unknownShare: 1, unknownCas: 1,
+      unknownDeriv: 1 + 1 + 1 + 1,
+      // Sessions held at 0: 07-30 (R), 08-04 (H), 08-06 (P) and 08-07 (X);
+      // '-' on 07-31 is unread, never unheld.
+      unheldIndex: 375 + 300 + 60 + 375, unheldShare: 375 + 316 + 60 + 375, unheldCas: 375 + 316 + 60 + 360, unheldDeriv: 375 + 385,
+      auction: 2, specials: 1, halted: 1, unmeasured: 1,
+      haltBars: 375 - 316,
+      // Held: 07-29, both weekend days, 08-03 and 08-05; of them sessions 07-29, 08-03, 08-05.
+      heldDays: 5, heldSessions: 3, closedHeld: 2
+    }
+  );
+  // A one-day span is that day, not an empty one.
+  assert.equal(ledgerSpan(L, from, from).sessions, 1);
+  assert.equal(ledgerSpan(L, from, from).inside, 1);
+  assert.equal(ledgerSpan(L, from - 5, from - 1).inside, 0);
+  // A halt day with no record owes no halted bars.
+  const bare = owedLedger({ days: 'H', from, owed: { regular: 375 } });
+  assert.equal(ledgerSpan(bare, from, from).haltBars, 0);
+  assert.equal(ledgerSpan(bare, from, from).sessions, 1, 'a halt day is a session');
+  // The answer's own words.
+  assert.equal(L.feed, 'zerodha');
+  assert.equal(L.rung, '1min');
+  assert.deepEqual(L.series, { symbol: 'ZZS', segment: 'CASH' });
+  assert.deepEqual(L.heldBy, ['ZZS']);
+  assert.equal(owedLedger({ days: 'R', from, target: { kind: 'series', symbol: 7 } }).series, null, 'a symbol that is not a name');
+  assert.deepEqual(owedLedger({ days: 'R', from, target: { kind: 'series', symbol: 'ZZS' } }).series, { symbol: 'ZZS', segment: '' });
+  assert.deepEqual(L.derivatives?.map((e) => e.tradeDriven), [false, true]);
+});
+
+test('the reader and its helpers at their edges', async () => {
+  const signal = new AbortController().signal;
+  // The calendar that measures nothing.
+  assert.deepEqual(emptyCalendar('why'), { first: '', last: '', owed: new Map(), indexOwed: new Map(), withheld: new Set(), withheldMonths: new Set(), from: [], clashes: 0, why: 'why' });
+  assert.throws(() => withheldDays('x', isoOfEpochDay), /is not a list/);
+  // Dense days: none, not a string, an auction day, a special day's own index count, a special entry that is null.
+  const from = epochDayOfIso('2026-08-03');
+  assert.equal(denseOwed(null).owed.size, 0);
+  assert.equal(denseOwed({ days: ['R'], from }).owed.size, 0);
+  const dense = denseOwed({ days: 'XP', from, minuteOwed: { regular: 375 }, special: [null, { day: from + 1, minuteOwed: 60, minuteIndexOwed: 55 }] });
+  assert.equal(dense.owed.get('2026-08-03'), 375, 'an auction day is a regular day here');
+  assert.equal(dense.indexOwed.get('2026-08-04'), 55);
+  assert.equal(denseOwed({ days: 'R', from }).owed.get('2026-08-03'), null, 'no regular count');
+  // A backwards month span holds nothing; a day string that is no string, or empty, is refused.
+  assert.deepEqual(monthsBetween('2025-01', '2024-03'), []);
+  assert.throws(() => owedLedger(null), /carried no day string/);
+  assert.throws(() => owedLedger({ days: ['R'], from }), /carried no day string/);
+  assert.throws(() => owedLedger({ days: '', from, reason: 'held back' }), /carried no day string \(held back\)/);
+  assert.equal(owedLedger({ days: 'R', from }).regular, null, 'an answer with no owed table owes no count');
+  assert.equal(derivativeEras(null), null);
+  assert.throws(() => derivativeEras([{ from: '2026-08-03junk', to: '2026-10-04' }]), /malformed era/);
+  assert.throws(() => derivativeEras([null]), /malformed era/);
+  // The day after the last era is unknown to a future, and the era's last day is its own.
+  const eraEnd = owedLedger({ days: 'RR..R', from: epochDayOfIso('2026-07-30'), owed: { regular: 375, derivatives: [{ from: '2018-01-01', to: '2026-07-30', regular: 375 }] } });
+  const e = ledgerSpan(eraEnd, eraEnd.from, eraEnd.to);
+  assert.equal(e.deriv, 375);
+  assert.equal(e.unknownDeriv, 2);
+  // The reader: what it asks with, the hint's floor, a null building body, a refusal named by route.
+  /** @type {any[]} */
+  const asked = [];
+  /** @type {number[]} */
+  const waits = [];
+  let n = 0;
+  const reply = await askCalendar('/calendar.json?x', async (url, init) => {
+    asked.push(init);
+    return ++n === 1 ? answer(202, { status: 'building', retry_after_ms: 50 }) : n === 2 ? answer(202, null) : answer(200, {});
+  }, signal, async (ms) => { waits.push(ms); });
+  assert.deepEqual(asked[0], { cache: 'no-store', signal });
+  assert.deepEqual(waits, [50], 'a hint of exactly 50 ms is taken as given');
+  assert.equal(reply.body, null, 'a building answer with no body is answered as it came');
+  const refusal = /** @type {any} */ ({ ok: false, status: 503, text: async () => '' });
+  assert.equal((await readLedger('/calendar.json', async () => refusal, signal)).why, '/calendar.json answered HTTP 503 and named no reason');
+  assert.equal((await readCalendar('gdfl', async () => refusal, signal)).why, '/calendar.json answered HTTP 503 and named no reason');
+  assert.equal((await readCalendar('gdfl', async () => answer(202, { status: 'building' }), signal, async () => {})).why, 'the server is still building this calendar: no reason given');
+  assert.equal((await readCalendar('gdfl', async () => answer(200, null), signal)).why, 'the store holds no bars for this feed');
+  assert.equal((await readCalendar('gdfl', async () => answer(200, { reason: '' }), signal)).why, 'the store holds no bars for this feed');
+  assert.equal((await readCalendar('gdfl', async () => { throw 'not an Error'; }, signal)).why, 'the calendar request failed');
+  const read = await readCalendar('gdfl', async () => answer(200, { days: [{ day: from, owed: 375 }], firstDay: from, lastDay: from }), signal);
+  assert.equal(read.why, '');
+  assert.equal(read.first, '2026-08-03');
+  assert.deepEqual(read.from, []);
+  // The loader asks the held span unless told otherwise.
+  /** @type {string[]} */
+  const urls = [];
+  const loader = createCalendarLoader({
+    request: async (url) => { urls.push(url); return answer(200, {}); },
+    apply: () => {},
+    requests: { run: async (work) => work({ signal, current: () => true }), cancel: () => {} }
+  });
+  await loader.load('gdfl');
+  assert.deepEqual(urls, ['/calendar.json?feed=gdfl']);
 });
