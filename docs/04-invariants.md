@@ -7507,3 +7507,26 @@ fixture is invented.
 | AG04-12 | **A restart day whose first post-reopen second carries at least the pre-restart volume is labelled `restart_carry`, and its GDFL volume is UNVERIFIED.** This holds on a halt day (P 1,000, F 1,250) and on a drill Saturday (F = P). A smaller first second, P = 0, no second after the reopen, and an ordinary day carry no label. Nothing is subtracted. The volume never says `gdfl_sum_verified: true` (nothing in the route verifies the sum), and a restart day of an option or an index names that its carry is not measured. | `sources_day_names_the_restart_carry_on_a_halt_day`, `sources_day_names_the_restart_carry_on_a_drill_saturday`, `an_ordinary_day_and_a_restart_day_with_a_small_first_print_carry_no_restart_label`, `the_gdfl_sum_is_never_said_verified_and_a_derivative_restart_day_is_named` | ✓ |
 | AG04-13 | **A restart comes from the calendar of record only.** Every `HALTS` row names its cash resume second, and a special session names a reopen exactly when it has two windows or is a halt day. | `every_restart_comes_from_the_calendar_of_record` | ✓ |
 | AG04-14 | **A sidecar filed after a day was cached is read on the next request.** The sidecar's stamp is in the day key. | `sources_day_reads_a_sidecar_filed_after_the_day_was_cached` | ✓ |
+
+## The /db bar grid's pager, Go to, sort offers and words (R3-03; D-5860 to D-5864)
+
+`web/src/lib/db/pager.js`, `web/src/lib/db/goto.js`,
+`web/src/lib/db/notes-bars.js` (`sortRefusal`, `localSortAdvice`,
+`readFailure`), `web/src/lib/db/bars-plan.js` (`acrossDay`),
+`web/src/routes/db/DbPager.svelte`, `DbBarsGrid.svelte` and
+`DbExtremes.svelte`. Proofs in `web/tests/db-pager.test.js`,
+`web/tests/db-goto.test.js` and `web/tests/db-bars-plan.test.js`, run by
+`npm test` in `web/`; the components are held by source-shape assertions in
+the same files, and the shadow checks of 17 Oct are in D-5860 to D-5864.
+
+| Id | Invariant | Proof | |
+|---|---|---|---|
+| R303-01 | **One change of order or row set is one page read, at page one**: no request at the old offset, no request for a selection still reconciling, a question already asked is not asked again, and a re-run that asks nothing new cancels nothing | `a_sort_change_at_a_deep_page_sends_one_request`; `db-pager.test.js` `one change of the selection sends one page read and one extremes read, and nothing while it settles` | ✓ |
+| R303-02 | **The pager offers no page the server refuses**: buttons, Next, Last and the page box stay within `MAX_SORT_DEPTH` of the front (and of the end where the server serves it) unless the answer read at most `MAX_READ_HELD` rows; both constants equal the Rust source's; the box refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in words | `the_pager_offers_no_page_past_the_served_depth`; `db-pager.test.js` `the page box refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in words` | ✓ |
+| R303-03 | **Go to a minute lands on its first bar in either direction**: the instant is asked ascending, the newest-first row is `total - 1 - at_index`, a null `at_index` is not row 0, and a second Go to to the same minute marks it again | `go_to_a_minute_lands_on_its_first_bar_in_both_directions`; `db-goto.test.js` `Go to takes a time alone, exact seconds, and refuses 1969, 2099 and nonsense in words` | ✓ |
+| R303-04 | **No sort is offered on a column with no value on the selection**, a sort the browser cannot afford is refused before it moves (the sort that was on is kept), and a sort already on that cannot be kept says the grid went back to time order | `no_sort_is_offered_on_a_column_without_values`; `db-pager.test.js` `a sort the page cannot do keeps the sort that was on, with advice that works for the rung`, `a sort already on that the page cannot do says the grid went back to time order, and no sentence loses a space` | ✓ |
+| R303-05 | **A refusal the page made is never called the server's or a failed read**, and Try again is offered only where asking again can answer | `a_page_made_refusal_is_not_called_the_servers` (`db-pager.test.js`) | ✓ |
+| R303-06 | **A store that grows between two pages of one read repeats no row**: the pages are compared by total and every series' count, a row already shown is dropped, and the move is named | `the_store_growing_between_two_pages_repeats_no_row` (`db-pager.test.js`) | ✓ |
+| R303-07 | **An empty grid is said only for an answer to the rows on screen**, the census disagreement only while the census is unchanged, and a time-of-day window that keeps nothing names the window, not the import | `db-pager.test.js` `an empty answer is said only once it is in, and a time window is not blamed on the import (DB-016)` | ✓ |
+| R303-08 | **Fit never claims a count it did not measure** (`Fit · measuring` before the box is measured) and counts below the heading's measured two rows, with the notes strip at a fixed one-line height in the box | `db-pager.test.js` `Rows per page: no "Fit · 50" before the box is measured, and the heading is measured with it (DB-N02)` | ✓ |
+| R303-09 | **A Change % measured across the overnight gap says so on its row**, naming the bar it was measured against | `db-pager.test.js` `a Change % measured across the overnight gap says so on the row` | ✓ |

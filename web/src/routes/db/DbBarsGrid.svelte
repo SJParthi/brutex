@@ -16,18 +16,21 @@
    *
    * Owner after WP-00: WP-52 (bars data path, pager, go-to, extremes, export).
    */
-  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, parseGoto, pageOfIndex, censusBehind, localComparator, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON, PAGE_SIZES, pageList } from '$lib/db/bars-plan.js';
-  import { untrack } from 'svelte';
+  import { ROW, HEAD, FIT_SLACK, MIN_USEFUL_ROWS, istDayKey, IST_OFFSET_MS, wireSort, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, seriesPlan, windowQuery, rowKey, pageOfIndex, censusBehind, localComparator, acrossDay, paisaText, daysBetween, MIN_SPINE, CHG_FLOOR_BPS, SKELETON } from '$lib/db/bars-plan.js';
+  import { tick, untrack } from 'svelte';
   import { TF_SECS, txt, tfCmp, fmt } from '$lib/db/notes-labels.js';
-  import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText } from '$lib/db/notes-bars.js';
+  import { BAR_COLS, FUTURE_COLS, OPTION_COLS, BAR_GROUPS, BAR_META, BAR_UNGROUPED, barWhyText, sortRefusal, localSortAdvice, readFailure } from '$lib/db/notes-bars.js';
   import { dayWindowApplies } from '$lib/db/notes-controls.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { readWindowPage, readAllRows, sortIndexNote } from '$lib/database-pages.js';
+  import { ask } from '$lib/ask.js';
+  import { servedPages, clampServed, stepServed, lastServed, pageToRead, askOnce, generationOf, joinPage, joinSlices } from '$lib/db/pager.js';
+  import { parseGoto, gotoAsk, landing } from '$lib/db/goto.js';
   import { dirOf, bpsText } from '$lib/bps.js';
   import { timeLabel, stampLabel, dayLabel, barTimeLabel } from '$lib/dates.js';
   import { refreshStore } from '$lib/store.svelte.js';
-  import Picker from '$lib/Picker.svelte';
   import DbChart from './DbChart.svelte';
+  import DbPager from './DbPager.svelte';
   import DbExtremes, { extremesState } from './DbExtremes.svelte';
   import DbDayFlags from './DbDayFlags.svelte';
   import DbOptionCells from './DbOptionCells.svelte';
@@ -123,6 +126,11 @@
     /** Whether a settled reading has been taken. In Fit mode the grid reads
         nothing before it, so a load asks for one page size, once (DB-N02). */
     let fitLatched = $state(false);
+    /** The sticky heading's measured height — its group band AND its labels —
+        taken with the settled reading. `HEAD` is the labels' row alone, and
+        the band's 22px under it was a row's worth of rows the Fit counted
+        that the heading covered (R3-03). */
+    let fitHead = $state(HEAD);
     /** @type {HTMLElement | null} */
     let barBox = $state(null);
     /** @type {HTMLElement | null} */
@@ -257,6 +265,7 @@
         measure();
         if (el.clientHeight > 0) {
           fitBoxH = el.clientHeight;
+          fitHead = /** @type {HTMLElement | null} */ (el.querySelector('thead'))?.offsetHeight || HEAD;
           fitLatched = true;
         }
       };
@@ -347,7 +356,7 @@
     });
     /** The row count the FOLD reasons about — from the settled height only. */
     const settledRows = $derived(
-      settledBoxH > 0 ? Math.max(1, Math.floor((settledBoxH - HEAD - FIT_SLACK) / ROW)) : 0
+      settledBoxH > 0 ? Math.max(1, Math.floor((settledBoxH - fitHead - FIT_SLACK) / ROW)) : 0
     );
 
     /* ======================================================================
@@ -432,22 +441,16 @@
        precisely one row of hidden scrolling. `max(1, …)` because a window short
        enough to fit no rows must still ask for a row, or the pager reports zero
        of zero on a store holding four million bars. */
-    /* 24, AND IT IS SIZED TO A NAMED THING RATHER THAN ROUNDED UP UNTIL THE BUG
-       STOPPED. `.bnotes` — the warnings strip under the grid — is 17px when it
-       carries a line and renders AFTER the bars load, so a box measured at 682
-       is 665 by the time the rows are in it. That is the seventeen; the rest is
-       the few pixels of font-and-animation settle measured earlier. It cannot be
-       observed away: the notes list one entry per file whose manifest disagrees
-       with what the file returned, and which files are read depends on the page
-       size, so watching that strip re-enters the loop this whole block exists to
-       cut. 24px is 0.6 of a row — it costs a row only when the box was within a
-       hair of holding one, and it guarantees the table never carries a five-pixel
-       scrollbar, which is the thing the reader actually notices.
-       THE DECLARATION ITSELF IS UP BESIDE `ROW` AND `HEAD`, because the fold's
-       `settledRows` divides by it too and is written above this point. The
-       reasoning stays here, where the 24 was measured. */
+    /* 24 WAS SIZED TO `.bnotes`, THE WARNINGS STRIP UNDER THE GRID, which used
+       to arrive after the bars and shrink a box already fitted — 17px of it,
+       plus a few of font-and-animation settle. R3-03 keeps that strip in the
+       box at one line's height whether or not it has anything to say, and
+       measures the heading's two rows (`fitHead`) instead of taking `HEAD`,
+       so the slack is back to the damper's eight (`FIT_SLACK`, beside `ROW`
+       and `HEAD` in `bars-plan.js`, because the fold's `settledRows`
+       divides by it too). */
     const rowsThatFit = $derived(
-      Math.max(1, Math.floor(((fitBoxH || barBoxH) - HEAD - FIT_SLACK) / ROW))
+      Math.max(1, Math.floor(((fitBoxH || barBoxH) - fitHead - FIT_SLACK) / ROW))
     );
 
     Object.defineProperties(db, {
@@ -634,10 +637,14 @@
     const planAll = $derived(seriesPlan(barPlan.all));
 
     /** The row set's identity — series, rung, months and bounds; never the page or the order. */
-    const setKey = $derived(
+    const setBase = $derived(
       [feeds.active ?? '', plan.timeframe, plan.from, plan.to, plan.keys.join(','),
-        bounds.fromDay, bounds.toDay, bounds.fromTime, bounds.toTime, db.nonce].join('|')
+        bounds.fromDay, bounds.toDay, bounds.fromTime, bounds.toTime].join('|')
     );
+    /** The same, and the census generation: a Read again asks it afresh. */
+    const setKey = $derived(`${setBase}|${db.nonce}`);
+    /** Whether a day or time bound narrows the read, so the bounded set is not the selection whole. */
+    const boundsNarrow = $derived(Boolean(bounds.fromDay || bounds.toDay || bounds.fromTime || bounds.toTime));
 
     /* ---------------------------------------------------------------------
        THE BAR GRID'S SORT. `barSortKey` is the GRID's column key; `wireSort`
@@ -649,16 +656,100 @@
     /** Why the last sort asked for was refused, said beside the grid until the next header press. */
     let sortWhy = $state('');
 
+    /**
+     * WHY A COLUMN IS NOT OFFERED AS A SORT ON THIS SELECTION, or `null`
+     * (R3-03): Volume on an index, open interest on an index or a share —
+     * n/a on every row, so an order would be time order under its caret.
+     * @param {string} key
+     */
+    const sortOff = (key) => sortRefusal(key, plan.keys);
+
+    /**
+     * THE ORDER THE READ USES: the one chosen, unless the selection has since
+     * become one it means nothing on (a Volume sort carried onto an index),
+     * when it is time order, newest first — and the effect below says so and
+     * puts the caret there, without a second request.
+     */
+    const sortNow = $derived(sortOff(barSortKey) ? { key: 'ts', desc: true } : { key: barSortKey, desc: barDesc });
+    $effect(() => {
+      const why = sortOff(barSortKey);
+      if (!why) return;
+      untrack(() => {
+        sortWhy = `${BAR_META[barSortKey]?.label ?? barSortKey} is not an order on this selection — ${why} The grid is in time order, newest first.`;
+        barSortKey = 'ts';
+        barDesc = true;
+      });
+    });
+
     /* ---------------------------------------------------------------------
-       THE READ. ONE REQUEST A PAGE, for one series or a thousand.
+       THE READ. ONE REQUEST A PAGE, for one series or a thousand — and ONE
+       REQUEST A CHANGE (R3-03).
        --------------------------------------------------------------------- */
-    /** @type {{ loading: boolean, error: string | null, answer: any, rows: any[], local: boolean }} */
-    let barState = $state.raw({ loading: false, error: null, answer: null, rows: [], local: false });
+    /**
+     * `page` is the page whose rows `rows` are, `set` the row set they were
+     * read for, `made` who refused when `error` is set (`page` before any
+     * request, `read` after one) and `status` the HTTP status that came back
+     * (0 when none did). `moved` names a store that changed between two pages.
+     * @type {{ loading: boolean, error: string | null, answer: any, rows: any[], local: boolean,
+     *   page: number, set: string, made: 'page' | 'read', status: number, moved: string | null }}
+     */
+    let barState = $state.raw({ loading: false, error: null, answer: null, rows: [], local: false, page: 1, set: '', made: 'read', status: 0, moved: null });
     let barToken = 0;
     /** How long the last page read took, request to rows, in milliseconds. */
     let pageMs = $state(0);
     /** The last full read a local sort made, by row-set identity: page turns of that sort read nothing. */
-    let localCache = { key: '', rows: /** @type {any[]} */ ([]), answer: /** @type {any} */ (null) };
+    let localCache = { key: '', rows: /** @type {any[]} */ ([]), answer: /** @type {any} */ (null), moved: /** @type {string | null} */ (null) };
+    /** The question asked last: a re-run of the effect that would ask it again asks nothing. */
+    const reads = askOnce();
+    /** The request in flight. Not torn down by a re-run that asks nothing new. */
+    let inFlight = /** @type {AbortController | null} */ (null);
+    /** The row set the request in flight reads. */
+    let inFlightSet = '';
+    /** The order the last read was asked in, so a change of order reads page one at once. */
+    let lastOrder = '';
+    /** The next read keeps `db.page` whatever the order did: a Go to chose both. */
+    let pinned = false;
+    /** While a Go to is finding its page, nothing is read: the landing is the page. */
+    let jumping = $state(false);
+    /** A press of Try again, part of the question so the same page is asked afresh. */
+    let retries = $state(0);
+    /** The page read before, in the same order: the next one is checked against it. */
+    let pageBefore = /** @type {{order: string, page: number, rows: any[], generation: string, total: number} | null} */ (null);
+    /** Whether the rows on screen were read in time order (or are every kept row,
+        for a sort this page does itself), so neighbours on the page are
+        neighbours in the series. Set with the rows; read by `overnight`. */
+    let rowsInTime = $state(false);
+
+    /** Stops the request in flight, if any. */
+    function stopRead() {
+      inFlight?.abort();
+      inFlight = null;
+      reads.forget();
+    }
+
+    /**
+     * The request function every bar read goes through, recording the HTTP
+     * status the server answered — so a refusal it made is told from a read
+     * that failed (`readFailure`) — and, when `bodies` is given, every answer.
+     * @param {{status: number}} seen @param {any[]} [bodies]
+     * @returns {typeof ask}
+     */
+    function asking(seen, bodies) {
+      return async (url, init) => {
+        const response = await ask(url, init);
+        seen.status = response.status;
+        if (!bodies) return response;
+        const json = response.json.bind(response);
+        Object.defineProperty(response, 'json', {
+          value: async () => {
+            const body = await json();
+            bodies.push(body);
+            return body;
+          }
+        });
+        return response;
+      };
+    }
 
     /**
      * One page in an order the server keeps: one request, whatever the number
@@ -667,40 +758,44 @@
      * count after the bounds — so it is the same in every order (DB-G02,
      * DB-G61) — and no extremes are folded on a page turn (DB-G83).
      *
-     * @param {string} feed @param {any} p @param {any} b @param {string} wire
-     * @param {boolean} desc @param {number} page @param {number} size @param {AbortSignal} signal
+     * @param {string} query @param {number} size @param {AbortSignal} signal @param {{status: number}} seen
      */
-    async function readServerPage(feed, p, b, wire, desc, page, size, signal) {
-      const offset = (page - 1) * size;
-      const answer = await readWindowPage(windowQuery(feed, p, { ...b, sort: wire, desc, offset, limit: size }), size, signal);
-      return { loading: false, error: null, answer, rows: answer.bars, local: false };
+    async function readServerPage(query, size, signal, seen) {
+      const answer = await readWindowPage(query, size, signal, asking(seen));
+      return { answer, rows: answer.bars, local: false, moved: null };
     }
 
     /**
      * One page in an order only this page can compute — a change column, or a
      * contract column — from every kept row, read in time order through the
      * window route, under `LOCAL_SORT_BUDGET` rows (DB-063, DB-N16, DB-A29,
-     * DB-B50). The count is asked first, one seek, so a selection past the
-     * budget is refused before a single row of it is read.
+     * DB-B50). The count is the answer on screen when it is this set's;
+     * otherwise it is asked first, one seek, so a selection past the budget
+     * is refused before a single row of it is read. Every slice is checked
+     * against the first one's total and store state, and a row a shifted
+     * slice repeats is dropped (R3-03).
      *
      * @param {string} feed @param {any} p @param {any} b @param {string} key
-     * @param {AbortSignal} signal
+     * @param {AbortSignal} signal @param {{status: number}} seen @param {any} known the answer on screen when it is this set's
      */
-    async function readLocalPage(feed, p, b, key, signal) {
+    async function readLocalPage(feed, p, b, key, signal, seen, known) {
       if (localCache.key === key) {
-        return { loading: false, error: null, answer: localCache.answer, rows: localCache.rows, local: true };
+        return { answer: localCache.answer, rows: localCache.rows, local: true, moved: localCache.moved };
       }
-      const head = await readWindowPage(windowQuery(feed, p, { ...b, sort: 'ts', desc: false, offset: 0, limit: 1 }), 1, signal);
+      const head = known ?? (await readWindowPage(windowQuery(feed, p, { ...b, sort: 'ts', desc: false, offset: 0, limit: 1 }), 1, signal, asking(seen)));
       if (head.total > LOCAL_SORT_BUDGET) {
         return { refused: head.total, answer: head };
       }
+      /** @type {any[]} */
+      const bodies = [];
       const got = await readAllRows(
         (offset, limit) => windowQuery(feed, p, { ...b, sort: 'ts', desc: false, offset, limit }),
-        head.total, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, signal
+        head.total, LOCAL_SORT_BUDGET, WINDOW_PAGE_MAX, signal, asking(seen, bodies)
       );
+      const joined = joinSlices(got.bars, [head, ...bodies], (bar) => rowKey(typeof bar.key === 'string' ? bar.key : p.keys[0], bar.t));
       const answer = { ...head, faults: got.faults.length ? got.faults.join('; ') : null };
-      localCache = { key, rows: got.bars, answer };
-      return { loading: false, error: null, answer, rows: got.bars, local: true };
+      localCache = { key, rows: joined.bars, answer, moved: joined.moved };
+      return { answer, rows: joined.bars, local: true, moved: joined.moved };
     }
 
     $effect(() => {
@@ -708,11 +803,14 @@
       const feed = feeds.active;
       const p = plan;
       const b = bounds;
-      const key = barSortKey;
-      const desc = barDesc;
+      const key = sortNow.key;
+      const desc = sortNow.desc;
       const set = setKey;
+      const base = setBase;
+      const again = retries;
       const page = Math.max(1, Math.trunc(Number(db.page)) || 1);
       const size = db.pageSize;
+      const held = Boolean(db.linkPending?.page) || pinned;
       /* NOTHING IS READ BEFORE THE FIT HAS SETTLED AND BEEN APPLIED (DB-N02).
          The box measured 4, then 3, then 8 rows on one load, and each was a
          request. In Fit mode the page waits for the settled measurement AND
@@ -724,55 +822,156 @@
          window, then aborted it when the span moved From (shadow, 16 Oct). */
       const ready = !db.linkDaysPending && (db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit));
       if (!active || !feed || p.keys.length === 0) {
-        barState = { loading: false, error: null, answer: null, rows: [], local: false };
+        stopRead();
+        barState = { loading: false, error: null, answer: null, rows: [], local: false, page: 1, set: '', made: 'read', status: 0, moved: null };
         return;
       }
       if (p.why) {
-        barState = { loading: false, error: p.why, answer: null, rows: [], local: false };
+        stopRead();
+        barState = { loading: false, error: p.why, answer: null, rows: [], local: false, page: 1, set, made: 'page', status: 0, moved: null };
         return;
       }
-      if (!ready) return;
-      const controller = new AbortController();
-      const mine = ++barToken;
-      barState = { ...untrack(() => barState), loading: true, error: null };
+      /* A READ FOR ANOTHER ROW SET IS STOPPED AT ONCE, settled or not: its
+         rows must not land under a selection that has moved on. */
+      if (inFlight && inFlightSet !== set) stopRead();
+      /* AND NOTHING WHILE THE SELECTION IS STILL RECONCILING (R3-03). A
+         change of instrument, Segment or feed is applied rung by rung over
+         several passes (`db.reconciling`, selection.svelte.js), and each pass
+         in between was a request — for a contract or a month the final
+         selection does not hold. `db.settled` would also wait for the day
+         window's seed, which never comes for census rows with no first or
+         last stamp, and a grid waiting on it would read nothing and say
+         nothing: so the gate is the reconcile alone. A Go to finding its page
+         reads nothing either: its landing is the page. */
+      if (!ready || db.reconciling || jumping) return;
+      /* ONE REQUEST A CHANGE (R3-03): a change of order reads page one now,
+         rather than the old page first and page one after the reset. */
+      const order = `${base}|${key}|${desc}`;
+      const asked = pageToRead({ page, order, lastOrder, held });
+      pinned = false;
+      const turned = lastOrder === order;
+      lastOrder = order;
+      if (asked !== page) untrack(() => (db.page = asked));
       const wire = wireSort(key);
+      const query = wire
+        ? windowQuery(feed, p, { ...b, sort: wire, desc, offset: (asked - 1) * size, limit: size })
+        : `local:${set}:${key}`;
+      if (!reads.fresh(`${query}|${set}|${again}`)) return;
+      inFlight?.abort();
+      const controller = new AbortController();
+      inFlight = controller;
+      inFlightSet = set;
+      const mine = ++barToken;
+      const before = turned ? pageBefore : null;
+      const shown = untrack(() => barState);
+      barState = { ...shown, loading: true, error: null };
+      const known = shown.answer && shown.set === set && !again ? shown.answer : null;
+      const seen = { status: 0 };
       const started = performance.now();
       (wire
-        ? readServerPage(feed, p, b, wire, desc, page, size, controller.signal)
-        : readLocalPage(feed, p, b, set, controller.signal)
+        ? readServerPage(query, size, controller.signal, seen)
+        : readLocalPage(feed, p, b, set, controller.signal, seen, known)
       )
         .then((/** @type {any} */ next) => {
           if (mine !== barToken || controller.signal.aborted) return;
+          inFlight = null;
           pageMs = Math.round(performance.now() - started);
           if (next.refused !== undefined) {
             /* REFUSED BEFORE ANY ROW WAS READ, AND THE GRID GOES BACK TO TIME
-               ORDER — a sort the selection cannot afford is not kept (DB-B50). */
-            sortWhy = `${BAR_META[key]?.label ?? key} cannot be ordered here: this query keeps ${fmt(next.refused)} bar(s), and the browser orders at most ${fmt(LOCAL_SORT_BUDGET)} of a column the server cannot sort. Narrow to a day, a time of day, a strike or a side — or sort by a stored column (Date, Time, Open, High, Low, Close, Volume, Open interest), which the server orders over any number.`;
+               ORDER — a sort the selection cannot afford is not kept (DB-B50).
+               A header press checks the count first and keeps the sort that
+               was on (`barHead`); this is the selection grown past the budget
+               under a sort already on, so the sentence says the grid left it. */
+            sortWhy = sortAdvice(key, next.refused, false);
+            barState = { ...untrack(() => barState), loading: false };
             barSortKey = 'ts';
             barDesc = true;
             return;
           }
-          barState = next;
+          /* TWO PAGES OF ONE READ, CHECKED (R3-03): the page before in the
+             same order, one step away, is the reference; a store that moved
+             between them is named and a repeated row dropped. */
+          const generation = generationOf(next.answer);
+          const total = Number(next.answer?.total) || 0;
+          const stepped = !next.local && before && before.order === order && Math.abs(before.page - asked) === 1;
+          const joined = stepped
+            ? joinPage(before, { rows: next.rows, generation, total }, (bar) => rowKey(typeof bar.key === 'string' ? bar.key : p.keys[0], bar.t))
+            : { rows: next.rows, dropped: 0, moved: null };
+          pageBefore = next.local ? null : { order, page: asked, rows: next.rows, generation, total };
+          rowsInTime = next.local || wire === 'ts';
+          barState = {
+            loading: false,
+            error: null,
+            answer: next.answer,
+            rows: joined.rows,
+            local: next.local,
+            page: asked,
+            set,
+            made: 'read',
+            status: seen.status,
+            moved: joined.moved ?? next.moved
+          };
           /* A PAGE PAST THE END OF A SHORTER ANSWER GOES TO THE LAST PAGE, so a
              narrowing never strands the reader on a blank page. */
-          const total = next.answer?.total ?? 0;
-          if (total > 0 && (page - 1) * size >= total) db.page = pageOfIndex(total - 1, size);
+          if (total > 0 && (asked - 1) * size >= total) db.page = pageOfIndex(total - 1, size);
         })
         .catch((why) => {
           if (mine !== barToken || controller.signal.aborted) return;
+          inFlight = null;
           barState = {
             loading: false,
             error: String(why && why.message ? why.message : why),
             answer: null,
             rows: [],
-            local: false
+            local: false,
+            page: asked,
+            set,
+            made: 'read',
+            status: seen.status,
+            moved: null
           };
         });
-      return () => controller.abort();
     });
+    /**
+     * WHETHER A READ NOW IS FOR THE SELECTION AND PAGE SIZE THE READER WILL
+     * SEE: the read effect's own `ready` and no reconcile in progress,
+     * published so the extremes read waits on exactly the same (R3-03).
+     */
+    const barsReady = $derived(
+      !db.linkDaysPending && (db.sizeMode !== 'fit' || (db.fitLatched && db.pageSize === db.rowsThatFit)) && !db.reconciling
+    );
+
+    /* THE READ IN FLIGHT IS STOPPED WHEN THE GRID'S STATE GOES, and only then:
+       a re-run that asks nothing new must not cancel the question asked. */
+    $effect(() => () => inFlight?.abort());
+
+    /** Asks the page on screen again, after a read that failed. */
+    function retryRead() {
+      retries += 1;
+    }
+
+    /**
+     * The sentence for a column the browser will not order here, with advice
+     * that works for this rung and this many series (R3-03). `kept` is false
+     * when the sort was already on and the grid has gone back to time order.
+     * @param {string} key @param {number} total @param {boolean} [kept]
+     */
+    function sortAdvice(key, total, kept = true) {
+      return localSortAdvice({
+        label: BAR_META[key]?.label ?? key,
+        total,
+        kept,
+        budget: LOCAL_SORT_BUDGET,
+        tfSecs: TF_SECS.get(plan.timeframe) ?? 60,
+        series: plan.keys.length,
+        stored: ['ts', 'tod', 'o', 'h', 'l', 'c', 'vol', 'oi'].filter((k) => !sortOff(k)).map((k) => BAR_META[k]?.label ?? k)
+      });
+    }
 
     /** The read's refusal, as a list, for the notes under the grid. */
     const barFails = $derived(barState.error ? [{ key: 'read', error: barState.error }] : []);
+    /** Who refused or failed, and whether asking again can help (R3-03). */
+    const barFailure = $derived(barState.error ? readFailure({ made: barState.made, status: barState.status }) : null);
     /** A read answered in part (206): the rows are real, the set is not whole, and the fault is named. */
     const barFaults = $derived(barState.answer?.faults ? [{ key: 'faults', faults: barState.answer.faults }] : []);
     /** What a value sort read instead of serving from sort indexes, in the server's words (D-3349, DB-N14). */
@@ -927,13 +1126,34 @@
      * (DB-002). A locally ordered sort orders every row it read.
      */
     const barSorted = $derived(
-      barState.local ? [...barRows].sort(localComparator(barSortKey, barDesc)) : barRows
+      barState.local ? [...barRows].sort(localComparator(sortNow.key, sortNow.desc)) : barRows
+    );
+
+    /**
+     * THE ROWS WHOSE CHANGE SPANS THE OVERNIGHT GAP (R3-03), by row key, with
+     * the instant of the bar each was measured against (`null` when that bar
+     * lies before the read). Known from the rows read: every kept row on a
+     * sort this page orders itself, the page alone in time order, and nothing
+     * on a page the server ordered by a value or by time of day, whose rows
+     * are not neighbours in their series (`rowsInTime`).
+     */
+    const overnight = $derived(
+      acrossDay(barRows, { timeNarrows, dayRung, edgeEarlier: barState.local && dayWindowNarrows, contiguous: rowsInTime })
     );
 
     /** @param {string} key */
     function barHead(key) {
       const col = BAR_COLS.find((c) => c.key === key);
-      if (!col || col.none || col.nosort) return; /* nothing to order, and the button says why */
+      if (!col || col.none || col.nosort || sortOff(key)) return; /* nothing to order, and the button says why */
+      /* A SORT THE BROWSER CANNOT AFFORD KEEPS THE SORT THAT WAS ON (R3-03).
+         The count on screen is this set's, and a re-order does not change
+         it, so a column past the budget is refused before the sort moves —
+         no read, no return to page one, and advice that works for the rung. */
+      const total = barState.answer && barState.set === setKey ? Number(barState.answer.total) : NaN;
+      if (!wireSort(key) && total > LOCAL_SORT_BUDGET) {
+        sortWhy = sortAdvice(key, total);
+        return;
+      }
       sortWhy = '';
       if (barSortKey === key) barDesc = !barDesc;
       else {
@@ -968,10 +1188,34 @@
     /* THE TIME BOUND IS THE SERVER'S NOW, over the whole query, so it is never
        partial. Kept as a name for the control that used to warn about it. */
     const timePartial = $derived(false);
-    const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / db.pageSize)));
-    const pageNow = $derived(Math.min(Math.max(1, db.page), pageCount));
-    const pageFrom = $derived(pageTotal === 0 ? 0 : (pageNow - 1) * db.pageSize + 1);
-    const pageTo = $derived(Math.min(pageNow * db.pageSize, pageTotal));
+    /**
+     * THE PAGES THE SERVER SERVES (R3-03): every page in time order and on
+     * the census grid; under an order it reads rather than indexes, the pages
+     * within its depth, from the answer's own account of what it read.
+     */
+    const served = $derived(
+      servedPages({
+        total: pageTotal,
+        size: db.pageSize,
+        wire: db.view === 'bars' && !barState.local ? (wireSort(sortNow.key) ?? 'ts') : 'ts',
+        report: barState.answer?.sort_index
+      })
+    );
+    const pageCount = $derived(served.count);
+    /** The page ASKED for, clamped to a page that is served — where the controls step from. */
+    const pageNow = $derived(clampServed(served, db.page));
+    /**
+     * THE PAGE WHOSE ROWS ARE ON SCREEN (R3-03). The readout printed the page
+     * asked for the moment Next was pressed, above the rows of the page
+     * before; it now prints the page the rows are, and the pager says which
+     * page is opening while one is. A page this grid orders itself is sliced
+     * from rows in memory, so there the two are one.
+     */
+    const pageShown = $derived(
+      db.view !== 'bars' || barState.local || !barState.answer ? pageNow : clampServed(served, barState.page)
+    );
+    const pageFrom = $derived(pageTotal === 0 ? 0 : (pageShown - 1) * db.pageSize + 1);
+    const pageTo = $derived(Math.min(pageShown * db.pageSize, pageTotal));
 
     /**
      * THE CENSUS AGAINST THE FILES, BY SERIES (DB-G02, DB-G61, DB-022). The
@@ -1004,11 +1248,23 @@
      * session, or beyond its reach — so an empty grid names its reason and
      * never accuses the store of what a weekend explains. At most 62 days are
      * named; a wider empty window is said as a window.
+     *
+     * ONLY AN ANSWER FOR THE ROWS ON SCREEN IS EMPTY (R3-03). Before the first
+     * answer — while the box is measured and the selection settles — the grid
+     * fell through to "No bar came back", and with a census count beside it,
+     * to "a disagreement between the census and the files", for the moment
+     * every /db link took to open. No answer, or an answer for another set,
+     * is a read still to come, never an empty one.
+     *
+     * A TIME-OF-DAY WINDOW IS NOT BLAMED ON THE IMPORT (R3-03). `time` says a
+     * time bound narrows: the days asked for may hold bars outside it, which
+     * this read did not ask about, so the note names the time window rather
+     * than an import that may have refused the day.
      */
     const emptyNote = $derived.by(() => {
       const a = barState.answer;
-      if (db.view !== 'bars' || barState.loading || barState.error || !a || a.total > 0) return null;
-      if (!dayWindowNarrows && !timeNarrows) return { kind: 'none', closed: [], open: [], unknown: [] };
+      if (db.view !== 'bars' || barState.loading || barState.error || !a || a.total > 0 || barState.set !== setKey) return null;
+      if (!dayWindowNarrows && !timeNarrows) return { kind: 'none', time: false, closed: [], open: [], unknown: [] };
       /** @type {string[]} */
       const days = [];
       if (bounds.fromDay && bounds.toDay) {
@@ -1021,6 +1277,7 @@
       const said = days.map((d) => ({ d, closed: db.dayClosed(d) }));
       return {
         kind: 'window',
+        time: timeNarrows,
         closed: said.filter((x) => x.closed === true).map((x) => x.d),
         open: said.filter((x) => x.closed === false).map((x) => x.d),
         unknown: said.filter((x) => x.closed === null).map((x) => x.d)
@@ -1045,52 +1302,84 @@
        the first row of a page (DB-007). It describes the selection whole, so
        it ignores the day and time bounds, as the "on disk" range beside it
        does.
+
+       AND NOT A THIRD REQUEST PER CHANGE (R3-03). One change of the selection
+       sent a page read, an extremes read and this seek, three at once. With
+       no bound narrowing, two of them already carry the newest bar: the
+       extremes read is `sort=ts&dir=desc&limit=1` over the same set, and the
+       page read is too at page one newest first. It is taken from whichever
+       answered, and asked alone only when a bound narrows or neither has it
+       — once per selection, never per page or per order.
        --------------------------------------------------------------------- */
-    let newestClose = $state.raw(/** @type {{ bar: any, key: string } | { why: string } | null} */ (null));
+    /** The selection whole, as the seek names it: no bound, any page, any order. */
+    const allKey = $derived(
+      [feeds.active ?? '', planAll.timeframe, planAll.from, planAll.to, planAll.keys.join(','), db.nonce].join('|')
+    );
+    let newestRead = $state.raw(/** @type {{ for: string, value: any } | null} */ (null));
+    /** @param {any} bar @param {any} p */
+    const newestOf = (bar, p) => (bar ? { bar, key: typeof bar.key === 'string' ? bar.key : p.keys[0] } : { why: 'no bar is stored for this selection' });
+    const newestClose = $derived.by(() => {
+      if (db.view !== 'bars' || planAll.keys.length === 0 || planAll.why) return null;
+      if (newestRead?.for === allKey) return newestRead.value;
+      if (boundsNarrow) return null;
+      const e = db.extremesRead;
+      if (e && e.for === setKey && !e.loading && e.newest !== undefined) return newestOf(e.newest, planAll);
+      const a = barState.answer;
+      const front = !barState.loading && !barState.local && barState.set === setKey && sortNow.key === 'ts' && sortNow.desc;
+      if (a && front && Number(a.offset) === 0) return newestOf(a.bars[0], planAll);
+      return null;
+    });
+    const newestAsk = askOnce();
+    let newestFlight = /** @type {AbortController | null} */ (null);
     $effect(() => {
       const feed = feeds.active;
       const p = planAll;
-      void db.nonce;
-      if (db.view !== 'bars' || !feed || p.keys.length === 0 || p.why) {
-        newestClose = null;
-        return;
-      }
+      const key = allKey;
+      if (db.view !== 'bars' || !feed || p.keys.length === 0 || p.why || db.reconciling) return;
+      if (newestClose !== null) return;
+      /* THE READS THAT MAY CARRY IT GO FIRST; this asks only when neither did. */
+      if (barState.loading || (!barState.answer && !barState.error) || db.extremesRead?.loading) return;
+      if (!newestAsk.fresh(key)) return;
+      newestFlight?.abort();
       const controller = new AbortController();
+      newestFlight = controller;
       readWindowPage(windowQuery(feed, p, { sort: 'ts', desc: true, offset: 0, limit: 1 }), 1, controller.signal)
         .then((answer) => {
           if (controller.signal.aborted) return;
-          const bar = answer.bars[0];
-          newestClose = bar ? { bar, key: typeof bar.key === 'string' ? bar.key : p.keys[0] } : { why: 'no bar is stored for this selection' };
+          newestRead = { for: key, value: newestOf(answer.bars[0], p) };
         })
         .catch((why) => {
           if (controller.signal.aborted) return;
-          newestClose = { why: String(why && why.message ? why.message : why) };
+          newestRead = { for: key, value: { why: String(why && why.message ? why.message : why) } };
         });
-      return () => controller.abort();
     });
+    $effect(() => () => newestFlight?.abort());
 
     /** What the last jump has to say — a refusal, or how far it had to go. */
     let jumpWhy = $state('');
 
     /**
-     * GO TO AN INSTANT (DB-005): the page holding the first bar at or after it
-     * (ascending) or at or before it (descending), across the WHOLE query.
+     * GO TO AN INSTANT (DB-005, R3-03): the page holding the first bar at or
+     * after it, across the WHOLE query, in EITHER direction.
      *
      * The server finds it — `at=` answers the global index in one rank per
-     * series — and the page is that index over the page size. It used to search
-     * only the fifty rows in memory and turn to a page computed from the first
-     * FILE's offset, landing about 17,450 one-second bars from where it said.
-     * The row it lands on is marked; when no bar opens exactly there, the line
-     * under the strip says which bar was taken and how far away it is.
+     * series — asked in ascending order (`gotoAsk`), because newest first its
+     * rule is "at or before", which marked the bar BEFORE the minute asked for
+     * whenever no bar opened on its first second (10:01:59 for 10:02). The
+     * landing (`landing`) turns the ascending place into the grid's own. A
+     * minute lands on its first bar; anything else is said under the strip.
      *
      * A value sort has no position in time, so a jump puts the grid back in
-     * time order first and says so.
+     * time order first and says so; the sort's own return to page one runs
+     * before the landing's page is written, and the read waits on `jumping`
+     * meanwhile, so a Go to costs the instant's seek and one page read.
      *
      * @param {number} at unix seconds @param {string} label the instant as typed
      * @param {string} [key] the series whose bar at `at` is meant, when the
      *   caller knows it (an extreme): several series can share one second
+     * @param {boolean} [minute] whether a minute was typed, so its first bar is meant
      */
-    async function jumpToInstant(at, label, key = '') {
+    async function jumpToInstant(at, label, key = '', minute = false) {
       db.landedRk = '';
       jumpWhy = '';
       const feed = feeds.active;
@@ -1099,46 +1388,53 @@
         jumpWhy = p.why ?? 'No selection is read, so there is nothing to go to.';
         return;
       }
-      const resorted = barSortKey !== 'ts';
-      if (resorted) {
-        barSortKey = 'ts';
-        barDesc = true;
-      }
-      const desc = barDesc;
+      const resorted = sortNow.key !== 'ts';
+      const desc = resorted ? true : sortNow.desc;
+      jumping = true;
       try {
-        const answer = await readWindowPage(
-          windowQuery(feed, p, { ...bounds, sort: 'ts', desc, at, limit: 1 }), 1, new AbortController().signal
-        );
-        const index = Number(answer.at_index);
-        const total = Number(answer.total);
-        const side = desc ? 'at or before' : 'at or after';
-        if (total === 0) {
-          jumpWhy = 'No bar is kept by this query, so there is nothing to land on.';
+        const answer = await readWindowPage(windowQuery(feed, p, { ...bounds, ...gotoAsk(at) }), 1, new AbortController().signal);
+        const land = landing(answer, {
+          at,
+          label,
+          minute,
+          desc,
+          size: db.pageSize,
+          when: (/** @type {number} */ t) => `${dayLabel(t * 1000)} ${barTimeLabel(t * 1000, 1)}`
+        });
+        if (!('page' in land)) {
+          jumpWhy = land.why;
           return;
         }
-        if (!Number.isSafeInteger(index) || index >= total) {
-          db.page = pageOfIndex(total - 1, db.pageSize);
-          jumpWhy = `No bar lies ${side} ${label} in this query: it ${desc ? 'begins after' : 'ends before'} that instant. Showing its ${desc ? 'oldest' : 'newest'} page.`;
-          return;
+        if (resorted) {
+          barSortKey = 'ts';
+          barDesc = desc;
+          await tick();
         }
-        const bar = answer.bars[0];
-        db.page = pageOfIndex(index, db.pageSize);
-        if (bar) {
-          db.landedRk = key && bar.t === at ? rowKey(key, at) : rowKey(typeof bar.key === 'string' ? bar.key : p.keys[0], bar.t);
-        }
+        pinned = true;
+        anchorRk = key && land.bar.t === at ? rowKey(key, at) : '';
+        anchorRow = land.index;
+        db.page = land.page;
         const lead = resorted ? 'The grid is back in time order, which is the order an instant has a place in. ' : '';
-        jumpWhy = !bar || bar.t === at
-          ? lead
-          : `${lead}No bar opens at ${label}. Landed on ${dayLabel(bar.t * 1000)} ${barTimeLabel(bar.t * 1000, 1)} IST, the first bar ${side} it, ${fmt(Math.abs(bar.t - at))} second(s) away — row ${fmt(index + 1)} of ${fmt(total)}.`;
+        jumpWhy = `${lead}${land.why}`.trim();
       } catch (why) {
         jumpWhy = `Go to could not be answered: ${String(/** @type {any} */ (why)?.message ?? why)}`;
+      } finally {
+        jumping = false;
       }
     }
+
+    /** The day a time alone is read on: the first row on screen, else the window's. */
+    const dayOnScreen = () => barPage[0]?.day ?? (db.toDay || db.fromDay || '');
+    /** The days an instant may name: the date window when one narrows, else the days held. */
+    const gotoSpan = () =>
+      dayWindowNarrows
+        ? { lo: bounds.fromDay, hi: bounds.toDay, what: 'the date window' }
+        : { lo: db.heldDays?.lo || '', hi: db.heldDays?.hi || '', what: 'this selection' };
 
     /**
      * THE TIME PICKER'S GO TO: a minute (or, on 1s, a second) on the day the
      * reader is looking at — the first row on screen — else the window's own
-     * last day. `HH:MM` and `HH:MM:SS` are both accepted (DB-005).
+     * last day. `HH:MM` lands on the minute's first bar (DB-005, R3-03).
      *
      * @param {string} [at] the time to land on
      */
@@ -1147,39 +1443,42 @@
         jumpWhy = `Every bar at ${db.timeframe} opens at the same minute, so there is no minute to choose between them.`;
         return;
       }
-      const day = barPage[0]?.day ?? (db.toDay || db.fromDay || '');
-      const got = parseGoto(String(at ?? ''), day);
+      const got = parseGoto(String(at ?? ''), dayOnScreen(), gotoSpan());
       if ('why' in got) {
         jumpWhy = got.why;
         return;
       }
-      void jumpToInstant(got.at, got.label);
+      void jumpToInstant(got.at, got.label, '', got.minute);
     }
 
     /**
      * THE GO-TO BOX'S TEXT: `YYYY-MM-DD HH:MM[:SS]`, or a time alone for the
-     * day on screen.
+     * day on screen; refused in words otherwise (R3-03).
      * @param {string} text
      */
     function jumpToText(text) {
-      const day = barPage[0]?.day ?? (db.toDay || db.fromDay || '');
-      const got = parseGoto(text, day);
+      const got = parseGoto(text, dayOnScreen(), gotoSpan());
       if ('why' in got) {
         db.landedRk = '';
         jumpWhy = got.why;
         return;
       }
-      void jumpToInstant(got.at, got.label);
+      void jumpToInstant(got.at, got.label, '', got.minute);
     }
 
-    /** @param {number} n */
+    /**
+     * A page, clamped to one the server serves: never past the last, never
+     * inside a stretch it refuses (R3-03).
+     * @param {number} n
+     */
     function goPage(n) {
-      const want = Number(n);
-      db.page = Math.min(pageCount, Math.max(1, Number.isFinite(want) ? Math.trunc(want) : 1));
+      db.page = clampServed(served, n);
     }
 
     /** The global row a page-size change promised to keep on screen, until it is shown. */
     let anchorRow = $state(-1);
+    /** The row a Go to means by its series, when several share its second (an extreme). */
+    let anchorRk = '';
     /**
      * KEEP THE READER'S PLACE ACROSS A PAGE-SIZE CHANGE, NOT THEIR ORDINAL: the
      * row they were standing on — the first row of the old page — is on the
@@ -1189,7 +1488,7 @@
      * @param {number} n @param {boolean} [anchor] whether the reader chose it
      */
     function setPageSize(n, anchor = true) {
-      const firstRow = (pageNow - 1) * db.pageSize;
+      const firstRow = (pageShown - 1) * db.pageSize;
       db.pageSize = Number(n);
       db.page = Math.floor(firstRow / db.pageSize) + 1;
       anchorRow = anchor && pageTotal > 0 ? firstRow : -1;
@@ -1201,20 +1500,28 @@
          narrowed (WP-53). */
       const rows = barPageRead;
       const box = db.barBox;
-      if (want < 0 || barState.loading || !box || rows.length === 0) return;
-      const index = want - (pageNow - 1) * db.pageSize;
+      /* ONLY ON THE ROWS OF THE PAGE IT NAMES (R3-03): the rows of the page
+         before are still on screen while the next one is read. */
+      if (want < 0 || barState.loading || !box || rows.length === 0 || pageShown !== pageNow) return;
+      const index = want - (pageShown - 1) * db.pageSize;
       untrack(() => {
         anchorRow = -1;
-        const row = rows[index];
+        const meant = anchorRk;
+        anchorRk = '';
+        const row = (meant ? rows.find((r) => r.rk === meant) : undefined) ?? rows[index];
         if (!row) return;
-        db.landedRk = row.rk;
         const drawn = barPage.indexOf(row);
-        if (drawn < 0) return;
-        /* AFTER THE ROWS ARE IN THE DOCUMENT: the next turn of the loop. */
+        /* AFTER THE ROWS ARE IN THE DOCUMENT: the next turn of the loop. The
+           mark is set there too, so a Go to that lands on the row already
+           marked — the same minute twice — clears and marks it again rather
+           than leaving nothing to see (R3-03). */
         setTimeout(() => {
+          db.landedRk = row.rk;
+          if (drawn < 0) return;
           const tr = /** @type {HTMLElement | null} */ (box.querySelectorAll('tbody tr.brow')[drawn] ?? null);
           if (!tr) return;
-          box.scrollTop = Math.max(0, tr.offsetTop - HEAD - Math.max(0, (box.clientHeight - HEAD - tr.offsetHeight) / 2));
+          const head = /** @type {HTMLElement | null} */ (box.querySelector('thead'))?.offsetHeight ?? HEAD;
+          box.scrollTop = Math.max(0, tr.offsetTop - head - Math.max(0, (box.clientHeight - head - tr.offsetHeight) / 2));
         }, 0);
       });
     });
@@ -1369,6 +1676,15 @@
       barSetKey: { get: () => setKey },
       barState: { get: () => barState, set: (v) => (barState = v) },
       barFails: { get: () => barFails },
+      barFailure: { get: () => barFailure },
+      retryRead: { get: () => retryRead },
+      sortOff: { get: () => sortOff },
+      sortNow: { get: () => sortNow },
+      overnight: { get: () => overnight },
+      boundsNarrow: { get: () => boundsNarrow },
+      served: { get: () => served },
+      barsReady: { get: () => barsReady },
+      pageShown: { get: () => pageShown },
       barFaults: { get: () => barFaults },
       barSortNote: { get: () => barSortNote },
       pageMs: { get: () => pageMs },
@@ -1645,6 +1961,28 @@
 <script>
   /** @type {{ db: any }} */
   let { db } = $props();
+
+  /**
+   * What the overnight mark says: the move since the previous stored bar's
+   * close, on an earlier day, named when it was read (R3-03).
+   * @param {number | null} prev the previous bar's epoch ms, `null` when before the read
+   */
+  const overnightText = (prev) =>
+    `Measured across the overnight gap: the previous stored bar of this series is ${
+      prev === null ? 'before the first day of the window, on an earlier day' : `at ${stampLabel(prev)} IST, on an earlier day`
+    }, so this is the move since that close — not a bar-to-bar move inside a session (D-3325).`;
+
+  /** Whether every note is listed, rather than the first (R3-03). */
+  let notesOpen = $state(false);
+  /** How many notes the strip holds — the same conditions it draws them on. */
+  const noteCount = $derived(
+    (db.sortWhy ? 1 : 0) +
+      (db.barState.moved ? 1 : 0) +
+      db.barFaults.length +
+      (db.barSortNote ? 1 : 0) +
+      (db.barDisagree.length ? 1 : 0) +
+      (db.barHoleMonths > 0 ? 1 : 0)
+  );
 </script>
 
   <!-- ==================================================================
@@ -1807,7 +2145,7 @@
                 scope="col"
                 class:numh={c.num}
                 class:deadh={Boolean(c.none)}
-                aria-sort={c.none || c.nosort ? undefined : db.barAriaSort(c.key)}
+                aria-sort={c.none || c.nosort || db.sortOff(c.key) ? undefined : db.barAriaSort(c.key)}
               >
                 <!-- A COLUMN WITH NO SOURCE DOES NOT PRETEND TO SORT. The
                      button is still here, still reachable and still
@@ -1817,11 +2155,13 @@
                 <button
                   class="sortbtn"
                   type="button"
-                  disabled={Boolean(c.none || c.nosort)}
+                  disabled={Boolean(c.none || c.nosort || db.sortOff(c.key))}
                   title={c.none
                     ? `${c.label} — no source, so there is nothing to order: ${c.none}`
                     : c.nosort
                       ? `${c.label} — ${c.why}. Not sortable: ${c.nosort}`
+                      : db.sortOff(c.key)
+                      ? `${c.label} — ${c.why}. Not sortable on this selection: ${db.sortOff(c.key)}`
                       : c.key === 'chg'
                       ? `${c.label} — ${c.why}. The bar behind each figure is that figure's size against the largest move ON THIS PAGE, measured PER RUNG so a minute bar is never judged against a daily one (${db.chgScaleText || 'no move on this page'}). It is the page's scale, not the query's: turning the page can change what a full bar means. Click to sort; click again to reverse — the browser orders this column itself, over at most ${fmt(LOCAL_SORT_BUDGET)} bars.`
                       : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
@@ -1830,7 +2170,7 @@
                   <span>{c.label}</span>
                   <span
                     class="caret"
-                    class:on={db.barSortKey === c.key && !c.none && !c.nosort}
+                    class:on={db.barSortKey === c.key && !c.none && !c.nosort && !db.sortOff(c.key)}
                     class:desc={db.barDesc}
                     aria-hidden="true"
                   ></span>
@@ -1844,15 +2184,17 @@
           {#if db.barState.error}
             <tr class="bstate">
               <td colspan={BAR_COLS.length}>
-                <div class="bnone" role="alert">
-                  <h3>This page of bars could not be read</h3>
+                <!-- WHO REFUSED, IN WORDS THAT ARE TRUE (R3-03): a refusal this
+                     page made before asking is not "the server's own" nor "a
+                     failed read", and Try again is offered only where asking
+                     again can answer. See `readFailure`. -->
+                <div class="bnone" role="alert" data-failure={db.barFailure?.kind}>
+                  <h3>{db.barFailure?.title}</h3>
                   <p class="err">{db.barState.error}</p>
-                  <p>
-                    Nothing is drawn rather than a plausible blank: a grid with no rows and no
-                    reason reads as an empty store, and this is a failed or refused read. The
-                    sentence above is the server's own.
-                  </p>
-                  <button class="btn" onclick={() => refreshStore()}>Try again</button>
+                  <p>{db.barFailure?.says}</p>
+                  {#if db.barFailure?.retry}
+                    <button class="btn" onclick={() => db.retryRead()}>Try again</button>
+                  {/if}
                 </div>
               </td>
             </tr>
@@ -1871,7 +2213,10 @@
                 </div>
               </td>
             </tr>
-          {:else if db.barState.loading && db.barPage.length === 0}
+          {:else if (db.barState.loading && db.barPage.length === 0) || (!db.barState.answer && !db.barState.error) || (db.barPage.length === 0 && db.barState.set !== db.barSetKey)}
+            <!-- NO ANSWER YET IS NOT AN EMPTY ANSWER (R3-03): until the read
+                 for this set has answered, the grid draws its loading rows,
+                 never "No bar came back" and never a census accusation. -->
             {#each SKELETON.slice(0, 12) as i (i)}
               <tr class="brow skelrow">
                 {#each BAR_COLS as c, ci (c.key)}
@@ -1926,7 +2271,15 @@
                         The exchange calendar marks {db.emptyNote.closed.map((/** @type {string} */ d) => dayLabel(d)).join(', ')} closed — a
                         weekend or a holiday — so no bar is owed there.
                       {/if}
-                      {#if db.emptyNote.open.length}
+                      {#if db.emptyNote.time}
+                        <!-- THE TIME WINDOW, NOT THE IMPORT (R3-03): bars outside
+                             the time of day were not asked for, so whether
+                             these days hold any is not known from this read. -->
+                        No bar of this selection opens inside that time of day{#if db.emptyNote.open.length}{' on '}{db.emptyNote.open.map((/** @type {string} */ d) => dayLabel(d)).join(', ')}{/if}.
+                        The time window is what keeps nothing: this read asked only for bars inside it, so it says
+                        nothing against the import or the store. Widen or clear From time and To time to see the
+                        day's other bars.
+                      {:else if db.emptyNote.open.length}
                         {db.emptyNote.open.map((/** @type {string} */ d) => dayLabel(d)).join(', ')}
                         {db.emptyNote.open.length === 1 ? 'was a session' : 'were sessions'}, and this selection
                         stores no bar there: the import may have refused the day, or the store has a gap. The day
@@ -1942,7 +2295,10 @@
                          DB-025, WP-54): a refused import with its words, a
                          closed day, a store gap, and the other feed's count.
                          `null` while the band has not answered this window. -->
-                    {#if db.dayEmptyWhy}
+                    {#if db.emptyNote.time}
+                      <!-- No day band reason under a time window: it speaks of
+                           whole days, and this read did not ask for them whole. -->
+                    {:else if db.dayEmptyWhy}
                       <p class="bwhy">{db.dayEmptyWhy}</p>
                     {:else if db.dayBandLoading}
                       <p class="bwhy">Reading why these days hold no bar from /dayflags.json…</p>
@@ -1950,11 +2306,15 @@
                   {:else}
                     <h3>No bar came back</h3>
                     <p>
-                      {#if db.barsClaimed > 0}
+                      {#if db.barsClaimed > 0 && db.censusMoved === false}
                         The census counts <b>{fmt(db.barsClaimed)}</b> bar(s) for this selection and the files
-                        it names hold none. That is a disagreement between the census and the files, not an
-                        empty query — read again, and if it stands, the census has run ahead of a file that
-                        was replaced.
+                        it names answered none, with the census unchanged since this page read it. That is a
+                        disagreement between the census and the files, not an empty query — read again, and if
+                        it stands, the census has run ahead of a file that was replaced.
+                      {:else if db.barsClaimed > 0}
+                        The census this page read counts <b>{fmt(db.barsClaimed)}</b> bar(s) for this selection,
+                        and the files answered none. The census has moved since, or is not yet checked again, so
+                        the two are not compared here: read again for both as they are now.
                       {:else}
                         No bar is stored for this selection.
                       {/if}
@@ -2107,6 +2467,17 @@
                         aria-label={barWhyText(b.chgWhy)}>—</span
                       >
                     {:else}
+                      {#if db.overnight.has(b.rk)}
+                        <!-- MEASURED ACROSS THE OVERNIGHT GAP, SAID ON THE ROW
+                             (R3-03): the previous stored bar is on an earlier
+                             day, so this is the move since that close, not a
+                             bar-to-bar one. See `acrossDay`. -->
+                        <span
+                          class="onite"
+                          title={overnightText(db.overnight.get(b.rk) ?? null)}
+                          aria-label={overnightText(db.overnight.get(b.rk) ?? null)}>overnight</span
+                        >
+                      {/if}
                       {bpsText(b.chg)}
                     {/if}
                   </td>
@@ -2194,12 +2565,24 @@
     <!-- EVERY REFUSED SORT, PARTIAL READ, LAG AND HOLE, NAMED. A refused or
          failed read is the grid's own state above, in the server's words, so
          it is not said twice here. None of these is allowed to be a shorter
-         grid. -->
-    {#if db.sortWhy || db.barSortNote || db.barFaults.length || db.barDisagree.length || db.barHoleMonths > 0}
-      <div class="bnotes">
+         grid.
+
+         AND NO NOTE CUTS A ROW (R3-03). The strip appeared after the read,
+         under a grid the Fit had already sized, so the last row went under
+         it. It is now always there at one line's height, measured into the
+         box with everything else: the first note is that line, and the rest
+         open over the grid on the reader's press. -->
+    <div class="bnotes" class:open={notesOpen} data-notes={noteCount}>
+      <div class="bnotes-list" id="bar-notes">
         {#if db.sortWhy}
-          <p class="bnote warn">{db.sortWhy}</p>
+          <p class="bnote warn" title={db.sortWhy}>{db.sortWhy}</p>
         {/if}
+        {#if db.barState.moved}
+          <p class="bnote warn" title={db.barState.moved}>{db.barState.moved}</p>
+        {/if}
+        {#each db.barFaults as f (f.key)}
+          <p class="bnote warn" title="Read in part: {f.faults}">Read in part: {f.faults}</p>
+        {/each}
         {#if db.barSortNote}
           <p class="bnote">{db.barSortNote}</p>
         {/if}
@@ -2223,227 +2606,29 @@
             {#if db.barState.answer?.months_outside_life}{fmt(db.barState.answer.months_outside_life)} more lie outside a contract's life and are not owed.{/if}
           </p>
         {/if}
-        {#each db.barFaults as f (f.key)}
-          <p class="bnote warn">Read in part: {f.faults}</p>
-        {/each}
+        {#if noteCount === 0}
+          <p class="bnote quiet">No note on this read.</p>
+        {/if}
       </div>
-    {/if}
+      {#if noteCount > 0}
+        <button
+          class="bnotes-more"
+          type="button"
+          aria-expanded={notesOpen}
+          aria-controls="bar-notes"
+          onclick={() => (notesOpen = !notesOpen)}
+          >{notesOpen ? 'Close' : noteCount === 1 ? 'Read in full' : `All ${noteCount} notes`}</button
+        >
+      {/if}
+    </div>
   </div>
 <DbProvenance {db} />
 <DbScrubNote {db} />
 
 {#snippet pager(/** @type {any} */ db)}
-  <!-- ==================================================================
-       THE PAGER — how you reach the rows that are not on screen.
-
-       IT GOVERNS BOTH GRIDS, so `1–50 of 8,250 rows` means the same thing
-       under either one and the arithmetic is written once. `pageNow` is a
-       CLAMP and not a write-back: a narrowing that shortens the run
-       cannot strand the reader on a page that no longer exists.
-
-       EVERY DISABLED BUTTON SAYS WHY, on its own title. A greyed control
-       with no reason is the silent degradation §4 bans; "already on the
-       first page" is one word longer and answers the question.
-       ================================================================== -->
-  <div class="pgbar" role="group" aria-label="Paging">
-    <span class="pgof">
-      {#if db.pageTotal === 0}
-        <b>0</b> rows — {db.view === 'bars'
-          ? 'no bar was read, so there is no page to turn'
-          : 'nothing matched, so there is no page to turn'}
-      {:else}
-        <b>{fmt(db.pageFrom)}–{fmt(db.pageTo)}</b> of <b>{fmt(db.pageTotal)}</b> rows · page
-        <b>{fmt(db.pageNow)}</b> of <b>{fmt(db.pageCount)}</b>
-      {/if}
-    </span>
-
-    <!-- THE LAST OS-DRAWN MENU IN THIS PRODUCT. `<select>` styles its closed
-         face and NOT its open list -- that popup belongs to the operating
-         system -- so this one control kept rendering the OS blue highlight
-         under a page that draws everything else itself. Same fix as both
-         calendars: `Picker`, single, with each row's own sentence carried
-         across as its `why` rather than an `<option title>` no reader hovers. -->
-    <div class="pgsize">
-      <span>Rows per page</span>
-      <!-- `why` MOVED TO `title`, AND THE MENU STOPPED COVERING THE PAGE.
-           Every one of the five rows carried a three-line paragraph, so each
-           row stood about 120px and the panel wanted 600 — capped to 380 and,
-           opening upward from a control at the foot of the page, it
-           blanketed the entire query strip. Reported exactly that way: the
-           sections above were hidden.
-           `why` IS FOR A REFUSAL, WHICH NONE OF THESE ARE. `Picker`'s own
-           header says it is the visible sentence on a row that "exists and
-           you cannot have it" — a row drawn dead in its own place carrying
-           its reason. `Fit`, `25`, `50`, `100` and `250` are all choosable,
-           and four of them are a number that explains itself.
-           The sentences are not deleted: each is on its row's `title`, which
-           is where an explanation of a WORKING control belongs. `Fit` keeps
-           its measured count as `detail`, because that is the row's value
-           rather than a note about it. -->
-      <Picker
-        single
-        label="page sizes"
-        summary={db.sizeMode === 'fit' ? `Fit · ${fmt(db.pageSize)}` : fmt(db.pageSize)}
-        title="How many rows this page holds. The reader's place is kept across a change: the row you were standing on stays on screen."
-        rows={[
-          {
-            key: 'fit',
-            name: 'Fit',
-            detail: `${fmt(db.rowsThatFit)} row(s)`,
-            title: `As many rows as this window can SHOW — measured now at ${fmt(db.rowsThatFit)}. The grid then holds nothing the screen cannot, so the table does not scroll and the page is one surface rather than two. Re-measured when the window changes.`
-          },
-          ...PAGE_SIZES.map((n) => ({
-            key: String(n),
-            name: fmt(n),
-            detail: n >= 1000 ? `${fmt(n * BAR_COLS.length)} cells` : undefined,
-            title:
-              n >= 1000
-                ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
-                : n > db.rowsThatFit
-                  ? `${fmt(n)} rows into a box that can show ${fmt(db.rowsThatFit)}. The remainder scrolls INSIDE the table, which is a second scrollbar — deliberate here, and the reason Fit exists.`
-                  : undefined
-          }))
-        ]}
-        selected={new Set([db.sizeMode === 'fit' ? 'fit' : String(db.pageSize)])}
-        onchange={(/** @type {Set<string>} */ sel) => {
-          const key = [...sel][0];
-          if (key === 'fit') {
-            /* No `setPageSize` here: the effect owns the value in this mode,
-               and setting it twice would move the reader's place twice. */
-            db.sizeMode = 'fit';
-            return;
-          }
-          const n = Number(key);
-          if (Number.isFinite(n) && n > 0) {
-            db.sizeMode = 'fixed';
-            db.setPageSize(n);
-          }
-        }}
-      />
-    </div>
-
-    <label class="pgjump">
-      <span>Go to page</span>
-      <input
-        type="number"
-        min="1"
-        max={db.pageCount}
-        value={db.pageNow}
-        disabled={db.pageTotal === 0}
-        title={db.pageTotal === 0
-          ? 'There is no page to go to: nothing is on this grid.'
-          : `Any page from 1 to ${fmt(db.pageCount)}. Out-of-range is clamped, never refused.`}
-        onchange={(e) => db.goPage(Number(e.currentTarget.value))}
-      />
-      <span class="pgof2">of {fmt(db.pageCount)}</span>
-    </label>
-
-    {#if db.view === 'bars'}
-      <!-- GO TO AN INSTANT, ACROSS THE WHOLE QUERY (DB-005). A day and a
-           time, to the second — `2019-03-20 12:33:38` — or a time alone for
-           the day on screen. The server finds the page that holds it; the row
-           it lands on is marked. -->
-      <label class="pgjump pgat">
-        <span>Go to</span>
-        <input
-          type="text"
-          inputmode="numeric"
-          placeholder={db.secondRung ? '2019-03-20 12:33:38' : '2019-03-20 12:33'}
-          disabled={db.pageTotal === 0}
-          title="An instant to open the page of: a day and a time to the second, 2019-03-20 12:33:38, or a time alone for the day on screen. Lands on the first bar at or after it (oldest first) or at or before it (newest first), across every month and series of the query, and marks it. Press Enter."
-          onkeydown={(e) => {
-            if (e.key === 'Enter') db.jumpToText(e.currentTarget.value);
-          }}
-        />
-      </label>
-      {#if db.jumpWhy}<span class="pgof2 pgwhy">{db.jumpWhy}</span>{/if}
-    {/if}
-
-    <span class="pgnav">
-      <button
-        class="pg"
-        type="button"
-        disabled={db.pageNow === 1}
-        title={db.pageNow === 1 ? 'Already on the first page' : 'First page'}
-        aria-label="First page"
-        onclick={() => db.goPage(1)}>«</button
-      >
-      <button
-        class="pg"
-        type="button"
-        disabled={db.pageNow === 1}
-        title={db.pageNow === 1 ? 'Already on the first page' : `Page ${fmt(db.pageNow - 1)}`}
-        aria-label="Previous page"
-        onclick={() => db.goPage(db.pageNow - 1)}>‹</button
-      >
-      {#each pageList(db.pageNow, db.pageCount) as item (item.k)}
-        {#if item.gap}
-          <!-- ELIDED, AND IT IS NOT A CONTROL. A 1,840-page run must not
-               render 1,840 buttons; the jump box above reaches the pages
-               this row does not draw, which is why the elision is honest. -->
-          <span class="pg gap" aria-hidden="true">…</span>
-        {:else}
-          <button
-            class="pg"
-            type="button"
-            aria-current={item.p === db.pageNow ? 'page' : undefined}
-            title="Page {fmt(item.p)} of {fmt(db.pageCount)}"
-            onclick={() => db.goPage(item.p)}>{fmt(item.p)}</button
-          >
-        {/if}
-      {/each}
-      <button
-        class="pg"
-        type="button"
-        disabled={db.pageNow === db.pageCount}
-        title={db.pageNow === db.pageCount
-          ? db.pageCount === 1
-            ? 'There is only one page'
-            : 'Already on the last page'
-          : `Page ${fmt(db.pageNow + 1)}`}
-        aria-label="Next page"
-        onclick={() => db.goPage(db.pageNow + 1)}>›</button
-      >
-      <button
-        class="pg"
-        type="button"
-        disabled={db.pageNow === db.pageCount}
-        title={db.pageNow === db.pageCount
-          ? db.pageCount === 1
-            ? 'There is only one page'
-            : 'Already on the last page'
-          : `Last page, ${fmt(db.pageCount)}`}
-        aria-label="Last page"
-        onclick={() => db.goPage(db.pageCount)}>»</button
-      >
-    </span>
-  </div>
-
-  <!-- THE STANDING BAR UNDER THE PAGER. It is not a second pager and it
-       draws no page buttons: the pager above owns the ordinals. What this
-       carries is what the pager cannot — how much of the page is actually
-       in the document, the newest instant in the whole matched set, and
-       the keys that move a reader through it.
-
-       IT GAINED THE NEWEST BAR, which is the one fact the standing "newest
-       bar" notice carried that nothing else on this page stated: `last_ts`
-       was read per row (the month cell's tooltip) and per instrument (the
-       drawer's "Days held") and never for the SET on screen, which is the
-       question a banner over a table is actually asked. Counted from the
-       rows, so it narrows with them; an absence is named and never rendered
-       as an epoch. -->
-  <!-- THE SECOND PAGER IS GONE, AND IT WAS SAYING THE FIRST ONE'S NUMBER.
-       `<p class="pager">` stood here holding one span: `{fmt(pageTotal)}
-       row(s)`. Thirty pixels above it `.pgbar`'s own readout already ends
-       "…of <b>4,225,185</b> rows", from the SAME `pageTotal`. Two elements,
-       one value, stacked — a reader who spots the difference is looking for
-       a difference that cannot exist.
-
-       It had already been trimmed once, down to the row count from a banner
-       carrying DOM counts and the newest bar; the honest end of that trim is
-       zero, because what remained was a duplicate rather than a small fact.
-       Worth 47px of the height the table's 25-row floor needs, but it would
-       have gone anyway. -->
+  <!-- THE PAGER IS ITS OWN FILE (R3-03): `DbPager.svelte`. This snippet stays
+       the name the shell renders under either grid, so the shell is untouched. -->
+  <DbPager {db} />
 {/snippet}
 
 <style>
@@ -2730,7 +2915,10 @@
        and Fit then paged a 1,53,107-row contract four rows at a time. The
        floor is the sticky head, the fit's slack and ten 40px rows; on a window
        too short for it the page scrolls, which is the honest outcome. */
-    min-height: calc(30px + 24px + 10 * 40px);
+    /* R3-03: the heading's two rows (22px band, 30px labels), the Fit's 8px
+       slack, ten rows and the one-line notes strip that now always stands
+       under them. */
+    min-height: calc(22px + 30px + 8px + 10 * 40px + 2 * var(--s3) + 1.55 * var(--fs-xs) + 1px);
     display: flex;
     flex-direction: column;
     position: relative;
@@ -3506,22 +3694,85 @@
   .bnone p.bwhy {
     color: var(--ink-2);
   }
+  /* ONE LINE, ALWAYS, SO NO NOTE CUTS A ROW (R3-03). The strip is in the box
+     the Fit measures, at a height that does not depend on what it says: the
+     first note on its line, cut with an ellipsis and whole on its title, and
+     every note on the press of its button, listed OVER the grid rather than
+     pushing it. */
   .bnotes {
     flex: none;
+    position: relative;
+    box-sizing: border-box;
+    height: calc(2 * var(--s3) + 1.55 * var(--fs-xs) + 1px);
     border-top: 1px solid var(--line);
     background: var(--panel-2);
-    padding: var(--s4) var(--s5);
+    padding: var(--s3) var(--s5);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+  }
+  .bnotes-list {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: var(--s2);
-    max-height: 168px;
+  }
+  .bnotes:not(.open) .bnote:not(:first-child) {
+    display: none;
+  }
+  .bnotes:not(.open) .bnote {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bnotes.open .bnotes-list {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    max-height: 240px;
     overflow-y: auto;
+    padding: var(--s4) var(--s5);
+    background: var(--panel-2);
+    border-top: 1px solid var(--line);
+    box-shadow: var(--e2);
+    z-index: 3;
+  }
+  .bnotes-more {
+    flex: none;
+    appearance: none;
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--panel);
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--fs-xs);
+    padding: 0 var(--s3);
+    cursor: pointer;
   }
   .bnote {
     margin: 0;
     font-size: var(--fs-xs);
     line-height: 1.55;
     color: var(--dim);
+  }
+  .bnote.quiet {
+    color: var(--faint);
+  }
+  /* THE OVERNIGHT MARK (R3-03): a word, not a colour, beside the figure it
+     qualifies; its sentence is on its title. */
+  .onite {
+    display: inline-block;
+    margin-right: var(--s2);
+    padding: 0 3px;
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    font-size: var(--fs-micro);
+    line-height: 1.4;
+    color: var(--warn);
+    vertical-align: middle;
+    cursor: help;
   }
   .bnote b {
     font-family: var(--mono);
@@ -3532,139 +3783,5 @@
     color: var(--warn);
   }
 
-  /* ---- THE PAGER ---- */
-  .pgbar {
-    flex: none;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--s3) var(--s5);
-    padding: var(--s4) var(--s5);
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    background: var(--panel-2);
-    /* ---------------------------------------------------------------------
-       NOT STICKY, AND THE STICKY VERSION IS WHY THE PAGE SHOOK.
-
-       It was pinned here — `position: sticky; bottom: calc(-1 * var(--s5))` —
-       to answer a real complaint: 25 rows in a fixed box put this bar 553px
-       below the fold, and pinning it meant the reader never had to travel to
-       reach the next page. It worked, and it was the wrong layer to fix it at.
-
-       A STICKY ELEMENT INSIDE A PADDED SCROLLER ALWAYS SNAPS BY THE PADDING.
-       `.board` carries 12px of it. Stuck, this bar held at the scrollport's
-       edge; released at the end of the scroll, it settled 12px higher.
-       MEASURED on a 980px window with a 56px scroll range: the bar sat still
-       through 55 pixels of scrolling and then JUMPED TWELVE at the last one.
-       Cross that threshold with the wheel and the whole bottom of the page
-       shakes, which is exactly what the operator reported and exactly what a
-       control the eye uses as a fixed landmark must never do.
-
-       AND IT WAS ALREADY REDUNDANT. `Fit` sizes the grid to what the window can
-       show, so the page fits and this bar is on screen without help — the
-       problem the pin was hired for no longer exists. What remained was its
-       side effect. A workaround kept after its cause is fixed is strictly worse
-       than no workaround, because it now only does the harm.
-
-       WHAT HAPPENS ON A WINDOW TOO SHORT FOR `Fit`, said plainly: the table
-       reaches its 320px floor, the page overflows by a few dozen pixels, and
-       this bar scrolls with everything else. That is a short, honest scroll to
-       a bar that does not move relative to the thing above it, and it is the
-       better of the two failures. `Compact` recovers ~180px and removes even
-       that. */
-  }
-  .pgof,
-  .pgof2 {
-    font-size: var(--fs-xs);
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
-  }
-  .pgof b {
-    color: var(--ink-2);
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-  }
-  .pgsize,
-  .pgjump {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s3);
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  /* BIG ENOUGH TO TYPE IN. A 46px box with 11px digits is a control that
-     technically accepts a page number; this one is legible at arm's length
-     and its own spinner is not the only way to reach page 37. */
-  .pgjump input {
-    width: 92px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    color: var(--ink);
-    font: inherit;
-    font-family: var(--mono);
-    font-size: 15px;
-    font-weight: var(--w-semi);
-    font-variant-numeric: tabular-nums;
-    padding: 10px 12px;
-    text-align: right;
-  }
-  .pgat input {
-    width: 200px;
-    text-align: left;
-  }
-  .pgwhy {
-    flex-basis: 100%;
-  }
-  .pgjump input:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .pgnav {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s2);
-    margin-left: auto;
-  }
-  .pg {
-    appearance: none;
-    min-width: 34px;
-    height: 32px;
-    padding: 0 var(--s3);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--panel);
-    color: var(--dim);
-    font: inherit;
-    font-family: var(--mono);
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    font-variant-numeric: tabular-nums;
-    cursor: pointer;
-  }
-  .pg:hover:not(:disabled) {
-    color: var(--ink);
-    border-color: var(--dim);
-  }
-  .pg:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-  }
-  .pg:disabled {
-    opacity: 0.34;
-    cursor: not-allowed;
-  }
-  .pg[aria-current='page'] {
-    background: var(--acc);
-    border-color: var(--acc);
-    color: var(--on-acc);
-  }
-  .pg.gap {
-    border: 0;
-    background: none;
-    cursor: default;
-    color: var(--faint);
-    min-width: 18px;
-    padding: 0;
-  }
+  /* ---- THE PAGER ---- is `DbPager.svelte` (R3-03), with its own rules. */
 </style>

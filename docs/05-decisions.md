@@ -71490,3 +71490,172 @@ test files (1,627,386 bytes in 145 files). Measured on 17 Oct 2026, built as CI
 builds it (`rustc`, no optimisation), a loaded machine, n = 200 sequential runs each: the listing
 p50 69.3 ms, p99 309.8 ms, max 670.1 ms; the full check over the document with
 the listing p50 192.4 ms, p99 229.3 ms, max 250.2 ms (L-G10W-3).
+
+### D-5860 — /db's bar grid asks one page read a change: a change of order reads page one itself, a question is asked once, and nothing is read while the selection reconciles (R3-03) — 2026-10-17
+
+**Number** taken at landing from the ledger's head under amendment A6 of the
+round-3 package list (no block was assigned to R3-03). The highest number on
+`feat/db-fix` when this was written was D-5830 and the highest on any local branch or
+worktree D-5831 (P-AG-05); D-5860 to D-5864 leave D-5832 to D-5859 to the
+packages already in flight. Built in the cloud on `cloud/db-R3-03-20261017`
+(cut from `origin/feat/db-fix` at its R3-35 merge) and run, fixed and measured on the Mac on
+`fix/db-R3-03`.
+
+**Findings** DB-021, DB-N02 and the requests-per-change half of DB-063 and
+RA-296 (11 Oct re-check controls: "Sort change at a deep page", "three
+requests at once", "every request the page made during a change of Side and
+of Segment").
+
+**What was wrong.** One change of order sent two requests: the read effect ran
+first with the new order at the OLD offset (offset 899 x 8 of a Close sort,
+read and thrown away) and the page reset asked page one after it. A change of
+instrument, Segment or Side is applied rung by rung, and each pass in between
+was a request for a contract or a month the final selection does not hold. The
+Fit box measured 4, then 3, then 8 rows on one load and each was a request. A
+newest-close seek went out beside the page read and the extremes read, three
+requests where two already carry the newest bar.
+
+**Decision.**
+
+1. The read computes the page it asks with `pageToRead`: a change of order or
+   row set reads page one in the same run; a page an act chose with the order
+   (an address's `page`, a Go to's landing) is kept.
+2. `askOnce` remembers the question asked; a re-run of the effect that would ask
+   it again sends nothing, and a re-run that asks nothing new does not cancel
+   the request in flight. A read for another row set is stopped at once.
+3. Nothing is read while `db.reconciling` or before Fit has been measured and
+   applied; the extremes read (`DbExtremes.svelte`) waits on the same
+   `barsReady`.
+4. The newest close is taken from the extremes read or from page one newest
+   first, and asked alone only when a bound narrows or neither has it, once per
+   selection.
+5. The readout prints the page whose rows are on screen, with "opening page N"
+   while one is read.
+
+**Proof.** `web/tests/db-pager.test.js`:
+`a_sort_change_at_a_deep_page_sends_one_request`, `one change of the
+selection sends one page read and one extremes read, and nothing while it
+settles`. On the R3-03 shadow (:9502, real store read through the bars link,
+GET only, 17 Oct): `/db?feed=gdfl&seg=spot&sym=NIFTY&tf=1s&page=900`, Close
+pressed: exactly one `/bars/window.json`, `sort=c&offset=0&limit=9`; Next,
+Next, Prev: one read each (`offset=9`, `18`, `9`); NIFTY 26 Mar 2020 12,000 CE
+to PE: one page read and one extremes read, both for the PE key; BANKNIFTY
+options (expiry 2020-03-26) to Spot: one page read and one extremes read for
+`NSE-INDEX-BANKNIFTY`; `/db` opened at 1440 x 900: two reads (`limit=9`, the
+extremes `limit=1`), Fit summary `Fit · measuring` then `Fit · 9`.
+
+**Cost.** No server change. Per change: one page read, one extremes read, and a
+third (the newest-close seek) only when a day or time bound narrows
+(L-R303-03).
+
+### D-5861 — The pager offers only pages the server serves, and the page box refuses in words (R3-03) — 2026-10-17
+
+**Finding** the 11 Oct re-check's EXTRA 1 and its probes of the "Go to page"
+box (0, -5, 2.5, 1e308, empty, letters, 6,000 digits, 4,890,334): typed
+pages, Next and Last landed past row 100,000 of a time-of-day order of the
+153,107-row 11,600 CE on a `sort_too_deep` refusal, and absurd numbers were
+clamped without a word.
+
+**Decision.** `web/src/lib/db/pager.js` mirrors `bars::MAX_SORT_DEPTH`
+(100,000) and `bars_sort::MAX_READ_HELD` (1,000,000), and reads the answer's
+own `sort_index` report: time order serves every page; a time-of-day order
+serves the front 100,000 rows; a value order that read at most 1,000,000 rows
+serves every page, past it the front (and the end, when no row came from an
+index and the column is not open interest). Pages past them are not drawn,
+stepped to, or accepted; the elided stretch carries the reason. The page box is
+text and is read by `parsePageBox`. Both constants are read out of the Rust
+source by a test, so the mirror cannot drift unseen. The pager moved to
+`DbPager.svelte` and its arithmetic to `pager.js`, so later packages do not
+queue on the grid.
+
+**Proof.** `the_pager_offers_no_page_past_the_served_depth`, `the page box
+refuses 0, -5, 2.5, 1e308, empty, letters and 6,000 digits in words`
+(`web/tests/db-pager.test.js`). Shadow: the 11,600 CE, `sort=tod&rows=25`:
+buttons stop at 4,000 with the dead stretch named; Last lands on 4,000 and its
+read is `offset=99975&limit=25` (200); Next is disabled there with the reason;
+4001, 6125, 0, -5, 2.5, 1e308, empty, abc and 6,000 digits are each refused
+under the box with no request. Under `sort=c` the answer read 153,107 rows, so
+every page is offered and Last reads `offset=153100` (200). The server itself:
+`sort=tod&offset=99992&limit=8` 200, `offset=100000&limit=8` 400
+`sort_too_deep`.
+
+### D-5862 — Go to asks the instant ascending in either direction, and a minute lands on its first bar (DB-005, R3-03) — 2026-10-17
+
+**Finding** DB-005's remainder and the 11 Oct probes of Go to: newest first,
+the server's `at=` rule is "at or before", so 10:02 marked 10:01:59 whenever no
+bar opened on the minute's first second; a second Go to to the same minute
+marked nothing; a time alone, seconds, and 1969 were not read as they should
+be.
+
+**Decision.** `web/src/lib/db/goto.js`: `gotoAsk` sends `at=` with `dir=asc`
+and `limit=1` whatever the grid's direction; `landing` puts the row at
+`total - 1 - at_index` newest first; a time typed without seconds names a
+minute and lands on its first bar; `parseGoto` takes a day and a time, a time
+alone for the day on screen, or seconds, and refuses an empty box, more than 32
+characters (by length, never echoed), a day or time that does not exist, and a
+day outside the held days or the date window, in words.
+
+**Proof.** `go_to_a_minute_lands_on_its_first_bar_in_both_directions`, `Go to
+takes a time alone, exact seconds, and refuses 1969, 2099 and nonsense in
+words` (`web/tests/db-goto.test.js`). Shadow: the 11,600 CE on 15 Mar 2019,
+10:00 to 10:04 (142 rows): 10:02 newest first lands on 10:02:03, row 81 of 142,
+page 9; oldest first on the same bar, row 62, page 7; First page then 10:02
+again marks it again; 10:02:07 lands on 10:02:08 and says so; 1969-12-31
+23:59:59, 2099-01-01 10:00:00, 2019-02-30 10:00:00, 25:61:61, abc, empty and
+6,000 characters are refused in words with no request.
+
+### D-5863 — Fit measures the heading's two rows and the notes strip is one fixed line, so no "Fit · 50" and no row under a notice (DB-N02, R3-03) — 2026-10-17
+
+**Decision.** The Fit takes the heading's measured height (`fitHead`, the group
+band and the labels) instead of `HEAD`, and `FIT_SLACK` goes from 24 to 8: the
+24 was sized to the warnings strip arriving after the bars, and the strip is
+now always in the box at one line's height (the first note, cut with an
+ellipsis; every note opens over the grid on a press). Until the box is measured
+the summary reads `Fit · measuring`, never the declared 50.
+
+**Proof.** `Rows per page: no "Fit · 50" before the box is measured, and the
+heading is measured with it (DB-N02)` (`web/tests/db-pager.test.js`). Shadow:
+at 1440 x 700, 900 and 1100 the last of 9 rows ends inside the box, before and
+after a note appears (a refused Change % on 1s), and the box does not scroll.
+
+### D-5864 — Words by who refused, sorts only where they mean something, and empty grids that blame nothing they cannot know (DB-016, DB-062, DB-063, R3-03) — 2026-10-17
+
+**Decision.**
+
+1. `readFailure`: a refusal the page made before asking is not "the server's
+   own" nor "a failed read"; a 4xx is the server's; Try again is offered only
+   for a failed read, and it asks the page again (not the census).
+2. `sortRefusal`: Volume on an index, and open interest on an index or a share,
+   are disabled with the reason; a sort carried onto such a selection reads
+   time order and says so.
+3. A column the browser orders itself is refused before the sort moves when the
+   count on screen is past `LOCAL_SORT_BUDGET`, and the advice works for the
+   rung (`localSortAdvice`: "a day alone is not enough" on 1s). A sort that was
+   already on (an address's `&sort=dte`, or a selection grown past the budget)
+   cannot be kept; its sentence says the grid is back in time order rather than
+   "keeps the order it had" (found on the shadow, 17 Oct).
+4. A Change % measured across the overnight gap carries an `overnight` mark with
+   the bar it was measured against (`acrossDay`).
+5. No answer yet draws loading rows, never "No bar came back"; the census
+   disagreement is said only when the census has not moved; a time-of-day
+   window that keeps nothing names the window, not the import.
+6. Two pages of one read are compared by total and every series' count
+   (`generationOf`, `joinPage`, `joinSlices`); a row already shown is dropped
+   and the move named.
+
+**Proof.** `no_sort_is_offered_on_a_column_without_values`, `a sort the page
+cannot do keeps the sort that was on, with advice that works for the rung`, `a
+sort already on that the page cannot do says the grid went back to time order,
+and no sentence loses a space`, `a_page_made_refusal_is_not_called_the_servers`,
+`the_store_growing_between_two_pages_repeats_no_row`, `an empty answer is said
+only once it is in, and a time window is not blamed on the import (DB-016)`, `a
+Change % measured across the overnight gap says so on the row`
+(`web/tests/db-pager.test.js`). Shadow: NIFTY spot Zerodha 1min, Sep 2026:
+Volume and Open interest disabled with the reason, Change % sorted shows
+`overnight` on the 09:15 rows with the previous session's 15:29 bar named;
+NIFTY spot GDFL 1s at page 3: Change % refused with the 333-minute advice, the
+sort and page kept, no request; `&sort=dte&dir=desc` on the 11,600 CE: refused,
+time order, "The grid is back in time order, newest first."; 03:00 to 04:00 on
+15 Mar 2019: the time window named; 2024-03-02: the drill session's day flags,
+no census accusation; six selections opened by address: no "census and the
+files disagree" and no "No bar came back" drawn at any moment.

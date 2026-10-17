@@ -18825,3 +18825,41 @@ report (`state/fix/round2/fix-AG-04.json`, `state/fix/ag04-r2/`).
 | L-AG04-08 | The restart carry is a label; the volume is never corrected, and only the cash segment is labelled | subtracting needs a charter source for the vendor's restatement and an operator decision (UNVERIFIED, D-4997 item 9). Whether a derivative's first post-restart print carries the same way was never measured; an option's restart day says so in `gdfl_sum_why`, and no day says `gdfl_sum_verified: true` | measured on the shadow, 16 October: 2020-03-13 carry on 293 of 293 shares with GDFL seconds that day; 2020-03-23 on 290 of 290; 2024-03-02 on 113 of 113 and 2024-05-18 on 112 of 112 (the store holds no GDFL seconds of either drill for most shares, including RELIANCE, SBIN, INFY, HDFCBANK, TCS and ITC: `carry: null`, not measured). 2021-02-24, the sourced outage: 1 of 121 (COROMANDEL, P 49,901, F 50,378), so the label's shape fits halts and drills and is not proof of a restatement on every day it fires. **NOT DONE** | operator, charter |
 | L-AG04-09 | A reader can meet a zero-byte sidecar | the first append opens the file before it takes the lock | the reader refuses it by name ("holds no header: its first append is in progress, or failed and was undone"). Only before any record exists, never between records (AG04-07) | AG-04 |
 | L-AG04-10 | `also_in_bars` is exact equality | the test is a second at the print's second, with close equal to its price and volume equal to its quantity | a print folded with other trades in its second (volume above the quantity) is not counted there; it is counted in `auction_band_bars` | AG-04 |
+
+## The /db bar grid's pager, Go to and words (R3-03, D-5860 to D-5864)
+
+Measured 17 October 2026 on the R3-03 shadow: a release build of
+`fix/db-R3-03` (the api as built from the branch, which changes no Rust; the front end rebuilt after each edit) on
+`127.0.0.1:9502` over a fresh shadow of the real store (bars linked read-only
+through `state/fix/shadow.sh` and `serve.sh`, under the kernel write lock), GET
+requests only. Page figures: headless Chrome through the DevTools protocol,
+1440 x 900, n = 200 page opens per case, cold (a new tab, cache disabled) and
+warm (one tab, cache on, navigated again). "First bar row" is
+`performance.now()` when the first non-skeleton bar row enters the DOM;
+"longest pause" the longest `longtask` entry; memory `usedJSHeapSize` with
+precise memory info; "on the wire" the sum of `encodedDataLength` of every
+request until the grid settled. Route figures: n = 200 sequential `curl` GETs
+per query, `%{time_total}`. The machine was shared with other builds. Figures
+are p50 / p99 / max.
+
+| ID | Limit | Why it is not O(1) / not closed | Bound | Package |
+|---|---|---|---|---|
+| L-R303-01 | **The goal's first-content target (p99 under 300 ms) is NOT MET** | the read waits for the Fit to latch, 250 ms after the grid box mounts (`barsLayout`'s `afterFold` timer, which keeps DB-N02's one read per open), and a cold open loads about 1.1 MB of application code first. On a warm open every other request had ended by 142 ms and the two bar reads began at 388 ms | NIFTY spot GDFL 1s: first bar row cold 1,329 / 2,274 / 4,928 ms, warm 439 / 975 / 983 ms; first contentful paint cold 724 / 1,652 / 4,372, warm 72 / 596 / 612. The 11,600 CE (153,107 rows): first bar row cold 933 / 2,171 / 2,488, warm 388 / 841 / 1,022; first paint cold 432 / 1,464 / 1,652, warm 56 / 344 / 412. **NOT DONE**: latching on a frame rather than a 250 ms timer without reopening the 4, 3, 8 reads | R3-03 follow-up |
+| L-R303-02 | The goal's other three page targets, as measured | the pause and wire figures include every request and script of the page, not the grid's alone | longest pause: NIFTY cold 0 / 0 / 3,601 ms (one open), warm 0 / 0 / 0; contract cold 0 / 53 / 75, warm 0 / 0 / 0. Memory: 9.2 / 9.7 / 9.7 MB cold and 36.0 / 55.9 / 57.2 warm (NIFTY), 9.5 / 9.6 / 9.6 and 43.4 / 58.2 / 58.2 (contract), under 100 MB. On the wire per open: warm 287.3 KB (NIFTY) and 320.5 KB (contract), under 400 KB; cold 1,145.7 and 1,178.9 KB, over it (the application code, cache disabled). The grid's own reads: 3.8 and 3.5 KB | R3-03 |
+| L-R303-03 | A change under a day or time bound sends a third read | the newest close describes the selection whole; the extremes read and page one carry it only when no bound narrows | one `/bars/window.json?…&sort=ts&dir=desc&limit=1` per selection, never per page or per order | R3-03 |
+| L-R303-04 | A sort from an address that the browser cannot afford costs one count read before its refusal | the count is not known before the first answer | `&sort=dte` on the 153,107-row contract: three reads on open (the count, the extremes, page one in time order) | R3-03 |
+| L-R303-05 | `joinSlices`, `acrossDay` and `pageItems` are not O(1) | a whole read's slices are de-duplicated, and a read's rows are grouped by series and ordered in time | `joinSlices` O(rows) once per local-sort read, at most `LOCAL_SORT_BUDGET` (20,000) rows; `acrossDay` O(rows log rows) once per read (20,000 at most, a page otherwise); `pageItems` draws at most 11 items at any page count | R3-03 |
+| L-R303-06 | No overnight mark on a page the server ordered by a value or by time of day | its rows are not neighbours in their series, and the answer does not carry the instant of each row's previous bar | the Change % figure is shown unmarked; a time-ordered page and a sort this page does itself are marked | R3-03 |
+| L-R303-07 | **A response that takes more than 10 s to write is cut** (outside R3-03) | `HeadDeadline::rearm` (`crates/api/src/server.rs`) starts the next head's 10 s clock on the FIRST write of a response and does not move it on later writes, so a body still streaming at 10 s is closed mid-way | `/store.json?feed=gdfl&encoding=census-tuples-v1` (183,715,726 B): `curl --limit-rate 12M` got 128,195,862 B in 10.19 s, exit 18; headless Chrome on the shadow got 32 to 34 MB in 10.4 to 11.2 s (`ERR_CONTENT_LENGTH_MISMATCH`), and /db then showed "The store manifest could not be read" after a Side or Segment change that needs the whole census. **NOT FIXED here** | owner of `serve_limited` (D-1200, D-1510) and of the census whole read |
+| L-R303-08 | The three Svelte components have no coverage or mutation tool here | `node --test` coverage reads JavaScript modules; no tool on this machine instruments a `.svelte` file | held by source-shape assertions in the owned tests; nine hand mutants of the 17 Oct Mac edits were each killed. The cloud's Stryker run (1,245 mutants of the four JS modules, 0 survivors) is of the cloud head and was not re-run on the Mac | R3-03 |
+| L-R303-09 | A value sort the server refuses moves the caret and empties the pager | the refusal is the server's answer to that order; it is shown in its words and the readout says no bar was read | GDFL RELIANCE cash 1s, Close: `scan_budget_exceeded`, 32,417,004 rows in months with no `.srt` sort index (the server names `cli srt-build`). The sort indexes are a store write, not this package's | R3-03 / store |
+| L-R303-10 | "Shown on: the Speed page" | no Speed page exists in this tree | the figures are in this section and in D-5860 | Speed page owner |
+
+Route figures for the reads this grid sends (n = 200 each): NIFTY spot 1s page
+one 1.0 / 1.9 / 2.7 ms; its extremes read 1.3 / 2.0 / 2.5; page 900
+(`offset=8091`) 1.1 / 2.2 / 3.1; Go to (`at=`, ascending) 1.1 / 1.9 / 4.8;
+Close page one, served from the sort indexes over 44,032,544 rows, 276.2 /
+299.9 / 398.8 (the server's sort, unchanged here). The 11,600 CE: page one 0.7
+/ 2.4 / 6.3; a time-of-day page at row 99,976 10.6 / 13.1 / 18.7; the last
+Close page (`offset=153100`) 15.5 / 16.5 / 16.6; Go to on 15 Mar 2019 0.5 / 1.1
+/ 1.4; past the depth (`offset=100000`, 400 `sort_too_deep`) 0.5 / 1.2 / 1.4.
