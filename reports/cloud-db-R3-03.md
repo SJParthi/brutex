@@ -110,4 +110,88 @@ and add the same three paths at merge.
 
 ## NEEDS THE MAC
 
-To be completed with exact commands in the final report.
+Nothing here was measured in the cloud: there is no store, no `:8080` and no
+real data. Every number the goal asks for is the Mac's to take.
+
+Set-up, the way every package is checked on the Mac: merge this branch into a
+scratch copy of `feat/db-fix`, then
+
+```
+npm --prefix web ci && npm --prefix web run build   # web/build is tracked (Gate W1); this part does not commit it
+cargo build --release -p api
+```
+
+then start that build on a FRESH shadow store at a port of its own, `$P`, with
+the Mac's `state/fix/shadow.sh` and `state/fix/serve.sh` exactly as they start
+every package's check (never `:8080`, never the real store). Below,
+`H=http://127.0.0.1:$P`.
+
+1. **Gate W1** — after the merge, `npm --prefix web run build` and commit
+   `web/build` (Gate W1: `git diff --exit-code -- web/build`). This part does
+   not own `web/build`, so it is not committed here.
+
+2. **The server rules the page mirrors** (exact curl, one-second option
+   contract of the 11 Oct re-check, 153,107 rows):
+   ```
+   K=NSE-FNO-NIFTY-2019-03-28-1160000-CE
+   curl -s "$H/bars/window.json?feed=gdfl&timeframe=1s&from=2019-03&to=2019-03&key=$K&sort=tod&dir=desc&offset=99992&limit=8&extremes=0" | head -c 300   # 200, a page
+   curl -s "$H/bars/window.json?feed=gdfl&timeframe=1s&from=2019-03&to=2019-03&key=$K&sort=tod&dir=desc&offset=100000&limit=8&extremes=0" | head -c 300  # sort_too_deep
+   curl -s "$H/bars/window.json?feed=gdfl&timeframe=1s&from=2019-03&to=2019-03&key=$K&sort=c&dir=desc&offset=0&limit=8&extremes=0" | grep -o '"sort_index":{[^}]*}'  # what the pager reads to offer pages
+   # Go to 2019-03-15 10:02 (1552624320): ascending, the minute's FIRST bar
+   curl -s "$H/bars/window.json?feed=gdfl&timeframe=1s&from=2019-03&to=2019-03&from_day=2019-03-15&to_day=2019-03-15&key=$K&sort=ts&dir=asc&at=1552624320&limit=1&extremes=0" | grep -o '"at_index":[0-9]*\|"t":[0-9]*' | head -2
+   ```
+   Expect the last line's `t` ≥ 1552624320 and < 1552624380 if the contract
+   traded in 10:02; the grid's newest-first landing is `total − 1 − at_index`.
+   (Correct the key if the census names the 11,600 CE differently.)
+
+3. **Requests per change, in the browser** (Chromium, DevTools Network
+   filtered to `window.json`, cache disabled; or the Mac's Playwright
+   harness). Open each and count `/bars/window.json` requests after the page
+   settles; target **1 page read + 1 extremes read** per change, and **no
+   request for an intermediate selection**:
+   - `$H/db` (default NIFTY spot, finest rung): 2 on open (page, extremes);
+     the Rows per page summary reads `Fit · measuring` then `Fit · N`, never
+     `Fit · 50`; exactly one page read (no limit=4, 3, 8).
+   - `$H/db?feed=gdfl&sym=NIFTY&seg=spot&tf=1s&page=900`: click the Close
+     header — exactly 1 request, `offset=0`; no request at
+     `offset=(900−1)·N`.
+   - NIFTY 26 Mar 2020 12,000 CE → PE (Side), and BANKNIFTY options → Spot
+     (Segment): each change 1 page read + 1 extremes read; no request names a
+     key or month the final selection does not hold.
+   - Next page twice, Prev once: 1 request each, the readout's "page N"
+     always matches the rows on screen ("opening page N…" while one loads).
+
+4. **Pager depth** — the 153,107-row contract, Time sort (`&sort=tod`),
+   Rows per page 8: page buttons stop at 12,500 with a ⋯ that names
+   `sort_too_deep`; Last lands on 12,500; Next is disabled there; typing
+   12501, 19139, 0, -5, 2.5, 1e308, empty and 6,000 digits in "Go to page"
+   each shows a sentence under the box and moves nothing. Repeat under Close:
+   if the server's `sort_index` says every row came from an index (or ≤
+   1,000,000 were read), every page is offered.
+
+5. **Go to** — the 11,600 CE on 15 Mar 2019, 10:00–10:04: pick 10:02 in
+   the minute picker, newest first and oldest first: the marked row is the
+   minute's first bar (not 10:01:5x) and is on screen. First page, then 10:02
+   again: marked again. Type `10:02`, `10:02:07`, `1969-12-31 23:59:59`,
+   `2099-01-01 10:00:00`, `2019-02-30 10:00:00`, `25:61:61`, `abc`, empty, and
+   6,000 characters: a time lands; every other one is refused in words and
+   moves nothing.
+
+6. **Sort offers and words** — NIFTY spot · Zerodha 1min (01–30 Sep 2026):
+   Volume and Open interest headers are disabled with the n/a reason; Change %
+   sort shows `overnight` on each row measured across the gap. NIFTY spot ·
+   GDFL 1s whole series: Change % is refused with the "a day alone is not
+   enough" advice and the grid keeps its sort and page. `&sort=dte&dir=desc`
+   on the whole contract: refused in words, back to time order. A too-many-
+   series selection (or a window outside the held months): "This selection is
+   not read as one page", no Try again. `&tfrom=03:00&tto=04:00` on 15 Mar
+   2019: the time window is named, no import blamed. Page open on every
+   selection above: no "census and the files disagree" flash.
+
+7. **The four page-side targets** (the goal's measured target), in the
+   Mac's browser harness, n = 200 cold and n = 200 warm, on NIFTY spot GDFL 1s
+   and on the 153,107-row contract: first content p50/p99/max (< 300 ms at
+   p99), longest main-thread pause (< 50 ms), JS heap (< 100 MB), bytes on
+   the wire per page (< 400 KB). Write p50, p99, max and n for each. "Shown
+   on: the Speed page" — no Speed page exists in this tree; its owner shows
+   these numbers.
