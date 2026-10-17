@@ -35,7 +35,15 @@ import {
   strandedEffect,
   wholeTitle,
   tokensOf,
-  censusKeyOf
+  censusKeyOf,
+  prefixOf,
+  UNIVERSES,
+  EVERYTHING,
+  LEGACY_BLIND,
+  SEGMENT_KEYS,
+  SEG_VIEW,
+  VIEWS,
+  dayWindowApplies
 } from '../src/lib/db/notes-controls.js';
 import { sessionGrid, SESSION_OPEN_MINUTE, calendarOf } from '../src/lib/db/selection-model.js';
 import { bandOf } from '../src/lib/db/dayflags.js';
@@ -401,4 +409,141 @@ test('a note cut to two lines carries the whole sentence as hover text', () => {
   assert.ok(notes.length >= 8);
   for (const tag of notes) assert.match(tag, /use:wholeTitle|title=/, tag);
   assert.match(controls, /:global\(\.strip\) \.field > \.note \{[\s\S]*?line-clamp: 2;/);
+});
+
+test('the fixed vocabulary of the strips is exactly this', () => {
+  // The universes, in the owner's order, with the token each joins on.
+  assert.deepEqual(
+    UNIVERSES.map((u) => [u.key, u.label, u.token]),
+    [
+      ['n50', 'NIFTY 50', 'n50'],
+      ['n100', 'NIFTY 100', 'n100'],
+      ['n200', 'NIFTY 200', 'n200'],
+      ['n500', 'NIFTY 500', 'n500'],
+      ['ntm', 'NIFTY Total Market', 'ntm'],
+      ['fno', 'F&O underlyings', 'fno'],
+      ['index', 'NSE indices', 'index'],
+      ['', 'Everything', '']
+    ]
+  );
+  assert.equal(UNIVERSES.at(-1), EVERYTHING);
+  assert.deepEqual([...LEGACY_BLIND], ['n50', 'n100', 'n200', 'n500']);
+  assert.deepEqual(SEGMENT_KEYS, ['INDEX', 'CASH', 'FNO']);
+  assert.deepEqual(
+    SEG_VIEW.map((s) => [s.key, s.name, s.note, s.always]),
+    [
+      ['spot', 'Spot', 'continuous series — no expiry', true],
+      ['futures', 'Expired futures', 'futures that settled before today, with their final session inside the archive', true],
+      ['options', 'Expired options', 'options that settled before today, with their final session inside the archive', true],
+      ['futures-cut', 'Futures settled after the archive ended', "settled before today but after the archive's measured last day, so their last sessions are not imported", false],
+      ['options-cut', 'Options settled after the archive ended', "settled before today but after the archive's measured last day, so their last sessions are not imported", false],
+      ['futures-live', 'Unexpired futures', 'expiring today or later — not settled', false],
+      ['options-live', 'Unexpired options', 'expiring today or later — not settled', false]
+    ]
+  );
+  assert.deepEqual(
+    VIEWS.map((v) => [v.key, v.label, v.sub, v.showing]),
+    [
+      ['census', 'Coverage', 'what you hold, per instrument-month', 'one row per INSTRUMENT-MONTH, counted from /store.json'],
+      ['bars', 'Bars', 'the stored values, one row per bar', 'Stored candles, one row at a time, shown in pages']
+    ]
+  );
+  assert.match(VIEWS[0].title, /^What the store HOLDS\. One row per instrument-month, off \/store\.json/);
+  assert.match(VIEWS[1].title, /^Inspect saved candle prices and volume/);
+  assert.equal(dayWindowApplies, true);
+});
+
+test('the edges of the special list, the day count and the month span', () => {
+  // A window's ends must be whole HH:MM inside a day, in order; a bad entry is dropped, never guessed.
+  const read = specialsOf({
+    special: [
+      null,
+      { date: 'x2024-11-01', windows: [{ from: '18:00', to: '18:59' }] },
+      { date: '2024-11-01x', windows: [{ from: '18:00', to: '18:59' }] },
+      { date: 20241101, windows: [{ from: '18:00', to: '18:59' }] },
+      { date: '2024-11-04', kind: '', windows: [{ from: '18:00', to: '18:00' }] },
+      { date: '2024-11-05', kind: 5, windows: [null, { from: '118:00', to: '18:59' }, { from: '18:00', to: '18:59x' }, { from: '24:00', to: '24:30' }, { from: '00:00', to: 'x' }, { from: '19:00', to: '18:00' }, { from: '18:30', to: '18:45' }] }
+    ]
+  });
+  assert.deepEqual(read, [
+    { date: '2024-11-04', kind: 'special session', windows: [{ from: 1080, to: 1080 }] },
+    { date: '2024-11-05', kind: 'special session', windows: [{ from: 1110, to: 1125 }] }
+  ]);
+  assert.deepEqual(specialsOf(null), []);
+
+  // The regular-day count, at every edge.
+  const cal = { from: 0, days: 'RR.RRP-R' };
+  assert.equal(prefixOf(cal), prefixOf(cal), 'built once per calendar and kept');
+  assert.deepEqual([...prefixOf(cal).regular], [0, 1, 2, 2, 3, 4, 4, 4, 5]);
+  assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-01'), 1, 'one day');
+  assert.equal(regularDaysIn(cal, '1970-01-05', '1970-01-04'), 0, 'backwards over a regular day');
+  assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-06'), 4);
+  assert.equal(regularDaysIn(cal, '1970-01-08', '1970-01-08'), 1, "after a '-' day, from the day after it");
+  assert.equal(regularDaysIn(cal, '1970-01-07', '1970-01-08'), null, "a '-' day at the span's start");
+  assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-07'), null, "a '-' day at the span's end");
+  assert.equal(regularDaysIn(cal, '1970-01-01', '1970-01-09'), null, 'one day past the end');
+  assert.equal(regularDaysIn(cal, 'garbage', ''), null, 'a day that is not YYYY-MM-DD');
+  assert.equal(regularDaysIn(/** @type {any} */ ({ from: 0, days: 123 }), '', ''), null);
+
+  // The month span at its edges.
+  assert.deepEqual(monthDays('2024-01'), { from: '2024-01-01', to: '2024-01-31' });
+  assert.deepEqual(monthDays('2024-12'), { from: '2024-12-01', to: '2024-12-31' });
+  assert.equal(monthDays('x2024-03'), null);
+  assert.equal(monthDays('2024-03x'), null);
+  assert.equal(monthNeedsRead('2019-03', { from: '2019-03-01', to: '2019-03-31' }), false, 'a band of exactly the month');
+  assert.equal(monthNeedsRead('2019-03', { from: '2019-03-01', to: '2019-03-15' }), true, 'a band ending mid-month');
+  assert.equal(monthNeedsRead('2019-03', { from: '2019-03-02', to: '2019-03-31' }), true, 'a band starting after the 1st');
+  assert.equal(flagText({ word: 'refused at import', says: ['a', 'b'] }), 'refused at import — a; b');
+});
+
+test('the edges of the special minutes and the list rows', () => {
+  // A 60min rung opens on 09:15 + 60k, so an 18:00–19:59 window lists 18:15 and 19:15.
+  assert.deepEqual(specialMinutes([{ date: 'd', kind: 'k', windows: [{ from: 1080, to: 1199 }] }], 60, SESSION_OPEN_MINUTE).map((m) => m.key), ['18:15', '19:15']);
+  // Overlapping windows of one day name that day once; minutes come back in clock order whatever the input order.
+  const a = { date: '2024-11-01', kind: 'a', windows: [{ from: 1095, to: 1096 }] };
+  const b = { date: '2024-11-02', kind: 'b', windows: [{ from: 1080, to: 1083 }, { from: 1082, to: 1084 }] };
+  const minutes = specialMinutes([a, b], 1, SESSION_OPEN_MINUTE);
+  assert.deepEqual(minutes.map((m) => m.key), ['18:00', '18:01', '18:02', '18:03', '18:04', '18:15', '18:16']);
+  assert.deepEqual(minutes.find((m) => m.key === '18:03')?.days, [b]);
+  // The row's reason names each window, joined, and three days with no remainder.
+  const outage = { date: '2021-02-24', kind: 'systems outage', windows: [{ from: 555, to: 699 }, { from: 945, to: 1019 }] };
+  const rows = timeListRows(sessionGrid(60, ['16:00'], {}), { specials: [outage], regular: 0, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(rows.find((r) => r.key === '16:00')?.why, 'systems outage, 24 Feb 2021: bars open 09:15–11:39 and 15:45–16:59 (the exchange calendar of record, /calendar.json). Listed because a day in view traded at this minute.');
+  const day = (/** @type {string} */ date) => ({ date, kind: 'Muhurat', windows: [{ from: 1110, to: 1110 }] });
+  const three = timeListRows(sessionGrid(60, ['18:30'], {}), { specials: [day('2019-01-01'), day('2019-01-02'), day('2019-01-03')], regular: null, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(three.find((r) => r.key === '18:30')?.why, 'Muhurat, 01 Jan 2019: bars open 18:30–18:30; Muhurat, 02 Jan 2019: bars open 18:30–18:30; Muhurat, 03 Jan 2019: bars open 18:30–18:30 (the exchange calendar of record, /calendar.json). Listed because a day in view traded at this minute.');
+  const four = timeListRows(sessionGrid(60, ['18:30'], {}), { specials: [day('2019-01-01'), day('2019-01-02'), day('2019-01-03'), day('2019-01-04')], regular: null, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(four.find((r) => r.key === '18:30')?.why, 'Muhurat, 01 Jan 2019: bars open 18:30–18:30; Muhurat, 02 Jan 2019: bars open 18:30–18:30; Muhurat, 03 Jan 2019: bars open 18:30–18:30; and 1 more (the exchange calendar of record, /calendar.json). Listed because a day in view traded at this minute.');
+  // A special minute that is a dated-close regular minute (it carries a reason) is the special day's.
+  const late = timeListRows(sessionGrid(60, [], { venue: 'derivative', lo: '2026-08-03', hi: '2026-09-24' }), { specials: [{ date: '2026-08-08', kind: 'k', windows: [{ from: 935, to: 935 }] }], regular: 5, held: [], step: 1, open: SESSION_OPEN_MINUTE });
+  assert.equal(late.find((r) => r.key === '15:35')?.detail, 'special session · 08 Aug 2026');
+  assert.equal(late.find((r) => r.key === '15:00')?.detail, 'regular session');
+});
+
+test('the edges of the shortfall fold and the hidden clause', () => {
+  /** @param {string} underlying @param {string} kind @param {string} month @param {string} timeframe @param {number} rows @param {any} [expiry] */
+  const row = (underlying, kind, month, timeframe, rows, expiry = null) => ({ underlying, kind, month, timeframe, rows, expiry });
+  const census = [
+    row('A', 'INDEX', '2020-01', '1min', 7_000),
+    // The fuller index comes LATER, and a spot row may carry no expiry field at all.
+    row('B', 'INDEX', '2020-01', '1min', 7_500, undefined),
+    // A contract is never the fullest, even one mis-segmented as CASH.
+    row('C', 'CASH', '2020-01', '1min', 9_999, '2020-01-30'),
+    row('D', 'CASH', '2020-01', '1min', 7_400),
+    row('A', 'INDEX', '2020-02', '1min', 6_000),
+    row('B', 'INDEX', '2020-02', '1min', 6_100),
+    // Two shares at 1s: the trade-driven rung is never short, whatever the fullest.
+    row('S', 'CASH', '2020-01', '1s', 100),
+    row('T', 'CASH', '2020-01', '1s', 90_000),
+    // A contract at a rung its underlying's spot lacks is not folded into the underlying.
+    row('A', 'FNO', '2020-01', '1day', 20, '2020-01-30')
+  ];
+  const by = spotShortfalls(census, census);
+  assert.deepEqual(by.get('A')?.get('1min'), { months: 2, short: 600, trade: false, seg: 'INDEX' }, 'two months, against the later fuller index');
+  assert.equal(by.get('A')?.has('1day'), false);
+  assert.deepEqual(by.get('B')?.get('1min'), { months: 2, short: 0, trade: false, seg: 'INDEX' });
+  assert.deepEqual(by.get('D')?.get('1min'), { months: 1, short: 0, trade: false, seg: 'CASH' }, 'the CASH contract is not the fullest share');
+  assert.deepEqual(by.get('S')?.get('1s'), { months: 1, short: 0, trade: true, seg: 'CASH' });
+  assert.equal(by.has('C'), false);
+  assert.equal(hiddenText(3, { from: '2018-01-01' }, fmt), ' 3 more month(s) are held outside your window and hidden — "Show them, labelled" under the dates brings them in.');
 });

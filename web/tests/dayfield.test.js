@@ -188,3 +188,25 @@ test('a To box always takes a day, and Escape closes a calendar opened with the 
   assert.match(held.body, /value="28 Mar 2019"/);
   assert.equal(refusal(held.body), null);
 });
+
+test('the edges of the day words: the bound itself, blank text, a day on either end', () => {
+  // Exactly the bound is kept whole; one past it is cut.
+  assert.deepEqual(cutText('x'.repeat(DAY_TEXT_MAX), DAY_TEXT_MAX, 'From date'), { text: 'x'.repeat(DAY_TEXT_MAX), why: '' });
+  assert.equal(cutText('x'.repeat(DAY_TEXT_MAX + 1), DAY_TEXT_MAX, 'From date').why, 'From date is 33 characters long, and /db reads at most 32');
+  // Spaces only is an emptied box, not a malformed day.
+  assert.equal(dayFieldWhy({ typed: '   ', value: '2026-09-30', label: 'To date', ...HELD }), null);
+  // Each bound takes the day it names.
+  const o = { ...HELD, after: '2026-09-10', before: '2026-09-20' };
+  for (const iso of ['2026-09-10', '2026-09-20']) {
+    assert.equal(dayTakes(iso, o), true, iso);
+    assert.equal(dayStruckWhy(iso, o), null, iso);
+  }
+  for (const iso of ['2026-09-01', '2026-09-30']) {
+    assert.equal(dayTakes(iso, HELD), true, iso);
+    assert.equal(dayStruckWhy(iso, HELD), null, iso);
+  }
+  assert.equal(dayStruckWhy('2026-09-15', o), null, 'between both bounds');
+  assert.equal(dayFieldWhy({ typed: '10 Sep 2026', value: '', label: 'To date', ...HELD, after: '2026-09-10' }), null, 'To on the From day');
+  assert.equal(dayFieldWhy({ typed: '20 Sep 2026', value: '', label: 'From date', ...HELD, before: '2026-09-20' }), null, 'From on the To day');
+  assert.equal(dayFieldWhy({ typed: '15 Sep 2026', value: '', label: 'From date', ...HELD, after: '2026-09-10', before: '2026-09-20' }), null);
+});

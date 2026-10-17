@@ -412,7 +412,8 @@ export function dayFieldWhy(o) {
   }
   const held = dayBoundWhy(iso, { lo: o.min, hi: o.max, reason: o.reason });
   if (held) return `${label} ${dayText(iso)}: ${held}`;
-  const order = o.after && iso < o.after ? windowWhy(o.after, iso) : o.before && iso > o.before ? windowWhy(iso, o.before) : null;
+  /* `windowWhy` answers only a backwards pair, so it is asked both ways. */
+  const order = windowWhy(o.after ?? '', iso) ?? windowWhy(iso, o.before ?? '');
   if (order) return `${order}.`;
   return null;
 }
@@ -475,7 +476,8 @@ export function calendarNote(o) {
 const clockOf = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 /** @param {unknown} t `HH:MM` @returns {number | null} */
 const minuteOf = (t) => {
-  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(t ?? ''));
+  if (typeof t !== 'string') return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(t);
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 };
 
@@ -500,7 +502,7 @@ export function specialsOf(body) {
   /** @type {SpecialDay[]} */
   const out = [];
   for (const s of body.special) {
-    if (typeof s?.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s.date) || !Array.isArray(s.windows)) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s?.date)) || !Array.isArray(s.windows)) continue;
     const windows = [];
     for (const w of s.windows) {
       const from = minuteOf(w?.from);
@@ -509,13 +511,36 @@ export function specialsOf(body) {
     }
     if (windows.length) out.push({ date: s.date, kind: typeof s.kind === 'string' && s.kind ? s.kind : 'special session', windows });
   }
-  return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  /* ISO days order as text; `sort` is stable, so one day's entries keep the answer's order. */
+  return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 /** Codes of the calendar of record that are a regular-length session. */
 const REGULAR = new Set(['R', 'X', 'U', 'H']);
 /** @type {WeakMap<object, {regular: Int32Array, unknown: Int32Array}>} */
 const PREFIX = new WeakMap();
+
+/**
+ * The two prefix sums of a calendar's day string — regular sessions and days
+ * the calendar does not reach — built once per calendar object and kept.
+ *
+ * @param {{days: string}} cal
+ * @returns {{regular: Int32Array, unknown: Int32Array}}
+ */
+export function prefixOf(cal) {
+  let p = PREFIX.get(cal);
+  if (!p) {
+    p = { regular: new Int32Array(cal.days.length + 1), unknown: new Int32Array(cal.days.length + 1) };
+    let i = 0;
+    for (const c of cal.days) {
+      p.regular[i + 1] = p.regular[i] + (REGULAR.has(c) ? 1 : 0);
+      p.unknown[i + 1] = p.unknown[i] + (c === '-' ? 1 : 0);
+      i += 1;
+    }
+    PREFIX.set(cal, p);
+  }
+  return p;
+}
 
 /** `YYYY-MM-DD` to days since 1970-01-01, on the calendar. @param {string} iso */
 const epochOf = (iso) => Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))) / 86_400_000);
@@ -533,23 +558,14 @@ const epochOf = (iso) => Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso
  * @param {{from: number, days: string} | null} cal
  * @param {string} lo `YYYY-MM-DD`, or `''` for the calendar's first day
  * @param {string} hi `YYYY-MM-DD`, or `''` for its last
- * @returns {number | null}
+ * @returns {number | null} also `null` for a day that is not `YYYY-MM-DD`
  */
 export function regularDaysIn(cal, lo, hi) {
-  if (!cal || typeof cal.days !== 'string' || cal.days.length === 0) return null;
-  let p = PREFIX.get(cal);
-  if (!p) {
-    const n = cal.days.length;
-    p = { regular: new Int32Array(n + 1), unknown: new Int32Array(n + 1) };
-    for (let i = 0; i < n; i += 1) {
-      const c = cal.days[i];
-      p.regular[i + 1] = p.regular[i] + (REGULAR.has(c) ? 1 : 0);
-      p.unknown[i + 1] = p.unknown[i] + (c === '-' ? 1 : 0);
-    }
-    PREFIX.set(cal, p);
-  }
-  const first = /^\d{4}-\d{2}-\d{2}$/.test(lo) ? epochOf(lo) - cal.from : 0;
-  const last = /^\d{4}-\d{2}-\d{2}$/.test(hi) ? epochOf(hi) - cal.from : cal.days.length - 1;
+  if (typeof cal?.days !== 'string' || cal.days.length === 0) return null;
+  const p = prefixOf(cal);
+  const first = lo ? epochOf(lo) - cal.from : 0;
+  const last = hi ? epochOf(hi) - cal.from : cal.days.length - 1;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last)) return null;
   if (first > last) return 0;
   if (first < 0 || last >= cal.days.length) return null;
   if (p.unknown[last + 1] - p.unknown[first] > 0) return null;
@@ -593,7 +609,8 @@ export function timeListRows(grid, o) {
   for (const row of grid) {
     const days = by.get(row.key);
     if (none && !days && !held.has(row.key)) continue;
-    if (!days || (!none && row.detail === 'regular session' && !row.why)) {
+    /* A plain regular minute is the one row `sessionGrid` gives no reason. */
+    if (!days || (!none && !row.why)) {
       out.push(row);
       continue;
     }
@@ -637,7 +654,7 @@ export function specialMinutes(specials, step, open) {
       }
     }
   }
-  return [...by.entries()].map(([key, days]) => ({ key, days })).sort((a, b) => (a.key < b.key ? -1 : 1));
+  return [...by.entries()].map(([key, days]) => ({ key, days })).sort((a, b) => a.key.localeCompare(b.key));
 }
 
 /**
@@ -660,13 +677,15 @@ export function specialsIn(specials, lo, hi) {
  * @param {string} ym
  */
 export function monthDays(ym) {
-  const m = /^(\d{4})-(\d{2})$/.exec(String(ym ?? ''));
+  if (typeof ym !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})$/.exec(ym);
   if (!m) return null;
   const y = Number(m[1]);
   const mo = Number(m[2]);
   if (mo < 1 || mo > 12) return null;
   const last = [31, (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
-  return { from: `${m[1]}-${m[2]}-01`, to: `${m[1]}-${m[2]}-${String(last).padStart(2, '0')}` };
+  /* Every month has at least 28 days, so the last day is two digits. */
+  return { from: `${m[1]}-${m[2]}-01`, to: `${m[1]}-${m[2]}-${last}` };
 }
 
 /**
@@ -756,6 +775,9 @@ export function tierLeavesOutText(tier, left, fmt) {
   return `${tier} leaves out ${fmt(left.count)} stored name(s): ${left.names.join(', ')}${rest > 0 ? ` and ${fmt(rest)} more` : ''} — held, outside this tier, and listed under Everything.`;
 }
 
+/** A census row with no expiry: a spot series. @param {{expiry?: string | null}} r */
+const isSpot = (r) => r.expiry === null || r.expiry === undefined;
+
 /**
  * Whether a census row's series is TRADE-DRIVEN: a bar exists only where a
  * trade printed (D-3336 §2) — a contract, or a share at one second. Its bar
@@ -765,8 +787,8 @@ export function tierLeavesOutText(tier, left, fmt) {
  * @param {{segment?: string, kind?: string, timeframe: string, expiry?: string | null}} r
  */
 export function tradeDriven(r) {
-  const seg = r.kind ?? r.segment ?? '';
-  return (r.expiry !== null && r.expiry !== undefined) || seg === 'FNO' || (seg === 'CASH' && r.timeframe === '1s');
+  const seg = r.kind ?? r.segment;
+  return !isSpot(r) || seg === 'FNO' || (seg === 'CASH' && r.timeframe === '1s');
 }
 
 /**
@@ -791,15 +813,14 @@ export function spotShortfalls(all, rows) {
   /** @type {Map<string, number>} */
   const fullest = new Map();
   for (const r of all) {
-    if (r.expiry !== null && r.expiry !== undefined) continue;
+    if (!isSpot(r)) continue;
     const k = `${r.month}|${r.timeframe}|${r.kind}`;
-    const seen = fullest.get(k);
-    if (seen === undefined || r.rows > seen) fullest.set(k, r.rows);
+    fullest.set(k, Math.max(fullest.get(k) ?? 0, r.rows));
   }
   /** @type {Map<string, Map<string, {months: number, short: number, trade: boolean, seg: string}>>} */
   const out = new Map();
   for (const r of rows) {
-    if (r.expiry !== null && r.expiry !== undefined) continue;
+    if (!isSpot(r)) continue;
     let by = out.get(r.underlying);
     if (!by) out.set(r.underlying, (by = new Map()));
     let a = by.get(r.timeframe);
@@ -848,7 +869,6 @@ export function shortfallText(by, order, fmt) {
 export function hiddenMonths(out, underlying, segOf, kind) {
   const bySegment = new Map();
   const byRung = new Map();
-  if (!underlying) return { bySegment, byRung };
   for (const r of out) {
     if (r.underlying !== underlying) continue;
     const s = segOf(r);
@@ -868,7 +888,7 @@ export function hiddenMonths(out, underlying, segOf, kind) {
  */
 export function hiddenText(n, window, fmt) {
   if (!n) return '';
-  return ` ${fmt(n)} more month(s) are held outside your window${window?.from && window?.to ? ` (${window.from} to ${window.to})` : ''} and hidden — "Show them, labelled" under the dates brings them in.`;
+  return ` ${fmt(n)} more month(s) are held outside your window${window?.from && window.to ? ` (${window.from} to ${window.to})` : ''} and hidden — "Show them, labelled" under the dates brings them in.`;
 }
 
 /**
