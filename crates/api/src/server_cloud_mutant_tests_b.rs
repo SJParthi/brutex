@@ -2337,3 +2337,43 @@ async fn a_feed_that_serves_expired_derivatives_goes_on_to_discovery() {
         visible(&body)
     );
 }
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+
+/// **A feed that declares no expired-derivative history is not walked, even
+/// with a credential in hand.** Zerodha's descriptor says `FnoAccess::None`
+/// (the operator's rule of 19 Aug 2026: spot only), so the walk refuses
+/// before any vendor request is built and the outcome is NOT STARTED.
+/// Covers `fno_walk`'s `!spec.fno.serves()` arm (server.rs:11515), which the
+/// form never reaches because the parse names a feed that serves.
+#[tokio::test]
+async fn a_feed_that_serves_no_expired_derivatives_is_not_walked() {
+    let root = Root::new("walk-zerodha");
+    // TWO SECRETS: Zerodha's auth names a key and a token, scripted as one
+    // `key:token` answer (`credential_law::Script`).
+    let site = scripted_site(
+        &root,
+        "http://127.0.0.1:0",
+        vec![Ok("cloudb-key:cloudb-token".to_owned())],
+    );
+    let today = day(2025, 8, 2);
+    let mut asked = groww_request(today);
+    asked.feed = pull::vendor::Feed::Zerodha;
+    let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
+        panic!("the premise: Zerodha is an HTTP feed");
+    };
+    assert!(!spec.fno.serves(), "the premise: no expired derivatives");
+
+    let (status, body) = walk(&asked, today, &site).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        body.contains(&render::escape(
+            "this feed declares no expired-derivative history at all, so there is \
+             nothing to ask it for"
+        )),
+        "{}",
+        visible(&body)
+    );
+    assert!(body.contains("NOT STARTED"), "{}", visible(&body));
+}
