@@ -1078,11 +1078,12 @@ fn exact_minute_withholding_unsourceable_days(
     underlying: &str,
     span: ((u16, u8), (u16, u8)),
     bars: &mut Vec<indicators::Candle>,
-) -> Result<(stored::ExactMinuteContext, Vec<i64>), String> {
+    signal_length: i64,
+) -> Result<(stored::ExactMinuteContext, Vec<crate::minute_gaps::Cut>), String> {
     /// A span needing more than this withheld is a different defect.
     const ATTEMPTS: usize = 64;
     let (from, to) = span;
-    let mut dropped: Vec<i64> = Vec::new();
+    let mut dropped: Vec<crate::minute_gaps::Cut> = Vec::new();
     for _ in 0..ATTEMPTS {
         match stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars) {
             Ok(context) => return Ok((context, dropped)),
@@ -1102,8 +1103,16 @@ fn exact_minute_withholding_unsourceable_days(
                 // contains a newline. Appending the reason put it on line two,
                 // where the report drops it -- so the operator saw the raw
                 // `MissingClosingMinute` and no word of what this loop decided.
-                if dropped.contains(&day) {
-                    // The same day twice means withholding it did not remove the
+                // CUT AT THE NAMED MINUTE (policy 4): the bucket holding it
+                // and every later row of the day go, every earlier row stays.
+                let cut = crate::minute_gaps::Cut::new(
+                    day,
+                    ts,
+                    crate::minute_gaps::CutCause::Unsourceable,
+                    signal_length,
+                );
+                if !crate::minute_gaps::tighten(&mut dropped, cut) {
+                    // The same cut twice means withholding it did not remove the
                     // bar that needed it -- a different defect wearing this one's
                     // message, and looping on it would spin.
                     return Err(format!(
@@ -1113,8 +1122,7 @@ fn exact_minute_withholding_unsourceable_days(
                          Underlying: {why}"
                     ));
                 }
-                dropped.push(day);
-                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[day]);
+                let (kept, _removed) = crate::minute_gaps::withhold(bars, &[cut]);
                 if kept.len() == bars.len() {
                     return Err(format!(
                         "withholding IST day {day} removed no signal bar, so the \
@@ -1212,7 +1220,7 @@ struct StoredPreparationBuild<'a> {
 /// the store holds and withholds only rows.
 struct FoldedSeries<'a> {
     folded: &'a [indicators::Candle],
-    days: &'a mut Vec<i64>,
+    days: &'a mut Vec<crate::minute_gaps::Cut>,
     bars: &'a mut Vec<indicators::Candle>,
 }
 
@@ -1291,14 +1299,25 @@ fn column_withholding_at_build(
                     return Err(why);
                 };
                 let day = indicators::ist_day(ts);
-                if withheld.contains(&day) {
+                // CUT AT THE MINUTE THE REFUSAL NAMED, not the whole day: the
+                // bucket holding it and every later row of the day leave the
+                // sweep, every row before it stays (policy 4).
+                let cut = crate::minute_gaps::Cut::new(
+                    day,
+                    ts,
+                    crate::minute_gaps::CutCause::Unsourceable,
+                    signal_length,
+                );
+                if !crate::minute_gaps::tighten(withheld, cut) {
                     return Err(format!(
                         "IST day {day} recurred after being withheld, so this is not \
                          a missing-minute hole. Nothing was swept. Underlying: {why}"
                     ));
                 }
-                dropped.push(day);
-                withheld.push(day);
+                // ONCE PER DAY: a day the retry tightens twice is one
+                // withheld day, so the telemetry and the refusal count days,
+                // not attempts (AH-01 repair round 1).
+                record_day_once(&mut dropped, day);
                 // FROM THE WHOLE SERIES, so the rebuild folds every bar and
                 // withholds only rows. D-1781.
                 let (kept, _removed) = crate::minute_gaps::withhold(whole, withheld);
@@ -1326,6 +1345,18 @@ fn column_withholding_at_build(
          span with holes. Nothing was swept."
     ))
 }
+
+/// Add `day` to `days` unless it is already there. `days` holds at most
+/// [`column_withholding_at_build`]'s 64 attempts, so the probe is bounded.
+fn record_day_once(days: &mut Vec<i64>, day: i64) {
+    if !days.contains(&day) {
+        days.push(day);
+    }
+}
+
+#[cfg(test)]
+#[path = "withholding_count_tests.rs"]
+mod withholding_count_tests;
 
 #[cfg(test)]
 std::thread_local! {
@@ -2269,7 +2300,7 @@ fn stored_month_arm(
                 return refuse(out, &why);
             }
             let text = command(vendor, underlying, rung, y, m, h);
-            let code = work_exit(&text);
+            let code = stored_month_exit(&text);
             out.push_str(&text);
             code
         }
@@ -2277,6 +2308,83 @@ fn stored_month_arm(
         (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
         (_, _, Err(why)) => refuse(out, why),
     }
+}
+
+/// The exit code of one rendered `sweep-stored` or `audit-stored` page.
+///
+/// # Why the verdict decides it, as it does for `auto` and `auto-stored`
+///
+/// This arm exited on [`work_exit`] alone, which reads a refusal line. A
+/// `sweep-stored` walk that HALTED on its candidate budget prints
+/// `outcome REFUSED the walk stopped short` and `trustworthy as a whole
+/// answer NO closure is incomplete on the halted frontier` -- neither is a
+/// refusal line -- writes `Completion::Halted` to its sweep evidence, and
+/// exited 0, so `run_with_sink` logged `phase: completed` and `run_durable`
+/// recorded `Phase::Completed` for the same run (repro-2). [`untrustworthy`]
+/// reads the verdict row's first word, so the halted case is caught and the
+/// three durable records agree with the evidence. `audit-stored` already
+/// refused such a walk (`ranked_opening`), so its codes do not move.
+/// Extends D-2720.
+///
+/// ONE PREDICATE: this is [`auto_stored_exit`]'s, called rather than copied,
+/// so the stored doors cannot drift apart on what a whole answer is.
+fn stored_month_exit(text: &str) -> u8 {
+    auto_stored_exit(text)
+}
+
+/// The lifecycle event's `phase` for a command's exit code: what
+/// `run_with_sink` writes beside `exit_code`, so the two never disagree.
+const fn lifecycle_phase(code: u8) -> &'static str {
+    if code == OK { "completed" } else { "refused" }
+}
+
+/// The invocation audit's terminal phase for a command's exit code: what
+/// `run_durable` records, so it follows the exit code and nothing else.
+const fn audit_phase(code: u8) -> operation_audit::Phase {
+    if code == OK {
+        operation_audit::Phase::Completed
+    } else {
+        operation_audit::Phase::Refused
+    }
+}
+
+#[cfg(test)]
+#[path = "sweep_exit_tests.rs"]
+mod sweep_exit_tests;
+
+/// What `auto-stored` prints under its provenance: a stock's overnight line
+/// over the whole folded span (corp-8) and the causal cuts it applied
+/// (lookahead-oos-1). Lifted out to keep `auto_stored_kernel` under
+/// `clippy::too_many_lines`.
+fn span_head_notes(
+    root: &std::path::Path,
+    span: &stored::Span,
+    folded: &[indicators::Candle],
+    cuts: &[crate::minute_gaps::Cut],
+) -> String {
+    let mut notes = stored::overnight_note(root, span.vendor, &span.key, span.timeframe, folded);
+    notes.push_str(&minute_gap_line(folded, cuts));
+    notes
+}
+
+/// The line a withholding door prints for its causal cuts (minute-gap policy
+/// 4): each cut day, its cut time and cause, and the rows admitted before and
+/// withheld after it, counted over the folded series. Empty when nothing was
+/// cut. lookahead-oos-1.
+fn minute_gap_line(folded: &[indicators::Candle], cuts: &[crate::minute_gaps::Cut]) -> String {
+    if cuts.is_empty() {
+        return String::new();
+    }
+    let counted = crate::minute_gaps::counted(folded, cuts);
+    let withheld: u64 = counted.iter().map(|cut| cut.withheld).sum();
+    format!(
+        "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {}. Each day is cut at its first hole (policy 4): rows wholly before it are swept, rows from it on are not.\n",
+        counted
+            .iter()
+            .map(crate::minute_gaps::describe)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
 }
 
 /// The `ledger-all` arm, lifted out of [`run`].
@@ -2538,12 +2646,7 @@ pub fn run_durable(args: &[String], out: &mut String) -> u8 {
         }
     };
     let code = audit.enter(|| run(args, out));
-    let phase = if code == OK {
-        operation_audit::Phase::Completed
-    } else {
-        operation_audit::Phase::Refused
-    };
-    if let Err(why) = audit.finish(phase, 0) {
+    if let Err(why) = audit.finish(audit_phase(code), 0) {
         let _ = writeln!(
             out,
             "\nrefused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed."
@@ -2575,7 +2678,7 @@ fn run_with_sink(args: &[String], out: &mut String, sink: Option<&telemetry::Sin
         &telemetry::Event::info("cli.lifecycle", "command finished")
             .with("command", command)
             .with("sweep_command", is_sweep_command(command))
-            .with("phase", if code == OK { "completed" } else { "refused" })
+            .with("phase", lifecycle_phase(code))
             .with("exit_code", u64::from(code)),
     );
     code
@@ -3193,7 +3296,9 @@ fn stored_anchored_column(
 #[derive(Clone, Copy)]
 struct Withholding<'a> {
     folded: &'a [indicators::Candle],
-    days: &'a [i64],
+    /// The causal cuts (minute-gap policy 4): each day's rows from its first
+    /// hole on are withheld, every row wholly before it is swept.
+    days: &'a [crate::minute_gaps::Cut],
     swept: &'a [indicators::Candle],
 }
 
@@ -3249,14 +3354,14 @@ fn stored_anchored_column_withholding(
         days,
         swept: signal,
     } = withholding;
-    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    let held = crate::minute_gaps::Admission::of(days);
     if !folded
         .iter()
-        .filter(|bar| !held.contains(&indicators::ist_day(bar.ts_micros)))
+        .filter(|bar| held.admits(bar.ts_micros))
         .eq(signal.iter())
     {
         return Err(
-            "the swept signal bars are not the folded series less its withheld days; no column was built"
+            "the swept signal bars are not the folded series less its withheld rows; no column was built"
                 .to_owned(),
         );
     }
@@ -3269,7 +3374,11 @@ fn stored_anchored_column_withholding(
         &daily.references,
     )
     .map_err(|why| format!("the stored 1day reference order was refused: {why:?}"))?;
-    let anchored = AnchoredColumn::build_required_withholding(folded, &mut evaluator, days)
+    let anchored = AnchoredColumn::build_required_withholding_from(
+        folded,
+        &mut evaluator,
+        &crate::minute_gaps::Admission::pairs(days),
+    )
         .map_err(|missing| {
             format!(
                 "{} signal bar(s) across {} IST day(s) have no eligible stored 1day record strictly before them. Same-day OHLCV and signal-rung reconstruction were not substituted",
@@ -4149,7 +4258,7 @@ impl StoredMonthInputs {
             days: self
                 .minute_gaps
                 .as_ref()
-                .map_or(&[], crate::minute_gaps::GapExclusion::day_numbers),
+                .map_or(&[], crate::minute_gaps::GapExclusion::cuts),
             swept: &self.loaded.bars,
         }
     }
@@ -4351,11 +4460,13 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
     // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS. p11num-1, D-1781: the whole
     // month is kept beside the swept slice, because the column is folded over
     // it and the daily context must anchor every bar the fold steps.
-    let (withheld, folded) = if holed_days.is_empty() {
-        (0, None)
+    // CAUSAL (policy 4): each holed day keeps its rows wholly before its
+    // first hole and withholds the rest (lookahead-oos-1).
+    let folded = if holed_days.is_empty() {
+        None
     } else {
-        let (kept, withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
-        (withheld, Some(std::mem::replace(&mut loaded.bars, kept)))
+        let (kept, _withheld) = crate::minute_gaps::withhold(&loaded.bars, &holed_days);
+        Some(std::mem::replace(&mut loaded.bars, kept))
     };
     if loaded.bars.is_empty() {
         return Err("every signal session has a minute gap; no sweepable bars remain".to_owned());
@@ -4377,10 +4488,11 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
     // WHAT LEFT WHICH SERIES. On `1min` the withheld bars were the execution
     // minutes as well, and the exclusion must not say "no minute bar was
     // removed" of a series that lost a day.
+    let whole = folded.as_deref().unwrap_or(&loaded.bars);
     let minute_gaps = if execution_bars.is_none() {
-        crate::minute_gaps::GapExclusion::one_series(holed_days, withheld)
+        crate::minute_gaps::GapExclusion::one_series(&holed_days, whole)
     } else {
-        crate::minute_gaps::GapExclusion::signal_only(holed_days, withheld)
+        crate::minute_gaps::GapExclusion::signal_only(&holed_days, whole)
     };
     Ok(StoredMonthInputs {
         loaded,
@@ -4557,7 +4669,16 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
-    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    // THE WHOLE LOADED MONTH, NOT THE SWEPT SLICE, and the session held before
+    // it: a session's last held bar is its close, and the move into the
+    // month's first session is measured (corp-8).
+    out.push_str(&stored::overnight_note(
+        &root,
+        loaded.vendor,
+        &loaded.key,
+        loaded.timeframe,
+        inputs.folded.as_deref().unwrap_or(&loaded.bars),
+    ));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4577,9 +4698,9 @@ fn stored_month_kernel(
     if let Some(gaps) = minute_gaps.as_ref().filter(|gaps| gaps.signal_bars() > 0) {
         let _ = writeln!(
             out,
-            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. The sweep uses the remaining {} signal bars.",
+            "MINUTE-GAP SESSIONS WITHHELD: {} signal bar(s); IST dates: {}. Each day is cut at its first hole (policy 4): rows wholly before it are swept, rows from it on are not. The sweep uses the remaining {} signal bars.",
             gaps.signal_bars(),
-            gaps.day_names().join(" "),
+            gaps.day_names().join("; "),
             loaded.bars.len(),
         );
     }
@@ -4894,7 +5015,7 @@ fn auto_stored_inner(
 /// anchored on them; only the swept rows leave (p11num-1, D-1781).
 fn fold_whole_sweep_without(
     bars: &mut Vec<indicators::Candle>,
-    holed_days: &[i64],
+    holed_days: &[crate::minute_gaps::Cut],
 ) -> Vec<indicators::Candle> {
     let folded = bars.clone();
     if !holed_days.is_empty() {
@@ -5015,7 +5136,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
-    out.push_str(&stored::overnight_note(&span.key, &span.bars));
+    out.push_str(&span_head_notes(root, &span, &folded, &holed_days));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -7230,7 +7351,13 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     );
     // D-1540: the month banner names the largest overnight move of a stock's
     // bars, where `month_banner` itself sees only their count.
-    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
+    header.push_str(&stored::overnight_note(
+        &root,
+        loaded.vendor,
+        &loaded.key,
+        loaded.timeframe,
+        &loaded.bars,
+    ));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -7442,15 +7569,27 @@ fn execution_rung_line(rung: &str) -> String {
 /// Split out of [`audit_range_inner`] to keep it under
 /// `clippy::too_many_lines`. It is one idea: what this run was over, said
 /// before any figure computed from it.
+///
+/// `folded` is the whole loaded series the overnight line reads (corp-8):
+/// a door that withheld rows passes its fold, so a session's last held bar is
+/// its close; one that withheld nothing passes `span.bars`.
 fn span_banner(
+    root: &std::path::Path,
     span: &stored::Span,
+    folded: &[indicators::Candle],
     underlying: &str,
     from: (u16, u8),
     to: (u16, u8),
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
-    header.push_str(&stored::overnight_note(&span.key, &span.bars));
+    header.push_str(&stored::overnight_note(
+        root,
+        span.vendor,
+        &span.key,
+        span.timeframe,
+        folded,
+    ));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7748,14 +7887,14 @@ struct AuditInputs {
     execution_bars: Option<stored::Span>,
     column: Column,
     exact_minute: stored::ExactMinuteContext,
-    unsourceable: Vec<i64>,
+    unsourceable: Vec<crate::minute_gaps::Cut>,
     daily: stored::DailyContext,
     executed_digest: [u8; 32],
     /// The whole signal span the column was folded over. p11num-1, D-1781.
     folded: Vec<indicators::Candle>,
-    /// Every day withheld from the sweep: the holed days, then any day the
-    /// overlay could not source.
-    withheld_days: Vec<i64>,
+    /// Every day cut from the sweep: the holed days, then any day the
+    /// overlay could not source, each with its causal cut (policy 4).
+    withheld_days: Vec<crate::minute_gaps::Cut>,
 }
 
 /// The inputs of the last stored range audit, or its refusal, and the raw
@@ -7958,6 +8097,7 @@ fn load_audit_inputs(
         underlying,
         (from, to),
         &mut span.bars,
+        signal_length,
     )?;
     let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
 
@@ -8149,7 +8289,8 @@ fn audit_range_kernel_cached(
         feed: span.vendor.as_str(),
     });
 
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(&root, span, folded, underlying, from, to, commit);
+    header.push_str(&minute_gap_line(folded, withheld_days));
     // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
     //
     // A sweep whose sample is smaller than the operator asked for must say so
@@ -8161,13 +8302,13 @@ fn audit_range_kernel_cached(
             header,
             "  EXACT-MINUTE HOLES  {} day(s) withheld -- no stored 1min bar ended \
              at a signal bar's close on them, so those days were DECLINED rather \
-             than answered with a neighbouring minute. IST days: {}",
+             than answered with a neighbouring minute. Cut: {}",
             unsourceable.len(),
             unsourceable
                 .iter()
-                .map(ToString::to_string)
+                .map(crate::minute_gaps::describe)
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join("; ")
         );
         note(
             &telemetry::Event::info("cli.audit", "exact-minute days withheld")
@@ -8513,7 +8654,7 @@ fn best_complete_line(best: Option<&crate::results::Record>) -> String {
     };
     format!(
         "  BEST COMPLETE RUN: {} {} {} {}-{:02}..{}-{:02} at min_hits {} -- {} \
-         worst-case over {} trades.\n  Ranked on the WORST-case total, \
+         worst-case over {} trades.\n  run {} finished {} IST.\n  Ranked on the WORST-case total, \
          which is the figure every other surface selects on. Halted rows are \
          excluded: a truncated ladder's total is not comparable with a complete \
          one's.\n",
@@ -8527,6 +8668,8 @@ fn best_complete_line(best: Option<&crate::results::Record>) -> String {
         best.min_hits,
         rupees(best.pessimistic),
         best.trades,
+        identity_prefix(&best.identity),
+        finished_ist(best.finished_micros),
     )
 }
 
@@ -9426,6 +9569,15 @@ fn results_table(out: &mut String, rows: &[crate::results::Record]) {
             vec![
                 crate::results::read_field(&record.feed),
                 crate::results::read_field(&record.timeframe),
+                // WHICH RUN THIS IS. The row printed feed, rung and figures
+                // only, so forty months of one instrument printed forty
+                // identical lines and a stale row and a current one for one
+                // month could not be told apart (repro-5). The instrument, the
+                // span, the bars swept, the identity's prefix and the finish
+                // time make two distinct runs two distinct lines.
+                crate::results::read_field(&record.underlying),
+                ledger_span(record),
+                grouped(record.bars),
                 // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing
                 // did not print it. An operator asking "how many combinations
                 // did this actually weigh" had no answer on this surface at all
@@ -9438,6 +9590,8 @@ fn results_table(out: &mut String, rows: &[crate::results::Record]) {
                 rupees(record.pessimistic),
                 rupees(record.optimistic),
                 record.trades.to_string(),
+                identity_prefix(&record.identity),
+                finished_ist(record.finished_micros),
             ]
         })
         .collect();
@@ -9445,6 +9599,9 @@ fn results_table(out: &mut String, rows: &[crate::results::Record]) {
         &[
             left(9),
             left(8),
+            left(12),
+            left(17),
+            right(12),
             right(16),
             right(16),
             right(7),
@@ -9453,10 +9610,15 @@ fn results_table(out: &mut String, rows: &[crate::results::Record]) {
             right(17),
             right(17),
             right(9),
+            left(12),
+            left(20),
         ],
         &[
             "feed",
             "rung",
+            "underlying",
+            "span",
+            "bars",
             "COMBINATIONS",
             "min_hits",
             "months",
@@ -9465,12 +9627,61 @@ fn results_table(out: &mut String, rows: &[crate::results::Record]) {
             "worst",
             "best",
             "trades",
+            "identity",
+            "finished (IST)",
         ],
         body,
     );
     for line in std::iter::once(&laid.header).chain(&laid.rows) {
         let _ = writeln!(out, "  {line}");
     }
+}
+
+#[cfg(test)]
+#[path = "results_line_tests.rs"]
+mod results_line_tests;
+
+/// A ledger row's span as `YYYY-MM`, or `YYYY-MM..YYYY-MM` when it covers
+/// more than one month. repro-5.
+fn ledger_span(record: &crate::results::Record) -> String {
+    let from = format!("{}-{:02}", record.from_year, record.from_month);
+    if (record.from_year, record.from_month) == (record.to_year, record.to_month) {
+        from
+    } else {
+        format!("{from}..{}-{:02}", record.to_year, record.to_month)
+    }
+}
+
+/// The first twelve hex characters of a run identity: enough to tell two
+/// runs apart on one page; the whole identity is `/backtest.json`'s. repro-5.
+fn identity_prefix(identity: &[u8; 32]) -> String {
+    identity_hex(identity).chars().take(12).collect()
+}
+
+/// A ledger row's finish time, in IST to the second. A stamp the calendar
+/// cannot place is printed as its raw microseconds rather than dropped, so a
+/// damaged row is still told apart from its neighbours. repro-5.
+///
+/// A zero or negative stamp is not a finish time (zero is an unset field): it printed as
+/// 1970-01-01 05:30:00, which dates a row that never recorded a finish. It is
+/// printed raw (AH-01 repair round 1).
+fn finished_ist(micros: i64) -> String {
+    if micros <= 0 {
+        return format!("{micros} us");
+    }
+    pull::session::IstMoment::from_epoch_secs(micros.div_euclid(1_000_000)).map_or_else(
+        |_| format!("{micros} us"),
+        |moment| {
+            let minute = moment.minute_of_day();
+            format!(
+                "{} {:02}:{:02}:{:02}",
+                moment.day(),
+                minute / 60,
+                minute % 60,
+                moment.second_of_minute()
+            )
+        },
+    )
 }
 
 /// The same read-only listing against a caller-owned root.
@@ -15667,7 +15878,7 @@ fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -
         // FOLDED WHOLE: a day withheld below leaves the sweep, not the fold.
         // D-1781.
         let folded = span.bars.clone();
-        let mut withheld_days: Vec<i64> = Vec::new();
+        let mut withheld_days: Vec<crate::minute_gaps::Cut> = Vec::new();
         let (column, digest) = match column_withholding_unsourceable_days(
             &root,
             vendor,
@@ -16550,11 +16761,21 @@ fn nothing_measured(text: &str) -> bool {
 ///
 /// Matched on the verdict row itself, the way [`nothing_measured`] is, so the
 /// phrase in prose cannot trip it.
+///
+/// # The FIRST word after the label, not the whole rest of the row
+///
+/// The ranked verdict (`runner::report::verdict_ranked`) prints `NO` and then,
+/// for a walk that halted, the note `closure is incomplete on the halted
+/// frontier` in the same row. Comparing the whole trimmed rest with `NO`
+/// missed exactly that case, so a halted `sweep-stored` walk was not
+/// untrustworthy here while its evidence said `halted` (repro-2). The first
+/// whitespace-separated word is the verdict cell; `NO,` in prose is still not
+/// it.
 fn untrustworthy(text: &str) -> bool {
     text.lines().any(|line| {
         line.trim_start()
             .strip_prefix("trustworthy as a whole answer")
-            .is_some_and(|rest| rest.trim() == "NO")
+            .is_some_and(|rest| rest.split_whitespace().next() == Some("NO"))
     })
 }
 
@@ -18174,7 +18395,7 @@ struct ScreenInputs {
     span: stored::Span,
     signal_length: i64,
     execution_bars: Option<stored::Span>,
-    holed_days: Vec<i64>,
+    holed_days: Vec<crate::minute_gaps::Cut>,
     withheld: u64,
     /// The whole signal span the column was folded over, holed days included.
     /// p11num-1, D-1781.
@@ -18482,21 +18703,16 @@ fn screen_range_kernel_cached(
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header = span_banner(span, underlying, from, to, commit);
+    let mut header = span_banner(&root, span, folded, underlying, from, to, commit);
     if withheld > 0 {
-        let dates = holed_days
+        let dates = crate::minute_gaps::counted(folded, holed_days)
             .iter()
-            .map(|day| {
-                u32::try_from(*day)
-                    .ok()
-                    .and_then(|days| pull::session::Day::from_days(days).ok())
-                    .map_or_else(|| day.to_string(), |date| date.to_string())
-            })
+            .map(crate::minute_gaps::describe)
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("; ");
         let _ = writeln!(
             header,
-            "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {dates}. Support uses the {can_hit} swept bar(s) of the remaining {} signal bars.",
+            "MINUTE-GAP SESSIONS WITHHELD: {withheld} signal bar(s); IST dates: {dates}. Each day is cut at its first hole (policy 4): rows wholly before it are swept, rows from it on are not. Support uses the {can_hit} swept bar(s) of the remaining {} signal bars.",
             span.bars.len(),
         );
     }
@@ -18781,7 +18997,7 @@ struct StoredReplay<'a> {
     /// column was: through every withheld bar, with rows only for the
     /// window's own swept bars. Rebuilding a window from the swept slice alone
     /// would splice its withheld days back out, and only inside validation.
-    withheld: Option<(&'a [indicators::Candle], &'a [i64])>,
+    withheld: Option<(&'a [indicators::Candle], &'a [crate::minute_gaps::Cut])>,
 }
 
 impl StoredReplay<'_> {
@@ -18817,18 +19033,18 @@ impl StoredReplay<'_> {
 /// rule 6).
 fn window_withholding<'a>(
     folded: &'a [indicators::Candle],
-    days: &'a [i64],
+    days: &'a [crate::minute_gaps::Cut],
     slice: &'a [indicators::Candle],
 ) -> Withholding<'a> {
     let (Some(first), Some(last)) = (slice.first(), slice.last()) else {
         return Withholding::none(slice);
     };
-    let held: std::collections::HashSet<i64> = days.iter().copied().collect();
+    let held = crate::minute_gaps::Admission::of(days);
     // `after_kept` is one past the last swept bar seen before the window, so
     // the withheld bars between it and the window's first bar are folded in.
     let (mut after_kept, mut start, mut end) = (0_usize, None, 0_usize);
     for (index, bar) in folded.iter().enumerate() {
-        if held.contains(&indicators::ist_day(bar.ts_micros)) {
+        if !held.admits(bar.ts_micros) {
             continue;
         }
         if bar.ts_micros > last.ts_micros {

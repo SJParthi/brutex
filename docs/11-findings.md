@@ -942,3 +942,37 @@ numbers are given beside this branch's.
   `LTI`) both claim `LTIXYZCE`; a fixed owner needs a fixed universe of names,
   which D-2815 chose not to have. A tick-store index or raw block is decoded up
   to the length its footer or entry states, which no sourced fact bounds.
+
+### Attack run 2026-10-14, AH-01 (stored sweep doors) — dispositions — 2026-10-16
+
+One row is added, for lookahead-oos-1, because it breaks a written rule
+(`CLAUDE.md` §3 rule 7); the other five are narrative only. Each finding was
+confirmed by two skeptics; their corrections are applied.
+
+| ID | Sev | Finding | Where | Disposition |
+|---|---|---|---|---|
+| `lookahead-oos-1` | `law` | Minute-gap withholding dropped every row of a holed session, so a row's existence depended on minutes after it; and, found by AH-01's first re-check, a day missing its 09:15 minute was never holed, so policy 4 admitted the rows after that hole (82 real Zerodha share-days, 1,155 rows) | `crates/cli/src/minute_gaps.rs` `first_interior_holes`, `days_with_minute_holes`, `withhold` | `IN PROGRESS` — fixed on `fix/db-AH-01` (minute-gap policy 4, the leading hole cut at the session's first minute in repair round 1), with tests proved to fail against the pre-fix code; becomes `FIXED <sha>` when it lands on `feat/db-fix`. re-measured after the repair: 1,493 real Zerodha share-days lack their open minute (132 inside the calendar, 1,361 outside it) and none of their rows is admitted. D-4981, AH1-01..AH1-05, AH1-12..AH1-15, AH1-17, L-AH1-01, L-AH1-11, L-AH1-12 |
+
+- **lookahead-oos-1: minute-gap withholding read minutes after the row.**
+  `minute_gaps::days_with_minute_holes` plus `withhold` dropped every row of a
+  session with any interior hole or missing closing minute, so a 10:00 row
+  disappeared because of a 14:02 vendor hole: look-ahead in which rows exist
+  (`CLAUDE.md` §3 rule 7 as D-0943, D-1182 and D-1514 read it), recorded
+  nowhere. The skeptics found the bias claim overstated (the removed rows are
+  not enriched in large movers). FIXED by the AH-01 change (`fix/db-AH-01`, pending merge): a holed
+  day is cut at its first hole and every row wholly before it is admitted,
+  minute-gap policy 4. D-4981, AH1-01..AH1-05, L-AH1-01.
+- **g-zerodha-universe-census-3: frozen bars inside both March 2020 halts were
+  swept.** FIXED by the AH-01 change: a recorded halt is a hole from its
+  first whole minute, `pull::calendar::HALTS` the one authority. D-4981,
+  AH1-03.
+- **repro-2: a halted `sweep-stored` walk exited 0 and was logged
+  completed.** FIXED by the AH-01 change. D-4982, AH1-06; the API's
+  in-process path is L-AH1-06.
+- **g-zerodha-universe-census-2: `sweep-all` called a month that swept no bar
+  a CEILING stop.** FIXED by the AH-01 change. D-4983, AH1-07, AH1-08.
+- **repro-5: distinct runs printed identical `cli results` lines.** FIXED
+  by the AH-01 change. D-4985, AH1-09.
+- **corp-8: the overnight line could not see the move into a slice's first
+  session**, and corp-2's line half (a zero-volume open printed as a move). FIXED
+  by the AH-01 change. D-4984, AH1-10, AH1-11.

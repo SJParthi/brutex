@@ -46,7 +46,9 @@ fn banners(underlying: &str) -> [(&'static str, String); 6] {
         (
             "audit-range",
             span_banner(
+                std::path::Path::new("/nonexistent-generated-store"),
                 &span(underlying),
+                &[],
                 underlying,
                 (2025, 1),
                 (2025, 6),

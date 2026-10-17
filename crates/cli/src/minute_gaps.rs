@@ -74,7 +74,7 @@
 //! (`indicators::column::AnchoredColumn::build_required_withholding`). The
 //! state a later day starts from is the fold of every bar the store holds,
 //! the holed day's included -- with its missing minute still missing, because
-//! nothing reconstructs it. [`MINUTE_GAP_POLICY`] is 2 from D-1781, and every
+//! nothing reconstructs it. [`MINUTE_GAP_POLICY`] was 2 from D-1781 (now 4), and every
 //! withholding door binds the withheld days into its data term with
 //! [`bind_withheld`], so no run made under the splice shares an identity with
 //! one made under the fold on a span that withheld a day.
@@ -123,33 +123,51 @@ use indicators::Candle;
 /// combined computation its own number so neither version-2 run shares it.
 /// Earlier runs keep their recorded identities and stay valid under them
 /// (`CLAUDE.md` §3 rule 8); they are not this computation.
-pub const MINUTE_GAP_POLICY: u32 = 3;
+///
+/// # Version 4 (lookahead-oos-1, g-zerodha-universe-census-3)
+///
+/// Versions 1 to 3 withheld EVERY row of a holed session, so a 10:00 row
+/// disappeared because the vendor lost a minute at 14:02: which rows exist
+/// depended on minutes after them, the look-ahead `CLAUDE.md` §3 rule 7 forbids
+/// (as D-0943, D-1182 and D-1514 read it). Version 4 is causal: a holed day
+/// is CUT at its first hole -- the first missing minute, the first signal
+/// bucket whose demanded closing minute is absent, or the start of a recorded
+/// halt ([`pull::calendar::halt_on`], the one authority) -- and every row
+/// whose bucket lies wholly before the cut is admitted, while every row from
+/// it to the session end is withheld. The fold stays whole (D-1781).
+/// [`bind_withheld`] binds each day's cut, so no version-3 run shares an
+/// identity with a version-4 run that withheld anything.
+pub const MINUTE_GAP_POLICY: u32 = 4;
 
-/// Bind the days a door withheld into its data term. D-1781.
+/// Bind the cuts a door applied into its data term. D-1781, version 4.
 ///
 /// Since D-1781 a withholding door digests the WHOLE folded signal series,
-/// so the withheld days no longer leave a mark on its data term by being
+/// so the withheld rows no longer leave a mark on its data term by being
 /// absent from it. This puts them back, with the rule's version: a holed
-/// span's term is `blake3(tag ‖ MINUTE_GAP_POLICY ‖ digest ‖ count ‖ days)`,
-/// and two runs that withheld different days, or the same days under a
-/// different rule, cannot share it.
+/// span's term is `blake3(tag ‖ MINUTE_GAP_POLICY ‖ digest ‖ count ‖ cuts)`,
+/// each cut its day, its cut instant, its first withheld bar-open and its
+/// cause, so two runs that cut different days, or one day at different
+/// instants, or under a different rule, cannot share it.
 ///
 /// A span that withheld nothing returns `digest` unchanged. Its column is the
 /// same fold under either version -- nothing was cut and nothing is left out
 /// -- so its data term has nothing new to say; `sweep-stored`, which binds the
 /// version as a params term of its own (`stored_month_params`), still moves.
 #[must_use]
-pub fn bind_withheld(digest: [u8; 32], days: &[i64]) -> [u8; 32] {
-    if days.is_empty() {
+pub fn bind_withheld(digest: [u8; 32], cuts: &[Cut]) -> [u8; 32] {
+    if cuts.is_empty() {
         return digest;
     }
     let mut hash = brutex_core::blake3::Hasher::new();
-    hash.update(b"brutex-minute-gap-withheld-days\0");
+    hash.update(b"brutex-minute-gap-causal-cuts\0");
     hash.update(&MINUTE_GAP_POLICY.to_le_bytes());
     hash.update(&digest);
-    hash.update(&u64::try_from(days.len()).unwrap_or(u64::MAX).to_le_bytes());
-    for day in days {
-        hash.update(&day.to_le_bytes());
+    hash.update(&u64::try_from(cuts.len()).unwrap_or(u64::MAX).to_le_bytes());
+    for cut in cuts {
+        hash.update(&cut.day.to_le_bytes());
+        hash.update(&cut.at_micros.to_le_bytes());
+        hash.update(&cut.from_micros.to_le_bytes());
+        hash.update(&[cut.cause.code()]);
     }
     hash.finalize()
 }
@@ -157,14 +175,147 @@ pub fn bind_withheld(digest: [u8; 32], days: &[i64]) -> [u8; 32] {
 /// One minute, in microseconds.
 const MINUTE_MICROS: i64 = 60_000_000;
 
-/// Which days a run withheld for a minute gap, and what they cost it.
+/// One day, in microseconds.
+const DAY_MICROS: i64 = 86_400_000_000;
+
+/// What cut a holed day where it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CutCause {
+    /// A minute the series skips inside the session: the first missing one.
+    Hole,
+    /// A signal bucket whose demanded closing minute
+    /// ([`indicators::anchored::exact_closing_minute`]) is not held.
+    ClosingMinute,
+    /// A recorded market-wide halt ([`pull::calendar::HALTS`]): from the first
+    /// whole halted minute, whatever bars the feed served in it.
+    Halt,
+    /// The exact-minute overlay could not source a minute the census did not
+    /// foresee: the retry loops' defence, cut at the minute the refusal named.
+    Unsourceable,
+}
+
+impl CutCause {
+    /// The word a report prints for it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Hole => "minute hole",
+            Self::ClosingMinute => "closing minute absent",
+            Self::Halt => "halt",
+            Self::Unsourceable => "unsourceable minute",
+        }
+    }
+
+    /// Its byte in [`bind_withheld`].
+    const fn code(self) -> u8 {
+        match self {
+            Self::Hole => 1,
+            Self::ClosingMinute => 2,
+            Self::Halt => 3,
+            Self::Unsourceable => 4,
+        }
+    }
+}
+
+/// One holed day and where it is cut: rows whose bucket lies wholly before
+/// [`Self::at_micros`] are admitted, every later row of the day is withheld.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Cut {
+    /// The IST day ([`indicators::ist_day`]).
+    pub day: i64,
+    /// The cut instant: the first missing minute's open, the demanded closing
+    /// minute that is absent, or the halt's first whole minute.
+    pub at_micros: i64,
+    /// The first signal-bar open this rung withholds: `at - length + 1`, so a
+    /// bar is withheld exactly when its bucket reaches past the cut.
+    pub from_micros: i64,
+    /// Why the day is cut.
+    pub cause: CutCause,
+    /// Rows of this day admitted before the cut (filled by [`counted`]).
+    pub admitted: u64,
+    /// Rows of this day withheld from the cut on (filled by [`counted`]).
+    pub withheld: u64,
+}
+
+impl Cut {
+    /// The cut of `day` at `at_micros` for a rung of `signal_length_micros`.
+    #[must_use]
+    pub const fn new(day: i64, at_micros: i64, cause: CutCause, signal_length_micros: i64) -> Self {
+        Self {
+            day,
+            at_micros,
+            from_micros: at_micros
+                .saturating_sub(signal_length_micros)
+                .saturating_add(1),
+            cause,
+            admitted: 0,
+            withheld: 0,
+        }
+    }
+
+    /// Whether this cut withholds the signal bar opening at `ts_micros`.
+    #[must_use]
+    pub fn withholds(&self, ts_micros: i64) -> bool {
+        indicators::ist_day(ts_micros) == self.day && ts_micros >= self.from_micros
+    }
+
+    /// `HH:MM` IST of the cut instant.
+    #[must_use]
+    pub fn clock(&self) -> String {
+        let minute = self
+            .at_micros
+            .saturating_add(indicators::IST_OFFSET_MICROS)
+            .rem_euclid(DAY_MICROS)
+            / MINUTE_MICROS;
+        format!("{:02}:{:02}", minute / 60, minute % 60)
+    }
+}
+
+/// The admission rule of a list of cuts, as one O(1) probe per bar: a map from
+/// each cut day to its first withheld bar-open. Built once per span.
+#[derive(Clone, Debug, Default)]
+pub struct Admission {
+    from: std::collections::HashMap<i64, i64>,
+}
+
+impl Admission {
+    /// The rule `cuts` describe. A day cut twice keeps its EARLIER cut.
+    #[must_use]
+    pub fn of(cuts: &[Cut]) -> Self {
+        let mut from = std::collections::HashMap::with_capacity(cuts.len());
+        for cut in cuts {
+            from.entry(cut.day)
+                .and_modify(|held: &mut i64| *held = (*held).min(cut.from_micros))
+                .or_insert(cut.from_micros);
+        }
+        Self { from }
+    }
+
+    /// Whether the signal bar opening at `ts_micros` is admitted.
+    #[must_use]
+    pub fn admits(&self, ts_micros: i64) -> bool {
+        self.from.is_empty()
+            || self
+                .from
+                .get(&indicators::ist_day(ts_micros))
+                .is_none_or(|from| ts_micros < *from)
+    }
+
+    /// The `(day, first withheld bar-open)` pairs the indicator fold takes.
+    #[must_use]
+    pub fn pairs(cuts: &[Cut]) -> Vec<(i64, i64)> {
+        cuts.iter().map(|cut| (cut.day, cut.from_micros)).collect()
+    }
+}
+
+/// Which days a run cut for a minute gap or a halt, and what they cost it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GapExclusion {
-    /// IST days withheld, ascending. Empty on a gap-free span.
-    days: Vec<i64>,
-    /// Signal bars removed.
+    /// The cuts, ascending by day, each counted over the folded series.
+    cuts: Vec<Cut>,
+    /// Signal bars withheld.
     signal_bars: u64,
-    /// Exact one-minute bars removed.
+    /// Exact one-minute bars withheld.
     minute_bars: u64,
 }
 
@@ -173,57 +324,56 @@ impl GapExclusion {
     #[must_use]
     pub const fn none() -> Self {
         Self {
-            days: Vec::new(),
+            cuts: Vec::new(),
             signal_bars: 0,
             minute_bars: 0,
         }
     }
 
     /// What a door that withholds from its SIGNAL bars alone removed, on a
-    /// coarse rung. D-0694.
+    /// coarse rung, counted over `folded`. D-0694.
     ///
-    /// `sweep-stored`, like `auto-stored`, `audit-range`, `screen` and `pool`,
-    /// removes the holed `days` from the signal series with [`withhold`]. On a
-    /// coarse rung it leaves its separately loaded execution minutes whole:
-    /// with no signal bar on a withheld day, none of that day's minutes is
-    /// ever looked up. So no minute bar was removed, and this says so rather
-    /// than counting one. On `1min` there is no separate series, and
+    /// On a coarse rung the separately loaded execution minutes stay whole:
+    /// no signal row exists from a cut on, so none of those minutes is
+    /// looked up for an entry. So no minute bar was removed, and this says so
+    /// rather than counting one. On `1min` there is no separate series, and
     /// [`Self::one_series`] is the answer.
     #[must_use]
-    pub const fn signal_only(days: Vec<i64>, signal_bars: u64) -> Self {
+    pub fn signal_only(cuts: &[Cut], folded: &[Candle]) -> Self {
+        let cuts = counted(folded, cuts);
+        let signal_bars = cuts.iter().map(|cut| cut.withheld).sum();
         Self {
-            days,
+            cuts,
             signal_bars,
             minute_bars: 0,
         }
     }
 
     /// What a door removed from a series that is both its signal and its
-    /// execution: the `1min` rung. D-0694.
-    ///
-    /// There the signal bars ARE the one-minute execution bars, so every bar
-    /// [`withhold`] removed is a minute bar too, and the day leaves the
-    /// execution as well. [`Self::signal_only`] recorded zero minute bars
-    /// here, which said the execution minutes stayed whole when they did not.
+    /// execution: the `1min` rung, counted over `folded`. D-0694.
     #[must_use]
-    pub const fn one_series(days: Vec<i64>, bars: u64) -> Self {
-        Self {
-            days,
-            signal_bars: bars,
-            minute_bars: bars,
-        }
+    pub fn one_series(cuts: &[Cut], folded: &[Candle]) -> Self {
+        let mut exclusion = Self::signal_only(cuts, folded);
+        exclusion.minute_bars = exclusion.signal_bars;
+        exclusion
     }
 
-    /// How many days were withheld.
+    /// How many days were cut.
     #[must_use]
     pub fn days(&self) -> usize {
-        self.days.len()
+        self.cuts.len()
     }
 
-    /// The withheld IST days, ascending.
+    /// The cut IST days, ascending.
     #[must_use]
-    pub fn day_numbers(&self) -> &[i64] {
-        &self.days
+    pub fn day_numbers(&self) -> Vec<i64> {
+        self.cuts.iter().map(|cut| cut.day).collect()
+    }
+
+    /// The cuts, ascending by day, counted.
+    #[must_use]
+    pub fn cuts(&self) -> &[Cut] {
+        &self.cuts
     }
 
     /// Signal bars removed.
@@ -241,10 +391,11 @@ impl GapExclusion {
     /// Whether this run withheld nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.days.is_empty()
+        self.cuts.is_empty()
     }
 
-    /// The withheld days as `YYYY-MM-DD`, ascending.
+    /// Each cut day as `YYYY-MM-DD from HH:MM (cause): A admitted before, W
+    /// withheld`, ascending.
     ///
     /// Named and not merely counted, for the reason `CLAUDE.md` §3 rule 2
     /// gives: an operator reading "twelve days were withheld" cannot check that
@@ -252,96 +403,240 @@ impl GapExclusion {
     /// number rather than being dropped.
     #[must_use]
     pub fn day_names(&self) -> Vec<String> {
-        self.days
-            .iter()
-            .map(|day| {
-                u32::try_from(*day)
-                    .ok()
-                    .and_then(|days| pull::session::Day::from_days(days).ok())
-                    .map_or_else(|| day.to_string(), |date| date.to_string())
-            })
-            .collect()
+        self.cuts.iter().map(describe).collect()
     }
+}
+
+/// One cut as a report names it.
+#[must_use]
+pub fn describe(cut: &Cut) -> String {
+    format!(
+        "{} from {} ({}): {} admitted before, {} withheld",
+        date_of(cut.day),
+        cut.clock(),
+        cut.cause.word(),
+        cut.admitted,
+        cut.withheld
+    )
+}
+
+/// `YYYY-MM-DD`, or the raw day number when it will not convert.
+fn date_of(day: i64) -> String {
+    u32::try_from(day)
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .map_or_else(|| day.to_string(), |date| date.to_string())
+}
+
+/// The cut days, ascending.
+#[must_use]
+pub fn days_of(cuts: &[Cut]) -> Vec<i64> {
+    cuts.iter().map(|cut| cut.day).collect()
 }
 
 /// Days whose one-minute series skips a minute inside a session.
 ///
-/// A gap is a pair of ADJACENT bars on the SAME IST day more than one minute
-/// apart. The same-day test is what makes this a hole rather than a night: the
-/// step from 15:29 to the next morning's 09:15 is enormous and is not a fault.
+/// A gap is a minute the calendar's session expects and the series lacks:
+/// before the day's first held bar (a missing 09:15), or between two ADJACENT
+/// bars on the SAME IST day. The same-day test is what makes this a hole
+/// rather than a night: the step from 15:29 to the next morning's 09:15 is
+/// enormous and is not a fault. See [`first_interior_holes`].
 ///
 /// The result is ascending and holds each day once.
 #[must_use]
 pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
-    let mut days: Vec<i64> = Vec::new();
-    let mut previous: Option<&Candle> = None;
-    for bar in minutes {
-        if let Some(before) = previous {
-            let day = indicators::ist_day(bar.ts_micros);
-            let same_day = indicators::ist_day(before.ts_micros) == day;
-            let step = bar.ts_micros.saturating_sub(before.ts_micros);
-            if same_day && step > MINUTE_MICROS && days.last() != Some(&day) {
-                days.push(day);
-            }
-        }
-        previous = Some(bar);
-    }
-    // The scan visits bars in time order, so `days` is already ascending and
-    // `last() != day` suppressed the repeats. Sorting would be a second claim
-    // about an order the input already guarantees.
-    days
+    first_interior_holes(minutes)
+        .into_iter()
+        .map(|(day, _)| day)
+        .collect()
 }
 
-/// Days a stored span must withhold before its column is built: every day
-/// [`days_with_interior_gaps`] finds, and every day holding a signal bar whose
-/// closing minute the exact-minute overlay will demand and the minute stream
-/// does not hold. W2-cli9-3, D-1662.
+/// Each holed day once, with the open of its FIRST missing minute.
+///
+/// A minute is MISSING when the exchange calendar's session for its day
+/// ([`pull::calendar::kind_of`]) expects it and the series does not hold it.
+/// Two walks see that, in one pass:
+///
+/// - **The leading hole.** A day whose first held minute is later than its
+///   session's first minute is holed AT the session's first minute, so a day
+///   with no 09:15 bar is cut at 09:15 and every row of it is withheld on
+///   every rung. The interior walk below cannot see this: the step into a
+///   day's first bar comes from the previous night and fails its same-day
+///   test. Found by AH-01's first re-check (132 of 415,277 real Zerodha
+///   share-days lacked the open minute and were admitted after the hole).
+/// - **The interior hole.** Between two ADJACENT bars of the same IST day, the
+///   first minute the session expects after the earlier one, when it is
+///   before the later one. The same-day test keeps the step from 15:29 to the
+///   next morning's 09:15 from being a fault, and the calendar keeps the gap
+///   between a two-window session's windows (the disaster-recovery Saturdays,
+///   09:15-09:59 and 11:30-12:29) from being one: no minute in it is expected.
+///
+/// A traded day OUTSIDE the calendar's measured range ([`pull::calendar::FIRST_DAY`]
+/// 2019-12-02 to [`pull::calendar::LAST_DAY`] 2026-09-04, `Unmeasured`) holds
+/// bars, so it traded; it is held to the regular session
+/// ([`pull::calendar::Session::full`], 09:15-15:29), whose first minute it
+/// must hold. Zerodha's `1min` reaches back to 2018-01 and on to 2026-09-30, so
+/// without this a missing 09:15 before 2019-12 or after 2026-09-04 was never a
+/// hole. A special session there that began late would be withheld whole and
+/// named, never admitted after a hole (`docs/06-limits.md` L-AH1-11).
+///
+/// A day the calendar says was closed, or a session whose length was never
+/// measured (the five pre-2025 Muhurats), has no known first minute, so it
+/// gets no leading check, and its interior check is the rule the
+/// calendar-free walk always applied: any same-day step longer than a minute
+/// is a hole at the minute after the earlier bar.
+///
+/// The scan visits bars in time order, so the list is already ascending and a
+/// day's first hole is the earliest. A hole is revealed by the first bar after
+/// it, or by the calendar alone, and the cut is AT the hole, so no row before
+/// the hole depends on it. One `kind_of` per day (O(1), at most nine
+/// comparisons) and O(1) per bar.
+fn first_interior_holes(minutes: &[Candle]) -> Vec<(i64, i64)> {
+    let mut holes: Vec<(i64, i64)> = Vec::new();
+    let mut previous: Option<&Candle> = None;
+    // The day the walk is on and its calendar session, looked up once a day.
+    let mut session: Option<(i64, Option<pull::calendar::Session>)> = None;
+    for bar in minutes {
+        let day = indicators::ist_day(bar.ts_micros);
+        let earlier = previous
+            .filter(|before| indicators::ist_day(before.ts_micros) == day)
+            .map(|before| minute_of_day(before.ts_micros));
+        previous = Some(bar);
+        if holes.last().map(|hole| hole.0) == Some(day) {
+            continue;
+        }
+        let calendar = match session {
+            Some((held, calendar)) if held == day => calendar,
+            _ => {
+                let calendar = match pull::calendar::kind_of(day) {
+                    pull::calendar::DayKind::Open(open) => Some(open),
+                    pull::calendar::DayKind::Unmeasured => Some(pull::calendar::Session::full()),
+                    pull::calendar::DayKind::Closed
+                    | pull::calendar::DayKind::OpenLengthUnmeasured => None,
+                };
+                session = Some((day, calendar));
+                calendar
+            }
+        };
+        let minute = minute_of_day(bar.ts_micros);
+        // The first minute expected after the earlier bar (or the session's
+        // first minute, for the day's first bar). Without a calendar there is
+        // no first minute to expect, and the gap rule is the calendar-free one.
+        let expected = match calendar {
+            Some(open) => first_expected_after(open, earlier),
+            None => earlier.map(|before| before.saturating_add(1)),
+        };
+        if let Some(missing) = expected.filter(|next| *next < minute) {
+            holes.push((
+                day,
+                day_open_micros(day).saturating_add(missing.saturating_mul(MINUTE_MICROS)),
+            ));
+        }
+    }
+    holes
+}
+
+/// The IST minute of day `ts_micros` opens in.
+fn minute_of_day(ts_micros: i64) -> i64 {
+    ts_micros
+        .saturating_add(indicators::IST_OFFSET_MICROS)
+        .rem_euclid(DAY_MICROS)
+        / MINUTE_MICROS
+}
+
+/// The instant IST midnight opens `day`.
+fn day_open_micros(day: i64) -> i64 {
+    day.saturating_mul(DAY_MICROS)
+        .saturating_sub(indicators::IST_OFFSET_MICROS)
+}
+
+/// The first minute `session` expects strictly after `earlier`, or its very
+/// first minute when `earlier` is `None` (the day's first held bar). `None`
+/// when the session expects nothing later. At most [`pull::calendar::MAX_WINDOWS`]
+/// windows, so O(1).
+fn first_expected_after(session: pull::calendar::Session, earlier: Option<i64>) -> Option<i64> {
+    session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .find_map(|window| {
+            let (from, to) = (i64::from(window.from), i64::from(window.to));
+            let candidate = earlier.map_or(from, |before| from.max(before.saturating_add(1)));
+            (candidate <= to).then_some(candidate)
+        })
+}
+
+/// The cuts a stored span applies before its column is built: for each day,
+/// the EARLIEST of its first interior hole ([`days_with_interior_gaps`]'s
+/// walk), its first signal bar whose demanded closing minute the minute
+/// stream does not hold (W2-cli9-3, D-1662), and the start of a halt
+/// [`pull::calendar::halt_on`] records for it. Version 4 of
+/// [`MINUTE_GAP_POLICY`].
 ///
 /// # The holes the interior walk could not see
 ///
-/// The interior walk compares adjacent minutes on the SAME day, so a session
+/// The interior walk sees a day's missing first minute and every gap between
+/// adjacent minutes on the SAME day, so a session
 /// that stops early (15:25 to 15:29 missing) steps from its last minute to the
 /// next morning's 09:15, fails the same-day test, and is never flagged. A day
 /// holding signal bars and no minutes at all is invisible to it for the same
-/// reason. The overlay then refused `MissingClosingMinute` for that day's last
-/// bucket, `pool` and `screen` refused the whole span, and `audit-range` found
-/// the days one refusal at a time, reloading both contexts and rebuilding the
-/// column per day (W2-cli8-6).
-///
-/// # Asking the overlay's own question
-///
-/// For each signal bar this computes the minute
+/// reason. For each signal bar this computes the minute
 /// [`indicators::anchored::exact_closing_minute`] says the overlay will demand,
 /// with `session_close`, which every caller takes from
 /// [`crate::stored::session_close_for`] -- the same close the stored column
-/// passes the overlay, dated per day for a cash share (D-2102) -- and checks
-/// that exact stamp is held. So the census
-/// and the join cannot disagree about which day is unsourceable, the retry
-/// loops behind it become a defence, and a day the overlay would not refuse is
-/// not withheld: a `1min` rung whose session ends early has no signal bar
-/// demanding the missing minutes, and nothing here invents one.
+/// passes the overlay (D-2102) -- and checks that exact stamp is held. So the
+/// census and the join cannot disagree about which bucket is unsourceable, and
+/// the retry loops behind it become a defence.
+///
+/// # Recorded halts are holes from their start (census-3)
+///
+/// A feed may serve frozen or auction-indicative index minutes through a
+/// market-wide halt. They are not continuous trading, so every bucket that
+/// overlaps the halt's first whole minute is cut, whatever the minute stream
+/// holds. `HALTS` is the one authority; no second list exists here.
+/// 2021-02-24 never reaches this: the charter's non-regular days are withheld
+/// whole when the month is decoded (`indicators::evaluator::
+/// CHARTER_NON_REGULAR_IST_DAYS`).
+///
+/// # Causal
+///
+/// Every cut instant is read from minutes at or before itself (a hole is seen
+/// by the minute after it, and the cut is AT the hole), from the bar's own
+/// demanded minute, or from the calendar. Rows before the cut never depend on
+/// anything after it: the prefix property
+/// `minute_gaps_causal_tests::a_row_before_a_later_hole_is_admitted` checks.
 ///
 /// # Cost
 ///
-/// O(signal + minutes) for d flagged days: one interior pass, one cursor walk
-/// that only moves forward because the demanded minute is non-decreasing in
-/// signal order, one `kind_of` lookup per signal bar (bounded by
-/// `pull::calendar::MAX_WINDOWS`), and one O(d) merge of the two ascending
-/// flagged-day lists (no sort).
-/// **UNVERIFIED as a measured bound**; read off the source per `CLAUDE.md` §3
-/// rule 6.
+/// O(signal + minutes): one interior pass, one cursor walk that only moves
+/// forward because the demanded minute is non-decreasing in signal order, one
+/// `halt_on` (three entries) per signal day, and two O(d) merges of ascending
+/// per-day lists (no sort).
 #[must_use]
 pub fn days_with_minute_holes(
     signal: &[Candle],
     minutes: &[Candle],
     signal_length_micros: i64,
     session_close: impl Fn(i64) -> Option<u16>,
-) -> Vec<i64> {
-    let interior = days_with_interior_gaps(minutes);
-    let mut edges: Vec<i64> = Vec::new();
+) -> Vec<Cut> {
+    let interior: Vec<Cut> = first_interior_holes(minutes)
+        .into_iter()
+        .map(|(day, at)| Cut::new(day, at, CutCause::Hole, signal_length_micros))
+        .collect();
+    let mut edges: Vec<Cut> = Vec::new();
+    let mut halts: Vec<Cut> = Vec::new();
     let mut cursor = 0_usize;
+    let mut seen_day: Option<i64> = None;
     for bar in signal {
         let day = indicators::ist_day(bar.ts_micros);
+        if seen_day != Some(day) {
+            seen_day = Some(day);
+            if let Some(halt) = pull::calendar::halt_on(day) {
+                let start = day_open_micros(day)
+                    .saturating_add(i64::from(halt.halted.from).saturating_mul(MINUTE_MICROS));
+                halts.push(Cut::new(day, start, CutCause::Halt, signal_length_micros));
+            }
+        }
         let expected = indicators::anchored::exact_closing_minute(
             bar.ts_micros,
             signal_length_micros,
@@ -356,138 +651,195 @@ pub fn days_with_minute_holes(
         if minutes
             .get(cursor)
             .is_none_or(|minute| minute.ts_micros != expected)
-            && edges.last() != Some(&day)
+            && edges.last().map(|cut| cut.day) != Some(day)
         {
-            edges.push(day);
+            edges.push(Cut::new(
+                day,
+                expected,
+                CutCause::ClosingMinute,
+                signal_length_micros,
+            ));
         }
     }
-    merge_ascending(&interior, &edges)
+    merge_cuts(&merge_cuts(&interior, &edges), &halts)
 }
 
-/// The ascending union of two ascending day lists, each day once.
+/// The ascending union of two ascending per-day cut lists, each day once,
+/// keeping the EARLIER cut of a day both name. A tie keeps `left`'s, except
+/// that a recorded HALT wins it: a feed that lost its minutes from the halt's
+/// first whole minute is explained by the halt, and naming it a minute hole
+/// would send the operator to the vendor for an exchange event.
 ///
 /// Both inputs are built by a forward walk over time-ordered bars, so each is
 /// already ascending; a two-cursor merge keeps that order in O(a + b) without
 /// the sort gate 11 rule 4 refuses on this path.
-fn merge_ascending(left: &[i64], right: &[i64]) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::with_capacity(left.len().saturating_add(right.len()));
+fn merge_cuts(left: &[Cut], right: &[Cut]) -> Vec<Cut> {
+    let mut out: Vec<Cut> = Vec::with_capacity(left.len().saturating_add(right.len()));
     let (mut l, mut r) = (left.iter().peekable(), right.iter().peekable());
     loop {
         let next = match (l.peek(), r.peek()) {
-            (Some(&&a), Some(&&b)) if a <= b => l.next().copied(),
+            (Some(a), Some(b)) if a.day <= b.day => l.next().copied(),
             (Some(_) | None, Some(_)) => r.next().copied(),
             (Some(_), None) => l.next().copied(),
             (None, None) => break,
         };
-        if let Some(day) = next
-            && out.last() != Some(&day)
-        {
-            out.push(day);
+        if let Some(cut) = next {
+            match out.last_mut() {
+                Some(last) if last.day == cut.day => {
+                    if cut.at_micros < last.at_micros
+                        || (cut.at_micros == last.at_micros && cut.cause == CutCause::Halt)
+                    {
+                        *last = cut;
+                    }
+                }
+                _ => out.push(cut),
+            }
         }
     }
     out
 }
 
-/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
-/// Remove every bar falling on one of `days`, counting what went.
-///
-/// Returns the kept bars and the number removed.
-///
-/// # The membership test is a SET, and it was a slice scan
-///
-/// This read `days.contains(&ist_day(bar.ts_micros))` inside `for bar in bars`,
-/// justified by a measurement: *"twelve on the operator's whole 6.5-year span,
-/// so membership is a linear scan over a handful of `i64`, not a set."*
-///
-/// Twelve is what the operator's store happens to hold, not a bound.
-/// [`days_with_interior_gaps`] caps nothing — it appends a day for every
-/// interior hole it finds — so a feed with a hole in most sessions yields a
-/// `days` proportional to the span and the loop becomes `O(bars × days)`. On a
-/// 609,722-bar minute series a three-hundred-day list is 1.8 × 10⁸ compares,
-/// and nothing anywhere refuses that list.
-///
-/// A measurement is not a bound, and a comment saying "expected short" is not
-/// an argument that it must be. The set costs one allocation of the same
-/// handful of `i64` and removes the multiplication entirely, so the O(1)
-/// membership holds however many days are handed in.
-///
-/// `days` is still expected ascending; nothing here needs that, and nothing
-/// here breaks if it is not.
+/// Add `cut` to `cuts`, or move its day's cut EARLIER. Returns `false` when
+/// the day already holds a cut at or before it, which means withholding did
+/// not remove the bar that needed the minute: a different defect, and the
+/// retry loops refuse on it rather than spin. O(d) for d cut days.
 #[must_use]
-pub fn withhold(bars: &[Candle], days: &[i64]) -> (Vec<Candle>, u64) {
-    if days.is_empty() {
+pub fn tighten(cuts: &mut Vec<Cut>, cut: Cut) -> bool {
+    let at = cuts
+        .iter()
+        .position(|held| held.day >= cut.day)
+        .unwrap_or(cuts.len());
+    match cuts.get_mut(at) {
+        Some(held) if held.day == cut.day => {
+            if cut.from_micros < held.from_micros {
+                *held = cut;
+                true
+            } else {
+                false
+            }
+        }
+        _ => {
+            cuts.insert(at, cut);
+            true
+        }
+    }
+}
+
+/// Remove every signal bar a cut withholds, counting what went.
+///
+/// Returns the kept bars and the number removed. One [`Admission`] probe per
+/// bar: a hash lookup of the bar's day, O(1) however many days are cut, so the
+/// loop is O(bars) (the reasoning the old day SET gave, kept).
+#[must_use]
+pub fn withhold(bars: &[Candle], cuts: &[Cut]) -> (Vec<Candle>, u64) {
+    if cuts.is_empty() {
         return (bars.to_vec(), 0);
     }
-    let withheld: std::collections::HashSet<i64> = days.iter().copied().collect();
+    let admission = Admission::of(cuts);
     let mut kept: Vec<Candle> = Vec::with_capacity(bars.len());
     let mut removed = 0_u64;
     for bar in bars {
-        if withheld.contains(&indicators::ist_day(bar.ts_micros)) {
-            removed = removed.saturating_add(1);
-        } else {
+        if admission.admits(bar.ts_micros) {
             kept.push(*bar);
+        } else {
+            removed = removed.saturating_add(1);
         }
     }
     (kept, removed)
 }
 
-/// Withhold the holed days from a signal series and its exact-minute stream.
-///
-/// **Both slices are filtered by ONE measured day set, and that is the whole
-/// correctness argument.** The set is derived from the minute stream, because
-/// the minute stream is what the overlay indexes; filtering the signal by a
-/// different set would leave a signal bar whose closing minute had been removed,
-/// which is the refusal this exists to prevent, arriving by a new route.
+/// `cuts` with each day's rows admitted before and withheld after its cut,
+/// counted over `folded`. One pass with one hash probe per bar.
 #[must_use]
-pub fn withhold_holed_days(
-    signal: &[Candle],
-    minutes: &[Candle],
-) -> (Vec<Candle>, Vec<Candle>, GapExclusion) {
-    let days = days_with_interior_gaps(minutes);
-    if days.is_empty() {
-        return (signal.to_vec(), minutes.to_vec(), GapExclusion::none());
+pub fn counted(folded: &[Candle], cuts: &[Cut]) -> Vec<Cut> {
+    let mut out: Vec<Cut> = cuts.to_vec();
+    let index: std::collections::HashMap<i64, usize> = out
+        .iter()
+        .enumerate()
+        .map(|(position, cut)| (cut.day, position))
+        .collect();
+    for cut in &mut out {
+        cut.admitted = 0;
+        cut.withheld = 0;
     }
-    let (kept_signal, signal_bars) = withhold(signal, &days);
-    let (kept_minutes, minute_bars) = withhold(minutes, &days);
-    (
-        kept_signal,
-        kept_minutes,
-        GapExclusion {
-            days,
-            signal_bars,
-            minute_bars,
-        },
-    )
+    for bar in folded {
+        if let Some(&position) = index.get(&indicators::ist_day(bar.ts_micros))
+            && let Some(cut) = out.get_mut(position)
+        {
+            if bar.ts_micros >= cut.from_micros {
+                cut.withheld = cut.withheld.saturating_add(1);
+            } else {
+                cut.admitted = cut.admitted.saturating_add(1);
+            }
+        }
+    }
+    out
 }
+
+#[cfg(test)]
+#[path = "minute_gaps_causal_tests.rs"]
+mod causal_tests;
+
+#[cfg(test)]
+#[path = "minute_gaps_measure_tests.rs"]
+mod measure_tests;
 
 #[cfg(test)]
 mod tests {
 
-    /// `days_with_minute_holes` unions its two ascending lists by a merge, not
-    /// a sort (gate 11 rule 4, D-1662): ascending, each day once, nothing
-    /// dropped, on every interleaving including empty sides and full overlap.
+    /// `days_with_minute_holes` unions its ascending per-day lists by a merge,
+    /// not a sort (gate 11 rule 4, D-1662): ascending, each day once, the
+    /// EARLIER cut of a day both name, on every interleaving including empty
+    /// sides and full overlap.
     #[test]
     fn the_flagged_day_union_is_ascending_and_each_day_once() {
-        let merge = super::merge_ascending;
-        assert_eq!(merge(&[], &[]), Vec::<i64>::new());
-        assert_eq!(merge(&[3], &[]), vec![3]);
-        assert_eq!(merge(&[], &[3]), vec![3]);
-        assert_eq!(merge(&[1, 4, 9], &[2, 4, 10]), vec![1, 2, 4, 9, 10]);
-        assert_eq!(merge(&[5, 6], &[1, 2]), vec![1, 2, 5, 6]);
-        assert_eq!(merge(&[1, 2], &[5, 6]), vec![1, 2, 5, 6]);
-        assert_eq!(merge(&[7, 7], &[7]), vec![7]);
+        use super::{Cut, CutCause, merge_cuts};
+        let cut = |day: i64, at: i64| Cut::new(day, at, CutCause::Hole, 60_000_000);
+        let days = |cuts: &[Cut]| {
+            cuts.iter()
+                .map(|c| (c.day, c.at_micros))
+                .collect::<Vec<_>>()
+        };
+        assert!(merge_cuts(&[], &[]).is_empty());
+        assert_eq!(days(&merge_cuts(&[cut(3, 9)], &[])), vec![(3, 9)]);
+        assert_eq!(days(&merge_cuts(&[], &[cut(3, 9)])), vec![(3, 9)]);
         assert_eq!(
-            merge(&[i64::MIN, 0], &[0, i64::MAX]),
-            vec![i64::MIN, 0, i64::MAX]
+            days(&merge_cuts(
+                &[cut(1, 5), cut(4, 7), cut(9, 1)],
+                &[cut(2, 2), cut(4, 3), cut(10, 0)]
+            )),
+            vec![(1, 5), (2, 2), (4, 3), (9, 1), (10, 0)]
         );
-        // Against a sort-and-dedup reference over a deterministic sweep.
+        assert_eq!(
+            days(&merge_cuts(
+                &[cut(5, 1), cut(6, 1)],
+                &[cut(1, 1), cut(2, 1)]
+            )),
+            vec![(1, 1), (2, 1), (5, 1), (6, 1)]
+        );
+        assert_eq!(days(&merge_cuts(&[cut(7, 8)], &[cut(7, 9)])), vec![(7, 8)]);
+        assert_eq!(days(&merge_cuts(&[cut(7, 9)], &[cut(7, 8)])), vec![(7, 8)]);
+        // Against a reference over a deterministic sweep: per day, the minimum.
         for seed in 0_i64..64 {
-            let left: Vec<i64> = (0..seed % 7).map(|k| k * 3 + seed % 2).collect();
-            let right: Vec<i64> = (0..seed % 5).map(|k| k * 2 + seed % 3).collect();
-            let mut expected = [left.clone(), right.clone()].concat();
-            expected.sort_unstable();
-            expected.dedup();
-            assert_eq!(merge(&left, &right), expected, "seed {seed}");
+            let left: Vec<Cut> = (0..seed % 7)
+                .map(|k| cut(k * 3 + seed % 2, seed - k))
+                .collect();
+            let right: Vec<Cut> = (0..seed % 5)
+                .map(|k| cut(k * 2 + seed % 3, k + seed % 4))
+                .collect();
+            let mut expected: std::collections::BTreeMap<i64, i64> =
+                std::collections::BTreeMap::new();
+            for c in left.iter().chain(&right) {
+                expected
+                    .entry(c.day)
+                    .and_modify(|at| *at = (*at).min(c.at_micros))
+                    .or_insert(c.at_micros);
+            }
+            assert_eq!(
+                days(&merge_cuts(&left, &right)),
+                expected.into_iter().collect::<Vec<_>>(),
+                "seed {seed}"
+            );
         }
     }
     use super::*;
@@ -560,12 +912,13 @@ mod tests {
         assert_eq!(days_with_interior_gaps(&bars), vec![18_501, 19_058]);
     }
 
-    /// Both slices lose the SAME days, which is the property the overlay needs.
+    /// The signal and a one-minute stream are cut at the SAME instant, each
+    /// withholding exactly the rows whose bucket reaches past it.
     #[test]
     fn the_signal_and_the_minute_stream_lose_the_same_days() {
         let mut minutes: Vec<Candle> = Vec::new();
         minutes.extend((0..20).map(|m| bar_on(19_000, m)));
-        minutes.extend([0, 1, 12, 13].map(|m| bar_on(19_001, m))); // holed
+        minutes.extend([0, 1, 12, 13].map(|m| bar_on(19_001, m))); // holed from minute 2
         minutes.extend((0..20).map(|m| bar_on(19_002, m)));
 
         // A five-minute signal series over the same three days.
@@ -573,50 +926,64 @@ mod tests {
         for day in [19_000, 19_001, 19_002] {
             signal.extend((0..4).map(|b| bar_on(day, b * 5)));
         }
-
-        let (kept_signal, kept_minutes, excluded) = withhold_holed_days(&signal, &minutes);
+        let five = 5 * MINUTE_MICROS;
+        let cuts = days_with_minute_holes(&signal, &minutes, five, |_| None);
+        assert_eq!(days_of(&cuts), vec![19_001]);
+        assert_eq!(
+            cuts.first().map(|cut| cut.at_micros),
+            Some(bar_on(19_001, 2).ts_micros)
+        );
+        let excluded = GapExclusion::signal_only(&cuts, &signal);
         assert_eq!(excluded.day_numbers(), &[19_001]);
         assert_eq!(excluded.days(), 1);
-        assert_eq!(excluded.signal_bars(), 4, "the holed day's signal bars go");
-        assert_eq!(
-            excluded.minute_bars(),
-            4,
-            "and its minute bars go with them"
-        );
+        // The 09:15 bucket holds the hole (09:17), so the whole day's signal goes.
+        assert_eq!(excluded.signal_bars(), 4, "every bucket reaches past 09:17");
+        assert_eq!(excluded.minute_bars(), 0, "a coarse rung keeps its minutes");
         assert!(!excluded.is_empty());
 
-        for bar in kept_signal.iter().chain(kept_minutes.iter()) {
-            assert_ne!(
-                indicators::ist_day(bar.ts_micros),
-                19_001,
-                "no bar of a withheld day may survive in either slice"
-            );
-        }
+        // On one minute the two rows before the hole are admitted.
+        let minute_cuts = days_with_minute_holes(&minutes, &minutes, MINUTE_MICROS, |_| None);
+        let (kept, removed) = withhold(&minutes, &minute_cuts);
+        assert_eq!(removed, 2, "09:27 and 09:28 are after the hole");
+        assert!(kept.contains(&bar_on(19_001, 0)) && kept.contains(&bar_on(19_001, 1)));
+        let one = GapExclusion::one_series(&minute_cuts, &minutes);
+        assert_eq!((one.signal_bars(), one.minute_bars()), (2, 2));
+        assert_eq!(
+            one.cuts().first().map(|cut| (cut.admitted, cut.withheld)),
+            Some((2, 2))
+        );
     }
 
-    /// A gap-free span withholds nothing and copies both slices unchanged.
+    /// A gap-free span withholds nothing and copies the slice unchanged.
     #[test]
     fn a_gap_free_span_withholds_nothing() {
         let minutes: Vec<Candle> = (0..40).map(|m| bar_on(19_000, m)).collect();
         let signal: Vec<Candle> = (0..8).map(|b| bar_on(19_000, b * 5)).collect();
-        let (kept_signal, kept_minutes, excluded) = withhold_holed_days(&signal, &minutes);
+        let cuts = days_with_minute_holes(&signal, &minutes, 5 * MINUTE_MICROS, |_| None);
+        assert!(cuts.is_empty());
+        let (kept, removed) = withhold(&signal, &cuts);
+        assert_eq!((kept, removed), (signal.clone(), 0));
+        let excluded = GapExclusion::signal_only(&cuts, &signal);
         assert!(excluded.is_empty());
         assert_eq!(excluded.days(), 0);
         assert_eq!(excluded.signal_bars(), 0);
         assert_eq!(excluded.minute_bars(), 0);
-        assert_eq!(kept_signal, signal);
-        assert_eq!(kept_minutes, minutes);
         assert!(excluded.day_names().is_empty());
+        assert_eq!(bind_withheld([7; 32], &cuts), [7; 32]);
     }
 
-    /// The days are named as dates, which is what an operator can check.
+    /// The cut days are named as dates with their cut time, cause and counts.
     #[test]
     fn withheld_days_are_named_as_dates() {
         let minutes: Vec<Candle> = [0_i64, 1, 9, 10]
             .iter()
             .map(|m| bar_on(19_522, *m))
             .collect();
-        let (_, _, excluded) = withhold_holed_days(&[], &minutes);
-        assert_eq!(excluded.day_names(), vec!["2023-06-14".to_owned()]);
+        let cuts = days_with_minute_holes(&minutes, &minutes, MINUTE_MICROS, |_| None);
+        let excluded = GapExclusion::one_series(&cuts, &minutes);
+        assert_eq!(
+            excluded.day_names(),
+            vec!["2023-06-14 from 09:17 (minute hole): 2 admitted before, 2 withheld".to_owned()]
+        );
     }
 }

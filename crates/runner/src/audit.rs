@@ -209,6 +209,10 @@ pub struct OvernightMove {
     /// The IST day (days since 1970-01-01, [`indicators::ist_day`]) of the
     /// session that OPENED at [`Self::open`].
     pub day: i64,
+    /// The IST day of the session whose last close is [`Self::prior_close`]:
+    /// the previous held session, which is the day before a weekend, a
+    /// holiday or a suspension, and may come from before the slice (corp-8).
+    pub prior_day: i64,
     /// The previous session's last close, in paisa.
     pub prior_close: i64,
     /// This session's first open, in paisa.
@@ -216,35 +220,69 @@ pub struct OvernightMove {
     /// `(open - prior_close) / prior_close`, in parts per million, truncated
     /// toward zero.
     pub ppm: i64,
+    /// The bar that opened the session traded no volume, so its open may be a
+    /// price that never traded (a vendor's carried or adjusted level); the
+    /// line says so rather than presenting it as a move (corp-2's line half).
+    pub untraded_open: bool,
 }
 
 /// The [`OvernightMove`] of largest magnitude in `bars`, or `None` when the
 /// bars hold fewer than two sessions with a positive prior close.
 ///
+/// `before` is the last bar of the session held before the slice, when the
+/// caller has it. Without it the move INTO the slice's first session has no
+/// prior close and was never measured: a monthly sweep's line could not see a
+/// bonus or split ex-date on the month's first session and named a smaller
+/// move instead (corp-8). With it, that move competes like any other. A
+/// `before` that is not strictly earlier than the first bar's day is ignored.
+///
 /// A tie keeps the earlier session, so the answer is a pure function of the
-/// bars. One pass, O(bars), at a once-per-report boundary.
+/// bars. One pass, O(bars), at a once-per-report boundary. Still the single
+/// largest move (D-1540).
 #[must_use]
-pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMove> {
+pub fn largest_overnight_move(
+    bars: &[indicators::Candle],
+    before: Option<&indicators::Candle>,
+) -> Option<OvernightMove> {
     let mut best: Option<OvernightMove> = None;
-    for pair in bars.windows(2) {
-        let [before, after] = pair else { continue };
+    let mut previous = before.filter(|prior| {
+        bars.first().is_some_and(|first| {
+            indicators::ist_day(prior.ts_micros) < indicators::ist_day(first.ts_micros)
+        })
+    });
+    for after in bars {
+        let Some(prior) = previous.replace(after) else {
+            continue;
+        };
         let day = indicators::ist_day(after.ts_micros);
-        if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
+        let prior_day = indicators::ist_day(prior.ts_micros);
+        if day == prior_day || prior.close <= 0 {
             continue;
         }
-        let ratio = i128::from(after.open.saturating_sub(before.close)) * 1_000_000
-            / i128::from(before.close);
+        let ratio = i128::from(after.open.saturating_sub(prior.close)) * 1_000_000
+            / i128::from(prior.close);
         let ppm = i64::try_from(ratio).unwrap_or(if ratio < 0 { i64::MIN } else { i64::MAX });
         if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
             best = Some(OvernightMove {
                 day,
-                prior_close: before.close,
+                prior_day,
+                prior_close: prior.close,
                 open: after.open,
                 ppm,
+                untraded_open: after.volume == 0,
             });
         }
     }
     best
+}
+
+/// What a stock's report adds when the move into its first session could not
+/// be measured: no session is held before the slice, or the one before could
+/// not be read. Said rather than omitted, so the line above it is never read
+/// as covering that session (corp-8).
+#[must_use]
+pub fn first_session_unmeasured(date: &str, why: &str) -> String {
+    format!("  THE MOVE INTO THE FIRST SESSION HERE ({date}) WAS NOT MEASURED: {why}.\n\n")
 }
 
 /// What a stock's report says when its bars hold no overnight to measure:
@@ -261,19 +299,27 @@ fn rupees(paisa: i64) -> String {
 }
 
 /// The line a stock's report carries under [`CORPORATE_ACTIONS_UNCHECKED`]:
-/// the [`largest_overnight_move`] in its bars, with `date` naming the session.
+/// the [`largest_overnight_move`] in its bars, with `date` naming the session
+/// and `prior_date` the session whose close it is measured from.
 ///
 /// It states a measurement and claims no threshold, because none is sourced.
+/// An open bar that traded no volume is marked: the move may be a level that
+/// never traded (corp-2's line half).
 #[must_use]
-pub fn overnight_line(found: &OvernightMove, date: &str) -> String {
+pub fn overnight_line(found: &OvernightMove, date: &str, prior_date: &str) -> String {
     let sign = if found.ppm < 0 { "-" } else { "+" };
     let size = found.ppm.unsigned_abs();
+    let untraded = if found.untraded_open {
+        "  Its open bar traded no volume: the price may never have traded.\n"
+    } else {
+        ""
+    };
     format!(
         "  LARGEST OVERNIGHT MOVE IN THESE BARS: {sign}{}.{:02}% into the {date}\n  \
-         session (close {} to open {}). NO THRESHOLD is applied to it\n  \
+         session (close {} on {prior_date} to open {}). NO THRESHOLD is applied to it\n  \
          (D-0018, D-1540); check that date against the exchange's\n  \
          corporate-action record before trusting a result that fires on or\n  \
-         after it.\n\n",
+         after it.\n{untraded}\n",
         size / 10_000,
         (size % 10_000) / 100,
         rupees(found.prior_close),
@@ -3452,7 +3498,7 @@ mod tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod overnight_tests {
-    use super::{OvernightMove, largest_overnight_move, overnight_line};
+    use super::{OvernightMove, first_session_unmeasured, largest_overnight_move, overnight_line};
     use indicators::Candle;
 
     /// Thirty generated sessions with every price halved from session 20 on:
@@ -3487,8 +3533,12 @@ mod overnight_tests {
     #[test]
     fn an_unadjusted_split_is_the_largest_overnight_move_and_is_named_by_its_session() {
         let (bars, first) = split_at_twenty();
-        let found = largest_overnight_move(&bars).expect("thirty sessions have overnights");
+        let found = largest_overnight_move(&bars, None).expect("thirty sessions have overnights");
         assert_eq!(found.day, indicators::ist_day(bars[first].ts_micros));
+        assert_eq!(
+            found.prior_day,
+            indicators::ist_day(bars[first - 1].ts_micros)
+        );
         assert_eq!(found.prior_close, bars[first - 1].close);
         assert_eq!(found.open, bars[first].open);
         assert!(
@@ -3513,17 +3563,17 @@ mod overnight_tests {
             bar.volume,
             bar.open_interest,
         );
-        let found = largest_overnight_move(&bars).expect("three sessions");
+        let found = largest_overnight_move(&bars, None).expect("three sessions");
         assert!(
             found.ppm.abs() < 10_000,
             "the tripled bar sits inside a session and must not be reported: {found:?}"
         );
         assert_eq!(
-            largest_overnight_move(&crate::synthetic::sessions(1)),
+            largest_overnight_move(&crate::synthetic::sessions(1), None),
             None,
             "one session has no overnight"
         );
-        assert_eq!(largest_overnight_move(&[]), None);
+        assert_eq!(largest_overnight_move(&[], None), None);
     }
 
     /// THE LINE STATES THE MEASURED FACT, CLAIMS NO THRESHOLD, AND NEVER
@@ -3533,11 +3583,14 @@ mod overnight_tests {
         let line = overnight_line(
             &OvernightMove {
                 day: 0,
+                prior_day: -3,
                 prior_close: 200_000,
                 open: 100_000,
                 ppm: -500_000,
+                untraded_open: false,
             },
             "2024-06-14",
+            "2024-06-11",
         );
         let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
         for fact in [
@@ -3546,6 +3599,7 @@ mod overnight_tests {
             "2024-06-14",
             "2000.00",
             "1000.00",
+            "on 2024-06-11",
             "NO THRESHOLD",
         ] {
             assert!(flat.contains(fact), "missing {fact:?}:\n{line}");
@@ -3557,15 +3611,85 @@ mod overnight_tests {
         let small = overnight_line(
             &OvernightMove {
                 day: 0,
+                prior_day: -1,
                 prior_close: 100_000,
                 open: 99_995,
                 ppm: -50,
+                untraded_open: false,
             },
             "2024-06-14",
+            "2024-06-13",
         );
         assert!(
             small.contains("-0.00%"),
             "a sub-basis-point fall keeps its sign:\n{small}"
         );
+        assert!(!line.contains("traded no volume"), "{line}");
+    }
+
+    /// THE MOVE INTO THE SLICE'S FIRST SESSION IS MEASURED FROM THE SESSION
+    /// HELD BEFORE IT. corp-8: a -20% open on the slice's first session, with
+    /// a -5% move later, named the -5% move; given the prior session's last
+    /// bar it names the -20% move into the first session.
+    #[test]
+    fn the_overnight_line_measures_the_move_into_the_first_session() {
+        let raw = crate::synthetic::sessions(4);
+        let (prior, slice) = raw.split_at(375);
+        let last = prior[374];
+        let mut bars: Vec<Candle> = slice.to_vec();
+        // Session 1 of the slice opens 20% below the prior close.
+        let open = last.close - last.close / 5;
+        bars[0] = Candle::new(bars[0].ts_micros, open, open, open, open, 10, i64::MIN);
+        for bar in &mut bars[1..375] {
+            *bar = Candle::new(bar.ts_micros, open, open, open, open, 10, i64::MIN);
+        }
+        // Session 2 opens 5% below session 1's close.
+        let lower = open - open / 20;
+        for bar in &mut bars[375..] {
+            *bar = Candle::new(bar.ts_micros, lower, lower, lower, lower, 10, i64::MIN);
+        }
+        let blind = largest_overnight_move(&bars, None).expect("three sessions in the slice");
+        assert!(
+            (-51_000..=-49_000).contains(&blind.ppm),
+            "premise: without the prior session only the -5% move is seen: {blind:?}"
+        );
+        let seen = largest_overnight_move(&bars, Some(&last)).expect("a prior session");
+        assert_eq!(seen.day, indicators::ist_day(bars[0].ts_micros));
+        assert_eq!(seen.prior_day, indicators::ist_day(last.ts_micros));
+        assert_eq!(seen.prior_close, last.close);
+        assert!(
+            (-201_000..=-199_000).contains(&seen.ppm),
+            "the move into the first session is named: {seen:?}"
+        );
+        // A `before` on the slice's own first day is not a prior session.
+        assert_eq!(largest_overnight_move(&bars, Some(&bars[0])), Some(blind));
+        // One session plus a prior session has an overnight.
+        assert!(largest_overnight_move(&bars[..375], Some(&last)).is_some());
+        assert_eq!(largest_overnight_move(&[], Some(&last)), None);
+        let note = first_session_unmeasured("2024-06-03", "no month is stored before it");
+        assert!(note.contains("NOT MEASURED"), "{note}");
+        assert!(note.starts_with("  "), "{note}");
+    }
+
+    /// A MOVE WHOSE OPEN BAR TRADED NO VOLUME IS MARKED. corp-2's line half:
+    /// the line printed a phantom move off an untraded open as a fact.
+    #[test]
+    fn a_zero_volume_open_is_marked_never_traded() {
+        let raw = crate::synthetic::sessions(2);
+        let mut bars = raw.clone();
+        let first = 375;
+        let jump = bars[first - 1].close * 2;
+        bars[first] = Candle::new(bars[first].ts_micros, jump, jump, jump, jump, 0, i64::MIN);
+        let found = largest_overnight_move(&bars, None).expect("two sessions");
+        assert!(found.untraded_open, "{found:?}");
+        let line = overnight_line(&found, "2024-06-14", "2024-06-13");
+        assert!(
+            line.contains("Its open bar traded no volume: the price may never have traded."),
+            "{line}"
+        );
+        bars[first] = Candle::new(bars[first].ts_micros, jump, jump, jump, jump, 1, i64::MIN);
+        let traded = largest_overnight_move(&bars, None).expect("two sessions");
+        assert!(!traded.untraded_open, "{traded:?}");
+        assert!(!overnight_line(&traded, "2024-06-14", "2024-06-13").contains("traded no volume"));
     }
 }

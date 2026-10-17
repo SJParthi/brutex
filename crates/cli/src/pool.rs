@@ -3499,7 +3499,7 @@ mod tests {
         rung: &'static str,
         words: [u64; 6],
         side: runner::excursion::Side,
-        withheld: &[i64],
+        withheld: &[crate::minute_gaps::Cut],
     ) -> Option<grid::Cell> {
         let span = |r: &str| {
             crate::stored::load_span(
@@ -3513,7 +3513,7 @@ mod tests {
             .expect("generated span")
         };
         let mut signal = span(rung);
-        // The days pass 1 withholds, named by the caller; none on a whole store.
+        // The cuts pass 1 applies, named by the caller; none on a whole store.
         signal.bars = crate::minute_gaps::withhold(&signal.bars, withheld).0;
         let native = rung == crate::EXECUTION_RUNG;
         let exec = (!native).then(|| span(crate::EXECUTION_RUNG));
@@ -3678,7 +3678,16 @@ mod tests {
                     Direction::Long => runner::excursion::Side::Long,
                     Direction::Short => runner::excursion::Side::Short,
                 };
-                let reference = audit_path_cell(root, "5min", candidate.words, side, &[day]);
+                // THE CUT PASS 1 APPLIES (policy 4): the short day's buckets
+                // from its absent closing minute on, not the whole day.
+                let cuts = crate::minute_gaps::days_with_minute_holes(
+                    &signal.bars,
+                    &minutes.bars,
+                    crate::stored::rung_length_micros("5min").expect("rung length"),
+                    |d| crate::stored::session_close_for(None, d),
+                );
+                assert_eq!(crate::minute_gaps::days_of(&cuts), vec![day]);
+                let reference = audit_path_cell(root, "5min", candidate.words, side, &cuts);
                 assert!(
                     reference.is_some_and(|c| c.trades > 0),
                     "premise: the audit path fires on the withheld span"

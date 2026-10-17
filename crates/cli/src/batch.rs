@@ -120,8 +120,14 @@ struct Row {
     depth: usize,
     /// Combinations meeting the threshold across every level.
     kept: usize,
-    /// `false` when a level breached the candidate ceiling.
+    /// `false` when the walk is not a whole answer: a level breached a
+    /// budget, or the closure is incomplete.
     completed: bool,
+    /// The budget a halted walk breached, or `None` when it did not halt.
+    /// Only `Breach::Candidates` is a CEILING stop; the report named every
+    /// incomplete month a ceiling stop, including a month whose column swept
+    /// no bar (g-zerodha-universe-census-2).
+    halt: Option<engine::Breach>,
     /// This month's run identity, as hex.
     ///
     /// # Why a per-ROW identity and not one for the batch
@@ -167,7 +173,17 @@ struct Tally {
     /// extinction. **Counted separately because it is not a failure and not a
     /// clean answer** — §6 says depth is decided by extinction, and a ceiling
     /// breach means this month did not get that far.
+    ///
+    /// ONLY a `Breach::Candidates` halt. It counted every month that did not
+    /// complete, so a month whose column swept no bar was "stopped on the
+    /// candidate ceiling" when no candidate was ever admitted
+    /// (g-zerodha-universe-census-2). Such a month is now refused; any other
+    /// incomplete month is [`Self::stopped_short`].
     incomplete: u64,
+    /// Months that swept, were filed, and are not whole answers for a reason
+    /// other than the candidate ceiling: another budget, or an incomplete
+    /// closure. Named as such, never as a ceiling stop.
+    stopped_short: u64,
     /// Bars swept across every month.
     bars: u64,
     /// Combinations kept across every month.
@@ -206,7 +222,11 @@ impl Tally {
             .kept
             .saturating_add(u64::try_from(row.kept).unwrap_or(u64::MAX));
         if !row.completed {
-            self.incomplete = self.incomplete.saturating_add(1);
+            if row.halt == Some(engine::Breach::Candidates) {
+                self.incomplete = self.incomplete.saturating_add(1);
+            } else {
+                self.stopped_short = self.stopped_short.saturating_add(1);
+            }
         }
     }
 }
@@ -478,6 +498,7 @@ impl Row {
             depth: 0,
             kept: 0,
             completed: false,
+            halt: None,
             identity,
             refused: Some(why),
             ran: false,
@@ -782,6 +803,40 @@ fn sweep_prepared(
             return Err(Row::refused_before(label, Some(id.hex()), why));
         }
     };
+    // A COLUMN THAT SWEPT NO BAR IS REFUSED, AS `sweep-stored` REFUSES IT.
+    //
+    // A month too short to warm (every zerodha 60min month holds at most 161
+    // bars against a warm-up measured at 200 on 15min) walked an empty ladder,
+    // filed a ledger row and printed `CEILING — depth not reached by
+    // extinction` with 0 bars, while `sweep-stored` refused the same month
+    // with this sentence (g-zerodha-universe-census-2). One sentence, one
+    // constant; the attempt finishes `Refused` and no ledger row is filed, so
+    // D-0696 refuses a run whose every month is such a month.
+    if column.census().swept == 0 {
+        let loaded_bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
+        crate::note(
+            &telemetry::Event::info("cli.sweep", "stored month refused")
+                .with("identity", id.hex().as_str())
+                .with("feed", loaded.vendor.as_str())
+                .with("label", label.as_str())
+                .with("bars", loaded_bars)
+                .with("swept", 0_u64),
+        );
+        let recorded = attempt
+            .finish(crate::sweep_evidence::Completion::Refused)
+            .err()
+            .map_or_else(String::new, |why| {
+                format!(" Its refusal was not recorded: {why}.")
+            });
+        return Err(Row::refused_before(
+            label,
+            Some(id.hex()),
+            format!(
+                "{}: {loaded_bars} bar(s) loaded, none swept past the warm-up. No ledger row was filed.{recorded}",
+                crate::and_checkpoint::UNMEASURED_COLUMN
+            ),
+        ));
+    }
     let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
         &column,
         &mut |level, admitted, pairs| {
@@ -899,6 +954,7 @@ fn file_swept(root: &std::path::Path, swept: Swept<'_>, min_hits: u64) -> Row {
         depth,
         kept,
         completed,
+        halt: outcome.sweep.halted.as_ref().map(|halt| halt.breach),
         identity: Some(runner::identity::RunId::hex(&id)),
         refused,
         ran: true,
@@ -949,6 +1005,15 @@ fn render(
             tally.incomplete
         );
     }
+    if tally.stopped_short > 0 {
+        let _ = writeln!(
+            out,
+            "{} month(s) stopped short of a whole answer for a reason other than \
+             the candidate ceiling (another budget, or an incomplete closure); \
+             their depth is a floor, not an answer.",
+            tally.stopped_short
+        );
+    }
     if !tally.reconciles() {
         let _ = writeln!(
             out,
@@ -990,6 +1055,27 @@ fn census_lines(out: &mut String, walk: &catalog::Census, offered: u64) {
     out.push_str(&walk.unoffered_report());
 }
 
+/// What a swept month's line says after its counts: nothing for a whole
+/// answer, `CEILING` only for a candidate-ceiling halt, and the budget's own
+/// name or the closure for any other incomplete walk
+/// (g-zerodha-universe-census-2).
+const fn stop_label(row: &Row) -> &'static str {
+    match (row.completed, row.halt) {
+        (true, _) => "",
+        (false, Some(engine::Breach::Candidates)) => "  CEILING — depth not reached by extinction",
+        (false, Some(engine::Breach::Pairs)) => {
+            "  HALTED on the pair budget — depth not reached by extinction"
+        }
+        (false, Some(engine::Breach::Memory)) => {
+            "  HALTED on the memory budget — depth not reached by extinction"
+        }
+        (false, Some(engine::Breach::Workers)) => {
+            "  HALTED on the workers budget — depth not reached by extinction"
+        }
+        (false, None) => "  INCOMPLETE — the closure is not certified; not a whole answer",
+    }
+}
+
 /// One line per instrument-month, and its identity under each month that
 /// swept and was filed: the report's rows, and the whole walk's refusal's
 /// too. D-0696.
@@ -1005,11 +1091,7 @@ fn month_lines(out: &mut String, rows: &[Row]) {
                 row.bars,
                 row.depth,
                 row.kept,
-                if row.completed {
-                    ""
-                } else {
-                    "  CEILING — depth not reached by extinction"
-                }
+                stop_label(row)
             );
             // THE IDENTITY, ON ITS OWN LINE UNDER THE MONTH IT IDENTIFIES.
             //
@@ -1028,6 +1110,10 @@ fn month_lines(out: &mut String, rows: &[Row]) {
 #[cfg(test)]
 #[path = "batch_stored_tests.rs"]
 mod stored_tests;
+
+#[cfg(test)]
+#[path = "batch_month_refusal_tests.rs"]
+mod month_refusal_tests;
 
 #[cfg(test)]
 #[path = "batch_verb_tests.rs"]

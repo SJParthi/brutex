@@ -2404,21 +2404,124 @@ pub(crate) fn equity_note(key: &InstrumentKey) -> String {
 /// threshold, because D-0018 names none. A stock whose bars hold fewer than
 /// two sessions says so; an index or a contract gets nothing, as it gets no
 /// [`equity_note`].
-pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle]) -> String {
+///
+/// # The move into the first session (corp-8)
+///
+/// The measure walked the slice alone, so the move into its first session had
+/// no prior close: a split or bonus ex-date on a month's first session was
+/// never seen and the line named an ordinary day. The prior close is now read
+/// from the store: the last regular-session bar of the calendar month before
+/// the first bar's month, on the SAME feed, instrument and rung -- the same
+/// basis (a bar's close to the next session's first open) as every other move
+/// on the line, never the daily file's official close. That is one
+/// `open_existing` and, from the end, one `read_record` per bar until one
+/// falls outside the charter's non-regular days ([`PRIOR_WALK_CAP`] at most).
+/// A month that is absent, empty or unreadable is NAMED: the line says the
+/// move into the first session was not measured, and why. `bars` should be
+/// the whole loaded series, not a withheld slice, so a session's last bar is
+/// its last held bar.
+pub(crate) fn overnight_note(
+    root: &Path,
+    vendor: Vendor,
+    key: &InstrumentKey,
+    rung_name: &str,
+    bars: &[Candle],
+) -> String {
     if key.kind != Kind::Equity {
         return String::new();
     }
-    runner::audit::largest_overnight_move(bars).map_or_else(
-        || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
-        |found| {
-            let date = u32::try_from(found.day)
-                .ok()
-                .and_then(|days| pull::session::Day::from_days(days).ok())
-                .map_or_else(|| format!("IST day {}", found.day), |day| day.to_string());
-            runner::audit::overnight_line(&found, &date)
-        },
+    let name = |day: i64| {
+        u32::try_from(day)
+            .ok()
+            .and_then(|days| pull::session::Day::from_days(days).ok())
+            .map_or_else(|| format!("IST day {day}"), |day| day.to_string())
+    };
+    let prior = bars
+        .first()
+        .map(|first| prior_session_bar(root, vendor, key, rung_name, first.ts_micros));
+    let mut note = runner::audit::largest_overnight_move(
+        bars,
+        prior.as_ref().and_then(|prior| prior.as_ref().ok()),
     )
+    .map_or_else(
+        || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
+        |found| runner::audit::overnight_line(&found, &name(found.day), &name(found.prior_day)),
+    );
+    if let (Some(Err(why)), Some(first)) = (prior, bars.first()) {
+        note.push_str(&runner::audit::first_session_unmeasured(
+            &name(indicators::ist_day(first.ts_micros)),
+            &why,
+        ));
+    }
+    note
 }
+
+/// The most bars [`prior_session_bar`] reads back from a month's end looking
+/// for one outside the charter's non-regular days: a whole regular session of
+/// one-minute bars and some, so a month ending on a special session is walked
+/// past and a month of nothing else is refused, never scanned whole.
+const PRIOR_WALK_CAP: u64 = 1_440;
+
+/// The last regular-session bar stored before `first_ts`'s month on the same
+/// feed, instrument and rung, or why there is none. corp-8.
+fn prior_session_bar(
+    root: &Path,
+    vendor: Vendor,
+    key: &InstrumentKey,
+    rung_name: &str,
+    first_ts: i64,
+) -> Result<Candle, String> {
+    let day = u32::try_from(indicators::ist_day(first_ts))
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .ok_or_else(|| "its first bar is not on a calendar day".to_owned())?;
+    let (year, month) = if day.month() == 1 {
+        (day.year().saturating_sub(1), 12)
+    } else {
+        (day.year(), day.month() - 1)
+    };
+    let timeframe = rung(rung_name)?;
+    let ym = YearMonth::new(year, month)
+        .map_err(|why| format!("{year}-{month:02} is not a month: {why}"))?;
+    let path = StorePath::for_key(vendor, key, timeframe, ym, FileKind::Bars)
+        .map_err(|why| format!("no store path for {year}-{month:02}: {why}"))?;
+    let hash = brutex_core::universe::fnv1a(key.underlying.as_str()).to_le_bytes();
+    let symbol_id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+    let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| match why {
+        StoreError::Missing { .. } => {
+            format!("no {rung_name} month {year}-{month:02} is stored before it")
+        }
+        other => {
+            format!("the {rung_name} month {year}-{month:02} before it could not be read: {other}")
+        }
+    })?;
+    let n = file.records();
+    let mut calendar = CalendarExclusion::none();
+    for back in 1..=n.min(PRIOR_WALK_CAP) {
+        let bar = file.read_record(n - back).map_err(|why| {
+            format!("the {rung_name} month {year}-{month:02} before it could not be read: {why}")
+        })?;
+        if !calendar.excludes(bar.ts_micros) {
+            return Ok(Candle {
+                ts_micros: bar.ts_micros,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                open_interest: bar.open_interest,
+            });
+        }
+    }
+    Err(format!(
+        "the {rung_name} month {year}-{month:02} before it holds no regular-session bar in its last {}",
+        n.min(PRIOR_WALK_CAP)
+    ))
+}
+
+#[cfg(test)]
+#[path = "overnight_first_session_tests.rs"]
+mod overnight_first_session_tests;
 
 /// [`equity_note`] for a symbol as the operator typed it.
 ///

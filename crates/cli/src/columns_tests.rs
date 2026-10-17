@@ -142,7 +142,13 @@ fn the_results_listing_keeps_full_text_fields_and_extreme_figures_apart() {
     let text = crate::results_at(&root, None, None);
     let _ = std::fs::remove_dir_all(&root);
     let (header, rows) = table(&text, "feed", 3);
-    under(header, &rows, &[L, L, R, R, R, R, R, R, R, R]);
+    // repro-5: underlying and span after the rung, bars before the
+    // combinations, the identity prefix and the IST finish time last.
+    under(
+        header,
+        &rows,
+        &[L, L, L, L, R, R, R, R, R, R, R, R, R, L, L],
+    );
 }
 
 #[test]
