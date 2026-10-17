@@ -951,8 +951,16 @@ mod tests {
         );
         assert_eq!(jump_bps(82_165, 8_990), Some(81_395), "PIIND's interleave");
         assert_eq!(jump_bps(10_000, 13_000), Some(JUMP_BPS));
-        assert_eq!(jump_bps(10_000, 13_001), Some(JUMP_BPS + 1), "the first that trips");
-        assert_eq!(jump_bps(13_001, 10_000), Some(JUMP_BPS + 1), "the same, downwards");
+        assert_eq!(
+            jump_bps(10_000, 13_001),
+            Some(JUMP_BPS + 1),
+            "the first that trips"
+        );
+        assert_eq!(
+            jump_bps(13_001, 10_000),
+            Some(JUMP_BPS + 1),
+            "the same, downwards"
+        );
         for (close, open) in [(0, 5), (5, 0), (-1, 5), (5, -1)] {
             assert_eq!(jump_bps(close, open), None, "{close} -> {open}");
         }

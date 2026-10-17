@@ -620,10 +620,13 @@ fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
 /// — another basis GDFL does not hold, a minute GDFL vouches for beside an
 /// adjusted day bar, a zero day bar, bars before the listing — and the plan is
 /// written before any bar is: none is, and a rerun writes nothing new.
-#[test]
-fn piind_minutes_are_named_by_cause_before_any_write() {
+/// PIIND's store as the scan meets it: Zerodha minutes with one block at
+/// another basis on the third session, a day bar adjusted to half the level
+/// on the fourth and a zero one on the fifth, a master listing it on the
+/// second, and GDFL's one-second bars of the third and fourth sessions at
+/// the series' own basis.
+fn piind_store(symbol: &str) -> Root {
     let root = Root::new();
-    let symbol = "PIIND";
     let (days, minutes) = week_minutes(|on, m| {
         if on == day(2024, 1, 3) && (600..=609).contains(&m) {
             (8_990, 82_165)
@@ -671,6 +674,13 @@ fn piind_minutes_are_named_by_cause_before_any_write() {
         store::path::Timeframe::SECOND_1,
         &honest,
     );
+    root
+}
+
+#[test]
+fn piind_minutes_are_named_by_cause_before_any_write() {
+    let symbol = "PIIND";
+    let root = piind_store(symbol);
     let before = bars(&root.0);
     let (code, out) = root.run(&[symbol, "--segment", "CASH"]);
     assert_eq!(code, FAILED, "{out}");

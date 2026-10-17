@@ -460,11 +460,10 @@ impl Plan {
         }
         let text = self.text(ask, scope);
         let digest = brutex_core::blake3::hash(text.as_bytes());
-        let hex: String = digest
-            .iter()
-            .take(8)
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let hex = digest.iter().take(8).fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
         let dir = PLAN_DIR
             .iter()
             .fold(root.to_path_buf(), |dir, part| dir.join(part));
@@ -528,6 +527,69 @@ fn plan_line(out: &mut String, written: Result<Option<PathBuf>, String>) -> bool
     }
 }
 
+/// Each month of either rung that holds a refused or suspect bar, and its
+/// (day, cause) groups.
+fn verdicts(out: &mut String, scan: &SeriesScan) {
+    for (month, tally) in &scan.day_verdicts {
+        if tally.refused() == 0 {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "  1day {month}: {} of {} day bars refused",
+            tally.refused(),
+            tally.minutes()
+        );
+        for group in &tally.flagged {
+            let _ = writeln!(
+                out,
+                "    {} {} {} day bar(s)",
+                day_text(group.day),
+                group.code,
+                group.minutes
+            );
+        }
+    }
+    for (month, tally) in &scan.months {
+        if tally.refused() + tally.suspect_level == 0 {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "  {month}: {} of {} minutes refused, {} suspect, {} in-session jump(s)",
+            tally.refused(),
+            tally.minutes(),
+            tally.suspect_level,
+            tally.in_session_jump
+        );
+        for group in &tally.flagged {
+            let _ = writeln!(
+                out,
+                "    {} {} {} minute(s)",
+                day_text(group.day),
+                group.code,
+                group.minutes
+            );
+        }
+    }
+}
+
+/// A CASH share's in-session jump distribution: the measurement
+/// `JUMP_BPS` is to be recorded from.
+fn jump_line(out: &mut String, scan: &SeriesScan, tripped: u64) {
+    let sorted = jumps(scan);
+    let _ = writeln!(
+        out,
+        "  in-session jumps: {} judged; p50 {} p99 {} p999 {} max {} bps; {tripped} beyond JUMP_BPS {JUMP_BPS} \
+         (PROVISIONAL: UNVERIFIED until this distribution is measured on the store)",
+        sorted.len(),
+        percentile(&sorted, 500),
+        percentile(&sorted, 990),
+        percentile(&sorted, 999),
+        sorted.last().copied().unwrap_or(0),
+    );
+}
+
 fn one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
     let Some(scan) = scan(root, ask, symbol) else {
         return MISUSED;
@@ -572,61 +634,9 @@ fn one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
         sum.before_listing,
         sum.in_session_jump
     );
-    for (month, tally) in &scan.day_verdicts {
-        if tally.refused() == 0 {
-            continue;
-        }
-        let _ = writeln!(
-            out,
-            "  1day {month}: {} of {} day bars refused",
-            tally.refused(),
-            tally.minutes()
-        );
-        for group in &tally.flagged {
-            let _ = writeln!(
-                out,
-                "    {} {} {} day bar(s)",
-                day_text(group.day),
-                group.code,
-                group.minutes
-            );
-        }
-    }
-    for (month, tally) in &scan.months {
-        if tally.refused() + tally.suspect_level == 0 {
-            continue;
-        }
-        let _ = writeln!(
-            out,
-            "  {month}: {} of {} minutes refused, {} suspect, {} in-session jump(s)",
-            tally.refused(),
-            tally.minutes(),
-            tally.suspect_level,
-            tally.in_session_jump
-        );
-        for group in &tally.flagged {
-            let _ = writeln!(
-                out,
-                "    {} {} {} minute(s)",
-                day_text(group.day),
-                group.code,
-                group.minutes
-            );
-        }
-    }
+    verdicts(out, &scan);
     if ask.segment == "CASH" {
-        let sorted = jumps(&scan);
-        let _ = writeln!(
-            out,
-            "  in-session jumps: {} judged; p50 {} p99 {} p999 {} max {} bps; {} beyond JUMP_BPS {JUMP_BPS} \
-             (PROVISIONAL: UNVERIFIED until this distribution is measured on the store)",
-            sorted.len(),
-            percentile(&sorted, 500),
-            percentile(&sorted, 990),
-            percentile(&sorted, 999),
-            sorted.last().copied().unwrap_or(0),
-            sum.in_session_jump
-        );
+        jump_line(out, &scan, sum.in_session_jump);
     }
     for (month, why) in &scan.unread {
         let _ = writeln!(out, "  {month}: NOT READ: {why}");
@@ -663,6 +673,48 @@ fn one(root: &Path, ask: &Ask, symbol: &str, out: &mut String) -> u8 {
     FAILED
 }
 
+/// One series' row of the `ALL` table; answers its minute counts.
+fn series_row(out: &mut String, ask: &Ask, symbol: &str, scan: &SeriesScan) -> Tally {
+    let from = |months: &[YearMonth]| {
+        months
+            .first()
+            .map_or_else(|| "none".to_owned(), ToString::to_string)
+    };
+    let row = total(scan);
+    let sorted = jumps(scan);
+    let measured = |per_mille: usize| {
+        if ask.segment == "CASH" {
+            percentile(&sorted, per_mille).to_string()
+        } else {
+            "-".to_owned()
+        }
+    };
+    let _ = writeln!(
+        out,
+        "  {symbol:<20}  {:>9}  {:>20}  {:>13}  {:>13}  {:>8}  {:>14}  {:>9}  {:>9}  {:>5}  {:>8}  {:>9}  {:>8}  {:>11}  {}{}",
+        row.minutes(),
+        row.before_first_day_bar,
+        row.foreign_level,
+        row.suspect_level,
+        row.unchecked(),
+        refused_months(scan).len(),
+        from(&scan.day_months),
+        from(&scan.minute_months),
+        row.in_session_jump,
+        measured(990),
+        measured(999),
+        measured(1_000),
+        day_refused(scan),
+        scan.listing,
+        if scan.unread.is_empty() {
+            String::new()
+        } else {
+            format!("  NOT READ: {} month(s)", scan.unread.len())
+        }
+    );
+    row
+}
+
 fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
     let dir = root
         .join("bars")
@@ -681,14 +733,11 @@ fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
         }
     };
     // IN NAME ORDER, so two runs print the same table.
-    let mut symbols = std::collections::BTreeSet::new();
-    for entry in entries.filter_map(Result::ok) {
-        if let Some(name) = entry.file_name().to_str()
-            && brutex_core::symbol::Symbol::new(name).is_ok()
-        {
-            symbols.insert(name.to_owned());
-        }
-    }
+    let symbols: std::collections::BTreeSet<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| brutex_core::symbol::Symbol::new(name).is_ok())
+        .collect();
     let _ = writeln!(
         out,
         "SERIES IDENTITY, EVERY SERIES (read-only of bars) — {} NSE/{}: {} series under {}",
@@ -708,11 +757,6 @@ fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
         let Some(scan) = scan(root, ask, symbol) else {
             continue;
         };
-        let from = |months: &[YearMonth]| {
-            months
-                .first()
-                .map_or_else(|| "none".to_owned(), ToString::to_string)
-        };
         let day_bad = day_refused(&scan);
         let _ = plan.add(root, ask, symbol, &scan);
         days_refused += day_bad;
@@ -721,41 +765,8 @@ fn all(root: &Path, ask: &Ask, out: &mut String) -> u8 {
             no_minutes.push(format!("{symbol} (1day {})", span(&scan.day_months)));
             continue;
         }
-        let row = total(&scan);
-        let months = refused_months(&scan).len();
-        bad |= months > 0 || !scan.unread.is_empty();
-        let sorted = jumps(&scan);
-        let measured = |per_mille: usize| {
-            if ask.segment == "CASH" {
-                percentile(&sorted, per_mille).to_string()
-            } else {
-                "-".to_owned()
-            }
-        };
-        let _ = writeln!(
-            out,
-            "  {symbol:<20}  {:>9}  {:>20}  {:>13}  {:>13}  {:>8}  {:>14}  {:>9}  {:>9}  {:>5}  {:>8}  {:>9}  {:>8}  {:>11}  {}{}",
-            row.minutes(),
-            row.before_first_day_bar,
-            row.foreign_level,
-            row.suspect_level,
-            row.unchecked(),
-            months,
-            from(&scan.day_months),
-            from(&scan.minute_months),
-            row.in_session_jump,
-            measured(990),
-            measured(999),
-            measured(1_000),
-            day_bad,
-            scan.listing,
-            if scan.unread.is_empty() {
-                String::new()
-            } else {
-                format!("  NOT READ: {} month(s)", scan.unread.len())
-            }
-        );
-        sum.absorb(row);
+        bad |= !refused_months(&scan).is_empty() || !scan.unread.is_empty();
+        sum.absorb(series_row(out, ask, symbol, &scan));
     }
     let _ = writeln!(
         out,

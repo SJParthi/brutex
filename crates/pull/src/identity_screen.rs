@@ -110,7 +110,6 @@ pub struct SeriesScan {
 /// path.
 #[must_use]
 pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
-    let symbol_id = repair_plan::symbol_id(parts.symbol);
     let rung = |timeframe: Timeframe, month: YearMonth| PathParts {
         timeframe,
         month,
@@ -120,22 +119,22 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
     let cash = parts.segment == "CASH" && parts.contract.is_none();
     let table = cash.then(|| crate::listing::for_store(store_root));
     let isin = brutex_core::universe::nse_isin(parts.symbol);
-    let span = table.as_deref().and_then(|listing| {
+    let held = table.as_deref().and_then(|listing| {
         listing.span(
             parts.exchange,
             parts.symbol,
             isin.as_ref().map(brutex_core::isin::Isin::as_str),
         )
     });
-    let listed_on = span
-        .and_then(|span| span.listed_on())
+    let listed_on = held
+        .and_then(|found| found.listed_on())
         .map(|day| i64::from(day.days_from_epoch()));
-    let mut scan = SeriesScan {
+    let mut series = SeriesScan {
         day_months: repair_plan::held_months(store_root, rung(Timeframe::DAY_1, parts.month)),
         minute_months: repair_plan::held_months(store_root, rung(Timeframe::MINUTE_1, parts.month)),
         first_day: None,
-        listing: match (span, cash) {
-            (Some(span), _) => span.source.code(),
+        listing: match (held, cash) {
+            (Some(found), _) => found.source.code(),
             (None, true) => crate::listing::Source::InferredFromVendorSpan.code(),
             (None, false) => NO_LISTING,
         },
@@ -150,73 +149,97 @@ pub fn scan_series(store_root: &Path, parts: PathParts<'_>) -> SeriesScan {
         listed_on,
         jumps: cash,
     };
-    let mut days: Vec<Bar> = Vec::new();
-    for month in scan.day_months.clone() {
-        match month_days(store_root, rung(Timeframe::DAY_1, month), symbol_id) {
-            Ok(bars) => {
-                let mut tally = Tally::default();
-                for bar in &bars {
-                    let day = ist_day(bar.ts_micros);
-                    let cause = series_identity::judge_day(day, prices(bar), rules);
-                    tally.count(
-                        cause.map_or(Verdict::Held, Verdict::Refused),
-                        day,
-                        bar.ts_micros,
-                    );
-                    if let Some(cause) = cause {
-                        scan.flagged.push(FlaggedBar {
-                            timeframe: Timeframe::DAY_1,
-                            month,
-                            bar: *bar,
-                            code: cause.code(),
-                            refused: true,
-                        });
-                    }
-                }
-                scan.day_verdicts.push((month, tally));
-                days.extend(bars);
-            }
-            Err(why) => scan.unread.push((month, format!("1day: {why}"))),
-        }
-    }
+    let symbol_id = repair_plan::symbol_id(parts.symbol);
+    let days = scan_days(
+        &mut series,
+        &|month| month_days(store_root, rung(Timeframe::DAY_1, month), symbol_id),
+        rules,
+    );
     let book = DayBook::new(&days, FirstDay::NoDayRung);
     if let FirstDay::On(first) = book.first() {
-        scan.first_day = Some(first);
+        series.first_day = Some(first);
     }
     let mut judge = MinuteJudge::new(&book, rules, 60);
-    for month in scan.minute_months.clone() {
-        let minutes = match month_days(store_root, rung(Timeframe::MINUTE_1, month), symbol_id) {
-            Ok(minutes) => minutes,
+    for month in series.minute_months.clone() {
+        match month_days(store_root, rung(Timeframe::MINUTE_1, month), symbol_id) {
+            Ok(minutes) => scan_minutes(&mut series, &mut judge, month, &minutes),
+            Err(why) => series.unread.push((month, format!("1min: {why}"))),
+        }
+    }
+    series
+}
+
+/// Every held day month judged by the day-rung arm; answers the day bars
+/// read, for the book the minutes are judged against.
+fn scan_days(
+    series: &mut SeriesScan,
+    read: &dyn Fn(YearMonth) -> Result<Vec<Bar>, String>,
+    rules: Rules,
+) -> Vec<Bar> {
+    let mut days: Vec<Bar> = Vec::new();
+    for month in series.day_months.clone() {
+        let bars = match read(month) {
+            Ok(bars) => bars,
             Err(why) => {
-                scan.unread.push((month, format!("1min: {why}")));
+                series.unread.push((month, format!("1day: {why}")));
                 continue;
             }
         };
         let mut tally = Tally::default();
-        for bar in &minutes {
+        for bar in &bars {
             let day = ist_day(bar.ts_micros);
-            let (verdict, jump) =
-                judge.judge(bar.ts_micros.div_euclid(1_000_000), day, prices(bar));
-            scan.jumps.extend(jump);
-            tally.count(verdict, day, bar.ts_micros);
-            let code = match verdict {
-                Verdict::Refused(cause) => Some((cause.code(), true)),
-                Verdict::Suspect { .. } => Some((series_identity::SUSPECT_CODE, false)),
-                Verdict::Held | Verdict::Unchecked(_) => None,
-            };
-            if let Some((code, refused)) = code {
-                scan.flagged.push(FlaggedBar {
-                    timeframe: Timeframe::MINUTE_1,
+            let cause = series_identity::judge_day(day, prices(bar), rules);
+            tally.count(
+                cause.map_or(Verdict::Held, Verdict::Refused),
+                day,
+                bar.ts_micros,
+            );
+            if let Some(cause) = cause {
+                series.flagged.push(FlaggedBar {
+                    timeframe: Timeframe::DAY_1,
                     month,
                     bar: *bar,
-                    code,
-                    refused,
+                    code: cause.code(),
+                    refused: true,
                 });
             }
         }
-        scan.months.push((month, tally));
+        series.day_verdicts.push((month, tally));
+        days.extend(bars);
     }
-    scan
+    days
+}
+
+/// One minute month judged in time order by `judge`, whose run carries over
+/// from the month before.
+fn scan_minutes(
+    series: &mut SeriesScan,
+    judge: &mut MinuteJudge<'_>,
+    month: YearMonth,
+    minutes: &[Bar],
+) {
+    let mut tally = Tally::default();
+    for bar in minutes {
+        let day = ist_day(bar.ts_micros);
+        let (verdict, jump) = judge.judge(bar.ts_micros.div_euclid(1_000_000), day, prices(bar));
+        series.jumps.extend(jump);
+        tally.count(verdict, day, bar.ts_micros);
+        let code = match verdict {
+            Verdict::Refused(cause) => Some((cause.code(), true)),
+            Verdict::Suspect { .. } => Some((series_identity::SUSPECT_CODE, false)),
+            Verdict::Held | Verdict::Unchecked(_) => None,
+        };
+        if let Some((code, refused)) = code {
+            series.flagged.push(FlaggedBar {
+                timeframe: Timeframe::MINUTE_1,
+                month,
+                bar: *bar,
+                code,
+                refused,
+            });
+        }
+    }
+    series.months.push((month, tally));
 }
 
 /// The rows of `kept` that are this series on their day, and the rest refused

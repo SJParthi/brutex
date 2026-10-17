@@ -9,6 +9,7 @@
     reason = "test-only assertions"
 )]
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,15 +83,17 @@ pub(crate) fn install(root: &Path, on: Day, rows: &[Row<'_>]) {
         "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n",
     );
     for (id, row) in rows.iter().enumerate() {
-        csv.push_str(&format!(
-            "{},{},EQ,{},1,{},{},{}\n",
+        writeln!(
+            csv,
+            "{},{},EQ,{},1,{},{},{}",
             9_000 + id,
             row.symbol,
             row.isin,
             row.listed,
             row.removed,
             row.readmitted
-        ));
+        )
+        .unwrap();
     }
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(csv.as_bytes()).expect("compress fixture");

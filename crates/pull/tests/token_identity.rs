@@ -378,7 +378,7 @@ fn the_module_list_is_closed_over_every_definition_of_a_key() {
 
 /// A fixture module whose census key holds a token, and a key builder that
 /// takes one: the checker must refuse both by name.
-const TOKEN_FIXTURE: &str = r#"
+const TOKEN_FIXTURE: &str = r"
 /// A census key. // a token in prose is not a field
 pub struct EntryKey {
     pub contract: Option<Contract>,
@@ -390,7 +390,7 @@ impl<'a> StorePath<'a> {
 fn build(row: &Row) -> EntryKey {
     EntryKey { contract: None, instrument_token: row.security_id }
 }
-"#;
+";
 
 #[test]
 fn a_token_field_in_a_fixture_key_builder_is_refused() {

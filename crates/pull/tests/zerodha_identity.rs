@@ -585,6 +585,7 @@ fn nse_seconds(on: Day) -> u64 {
 /// Install an invented, receipted NSE master dated 2026-08-03 under `root`
 /// stating, for each symbol, its listing and removal days (`None` is `0`).
 fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
+    use std::fmt::Write as _;
     use std::io::Write as _;
     let mut csv = String::from(
         "FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn,ListgDt,RmvlDt,RadmssnDt\n",
@@ -593,13 +594,15 @@ fn install_master(root: &Path, rows: &[(&str, Option<Day>, Option<Day>)]) {
         let isin = brutex_core::universe::nse_isin(symbol).expect("an NSE ISIN");
         let cell =
             |on: &Option<Day>| on.map_or_else(|| "0".to_owned(), |d| nse_seconds(d).to_string());
-        csv.push_str(&format!(
-            "{},{symbol},EQ,{},1,{},{},0\n",
+        writeln!(
+            csv,
+            "{},{symbol},EQ,{},1,{},{},0",
             7_000 + id,
             isin.as_str(),
             cell(listed),
             cell(removed)
-        ));
+        )
+        .unwrap();
     }
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(csv.as_bytes()).unwrap();
