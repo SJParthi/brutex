@@ -83,6 +83,19 @@ All are fixed:
 - the ext4 inode-reuse failure of the staging leftover test: the test now
   holds the old file open and checks that it keeps its bytes.
 
+### A flaky test this branch exposed, fixed
+
+`telemetry::sink::tests::a_run_is_read_from_every_form_a_line_carries_it_in`
+failed 3 of 30 runs on this branch (0 of 30 on the base).
+- It drops a sink and reopens its directory without holding
+  `crate::tests::no_fork_in_flight()`.
+- `FORK_GATE`'s doc asks every such test to hold it. Without it, a child
+  forked by a permission test inside that window still holds the first
+  sink's lock, and the reopen is refused.
+- The base's timing hid the race. This branch's extra tests exposed it.
+- The test, and the two other tests that reopen without the gate, now
+  hold it. Measured afterwards: 0 failures in 40 runs.
+
 ### Docs
 
 - `docs/05-decisions.md` D-6017. The number is above every D-number on any
