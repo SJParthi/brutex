@@ -1437,18 +1437,18 @@ fn contradicted(
                         .map(|read| read.parsed)
                 })
                 .as_ref()?;
-            let mut rows = parsed.range(day, day).filter(|row| row.kind == kind);
-            // A MEMBER KEY'S CLOSE names its key; a day's does not, and its
-            // key is the whole tree's (`*`) when the journal holds one.
-            let row = if let Some(key) = text_of(record, "key") {
-                rows.find(|row| key.ends_with(&format!(" {}", row.filter)))
-            } else {
-                let rows: Vec<_> = rows.collect();
-                rows.iter()
-                    .find(|row| row.filter == "*")
-                    .or_else(|| rows.first())
-                    .copied()
-            };
+            // A DAY'S CLOSE is the whole tree's key (`*`) when the journal
+            // holds one, else the first key of that kind and day. (A member
+            // key's close is "member imported", never this message.)
+            let rows: Vec<_> = parsed
+                .range(day, day)
+                .filter(|row| row.kind == kind)
+                .collect();
+            let row = rows
+                .iter()
+                .find(|row| row.filter == "*")
+                .or_else(|| rows.first())
+                .copied();
             match row {
                 Some(row) if row.outcome.is_done() => None,
                 Some(row) => Some(Contradicted {
@@ -8644,6 +8644,13 @@ mod r3_24_tests {
                 .unwrap()
                 .contains("every match")
         );
+        // A SPAN ALONE that stopped at its read budget has not counted the
+        // rest: "at least", never a total.
+        let span = keyed(&dir, "from=0&limit=5");
+        let index = &span["keyed"]["index"];
+        assert_eq!(index["of_open"], true, "{index:#}");
+        let said = index["said"].as_str().expect("words");
+        assert!(said.contains("of at least 2000"), "{said}");
         drop(sink);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
@@ -8691,6 +8698,17 @@ mod r3_24_tests {
         assert_eq!(
             days(&keyed(&dir, "kind=stocks&month=2020-02")),
             ["2020-02-03"]
+        );
+        // A KEY BESIDE THE ONE PROBED filters what the probe found.
+        assert!(
+            keyed(&dir, "code=C&reason=census_full")["records"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            days(&keyed(&dir, "reason=census_full&month=2020-01")),
+            ["2020-01-02"]
         );
         let by_kind = keyed(&dir, "kind=options");
         assert_eq!(
@@ -8897,6 +8915,12 @@ mod r3_24_tests {
         .expect("JSON");
         assert!(later["reach"]["alert"].is_null(), "{later:#}");
         assert_eq!(later["reach"]["days"], 31);
+        let quiet = super::reach_note(&halves, started + 31 * 86_400_000);
+        assert!(
+            quiet.starts_with("<p class=\"lead\">Reaches back:"),
+            "{quiet}"
+        );
+        assert!(!quiet.contains("Audit history is short"));
         // NOTHING KEPT is the alert, never a quiet answer.
         let empty = [Half {
             name: "served",
@@ -9460,6 +9484,346 @@ mod r3_24_ring_edge_tests {
         assert!(
             !std::sync::Arc::ptr_eq(&held, &grown),
             "the grown file was read"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod r3_24_edge_tests {
+    //! R3-24: a span read across generations and every way it stops, and the
+    //! streams that are there and will not answer, each named.
+
+    use super::{Half, RefusalTail, Seen, Walked, span_backwards, span_page};
+    use std::fmt::Write as _;
+
+    /// A fresh scratch directory.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = crate::scratch::path(&format!("logs-r324x-{name}"));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// One audit line stamped `ms`, its `seq` as given.
+    fn line(seq: u64, ms: i64) -> String {
+        format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-10-05T03:31:18.967Z\",\"ms\":{ms},\"level\":\"error\",\
+             \"target\":\"span.test\",\"msg\":\"at {ms}\",\"fields\":{{}}}}\n"
+        )
+    }
+
+    /// An audit stream written by hand into `dir`: one generation per entry
+    /// of `gens`, oldest first, the last the file being appended to; each line
+    /// stamped with its time; each generation with its span file (the current
+    /// one open-ended) and its `target` posting. `seq` runs from 1.
+    fn hand_stream(dir: &std::path::Path, gens: &[&[i64]]) {
+        let current = u64::try_from(gens.len() - 1).unwrap();
+        std::fs::create_dir_all(dir.join(telemetry::AUDIT_INDEX_DIR)).expect("an index");
+        std::fs::write(telemetry::audit_serial_path(dir), current.to_le_bytes()).expect("serial");
+        let mut seq = 0u64;
+        for (serial, times) in (0u64..).zip(gens) {
+            let (mut file, mut posting) = (Vec::new(), Vec::new());
+            for &ms in *times {
+                seq += 1;
+                let text = line(seq, ms);
+                posting.extend_from_slice(
+                    &telemetry::AuditPointer {
+                        serial,
+                        offset: u64::try_from(file.len()).unwrap(),
+                        seq,
+                        len: u32::try_from(text.len()).unwrap(),
+                        level: telemetry::Level::Error,
+                    }
+                    .image(),
+                );
+                file.extend_from_slice(text.as_bytes());
+            }
+            let path = telemetry::audit_path_for(dir, current, serial).expect("a kept file");
+            std::fs::write(&path, &file).expect("the audit file");
+            let last = if serial == current {
+                i64::MAX
+            } else {
+                *times.last().unwrap()
+            };
+            let generation = telemetry::audit_generation_path(dir, serial);
+            std::fs::create_dir_all(&generation).expect("a generation");
+            std::fs::write(
+                generation.join(telemetry::run_dirs::AUDIT_SPAN_FILE),
+                [times[0].to_le_bytes(), last.to_le_bytes()].concat(),
+            )
+            .expect("a span file");
+            let posting_path =
+                telemetry::audit_posting_path(dir, serial, "target", "span.test").expect("a name");
+            std::fs::create_dir_all(posting_path.parent().unwrap()).expect("a dimension");
+            std::fs::write(posting_path, posting).expect("a posting");
+        }
+    }
+
+    /// Three generations of three lines, a second apart.
+    const GENS: [&[i64]; 3] = [
+        &[1000, 1001, 1002],
+        &[2000, 2001, 2002],
+        &[3000, 3001, 3002],
+    ];
+
+    /// The `(serial, seq)` of a page's lines, newest first.
+    fn seqs(page: &telemetry::PostingsPage) -> Vec<(u64, u64)> {
+        page.pointers
+            .iter()
+            .map(|(at, pointer)| (at.serial, pointer.seq))
+            .collect()
+    }
+
+    /// **A SPAN IS READ ACROSS GENERATIONS, NEWEST FIRST, AND STOPS WHERE IT
+    /// MUST** (R3-24): a newer file whose span misses is passed over unread,
+    /// an older one wholly before the span ends the walk, a line older than
+    /// the span ends it mid-file, `take` stops it and says more may remain,
+    /// and a cursor reads strictly older lines.
+    #[test]
+    fn a_span_is_read_across_generations_and_stops_where_it_must() {
+        let dir = scratch("gens");
+        hand_stream(&dir, &GENS);
+        let (middle, more) = span_page(&dir, (1500, 2500), 100, None).expect("a page");
+        assert_eq!(seqs(&middle), [(1, 6), (1, 5), (1, 4)]);
+        assert!(!more, "the older file is wholly before the span");
+        let (two, more) = span_page(&dir, (1500, 2500), 2, None).expect("a page");
+        assert_eq!(seqs(&two), [(1, 6), (1, 5)]);
+        assert!(more, "stopped at take: older lines may remain");
+        let (wide, more) = span_page(&dir, (1001, 3001), 100, None).expect("a page");
+        assert_eq!(
+            seqs(&wide),
+            [(2, 8), (2, 7), (1, 6), (1, 5), (1, 4), (0, 3), (0, 2)]
+        );
+        assert!(!more, "a line older than the span ends it");
+        let cursor = middle.pointers[1].0;
+        let (older, _) = span_page(&dir, (1001, 3001), 100, Some(cursor)).expect("a page");
+        assert_eq!(seqs(&older), [(1, 4), (0, 3), (0, 2)], "strictly older");
+        // A LINE THAT IS NOT ONE is counted and passed over.
+        let one = telemetry::audit_path_for(&dir, 2, 1).unwrap();
+        let held = std::fs::read(&one).expect("the file");
+        std::fs::write(&one, [b"not a line\n".as_slice(), &held].concat()).expect("rewritten");
+        let (counted, _) = span_page(&dir, (1500, 2500), 100, None).expect("a page");
+        assert_eq!(seqs(&counted), [(1, 6), (1, 5), (1, 4)]);
+        assert_eq!(counted.malformed, 1);
+        // A FILE GONE UNDER ITS SPAN is passed over; one that cannot be
+        // asked about is the page's error, named.
+        std::fs::remove_file(&one).expect("removed");
+        let (none, more) = span_page(&dir, (1500, 2500), 100, None).expect("a page");
+        assert!(none.pointers.is_empty() && !more);
+        std::os::unix::fs::symlink(&one, &one).expect("a link to itself");
+        let refused = span_page(&dir, (1500, 2500), 100, None).expect_err("refused");
+        assert!(refused.contains(&one.display().to_string()), "{refused}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A WALK WITH NO SLICE LEFT, OR A SLICE INSIDE ONE LINE, STOPS AND
+    /// SAYS MORE MAY REMAIN**, never reads past its budget.
+    #[test]
+    fn a_walk_out_of_slice_stops_and_says_so() {
+        let dir = scratch("slice");
+        hand_stream(&dir, &GENS);
+        let path = telemetry::audit_path_for(&dir, 2, 0).unwrap();
+        let len = std::fs::metadata(&path).expect("the file").len();
+        let mut out = telemetry::PostingsPage::default();
+        let spent = span_backwards(&path, 0, (len, 0), 100, &mut 0, &mut out);
+        assert!(matches!(spent, Ok(Walked::Stopped)));
+        // A TORN END: the slice holds part of one line and no newline.
+        let mut budget = 10;
+        let torn = span_backwards(&path, 0, (len - 1, 0), 100, &mut budget, &mut out);
+        assert!(matches!(torn, Ok(Walked::Stopped)));
+        assert_eq!(budget, 0, "the slice was spent");
+        assert!(out.pointers.is_empty());
+        let gone = span_backwards(&dir.join("absent"), 0, (len, 0), 100, &mut 99, &mut out);
+        assert!(gone.is_err());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A KEY BESIDE A SPAN PASSES A GENERATION THE SPAN MISSES UNREAD**
+    /// (R3-24): its pointers are consumed, never their lines read.
+    #[test]
+    fn a_key_beside_a_span_passes_a_generation_unread() {
+        let dir = scratch("prune");
+        hand_stream(&dir, &GENS);
+        let asked = super::asked("target=span.test&from=1500&to=2500&limit=50");
+        let got: serde_json::Value =
+            serde_json::from_str(&super::keyed_json(&dir, None, &asked, None)).expect("JSON");
+        let found: Vec<i64> = got["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["ts"].as_i64().unwrap())
+            .collect();
+        assert_eq!(found, [2002, 2001, 2000], "{:#}", got["keyed"]);
+        // THE PASSED-OVER FILES COULD NOT HAVE BEEN READ: gone, every line
+        // of them would have been an error or a roll-off.
+        for serial in [0, 2] {
+            std::fs::remove_file(telemetry::audit_path_for(&dir, 2, serial).unwrap())
+                .expect("removed");
+        }
+        let again: serde_json::Value =
+            serde_json::from_str(&super::keyed_json(&dir, None, &asked, None)).expect("JSON");
+        assert_eq!(again["records"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            again["keyed"]["index"]["rolled_off"], 0,
+            "{:#}",
+            again["keyed"]
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A STATE STREAM THAT IS THERE AND WILL NOT READ IS NAMED** in
+    /// `/audit.json`'s state changes; one that is not there is passed over.
+    #[test]
+    fn a_state_stream_that_will_not_read_is_named() {
+        let dir = scratch("state-unread");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("cli.lifecycle", "command started"));
+        }
+        let halves = [Half {
+            name: "served",
+            path: dir.clone(),
+        }];
+        let read = |halves: &[Half]| -> serde_json::Value {
+            serde_json::from_str(&super::state_changes_json(halves, 5)).expect("JSON")
+        };
+        let got = read(&halves);
+        assert_eq!(got["rows"][0]["message"], "command started");
+        assert!(got["unread"].as_array().unwrap().is_empty());
+        let stream = telemetry::run_dirs::state_stream_of(&dir);
+        let file = telemetry::audit_current_path(&stream);
+        // ITS FILE A DIRECTORY: there, and no byte of it reads.
+        std::fs::rename(&file, dir.join("aside")).expect("aside");
+        std::fs::create_dir(&file).expect("a directory in its place");
+        let got = read(&halves);
+        assert!(got["rows"].as_array().unwrap().is_empty());
+        let why = got["unread"][0].as_str().expect("named");
+        assert!(why.contains(&file.display().to_string()), "{why}");
+        // ITS STREAM A FILE: the file cannot even be asked about.
+        std::fs::remove_dir_all(&stream).expect("removed");
+        std::fs::write(&stream, b"not a directory").expect("a file in its place");
+        let got = read(&halves);
+        let why = got["unread"][0].as_str().expect("named");
+        assert!(why.contains(&file.display().to_string()), "{why}");
+        // NO STREAM AT ALL is nothing to show, never an error.
+        std::fs::remove_file(&stream).expect("removed");
+        assert!(read(&halves)["unread"].as_array().unwrap().is_empty());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN AUDIT STREAM THAT IS THERE AND WILL NOT ANSWER IS NAMED UNREAD**
+    /// for the importer's evidence: a value the index cannot name, and a
+    /// pointer whose file is no file.
+    #[test]
+    fn an_audit_stream_that_will_not_answer_is_named_unread() {
+        let root = scratch("audited");
+        let cli = root.join(telemetry::run_dirs::LOGS).join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli)).expect("opens");
+            let _ = sink.emit(
+                &telemetry::Event::error("gdfl.import", "refused")
+                    .with("kind", "options")
+                    .with("day", "2020-01-02"),
+            );
+        }
+        let found = super::audited_import_refusals(&root, "options", "2020-01-02");
+        assert_eq!(found.records.len(), 1, "{:?}", found.unread);
+        let long = "d".repeat(telemetry::AUDIT_MAX_POSTING_NAME + 1);
+        let unnamed = super::audited_import_refusals(&root, "options", &long);
+        assert!(
+            unnamed
+                .unread
+                .iter()
+                .any(|why| why.starts_with("logs/cli audit stream:")),
+            "{:?}",
+            unnamed.unread
+        );
+        let file = telemetry::audit_current_path(&cli);
+        std::fs::rename(&file, cli.join("aside")).expect("aside");
+        std::fs::create_dir(&file).expect("a directory in its place");
+        let unread = super::audited_import_refusals(&root, "options", "2020-01-02");
+        assert!(unread.records.is_empty());
+        assert!(
+            unread
+                .unread
+                .iter()
+                .any(|why| why.starts_with("logs/cli audit stream:")
+                    && why.contains(&file.display().to_string())),
+            "{:?}",
+            unread.unread
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A QUEUED RING FILE THAT WENT IS PASSED OVER, ONE THAT WILL NOT READ
+    /// IS NAMED, AND A SLICE ENDS AT ITS LAST NEWLINE** (R3-24).
+    #[test]
+    fn a_queued_file_is_passed_named_or_read_to_its_last_newline() {
+        let root = scratch("queued");
+        let gone = root.join("gone.ndjson");
+        let looped = root.join("looped.ndjson");
+        let lines = root.join("lines.ndjson");
+        std::fs::write(&gone, b"{}\n").expect("a file");
+        std::fs::write(&looped, b"{}\n").expect("a file");
+        let text = (0..2_000).fold(String::new(), |mut text, n| {
+            let _ = writeln!(text, "{{\"n\":{n}}}");
+            text
+        });
+        std::fs::write(&lines, &text).expect("a file");
+        let rolled = [
+            (&gone, Seen::of(&gone)),
+            (&looped, Seen::of(&looped)),
+            (&lines, Seen::of(&lines)),
+        ];
+        let mut tail = RefusalTail::queue_ring(&rolled, &root.join("current"), Seen::Absent);
+        std::fs::remove_file(&gone).expect("removed");
+        std::fs::remove_file(&looped).expect("removed");
+        std::os::unix::fs::symlink(&looped, &looped).expect("a link to itself");
+        let left = tail.read_queued(1_000);
+        assert_eq!(tail.built.errors.len(), 1, "{:?}", tail.built.errors);
+        assert!(tail.built.errors[0].contains(&looped.display().to_string()));
+        assert_eq!(tail.queue.len(), 1, "the lines file is still being read");
+        let read = tail.queue[0].at;
+        assert!(read > 0 && read <= 1_000, "{read}");
+        assert_eq!(text.as_bytes()[usize::try_from(read).unwrap() - 1], b'\n');
+        assert_eq!(tail.built.bytes, read);
+        assert_eq!(left, 1_000 - read);
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RING FILE THAT CANNOT BE ASKED ABOUT LEAVES ITS DIRECTORY
+    /// UNREAD**, never "read" and so never "none".
+    #[test]
+    fn a_ring_file_that_cannot_be_asked_about_leaves_its_directory_unread() {
+        let root = scratch("ring-unread");
+        let cli = root.join(telemetry::run_dirs::LOGS).join("cli");
+        {
+            let sink = telemetry::Sink::open(&telemetry::Config::new(&cli).with_audit(false))
+                .expect("opens");
+            let _ = sink.emit(&telemetry::Event::info("x", "a line"));
+        }
+        let rolled = telemetry::rotated_path(&cli, 1);
+        std::os::unix::fs::symlink(&rolled, &rolled).expect("a link to itself");
+        let got = super::import_refusals(&root);
+        let dir = got
+            .dirs()
+            .iter()
+            .find(|dir| dir.half == "cli")
+            .expect("the cli directory");
+        assert!(
+            matches!(&dir.state, super::DirState::Unreadable(why)
+                if why.contains(&rolled.display().to_string())),
+            "{:?}",
+            dir.state
         );
         let _ignored = std::fs::remove_dir_all(&root);
     }

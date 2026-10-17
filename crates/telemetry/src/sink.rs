@@ -8868,6 +8868,8 @@ mod state_tests {
                     .with("why", why.as_str()),
             );
             let after = sink.audit_health().expect("a stream");
+            // A STREAM THAT TOOK NO LINE fails here, never loops for ever.
+            assert!(after.written > before.written, "{after:?}");
             written += if after.rotations > before.rotations {
                 after.current_bytes
             } else {
@@ -9093,6 +9095,22 @@ mod state_tests {
                 last_ms: Some(aaa[1])
             })
         );
+        // A ROLLED GENERATION WHOSE SPAN WAS NEVER CLOSED (the process ended
+        // between the roll and the close) stays open-ended, never "last at
+        // the end of time".
+        let span_of_first = audit_generation_path(&dir, 0).join(AUDIT_SPAN_FILE);
+        let closed = std::fs::read(&span_of_first).expect("a span file");
+        let mut unclosed = closed.clone();
+        unclosed[8..].copy_from_slice(&i64::MAX.to_le_bytes());
+        std::fs::write(&span_of_first, &unclosed).expect("a span file");
+        assert_eq!(
+            audit_span(&dir, 2, 0),
+            Some(AuditSpan {
+                first_ms: aaa[0],
+                last_ms: None
+            })
+        );
+        std::fs::write(&span_of_first, &closed).expect("a span file");
         // A FILE ROLLED OUT OF THE KEPT SET has no span to read.
         assert_eq!(audit_span(&dir, u64::from(AUDIT_KEEP_FILES) + 5, 0), None);
         // A REOPENED STREAM records the current file's span again.
@@ -9148,6 +9166,59 @@ mod state_tests {
         assert!(at(true, STATE_LOUD_BYTES + 1).is_loud());
         assert!(at(true, STATE_LOUD_BYTES + 1).grown_past_loud());
         assert!(!at(false, u64::MAX).is_loud());
+        assert_eq!(STATE_LOUD_BYTES, 268_435_456, "256 MiB, the size it says");
+    }
+
+    /// **A STATE LINE IS READ BACK WITHOUT ITS NEWLINE**, whether the file
+    /// ends it or not: the bytes a seed copies are the line's own.
+    #[test]
+    fn a_state_line_is_read_without_its_newline() {
+        let dir = scratch("state-lines");
+        let line = {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::info("cli.lifecycle", "command started"));
+            drop(sink);
+            let bytes = std::fs::read(audit_current_path(&dir)).expect("a stream");
+            bytes.strip_suffix(b"\n").expect("a whole line").to_vec()
+        };
+        let file = dir.join("lines");
+        std::fs::write(&file, [line.as_slice(), b"\n", line.as_slice()].concat()).expect("a file");
+        let read: Vec<Vec<u8>> = super::StateLines::new(vec![file])
+            .map(|(_, bytes)| bytes)
+            .collect();
+        assert_eq!(read, [line.clone(), line]);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **TWO LINES THAT SHARE A `seq` ARE TWO LINES** unless their bytes are
+    /// the same: a ring line a later process numbered as an audited one was
+    /// is seeded beside it, not taken for it.
+    #[test]
+    fn a_ring_line_sharing_a_seq_with_another_is_seeded_too() {
+        let dir = scratch("seed-same-seq");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let _ = sink.emit(&Event::info("cli.lifecycle", "command started"));
+        }
+        let ring = super::current_path(&dir);
+        let held = String::from_utf8(std::fs::read(&ring).expect("a ring")).expect("text");
+        std::fs::write(&ring, held.replace("command started", "command finished"))
+            .expect("the ring rewritten");
+        std::fs::remove_dir_all(state_stream_of(&dir)).expect("a state stream");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert_eq!(sink.state_health().expect("a state stream").seeded, 2);
+        let seeded: Vec<(u64, String)> = lines_of(&state_stream_of(&dir))
+            .into_iter()
+            .map(|record| (record.seq, record.message))
+            .collect();
+        assert_eq!(seeded.len(), 2, "{seeded:?}");
+        assert_eq!(seeded[0].0, seeded[1].0, "premise: one seq");
+        assert_eq!(
+            [seeded[0].1.as_str(), seeded[1].1.as_str()],
+            ["command started", "command finished"]
+        );
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
     }
 
     /// **A STREAM WHOSE FILE CANNOT BE OPENED IS NAMED, AND THE RING WRITES
@@ -9338,7 +9409,12 @@ mod picture_tests {
         let sink = Sink::open(&Config::new(&dir)).expect("opens");
         let _ = sink.emit(&Event::info("a", "one"));
         let _ = sink.emit(&Event::info("a", "two"));
-        let _ = sink.emit(&Event::warn("a", "three").with("code", "late"));
+        // THE CODE IS THE FIELD NAMED `code`, wherever it stands.
+        let _ = sink.emit(
+            &Event::warn("a", "three")
+                .with("instrument", "NSE-NIFTY")
+                .with("code", "late"),
+        );
         let _ = sink.emit(&Event::error("a", "four").with("code", "census_full"));
         let _ = sink.emit(&Event::error("a", "five").with("code", "census_full"));
         let _ = sink.emit(&Event::error("a", "six").with("reason", "bad_row"));
