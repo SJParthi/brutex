@@ -4073,3 +4073,45 @@ fn a_banknifty_index_window_observes_banknifty() {
         "no NIFTY month is held"
     );
 }
+
+// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017).
+
+/// **A NIFTY index held only on another exchange is not the NSE index the
+/// observation is about, and observes nothing.** The census holds NIFTY as
+/// a BSE INDEX series for May 2025: the NSE spot NIFTY window finds no month
+/// of its own series and derives no calendar. Covers the false side of
+/// `ingestion_observations_reading`'s `series.exchange == "NSE"`
+/// (server.rs:3329), every other fixture of which held NSE series only.
+#[test]
+fn a_nifty_held_only_on_another_exchange_observes_nothing() {
+    let fixture = Fixture::new("census-observation-bse-only");
+    let mut manifest = Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest");
+    let ts = on_the_2nd(may());
+    manifest
+        .record(Entry {
+            key: EntryKey {
+                contract: None,
+                exchange: Exchange::Bse,
+                segment: Segment::Index,
+                symbol: Symbol::new("NIFTY").expect("fixture symbol"),
+                timeframe: Timeframe::DAY_1,
+                month: may(),
+            },
+            rows: 1,
+            first_ts_micros: ts,
+            last_ts_micros: ts,
+        })
+        .expect("one held month");
+    fixture.publish_bytes(Vendor::Dhan, &manifest.image(), 0);
+    cold(&fixture);
+    assert!(
+        ingestion_observations_reading(&landed_nifty(), &fixture.site, census_now_stamped)
+            .is_none(),
+        "a BSE series is not the NSE index"
+    );
+    // THE PREMISE: the same window over the NSE series observes it.
+    let held = nifty_store("census-observation-nse-held");
+    assert!(
+        ingestion_observations_reading(&landed_nifty(), &held.site, census_now_stamped).is_some()
+    );
+}
