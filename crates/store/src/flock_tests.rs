@@ -548,3 +548,429 @@ fn a_contended_lock_is_refused_and_takes_nothing() {
     second.release().expect("release");
     scratch.probe().expect("every refusal above took nothing");
 }
+
+/// **A PATIENT READER WAITS FOR A WRITER, THEN IS REFUSED; AN IMPATIENT ONE
+/// IS REFUSED AT ONCE** (R3-08, NEW-21). With no patience set the patient
+/// call is the one attempt `try_lock_shared` always was. With patience it
+/// keeps asking until the patience runs out, and only then refuses.
+#[test]
+fn a_patient_reader_waits_for_a_writer_then_is_refused() {
+    use std::time::{Duration, Instant};
+    let scratch = Scratch::new("patient-refused");
+    let writer = Flock::try_lock(scratch.open(), scratch.lock.clone()).expect("free");
+
+    let began = Instant::now();
+    let impatient = Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.as_path());
+    let impatient_took = began.elapsed();
+    assert!(matches!(impatient, Err(TryLockError::WouldBlock)));
+    assert_eq!(
+        super::patience(),
+        Duration::ZERO,
+        "no caller asked for patience"
+    );
+
+    let wait = Duration::from_millis(400);
+    let began = Instant::now();
+    let patient = super::with_patience(wait, || {
+        assert_eq!(super::patience(), wait);
+        Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.as_path()).map(drop)
+    });
+    let patient_took = began.elapsed();
+    assert!(matches!(patient, Err(TryLockError::WouldBlock)));
+    assert!(
+        patient_took >= wait,
+        "it waited its whole patience: {patient_took:?}"
+    );
+    assert!(
+        patient_took < wait + Duration::from_millis(400),
+        "and no longer than one pause past it: {patient_took:?}"
+    );
+    assert!(
+        impatient_took < patient_took / 2,
+        "the impatient call did not wait: {impatient_took:?} against {patient_took:?}"
+    );
+    writer.release().expect("release");
+    scratch.probe().expect("every refusal took nothing");
+}
+
+/// **A WRITER THAT LETS GO WITHIN THE PATIENCE IS WAITED FOR, AND THE READ
+/// GOES ON** (R3-08, NEW-21): the page read that met an import worker an
+/// instant before it finished its day is answered, not refused.
+#[test]
+fn a_patient_reader_takes_the_month_a_writer_lets_go_in_time() {
+    use std::time::{Duration, Instant};
+    let scratch = Scratch::new("patient-served");
+    let writer = Flock::try_lock(scratch.open(), scratch.lock.clone()).expect("free");
+    let letting_go = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        writer.release().expect("the writer lets go");
+    });
+    let began = Instant::now();
+    let reader = super::with_patience(Duration::from_secs(1), || {
+        Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.clone())
+    })
+    .expect("the writer let go inside the patience");
+    let took = began.elapsed();
+    letting_go.join().expect("the writer thread");
+    assert!(
+        took >= Duration::from_millis(60),
+        "it waited for the writer: {took:?}"
+    );
+    assert!(
+        would_block(&scratch.probe()),
+        "the reader holds its shared lock"
+    );
+    reader.release().expect("release");
+    scratch.probe().expect("and gave it back");
+}
+
+/// **PATIENCE IS BOUNDED, SCOPED TO ITS CALL AND RESTORED, ALSO BY A PANIC**
+/// (R3-08). Whatever a caller asks for, no thread waits past
+/// [`super::MAX_PATIENCE`] for one lock; the patience a nested call sets ends
+/// with it; and a panic inside `with_patience` leaves the thread as it was,
+/// so a reused blocking thread never inherits another request's patience.
+#[test]
+fn patience_is_bounded_scoped_and_restored_by_a_panic() {
+    use std::time::Duration;
+    assert_eq!(super::patience(), Duration::ZERO);
+    super::with_patience(Duration::from_mins(1), || {
+        assert_eq!(super::patience(), super::MAX_PATIENCE, "bounded");
+        super::with_patience(Duration::from_millis(5), || {
+            assert_eq!(super::patience(), Duration::from_millis(5), "nested");
+        });
+        assert_eq!(
+            super::patience(),
+            super::MAX_PATIENCE,
+            "the outer patience is back"
+        );
+    });
+    assert_eq!(super::patience(), Duration::ZERO, "ended with its call");
+    let unwound = std::panic::catch_unwind(|| {
+        super::with_patience(Duration::from_millis(250), || panic!("work that panics"));
+    });
+    assert!(unwound.is_err());
+    assert_eq!(super::patience(), Duration::ZERO, "restored by the unwind");
+}
+
+/// **ONE REQUEST'S PATIENCE IS ONE BUDGET, NEVER ONCE PER MONTH** (R3-08,
+/// NEW-21). A window scan that opens three months a writer holds waits its
+/// patience once, in total; the later months are refused at once, so a slot
+/// is never held for patience times months.
+#[test]
+fn a_requests_patience_is_spent_across_every_month_it_opens() {
+    use std::time::{Duration, Instant};
+    let held: Vec<Scratch> = (0..3)
+        .map(|n| Scratch::new(&format!("budget-{n}")))
+        .collect();
+    let writers: Vec<_> = held
+        .iter()
+        .map(|month| Flock::try_lock(month.open(), month.lock.clone()).expect("free"))
+        .collect();
+    let wait = Duration::from_millis(150);
+    let began = Instant::now();
+    let (refusals, left) = super::with_patience(wait, || {
+        let refusals = held
+            .iter()
+            .map(|month| {
+                matches!(
+                    Flock::try_lock_shared_patiently(month.open(), month.lock.as_path()),
+                    Err(TryLockError::WouldBlock)
+                )
+            })
+            .filter(|refused| *refused)
+            .count();
+        (refusals, super::patience())
+    });
+    let took = began.elapsed();
+    assert_eq!(refusals, 3, "every held month is refused");
+    assert_eq!(left, Duration::ZERO, "the budget was spent");
+    assert!(took >= wait, "it waited its patience once: {took:?}");
+    assert!(
+        took < wait * 2,
+        "and not once per month (3 x {wait:?}): {took:?}"
+    );
+    for writer in writers {
+        writer.release().expect("release");
+    }
+}
+
+/// **A REFUSED READER NAMES THE WRITER IN THIS PROCESS: ITS PID, ITS THREAD
+/// AND THE LOCK** (R3-08, RA-298). Only a month lock's own constructors
+/// register; every way a guard ends (release, drop) forgets it; and the
+/// store's refusal says "being written", never "unreadable".
+#[test]
+fn a_refused_reader_names_the_writer_in_this_process() {
+    let scratch = Scratch::new("holder");
+    let pid = std::process::id().to_string();
+    let lock = scratch.lock.display().to_string();
+    let nobody = super::holder_note(&scratch.lock);
+    assert!(nobody.contains("left no note"), "{nobody}");
+    assert!(nobody.contains(&pid) && nobody.contains(&lock), "{nobody}");
+
+    let path = scratch.lock.clone();
+    let file = scratch.open();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let writer = std::thread::Builder::new()
+        .name("r3-08-holder".to_owned())
+        .spawn(move || {
+            let guard = Flock::try_lock_noted(file, path).expect("free");
+            held_tx.send(()).expect("the test waits");
+            let _ = go_rx.recv();
+            drop(guard);
+        })
+        .expect("a writer thread");
+    held_rx.recv().expect("the writer holds the lock");
+    let named = super::holder_note(&scratch.lock);
+    assert!(named.contains("held by this process"), "{named}");
+    assert!(named.contains(&format!("pid {pid}")), "{named}");
+    assert!(named.contains("thread r3-08-holder"), "{named}");
+    assert!(named.contains(&lock), "{named}");
+    let said = crate::file::StoreError::Locked {
+        path: scratch.lock.clone(),
+    }
+    .to_string();
+    assert!(said.starts_with(super::BEING_WRITTEN), "{said}");
+    assert!(
+        said.contains("r3-08-holder") && !said.contains("nreadable"),
+        "{said}"
+    );
+    go_tx.send(()).expect("the writer lets go");
+    writer.join().expect("the writer thread");
+    let after = super::holder_note(&scratch.lock);
+    assert!(after.contains("left no note"), "forgotten on drop: {after}");
+
+    let released = Flock::try_lock_noted(scratch.open(), scratch.lock.clone()).expect("free");
+    assert!(super::holder_note(&scratch.lock).contains("held by this process"));
+    released.release().expect("release");
+    assert!(
+        super::holder_note(&scratch.lock).contains("left no note"),
+        "forgotten on release"
+    );
+    for take in TAKES {
+        let plain = take.on(scratch.open(), scratch.lock.clone());
+        assert!(
+            super::holder_note(&scratch.lock).contains("left no note"),
+            "{take:?}: a lock that is not a month lock's is never registered"
+        );
+        drop(plain);
+    }
+}
+
+/// **A WRITER LEAVES ITS NOTE IN THE MONTH LOCK, SO A READER IN ANOTHER
+/// PROCESS NAMES IT; THE NOTE IS GONE WHEN THE WRITER LETS GO** (R3-08,
+/// RA-298: a test server held a real month busy and no page said who).
+///
+/// `flock(2)` names no holder across processes. The writer's note does: the
+/// test reads the bytes `try_lock_noted` wrote, then plays the other process
+/// by writing a note into a lock this process holds through the unregistered
+/// constructor, so the registry has nothing and only the file can answer.
+#[test]
+fn a_writers_note_names_it_to_a_reader_in_another_process() {
+    let scratch = Scratch::new("note");
+    let pid = std::process::id().to_string();
+    let lock = scratch.lock.display().to_string();
+    let writer = Flock::try_lock_noted(scratch.open(), scratch.lock.clone()).expect("free");
+    let written = fs::read_to_string(&scratch.lock).expect("the lock reads");
+    assert!(written.starts_with(super::NOTE_MARK), "{written}");
+    for part in [
+        format!("pid {pid}"),
+        "thread ".to_owned(),
+        "ms after the Unix epoch".to_owned(),
+        format!("as {lock}"),
+    ] {
+        assert!(written.contains(&part), "{part}: {written}");
+    }
+    assert!(written.len() <= super::NOTE_MAX, "{}", written.len());
+    drop(writer);
+    assert_eq!(
+        fs::metadata(&scratch.lock).expect("the lock").len(),
+        0,
+        "the note is cleared before the lock is let go"
+    );
+
+    // ANOTHER PROCESS'S WRITER, as the bytes it leaves: a pid that is not
+    // this one, its program and verb, and the lock path IT opened, which
+    // names a different store.
+    let other = Flock::try_lock(scratch.open(), scratch.lock.clone()).expect("free");
+    let theirs = format!(
+        "{} pid 4242424, api serve, thread import-worker-3, since 1 ms after the Unix epoch, \
+         as /elsewhere/runtime/store/bars/x.lock\n",
+        super::NOTE_MARK
+    );
+    fs::write(&scratch.lock, &theirs).expect("their note");
+    let named = super::holder_note(&scratch.lock);
+    assert!(named.contains("held by another process"), "{named}");
+    for part in [
+        "pid 4242424",
+        "api serve",
+        "import-worker-3",
+        "/elsewhere/runtime/store",
+    ] {
+        assert!(named.contains(part), "{part}: {named}");
+    }
+    let said = crate::file::StoreError::Locked {
+        path: scratch.lock.clone(),
+    }
+    .to_string();
+    assert!(
+        said.starts_with(super::BEING_WRITTEN) && said.contains("pid 4242424"),
+        "{said}"
+    );
+
+    // A NOTE PAST ITS BOUND is read only to the bound, never whole.
+    let huge = format!(
+        "{} pid 7, {}\n",
+        super::NOTE_MARK,
+        "x".repeat(super::NOTE_MAX * 4)
+    );
+    fs::write(&scratch.lock, &huge).expect("a long note");
+    let cut = super::holder_note(&scratch.lock);
+    assert!(cut.len() < super::NOTE_MAX + 200, "{}", cut.len());
+
+    // BYTES THAT ARE NOT A NOTE are not read as one.
+    fs::write(&scratch.lock, "not a note at all").expect("garbage");
+    assert!(super::holder_note(&scratch.lock).contains("left no note"));
+    other.release().expect("release");
+
+    // A LOCK FILE THAT IS GONE says why its note did not read.
+    let gone = scratch.dir.join("absent.lock");
+    assert!(super::holder_note(&gone).contains("did not read"));
+}
+
+/// **A RELEASED MONTH LOCK IS THE FILE IT WAS: ITS BYTES AND ITS
+/// MODIFICATION TIME** (R3-08). The note is written while the month is held
+/// and cleared before it is let go, and the lock file's times are put back
+/// as it is cleared, so a write that is refused after taking the lock (the
+/// sort-index door's checks) or one that finishes leaves no trace in the
+/// month: `crates/store/tests/sort_index.rs` compares every file's bytes,
+/// inode and modification time before and after.
+#[test]
+fn a_released_noted_lock_keeps_its_bytes_and_its_modification_time() {
+    let scratch = Scratch::new("times");
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    scratch
+        .open()
+        .set_times(fs::FileTimes::new().set_modified(past))
+        .expect("an old modification time");
+    let before = fs::metadata(&scratch.lock).expect("the lock");
+    assert_eq!(before.modified().expect("mtime"), past);
+    for release in [true, false] {
+        let writer = Flock::try_lock_noted(scratch.open(), scratch.lock.clone()).expect("free");
+        assert!(
+            fs::read_to_string(&scratch.lock)
+                .expect("the lock reads")
+                .starts_with(super::NOTE_MARK),
+            "noted while held"
+        );
+        if release {
+            writer.release().expect("release");
+        } else {
+            drop(writer);
+        }
+        let after = fs::metadata(&scratch.lock).expect("the lock");
+        assert_eq!(after.len(), 0, "cleared (release {release})");
+        assert_eq!(
+            after.modified().expect("mtime"),
+            past,
+            "the modification time is put back (release {release})"
+        );
+    }
+}
+
+/// **A NOTE A KILLED WRITER LEFT IS SAID TO BE THE LAST WRITER'S, NEVER
+/// THE HOLDER'S FOR CERTAIN** (R3-08, killed mid-write). A writer killed
+/// while it held the month cannot clear its note; a reader in another process
+/// then holds the month and leaves none. A writer refused now must not read
+/// the dead writer's pid as today's holder without saying so; the next writer
+/// that takes the month overwrites the stale note and clears its own.
+#[test]
+fn a_note_a_killed_writer_left_is_said_to_be_the_last_writers() {
+    let scratch = Scratch::new("stale");
+    let dead = format!(
+        "{} pid 9191919, api serve, thread import-worker-1, since 1 ms after the Unix epoch, \
+         as /gone/store/bars/x.lock\n",
+        super::NOTE_MARK
+    );
+    fs::write(&scratch.lock, &dead).expect("the note a killed writer left");
+    // ANOTHER PROCESS'S READER: a shared lock no registry of this process
+    // knows about, exactly what a reader elsewhere is to this one.
+    let reader = Flock::try_lock_shared(scratch.open(), scratch.lock.clone()).expect("free");
+    assert!(
+        matches!(
+            Flock::try_lock_noted(scratch.open(), scratch.lock.clone()),
+            Err(TryLockError::WouldBlock)
+        ),
+        "a writer is refused while the reader holds the month"
+    );
+    let named = super::holder_note(&scratch.lock);
+    for part in [
+        "the note the last writer left",
+        "pid 9191919",
+        "killed",
+        "the holder is a reader",
+    ] {
+        assert!(named.contains(part), "{part}: {named}");
+    }
+    assert_eq!(
+        fs::read_to_string(&scratch.lock).expect("the lock reads"),
+        dead,
+        "a refused writer writes nothing"
+    );
+    reader.release().expect("release");
+    let next = Flock::try_lock_noted(scratch.open(), scratch.lock.clone()).expect("free now");
+    let note = fs::read_to_string(&scratch.lock).expect("the lock reads");
+    assert!(
+        note.contains(&format!("pid {}", std::process::id())) && !note.contains("9191919"),
+        "the next writer's note replaces the stale one: {note}"
+    );
+    next.release().expect("release");
+    assert_eq!(fs::metadata(&scratch.lock).expect("the lock").len(), 0);
+}
+
+/// **A NOTE THAT CANNOT BE WRITTEN NEVER COSTS THE WRITE** (R3-08). A lock
+/// file opened read-only takes the lock, writes no note, is still named in
+/// this process, and leaves the file as it was.
+#[test]
+fn a_note_that_cannot_be_written_leaves_the_lock_held_and_the_file_untouched() {
+    let scratch = Scratch::new("unnoted");
+    let read_only = File::open(&scratch.lock).expect("read-only");
+    let writer = Flock::try_lock_noted(read_only, scratch.lock.clone()).expect("free");
+    assert!(would_block(&scratch.probe()), "the lock is held");
+    assert_eq!(fs::metadata(&scratch.lock).expect("the lock").len(), 0);
+    assert!(super::holder_note(&scratch.lock).contains("held by this process"));
+    writer.release().expect("release");
+    scratch.probe().expect("and let go");
+}
+
+/// **A READER IN THIS PROCESS IS COUNTED, SO A WRITER IT REFUSES CAN SAY
+/// WHO** (R3-08, RA-298, FM-066's naming half): the patient shared lock
+/// registers while held, and every reader that ends is forgotten.
+#[test]
+fn readers_in_this_process_are_counted_while_they_hold_the_month() {
+    let scratch = Scratch::new("readers");
+    let first =
+        Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.clone()).expect("free");
+    let second =
+        Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.clone()).expect("shared");
+    let named = super::holder_note(&scratch.lock);
+    assert!(
+        named.contains("held by 2 reader(s) in this process"),
+        "{named}"
+    );
+    drop(first);
+    assert!(super::holder_note(&scratch.lock).contains("held by 1 reader(s)"));
+    second.release().expect("release");
+    assert!(super::holder_note(&scratch.lock).contains("left no note"));
+    let refused = super::with_patience(std::time::Duration::ZERO, || {
+        let writer = Flock::try_lock(scratch.open(), scratch.lock.clone()).expect("free");
+        let refused = Flock::try_lock_shared_patiently(scratch.open(), scratch.lock.clone());
+        drop(writer);
+        refused.map(drop)
+    });
+    assert!(matches!(refused, Err(TryLockError::WouldBlock)));
+    assert!(
+        super::holder_note(&scratch.lock).contains("left no note"),
+        "a refused reader registers nothing"
+    );
+}

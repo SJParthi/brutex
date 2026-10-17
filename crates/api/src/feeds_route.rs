@@ -246,23 +246,38 @@ pub(super) async fn feeds_json(
     // next request with no restart. ON THE BLOCKING POOL, NOT THIS WORKER
     // (repair 3): the read is file I/O, and an async handler that waits on
     // it holds a runtime worker every other route needs.
-    let settings =
-        crate::server::settings_route::snapshot_off_worker(site.store_root.clone()).await;
     // THE CENSUS READ AND THE HELD-SPAN WALK ON THE BLOCKING POOL TOO (R3-05
     // repair 4, the second agent's follow-up). A cold held-span walk is
     // O(census keys) — 0.66 to 2 s on the operator's store — and it ran
     // inline on a runtime worker, so the first `/feeds.json` after a start
     // stalled unrelated routes. A task that did not finish is a 503 that
     // says so, never an empty list.
-    let answer = tokio::task::spawn_blocking(move || feeds_body(&site, &settings)).await;
+    //
+    // IN THE NAMED LIST POOL, BOTH READS IN ONE HOP (R3-08, NEW-04): Tokio's
+    // own blocking pool has no name, no bound and no busy answer; the list
+    // pool has all three, and is apart from every page read's pool.
+    let root = site.store_root.clone();
+    let answer = crate::detail::run_list(move || {
+        let settings = crate::server::settings_route::snapshot(&root);
+        feeds_body(&site, &settings)
+    })
+    .await;
     let (status, body) = match answer {
         Ok(body) => (axum::http::StatusCode::OK, body),
+        Err(crate::detail::RunError::Saturated) => {
+            // 429; the server adds `Retry-After` to every 429 (WP-81).
+            crate::detail::admission_refused(
+                "/feeds.json",
+                crate::detail::MAX_LIST_CONCURRENT,
+                &crate::detail::RunError::Saturated,
+            )
+        }
         Err(why) => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             format!(
                 r#"{{"refused":{}}}"#,
                 render::json_string(&format!(
-                    "the /feeds.json answer did not finish on the blocking pool: {why}"
+                    "the /feeds.json answer did not finish on the list pool: {why:?}"
                 ))
             ),
         ),
@@ -2000,8 +2015,13 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\nfn feeds_body(").next())
             .expect("the handler, then the body");
+        // In the named list pool since R3-08 (NEW-04), the settings read
+        // and the body in one hop.
+        assert!(handler.contains("crate::detail::run_list(move || {"));
+        assert!(handler.contains("feeds_body(&site, &settings)"));
         assert!(
-            handler.contains("tokio::task::spawn_blocking(move || feeds_body(&site, &settings))")
+            !handler.contains("tokio::task::spawn_blocking("),
+            "an unnamed, unbounded blocking task"
         );
         assert!(
             !handler.contains("census_now("),

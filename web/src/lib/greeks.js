@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { askWhileBeingWritten, pause } from './being-written.js';
 import { parseKey } from './instrument.js';
 import { ownMonth } from './moneyness.js';
 
@@ -218,9 +219,10 @@ export const greekWhyText = (cell) =>
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
  * @param {'exact'|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking a month being written again (R3-08)
  * @returns {Promise<{cells: Map<string, GreekCell>, rate: Record<string, any>|null}>}
  */
-export async function readGreeks(feed, rows, signal, request = ask, asof = 'exact') {
+export async function readGreeks(feed, rows, signal, request = ask, asof = 'exact', wait = pause) {
   /** @type {Map<string, {instrument: string, tf: string, month: string, times: Set<number>}>} */
   const groups = new Map();
   for (const r of rows) {
@@ -253,8 +255,8 @@ export async function readGreeks(feed, rows, signal, request = ask, asof = 'exac
       });
       if (asof === 'prev') q.set('asof', 'prev');
       try {
-        const res = await request(`/greeks.json?${q}`, { signal });
-        const body = await res.json();
+        // A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21).
+        const { res, body } = await askWhileBeingWritten(request, `/greeks.json?${q}`, signal, wait);
         if (!Array.isArray(body?.rows) || body.rows.length !== chunk.length) {
           throw new Error(body?.error ?? `HTTP ${res.status}`);
         }

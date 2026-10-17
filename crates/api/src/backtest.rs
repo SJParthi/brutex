@@ -1237,7 +1237,28 @@ type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 ///
 /// The body is [`respond`], for the reason that function's header gives.
 pub async fn backtest_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
-    respond(crate::server::store_dir(), uri.query().unwrap_or(""))
+    // THE LEDGER READ, IN THE DETAIL POOL (R3-08, NEW-04): it read the run
+    // ledger on the async worker every other route shares. A full pool waits
+    // its turn, then is a named 429 that `Retry-After` follows.
+    let query = uri.query().unwrap_or("").to_owned();
+    match crate::detail::run(move || respond(crate::server::store_dir(), &query)).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "a run ledger read",
+                crate::detail::MAX_CONCURRENT,
+                &why,
+            );
+            (
+                status,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json; charset=utf-8",
+                )],
+                body,
+            )
+        }
+    }
 }
 
 /// [`backtest_json`], over a store root the caller has already resolved.

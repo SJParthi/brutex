@@ -69,6 +69,39 @@ test('a saturated scan pool is retried with a growing pause, and past the tries 
   assert.equal(calls, SATURATED_TRIES);
 });
 
+test('a month being written is asked again after the server’s delay, and past the tries its sentence names the holder (R3-08)', async () => {
+  /** @type {number[]} */
+  const waits = [];
+  const wait = async (/** @type {number} */ ms) => { waits.push(ms); };
+  const written = () => Response.json(
+    { error: 'being written, ask again: another writer holds /s/bars/x.lock (held by another process; the note the last writer left in the lock reads: pid 42, api serve)', being_written: true },
+    { status: 503, headers: { 'Retry-After': '1' } });
+  let calls = 0;
+  const body = await readWindowPage('feed=gdfl', 1, signal(), async () => {
+    calls += 1;
+    return calls < 3 ? written() : answer([{ t: 1 }], 1);
+  }, wait);
+  assert.equal(calls, 3, 'asked again by itself until the writer let go');
+  assert.equal(body.bars.length, 1);
+  assert.equal(waits.length, 2);
+  assert.ok(waits.every((ms) => ms >= 1000 && ms < 1250), `the server's own delay: ${waits}`);
+  calls = 0;
+  await assert.rejects(
+    readWindowPage('feed=gdfl', 1, signal(), async () => { calls += 1; return written(); }, async () => {}),
+    /being written, ask again.*pid 42/
+  );
+  assert.equal(calls, SATURATED_TRIES, 'bounded: never an endless retry');
+  calls = 0;
+  await assert.rejects(
+    readWindowPage('feed=gdfl', 1, signal(), async () => {
+      calls += 1;
+      return Response.json({ error: 'the census did not read' }, { status: 503, headers: { 'Retry-After': '1' } });
+    }, async () => {}),
+    /census did not read/
+  );
+  assert.equal(calls, 1, 'a 503 that is not "being written" is not retried');
+});
+
 test('a refusal carries the server’s own sentence, and a malformed answer is a failure, not a page', async () => {
   await assert.rejects(
     readWindowPage('q', 50, signal(), async () => Response.json({ error: 'scan_budget_exceeded: ordering by Close reads all 43942544 kept rows' }, { status: 400 })),

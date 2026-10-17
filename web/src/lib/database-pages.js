@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { BEING_WRITTEN_TRIES, askAgainDelay, isBeingWritten } from './being-written.js';
 
 /* ======================================================================
    ONE PAGE OF THE BAR GRID, READ IN ONE REQUEST (D-3326)
@@ -73,6 +74,20 @@ export async function readWindowPage(query, limit, signal, request = ask, wait =
     signal.throwIfAborted();
     if (response.status === 429 && attempt < SATURATED_TRIES) {
       await wait(250 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250), signal);
+      continue;
+    }
+    /* A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21). A read
+       that meets an import worker, a month repair or an index build on its
+       month waits briefly on the server, then answers 503 with
+       `"being_written": true` and `Retry-After` — never "unreadable". The page
+       asks again after the server's own delay (one second when it names
+       none, never more than two), at most `BEING_WRITTEN_TRIES` requests;
+       past that the server's sentence, which names who holds the month, is
+       the failure. A 503 without the field is not a "come back" and is not
+       retried. The rule is `being-written.js`'s, shared with the spot and
+       Greeks cells. */
+    if (isBeingWritten(response, body) && attempt < BEING_WRITTEN_TRIES) {
+      await wait(askAgainDelay(response), signal);
       continue;
     }
     if (!response.ok) throw new Error(String(body?.error ?? `HTTP ${response.status}`));

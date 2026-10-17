@@ -14,7 +14,6 @@
 use super::{Addressed, Loaded, param, params, timeframe_param};
 use crate::{bars, ingest, render};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The bars of one month as a JSON array, narrowed to a half-open microsecond
 /// window.
@@ -212,9 +211,10 @@ pub(super) fn day_window_bounds(query: &str) -> Result<(Option<i64>, Option<i64>
 /// answer. A day window (`from=` and `to=`) cuts the month to its days: one
 /// day of that month is 3,105,001 bytes. `/bars/window.json` pages any range,
 /// at most [`bars::MAX_WINDOW_LIMIT`] rows a page. With no window, this
-/// route sends the whole month: no cap on its rows is in this file when AF-05
-/// lands. R3-08 (RA-060), not yet merged then, adds one that refuses a
-/// too-large answer by name; whichever merges second rewrites this sentence.
+/// route sends the whole month only up to [`MAX_MONTH_ANSWER_ROWS`] rows
+/// (R3-08, RA-060, merged after AF-05): a window that holds more is refused
+/// by name, 400 `too_many_rows`, before a record is read, pointing at the
+/// paged route — so a whole one-second month is never sent from here.
 ///
 /// **This route takes no `limit`, `page` or `offset`, and it refuses each one
 /// by name.** Until AF-05 they were accepted and ignored: `limit=2` answered
@@ -304,6 +304,13 @@ pub(super) async fn bars_json(
             json(),
             format!(r#"{{"error":{}}}"#, render::json_string(&why)),
         ),
+        // BEING WRITTEN, NEVER "UNREADABLE" (R3-08, NEW-21): a writer held
+        // the month past the read's patience; 503, and `Retry-After`.
+        Ok(Err(why)) if crate::detail::is_being_written(&why) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            json(),
+            being_written(&why),
+        ),
         Ok(Err(why)) => refuse(why),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
@@ -315,6 +322,15 @@ pub(super) async fn bars_json(
         }
     }
 }
+
+/// The most rows one `/bars.json` answer carries (R3-08, RA-060): the bound
+/// `/markets` keeps for a month it reads whole (`MONTH_READ_MAX` in
+/// `web/src/lib/markets-tail.js`), so no page the front end draws is refused,
+/// and a direct request for more is refused by name before any record is
+/// read. A one-minute month holds at most 31 x 1,440 = 44,640 rows and always
+/// fits; a one-second month (380,000 to 500,000 rows) is paged through
+/// `/bars/window.json` or narrowed by day.
+pub(super) const MAX_MONTH_ANSWER_ROWS: usize = 60_000;
 
 /// [`bars_json`]'s blocking half: open the month, locate the day window and
 /// render it. Returns the status and body, or the refusal sentence.
@@ -411,6 +427,23 @@ fn month_answer(
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok())
         .map_or(held, |index| index.clamp(begins, held));
+    // A ROW CAP ON THE SERVER, NOT ONLY IN THE BROWSER (R3-08, RA-060). The
+    // bound lived in `/markets` alone (`MONTH_READ_MAX`): anyone asking this
+    // route directly got a whole one-second month, 36 to 71 MB, from the pool
+    // `/db` reads through. Refused before a record is read, by name, pointing
+    // at the paged route.
+    let rows_asked = ends.saturating_sub(begins);
+    if rows_asked > MAX_MONTH_ANSWER_ROWS {
+        return Err(format!(
+            "too_many_rows: {} {} {} holds {rows_asked} rows in the window asked, past the \
+             {MAX_MONTH_ANSWER_ROWS} one /bars.json answer serves; page it through \
+             /bars/window.json (at most {} rows a page) or narrow it with from= and to= days",
+            asked.symbol,
+            asked.timeframe.as_str(),
+            asked.month,
+            bars::MAX_WINDOW_LIMIT
+        ));
+    }
     let (rows, mut faults) =
         bars::page_cancellable(&file, begins, ends.saturating_sub(begins), cancel)?;
 
@@ -816,44 +849,12 @@ impl WindowAsk {
 
 /// Window scans — a non-time sort, a fold of the extremes, or the O(days)
 /// work of a time-of-day bound or `coverage=1` — that may be queued or
-/// running at once on the blocking pool.
-///
-/// A pool of its own, apart from `crate::detail::run_store_read`'s, so a seek
-/// never waits behind a scan (D-3326, DB-066): a scan reads up to
-/// [`bars::MAX_SCAN_BARS`] records, a seek a page.
-pub(super) const MAX_SCAN_CONCURRENT: usize = 2;
-
-static SCANS_ACTIVE: AtomicUsize = AtomicUsize::new(0);
-
-/// One admitted scan; dropping it returns the slot.
-struct ScanPermit;
-
-impl Drop for ScanPermit {
-    fn drop(&mut self) {
-        SCANS_ACTIVE.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// Runs a window scan on the blocking pool, in the scan pool of
-/// [`MAX_SCAN_CONCURRENT`] slots, or refuses before queueing.
-async fn run_scan<T, F>(work: F) -> Result<T, crate::detail::RunError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    SCANS_ACTIVE
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-            (active < MAX_SCAN_CONCURRENT).then_some(active.saturating_add(1))
-        })
-        .map_err(|_| crate::detail::RunError::Saturated)?;
-    let permit = ScanPermit;
-    tokio::task::spawn_blocking(move || {
-        let _held = permit;
-        work()
-    })
-    .await
-    .map_err(|why| crate::detail::RunError::Join(why.to_string()))
-}
+/// running at once on the blocking pool: the named scan pool's ceiling
+/// (`crate::detail::run_scan`, R3-08), apart from
+/// `crate::detail::run_store_read`'s, so a seek never waits behind a scan
+/// (D-3326, DB-066): a scan reads up to [`bars::MAX_SCAN_BARS`] records, a
+/// seek a page.
+pub(super) const MAX_SCAN_CONCURRENT: usize = crate::detail::MAX_SCAN_CONCURRENT;
 
 /// Runs `work` off the async workers — in the scan pool when `heavy`, else
 /// the store-read pool, each admitted under its cap and refused by name when
@@ -872,15 +873,14 @@ where
     T: Send + 'static,
     F: FnOnce(&bars::Cancel) -> T + Send + 'static,
 {
-    let (cancel, guard) = bars::Cancel::pair();
-    let job = move || work(&cancel);
-    let answered = if heavy {
-        run_scan(job).await
+    // ONE NAMED POOL OR THE OTHER, each with the bounded wait, the counts
+    // and the read patience every pool has (R3-08).
+    let named = if heavy {
+        crate::detail::Named::Scan
     } else {
-        crate::detail::run_store_read(job).await
+        crate::detail::Named::StoreRead
     };
-    guard.disarm();
-    answered
+    crate::detail::cancellable_in(named, work).await
 }
 
 pub(super) async fn bars_window_json(
@@ -925,11 +925,22 @@ pub(super) async fn bars_window_json(
     let work = move |cancel: &bars::Cancel| {
         let window = bars::window_cancellable(&root, &query, cancel);
         note_cancelled("/bars/window.json", &window);
-        Ok::<_, String>(render_window(&window?, scanned))
+        let window = window?;
+        // A MONTH BEING WRITTEN IS "ASK AGAIN", NOT "READ IN PART" (R3-08,
+        // NEW-21): when every fault of the answer is a month a writer held
+        // past the read's patience — nothing damaged, nothing withheld — the
+        // set is short only for as long as the writer holds it.
+        let waiting_on_writer = window.faulted_records == 0
+            && !window.faults.is_empty()
+            && window
+                .faults
+                .iter()
+                .all(|fault| crate::detail::is_being_written(fault));
+        Ok::<_, String>((render_window(&window, scanned), waiting_on_writer))
     };
     // OFF THE ASYNC WORKERS, AND A SCAN APART FROM A SEEK (DB-066).
     let answered = cancellable(heavy, work).await;
-    let (body, withheld, faulted) = match answered {
+    let ((body, withheld, faulted), waiting_on_writer) = match answered {
         Ok(Ok(rendered)) => rendered,
         // A SERIES THE DECODER REFUSES IS GONE, not malformed: 410, with the
         // refusal the re-key recorded (D-3331; WP-12c, DB-A18).
@@ -938,6 +949,13 @@ pub(super) async fn bars_window_json(
                 axum::http::StatusCode::GONE,
                 json(),
                 format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+            );
+        }
+        Ok(Err(why)) if crate::detail::is_being_written(&why) => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                json(),
+                being_written(&why),
             );
         }
         Ok(Err(why)) => return refuse(why),
@@ -958,6 +976,19 @@ pub(super) async fn bars_window_json(
             return (status, json(), body);
         }
     };
+    // 503 AND "ASK AGAIN" WHEN THE ONLY GAP IS A WRITER (R3-08, NEW-21): the
+    // body is the window as read, with `"being_written":true` first, so the
+    // page asks again after `Retry-After` (`crate::detail::count_route` adds
+    // it) instead of drawing a month as read in part. A gap with any other
+    // cause stays the 206 below, the writer's month named once among them.
+    if waiting_on_writer && withheld == 0 {
+        let rest = body.strip_prefix('{').unwrap_or(&body);
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            json(),
+            format!("{{{},{rest}", crate::detail::BEING_WRITTEN_FIELD),
+        );
+    }
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
     // the set is not whole, and one status must not mean both.
@@ -967,6 +998,16 @@ pub(super) async fn bars_window_json(
         axum::http::StatusCode::PARTIAL_CONTENT
     };
     (status, json(), body)
+}
+
+/// The body of a read that met a writer: the store's sentence (which names
+/// the holder) and `"being_written": true`, so a page asks again by itself
+/// rather than reading the answer as damage (R3-08, NEW-21).
+fn being_written(why: &str) -> String {
+    format!(
+        r#"{{"error":{},"being_written":true}}"#,
+        render::json_string(why)
+    )
 }
 
 /// `api.bars`, INFO, once per request whose client went away mid-read: the
@@ -1969,14 +2010,14 @@ mod tests {
             bars_window_json(axum::extract::State(std::sync::Arc::clone(&loaded)), uri)
         };
         // EVERY SLOT TAKEN, whatever another test holds at this instant.
-        SCANS_ACTIVE.fetch_add(MAX_SCAN_CONCURRENT, Ordering::AcqRel);
+        let crowd = crate::detail::crowd(crate::detail::Named::Scan);
         let (scan, _, refused) = ask("c").await;
         let (seek, _, served) = ask("ts").await;
         // A TIME-OF-DAY BOUND AND A COVERAGE COUNT ARE O(days): they wait
         // where the sorts wait, not in a seek's slot.
         let (timed, _, timed_body) = ask("ts&tod_from=09:15:00&tod_to=09:16:59").await;
         let (covered, _, covered_body) = ask("ts&coverage=1").await;
-        SCANS_ACTIVE.fetch_sub(MAX_SCAN_CONCURRENT, Ordering::AcqRel);
+        drop(crowd);
         for (status, body) in [(timed, &timed_body), (covered, &covered_body)] {
             assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS, "{body}");
             assert!(body.contains("a bar window scan not admitted"), "{body}");

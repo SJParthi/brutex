@@ -15582,6 +15582,9 @@ fn admitted_gated(
             refuse_unstamped_writes(gate.unstamped, request, next)
         }))
         .layer(axum::middleware::from_fn(crate::logs::note_request))
+        // EVERY ROUTE'S ANSWERS COUNTED: answered, busy, being written,
+        // cancelled (R3-08); a being-written 503 gains `Retry-After` there.
+        .layer(axum::middleware::from_fn(crate::detail::count_route))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .layer(axum::middleware::map_response(never_framed))
         .with_state(site)
@@ -16100,6 +16103,7 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         .route("/store.json", axum::routing::get(store_json))
         // THE ONLY ROUTE THAT OPENS A BAR FILE TO CHECK THE COUNTER.
         .route("/verify.json", axum::routing::get(verify_json))
+        .route("/pools.json", axum::routing::get(crate::detail::pools_json))
         // READ FROM DISK, NOT `include_str!`. It is a file under `web/`, and a
         // crate that reaches into that tree at compile time is the coupling CI
         // gate 1e detaches the tree to find. D-0064.
@@ -35710,6 +35714,9 @@ mod calendar_identity {
 #[cfg(test)]
 #[path = "http_admission_tests.rs"]
 mod http_admission_tests;
+#[cfg(test)]
+#[path = "pool_table_tests.rs"]
+mod pool_table_tests;
 
 #[cfg(test)]
 #[path = "hand_stop_tests.rs"]

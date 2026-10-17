@@ -1,4 +1,5 @@
 import { ask } from './ask.js';
+import { askWhileBeingWritten, pause } from './being-written.js';
 import { istMonth } from './dates.js';
 import { parseKey } from './instrument.js';
 
@@ -218,9 +219,10 @@ const int = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
  * @param {AbortSignal} signal
  * @param {typeof ask} [request]
  * @param {'exact'|'prev'} [asof] `prev` opts in to the last spot at or before t (D-3328)
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait] the pause before asking a month being written again (R3-08)
  * @returns {Promise<Map<string, SpotAnswer>>}
  */
-export async function readSpots(feed, rows, signal, request = ask, asof = 'exact') {
+export async function readSpots(feed, rows, signal, request = ask, asof = 'exact', wait = pause) {
   /** @type {Map<string, {exchange: string, symbol: string, tf: string, month: string, times: Set<number>}>} */
   const groups = new Map();
   for (const r of rows) {
@@ -246,8 +248,8 @@ export async function readSpots(feed, rows, signal, request = ask, asof = 'exact
         timeframe: e.tf, month: e.month, t: chunk.join(',') });
       if (asof === 'prev') q.set('asof', 'prev');
       try {
-        const res = await request(`/spot.json?${q}`, { signal });
-        const body = await res.json();
+        // A MONTH BEING WRITTEN IS ASKED AGAIN, BY ITSELF (R3-08, NEW-21).
+        const { res, body } = await askWhileBeingWritten(request, `/spot.json?${q}`, signal, wait);
         if (!Array.isArray(body?.spots) || body.spots.length !== chunk.length) {
           throw new Error(body?.error ?? `HTTP ${res.status}`);
         }

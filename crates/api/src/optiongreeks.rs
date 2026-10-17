@@ -819,6 +819,11 @@ pub fn respond_with(
         }
         Err(why) => return bad_request(&why),
     };
+    // BEING WRITTEN, NEVER "UNREADABLE" (R3-08, NEW-21): a writer held the
+    // option's month or its underlying's past the read's patience.
+    if let Some((status, body)) = crate::detail::being_written_answer(&faults) {
+        return (status, json_headers(), body);
+    }
     let status = if faults.is_empty() {
         axum::http::StatusCode::OK
     } else {
@@ -832,7 +837,9 @@ pub fn respond_with(
 /// 400 for a malformed question, 206 when any record would not read (the
 /// answers are real and the set is not whole), 200 otherwise — including
 /// when every cell is a named refusal, the rate's among them. 429 with
-/// `Retry-After` when the store-read pool is full (DB-066, DB-G80).
+/// `Retry-After` when the store-read pool is full (DB-066, DB-G80). 503 with
+/// `Retry-After` and `"being_written": true` when a writer held a month the
+/// read needed past its patience (R3-08, NEW-21), never 206 "unreadable".
 pub async fn greeks_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,

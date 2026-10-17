@@ -630,9 +630,16 @@ async fn audit_span(
 ) -> Result<(Vec<AuditedMonth>, Denominator), crate::detail::RunError> {
     let runtime = tokio::runtime::Handle::current();
     let audit_site = std::sync::Arc::clone(site);
-    crate::detail::run_calendar(move || {
+    // STOPPED WHEN THE READER LEAVES (R3-08, RA-130): one flag read per month
+    // of the span. The flag is set only when this request's future — the one
+    // reader of what the walk returns — has been dropped, so the months it
+    // stops short of are read by nobody, and nothing partial is ever served.
+    crate::detail::cancellable_in(crate::detail::Named::Calendar, move |cancel| {
         let mut months = Vec::with_capacity(span.len());
         for month in &span {
+            if cancel.is_cancelled() {
+                break;
+            }
             let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
             let mut audited = audit_one(
                 &audit_site,
