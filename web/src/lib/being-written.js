@@ -68,3 +68,39 @@ export async function askWhileBeingWritten(request, url, signal, wait = pause) {
     await wait(askAgainDelay(res), signal);
   }
 }
+
+/**
+ * `request(url, options)`, asked again while the server says its month is
+ * being written — for a reader that keeps the RESPONSE: the last one comes
+ * back with its body unread, so a caller that checks `response.ok` and quotes
+ * `refusalFrom` keeps doing exactly that, and its last failure is the
+ * server's sentence naming who holds the month. Only a 503 is looked at, its
+ * body read from a clone; any other answer is returned as it came.
+ *
+ * The /db chart's folded rungs (`/sources/bars.json`), the day flags
+ * (`/dayflags.json`) and the sources pages read through here (R3-08, RA-117):
+ * beside a writer-held month each used to show the first 503 — or, for the
+ * day flags, every day "unreadable" — and never ask again.
+ *
+ * @param {(url: string, options: any) => Promise<any>} request `ask`, or a counting wrapper of it
+ * @param {string} url
+ * @param {{ signal?: AbortSignal } & Record<string, any>} [options] passed to every request
+ * @param {(ms: number, signal: AbortSignal) => Promise<unknown>} [wait]
+ * @returns {Promise<any>} the last response, its body unread
+ */
+export async function askAgainWhileWritten(request, url, options = {}, wait = pause) {
+  const signal = options.signal ?? new AbortController().signal;
+  for (let attempt = 1; ; attempt += 1) {
+    signal.throwIfAborted();
+    const res = await request(url, options);
+    if (res?.status !== 503 || attempt >= BEING_WRITTEN_TRIES) return res;
+    let body = null;
+    try {
+      body = await res.clone().json();
+    } catch {
+      return res;
+    }
+    if (!isBeingWritten(res, body)) return res;
+    await wait(askAgainDelay(res), signal);
+  }
+}

@@ -438,7 +438,10 @@ pub(super) async fn dayflags_json(
     };
     let root = site.store_root.clone();
     match crate::detail::run_store_read(move || answer(&root, &asked)).await {
-        Ok(body) => (axum::http::StatusCode::OK, json_header(), body.to_string()),
+        Ok(body) => match being_written(&body) {
+            Some((status, said)) => (status, json_header(), said),
+            None => (axum::http::StatusCode::OK, json_header(), body.to_string()),
+        },
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
                 "day flags read",
@@ -448,6 +451,26 @@ pub(super) async fn dayflags_json(
             (status, json_header(), body)
         }
     }
+}
+
+/// The "being written, ask again" 503 for an [`answer`] whose EVERY month
+/// fault is a writer holding the month past the read's patience — the same
+/// small body every bar route answers a writer with, so `count_route` adds
+/// `Retry-After`, counts it as being written, and the page asks again by
+/// itself (R3-08, RA-117). Before this a page beside a writer-held month was
+/// 200 with every day's cell `"unreadable"` (30 of 30 measured on a copy of
+/// gdfl NIFTY 1s 2019-11 held by `lockf(1)`) and nothing asked again. `None`
+/// when nothing failed, or when anything failed for another reason: real
+/// damage beside a busy month is answered as damage, its writer-held cells
+/// saying `being_written`.
+pub(crate) fn being_written(body: &Value) -> Option<(axum::http::StatusCode, String)> {
+    let faults: Vec<String> = body
+        .get("month_faults")?
+        .as_array()?
+        .iter()
+        .filter_map(|fault| fault.as_str().map(str::to_owned))
+        .collect();
+    crate::detail::being_written_answer(&faults)
 }
 
 /// The page's days: `(first, last)` of page `page` (clamped), and the count
@@ -511,10 +534,12 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
     let underlying = sampled_series(asked.feed, inst);
     let held = PageHeld::count(root, asked, &days, (fills, underlying.as_ref()));
     notes.extend(held.notes());
+    let mut month_faults: Vec<String> = held.faults().collect();
     let day_bars = (asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno)
         .then(|| day_bars(root, inst, &days));
     if let Some(bars) = &day_bars {
         notes.extend(bars.notes.iter().cloned());
+        month_faults.extend(bars.faults.iter().cloned());
     }
     // THE PULL JOURNAL IS READ FOR A ZERODHA SPOT PAGE ONLY. Zerodha pulls
     // spot, so an option has no record there; a GDFL page carries Zerodha's
@@ -591,6 +616,10 @@ pub(crate) fn answer(root: &Path, asked: &Asked) -> Value {
         "lineage": lineage_json(root, asked.feed, inst),
         "rules": rules_json(),
         "notes": notes,
+        // EVERY MONTH THAT WOULD NOT OPEN, whatever the cause (R3-08, RA-117):
+        // when a writer is the only cause the route answers "being written,
+        // ask again" from these, and a reader of the body sees them here.
+        "month_faults": month_faults,
     })
 }
 
@@ -3049,6 +3078,11 @@ enum Held {
     NoFile,
     /// The file is there and could not be read; a note names why.
     Unreadable,
+    /// A writer (an import worker, a month repair, an index build) held the
+    /// month past the read's patience: nothing is wrong with the file, and
+    /// the count is there once the writer lets go (R3-08, RA-117). Never
+    /// "unreadable", the word a damaged file earns.
+    BeingWritten,
     /// The instrument is an underlying's options as a kind (`NSE-FNO-NIFTY`)
     /// and names no contract, so there is no one series to count.
     NoContract,
@@ -3060,6 +3094,7 @@ impl Held {
             Self::Bars(n) => (Value::from(n), Value::Null),
             Self::NoFile => (Value::Null, Value::from("not_held")),
             Self::Unreadable => (Value::Null, Value::from("unreadable")),
+            Self::BeingWritten => (Value::Null, Value::from("being_written")),
             Self::NoContract => (Value::Null, Value::from("no_contract")),
         };
         json!({ "feed": feed.as_str(), "rung": rung.as_str(), "bars": bars, "why": why })
@@ -3086,6 +3121,41 @@ struct Counts {
     /// bars were not counted.
     halted: Vec<Option<u64>>,
     notes: Vec<String>,
+    /// Every month and lookup that could not be read, one sentence each,
+    /// whatever the cause: what [`answer`] lists as `month_faults`, and what
+    /// the route answers "being written, ask again" from when a writer is
+    /// the only cause (R3-08, RA-117).
+    faults: Vec<String>,
+}
+
+/// One month that would not open, said once in `notes` and once in `faults`:
+/// a writer's hold as being written (its cells [`Held::BeingWritten`]),
+/// anything else as could not be read (its cells [`Held::Unreadable`]).
+/// Whether it is a writer's hold.
+fn month_refused(what: &str, why: &str, notes: &mut Vec<String>, faults: &mut Vec<String>) -> bool {
+    let written = crate::detail::is_being_written(why);
+    let said = if written {
+        format!("{what}: {why}")
+    } else {
+        format!("{what}: the month could not be read: {why}")
+    };
+    notes.push(said.clone());
+    faults.push(said);
+    written
+}
+
+impl Counts {
+    /// An underlying's options as a kind, which names no contract: nothing
+    /// to count on any of `days` days, and nothing that failed.
+    fn no_contract(days: usize) -> Self {
+        Self {
+            per_day: vec![Held::NoContract; days],
+            fills: vec![None; days],
+            halted: vec![None; days],
+            notes: Vec::new(),
+            faults: Vec::new(),
+        }
+    }
 }
 
 /// The most bars one day's zero-volume count reads: a whole session of
@@ -3191,16 +3261,9 @@ fn counts(
     let mut zero = Vec::with_capacity(days.len());
     let mut halted = Vec::with_capacity(days.len());
     let mut notes = Vec::new();
+    let mut faults = Vec::new();
     if inst.segment == Segment::Fno && inst.contract.is_none() {
-        per_day.extend(days.iter().map(|_| Held::NoContract));
-        zero.extend(days.iter().map(|_| None));
-        halted.extend(days.iter().map(|_| None));
-        return Counts {
-            per_day,
-            fills: zero,
-            halted,
-            notes,
-        };
+        return Counts::no_contract(days.len());
     }
     let mut at = 0usize;
     while let Some(first) = days.get(at) {
@@ -3213,13 +3276,13 @@ fn counts(
         match opened {
             Opened::Absent => per_day.extend(month_days.iter().map(|_| Held::NoFile)),
             Opened::Refused(why) => {
-                notes.push(format!(
-                    "{} {} {} {first}: the month could not be read: {why}",
-                    feed.as_str(),
-                    inst.key(),
-                    rung.as_str()
-                ));
-                per_day.extend(month_days.iter().map(|_| Held::Unreadable));
+                let what = format!("{} {} {} {first}", feed.as_str(), inst.key(), rung.as_str());
+                let held = if month_refused(&what, &why, &mut notes, &mut faults) {
+                    Held::BeingWritten
+                } else {
+                    Held::Unreadable
+                };
+                per_day.extend(month_days.iter().map(|_| held));
             }
             Opened::File(file) => {
                 let mut lower: Option<u64> = None;
@@ -3260,12 +3323,14 @@ fn counts(
                             lower = Some(hi);
                         }
                         Err(why) => {
-                            notes.push(format!(
+                            let said = format!(
                                 "{} {} {} {day}: a lookup failed: {why}",
                                 feed.as_str(),
                                 inst.key(),
                                 rung.as_str()
-                            ));
+                            );
+                            notes.push(said.clone());
+                            faults.push(said);
                             // ALL THREE ANSWERS, or every later day of the
                             // month reads the next day's halt count.
                             per_day.push(Held::Unreadable);
@@ -3286,6 +3351,7 @@ fn counts(
         fills: zero,
         halted,
         notes,
+        faults,
     }
 }
 
@@ -3357,6 +3423,8 @@ enum DayBarAt {
     None,
     NotHeld,
     Unreadable,
+    /// A writer held the month past the read's patience ([`Held::BeingWritten`]).
+    BeingWritten,
 }
 
 /// The page's `1day` bars and, for `impossible_jump`, the close before each.
@@ -3366,6 +3434,8 @@ struct DayBars {
     /// in the page or, for the page's first bars, before the page.
     prev_close: Vec<Option<i64>>,
     notes: Vec<String>,
+    /// Every month that could not be read, as [`Counts::faults`].
+    faults: Vec<String>,
 }
 
 impl DayBars {
@@ -3427,6 +3497,7 @@ fn bar_before(root: &Path, inst: &Instrument, day: Day) -> Option<DayBar> {
 fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
     let mut per_day = Vec::with_capacity(days.len());
     let mut notes = Vec::new();
+    let mut faults = Vec::new();
     let mut before_page: Option<DayBar> = None;
     let mut at = 0usize;
     while let Some(first) = days.get(at) {
@@ -3444,11 +3515,13 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
         match held {
             Ok(None) => per_day.extend(month_days.iter().map(|_| DayBarAt::NotHeld)),
             Err(why) => {
-                notes.push(format!(
-                    "zerodha {} 1day {first}: the month could not be read: {why}",
-                    inst.key()
-                ));
-                per_day.extend(month_days.iter().map(|_| DayBarAt::Unreadable));
+                let what = format!("zerodha {} 1day {first}", inst.key());
+                let held = if month_refused(&what, &why, &mut notes, &mut faults) {
+                    DayBarAt::BeingWritten
+                } else {
+                    DayBarAt::Unreadable
+                };
+                per_day.extend(month_days.iter().map(|_| held));
             }
             Ok(Some(bars)) => {
                 if at == 0 {
@@ -3488,6 +3561,7 @@ fn day_bars(root: &Path, inst: &Instrument, days: &[Day]) -> DayBars {
         per_day,
         prev_close,
         notes,
+        faults,
     }
 }
 
@@ -3548,6 +3622,14 @@ impl PageHeld {
             .into_iter()
             .flatten()
             .flat_map(|counts| counts.notes.iter().cloned())
+    }
+
+    /// Every month and lookup of all three that could not be read.
+    fn faults(&self) -> impl Iterator<Item = String> + '_ {
+        [Some(&self.own), Some(&self.peer), self.under.as_ref()]
+            .into_iter()
+            .flatten()
+            .flat_map(|counts| counts.faults.iter().cloned())
     }
 
     /// The page's day `at`.
@@ -4191,6 +4273,7 @@ fn day_bar_json(at: DayBarAt) -> Value {
         DayBarAt::None => json!({ "held": false, "why": "no_bar" }),
         DayBarAt::NotHeld => json!({ "held": false, "why": "not_held" }),
         DayBarAt::Unreadable => json!({ "held": null, "why": "unreadable" }),
+        DayBarAt::BeingWritten => json!({ "held": null, "why": "being_written" }),
     }
 }
 
@@ -4864,6 +4947,10 @@ impl Says<'_> {
                 out.push(format!("{} holds no file for this month", name(self.feed)));
             }
             Held::Unreadable => out.push(format!("{}'s month could not be read", name(self.feed))),
+            Held::BeingWritten => out.push(format!(
+                "{}'s month is being written; ask again once the writer lets go",
+                name(self.feed)
+            )),
             _ => {}
         }
         // HELD IS NOT TRADED (DB-B16): a zero-volume candle is a minute
@@ -4882,6 +4969,10 @@ impl Says<'_> {
                 out.push(format!("{} holds {n} bar(s)", name(peer)));
             }
             Held::Unreadable => out.push(format!("{}'s month could not be read", name(peer))),
+            Held::BeingWritten => out.push(format!(
+                "{}'s month is being written; ask again once the writer lets go",
+                name(peer)
+            )),
             _ => {}
         }
     }

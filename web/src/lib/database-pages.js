@@ -90,7 +90,17 @@ export async function readWindowPage(query, limit, signal, request = ask, wait =
       await wait(askAgainDelay(response), signal);
       continue;
     }
-    if (!response.ok) throw new Error(String(body?.error ?? `HTTP ${response.status}`));
+    /* THE LAST FAILURE IS THE SERVER'S SENTENCE. A being-written 503 names the
+       holder in `error`; a body from a server built before that carried it in
+       `faults` alone, and the grid showed "HTTP 503" (verify-R3-08-r1) — so a
+       being-written answer without `error` is quoted from `faults`, never
+       replaced by a bare status. */
+    if (!response.ok) {
+      const said = typeof body?.error === 'string' && body.error ? body.error
+        : isBeingWritten(response, body) && typeof body?.faults === 'string' && body.faults ? body.faults
+        : `HTTP ${response.status}`;
+      throw new Error(said);
+    }
     const offset = Number(body?.offset);
     if (!body || !Array.isArray(body.bars) || !Number.isSafeInteger(body.total) || body.total < 0 ||
         !Number.isSafeInteger(offset) || offset < 0 || body.bars.length > limit ||

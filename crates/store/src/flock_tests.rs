@@ -909,6 +909,10 @@ fn a_note_a_killed_writer_left_is_said_to_be_the_last_writers() {
         "pid 9191919",
         "killed",
         "the holder is a reader",
+        // A STALE NOTE DOES NOT NAME A READER ALONE (R3-08 repair): a tool
+        // that takes the lock and writes no note, `lockf(1)` as the verifier
+        // used it, holds a month just as a reader does.
+        "or a writer that writes none",
     ] {
         assert!(named.contains(part), "{part}: {named}");
     }

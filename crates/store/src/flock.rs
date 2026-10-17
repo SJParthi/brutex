@@ -332,12 +332,12 @@ pub fn holder_note(path: &Path) -> String {
         // clears its note before it lets go, but one killed while it held the
         // month cannot, and its note stays until the next writer takes the
         // month. Readers write none. So the note names the holder unless that
-        // writer has since ended and readers hold the month now — said, never
-        // left for the reader to assume.
+        // writer has since ended and readers, or a writer that writes no note,
+        // hold the month now — said, never left for the reader to assume.
         Ok(Some(note)) => format!(
             "held by another process; the note the last writer left in the lock reads: {note} \
-             (a writer killed while it held the month leaves its note behind, so if that pid \
-             has ended the holder is a reader, which leaves none)"
+             (a killed writer leaves its note behind: if that pid has ended, the holder is a \
+             reader, which leaves none, or a writer that writes none)"
         ),
         Ok(None) => format!(
             "held by another process that left no note in the lock: a reader (readers write \
@@ -674,19 +674,6 @@ fn unlock(file: &File) -> io::Result<()> {
     file.unlock()
 }
 
-/// A guard dropped without a release, whose unlock the host refused.
-///
-/// `Warn`, not `Error`: the kernel still frees the lock once every descriptor
-/// of its open file description has closed. For a guard that owned its `File`
-/// that is its own descriptor, which closes as the guard drops, and any
-/// duplicate of it. For a guard over a borrowed file the drop closes nothing,
-/// and the owner's descriptor can hold the lock while the owner stays open,
-/// until a later guard over the same owner releases it or the owner closes.
-/// The line records a refused unlock; the lock may outlive the guard while a
-/// borrowed owner or a duplicate descriptor remains open. Without either,
-/// the owned file's last close frees the lock as the guard drops. One event
-/// per refused unlock, never per acquisition, so the normal
-/// path costs nothing beyond the `flock` call itself.
 /// A holder's note that could not be written or cleared
 /// ([`Flock::try_lock_noted`]): said ONCE per process on `store.flock`, so a
 /// lock file that refuses every note is one line, never one per month.
@@ -706,6 +693,19 @@ fn note_unnoted(path: &Path, why: &io::Error) {
     );
 }
 
+/// A guard dropped without a release, whose unlock the host refused.
+///
+/// `Warn`, not `Error`: the kernel still frees the lock once every descriptor
+/// of its open file description has closed. For a guard that owned its `File`
+/// that is its own descriptor, which closes as the guard drops, and any
+/// duplicate of it. For a guard over a borrowed file the drop closes nothing,
+/// and the owner's descriptor can hold the lock while the owner stays open,
+/// until a later guard over the same owner releases it or the owner closes.
+/// The line records a refused unlock; the lock may outlive the guard while a
+/// borrowed owner or a duplicate descriptor remains open. Without either,
+/// the owned file's last close frees the lock as the guard drops. One event
+/// per refused unlock, never per acquisition, so the normal
+/// path costs nothing beyond the `flock` call itself.
 fn note_unreleased(path: &Path, why: &io::Error) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn("store.flock", "advisory lock not released by its guard")

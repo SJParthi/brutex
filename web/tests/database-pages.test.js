@@ -159,3 +159,19 @@ test('a whole read is refused before any request past its budget, and otherwise 
   assert.deepEqual(seen, [1000, 2000, 2500]);
   assert.equal(got.bars[2_499].t, 2_499);
 });
+
+test('past the tries the grid quotes the server’s being-written sentence, never a bare "HTTP 503" (R3-08 repair)', async () => {
+  // The body the window route answered a writer with before the repair (taken
+  // from a shadow server held by lockf, shortened; the path is invented): the
+  // sentence in `faults`, no `error`. The grid threw "HTTP 503" for it.
+  const old = () => Response.json(
+    { being_written: true, total: 0, offset: 0, series_totals: [], bars: [],
+      faults: '2099-01: being written, ask again: another writer holds /s/bars/y.lock (held by this process (pid 7, thread import-1))' },
+    { status: 503, headers: { 'Retry-After': '1' } });
+  let calls = 0;
+  await assert.rejects(
+    readWindowPage('feed=gdfl', 1, signal(), async () => { calls += 1; return old(); }, async () => {}),
+    (error) => /being written, ask again.*pid 7, thread import-1/.test(String(error?.message)) && !/HTTP 503/.test(String(error?.message))
+  );
+  assert.equal(calls, SATURATED_TRIES);
+});

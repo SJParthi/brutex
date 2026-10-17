@@ -994,6 +994,272 @@ async fn a_spot_or_greeks_read_beside_a_writer_says_being_written() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Appends `n` invented bars to `vendor`'s NSE NIFTY `timeframe` month
+/// `year-month` under `root`, from `first_s` (epoch seconds), `step_s` apart
+/// and 300 a day on consecutive days, at prices no market printed; the
+/// month's path and symbol id, for a writer to hold.
+fn add_month(
+    root: &Path,
+    (vendor, timeframe): (Vendor, store::path::Timeframe),
+    (year, month): (u16, u8),
+    (first_s, step_s, n): (i64, i64, i64),
+) -> (store::path::StorePath<'static>, u32) {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe,
+        month: store::path::YearMonth::new(year, month).expect("a legal month"),
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id is the cross-check `open` folds; any 32 bits serve"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+    let mut file = store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+    let rows: Vec<store::format::Bar> = (0..n)
+        .map(|at| store::format::Bar {
+            ts_micros: (first_s + (at / 300) * 86_400 + (at % 300) * step_s) * 1_000_000,
+            open: 1_000 + at,
+            high: 1_010 + at,
+            low: 990 + at,
+            close: 1_005 + at,
+            volume: 0,
+            open_interest: i64::MIN,
+        })
+        .collect();
+    file.append(&rows).expect("legal bars");
+    (path, symbol_id)
+}
+
+/// A writer on its own thread named `name`, holding `path` until the sender
+/// it returns is sent to (or dropped).
+fn hold(
+    root: &Path,
+    path: store::path::StorePath<'static>,
+    symbol_id: u32,
+    name: &str,
+) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let writer_root = root.to_path_buf();
+    let writer = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let held = store::file::BarFile::open_or_create(&writer_root, path, symbol_id)
+                .expect("the writer takes the month");
+            holding_tx.send(()).expect("the test waits for the writer");
+            let _ = release_rx.recv();
+            drop(held);
+        })
+        .expect("a writer thread");
+    holding_rx.recv().expect("the writer holds the month");
+    (writer, release_tx)
+}
+
+/// The asserts every being-written answer meets: 503, `Retry-After: 1`,
+/// `"being_written":true`, the holder named in `error`, no "unreadable", no
+/// rows, and the body under what `count_route` reads; counted as being
+/// written on `route`, never as failed.
+fn says_being_written(route: &str, answer: &str, holder: &str, before: RouteTallyNow) {
+    assert_eq!(status_of(answer), "503", "{route}: {}", head_text(answer));
+    assert!(
+        head_of(answer).contains("retry-after: 1"),
+        "{route}: {}",
+        head_text(answer)
+    );
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    // A `Connection: close` answer may be chunked: the JSON is the part
+    // between the first `{` and the last `}`.
+    let json = body
+        .find('{')
+        .zip(body.rfind('}'))
+        .and_then(|(from, to)| body.get(from..=to))
+        .unwrap_or("");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json).unwrap_or_else(|why| panic!("{route}: {why}: {json}"));
+    assert_eq!(parsed["being_written"], true, "{route}: {json}");
+    let error = parsed["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("being written, ask again"),
+        "{route}: {json}"
+    );
+    assert!(error.contains(holder), "{route} names the holder: {json}");
+    assert!(
+        parsed.get("bars").is_none(),
+        "{route} sends no rows: {json}"
+    );
+    assert!(
+        !json.to_ascii_lowercase().contains("unreadable"),
+        "{route}: {json}"
+    );
+    assert!(
+        json.len() <= crate::detail::BEING_WRITTEN_BODY_MAX,
+        "{route}: {}",
+        json.len()
+    );
+    let after = crate::detail::route_tally(route);
+    assert!(
+        after.being_written > before.being_written,
+        "{route} is counted as being written"
+    );
+    assert_eq!(
+        after.failed, before.failed,
+        "{route} is never counted failed"
+    );
+}
+
+/// A route's being-written and failed counts now.
+#[derive(Clone, Copy)]
+struct RouteTallyNow {
+    being_written: u64,
+    failed: u64,
+}
+
+fn tally_now(route: &str) -> RouteTallyNow {
+    let row = crate::detail::route_tally(route);
+    RouteTallyNow {
+        being_written: row.being_written,
+        failed: row.failed,
+    }
+}
+
+/// **A WINDOW PAGE OVER 16 KiB ACROSS A HELD MONTH AND AN UNHELD ONE SAYS
+/// "BEING WRITTEN", WITH `Retry-After`, AND IS COUNTED SO** (R3-08 repair,
+/// verify-R3-08-r1 blocking 1 and 4). The window used to answer its
+/// being-written 503 with every row it had read from the unheld month —
+/// 126,649 bytes measured on a shadow server — which is past what
+/// `count_route` reads: no `Retry-After`, counted "failed", and the sentence
+/// only under `faults`, so the /db grid's last failure read "HTTP 503". The
+/// same page without the writer is proved over the bound first, so the case
+/// is the one the verifier measured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_window_beside_a_writer_says_being_written_with_retry_after() {
+    let (root, path, symbol_id) = one_month("large-window-beside-writer");
+    // 2023-12-01 09:15 IST onward: 600 invented bars over two days.
+    let _ = add_month(
+        &root,
+        (Vendor::Zerodha, store::path::Timeframe::MINUTE_1),
+        (2023, 12),
+        (19_692 * 86_400 - 19_800 + 9 * 3_600 + 15 * 60, 60, 600),
+    );
+    // THE PAGE SPANS BOTH MONTHS: 500 rows of the unheld December, then the
+    // held January's five.
+    let page = "/bars/window.json?feed=zerodha&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                &timeframe=1min&from=2023-12&to=2024-01&sort=ts&dir=asc&offset=100&limit=600";
+    live(&root, |addr| async move {
+        let (whole, _) = get(addr, page).await;
+        assert_eq!(status_of(&whole), "200", "{}", head_text(&whole));
+        assert!(
+            whole.len() > crate::detail::BEING_WRITTEN_BODY_MAX,
+            "the page is over the bound count_route reads: {}",
+            whole.len()
+        );
+    })
+    .await;
+    // A FRESH SERVER, so no total of the held month is remembered.
+    let (writer, release) = hold(&root, path, symbol_id, "r3-08-window-writer");
+    live(&root, |addr| async move {
+        let before = tally_now("/bars/window.json");
+        let (answer, _) = get(addr, page).await;
+        says_being_written("/bars/window.json", &answer, "r3-08-window-writer", before);
+        release.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        let (answer, _) = get(addr, page).await;
+        assert_eq!(status_of(&answer), "200", "{}", head_text(&answer));
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **THE CHART'S FOLD, THE DAY FLAGS AND THE DAY TABLE BESIDE A WRITER SAY
+/// "BEING WRITTEN", NEVER "UNREADABLE" OR A BARE 503** (R3-08 repair,
+/// verify-R3-08-r1 blocking 2 and 3; RA-117). Before the repair
+/// `/sources/bars.json` answered `{"error":"being written, ask again: ..."}`
+/// with no field and no `Retry-After` (counted failed; the chart never asked
+/// again), `/dayflags.json` answered 200 with every day's cell
+/// `"unreadable"`, and `/sources/day.json` answered 200 with a note nothing
+/// asked again on. Each now answers the one being-written 503, and when the
+/// writer lets go each is answered and no cell says "unreadable".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_fold_day_flags_and_day_table_beside_a_writer_say_being_written() {
+    let (root, path, symbol_id) = one_month("fold-flags-beside-writer");
+    // GDFL's one-second month, which the fold reads for its 1min rung:
+    // 2024-01-02 09:15 IST onward, 300 invented bars a second apart.
+    let (seconds, seconds_id) = add_month(
+        &root,
+        (Vendor::Gdfl, store::path::Timeframe::SECOND_1),
+        (2024, 1),
+        (FIRST_BAR_S, 1, 300),
+    );
+    let fold = "/sources/bars.json?exchange=NSE&segment=INDEX&symbol=NIFTY&rung=1min\
+                &from=2024-01-02&to=2024-01-02&dir=desc&limit=100";
+    let flags = "/dayflags.json?feed=zerodha&instrument=NSE-INDEX-NIFTY\
+                 &from=2024-01-01&to=2024-01-31&order=asc";
+    let day = "/sources/day.json?exchange=NSE&segment=INDEX&symbol=NIFTY\
+               &from=2024-01-02&to=2024-01-02";
+    let (writer, release) = hold(&root, path, symbol_id, "r3-08-hold-zerodha");
+    let (second_writer, second_release) = hold(&root, seconds, seconds_id, "r3-08-hold-gdfl");
+    // THE CELLS, read directly: a writer-held month is `being_written` in
+    // every cell, its own and its peer's, and once each in `month_faults`,
+    // never "unreadable".
+    let asked = crate::server::dayflags::asked(
+        "feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-01-01&to=2024-01-31&order=asc",
+    )
+    .expect("a legal ask");
+    let body = crate::server::dayflags::answer(&root, &asked);
+    let days = body["days"].as_array().expect("days");
+    assert_eq!(days.len(), 31);
+    assert!(
+        days.iter()
+            .all(|day| day["held"]["why"] == "being_written"
+                && day["peer"]["why"] == "being_written"),
+        "{}",
+        body["days"]
+    );
+    assert!(!body.to_string().contains("\"unreadable\""), "{body}");
+    assert_eq!(
+        body["month_faults"].as_array().map(Vec::len),
+        Some(2),
+        "{}",
+        body["month_faults"]
+    );
+    live(&root, |addr| async move {
+        for (route, asked) in [
+            ("/sources/bars.json", fold),
+            ("/dayflags.json", flags),
+            ("/sources/day.json", day),
+        ] {
+            let before = tally_now(route);
+            let (answer, _) = get(addr, asked).await;
+            says_being_written(route, &answer, "r3-08-hold-", before);
+        }
+        release.send(()).expect("the writer lets go");
+        writer.join().expect("the writer thread");
+        second_release.send(()).expect("the second writer lets go");
+        second_writer.join().expect("the second writer thread");
+        for (route, asked) in [
+            ("/sources/bars.json", fold),
+            ("/dayflags.json", flags),
+            ("/sources/day.json", day),
+        ] {
+            let (answer, _) = get(addr, asked).await;
+            assert_eq!(status_of(&answer), "200", "{route}: {}", head_text(&answer));
+            assert!(
+                !answer.contains("being written") && !answer.contains("\"unreadable\""),
+                "{route}: {}",
+                head_text(&answer)
+            );
+        }
+    })
+    .await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The being-written answer is for a read whose EVERY fault is a writer:
 /// none at all, or any other fault beside one, is no "ask again"; past
 /// [`crate::detail::being_written_answer`]'s naming bound the rest are
@@ -1021,6 +1287,21 @@ fn only_a_read_whose_every_fault_is_a_writer_is_asked_again() {
     let (_, body) = crate::detail::being_written_answer(&many).expect("nine writers");
     assert!(body.contains("and 5 more being written"), "{body}");
     assert!(body.len() <= 16 * 1024, "{}", body.len());
+    serde_json::from_str::<serde_json::Value>(&body).expect("the body is JSON");
+    // THE BOUND HOLDS WHATEVER THE SENTENCES HOLD (R3-08 repair): a holder's
+    // note is written by whoever took the lock, and an escape writes up to six
+    // bytes for one character, so sentences of `<` and control characters
+    // are the worst case. Before the repair the cap was 4,096 characters,
+    // not bytes — up to six times that once escaped, past what `count_route`
+    // reads — so such a body lost `Retry-After` and was counted "failed".
+    let hostile = format!("{busy} {}{}", "<".repeat(20_000), "\u{1}".repeat(20_000));
+    let (_, body) = crate::detail::being_written_answer(&vec![hostile; 9]).expect("nine writers");
+    assert!(
+        body.len() <= crate::detail::BEING_WRITTEN_BODY_MAX,
+        "a being-written body is never past what count_route reads: {}",
+        body.len()
+    );
+    assert!(body.contains(crate::detail::BEING_WRITTEN_FIELD));
     serde_json::from_str::<serde_json::Value>(&body).expect("the body is JSON");
 }
 

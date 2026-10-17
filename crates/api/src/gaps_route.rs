@@ -635,26 +635,40 @@ async fn audit_span(
     // reader of what the walk returns — has been dropped, so the months it
     // stops short of are read by nobody, and nothing partial is ever served.
     crate::detail::cancellable_in(crate::detail::Named::Calendar, move |cancel| {
-        let mut months = Vec::with_capacity(span.len());
-        for month in &span {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
+        let months = walk_until(&span, cancel, |month| {
+            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, month));
             let mut audited = audit_one(
                 &audit_site,
                 &asked,
-                *month,
+                month,
                 denominator.calendar.as_ref(),
                 schedule.as_ref().ok().and_then(Option::as_ref),
                 min_run,
             );
             audited.evidence_error = schedule.err();
-            months.push(audited);
-        }
+            audited
+        });
         (months, denominator)
     })
     .await
+}
+
+/// `each` month of `span` in order, until `cancel` says the reader left: one
+/// flag read before each month, so the walk stops before the next month
+/// rather than after the whole span (R3-08, RA-130).
+fn walk_until<T>(
+    span: &[store::path::YearMonth],
+    cancel: &crate::bars::Cancel,
+    mut each: impl FnMut(store::path::YearMonth) -> T,
+) -> Vec<T> {
+    let mut months = Vec::with_capacity(span.len());
+    for month in span {
+        if cancel.is_cancelled() {
+            break;
+        }
+        months.push(each(*month));
+    }
+    months
 }
 
 /// The audit's whole answer, from the months it walked.
@@ -2093,6 +2107,47 @@ mod tests {
         cash_month_files, cash_month_replay_fixture, day, masters, store_root,
     };
     use brutex_core::vendor::Vendor;
+
+    /// **THE GAPS AUDIT STOPS WHEN ITS READER LEAVES** (R3-08, RA-130; the
+    /// verifier proved it live and found no test). A reader still there walks
+    /// every month; one that left before the walk reads none; one that leaves
+    /// while the second month is audited stops before the third.
+    #[test]
+    fn the_gaps_audit_stops_when_its_reader_leaves() {
+        let span: Vec<store::path::YearMonth> = (1..=6)
+            .map(|month| store::path::YearMonth::new(2024, month).expect("a legal month"))
+            .collect();
+        let whole = walk_until(&span, &crate::bars::Cancel::never(), |month| month);
+        assert_eq!(whole, span, "a reader still there gets every month");
+
+        let (cancel, guard) = crate::bars::Cancel::pair();
+        drop(guard);
+        let mut read = 0_u32;
+        let none = walk_until(&span, &cancel, |month| {
+            read += 1;
+            month
+        });
+        assert!(
+            none.is_empty() && read == 0,
+            "a reader gone first: no month is read"
+        );
+
+        let (cancel, guard) = crate::bars::Cancel::pair();
+        let mut guard = Some(guard);
+        let mut read = 0_u32;
+        let some = walk_until(&span, &cancel, |month| {
+            read += 1;
+            if read == 2 {
+                drop(guard.take());
+            }
+            month
+        });
+        assert_eq!(
+            read, 2,
+            "the month in hand finishes; the next is never opened"
+        );
+        assert_eq!(some, span[..2].to_vec());
+    }
 
     #[tokio::test]
     async fn cash_gap_page_uses_receipted_local_flags_and_refuses_missing_or_corrupt_evidence() {

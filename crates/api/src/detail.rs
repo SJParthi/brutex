@@ -777,10 +777,12 @@ pub(crate) struct RouteTally {
 pub const BEING_WRITTEN_FIELD: &str = r#""being_written":true"#;
 
 /// The longest 503 body [`count_route`] reads to tell "being written" from
-/// any other 503. A being-written answer is one store sentence and the
-/// holder's name: a few hundred bytes. A longer body is not one, and is left
-/// as it is without being read.
-const BEING_WRITTEN_BODY_MAX: usize = 16 * 1024;
+/// any other 503. Every being-written answer is made by
+/// [`being_written_answer`], which keeps it under this bound by construction
+/// ([`BEING_WRITTEN_CHARS`]): the store's sentences and the holders' names,
+/// never the rows a read got before it met the writer. A longer body is not
+/// one, and is left as it is without being read.
+pub(crate) const BEING_WRITTEN_BODY_MAX: usize = 16 * 1024;
 
 /// Every route's tally, keyed by the route as registered (`MatchedPath`), so
 /// the map holds at most one row per registered route plus [`FRONT_END`]:
@@ -1012,6 +1014,12 @@ pub fn is_being_written(why: &str) -> bool {
 /// `Retry-After`, whatever a later caller passes.
 const BEING_WRITTEN_NAMED: usize = 4;
 
+/// The most characters of the holders' sentences one being-written body
+/// quotes: six bytes each at worst once escaped, with 128 bytes left for the
+/// envelope and the count of the rest, so the body is never over
+/// [`BEING_WRITTEN_BODY_MAX`].
+pub(crate) const BEING_WRITTEN_CHARS: usize = (BEING_WRITTEN_BODY_MAX - 128) / 6;
+
 /// A read that answers per instant (`/spot.json`, `/greeks.json`) and whose
 /// EVERY fault is a writer holding a month it needed: the "being written, ask
 /// again" 503, its body the store's sentences (each names the holder) and
@@ -1029,8 +1037,14 @@ pub(crate) fn being_written_answer(faults: &[String]) -> Option<(axum::http::Sta
     if faults.is_empty() || !faults.iter().all(|why| is_being_written(why)) {
         return None;
     }
-    // Escaping at most doubles ordinary text; a quarter of the bound for the
-    // sentences leaves the whole body under it, the count of the rest kept.
+    // BOUNDED BY CONSTRUCTION, WHATEVER THE SENTENCES HOLD: the JSON escape
+    // writes at most six bytes for one character (`<`, `\u001f`), so
+    // [`BEING_WRITTEN_CHARS`] characters and the envelope stay under
+    // [`BEING_WRITTEN_BODY_MAX`]. The verifier's case: a window page that
+    // spanned a held month and an unheld one answered its being-written 503
+    // with every row it read — 126,649 bytes, no `Retry-After`, counted
+    // "failed". Every being-written body is made here now, and this cap is
+    // what lets `count_route` read it.
     let named = faults
         .iter()
         .take(BEING_WRITTEN_NAMED)
@@ -1038,7 +1052,7 @@ pub(crate) fn being_written_answer(faults: &[String]) -> Option<(axum::http::Sta
         .collect::<Vec<_>>()
         .join("; ")
         .chars()
-        .take(BEING_WRITTEN_BODY_MAX / 4)
+        .take(BEING_WRITTEN_CHARS)
         .collect::<String>();
     let more = faults.len().saturating_sub(BEING_WRITTEN_NAMED);
     let said = if more == 0 {

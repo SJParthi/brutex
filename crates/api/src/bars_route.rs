@@ -311,12 +311,10 @@ pub(super) async fn bars_json(
         ),
         // BEING WRITTEN, NEVER "UNREADABLE" (R3-08, NEW-21): a writer held
         // the month past the read's patience; 503, and `Retry-After`.
-        Ok(Err(why)) if crate::detail::is_being_written(&why) => (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            json(),
-            being_written(&why),
-        ),
-        Ok(Err(why)) => refuse(why),
+        Ok(Err(why)) => match crate::detail::being_written_answer(std::slice::from_ref(&why)) {
+            Some((status, body)) => (status, json(), body),
+            None => refuse(why),
+        },
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
                 "a month of bars",
@@ -934,13 +932,14 @@ pub(super) async fn bars_window_json(
         // A MONTH BEING WRITTEN IS "ASK AGAIN", NOT "READ IN PART" (R3-08,
         // NEW-21): when every fault of the answer is a month a writer held
         // past the read's patience — nothing damaged, nothing withheld — the
-        // set is short only for as long as the writer holds it.
-        let waiting_on_writer = window.faulted_records == 0
-            && !window.faults.is_empty()
-            && window
-                .faults
-                .iter()
-                .all(|fault| crate::detail::is_being_written(fault));
+        // set is short only for as long as the writer holds it. The answer is
+        // the writers' sentences alone, made where every being-written body
+        // is made, never the rows the read got from an unheld month first.
+        let waiting_on_writer = if window.faulted_records == 0 {
+            crate::detail::being_written_answer(&window.faults)
+        } else {
+            None
+        };
         Ok::<_, String>((render_window(&window, scanned), waiting_on_writer))
     };
     // OFF THE ASYNC WORKERS, AND A SCAN APART FROM A SEEK (DB-066).
@@ -956,14 +955,12 @@ pub(super) async fn bars_window_json(
                 format!(r#"{{"error":{}}}"#, render::json_string(&why)),
             );
         }
-        Ok(Err(why)) if crate::detail::is_being_written(&why) => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                json(),
-                being_written(&why),
-            );
+        Ok(Err(why)) => {
+            return match crate::detail::being_written_answer(std::slice::from_ref(&why)) {
+                Some((status, body)) => (status, json(), body),
+                None => refuse(why),
+            };
         }
-        Ok(Err(why)) => return refuse(why),
         Err(why) => {
             let (status, body) = crate::detail::admission_refused(
                 if heavy {
@@ -982,17 +979,20 @@ pub(super) async fn bars_window_json(
         }
     };
     // 503 AND "ASK AGAIN" WHEN THE ONLY GAP IS A WRITER (R3-08, NEW-21): the
-    // body is the window as read, with `"being_written":true` first, so the
-    // page asks again after `Retry-After` (`crate::detail::count_route` adds
-    // it) instead of drawing a month as read in part. A gap with any other
-    // cause stays the 206 below, the writer's month named once among them.
-    if waiting_on_writer && withheld == 0 {
-        let rest = body.strip_prefix('{').unwrap_or(&body);
-        return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            json(),
-            format!("{{{},{rest}", crate::detail::BEING_WRITTEN_FIELD),
-        );
+    // body is the writers' sentences and `"being_written":true` — the same
+    // small body every route answers a writer with — so the page asks again
+    // after `Retry-After` (`crate::detail::count_route` adds it) instead of
+    // drawing a month as read in part, and its last failure is the sentence
+    // that names the holder (`error`). The rows of an unheld month in the
+    // same page are not sent: a page re-read after the writer lets go
+    // carries them, and a 503 carrying them grew past what `count_route`
+    // reads (126,649 bytes measured), so it lost `Retry-After` and was
+    // counted "failed". A gap with any other cause stays the 206 below, the
+    // writer's month named once among them.
+    if let Some((status, said)) = waiting_on_writer
+        && withheld == 0
+    {
+        return (status, json(), said);
     }
     // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
     // `/bars.json` answers with, for the same reason: the rows are real and
@@ -1003,16 +1003,6 @@ pub(super) async fn bars_window_json(
         axum::http::StatusCode::PARTIAL_CONTENT
     };
     (status, json(), body)
-}
-
-/// The body of a read that met a writer: the store's sentence (which names
-/// the holder) and `"being_written": true`, so a page asks again by itself
-/// rather than reading the answer as damage (R3-08, NEW-21).
-fn being_written(why: &str) -> String {
-    format!(
-        r#"{{"error":{},"being_written":true}}"#,
-        render::json_string(why)
-    )
 }
 
 /// `api.bars`, INFO, once per request whose client went away mid-read: the

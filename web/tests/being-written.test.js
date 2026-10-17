@@ -4,8 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  BEING_WRITTEN_TRIES, askAgainDelay, askWhileBeingWritten, isBeingWritten
+  BEING_WRITTEN_TRIES, askAgainDelay, askAgainWhileWritten, askWhileBeingWritten, isBeingWritten
 } from '../src/lib/being-written.js';
+import { refusalFrom } from '../src/lib/refusal.js';
 import { readSpots } from '../src/lib/moneyness.js';
 import { readGreeks } from '../src/lib/greeks.js';
 
@@ -84,4 +85,60 @@ test('the Greeks cells ask a month being written again; past the tries the holde
   assert.equal(cell.why, 'greeks_request_failed');
   assert.match(String(cell.detail), /being written, ask again.*pid 42/);
   assert.doesNotMatch(String(cell.detail), /unreadable/);
+});
+
+// THE SHAPE THE SERVER SENDS: `crate::detail::being_written_answer`'s body,
+// `{"error": <the holders' sentences>, "being_written": true}`, with the
+// `Retry-After: 1` that `count_route` adds. `/sources/bars.json`,
+// `/dayflags.json` and the window all answer a writer with it (R3-08, RA-117).
+const written = () => Response.json({ error: SENTENCE, being_written: true },
+  { status: 503, headers: { 'Retry-After': '1' } });
+
+test('a folded rung or the day flags beside a writer are asked again, and the response comes back unread (RA-117)', async () => {
+  /** @type {number[]} */
+  const waited = [];
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    return calls < 3 ? written() : Response.json({ days: [] }, { status: 200 });
+  };
+  const res = await askAgainWhileWritten(request, '/dayflags.json?x', { cache: 'no-store' },
+    async (ms) => { waited.push(ms); });
+  assert.equal(calls, 3, 'asked again by itself until the writer let go');
+  assert.equal(waited.length, 2);
+  assert.ok(waited.every((ms) => ms >= 1000 && ms < 1250), `the server's own delay: ${waited}`);
+  assert.equal(res.status, 200);
+  assert.equal(res.bodyUsed, false, 'the caller reads the body itself');
+  assert.deepEqual(await res.json(), { days: [] });
+});
+
+test('past the tries the last 503 is handed back unread, and its refusal names the holder (RA-117)', async () => {
+  let calls = 0;
+  const res = await askAgainWhileWritten(async () => { calls += 1; return written(); }, '/sources/bars.json?x',
+    { signal: new AbortController().signal }, async () => {});
+  assert.equal(calls, BEING_WRITTEN_TRIES, 'bounded: never an endless retry');
+  assert.equal(res.status, 503);
+  const said = await refusalFrom('/sources/bars.json', res);
+  assert.match(said, /being written, ask again.*pid 42, thread import-3/);
+  assert.doesNotMatch(said, /unreadable|named no reason/);
+});
+
+test('any other answer is handed back at once, unread, and a reader who leaves stops the asking', async () => {
+  for (const answer of [
+    () => Response.json({ error: 'the census did not read' }, { status: 503, headers: { 'Retry-After': '1' } }),
+    () => new Response('not json', { status: 503 }),
+    () => Response.json({ being_written: true }, { status: 200 }),
+    () => Response.json({ error: 'busy' }, { status: 429, headers: { 'Retry-After': '1' } })
+  ]) {
+    let calls = 0;
+    const res = await askAgainWhileWritten(async () => { calls += 1; return answer(); }, '/x', {},
+      async () => { throw new Error('must not wait'); });
+    assert.equal(calls, 1, `status ${res.status}`);
+    assert.equal(res.bodyUsed, false);
+  }
+  const gone = new AbortController();
+  let calls = 0;
+  await assert.rejects(askAgainWhileWritten(async () => { calls += 1; gone.abort(); return written(); }, '/x',
+    { signal: gone.signal }, async (_ms, signal) => signal.throwIfAborted()));
+  assert.equal(calls, 1);
 });
