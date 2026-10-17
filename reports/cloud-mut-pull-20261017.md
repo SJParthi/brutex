@@ -73,6 +73,28 @@ Run `timeouts2`, the same flags on the branch with both changes (baseline
 | `gdfl_nfo.rs:569:22` `-=` → `/=` in `monthly_expiry` | `gdfl_nfo::cloud_mutant_tests::the_monthly_walk_back_over_a_holiday_answers_within_a_bound` | test 1, 10.0 s |
 | `cash_session_cache.rs:546:19` `>=` → `<` in `hold` | `cash_session_cache::cloud_mutant_tests::an_installer_waits_for_readers_who_let_go_inside_the_bound` | test 129, 0.03 s |
 
+### The code `feat/db-fix` changed since the old base
+
+Run `newcode`: every mutant on a line `git diff c9e3472e5 origin/feat/db-fix
+-- crates/pull/src/request_minutes.rs crates/pull/src/gdfl_archive.rs`
+touches (`--in-diff`), the same flags with two test threads (a thread count
+changes only how soon a catch is seen; no mutant here hangs). Baseline 62 s
+build, 203 s test.
+
+**58 mutants: 53 caught, 3 unviable, 2 missed.** No catch rests on a timing
+test alone: the first failing test of every caught mutant is a behaviour
+test (`emit_sites::every_emit_site_in_this_crate_reaches_a_file` 25,
+`a_gap_ledger_is_written_for_stored_months_without_a_vendor_call` 13, the
+rest request-audit, tick-store and import tests).
+
+| Missed | Outcome |
+|---|---|
+| `request_minutes.rs:544:19` `>` → `>=` in `stored_line` | **A missing test, now written.** `stored_line` answers `None` for a day holding every owed minute, and nothing pinned it: `gap_backfill` hands it only days already short. `a_stored_day_holding_every_owed_minute_has_no_line` asks it directly; applied by hand, the mutant fails that test (it writes a `missing=0` line for the whole day), and the real code passes. |
+| `gdfl_archive.rs:280:58` `\|` → `^` in `central_directory` | **Equivalent.** `dos_time = field(14, 2) << 16 \| field(12, 2)`: each field is two bytes, so the shifted date and the time share no bit and OR, XOR and `+` agree on every input. |
+
+The three unviable mutants ask `Default` of `Entry`, `ZipEntry` and `Group`,
+which do not implement it.
+
 ### Equivalent mutants (18, missed by construction)
 
 Re-confirmed missed under Gate 18's flags (run `survivors1`). Line numbers
