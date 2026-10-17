@@ -98,8 +98,24 @@ builder is NOT MEASURED (it needs timing inside the store's doors, not R3-17's f
 
 - `cargo fmt --all --check`: clean.
 - `cargo clippy -p cli -p pull --all-targets --locked -- -D warnings`: clean (workspace run pending).
-- `cargo test -p pull --lib upkeep`: 21 passed. `cargo test -p cli --lib upkeep_command`: 13 passed.
-  The workspace run is in progress.
+- `cargo test -p pull --lib upkeep`: 24 passed. `cargo test -p cli --lib upkeep_command`: 13 passed.
+- `cargo test --workspace --locked --no-fail-fast -- --skip the_pool_verb_prints_its_whole_page_on_a_generated_store`
+  (the one test CONTEXT.md says to skip; it reads nothing R3-17 touches), on `3704e6bd`'s
+  predecessor `fb05b8b9`: every failure but one is the base's or root-only, and the one was R3-17's and
+  is fixed:
+  - **R3-17's, fixed in `2e19520b`**: `cli::sweep_wiring_tests::only_actual_computation_verbs_can_establish_sweep_status`
+    (the new `upkeep` verb was on neither side of its list); `upkeep` is now a store verb there and
+    the test passes.
+  - **Root-only** (this container runs as root, which ignores file modes): api 12 (`logs::tests` ×3,
+    `pullrun` ×3, `server::feeds_route` ×1, `server::tests` ×5), cli 3
+    (`scrub_blocks::tests::an_empty_census_a_single_record_and_an_unwritable_ledger`,
+    `watchdog_command::tests` ×2), pull 3 (`gdfl_import::tests` ×2, `gdfl_tickstore::tests` ×1),
+    store 4 (`settings::tests` ×3, `staging::tests::a_dead_writers_leftover_loses_its_name_and_its_bytes_are_reported`),
+    telemetry 4 (`sink::tests`). **Every one passes when the same test binary is run as `nobody`**
+    (`runuser -u nobody -- <binary> --exact <names>`: 12, 3, 3, 4 and 4 passed).
+  - **The base's**: `store::cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not`
+    — nine `feat/db-fix` commits cited by other packages' rows of `docs/06-limits.md` are not on
+    `main`; none is R3-17's.
 - `cargo deny check`: **advisories FAILED; bans, licenses and sources ok** — exactly the base's five
   (RUSTSEC-2026-0344 ruzstd 0.8.2; RUSTSEC-2026-0346/0347/0348/0349 rustls 0.23.45), on the base
   (`f9cdb584`, a worktree) and on this branch alike. `Cargo.toml`, `Cargo.lock` and `deny.toml` are
