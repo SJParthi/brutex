@@ -1258,6 +1258,162 @@ fn keep_append_is_flat(stores: &[std::path::PathBuf; 3]) -> bool {
     a && b
 }
 
+// ══ The fold, per bar (cloud/attack-o1-20261016): C-FD-01 ══════════════════
+
+/// Snapshot counts folded: 1x / 10x / 100x.
+const FOLD_SIZES: [u32; 3] = [1_000, 10_000, 100_000];
+
+/// `n` one-second snapshots of one IST day from 2026-09-07 09:15, every
+/// tenth second skipped so a bucket is folded from a ragged run of rows.
+fn snapshots(n: u32) -> Vec<store::format::Bar> {
+    // 2026-09-07 09:15:00 IST in UTC microseconds.
+    const OPEN: i64 = 1_788_752_700_000_000;
+    (0..n)
+        .map(|i| {
+            let raw = i64::from(i);
+            store::format::Bar {
+                ts_micros: OPEN + (raw + raw / 9) * 1_000_000,
+                open: 2_000_000 + raw % 97,
+                high: 2_000_100 + raw % 97,
+                low: 1_999_900 + raw % 97,
+                close: 2_000_050 + raw % 89,
+                volume: 75,
+                open_interest: store::format::OI_NULL,
+            }
+        })
+        .collect()
+}
+
+/// C-FD-01 — `pull::fold::fold_from_snapshots` into minutes costs the same
+/// PER BAR at 1,000, 10,000 and 100,000 snapshots, and its p50/p99/max per
+/// whole fold are printed. `docs/06-limits.md` (D-1201) said "no bench times
+/// the fold"; this is the row.
+fn fold_is_flat_per_bar() -> bool {
+    let mut per_bar = Vec::with_capacity(FOLD_SIZES.len());
+    for n in FOLD_SIZES {
+        let bars = snapshots(n);
+        let folded = pull::fold::fold_from_snapshots(&bars, pull::fold::Bucket::MINUTE)
+            .unwrap_or_else(|_| refuse("the fold refused its fixture"));
+        if folded.is_empty() {
+            refuse("the fold produced no minute");
+        }
+        spread(&format!("C-FD-01 fold to 1min, {n} snapshots"), 200, || {
+            black_box(
+                pull::fold::fold_from_snapshots(black_box(&bars), pull::fold::Bucket::MINUTE)
+                    .map_or(0, |out| out.len()),
+            );
+        });
+        let whole = cost_ps(3, || {
+            pull::fold::fold_from_snapshots(black_box(&bars), pull::fold::Bucket::MINUTE)
+                .map_or(0, |out| out.len())
+        });
+        per_bar.push(whole / u128::from(n));
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (per_bar.first(), per_bar.get(1), per_bar.get(2))
+    else {
+        refuse("three sizes measured");
+    };
+    ratio("C-FD-01 fold per bar, 1k -> 10k", base, mid)
+        & ratio("C-FD-01 fold per bar, 1k -> 100k", base, big)
+}
+
+// ══ The options reader, per row (D-5800): C-NFO-01 ═════════════════════════
+
+/// Rows in one options file: 1x / 10x / 100x.
+const NFO_ROWS: [usize; 3] = [1_000, 10_000, 100_000];
+
+/// A source holding one options file's bytes and nothing else.
+struct OneNfoFile(Vec<u8>);
+
+impl pull::gdfl_nfo::NfoSource for OneNfoFile {
+    type Locator = ();
+
+    fn day(
+        &self,
+        _: pull::session::Day,
+    ) -> Result<Option<pull::gdfl_nfo::NfoDay<()>>, pull::gdfl_cm::CmRefusal> {
+        Ok(None)
+    }
+
+    fn fetch(
+        &self,
+        _: &pull::gdfl_cm::ListedFile<()>,
+    ) -> Result<Vec<u8>, pull::gdfl_cm::CmRefusal> {
+        Ok(self.0.clone())
+    }
+}
+
+/// An invented options file of `rows` rows of one weekly NIFTY call on
+/// 2024-04-01, listed as that day's one option file. No vendor printed it.
+fn nfo_file(
+    rows: usize,
+) -> (
+    OneNfoFile,
+    pull::gdfl_nfo::NfoDay<()>,
+    pull::gdfl_cm::ListedFile<()>,
+) {
+    let day = pull::session::Day::new(2024, 4, 1).unwrap_or_else(|_| refuse("a real day"));
+    let mut text = format!("{}\r\n", pull::gdfl_cm::HEADER_OPEN_INTEREST);
+    for i in 0..rows {
+        let sod = 33_300 + i % 22_000;
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "NIFTY04APR2422000CE.NFO,01/04/2024,{:02}:{:02}:{:02},10.05,0,0,0,0,75,{}\r\n",
+                sod / 3_600,
+                sod / 60 % 60,
+                sod % 60,
+                300 + i % 7
+            ),
+        );
+    }
+    let bytes = text.into_bytes();
+    let mut listing = pull::gdfl_nfo::NfoDay::new(day, 1);
+    let entry = format!(
+        "{}/Options/NIFTY04APR2422000CE.NFO.csv",
+        pull::gdfl_nfo::day_folder_name(day)
+    );
+    let len = u64::try_from(bytes.len()).unwrap_or_else(|_| refuse("a length"));
+    listing.push(&entry, len, pull::gdfl_archive::crc32(&bytes), ());
+    let Some(file) = listing.entries().first().cloned() else {
+        refuse("the file is listed");
+    };
+    (OneNfoFile(bytes), listing, file)
+}
+
+/// C-NFO-01 — `pull::gdfl_nfo::read_file` (CRC check and decode) costs the
+/// same PER ROW at 1,000, 10,000 and 100,000 rows, and its p50/p99/max per
+/// whole file are printed. The options tree is 27.6 million rows over 11,524
+/// files on 2026-08-03 (`cloud/attack-o1-20261016`); until D-5800 each row
+/// collected a field vector, and no bench timed the reader.
+fn nfo_read_is_flat_per_row() -> bool {
+    let mut per_row = Vec::with_capacity(NFO_ROWS.len());
+    for n in NFO_ROWS {
+        let (source, listing, file) = nfo_file(n);
+        match pull::gdfl_nfo::read_file(&source, &listing, &file) {
+            Ok(read) if read.file.rows.len() == n => {}
+            _ => refuse("the options fixture did not decode whole"),
+        }
+        spread(&format!("C-NFO-01 options file, {n} rows"), 200, || {
+            black_box(
+                pull::gdfl_nfo::read_file(black_box(&source), &listing, &file)
+                    .map_or(0, |read| read.file.rows.len()),
+            );
+        });
+        let whole = cost_ps(3, || {
+            pull::gdfl_nfo::read_file(black_box(&source), &listing, &file)
+                .map_or(0, |read| read.file.rows.len())
+        });
+        per_row.push(whole / u128::try_from(n).unwrap_or(u128::MAX));
+    }
+    let (Some(&base), Some(&mid), Some(&big)) = (per_row.first(), per_row.get(1), per_row.get(2))
+    else {
+        refuse("three sizes measured");
+    };
+    ratio("C-NFO-01 options read per row, 1k -> 10k", base, mid)
+        & ratio("C-NFO-01 options read per row, 1k -> 100k", base, big)
+}
+
 fn main() {
     println!("gate 8 — crates/pull, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
@@ -1279,6 +1435,8 @@ fn main() {
     ok &= keep_lookup_is_flat(&keep_stores);
     ok &= keep_append_is_flat(&keep_stores);
     let _cleanup = std::fs::remove_dir_all(&keep_root);
+    ok &= fold_is_flat_per_bar();
+    ok &= nfo_read_is_flat_per_row();
     if ok {
         println!("all ratios within the ceiling");
     } else {
