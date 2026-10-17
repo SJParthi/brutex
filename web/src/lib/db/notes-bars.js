@@ -343,7 +343,7 @@ export const BAR_WHY = {
 };
 /** @param {string | null} code */
 export const barWhyText = (code) =>
-  /** @type {any} */ (BAR_WHY)[code ?? ''] ??
+  /** @type {any} */ (BAR_WHY)[String(code)] ??
   'unknown, and this page did not record why - which is a defect here, not a fact about the store.';
 
 /* ---------------------------------------------------------------------
@@ -351,7 +351,7 @@ export const barWhyText = (code) =>
    --------------------------------------------------------------------- */
 
 /** The segment a census key names, its second token: `INDEX`, `CASH` or `FNO`. @param {string} key */
-export const segmentOfKey = (key) => String(key ?? '').split('-')[1] ?? '';
+export const segmentOfKey = (key) => String(key).split('-')[1] ?? '';
 
 export const NO_VOLUME_SORT =
   'an index has no traded volume (D-2802, D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under a Volume caret.';

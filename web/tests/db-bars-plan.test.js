@@ -302,3 +302,19 @@ test('the plan, the query and the instant at every boundary (R3-03)', () => {
   assert.equal(localComparator('chg', true)({ chg: 7, ts: 1, rk: 'a' }, { chg: 5, ts: 1, rk: 'b' }), -1);
   assert.equal(localComparator('chg', false)({ chg: 7, ts: 1, rk: 'a' }, { chg: 5, ts: 1, rk: 'b' }), 1);
 });
+
+test('an unknown on either side of a comparison is last, an empty plan names no month, and a day key is zero-padded (R3-03)', async () => {
+  const { istDayKey, acrossDay } = await import('../src/lib/db/bars-plan.js');
+  assert.equal(localComparator('chg', false)({ chg: 5, ts: 1, rk: 'a' }, { chg: undefined, ts: 1, rk: 'b' }), -1);
+  assert.equal(localComparator('chg', true)({ chg: 5, ts: 1, rk: 'a' }, { chg: null, ts: 1, rk: 'b' }), -1);
+  assert.deepEqual([seriesPlan([]).from, seriesPlan([]).to], ['', '']);
+  assert.equal(istDayKey(Date.UTC(2019, 2, 4, 20, 0)), '2019-03-05', 'IST is ahead: 20:00 UTC on the 4th is the 5th');
+  assert.equal(istDayKey(Date.UTC(2019, 8, 9, 0, 0)), '2019-09-09');
+  // A row with no change is never marked, even straight after a day break.
+  const rows = [
+    { rk: 'a', key: CE, ts: 1, day: '2019-03-04', chg: 5 },
+    { rk: 'b', key: CE, ts: 2, day: '2019-03-05', chg: null },
+    { rk: 'c', key: CE, ts: 3, day: '2019-03-06', chg: undefined }
+  ];
+  assert.equal(acrossDay(rows, { timeNarrows: false, dayRung: false, edgeEarlier: false }).size, 0);
+});

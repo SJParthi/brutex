@@ -198,7 +198,7 @@ export function monthSpan(a, b) {
  * @param {string} [fromDay] the day window's first day, when it narrows
  * @param {string} [toDay] the day window's last day, when it narrows
  */
-export function seriesPlan(rows, fromDay = '', toDay = '') {
+export function seriesPlan(rows, fromDay, toDay) {
   /** @type {Map<string, {rows: number, census: any}>} */
   const series = new Map();
   const rungs = new Set();
@@ -219,7 +219,7 @@ export function seriesPlan(rows, fromDay = '', toDay = '') {
   const timeframe = rungs.size === 1 ? String([...rungs][0]) : '';
   /* A day window narrows the months asked for, never widens them. An empty
      From sorts before every month, so it leaves the first held one. */
-  const from = [lo, String(fromDay).slice(0, 7)].sort()[1];
+  const from = fromDay ? [lo, fromDay.slice(0, 7)].sort()[1] : lo;
   const to = toDay ? [hi, toDay.slice(0, 7)].sort()[0] : hi;
   /** @type {string | null} */
   let why = null;
@@ -246,10 +246,10 @@ export function seriesPlan(rows, fromDay = '', toDay = '') {
  * `HH:MM:59` at the To end; a bound that already carries its second is sent
  * as it is. Anything else is `''`, no bound.
  *
- * @param {string} t @param {'from' | 'to'} end
+ * @param {string | undefined} t @param {'from' | 'to'} end
  */
 export function todWire(t, end) {
-  const s = String(t ?? '').trim();
+  const s = typeof t === 'string' ? t.trim() : '';
   if (/^\d{2}:\d{2}$/.test(s)) return `${s}:${end === 'to' ? '59' : '00'}`;
   if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
   return '';
@@ -284,8 +284,8 @@ export function windowQuery(feed, plan, o) {
   q.set('limit', String(o.limit ?? 50));
   if (o.fromDay) q.set('from_day', o.fromDay);
   if (o.toDay) q.set('to_day', o.toDay);
-  const tf = todWire(o.fromTime ?? '', 'from');
-  const tt = todWire(o.toTime ?? '', 'to');
+  const tf = todWire(o.fromTime, 'from');
+  const tt = todWire(o.toTime, 'to');
   if (tf) q.set('tod_from', tf);
   if (tt) q.set('tod_to', tt);
   q.set('extremes', o.extremes ? '1' : '0');
@@ -307,8 +307,8 @@ export const rowKey = (key, t) => `${key}|${t}`;
  * @param {string} day `YYYY-MM-DD` @param {string} time `HH:MM` or `HH:MM:SS`
  */
 export function istInstant(day, time) {
-  const d = String(day ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const t = String(time ?? '').match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  const d = typeof day === 'string' ? day.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null;
+  const t = typeof time === 'string' ? time.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/) : null;
   if (!d || !t) return null;
   const [h, m, s] = [Number(t[1]), Number(t[2]), Number(t[3] ?? 0)];
   if (h > 23 || m > 59 || s > 59) return null;

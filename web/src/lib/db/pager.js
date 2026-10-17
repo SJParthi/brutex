@@ -133,15 +133,13 @@ export function stepServed(s, p, step) {
  */
 export function pageItems(cur, s) {
   const last = lastServed(s);
-  /* The neighbours already give page 2 near the start and the page before the
-     last near the end; the two pages after them make the run four long. */
-  const want = new Set([1, cur - 1, cur, cur + 1, last]);
-  if (cur < 4) for (const p of [3, 4]) want.add(p);
-  if (cur > last - 3) for (const p of [last - 2, last - 3]) want.add(p);
-  if (s.tail !== null) {
-    want.add(s.front);
-    want.add(s.tail);
-  }
+  /* The page, its neighbours, and four pages in a run at either end: a
+     window from `lo` to `hi` that slides inside 1..last, so the first and the
+     last page are always one jump away and the row never grows. */
+  const lo = Math.max(1, Math.min(cur - 1, last - 3));
+  const hi = Math.min(last, Math.max(cur + 1, 4));
+  const want = new Set([1, last, s.front, s.tail ?? last]);
+  for (let p = lo; p <= hi; p += 1) want.add(p);
   const list = [...want].filter((p) => isServed(s, p)).sort((a, b) => a - b);
   /* Page 1 is always served, so the list always opens on it. */
   /** @type {{k: string, p: number, gap: boolean, dead: boolean}[]} */

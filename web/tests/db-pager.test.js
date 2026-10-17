@@ -466,7 +466,7 @@ test('the pager arithmetic at every boundary, and every sentence it says, exactl
   assert.equal(isServed(both, 2001), false);
   assert.equal(isServed(both, 2000), true);
   // clampServed: nonsense is page 1; a page past the end the last served; a dead page the front.
-  assert.equal(clampServed(front, 'x'), 1);
+  assert.equal(clampServed(front, /** @type {any} */ ('x')), 1);
   assert.equal(clampServed(front, 0), 1);
   assert.equal(clampServed(front, 1), 1);
   assert.equal(clampServed(front, 2.9), 2);
