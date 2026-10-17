@@ -3279,7 +3279,7 @@ pub(crate) fn bears(record: &telemetry::Record, keys: &Keys) -> Option<Scope> {
         return None;
     }
     if let Some((from, to)) = keys.span
-        && !(from..=to).contains(&record.at_unix_millis)
+        && (record.at_unix_millis < from || record.at_unix_millis > to)
     {
         return None;
     }
@@ -3955,7 +3955,9 @@ fn open_streams<'d>(
                         source,
                         dir,
                         prune: keys.span.filter(|_| *dimension != SPAN_PROBE),
-                        spans: std::collections::HashMap::new(),
+                        spans: std::collections::HashMap::with_capacity(
+                            usize::from(telemetry::AUDIT_KEEP_FILES).saturating_add(2),
+                        ),
                         serial,
                         dimension,
                         value: value.clone(),
@@ -5657,14 +5659,15 @@ fn audited_in(
     keep: impl Fn(&telemetry::Record) -> bool,
 ) -> Audited {
     let mut out = Audited::default();
-    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len());
+    let mut lists: Vec<Vec<telemetry::Record>> = Vec::with_capacity(halves.len().saturating_mul(2));
     for half in halves {
         let dir = store_root.join("logs").join(half);
         // BOTH DURABLE STREAMS OF THE DIRECTORY (R3-24): a run's lifecycle
         // the refusals rolled out of the audit stream is still in the state
         // stream. A line in both is one line: same `seq`, same time.
-        let mut found: Vec<telemetry::Record> = Vec::new();
-        let mut seen: std::collections::HashSet<(u64, i64)> = std::collections::HashSet::new();
+        let mut held_here = false;
+        let mut seen: std::collections::HashSet<(u64, i64)> =
+            std::collections::HashSet::with_capacity(MAX_KEYED_READS.saturating_mul(2));
         for (stream, at) in [
             ("audit stream", dir.clone()),
             ("state stream", telemetry::run_dirs::state_stream_of(&dir)),
@@ -5685,6 +5688,7 @@ fn audited_in(
                 }
             };
             out.capped |= usize::try_from(postings.total).unwrap_or(usize::MAX) > MAX_KEYED_READS;
+            let mut found: Vec<telemetry::Record> = Vec::with_capacity(postings.pointers.len());
             for pointer in &postings.pointers {
                 match telemetry::audit_read(&at, serial, pointer) {
                     telemetry::AuditLine::Found(record)
@@ -5698,12 +5702,16 @@ fn audited_in(
                     }
                 }
             }
+            if !found.is_empty() {
+                // NEWEST FIRST AS READ; oldest first as answered, each
+                // stream's list merged with the rest below, never sorted.
+                found.reverse();
+                held_here = true;
+                lists.push(found);
+            }
         }
-        if !found.is_empty() {
-            // OLDEST FIRST AS ANSWERED, whichever stream each came from.
-            found.sort_by_key(|record| (record.at_unix_millis, record.seq));
+        if held_here {
             out.from.push(format!("logs/{half}"));
-            lists.push(found);
         }
     }
     let lists: Vec<&[telemetry::Record]> = lists.iter().map(Vec::as_slice).collect();

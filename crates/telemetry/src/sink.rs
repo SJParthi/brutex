@@ -803,6 +803,13 @@ pub struct Picture {
 
 /// The counters behind a [`Picture`], and the live copy, behind the ring's
 /// lock: every update is O(1) or bounded by a constant of this module.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the shape of
+/// the code (fixed arrays, a table of at most [`PICTURE_CODES`], one copy per
+/// line) and no bench in this workspace times an emit with them; that the
+/// picture is read from them and never from a file is proven by
+/// `telemetry::sink::picture_tests::the_picture_survives_its_files_and_a_reopen_reads_the_ring_once`.
+/// `CLAUDE.md` §3 rule 6.
 #[derive(Debug)]
 struct Counters {
     /// `(minute, counts)` by minute modulo [`PICTURE_MINUTES`]; a slot whose
@@ -864,6 +871,9 @@ impl Counters {
     /// its copy. O(1) but for the code table, a scan of at most
     /// [`PICTURE_CODES`] entries, and the copy, one `memcpy` into a buffer
     /// that already has the room once it has held a line as wide.
+    ///
+    /// **UNVERIFIED as a measurement**: argued from the code's shape; no
+    /// bench times it (`CLAUDE.md` §3 rule 6).
     fn count(&mut self, at: i64, level: Level, code: Option<&str>, line: &[u8]) {
         let minute = at.div_euclid(60_000);
         let width = i64::try_from(PICTURE_MINUTES).unwrap_or(60);
