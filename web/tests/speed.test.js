@@ -588,6 +588,7 @@ test('the up check asks for headers only, from a constant route, and an idle tab
   assert.equal(down?.state, 'down');
   assert.equal(down?.why, 'HTTP 502');
   assert.equal((await upCheck(async () => { throw 'refused'; }, ticket, time))?.why, 'refused');
+  assert.equal((await upCheck(async () => { throw new Error(''); }, ticket, time))?.why, '', 'an empty message is said empty, not as the error\'s type');
   const revoked = { signal: ticket.signal, current: () => false };
   assert.equal(await upCheck(async () => response(200, '', { 'content-type': 'application/json' }), revoked, time), null);
   assert.equal(await upCheck(async () => { throw new Error('x'); }, revoked, time), null);
