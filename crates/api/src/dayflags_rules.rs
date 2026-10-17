@@ -494,7 +494,10 @@ pub(super) struct DayScan {
 /// Each closed day's scan, by month file and the day's `[lo, hi)` rows and the
 /// file's committed count: a month that grows is scanned again, a month that
 /// does not is one probe a day.
-static SCANS: OnceLock<Mutex<HashMap<(PathBuf, u64, u64, u64), DayScan>>> = OnceLock::new();
+static SCANS: OnceLock<Mutex<ScanMemo>> = OnceLock::new();
+
+/// Scans by month file, `[lo, hi)` and committed count.
+type ScanMemo = HashMap<(PathBuf, u64, u64, u64), DayScan>;
 
 /// Folds one day's one-minute bars, oldest first: the extremes, and the runs
 /// of consecutive minutes (no minute missing between them) each printing one

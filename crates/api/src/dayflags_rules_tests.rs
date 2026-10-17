@@ -16,6 +16,7 @@
 use super::super::tests::{ask, bar, day, file_bars, record, root_of, says, says_has, write};
 use super::super::{Value, answer, answer_at};
 use super::*;
+use std::fmt::Write as _;
 
 /// A gzip member of one stored (uncompressed) deflate block: `api` has no
 /// compressor, and the master reader only needs a valid member. The same
@@ -847,6 +848,10 @@ fn a_frozen_run_is_three_unchanged_minutes_in_a_row() {
 /// recorded halt of 2020-03-13 is the halt's, never frozen. Before, neither
 /// page said either.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture on both feeds and every assertion about it, read top to bottom"
+)]
 fn a_frozen_index_run_is_flagged_on_both_feeds() {
     let root = root_of("r3-13-frozen");
     let key = "NSE-INDEX-NIFTY";
@@ -1214,4 +1219,282 @@ fn an_option_family_narrowed_to_an_expiry_is_expired_after_it() {
             expiry: None
         })
     );
+}
+
+// ══ The measured target ══════════════════════════════════════════════════════
+
+/// p50, p99 and max of `samples`, microseconds, and n.
+fn spread(mut samples: Vec<u128>) -> (u128, u128, u128, usize) {
+    samples.sort_unstable();
+    let n = samples.len();
+    let at = |q: usize| {
+        samples
+            .get((n * q / 100).min(n.saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    (at(50), at(99), samples.last().copied().unwrap_or(0), n)
+}
+
+/// An invented store for the timing: NIFTY on both feeds for the page's 92
+/// days (375 bars a session at each feed's finest rung, and Zerodha's day
+/// bars), one share and one contract, and `history` x 1,000 import-journal
+/// and day-ledger lines about days before the page, which no page reads.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one invented store, every series of it in the order a page reads them"
+)]
+fn timing_store(root: &Path, history: u32) {
+    let sessions: Vec<Day> = (day("2024-07-01").days_from_epoch()
+        ..=day("2024-09-30").days_from_epoch())
+        .filter_map(|n| Day::from_days(n).ok())
+        .filter(|d| {
+            matches!(
+                pull::calendar::record_of(i64::from(d.days_from_epoch())).kind,
+                pull::calendar::DayKind::Open(_)
+            )
+        })
+        .collect();
+    let minute = |d: Day, m: i64, second: i64, v: i64| store::format::Bar {
+        ts_micros: super::super::ist_midnight_micros(d)
+            + (9 * 3_600 + 15 * 60 + m * 60 + second) * 1_000_000,
+        open: v,
+        high: v + 5,
+        low: v - 5,
+        close: v,
+        volume: 10,
+        open_interest: store::format::OI_NULL,
+    };
+    let per = |second: i64| -> Vec<store::format::Bar> {
+        sessions
+            .iter()
+            .flat_map(|d| (0..375).map(move |m| minute(*d, m, second, 1_000_000 + m)))
+            .collect()
+    };
+    file_bars(
+        root,
+        Vendor::Gdfl,
+        "NSE-INDEX-NIFTY",
+        Timeframe::SECOND_1,
+        per(59),
+    );
+    file_bars(
+        root,
+        Vendor::Zerodha,
+        "NSE-INDEX-NIFTY",
+        Timeframe::MINUTE_1,
+        per(0),
+    );
+    file_bars(
+        root,
+        Vendor::Zerodha,
+        "NSE-CASH-RELIANCE",
+        Timeframe::MINUTE_1,
+        per(0),
+    );
+    file_bars(
+        root,
+        Vendor::Gdfl,
+        "NSE-CASH-RELIANCE",
+        Timeframe::SECOND_1,
+        per(7),
+    );
+    file_bars(
+        root,
+        Vendor::Gdfl,
+        "NSE-FNO-NIFTY-2024-09-26-2500000-CE",
+        Timeframe::SECOND_1,
+        per(3),
+    );
+    let days = sessions
+        .iter()
+        .map(|d| bar(&d.to_string(), 0, [1_000_000; 4], 0))
+        .collect::<Vec<_>>();
+    file_bars(
+        root,
+        Vendor::Zerodha,
+        "NSE-INDEX-NIFTY",
+        Timeframe::DAY_1,
+        days.clone(),
+    );
+    file_bars(
+        root,
+        Vendor::Zerodha,
+        "NSE-CASH-RELIANCE",
+        Timeframe::DAY_1,
+        days,
+    );
+    let mut journal = String::new();
+    let mut ledger = String::new();
+    for d in &sessions {
+        for kind in ["indices", "stocks", "options"] {
+            let _ = writeln!(
+                journal,
+                "begin {kind} {d} *\ndone {kind} {d} * definition=4 files=2 seconds=3 failures=0 late=4 late_unresolved=0 max_back_s=2"
+            );
+        }
+        ledger.push_str(&super::super::tests::index_flags(
+            &d.to_string(),
+            "NIFTY",
+            &[],
+        ));
+    }
+    // THE HISTORY NO PAGE READS: closes of earlier days under other filters.
+    let first = day("2018-01-01").days_from_epoch();
+    for i in 0..history.saturating_mul(1_000) {
+        let d = Day::from_days(first + i % 2_000).expect("a day");
+        let _ = writeln!(
+            journal,
+            "done stocks {d} S{i} definition=4 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0"
+        );
+        ledger.push_str(&super::super::tests::index_flags(
+            &d.to_string(),
+            &format!("X{i}"),
+            &[],
+        ));
+    }
+    write(&pull::gdfl_import::journal_path(root), &journal);
+    write(&super::super::quality_path(root), &ledger);
+}
+
+/// The pages timed: every feed and segment the band serves, 92 days each.
+const TIMED: [&str; 5] = [
+    "feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2024-07-01&to=2024-09-30",
+    "feed=zerodha&instrument=NSE-INDEX-NIFTY&from=2024-07-01&to=2024-09-30",
+    "feed=zerodha&instrument=NSE-CASH-RELIANCE&from=2024-07-01&to=2024-09-30",
+    "feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2024-07-01&to=2024-09-30",
+    "feed=gdfl&instrument=NSE-FNO-NIFTY-2024-09-26-2500000-CE&from=2024-07-01&to=2024-09-30",
+];
+
+/// Times `n` answers of each page over `root`: microseconds each.
+fn timed(root: &Path, n: usize) -> Vec<u128> {
+    let mut out = Vec::with_capacity(n * TIMED.len());
+    for query in TIMED {
+        let asked = ask(query);
+        for _ in 0..n {
+            let started = std::time::Instant::now();
+            let body = answer(root, &asked);
+            out.push(started.elapsed().as_micros());
+            assert_eq!(body["days"].as_array().map(Vec::len), Some(92));
+        }
+    }
+    out
+}
+
+/// **THE MEASURED TARGET** (R3-13): `/dayflags.json`'s answer for 92 days,
+/// p50, p99 and max at n = 200 a page, over every feed and segment the band
+/// serves, on an invented store:
+///
+/// - warm (the process has read the store once) and cold (a fresh copy of the
+///   store under a new path, so every per-path memo is empty; the page cache
+///   is warm: a cold DEVICE is not measured here);
+/// - with 1 client, and with 60 clients at once;
+/// - with an import writing (journal lines and bars appended) while it reads;
+/// - and at 1x, 10x and 100x history no page reads (1,000 to 100,000 journal
+///   and day-ledger lines): the warm p50 at 100x is held within 3 times the
+///   1x one, the ratio gate.
+///
+/// IGNORED in the ordinary run: it builds three stores and times 3,000+
+/// answers. Run it with `cargo test -p api --locked --
+/// --ignored the_day_band_is_timed` and read the table it prints.
+#[test]
+#[ignore = "the measured target: builds three stores and times 3,000+ answers; run with --ignored"]
+fn the_day_band_is_timed_cold_warm_concurrent_and_growing() {
+    let mut warm_p50 = Vec::new();
+    for history in [1_u32, 10, 100] {
+        let root = root_of(&format!("r3-13-timing-{history}"));
+        timing_store(&root, history);
+        // COLD: a fresh copy of the store per sample, so no memo holds it.
+        let mut cold = Vec::new();
+        for at in 0..20 {
+            let copy = root_of(&format!("r3-13-timing-{history}-cold-{at}"));
+            copy_tree(&root, &copy);
+            let asked = ask(TIMED[1]);
+            let started = std::time::Instant::now();
+            let _ = answer(&copy, &asked);
+            cold.push(started.elapsed().as_micros());
+        }
+        let _ = timed(&root, 1);
+        let warm = spread(timed(&root, 200));
+        warm_p50.push(warm.0);
+        eprintln!(
+            "R3-13 timing history={history}x warm 1 client: p50 {} us, p99 {} us, max {} us, n {}",
+            warm.0, warm.1, warm.2, warm.3
+        );
+        let cold = spread(cold);
+        eprintln!(
+            "R3-13 timing history={history}x cold (fresh path, zerodha NIFTY): p50 {} us, p99 {} us, max {} us, n {}",
+            cold.0, cold.1, cold.2, cold.3
+        );
+        if history == 1 {
+            // 60 CLIENTS AT ONCE, and AN IMPORT WRITING beside them.
+            let shared = std::sync::Arc::new(root.clone());
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer = {
+                let (root, stop) = (std::sync::Arc::clone(&shared), std::sync::Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let mut i = 0_u64;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        super::super::tests::append(
+                            &pull::gdfl_import::journal_path(&root),
+                            &format!(
+                                "done stocks 2018-01-02 W{i} definition=4 files=1 seconds=1 failures=0 late=0 late_unresolved=0 max_back_s=0\n"
+                            ),
+                        );
+                        i += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    i
+                })
+            };
+            let writing = spread(timed(&root, 200));
+            eprintln!(
+                "R3-13 timing history=1x warm 1 client, import writing: p50 {} us, p99 {} us, max {} us, n {}",
+                writing.0, writing.1, writing.2, writing.3
+            );
+            let clients: Vec<_> = (0..60)
+                .map(|_| {
+                    let root = std::sync::Arc::clone(&shared);
+                    std::thread::spawn(move || timed(&root, 4))
+                })
+                .collect();
+            let all: Vec<u128> = clients
+                .into_iter()
+                .flat_map(|c| c.join().expect("a client"))
+                .collect();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let lines = writer.join().expect("the writer");
+            let sixty = spread(all);
+            eprintln!(
+                "R3-13 timing history=1x 60 clients, import writing ({lines} lines appended): p50 {} us, p99 {} us, max {} us, n {}",
+                sixty.0, sixty.1, sixty.2, sixty.3
+            );
+        }
+    }
+    // THE RATIO, IN HUNDREDTHS: integer arithmetic, no float cast.
+    let base = warm_p50.first().copied().unwrap_or(1).max(1);
+    let ratio = |at: usize| warm_p50.get(at).copied().unwrap_or(0).saturating_mul(100) / base;
+    eprintln!(
+        "R3-13 timing growth: warm p50 10x/1x {}/100, 100x/1x {}/100",
+        ratio(1),
+        ratio(2)
+    );
+    assert!(
+        ratio(2) <= 300,
+        "the warm answer grew with history no page reads: {warm_p50:?}"
+    );
+}
+
+/// Copies a directory tree (the timing's cold samples).
+fn copy_tree(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).expect("a directory") {
+        let entry = entry.expect("an entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("a type").is_dir() {
+            std::fs::create_dir_all(&target).expect("mkdir");
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("a copy");
+        }
+    }
 }

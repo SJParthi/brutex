@@ -1202,9 +1202,12 @@ export function sourceOfDay(answer, day) {
  * its month file, its price, volume and close basis, its session phase and
  * whether it is the closing auction's print, where it came from (record,
  * import day and archive, or pull run), the month file and its sidecar, and
- * the operator's window.
+ * the operator's window. With the day band's cell for the row's day, the bar
+ * definition that built it and whether this build builds the same bars
+ * (R3-13 goal 3); with a share's adjusted runs (`basisRunsOf`), the run the
+ * row's day belongs to (goal 4).
  *
- * @param {{ feed: any, row: any, answer: any, bar?: any, tail?: any, dayFacts?: any }} on
+ * @param {{ feed: any, row: any, answer: any, bar?: any, tail?: any, dayFacts?: any, band?: any, basis?: ReturnType<typeof basisRunsOf> | null }} on
  * @returns {{ k: string, v: string, tone?: string }[]}
  */
 export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFacts = null, band = null, basis = null }) {
