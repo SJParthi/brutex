@@ -133,15 +133,16 @@ cloud session runs as root, which matters for one gate below.
   unchanged.
 - **Coverage, Rust: 100% of the changed lines and branches.** Of the production lines this branch
   adds or changes in `dayflags.rs` and `dayflags_rules.rs` (the diff against `origin/feat/db-fix`),
-  1,097 of 1,097 run, and 170 of 170 branches on them are taken; the 27 changed lines of
+  1,165 of 1,165 run, and 170 of 170 branches on them are taken; the 27 changed lines of
   `dayflags.rs`'s own test module run too. Measured with `cargo-llvm-cov` 0.9.1 `--branch` on a
   nightly toolchain (rustc 1.101.0-nightly 2026-10-16; branch coverage needs nightly, and the
   repository's pinned 1.97.1 is untouched), opt-level 0, over the `server::dayflags` tests only,
-  so a line counts only if a day-flag test runs it. Reaching 100% took eight tests (a month
+  so a line counts only if a day-flag test runs it. Reaching 100% took these tests: a month
   before the page that will not open, near and 22 months back; a page in 1970-01; a month cut
-  short under an open handle; a late ledger that will not read; a day bar session with no
-  minutes; a peer across three months under two names; the sidecar's one-stat-a-month memo),
-  and the removal of every line that existed only for an impossible case: the answer's
+  short under an open handle, and the same day scanned in place; a late ledger that will not
+  read; a day bar session with no minutes; a peer across three months under two names; the
+  sidecar's one-stat-a-month memo; a month's first scans in parallel. It also took the removal
+  of every line that existed only for an impossible case: the answer's
   envelope and each count are built by `object`, with no `as_object_mut` fallback; the month
   step is one `month_before` (`Day::year_month` documents its refusal unreachable); a frozen
   minute is `high == low`, since the store refuses any bar whose open or close lies outside its
