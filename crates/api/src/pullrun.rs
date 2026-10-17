@@ -8838,3 +8838,1001 @@ mod tests {
         );
     }
 }
+
+/// Tests added by the cloud mutation pass (cloud/mut-api-b-20261016): each one
+/// pins a behaviour a surviving mutant broke, or reaches a line no other test
+/// reached. The helpers repeat the shapes `tests` uses, which are private to
+/// that module.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod cloud_mutant_tests {
+    use super::*;
+    use crate::audit::{Journal, RECORD_LEN, Record, Scope};
+
+    const ASK: u64 = 0x00c1_0ad0_0000_0002;
+    const GARBAGE: [u8; RECORD_LEN] = [0xFF; RECORD_LEN];
+
+    fn at(secs: u64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + core::time::Duration::from_secs(secs)
+    }
+
+    fn window(from: u32, to: u32) -> pull::session::Window {
+        let day = |n| pull::session::Day::from_days(n).expect("a day");
+        pull::session::Window::new(day(from), day(to)).expect("a window")
+    }
+
+    fn opened(secs: u64) -> Record {
+        Record::opened(
+            Scope::Spot,
+            at(secs),
+            "kite",
+            window(20_000, 20_010),
+            7,
+            ASK,
+        )
+    }
+
+    fn closed(secs: u64) -> Record {
+        Record::refused(
+            Scope::Spot,
+            crate::audit::Outcome::Failed,
+            at(secs),
+            "kite",
+            "closed",
+        )
+        .with_window(window(20_000, 20_010))
+    }
+
+    fn failure(secs: u64) -> Record {
+        Record::member_failure(
+            Scope::Spot,
+            at(secs),
+            "NIFTY",
+            window(20_000, 20_000),
+            "a gap",
+        )
+    }
+
+    fn failures(from: u64, n: u64) -> Vec<[u8; RECORD_LEN]> {
+        (0..n).map(|k| failure(from + k).image()).collect()
+    }
+
+    /// A journal of exactly these record images, with its index built over
+    /// all of them.
+    fn journal_of_images(name: &str, images: &[[u8; RECORD_LEN]]) -> Journal {
+        let root = crate::scratch::path(&format!("pullrun-cloud-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::audit::journal_path(&root);
+        std::fs::create_dir_all(path.parent().expect("audit/")).expect("mkdir");
+        std::fs::write(&path, images.concat()).expect("write");
+        let journal = Journal::at(&root);
+        let built = journal.build_index().expect("the index builds");
+        assert_eq!(built.records, images.len() as u64);
+        journal
+    }
+
+    /// Appends images straight to the file, past the journal's own append,
+    /// so the index is left behind exactly where it was.
+    fn append_raw(journal: &Journal, images: &[[u8; RECORD_LEN]]) {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal.path)
+            .expect("the journal opens")
+            .write_all(&images.concat())
+            .expect("the images land");
+    }
+
+    fn reason(found: &Restart) -> &str {
+        match found {
+            Restart::NotKnown(why) => why,
+            other => panic!("NOT KNOWN was expected, and the scan said {other:?}"),
+        }
+    }
+
+    fn lock(journal: &Journal) -> store::flock::Flock<std::fs::File> {
+        store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&journal.path)
+                .expect("the journal handle"),
+            journal.path.clone(),
+        )
+        .expect("nothing else holds it")
+    }
+
+    /// An F&O walk whose opening record names no ask and no window, with
+    /// damage before it and an index that could not be read: every such
+    /// field is `null` or named on the document, and the sentence says each.
+    #[test]
+    fn an_fno_walk_with_no_ask_or_window_is_written_with_nulls_and_its_doubts() {
+        let run = Interrupted {
+            ordinal: 3,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "dhan".to_owned(),
+            scope: Scope::Fno,
+            ask: None,
+            window: None,
+            failures: 2,
+            failures_whole: true,
+            note: "opened".to_owned(),
+            undecodable_before: 1,
+            undecodable: "record 1 (bad)".to_owned(),
+            newer_may_be_open: false,
+            older_unread: Some("no index".to_owned()),
+        };
+        let mut out = String::new();
+        run.json(&mut out);
+        let doc: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(doc["scope"], "fno");
+        assert_eq!(doc["ask"], serde_json::Value::Null);
+        assert_eq!(doc["from"], serde_json::Value::Null);
+        assert_eq!(doc["to"], serde_json::Value::Null);
+        assert_eq!(doc["olderUnread"], "no index");
+        assert_eq!(doc["undecodableBefore"], 1);
+        let words = run.words();
+        assert!(words.contains("an expired-F&O walk was opened"), "{words}");
+        assert!(words.contains("/pull/fno"), "{words}");
+        assert!(words.contains("its opening record names no ask"), "{words}");
+        assert!(words.contains("2 member failure(s)"), "{words}");
+        assert!(
+            words.contains(
+                "1 record(s) before its opening record could not be decoded (record 1 (bad))"
+            ),
+            "{words}"
+        );
+        assert!(words.contains("(no index)"), "{words}");
+
+        // No damage before it: no sentence about damage (kills `> 0` to
+        // `>= 0`).
+        let clean = Interrupted {
+            undecodable_before: 0,
+            undecodable: String::new(),
+            older_unread: None,
+            ..run
+        };
+        assert!(!clean.words().contains("could not be decoded"));
+        assert!(!clean.words().contains("through the journal's index ("));
+    }
+
+    /// A feed whose store refused a write says so on the status document.
+    #[test]
+    fn a_feed_whose_store_is_unavailable_says_so_on_the_document() {
+        let progress = Progress {
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                store_unavailable: true,
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&progress.json()).expect("valid JSON");
+        assert_eq!(doc["feeds"][0]["storeUnavailable"], true);
+        assert_eq!(doc["feeds"][0]["credentialDead"], false);
+    }
+
+    /// A halted run's summary says what else ended it: the operator's stop,
+    /// or the pass ceiling, and neither when it was neither.
+    #[test]
+    fn a_halted_summary_names_a_stop_or_the_ceiling_when_either_happened() {
+        let halted = |passes, stopping| Progress {
+            passes,
+            retries: 1,
+            stopping,
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                credential_dead: true,
+                last_error: Some("a dead token".to_owned()),
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        let stopped = run_summary(&halted(3, true), &[PassOutcome::Halted], Some(5));
+        assert!(
+            stopped.starts_with("INCOMPLETE after 3 pass(es); 5 bar(s) written"),
+            "{stopped}"
+        );
+        assert!(stopped.contains("dhan: a dead token"), "{stopped}");
+        assert!(
+            stopped.ends_with(" The operator also pressed stop."),
+            "{stopped}"
+        );
+        let ceiling = run_summary(&halted(MAX_PASSES, false), &[PassOutcome::Halted], None);
+        assert!(ceiling.contains("an unknown number of bar(s)"), "{ceiling}");
+        assert!(
+            ceiling.ends_with(" The remaining work reached the pass ceiling."),
+            "{ceiling}"
+        );
+        let neither = run_summary(&halted(3, false), &[PassOutcome::Halted], Some(0));
+        assert!(
+            neither.ends_with("Full basket coverage has not been verified."),
+            "{neither}"
+        );
+    }
+
+    /// A chain that died after its feed already named an error keeps that
+    /// first error, and is still marked finished with its unattempted legs
+    /// counted as skipped.
+    #[tokio::test]
+    async fn a_dead_chain_keeps_an_error_its_feed_already_named() {
+        let site = site("dead-chain-named");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                legs: 3,
+                legs_done: 1,
+                doing: "dhan · 1min".to_owned(),
+                last_error: Some("the first cause".to_owned()),
+                ..FeedReport::default()
+            }];
+        });
+        let dead = tokio::spawn(async { panic!("a chain that dies on purpose") })
+            .await
+            .expect_err("the task panicked");
+        note_dead_chain(&site, run, 0, 2, &dead);
+        let feed = observed(&site).feeds[0].clone();
+        assert_eq!(feed.last_error.as_deref(), Some("the first cause"));
+        assert!(feed.finished);
+        assert_eq!(feed.doing, "");
+        assert_eq!(feed.skipped, 1, "3 legs, 1 done, 1 interrupted");
+    }
+
+    /// A receipt's own refusal: a non-terminal outcome never overwrites the
+    /// feed's first error, a terminal one does and names the halt, and the
+    /// credential and store flags follow the outcome.
+    #[test]
+    fn a_receipt_refusal_overwrites_the_first_error_only_when_terminal() {
+        let site = site("receipt-refusal-terminal");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                last_error: Some("the first cause".to_owned()),
+                ..FeedReport::default()
+            }];
+        });
+        let facts = vec![("Refused because", "a seat is held".to_owned())];
+        let html = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "REFUSED",
+            reason: "synthetic",
+            good: false,
+            facts: &facts,
+            footnote: "No vendor was contacted.",
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1min".to_owned(),
+            label: "dhan · 1min".to_owned(),
+            body: String::new(),
+        };
+        let conflict = axum::http::StatusCode::CONFLICT;
+        note_leg_failure(&site, run, 0, &leg, (conflict, &html), LegOutcome::Standing);
+        let feed = observed(&site).feeds[0].clone();
+        assert_eq!(feed.last_error.as_deref(), Some("the first cause"));
+        assert!(!feed.store_unavailable && !feed.credential_dead);
+
+        note_leg_failure(&site, run, 0, &leg, (conflict, &html), LegOutcome::Store);
+        let feed = observed(&site).feeds[0].clone();
+        let said = feed
+            .last_error
+            .expect("a terminal cause replaces the first");
+        assert!(said.contains("a seat is held"), "{said}");
+        assert!(
+            said.contains("this feed is halted for the rest of this run"),
+            "{said}"
+        );
+        assert!(
+            said.contains("no journal record was written for a request refused at the door"),
+            "{said}"
+        );
+        assert!(feed.store_unavailable);
+        assert!(!feed.credential_dead);
+
+        note_leg_failure(
+            &site,
+            run,
+            0,
+            &leg,
+            (conflict, &html),
+            LegOutcome::Credential,
+        );
+        assert!(observed(&site).feeds[0].credential_dead);
+
+        // A standing outcome on a feed with no error yet names it as standing.
+        with_progress(&site, run, |progress| progress.feeds[0].last_error = None);
+        note_leg_failure(&site, run, 0, &leg, (conflict, &html), LegOutcome::Standing);
+        let said = observed(&site).feeds[0].last_error.clone().expect("named");
+        assert!(
+            said.contains("no later pass of this run can change that"),
+            "{said}"
+        );
+    }
+
+    /// Without a refusal on the receipt, a terminal outcome still replaces an
+    /// earlier transient error and sets its flag.
+    #[test]
+    fn a_terminal_outcome_without_a_refusal_replaces_the_first_error() {
+        let site = site("terminal-no-refusal");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                last_error: Some("the first cause".to_owned()),
+                ..FeedReport::default()
+            }];
+        });
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1min".to_owned(),
+            label: "dhan · 1min".to_owned(),
+            body: String::new(),
+        };
+        let status = axum::http::StatusCode::BAD_GATEWAY;
+        note_leg_failure(
+            &site,
+            run,
+            0,
+            &leg,
+            (status, "<p>no receipt</p>"),
+            LegOutcome::Store,
+        );
+        let feed = observed(&site).feeds[0].clone();
+        let said = feed.last_error.expect("replaced");
+        assert!(
+            said.starts_with("dhan · 1min answered HTTP 502: STORE UNAVAILABLE"),
+            "{said}"
+        );
+        assert!(feed.store_unavailable);
+    }
+
+    /// The production request boundary sends an F&O leg to the F&O route,
+    /// which refuses an empty form without asking any vendor.
+    #[tokio::test]
+    async fn an_fno_leg_reaches_the_fno_route() {
+        let site = site("fno-leg-route");
+        let leg = Leg {
+            route: Route::Fno,
+            vendor: "dhan".to_owned(),
+            dir: "1min".to_owned(),
+            label: "dhan · fno".to_owned(),
+            body: String::new(),
+        };
+        let (status, body) = request_leg(site, leg).await;
+        assert!(status.is_client_error(), "{status}: {body}");
+        assert!(
+            body.contains("F&amp;O") || body.contains("fno") || body.contains("F&O"),
+            "{body}"
+        );
+    }
+
+    /// A leg that answers as a transient failure and adds nothing is retried
+    /// only after [`RETRY_WAIT`]: a stop pressed during that wait ends the run
+    /// at the top of the loop with exactly one pass made (kills the retry
+    /// branch's deletions and `passes < MAX_PASSES` turned around). The row
+    /// ticker runs inside the wait.
+    #[tokio::test]
+    async fn a_retry_waits_before_the_next_pass_and_a_stop_in_the_wait_ends_it() {
+        let held = site("retry-wait");
+        let run = claim(&held);
+        let stopper = {
+            let site = Loaded::clone(&held);
+            tokio::spawn(async move {
+                tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+                with_progress(&site, run, |progress| progress.stopping = true);
+            })
+        };
+        let started = std::time::Instant::now();
+        let failing = |_site: Loaded, _leg: Leg| async {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                crate::render::receipt_page(&crate::render::Receipt {
+                    scope: "Spot pull",
+                    verdict: "FAILED",
+                    reason: "synthetic transient failure",
+                    good: false,
+                    facts: &[],
+                    footnote: "No vendor was contacted.",
+                }),
+            )
+        };
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1day".to_owned(),
+            label: "dhan · 1day".to_owned(),
+            body: String::new(),
+        };
+        // BOUNDED, so a run that never sees its stop FAILS here rather than
+        // hanging the suite.
+        tokio::time::timeout(
+            core::time::Duration::from_mins(1),
+            conduct_with(Loaded::clone(&held), run, vec![leg], failing),
+        )
+        .await
+        .expect("the stop ends the run within one retry wait");
+        stopper.await.expect("the stopper ran");
+        let elapsed = started.elapsed();
+        let seen = observed(&held);
+        assert_eq!(seen.passes, 1, "no second pass before the wait ended");
+        assert_eq!(seen.stop, Some(Stop::Operator));
+        assert!(elapsed >= RETRY_WAIT, "the retry waited {elapsed:?}");
+        assert!(seen.finished.is_some());
+    }
+
+    /// The journal's newest records cannot be read (the file will not open,
+    /// though it can be measured): NOT KNOWN, by name. Root ignores modes, so
+    /// this bites for a non-root user, as the suite is meant to run.
+    #[test]
+    fn newest_records_that_cannot_be_read_leave_the_answer_not_known() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut images = vec![closed(100).image()];
+        images.extend(failures(200, 10));
+        let journal = journal_of_images("page-refused", &images);
+        std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        let found = restart_scan(&journal);
+        std::fs::set_permissions(&journal.path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod back");
+        let why = reason(&found);
+        assert!(
+            why.starts_with("the pull journal's newest records:"),
+            "{why}"
+        );
+    }
+
+    /// An index that covers EXACTLY the records before the scan is read as it
+    /// is, with no build: here a held lock would make a build impossible, and
+    /// the answer is still clean (kills `covered < scan_first` to `<=`).
+    #[test]
+    fn an_index_covering_exactly_the_records_before_the_scan_is_read_as_it_is() {
+        let mut images = vec![closed(100).image()];
+        images.extend(failures(200, 99));
+        let journal = journal_of_images("index-exact", &images);
+        append_raw(&journal, &failures(1_000, INTERRUPTED_SCAN));
+        let squatter = lock(&journal);
+        let found = restart_scan_waiting(&journal, 0);
+        drop(squatter);
+        assert_eq!(found, Restart::Clean);
+    }
+
+    /// An index behind the records before the scan is caught up here and
+    /// then read: the answer is the one a whole index gives, and the index
+    /// now covers the journal.
+    #[test]
+    fn an_index_behind_the_scan_is_caught_up_and_then_read() {
+        let mut images = vec![opened(100).image()];
+        images.extend(failures(200, 99));
+        let journal = journal_of_images("index-behind", &images);
+        append_raw(&journal, &failures(1_000, INTERRUPTED_SCAN + 1));
+        let found = restart_scan(&journal);
+        assert_eq!(
+            found
+                .interrupted()
+                .map(|run| (run.ordinal, run.failures_whole)),
+            Some((0, false)),
+            "{found:?}"
+        );
+        let records = 100 + INTERRUPTED_SCAN + 1;
+        assert_eq!(
+            journal
+                .read_index(records)
+                .expect("the index reads")
+                .covered,
+            records
+        );
+    }
+
+    /// With a held lock and the index absent, a reader that finds the index
+    /// back in place between two waits answers through it (the `older_runs`
+    /// retried after a wait).
+    #[test]
+    fn an_index_that_reappears_while_the_lock_is_held_is_read_after_a_wait() {
+        let mut images = vec![opened(100).image()];
+        images.extend(failures(200, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("index-reappears", &images);
+        let index = journal.index_dir();
+        let aside = index.with_extension("aside");
+        std::fs::rename(&index, &aside).expect("moved aside");
+        let squatter = lock(&journal);
+        let restorer = std::thread::spawn({
+            let (index, aside) = (index.clone(), aside.clone());
+            move || {
+                std::thread::sleep(core::time::Duration::from_millis(350));
+                std::fs::rename(&aside, &index).expect("moved back");
+            }
+        });
+        let found = restart_scan_waiting(&journal, 50);
+        drop(squatter);
+        restorer.join().expect("the restorer ran");
+        assert_eq!(
+            found.interrupted().map(|run| run.ordinal),
+            Some(0),
+            "{found:?}"
+        );
+    }
+
+    /// An index caught up here that still cannot be read, for a reason other
+    /// than the first, says both: what was wrong, that it was caught up, and
+    /// what is wrong now.
+    #[test]
+    fn a_catch_up_that_meets_a_new_fault_names_both() {
+        let mut images = vec![closed(100).image()];
+        images.extend(failures(200, 100));
+        let journal = journal_of_images("index-new-fault", &images);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        append_raw(&journal, &failures(1_000, INTERRUPTED_SCAN + 50));
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(
+            why.contains(
+                "the index covers the first 101 records and the scan begins at record 151"
+            ),
+            "{why}"
+        );
+        assert!(
+            why.contains(
+                "it was built or caught up here, and then: 1 of the index's entries cannot be read"
+            ),
+            "{why}"
+        );
+    }
+
+    /// More than [`INTERRUPTED_RUNS`] run records before the scan: the walk
+    /// begins at the oldest of the 64 it reads, so a damaged record before
+    /// that is outside it and the answer is clean (kills `below >
+    /// INTERRUPTED_RUNS` turned to `<` or `==`, and the faults' lower bound
+    /// turned around).
+    #[test]
+    fn damage_older_than_the_runs_the_walk_reads_is_outside_it() {
+        let mut images = vec![failure(10).image(), GARBAGE, failure(11).image()];
+        for pair in 0..35_u64 {
+            images.push(opened(1_000 + pair * 10).image());
+            images.push(closed(1_005 + pair * 10).image());
+        }
+        images.extend(failures(5_000, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("runs-past-cap", &images);
+        assert_eq!(restart_scan(&journal), Restart::Clean);
+    }
+
+    /// Exactly [`INTERRUPTED_RUNS`] run records before the scan: every one
+    /// was read, so the walk begins at the journal's first record and a
+    /// damaged record before the first run record is inside it (kills `>` to
+    /// `>=`).
+    #[test]
+    fn with_exactly_64_runs_before_the_scan_the_walk_begins_at_record_0() {
+        let mut images = vec![failure(10).image(), GARBAGE, failure(11).image()];
+        for pair in 0..32_u64 {
+            images.push(opened(1_000 + pair * 10).image());
+            images.push(closed(1_005 + pair * 10).image());
+        }
+        images.extend(failures(5_000, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("runs-at-cap", &images);
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(
+            why.starts_with("1 of the journal records the scan read"),
+            "{why}"
+        );
+        assert!(why.contains("record 1 ("), "{why}");
+    }
+
+    /// A damaged record AT the journal's first record is inside a walk that
+    /// begins there (kills the faults' lower bound `<` turned to `<=` or
+    /// `==`).
+    #[test]
+    fn damage_at_record_0_is_inside_a_walk_that_begins_there() {
+        let mut images = vec![GARBAGE, closed(100).image()];
+        images.extend(failures(200, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("damage-at-0", &images);
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(why.contains("record 0 ("), "{why}");
+    }
+
+    /// More than [`INTERRUPTED_RUNS`] faults the index filed inside the
+    /// walk: the newest 64 are read again and the older ones are reported as
+    /// the index filed them.
+    #[test]
+    fn faults_past_the_cap_are_reported_as_the_index_filed_them() {
+        let mut images = vec![GARBAGE; 70];
+        images.push(closed(100).image());
+        images.extend(failures(200, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("faults-past-cap", &images);
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(
+            why.starts_with("70 of the journal records the scan read"),
+            "{why}"
+        );
+        assert!(
+            why.contains(
+                "record 0 (the journal's index files it as a record that would not decode)"
+            ),
+            "{why}"
+        );
+        assert!(why.contains("and 67 more, the newest record 69"), "{why}");
+    }
+
+    /// The pullrun test site shape: a universe and a store root of its own.
+    fn site(name: &str) -> Loaded {
+        let store = crate::scratch::path(&format!("pullrun-cloud-site-{name}"));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir");
+        let masters = crate::scratch::path(&format!("pullrun-cloud-masters-{name}"));
+        std::fs::create_dir_all(&masters).expect("mkdir");
+        std::fs::write(
+            masters.join("groww_instruments.csv"),
+            "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+             expiry_date,strike_price,groww_symbol\n\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n",
+        )
+        .expect("write");
+        Loaded::new(Site::load(&masters, &store))
+    }
+
+    fn claim(site: &Site) -> u64 {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let claimed = Progress::claimed();
+        let run = claimed.generation;
+        *held = Some(claimed);
+        run
+    }
+
+    fn observed(site: &Site) -> Progress {
+        site.run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The leg encoding the page writes: `route|vendor|dir|label|payload`,
+    /// each part's `%`, `&`, `=`, `|` and `+` escaped, twice over.
+    fn enc(raw: &str) -> String {
+        let mut out = String::new();
+        for ch in raw.chars() {
+            match ch {
+                '%' => out.push_str("%25"),
+                '&' => out.push_str("%26"),
+                '=' => out.push_str("%3D"),
+                '|' => out.push_str("%7C"),
+                '+' => out.push_str("%2B"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// A leg whose payload names more distinct fields than the form
+    /// middleware's own bound refuses the whole run by name, and the bound
+    /// itself is admitted (`FormKeys::TooMany`).
+    #[test]
+    fn a_leg_whose_payload_names_too_many_fields_refuses_the_run() {
+        let leg = |distinct: usize| {
+            use std::fmt::Write as _;
+            let mut body = String::from("vendor=dhan&granularity=1day");
+            for n in 2..distinct {
+                let _infallible = write!(body, "&k{n}=v");
+            }
+            let joined = format!("/pull/spot|dhan|1day|wide|{}", enc(&body));
+            format!("leg={}", enc(&joined))
+        };
+        let bound = crate::server::MAX_DISTINCT_FORM_KEYS;
+        assert_eq!(
+            legs_from(&leg(bound)).expect("the bound is admitted").len(),
+            1
+        );
+        match legs_from(&leg(bound + 1)) {
+            Err(Refusal::Malformed(why)) => assert!(
+                why.ends_with(&format!(
+                    "(its form names more than {bound} distinct fields)"
+                )),
+                "{why}"
+            ),
+            other => panic!("a payload past the bound must refuse the run: {other:?}"),
+        }
+    }
+
+    /// A leg failure or a dead chain addressed to a feed the document does
+    /// not hold changes nothing and does not panic.
+    #[tokio::test]
+    async fn an_edit_to_a_feed_the_document_does_not_hold_changes_nothing() {
+        let site = site("edit-past-feeds");
+        let run = claim(&site);
+        let before = observed(&site);
+        let leg = Leg {
+            route: Route::Spot,
+            vendor: "dhan".to_owned(),
+            dir: "1day".to_owned(),
+            label: "dhan · 1day".to_owned(),
+            body: String::new(),
+        };
+        let status = axum::http::StatusCode::BAD_GATEWAY;
+        note_leg_failure(
+            &site,
+            run,
+            3,
+            &leg,
+            (status, "<p>no receipt</p>"),
+            LegOutcome::Store,
+        );
+        let facts = vec![("Refused because", "a seat is held".to_owned())];
+        let refused = crate::render::receipt_page(&crate::render::Receipt {
+            scope: "Spot pull",
+            verdict: "REFUSED",
+            reason: "synthetic",
+            good: false,
+            facts: &facts,
+            footnote: "No vendor was contacted.",
+        });
+        note_leg_failure(&site, run, 3, &leg, (status, &refused), LegOutcome::Store);
+        let dead = tokio::spawn(async { panic!("a chain that dies on purpose") })
+            .await
+            .expect_err("the task panicked");
+        note_dead_chain(&site, run, 3, 1, &dead);
+        assert_eq!(observed(&site), before);
+        assert!(observed(&site).feeds.is_empty());
+    }
+
+    /// A synthetic spot receipt: `verdict`, and `wrote` bars under the spot
+    /// landing's label.
+    fn receipt_wrote(status: u16, verdict: &str, wrote: u64) -> (axum::http::StatusCode, String) {
+        let facts = vec![(BARS_WRITTEN_FACTS[0], wrote.to_string())];
+        (
+            axum::http::StatusCode::from_u16(status).expect("HTTP status"),
+            crate::render::receipt_page(&crate::render::Receipt {
+                scope: "Spot pull",
+                verdict,
+                reason: "synthetic coordinator receipt",
+                good: verdict == "STORED",
+                facts: &facts,
+                footnote: "No vendor was contacted.",
+            }),
+        )
+    }
+
+    fn spot_leg(vendor: &str) -> Leg {
+        Leg {
+            route: Route::Spot,
+            vendor: vendor.to_owned(),
+            dir: "1day".to_owned(),
+            label: format!("{vendor} · 1day"),
+            body: String::new(),
+        }
+    }
+
+    /// A run whose every pass stores more bars runs EXACTLY [`MAX_PASSES`]
+    /// passes, and when its last pass leaves a leg owed it stops at the
+    /// ceiling at once, with no retry wait for a pass that can never run.
+    /// Each feed's document names how many legs it carries. Kills `passes <
+    /// MAX_PASSES` turned to `<=` (a 401st request), the retry wait's own `<`
+    /// turned to `<=` (a twenty-second sleep), the idle flag's `>=` turned
+    /// to `<` (the stop would not be the ceiling) and the deleted `legs` field.
+    #[tokio::test]
+    async fn a_run_that_grows_every_pass_stops_at_the_pass_ceiling_without_a_last_wait() {
+        let held = site("pass-ceiling");
+        let run = claim(&held);
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&asked);
+        let request = move |_site: Loaded, _leg: Leg| {
+            let nth = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            async move {
+                if nth < MAX_PASSES as usize {
+                    receipt_wrote(200, "STORED", 1)
+                } else {
+                    receipt_wrote(502, "FAILED", 0)
+                }
+            }
+        };
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            core::time::Duration::from_secs(15),
+            conduct_with(Loaded::clone(&held), run, vec![spot_leg("dhan")], request),
+        )
+        .await
+        .expect("no retry wait after the last allowed pass");
+        let elapsed = started.elapsed();
+        let seen = observed(&held);
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_PASSES as usize
+        );
+        assert_eq!(seen.passes, MAX_PASSES);
+        assert_eq!(seen.stop, Some(Stop::Ceiling), "{:?}", seen.finished);
+        assert!(elapsed < RETRY_WAIT, "{elapsed:?}");
+        assert_eq!(seen.feeds.len(), 1);
+        assert_eq!(seen.feeds[0].legs, 1, "the document names the feed's legs");
+        assert_eq!(seen.bars_written, Some(u64::from(MAX_PASSES) - 1));
+    }
+
+    /// Two feeds render as two comma-separated objects that parse (kills the
+    /// feeds separator's `nth > 0` turned to `>=`).
+    #[test]
+    fn two_feeds_render_as_valid_json() {
+        let progress = Progress {
+            feeds: vec![
+                FeedReport {
+                    vendor: "dhan".to_owned(),
+                    ..FeedReport::default()
+                },
+                FeedReport {
+                    vendor: "groww".to_owned(),
+                    ..FeedReport::default()
+                },
+            ],
+            ..Progress::default()
+        };
+        let doc: serde_json::Value = serde_json::from_str(&progress.json()).expect("valid JSON");
+        assert_eq!(doc["feeds"].as_array().map(Vec::len), Some(2));
+        assert_eq!(doc["feeds"][1]["vendor"], "groww");
+    }
+
+    /// No feed with standing failures, no standing note (kills `standing >
+    /// 0` turned to `>=`).
+    #[test]
+    fn a_feed_with_no_standing_failures_is_not_named_as_standing() {
+        let progress = Progress {
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                standing: 0,
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        assert_eq!(standing_note(&progress), "");
+        let standing = Progress {
+            feeds: vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                standing: 1,
+                ..FeedReport::default()
+            }],
+            ..Progress::default()
+        };
+        assert!(standing_note(&standing).contains("dhan (1 leg(s))"));
+    }
+
+    /// A chain that died having attempted only the legs it finished counts
+    /// none as interrupted (kills `attempted > legs_done` turned to `>=`).
+    #[tokio::test]
+    async fn a_dead_chain_whose_attempts_all_returned_skips_the_rest() {
+        let site = site("dead-chain-even");
+        let run = claim(&site);
+        with_progress(&site, run, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: "dhan".to_owned(),
+                legs: 3,
+                legs_done: 1,
+                ..FeedReport::default()
+            }];
+        });
+        let dead = tokio::spawn(async { panic!("a chain that dies on purpose") })
+            .await
+            .expect_err("the task panicked");
+        note_dead_chain(&site, run, 0, 1, &dead);
+        assert_eq!(
+            observed(&site).feeds[0].skipped,
+            2,
+            "3 legs, 1 done, none interrupted"
+        );
+    }
+
+    /// An opening record with no window is a run with no window, and one
+    /// whose window starts on day 0 keeps it (kills each `!= 0` turned to
+    /// `== 0` and the `||` turned to `&&`).
+    #[test]
+    fn a_run_record_with_no_window_is_read_as_having_none() {
+        let mut bare = opened(100);
+        bare.from_days = 0;
+        bare.to_days = 0;
+        let open = interrupted_in(&[(0, bare)]).expect("open");
+        assert_eq!(open.window, None);
+        let mut epoch = opened(100);
+        epoch.from_days = 0;
+        epoch.to_days = 5;
+        let open = interrupted_in(&[(0, epoch)]).expect("open");
+        assert_eq!(open.window, Some((0, 5)));
+    }
+
+    /// A journal the scan reads whole needs no index: with the index gone
+    /// and `audit/` taking no write it is still CLEAN, never NOT KNOWN
+    /// (kills `scan_first > 0` turned to `>=`). Root ignores modes, so this
+    /// bites for a non-root user, as the suite is meant to run.
+    #[test]
+    fn a_journal_read_whole_by_the_scan_needs_no_index() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut images = vec![opened(100).image(), closed(120).image()];
+        images.extend(failures(200, 10));
+        let journal = journal_of_images("whole-no-index", &images);
+        let index = journal.index_dir();
+        std::fs::rename(&index, index.with_extension("aside")).expect("moved aside");
+        let audit = index.parent().expect("audit/").to_path_buf();
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        let found = restart_scan_waiting(&journal, 0);
+        std::fs::set_permissions(&audit, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(found, Restart::Clean);
+    }
+
+    /// With the index unreadable and only member failures in the scan, the
+    /// reason says the scan holds no run record (kills the `settled` test's
+    /// `==` turned to `!=` and `&&` turned to `||`).
+    #[test]
+    fn a_scan_of_member_failures_alone_holds_no_run_record() {
+        let mut images = vec![opened(100).image()];
+        images.extend(failures(200, INTERRUPTED_SCAN + 50));
+        let journal = journal_of_images("failures-alone", &images);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(why.contains("records hold no run record"), "{why}");
+    }
+
+    /// A run opened at EXACTLY the scan's first record was read with every
+    /// record after it, so with the index unreadable it is still reported
+    /// open, with the older runs named unread (kills `run.ordinal <
+    /// scan_first` turned to `<=`).
+    #[test]
+    fn a_run_opened_at_the_scans_first_record_is_open_though_the_index_is_unreadable() {
+        let mut images = failures(10, 10);
+        images.push(opened(100).image());
+        images.extend(failures(200, INTERRUPTED_SCAN - 1));
+        let journal = journal_of_images("open-at-scan-first", &images);
+        let runs = journal.index_dir().join("runs");
+        let mut bytes = std::fs::read(&runs).expect("the runs file");
+        bytes.fill(0xFF);
+        std::fs::write(&runs, bytes).expect("the entry is overwritten");
+        let found = restart_scan(&journal);
+        let run = found.interrupted().expect("it is open");
+        assert_eq!(run.ordinal, 10);
+        assert!(run.older_unread.is_some());
+    }
+
+    /// A run record AT the scan's first record is the scan's, not one of the
+    /// [`INTERRUPTED_RUNS`] the index supplies: with exactly 64 run records
+    /// before the scan the walk still begins at record 0, so a damaged
+    /// record between the first two is inside it and named (kills the index
+    /// partition's `ordinal < scan_first` turned to `<=`, which would take
+    /// the scan's own run record as the 64th and push the walk past the
+    /// damage).
+    #[test]
+    fn a_run_record_at_the_scans_first_record_does_not_shift_the_walk() {
+        let mut images = vec![closed(100).image(), GARBAGE];
+        images.extend((0..63).map(|k| closed(110 + k).image()));
+        images.push(closed(500).image());
+        images.extend(failures(1_000, INTERRUPTED_SCAN - 1));
+        assert_eq!(
+            images.len() as u64 - INTERRUPTED_SCAN,
+            65,
+            "the scan begins at 65"
+        );
+        let journal = journal_of_images("run-at-scan-first", &images);
+        let found = restart_scan(&journal);
+        let why = reason(&found);
+        assert!(
+            why.starts_with("1 of the journal records the scan read"),
+            "{why}"
+        );
+        assert!(why.contains("record 1 ("), "{why}");
+    }
+}

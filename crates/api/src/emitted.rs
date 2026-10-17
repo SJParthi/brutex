@@ -1483,16 +1483,17 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
         let found = landed(from, case.target, case.message);
         let mine: Vec<&telemetry::Record> =
             found.iter().filter(|record| (case.mine)(record)).collect();
+        // Bound before the assertion so the message's values are computed on
+        // every run, not only on the failing one a passing suite never takes.
+        let (file, on_target) = (sink.path().display().to_string(), found.len());
         assert!(
             !mine.is_empty(),
-            "{}: the production call wrote no {:?} record with message {:?} to {}. \
-             {} record(s) on that target did land in the window; either the emit \
+            "{}: the production call wrote no {:?} record with message {:?} to {file}. \
+             {on_target} record(s) on that target did land in the window; either the emit \
              is gone or its fields changed.",
             case.site,
             case.target,
             case.message,
-            sink.path().display(),
-            found.len(),
         );
         for record in mine {
             assert_eq!(
@@ -1505,10 +1506,10 @@ fn every_reachable_emit_site_puts_a_record_in_the_file() {
         }
     }
 
+    let health = sink.health();
     assert!(
-        !sink.health().is_loud(),
-        "nothing was dropped while proving the sites: {:?}",
-        sink.health(),
+        !health.is_loud(),
+        "nothing was dropped while proving the sites: {health:?}",
     );
 }
 
@@ -1739,10 +1740,10 @@ fn lib_emit_sites() -> usize {
         .filter(|path| path.file_name().is_some_and(|name| name != "main.rs"))
         .collect();
     paths.sort();
+    let read = paths.len();
     assert!(
-        paths.len() > 8,
-        "read only {} source file(s) — the layout changed and this stopped counting",
-        paths.len()
+        read > 8,
+        "read only {read} source file(s) — the layout changed and this stopped counting",
     );
     paths
         .iter()
