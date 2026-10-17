@@ -94,10 +94,11 @@ test('the_speed_sheet_uses_the_pages_own_requests', async () => {
   assert.deepEqual(skipped, []);
   assert.ok(requests.some((r) => r.url === `/bars/window.json?${windowQuery(CTX.feed, plan, { sort: 'ts', desc: true, offset: 0 })}`));
   assert.ok(requests.some((r) => r.url === dayflagsUrl(CTX.feed, CTX.instrument, CTX.from, CTX.to)));
+  assert.ok(requests.some((r) => r.label === 'extremes' && r.url === `/bars/window.json?${windowQuery(CTX.feed, plan, { sort: 'ts', desc: true, offset: 0, limit: 1, extremes: true })}`), 'the extremes read, newest first, as DbExtremes asks it');
   assert.ok(requests.some((r) => r.url === rungsUrl(CTX.instrument)));
   assert.ok(requests.some((r) => r.method === UP_METHOD && r.url === UP_ROUTE), 'the header-only up check is timed as the page sends it');
   // A page that builds its URL inline is replayed VERBATIM from the harness's capture.
-  const capture = JSON.stringify({ requests: [{ page: '/gaps', method: 'GET', url: '/gaps.json?feed=zerodha&symbol=NIFTY' }, { page: '/db', method: 'GET', url: '/feeds.json' }] });
+  const capture = JSON.stringify({ requests: [{ page: '/gaps', method: 'GET', url: '/gaps.json?feed=zerodha&symbol=NIFTY' }, { page: '/db', method: 'GET', url: '/feeds.json' }, { page: '/gaps', method: 'GET', url: '/gaps.json?feed=zerodha&symbol=NIFTY' }] });
   const withCapture = sheet.requestsFor(CTX, sheet.readCapture(capture));
   const replay = withCapture.requests.filter((r) => r.builder === '(the page, captured)');
   assert.deepEqual(replay.map((r) => [r.page, r.url]), [['/gaps', '/gaps.json?feed=zerodha&symbol=NIFTY']], 'replayed verbatim, a request already built once is not timed twice');
@@ -628,10 +629,13 @@ test('the sheet\'s command line is read and every misuse is named', () => {
     [['--base', 'http://h:1/path'], /no path/],
     [['--base', 'http://h:1', '--n', '0'], /--n must be a whole number of at least 1/],
     [['--base', 'http://h:1', '--clients', '0'], /--clients is a comma list/],
+    [['--base', 'http://h:1', '--clients', '1,0'], /--clients is a comma list/],
+    [['--base', 'http://h:1', '--clients', '513'], /--clients is a comma list/],
     [['--base', 'http://h:1', '--day', '30-09-2026'], /--day is YYYY-MM-DD/],
     [['--base', 'http://h:1', '--month', '2026-9'], /--month is YYYY-MM/]
   ];
   for (const [argv, why] of bad) assert.throws(() => sheet.parseArgs(argv), why);
+  assert.deepEqual(sheet.parseArgs(['--base', 'http://h:1', '--clients', '1,512']).clients, [1, 512], '512 clients is the largest allowed');
   assert.deepEqual(sheet.monthDays('2024-02'), { from: '2024-02-01', to: '2024-02-29' });
 });
 
@@ -665,7 +669,13 @@ test('the sheet times over the network, and a request with no answer is said, ne
     assert.equal((await sheet.timed(base, '/plain')).build, null, 'a server that names no build is said as null');
     const agent = new http.Agent({ keepAlive: true });
     const row = await sheet.measure((p, o) => sheet.timed(base, p, o), { page: '/p', route: '/x', label: '', method: 'GET', url: '/x', builder: 'b' }, { n: 6, clients: 2, phase: 'warm', agentOf: () => agent, timeoutMs: 1_000 });
-    assert.deepEqual([row.n, row.classes.answered, row.builds], [6, 6, ['b'.repeat(40)]]);
+    assert.deepEqual([row.n, row.classes.answered, row.builds, row.bytes, row.said], [6, 6, ['b'.repeat(40)], 11, null], 'the largest answer, and nothing said for a clean row');
+    let connections = 0;
+    server.on('connection', () => (connections += 1));
+    await sheet.measure((p, o) => sheet.timed(base, p, o), { page: '/p', route: '/x', label: '', method: 'GET', url: '/x', builder: 'b' }, { n: 4, clients: 1, phase: 'warm', agentOf: sheet.warmAgent, timeoutMs: 1_000 });
+    assert.equal(connections, 1, 'a warm client keeps one connection');
+    await sheet.measure((p, o) => sheet.timed(base, p, o), { page: '/p', route: '/x', label: '', method: 'GET', url: '/x', builder: 'b' }, { n: 4, clients: 1, phase: 'cold', agentOf: () => false, timeoutMs: 1_000 });
+    assert.equal(connections, 5, 'a cold request opens a connection each');
     assert.equal((await sheet.timed('https://127.0.0.1:1', '/x', { timeoutMs: 500 })).status, 0, 'https is spoken, and a closed port is no answer');
   } finally {
     server.close();
@@ -675,6 +685,7 @@ test('the sheet times over the network, and a request with no answer is said, ne
   assert.equal(sheet.classOf(answer(429)), 'busy');
   assert.equal(sheet.classOf(answer(503, '', { 'retry-after': '1' })), 'busy');
   assert.equal(sheet.classOf(answer(400)), 'refused');
+  assert.equal(sheet.classOf(answer(400, '', { 'retry-after': '1' })), 'refused', 'Retry-After makes only a 503 busy');
   assert.equal(sheet.classOf(answer(500)), 'failed');
 });
 
@@ -689,8 +700,14 @@ test('the sheet discovers the selection /db opens on, from the server, or refuse
   assert.deepEqual(ctx, { feed: 'zerodha', instrument: 'NSE-INDEX-NIFTY', timeframe: '1min', month: '2026-08', day: '2026-08-31', from: '2026-08-01', to: '2026-08-31' });
   const gdfl = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'gdfl' });
   assert.deepEqual([gdfl.timeframe, gdfl.day], ['1s', '2026-07-01'], 'a rung with no last day starts at its month');
+  const noMonth = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'zerodha', timeframe: '1min', day: '2026-08-03' });
+  assert.deepEqual([noMonth.month, noMonth.day], ['2026-08', '2026-08-03'], 'a month not given is discovered though the rung and the day are');
+  const noDay = await sheet.discover(get({ [url]: rungs }), { ...args, feed: 'zerodha', timeframe: '1min', month: '2026-08' });
+  assert.equal(noDay.day, '2026-08-31', 'a day not given is discovered though the rung and the month are');
   const given = await sheet.discover(get({}), { ...args, feed: 'zerodha', timeframe: '1min', month: '2026-01', day: '2026-01-02' });
   assert.equal(given.to, '2026-01-31');
+  const offered = await sheet.discover(get({ '/feeds.json': [{ wire: 'groww', ready: false }, { wire: 'zerodha', ready: true, offered: true }], [url]: rungs }), args);
+  assert.equal(offered.feed, 'zerodha', 'a feed offered and ready is chosen over the first listed');
   const first = await sheet.discover(get({ '/feeds.json': [{ wire: 'groww', ready: false }], [url]: { rungs: [{ feed: 'groww', rung: '1min', stored: true, last_month: '2026-01' }] } }), args);
   assert.equal(first.feed, 'groww', 'no feed ready: the first listed');
   await assert.rejects(sheet.discover(get({}), args), /\/feeds\.json answered HTTP 404/);
@@ -865,8 +882,9 @@ test('the sheet\'s own edges: a capture file, a request with no first answer, a 
   assert.ok(blank.failures.includes('restart 1: the first /aliases.json answered dropped'), blank.failures.join('\n'));
   assert.deepEqual(blank.rows.filter((r) => r.phase === 'first after restart')[0].builds, [], 'an unstamped server stamps no build on a restart row');
   void gone;
-  const slow = sheet.renderSheet({ ...blank, rows: [{ ...blank.rows[0], p50: 12.345, p99: 9.5, max: 100 }] }, argsFor());
-  assert.match(slow, /\| 12\.3 \| 9\.50 \| 100\.0 \|/);
+  const slow = sheet.renderSheet({ ...blank, rows: [{ ...blank.rows[0], p50: 12.345, p99: 9.5, max: 10 }] }, argsFor());
+  assert.match(slow, /\| 12\.3 \| 9\.50 \| 10\.0 \|/, 'from ten ms, one decimal');
+  assert.match(slow, /\|\n\n- (SKIPPED|NOT MEASURED|FAILED): /, 'a blank line between the table and the list');
   // A writer killed at the end of its pass, by a signal, is said as ended by its signal.
   const killed = await sheet.runSheet({ ...argsFor(), writer: 'sleep 5' }, { send: standIn({ ignore: new Set() }).send, log: () => {} });
   assert.ok(!killed.failures.some((f) => f.includes('--writer')), killed.failures.join('\n'));

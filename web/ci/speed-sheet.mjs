@@ -269,6 +269,9 @@ export function timed(base, path, o = {}) {
   });
 }
 
+/** A warm client's connection: one, kept alive across its requests. */
+export const warmAgent = () => new http.Agent({ keepAlive: true, maxSockets: 1 });
+
 /** An answer's class, the server's five words less `cancelled` (the sheet never leaves early). @param {Answer | NoAnswer} a */
 export function classOf(a) {
   if (a.status === 0) return 'no answer';
@@ -461,10 +464,9 @@ export async function runSheet(args, deps = {}) {
 
   /** @type {SheetRow[]} */
   const rows = [];
-  const keepAlive = () => new http.Agent({ keepAlive: true, maxSockets: 1 });
   for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients: 1, phase: 'cold', agentOf: () => false, timeoutMs: args.timeoutMs }));
   for (const clients of args.clients) {
-    for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm', agentOf: keepAlive, timeoutMs: args.timeoutMs }));
+    for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm', agentOf: warmAgent, timeoutMs: args.timeoutMs }));
   }
   if (args.writer === null) notMeasured.push('warm+writer: no --writer command was given (an import or a pull writing)');
   else {
@@ -472,7 +474,7 @@ export async function runSheet(args, deps = {}) {
     let exited = false;
     void writer.wait.then(() => (exited = true));
     for (const clients of [Math.min(...args.clients), Math.max(...args.clients)]) {
-      for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm+writer', agentOf: keepAlive, timeoutMs: args.timeoutMs }));
+      for (const r of requests) rows.push(await measure(send, r, { n: args.n, clients, phase: 'warm+writer', agentOf: warmAgent, timeoutMs: args.timeoutMs }));
     }
     if (exited) failures.push('the --writer command ended before the warm+writer pass did: part of that pass ran with nothing writing');
     writer.child.kill('SIGTERM');
