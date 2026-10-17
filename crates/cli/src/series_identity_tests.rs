@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pull::fetch::{RawRow, RawWindow};
 use pull::session::{Day, IST_OFFSET_SECS, Window};
 
-use super::{USAGE, command_with};
+use super::{USAGE, command_with, percentile, within};
 use crate::{FAILED, MISUSED, OK};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -301,6 +301,10 @@ fn a_series_holding_another_series_minutes_is_listed_by_month_day_and_cause() {
     assert!(
         out.contains("QUARANTINE NEEDED: 2 month(s) hold 383 minute(s) a landing refuses today: 2021-03 2024-01"),
         "{out}"
+    );
+    assert!(
+        !out.contains("day bar(s) a landing refuses"),
+        "no day bar is refused: {out}"
     );
     assert_eq!(
         bars(&root.0),
@@ -610,6 +614,10 @@ fn the_store_scan_counts_in_session_jumps_and_fails_on_a_seeded_copy() {
     assert_eq!(code, FAILED, "{out}");
     assert!(
         out.contains("in_session_jump 10, day bars refused 0"),
+        "{out}"
+    );
+    assert!(
+        out.contains("measured causes: zero_price 0, before_listing 0, before_first_day_bar 0, basis_mismatch 0, foreign_level 0, no_gdfl_witness 10"),
         "{out}"
     );
     let (code, out) = clean.run(&["ALL", "--segment", "CASH"]);
@@ -946,6 +954,11 @@ fn a_day_bar_alone_fails_and_a_suspect_minute_alone_passes_unless_its_plan_fails
         out.contains("2024-01-03 non_positive_price 1 day bar(s)"),
         "{out}"
     );
+    // ALL over the segment fails on the day bar alone, and totals it.
+    let (code, all) = root.run(&["ALL", "--segment", "CASH"]);
+    assert_eq!(code, FAILED, "{all}");
+    assert!(all.contains("day bars refused 1"), "{all}");
+    assert!(all.contains("measured causes: zero_price 1,"), "{all}");
 
     let suspect = |on: Day, m: i64| {
         if on == days[1] && m == 600 {
@@ -994,4 +1007,38 @@ fn a_day_bar_alone_fails_and_a_suspect_minute_alone_passes_unless_its_plan_fails
             assert!(plan.contains("\tno_gdfl_witness\tlabel\t1\t"), "{plan}");
         }
     }
+}
+
+/// The witness tolerance is 100 bps of GDFL's close, inclusive, either way;
+/// a witness at zero vouches for nothing.
+#[test]
+fn a_witness_vouches_within_its_tolerance_and_no_further() {
+    for (close, vouched) in [
+        (10_000, true),
+        (10_050, true),
+        (10_100, true),
+        (10_101, false),
+        (9_950, true),
+        (9_900, true),
+        (9_899, false),
+        (1_000, false),
+    ] {
+        assert_eq!(within(close, 10_000), vouched, "{close}");
+    }
+    assert!(!within(5, 0));
+    assert!(!within(5, -5));
+}
+
+/// The nearest-rank percentile of an ascending distribution.
+#[test]
+fn a_percentile_is_the_nearest_rank() {
+    let sorted: Vec<i64> = (1..=100).map(|n| n * 10).collect();
+    assert_eq!(percentile(&sorted, 500), 500);
+    assert_eq!(percentile(&sorted, 990), 990);
+    assert_eq!(percentile(&sorted, 999), 1_000);
+    assert_eq!(percentile(&sorted, 1_000), 1_000);
+    assert_eq!(percentile(&sorted, 1), 10, "the first rank is the smallest");
+    assert_eq!(percentile(&[7], 500), 7);
+    assert_eq!(percentile(&[3, 9], 500), 3);
+    assert_eq!(percentile(&[], 990), 0);
 }

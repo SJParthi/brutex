@@ -347,11 +347,13 @@ fn measure(flag: &FlaggedBar, witness: &mut Witness<'_>) -> Measured {
     }
 }
 
-/// Whether `close` lies within [`WITNESS_TOLERANCE_BPS`] of `witness`.
+/// Whether `close` lies within [`WITNESS_TOLERANCE_BPS`] of `witness`. A
+/// witness at or below zero vouches for nothing: no positive close lies
+/// within a non-positive bound, and a close at or below zero was measured
+/// `zero_price` before it reached here.
 fn within(close: i64, witness: i64) -> bool {
-    witness > 0
-        && (i128::from(close) - i128::from(witness)).abs() * 10_000
-            <= i128::from(witness) * i128::from(WITNESS_TOLERANCE_BPS)
+    (i128::from(close) - i128::from(witness)).abs() * 10_000
+        <= i128::from(witness) * i128::from(WITNESS_TOLERANCE_BPS)
 }
 
 /// One plan row's key: (series key, rung, month, measured cause, action).
