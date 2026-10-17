@@ -18421,12 +18421,12 @@ the operator's machine; `cargo bench -p pull --bench ratio`, release build):
 
 | Row | 1x | 10x | 100x | Single call p50 / p99 / max |
 |---|---|---|---|---|
-| C-ZI-01 listing probe (`Listing::span`), master of 300 → 3,000 rows | 76,811 ps | 77,851 ps (1.013x) | — | 86 / 118 / 6,058 ns at 300 rows; 98 / 101 / 13,881 ns at 3,000 rows (n=20,000) |
-| C-ZI-02 identity judge per minute (`MinuteJudge::judge`), answer of 1 → 10 → 100 sessions | 24,977 ps | 29,397 ps (1.176x) | 37,108 ps (1.485x) | 75 / 85 / 21,242 ns at 100 sessions (n=20,000) |
+| C-ZI-01 listing probe (`Listing::span`), master of 300 → 3,000 rows | 80,501 ps | 80,418 ps (0.998x) | — | 125 / 210 / 31,583 ns at 300 rows; 96 / 113 / 3,520 ns at 3,000 rows (n=20,000) |
+| C-ZI-02 identity judge per minute (`MinuteJudge::judge`), answer of 1 → 10 → 100 sessions | 24,974 ps | 29,785 ps (1.192x) | 37,798 ps (1.513x) | 74 / 77 / 3,475 ns at 100 sessions (n=20,000) |
 
 **C-ZI-02 is not O(1): the per-minute judgement is one binary search over the
 day bars of the months the answer touches, O(log days).** That is
-1.485x at 100 sessions, inside the 3.0x ceiling and above the 1.4x line past
+1.513x at 100 sessions, inside the 3.0x ceiling and above the 1.4x line past
 which a shared-host ratio is re-run on dedicated hardware before it is believed. A
 landing's book holds only the months its answer touches (a 60-day Zerodha
 window touches at most three: about 63 day bars), so the 100x row, about five
