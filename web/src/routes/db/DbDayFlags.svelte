@@ -188,7 +188,7 @@
   const casUnheld = $derived(casLone.length - casDays);
   /** Of those, the days whose month keeps the auction print apart (SC-CLOSE-9). */
   const casApart = $derived(
-    flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1 && c.auctionSidecar === true).length
+    flagged.filter((/** @type {any} */ c) => c.kind === 'cas' && c.kinds.length === 1 && c.cas === true && c.auctionSidecar === true).length
   );
   const sessions = $derived(
     db.dayBandCells.filter((/** @type {any} */ c) => c.kind !== 'closed' && c.kind !== 'outside').length

@@ -551,7 +551,8 @@ pub(crate) fn answer_at(root: &Path, asked: &Asked, band: rules::Band) -> Value 
     let underlying = sampled_series(asked.feed, inst);
     let held = PageHeld::count(root, asked, &days, (fills, underlying.as_ref()), counted);
     notes.extend(held.notes());
-    let (flags, sidecar) = auction_of_days(root, asked, &days, &mut notes);
+    let today = crate::ingest::today_ist().ok();
+    let (flags, sidecar) = auction_of_days(root, asked, (&days, today), &mut notes);
     let day_bars = (asked.feed == Vendor::Zerodha && inst.segment != Segment::Fno)
         .then(|| day_bars(root, inst, &days));
     if let Some(bars) = &day_bars {
@@ -674,13 +675,24 @@ fn start_of_page(
 fn auction_of_days(
     root: &Path,
     asked: &Asked,
-    days: &[Day],
+    (days, today): (&[Day], Option<Day>),
     notes: &mut Vec<String>,
 ) -> (Vec<rules::CasFlag>, Vec<Option<bool>>) {
     let inst = &asked.instrument;
     let share = inst.segment == Segment::Cash;
     let mut cas = rules::CasFlags::of(root, &inst.symbol, share);
-    let flags = days.iter().map(|day| cas.on(*day)).collect();
+    // A MASTER IS READ ONLY FOR A SESSION THAT HAS HAPPENED: a closed day has
+    // no closing auction, and a day after today has no master dated it yet.
+    let flags = days
+        .iter()
+        .map(|day| {
+            let open = matches!(
+                pull::calendar::record_of(i64::from(day.days_from_epoch())).kind,
+                DayKind::Open(_)
+            );
+            cas.on_session(*day, open, today.is_some_and(|today| *day > today))
+        })
+        .collect();
     notes.extend(cas_notes(&cas));
     let mut sidecars = rules::AuctionSidecars::of(root, asked.feed, &inst.symbol, share);
     let sidecar = days.iter().map(|day| sidecars.on(*day)).collect();
@@ -1490,7 +1502,8 @@ fn import_json(rows: &JournalRows, inst: &Instrument, day: Day) -> Value {
         // counted it, every file of the kind-day (DB-029).
         "late_line": late_line,
         "late_from": if earlier.is_some() { Value::from("close_before_recount") } else if late_line.is_null() { Value::Null } else { Value::from("closing_line") },
-        "late_scope": if late_line.is_null() { Value::Null } else { Value::from("all files of the kind-day") },
+        "late_scope": if late_line.is_null() { Value::Null } else if filter == "*" { Value::from("all files of the kind-day") } else { Value::from("the files the closing run's filter names") },
+        "filter": filter,
         "definition": field("definition"),
         "refusals": {
             "this": refusals.this.iter().map(pair).collect::<Vec<_>>(),
@@ -5342,9 +5355,15 @@ impl Says<'_> {
                 ),
                 _ => String::new(),
             };
+            // OVER THE FILES THE CLOSING RUN READ (the R3-13 review): every file
+            // of the kind-day for a `*` run, the names of a run given a filter.
+            let scope = match import.get("filter").and_then(Value::as_str) {
+                None | Some("*") => format!("all of the day's {kind} files"),
+                Some(filter) => format!("the day's {kind} files its run read ({filter})"),
+            };
             out.push(format!(
-                "{late} late row(s) over all of the day's {kind} files deferred to a later second, \
-                 at most {back} s back{offset}{source}"
+                "{late} late row(s) over {scope} deferred to a later second, at most {back} s \
+                 back{offset}{source}"
             ));
         }
     }
@@ -5390,16 +5409,22 @@ impl Says<'_> {
             // "KEPT APART" ONLY WHERE A SIDECAR KEEPS THEM (SC-CLOSE-9): a month
             // imported before D-3320 holds the print as an ordinary bar.
             if n("auction_prints") > 0 {
+                // THE COUNT IS THE DAY'S SHARE FILES', the sidecar this
+                // share's: a record that is not a GDFL share claims nothing
+                // about a sidecar it never looked for (the R3-13 review).
+                let prints = n("auction_prints");
                 out.push(match self.sidecar {
                     Some(true) => format!(
-                        "{} closing-auction print(s), kept apart from trades in the month's \
-                         auction sidecar",
-                        n("auction_prints")
+                        "{prints} closing-auction print(s) in the day's share files; this share's \
+                         month keeps its print apart from trades in its auction sidecar"
                     ),
-                    _ => format!(
-                        "{} closing-auction print(s) counted by the import; this month holds no \
-                         auction sidecar, so no print is kept apart from trades",
-                        n("auction_prints")
+                    Some(false) => format!(
+                        "{prints} closing-auction print(s) in the day's share files; this share's \
+                         month holds no auction sidecar, so its print is not kept apart from trades"
+                    ),
+                    None => format!(
+                        "{prints} closing-auction print(s) in the day's share files, counted by the \
+                         import"
                     ),
                 });
             }

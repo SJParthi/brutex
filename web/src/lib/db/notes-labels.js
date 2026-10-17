@@ -1280,7 +1280,7 @@ export function drawerFacts({ feed, row, answer, bar = null, tail = null, dayFac
 /**
  * `/sources/day.json` over one share's days, the route that serves each day's
  * measured factor against GDFL's raw prints and whether Zerodha's grid is
- * coarser than an exact adjustment leaves (`share_basis`, DB-G38, DB-G40).
+ * coarser than an exact adjustment leaves (`basis`, DB-G38, DB-G40).
  * `null` for anything but a spot share key.
  *
  * @param {string} instrument
@@ -1297,7 +1297,7 @@ export function shareBasisUrl(instrument, from, to) {
 /**
  * THE RUNS OF DAYS WHOSE ZERODHA PRICES ARE ADJUSTED OR QUANTISED, from a
  * `/sources/day.json` answer (R3-13 goal 4; DB-G38, DB-G40): consecutive days
- * of the answer (oldest first) whose served `share_basis` says the basis
+ * of the answer (oldest first) whose served `basis` says the basis
  * differs from GDFL's raw prints, or the grid is quantised. A day neither
  * feed measured breaks no run and joins none. Each run names its first and
  * last day, the factors served on it and the grids, and whether it touches
@@ -1309,15 +1309,18 @@ export function shareBasisUrl(instrument, from, to) {
  * @returns {{ from: string, to: string, days: number, adjusted: boolean, quantised: boolean, factors: number[], grid: { zerodha: number | null, gdfl: number | null }, open: { before: boolean, after: boolean } }[]}
  */
 export function basisRunsOf(body) {
-  const days = Array.isArray(body?.days) ? [...body.days] : [];
-  days.sort((a, b) => (String(a?.day) < String(b?.day) ? -1 : 1));
+  const all = Array.isArray(body?.days) ? [...body.days] : [];
+  all.sort((a, b) => (String(a?.day) < String(b?.day) ? -1 : 1));
+  // A DAY IS MEASURED WHERE A FACTOR IS SERVED (`basis.factor` a number): a
+  // weekend, a holiday or a day one feed does not hold carries a `basis` with
+  // no factor, and neither joins a run nor breaks one (the R3-13 review).
+  const days = all.filter((d) => d?.basis && typeof d.basis === 'object' && typeof d.basis.factor === 'number');
   /** @type {ReturnType<typeof basisRunsOf>} */
   const out = [];
   /** @type {ReturnType<typeof basisRunsOf>[number] | null} */
   let cur = null;
   for (const [i, d] of days.entries()) {
-    const b = d?.share_basis;
-    if (!b || typeof b !== 'object') continue;
+    const b = d.basis;
     const adjusted = b.basis_differs === true;
     const quantised = b.quantised === true;
     if (!adjusted && !quantised) {
@@ -1325,6 +1328,7 @@ export function basisRunsOf(body) {
       continue;
     }
     if (!cur) {
+      // AN EDGE IS OPEN where no measured day of the answer lies beyond it.
       cur = { from: d.day, to: d.day, days: 0, adjusted: false, quantised: false, factors: [], grid: { zerodha: null, gdfl: null }, open: { before: i === 0, after: false } };
       out.push(cur);
     }
@@ -1332,7 +1336,7 @@ export function basisRunsOf(body) {
     cur.days += 1;
     cur.adjusted ||= adjusted;
     cur.quantised ||= quantised;
-    if (typeof b.factor === 'number' && !cur.factors.includes(b.factor)) cur.factors.push(b.factor);
+    if (!cur.factors.includes(b.factor)) cur.factors.push(b.factor);
     if (Number.isSafeInteger(b.grid_paisa?.zerodha_minutes)) cur.grid.zerodha = b.grid_paisa.zerodha_minutes;
     if (Number.isSafeInteger(b.grid_paisa?.gdfl_seconds)) cur.grid.gdfl = b.grid_paisa.gdfl_seconds;
     cur.open.after = i === days.length - 1;
@@ -1353,11 +1357,10 @@ export function basisRunLabel(runs, day) {
   const run = runs.find((r) => day && r.from <= day && day <= r.to);
   if (!run) return null;
   const what = run.adjusted && run.quantised ? 'adjusted and quantised' : run.adjusted ? 'adjusted' : 'quantised';
-  const factors = run.factors.length === 0
-    ? 'no factor served'
-    : run.factors.length === 1
-      ? `factor ×${run.factors[0].toFixed(4)}`
-      : `factor ×${Math.min(...run.factors).toFixed(4)} to ×${Math.max(...run.factors).toFixed(4)} (it drifts)`;
+  // A RUN HOLDS ONLY MEASURED DAYS, so it carries at least one factor.
+  const factors = run.factors.length === 1
+    ? `factor ×${run.factors[0].toFixed(4)}`
+    : `factor ×${Math.min(...run.factors).toFixed(4)} to ×${Math.max(...run.factors).toFixed(4)} (it drifts)`;
   const grid = run.quantised && run.grid.zerodha !== null
     ? `; Zerodha's prices sit on a ${exact(run.grid.zerodha)}-paisa grid${run.grid.gdfl !== null ? ` against GDFL's raw ${exact(run.grid.gdfl)}-paisa grid` : ''}, coarser than an exact adjustment leaves`
     : '';

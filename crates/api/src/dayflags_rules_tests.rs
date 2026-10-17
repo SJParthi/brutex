@@ -367,8 +367,8 @@ fn an_auction_print_is_said_kept_apart_only_where_a_sidecar_is() {
     assert_eq!(rec["auction_sidecar"], false);
     says_has(
         rec,
-        "3 closing-auction print(s) counted by the import; this month holds no auction \
-         sidecar, so no print is kept apart from trades",
+        "3 closing-auction print(s) in the day's share files; this share's month holds no \
+         auction sidecar, so its print is not kept apart from trades",
     );
     let key = brutex_core::instrument::InstrumentKey {
         exchange: brutex_core::instrument::Exchange::Nse,
@@ -383,7 +383,8 @@ fn an_auction_print_is_said_kept_apart_only_where_a_sidecar_is() {
     assert_eq!(rec["auction_sidecar"], true);
     says_has(
         rec,
-        "3 closing-auction print(s), kept apart from trades in the month's auction sidecar",
+        "3 closing-auction print(s) in the day's share files; this share's month keeps its print \
+         apart from trades in its auction sidecar",
     );
     // Zerodha keeps no sidecar and none is looked for; nor before 2026-08-03.
     let zerodha = answer(
@@ -399,6 +400,18 @@ fn an_auction_print_is_said_kept_apart_only_where_a_sidecar_is() {
         &ask("feed=gdfl&instrument=NSE-CASH-RELIANCE&from=2026-07-31&to=2026-07-31"),
     );
     assert_eq!(record(&early, "2026-07-31")["auction_sidecar"], Value::Null);
+    // An index record carries the day's stocks line too: it names the count and
+    // claims nothing about a sidecar it never looked for (the R3-13 review).
+    let index = answer(
+        &root,
+        &ask("feed=gdfl&instrument=NSE-INDEX-NIFTY&from=2026-08-04&to=2026-08-04"),
+    );
+    let rec = record(&index, "2026-08-04");
+    assert_eq!(rec["auction_sidecar"], Value::Null);
+    says_has(
+        rec,
+        "3 closing-auction print(s) in the day's share files, counted by the import",
+    );
     let mut none = AuctionSidecars::of(&root, Vendor::Gdfl, "NIFTY", false);
     assert_eq!(none.on(day("2026-08-04")), None);
 }

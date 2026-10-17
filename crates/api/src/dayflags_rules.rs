@@ -172,6 +172,9 @@ pub(super) enum CasBasis {
     /// Not a share, or a day before the closing auction began (2026-08-03):
     /// no flag is needed, and none is read.
     NotRequired,
+    /// A session after today (IST): no master is dated it yet, and nothing is
+    /// read or claimed.
+    NotYet,
     /// The day's dated master holds the share's flag.
     DatedMaster,
     /// The share has no ISIN in the universe, so no master row can name it.
@@ -202,6 +205,10 @@ impl CasFlag {
         };
         match &self.basis {
             CasBasis::NotRequired => serde_json::Value::Null,
+            CasBasis::NotYet => serde_json::json!({
+                "eligible": null, "basis": "not_yet",
+                "why": "a session after today: no master is dated it yet",
+            }),
             CasBasis::DatedMaster => serde_json::json!({
                 "eligible": eligible, "basis": "dated_master", "why": null,
             }),
@@ -242,6 +249,23 @@ impl CasFlags {
             share,
             dir: root.join("session-masters"),
             refused: HashMap::new(),
+        }
+    }
+
+    /// The flag on `day` as a page reads it: nothing is read for a day that is
+    /// not an `open` session (a closed day has no closing auction), and a
+    /// session after today (`future`) has no master dated it yet — said so,
+    /// never read and never a refusal (R3-13 review). Otherwise [`Self::on`].
+    pub(super) fn on_session(&mut self, day: Day, open: bool, future: bool) -> CasFlag {
+        let required = self.share && pull::vendor::cash_auction_eligibility_required(day);
+        let basis = match (required && open, future) {
+            (false, _) => CasBasis::NotRequired,
+            (true, true) => CasBasis::NotYet,
+            (true, false) => return self.on(day),
+        };
+        CasFlag {
+            eligibility: CasEligibility::Unknown,
+            basis,
         }
     }
 
@@ -672,16 +696,37 @@ impl IndexDay {
                 })
             }
             (None, Some((seconds, at, line))) => {
-                let in_halt = matches!((at, self.halt), (Some(at), Some((from, resume))) if at >= from && at < resume);
-                let flagged = seconds >= FROZEN_MIN_S && !in_halt;
-                if flagged {
+                // ONLY THE RUN'S SECONDS OUTSIDE THE RECORDED HALT COUNT (the
+                // R3-13 review): 2020-03-13's run starts at 09:21:09, a second
+                // before the index halt's 09:21:10, and is the halt itself. A
+                // run with no stamp on a halt day cannot be placed, so it is
+                // not flagged.
+                let outside_s = match (at, self.halt) {
+                    (Some(at), Some((from, resume))) => {
+                        let start = u64::from(at);
+                        let end = start.saturating_add(seconds);
+                        let overlap = end
+                            .min(u64::from(resume))
+                            .saturating_sub(start.max(u64::from(from)));
+                        Some(seconds.saturating_sub(overlap))
+                    }
+                    (None, Some(_)) => None,
+                    (_, None) => Some(seconds),
+                };
+                let flagged = outside_s.is_some_and(|outside| outside >= FROZEN_MIN_S);
+                let clock = |at: u32| {
+                    format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)
+                };
+                if let Some(outside) = outside_s.filter(|_| flagged) {
+                    let part = if outside < seconds {
+                        format!(", {outside} s of it outside the recorded halt")
+                    } else {
+                        ", outside any recorded halt".to_owned()
+                    };
                     says.push(format!(
                         "index value frozen in session: unchanged for {seconds} s from {} (the \
-                         import's measure of the vendor's rows), outside any recorded halt",
-                        at.map_or_else(
-                            || "-".to_owned(),
-                            |at| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)
-                        )
+                         import's measure of the vendor's rows){part}",
+                        at.map_or_else(|| "-".to_owned(), clock)
                     ));
                 }
                 serde_json::json!({
@@ -690,7 +735,8 @@ impl IndexDay {
                     "flagged": flagged,
                     "runs": null,
                     "longest_s": seconds,
-                    "longest_from": at.map(|at| format!("{:02}:{:02}:{:02}", at / 3_600, at % 3_600 / 60, at % 60)),
+                    "outside_halt_s": outside_s,
+                    "longest_from": at.map(clock),
                     "line": line,
                 })
             }

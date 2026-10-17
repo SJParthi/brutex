@@ -226,7 +226,9 @@ export function kindsOf(rec, ctx = {}) {
   // day nothing traded, never a store gap; a Zerodha minute series, which
   // sends a candle for every minute of a session, is not one.
   const segment = segmentOf(rec?.instrument);
-  const tradeDriven = segment === 'FNO' || (segment === 'CASH' && rec?.held?.rung === '1s');
+  // THE FINEST RUNG DECIDES IT, whatever rung the grid counts (R3-13): `held`
+  // may be the grid's coarser rung, `finest` is the feed's own.
+  const tradeDriven = segment === 'FNO' || (segment === 'CASH' && (rec?.finest?.rung ?? rec?.held?.rung) === '1s');
   if (before) out.push('before_archive');
   else if (beyond) out.push('outside_archive');
   // A DAY AFTER EXPIRY OWES NOTHING (SC-CLOSE-12): no store gap, no "no
@@ -257,8 +259,11 @@ export function kindsOf(rec, ctx = {}) {
   if (Number(rec?.import?.late) > 0) out.push('late');
   // HELD IS NOT TRADED (DB-B16): a share's day whose minute bars are mostly
   // zero-volume candles reads complete by count alone.
-  const fills = Number.isSafeInteger(rec?.held?.zero_volume) ? rec.held.zero_volume : null;
-  if (held !== null && held > 0 && fills !== null && fills * 2 >= held) out.push('fills');
+  // The minutes are the finest rung's: on a coarser grid they ride on `finest`.
+  const minutes = minutesOf(rec);
+  const minuteBars = barsOf(minutes);
+  const fills = Number.isSafeInteger(minutes?.zero_volume) ? minutes.zero_volume : null;
+  if (minuteBars !== null && minuteBars > 0 && fills !== null && fills * 2 >= minuteBars) out.push('fills');
   if (code === 'H' || rec?.events?.halt) out.push('halt');
   if (code === 'P') out.push('special');
   if (code === 'U') out.push('unmeasured');
@@ -277,6 +282,16 @@ export function kindsOf(rec, ctx = {}) {
   // ONE KIND ONCE, in the fixed order of `DAY_KINDS`.
   const seen = new Set(out);
   return DAY_KINDS.map((k) => k.kind).filter((k) => seen.has(k));
+}
+
+/**
+ * The count a record's zero-volume minutes are counted in: `finest` where the
+ * grid's rung is another one (R3-13), else `held`.
+ *
+ * @param {any} rec
+ */
+function minutesOf(rec) {
+  return rec?.finest && typeof rec.finest === 'object' ? rec.finest : rec?.held;
 }
 
 /** @param {unknown} key */
@@ -311,7 +326,7 @@ export function cellOf(rec, ctx = {}) {
     peerWhy: typeof rec?.peer?.why === 'string' ? rec.peer.why : null,
     // ZERO-VOLUME BARS, where the route counted them (a Zerodha share's
     // minutes, DB-B16); `null` is "not counted", never zero.
-    fills: Number.isSafeInteger(rec?.held?.zero_volume) ? rec.held.zero_volume : null,
+    fills: Number.isSafeInteger(minutesOf(rec)?.zero_volume) ? minutesOf(rec).zero_volume : null,
     // REFUSALS AN EARLIER RUN LOGGED (DB-B45): history, with the run that
     // logged them where the journal records it — never the current reason.
     superseded: Array.isArray(rec?.import?.refusals?.superseded) ? rec.import.refusals.superseded : [],
