@@ -1037,4 +1037,107 @@ mod cloud_mutant_tests {
         assert!(lineage.ledger.is_none());
         assert_eq!(lineage.status_of("NSE-FNO-NIFTY"), None);
     }
+
+    /// IST epoch day of `y-m-d`.
+    fn day(y: u16, m: u8, d: u8) -> i64 {
+        i64::from(
+            pull::session::Day::new(y, m, d)
+                .expect("a real day")
+                .days_from_epoch(),
+        )
+    }
+
+    /// **A BAR STAMPED AT IST MIDNIGHT HAS NO BUCKET OF ITS OWN DAY BEFORE
+    /// IT**: the minute before it is the previous day's, so only the bar
+    /// before it decides whether a bucket the store does not hold lies
+    /// between them. After a 15:29 bar (its next minute is the close) the
+    /// two are adjacent; after a 14:00 bar (14:01 is continuous trading)
+    /// they are not. Takes the false branch of `day_of(ts) == day` in
+    /// `adjacent_buckets`, which no fixture reached.
+    #[test]
+    fn a_bar_at_midnight_is_judged_by_the_bucket_after_the_bar_before_it() {
+        let index = rules("INDEX", "NIFTY", Timeframe::MINUTE_1);
+        let friday = day(2025, 5, 2);
+        let saturday = friday + 1;
+        let midnight = day_start(saturday);
+        let at = |minutes: i64| day_start(friday) + minutes * 60 * MICROS;
+        assert_eq!(
+            index.phase_at(friday, at(15 * 60 + 30)),
+            Some(Phase::PostClose)
+        );
+        assert_eq!(
+            index.phase_at(friday, at(14 * 60 + 1)),
+            Some(Phase::Continuous)
+        );
+        assert!(index.adjacent_buckets(friday, saturday, at(15 * 60 + 29), midnight));
+        assert!(!index.adjacent_buckets(friday, saturday, at(14 * 60), midnight));
+    }
+
+    /// **AN EVENT'S UNSCALED WINDOW STARTS AT ITS EX-DATE**: a bar before the
+    /// ex-date is not labelled, though it is before `oi_until`. Takes the
+    /// false branch of `event.ex_start <= bar.ts_micros` in `oi_unadjusted`.
+    #[test]
+    fn a_bar_before_the_ex_date_is_not_labelled_unscaled() {
+        let mut option = rules("FNO", "NIFTY", Timeframe::MINUTE_1);
+        let ex_start = day_start(20_000);
+        option.lineage = vec![LineageEvent {
+            ex_start,
+            oi_until: ex_start + 86_400 * MICROS,
+        }];
+        assert!(!option.oi_unadjusted(&bar_at(ex_start - MICROS)));
+        assert!(option.oi_unadjusted(&bar_at(ex_start)));
+    }
+
+    /// **A PHASE THE CALENDAR CANNOT VERIFY IS NO BOUNDARY**: a share whose
+    /// closing-auction flag is unknown on a day the flag decides (from
+    /// 2026-08-03) is `Unverified` from 15:15, and a change from 15:20 to
+    /// 15:35 (`PostClose`) is not called a change of phase. Takes the false
+    /// branch of `was != Phase::Unverified` in `phases_differ`.
+    #[test]
+    fn a_change_out_of_an_unverified_phase_is_no_boundary() {
+        let share = rules("CASH", "RELIANCE", Timeframe::MINUTE_1);
+        let tuesday = day(2026, 8, 4);
+        let at = |minutes: i64| day_start(tuesday) + minutes * 60 * MICROS;
+        assert_eq!(
+            share.phase_at(tuesday, at(15 * 60 + 20)),
+            Some(Phase::Unverified)
+        );
+        assert_eq!(
+            share.phase_at(tuesday, at(15 * 60 + 35)),
+            Some(Phase::PostClose)
+        );
+        assert!(!share.phases_differ(tuesday, at(15 * 60 + 20), at(15 * 60 + 35)));
+        // A KNOWN CHANGE STILL IS ONE: continuous trading into the close.
+        assert!(share.phases_differ(tuesday, at(15 * 60 + 10), at(15 * 60 + 35)));
+    }
+
+    /// **A REFUSAL LEDGER POISONED BY A PANICKING THREAD NEVER STOPS A READ**:
+    /// the day's master still answers `None` (its flag is `Unknown`), and the
+    /// refusal is not recorded rather than recorded wrongly. Takes the false
+    /// branch of `if let Ok(mut refused) = self.refused.lock()` in `master`.
+    #[test]
+    #[allow(clippy::panic, reason = "the panic is what poisons the ledger")]
+    fn a_poisoned_refusal_ledger_never_stops_a_read() {
+        let share = rules("CASH", "RELIANCE", Timeframe::MINUTE_1);
+        let days = u32::try_from(day(2026, 8, 4)).expect("after the epoch");
+        let poisoned = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _held = share.refused.lock();
+                    panic!("poison the ledger");
+                })
+                .join()
+        });
+        assert!(poisoned.is_err(), "the holder panicked");
+        assert!(share.refused.is_poisoned());
+        assert!(
+            share.master(days).is_none(),
+            "no master under a missing root"
+        );
+        assert_eq!(
+            share.refusal(days),
+            None,
+            "a poisoned ledger records nothing"
+        );
+    }
 }

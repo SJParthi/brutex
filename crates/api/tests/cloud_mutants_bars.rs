@@ -534,6 +534,56 @@ mod ladder_rs {
             "the futures leg is probed under its own segment"
         );
     }
+
+    /// **AN OWED RUN IS ONE INSTRUMENT'S: THE SAME SYMBOL ON ANOTHER
+    /// EXCHANGE, OR IN ANOTHER SEGMENT, STARTS A RUN OF ITS OWN** even when
+    /// its month follows the run's last. Three consecutive months of one
+    /// symbol, nothing held: NSE INDEX in January, BSE INDEX in February, BSE
+    /// CASH in March. They are three runs of one month each, never one run of
+    /// three. Takes the false branches of `owed_runs`'s exchange and segment
+    /// tests, which no ask reached.
+    #[test]
+    fn ladder_a_run_never_spans_two_exchanges_or_two_segments() {
+        let one = |exchange: Exchange, segment: Segment, m: u8| Wanted {
+            leg: Leg::Spot,
+            symbol: sym("SPLIT"),
+            exchange,
+            segment,
+            month: month(m),
+        };
+        let asked = [
+            one(Exchange::Nse, Segment::Index, 1),
+            one(Exchange::Bse, Segment::Index, 2),
+            one(Exchange::Bse, Segment::Cash, 3),
+        ];
+        let gated = gate(
+            |_: &EntryKey| false,
+            Feed::Zerodha,
+            Timeframe::MINUTE_1,
+            &asked,
+        );
+        let Gate::RungFirst {
+            missing,
+            of,
+            owed,
+            runs,
+            ..
+        } = gated
+        else {
+            panic!("every month is owed: {gated:?}");
+        };
+        assert_eq!((missing, of, runs), (3, 3, 3));
+        assert_eq!(
+            owed.iter()
+                .map(|o| (o.exchange, o.segment, o.from, o.to, o.months))
+                .collect::<Vec<_>>(),
+            vec![
+                (Exchange::Nse, Segment::Index, month(1), month(1), 1),
+                (Exchange::Bse, Segment::Index, month(2), month(2), 1),
+                (Exchange::Bse, Segment::Cash, month(3), month(3), 1),
+            ]
+        );
+    }
 }
 
 /// `render.rs`: the two public pages whose branches a mutant could flip

@@ -4769,4 +4769,333 @@ mod cloud_mutant_tests {
             let _ = std::fs::remove_dir_all(&root);
         });
     }
+
+    /// **`gaps_answer` IS THE ROUTE'S OWN ANSWER, AND A QUERY THAT IS NO URI
+    /// IS A NAMED `400`.** The door the gate-8 bench times (R3-06) had no
+    /// caller in any test.
+    #[tokio::test]
+    async fn the_bench_door_answers_as_the_route_and_refuses_what_is_no_uri() {
+        let root = crate::server::tests::store_root("cloud-gaps-door");
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-door", None, None),
+            &root,
+        ));
+        let query =
+            "feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2026-08";
+        let uri: axum::http::Uri = format!("/gaps.json?{query}").parse().expect("a URI");
+        let (status, _, said) = gaps_json(axum::extract::State(site.clone()), uri).await;
+        assert_eq!(
+            gaps_answer(site.clone(), query).await,
+            (status.as_u16(), said)
+        );
+        let (refused, body) = gaps_answer(site, "feed=gdfl month 2026-08").await;
+        assert_eq!(refused, 400, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert!(
+            body["error"].as_str().is_some_and(|why| !why.is_empty()),
+            "the refusal names its reason: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **ONLY AN NSE SHARE WITH NO CONTRACT IS AUDITED AGAINST THE DATED CASH
+    /// TABLE.** The same symbol on BSE, or named with a contract below it,
+    /// counts against the calendar of record. Takes the false branches of
+    /// `exchange == "NSE"` and `contract.is_none()` in the route's cash test,
+    /// and of `contract.is_none()` in `audit_one`'s classifier choice.
+    #[tokio::test]
+    async fn only_an_nse_share_with_no_contract_counts_against_the_cash_table() {
+        let root = crate::server::tests::store_root("cloud-gaps-cash-only");
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters("cloud-gaps-cash-only", None, None),
+            &root,
+        ));
+        let source = |query: &'static str| {
+            let site = site.clone();
+            async move {
+                let uri: axum::http::Uri = format!(
+                    "/gaps.json?feed=zerodha&segment=CASH&symbol=RELIANCE&timeframe=1min\
+                     &month=2026-08&{query}"
+                )
+                .parse()
+                .expect("a URI");
+                let (status, _, body) = gaps_json(axum::extract::State(site), uri).await;
+                assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+                let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+                body["calendar"]["source"].clone()
+            }
+        };
+        assert_eq!(source("exchange=NSE").await, "table");
+        assert_eq!(source("exchange=BSE").await, "record");
+        assert_eq!(
+            source("exchange=NSE&contract=2026-08-27-2500000-CE").await,
+            "record"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RUN THAT REACHES PAST A RECORDED HALT IS NOT CALLED HALTED**: the
+    /// halt must hold both its ends. Takes the false branch of
+    /// `halt.halted.holds(gap.to)` in `run_word`.
+    #[test]
+    fn a_run_reaching_past_a_halt_is_not_called_halted() {
+        use pull::gaps::{Gap, Reason};
+        let outage = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let run = |to: u16| Gap {
+            day: outage,
+            from: 700,
+            to,
+            reason: Reason::OutsideWindow,
+        };
+        assert_eq!(run_word(&run(710), false, None, &silent_reach()), "halted");
+        assert_eq!(
+            run_word(&run(1_000), false, None, &silent_reach()),
+            "outside-window"
+        );
+    }
+
+    /// Records one month of `symbol`, a spot index on GDFL at `rung`, in GDFL's
+    /// census, as a landing would.
+    fn census_holds_index(
+        root: &std::path::Path,
+        symbol: &str,
+        rung: store::path::Timeframe,
+        month: YearMonth,
+    ) {
+        let path = pull::manifest::manifest_path(root, Vendor::Gdfl);
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let mut manifest =
+            pull::manifest::Manifest::open_image(Vendor::Gdfl, &bytes).expect("a census");
+        manifest
+            .record(pull::manifest::Entry {
+                key: pull::manifest::EntryKey {
+                    contract: None,
+                    exchange: brutex_core::instrument::Exchange::Nse,
+                    segment: brutex_core::instrument::Segment::Index,
+                    symbol: brutex_core::symbol::Symbol::new(symbol).expect("a symbol"),
+                    timeframe: rung,
+                    month,
+                },
+                rows: 1,
+                first_ts_micros: 1,
+                last_ts_micros: 2,
+            })
+            .expect("one month in the census");
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the census directory");
+        std::fs::write(&path, manifest.image()).expect("publish the census");
+    }
+
+    /// **A PEER THAT HOLDS NO SESSION IS NO VOTE, AND NO UNREADABLE PEER
+    /// EITHER.** BANKNIFTY's census names its daily and minute months, and
+    /// both files open and hold no bar: the vote has no calendar and names
+    /// nobody, as voter or as unreadable. One daily bar makes the same peer a
+    /// voter. Takes the false branch of `calendar.sessions() > 0` in
+    /// `peer_vote_reading`.
+    #[test]
+    fn a_peer_that_holds_no_session_is_no_vote() {
+        let root = crate::server::tests::store_root("cloud-gaps-empty-peer");
+        let masters = crate::server::tests::masters("cloud-gaps-empty-peer", None, None);
+        let held = month(2026, 8);
+        let id = u32::try_from(brutex_core::universe::fnv1a("BANKNIFTY") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let paths = [
+            store::path::Timeframe::DAY_1,
+            store::path::Timeframe::MINUTE_1,
+        ]
+        .map(|rung| {
+            census_holds_index(&root, "BANKNIFTY", rung, held);
+            let path = store::path::StorePath::new(store::path::PathParts {
+                vendor: Vendor::Gdfl,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "BANKNIFTY",
+                contract: None,
+                timeframe: rung,
+                month: held,
+                file: store::path::FileKind::Bars,
+            })
+            .expect("a legal path");
+            // CREATED AND CLOSED: a writer holds its month locked, and a
+            // locked month is a peer that would not open.
+            drop(store::file::BarFile::open_or_create(&root, path, id).expect("an empty month"));
+            path
+        });
+        let asked = subject("INDEX", None, store::path::Timeframe::MINUTE_1);
+
+        let (_, vote) = peer_vote_reading(&Site::load(&masters, &root), &asked, census_now_stamped);
+        assert!(vote.calendar.is_none(), "an empty peer agrees on nothing");
+        assert!(vote.from.is_empty(), "{:?}", vote.from);
+        assert!(vote.unreadable.is_empty(), "{:?}", vote.unreadable);
+
+        let tuesday = epoch_day(2026, 8, 4);
+        let mut daily =
+            store::file::BarFile::open_or_create(&root, paths[0], id).expect("the daily month");
+        daily
+            .append(&[store::format::Bar {
+                ts_micros: (tuesday * 86_400 - 19_800) * 1_000_000,
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 0,
+                open_interest: i64::MIN,
+            }])
+            .expect("one daily bar");
+        drop(daily);
+        let (_, vote) = peer_vote_reading(&Site::load(&masters, &root), &asked, census_now_stamped);
+        assert_eq!(vote.from, vec!["gdfl:BANKNIFTY".to_owned()]);
+        assert!(vote.calendar.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One one-second NIFTY month on GDFL, 2025-05: `count` bars a second
+    /// apart from 09:15:00 on the 2nd, the first two each carrying `volume`.
+    /// Returns the bar file's path.
+    fn one_second_index(root: &std::path::Path, count: i64, volume: i64) -> std::path::PathBuf {
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Gdfl,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::SECOND_1,
+            month: month(2025, 5),
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        let id = u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX))
+            .expect("low 32 bits");
+        let mut file = store::file::BarFile::open_or_create(root, path, id).expect("a file");
+        let day = epoch_day(2025, 5, 2);
+        let rows: Vec<store::format::Bar> = (0..count)
+            .map(|n| store::format::Bar {
+                volume: if n < 2 { volume } else { 0 },
+                ..second_bar(day, 33_300 + n)
+            })
+            .collect();
+        file.append(&rows).expect("generated records");
+        path.to_path_buf(root)
+    }
+
+    /// `/gaps.json` for the one-second NIFTY month of 2025-05 on GDFL: the
+    /// month's object.
+    async fn one_second_audit(root: &std::path::Path, tag: &str) -> serde_json::Value {
+        let site = std::sync::Arc::new(Site::serving(
+            &crate::server::tests::masters(tag, None, None),
+            root,
+        ));
+        let uri: axum::http::Uri =
+            "/gaps.json?feed=gdfl&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1s&month=2025-05"
+                .parse()
+                .expect("a URI");
+        let (status, _, body) = gaps_json(axum::extract::State(site), uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        body["month"][0].clone()
+    }
+
+    /// **A ONE-SECOND MONTH WHOSE ROWS THE FOLD REFUSES IS NAMED IN THE
+    /// FOLD'S OWN WORDS AND CLAIMS NOTHING**: two prints in one minute whose
+    /// volumes sum past `i64::MAX`. The kept summary saw the sum saturate, so
+    /// the bars are read, the fold refuses them, and the month owes and holds
+    /// no minute. Takes the true branch of `extremes.volume == i64::MAX` in
+    /// `month_input`, its fallback sentence, and every `fold_error` arm of
+    /// `audit_one`.
+    #[tokio::test]
+    async fn a_month_the_fold_refuses_is_named_and_claims_nothing() {
+        let root = crate::server::tests::store_root("cloud-gaps-fold-refused");
+        one_second_index(&root, 1_100, i64::MAX / 2 + 1);
+        let audited = one_second_audit(&root, "cloud-gaps-fold-refused").await;
+        assert!(
+            audited["fold_error"]
+                .as_str()
+                .is_some_and(|why| why.contains("VolumeOverflow")),
+            "{audited}"
+        );
+        assert_eq!(audited["summary"], "built", "{audited}");
+        assert_eq!(
+            audited["summary_fallback"],
+            "the month holds rows the fold may refuse; its answer is read from the bars"
+        );
+        assert_eq!(
+            (audited["expected"].as_u64(), audited["held"].as_u64()),
+            (Some(0), Some(0))
+        );
+        assert_eq!(audited["gaps"], serde_json::json!([]), "no run is claimed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A KEPT SUMMARY THAT COUNTS ANY ROW THE FOLD MAY REFUSE SENDS THE
+    /// AUDIT TO THE BARS, WHATEVER THE KIND.** The month's `.sum` is
+    /// rewritten with one count raised at a time (a decreasing stamp, a
+    /// negative volume, a row outside the month), as a summary written by a
+    /// writer that admitted such a row would say. Each is read from the bars,
+    /// named, and — the bars themselves being clean — audited whole. Takes
+    /// the true branch of each of the three counts in `month_input`.
+    #[tokio::test]
+    async fn a_kept_summary_counting_any_row_the_fold_may_refuse_reads_the_bars() {
+        let root = crate::server::tests::store_root("cloud-gaps-kept-refusable");
+        let bars = one_second_index(&root, 1_100, 0);
+        let clean = one_second_audit(&root, "cloud-gaps-kept-refusable").await;
+        assert_eq!(clean["summary"], "kept", "{clean}");
+        let kept =
+            store::month_summary::read_kept(&bars, 1_100).expect("the writer kept a summary");
+        let raise: [fn(&mut store::month_summary::MonthSummary); 3] = [
+            |summary| summary.counts.decreasing = 1,
+            |summary| summary.counts.negative_volume = 1,
+            |summary| summary.counts.outside_month = 1,
+        ];
+        for one in raise {
+            let mut forged = kept.clone();
+            one(&mut forged);
+            std::fs::write(
+                store::month_summary::path_beside(&bars),
+                forged.file_image(),
+            )
+            .expect("the rewritten summary");
+            let audited = one_second_audit(&root, "cloud-gaps-kept-refusable").await;
+            assert_eq!(audited["summary"], "built", "{audited}");
+            assert_eq!(
+                audited["summary_fallback"],
+                "the month holds rows the fold may refuse; its answer is read from the bars"
+            );
+            assert_eq!(audited["fold_error"], serde_json::Value::Null, "{audited}");
+            assert_eq!(audited["held"], clean["held"], "the same rows, read");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A RUN OF MISSING SECONDS ON A DAY AFTER TODAY IS `not-yet`, NEVER A
+    /// VENDOR HOLE**: the session has not happened. The same month audited
+    /// with a clock that has passed the day calls the run a vendor hole.
+    /// Takes the true branch of `reach.not_yet(run.day)` in
+    /// `one_second_members`.
+    #[test]
+    fn a_missing_second_after_today_is_not_yet() {
+        let day = epoch_day(2025, 5, 2);
+        let rows: Vec<store::format::Bar> = (33_300..33_400)
+            .filter(|second| !(33_350..33_360).contains(second))
+            .map(|second| second_bar(day, second))
+            .collect();
+        let held = summary_of(day, &rows);
+        let words = |today: i64| {
+            let reach = super::super::feeds_route::ImportReach {
+                today: Some(today),
+                ..silent_reach()
+            };
+            let members =
+                one_second_members(&held, day, day, None, false, None, 10, None, (0, 0), &reach);
+            let members: serde_json::Value =
+                serde_json::from_str(&format!("{{{}}}", &members[1..])).expect("members");
+            members["second_runs"]
+                .as_array()
+                .expect("runs")
+                .iter()
+                .filter(|run| run["from_second"] == 33_350)
+                .map(|run| run["reason"].as_str().expect("a word").to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(words(day - 1), vec![NOT_YET_WORD.to_owned()]);
+        assert_eq!(words(day + 1), vec!["vendor-hole".to_owned()]);
+    }
 }

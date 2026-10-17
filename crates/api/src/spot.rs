@@ -793,4 +793,25 @@ mod cloud_mutant_tests {
         guard.disarm();
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A RUNG OF NO WIDTH IS JUDGED AS A DAY RUNG IS: ANY WHOLE SECOND IS
+    /// ON ITS GRID, AND NO FRACTION OF ONE.** `timeframe_secs == 0` has no
+    /// 09:15-anchored grid to divide by. Takes the true branch of
+    /// `on_grid`'s `timeframe_secs == 0`, which no rung reached.
+    #[test]
+    fn a_rung_of_no_width_admits_whole_seconds_only() {
+        let open = open_second() * 1_000_000;
+        assert!(on_grid(0, open));
+        assert!(on_grid(0, open + 7_000_000), "09:15:07 is a whole second");
+        assert!(!on_grid(0, open + 500_000), "half a second is not");
+        // THE SAME RULE A DAY RUNG KEEPS, and not the minute grid's.
+        assert_eq!(
+            on_grid(0, open + 7_000_000),
+            on_grid(86_400, open + 7_000_000)
+        );
+        assert!(
+            !on_grid(60, open + 7_000_000),
+            "a minute rung refuses 09:15:07"
+        );
+    }
 }
