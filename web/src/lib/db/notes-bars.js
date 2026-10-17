@@ -347,3 +347,116 @@ export const BAR_WHY = {
 export const barWhyText = (code) =>
   (code === null ? null : /** @type {any} */ (BAR_WHY)[code]) ??
   'unknown, and this page did not record why - which is a defect here, not a fact about the store.';
+
+/* ---------------------------------------------------------------------
+   R3-03 — WHAT THE GRID OFFERS, AND WHAT IT SAYS WHEN IT CANNOT.
+   --------------------------------------------------------------------- */
+
+/** The segment a census key names, its second token: `INDEX`, `CASH` or `FNO`. @param {string} key */
+export const segmentOfKey = (key) => String(key ?? '').split('-')[1] ?? '';
+
+export const NO_VOLUME_SORT =
+  'an index has no traded volume (D-2802, D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under a Volume caret.';
+export const NO_OI_SORT =
+  'an index or a share has no open interest (D-3322): every row of this selection reads n/a, so there is nothing to order — the rows would come back in time order under this caret.';
+
+/**
+ * WHETHER A SORT MEANS SOMETHING ON THIS SELECTION (R3-03): `null` when it
+ * does, else the reason its button is disabled.
+ *
+ * Volume on an index and open interest on an index or a share are n/a on
+ * every row, by the server's own rule (`bars_change.rs`: an `INDEX` bar has no
+ * traded volume, an `INDEX` or `CASH` bar no open interest, D-3322). Ordering
+ * them answered time order wearing a Volume caret (the 11 Oct re-check, NIFTY
+ * spot · Zerodha 1min). A selection with any derivative keeps the sort.
+ *
+ * @param {string} key the grid's column key @param {string[]} keys the selection's series
+ * @returns {string | null}
+ */
+export function sortRefusal(key, keys) {
+  if (keys.length === 0) return null;
+  const segs = keys.map(segmentOfKey);
+  if (key === 'vol' && segs.every((s) => s === 'INDEX')) return NO_VOLUME_SORT;
+  if ((key === 'oi' || key === 'oichg') && segs.every((s) => s === 'INDEX' || s === 'CASH')) return NO_OI_SORT;
+  return null;
+}
+
+/**
+ * WHAT TO DO WHEN THE BROWSER WILL NOT ORDER A COLUMN (R3-03, DB-B50): advice
+ * that WORKS for this rung and this many series.
+ *
+ * The old sentence told every reader to "narrow to a day". A whole IST day
+ * holds at most `86,400 / rung seconds` bars of one series — 1,440 one-minute
+ * bars, but 86,400 one-second bars, past the 20,000 the browser orders — so
+ * on a one-second series the advice could not work. A day is offered only
+ * where a day of every series fits; otherwise the time of day it must be
+ * narrowed to as well is named in minutes. Every figure is arithmetic on the
+ * rung and the budget; no session length is assumed.
+ *
+ * @param {{label: string, total: number, budget: number, tfSecs: number, series: number, stored: string[]}} o
+ */
+export function localSortAdvice({ label, total, budget, tfSecs, series, stored }) {
+  const n = Math.max(1, series);
+  const perDay = n * Math.ceil(86_400 / Math.max(1, tfSecs));
+  const ways = [];
+  if (perDay <= budget) {
+    ways.push(`narrow to one day (a day holds at most ${fmt(perDay)} bar(s) of ${n === 1 ? 'this series' : `these ${fmt(n)} series`} at this rung)`);
+  } else {
+    const minutes = Math.floor(budget / (n * Math.max(1, Math.ceil(60 / Math.max(1, tfSecs)))));
+    ways.push(
+      minutes >= 1
+        ? `narrow to one day AND a time of day of at most ${fmt(minutes)} minute(s) — a whole day of ${n === 1 ? 'this series' : `these ${fmt(n)} series`} can hold ${fmt(perDay)} bar(s) at this rung, so a day alone is not enough`
+        : `choose fewer series — one minute of these ${fmt(n)} series is already past it`
+    );
+  }
+  if (n > 1) ways.push(`choose one strike or one side (${fmt(n)} series now)`);
+  ways.push(`or sort by a stored column (${stored.join(', ')}), which the server orders over any number`);
+  return `${label} cannot be ordered here: this query keeps ${fmt(total)} bar(s), and the browser orders at most ${fmt(budget)} of a column the server cannot sort. The grid keeps the order it had. To order by ${label}: ${ways.join('; ')}.`;
+}
+
+/**
+ * WHY A PAGE OF BARS IS NOT ON SCREEN, IN WORDS THAT ARE TRUE ABOUT WHO SAID
+ * IT (R3-03).
+ *
+ * The grid called every missing page "a failed or refused read" and "the
+ * server's own" sentence, with Try again under it — also when the PAGE had
+ * refused the selection before asking anything (too many series, two rungs, a
+ * window outside the held months), where no server had spoken and pressing
+ * Try again asked the same impossible question. Three cases now:
+ *
+ * - `page`: this page refused before any request; nothing was read; the fix
+ *   is to change the selection, so no Try again.
+ * - `server`: the server answered 4xx with its reason; the same question gets
+ *   the same answer, so no Try again.
+ * - `failed`: no answer, a 5xx, a 408/429 past its retries, or an answer
+ *   that did not check; asking again can help, so Try again is offered.
+ *
+ * @param {{made: 'page' | 'read', status: number}} o
+ * @returns {{kind: 'page' | 'server' | 'failed', title: string, says: string, retry: boolean}}
+ */
+export function readFailure({ made, status }) {
+  if (made === 'page') {
+    return {
+      kind: 'page',
+      title: 'This selection is not read as one page',
+      says: 'This page refused it before asking the server, so nothing was read and no store was consulted. Change the selection as the sentence above says.',
+      retry: false
+    };
+  }
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+    return {
+      kind: 'server',
+      title: 'The server refused this page',
+      says: `The sentence above is the server's own (HTTP ${status}). Asking again asks the same question, so it is not offered: change what it names.`,
+      retry: false
+    };
+  }
+  return {
+    kind: 'failed',
+    title: 'This page of bars could not be read',
+    says: status >= 400
+      ? `The server answered HTTP ${status} and no page. Nothing is drawn rather than a plausible blank; asking again may answer.`
+      : 'No answer arrived, or the answer did not check. Nothing is drawn rather than a plausible blank; asking again may answer.',
+    retry: true
+  };
+}

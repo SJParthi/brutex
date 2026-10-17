@@ -307,31 +307,6 @@ export function istInstant(day, time) {
   return (midnight - IST_OFFSET_MS) / 1000 + h * 3600 + m * 60 + s;
 }
 
-/**
- * WHAT THE GO-TO BOX TYPED, as an instant (DB-005).
- *
- * `YYYY-MM-DD HH:MM[:SS]` names the day; a bare `HH:MM[:SS]` takes `day`, the
- * day the reader is looking at. Seconds are accepted on every rung and are the
- * point on a one-second rung, where sixty bars share a minute.
- *
- * @param {string} text @param {string} day the default day, `YYYY-MM-DD`
- * @returns {{at: number, label: string} | {why: string}}
- */
-export function parseGoto(text, day) {
-  const s = String(text ?? '').trim().replace('T', ' ');
-  const both = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)$/);
-  const only = s.match(/^(\d{2}:\d{2}(?::\d{2})?)$/);
-  const d = both ? both[1] : day;
-  const t = both ? both[2] : only ? only[1] : '';
-  if (!t) {
-    return { why: `“${s}” is not an instant. Type a day and a time, 2019-03-20 12:33:38, or a time alone, 12:33:38, for the day on screen.` };
-  }
-  if (!d) return { why: `“${s}” names no day and no bar is on screen to take one from. Type the day too: 2019-03-20 ${t}.` };
-  const at = istInstant(d, t);
-  if (at === null) return { why: `“${s}” is not a real IST instant: the day must exist and the time be 00:00:00 to 23:59:59.` };
-  return { at, label: `${d} ${t.length === 5 ? `${t}:00` : t}` };
-}
-
 /** The 1-based page holding 0-based row `index` at `size` rows a page. @param {number} index @param {number} size */
 export const pageOfIndex = (index, size) => Math.floor(Math.max(0, index) / Math.max(1, size)) + 1;
 
@@ -377,6 +352,54 @@ export function localComparator(k, desc) {
     if (d !== 0) return dir * d;
     return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.rk < b.rk ? -1 : a.rk > b.rk ? 1 : 0;
   };
+}
+
+/**
+ * WHICH CHANGES WERE MEASURED ACROSS THE OVERNIGHT GAP (R3-03).
+ *
+ * A bar's Change % is its close against the previous STORED bar of its
+ * series, wherever that lies (D-3325). For the first bar of a session that is
+ * the last bar of an earlier day, so the figure is the overnight move, not a
+ * bar-to-bar one — and sorted by Change % those rows come out on top looking
+ * like the biggest bars of the month (the 11 Oct re-check, NIFTY spot ·
+ * Zerodha 1min, source row 57). Each such row now says so.
+ *
+ * Said only where it is KNOWN, never guessed:
+ * - the previous bar of the same series is in `rows` and on an earlier IST
+ *   day; or
+ * - `edgeEarlier`: the read began at the first kept bar of a day window
+ *   with no time-of-day bound, so the bar before a series' first row lies
+ *   before the window's first day.
+ * A time-of-day bound proves nothing: the bar before the first kept bar of a
+ * day may be on that same day, outside the window, so no row is marked under
+ * one. A day rung is a close-to-close series by definition and is not marked.
+ *
+ * O(rows · log rows), once per read — never per paint.
+ *
+ * @param {any[]} rows grid rows (`rk`, `key`, `ts`, `day`, `chg`), any order
+ * @param {{timeNarrows: boolean, dayRung: boolean, edgeEarlier: boolean}} o
+ * @returns {Map<string, number | null>} row key → the previous bar's ms, `null` when it is before the read
+ */
+export function acrossDay(rows, o) {
+  /** @type {Map<string, number | null>} */
+  const out = new Map();
+  if (o.timeNarrows || o.dayRung) return out;
+  /** @type {Map<string, any[]>} */
+  const bySeries = new Map();
+  for (const r of rows) {
+    const list = bySeries.get(r.key);
+    if (list) list.push(r);
+    else bySeries.set(r.key, [r]);
+  }
+  for (const list of bySeries.values()) {
+    list.sort((a, b) => a.ts - b.ts);
+    list.forEach((r, i) => {
+      if (r.chg === null || r.chg === undefined) return;
+      const prev = i > 0 ? list[i - 1] : null;
+      if (prev ? prev.day < r.day : o.edgeEarlier) out.set(r.rk, prev ? prev.ts : null);
+    });
+  }
+  return out;
 }
 
 /* ---------------------------------------------------------------------
@@ -540,65 +563,6 @@ export function paisaText(p) {
  */
 export const FLOOR_YEAR = 2015;
 export const spanFloor = `${FLOOR_YEAR}-01-01`;
-
-/**
- * `HH:MM` to minutes since IST midnight, or `null` if it is not a time.
- *
- * VALIDATES THE PARTS, not just the shape: `25:00` and `10:73` both match a
- * digits-colon-digits pattern and neither is a minute of any day. Returning
- * `null` for them is what lets the caller say "that is not a time" instead
- * of landing on a bar chosen by arithmetic on nonsense.
- *
- * @param {string | null | undefined} hhmm
- */
-export function minuteOf(hhmm) {
-  const m = String(hhmm ?? '')
-    .trim()
-    .match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const h = Number(m[1]);
-  const mi = Number(m[2]);
-  if (h > 23 || mi > 59) return null;
-  return h * 60 + mi;
-}
-
-/**
- * Which page buttons to draw. Always first, last, current and its
- * neighbours; the rest elided - a 1,840-page run must not render 1,840
- * buttons, which is the constant-per-paint rule applied to a control.
- *
- * @param {number} cur
- * @param {number} total
- */
-export function pageList(cur, total) {
-  /* ONE SHAPE FROM BOTH BRANCHES. The short branch returned bare numbers
-     and the long one returned records, so the `{#each}` key expression was
-     reading `.k` off a number for every run of seven pages or fewer. */
-  if (total <= 7) {
-    return Array.from({ length: total }, (_, i) => ({ k: `p${i + 1}`, p: i + 1, gap: false }));
-  }
-  const want = new Set([1, total, cur, cur - 1, cur + 1]);
-  if (cur <= 3) {
-    want.add(2);
-    want.add(3);
-    want.add(4);
-  }
-  if (cur >= total - 2) {
-    want.add(total - 1);
-    want.add(total - 2);
-    want.add(total - 3);
-  }
-  const list = [...want]
-    .filter((p) => p >= 1 && p <= total)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  /** @type {{ k: string, p: number, gap: boolean }[]} */
-  const out = [];
-  list.forEach((p, i) => {
-    if (i && p - list[i - 1] > 1) out.push({ k: `gap${p}`, p, gap: true });
-    out.push({ k: `p${p}`, p, gap: false });
-  });
-  return out;
-}
 
 /* ======================================================================
    WINDOWING — only the visible slice is in the DOM
