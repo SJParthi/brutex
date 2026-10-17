@@ -236,7 +236,18 @@ each crate's library tests run as uid 65534:
   test modules: the `#[ignore]`d full-size proof's body, two arms of a test
   helper that a passing test never takes, and a test double's `sync` and
   `reopen`.
-- `api`: the run before the last two commits left 13 added lines uncovered in `logs.rs`, none in `audit_json.rs`; the four on production paths are now gone (two tested, one rewritten without an arm that could not run, one tested by the slice test). The re-measure of the final tree is running and its result is recorded here when it ends.
+- `api`: on the final tree (2145 library tests, all passing as uid 65534),
+  every added line outside a test module in `logs.rs` and `audit_json.rs` is
+  covered. The five uncovered added lines are all in `logs.rs`'s test modules,
+  and each is an argument of an assertion's message, evaluated only when the
+  assertion fails. Whole-file counts in this measurement: `logs.rs` 147
+  uncovered lines, `audit_json.rs` 54; the base's `api` was not measured the
+  same way (its instrumented build needs disk this sandbox did not have beside
+  the mutation job), so whether any base line of those two files lost its
+  coverage is NOT MEASURED. No base test was removed and no assertion
+  dropped: base tests changed only for a new argument (`rows_table`'s
+  conflicts) or because their example of an unknown parameter, `reason=`, is
+  a key now.
 - Gate 20's declaration counts uncovered lines per `telemetry` file from a
   WORKSPACE profile, which was not built here (it compiles every crate
   instrumented, and this sandbox has neither the disk nor the time beside the
