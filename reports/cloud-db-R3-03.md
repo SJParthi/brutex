@@ -92,7 +92,33 @@ and add the same three paths at merge.
 
 ## Gate results (so far)
 
+This part changes no Rust: `git diff origin/feat/db-fix -- Cargo.toml
+Cargo.lock deny.toml crates` is empty, so every cargo gate below is the
+base's own result, run on this branch.
+
 - `cargo fmt --check`: clean.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: clean
+  (exit 0).
+- `cargo deny check`, run with the CI pin 0.19.0 and with 0.20.2, on this
+  branch AND on the base (`origin/feat/db-fix` `50093fa3`, a scratch
+  worktree): both `advisories FAILED, bans ok, licenses ok, sources ok`, the
+  same five and only those — RUSTSEC-2026-0344 (ruzstd 0.8.2) and
+  RUSTSEC-2026-0346, -0347, -0348, -0349 (rustls 0.23.45). DENY-1 owns them;
+  Cargo.toml and Cargo.lock are untouched here.
+- `cargo test --workspace --locked` (skipping only `cli`'s known slow
+  `the_pool_verb_prints_its_whole_page_on_a_generated_store`, as CONTEXT
+  allows): run as root in this container, `api`'s lib suite gave 2,071 pass /
+  12 fail, and every one of the 12 is a permission test (an unreadable
+  directory, a name that cannot be unlinked, a store that cannot take a
+  write) — uid 0 bypasses permission bits. Re-run with root's file-access
+  override dropped (`setpriv --inh-caps=-dac_override,-dac_read_search,-fowner
+  --bounding-set=…`), the same groups gave 162 pass / 0 fail, the 12
+  included. The whole workspace under that `setpriv` is in progress.
+- Fail before, pass after: with this branch's `pager.js`, `goto.js`,
+  `bars-plan.js` and `notes-bars.js` copied into a base worktree and the
+  base's own grid left in place, `db-pager.test.js` + `db-goto.test.js` give
+  12 of 15 failing — all six named tests among them; on this branch 15 of 15
+  pass. On the plain base both files fail at import (no `pager.js`/`goto.js`).
 - Web tests (`node --test tests/*.test.js`, Node 22.22.0): branch 1,407 pass,
   0 fail, 5 cancelled; the 5 are timing tests in `ask.test.js` (3) and
   `census-worker.test.js` (2), cancelled identically on the base (1,393 pass,
