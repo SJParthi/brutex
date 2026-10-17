@@ -1893,3 +1893,337 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail"
+)]
+mod cloud_mutant_tests {
+    //! Mutant kills for the cache's size caps, its bounded reader and its
+    //! download (cloud mutation round, 2026-10-16). The download is driven
+    //! against a loopback socket this test opens itself: no NSE host is
+    //! reached. Every byte served is invented.
+
+    use super::*;
+    use crate::gdfl_fixtures::scratch;
+    use std::io::{BufRead as _, BufReader};
+    use std::net::TcpListener;
+
+    fn gz(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// The caps are 4 MiB compressed and 32 MiB expanded, as the code says.
+    #[test]
+    fn the_caps_are_four_and_thirty_two_mebibytes() {
+        assert_eq!(MAX_COMPRESSED, 4_194_304);
+        assert_eq!(MAX_EXPANDED, 33_554_432);
+    }
+
+    /// A master of exactly 4 MiB is handed to the gzip reader, not refused
+    /// for its size; one byte more is refused for its size. Kills the cap
+    /// test's `>` read as `>=` or `==`, and either factor of the cap
+    /// mutated.
+    #[test]
+    fn a_master_exactly_at_the_compressed_cap_reaches_the_gzip_reader() {
+        let why = decode(&vec![0; MAX_COMPRESSED]).unwrap_err();
+        assert!(why.starts_with("invalid NSE cash master gzip"), "{why}");
+        assert_eq!(
+            decode(&vec![0; MAX_COMPRESSED + 1]).unwrap_err(),
+            "NSE cash master exceeds 4194304 compressed bytes"
+        );
+    }
+
+    /// A gzip expanding to exactly 32 MiB reaches the CSV reader; one byte
+    /// more is refused for its size. Kills the expanded cap's `>` read as
+    /// `>=` or `==` and its factors mutated.
+    #[test]
+    fn an_expansion_exactly_at_the_cap_reaches_the_csv_reader() {
+        let why = decode(&gz(&vec![b'a'; MAX_EXPANDED])).unwrap_err();
+        assert!(why.starts_with("invalid NSE cash eligibility CSV"), "{why}");
+        assert_eq!(
+            decode(&gz(&vec![b'a'; MAX_EXPANDED + 1])).unwrap_err(),
+            "NSE cash master exceeds 33554432 expanded bytes"
+        );
+    }
+
+    /// A gzip with a second member after the first is refused by name.
+    /// Kills the trailing-bytes test's `!` deleted.
+    #[test]
+    fn a_second_gzip_member_is_refused_and_one_member_is_read() {
+        let csv = b"FinInstrmId,TckrSymb,SctySrs,ISIN,ElgbltyClsgAuctnSsn\n1363,HINDALCO,EQ,INE038A01020,1\n";
+        let one = gz(csv);
+        assert!(decode(&one).is_ok());
+        let mut two = one.clone();
+        two.extend_from_slice(&one);
+        assert_eq!(
+            decode(&two).unwrap_err(),
+            "invalid NSE cash master gzip: trailing bytes or additional gzip members"
+        );
+    }
+
+    /// `read_limited` takes a regular file of up to and EXACTLY its limit,
+    /// whole, and refuses one byte more; a directory is not a regular file;
+    /// and a file that yields more than its stated length (a procfs file
+    /// states 0) is held to the limit by the read itself. Kills every
+    /// mutant of the stat test, the `limit + 1` read bound and the length
+    /// recheck.
+    #[test]
+    fn read_limited_reads_exactly_its_limit_and_no_further() {
+        let root = scratch("CloudCashLimit");
+        let path = root.join("Evidence");
+        for (len, whole) in [(0_u8, true), (9, true), (10, true), (11, false)] {
+            let bytes: Vec<u8> = (0..len).map(|at| b'a' + at).collect();
+            fs::write(&path, &bytes).unwrap();
+            match read_limited(&path, 10) {
+                Ok(read) => {
+                    assert!(whole, "{len} bytes must be refused");
+                    assert_eq!(read, bytes, "{len} bytes are read whole");
+                }
+                Err(why) => {
+                    assert!(!whole, "{len} bytes must be read: {why}");
+                    assert!(
+                        why.ends_with("is not a regular file within 10 bytes"),
+                        "{why}"
+                    );
+                }
+            }
+        }
+        let why = read_limited(&root, 10_000).unwrap_err();
+        assert!(
+            why.ends_with("is not a regular file within 10000 bytes"),
+            "{why}"
+        );
+        let status = Path::new("/proc/self/status");
+        assert_eq!(fs::metadata(status).unwrap().len(), 0, "procfs states 0");
+        let why = read_limited(status, 10).unwrap_err();
+        assert_eq!(why, "/proc/self/status exceeds 10 bytes");
+        assert!(
+            read_limited(&root.join("absent"), 10)
+                .unwrap_err()
+                .starts_with("cannot open")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Serves `answer` verbatim to the first connection on a loopback port;
+    /// the handle yields the request head it read.
+    fn serve(answer: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/content/cm/NSE_CM_security_03082026.csv.gz",
+            listener.local_addr().unwrap()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            // The client may hang up as soon as it refuses the head.
+            let _ignored = stream.write_all(&answer);
+            let _ignored = stream.flush();
+            head
+        });
+        (url, handle)
+    }
+
+    fn fetch(url: String) -> Result<Vec<u8>, String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(download(url))
+    }
+
+    fn sized(status: &str, declared: usize, body: &[u8]) -> Vec<u8> {
+        let mut out =
+            format!("HTTP/1.1 {status}\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n")
+                .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn chunked(total: usize) -> Vec<u8> {
+        let mut out =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        let mut left = total;
+        while left > 0 {
+            let n = left.min(65_536);
+            out.extend_from_slice(format!("{n:x}\r\n").as_bytes());
+            out.extend(std::iter::repeat_n(b'z', n));
+            out.extend_from_slice(b"\r\n");
+            left -= n;
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    /// A 200 is the body, byte for byte, asked for with an identity
+    /// encoding; any other status, a redirect included, is refused naming
+    /// it. Kills `download` answering a fixed body and the status test's
+    /// `!=` read as `==`.
+    #[test]
+    fn a_download_is_the_body_of_a_200_and_nothing_else_is() {
+        let (url, server) = serve(sized("200 OK", 5, b"Hello"));
+        assert_eq!(fetch(url).unwrap(), b"Hello");
+        let head = server.join().unwrap().to_ascii_lowercase();
+        assert!(
+            head.starts_with("get /content/cm/nse_cm_security_03082026.csv.gz http/1.1"),
+            "{head}"
+        );
+        assert!(head.contains("accept-encoding: identity"), "{head}");
+        for status in [
+            "404 Not Found",
+            "301 Moved Permanently",
+            "206 Partial Content",
+        ] {
+            let (url, server) = serve(sized(status, 2, b"no"));
+            let why = fetch(url).unwrap_err();
+            let code = status.split(' ').next().unwrap();
+            assert!(why.contains(&format!("answered HTTP {code}")), "{why}");
+            server.join().unwrap();
+        }
+    }
+
+    /// A body declared at exactly 4 MiB is read; one declared a byte past
+    /// it is refused from its head. Kills the declared-length test's `>`
+    /// read as `>=`, `==` or `<`.
+    #[test]
+    fn a_declared_length_of_exactly_the_cap_is_read_and_one_more_is_refused() {
+        let body = vec![b'y'; MAX_COMPRESSED];
+        let (url, server) = serve(sized("200 OK", MAX_COMPRESSED, &body));
+        assert_eq!(fetch(url).unwrap().len(), MAX_COMPRESSED);
+        server.join().unwrap();
+        let (url, server) = serve(sized("200 OK", MAX_COMPRESSED + 1, b""));
+        let why = fetch(url).unwrap_err();
+        assert!(
+            why.ends_with("declares more than 4194304 compressed bytes"),
+            "{why}"
+        );
+        server.join().unwrap();
+    }
+
+    /// An installer that cannot take the day alone within its bound refuses
+    /// naming who held it and that nothing was installed; a reader beside
+    /// another reader is never refused. The exclusive arm of the bound's
+    /// message, which the 5-second production bound keeps out of the other
+    /// tests.
+    #[test]
+    fn an_installer_that_cannot_hold_the_day_alone_names_the_readers() {
+        let root = scratch("CloudCashHold");
+        let (path, file) = open_lock(&root, Day::new(2026, 8, 3).unwrap()).unwrap();
+        let reader = hold(&file, &path, Hold::Shared, LOCK_WAIT).unwrap();
+        let second = File::open(&path).unwrap();
+        let other = hold(&second, &path, Hold::Shared, Duration::from_millis(5)).unwrap();
+        let third = File::open(&path).unwrap();
+        let why = hold(&third, &path, Hold::Exclusive, Duration::from_millis(30)).unwrap_err();
+        assert!(
+            why.contains("readers or another installer held it")
+                && why.contains("for the whole 30 ms bound")
+                && why.contains("nothing was installed"),
+            "{why}"
+        );
+        other.release().unwrap();
+        reader.release().unwrap();
+        let alone = hold(&third, &path, Hold::Exclusive, Duration::from_millis(30)).unwrap();
+        alone.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An installer whose readers let go part-way through the bound waits for
+    /// them and takes the day: a held lock is waited on, never refused at the
+    /// first attempt. Kills the bound test's `>=` read as `<`.
+    #[test]
+    fn an_installer_waits_for_readers_who_let_go_inside_the_bound() {
+        let root = scratch("CloudCashWait");
+        let (path, file) = open_lock(&root, Day::new(2026, 8, 3).unwrap()).unwrap();
+        let (taken, released) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let file = File::open(&reader_path).unwrap();
+            let lock = hold(&file, &reader_path, Hold::Shared, LOCK_WAIT).unwrap();
+            taken.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+            lock.release().unwrap();
+        });
+        released.recv().unwrap();
+        let started = Instant::now();
+        let alone = hold(&file, &path, Hold::Exclusive, LOCK_WAIT).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "the installer waited for the reader"
+        );
+        alone.release().unwrap();
+        reader.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A path the host cannot even inspect (a component is a file) is named
+    /// as that, never read as absent; `write_new` never overwrites.
+    #[test]
+    fn an_uninspectable_path_is_named_and_write_new_never_overwrites() {
+        let root = scratch("CloudCashInspect");
+        let file = root.join("Plain");
+        fs::write(&file, b"held").unwrap();
+        let why = regular_file(&file.join("Below")).unwrap_err();
+        assert!(why.starts_with("cannot inspect"), "{why}");
+        let why = write_new(&file, b"other").unwrap_err();
+        assert!(why.contains("no existing file was overwritten"), "{why}");
+        assert_eq!(fs::read(&file).unwrap(), b"held");
+        write_new(&root.join("Fresh"), b"new").unwrap();
+        assert_eq!(fs::read(root.join("Fresh")).unwrap(), b"new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A lock file that exists and cannot be opened refuses the read by name
+    /// and the path, run where permission bits bind (D-0995).
+    #[test]
+    fn a_lock_that_cannot_be_opened_refuses_the_read_by_name() {
+        crate::support::where_permission_binds(
+            "cash_session_cache::cloud_mutant_tests::a_lock_that_cannot_be_opened_refuses_the_read_by_name",
+            || {
+                use std::os::unix::fs::PermissionsExt as _;
+                let root = scratch("CloudCashSealed");
+                let day = Day::new(2026, 8, 3).unwrap();
+                drop(open_lock(&root, day).unwrap());
+                let lock = lock_path(&root, day);
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).unwrap();
+                let why = read_local_lifecycle(&root, day).unwrap_err();
+                assert!(
+                    why.starts_with("UNVERIFIED cannot open local lifecycle lock")
+                        && why.contains(&lock.display().to_string()),
+                    "{why}"
+                );
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::remove_dir_all(root).unwrap();
+            },
+        );
+    }
+
+    /// An undeclared (chunked) body of exactly 4 MiB is read whole; one byte
+    /// more is refused as it arrives. Kills the running total's `>` read as
+    /// `>=`, `==` or `<`.
+    #[test]
+    fn an_undeclared_body_of_exactly_the_cap_is_read_and_one_more_is_refused() {
+        let (url, server) = serve(chunked(MAX_COMPRESSED));
+        let got = fetch(url).unwrap();
+        assert_eq!(got.len(), MAX_COMPRESSED);
+        assert!(got.iter().all(|&b| b == b'z'));
+        server.join().unwrap();
+        let (url, server) = serve(chunked(MAX_COMPRESSED + 1));
+        let why = fetch(url).unwrap_err();
+        assert!(why.ends_with("exceeds 4194304 compressed bytes"), "{why}");
+        server.join().unwrap();
+    }
+}
