@@ -10043,6 +10043,107 @@ mod cloud_mutant_tests {
         assert_eq!(doc["calendar"]["endsSoon"], true, "{doc}");
         assert_eq!(doc["calendar"]["daysLeft"], -10, "{doc}");
     }
+
+    /// **A fault the index files AT the scan's first record is the scan's to
+    /// read, not the index's.** Records 2 and 5 would not decode, and the
+    /// index files both. With the scan beginning at record 5, what the index
+    /// adds is only what lies below it: record 2, read again and reported in
+    /// the decoder's words. Record 5 is the scan's own first record, read and
+    /// reported by the scan, and counting it here as well would name one
+    /// damaged record twice. Kills `<` turned to `<=` in `older_runs`' upper
+    /// bound on filed faults (pullrun.rs:2818).
+    #[test]
+    fn a_fault_at_the_scans_first_record_is_left_to_the_scan() {
+        let mut images = vec![closed(100).image(), failure(101).image(), GARBAGE];
+        images.extend([failure(102).image(), failure(103).image(), GARBAGE]);
+        images.extend([failure(104).image(), failure(105).image()]);
+        let journal = journal_of_images("fault-at-scan-first", &images);
+        let older = older_runs(&journal, images.len() as u64, 5).expect("the index reads");
+        assert_eq!(
+            older.damaged.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            [2],
+            "{:?}",
+            older.damaged
+        );
+    }
+
+    /// **Exactly as many damaged records as a sentence names are all named,
+    /// and none is counted.** One more is counted, with the newest named.
+    /// Kills `>` turned to `>=` in `damaged_list`'s count of the rest
+    /// (pullrun.rs:2632), which wrote "and 0 more" after the third.
+    #[test]
+    fn exactly_the_named_damage_is_named_and_none_counted() {
+        let damaged: Vec<Damaged> = (0..=DAMAGED_NAMED as u64)
+            .map(|at| (at * 10, std::borrow::Cow::Borrowed("bad")))
+            .collect();
+        assert_eq!(
+            damaged_list(&damaged[..DAMAGED_NAMED]),
+            "record 0 (bad), record 10 (bad), record 20 (bad)"
+        );
+        assert_eq!(
+            damaged_list(&damaged),
+            "record 0 (bad), record 10 (bad), record 20 (bad) and 1 more, the newest record 30"
+        );
+    }
+
+    /// **A run whose every other open run is named logs no count of unnamed
+    /// ones.** Four runs open, the newest carrying the other three by name:
+    /// none is counted and not named, so the counted line is not written.
+    /// Kills `>` turned to `>=` at `unnamed > 0` in `logged`
+    /// (pullrun.rs:2601), which wrote that line counting zero.
+    #[test]
+    fn a_run_whose_every_other_open_run_is_named_logs_no_count() {
+        let named = |ordinal| AlsoOpen {
+            ordinal,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "cloud-logged-all-named".to_owned(),
+            scope: Scope::Spot,
+            ask: None,
+            window: None,
+            failures: 0,
+            failures_whole: true,
+            doubt: None,
+        };
+        let run = Interrupted {
+            ordinal: 9,
+            opened_at_secs: 10,
+            last_at_secs: 20,
+            source: "cloud-logged-all-named".to_owned(),
+            scope: Scope::Spot,
+            ask: None,
+            window: None,
+            failures: 0,
+            failures_whole: true,
+            note: "opened".to_owned(),
+            undecodable_before: 0,
+            undecodable: String::new(),
+            newer_may_be_open: false,
+            older_unread: None,
+            open_count: 4,
+            also_open: vec![named(3), named(5), named(7)],
+            runs_unread: 0,
+        };
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+        logged(&run, 0);
+        let mine = crate::emitted::landed(from, "pull.run", "a pull run has no closing record")
+            .into_iter()
+            .filter(|line| crate::emitted::says(line, "source", "cloud-logged-all-named"))
+            .count();
+        assert_eq!(mine, 4, "the premise: one line for each run left open");
+        let counted = crate::emitted::landed(
+            from,
+            "pull.run",
+            "pull runs have no closing record, not named",
+        );
+        assert!(
+            !counted
+                .iter()
+                .any(|line| crate::emitted::counts(line, "unnamed", 0)),
+            "{counted:?}"
+        );
+    }
 }
 
 /// Tests added by the cloud mutation pass of 17 Oct (cloud/mut-api-b-20261017)
@@ -10707,6 +10808,37 @@ mod cloud_walk_tests {
             first.doubted
         );
         assert!(first.doubted.is_empty(), "{:?}", first.doubted);
+    }
+
+    /// **Damage older than every run of a counted pairing leaves its count a
+    /// fact; damage after the oldest of them drops it.** A record that would
+    /// not decode may be a close of the pairing's runs only if it lies after
+    /// the oldest of their opening records. Kills `<` turned to `==` in
+    /// `guessed_answer`'s damage filter on counts (pullrun.rs:2449), under
+    /// which damage anywhere before the runs dropped the count.
+    #[test]
+    fn damage_before_a_pairings_runs_leaves_its_count_a_fact() {
+        let counted = || LeftOpen {
+            close: 950,
+            left_open: 1,
+            runs: vec![940, 930],
+            scope: Scope::Spot,
+            source: "kite".to_owned(),
+        };
+        let with = |before: &[Damaged]| {
+            guessed_of(guessed_answer(
+                &[pairing_at(950, vec![940, 930])],
+                None,
+                vec![counted()],
+                before,
+                None,
+                span(200),
+            ))
+            .left_open
+            .len()
+        };
+        assert_eq!(with(&[(10, std::borrow::Cow::Borrowed("bad"))]), 1);
+        assert_eq!(with(&[(935, std::borrow::Cow::Borrowed("bad"))]), 0);
     }
 
     /// Another run left open at `ordinal`, its failure count whole or not.
