@@ -43,24 +43,50 @@ fn main() -> std::process::ExitCode {
         Ok(runtime) => runtime,
         Err(why) => {
             eprintln!("FAILED: the async runtime could not start: {why}");
-            note_exit(api::server::FAILED, count);
+            note_exit(api::server::FAILED, count, false);
             return std::process::ExitCode::from(api::server::FAILED);
         }
+    };
+    // CTRL-C AND SIGTERM ARE REGISTERED FIRST (R3-14 repair 4), inside the
+    // runtime and before the masters and the store load. Registered at the
+    // serve's first poll, a TERM in the 1-2.5 s before it ended the process
+    // with no line at all; one now is kept and answered by a graceful stop,
+    // raced against the load (repair 5, `api::server::loaded_or_stopped`).
+    // ONLY FOR A SERVE (repair 5): a report never polls a stop, so a handler
+    // registered for it swallowed Ctrl-C; see `api::server::catches_stops`.
+    let args = text_args(raw);
+    let stop: api::server::Shutdown = match &args {
+        Ok(words) if api::server::catches_stops(words) => {
+            let _inside = runtime.enter();
+            Box::pin(api::speed::stop_asked())
+        }
+        _ => Box::pin(std::future::pending()),
     };
     // A BUILD NOBODY CAN NAME SERVES NO WRITE (DB-B71): armed here, by the
     // binary, before a router exists. See `api::server::arm_unstamped_gate`.
     let _refusal = api::server::arm_unstamped_gate();
+    // WHAT A SERVE KEEPS UNTIL THE RUNTIME HAS ENDED (R3-14): its log, its
+    // serve lock and its port, released in that order after the exit line, so
+    // a free port means a free store and a free log. See `api::server::Held`.
+    let mut held = api::server::Held::default();
     let code = runtime.block_on(async {
-        match text_args(raw) {
-            Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+        match args {
+            // CTRL-C OR SIGTERM (R3-14): a `kill -TERM` stops gracefully too,
+            // so the speed table's open minute is written (`api::speed`).
+            Ok(args) => api::server::run_held(&args, stop, &mut held).await,
             Err(refusal) => {
                 eprintln!("{refusal}");
                 api::server::MISUSED
             }
         }
     });
-    let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
-    note_exit(code, count);
+    // THE EXIT LINE IS THE LAST LINE, said before the log is closed: after
+    // the release the log directory may be the successor's (R3-14 repair 3).
+    // It says whether blocking work outlived the wait (repair 5).
+    let _abandoned =
+        api::server::end_served(runtime, api::server::SHUTDOWN_GRACE, held, |outlived| {
+            note_exit(code, count, outlived);
+        });
     std::process::ExitCode::from(code)
 }
 
@@ -148,13 +174,14 @@ fn text_args(raw: Vec<std::ffi::OsString>) -> Result<Vec<String>, String> {
 /// run on the machine appends to the same file, and a record carries `seq` and
 /// a timestamp but no process identity. Without it, two exits an hour apart
 /// and two exits from two processes at the same instant read alike.
-fn note_exit(code: u8, argc: usize) {
-    let (level, said, why) = exit_note(code);
+fn note_exit(code: u8, argc: usize, outlived: bool) {
+    let (level, said, why) = exit_note_after(code, outlived);
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(level, "api.main", said)
             .with("code", telemetry::Value::Uint(u64::from(code)))
             .with("why", telemetry::Value::Str(why))
             .with("argc", telemetry::Value::Uint(argc as u64))
+            .with("outlived", telemetry::Value::Bool(outlived))
             .with("pid", telemetry::Value::Uint(u64::from(std::process::id()))),
     );
 }
@@ -171,6 +198,24 @@ fn note_exit(code: u8, argc: usize) {
 /// The words are the documented meanings of the constants in `api::server`,
 /// taken from there rather than invented, so this line and the definition
 /// cannot drift into saying two different things about one number.
+fn exit_note_after(code: u8, outlived: bool) -> (telemetry::Level, &'static str, &'static str) {
+    match (code, outlived) {
+        // A STOP THAT LEFT WORK UNFINISHED IS NOT "EVERYTHING WENT AS ASKED"
+        // (R3-14 repair 5, the second agent's follow-up): the code stays 0,
+        // because the stop was asked and a supervisor must not read it as a
+        // crash, but the line says what the stop abandoned, at `Warn`.
+        (api::server::OK, true) => (
+            telemetry::Level::Warn,
+            "exited cleanly",
+            "stopped as asked, but blocking work outlived the shutdown wait and ended \
+             unfinished with the process",
+        ),
+        _ => exit_note(code),
+    }
+}
+
+/// The level, the sentence and the reason one exit code has earned when no
+/// blocking work outlived the end; see [`exit_note_after`].
 fn exit_note(code: u8) -> (telemetry::Level, &'static str, &'static str) {
     match code {
         api::server::OK => (
@@ -220,7 +265,7 @@ fn exit_note(code: u8) -> (telemetry::Level, &'static str, &'static str) {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{exit_note, note_exit, text_args};
+    use super::{exit_note, exit_note_after, note_exit, text_args};
 
     /// Every code this build can return says something of its own, and zero is
     /// the only one that is not an error.
@@ -257,6 +302,28 @@ mod tests {
         assert_eq!(reasons.len(), codes.len(), "five codes, five reasons");
     }
 
+    /// **A CLEAN STOP THAT ABANDONED BLOCKING WORK SAYS SO** (R3-14 repair 5):
+    /// the code stays 0 and the sentence "exited cleanly", but the level is
+    /// `Warn` and the reason names the abandoned work, never "everything went
+    /// as asked". Fails before: the exit line could not know. A code that is
+    /// already an error keeps its own reason.
+    #[test]
+    fn a_stop_that_abandoned_work_is_not_everything_as_asked() {
+        let (level, said, why) = exit_note_after(api::server::OK, true);
+        assert_eq!(level, telemetry::Level::Warn);
+        assert_eq!(said, "exited cleanly");
+        assert!(why.contains("outlived the shutdown wait"), "{why}");
+        assert_ne!(why, exit_note(api::server::OK).2);
+        assert_eq!(
+            exit_note_after(api::server::OK, false),
+            exit_note(api::server::OK)
+        );
+        assert_eq!(
+            exit_note_after(api::server::FAILED, true),
+            exit_note(api::server::FAILED)
+        );
+    }
+
     /// THE EVENT IS WRITTEN, not merely built.
     ///
     /// Installs a sink over a temporary directory and reads the line back
@@ -270,7 +337,7 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
         let sink = telemetry::install(&telemetry::Config::new(&dir)).expect("installs");
 
-        note_exit(api::server::MISUSED, 1);
+        note_exit(api::server::MISUSED, 1, false);
 
         let found = telemetry::tail(&dir, sink.keep_files(), &telemetry::Query::last(10));
         assert_eq!(found.records.len(), 1, "one exit, one line");
