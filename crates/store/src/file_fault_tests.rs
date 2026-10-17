@@ -730,3 +730,35 @@ fn a_month_with_a_bar_off_its_grid_is_unsortable_and_nothing_is_written() {
         "nor its staging name"
     );
 }
+
+/// **THE DIRECTORIES AN OPEN WOULD MAKE ARE THOSE STRICTLY BELOW THE ROOT,
+/// AND NONE OUTSIDE IT.**
+///
+/// Kills `replace && with ||` in `missing_below`'s walk
+/// (`here != root && here.starts_with(root)`): with `||` the walk would
+/// count the root itself when it is missing, and any missing directory of a
+/// path outside the root. Every open checks its root before it asks, so
+/// through the doors the two agree; the function's own contract is the
+/// directories between the root (exclusive) and the leaf (inclusive),
+/// outermost first, and a leaf outside the root has none.
+#[test]
+fn the_missing_directories_are_strictly_below_the_root() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let held = Root::new("missing-below");
+    let root = held.0.join("root");
+    let leaf = root.join("a").join("b");
+    assert_eq!(
+        super::missing_below(&root, &leaf),
+        vec![root.join("a"), leaf.clone()],
+        "a missing root is not counted"
+    );
+    fs::create_dir_all(root.join("a")).unwrap();
+    assert_eq!(super::missing_below(&root, &leaf), vec![leaf.clone()]);
+    let outside = held.0.join("elsewhere").join("c");
+    assert_eq!(
+        super::missing_below(&root, &outside),
+        Vec::<PathBuf>::new(),
+        "nothing outside the root"
+    );
+    assert_eq!(super::missing_below(&root, &root), Vec::<PathBuf>::new());
+}
