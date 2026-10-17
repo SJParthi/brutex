@@ -1565,6 +1565,39 @@ mod bars_rs {
     fn bars_only_a_gdfl_nse_option_is_decoded_for_its_successor() {
         let scratch = Scratch::new("bars-rekey-guard");
         let contract = brutex_core::instrument::Contract::parse("2023-06-29-1000000-PE");
+        // EACH ASKED KEY HOLDS ONE ONE-SECOND BAR, so the window answers
+        // rather than refusing a key that names no series (AG-03).
+        for (vendor, exchange) in [
+            (Vendor::Dhan, "NSE"),
+            (Vendor::Gdfl, "BSE"),
+            (Vendor::Gdfl, "NSE"),
+        ] {
+            let month = YearMonth::new(2020, 6).expect("a month");
+            let path = StorePath::new(PathParts {
+                vendor,
+                exchange,
+                segment: "FNO",
+                symbol: "NIFTY",
+                contract,
+                timeframe: Timeframe::SECOND_1,
+                month,
+                file: FileKind::Bars,
+            })
+            .expect("a generated path");
+            let mut file = BarFile::open_or_create(scratch.root(), path, super::symbol_id("NIFTY"))
+                .expect("a generated bar file");
+            let at = month.ist_bounds_micros().0 + 33_300 * 1_000_000;
+            file.append(&[Bar {
+                ts_micros: at,
+                open: 100,
+                high: 105,
+                low: 95,
+                close: 100,
+                volume: 1,
+                open_interest: 7,
+            }])
+            .expect("a generated record");
+        }
         let ask = |vendor: Vendor, exchange: &str| {
             let mut asked = query(
                 vec![SeriesKey::new(exchange, "FNO", "NIFTY", contract)],
@@ -1590,14 +1623,29 @@ mod bars_rs {
     }
 
     /// **EXACTLY `MAX_SERIES` SERIES ARE READ**: the bound is inclusive.
-    /// Kills `> with >=` in the series-count refusal.
+    /// Each series holds one bar (a key that names no series is refused by
+    /// name, AG-03), so the window counts one row a series. Kills `> with >=`
+    /// in the series-count refusal.
     #[test]
     fn bars_exactly_max_series_series_are_read() {
         let scratch = Scratch::new("bars-max-series");
-        let many: Vec<SeriesKey> = (0..MAX_SERIES).map(|i| index(&format!("S{i}"))).collect();
+        let many: Vec<SeriesKey> = (0..MAX_SERIES)
+            .map(|i| {
+                let symbol = format!("S{i}");
+                write_month(
+                    scratch.root(),
+                    "INDEX",
+                    &symbol,
+                    Timeframe::MINUTE_1,
+                    month(5),
+                    &minutes(5, 2, 1, 100),
+                );
+                index(&symbol)
+            })
+            .collect();
         let got = read(scratch.root(), &query(many, month(5), month(5)));
         assert_eq!(got.series.len(), MAX_SERIES);
-        assert_eq!(got.total, 0);
+        assert_eq!(got.total, MAX_SERIES as u64, "one row in every series");
     }
 
     /// **A TIME-OF-DAY ORDER NOT ASKED FOR ITS EXTREMES SERVES NONE.** Kills
