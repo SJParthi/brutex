@@ -20,6 +20,16 @@ and no test was removed between the two bases (every `#[test]` name of
 `c9e3472` is still in `f9cdb584`; 52 were added), so the old pass's kills in
 those eight files still stand.
 
+**`feat/db-fix` moved during the pass** (31 commits, to `297996d9`), three
+of them inside this scope: `gdfl_cm_auction.rs` (the v2 auction sidecar,
++490/−80), `gdfl_tickstore.rs` (+118) and `gdfl_nfo.rs` (+23/−7). It was
+merged in (`c511abfc`). The one conflict was both sides appending a test
+module at the end of `gdfl_cm_auction.rs`; both are kept. `auction::parse`
+now answers a `Sidecar`, so one old test reads its `.records`, assertions
+unchanged. Every result below up to that merge was measured on the
+`f9cdb584` base; what the merge brought into scope is measured separately
+(Mutants: the code `feat/db-fix` moved during the pass).
+
 **No production line changed on this branch.** `git diff origin/feat/db-fix`
 touches only test code under `crates/pull`, one test-order override in
 `.config/nextest.toml`, one gate-1d declaration in `.github/gates_tree.rs`,
@@ -41,7 +51,7 @@ branch left in the other five is listed with why no test can reach it.
 | `timeouts2` — the 4 timeouts and the 1 old timeout caught above, after | 5 | **5** | 0 | **0** | 0 |
 | `newcode` — every mutant on a line `feat/db-fix` changed since `c9e3472` | 58 | 53 | 2 | 0 | 3 |
 | `rmrest` — the rest of `request_minutes.rs` | 115 | 104 | 2 | 0 | 9 |
-| `fixed544` — `stored_line`'s mutant after its new test | 1 | PENDING | | | |
+| `fixed544` — `stored_line`'s mutant after its new test | 1 | **1** | 0 | 0 | 0 |
 
 The eight files whose production code is unchanged since `c9e3472` were not
 re-mutated whole: the old pass killed every killable mutant in them against
@@ -67,7 +77,9 @@ undeclared gate-1d words.
 
 ## Left
 
-- `fixed544`'s result (running at the time of this line).
+- The mutants of the code the merge brought into scope (run `moved`, 92
+  mutants), and the coverage and workspace tests on the merged head:
+  running at the time of this line.
 - Nothing else in scope. Everything that needs a decision is under NEEDS
   THE MAC.
 
@@ -135,7 +147,7 @@ rest request-audit, tick-store and import tests).
 
 | Missed | Outcome |
 |---|---|
-| `request_minutes.rs:544:19` `>` → `>=` in `stored_line` | **A missing test, now written.** `stored_line` answers `None` for a day holding every owed minute, and nothing pinned it: `gap_backfill` hands it only days already short. `a_stored_day_holding_every_owed_minute_has_no_line` asks it directly; applied by hand, the mutant fails that test (it writes a `missing=0` line for the whole day), and the real code passes. |
+| `request_minutes.rs:544:19` `>` → `>=` in `stored_line` | **A missing test, now written.** `stored_line` answers `None` for a day holding every owed minute, and nothing pinned it: `gap_backfill` hands it only days already short. `a_stored_day_holding_every_owed_minute_has_no_line` asks it directly. Run `fixed544` (Gate 18's flags, one test thread): **caught** by that test, 910th of 1,751; its baseline is also the whole `pull` suite passing as the unprivileged user on the head before the merge below. |
 | `gdfl_archive.rs:280:58` `\|` → `^` in `central_directory` | **Equivalent.** `dos_time = field(14, 2) << 16 \| field(12, 2)`: each field is two bytes, so the shifted date and the time share no bit and OR, XOR and `+` agree on every input. |
 
 The three unviable mutants ask `Default` of `Entry`, `ZipEntry` and `Group`,
