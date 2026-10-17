@@ -1,4 +1,14 @@
-STATUS: IN PROGRESS
+STATUS: DONE
+
+Every gate is green for what R4-17 changed. Four kinds of red remain in this container, each also red on
+`origin/feat/db-fix` and outside this part:
+- root-only permission tests, which pass as a non-root user;
+- one ext4 inode-reuse test in `store`;
+- `cited_commits` (base docs against `main`);
+- `cargo deny` advisories in the unchanged `Cargo.lock`.
+
+See Gate results. NEEDS THE MAC items 5 and 6 confirm them on the Mac, and items 1 to 4 and 7 are the real-data
+checks only the Mac can run.
 
 # R4-17 — Zerodha series identity: listing dates, landing refusals (day rung too), history ends at delisting, store scan, token guard
 
@@ -20,7 +30,7 @@ confirmed against `git log origin/feat/db-fix --merges --format=%s`.
 | CON-13 | Source-shape test over the six named modules: no key body, key-builder parameter or `EntryKey`/`PathParts` literal names a token. The module list is closed (no other non-test file of core/store/pull/api defines those names), and a self-test fixture with `instrument_token` must be refused. | `crates/pull/tests/token_identity.rs` |
 | Item 6 | The `state/fix/...` path is gone from `series_identity.rs`'s `FOREIGN_BAND_BPS` comment. | `crates/pull/src/series_identity.rs` |
 | Bench | Gate 8 rows C-ZI-01 (listing probe, 300 → 3,000 rows) and C-ZI-02 (identity judge per minute, 1x/10x/100x). | `crates/pull/benches/ratio/identity.rs` |
-| Docs | D-4990 (listing rule), D-4991 (history ends), D-4992 (day-rung arm, amends WP-13d), D-4993 (in-session jump; JUMP_BPS PROVISIONAL), D-4994 (store scan, measured causes, plan), D-4995 (token guard); docs/04 ZI-01..ZI-09; docs/06 R4-17 section with the C-ZI numbers and every limit. | `docs/05-decisions.md`, `docs/04-invariants.md`, `docs/06-limits.md` |
+| Docs | D-4990 (listing rule), D-4991 (history ends), D-4992 (day-rung arm, amends WP-13d), D-4993 (in-session jump; JUMP_BPS PROVISIONAL), D-4994 (store scan, measured causes, plan), D-4995 (token guard); docs/04 ZI-01..ZI-11; docs/06 R4-17 section with the C-ZI numbers and every limit. | `docs/05-decisions.md`, `docs/04-invariants.md`, `docs/06-limits.md` |
 
 ### Failing-first tests (each named in the work package exists)
 
@@ -47,7 +57,7 @@ in `token_identity.rs`.
 
 ## Left
 
-- cli mutants: running now.
+Nothing in this part's scope. What only the Mac can do is listed under NEEDS THE MAC.
 
 ## Mutants (cargo-mutants 27.1.0, `--in-diff` against `origin/feat/db-fix`, nextest)
 
@@ -68,6 +78,16 @@ CARGO_PROFILE_DEV_INCREMENTAL=true` (environment, no repository change).
   Re-runs: 2a 15 caught, 6 unviable; 2b 5 caught (its one "missed" was a `fetch.rs` mutant the regex took in by
   mistake, already caught in pass 1); 3 20 caught, 1 timeout (`cursor *= 1` loops for ever: detected).
   **No pull mutant survives.**
+- **cli** (`series_identity.rs`): 98 mutants in the changed lines, tested against `--lib` `series_identity::`.
+  Pass 1: 80 caught, 5 unviable, 13 missed. Each was answered:
+  - `within`: the tolerance boundary tested both ways, and the redundant `witness > 0` guard removed (it was an
+    equivalent mutant: a zero close is measured `zero_price` before it gets there).
+  - `percentile`: unit-tested.
+  - `one`'s `days > 0`: no day-bar line when only minutes are refused.
+  - `all`'s day-bar total and exit, and `Plan::add`'s counter: an `ALL` run over a day-bar-only series, and the
+    `ALL` line's measured-cause counts asserted.
+
+  Re-run of every mutant in those five functions: **36 of 36 caught. No cli mutant survives.**
 
 ## Coverage (nightly `cargo +nightly llvm-cov --branch`, the three runs unioned)
 
@@ -103,12 +123,16 @@ gate (`cargo llvm-cov --workspace`, stable) measures lines and regions.
     is unchanged by R4-17.
   - store `cited_commits`: commits cited by feat/db-fix's own `docs/06-limits.md` are not ancestors of
     `origin/main` (feat/db-fix is not merged into main). R4-17's docs cite no commit.
+- **Final re-run on the last commit**: `cargo test -p pull -p cli -p core --locked --no-fail-fast -- --skip
+  the_pool_verb_prints_its_whole_page_on_a_generated_store` ran 112 test binaries. The only failures are the four
+  root-only permission tests of `pull` (`gdfl_import` 2, `gdfl_tickstore` 1) and `cli` (`scrub_blocks` 1) named
+  above. Core's `decision_citations` and `graph` pass. fmt and workspace clippy are clean on the same commit.
 - `cargo deny check`: bans ok, licenses ok, sources ok; **advisories FAILED** on five advisories published
   in the live database: RUSTSEC-2026-0344 (`ruzstd` 0.8.2) and RUSTSEC-2026-0346..0349 (`rustls`).
   `Cargo.lock`, `deny.toml` and every `Cargo.toml` are byte-identical to `origin/feat/db-fix`, so the base
   fails the same way. Not fixed here: the lockfile is shared, and bumping it belongs to its own part.
-- `cargo bench -p pull --bench ratio` (gate 8): all ratios within the ceiling, including C-ZI-01 1.013x and
-  C-ZI-02 1.176x (10x) / 1.485x (100x). Measured in this container, not on the operator's machine.
+- `cargo bench -p pull --bench ratio` (gate 8): all ratios within the ceiling, including C-ZI-01 0.998x and
+  C-ZI-02 1.192x (10x) / 1.513x (100x), from the final code. Measured in this container, not on the operator's machine.
 
 ## NEEDS THE MAC
 
@@ -145,3 +169,9 @@ after merge-back. `BRUTEX_STORE` is how `cli` finds the store (`crates/cli/src/l
 8. **R4-14** must call `pull::fetch::fetch_and_land_listed` from `broker_run` with the share's
    `pull::listing::for_store(store).span("NSE", symbol, isin)` for history ends to reach the live pull
    (docs/06 names it).
+
+## Left on disk in this container (nothing deleted)
+
+The cloud scratchpad holds the moved coverage build (`target-cov-moved`), the mutant outputs (`mut-*`), the logs
+and the NSE Masters Data v1.6 PDF that was read. `/tmp/brutex-zi-bench-*` are the gate-8 scratch stores, which the
+bench never removes. The repository's `target/` is as cargo left it.
