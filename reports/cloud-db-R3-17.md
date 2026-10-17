@@ -167,6 +167,7 @@ tests::every_command`). `sweep_wiring_tests::` (114 s a run) is left out: its R3
 | `prefix`'s `parts.len() > 4` → `>=` | no test gave a four-segment scope | `the_plan_lists_what_each_series_lacks_and_writes_nothing`: a plan scoped to one contract |
 | `flags`: `workers: 1` deleted (0 asked; the runner's clamp still starts one) | no test read `asked=` on a run without `--workers` | `an_upkeep_run_stops_and_resumes_where_it_stopped`: its uninterrupted run's journal says `workers=1 asked=1` |
 | `flags`: the inverted-days arm deleted (still refused, with the wrong reason) | the misuse test checked only the exit | `a_misuse_is_refused_before_anything_is_opened`: an inverted span, of months and of days, says `… is before --from …`; one day (from = to) is not a misuse, which also holds the guard's `>=` (checked by hand: `>` fails it) |
+| `spans`' guard `next <= to` → `true`, and `<=` → `>` (two TIMEOUTS: an endless loop) | the loop's exit was a guard | the bound is the loop's own condition (`while let Some(day) = start.filter(\|day\| *day <= to)`); its `>` mutant leaves no span, which two recount tests fail (checked by hand) |
 
 ## Gate results (so far)
 

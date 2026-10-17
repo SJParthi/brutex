@@ -358,18 +358,18 @@ fn span_key(span: Span) -> String {
 /// The day spans of `from..=to`, one per calendar month.
 fn spans(from: Day, to: Day) -> Vec<Span> {
     let mut out = Vec::new();
-    let mut start = from;
-    loop {
-        let end = start.end_of_month().min(to);
+    let mut start = Some(from);
+    // The bound is the loop's own condition: each pass moves `start` past
+    // a month's end, and the last day there is has no successor.
+    while let Some(day) = start.filter(|day| *day <= to) {
+        let end = day.end_of_month().min(to);
         out.push(Span {
-            from: start,
+            from: day,
             to: Some(end),
         });
-        match end.succ() {
-            Ok(next) if next <= to => start = next,
-            _ => return out,
-        }
+        start = end.succ().ok();
     }
+    out
 }
 
 /// The underlyings under `bars/gdfl/NSE/FNO/`, in name order, narrowed to
