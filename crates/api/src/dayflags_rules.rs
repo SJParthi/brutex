@@ -637,56 +637,33 @@ pub(super) fn scan_day(
     Ok(Some(scan))
 }
 
-/// The days one lane of [`scan_month`] scans: a month's twenty-odd sessions
-/// on three or four scoped threads.
-const SCAN_LANE_DAYS: usize = 8;
+/// The days of `spans` a month's scan has still to read: those that hold bars
+/// and that the memo does not hold at their end row, under the month file's
+/// `(dev, ino)`. One lock of the memo a month.
+pub(super) fn cold_days((dev, ino): (u64, u64), spans: &[(Day, u64, u64)]) -> Vec<(Day, u64, u64)> {
+    let memo = scans().lock().unwrap_or_else(PoisonError::into_inner);
+    spans
+        .iter()
+        .filter(|(_, lo, hi)| {
+            hi > lo && memo.get(&(dev, ino, *lo)).is_none_or(|(end, _)| end != hi)
+        })
+        .copied()
+        .collect()
+}
 
-/// **A MONTH'S FIRST SCANS RUN IN PARALLEL** (DB-B20's cold cost; R3-13's
-/// measured target, "no slower than today's figure"): every day of `spans`
-/// that holds bars and that the memo does not hold at its end row is scanned
-/// once, [`SCAN_LANE_DAYS`] days a scoped thread, and kept; each day's own
-/// [`scan_day`] then answers from the memo. A month the memo holds spawns
-/// nothing. A day that will not read is left for [`scan_day`] to read again
-/// and name.
-///
-/// A HANDLE A LANE, from `open_lane`: a handle verifies a sealed month's reads
-/// through ONE cached block behind one lock, so lanes sharing a handle would
-/// evict each other's block on every read and wait on each other's verify.
-/// A lane whose month will not open, or opens as another file than
-/// `(dev, ino)`, scans nothing, and its days' own [`scan_day`] read them.
-/// Returns how many days were handed to lanes.
-pub(super) fn scan_month(
-    open_lane: impl Fn() -> Option<Box<store::file::BarFile>> + Sync,
-    (dev, ino): (u64, u64),
-    spans: &[(Day, u64, u64)],
-    in_halt: impl Fn(Day, i64) -> bool + Sync,
+/// Scans `days` of `file` in order and keeps each ([`scan_day`]); a day that
+/// will not read is left for its own [`scan_day`] to read again and name.
+/// Returns how many days were read.
+pub(super) fn scan_days(
+    file: &store::file::BarFile,
+    identity: (u64, u64),
+    days: &[(Day, u64, u64)],
+    in_halt: impl Fn(Day, i64) -> bool,
 ) -> usize {
-    let cold: Vec<(Day, u64, u64)> = {
-        let memo = scans().lock().unwrap_or_else(PoisonError::into_inner);
-        spans
-            .iter()
-            .filter(|(_, lo, hi)| {
-                hi > lo && memo.get(&(dev, ino, *lo)).is_none_or(|(end, _)| end != hi)
-            })
-            .copied()
-            .collect()
-    };
-    let (open_lane, in_halt) = (&open_lane, &in_halt);
-    std::thread::scope(|scope| {
-        for lane in cold.chunks(SCAN_LANE_DAYS) {
-            let _lane = scope.spawn(move || {
-                let Some(file) = open_lane().filter(|file| file_identity(file) == Some((dev, ino)))
-                else {
-                    return;
-                };
-                for &(day, lo, hi) in lane {
-                    let _scanned =
-                        scan_day(&file, Some((dev, ino)), (lo, hi), |ts| in_halt(day, ts));
-                }
-            });
-        }
-    });
-    cold.len()
+    for &(day, lo, hi) in days {
+        let _scanned = scan_day(file, Some(identity), (lo, hi), |ts| in_halt(day, ts));
+    }
+    days.len()
 }
 
 /// What an index day's rules read: the feed, the day's scan of its minutes

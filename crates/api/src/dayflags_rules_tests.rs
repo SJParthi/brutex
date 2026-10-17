@@ -2235,20 +2235,24 @@ fn a_day_bar_session_without_minutes_says_only_no_bar() {
     );
 }
 
-/// **A MONTH'S FIRST SCANS RUN IN PARALLEL AND ARE KEPT** (R3-13's measured
-/// target): every day that holds bars and that the memo does not hold at its
-/// end row is scanned once, over more than one lane; a second call scans
-/// none; a day read to another end row is scanned again; a day with no bar is
-/// never scanned. Each day's own scan then answers from the memo.
+/// **A PAGE'S FIRST SCANS RUN A MONTH A THREAD AND ARE KEPT** (R3-13's
+/// measured target): every day that holds bars and that the memo does not
+/// hold at its end row is cold, and is scanned once; a second count of the
+/// page scans none; a day read to another end row is cold again; a day with
+/// no bar is never cold. Each day's own scan then answers from the memo.
 #[test]
-fn a_months_first_scans_run_in_parallel_and_are_kept() {
-    let root = root_of("r3-13-scan-month");
+fn a_pages_first_scans_run_a_month_a_thread_and_are_kept() {
+    let root = root_of("r3-13-scan-months");
     let key = "NSE-INDEX-NIFTY";
     let open_at = 9 * 3_600 + 15 * 60;
-    let held: Vec<Day> = [2, 3, 4, 7, 8, 9, 10, 11, 14, 15]
-        .iter()
-        .map(|d| day(&format!("2022-03-{d:02}")))
-        .collect();
+    // Ten March days and four April days, two minutes each: two months.
+    let held: Vec<Day> = [
+        "03-02", "03-03", "03-04", "03-07", "03-08", "03-09", "03-10", "03-11", "03-14", "03-15",
+        "04-01", "04-04", "04-05", "04-06",
+    ]
+    .iter()
+    .map(|d| day(&format!("2022-{d}")))
+    .collect();
     let bars = held
         .iter()
         .flat_map(|on| {
@@ -2261,18 +2265,51 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
         .collect();
     file_bars(&root, Vendor::Zerodha, key, Timeframe::MINUTE_1, bars);
     let inst = super::super::instrument_of(key, "").expect("a key");
-    let month = YearMonth::new(2022, 3).expect("a month");
+    let mut days: Vec<Day> = held.clone();
+    days.push(day("2022-04-07"));
+    days.sort();
+    let scan = super::super::Reads {
+        scan: true,
+        ..super::super::Reads::default()
+    };
+    let count = || {
+        super::super::counts(
+            &root,
+            Vendor::Zerodha,
+            &inst,
+            Timeframe::MINUTE_1,
+            &days,
+            scan,
+        )
+    };
+    let first = count();
+    assert_eq!(first.scanned, 14, "every held day, on two months' threads");
+    assert_eq!(first.scans.iter().flatten().count(), 14);
+    assert_eq!(count().scanned, 0, "every day is kept");
+    // A page that scans nothing counts nothing scanned.
+    let plain = super::super::counts(
+        &root,
+        Vendor::Zerodha,
+        &inst,
+        Timeframe::MINUTE_1,
+        &days,
+        super::super::Reads::default(),
+    );
+    assert_eq!(plain.scanned, 0);
+
+    // The month's cold days, directly: a day with no bar is never cold, a kept
+    // day is not, and a day read to another end row is cold again.
+    let month = YearMonth::new(2022, 4).expect("a month");
     let super::super::Opened::File(file) =
         super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month)
     else {
         panic!("the month opens");
     };
     let identity = file_identity(&file).expect("an identity");
-    let mut days = held.clone();
-    days.push(day("2022-03-16"));
-    let spans: Vec<(Day, u64, u64)> = days
+    let april: Vec<Day> = days.iter().copied().filter(|d| d.month() == 4).collect();
+    let spans: Vec<(Day, u64, u64)> = april
         .iter()
-        .zip(super::super::day_spans(&file, &days))
+        .zip(super::super::day_spans(&file, &april))
         .map(|(on, span)| {
             let (lo, hi) = span.expect("a span");
             (*on, lo, hi)
@@ -2281,59 +2318,21 @@ fn a_months_first_scans_run_in_parallel_and_are_kept() {
     assert_eq!(
         spans.last().map(|(_, lo, hi)| hi - lo),
         Some(0),
-        "the 16th holds no bar"
+        "the 7th holds no bar"
     );
+    assert!(cold_days(identity, &spans).is_empty(), "April is kept");
+    let (on, lo, hi) = spans[0];
+    let shorter = [(on, lo, hi - 1)];
+    assert_eq!(cold_days(identity, &shorter), shorter.to_vec());
     let quiet = |_: Day, _: i64| false;
-    let open = || {
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, month).file()
-    };
-    // A lane whose month will not open, or opens as another file, keeps nothing.
-    assert_eq!(
-        scan_month(|| None, identity, &spans, quiet),
-        10,
-        "handed to lanes"
-    );
-    let other = super::super::instrument_of("NSE-INDEX-BANKNIFTY", "").expect("a key");
-    file_bars(
-        &root,
-        Vendor::Zerodha,
-        "NSE-INDEX-BANKNIFTY",
-        Timeframe::MINUTE_1,
-        vec![bar("2022-03-02", open_at, [3_400_000; 4], 0)],
-    );
-    let elsewhere = || {
-        super::super::open_month(&root, Vendor::Zerodha, &other, Timeframe::MINUTE_1, month).file()
-    };
-    assert_eq!(scan_month(elsewhere, identity, &spans, quiet), 10);
-    // Each lane on a handle of its own: every day is scanned and kept.
-    assert_eq!(
-        scan_month(open, identity, &spans, quiet),
-        10,
-        "ten days, two lanes"
-    );
-    assert_eq!(
-        scan_month(open, identity, &spans, quiet),
-        0,
-        "every day is kept"
-    );
-    for &(_, lo, hi) in &spans[..10] {
+    assert_eq!(scan_days(&file, identity, &shorter, quiet), 1);
+    assert!(cold_days(identity, &shorter).is_empty());
+    assert_eq!(cold_days(identity, &spans[..1]), spans[..1].to_vec());
+    assert_eq!(scan_days(&file, identity, &spans[..1], quiet), 1);
+    for &(_, lo, hi) in &spans[..4] {
         let kept = scan_day(&file, Some(identity), (lo, hi), |_| false).expect("from the memo");
         assert_eq!(kept.map(|scan| scan.bars), Some(2));
     }
-    // A day read to another end row is scanned again, once.
-    let (on, lo, hi) = spans[0];
-    let shorter = [(on, lo, hi - 1)];
-    assert_eq!(scan_month(open, identity, &shorter, quiet), 1);
-    assert_eq!(scan_month(open, identity, &shorter, quiet), 0);
-    assert_eq!(scan_month(open, identity, &spans[..1], quiet), 1);
-    // A month that opens is its file; one that does not is none.
-    assert!(open().is_some());
-    let absent = YearMonth::new(2022, 4).expect("a month");
-    assert!(
-        super::super::open_month(&root, Vendor::Zerodha, &inst, Timeframe::MINUTE_1, absent)
-            .file()
-            .is_none()
-    );
 }
 
 /// **A SCALE SWITCH AGAINST THE MONTH JUST BEFORE THE PAGE** (DB-031): the

@@ -3381,6 +3381,9 @@ struct Counts {
     scans: Vec<Option<rules::DayScan>>,
     /// Per day, the first held bar's stamp (CMP-06), where asked and read.
     first_at: Vec<Option<i64>>,
+    /// How many days this count scanned on a month's own thread before
+    /// counting them ([`scan_months`]): none where the memo held them.
+    scanned: usize,
     notes: Vec<String>,
 }
 
@@ -3394,16 +3397,6 @@ enum Opened {
     File(Box<BarFile>),
     Absent,
     Refused(String),
-}
-
-impl Opened {
-    /// The file, where one opened.
-    fn file(self) -> Option<Box<BarFile>> {
-        match self {
-            Self::File(file) => Some(file),
-            Self::Absent | Self::Refused(_) => None,
-        }
-    }
 }
 
 /// The symbol id `pull::ingest` stamps into a month's header, which the store
@@ -3523,10 +3516,15 @@ fn counts(
             halted: vec![None; per_day.len()],
             scans: vec![None; per_day.len()],
             first_at: vec![None; per_day.len()],
+            scanned: 0,
             per_day,
             notes,
         };
     }
+    // THE PAGE'S MONTHS, EACH OPENED ONCE AND ITS DAYS' ROWS LOOKED UP, before
+    // any is counted: a Zerodha index page then scans its months in parallel,
+    // a thread a month on that month's own handle ([`scan_months`]).
+    let mut months = Vec::new();
     let mut at = 0usize;
     while let Some(first) = days.get(at) {
         let run = month_run(days, at).max(1);
@@ -3535,6 +3533,32 @@ fn counts(
             Ok(month) => open_month(root, feed, inst, rung, month),
             Err(why) => Opened::Refused(why.to_string()),
         };
+        let (rows, identity) = match &opened {
+            // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
+            Opened::File(file) => (
+                day_spans(file, month_days),
+                reads.scan.then(|| rules::file_identity(file)).flatten(),
+            ),
+            Opened::Absent | Opened::Refused(_) => (Vec::new(), None),
+        };
+        months.push(Month {
+            first: *first,
+            days: month_days,
+            opened,
+            rows,
+            identity,
+        });
+        at = at.saturating_add(run);
+    }
+    let scanned = scan_months(&months, inst.venue());
+    for Month {
+        first,
+        days: month_days,
+        opened,
+        rows: day_rows,
+        identity,
+    } in months
+    {
         match opened {
             Opened::Absent => per_day.extend(month_days.iter().map(|_| Held::NoFile)),
             Opened::Refused(why) => {
@@ -3547,26 +3571,6 @@ fn counts(
                 per_day.extend(month_days.iter().map(|_| Held::Unreadable));
             }
             Opened::File(file) => {
-                // THE SCAN MEMO'S KEY, one `stat` a month (DB-B20's cost).
-                let identity = reads.scan.then(|| rules::file_identity(&file)).flatten();
-                let day_rows = day_spans(&file, month_days);
-                if let Some(identity) = identity {
-                    let held: Vec<(Day, u64, u64)> = month_days
-                        .iter()
-                        .zip(&day_rows)
-                        .filter_map(|(day, span)| {
-                            span.as_ref().ok().map(|&(lo, hi)| (*day, lo, hi))
-                        })
-                        .collect();
-                    let venue = inst.venue();
-                    let open_lane = || {
-                        let month = first.year_month().ok()?;
-                        open_month(root, feed, inst, rung, month).file()
-                    };
-                    let _scanned = rules::scan_month(open_lane, identity, &held, |day, ts| {
-                        in_recorded_halt(venue, day, ts)
-                    });
-                }
                 for (day, counted) in month_days.iter().zip(day_rows) {
                     match counted {
                         Ok((lo, hi)) => {
@@ -3607,7 +3611,6 @@ fn counts(
         halted.resize(per_day.len(), None);
         scans.resize(per_day.len(), None);
         first_at.resize(per_day.len(), None);
-        at = at.saturating_add(run);
     }
     Counts {
         per_day,
@@ -3615,8 +3618,59 @@ fn counts(
         halted,
         scans,
         first_at,
+        scanned,
         notes,
     }
+}
+
+/// One month of a page, opened once: its days, the file or why not, each
+/// day's rows (or the lookup's refusal), and the scan memo's key where the
+/// page scans.
+struct Month<'a> {
+    first: Day,
+    days: &'a [Day],
+    opened: Opened,
+    rows: Vec<Result<(u64, u64), StoreError>>,
+    identity: Option<(u64, u64)>,
+}
+
+/// **A PAGE'S FIRST SCANS RUN A MONTH A THREAD** (DB-B20's cold cost; R3-13's
+/// measured target, "no slower than today's figure"): each month the page
+/// scans whose days the memo does not all hold ([`rules::cold_days`]) is read
+/// on a scoped thread of its own, ON ITS OWN HANDLE, and kept; each day's own
+/// [`rules::scan_day`] then answers from the memo. A handle verifies a sealed
+/// month's reads through one cached block behind one lock, so threads that
+/// shared one would evict each other's block on every read. A page the memo
+/// holds spawns nothing. Returns how many days were scanned here.
+fn scan_months(months: &[Month<'_>], venue: Venue) -> usize {
+    let cold: Vec<(&BarFile, (u64, u64), Vec<(Day, u64, u64)>)> = months
+        .iter()
+        .filter_map(|month| {
+            let (Opened::File(file), Some(identity)) = (&month.opened, month.identity) else {
+                return None;
+            };
+            let held: Vec<(Day, u64, u64)> = month
+                .days
+                .iter()
+                .zip(&month.rows)
+                .filter_map(|(day, span)| span.as_ref().ok().map(|&(lo, hi)| (*day, lo, hi)))
+                .collect();
+            let cold = rules::cold_days(identity, &held);
+            (!cold.is_empty()).then_some((&**file, identity, cold))
+        })
+        .collect();
+    // THE SCOPE JOINS EVERY THREAD and re-raises a panic in one: never a
+    // count of a scan that did not finish.
+    std::thread::scope(|scope| {
+        for (file, identity, days) in &cold {
+            let _thread = scope.spawn(move || {
+                rules::scan_days(file, *identity, days, |day, ts| {
+                    in_recorded_halt(venue, day, ts)
+                })
+            });
+        }
+    });
+    cold.iter().map(|(_, _, days)| days.len()).sum()
 }
 
 /// Each day's `[lo, hi)` rows in `file`, or the lookup's refusal: two lookups
