@@ -1857,15 +1857,15 @@ impl Journal {
     /// an error here — it is an [`Entry`] carrying its own fault, so one
     /// damaged record does not blank the page around it.
     ///
-    /// # One arm here is a backstop and no test drives it
+    /// # The `seek` refusal is reached by a count no `look` returns
     ///
-    /// The `seek` refusal. `SeekFrom::Start` takes a `u64` and every value of
-    /// it is a legal offset on a regular file — seeking past the end is
-    /// defined and succeeds — so on the platforms this builds for there is no
-    /// input that reaches it. It is written rather than unwrapped because a
-    /// `?` that cannot fire costs nothing and an `unwrap` that cannot fire is
-    /// still an `unwrap`. It is named here rather than left for a coverage
-    /// report to find, per `CLAUDE.md` §3 rule 6.
+    /// `SeekFrom::Start` takes a `u64`, and seeking past the end of a regular
+    /// file is defined and succeeds, so no count [`Self::look`] answers
+    /// reaches it. It was called unreachable here, and it is not: `lseek`
+    /// takes a SIGNED offset, so a start past `i64::MAX` bytes is `EINVAL` on
+    /// Linux, and a caller handing `records` near `u64::MAX` gets this
+    /// refusal by name (`a_page_past_every_seekable_offset_is_refused_by_name`).
+    /// `CLAUDE.md` §3 rule 6.
     pub fn page(&self, records: u64, skip: u64, take: u64) -> Result<Vec<Entry>, String> {
         // A REFUSED READ, ONCE PER REQUEST — not once per record. A record that
         // will not decode is an `Entry` carrying its own fault and is deliberately
@@ -5644,5 +5644,118 @@ mod cloud_mutant_tests {
             crate::emitted::says(&logged[0], "why", "No space left on device"),
             "{logged:?}"
         );
+    }
+
+    /// **A whole reason goes to the notes file only for a member failure
+    /// whose note was cut.** A member failure whose reason fits its note, and
+    /// a run record handed a long reason, both land as they are: no
+    /// `note_at`, no whole note on the page, and no notes file made. Covers
+    /// the false side of `with_whole_note`'s filter (audit.rs:1649), which
+    /// every other append took true.
+    #[test]
+    fn a_whole_reason_is_kept_only_for_a_member_failure_whose_note_was_cut() {
+        let root = scratch("whole-only-when-cut");
+        let journal = Journal::at(&root);
+        let short = member("refused: a reason that fits its note");
+        assert!(!short.note_was_cut(), "the premise: nothing was cut");
+        past_a_shared_lock(|| journal.append_member(&short, &short.note)).expect("lands");
+        let long = "x".repeat(NOTE_CAPACITY * 2);
+        past_a_shared_lock(|| journal.append_member(&run_record(), &long)).expect("lands");
+
+        let page = journal.page(2, 0, 2).expect("a page");
+        assert_eq!(page.len(), 2, "{page:?}");
+        for entry in &page {
+            let landed = entry.decoded.clone().expect("decodes");
+            assert_eq!(
+                (landed.note_at, &entry.whole_note),
+                (None, &None),
+                "{landed:?}"
+            );
+        }
+        assert!(
+            !journal.notes_path().exists(),
+            "no whole note was asked for, so no notes file was made"
+        );
+        let _ignored = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A record that may name a refusal is filed under its source, and one
+    /// with no source is not filed at all.** `source_file` names no file for
+    /// an empty source, so there is no `refusals/` entry to write; the record
+    /// is still counted as read. Covers the false side of `Batch::file`'s
+    /// `let Some(name)` (audit.rs:2695).
+    #[test]
+    fn a_refusal_with_no_source_is_counted_and_filed_nowhere() {
+        let mut batch = Batch::default();
+        let nameless =
+            Record::member_failure(Scope::Spot, at(100), "", window(), "refused by the vendor");
+        assert!(may_name_a_refusal(&nameless.note), "the premise");
+        batch.file(0, &nameless.image());
+        assert_eq!(
+            (
+                batch.built.records,
+                batch.built.refusals,
+                batch.refusals.len()
+            ),
+            (1, 0, 0),
+            "{batch:?}"
+        );
+        // THE SAME RECORD WITH A SOURCE IS FILED, so the arm above is the
+        // source's doing and not the note's.
+        let named = Record::member_failure(
+            Scope::Spot,
+            at(100),
+            "NIFTY",
+            window(),
+            "refused by the vendor",
+        );
+        batch.file(1, &named.image());
+        assert_eq!((batch.built.records, batch.built.refusals), (2, 1));
+        assert_eq!(
+            batch.refusals.keys().collect::<Vec<_>>(),
+            [&"NIFTY.idx".to_owned()]
+        );
+    }
+
+    /// **An index entry for a path with no parent makes no directory and is
+    /// refused at the open, naming the path.** Every caller hands
+    /// `append_synced` a file inside the index directory; a bare name with no
+    /// parent is the function's other contract and creates nothing. Covers
+    /// the `None` side of `if let Some(parent)` (audit.rs:2727).
+    #[test]
+    fn an_index_entry_with_no_parent_is_refused_at_the_open() {
+        let why = append_synced(Path::new(""), b"one entry").expect_err("no file to open");
+        assert!(why.starts_with(": cannot open — "), "{why}");
+        // NOTHING FOR NOTHING, even with no parent.
+        assert_eq!(append_synced(Path::new(""), b""), Ok(()));
+    }
+
+    /// **A page whose first record lies past every offset the host can seek
+    /// to is refused by name.** `lseek` takes a signed offset, so a start
+    /// past `i64::MAX` bytes is `EINVAL` on Linux: the `seek` refusal
+    /// `Journal::page`'s doc called unreachable is reached by a record count
+    /// no `look` returns, here asked for directly. Covers audit.rs:1907-1911.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_page_past_every_seekable_offset_is_refused_by_name() {
+        let root = scratch("seek-refused");
+        let journal = Journal::at(&root);
+        past_a_shared_lock(|| journal.append(&run_record())).expect("one record");
+        let from = crate::emitted::mark();
+        let why = journal
+            .page(u64::MAX, 0, 1)
+            .expect_err("no host seeks that far");
+        let head = format!(
+            "{}: cannot seek to record {} — ",
+            journal.path.display(),
+            u64::MAX - 1
+        );
+        assert!(why.starts_with(&head), "{why}");
+        let logged = crate::emitted::landed(from, "api.audit", "journal page refused")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "why", &head))
+            .count();
+        assert_eq!(logged, 1, "the refused page is said once");
+        let _ignored = std::fs::remove_dir_all(&root);
     }
 }
