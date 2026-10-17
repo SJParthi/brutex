@@ -170,39 +170,117 @@ so every survivor below is re-tested on the final tree.
     helper now gives up after 30 s by the clock. Measured under the mutant:
     4 tests fail and the suite ends in 60 s. Clean, it passes in 0.16 s.
 
+### Coverage (run r3, on `402b9349`)
+
+Measured with `cargo llvm-cov` (`--branch`, `RUSTC_BOOTSTRAP=1`) over
+`cargo test -p store -p telemetry`, as root with the capabilities dropped.
+The union is taken per test binary with `llvm-profdata` and
+`llvm-cov export`. Every test binary passed (41 results, `cited_commits`
+skipped).
+
+| file | lines | missed | branches | missed |
+|---|---:|---:|---:|---:|
+| `store/src/emits.rs` | 285 | 6 | 2 | 0 |
+| `store/src/file.rs` | 4,426 | 65 | 358 | 24 |
+| `store/src/flock.rs` | 75 | 0 | 8 | 0 |
+| `store/src/path.rs` | 206 | 0 | 30 | 0 |
+| `store/src/safe_open.rs` | 177 | 8 | 22 | 2 |
+| `store/src/sealed.rs` | 1,434 | 0 | 274 | 4 |
+| `store/src/sealed_codec.rs` | 646 | 0 | 90 | 0 |
+| `store/src/sort_index_writer.rs` | 388 | 0 | 62 | 1 |
+| `store/src/staging.rs` | 109 | 0 | 14 | 0 |
+| `store/src/time_index.rs` | 742 | 0 | 80 | 10 |
+| `store/src/verdict.rs` | 2,685 | 6 | 310 | 14 |
+| `telemetry/src/sink.rs` | 4,450 | 31 | 338 | 20 |
+
+The base, measured the same way: `file.rs` 83 lines and 28 branches,
+`verdict.rs` 18 and 33, `sort_index_writer.rs` 10 and 4, `staging.rs` 2
+and 2, `sink.rs` 34 and 29.
+
+`af6423fe` then covered these:
+- the sealed-batch answers at `file.rs` 4580, 4890 and
+  `sort_index_writer.rs` 591;
+- the small-month `.tix` branch at `file.rs` 3201;
+- the seam's arm at `file.rs` 6059-6060;
+- `time_index.rs` 618;
+- `sink.rs` 918 and the `Refusing` double's lines 8661-8666.
+
+A final run on the final tree confirms them.
+
+**Uncovered production lines, each unreachable, with its reason:**
+- **`file.rs` defensive re-borrows**, after the caller checked the same
+  value: lines and branches 3344-3345, 3358-3359, 3462-3463, 3541-3542,
+  3552-3553, 3569-3570, 3572-3573. Each is a
+  `let Some(tix) = self.tix.as_ref() else`.
+- **`file.rs` 3370-3380 and 3488-3502**: `time_index::extend` refusing
+  `OffGrid` or `Outside`. Admission has already refused those bars on the
+  same grid (`Geometry::new` uses `Admission`'s `OPEN_ANCHOR_MICROS` and the
+  same month bounds). `Err(other)` there is unreachable, because the stamps
+  iterator never errs.
+- **`file.rs` 3483-3486**: `SharedSlot` at the threshold. An intraday slot
+  holds one bar, and a daily month never reaches 1,024 bars.
+- **`file.rs` 2582, 2588, 3791, 3801-3803**: geometry refusals of a block
+  range computed from the same layout, and a buffer that a `const`
+  assertion sizes.
+- **`file.rs` 3936-3937, 3988-3989, 4419-4422**:
+  - the overlap walk past `held_through`;
+  - an empty month at `suffix_that_follows`, which admission refuses
+    first;
+  - `index_refused`'s non-`Unreadable` arm, which only the arms above
+    reach.
+- **`safe_open.rs` 104/107**: a file type Linux does not have.
+- **`safe_open.rs` 299-306**: an arm for targets without verified flags.
+- **`verdict.rs` 716-717**: a vendor table that disagrees with its
+  declaration.
+- **`verdict.rs` 3923-3924, 4075-4076, 4136-4137**: `handle` answering
+  `None` right after `prefix` cached it.
+- **`sink.rs` 3410/3413**: a posting path with no parent.
+
+**Uncovered production branches with no uncovered line:**
+- **`file.rs` 3251**: `set_tix_state` on a handle with no `tix`. Every
+  caller has read `self.tix` as `Some` first.
+- **`file.rs` 3674**, the cache's second key (`cache.n_valid != n_valid`
+  with the same block): every commit sets the cached block to `NO_BLOCK`
+  (2549), so a changed count always comes with a changed block. The second
+  key keeps the two saying the same thing, as its own comment says.
+- **`file.rs` 5144**: `O_SYNC.is_none()`, true only on targets without a
+  verified `O_SYNC`.
+- **`file.rs` 5238**: the parent walk ending by `None`. It ends at the
+  root's parent, which `starts_with(root)` refuses, for every root that has
+  a parent. Only `/` or an empty root ends it by `None`, and no caller
+  passes either.
+- **`sealed.rs` 1499, 1525**: `get_mut(5)` on arrays of six (the crate
+  denies indexing).
+- **`sealed.rs` 1504**: the table-length guard, which never stops the loop
+  (the `Fold::push` equivalent below).
+- **`sealed.rs` 2352**: `Some(previous) if block > 0` with block 0. Block 0
+  needs `lo == 0` and `at == 0`, which make `index` 0, so `checked_sub`
+  answers `None` first.
+- **`verdict.rs` 2278, 2312, 2478, 3417**: `get_mut` on tables sized by
+  the value that indexes them: `first` by the plan, `counts` by
+  `CODE_SLOTS` over decoded codes, `days` by the year. The crate denies
+  indexing.
+- **`verdict.rs` 3143**: `make_dirs`' parent walk ending by `None`. It
+  breaks at the series root, and `series.dir()` is always below it.
+- **`verdict.rs` 3853**: the eviction's `min_by_key` answering `None`. It
+  runs only on a cache holding at least `HANDLE_CACHE` handles, so it is
+  never empty.
+
+**Test code.** These lines and branches run only when a test fails:
+- the `panic!` arms of test helpers and `assert!` short-circuits (`file.rs`
+  test lines, `verdict.rs` 4219 and 4227, `time_index.rs` 921, 1057,
+  1058 and 1105, `emits.rs` 788-792 and 801);
+- doubles' methods a test does not call (`sink.rs` 3706-3716).
+
+Of these, only `verdict.rs` 4219 and 4227 are this branch's. Both are
+`other => panic!` arms of the `corrupt_why` and `unknown` helpers.
+
 ## Left
 
 - **Mutation runs**: finish B and D, then run C on `sealed.rs` and
   `sealed_codec.rs`, then a final re-test of every survivor on the final
   tree.
-- **Coverage**: a final per-binary union run. The production lines that
-  remain uncovered on this tree, each with its reason:
-  - **`file.rs` defensive re-borrows**, after the caller checked the same
-    value: 3345, 3359, 3463, 3542, 3553, 3570, 3573 (each a
-    `let Some(tix) = self.tix.as_ref() else`).
-  - **`file.rs` 3370-3380 and 3488-3502**: `time_index::extend` refusing
-    `OffGrid` or `Outside`. Admission has already refused those bars on
-    the same grid (`Geometry::new` uses `Admission`'s `OPEN_ANCHOR_MICROS`
-    and the same month bounds). `Err(other)` there is unreachable, because
-    the stamps iterator never errs.
-  - **`file.rs` 3483-3486**: `SharedSlot` at the threshold. An intraday
-    slot holds one bar, and a daily month never reaches 1,024 bars.
-  - **`file.rs` 2582, 2588, 3791, 3801-3803**: geometry refusals of a block
-    range computed from the same layout, and a buffer that a `const`
-    assertion sizes.
-  - **`file.rs` 3937, 3989, 4419-4422**: the overlap walk past
-    `held_through`, an empty month at `suffix_that_follows` (admission
-    refuses first), and `index_refused`'s non-`Unreadable` arm, which only
-    the arms above reach.
-  - **`safe_open.rs` 107**: a file type Linux does not have.
-  - **`safe_open.rs` 300-306**: an arm for targets without verified flags.
-  - **`verdict.rs` 717**: a vendor table that disagrees with its
-    declaration.
-  - **`verdict.rs` 3924, 4076, 4137**: `handle` answering `None` right
-    after `prefix` cached it.
-  - **`sink.rs` 3408**: a posting path with no parent.
-  - **`emits.rs` 788-792, 801**: test-only assertion messages inside a
-    `#[test]`.
+- **Coverage**: a final run on the final tree.
 - **Equivalent mutants** still argued, each to be confirmed by the runs:
   - `verdict` `Code::worse` `<` → `<=`.
   - `verdict` `Series::feed_byte` → `Ok(0)` and `Ok(1)`.
