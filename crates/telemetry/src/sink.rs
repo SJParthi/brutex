@@ -7642,6 +7642,7 @@ mod tests {
     /// is never read as "nothing carried the value".
     #[test]
     fn a_generation_names_the_offset_each_dimension_covers_it_from() {
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("audit-coverage");
         {
             let sink = Sink::open(&Config::new(&dir)).expect("opens");
@@ -7904,6 +7905,12 @@ mod tests {
     /// zero one.
     #[test]
     fn a_run_is_read_from_every_form_a_line_carries_it_in() {
+        // It drops a sink and reopens its directory, so it holds the fork
+        // gate as `crate::tests::FORK_GATE` asks: without it a child forked
+        // by a permission test in that window still held the first sink's
+        // lock, and the reopen was refused (3 of 30 runs, cloud pass
+        // 2026-10-17).
+        let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("audit-run-forms");
         {
             let ring_only = Sink::open(&Config::new(&dir).with_audit(false)).expect("opens");
@@ -7941,6 +7948,7 @@ mod tests {
     /// cannot be read or written is named in the stream's health.
     #[test]
     fn a_coverage_file_is_read_line_by_line_and_extended_where_it_stands() {
+        let _gate = crate::tests::no_fork_in_flight();
         assert_eq!(
             super::dims_of("day 0\nnonsense\nrun x\nrun 5\nrun 6\ncode 007\n"),
             vec![("day".to_owned(), 0), ("run".to_owned(), 5)]

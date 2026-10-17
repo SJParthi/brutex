@@ -918,3 +918,42 @@ fn a_year_index_slot_is_read_only_when_whole_and_its_own() {
     crc[len - 1] ^= 0x01;
     assert!(decode_slot(&crc, 2031).is_none(), "checksum");
 }
+
+/// **A DAY WITH NO DETAILS OF ITS OWN, BESIDE A RECORD THAT HAS SOME,
+/// ANSWERS NONE.**
+///
+/// Covers `Reader::details`' walk for the day (`record` `None`) when the
+/// section's first entry is a record's: the walk stops at once, and an
+/// empty answer for the day is the truth, not the "entry is not this
+/// record's own" refusal a record with an offset would earn. The record's
+/// own details still read back.
+#[test]
+fn a_day_with_no_details_of_its_own_answers_none() {
+    let root = Root::new();
+    let series = root.series();
+    let mut with = entry("NSE-FNO-ZZTEST-A", Code::Match);
+    with.details = vec![super::Detail {
+        kind: 2,
+        payload: b"an invented why".to_vec(),
+    }];
+    let done = commit(&series, &generation(101, vec![with.clone()])).unwrap();
+    let mut reader = Reader::new();
+    assert_eq!(
+        reader
+            .details(&series, day(), done.generation, None)
+            .unwrap(),
+        Vec::new(),
+        "the day owns no entry"
+    );
+    let key = Key::instrument("NSE-FNO-ZZTEST-A").unwrap();
+    let found = reader.lookup(&series, day(), &key).unwrap().answer.unwrap();
+    let super::Found::Record { ordinal, record } = found.found else {
+        panic!("the key's record: {:?}", found.found);
+    };
+    assert_eq!(
+        reader
+            .details(&series, day(), done.generation, Some((ordinal, &record)))
+            .unwrap(),
+        with.details
+    );
+}
